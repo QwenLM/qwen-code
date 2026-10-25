@@ -254,6 +254,7 @@ function renderPanel(
     initialCategory: string;
     presentation: WebShellSettingsOptions;
     connections: ReactNode;
+    archivedSessions: ReactNode;
     workspaceSettingsWritable: boolean;
   }> = {},
 ): HTMLElement {
@@ -272,6 +273,7 @@ function renderPanel(
         onChatWidthModeChange={noop}
         modelManagementSectionProps={overrides.modelManagementSectionProps}
         connections={overrides.connections}
+        archivedSessions={overrides.archivedSessions}
         workspaceSettingsWritable={overrides.workspaceSettingsWritable}
       />
     </I18nProvider>,
@@ -375,6 +377,61 @@ describe('SettingsMessage initialCategory', () => {
     );
 
     expect(activeCategoryButton(container).textContent).toContain('General');
+  });
+
+  it('mounts archive management only in its category, without scope tabs or a settings count', () => {
+    const container = renderPanel(makeState([boolSetting()], vi.fn()), {
+      archivedSessions: (
+        <div data-testid="archive-management">Archive list</div>
+      ),
+    });
+    expect(
+      container.querySelector('[data-testid="archive-management"]'),
+    ).toBeNull();
+    const category = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('nav button'),
+    ).find((button) => button.textContent === 'Archived conversations')!;
+    expect(category).toBeDefined();
+    act(() => category.click());
+    expect(
+      container.querySelector('[data-testid="archive-management"]'),
+    ).not.toBeNull();
+    expect(container.querySelectorAll('[role="tab"]')).toHaveLength(0);
+    expect(container.querySelector('h2')?.textContent).toBe(
+      'Archived conversations',
+    );
+    const general = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('nav button'),
+    ).find((button) => button.textContent?.startsWith('General'))!;
+    act(() => general.click());
+    expect(
+      container.querySelector('[data-testid="archive-management"]'),
+    ).toBeNull();
+    expect(container.querySelectorAll('[role="tab"]')).toHaveLength(2);
+  });
+
+  it('honors archive host presentation and keeps an empty management slot available', () => {
+    const archivedSessions = <div data-testid="archive-management" />;
+    const excluded = renderPanel(makeState([], vi.fn()), {
+      archivedSessions,
+      initialCategory: 'Archived',
+      presentation: { excludeItems: ['builtin:archived-sessions'] },
+    });
+    expect(excluded.textContent).not.toContain('Archived conversations');
+    expect(
+      excluded.querySelector('[data-testid="archive-management"]'),
+    ).toBeNull();
+    const included = renderPanel(makeState([], vi.fn()), {
+      archivedSessions,
+      initialCategory: 'Archived',
+      presentation: { includeItems: ['builtin:archived-sessions'] },
+    });
+    expect(included.querySelector('nav')?.textContent).toBe(
+      'Archived conversations',
+    );
+    expect(
+      included.querySelector('[data-testid="archive-management"]'),
+    ).not.toBeNull();
   });
 
   it('renders browser-local connections without workspace scope tabs', () => {

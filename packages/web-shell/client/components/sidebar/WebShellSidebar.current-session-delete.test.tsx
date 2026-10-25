@@ -168,6 +168,7 @@ installSidebarDomShims();
 
 let root: Root;
 let container: HTMLDivElement;
+let archivedSessionsTarget: HTMLDivElement;
 
 function renderSidebar(
   props: {
@@ -178,6 +179,7 @@ function renderSidebar(
     managedArchivedSessions?: React.ComponentProps<
       typeof WebShellSidebar
     >['managedArchivedSessions'];
+    archivedSessionsTarget?: HTMLElement | null;
     onSearchQueryChange?: (query: string) => void;
   } = {},
 ): void {
@@ -186,6 +188,7 @@ function renderSidebar(
     root.render(
       <I18nProvider language="en">
         <WebShellSidebar
+          archivedSessionsTarget={props.archivedSessionsTarget}
           collapsed={false}
           onCollapsedChange={() => {}}
           onOpenSettings={() => {}}
@@ -241,7 +244,8 @@ beforeEach(() => {
   window.localStorage.clear();
   container = document.createElement('div');
   document.body.appendChild(container);
-  root = createRoot(container);
+  root = createRoot(container.appendChild(document.createElement('div')));
+  archivedSessionsTarget = container.appendChild(document.createElement('div'));
   connection.sessionId = null;
   connection.workspaceCwd = '/tmp/project';
   connection.capabilities = undefined;
@@ -267,7 +271,7 @@ afterEach(() => {
 });
 
 describe('WebShellSidebar current-session delete (issue #12619)', () => {
-  it('keeps Managed and Local archives in the single bottom fold', async () => {
+  it('renders Managed and Local archives only in the settings target', async () => {
     connection.capabilities = {
       qwenCodeVersion: '1.2.3',
       features: ['session_archive'],
@@ -286,25 +290,25 @@ describe('WebShellSidebar current-session delete (issue #12619)', () => {
       },
     });
     await flushSidebar();
-    const fold = [
-      ...container.querySelectorAll<HTMLButtonElement>('button'),
-    ].find((button) => button.textContent === 'Archived')!;
-    expect(fold.getAttribute('aria-expanded')).toBe('false');
     expect(container.querySelector('[data-managed-archive]')).toBeNull();
-    act(() => click(fold));
+    const archiveProps = {
+      archivedSessionsTarget,
+      managedWorkspaces: <div>Managed workspace</div>,
+      managedArchivedSessions: {
+        content: <div data-managed-archive>Managed archive</div>,
+        count: 1,
+        loading: false,
+        error: false,
+      },
+    };
+    renderSidebar(archiveProps);
     await flushSidebar();
-    expect(fold.getAttribute('aria-expanded')).toBe('true');
-    expect(container.querySelector('[data-managed-archive]')?.textContent).toBe(
-      'Managed archive',
-    );
-    expect(container.textContent).toContain('Local archive');
+    expect(archivedSessionsTarget.textContent).toContain('Managed archive');
+    expect(archivedSessionsTarget.textContent).toContain('Local archive');
     expect(container.textContent).toContain('Managed workspace');
-    act(() => click(fold));
+    renderSidebar({ ...archiveProps, archivedSessionsTarget: null });
     await flushSidebar();
-    expect(
-      container.querySelector('[data-managed-archive]')?.closest('[hidden]'),
-    ).not.toBeNull();
-    expect(fold.getAttribute('aria-expanded')).toBe('false');
+    expect(archivedSessionsTarget.textContent).toBe('');
   });
 
   it('keeps New task plain and labels daemon workspaces when Managed is available', async () => {

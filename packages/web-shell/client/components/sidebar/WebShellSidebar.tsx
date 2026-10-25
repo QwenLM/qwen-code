@@ -12,6 +12,7 @@ import {
   type ReactNode,
   type RefObject,
 } from 'react';
+import { createPortal } from 'react-dom';
 import {
   useActions,
   useChannels,
@@ -41,8 +42,6 @@ import {
   FolderKanbanIcon,
   ActivityIcon,
   CalendarClockIcon,
-  ChevronDownIcon,
-  ChevronRightIcon,
   Columns2Icon,
   LayoutGridIcon,
   LoaderCircleIcon,
@@ -535,6 +534,8 @@ interface WebShellSidebarProps {
   sessionContent?: ReactNode;
   sessionHeader?: ReactNode;
   managedWorkspaces?: ReactNode;
+  canOpenSettings?: boolean;
+  archivedSessionsTarget?: HTMLElement | null;
   managedArchivedSessions?: ManagedArchivedSessionsStatus & {
     content: ReactNode;
   };
@@ -1097,6 +1098,7 @@ export function WebShellSidebar({
   onOpenHome,
   onCollapsedChange,
   onOpenSettings,
+  canOpenSettings,
   onOpenAgents,
   onOpenPlugins,
   onOpenChannels,
@@ -1138,6 +1140,7 @@ export function WebShellSidebar({
   sessionHeader,
   managedWorkspaces,
   managedArchivedSessions,
+  archivedSessionsTarget,
   onSearchQueryChange,
   currentSessionActive = true,
   showSessionSourceSwitch = true,
@@ -1574,8 +1577,7 @@ export function WebShellSidebar({
       view: 'organized',
       group: 'pinned',
     });
-  const [archivedExpanded, setArchivedExpanded] = useState(false);
-  const [archivedContentMounted, setArchivedContentMounted] = useState(false);
+  const archivedExpanded = Boolean(archivedSessionsTarget);
   const [standaloneRefreshKey, setStandaloneRefreshKey] = useState(0);
   const [standaloneArchivedStatus, setStandaloneArchivedStatus] = useState({
     count: 0,
@@ -2096,9 +2098,8 @@ export function WebShellSidebar({
   const secondaryArchivedError = secondaryArchivedSnapshots.some(
     (snapshot) => snapshot.error !== undefined,
   );
-  const toggleArchived = useCallback(() => {
-    if (!archivedExpanded) {
-      setArchivedContentMounted(true);
+  useEffect(() => {
+    if (archivedExpanded) {
       const queries = [
         ...(includePrimaryWorkspaceSessions && archivedCatalogQuery
           ? [archivedCatalogQuery]
@@ -2109,7 +2110,6 @@ export function WebShellSidebar({
         sessionCatalogController.refreshQueries(queries);
       }
     }
-    setArchivedExpanded((expanded) => !expanded);
   }, [
     archivedCatalogQuery,
     archivedExpanded,
@@ -5764,7 +5764,7 @@ export function WebShellSidebar({
       (!sessionArchiveEnabled &&
         !standaloneSessionsVisible &&
         managedArchivedSessions === undefined) ||
-      searchQuery.trim()
+      !archivedSessionsTarget
     ) {
       return null;
     }
@@ -5780,29 +5780,6 @@ export function WebShellSidebar({
     const archivedErrorWithStandalone =
       effectiveArchivedError ||
       (standaloneSessionsVisible && standaloneArchivedStatus.error);
-
-    const header = (
-      <button
-        type="button"
-        className={styles.archivedHeader}
-        aria-expanded={archivedExpanded}
-        onClick={toggleArchived}
-      >
-        <span className={styles.archivedTitle} style={{ flex: '0 1 auto' }}>
-          {t('sidebar.archivedTitle')}
-        </span>
-        <span className={styles.archivedChevron} aria-hidden="true">
-          {archivedExpanded ? <ChevronDownIcon /> : <ChevronRightIcon />}
-        </span>
-        {archivedExpanded && archivedCount > 0 && (
-          <span className={styles.archivedCount}>{archivedCount}</span>
-        )}
-      </button>
-    );
-
-    if (!archivedContentMounted) {
-      return <div className={styles.archivedSection}>{header}</div>;
-    }
 
     const retry = (
       <button
@@ -5892,17 +5869,12 @@ export function WebShellSidebar({
       </>
     );
 
-    return (
-      <div className={styles.archivedSection}>
-        {header}
-        <div className={styles.archivedList} hidden={!archivedExpanded}>
-          {content}
-        </div>
-      </div>
+    return createPortal(
+      <div className={styles.archivedList}>{content}</div>,
+      archivedSessionsTarget,
     );
   }, [
-    archivedContentMounted,
-    archivedExpanded,
+    archivedSessionsTarget,
     archivedWorkspaceGroups,
     allArchivedSessions,
     connection.catchingUp,
@@ -5921,7 +5893,6 @@ export function WebShellSidebar({
     onStandaloneNotice,
     reloadArchived,
     renderSessionRow,
-    searchQuery,
     secondaryWorkspaceCwds,
     sessionCatalogController,
     sessionArchiveEnabled,
@@ -5929,7 +5900,6 @@ export function WebShellSidebar({
     standaloneRefreshKey,
     standaloneSessionsVisible,
     t,
-    toggleArchived,
   ]);
   const primaryNavigation = hasScrollingPrimaryNav && (
     <div className={styles.primaryNav}>
@@ -6137,27 +6107,28 @@ export function WebShellSidebar({
           footer &&
           typeof footer === 'object' &&
           footer.render?.()}
-        {projectFeaturesEnabled && footerItems.has('settings') && (
-          <button
-            className={styles.footerButton}
-            type="button"
-            title={t('sidebar.settings')}
-            aria-label={t('sidebar.settings')}
-            aria-current={
-              railLayout && activePage === 'settings' ? 'page' : undefined
-            }
-            onClick={() => openNavigation(onOpenSettings)}
-          >
-            <span className={`${styles.navIcon} ${styles.settingsIcon}`}>
-              <SettingsIcon size={16} strokeWidth={1.2} />
-            </span>
-            {(railLayout || (!collapsed && !footerCompact)) && (
-              <span className={styles.footerButtonLabel}>
-                {t('sidebar.settings')}
+        {(canOpenSettings ?? projectFeaturesEnabled) &&
+          footerItems.has('settings') && (
+            <button
+              className={styles.footerButton}
+              type="button"
+              title={t('sidebar.settings')}
+              aria-label={t('sidebar.settings')}
+              aria-current={
+                railLayout && activePage === 'settings' ? 'page' : undefined
+              }
+              onClick={() => openNavigation(onOpenSettings)}
+            >
+              <span className={`${styles.navIcon} ${styles.settingsIcon}`}>
+                <SettingsIcon size={16} strokeWidth={1.2} />
               </span>
-            )}
-          </button>
-        )}
+              {(railLayout || (!collapsed && !footerCompact)) && (
+                <span className={styles.footerButtonLabel}>
+                  {t('sidebar.settings')}
+                </span>
+              )}
+            </button>
+          )}
       </div>
       <div className={styles.footerActions}>
         {footerItems.has('theme') && (
@@ -7779,7 +7750,6 @@ export function WebShellSidebar({
                     }}
                   />
                 )}
-              {!liveView && archivedSection}
             </SidebarSessionSurface>
           </div>
 
@@ -7798,6 +7768,7 @@ export function WebShellSidebar({
           onPointerDown={handleResizePointerDown}
         />
       </aside>
+      {archivedSection}
     </>
   );
 }

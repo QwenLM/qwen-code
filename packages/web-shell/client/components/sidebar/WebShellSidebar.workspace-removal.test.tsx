@@ -397,6 +397,10 @@ const capabilities = {
 
 let root: Root;
 let container: HTMLDivElement;
+let archivedSessionsTarget: HTMLDivElement;
+
+let renderedSidebarProps: Parameters<typeof renderSidebar>[0];
+let archiveSettingsOpen = false;
 
 function renderSidebar(
   overrides: {
@@ -452,10 +456,14 @@ function renderSidebar(
     };
   } = {},
 ) {
+  renderedSidebarProps = overrides;
   act(() => {
     root.render(
       <I18nProvider language="en">
         <WebShellSidebar
+          archivedSessionsTarget={
+            archiveSettingsOpen ? archivedSessionsTarget : null
+          }
           collapsed={false}
           onCollapsedChange={() => {}}
           onOpenSettings={() => {}}
@@ -553,13 +561,10 @@ function archiveButtonFor(label: string): HTMLButtonElement | undefined {
   );
 }
 
-async function expandArchived(): Promise<void> {
-  const button = Array.from(
-    container.querySelectorAll<HTMLButtonElement>('button'),
-  ).find((candidate) => candidate.textContent?.includes('Archived'));
-  expect(button).toBeDefined();
+async function openArchiveSettings(): Promise<void> {
+  archiveSettingsOpen = true;
+  renderSidebar(renderedSidebarProps);
   await act(async () => {
-    click(button!);
     await Promise.resolve();
     await Promise.resolve();
   });
@@ -781,11 +786,13 @@ function dialogButton(label: string): HTMLButtonElement {
 }
 
 beforeEach(() => {
+  archiveSettingsOpen = false;
   setLivePresence(workspace.client as unknown as DaemonClient, undefined);
   window.localStorage.clear();
   container = document.createElement('div');
   document.body.appendChild(container);
-  root = createRoot(container);
+  root = createRoot(container.appendChild(document.createElement('div')));
+  archivedSessionsTarget = container.appendChild(document.createElement('div'));
   connection.sessionId = null;
   connection.sessionContext = undefined;
   connection.workspaceCwd = '/tmp/project';
@@ -997,11 +1004,7 @@ describe('WebShellSidebar workspace removal', () => {
     expect(container.textContent).toContain('Secondary pinned');
     expect(container.textContent).not.toContain('Primary pinned');
 
-    const archivedButton = Array.from(
-      container.querySelectorAll<HTMLButtonElement>('button'),
-    ).find((button) => button.textContent?.includes('Archived'));
-    expect(archivedButton).toBeDefined();
-    act(() => click(archivedButton!));
+    await openArchiveSettings();
     expect(refreshSessionCatalogQueries).toHaveBeenCalledWith([
       expect.objectContaining({
         routeKind: 'qualified',
@@ -1598,7 +1601,7 @@ describe('WebShellSidebar workspace removal', () => {
       },
     });
     await expandWorkspace('other');
-    await expandArchived();
+    await openArchiveSettings();
 
     expect(refreshSessionCatalogQueries).not.toHaveBeenCalled();
 
@@ -1987,7 +1990,7 @@ describe('WebShellSidebar workspace removal', () => {
     expect(inlineSessionAction('Configured pinned', 'Unpin')).toBeDefined();
     expect(inlineSessionAction('Configured pinned', 'Archive')).toBeUndefined();
 
-    await expandArchived();
+    await openArchiveSettings();
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
@@ -2094,7 +2097,7 @@ describe('WebShellSidebar workspace removal', () => {
       container.querySelector('button[aria-label="Delete group"]'),
     ).toBeNull();
 
-    await expandArchived();
+    await openArchiveSettings();
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
@@ -2374,7 +2377,7 @@ describe('WebShellSidebar workspace removal', () => {
         items: ['details', 'archive', 'delete', 'export'],
       },
     });
-    await expandArchived();
+    await openArchiveSettings();
 
     await selectSessionMenuItem('Primary archived controlled', 'Restore');
     await act(async () => {
@@ -3091,7 +3094,7 @@ describe('WebShellSidebar workspace removal', () => {
       sessionActions: { inlineItems: ['pin'] },
     });
     await expandWorkspace('other');
-    await expandArchived();
+    await openArchiveSettings();
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
@@ -4123,7 +4126,7 @@ describe('WebShellSidebar non-primary archive', () => {
       sessionActions: { items: ['archive'], inlineItems: [] },
     });
     await expandWorkspace('other');
-    await expandArchived();
+    await openArchiveSettings();
     const archiveButton = archiveButtonFor('Secondary active');
     expect(archiveButton).toBeUndefined();
     const menuItems = await openSessionMenuItems('Secondary active');
@@ -4186,7 +4189,7 @@ describe('WebShellSidebar non-primary archive', () => {
 
     renderSidebar({ onError });
     await expandWorkspace('other');
-    await expandArchived();
+    await openArchiveSettings();
     const moreButton = Array.from(
       container.querySelectorAll<HTMLButtonElement>(
         'button[aria-label="More actions"]',
@@ -4303,7 +4306,7 @@ describe('WebShellSidebar non-primary archive', () => {
     await expandWorkspace('other');
     expect(await openSessionMenuItems('Primary active')).toContain('Archive');
     expect(sessionAction('Secondary active')).toBeUndefined();
-    await expandArchived();
+    await openArchiveSettings();
     expect(
       listWorkspaceSessions.mock.calls.some(
         ([, options]) => options?.archiveState === 'archived',
@@ -5029,7 +5032,7 @@ describe('WebShellSidebar session source switch', () => {
     });
 
     renderSidebar();
-    await expandArchived();
+    await openArchiveSettings();
 
     const title = Array.from(
       container.querySelectorAll('[data-web-shell-session-title]'),
@@ -5157,7 +5160,7 @@ describe('WebShellSidebar session source switch', () => {
       },
     );
     renderSidebar();
-    await expandArchived();
+    await openArchiveSettings();
 
     expect(container.textContent).toContain('Archived task session');
     expect(container.textContent).not.toContain('Archived channel session');
@@ -6425,7 +6428,7 @@ describe('WebShellSidebar archived session export', () => {
       isArchived: true,
     });
     renderSidebar();
-    await expandArchived();
+    await openArchiveSettings();
 
     const trigger = sessionAction('Archived primary');
     expect(trigger).toBeDefined();
@@ -6453,7 +6456,7 @@ describe('WebShellSidebar archived session export', () => {
       isArchived: true,
     });
     renderSidebar();
-    await expandArchived();
+    await openArchiveSettings();
 
     expect(sessionAction('Archived untrusted')).toBeUndefined();
     expect(deleteSessionsData).not.toHaveBeenCalled();
@@ -6496,7 +6499,7 @@ describe('WebShellSidebar archived session export', () => {
         ],
       },
     });
-    await expandArchived();
+    await openArchiveSettings();
 
     expect(sessionAction('Untrusted primary archived')).toBeUndefined();
     expect(archived.unarchiveSession).not.toHaveBeenCalled();
@@ -6541,7 +6544,7 @@ describe('WebShellSidebar archived session export', () => {
         cwd === '/tmp/project' ? primaryExport : secondaryExport,
     }));
     renderSidebar();
-    await expandArchived();
+    await openArchiveSettings();
 
     expect(sessionAction('Primary archive')).toBeDefined();
     expect(sessionAction('Secondary archive')).toBeDefined();
@@ -6898,7 +6901,7 @@ describe('WebShellSidebar standalone grouping', () => {
       onLoadStandaloneSession: vi.fn(),
       onStandaloneNotice: vi.fn(),
     });
-    await expandArchived();
+    await openArchiveSettings();
     await vi.waitFor(() =>
       expect(container.textContent).toContain('Moving conversation'),
     );
@@ -7105,7 +7108,7 @@ describe('WebShellSidebar standalone grouping', () => {
     expect(listStandaloneSessionsPage).not.toHaveBeenCalled();
   });
 
-  it('loads standalone archive inside the shared Archived section', async () => {
+  it('loads standalone archive inside the shared settings archive list', async () => {
     const standaloneCapabilities = {
       ...capabilities,
       features: [...capabilities.features, 'standalone_sessions_v1'],
@@ -7132,7 +7135,7 @@ describe('WebShellSidebar standalone grouping', () => {
       onStandaloneNotice: vi.fn(),
     });
 
-    await expandArchived();
+    await openArchiveSettings();
     await vi.waitFor(() => {
       expect(container.textContent).toContain('Archived without workspace');
     });
@@ -7143,7 +7146,7 @@ describe('WebShellSidebar standalone grouping', () => {
     expect(group!.closest('[class*="archivedList"]')).not.toBeNull();
   });
 
-  it('keeps the standalone archive mounted while Archived is collapsed', async () => {
+  it('unmounts standalone archives on category exit and refreshes on re-entry', async () => {
     const standaloneCapabilities = {
       ...capabilities,
       features: [...capabilities.features, 'standalone_sessions_v1'],
@@ -7170,7 +7173,7 @@ describe('WebShellSidebar standalone grouping', () => {
       onStandaloneNotice: vi.fn(),
     });
 
-    await expandArchived();
+    await openArchiveSettings();
     await vi.waitFor(() =>
       expect(
         listStandaloneSessionsPage.mock.calls.filter(
@@ -7178,19 +7181,46 @@ describe('WebShellSidebar standalone grouping', () => {
         ),
       ).toHaveLength(1),
     );
-    await expandArchived();
-    const group = container.querySelector(
-      '[data-testid="standalone-archived-group"]',
-    );
-    expect(group).not.toBeNull();
-    expect(group!.closest('[hidden]')).not.toBeNull();
+    archiveSettingsOpen = false;
+    renderSidebar(renderedSidebarProps);
+    expect(archivedSessionsTarget.textContent).toBe('');
 
-    await expandArchived();
-    expect(
-      listStandaloneSessionsPage.mock.calls.filter(
-        ([options]) => options.archiveState === 'archived',
-      ),
-    ).toHaveLength(1);
+    await openArchiveSettings();
+    await vi.waitFor(() =>
+      expect(
+        listStandaloneSessionsPage.mock.calls.filter(
+          ([options]) => options.archiveState === 'archived',
+        ),
+      ).toHaveLength(2),
+    );
+  });
+
+  it('shows settings archives independently of the sidebar search', async () => {
+    archived.sessions.push({
+      sessionId: 'archive-search-independent',
+      displayName: 'Unrelated archived conversation',
+      workspaceCwd: '/tmp/project',
+      isArchived: true,
+    } as DaemonSessionSummary);
+    renderSidebar();
+    const searchButton = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Search sessions"]',
+    );
+    expect(searchButton).not.toBeNull();
+    act(() => click(searchButton!));
+    const input = container.querySelector<HTMLInputElement>(
+      'input[aria-label="Search sessions"]',
+    );
+    expect(input).not.toBeNull();
+    act(() => setInputValue(input!, 'does not match archive'));
+
+    await openArchiveSettings();
+    expect(archivedSessionsTarget.textContent).toContain(
+      'Unrelated archived conversation',
+    );
+    expect(container.querySelector('aside')?.textContent).not.toContain(
+      'Unrelated archived conversation',
+    );
   });
 
   it('groups archived rows under their workspace labels', async () => {
@@ -7229,7 +7259,7 @@ describe('WebShellSidebar standalone grouping', () => {
     );
     renderSidebar({ workspaces: groupedCapabilities.workspaces });
 
-    await expandArchived();
+    await openArchiveSettings();
     const sections = Array.from(container.querySelectorAll('section'));
     const sectionFor = (label: string) =>
       sections.find((section) =>
@@ -7265,7 +7295,7 @@ describe('WebShellSidebar standalone grouping', () => {
     });
     renderSidebar({ workspaces: [] });
 
-    await expandArchived();
+    await openArchiveSettings();
 
     const projectGroup = container.querySelector(
       'section[aria-label="Archived: Project"]',
@@ -7286,7 +7316,7 @@ describe('WebShellSidebar standalone grouping', () => {
       onStandaloneNotice: vi.fn(),
     });
 
-    await expandArchived();
+    await openArchiveSettings();
     const retry = await vi.waitFor(() => {
       const button = Array.from(container.querySelectorAll('button')).find(
         (entry) =>

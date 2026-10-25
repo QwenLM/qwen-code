@@ -839,7 +839,9 @@ Live 和频道右侧标题都为「设置」，左栏标题与首页品牌名共
 
 `WebShellSettingsOptions.includeItems` 与 `excludeItems` 接受 `WebShellSettingItemId` 值。可导入 `WEB_SHELL_SETTING_ITEM_IDS` 获取受支持的只读列表。这些 ID 是经过整理的别名，而不是 daemon 的配置路径：`setting:language` 对应语言控件（界面语言），`setting:output-language` 对应模型输出语言（用户作用域，仅用户标签页显示），`setting:fast-model` 对应快速模型选择器。即使内部 schema 路径变化，别名也保持稳定。未知的运行时 ID 不匹配任何条目；配置白名单后，尚无公开别名的字段也会隐藏。
 
-前端内置块有自己的 ID：`builtin:chat-width`、`builtin:browser-notifications`、`builtin:live-setup`、`builtin:local-control`、`builtin:connections` 和 `builtin:model-management`。`builtin:connections` 区块仅在 standalone 构建中渲染，而 standalone 入口不接收 `settings` 呈现配置，因此该 ID 目前对嵌入方没有作用。模型管理块与普通 Model 字段独立过滤；仅排除普通 Model 字段时，模型列表与选择仍然可用；配置白名单时需包含 `builtin:model-management` 才会显示该块。浏览器通知与聊天宽度相互独立。既有的能力和隐藏限制仍然适用，白名单不能强制显示不可用的控件，也不会改变排序。
+前端内置块有自己的 ID：`builtin:chat-width`、`builtin:browser-notifications`、`builtin:live-setup`、`builtin:local-control`、`builtin:connections`、`builtin:archived-sessions` 和 `builtin:model-management`。`builtin:connections` 区块仅在 standalone 构建中渲染，而 standalone 入口不接收 `settings` 呈现配置，因此该 ID 目前对嵌入方没有作用。模型管理块与普通 Model 字段独立过滤；仅排除普通 Model 字段时，模型列表与选择仍然可用；配置白名单时需包含 `builtin:model-management` 才会显示该块。浏览器通知与聊天宽度相互独立。既有的能力和隐藏限制仍然适用，白名单不能强制显示不可用的控件，也不会改变排序。
+
+归档会话管理位于 **设置 → 归档会话**，直接展示现有归档列表及工作区分组；侧边栏不再常驻“已归档”区块。只有进入该分类时才加载归档，离开后停止相关订阅。该分类沿用原有侧边栏归档功能的能力限制，禁用侧边栏的嵌入宿主不展示此分类；可通过 `builtin:archived-sessions` 控制其设置入口。
 
 - 未传 `includeItems` 时保持现有展示逻辑，仅应用 `excludeItems`；新增的上游设置默认仍然可见。
 - `includeItems: []` 隐藏全部原生设置条目；它与未传入白名单不同。

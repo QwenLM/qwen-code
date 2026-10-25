@@ -74,6 +74,7 @@ const BUILTIN_IDS = [
   'builtin:live-setup',
   'builtin:local-control',
   'builtin:connections',
+  'builtin:archived-sessions',
   'builtin:model-management',
 ] as const;
 
