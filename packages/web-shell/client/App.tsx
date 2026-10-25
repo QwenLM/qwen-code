@@ -4234,12 +4234,15 @@ export function App({
       'scratch_workspace_registration',
     ) === true;
   // SSH workspaces validate paths on the remote host; the daemon route
-  // refuses them, so do not offer the section at all.
+  // refuses them, so do not offer the section at all. Registration rewrites an
+  // `ssh://` URL to a local mirror directory, so the cwd never carries that
+  // scheme: the selected workspace entry's SSH marker is the signal.
   const workspaceDirectoriesSupported =
     workspace.capabilities?.features?.includes('workspace_directories') ===
       true &&
     workspace.workspaceCwd !== undefined &&
-    !workspace.workspaceCwd.startsWith('ssh://');
+    workspaces.find((entry) => entry.cwd === workspace.workspaceCwd)?.ssh ===
+      undefined;
   const workspaceDisplayNameSupported =
     workspace.capabilities?.features?.includes('workspace_display_name') ===
     true;
