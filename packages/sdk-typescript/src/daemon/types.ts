@@ -2680,9 +2680,13 @@ export interface DaemonWorkspaceMemoryStatus {
 }
 
 /**
- * Scope of a managed auto-memory entry: `project` is the per-workspace
- * directory under `~/.qwen/projects/.../memory`, `user` is the shared
- * `~/.qwen/memories` directory. Both live OUTSIDE the bound workspace.
+ * Scope of a managed auto-memory entry: `project` is the workspace's
+ * project memory (the configured root under the runtime's memory base —
+ * `~/.qwen/projects/.../memory` by default — plus, for a trusted
+ * workspace, the repo-local `.qwen/memory`); `user` is the root shared
+ * across every project (`<memory base>/memories`). The memory base is the
+ * workspace runtime's storage base: the global `~/.qwen` unless the
+ * runtime pins its own output dir.
  */
 export type DaemonAutoMemoryScope = 'project' | 'user';
 
@@ -2702,19 +2706,29 @@ export interface DaemonAutoMemoryFile {
 
 /**
  * Managed auto-memory listing returned from
- * `GET /workspace/auto-memory`. The directories sit outside the bound
- * workspace, so this route (not `readWorkspaceFile`) is the way to
- * browse them. `initialized: false` and empty `entries` until a
- * directory has been created.
+ * `GET /workspace/auto-memory` (and `GET /workspaces/:workspace/
+ * auto-memory`). The directories sit outside the bound workspace, so this
+ * route (not `readWorkspaceFile`) is the way to browse them.
+ * `initialized: false` and empty `entries` until a directory has been
+ * created.
  */
 export interface DaemonWorkspaceAutoMemoryStatus {
   v: 1;
   workspaceCwd: string;
+  /** True when at least one managed root exists on disk. */
   initialized: boolean;
   /** Root directory of `user`-scoped entries (may not exist yet). */
   userDir: string;
-  /** Root directory of `project`-scoped entries (may not exist yet). */
+  /** True when `userDir` exists and was walked. */
+  userDirExists: boolean;
+  /** The configured `project` root (may not exist yet). */
   projectDir: string;
+  /**
+   * The `project` roots that exist and were walked, in precedence order
+   * (the configured root, then the repo-local `.qwen/memory` for a trusted
+   * workspace). A project entry lives under exactly one of them.
+   */
+  projectDirs: string[];
   entries: DaemonAutoMemoryFile[];
   totalBytes: number;
   fileCount: number;
@@ -2725,11 +2739,10 @@ export interface DaemonWorkspaceAutoMemoryStatus {
  * Body of `GET /workspace/auto-memory/file?path=...`. The path is
  * re-validated by the daemon against its auto-memory roots; `content`
  * is absent for BOM'd or non-UTF-8 files and for reads that raced a
- * write. The `content`-absence contract matches
- * `DaemonWorkspaceMemoryFile.content`; unlike that type, `truncated`
- * here is set only for the daemon's read cap — a read that raced a
- * write returns neither `content` nor `truncated`, so clients must
- * treat a content-less response as retryable.
+ * write, and `contentUnavailable` then says which: `torn` is transient
+ * (retry the read), `undecodable` is permanent until the file changes.
+ * The `content`-absence contract matches `DaemonWorkspaceMemoryFile.content`;
+ * unlike that type, `truncated` here is set only for the daemon's read cap.
  */
 export interface DaemonAutoMemoryFileContent {
   scope: DaemonAutoMemoryScope;
@@ -2738,6 +2751,8 @@ export interface DaemonAutoMemoryFileContent {
   modifiedAt?: string;
   content?: string;
   truncated?: boolean;
+  /** Set exactly when `content` is absent. */
+  contentUnavailable?: 'torn' | 'undecodable';
 }
 
 /**
