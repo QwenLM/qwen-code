@@ -519,6 +519,10 @@ const listeners = new Set<Server>();
 
 beforeEach(() => {
   wakeDeps.runTurnGate = undefined;
+  vi.spyOn(
+    HostedWorkspaceBroker.prototype,
+    'resolveCapabilities',
+  ).mockResolvedValue();
   state.approvalSelections.clear();
   state.approvalQueries.length = 0;
   vi.spyOn(
@@ -25794,6 +25798,34 @@ describe('Hosted Harness refusal reasons', () => {
     expect(created.status).toBe(200);
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   }
+
+  // The lifecycle protocol is why a Shell Session cannot be retired by
+  // default, so the refusal has to name itself instead of reading like a
+  // missing guard: protocol 1 commits one effects phase and stays with the
+  // files profile, protocol 2 only admits the profiles the Harness contract
+  // lists.
+  it('names a lifecycle protocol the Session profile is not admitted for', async () => {
+    const server = await app(true);
+    const load = (toolProfile: string, lifecycleProtocolVersion: 1 | 2) =>
+      headers(supertest(server).post(`/session/${SESSION_ID}/load`)).send({
+        managedSessionStore: store(),
+        toolProfile,
+        lifecycleProtocolVersion,
+        lifecycleAuthority: {
+          operationId: `lifecycle-${lifecycleProtocolVersion}`,
+          claimGeneration: 1,
+        },
+      });
+    // files/1 is a real profile, but the contract admits only shell/1 and
+    // mcp/1 for protocol 2.
+    const v2 = await load('hosted-workspace-files/1', 2);
+    expect(v2.status).toBe(409);
+    expect(v2.body.code).toBe('hosted_lifecycle_profile_unavailable');
+    // shell/1 is a lifecycle-v2 profile, but protocol 1 stays with files/1.
+    const v1 = await load('hosted-workspace-shell/1', 1);
+    expect(v1.status).toBe(409);
+    expect(v1.body.code).toBe('hosted_lifecycle_profile_unavailable');
+  });
 
   it('names a blocked restore bundle on a cold load', async () => {
     await createAndDetach();

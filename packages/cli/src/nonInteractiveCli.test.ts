@@ -1212,6 +1212,53 @@ describe('runNonInteractive', () => {
     },
   );
 
+  it.each([OutputFormat.JSON, OutputFormat.STREAM_JSON])(
+    'surfaces retry classification scalars on a bare Retry in %s',
+    async (format) => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+      setupMetricsMock();
+      mockLlmClient.sendMessageStream.mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: LlmEventType.Content, value: 'abandoned answer' },
+          {
+            type: LlmEventType.Retry,
+            retryDiagnostics: {
+              kind: 'transport',
+              reason: 'transport-error',
+              transportCode: 'UND_ERR_SOCKET',
+            },
+          },
+          { type: LlmEventType.Content, value: 'final answer' },
+          {
+            type: LlmEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 1 },
+            },
+          },
+        ]),
+      );
+
+      await expect(
+        runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'test',
+          'retry-diagnostics',
+        ),
+      ).resolves.toBe(0);
+
+      const stderr = processStderrSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      expect(stderr).toContain(
+        'Retrying provider attempt (0 buffered tool call(s) discarded) ' +
+          '[kind=transport, reason=transport-error, transportCode=UND_ERR_SOCKET].',
+      );
+      expect(stderr).not.toContain('undefined');
+    },
+  );
+
   function mockFinishedGoalWorker(): void {
     vi.spyOn(goalRuntime, 'finishTurn').mockResolvedValue(undefined);
     mockLlmClient.sendMessageStream.mockImplementation(() =>

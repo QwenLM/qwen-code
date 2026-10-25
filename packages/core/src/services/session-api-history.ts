@@ -12,7 +12,9 @@ import type {
   GoalTurnEndRecordPayload,
   SlashCommandRecordPayload,
   TurnResultRecordPayload,
+  UserPromptRecordPayload,
 } from './chatRecordingService.js';
+import { restoreUserPromptSubmitContextReceipt } from '../hooks/user-prompt-submit-context.js';
 import { isInternalCodeModeToolResult } from '../utils/transcript-records.js';
 import {
   appendAutoMemorySnapshot,
@@ -243,6 +245,13 @@ function appendApiHistoryRecord(
   const message = copyContentForApiHistory(record.message);
   if (record.type === 'user' && !record.subtype) {
     markApiHistoryPrompt(message, getRecordRewindId(record));
+    const payload = record.systemPayload as UserPromptRecordPayload | undefined;
+    // Only the injector records per-turn hookContext provenance, so a
+    // trailing tagged part matching it is injector-owned: restore the
+    // receipt the JSON transcript could not carry.
+    if (typeof payload?.hookContext === 'string' && payload.hookContext) {
+      restoreUserPromptSubmitContextReceipt(message, payload.hookContext);
+    }
   }
   // Session multi-agent records (`agent_mention` / `agent_message`) need no
   // branch: their `message` is the enveloped model text, pushed below as its

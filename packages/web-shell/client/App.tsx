@@ -4346,6 +4346,7 @@ export function App({
     () => pendingSessionContext ?? settledSessionContext,
     [pendingSessionContext, settledSessionContext],
   );
+  const sessionIsStandalone = effectiveSessionContext?.kind === 'standalone';
   const workspaceContextActive = effectiveSessionContext?.kind === 'workspace';
   // The composer picker chooses the target of the next session, so a
   // projectless draft keeps it enabled: that is where "no workspace" is
@@ -13989,12 +13990,18 @@ export function App({
       if (sessionWriteBlocked) return;
       const owner = { current: sessionOwnerGuard.capture() };
       const previousLanguage = selectedLanguage;
+      // A standalone session refuses every workspace write, so its only
+      // writable language scope is the user one. The settings panel hides the
+      // row on the Workspace tab there; keep this guard for a scope that was
+      // picked before the session context settled.
+      const effectiveScope = sessionIsStandalone ? 'user' : scope;
       // Forward the settings tab's scope to the command so a Workspace-tab edit
       // persists to workspace settings instead of always writing user scope
       // (the /language command otherwise defaults to user). The command still
       // switches the daemon's live locale so command descriptions re-localize —
       // which a plain scoped settings write wouldn't do.
-      const scopeFlag = scope === 'workspace' ? ' --project' : ' --global';
+      const scopeFlag =
+        effectiveScope === 'workspace' ? ' --project' : ' --global';
       const command = `/language ui ${nextLanguage}${scopeFlag}`;
       const refreshSettings = async () => {
         if (!owner.current.isCurrent()) return;
@@ -14024,7 +14031,7 @@ export function App({
       sendPrompt(command, undefined, undefined, { ownerRef: owner })
         .then(() => {
           if (!owner.current.isCurrent()) return;
-          if (scope === 'user') {
+          if (effectiveScope === 'user') {
             // A user-scoped choice becomes the host's persisted opinion. A
             // workspace choice remains settings-owned for that workspace.
             handleLanguageChange(nextLanguage);
@@ -14054,6 +14061,7 @@ export function App({
       selectedLanguage,
       sessionActions,
       sessionOwnerGuard,
+      sessionIsStandalone,
       isGoalGateBlocked,
     ],
   );
@@ -22654,6 +22662,7 @@ export function App({
                         onOutputLanguageChange={
                           handleSettingsOutputLanguageChange
                         }
+                        workspaceSettingsWritable={!sessionIsStandalone}
                         onThemeChange={handleThemeChange}
                         chatWidthMode={chatWidthMode}
                         onChatWidthModeChange={handleChatWidthModeChange}

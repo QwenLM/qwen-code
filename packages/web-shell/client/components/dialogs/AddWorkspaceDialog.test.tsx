@@ -323,6 +323,80 @@ describe('AddWorkspaceDialog', () => {
       },
     );
 
+    it.each(['parent folder', 'suggestion'] as const)(
+      'locks the %s path writer while a host picker is pending',
+      async (writer) => {
+        vi.useFakeTimers();
+        try {
+          const pending = deferredPick();
+          const onAdd = vi.fn().mockResolvedValue(undefined);
+          mount(
+            <AddWorkspaceDialog
+              browseDirectories
+              pickerUsesHostUi
+              initialPath="/daemon/original"
+              onClose={vi.fn()}
+              onAdd={onAdd}
+              onPick={() => pending.promise}
+              onSuggest={async () => ({
+                dir: '/daemon/',
+                sep: '/',
+                suggestions: [{ name: 'other', path: '/daemon/other' }],
+                truncated: false,
+              })}
+            />,
+          );
+          await act(async () => vi.advanceTimersByTimeAsync(200));
+          expect(
+            document.querySelector('[role="option"]')?.textContent,
+          ).toContain('other');
+          await act(async () => browseButton().click());
+          expect(document.body.style.pointerEvents).toBe('');
+          if (writer === 'parent folder') {
+            const parent = document.querySelector<HTMLButtonElement>(
+              'button[aria-label="Parent folder"]',
+            )!;
+            act(() => parent.click());
+            expect.soft(parent.disabled).toBe(true);
+          } else {
+            const option = document.querySelector('[role="option"]');
+            if (option) {
+              act(() =>
+                option.dispatchEvent(
+                  new MouseEvent('mousedown', {
+                    bubbles: true,
+                    cancelable: true,
+                  }),
+                ),
+              );
+            }
+            expect.soft(document.querySelector('[role="listbox"]')).toBeNull();
+          }
+          expect.soft(input().value).toBe('/daemon/original');
+          expect(document.querySelector('[role="status"]')).toBeNull();
+          expect(submitButton().disabled).toBe(true);
+          expect(onAdd).not.toHaveBeenCalled();
+
+          await act(async () => pending.resolve('/daemon/original'));
+          expect.soft(input().value).toBe('/daemon/original');
+          expect(document.activeElement).toBe(browseButton());
+          expect(document.activeElement).not.toBe(input());
+          expect(
+            document.querySelector<HTMLButtonElement>(
+              'button[aria-label="Parent folder"]',
+            )!.disabled,
+          ).toBe(false);
+          await act(async () => submitButton().click());
+          expect(onAdd).toHaveBeenCalledExactlyOnceWith(
+            '/daemon/original',
+            true,
+          );
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
+
     it('keeps an invocation alive across inline callback rerenders on the same target', async () => {
       const pending = deferredPick();
       let signal: AbortSignal | undefined;

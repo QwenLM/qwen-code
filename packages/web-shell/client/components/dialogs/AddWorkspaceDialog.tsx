@@ -916,7 +916,8 @@ export function AddWorkspaceDialog({
     ],
   );
 
-  const showList = (browseDirectories || listOpen) && suggestions.length > 0;
+  const showList =
+    !browsing && (browseDirectories || listOpen) && suggestions.length > 0;
   const showGitSuggestions =
     gitSuggestOpen &&
     !submitting &&
@@ -1167,7 +1168,7 @@ export function AddWorkspaceDialog({
                             variant="outline"
                             title={t('workspaceHost.parent')}
                             aria-label={t('workspaceHost.parent')}
-                            disabled={submitting}
+                            disabled={submitting || browsing}
                             onMouseDown={(event) => event.preventDefault()}
                             onClick={() => {
                               const trimmed = path.replace(/[\\/]+$/, '');
@@ -1256,18 +1257,21 @@ export function AddWorkspaceDialog({
                         ))}
                       </ul>
                     )}
-                    {browseDirectories && suggestionsLoaded && !showList && (
-                      <div
-                        role={suggestionsError ? 'alert' : 'status'}
-                        className="mt-1 rounded-md border px-3 py-3 text-sm text-muted-foreground"
-                      >
-                        {t(
-                          suggestionsError
-                            ? 'workspaceHost.folderListError'
-                            : 'workspaceHost.noFolders',
-                        )}
-                      </div>
-                    )}
+                    {browseDirectories &&
+                      !browsing &&
+                      suggestionsLoaded &&
+                      !showList && (
+                        <div
+                          role={suggestionsError ? 'alert' : 'status'}
+                          className="mt-1 rounded-md border px-3 py-3 text-sm text-muted-foreground"
+                        >
+                          {t(
+                            suggestionsError
+                              ? 'workspaceHost.folderListError'
+                              : 'workspaceHost.noFolders',
+                          )}
+                        </div>
+                      )}
                   </div>
                   <FieldDescription
                     id={browseDirectories ? undefined : HINT_ID}
