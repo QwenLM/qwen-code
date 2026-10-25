@@ -925,6 +925,19 @@ fi
       },
     );
 
+    it('heads a provisional aggregate occurrence with the caveat', () => {
+      // The caveat is prepended once, ahead of the route split, so the
+      // aggregate's own body file is a third write site: a prepend narrowed to
+      // the per-signature branch would silently drop it here.
+      const result = run([botIssue(42)], { provisional: true });
+      expect(result.status).toBe(0);
+      expect(result.calls).toContain('issue comment 42');
+      expect(result.body).toMatch(
+        /^> \*\*Provisional\.\*\* Main advanced past this head/,
+      );
+      expect(result.body).toContain('Run 123 failed at commit abcdef123456');
+    });
+
     it('retires the autofix route when adopting a legacy issue without the workflow marker', () => {
       const result = run([botIssue(42, ' on abc123')], {
         issueBody:
@@ -1527,6 +1540,27 @@ fi
         expect(result.status).toBe(0);
         expect(result.calls).toContain('issue comment 7');
         expect(result.calls).not.toContain('issue edit');
+      });
+
+      it('heads a provisional recurrence comment with the caveat', () => {
+        // A recurrence is written from a separate file than the certified-miss
+        // create, so it is its own write site: scoping the prepend to the
+        // filing paths would leave a provisional recurrence unmarked.
+        const tracked = `<!-- ${markerA} -->\n<!-- main-ci-failure-scope:1234 -->\n`;
+        const result = run([botIssue(7, ' — Foo.test')], {
+          signatureTitle,
+          testMarkers: markerA,
+          issueBodies: { 7: tracked },
+          provisional: true,
+        });
+        expect(result.status).toBe(0);
+        expect(result.calls).toContain('issue comment 7');
+        expect(result.commentBody).toMatch(
+          /^> \*\*Provisional\.\*\* Main advanced past this head/,
+        );
+        expect(result.commentBody).toContain(
+          'Run 123 failed at commit abcdef123456',
+        );
       });
 
       it('keeps the recorded recurrence when the accretion edit fails', () => {
