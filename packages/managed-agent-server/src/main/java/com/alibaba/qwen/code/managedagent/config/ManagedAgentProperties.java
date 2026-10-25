@@ -75,6 +75,8 @@ public class ManagedAgentProperties implements EnvironmentAware {
     private List<String> definitionModels = List.of();
     private List<ModelOption> modelCatalog = List.of();
     private String trustedActorHeader = "";
+    // The account the server runs as; preflight checks file access as it.
+    private String serviceUser = "";
     // Validation may run more than once; the file is read only the first time.
     private boolean harnessCredentialsApplied;
     private String harnessBrokerUrl = "";
@@ -183,6 +185,14 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
     public void setTrustedActorHeader(String trustedActorHeader) {
         this.trustedActorHeader = trustedActorHeader;
+    }
+
+    public String getServiceUser() {
+        return serviceUser;
+    }
+
+    public void setServiceUser(String serviceUser) {
+        this.serviceUser = serviceUser == null ? "" : serviceUser.strip();
     }
 
     @Override

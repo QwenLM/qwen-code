@@ -338,6 +338,7 @@ import {
   type WebShellSettingsOptions,
 } from './settings';
 import { SettingsMessage } from './components/messages/SettingsMessage';
+import { WorkspaceDirectoriesSection } from './components/workspaces/WorkspaceDirectoriesSection';
 import { isAskUserPermission } from './utils/askUserPermission';
 import { ToolApproval } from './components/messages/ToolApproval';
 import { AskUserQuestion } from './components/messages/AskUserQuestion';
@@ -4232,6 +4233,16 @@ export function App({
     workspace.capabilities?.features?.includes(
       'scratch_workspace_registration',
     ) === true;
+  // SSH workspaces validate paths on the remote host; the daemon route
+  // refuses them, so do not offer the section at all. Registration rewrites an
+  // `ssh://` URL to a local mirror directory, so the cwd never carries that
+  // scheme: the selected workspace entry's SSH marker is the signal.
+  const workspaceDirectoriesSupported =
+    workspace.capabilities?.features?.includes('workspace_directories') ===
+      true &&
+    workspace.workspaceCwd !== undefined &&
+    workspaces.find((entry) => entry.cwd === workspace.workspaceCwd)?.ssh ===
+      undefined;
   const gitWorkspaceCloneSupported =
     workspace.capabilities?.features?.includes('git_workspace_clone') === true;
   const workspaceDisplayNameSupported =
@@ -22648,6 +22659,11 @@ export function App({
                         onChatWidthModeChange={handleChatWidthModeChange}
                         connections={
                           standalone ? <DaemonConnectionsSettings /> : undefined
+                        }
+                        workspaceDirectoriesSection={
+                          workspaceDirectoriesSupported ? (
+                            <WorkspaceDirectoriesSection />
+                          ) : undefined
                         }
                         modelManagementSectionProps={{
                           ...modelManagementPolicy,
