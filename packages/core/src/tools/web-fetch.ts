@@ -670,6 +670,11 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
         };
       }
 
+      const persistedOutputFiles = entry.persistedTextPath
+        ? [entry.persistedTextPath]
+        : entry.reduced
+          ? []
+          : undefined;
       const fallbackPrompt = `The user requested the following: "${this.params.prompt}".
 
 I have fetched the content from ${this.params.url}. Fetch metadata:
@@ -729,6 +734,7 @@ ${entry.content}
           llmContent: `${header}\n\n[Content processing failed (${getErrorMessage(error)}). The raw fetched content follows.]\n\n${entry.content}${binaryNote}`,
           returnDisplay: `${displaySummary}${elapsedSuffix()} — processing failed, raw content returned`,
           rawOutputSize: entry.rawOutputSize,
+          persistedOutputFiles,
           ...(entry.persistedPath
             ? { resultFilePaths: [entry.persistedPath] }
             : {}),
@@ -743,6 +749,7 @@ ${entry.content}
         llmContent: `${header}\n\n${resultText}${binaryNote}`,
         returnDisplay: `${displaySummary}${elapsedSuffix()}`,
         rawOutputSize: entry.rawOutputSize,
+        persistedOutputFiles,
         ...(entry.persistedPath
           ? { resultFilePaths: [entry.persistedPath] }
           : {}),

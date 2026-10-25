@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { convertToFunctionResponse } from '../core/coreToolScheduler.js';
+import { enforceFunctionResponseBudget } from './tool-response-finalizer.js';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -500,6 +502,44 @@ describe('WebFetchTool', () => {
       // reports truncated: false for a page that was cut.
       expect(result.rawOutputSize?.chars).toBeGreaterThan(100_000);
     });
+
+    it.each([false, true])(
+      'retains the real extracted-text artifact through finalization (processing failure: %s)',
+      async (processingFailure) => {
+        const body = 'word '.repeat(30_000);
+        stubFetch({ contentType: 'text/plain', body: Buffer.from(body) });
+        if (processingFailure)
+          mockGenerateContent.mockRejectedValue(new Error('API error'));
+        else
+          mockGenerateContent.mockResolvedValue({
+            text: 'summary '.repeat(1000),
+          });
+        const result = await run('https://example.com/large');
+        expect(result.persistedOutputFiles).toHaveLength(1);
+        const artifact = result.persistedOutputFiles![0];
+        expect(fs.readFileSync(artifact, 'utf8')).toBe(body);
+        const [finalized] = enforceFunctionResponseBudget(
+          [
+            {
+              callId: 'web',
+              toolName: 'web_fetch',
+              responseParts: convertToFunctionResponse(
+                'web_fetch',
+                'web',
+                result.llmContent,
+                result,
+              ),
+            },
+          ],
+          500,
+        );
+        const output = finalized.responseParts[0].functionResponse!.response![
+          'output'
+        ] as string;
+        expect(output).toContain(artifact);
+        expect(output.length).toBeLessThanOrEqual(500);
+      },
+    );
 
     it('keeps default result budgets without shrinking side-query input', async () => {
       stubFetch({

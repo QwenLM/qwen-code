@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { attachToolOutputRecovery } from '../tools/tool-output-recovery.js';
+
 import { logToolResultSize } from '../telemetry/loggers.js';
 import { ToolResultSizeEvent } from '../telemetry/types.js';
 import {
@@ -1002,7 +1004,13 @@ export function convertToFunctionResponse(
   toolName: string,
   callId: string,
   llmContent: PartListUnion,
-  producerResult?: Pick<ToolResult, 'rawOutputSize' | 'truncatedByProducer'>,
+  producerResult?: Pick<
+    ToolResult,
+    | 'rawOutputSize'
+    | 'truncatedByProducer'
+    | 'recoveryText'
+    | 'persistedOutputFiles'
+  >,
   config?: Pick<Config, 'getChatCompression'>,
 ): Part[] {
   const processed = measureToolOutput(llmContent, config);
@@ -1021,7 +1029,13 @@ export function convertToFunctionResponse(
     // Optional observation metadata must not change a tool's outcome.
   }
   return attachToolOutputProvenance(
-    convertToFunctionResponseParts(toolName, callId, llmContent),
+    attachToolOutputRecovery(
+      convertToFunctionResponseParts(toolName, callId, llmContent),
+      {
+        text: producerResult?.recoveryText,
+        persistedOutputFiles: producerResult?.persistedOutputFiles,
+      },
+    ),
     {
       callId,
       toolName,
@@ -6376,7 +6390,10 @@ export class CoreToolScheduler {
         ).chars;
         const budgetReduced = !replacement && appliedOutputBudget !== undefined;
         response.responseParts = attachToolOutputProvenance(
-          response.responseParts,
+          attachToolOutputRecovery(response.responseParts, {
+            text: replacement ? undefined : producerToolResult?.recoveryText,
+            persistedOutputFiles: response.persistedOutputFiles,
+          }),
           {
             callId,
             toolName: getModelFacingToolName(scheduledCall.request),
@@ -7005,6 +7022,7 @@ export class CoreToolScheduler {
           getModelFacingToolName(scheduledCall.request),
           callId,
           content,
+          { recoveryText: toolResult.recoveryText, persistedOutputFiles },
         );
         const processedImages = await this.processToolResultImages(
           convertedResponse,

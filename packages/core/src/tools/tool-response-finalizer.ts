@@ -25,9 +25,13 @@ import {
 import {
   normalizeToolResultCallId,
   persistAndTruncateToolResult,
-  persistedOutputPointerRange,
 } from './truncation.js';
-import { transcriptMarkerRange } from './agent/transcript-marker.js';
+import {
+  attachToolOutputRecovery,
+  getToolOutputRecovery,
+  setToolOutputRecovery,
+  type ToolOutputRecovery,
+} from './tool-output-recovery.js';
 import { canonicalToolName, ToolNames } from './tool-names.js';
 
 const debugLogger = createDebugLogger('TOOL_RESPONSE_FINALIZER');
@@ -108,27 +112,36 @@ type TextSlot = {
   field: 'text' | 'output' | 'error';
   text: string;
   protectedPrefix?: string;
-  /**
-   * The character range of an inline recovery handle: a spill envelope's
-   * `Full output saved to:` line, or a subagent transcript marker. Slicing
-   * through either orphans the artifact for the rest of the session, and
-   * `fitText` otherwise slices 1/5 head : 4/5 tail without looking. `fitText`
-   * keeps the range whole and budgets the preview around it; the artifact path
-   * in its header still comes from `persistedOutputFiles` — data this module
-   * owns — never from the text.
-   */
-  recoveryRange?: { start: number; end: number };
+  recovery?: ToolOutputRecovery;
 };
 
-/**
- * The inline recovery handle a producer rendered into this text, if any. Both
- * ranges are producer-owned inverses (see `truncation.ts` and
- * `agent/transcript-marker.ts`), so neither can drift from the renderer.
- */
-function recoveryRangeOf(
-  text: string,
-): { start: number; end: number } | undefined {
-  return persistedOutputPointerRange(text) ?? transcriptMarkerRange(text);
+function recoveryOf(
+  entry: ToolResponseBudgetEntry,
+  part: Part,
+): ToolOutputRecovery {
+  const recovery = getToolOutputRecovery(part);
+  return {
+    ...recovery,
+    persistedOutputFiles:
+      entry.persistedOutputFiles ?? recovery?.persistedOutputFiles,
+  };
+}
+
+function recoveryHeader(files: string[] | undefined): string {
+  return files?.length
+    ? files.length === 1
+      ? `Tool output truncated. Persisted tool-output artifact: ${files[0]}`
+      : `Tool output truncated. Persisted tool-output artifacts:\n${files.map((file) => `- ${file}`).join('\n')}`
+    : TOOL_OUTPUT_TRUNCATED_NOTICE;
+}
+
+function minimumRecoveryBudget(slot: TextSlot): number {
+  const text = slot.recovery?.text;
+  return (
+    recoveryHeader(slot.recovery?.persistedOutputFiles).length +
+    (text ? text.length + 2 : 0) +
+    3
+  );
 }
 
 function isBudgetExemptOutputName(name: string | undefined): boolean {
@@ -177,14 +190,17 @@ function collectTextSlots(
     const parts = entry.responseParts;
     for (let partIndex = 0; partIndex < parts.length; partIndex++) {
       const part = parts[partIndex];
+      if (entry.persistedOutputFiles !== undefined) {
+        setToolOutputRecovery(part, recoveryOf(entry, part));
+      }
       if (includeTopLevelText && typeof part.text === 'string') {
-        const recoveryRange = recoveryRangeOf(part.text);
+        const recovery = recoveryOf(entry, part);
         slots.push({
           entryIndex,
           partIndex,
           field: 'text',
           text: part.text,
-          ...(recoveryRange ? { recoveryRange } : {}),
+          recovery,
         });
       }
       const response = part.functionResponse?.response;
@@ -206,25 +222,25 @@ function collectTextSlots(
           ? output.slice(protectedPrefix.length)
           : output;
         if (budgetedOutput.length > 0) {
-          const recoveryRange = recoveryRangeOf(budgetedOutput);
+          const recovery = recoveryOf(entry, part);
           slots.push({
             entryIndex,
             partIndex,
             field: 'output',
             text: budgetedOutput,
             ...(protectedPrefix ? { protectedPrefix } : {}),
-            ...(recoveryRange ? { recoveryRange } : {}),
+            recovery,
           });
         }
       }
       if (typeof error === 'string') {
-        const recoveryRange = recoveryRangeOf(error);
+        const recovery = recoveryOf(entry, part);
         slots.push({
           entryIndex,
           partIndex,
           field: 'error',
           text: error,
-          ...(recoveryRange ? { recoveryRange } : {}),
+          recovery,
         });
       }
     }
@@ -289,23 +305,20 @@ function fitText(
   text: string,
   maxChars: number,
   persistedOutputFiles: string[] | undefined,
-  recoveryRange?: { start: number; end: number },
+  recovery?: ToolOutputRecovery,
 ): string {
   if (text.length <= maxChars) return text;
   if (maxChars <= 0) return '';
 
-  const pointer =
-    persistedOutputFiles && persistedOutputFiles.length > 0
-      ? persistedOutputFiles.length === 1
-        ? `Tool output truncated. Persisted tool-output artifact: ${persistedOutputFiles[0]}`
-        : `Tool output truncated. Persisted tool-output artifacts:\n${persistedOutputFiles
-            .map((file) => `- ${file}`)
-            .join('\n')}`
-      : TOOL_OUTPUT_TRUNCATED_NOTICE;
+  const preserved = recovery?.text ?? '';
+  const preservedSize = preserved ? preserved.length + 2 : 0;
+  const pointer = recoveryHeader(persistedOutputFiles);
   // A pointer too long to deliver in full is dropped rather than sent as a
   // partial path, so the preview is budgeted against the notice that is sent.
   const header =
-    pointer.length <= maxChars ? pointer : TOOL_OUTPUT_TRUNCATED_NOTICE;
+    pointer.length + preservedSize + 3 <= maxChars
+      ? pointer
+      : TOOL_OUTPUT_TRUNCATED_NOTICE;
   if (header.length > maxChars) {
     return sliceStartWithoutBrokenSurrogate(
       TOOL_OUTPUT_TRUNCATED_NOTICE,
@@ -315,16 +328,15 @@ function fitText(
 
   const separator = '\n\n';
   const marker = '\n...\n';
-  // An inline handle is the artifact's only way back wherever the entry has no
-  // persisted path of its own, so it is delivered whole above the preview and
-  // the body is sliced without it. Below the room that needs, the bare notice
-  // is the fail-closed branch: no path fragment, complete or not.
-  const preserved = recoveryRange
-    ? text.slice(recoveryRange.start, recoveryRange.end)
-    : '';
-  const body = recoveryRange
-    ? text.slice(0, recoveryRange.start) + text.slice(recoveryRange.end)
-    : text;
+  let body = text;
+  // Remove only producer-owned data, never recognize handles in tool text.
+  for (const owned of [
+    pointer,
+    preserved,
+    ...(recovery?.persistedOutputFiles ?? []),
+  ]) {
+    if (owned) body = body.split(owned).join('');
+  }
   const preservedBlock = preserved ? `${separator}${preserved}` : '';
   const previewBudget =
     maxChars - header.length - preservedBlock.length - separator.length;
@@ -365,34 +377,45 @@ function replaceTextSlots(
     if (slot.text.length <= allocations[index]) continue;
     const entry = result[slot.entryIndex];
     const part = entry.responseParts[slot.partIndex];
+    const files =
+      entry.persistedOutputFiles ?? slot.recovery?.persistedOutputFiles;
+    const recovery = { ...slot.recovery, persistedOutputFiles: files };
     // The header path is the entry's persisted artifact — data this module
     // wrote, never a string recovered from model-visible text.
     const replacement = fitText(
       slot.text,
       allocations[index],
-      entry.persistedOutputFiles,
-      slot.recoveryRange,
+      files,
+      slot.recovery,
     );
 
     if (slot.field === 'text') {
-      entry.responseParts[slot.partIndex] = { ...part, text: replacement };
+      entry.responseParts[slot.partIndex] = attachToolOutputRecovery(
+        [{ ...part, text: replacement }],
+        recovery,
+      )[0];
       continue;
     }
 
     const functionResponse = part.functionResponse;
     if (!functionResponse) continue;
-    entry.responseParts[slot.partIndex] = {
-      ...part,
-      functionResponse: {
-        ...functionResponse,
-        response: {
-          ...functionResponse.response,
-          [slot.field]: slot.protectedPrefix
-            ? `${slot.protectedPrefix}${replacement}`
-            : replacement,
+    entry.responseParts[slot.partIndex] = attachToolOutputRecovery(
+      [
+        {
+          ...part,
+          functionResponse: {
+            ...functionResponse,
+            response: {
+              ...functionResponse.response,
+              [slot.field]: slot.protectedPrefix
+                ? `${slot.protectedPrefix}${replacement}`
+                : replacement,
+            },
+          },
         },
-      },
-    };
+      ],
+      recovery,
+    )[0];
   }
 
   return result;
@@ -404,6 +427,23 @@ export function toolResponseTextLength(parts: Part[]): number {
     true,
     false,
   ).reduce((total, slot) => total + slot.text.length, 0);
+}
+
+export function minimumFunctionResponseContent(parts: Part[]): {
+  parts: Part[];
+  budgetedChars: number;
+} {
+  const entries = [{ callId: '', toolName: '', responseParts: parts }];
+  const slots = collectTextSlots(entries, false);
+  const allocations = slots.map((slot) =>
+    slot.recovery?.text || slot.recovery?.persistedOutputFiles?.length
+      ? Math.min(slot.text.length, minimumRecoveryBudget(slot))
+      : 0,
+  );
+  return {
+    parts: replaceTextSlots(entries, slots, allocations)[0].responseParts,
+    budgetedChars: allocations.reduce((sum, value) => sum + value, 0),
+  };
 }
 
 export function enforceFunctionResponseBudget(
@@ -422,14 +462,20 @@ export function enforceFunctionResponseBudget(
   const total = slots.reduce((sum, slot) => sum + slot.text.length, 0);
   if (total <= budget) return entries;
 
-  const reduced = replaceTextSlots(
-    entries,
-    slots,
-    allocateTextBudget(
-      slots.map((slot) => slot.text.length),
-      budget,
-    ),
+  const allocations = allocateTextBudget(
+    slots.map((slot) => slot.text.length),
+    budget,
   );
+  if (
+    slots.some(
+      (slot, index) =>
+        slot.text.length > allocations[index] &&
+        (slot.recovery?.text || slot.recovery?.persistedOutputFiles?.length) &&
+        allocations[index] < minimumRecoveryBudget(slot),
+    )
+  )
+    return entries;
+  const reduced = replaceTextSlots(entries, slots, allocations);
   for (let index = 0; index < reduced.length; index++)
     for (
       let partIndex = 0;
@@ -516,14 +562,16 @@ export async function finalizeToolResponses(
     budget,
   );
   if (
-    budgetOverride !== undefined &&
     slots.some(
       (slot, index) =>
         slot.text.length > allocations[index] &&
         // `fitText` spends the allocation on the notice and its separator
         // first, so anything below notice + '\n\n' + one character would
         // persist an artifact and then send a contentless notice.
-        allocations[index] < TOOL_OUTPUT_TRUNCATED_NOTICE.length + 3,
+        (budgetOverride !== undefined ||
+          slot.recovery?.text ||
+          slot.recovery?.persistedOutputFiles?.length) &&
+        allocations[index] < minimumRecoveryBudget(slot),
     )
   ) {
     // Compaction owns headroom too small for a meaningful tool result.
@@ -568,7 +616,19 @@ export async function finalizeToolResponses(
   const usedCallIds = new Set<string>();
   for (const entryIndex of entriesToPersist) {
     const entry = withPersistence[entryIndex];
-    if (entry.persistedOutputFiles !== undefined) continue;
+    const previousFiles =
+      entry.persistedOutputFiles ??
+      entry.responseParts
+        .map(getToolOutputRecovery)
+        .find((recovery) => recovery?.persistedOutputFiles !== undefined)
+        ?.persistedOutputFiles;
+    if (previousFiles !== undefined) {
+      withPersistence[entryIndex] = {
+        ...entry,
+        persistedOutputFiles: previousFiles,
+      };
+      continue;
+    }
     const content = slots
       .filter((slot) => slot.entryIndex === entryIndex)
       .map((slot) => slot.text)

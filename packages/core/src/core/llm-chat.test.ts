@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { convertToFunctionResponse } from './coreToolScheduler.js';
+import { truncateAndSaveToFile } from '../tools/truncation.js';
+import { mkdtemp, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import {
   attachToolOutputProvenance,
   getToolOutputProvenance,
@@ -13458,99 +13463,49 @@ describe('LlmChat', async () => {
       expect(resultChars(1)).toBeLessThanOrEqual(1_333);
     });
 
-    // Regression (review R12-1): a pressure cut that reaches a
-    // `<persisted-output>` envelope must keep its artifact path atomic —
-    // the whole path, or no path at all — never a string severed mid-way.
-    it('keeps spill pointers atomic when the pressure cut reaches an envelope', async () => {
-      // 8 slots sharing ~2.1k chars ≈ 266 each: above the notice's own
-      // length, so every envelope survives with its path intact.
-      await reportUsage(849_000);
-      await sendDrain(
-        Array.from({ length: 8 }, (_, n) =>
-          fnResponse(
-            'shell',
-            { output: `${spillEnvelope(n)}${'x'.repeat(18_000)}` },
-            `spilled-${n}`,
-          ),
-        ),
-        'second',
-      );
-      const outputs = resultOutputs(1);
-      expect(outputs).toHaveLength(8);
-      for (const [n, output] of outputs.entries()) {
-        const path = `/home/runner/.qwen/tmp/project-temp-dir/shell_${'a'.repeat(12)}${n}.log`;
-        // The intact path survives — kept on its own line above the preview
-        // even though the text around it was cut.
-        expect(output.includes(path)).toBe(true);
-        // The headroom budget is still honoured: every slot was shortened.
-        expect(output.length).toBeLessThan(20_000);
-      }
-    });
-
-    it('keeps a spaced spill pointer whole through the send boundary', async () => {
-      // A home directory containing a space is a real path chain
-      // (`os.homedir()`): a whitespace-delimited read of the pointer line
-      // would recover and advertise only the first segment.
-      const base = '/home/runner/My Projects/tool-results';
-      await reportUsage(849_000);
-      await sendDrain(
-        Array.from({ length: 8 }, (_, n) =>
-          fnResponse(
-            'shell',
-            { output: `${spillEnvelope(n, base)}${'x'.repeat(18_000)}` },
-            `spaced-${n}`,
-          ),
-        ),
-        'second',
-      );
-      const outputs = resultOutputs(1);
-      expect(outputs).toHaveLength(8);
-      for (const [n, output] of outputs.entries()) {
-        const line = `Full output saved to: ${base}/shell_${'a'.repeat(12)}${n}.log`;
-        expect(output).toContain(line);
-        // Every fragment of the spaced directory is the whole directory, never
-        // a prefix of it.
-        for (
-          let at = output.indexOf('/home/runner/My');
-          at !== -1;
-          at = output.indexOf('/home/runner/My', at + 1)
-        ) {
-          expect(output.slice(at).startsWith('/home/runner/My Projects/')).toBe(
-            true,
+    it.each([849_000, 848_000])(
+      'keeps real spaced producer paths whole through the send boundary at %s tokens',
+      async (usage) => {
+        const dir = await mkdtemp(path.join(os.tmpdir(), 'chat recovery '));
+        try {
+          await reportUsage(usage);
+          const producers = await Promise.all(
+            Array.from({ length: 8 }, (_, n) =>
+              truncateAndSaveToFile(
+                'x'.repeat(30_000),
+                `shell-${n}`,
+                dir,
+                20_000,
+                Infinity,
+              ),
+            ),
           );
+          await sendDrain(
+            producers.flatMap((producer, n) =>
+              convertToFunctionResponse(
+                'shell',
+                `spilled-${n}`,
+                producer.content,
+                { persistedOutputFiles: [producer.outputFile!] },
+              ),
+            ),
+            'second',
+          );
+          const outputs = resultOutputs(1);
+          expect(outputs).toHaveLength(8);
+          expect(resultChars(1)).toBeLessThan((850_000 - usage) * 4);
+          for (const [n, output] of outputs.entries()) {
+            const artifact = producers[n].outputFile!;
+            expect(artifact).toBeDefined();
+            expect(output).toContain(artifact);
+            expect(output.split(artifact).join('')).not.toContain(dir);
+            expect(output.length).toBeLessThan(producers[n].content.length);
+          }
+        } finally {
+          await rm(dir, { recursive: true, force: true });
         }
-      }
-    });
-
-    it('ships the spill pointer whole or not at all', async () => {
-      // 8 slots sharing ~5.3k chars ≈ 660 each: the plain head/tail slice
-      // would land smack inside the pointer line (character ~131), so this
-      // band is exactly where a partial `shell_a…` fragment would ship.
-      await reportUsage(848_000);
-      await sendDrain(
-        Array.from({ length: 8 }, (_, n) =>
-          fnResponse(
-            'shell',
-            { output: `${spillEnvelope(n)}${'x'.repeat(18_000)}` },
-            `spilled-${n}`,
-          ),
-        ),
-        'second',
-      );
-      const outputs = resultOutputs(1);
-      expect(outputs).toHaveLength(8);
-      for (const [n, output] of outputs.entries()) {
-        // Every surviving pointer fragment — kept line or preview — is exactly
-        // this slot's complete path; nothing severed mid-string.
-        const stems = output.match(/shell_[a-z0-9._-]*/g) ?? [];
-        for (const stem of stems) {
-          expect(stem).toBe(`shell_${'a'.repeat(12)}${n}.log`);
-        }
-        // The notice, when present, is complete.
-        if (output.includes('Tool output truncated'))
-          expect(output.startsWith('Tool output truncated.')).toBe(true);
-      }
-    });
+      },
+    );
 
     it('charges media before sharing the remaining headroom between previews', async () => {
       const stat = { dev: 1, ino: 100 } as Stats;

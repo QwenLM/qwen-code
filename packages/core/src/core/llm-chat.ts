@@ -32,6 +32,7 @@ import { createUserContent, FinishReason } from './genai-compat.js';
 import {
   finalizeToolResponses,
   enforceFunctionResponseBudget,
+  minimumFunctionResponseContent,
   isBudgetShrinkablePart,
 } from '../tools/tool-response-finalizer.js';
 import {
@@ -6294,22 +6295,12 @@ export class LlmChat {
     // the budget never touches it.
     const shrinkableParts = userContent.parts.filter(isBudgetShrinkablePart);
     if (shrinkableParts.length === 0) return undefined;
+    const minimumContent = minimumFunctionResponseContent(userContent.parts);
     const newUnshrinkableContent: Content[] = [
       ...this.history.slice(anchor.history.length),
       {
         ...userContent,
-        parts: enforceFunctionResponseBudget(
-          [
-            {
-              callId: '',
-              toolName: 'tool-response-batch',
-              responseParts: userContent.parts,
-            },
-          ],
-          0,
-          true,
-          false,
-        )[0].responseParts,
+        parts: minimumContent.parts,
       },
     ];
     const { auto } = computeThresholds(
@@ -6328,7 +6319,9 @@ export class LlmChat {
     const remainingTokens =
       (auto - projectedTokens) / CONSERVATIVE_NEW_CONTENT_SAFETY_FACTOR;
     if (remainingTokens <= 0) return undefined;
-    const chars = Math.floor(remainingTokens * TOKEN_TO_CHAR_RATIO);
+    const chars =
+      Math.floor(remainingTokens * TOKEN_TO_CHAR_RATIO) +
+      minimumContent.budgetedChars;
     return chars < baseChars * shrinkableParts.length ? chars : undefined;
   }
 
