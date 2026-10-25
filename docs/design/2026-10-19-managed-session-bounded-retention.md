@@ -126,7 +126,12 @@ continues to apply only after a complete snapshot or legacy event prefix.
 
 ## Remaining native-journal and authority design
 
-These are required serial follow-ups, not implemented by slice 1:
+These are required follow-ups, not implemented by slice 1. Identity storage
+and the native snapshot contract can be developed in parallel. HTTP and local
+replay can proceed in parallel once the snapshot contract is stable; the
+authority window depends on identity storage and both verified replay paths.
+See the [PR2 protocol design](2026-10-26-managed-native-journal-snapshots.md)
+for its implementation boundary and the lossless first payload format.
 
 1. **Identity storage:** move terminal bodies and deduplication evidence to a
    durable lookup/archival structure before removing them from resident maps.

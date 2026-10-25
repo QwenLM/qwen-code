@@ -552,6 +552,27 @@ public class ManagedSessionStore {
             Long activationExpiresAt, Long activationHeadRevision) {
     }
 
+    RestoreHead lockSnapshotWriter(String tenant, String session, String token,
+            ManagedNativeJournalSnapshots.PublishRequest request) {
+        validateScope(tenant, request.workspaceId(), session);
+        requireCredential(tenant, request.workspaceId(), session, token);
+        validateStableId(request.writerId(), "writerId");
+        validateStableId(request.snapshotId(), "snapshotId");
+        validateCounter(request.writerGeneration(), "writerGeneration", 1);
+        validateCounter(request.expectedJournalRevision(), "expectedJournalRevision", 1);
+        validateCounter(request.expectedCommittedSequence(), "expectedCommittedSequence", 0);
+        validateDigest(request.expectedLastCommitDigest(), "expectedLastCommitDigest", true);
+        lockBounded(() -> WorkspaceLifecycleStore.lockPlacement(jdbc, tenant, GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        lockPublicationWriter(tenant, request.workspaceId(), session, request.writerId(), request.writerGeneration(), token);
+        requireOrdinaryAdmission(tenant, session);
+        HeadRow locked = requireHeadForUpdate(tenant, session);
+        RestoreHead head = restoreHead(locked);
+        if (!"READY".equals(head.recoveryStatus())) {
+            throw conflict("managed_session_recovery_blocked", "The Session is blocked from snapshot publication.");
+        }
+        return head;
+    }
+
     PublicationWriter lockPublicationWriter(String tenant, String workspace,
             String session, String writer, long generation, String token) {
         validateScope(tenant, workspace, session);
@@ -1410,6 +1431,10 @@ public class ManagedSessionStore {
         HeadRow head = requireHead(tenantId, sessionId);
         requireHeadScope(head, tenantId, workspaceId, sessionId);
         requireReadGrant(head, writerToken);
+        return restoreHead(head);
+    }
+
+    private static RestoreHead restoreHead(HeadRow head) {
         return new RestoreHead(head.state(), head.storageVersion(),
                 head.writerGeneration(), head.journalRevision(),
                 head.committedSequence(), head.lastCommitDigest(),
@@ -1667,15 +1692,28 @@ public class ManagedSessionStore {
 
     public StoredResource readResource(String tenantId, String workspaceId,
             String sessionId, String resourceId, String writerToken) {
+        return readResource(tenantId, workspaceId, sessionId, resourceId, writerToken, true);
+    }
+
+    StoredResource readSnapshotResource(String tenantId, String workspaceId, String sessionId,
+            String resourceId, String writerToken) {
+        return readResource(tenantId, workspaceId, sessionId, resourceId, writerToken, false);
+    }
+
+    private StoredResource readResource(String tenantId, String workspaceId,
+            String sessionId, String resourceId, String writerToken, boolean updateVerification) {
         validateScope(tenantId, workspaceId, sessionId);
         requireCredential(tenantId, workspaceId, sessionId, writerToken);
+        if (updateVerification && ManagedNativeJournalSnapshots.isSnapshotId(resourceId)) {
+            throw invalid("Native snapshot resources require the journal-snapshots read API.");
+        }
         validateStableId(resourceId, "resourceId");
         HeadRow head = requireHead(tenantId, sessionId);
         requireHeadScope(head, tenantId, workspaceId, sessionId);
         requireReadGrant(head, writerToken);
         try (var lease = outputRetention.read(tenantId, sessionId)) {
             String scopeKey = sessionScopeKey(tenantId, sessionId);
-            ResourceRow resource = findResource(scopeKey, resourceId);
+            ResourceRow resource = findResource(scopeKey, resourceId, updateVerification);
             if (resource == null) {
                 throw new ManagedAgentException(HttpStatus.NOT_FOUND,
                         ManagedSessionStoreModels.ERROR_RESOURCE_NOT_FOUND,
@@ -1684,12 +1722,14 @@ public class ManagedSessionStore {
             requireResourceScope(resource, tenantId, workspaceId, sessionId,
                     resourceId);
             verifyStoredResource(resource);
-            jdbc.update("UPDATE ma_resource SET"
+            if (updateVerification) {
+                jdbc.update("UPDATE ma_resource SET"
                             + " last_verified_at = ? WHERE session_scope_key = ?"
                             + " AND resource_id = ?",
-                    databaseNow(), scopeKey, resourceId);
+                        databaseNow(), scopeKey, resourceId);
+            }
             byte[] bytes = "TOOL_PUBLICATION".equals(resource.storageKind())
-                    ? readPublicationObject(resource, lease) : resource.bytes();
+                    ? readPublicationObject(resource, lease, updateVerification) : resource.bytes();
             var result = new StoredResource(resource.resourceId(), resource.kind(),
                     resource.schemaVersion(), resource.byteLength(),
                     resource.digest(), bytes);
@@ -1704,6 +1744,10 @@ public class ManagedSessionStore {
             String sessionId,
             String resourceId,
             String writerToken) {
+        if (ManagedNativeJournalSnapshots.isSnapshotId(resourceId)) {
+            requireCredential(tenantId, workspaceId, sessionId, writerToken);
+            throw invalid("Native snapshot resources require the journal-snapshots read API.");
+        }
         if (org.springframework.transaction.support.TransactionSynchronizationManager
                         .isActualTransactionActive()
                 || org.springframework.transaction.support.TransactionSynchronizationManager
@@ -2082,6 +2126,9 @@ public class ManagedSessionStore {
     @Transactional
     public ToolResultResourceRef publishInheritedExtensionResource(String tenantId, String workspaceId, String sessionId, StoredResource source) {
         validateScope(tenantId, workspaceId, sessionId);
+        if (ManagedNativeJournalSnapshots.isSnapshotId(source.resourceId())) {
+            throw invalid("Native snapshot resources require fenced snapshot publication.");
+        }
         ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenantId, sessionId);
         if (!Set.of("managed-extension-config-bundle", "managed-extension-contributions", "managed-extension-contributions-part").contains(source.kind())
                 || source.schemaVersion() != 1 || source.byteLength() > ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES
@@ -2153,6 +2200,9 @@ public class ManagedSessionStore {
         validateStableId(request.writerId(), "writerId");
         validateCounter(request.writerGeneration(), "writerGeneration", 1);
         validateStableId(request.resourceId(), "resourceId");
+        if (ManagedNativeJournalSnapshots.isSnapshotId(request.resourceId())) {
+            throw invalid("Native snapshot resources require fenced snapshot publication.");
+        }
         validateDigest(request.digest(), "resource digest", false);
         int limit = toolResultLimit(request.kind());
         if (limit == 0 || request.schemaVersion() != 1 || request.byteLength() < 1) {
@@ -2678,6 +2728,10 @@ public class ManagedSessionStore {
             }
             validateStableId(resource.resourceId(), "resourceId");
             validateStableId(resource.kind(), "resource kind");
+            if (ManagedNativeJournalSnapshots.isSnapshotKind(resource.kind())
+                    || ManagedNativeJournalSnapshots.isSnapshotId(resource.resourceId())) {
+                throw invalid("Native snapshot resources require fenced snapshot publication.");
+            }
             validateDigest(resource.digest(), "resource digest", false);
             if (resource.schemaVersion() < 1 || resource.byteLength() < 0) {
                 throw invalid("Resource version or length is invalid.");
@@ -3115,10 +3169,14 @@ public class ManagedSessionStore {
     }
 
     private ResourceRow findResource(String scopeKey, String resourceId) {
+        return findResource(scopeKey, resourceId, true);
+    }
+
+    private ResourceRow findResource(String scopeKey, String resourceId, boolean lock) {
         List<ResourceRow> rows =
                 jdbc.query(
                         "SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE resource_key = ? AND session_scope_key = ?"
-                            + " AND resource_id = ? FOR UPDATE",
+                        + " AND resource_id = ?" + (lock ? " FOR UPDATE" : ""),
                         resourceMapper,
                         resourceKey(scopeKey, resourceId),
                         scopeKey,
@@ -3375,6 +3433,10 @@ public class ManagedSessionStore {
     }
 
     private byte[] readPublicationObject(ResourceRow resource, ToolPublicationRetentionStore.ReadLease lease) {
+        return readPublicationObject(resource, lease, true);
+    }
+
+    private byte[] readPublicationObject(ResourceRow resource, ToolPublicationRetentionStore.ReadLease lease, boolean quarantine) {
         if (publicationObjects == null) {
             throw resourceCorrupt();
         }
@@ -3384,9 +3446,11 @@ public class ManagedSessionStore {
                     || !sha256(bytes).equals(resource.digest())) {
                 var error = resourceCorrupt();
                 try {
-                    outputRetention.quarantineResource(
-                            ToolPublicationDataStore.scope(resource.tenantId(), resource.workspaceId(), resource.sessionId()),
-                            resource.resourceId(), resource.objectKey());
+                    if (quarantine) {
+                        outputRetention.quarantineResource(
+                                ToolPublicationDataStore.scope(resource.tenantId(), resource.workspaceId(), resource.sessionId()),
+                                resource.resourceId(), resource.objectKey());
+                    }
                 } catch (RuntimeException cleanup) {
                     error.addSuppressed(cleanup);
                 }

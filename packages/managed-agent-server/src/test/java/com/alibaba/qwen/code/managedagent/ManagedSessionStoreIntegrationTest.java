@@ -90,6 +90,33 @@ class ManagedSessionStoreIntegrationTest {
     private ManagedSessionStore sessionStore;
 
     @Test
+    void nativeJournalSnapshotRoutesPublishReadAndPageWithinWriterScope() throws Exception {
+        String session = "native-snapshot-" + UUID.randomUUID();
+        String base = historySession(session);
+        ObjectNode request = objectMapper.createObjectNode().put("workspaceId", WORKSPACE)
+                .put("writerId", WRITER_A).put("writerGeneration", 1).put("snapshotId", "native-one")
+                .put("expectedJournalRevision", 1).put("expectedCommittedSequence", 0);
+        mvc.perform(post(base + "/journal-snapshots:publish").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
+                .contentType(MediaType.APPLICATION_JSON).content(request.toString()))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.snapshot.payloadFormat").value("committed-prefix-v1"))
+                .andExpect(jsonPath("$.snapshot.coveredJournalRevision").value(1));
+        mvc.perform(get(base + "/journal-snapshots/native-one").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A).param("workspaceId", WORKSPACE))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.snapshot.snapshotId").value("native-one"));
+        mvc.perform(get(base + "/journal-snapshots/native-one/pages").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A).param("workspaceId", WORKSPACE))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.pages.length()").value(1))
+                .andExpect(jsonPath("$.nextRevision").value(1)).andExpect(jsonPath("$.hasMore").value(false));
+        mvc.perform(get(base + "/journal-snapshots/native-one").header(TenantContextFilter.HEADER, TENANT)
+                .param("workspaceId", WORKSPACE)).andExpect(status().isBadRequest());
+        mvc.perform(get(base + "/journal-snapshots/native-one").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_B).param("workspaceId", WORKSPACE))
+                .andExpect(status().isConflict());
+        assertThat(sessionStore.restore(TENANT, WORKSPACE, session, TOKEN_A).compactedThroughRevision()).isZero();
+    }
+
+    @Test
     void checkpointHistoryReusesCommittedDependenciesWithoutRecensus() throws Exception {
         String session = "checkpoint-history-" + UUID.randomUUID();
         String base = historySession(session);
