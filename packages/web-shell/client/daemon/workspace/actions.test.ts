@@ -36,6 +36,43 @@ describe('workspace actions', () => {
     });
   });
 
+  it('routes auto-memory reads through the selected workspace, not the primary', async () => {
+    const status = { v: 1, workspaceCwd: '/ws/secondary', entries: [] };
+    const file = { scope: 'project', path: '/m/note.md', bytes: 1 };
+    const scoped = {
+      workspaceAutoMemory: vi.fn().mockResolvedValue(status),
+      workspaceAutoMemoryFile: vi.fn().mockResolvedValue(file),
+      openAutoMemoryFolderLocally: vi.fn().mockResolvedValue(undefined),
+    };
+    const workspaceByCwd = vi.fn(() => scoped);
+    const primaryAutoMemory = vi.fn();
+    const primaryAutoMemoryFile = vi.fn();
+    const actions = createDaemonWorkspaceActions({
+      getClient: () =>
+        ({
+          workspaceByCwd,
+          workspaceAutoMemory: primaryAutoMemory,
+          workspaceAutoMemoryFile: primaryAutoMemoryFile,
+        }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/ws/secondary',
+      baseUrl: '',
+    });
+
+    await expect(actions.loadAutoMemoryStatus()).resolves.toBe(status);
+    await expect(actions.readAutoMemoryFile('/m/note.md')).resolves.toBe(file);
+    await actions.openAutoMemoryFolder('project', '/ws/secondary', '/m');
+
+    expect(workspaceByCwd).toHaveBeenCalledWith('/ws/secondary');
+    expect(workspaceByCwd).toHaveBeenCalledTimes(3);
+    expect(scoped.workspaceAutoMemoryFile).toHaveBeenCalledWith('/m/note.md');
+    expect(scoped.openAutoMemoryFolderLocally).toHaveBeenCalledWith(
+      'project',
+      '/m',
+    );
+    expect(primaryAutoMemory).not.toHaveBeenCalled();
+    expect(primaryAutoMemoryFile).not.toHaveBeenCalled();
+  });
+
   it('preheats ACP with the requested timeout', async () => {
     const workspaceAcpPreheat = vi.fn().mockResolvedValue({
       ready: true,

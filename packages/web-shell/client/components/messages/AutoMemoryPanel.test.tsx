@@ -8,18 +8,26 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import type {
+  DaemonAutoMemoryFile,
+  DaemonSettingDescriptor,
+  DaemonWorkspaceAutoMemoryStatus,
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { I18nProvider } from '../../i18n';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
+// Knobs typed with the published wire types, so a fixture shape the
+// daemon never sends does not typecheck. `entries` is not a knob: the real
+// hook derives it from the status (`status?.entries ?? []`).
 const state = vi.hoisted(() => ({
-  status: undefined as unknown,
-  entries: [] as unknown[],
+  status: undefined as DaemonWorkspaceAutoMemoryStatus | undefined,
   loading: false,
   error: undefined as Error | undefined,
   readAutoMemoryFile: vi.fn(),
   openAutoMemoryFolder: vi.fn(),
-  settings: [] as unknown[],
+  settings: [] as DaemonSettingDescriptor[],
+  settingsError: undefined as Error | undefined,
   setValue: vi.fn(),
   reload: vi.fn(),
   features: [] as string[],
@@ -35,7 +43,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
     ...actual,
     useAutoMemory: () => ({
       status: state.status,
-      entries: state.entries,
+      entries: state.status?.entries ?? [],
       loading: state.loading,
       error: state.error,
       readAutoMemoryFile: state.readAutoMemoryFile,
@@ -43,6 +51,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
     }),
     useSettings: () => ({
       settings: state.settings,
+      error: state.settingsError,
       setValue: state.setValue,
       reload: state.reload,
     }),
@@ -58,10 +67,13 @@ vi.mock('../../config/daemon', () => ({
 
 const { AutoMemoryPanel } = await import('./AutoMemoryPanel');
 
-const PROJECT_ENTRY = {
+const PROJECT_DIR = '/workspace/.qwen/memory';
+const USER_DIR = '/home/u/.qwen/memories';
+
+const PROJECT_ENTRY: DaemonAutoMemoryFile = {
   kind: 'auto_memory_file',
   scope: 'project',
-  path: '/workspace/.qwen/auto-memory/project/notes.md',
+  path: `${PROJECT_DIR}/notes.md`,
   title: 'Build notes',
   description: 'How the project builds',
   type: 'project',
@@ -69,54 +81,89 @@ const PROJECT_ENTRY = {
   modifiedAt: '2026-10-14T12:00:00.000Z',
 };
 
-const USER_ENTRY = {
+const USER_ENTRY: DaemonAutoMemoryFile = {
   kind: 'auto_memory_file',
   scope: 'user',
-  path: '/home/u/.qwen/auto-memory/preferences.md',
+  path: `${USER_DIR}/preferences.md`,
   title: 'Preferences',
   bytes: 512,
   modifiedAt: '2026-10-14T13:00:00.000Z',
 };
 
 function listing(
-  entries: Array<typeof PROJECT_ENTRY | typeof USER_ENTRY> = [
-    PROJECT_ENTRY,
-    USER_ENTRY,
-  ],
-) {
+  entries: DaemonAutoMemoryFile[] = [PROJECT_ENTRY, USER_ENTRY],
+  overrides: Partial<DaemonWorkspaceAutoMemoryStatus> = {},
+): DaemonWorkspaceAutoMemoryStatus {
   return {
     v: 1,
     workspaceCwd: '/workspace',
     initialized: true,
-    userDir: '/home/u/.qwen/auto-memory',
-    projectDir: '/workspace/.qwen/auto-memory',
+    userDir: USER_DIR,
+    userDirExists: true,
+    projectDir: PROJECT_DIR,
+    projectDirs: [PROJECT_DIR],
     entries,
     totalBytes: entries.reduce((sum, entry) => sum + entry.bytes, 0),
     fileCount: entries.length,
+    ...overrides,
   };
 }
 
-function settingsWith(autoMemory: boolean, autoDream: boolean) {
+/**
+ * Descriptors shaped like the served ones: both keys default to true and
+ * require a restart (settingsSchema.ts); a value that differs from the
+ * default is defined at user scope, as the daemon would report it.
+ */
+function descriptor(
+  key: string,
+  label: string,
+  values: DaemonSettingDescriptor['values'],
+): DaemonSettingDescriptor {
+  return {
+    key,
+    type: 'boolean',
+    label,
+    category: 'Memory',
+    requiresRestart: true,
+    default: true,
+    values,
+  };
+}
+
+function userValue(value: boolean): DaemonSettingDescriptor['values'] {
+  return value ? { effective: true } : { effective: false, user: false };
+}
+
+function settingsWith(
+  autoMemory: boolean,
+  autoDream: boolean,
+): DaemonSettingDescriptor[] {
   return [
-    {
-      key: 'memory.enableManagedAutoMemory',
-      type: 'boolean',
-      label: 'Auto-memory',
-      category: 'memory',
-      requiresRestart: false,
-      default: false,
-      values: { effective: autoMemory },
-    },
-    {
-      key: 'memory.enableManagedAutoDream',
-      type: 'boolean',
-      label: 'Auto-dream',
-      category: 'memory',
-      requiresRestart: false,
-      default: false,
-      values: { effective: autoDream },
-    },
+    descriptor(
+      'memory.enableManagedAutoMemory',
+      'Auto-memory',
+      userValue(autoMemory),
+    ),
+    descriptor(
+      'memory.enableManagedAutoDream',
+      'Auto-dream',
+      userValue(autoDream),
+    ),
   ];
+}
+
+function rerender() {
+  act(() =>
+    root.render(
+      <I18nProvider language="en">
+        <AutoMemoryPanel />
+      </I18nProvider>,
+    ),
+  );
+}
+
+function liveRegions(): Element[] {
+  return Array.from(container.querySelectorAll('[aria-live="polite"]'));
 }
 
 let container: HTMLDivElement;
@@ -174,15 +221,20 @@ function openFolderButtons(): HTMLButtonElement[] {
 
 beforeEach(() => {
   state.status = listing();
-  state.entries = [PROJECT_ENTRY, USER_ENTRY];
   state.loading = false;
   state.error = undefined;
   state.settings = settingsWith(true, false);
+  state.settingsError = undefined;
   state.features = [];
   state.localDaemon = false;
   state.readAutoMemoryFile.mockReset();
   state.openAutoMemoryFolder.mockReset().mockResolvedValue(undefined);
-  state.setValue.mockReset().mockResolvedValue(undefined);
+  state.setValue.mockReset().mockResolvedValue({
+    key: 'memory.enableManagedAutoMemory',
+    scope: 'user',
+    value: false,
+    requiresRestart: false,
+  });
   state.reload.mockReset().mockResolvedValue(undefined);
 });
 
@@ -199,15 +251,19 @@ describe('AutoMemoryPanel', () => {
     expect(container.textContent).toContain('User memory');
     expect(container.textContent).toContain('Build notes');
     expect(container.textContent).toContain('How the project builds');
-    expect(container.textContent).toContain('/workspace/.qwen/auto-memory');
+    expect(container.textContent).toContain(PROJECT_DIR);
+    expect(container.textContent).toContain(USER_DIR);
     // One 512-byte entry per scope.
     expect(container.textContent).toContain('1 · 512 B');
     expect(container.textContent).toContain('512 B');
   });
 
   it('shows the not-initialized hint when no directory exists yet', async () => {
-    state.status = { ...listing([]), initialized: false };
-    state.entries = [];
+    state.status = listing([], {
+      initialized: false,
+      userDirExists: false,
+      projectDirs: [],
+    });
 
     await mount();
 
@@ -290,6 +346,9 @@ describe('AutoMemoryPanel', () => {
     await mount();
 
     expect(container.textContent).toContain('Loading memory...');
+    // No status means no entries: nothing is listed while loading.
+    expect(container.textContent).not.toContain('Build notes');
+    expect(container.textContent).not.toContain('Preferences');
   });
 
   it('shows the load error when the status request fails', async () => {
@@ -301,6 +360,7 @@ describe('AutoMemoryPanel', () => {
     expect(container.textContent).toContain(
       'GET /workspace/auto-memory: 500 Internal',
     );
+    expect(container.textContent).not.toContain('Build notes');
   });
 
   it('reflects the effective setting values on the toggles', async () => {
@@ -335,24 +395,13 @@ describe('AutoMemoryPanel', () => {
     // A workspace-scope value wins in the merged effective value, so the
     // write must target the scope that currently defines the value.
     state.settings = [
-      {
-        key: 'memory.enableManagedAutoMemory',
-        type: 'boolean',
-        label: 'Auto-memory',
-        category: 'memory',
-        requiresRestart: false,
-        default: false,
-        values: { effective: false, workspace: false },
-      },
-      {
-        key: 'memory.enableManagedAutoDream',
-        type: 'boolean',
-        label: 'Auto-dream',
-        category: 'memory',
-        requiresRestart: false,
-        default: false,
-        values: { effective: false },
-      },
+      descriptor('memory.enableManagedAutoMemory', 'Auto-memory', {
+        effective: false,
+        workspace: false,
+      }),
+      descriptor('memory.enableManagedAutoDream', 'Auto-dream', {
+        effective: true,
+      }),
     ];
 
     await mount();
@@ -422,15 +471,9 @@ describe('AutoMemoryPanel', () => {
 
   it('disables a switch only when its own setting is missing from the descriptors', async () => {
     state.settings = [
-      {
-        key: 'memory.enableManagedAutoMemory',
-        type: 'boolean',
-        label: 'Auto-memory',
-        category: 'memory',
-        requiresRestart: false,
-        default: false,
-        values: { effective: true },
-      },
+      descriptor('memory.enableManagedAutoMemory', 'Auto-memory', {
+        effective: true,
+      }),
     ];
 
     await mount();
@@ -440,22 +483,26 @@ describe('AutoMemoryPanel', () => {
   });
 
   it('surfaces per-root scan errors from the status', async () => {
-    state.status = {
-      ...listing([USER_ENTRY]),
+    // The cell shape the daemon emits (DaemonStatusCell).
+    state.status = listing([USER_ENTRY], {
+      projectDirs: [],
       errors: [
         {
-          scope: 'project',
-          errorKind: 'readdir_failed',
-          error: 'EACCES: permission denied, scandir /workspace/.qwen/memory',
+          kind: 'auto_memory_file',
+          status: 'error',
+          errorKind: 'symlinked_root',
+          error: 'refusing symlinked project memory root',
+          hint: PROJECT_DIR,
         },
       ],
-    };
-    state.entries = [USER_ENTRY];
+    });
 
     await mount();
 
-    expect(container.textContent).toContain(
-      'EACCES: permission denied, scandir /workspace/.qwen/memory',
+    // The pathless message is attributed to its root through `hint`.
+    const [region] = liveRegions();
+    expect(region.textContent).toContain(
+      `refusing symlinked project memory root (${PROJECT_DIR})`,
     );
   });
 
@@ -465,52 +512,211 @@ describe('AutoMemoryPanel', () => {
 
     // A local daemon without the feature tag.
     state.localDaemon = true;
-    act(() =>
-      root.render(
-        <I18nProvider language="en">
-          <AutoMemoryPanel />
-        </I18nProvider>,
-      ),
-    );
+    rerender();
     await flush();
     expect(openFolderButtons()).toHaveLength(0);
 
     // The feature tag on a non-local daemon is not an open affordance.
     state.features = ['workspace_local_open'];
     state.localDaemon = false;
-    act(() =>
-      root.render(
-        <I18nProvider language="en">
-          <AutoMemoryPanel />
-        </I18nProvider>,
-      ),
-    );
+    rerender();
     await flush();
     expect(openFolderButtons()).toHaveLength(0);
 
     state.localDaemon = true;
-    act(() =>
-      root.render(
-        <I18nProvider language="en">
-          <AutoMemoryPanel />
-        </I18nProvider>,
-      ),
-    );
+    rerender();
     await flush();
     expect(openFolderButtons()).toHaveLength(2);
-  });
 
-  it('opens the memory folder for a scope on the daemon host', async () => {
-    state.localDaemon = true;
-    state.features = ['workspace_local_open'];
+    // No directory exists yet: no button offers a guaranteed 404.
+    state.status = listing([], {
+      initialized: false,
+      userDirExists: false,
+      projectDirs: [],
+    });
+    rerender();
+    await flush();
+    expect(openFolderButtons()).toHaveLength(0);
 
-    await mount();
+    // Only the user root exists: only its button renders.
+    state.status = listing([USER_ENTRY], { projectDirs: [] });
+    rerender();
+    await flush();
+    expect(openFolderButtons()).toHaveLength(1);
     act(() => openFolderButtons()[0].click());
     await flush();
-
-    expect(state.openAutoMemoryFolder).toHaveBeenCalledWith(
-      'project',
+    expect(state.openAutoMemoryFolder).toHaveBeenLastCalledWith(
+      'user',
       '/workspace',
+      undefined,
     );
+  });
+
+  it('opens each walked project root and the user root with their own arguments', async () => {
+    state.localDaemon = true;
+    state.features = ['workspace_local_open'];
+    const repoLocal = '/workspace/.qwen/memory';
+    const configured = '/home/u/.qwen/projects/-workspace/memory';
+    state.status = listing([PROJECT_ENTRY, USER_ENTRY], {
+      projectDir: configured,
+      projectDirs: [configured, repoLocal],
+    });
+
+    await mount();
+    const buttons = openFolderButtons();
+    expect(buttons).toHaveLength(3);
+    expect(container.textContent).toContain(configured);
+    expect(container.textContent).toContain(repoLocal);
+
+    for (const button of buttons) {
+      act(() => button.click());
+      await flush();
+    }
+
+    expect(state.openAutoMemoryFolder.mock.calls).toEqual([
+      ['project', '/workspace', configured],
+      ['project', '/workspace', repoLocal],
+      ['user', '/workspace', undefined],
+    ]);
+  });
+
+  it('says a toggle change applies to new sessions when the write requires a restart', async () => {
+    state.setValue.mockResolvedValue({
+      key: 'memory.enableManagedAutoMemory',
+      scope: 'user',
+      value: false,
+      requiresRestart: true,
+    });
+
+    await mount();
+    act(() => switchByLabel('Auto-memory').click());
+    await flush();
+
+    const [region] = liveRegions();
+    expect(region.textContent).toContain(
+      'This change requires a restart to take effect.',
+    );
+    expect(state.reload).toHaveBeenCalledTimes(1);
+  });
+
+  it('disables and explains a toggle whose value a higher-priority scope defines', async () => {
+    // Neither the user nor the workspace value (nor the default) explains
+    // the effective value: a system/managed setting does, and a write here
+    // would never take effect.
+    state.settings = [
+      descriptor('memory.enableManagedAutoMemory', 'Auto-memory', {
+        effective: false,
+      }),
+      descriptor('memory.enableManagedAutoDream', 'Auto-dream', {
+        effective: true,
+        user: false,
+      }),
+    ];
+
+    await mount();
+
+    expect(switchByLabel('Auto-memory').disabled).toBe(true);
+    expect(switchByLabel('Auto-dream').disabled).toBe(true);
+    expect(container.textContent).toContain(
+      'Set by a higher-priority configuration; it cannot be changed here.',
+    );
+    act(() => switchByLabel('Auto-memory').click());
+    await flush();
+    expect(state.setValue).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a settings load failure in the status region', async () => {
+    state.settings = [];
+    state.settingsError = new Error('Load settings timed out');
+
+    await mount();
+
+    const [region] = liveRegions();
+    expect(region.textContent).toContain('Load settings timed out');
+    expect(switchByLabel('Auto-memory').disabled).toBe(true);
+  });
+
+  it('re-reads a content-less entry when it is selected again', async () => {
+    state.readAutoMemoryFile
+      .mockResolvedValueOnce({
+        scope: 'project',
+        path: PROJECT_ENTRY.path,
+        bytes: 512,
+        contentUnavailable: 'torn',
+      })
+      .mockResolvedValueOnce({
+        scope: 'project',
+        path: PROJECT_ENTRY.path,
+        bytes: 512,
+        content: 'settled body\n',
+      });
+
+    await mount();
+    act(() => entryButton('Build notes').click());
+    await flush();
+    expect(container.textContent).toContain(
+      'This entry changed while it was being read. Select it again to retry.',
+    );
+
+    act(() => entryButton('Build notes').click());
+    await flush();
+    expect(state.readAutoMemoryFile).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain('settled body');
+
+    // A loaded entry stays a no-op on re-select.
+    act(() => entryButton('Build notes').click());
+    await flush();
+    expect(state.readAutoMemoryFile).toHaveBeenCalledTimes(2);
+  });
+
+  it('re-reads the open entry when the listing reports it changed, and closes it when it vanishes', async () => {
+    state.readAutoMemoryFile
+      .mockResolvedValueOnce({
+        scope: 'project',
+        path: PROJECT_ENTRY.path,
+        bytes: 512,
+        content: 'version one\n',
+      })
+      .mockResolvedValueOnce({
+        scope: 'project',
+        path: PROJECT_ENTRY.path,
+        bytes: 600,
+        content: 'version two\n',
+      });
+
+    await mount();
+    act(() => entryButton('Build notes').click());
+    await flush();
+    expect(container.textContent).toContain('version one');
+
+    // A background extraction rewrote the file; the listing reloads.
+    state.status = listing([
+      { ...PROJECT_ENTRY, bytes: 600, modifiedAt: '2026-10-14T12:05:00.000Z' },
+      USER_ENTRY,
+    ]);
+    rerender();
+    await flush();
+    expect(state.readAutoMemoryFile).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain('version two');
+    expect(container.textContent).not.toContain('version one');
+
+    // Consolidation removed it: the pane closes instead of showing it.
+    state.status = listing([USER_ENTRY]);
+    rerender();
+    await flush();
+    expect(container.textContent).not.toContain('version two');
+    expect(state.readAutoMemoryFile).toHaveBeenCalledTimes(2);
+  });
+
+  it('announces a read failure through a live region', async () => {
+    state.readAutoMemoryFile.mockRejectedValue(new Error('read boom'));
+
+    await mount();
+    act(() => entryButton('Build notes').click());
+    await flush();
+
+    expect(
+      liveRegions().some((region) => region.textContent?.includes('read boom')),
+    ).toBe(true);
   });
 });

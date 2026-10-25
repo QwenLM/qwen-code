@@ -35,6 +35,10 @@ function fileForScope(
   return files.find((file) => file.scope === scope);
 }
 
+function entryKey(entry: MemoryEntry): string {
+  return `${entry.scope}\0${entry.file?.path ?? ''}`;
+}
+
 function scopeLabel(
   scope: MemoryScope,
   t: ReturnType<typeof useI18n>['t'],
@@ -73,6 +77,12 @@ export function MemoryMessage({
   const [editable, setEditable] = useState(true);
   const [message, setMessage] = useState<string | null>(null);
   const handledAddSignalRef = useRef(0);
+  // The file whose text `content`/`draft` hold (`scope\0path`).
+  const loadedKeyRef = useRef<string | null>(null);
+  // The gate holds at both ends: when the tag goes away (e.g. while
+  // capabilities refetch) the Auto tab is not rendered, nor is its panel.
+  const activeTab: MemoryTab =
+    selectedTab === 'auto' && !autoMemoryAvailable ? 'workspace' : selectedTab;
 
   const entries = useMemo<MemoryEntry[]>(() => {
     const globalFile = fileForScope(files, 'global');
@@ -96,9 +106,9 @@ export function MemoryMessage({
   }, [files, t]);
 
   const selectedEntry =
-    selectedTab === 'auto'
+    activeTab === 'auto'
       ? undefined
-      : (entries.find((entry) => entry.scope === selectedTab) ?? entries[0]);
+      : (entries.find((entry) => entry.scope === activeTab) ?? entries[0]);
 
   // Replace needs both the file's full text and the list that says whether
   // the file exists. While the status load is outstanding (`status` is
@@ -111,6 +121,7 @@ export function MemoryMessage({
   const loadContent = useCallback(
     (entry: MemoryEntry | undefined, nextMode: MemoryMode) => {
       const loadSeq = ++loadSeqRef.current;
+      loadedKeyRef.current = entry ? entryKey(entry) : null;
       setMode(nextMode);
       setMessage(null);
       setContent('');
@@ -156,8 +167,16 @@ export function MemoryMessage({
     [onMessage, readMemoryFile, t],
   );
 
+  // An unsaved edit survives an excursion to the read-only Auto tab:
+  // returning to the file that owns the dirty draft must not re-read it.
+  const keepsDraft = (entry: MemoryEntry) =>
+    mode === 'edit' &&
+    draft !== content &&
+    loadedKeyRef.current === entryKey(entry);
+
   useEffect(() => {
-    if (selectedTab === 'auto' || !selectedEntry) return;
+    if (activeTab === 'auto' || !selectedEntry) return;
+    if (keepsDraft(selectedEntry)) return;
     loadContent(selectedEntry, mode);
     // Only reload when the selected file changes. Mode changes are explicit
     // button actions that call loadContent directly.
@@ -194,6 +213,7 @@ export function MemoryMessage({
 
   const handleSelect = (entry: MemoryEntry) => {
     setSelectedTab(entry.scope);
+    if (keepsDraft(entry)) return;
     loadContent(entry, 'view');
   };
 
@@ -251,7 +271,7 @@ export function MemoryMessage({
     <div className={styles.page}>
       <nav className={styles.tabs} aria-label={t('memory.menu')}>
         {entries.map((entry) => {
-          const active = entry.scope === selectedTab;
+          const active = entry.scope === activeTab;
           return (
             <button
               key={entry.scope}
@@ -270,7 +290,7 @@ export function MemoryMessage({
             key="auto"
             type="button"
             className={`${styles.memoryCard} ${
-              selectedTab === 'auto' ? styles.memoryCardActive : ''
+              activeTab === 'auto' ? styles.memoryCardActive : ''
             }`}
             onClick={() => setSelectedTab('auto')}
           >
@@ -282,7 +302,7 @@ export function MemoryMessage({
       </nav>
 
       <section className={styles.detail}>
-        {selectedTab === 'auto' ? (
+        {activeTab === 'auto' ? (
           <AutoMemoryPanel onMessage={onMessage} />
         ) : (
           <>

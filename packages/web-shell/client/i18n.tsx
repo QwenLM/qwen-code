@@ -3148,12 +3148,16 @@ const EN: Messages = {
     'Another goal control is still running. Try again once it finishes.',
   'memory.add': 'Add',
   'memory.add.desc': 'Write a durable memory',
+  'memory.autoContentChanged':
+    'This entry changed while it was being read. Select it again to retry.',
   'memory.autoContentUnavailable': 'Content is not available for this entry.',
   'memory.autoEmpty': 'No auto-memory entries yet.',
   'memory.autoMemoryTab': 'Auto memory',
   'memory.autoNotInitialized':
     'No auto-memory directories have been created yet.',
   'memory.autoProjectScope': 'Project memory',
+  'memory.autoToggleManaged':
+    'Set by a higher-priority configuration; it cannot be changed here.',
   'memory.autoTruncated':
     'Content is truncated (the file is larger than the read limit).',
   'memory.autoUserScope': 'User memory',
@@ -7461,11 +7465,13 @@ const ZH: Messages = {
   'goals.error.controlBusy': '还有一个目标操作正在进行，请等它完成后再试。',
   'memory.add': '添加',
   'memory.add.desc': '写入一条持久 memory',
+  'memory.autoContentChanged': '该条目在读取时发生了变化，请再次选择以重试。',
   'memory.autoContentUnavailable': '该条目的内容不可用。',
   'memory.autoEmpty': '还没有自动记忆条目。',
   'memory.autoMemoryTab': '自动记忆',
   'memory.autoNotInitialized': '自动记忆目录尚未创建。',
   'memory.autoProjectScope': '项目级记忆',
+  'memory.autoToggleManaged': '由更高优先级的配置设定，无法在此修改。',
   'memory.autoTruncated': '内容已截断（文件超过读取上限）。',
   'memory.autoUserScope': '用户级记忆',
   'memory.chooseScope': '选择 memory 的保存位置',

@@ -609,12 +609,13 @@ export interface DaemonWorkspaceActions {
   /**
    * Ask the daemon host to open the auto-memory directory for `scope`.
    * The daemon resolves the path itself; `workspaceCwd` selects the
-   * registered workspace whose per-project directory is opened for
-   * `scope: 'project'`.
+   * registered workspace, and `dir` one of its listing's `projectDirs`
+   * for `scope: 'project'`.
    */
   openAutoMemoryFolder(
     scope: 'project' | 'user',
     workspaceCwd: string,
+    dir?: string,
   ): Promise<void>;
 
   generateContent(

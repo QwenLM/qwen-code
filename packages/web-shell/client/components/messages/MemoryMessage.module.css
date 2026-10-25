@@ -215,6 +215,13 @@
   overflow-wrap: anywhere;
 }
 
+.autoScopeDir {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
 .autoList {
   display: flex;
   flex-direction: column;

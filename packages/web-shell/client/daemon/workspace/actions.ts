@@ -634,26 +634,36 @@ export function createDaemonWorkspaceActions({
       );
     },
 
+    // Auto memory is per workspace: the selected workspace's qualified
+    // routes, never the primary's legacy ones while a workspace is known.
     async loadAutoMemoryStatus() {
       const client = requireClient(getClient, 'Load auto-memory failed');
+      const cwd = getWorkspaceCwd();
       return withActionTimeout(
-        client.workspaceAutoMemory(),
+        cwd
+          ? client.workspaceByCwd(cwd).workspaceAutoMemory()
+          : client.workspaceAutoMemory(),
         'Load auto-memory timed out',
       );
     },
 
     async readAutoMemoryFile(filePath) {
       const client = requireClient(getClient, 'Read auto-memory file failed');
+      const cwd = getWorkspaceCwd();
       return withActionTimeout(
-        client.workspaceAutoMemoryFile(filePath),
+        cwd
+          ? client.workspaceByCwd(cwd).workspaceAutoMemoryFile(filePath)
+          : client.workspaceAutoMemoryFile(filePath),
         'Read auto-memory file timed out',
       );
     },
 
-    async openAutoMemoryFolder(scope, workspaceCwd) {
+    async openAutoMemoryFolder(scope, workspaceCwd, dir) {
       const client = requireClient(getClient, 'Open auto-memory folder failed');
       await withActionTimeout(
-        client.workspaceByCwd(workspaceCwd).openAutoMemoryFolderLocally(scope),
+        client
+          .workspaceByCwd(workspaceCwd)
+          .openAutoMemoryFolderLocally(scope, dir),
         'Open auto-memory folder timed out',
       );
     },
