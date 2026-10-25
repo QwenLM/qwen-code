@@ -17,6 +17,8 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
+import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -795,6 +797,88 @@ class ManagedAgentPreflightTest {
         return ManagedAgentPreflight.brokerChecks(properties).stream()
                 .filter(check -> check.name().equals("broker-url"))
                 .findFirst().orElseThrow();
+    }
+
+    @Test
+    void resolvesTheServiceUserTheFileRowsCheckFor() {
+        ManagedAgentPreflight.AccessCheck unset =
+                ManagedAgentPreflight.serviceUserCheck("", "root", name -> {
+                    throw new AssertionError("no lookup without a name");
+                });
+        assertEquals(ManagedAgentPreflight.Status.SKIP, unset.check().status());
+        assertEquals("not set; file rows check access as root",
+                unset.check().detail());
+        assertNull(unset.account());
+        // Preflight running as the account checks as itself.
+        ManagedAgentPreflight.AccessCheck self =
+                ManagedAgentPreflight.serviceUserCheck("svc", "svc", name -> {
+                    throw new AssertionError("no lookup for this process");
+                });
+        assertEquals(ManagedAgentPreflight.Status.PASS, self.check().status());
+        assertNull(self.account());
+        ManagedAgentPreflight.AccessCheck found =
+                ManagedAgentPreflight.serviceUserCheck("svc", "root", name ->
+                        Optional.of(new ServiceAccount(name, Set.of("svc", "adm"))));
+        assertEquals("svc (groups adm, svc)", found.check().detail());
+        assertEquals("svc", found.account().name());
+        ManagedAgentPreflight.AccessCheck missing =
+                ManagedAgentPreflight.serviceUserCheck("svc", "root",
+                        name -> Optional.empty());
+        assertEquals(ManagedAgentPreflight.Status.FAIL, missing.check().status());
+        assertEquals("svc does not exist", missing.check().detail());
+        assertNull(missing.account());
+        ManagedAgentPreflight.AccessCheck unknown =
+                ManagedAgentPreflight.serviceUserCheck("svc", "root", name -> {
+                    throw new IOException("no id");
+                });
+        assertEquals(ManagedAgentPreflight.Status.WARN, unknown.check().status());
+        assertEquals("cannot look up svc; file rows check access as root",
+                unknown.check().detail());
+        assertNull(unknown.account());
+    }
+
+    @Test
+    @org.junit.jupiter.api.condition.DisabledOnOs(
+            org.junit.jupiter.api.condition.OS.WINDOWS)
+    void checksTheSecretFilesAsTheServiceUser(@TempDir Path directory)
+            throws IOException {
+        Files.setPosixFilePermissions(directory,
+                java.nio.file.attribute.PosixFilePermissions.fromString("rwx--x--x"));
+        Path harness = Files.writeString(directory.resolve("harness.env"), "");
+        Path application = Files.writeString(
+                directory.resolve("application.yml"), "credential-key: x\n");
+        for (Path file : List.of(harness, application)) {
+            Files.setPosixFilePermissions(file,
+                    java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"));
+        }
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getHarness().setEnabled(true);
+        properties.getHarness().setCredentialsFile(harness.toString());
+        String owner = Files.getOwner(harness).getName();
+        ServiceAccount stranger =
+                new ServiceAccount("qwen-preflight-stranger", Set.of());
+        // This process owns both files, so it alone can read them.
+        assertEquals(ManagedAgentPreflight.Status.PASS,
+                ManagedAgentPreflight.credentialsFileCheck(properties).status());
+        ManagedAgentPreflight.Check credentials =
+                ManagedAgentPreflight.credentialsFileCheck(properties, stranger);
+        assertEquals(ManagedAgentPreflight.Status.FAIL, credentials.status());
+        assertEquals(harness + " is not readable by qwen-preflight-stranger",
+                credentials.detail());
+        assertEquals("chown qwen-preflight-stranger " + harness + ", chmod 600 "
+                + harness + ", and let qwen-preflight-stranger enter every"
+                + " directory above it", credentials.fix());
+        ManagedAgentPreflight.Check config = ManagedAgentPreflight.configFileCheck(
+                List.of("file:" + application), stranger);
+        assertEquals(ManagedAgentPreflight.Status.FAIL, config.status());
+        assertEquals(application + " is not readable by qwen-preflight-stranger",
+                config.detail());
+        ServiceAccount ownerAccount = new ServiceAccount(owner, Set.of());
+        assertEquals(ManagedAgentPreflight.Status.PASS, ManagedAgentPreflight
+                .credentialsFileCheck(properties, ownerAccount).status());
+        assertEquals(ManagedAgentPreflight.Status.PASS, ManagedAgentPreflight
+                .configFileCheck(List.of("file:" + application), ownerAccount)
+                .status());
     }
 
     @Test
