@@ -15,7 +15,14 @@ import { OutputFormat } from '@qwen-code/qwen-code-core/output/types.js';
 import type {
   ModCommand,
   ModLog,
+  ModSessionFacts,
 } from '@qwen-code/qwen-code-core/mods/types.js';
+import { uiTelemetryService } from '@qwen-code/qwen-code-core/telemetry/uiTelemetry.js';
+import {
+  getRuntimeContentGenerator,
+  runWithRuntimeContentGenerator,
+  type RuntimeContentGeneratorView,
+} from '@qwen-code/qwen-code-core/agents/runtime/agent-context.js';
 import type { LoadedSettings } from '../config/settings.js';
 import type { JsonOutputAdapterInterface } from '../nonInteractive/io/BaseJsonOutputAdapter.js';
 import { ModSession, type ModTerminalHost } from './mod-session.js';
@@ -53,6 +60,7 @@ describe('Mod session ownership', () => {
     const config = {
       getSessionId: vi.fn(() => 'session-1'),
       getTargetDir: () => '/workspace',
+      getCliVersion: () => '1.2.3',
       getOutputFormat: () => OutputFormat.JSON,
       getExtensions: () => [extension],
       isInteractive: () => false,
@@ -66,6 +74,9 @@ describe('Mod session ownership', () => {
       getHookSystem: () => undefined,
       getSandbox: () => undefined,
       isSessionAgentSession: () => false,
+      getChatRecordingService: () => undefined,
+      getContentGeneratorConfig: () => undefined,
+      getResumedSessionData: () => undefined,
       ...overrides,
     };
     const adapter = { emitSystemMessage: vi.fn() };
@@ -108,6 +119,7 @@ describe('Mod session ownership', () => {
         .splice(0)
         .map((dir) => fs.rm(dir, { recursive: true, force: true })),
     );
+    uiTelemetryService.setLastPromptTokenCount(0);
     vi.resetAllMocks();
   });
 
@@ -423,6 +435,205 @@ describe('Mod session ownership', () => {
     expect(mocks.create).toHaveBeenCalledOnce();
   });
 
+  it('reports the facts $.session answers and keeps them for the ending session', async () => {
+    const recorder = vi.fn<() => unknown>(() => ({
+      getUserTurnCount: () => 2,
+    }));
+    const resumed = vi.fn<() => unknown>(() => ({
+      conversation: {
+        sessionId: 'session-1',
+        startTime: '2026-10-20T08:00:00.000Z',
+      },
+    }));
+    const { session, runtime, config } = setup({
+      getProjectRoot: () => '/project',
+      getModel: () => 'qwen-max',
+      getChatRecordingService: recorder,
+      getContentGeneratorConfig: () => ({ contextWindowSize: 1_000 }),
+      getResumedSessionData: resumed,
+    });
+    await session.loadCommands(new AbortController().signal);
+    const facts = mocks.create.mock.calls[0][7] as () => ModSessionFacts;
+    uiTelemetryService.setLastPromptTokenCount(304);
+    expect(facts()).toEqual({
+      id: 'session-1',
+      cwd: '/workspace',
+      root: '/project',
+      model: 'qwen-max',
+      turns: 2,
+      usage: {
+        startedAt: Date.parse('2026-10-20T08:00:00.000Z'),
+        context: { tokens: 304, window: 1_000, percent: 30 },
+        rateLimits: [],
+      },
+    });
+
+    // The last response can arrive after the last dispatch: only the
+    // telemetry listener sees it before the config moves on.
+    uiTelemetryService.setLastPromptTokenCount(612);
+    // The config moves to the next session before the old one ends.
+    config.getSessionId.mockReturnValue('session-2');
+    recorder.mockReturnValue({ getUserTurnCount: () => 0 });
+    resumed.mockReturnValue(undefined);
+    uiTelemetryService.setLastPromptTokenCount(0);
+    let ending: ModSessionFacts | undefined;
+    runtime.end.mockImplementation(async () => {
+      ending = facts();
+    });
+    const switched = Date.now();
+    await session.syncSession('clear');
+    expect(ending).toMatchObject({
+      id: 'session-1',
+      turns: 2,
+      usage: {
+        startedAt: Date.parse('2026-10-20T08:00:00.000Z'),
+        context: { tokens: 612, window: 1_000, percent: 61 },
+      },
+    });
+    const next = facts();
+    expect(next).toMatchObject({
+      id: 'session-2',
+      turns: 0,
+      usage: { context: { tokens: 0, window: 1_000, percent: 0 } },
+    });
+    expect(next.usage.startedAt).toBeGreaterThanOrEqual(switched);
+    expect(next.usage.startedAt).toBeLessThanOrEqual(Date.now());
+  });
+
+  it('keeps the facts of a resumed session that ends before anything reads it', async () => {
+    const recorder = vi.fn<() => unknown>(() => ({
+      getUserTurnCount: () => 2,
+    }));
+    const resumed = vi.fn<() => unknown>(() => undefined);
+    const { session, runtime, config } = setup({
+      getProjectRoot: () => '/project',
+      getModel: () => 'qwen-max',
+      getChatRecordingService: recorder,
+      getContentGeneratorConfig: () => ({ contextWindowSize: 1_000 }),
+      getResumedSessionData: resumed,
+    });
+    await session.loadCommands(new AbortController().signal);
+    const facts = mocks.create.mock.calls[0][7] as () => ModSessionFacts;
+
+    // /resume replays the resumed session's figures before the Mod adopts it.
+    config.getSessionId.mockReturnValue('session-2');
+    recorder.mockReturnValue({ getUserTurnCount: () => 5 });
+    resumed.mockReturnValue({
+      conversation: {
+        sessionId: 'session-2',
+        startTime: '2026-10-21T09:00:00.000Z',
+      },
+    });
+    uiTelemetryService.setLastPromptTokenCount(812);
+    await session.syncSession('resume');
+
+    // /clear switches the config again with no dispatch or API response.
+    config.getSessionId.mockReturnValue('session-3');
+    recorder.mockReturnValue({ getUserTurnCount: () => 0 });
+    resumed.mockReturnValue(undefined);
+    uiTelemetryService.setLastPromptTokenCount(0);
+    let ending: ModSessionFacts | undefined;
+    runtime.end.mockImplementation(async () => {
+      ending = facts();
+    });
+    await session.syncSession('clear');
+    expect(ending).toMatchObject({
+      id: 'session-2',
+      turns: 5,
+      usage: {
+        startedAt: Date.parse('2026-10-21T09:00:00.000Z'),
+        context: { tokens: 812, window: 1_000, percent: 81 },
+      },
+    });
+  });
+
+  it('reads the main session through a subagent model frame', async () => {
+    // The real Config resolves these through the current agent frame.
+    const { session, runtime, config } = setup({
+      getProjectRoot: () => '/workspace',
+      getModel: () =>
+        getRuntimeContentGenerator()?.contentGeneratorConfig.model ??
+        'qwen-max',
+      getChatRecordingService: () => ({ getUserTurnCount: () => 2 }),
+      getContentGeneratorConfig: () =>
+        getRuntimeContentGenerator()?.contentGeneratorConfig ?? {
+          contextWindowSize: 1_000,
+        },
+      getResumedSessionData: () => undefined,
+    });
+    await session.loadCommands(new AbortController().signal);
+    const facts = mocks.create.mock.calls[0][7] as () => ModSessionFacts;
+    const subagent = {
+      contentGenerator: {},
+      contentGeneratorConfig: { model: 'qwen-turbo', contextWindowSize: 8_000 },
+    } as unknown as RuntimeContentGeneratorView;
+    const main = { tokens: 304, window: 1_000, percent: 30 };
+    uiTelemetryService.setLastPromptTokenCount(304);
+    // A subagent's API response emits the update from inside its frame.
+    await runWithRuntimeContentGenerator(subagent, async () => {
+      uiTelemetryService.setLastPromptTokenCount(304);
+      expect(facts()).toMatchObject({
+        model: 'qwen-max',
+        usage: { context: main },
+      });
+    });
+    expect(facts().usage.context).toEqual(main);
+
+    await runWithRuntimeContentGenerator(subagent, async () => {
+      uiTelemetryService.setLastPromptTokenCount(304);
+    });
+    let ending: ModSessionFacts | undefined;
+    runtime.end.mockImplementation(async () => {
+      ending = facts();
+    });
+    config.getSessionId.mockReturnValue('session-2');
+    await session.syncSession('clear');
+    expect(ending?.usage.context).toEqual(main);
+  });
+
+  it('rounds the context percent and caps it at 100', async () => {
+    const { session } = setup({
+      getProjectRoot: () => '/workspace',
+      getModel: () => 'qwen-max',
+      getChatRecordingService: () => undefined,
+      getContentGeneratorConfig: () => ({ contextWindowSize: 1_000 }),
+      getResumedSessionData: () => undefined,
+    });
+    await session.loadCommands(new AbortController().signal);
+    const facts = mocks.create.mock.calls[0][7] as () => ModSessionFacts;
+    uiTelemetryService.setLastPromptTokenCount(306);
+    expect(facts().usage.context.percent).toBe(31);
+    // After a switch to a smaller model the last prompt can exceed its window.
+    uiTelemetryService.setLastPromptTokenCount(1_200);
+    expect(facts().usage.context.percent).toBe(100);
+  });
+
+  it('stops listening to telemetry once closed', async () => {
+    const before = uiTelemetryService.listenerCount('update');
+    const { session } = setup();
+    expect(uiTelemetryService.listenerCount('update')).toBe(before + 1);
+    await session.close();
+    expect(uiTelemetryService.listenerCount('update')).toBe(before);
+  });
+
+  it('answers no turns without chat recording and no percent without a window', async () => {
+    const { session } = setup({
+      getProjectRoot: () => '/workspace',
+      getModel: () => 'qwen-max',
+      getChatRecordingService: () => undefined,
+      getContentGeneratorConfig: () => ({}),
+      getResumedSessionData: () => undefined,
+    });
+    await session.loadCommands(new AbortController().signal);
+    const facts = mocks.create.mock.calls[0][7] as () => ModSessionFacts;
+    uiTelemetryService.setLastPromptTokenCount(12);
+    expect(facts()).toMatchObject({
+      turns: 0,
+      usage: { context: { tokens: 12, window: 0 } },
+    });
+    expect(facts().usage.context).not.toHaveProperty('percent');
+  });
+
   it('sanitizes terminal output, keeps debug logs private and discards cancelled output', async () => {
     const log = vi.fn();
     const { session, runtime } = setup(
@@ -569,6 +780,59 @@ describe('Mod session ownership', () => {
       });
     },
   );
+
+  it.each([
+    [undefined, undefined, 'skip'],
+    ['reject', undefined, 'reject'],
+    ['reject', 'skip', 'skip'],
+  ] as const)(
+    'selects the unsupported-event policy from operator settings (%s, %s)',
+    async (user, system, expected) => {
+      const { config, adapter } = setup();
+      const settings = {
+        merged: {
+          experimental: { mods: true },
+          pluginConfigs: { 'hello-mod': { unsupportedEvents: 'reject' } },
+        },
+        systemDefaults: { settings: {} },
+        user: {
+          settings: {
+            pluginConfigs: { 'hello-mod': { unsupportedEvents: user } },
+          },
+        },
+        system: {
+          settings: {
+            pluginConfigs: { 'hello-mod': { unsupportedEvents: system } },
+          },
+        },
+      } as unknown as LoadedSettings;
+      const session = ModSession.create(
+        config as unknown as Config,
+        settings,
+        adapter as unknown as JsonOutputAdapterInterface,
+      )!;
+      sessions.push(session);
+      await session.initialize(new AbortController().signal);
+      expect(mocks.create.mock.calls[0][0][0]).toMatchObject({
+        unsupportedEvents: expected,
+      });
+      expect(mocks.create.mock.calls[0][6]).toBe('1.2.3');
+    },
+  );
+
+  it('rejects an invalid unsupported-event policy before any worker starts', async () => {
+    const { config, adapter } = setup();
+    const session = new ModSession(
+      config as unknown as Config,
+      adapter as unknown as JsonOutputAdapterInterface,
+      [{ 'hello-mod': { unsupportedEvents: 'warn' } }],
+    );
+    sessions.push(session);
+    await expect(
+      session.initialize(new AbortController().signal),
+    ).rejects.toThrow('Mod hello-mod: Invalid Mod unsupportedEvents');
+    expect(mocks.create).not.toHaveBeenCalled();
+  });
 
   it('rejects an invalid dialect on a later plugin before any worker starts without userConfig', async () => {
     const extensions = [

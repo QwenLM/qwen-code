@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import type { OperationGrant } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import { MANAGED_MCP_TOOL } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import type {
   ManagedMcpCatalog,
   ManagedMcpConfigure,
@@ -211,6 +212,73 @@ function invoke(
 }
 
 describe('Managed MCP Runtime', () => {
+  it('isolates pending Session lookups while preserving the Workspace drain total', async () => {
+    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(
+      path.join(directory, 'global'),
+    );
+    const otherRuntime = 'mcp:session-b';
+    const otherKey = { ...sessionKey, sessionId: 'session-b' };
+    let entered!: () => void;
+    let resume!: () => void;
+    const waiting = new Promise<void>((resolve) => (entered = resolve));
+    const gate = new Promise<void>((resolve) => (resume = resolve));
+    const instance = new ManagedMcpRuntime(
+      { ...sessionKey, workspaceGeneration: '1' },
+      async (id) => {
+        if (id === otherRuntime) {
+          entered();
+          await gate;
+          return undefined;
+        }
+        return directory;
+      },
+      { version: 1, servers: [stdioDefinition()] },
+    );
+    runtimes.push(instance);
+    const executor = new ManagedToolExecutor(
+      async () => ({
+        sessionId: runtimeSessionId,
+        directory,
+        admitsDirectory: () => true,
+        tools: new Map(),
+      }),
+      undefined,
+      instance,
+    );
+    await executor.controlFileHistory(sessionKey.sessionId, runtimeSessionId, {
+      kind: 'raw-file-history',
+      action: 'bind',
+      state: null,
+    });
+    const input = configure();
+    const pending = instance
+      .control(otherRuntime, {
+        ...input,
+        sessionKey: otherKey,
+        grant: { ...input.grant, sessionKey: otherKey },
+      })
+      .catch((cause: unknown) => cause);
+    await waiting;
+    try {
+      expect(instance.getDrainInspection().pendingStarts).toBe(1);
+      expect(instance.hasPendingWork(otherRuntime)).toBe(true);
+      expect(instance.hasPendingWork(runtimeSessionId)).toBe(false);
+      await expect(
+        executor.controlFileHistory(sessionKey.sessionId, runtimeSessionId, {
+          kind: 'raw-file-history',
+          action: 'snapshot',
+        }),
+      ).resolves.toMatchObject({ ownerSessionId: sessionKey.sessionId });
+    } finally {
+      resume();
+      expect(await pending).toMatchObject({
+        code: 'managed_mcp_session_unavailable',
+      });
+    }
+    expect(instance.getDrainInspection().pendingStarts).toBe(0);
+    expect(instance.hasPendingWork(otherRuntime)).toBe(false);
+  });
+
   it('refuses a parked configuration after sealing before any connection starts', async () => {
     let enter!: () => void;
     let resume!: () => void;
@@ -834,6 +902,99 @@ describe('Managed MCP Runtime', () => {
     expect(methods.filter((method) => method === 'prompts/get')).toHaveLength(
       1,
     );
+  });
+
+  it('allows file history with idle connections while fencing concurrent MCP work', async () => {
+    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(
+      path.join(directory, 'global'),
+    );
+    const instance = runtime();
+    const catalog = (await settled(instance, configure())).catalog!;
+    let blockLookup: (() => Promise<void>) | undefined;
+    const executor = new ManagedToolExecutor(
+      async () => {
+        await blockLookup?.();
+        return {
+          sessionId: runtimeSessionId,
+          directory,
+          admitsDirectory: () => true,
+          tools: new Map(),
+        };
+      },
+      undefined,
+      instance,
+    );
+    expect(instance.hasHolds(runtimeSessionId)).toBe(true);
+    expect(instance.hasPendingWork(runtimeSessionId)).toBe(false);
+    await expect(
+      executor.controlFileHistory(sessionKey.sessionId, runtimeSessionId, {
+        kind: 'raw-file-history',
+        action: 'bind',
+        state: null,
+      }),
+    ).resolves.toMatchObject({ ownerSessionId: sessionKey.sessionId });
+    expect(executor.hasActiveSession(runtimeSessionId)).toBe(true);
+
+    let entered!: () => void;
+    let resume!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    blockLookup = () => {
+      entered();
+      return gate;
+    };
+    const history = executor.controlFileHistory(
+      sessionKey.sessionId,
+      runtimeSessionId,
+      {
+        kind: 'raw-file-history',
+        action: 'snapshot',
+      },
+    );
+    await waiting;
+    const input = invoke(catalog, 'history-race', {
+      kind: 'tool_call',
+      name: 'echo',
+      arguments: {},
+    });
+    try {
+      await expect(
+        instance.invokeTool(runtimeSessionId, input),
+      ).rejects.toThrow('managed_mcp_file_history_active');
+    } finally {
+      resume();
+      await history;
+      blockLookup = undefined;
+    }
+    const delayed = instance.invokeTool(
+      runtimeSessionId,
+      invoke(catalog, 'pending-history', {
+        kind: 'tool_call',
+        name: 'delayed',
+        arguments: {},
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(instance.hasPendingWork(runtimeSessionId)).toBe(true),
+    );
+    await expect(
+      executor.controlFileHistory(sessionKey.sessionId, runtimeSessionId, {
+        kind: 'raw-file-history',
+        action: 'snapshot',
+      }),
+    ).rejects.toThrow('File history requires an idle Runtime Session.');
+    await delayed;
+    await expect(
+      executor.controlFileHistory(sessionKey.sessionId, runtimeSessionId, {
+        kind: 'raw-file-history',
+        action: 'snapshot',
+      }),
+    ).resolves.toMatchObject({ snapshots: [] });
+    await executor.close();
   });
 
   it.each([1, 2])(
@@ -1597,4 +1758,42 @@ describe('Managed MCP Runtime', () => {
       events?.end();
     },
   );
+});
+
+it('lists only published pins for its boot Workspace without connecting or exposing recipes', () => {
+  const definition = stdioDefinition();
+  const instance = runtime([
+    definition,
+    { ...definition, tenantId: 'other-tenant', serverId: 'private-tenant' },
+    {
+      ...definition,
+      workspaceId: 'other-workspace',
+      serverId: 'private-workspace',
+    },
+  ]);
+  const published = instance.publishedDefinitions(
+    sessionKey.tenantId,
+    sessionKey.workspaceId,
+  );
+  expect(published).toEqual([
+    {
+      serverId: definition.serverId,
+      serverRevision: definition.serverRevision,
+      definitionDigest: definition.definitionDigest,
+      transport: 'stdio',
+    },
+  ]);
+  expect(JSON.stringify(published)).not.toContain('runtime-only-secret');
+  expect(instance.getDrainInspection()).toEqual({
+    pendingStarts: 0,
+    pendingInvocations: 0,
+    hasActivity: false,
+  });
+  expect(() =>
+    instance.publishedDefinitions('other-tenant', sessionKey.workspaceId),
+  ).toThrow('managed_mcp_scope_conflict');
+  instance.sealAdmission();
+  expect(() =>
+    instance.publishedDefinitions(sessionKey.tenantId, sessionKey.workspaceId),
+  ).toThrow('managed_mcp_closed');
 });

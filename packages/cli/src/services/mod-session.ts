@@ -17,6 +17,7 @@ import {
 import {
   resolveModOptions,
   resolveModToolDialect,
+  resolveModUnsupportedEvents,
 } from '@qwen-code/qwen-code-core/mods/options.js';
 import { ModRuntime } from '@qwen-code/qwen-code-core/mods/runtime.js';
 import type { ModToolCall } from '@qwen-code/qwen-code-core/mods/tool-events.js';
@@ -24,7 +25,11 @@ import { MOD_END_TIMEOUT_MS } from '@qwen-code/qwen-code-core/mods/types.js';
 import type {
   ModCommandPresentation,
   ModLog,
+  ModSessionFacts,
 } from '@qwen-code/qwen-code-core/mods/types.js';
+import { runOutsideAgentContext } from '@qwen-code/qwen-code-core/agents/runtime/agent-context.js';
+import type { ChatRecordingService } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
+import { uiTelemetryService } from '@qwen-code/qwen-code-core/telemetry/uiTelemetry.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { stripAnsiAndControl } from '@qwen-code/qwen-code-core/utils/textUtils.js';
 import type { LoadedSettings } from '../config/settings.js';
@@ -69,6 +74,24 @@ export class ModSession implements ICommandLoader {
   private commandSignal?: AbortSignal;
   private toolSignal?: AbortSignal;
   private sessionId: string;
+  // What `$.session` reports describes `sessionId`. The config switches first
+  // on /clear and /resume, so these stay with the old session until its end.
+  private adoptedAt = Date.now();
+  private startedAt?: number;
+  private recorder?: ChatRecordingService;
+  private context = { tokens: 0, window: 0 };
+  // Also runs on every API response, so a session that no hook saw still has
+  // its figures when it ends. A subagent's response emits from inside its
+  // agent frame, whose model would otherwise answer for the main session.
+  private readonly observe = () =>
+    runOutsideAgentContext(() => {
+      if (this.config.getSessionId() !== this.sessionId) return;
+      this.recorder = this.config.getChatRecordingService();
+      this.context = {
+        tokens: uiTelemetryService.getLastPromptTokenCount(),
+        window: this.config.getContentGeneratorConfig()?.contextWindowSize || 0,
+      };
+    });
   private toolGeneration = new AbortController();
   private unregisterCleanup: () => void;
 
@@ -78,6 +101,7 @@ export class ModSession implements ICommandLoader {
     private readonly optionScopes: readonly unknown[] = [],
   ) {
     this.sessionId = config.getSessionId();
+    uiTelemetryService.on('update', this.observe);
     this.unregisterCleanup = registerCleanup(
       () => {
         // Exit cleanup iterates its registry; do not splice its current item.
@@ -164,6 +188,13 @@ export class ModSession implements ICommandLoader {
                   marketplace,
                 )
               : undefined,
+            unsupportedEvents: source
+              ? resolveModUnsupportedEvents(
+                  this.optionScopes,
+                  extension.name,
+                  marketplace,
+                )
+              : undefined,
             options: source
               ? resolveModOptions(
                   source.userConfig,
@@ -216,17 +247,26 @@ export class ModSession implements ICommandLoader {
       const ordered = orderModPlugins(mods);
       if (ordered.length) {
         this.runtime = await ModRuntime.createGroup(
-          ordered.map(({ extension, source, options, toolDialect }) => ({
-            id: extension.id,
-            name: extension.name,
-            source: {
-              root: source!.root,
-              entry: source!.entry,
-              source: source!.source,
-            },
-            options,
-            toolDialect,
-          })),
+          ordered.map(
+            ({
+              extension,
+              source,
+              options,
+              toolDialect,
+              unsupportedEvents,
+            }) => ({
+              id: extension.id,
+              name: extension.name,
+              source: {
+                root: source!.root,
+                entry: source!.entry,
+                source: source!.source,
+              },
+              options,
+              toolDialect,
+              unsupportedEvents,
+            }),
+          ),
           this.config.getTargetDir(),
           (entry, plugin) => {
             if (this.commandSignal?.aborted || this.toolSignal?.aborted) return;
@@ -240,6 +280,8 @@ export class ModSession implements ICommandLoader {
           signal,
           (name) => this.config.getToolRegistry().ensureTool(name),
           this.terminal?.surface ?? null,
+          this.config.getCliVersion() || 'unknown',
+          () => this.facts(),
         );
         this.mods.push(
           ...ordered.map(({ extension }) => ({
@@ -358,6 +400,12 @@ export class ModSession implements ICommandLoader {
       if (current === this.sessionId || this.closing) return;
       await this.end(reason);
       this.sessionId = current;
+      this.adoptedAt = Date.now();
+      this.startedAt = undefined;
+      this.recorder = undefined;
+      this.context = { tokens: 0, window: 0 };
+      // The adopted session may end before any hook or API response reads it.
+      this.capture();
       this.toolGeneration = new AbortController();
     });
     this.toolQueue = task.catch(() => {});
@@ -459,6 +507,46 @@ export class ModSession implements ICommandLoader {
     ]);
   }
 
+  private capture(): number {
+    this.observe();
+    if (this.startedAt !== undefined) return this.startedAt;
+    // A resumed session began at its first record; a new one when adopted.
+    const resumed = this.config.getResumedSessionData()?.conversation;
+    const first =
+      resumed?.sessionId === this.sessionId
+        ? Date.parse(resumed.startTime)
+        : NaN;
+    return (this.startedAt = Number.isFinite(first) ? first : this.adoptedAt);
+  }
+
+  // The main session's facts, even when a dispatch starts in an agent frame.
+  private facts(): ModSessionFacts {
+    return runOutsideAgentContext(() => this.readFacts());
+  }
+
+  private readFacts(): ModSessionFacts {
+    const startedAt = this.capture();
+    const { tokens, window } = this.context;
+    return {
+      id: this.sessionId,
+      cwd: this.config.getTargetDir(),
+      root: this.config.getProjectRoot(),
+      model: this.config.getModel(),
+      turns: this.recorder?.getUserTurnCount() ?? 0,
+      usage: {
+        startedAt,
+        context: {
+          tokens,
+          window,
+          ...(window > 0
+            ? { percent: Math.min(100, Math.round((tokens / window) * 100)) }
+            : {}),
+        },
+        rateLimits: [],
+      },
+    };
+  }
+
   private active(): boolean {
     const extensions = this.config.getExtensions();
     return this.mods.every((mod) =>
@@ -484,6 +572,7 @@ export class ModSession implements ICommandLoader {
   close(): Promise<void> {
     this.closing ??= (async () => {
       this.unregisterCleanup();
+      uiTelemetryService.off('update', this.observe);
       this.lifetime.abort();
       this.invalidateTools();
       await this.initialization?.catch(() => {});
