@@ -154,9 +154,13 @@ import {
 } from '../conversations/standalone-session-service.js';
 import { collectWorkspaceMemoryStatus } from '../workspace-memory.js';
 import {
+  AutoMemoryEnvOverrideError,
   AutoMemoryPathError,
+  autoMemoryPathErrorStatus,
   collectWorkspaceAutoMemoryStatus,
   readWorkspaceAutoMemoryFile,
+  runWithAutoMemoryRuntime,
+  type AutoMemoryRuntime,
 } from '../workspace-auto-memory.js';
 import { runWithWorkspaceRuntimeStorage } from '../workspace-runtime-storage.js';
 import {
@@ -1337,6 +1341,50 @@ export class AcpDispatcher {
     private readonly standaloneSessionService?: LegacyStandaloneSessionRestorer,
   ) {
     this.agentManager = createDaemonSubagentManager(boundWorkspace);
+  }
+
+  /** The memory axes this dispatcher's workspace runtime resolves under. */
+  private autoMemoryRuntime(): AutoMemoryRuntime {
+    return {
+      sessionRuntimeBaseDir:
+        this.getSessionRuntimeContext().sessionRuntimeBaseDir,
+      env: { mode: 'runtime-overlay', effectiveEnv: this.getEnv() },
+    };
+  }
+
+  /**
+   * Auto-memory refusals, which toRpcError's switch does not know: path
+   * refusals keep the REST route's status split (404 / 400 client fault /
+   * 500 `read_failed` daemon fault), an unsupported memory env override
+   * answers 409. Returns false for anything else.
+   */
+  private sendAutoMemoryRefusal(
+    conn: AcpConnection,
+    id: JsonRpcId,
+    err: unknown,
+  ): boolean {
+    if (err instanceof AutoMemoryPathError) {
+      const httpStatus = autoMemoryPathErrorStatus(err);
+      conn.sendConn(
+        error(
+          id,
+          httpStatus >= 500 ? RPC.INTERNAL_ERROR : RPC.INVALID_PARAMS,
+          err.message,
+          { errorKind: err.code, httpStatus },
+        ),
+      );
+      return true;
+    }
+    if (err instanceof AutoMemoryEnvOverrideError) {
+      conn.sendConn(
+        error(id, RPC.INVALID_REQUEST, err.message, {
+          errorKind: err.code,
+          httpStatus: 409,
+        }),
+      );
+      return true;
+    }
+    return false;
   }
 
   private invalidateSessionLists(
@@ -4410,10 +4458,22 @@ export class AcpDispatcher {
         }
 
         case `${QWEN_METHOD_NS}workspace/auto-memory`: {
-          const result = await collectWorkspaceAutoMemoryStatus(
-            this.boundWorkspace,
-            { trusted: this.isWorkspaceTrusted() },
-          );
+          // TRUSTED_WORKSPACE_METHODS refuses an untrusted workspace
+          // before dispatch, so the listing always runs trusted here.
+          let result;
+          try {
+            result = await runWithAutoMemoryRuntime(
+              this.autoMemoryRuntime(),
+              () =>
+                collectWorkspaceAutoMemoryStatus(this.boundWorkspace, {
+                  trusted: true,
+                }),
+            );
+          } catch (err) {
+            if (id !== undefined && this.sendAutoMemoryRefusal(conn, id, err))
+              return;
+            throw err;
+          }
           assertGenerationOpen?.();
           this.replyConn(conn, id, result as unknown);
           return;
@@ -4433,28 +4493,20 @@ export class AcpDispatcher {
             return;
           }
           try {
-            const result = await readWorkspaceAutoMemoryFile(
-              this.boundWorkspace,
-              filePath,
-              { trusted: this.isWorkspaceTrusted() },
+            const result = await runWithAutoMemoryRuntime(
+              this.autoMemoryRuntime(),
+              () =>
+                readWorkspaceAutoMemoryFile(this.boundWorkspace, filePath, {
+                  trusted: true,
+                }),
             );
             assertGenerationOpen?.();
             this.replyConn(conn, id, result as unknown);
           } catch (err) {
             if (id === undefined) return;
-            if (err instanceof AutoMemoryPathError) {
-              // Client-fault mapping only: AutoMemoryPathError is absent
-              // from toRpcError's switch. Everything else is rethrown so
-              // the outer mapper keeps the coded, client-safe envelope
-              // (and the stderr log) it owns.
-              conn.sendConn(
-                error(id, RPC.INVALID_PARAMS, err.message, {
-                  errorKind: err.code,
-                  httpStatus: err.code === 'not_found' ? 404 : 400,
-                }),
-              );
-              return;
-            }
+            if (this.sendAutoMemoryRefusal(conn, id, err)) return;
+            // Everything else is rethrown so the outer mapper keeps the
+            // coded, client-safe envelope (and the stderr log) it owns.
             throw err;
           }
           return;

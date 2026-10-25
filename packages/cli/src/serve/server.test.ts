@@ -29,6 +29,7 @@ import {
   vi,
 } from 'vitest';
 import supertest from 'supertest';
+import { clearAutoMemoryRootCache } from '@qwen-code/qwen-code-core/memory/paths.js';
 import { SessionAttachmentStore } from '@qwen-code/acp-bridge/sessionAttachments';
 import { WebSocket } from 'ws';
 import { trace, type Span } from '@opentelemetry/api';
@@ -44175,6 +44176,83 @@ describe('T2.9 SSE writer idle timeout (issue #4514)', () => {
     } finally {
       writeSpy.mockRestore();
     }
+  });
+});
+
+describe('createServeApp auto-memory routes', () => {
+  // Memory-path env pre-empts the runtime storage scope; keep it unset so
+  // each runtime's session base dir decides where its roots live.
+  const savedEnv: Record<string, string | undefined> = {};
+  const roots: string[] = [];
+  beforeEach(() => {
+    for (const key of ['QWEN_CODE_MEMORY_BASE_DIR', 'QWEN_CODE_MEMORY_LOCAL']) {
+      savedEnv[key] = process.env[key];
+      delete process.env[key];
+    }
+    clearAutoMemoryRootCache();
+  });
+  afterEach(async () => {
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    clearAutoMemoryRootCache();
+    await Promise.all(
+      roots
+        .splice(0)
+        .map((dir) => fsp.rm(dir, { recursive: true, force: true })),
+    );
+  });
+
+  async function runtimeBaseWithPrefs(note: string): Promise<string> {
+    const base = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-serve-am-'));
+    roots.push(base);
+    await fsp.mkdir(path.join(base, 'memories'), { recursive: true });
+    await fsp.writeFile(path.join(base, 'memories', 'prefs.md'), note);
+    return base;
+  }
+
+  it('mounts the legacy listing on the primary runtime and the qualified one per workspace', async () => {
+    const primaryBase = await runtimeBaseWithPrefs('primary prefs\n');
+    const secondaryBase = await runtimeBaseWithPrefs('secondary prefs\n');
+    const registry = createWorkspaceRegistry([
+      makeWorkspaceRuntimeForTest({
+        workspaceId: 'ws-primary',
+        workspaceCwd: WS_BOUND,
+        primary: true,
+        bridge: fakeBridge(),
+        sessionRuntimeBaseDir: primaryBase,
+      }),
+      makeWorkspaceRuntimeForTest({
+        workspaceId: 'ws-secondary',
+        workspaceCwd: WS_DIFFERENT,
+        primary: false,
+        bridge: fakeBridge(),
+        sessionRuntimeBaseDir: secondaryBase,
+      }),
+    ]);
+    const app = createServeApp(baseOpts, undefined, {
+      workspaceRegistry: registry,
+    });
+    const get = (url: string) =>
+      request(app).get(url).set('Host', `127.0.0.1:${baseOpts.port}`);
+
+    const primary = await get('/workspace/auto-memory');
+    expect(primary.status).toBe(200);
+    expect(primary.body.workspaceCwd).toBe(WS_BOUND);
+    expect(primary.body.userDir).toBe(path.join(primaryBase, 'memories'));
+    expect(primary.body.fileCount).toBe(1);
+
+    const secondary = await get('/workspaces/ws-secondary/auto-memory');
+    expect(secondary.status).toBe(200);
+    expect(secondary.body.workspaceCwd).toBe(WS_DIFFERENT);
+    expect(secondary.body.userDir).toBe(path.join(secondaryBase, 'memories'));
+
+    const file = await get('/workspaces/ws-secondary/auto-memory/file').query({
+      path: path.join(secondaryBase, 'memories', 'prefs.md'),
+    });
+    expect(file.status).toBe(200);
+    expect(file.body.content).toBe('secondary prefs\n');
   });
 });
 

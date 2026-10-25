@@ -10,15 +10,43 @@ import * as path from 'node:path';
 import express from 'express';
 import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { SERVE_ERROR_KINDS } from '@qwen-code/acp-bridge/status';
+import { DAEMON_ERROR_KINDS } from '@qwen-code/sdk/daemon';
 import {
   clearAutoMemoryRootCache,
   getAutoMemoryRoot,
 } from '@qwen-code/qwen-code-core/memory/paths.js';
+import { sanitizeCwd } from '@qwen-code/qwen-code-core/utils/paths.js';
 import {
+  AUTO_MEMORY_ERROR_KINDS,
   collectWorkspaceAutoMemoryStatus,
   mountWorkspaceAutoMemoryRoutes,
+  mountWorkspaceQualifiedAutoMemoryRoutes,
   readWorkspaceAutoMemoryFile,
+  type AutoMemoryRuntime,
 } from './workspace-auto-memory.js';
+import type {
+  WorkspaceEntry,
+  WorkspaceRegistry,
+  WorkspaceRuntime,
+} from './workspace-registry.js';
+
+// Lets one test make core's no-follow open reject the way it does on a
+// volume that cannot prove file identity (inode 0, Windows-only).
+const noFollow = vi.hoisted(() => ({ reject: undefined as Error | undefined }));
+vi.mock('@qwen-code/qwen-code-core/noFollowOpen', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('@qwen-code/qwen-code-core/noFollowOpen')
+    >();
+  return {
+    ...actual,
+    openNoFollow: (...args: Parameters<typeof actual.openNoFollow>) =>
+      noFollow.reject
+        ? Promise.reject(noFollow.reject)
+        : actual.openNoFollow(...args),
+  };
+});
 
 const ONE_MIB = 1024 * 1024;
 
@@ -28,14 +56,37 @@ async function writeFile(dir: string, rel: string, content: string | Buffer) {
   await fs.writeFile(absolute, content);
 }
 
-function mountApp(opts: { boundWorkspace: string; trusted?: boolean }) {
+function mountApp(opts: {
+  boundWorkspace: string;
+  trusted?: boolean;
+  runtime?: AutoMemoryRuntime;
+}) {
   const app = express();
   const trusted = opts.trusted;
   mountWorkspaceAutoMemoryRoutes(app, {
     boundWorkspace: opts.boundWorkspace,
     ...(trusted === undefined ? {} : { isWorkspaceTrusted: () => trusted }),
+    ...(opts.runtime ? { runtime: opts.runtime } : {}),
   });
   return app;
+}
+
+/** A runtime whose sessions run with exactly the daemon's memory env. */
+function overlayRuntime(
+  sessionRuntimeBaseDir: string,
+  env: Record<string, string | undefined> = {},
+): AutoMemoryRuntime {
+  return {
+    sessionRuntimeBaseDir,
+    env: {
+      mode: 'runtime-overlay',
+      effectiveEnv: {
+        QWEN_CODE_MEMORY_LOCAL: process.env['QWEN_CODE_MEMORY_LOCAL'],
+        QWEN_CODE_MEMORY_BASE_DIR: process.env['QWEN_CODE_MEMORY_BASE_DIR'],
+        ...env,
+      },
+    },
+  };
 }
 
 let tmp: string;
@@ -45,7 +96,12 @@ let projectDir: string;
 let userDir: string;
 
 beforeEach(async () => {
-  tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-serve-auto-memory-'));
+  // Canonical temp root: the resolver canonicalizes roots with realpath,
+  // so a symlinked TMPDIR (macOS /var -> /private/var) must not leak
+  // into the literal fixture paths.
+  tmp = await fs.mkdtemp(
+    path.join(await fs.realpath(os.tmpdir()), 'qwen-serve-auto-memory-'),
+  );
   workspace = path.join(tmp, 'workspace');
   globalBase = path.join(tmp, 'global');
   // QWEN_CODE_MEMORY_LOCAL pins the project root to `<workspace>/.qwen/memory`;
@@ -60,6 +116,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   vi.restoreAllMocks();
+  noFollow.reject = undefined;
   delete process.env['QWEN_CODE_MEMORY_LOCAL'];
   delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
   clearAutoMemoryRootCache();
@@ -75,7 +132,9 @@ describe('collectWorkspaceAutoMemoryStatus', () => {
       workspaceCwd: workspace,
       initialized: false,
       userDir,
+      userDirExists: false,
       projectDir,
+      projectDirs: [],
       entries: [],
       totalBytes: 0,
       fileCount: 0,
@@ -202,6 +261,13 @@ describe('collectWorkspaceAutoMemoryStatus', () => {
       'project',
       'project',
     ]);
+    // The payload names every walked root, so the panel can show and
+    // open the directory that really holds each entry.
+    expect(status.projectDir).toBe(configuredRoot);
+    expect(status.projectDirs).toEqual([configuredRoot, projectDir]);
+    expect(
+      status.entries.map((entry) => path.dirname(entry.path)).sort(),
+    ).toEqual([configuredRoot, projectDir].sort());
 
     const result = await readWorkspaceAutoMemoryFile(
       workspace,
@@ -210,6 +276,75 @@ describe('collectWorkspaceAutoMemoryStatus', () => {
     );
     expect(result.scope).toBe('project');
     expect(result.content).toBe('repo local note\n');
+  });
+
+  it('refuses a project root reached through a symlinked .qwen ancestor', async () => {
+    // A repo-tracked `.qwen -> /outside`: lstat of `.qwen/memory` sees a
+    // real directory, only the whole-chain check sees the escape.
+    const outside = path.join(tmp, 'outside-qwen');
+    await writeFile(path.join(outside, 'memory'), 'planted.md', 'planted\n');
+    await fs.symlink(outside, path.join(workspace, '.qwen'));
+
+    const status = await collectWorkspaceAutoMemoryStatus(workspace, {
+      trusted: true,
+    });
+    expect(status.entries).toEqual([]);
+    expect(status.projectDirs).toEqual([]);
+    expect(status.errors).toEqual([
+      expect.objectContaining({
+        errorKind: 'symlinked_root',
+        hint: projectDir,
+      }),
+    ]);
+
+    await expect(
+      readWorkspaceAutoMemoryFile(
+        workspace,
+        path.join(projectDir, 'planted.md'),
+        { trusted: true },
+      ),
+    ).rejects.toMatchObject({ code: 'outside' });
+  });
+
+  it('publishes a relative path present in both project roots once, first root wins', async () => {
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    clearAutoMemoryRootCache();
+    const configuredRoot = getAutoMemoryRoot(workspace);
+    await writeFile(configuredRoot, 'shared.md', 'configured copy\n');
+    await writeFile(projectDir, 'shared.md', 'repo copy, longer\n');
+
+    const status = await collectWorkspaceAutoMemoryStatus(workspace, {
+      trusted: true,
+    });
+
+    expect(status.entries.map((entry) => entry.path)).toEqual([
+      path.join(configuredRoot, 'shared.md'),
+    ]);
+    expect(status.fileCount).toBe(1);
+    expect(status.totalBytes).toBe('configured copy\n'.length);
+  });
+
+  it('never lists the MEMORY.md index, at any depth', async () => {
+    await writeFile(projectDir, 'MEMORY.md', '- [notes](notes.md)\n');
+    await writeFile(projectDir, 'nested/MEMORY.md', '- index\n');
+    await writeFile(projectDir, 'notes.md', 'a note\n');
+
+    const status = await collectWorkspaceAutoMemoryStatus(workspace, {
+      trusted: true,
+    });
+
+    expect(status.entries.map((entry) => entry.path)).toEqual([
+      path.join(projectDir, 'notes.md'),
+    ]);
+    expect(status.fileCount).toBe(1);
+    expect(status.totalBytes).toBe('a note\n'.length);
+  });
+
+  it('emits only error kinds of the closed serve and SDK taxonomies', () => {
+    for (const kind of AUTO_MEMORY_ERROR_KINDS) {
+      expect(SERVE_ERROR_KINDS).toContain(kind);
+      expect(DAEMON_ERROR_KINDS).toContain(kind);
+    }
   });
 
   it('records a stat-failed root and keeps the scope initialized', async () => {
@@ -367,6 +502,71 @@ describe('readWorkspaceAutoMemoryFile', () => {
 
     expect(result.content).toBeUndefined();
     expect(result.bytes).toBe(7);
+  });
+
+  it('discriminates a torn read from an undecodable file', async () => {
+    const bomFile = path.join(projectDir, 'bom.md');
+    await writeFile(
+      projectDir,
+      'bom.md',
+      Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('text\n')]),
+    );
+    const tornFile = path.join(projectDir, 'note.md');
+    await writeFile(projectDir, 'note.md', 'stable\n');
+    const realStat = await fs.stat(tornFile);
+    const canonicalTorn = await fs.realpath(tornFile);
+    const originalLstat = fs.lstat.bind(fs);
+    vi.spyOn(fs, 'lstat').mockImplementation((target) =>
+      String(target) === canonicalTorn
+        ? Promise.resolve(
+            Object.assign(realStat, { size: realStat.size + 100 }),
+          )
+        : originalLstat(target),
+    );
+
+    const torn = await readWorkspaceAutoMemoryFile(workspace, tornFile, {
+      trusted: true,
+    });
+    const bom = await readWorkspaceAutoMemoryFile(workspace, bomFile, {
+      trusted: true,
+    });
+
+    expect(torn.content).toBeUndefined();
+    expect(torn.contentUnavailable).toBe('torn');
+    expect(bom.content).toBeUndefined();
+    expect(bom.contentUnavailable).toBe('undecodable');
+  });
+
+  it('answers not_found for a path through a regular-file component or an over-long name', async () => {
+    await writeFile(projectDir, 'note.md', 'hello\n');
+
+    await expect(
+      readWorkspaceAutoMemoryFile(
+        workspace,
+        path.join(projectDir, 'note.md', 'child.md'),
+        { trusted: true },
+      ),
+    ).rejects.toMatchObject({ code: 'not_found' });
+    await expect(
+      readWorkspaceAutoMemoryFile(
+        workspace,
+        path.join(projectDir, `${'n'.repeat(5000)}.md`),
+        { trusted: true },
+      ),
+    ).rejects.toMatchObject({ code: 'not_found' });
+  });
+
+  it('classifies an unverifiable-identity open refusal as read_failed', async () => {
+    const file = path.join(projectDir, 'note.md');
+    await writeFile(projectDir, 'note.md', 'hello\n');
+    noFollow.reject = Object.assign(
+      new Error('cannot verify file identity (inode 0)'),
+      { code: 'EUNVERIFIABLE' },
+    );
+
+    await expect(
+      readWorkspaceAutoMemoryFile(workspace, file, { trusted: true }),
+    ).rejects.toMatchObject({ code: 'read_failed' });
   });
 
   it('classifies a non-searchable root directory as read_failed, not outside', async () => {
@@ -552,5 +752,229 @@ describe('mountWorkspaceAutoMemoryRoutes', () => {
     expect(res.body.userDir).toBe(path.join(runtimeBase, 'memories'));
     expect(res.body.fileCount).toBe(1);
     expect(res.body.entries[0].title).toBe('prefs');
+
+    // The read route resolves under the same runtime scope as the listing:
+    // the entry it advertised is served.
+    const fileRes = await request(app)
+      .get('/workspace/auto-memory/file')
+      .query({ path: path.join(runtimeBase, 'memories', 'prefs.md') });
+    expect(fileRes.status).toBe(200);
+    expect(fileRes.body.scope).toBe('user');
+    expect(fileRes.body.content).toBe('prefs\n');
+  });
+
+  it('resolves the PROJECT root under the runtime storage scope outside local mode', async () => {
+    delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    clearAutoMemoryRootCache();
+    const runtimeBase = path.join(tmp, 'runtime-base');
+    const app = mountApp({
+      boundWorkspace: workspace,
+      trusted: true,
+      runtime: { sessionRuntimeBaseDir: runtimeBase },
+    });
+
+    const res = await request(app).get('/workspace/auto-memory');
+
+    expect(res.status).toBe(200);
+    expect(res.body.projectDir).toBe(
+      path.join(runtimeBase, 'projects', sanitizeCwd(workspace), 'memory'),
+    );
+  });
+
+  it('resolves the project root on the runtime memory project scope, not the daemon ambient one', async () => {
+    // A workspace bound to a git-repo SUBDIRECTORY (the monorepo case):
+    // the daemon's ambient scope (unset -> git-root) keys the partition
+    // by the repo root, while the runtime's sessions run with
+    // QWEN_CODE_MEMORY_PROJECT_SCOPE=workspace and write the
+    // workspace-keyed partition. The routes must follow the sessions.
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    delete process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
+    clearAutoMemoryRootCache();
+    const repo = path.join(tmp, 'repo');
+    const subWorkspace = path.join(repo, 'packages', 'app');
+    await fs.mkdir(path.join(repo, '.git'), { recursive: true });
+    await fs.mkdir(subWorkspace, { recursive: true });
+    const workspaceKeyed = path.join(
+      globalBase,
+      'projects',
+      sanitizeCwd(subWorkspace),
+      'memory',
+    );
+    const gitRootKeyed = path.join(
+      globalBase,
+      'projects',
+      sanitizeCwd(repo),
+      'memory',
+    );
+    await writeFile(workspaceKeyed, 'session.md', 'from the session\n');
+    await writeFile(gitRootKeyed, 'other.md', 'another partition\n');
+    const app = mountApp({
+      boundWorkspace: subWorkspace,
+      trusted: true,
+      runtime: overlayRuntime(path.join(tmp, 'runtime-base'), {
+        QWEN_CODE_MEMORY_PROJECT_SCOPE: 'workspace',
+      }),
+    });
+
+    const res = await request(app).get('/workspace/auto-memory');
+    expect(res.status).toBe(200);
+    expect(res.body.projectDir).toBe(workspaceKeyed);
+    expect(
+      res.body.entries.map((entry: { path: string }) => entry.path),
+    ).toEqual([path.join(workspaceKeyed, 'session.md')]);
+
+    const served = await request(app)
+      .get('/workspace/auto-memory/file')
+      .query({ path: path.join(workspaceKeyed, 'session.md') });
+    expect(served.status).toBe(200);
+    const refused = await request(app)
+      .get('/workspace/auto-memory/file')
+      .query({ path: path.join(gitRootKeyed, 'other.md') });
+    expect(refused.status).toBe(400);
+    expect(refused.body.code).toBe('outside');
+  });
+
+  it('refuses a runtime whose sessions pin a different process-global memory override', async () => {
+    const app = mountApp({
+      boundWorkspace: workspace,
+      trusted: true,
+      runtime: overlayRuntime(path.join(tmp, 'runtime-base'), {
+        QWEN_CODE_MEMORY_BASE_DIR: path.join(tmp, 'elsewhere'),
+      }),
+    });
+
+    const listing = await request(app).get('/workspace/auto-memory');
+    expect(listing.status).toBe(409);
+    expect(listing.body).toMatchObject({
+      code: 'auto_memory_env_override_unsupported',
+      key: 'QWEN_CODE_MEMORY_BASE_DIR',
+    });
+    const read = await request(app)
+      .get('/workspace/auto-memory/file')
+      .query({ path: path.join(userDir, 'x.md') });
+    expect(read.status).toBe(409);
+  });
+
+  it('answers 404 for a path through a regular-file component', async () => {
+    await writeFile(projectDir, 'note.md', 'hello\n');
+    const app = mountApp({ boundWorkspace: workspace, trusted: true });
+
+    const res = await request(app)
+      .get('/workspace/auto-memory/file')
+      .query({ path: path.join(projectDir, 'note.md', 'child.md') });
+
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('not_found');
+  });
+});
+
+describe('mountWorkspaceQualifiedAutoMemoryRoutes', () => {
+  function registryOf(
+    runtimes: Array<
+      Pick<
+        WorkspaceRuntime,
+        'workspaceId' | 'workspaceCwd' | 'sessionRuntimeBaseDir' | 'trusted'
+      > & { env: WorkspaceRuntime['env'] }
+    >,
+  ): WorkspaceRegistry {
+    const entries = runtimes.map(
+      (runtime) =>
+        ({
+          workspaceId: runtime.workspaceId,
+          workspaceCwd: runtime.workspaceCwd,
+          state: 'active',
+          current: { runtime },
+        }) as unknown as WorkspaceEntry,
+    );
+    return {
+      getEntryByWorkspaceId: (id: string) =>
+        entries.find((entry) => entry.workspaceId === id),
+      getEntryByWorkspaceCwd: (cwd: string) =>
+        entries.find((entry) => entry.workspaceCwd === cwd),
+      listEntries: () => entries,
+    } as unknown as WorkspaceRegistry;
+  }
+
+  it('serves the SELECTED workspace, never the primary', async () => {
+    const primaryWs = path.join(tmp, 'primary');
+    const secondaryWs = path.join(tmp, 'secondary');
+    await writeFile(
+      path.join(primaryWs, '.qwen', 'memory'),
+      'primary.md',
+      'primary note\n',
+    );
+    await writeFile(
+      path.join(secondaryWs, '.qwen', 'memory'),
+      'secondary.md',
+      'secondary note\n',
+    );
+    const env = {
+      mode: 'parent-process' as const,
+      overlayKeys: [],
+    };
+    const app = express();
+    mountWorkspaceQualifiedAutoMemoryRoutes(app, {
+      workspaceRegistry: registryOf([
+        {
+          workspaceId: 'primary-id',
+          workspaceCwd: primaryWs,
+          sessionRuntimeBaseDir: path.join(tmp, 'rt-primary'),
+          trusted: true,
+          env,
+        },
+        {
+          workspaceId: 'secondary-id',
+          workspaceCwd: secondaryWs,
+          sessionRuntimeBaseDir: path.join(tmp, 'rt-secondary'),
+          trusted: true,
+          env,
+        },
+      ]),
+    });
+
+    const res = await request(app).get(
+      `/workspaces/${encodeURIComponent(secondaryWs)}/auto-memory`,
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.workspaceCwd).toBe(secondaryWs);
+    expect(res.body.projectDir).toBe(path.join(secondaryWs, '.qwen', 'memory'));
+    expect(
+      res.body.entries.map((entry: { path: string }) =>
+        path.basename(entry.path),
+      ),
+    ).toEqual(['secondary.md']);
+
+    const file = await request(app)
+      .get('/workspaces/secondary-id/auto-memory/file')
+      .query({
+        path: path.join(secondaryWs, '.qwen', 'memory', 'secondary.md'),
+      });
+    expect(file.status).toBe(200);
+    expect(file.body.content).toBe('secondary note\n');
+    const crossRead = await request(app)
+      .get('/workspaces/secondary-id/auto-memory/file')
+      .query({ path: path.join(primaryWs, '.qwen', 'memory', 'primary.md') });
+    expect(crossRead.status).toBe(400);
+    expect(crossRead.body.code).toBe('outside');
+  });
+
+  it('refuses an untrusted workspace', async () => {
+    const app = express();
+    mountWorkspaceQualifiedAutoMemoryRoutes(app, {
+      workspaceRegistry: registryOf([
+        {
+          workspaceId: 'ws-id',
+          workspaceCwd: workspace,
+          sessionRuntimeBaseDir: path.join(tmp, 'rt'),
+          trusted: false,
+          env: { mode: 'parent-process', overlayKeys: [] },
+        },
+      ]),
+    });
+
+    const res = await request(app).get('/workspaces/ws-id/auto-memory');
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('untrusted_workspace');
   });
 });

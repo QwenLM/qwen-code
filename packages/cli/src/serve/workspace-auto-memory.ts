@@ -8,19 +8,34 @@ import { promises as fs } from 'node:fs';
 import type { Dirent } from 'node:fs';
 import * as path from 'node:path';
 import type { Application, Request, Response } from 'express';
+import type { ServeErrorKind } from '@qwen-code/acp-bridge/status';
 import {
+  AUTO_MEMORY_INDEX_FILENAME,
   getAutoMemoryRoot,
+  getMemoryRootTrustedAnchor,
   getProjectAutoMemoryRoots,
   getUserAutoMemoryRoot,
+  runWithMemoryProjectScope,
 } from '@qwen-code/qwen-code-core/memory/paths.js';
+import { resolveTrustedMemoryRoot } from '@qwen-code/qwen-code-core/memory/trusted-memory-filesystem.js';
 import { detectBOM } from '@qwen-code/qwen-code-core/utils/fileUtils.js';
-import { openNoFollow } from '@qwen-code/qwen-code-core/noFollowOpen';
+import {
+  isUnverifiableIdentityError,
+  openNoFollow,
+} from '@qwen-code/qwen-code-core/noFollowOpen';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { FsError } from './fs/errors.js';
 import { resolveWithinWorkspace } from './fs/paths.js';
-import { sendGenerationClosedError } from './workspace-route-runtime.js';
+import {
+  resolveTrustedRuntime,
+  sendGenerationClosedError,
+} from './workspace-route-runtime.js';
 import { runWithWorkspaceRuntimeStorage } from './workspace-runtime-storage.js';
-import type { WorkspaceRuntime } from './workspace-registry.js';
+import type {
+  WorkspaceRegistry,
+  WorkspaceRuntime,
+  WorkspaceRuntimeEnvMetadata,
+} from './workspace-registry.js';
 
 /**
  * Issue #4175 PR 16.5 (web-shell gap #13396): managed auto-memory browse
@@ -45,14 +60,23 @@ import type { WorkspaceRuntime } from './workspace-registry.js';
  * The project scope walks core's trusted project root SET
  * (`getProjectAutoMemoryRoots`): the configured root plus, for a trusted
  * workspace, the repo-local `.qwen/memory` — the same universe recall
- * and forget scan. A symlinked PROJECT root is refused (a committed
- * symlink would relocate the read boundary to its target); only the
- * user root may itself be a symlink (dotfiles layout).
+ * and forget scan, with the same first-root-wins precedence for a
+ * relative path present in several roots and the same exclusion of the
+ * `MEMORY.md` index. A PROJECT root is admitted only through core's
+ * whole-chain check (`resolveTrustedMemoryRoot`): a symlinked root or a
+ * symlinked ancestor inside its trusted anchor (a repo-tracked
+ * `.qwen -> /outside`) is refused, since it would relocate the read
+ * boundary to its target; only the user root may itself be a symlink
+ * (dotfiles layout).
  *
- * Mounted with a workspace `runtime`, both routes resolve the roots
- * under that runtime's session storage scope
- * (`runWithWorkspaceRuntimeStorage`) instead of the daemon's ambient
- * Storage scope; without one the ambient scope applies (unit tests).
+ * The roots are resolved on BOTH memory axes of the serving workspace
+ * runtime, matching what that runtime's sessions write: the Storage
+ * base dir (`runWithWorkspaceRuntimeStorage`, the runtime's pinned
+ * session output dir) and the memory PROJECT scope
+ * (`runWithMemoryProjectScope`, read from the runtime's effective env the
+ * way memory import does). Without a runtime (unit tests) the daemon's
+ * ambient scope applies. `GET /workspaces/:workspace/auto-memory[/file]`
+ * serves the same payloads for any registered workspace.
  *
  * Both routes are filesystem-only — neither spawns the ACP child.
  */
@@ -74,13 +98,36 @@ export interface ServeAutoMemoryFile {
   modifiedAt: string;
 }
 
+/**
+ * Every `errorKind` the listing can put in its `errors` cells. Each is a
+ * member of the closed serve taxonomy (`SERVE_ERROR_KINDS`, enforced by
+ * the `satisfies` below) and of the SDK's `DAEMON_ERROR_KINDS` (pinned by
+ * test).
+ */
+export const AUTO_MEMORY_ERROR_KINDS = [
+  'readdir_failed',
+  'stat_failed',
+  'symlinked_root',
+] as const satisfies readonly ServeErrorKind[];
+
+export type ServeAutoMemoryErrorKind = (typeof AUTO_MEMORY_ERROR_KINDS)[number];
+
 export interface ServeAutoMemoryStatus {
   v: 1;
   workspaceCwd: string;
   /** True when at least one managed root exists on disk. */
   initialized: boolean;
   userDir: string;
+  /** True when the user root exists on disk. */
+  userDirExists: boolean;
+  /** The configured project root (may not exist yet). */
   projectDir: string;
+  /**
+   * The project roots that exist and were walked, in precedence order —
+   * the configured root and, for a trusted workspace, the repo-local
+   * `.qwen/memory`. Refused (symlinked) and absent roots are not listed.
+   */
+  projectDirs: string[];
   entries: ServeAutoMemoryFile[];
   totalBytes: number;
   fileCount: number;
@@ -89,7 +136,7 @@ export interface ServeAutoMemoryStatus {
     status: 'error';
     error: string;
     hint?: string;
-    errorKind?: string;
+    errorKind?: ServeAutoMemoryErrorKind;
   }>;
 }
 
@@ -105,6 +152,12 @@ export interface ServeAutoMemoryFileContent {
    */
   content?: string;
   truncated?: boolean;
+  /**
+   * Set exactly when `content` is absent: `torn` — the file changed
+   * while it was read (transient, retry the read); `undecodable` — BOM'd
+   * or non-UTF-8 bytes (permanent until the file itself changes).
+   */
+  contentUnavailable?: 'torn' | 'undecodable';
 }
 
 /** Refusals for `readWorkspaceAutoMemoryFile`, mapped to HTTP status. */
@@ -122,13 +175,30 @@ const AUTO_MEMORY_STATUS_SCHEMA_VERSION = 1 as const;
 const MAX_AUTO_MEMORY_CONTENT_BYTES = 1024 * 1024;
 const FRONTMATTER_PROBE_BYTES = 4096;
 
-function isEnoent(err: unknown): boolean {
-  return (
-    typeof err === 'object' &&
-    err !== null &&
-    (err as { code?: string }).code === 'ENOENT'
-  );
+function errnoCode(err: unknown): string | undefined {
+  const code =
+    typeof err === 'object' && err !== null
+      ? (err as { code?: unknown }).code
+      : undefined;
+  return typeof code === 'string' ? code : undefined;
 }
+
+function isEnoent(err: unknown): boolean {
+  return errnoCode(err) === 'ENOENT';
+}
+
+/**
+ * Errnos a resolver raises for a path that cannot name an existing entry
+ * (a regular-file ancestor, an over-long component, a malformed path) —
+ * faults of the request, answered like a missing file instead of
+ * falling through to the daemon-fault bucket.
+ */
+const NOT_FOUND_ERRNOS = new Set([
+  'ENOENT',
+  'ENOTDIR',
+  'ENAMETOOLONG',
+  'EINVAL',
+]);
 
 function isMarkdownName(name: string): boolean {
   return name.toLowerCase().endsWith('.md');
@@ -231,6 +301,9 @@ async function collectFilesIn(
       continue;
     }
     if (!isMarkdownName(entry.name)) continue;
+    // The index is a link catalog, not a memory: core's scanners skip it
+    // at every depth, so recall/forget never see it either.
+    if (entry.name === AUTO_MEMORY_INDEX_FILENAME) continue;
     const absolutePath = path.join(dir, entry.name);
     try {
       const stat = await fs.stat(absolutePath);
@@ -255,6 +328,49 @@ async function collectFilesIn(
   }
 }
 
+type ProjectRootAdmission =
+  | { state: 'admitted' }
+  | { state: 'absent' }
+  | { state: 'refused' }
+  | { state: 'stat_failed'; detail: string };
+
+/**
+ * Admission check for one PROJECT root, shared by the listing, the read
+ * route and the folder-open target so all three agree on the boundary.
+ * A root is admitted only when it is a real directory whose whole chain
+ * inside its trusted anchor stays inside that anchor — core's
+ * `resolveTrustedMemoryRoot`, the check recall/forget apply — so neither
+ * a symlinked root nor a symlinked ancestor (a repo-tracked
+ * `.qwen -> /outside`) can relocate the boundary to its target.
+ */
+export async function admitAutoMemoryProjectRoot(
+  root: string,
+): Promise<ProjectRootAdmission> {
+  const describe = (err: unknown) =>
+    err instanceof Error ? err.message : String(err);
+  let rootStat;
+  try {
+    rootStat = await fs.lstat(root);
+  } catch (err) {
+    return isEnoent(err)
+      ? { state: 'absent' }
+      : { state: 'stat_failed', detail: describe(err) };
+  }
+  if (rootStat.isSymbolicLink()) return { state: 'refused' };
+  if (!rootStat.isDirectory()) return { state: 'absent' };
+  try {
+    await resolveTrustedMemoryRoot(root, getMemoryRootTrustedAnchor(root));
+  } catch (err) {
+    // An errno is a fault of the lstat/realpath itself; core's refusals
+    // are plain errors.
+    if (errnoCode(err) === undefined) return { state: 'refused' };
+    return isEnoent(err)
+      ? { state: 'absent' }
+      : { state: 'stat_failed', detail: describe(err) };
+  }
+  return { state: 'admitted' };
+}
+
 /**
  * Filesystem-only discovery of managed auto-memory entries under the
  * bound workspace's project root set and the user-level root. Per-file
@@ -262,9 +378,11 @@ async function collectFilesIn(
  * error (a fresh host has neither).
  *
  * `opts.trusted` gates the repo-local project root the same way core's
- * recall/forget scans do (`getProjectAutoMemoryRoots`): an untrusted
- * workspace exposes only the configured root, and in local-memory mode
- * no project root at all.
+ * recall/forget scans do (`getProjectAutoMemoryRoots`): untrusted, only
+ * the configured root is walked, and in local-memory mode no project
+ * root at all. Both transports refuse an untrusted workspace (403) before
+ * calling this, so production callers always pass `trusted: true`; the
+ * narrowing is the fail-safe for a caller that omits it.
  */
 export async function collectWorkspaceAutoMemoryStatus(
   boundWorkspace: string,
@@ -278,46 +396,33 @@ export async function collectWorkspaceAutoMemoryStatus(
   );
   const entries: ServeAutoMemoryFile[] = [];
   const errors: AutoMemoryError[] = [];
+  const pushError = (
+    error: string,
+    hint: string,
+    errorKind: ServeAutoMemoryErrorKind,
+  ) =>
+    errors.push({
+      kind: 'auto_memory_file',
+      status: 'error',
+      error,
+      hint,
+      errorKind,
+    });
+  const reportStatFailed = (detail: string, root: string) => {
+    // A root that exists but cannot be stat'ed must not read as "never
+    // created": record it and keep the scope initialized, so the panel
+    // does not assert a creation state we could not observe.
+    pushError(detail, root, 'stat_failed');
+    writeStderrLine(
+      `qwen serve: auto-memory root stat failed: ${detail} (${root})`,
+    );
+  };
 
-  const scanRoot = async (
+  const listRoot = async (
     scope: ServeAutoMemoryScope,
     root: string,
-    refuseRootSymlink: boolean,
-  ): Promise<boolean> => {
-    let rootStat;
-    try {
-      rootStat = refuseRootSymlink ? await fs.lstat(root) : await fs.stat(root);
-    } catch (err) {
-      if (isEnoent(err)) return false;
-      // A root that exists but cannot be stat'ed must not read as
-      // "never created": record it and keep the scope initialized, so
-      // the panel does not assert a creation state we could not observe.
-      const detail = err instanceof Error ? err.message : String(err);
-      errors.push({
-        kind: 'auto_memory_file',
-        status: 'error',
-        error: detail,
-        hint: root,
-        errorKind: 'stat_failed',
-      });
-      writeStderrLine(
-        `qwen serve: auto-memory root stat failed: ${detail} (${root})`,
-      );
-      return true;
-    }
-    if (refuseRootSymlink && rootStat.isSymbolicLink()) {
-      // A symlinked project root would relocate the read boundary to its
-      // target; core refuses the same shape for its memory roots.
-      errors.push({
-        kind: 'auto_memory_file',
-        status: 'error',
-        error: 'refusing symlinked project memory root',
-        hint: root,
-        errorKind: 'symlinked_root',
-      });
-      return true;
-    }
-    if (!rootStat.isDirectory()) return false;
+    seen?: Set<string>,
+  ): Promise<void> => {
     const files: ScannedFile[] = [];
     await collectFilesIn(root, root, files, errors);
     files.sort((a, b) =>
@@ -328,6 +433,12 @@ export async function collectWorkspaceAutoMemoryStatus(
           : 0,
     );
     for (const file of files) {
+      // Core's cross-root precedence: the first root holding a relative
+      // path wins, so a copy in a later root is not a second memory.
+      if (seen) {
+        if (seen.has(file.relativePath)) continue;
+        seen.add(file.relativePath);
+      }
       const meta = await probeFrontmatter(file.absolutePath);
       const entry: ServeAutoMemoryFile = {
         kind: 'auto_memory_file',
@@ -343,21 +454,59 @@ export async function collectWorkspaceAutoMemoryStatus(
       if (meta['category']) entry.category = meta['category'];
       entries.push(entry);
     }
-    return true;
   };
 
   let projectExists = false;
+  const projectDirs: string[] = [];
+  const seenProjectPaths = new Set<string>();
   for (const root of projectRoots) {
-    if (await scanRoot('project', root, true)) projectExists = true;
+    const admission = await admitAutoMemoryProjectRoot(root);
+    if (admission.state === 'absent') continue;
+    projectExists = true;
+    if (admission.state === 'stat_failed') {
+      reportStatFailed(admission.detail, root);
+      continue;
+    }
+    if (admission.state === 'refused') {
+      pushError(
+        'refusing symlinked project memory root',
+        root,
+        'symlinked_root',
+      );
+      continue;
+    }
+    projectDirs.push(root);
+    await listRoot('project', root, seenProjectPaths);
   }
-  const userExists = await scanRoot('user', userDir, false);
+
+  // The user root is deliberately symlink-tolerant (dotfiles layout).
+  let userExists = false;
+  let userDirExists = false;
+  try {
+    const userStat = await fs.stat(userDir);
+    if (userStat.isDirectory()) {
+      userExists = true;
+      userDirExists = true;
+      await listRoot('user', userDir);
+    }
+  } catch (err) {
+    if (!isEnoent(err)) {
+      userExists = true;
+      reportStatFailed(
+        err instanceof Error ? err.message : String(err),
+        userDir,
+      );
+    }
+  }
 
   const result: ServeAutoMemoryStatus = {
     v: AUTO_MEMORY_STATUS_SCHEMA_VERSION,
     workspaceCwd: boundWorkspace,
     initialized: projectExists || userExists,
     userDir,
+    userDirExists,
     projectDir,
+    projectDirs,
     entries,
     totalBytes: entries.reduce((acc, entry) => acc + entry.bytes, 0),
     fileCount: entries.length,
@@ -382,21 +531,17 @@ export async function readWorkspaceAutoMemoryFile(
 ): Promise<ServeAutoMemoryFileContent> {
   const userDir = getUserAutoMemoryRoot();
 
-  // Admit only project roots that are real, non-symlinked directories:
-  // a symlinked root would relocate the containment boundary to its
-  // target, so it is refused instead of canonicalized.
+  // Admit only the project roots the listing walks: a symlinked root or
+  // ancestor would relocate the containment boundary to its target, so
+  // it is refused instead of canonicalized. Absent, unstat'able and
+  // refused roots admit nothing.
   const projectRoots: string[] = [];
   for (const root of getProjectAutoMemoryRoots(
     boundWorkspace,
     opts.trusted === true,
   )) {
-    try {
-      const rootStat = await fs.lstat(root);
-      if (rootStat.isDirectory() && !rootStat.isSymbolicLink()) {
-        projectRoots.push(root);
-      }
-    } catch {
-      // Absent (or unstat'able) roots admit nothing.
+    if ((await admitAutoMemoryProjectRoot(root)).state === 'admitted') {
+      projectRoots.push(root);
     }
   }
 
@@ -449,6 +594,15 @@ export async function readWorkspaceAutoMemoryFile(
             : 'read_failed';
       throw new AutoMemoryPathError(kind, err.message);
     }
+    // The resolver rethrows raw errnos it does not map for 'read'
+    // intent (a regular-file ancestor, an over-long name): the path
+    // cannot name an existing entry, which is a fault of the request.
+    if (NOT_FOUND_ERRNOS.has(errnoCode(err) ?? '')) {
+      throw new AutoMemoryPathError(
+        'not_found',
+        `no such auto-memory file: ${filePath}`,
+      );
+    }
     throw err;
   }
 
@@ -456,7 +610,7 @@ export async function readWorkspaceAutoMemoryFile(
   try {
     before = await fs.lstat(resolved);
   } catch (err) {
-    if (isEnoent(err)) {
+    if (NOT_FOUND_ERRNOS.has(errnoCode(err) ?? '')) {
       throw new AutoMemoryPathError(
         'not_found',
         `no such auto-memory file: ${filePath}`,
@@ -491,7 +645,13 @@ export async function readWorkspaceAutoMemoryFile(
         `no such auto-memory file: ${filePath}`,
       );
     }
-    if (code === 'EACCES' || code === 'EPERM') {
+    // Core's deliberate fail-closed refusal on volumes that cannot prove
+    // file identity (inode 0) is a read fault, not an unexpected crash.
+    if (
+      code === 'EACCES' ||
+      code === 'EPERM' ||
+      isUnverifiableIdentityError(err)
+    ) {
       throw new AutoMemoryPathError(
         'read_failed',
         `auto-memory file cannot be opened: ${filePath}`,
@@ -539,7 +699,9 @@ export async function readWorkspaceAutoMemoryFile(
       bytes: opened.size,
       modifiedAt: new Date(opened.mtimeMs).toISOString(),
       ...(decoded.truncated ? { truncated: true } : {}),
-      ...(decoded.content !== undefined ? { content: decoded.content } : {}),
+      ...(decoded.content !== undefined
+        ? { content: decoded.content }
+        : { contentUnavailable: torn ? 'torn' : 'undecodable' }),
     };
   } finally {
     await handle.close();
@@ -568,16 +730,103 @@ function decodeAutoMemoryContent(
   }
 }
 
+const MEMORY_PROJECT_SCOPE_ENV = 'QWEN_CODE_MEMORY_PROJECT_SCOPE';
+
+/**
+ * Memory-path overrides core reads from the daemon PROCESS env only
+ * (`getMemoryBaseDir`, `getAutoMemoryRoot`): they cannot be applied per
+ * runtime, so a runtime whose sessions run with a different value is
+ * refused rather than served the daemon's layout.
+ */
+const PROCESS_GLOBAL_MEMORY_ENV = [
+  'QWEN_CODE_MEMORY_BASE_DIR',
+  'QWEN_CODE_MEMORY_LOCAL',
+] as const;
+
+/** The parts of a workspace runtime the managed roots resolve under. */
+export type AutoMemoryRuntime = Pick<
+  WorkspaceRuntime,
+  'sessionRuntimeBaseDir'
+> & {
+  readonly env?: Pick<WorkspaceRuntimeEnvMetadata, 'mode' | 'effectiveEnv'>;
+};
+
+/** A runtime pins a process-global memory override the daemon cannot apply. */
+export class AutoMemoryEnvOverrideError extends Error {
+  readonly code = 'auto_memory_env_override_unsupported';
+  constructor(readonly key: string) {
+    super(
+      `Auto-memory browse does not support a workspace-specific ${key} override.`,
+    );
+    this.name = 'AutoMemoryEnvOverrideError';
+  }
+}
+
+function normalizedMemoryEnv(
+  key: (typeof PROCESS_GLOBAL_MEMORY_ENV)[number],
+  value: string | undefined,
+): string {
+  return key === 'QWEN_CODE_MEMORY_LOCAL'
+    ? String(value === '1')
+    : (value ?? '');
+}
+
+/**
+ * Run `fn` with core's memory paths resolving on BOTH axes of `runtime`,
+ * the way its sessions resolve them: the Storage base dir (the runtime's
+ * pinned session output dir) and the memory PROJECT scope, read from the
+ * runtime's effective env exactly as memory import does (process env
+ * only for a parent-process runtime without a snapshot). The scope is
+ * resolved inside the wrapper, per call — core's root memo keys on it.
+ * Without a runtime the daemon's ambient scope applies (unit tests).
+ */
+export function runWithAutoMemoryRuntime<T>(
+  runtime: AutoMemoryRuntime | undefined,
+  fn: () => T,
+): T {
+  if (!runtime) return fn();
+  const env = runtime.env;
+  if (!env) return runWithWorkspaceRuntimeStorage(runtime, fn);
+  if (env.effectiveEnv !== undefined) {
+    for (const key of PROCESS_GLOBAL_MEMORY_ENV) {
+      if (
+        normalizedMemoryEnv(key, env.effectiveEnv[key]) !==
+        normalizedMemoryEnv(key, process.env[key])
+      ) {
+        throw new AutoMemoryEnvOverrideError(key);
+      }
+    }
+  }
+  const configured =
+    env.effectiveEnv !== undefined
+      ? env.effectiveEnv[MEMORY_PROJECT_SCOPE_ENV]
+      : env.mode === 'parent-process'
+        ? process.env[MEMORY_PROJECT_SCOPE_ENV]
+        : undefined;
+  const scope =
+    configured?.trim().toLowerCase() === 'workspace' ? 'workspace' : 'git-root';
+  return runWithWorkspaceRuntimeStorage(runtime, () =>
+    runWithMemoryProjectScope(scope, fn),
+  );
+}
+
 export interface WorkspaceAutoMemoryRouteDeps {
   boundWorkspace: string;
   isWorkspaceTrusted?: () => boolean;
   captureGenerationAssertion?: () => (() => void) | undefined;
   /**
-   * Workspace runtime whose session storage base dir the managed roots
-   * resolve under (Storage scope). Omitted — e.g. by unit tests — the
-   * daemon's ambient Storage scope applies.
+   * Workspace runtime whose memory axes (session storage base dir +
+   * memory project scope) the managed roots resolve under. Omitted —
+   * e.g. by unit tests — the daemon's ambient scope applies.
    */
-  runtime?: Pick<WorkspaceRuntime, 'sessionRuntimeBaseDir'>;
+  runtime?: AutoMemoryRuntime;
+}
+
+/** Everything one request needs, for either mount. */
+interface AutoMemoryRequestContext {
+  workspaceCwd: string;
+  runtime?: AutoMemoryRuntime;
+  assertGenerationOpen: () => void;
 }
 
 function requireTrustedWorkspace(
@@ -593,11 +842,10 @@ function requireTrustedWorkspace(
 }
 
 function captureOpenGeneration(
-  deps: WorkspaceAutoMemoryRouteDeps,
+  capture: (() => (() => void) | undefined) | undefined,
   res: Response,
 ): (() => void) | null {
-  const assertGenerationOpen =
-    deps.captureGenerationAssertion?.() ?? (() => {});
+  const assertGenerationOpen = capture?.() ?? (() => {});
   try {
     assertGenerationOpen();
     return assertGenerationOpen;
@@ -607,97 +855,197 @@ function captureOpenGeneration(
   }
 }
 
-/** Mount the two auto-memory browse routes on the supplied Express app. */
+function sendEnvOverrideError(res: Response, err: unknown): boolean {
+  if (!(err instanceof AutoMemoryEnvOverrideError)) return false;
+  res.status(409).json({ error: err.message, code: err.code, key: err.key });
+  return true;
+}
+
+// Both mounts serve a workspace only after the trust gate (403), so the
+// collector/reader always run trusted here.
+async function handleListing(
+  label: string,
+  ctx: AutoMemoryRequestContext,
+  res: Response,
+): Promise<void> {
+  try {
+    const status = await runWithAutoMemoryRuntime(ctx.runtime, () =>
+      collectWorkspaceAutoMemoryStatus(ctx.workspaceCwd, { trusted: true }),
+    );
+    ctx.assertGenerationOpen();
+    res.status(200).json(status);
+  } catch (err) {
+    if (sendGenerationClosedError(res, err)) return;
+    if (sendEnvOverrideError(res, err)) return;
+    writeStderrLine(
+      `qwen serve: GET ${label} failed: ${
+        err instanceof Error ? (err.stack ?? err.message) : String(err)
+      }`,
+    );
+    res.status(500).json({
+      error: 'Failed to discover auto-memory',
+      code: 'auto_memory_discovery_failed',
+    });
+  }
+}
+
+async function handleFileRead(
+  label: string,
+  ctx: AutoMemoryRequestContext,
+  req: Request,
+  res: Response,
+): Promise<void> {
+  const filePath = req.query['path'];
+  if (typeof filePath !== 'string' || filePath.length === 0) {
+    res.status(400).json({
+      error: '`path` query parameter is required',
+      code: 'missing_path',
+    });
+    return;
+  }
+  try {
+    const result = await runWithAutoMemoryRuntime(ctx.runtime, () =>
+      readWorkspaceAutoMemoryFile(ctx.workspaceCwd, filePath, {
+        trusted: true,
+      }),
+    );
+    ctx.assertGenerationOpen();
+    res.status(200).json(result);
+  } catch (err) {
+    if (sendGenerationClosedError(res, err)) return;
+    if (sendEnvOverrideError(res, err)) return;
+    if (err instanceof AutoMemoryPathError) {
+      res.status(autoMemoryPathErrorStatus(err)).json({
+        error: err.message,
+        code: err.code,
+        path: filePath,
+      });
+      return;
+    }
+    writeStderrLine(
+      `qwen serve: GET ${label} failed: ${
+        err instanceof Error ? (err.stack ?? err.message) : String(err)
+      }`,
+    );
+    res.status(500).json({
+      error: 'Failed to read auto-memory file',
+      code: 'auto_memory_read_failed',
+    });
+  }
+}
+
+/**
+ * HTTP status of a read refusal, shared by REST and ACP. `read_failed`
+ * means the admitted path could not be resolved or opened by the daemon
+ * (a locked root directory, an unreadable file) — a server fault,
+ * deliberately not the 400 bucket.
+ */
+export function autoMemoryPathErrorStatus(err: AutoMemoryPathError): number {
+  return err.code === 'not_found'
+    ? 404
+    : err.code === 'read_failed'
+      ? 500
+      : 400;
+}
+
+/**
+ * Mount the two legacy auto-memory browse routes for the daemon's primary
+ * workspace.
+ */
 export function mountWorkspaceAutoMemoryRoutes(
   app: Application,
   deps: WorkspaceAutoMemoryRouteDeps,
 ): void {
-  // Resolve the managed roots under the bound workspace's runtime
-  // storage scope, not the daemon's ambient one (each workspace may pin
-  // its own runtimeOutputDir).
-  const withRuntimeStorage = <T>(fn: () => T): T =>
-    deps.runtime ? runWithWorkspaceRuntimeStorage(deps.runtime, fn) : fn();
-  const trusted = () => deps.isWorkspaceTrusted?.() === true;
+  const context = (
+    assertGenerationOpen: () => void,
+  ): AutoMemoryRequestContext => ({
+    workspaceCwd: deps.boundWorkspace,
+    ...(deps.runtime ? { runtime: deps.runtime } : {}),
+    assertGenerationOpen,
+  });
 
   app.get('/workspace/auto-memory', async (_req: Request, res: Response) => {
-    const assertGenerationOpen = captureOpenGeneration(deps, res);
+    const assertGenerationOpen = captureOpenGeneration(
+      deps.captureGenerationAssertion,
+      res,
+    );
     if (!assertGenerationOpen) return;
     if (!requireTrustedWorkspace(deps, res)) return;
-    try {
-      const status = await withRuntimeStorage(() =>
-        collectWorkspaceAutoMemoryStatus(deps.boundWorkspace, {
-          trusted: trusted(),
-        }),
-      );
-      assertGenerationOpen();
-      res.status(200).json(status);
-    } catch (err) {
-      if (sendGenerationClosedError(res, err)) return;
-      writeStderrLine(
-        `qwen serve: GET /workspace/auto-memory failed: ${
-          err instanceof Error ? (err.stack ?? err.message) : String(err)
-        }`,
-      );
-      res.status(500).json({
-        error: 'Failed to discover auto-memory',
-        code: 'auto_memory_discovery_failed',
-      });
-    }
+    await handleListing(
+      '/workspace/auto-memory',
+      context(assertGenerationOpen),
+      res,
+    );
   });
 
   app.get(
     '/workspace/auto-memory/file',
     async (req: Request, res: Response) => {
-      const assertGenerationOpen = captureOpenGeneration(deps, res);
+      const assertGenerationOpen = captureOpenGeneration(
+        deps.captureGenerationAssertion,
+        res,
+      );
       if (!assertGenerationOpen) return;
       if (!requireTrustedWorkspace(deps, res)) return;
-      const filePath = req.query['path'];
-      if (typeof filePath !== 'string' || filePath.length === 0) {
-        res.status(400).json({
-          error: '`path` query parameter is required',
-          code: 'missing_path',
-        });
-        return;
-      }
-      try {
-        const result = await withRuntimeStorage(() =>
-          readWorkspaceAutoMemoryFile(deps.boundWorkspace, filePath, {
-            trusted: trusted(),
-          }),
-        );
-        assertGenerationOpen();
-        res.status(200).json(result);
-      } catch (err) {
-        if (sendGenerationClosedError(res, err)) return;
-        if (err instanceof AutoMemoryPathError) {
-          // read_failed means the admitted path could not be resolved or
-          // opened by the daemon (a locked root directory, an unreadable
-          // file) — a server fault, deliberately not the 400 bucket.
-          res
-            .status(
-              err.code === 'not_found'
-                ? 404
-                : err.code === 'read_failed'
-                  ? 500
-                  : 400,
-            )
-            .json({
-              error: err.message,
-              code: err.code,
-              path: filePath,
-            });
-          return;
-        }
-        writeStderrLine(
-          `qwen serve: GET /workspace/auto-memory/file failed: ${
-            err instanceof Error ? (err.stack ?? err.message) : String(err)
-          }`,
-        );
-        res.status(500).json({
-          error: 'Failed to read auto-memory file',
-          code: 'auto_memory_read_failed',
-        });
-      }
+      await handleFileRead(
+        '/workspace/auto-memory/file',
+        context(assertGenerationOpen),
+        req,
+        res,
+      );
+    },
+  );
+}
+
+/**
+ * Mount the workspace-qualified twins, `GET /workspaces/:workspace/
+ * auto-memory[/file]`: the runtime is resolved per request from the
+ * registry (never falling back to the primary), trust-gated, and its
+ * cwd and memory axes drive the same listing/read.
+ */
+export function mountWorkspaceQualifiedAutoMemoryRoutes(
+  app: Application,
+  deps: { workspaceRegistry: WorkspaceRegistry },
+): void {
+  const resolve = (
+    req: Request,
+    res: Response,
+  ): AutoMemoryRequestContext | null => {
+    const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
+    if (!runtime) return null;
+    const guard = runtime.generationGuard;
+    const assertGenerationOpen = captureOpenGeneration(
+      () => (guard ? () => guard.assertOpen() : undefined),
+      res,
+    );
+    if (!assertGenerationOpen) return null;
+    return {
+      workspaceCwd: runtime.workspaceCwd,
+      runtime,
+      assertGenerationOpen,
+    };
+  };
+
+  app.get(
+    '/workspaces/:workspace/auto-memory',
+    async (req: Request, res: Response) => {
+      const ctx = resolve(req, res);
+      if (!ctx) return;
+      await handleListing('/workspaces/:workspace/auto-memory', ctx, res);
+    },
+  );
+
+  app.get(
+    '/workspaces/:workspace/auto-memory/file',
+    async (req: Request, res: Response) => {
+      const ctx = resolve(req, res);
+      if (!ctx) return;
+      await handleFileRead(
+        '/workspaces/:workspace/auto-memory/file',
+        ctx,
+        req,
+        res,
+      );
     },
   );
 }

@@ -5,9 +5,11 @@
  */
 
 import { promises as fs } from 'node:fs';
+import * as path from 'node:path';
 import type { Application, Request, RequestHandler, Response } from 'express';
 import {
   getAutoMemoryRoot,
+  getProjectAutoMemoryRoots,
   getUserAutoMemoryRoot,
 } from '@qwen-code/qwen-code-core/memory/paths.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -19,7 +21,11 @@ import {
 import { safeBody } from '../server/request-helpers.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 import { resolveTrustedRuntime } from '../workspace-route-runtime.js';
-import { runWithWorkspaceRuntimeStorage } from '../workspace-runtime-storage.js';
+import {
+  AutoMemoryEnvOverrideError,
+  admitAutoMemoryProjectRoot,
+  runWithAutoMemoryRuntime,
+} from '../workspace-auto-memory.js';
 
 type LocalOpenTarget = 'folder' | 'terminal' | 'auto-memory';
 type AutoMemoryOpenScope = 'project' | 'user';
@@ -30,6 +36,44 @@ function isEnoent(err: unknown): boolean {
     err !== null &&
     (err as { code?: string }).code === 'ENOENT'
   );
+}
+
+/**
+ * The directory the auto-memory open target opens. User scope: the shared
+ * user root. Project scope: the project roots the listing walks
+ * (`projectDirs`, same admission check) — `requestedDir` selects one of
+ * them and must match exactly (null when it does not); without it the
+ * first walked root is opened, falling back to the configured root so an
+ * absent directory still answers 404.
+ */
+async function resolveAutoMemoryOpenTarget(
+  workspaceCwd: string,
+  scope: AutoMemoryOpenScope,
+  trusted: boolean,
+  requestedDir: unknown,
+): Promise<string | null> {
+  if (scope === 'user') return getUserAutoMemoryRoot();
+  const admitted: string[] = [];
+  for (const root of getProjectAutoMemoryRoots(workspaceCwd, trusted)) {
+    if ((await admitAutoMemoryProjectRoot(root)).state === 'admitted') {
+      admitted.push(root);
+    }
+  }
+  if (typeof requestedDir === 'string' && requestedDir.length > 0) {
+    return (
+      admitted.find(
+        (root) => path.resolve(root) === path.resolve(requestedDir),
+      ) ?? null
+    );
+  }
+  if (admitted.length > 0) return admitted[0];
+  // Nothing walked: fall back to the configured root so the caller's stat
+  // answers 404 (absent) or 500 (unstat'able) — but never open a root the
+  // listing refused (a symlink would open its target).
+  const configured = getAutoMemoryRoot(workspaceCwd);
+  return (await admitAutoMemoryProjectRoot(configured)).state === 'refused'
+    ? null
+    : configured;
 }
 
 export function registerWorkspaceLocalOpenRoutes(
@@ -61,20 +105,45 @@ export function registerWorkspaceLocalOpenRoutes(
             : 'folder';
       const autoMemoryScope: AutoMemoryOpenScope =
         body['autoMemoryScope'] === 'user' ? 'user' : 'project';
+      const requestedDir = body['autoMemoryDir'];
       try {
         // The opened path is always resolved on the daemon — never
-        // client-supplied beyond the route params.
+        // client-supplied beyond the route params and the body enums; an
+        // `autoMemoryDir` only SELECTS one of the daemon-resolved roots.
         let targetPath = runtime.workspaceCwd;
         if (target === 'auto-memory') {
-          // Resolve the roots under THIS runtime's session storage scope:
-          // each workspace may pin its own runtimeOutputDir, and the
-          // daemon's ambient Storage scope is the primary's, not this
-          // workspace's.
-          targetPath = runWithWorkspaceRuntimeStorage(runtime, () =>
-            autoMemoryScope === 'user'
-              ? getUserAutoMemoryRoot()
-              : getAutoMemoryRoot(runtime.workspaceCwd),
-          );
+          // Resolve the roots on THIS runtime's memory axes (session
+          // storage base dir + memory project scope) — what its sessions
+          // write, not the daemon's ambient scope.
+          let resolvedTarget: string | null;
+          try {
+            resolvedTarget = await runWithAutoMemoryRuntime(runtime, () =>
+              resolveAutoMemoryOpenTarget(
+                runtime.workspaceCwd,
+                autoMemoryScope,
+                runtime.trusted,
+                requestedDir,
+              ),
+            );
+          } catch (err) {
+            if (!(err instanceof AutoMemoryEnvOverrideError)) throw err;
+            res.status(409).json({
+              error: err.message,
+              code: err.code,
+              key: err.key,
+            });
+            return;
+          }
+          if (resolvedTarget === null) {
+            res.status(400).json({
+              error:
+                'Auto-memory directory is not one of the walked memory roots',
+              code: 'auto_memory_dir_not_admitted',
+              scope: autoMemoryScope,
+            });
+            return;
+          }
+          targetPath = resolvedTarget;
           let dirStat;
           try {
             dirStat = await fs.stat(targetPath);
@@ -90,19 +159,26 @@ export function registerWorkspaceLocalOpenRoutes(
             // An existing-but-unstat'able root (EACCES and friends) is a
             // daemon-side fault, not a client error; answer it directly
             // instead of shadowing the local-open failure codes below.
+            // `errno` carries Node's string error CODE (e.g. 'EACCES'),
+            // not libuv's numeric errno; 'UNKNOWN' when the error has none.
+            const code = (err as { code?: unknown }).code;
             res.status(500).json({
               error: 'Auto-memory directory is not accessible',
               code: 'auto_memory_dir_stat_failed',
               scope: autoMemoryScope,
-              errno: (err as { code?: string }).code,
+              errno: typeof code === 'string' ? code : 'UNKNOWN',
             });
             return;
           }
           if (!dirStat.isDirectory()) {
-            res.status(400).json({
+            // A regular file where the memory root belongs is daemon-host
+            // state the request cannot fix — a daemon-side fault, like
+            // the unstat'able root above.
+            res.status(500).json({
               error: 'Auto-memory path is not a directory',
               code: 'auto_memory_dir_not_directory',
               scope: autoMemoryScope,
+              path: targetPath,
             });
             return;
           }

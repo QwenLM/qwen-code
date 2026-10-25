@@ -117,7 +117,10 @@ import {
   mountWorkspaceMemoryRoutes,
   mountWorkspaceQualifiedMemoryRoutes,
 } from './workspace-memory.js';
-import { mountWorkspaceAutoMemoryRoutes } from './workspace-auto-memory.js';
+import {
+  mountWorkspaceAutoMemoryRoutes,
+  mountWorkspaceQualifiedAutoMemoryRoutes,
+} from './workspace-auto-memory.js';
 import {
   mountWorkspaceMemoryRememberRoutes,
   mountWorkspaceQualifiedMemoryRememberRoutes,
@@ -3036,6 +3039,7 @@ export function createServeApp(
     captureGenerationAssertion: capturePrimaryGenerationAssertion,
     runtime: primaryRuntime,
   });
+  mountWorkspaceQualifiedAutoMemoryRoutes(app, { workspaceRegistry });
   mountWorkspaceQualifiedMemoryRoutes(app, {
     workspaceRegistry,
     mutate,

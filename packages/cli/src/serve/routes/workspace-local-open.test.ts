@@ -10,7 +10,11 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import express, { type RequestHandler } from 'express';
 import request from 'supertest';
-import { clearAutoMemoryRootCache } from '@qwen-code/qwen-code-core/memory/paths.js';
+import {
+  clearAutoMemoryRootCache,
+  getAutoMemoryRoot,
+} from '@qwen-code/qwen-code-core/memory/paths.js';
+import { sanitizeCwd } from '@qwen-code/qwen-code-core/utils/paths.js';
 import { registerWorkspaceLocalOpenRoutes } from './workspace-local-open.js';
 import { LocalPathOpenUnavailableError } from '../local-path-open.js';
 import type {
@@ -33,7 +37,7 @@ type LocalOpenTestRuntime = Pick<
   | 'sessionRuntimeBaseDir'
   | 'primary'
   | 'trusted'
->;
+> & { env?: WorkspaceRuntime['env'] };
 
 function makeRuntime(
   overrides: Partial<LocalOpenTestRuntime> = {},
@@ -350,7 +354,7 @@ describe('POST /workspaces/:workspace/open (auto-memory target)', () => {
     expect(openPathLocally).not.toHaveBeenCalled();
   });
 
-  it('returns 400 when the auto-memory path is not a directory', async () => {
+  it('returns 500 with the path when the auto-memory root is not a directory', async () => {
     await fs.mkdir(path.join(cwd, '.qwen'), { recursive: true });
     await fs.writeFile(path.join(cwd, '.qwen', 'memory'), 'not a dir\n');
     const openPathLocally = vi.fn().mockResolvedValue(undefined);
@@ -363,8 +367,10 @@ describe('POST /workspaces/:workspace/open (auto-memory target)', () => {
       .post('/workspaces/primary-id/open')
       .send({ target: 'auto-memory' });
 
-    expect(res.status).toBe(400);
+    // Daemon-host layout the request cannot fix: a daemon-side fault.
+    expect(res.status).toBe(500);
     expect(res.body.code).toBe('auto_memory_dir_not_directory');
+    expect(res.body.path).toBe(path.join(cwd, '.qwen', 'memory'));
     expect(openPathLocally).not.toHaveBeenCalled();
   });
 
@@ -388,9 +394,144 @@ describe('POST /workspaces/:workspace/open (auto-memory target)', () => {
     expect(res.status).toBe(500);
     expect(res.body.code).toBe('auto_memory_dir_stat_failed');
     expect(res.body.scope).toBe('project');
+    // `errno` is Node's string error CODE, as documented.
+    expect(typeof res.body.errno).toBe('string');
     expect(res.body.errno).toBe('EACCES');
     expect(openPathLocally).not.toHaveBeenCalled();
     stat.mockRestore();
+  });
+
+  it('keeps errno present as UNKNOWN when the stat error carries no code', async () => {
+    const stat = vi
+      .spyOn(fs, 'stat')
+      .mockRejectedValueOnce(new Error('stat exploded'));
+    const app = createApp({
+      runtimes: [makeRuntime({ workspaceCwd: cwd })],
+      openPathLocally: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const res = await request(app)
+      .post('/workspaces/primary-id/open')
+      .send({ target: 'auto-memory' });
+
+    expect(res.status).toBe(500);
+    expect(res.body.errno).toBe('UNKNOWN');
+    stat.mockRestore();
+  });
+
+  it('opens the repo-local project root when it is the only walked root', async () => {
+    // Non-local mode, trusted: the listing walks the configured root and
+    // <workspace>/.qwen/memory; only the latter exists, so the folder
+    // that holds the listed entries is the one opened.
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    clearAutoMemoryRootCache();
+    const repoLocal = path.join(cwd, '.qwen', 'memory');
+    await fs.mkdir(repoLocal, { recursive: true });
+    const openPathLocally = vi.fn().mockResolvedValue(undefined);
+    const app = createApp({
+      runtimes: [makeRuntime({ workspaceCwd: cwd })],
+      openPathLocally,
+    });
+
+    const res = await request(app)
+      .post('/workspaces/primary-id/open')
+      .send({ target: 'auto-memory' });
+
+    expect(res.status).toBe(200);
+    expect(openPathLocally).toHaveBeenCalledWith(repoLocal);
+  });
+
+  it('opens the walked project root named by autoMemoryDir, and refuses any other', async () => {
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    clearAutoMemoryRootCache();
+    const configured = getAutoMemoryRoot(cwd);
+    const repoLocal = path.join(cwd, '.qwen', 'memory');
+    await fs.mkdir(configured, { recursive: true });
+    await fs.mkdir(repoLocal, { recursive: true });
+    const openPathLocally = vi.fn().mockResolvedValue(undefined);
+    const app = createApp({
+      runtimes: [makeRuntime({ workspaceCwd: cwd })],
+      openPathLocally,
+    });
+
+    const selected = await request(app)
+      .post('/workspaces/primary-id/open')
+      .send({ target: 'auto-memory', autoMemoryDir: repoLocal });
+    expect(selected.status).toBe(200);
+    expect(openPathLocally).toHaveBeenLastCalledWith(repoLocal);
+
+    const refused = await request(app)
+      .post('/workspaces/primary-id/open')
+      .send({ target: 'auto-memory', autoMemoryDir: tmp });
+    expect(refused.status).toBe(400);
+    expect(refused.body.code).toBe('auto_memory_dir_not_admitted');
+    expect(openPathLocally).toHaveBeenCalledTimes(1);
+  });
+
+  it('never opens a project root reached through a symlinked .qwen', async () => {
+    const outside = path.join(tmp, 'outside-qwen');
+    await fs.mkdir(path.join(outside, 'memory'), { recursive: true });
+    await fs.symlink(outside, path.join(cwd, '.qwen'));
+    const openPathLocally = vi.fn().mockResolvedValue(undefined);
+    const app = createApp({
+      runtimes: [makeRuntime({ workspaceCwd: cwd })],
+      openPathLocally,
+    });
+
+    const res = await request(app)
+      .post('/workspaces/primary-id/open')
+      .send({ target: 'auto-memory' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('auto_memory_dir_not_admitted');
+    expect(openPathLocally).not.toHaveBeenCalled();
+  });
+
+  it('opens the partition the runtime sessions write (memory project scope)', async () => {
+    // Subdirectory workspace of a git repo: daemon ambient scope keys by
+    // the repo root, the runtime's sessions (scope=workspace) by the cwd.
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    delete process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
+    clearAutoMemoryRootCache();
+    const repo = path.join(tmp, 'repo');
+    const sub = path.join(repo, 'packages', 'app');
+    await fs.mkdir(path.join(repo, '.git'), { recursive: true });
+    await fs.mkdir(sub, { recursive: true });
+    const workspaceKeyed = path.join(
+      globalBase,
+      'projects',
+      sanitizeCwd(sub),
+      'memory',
+    );
+    await fs.mkdir(workspaceKeyed, { recursive: true });
+    await fs.mkdir(
+      path.join(globalBase, 'projects', sanitizeCwd(repo), 'memory'),
+      { recursive: true },
+    );
+    const openPathLocally = vi.fn().mockResolvedValue(undefined);
+    const app = createApp({
+      runtimes: [
+        makeRuntime({
+          workspaceCwd: sub,
+          env: {
+            mode: 'runtime-overlay',
+            overlayKeys: [],
+            effectiveEnv: {
+              QWEN_CODE_MEMORY_BASE_DIR: globalBase,
+              QWEN_CODE_MEMORY_PROJECT_SCOPE: 'workspace',
+            },
+          },
+        }),
+      ],
+      openPathLocally,
+    });
+
+    const res = await request(app)
+      .post('/workspaces/primary-id/open')
+      .send({ target: 'auto-memory' });
+
+    expect(res.status).toBe(200);
+    expect(openPathLocally).toHaveBeenCalledWith(workspaceKeyed);
   });
 
   it('resolves the user root under the runtime session base dir, not the ambient one', async () => {
