@@ -245,6 +245,8 @@ export function WorkspaceDirectoriesSection() {
           browseDirectories
           persistenceSupported={false}
           displayNameEnabled={false}
+          initialPath={workspaceCwd}
+          pathPlaceholder={workspaceCwd}
           pathHint={t('workspaceDirectories.pathHint')}
           onSuggest={actions.suggestWorkspacePaths}
           onPick={

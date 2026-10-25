@@ -15694,10 +15694,22 @@ class QwenAgent implements Agent {
             { errorKind: 'directory_management_unsupported' },
           );
         }
-        if (!this.workspaceSettings.workspaceSettingsActive) {
+        // `workspaceSettingsActive` is false for two unrelated states: an
+        // untrusted workspace, and a trusted workspace rooted at `$HOME`
+        // (whose `~/.qwen/settings.json` must not be read twice). Only the
+        // first is a trust failure; telling a home-rooted workspace it is
+        // untrusted points at a grant that cannot fix it.
+        if (!this.config.isTrustedFolder()) {
           throw new RequestError(-32005, 'Workspace is not trusted.', {
             errorKind: 'untrusted_workspace',
           });
+        }
+        if (!this.workspaceSettings.workspaceSettingsActive) {
+          throw new RequestError(
+            -32004,
+            'A workspace rooted at the home directory cannot manage extra directories',
+            { errorKind: 'directory_management_unsupported' },
+          );
         }
 
         // Resolve an entry the same way runtime configuration does: expand

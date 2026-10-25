@@ -10,7 +10,10 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import request from 'supertest';
-import { sendBridgeError as sendBridgeErrorResponse } from '../server/error-response.js';
+import {
+  sendBridgeError as sendBridgeErrorResponse,
+  type SendBridgeError,
+} from '../server/error-response.js';
 import { registerWorkspaceDirectoriesRoutes } from './workspace-directories.js';
 
 let scratch: string;
@@ -38,7 +41,7 @@ function makeApp(
     runtimeEnv?: Readonly<Record<string, string | undefined>>;
     envMode?: 'parent-process' | 'runtime-overlay';
     sshWorkspace?: { host: string; directory: string };
-    sendBridgeError?: (res: unknown, error: unknown, ctx?: unknown) => void;
+    sendBridgeError?: SendBridgeError;
   } = {},
 ) {
   const invoke = options.invoke ?? vi.fn();
