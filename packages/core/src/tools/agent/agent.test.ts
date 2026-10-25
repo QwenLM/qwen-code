@@ -2052,6 +2052,51 @@ describe('AgentTool', () => {
       }
     });
 
+    it("never spawns a teammate in the session's own directory when a background fix holds it", async () => {
+      const wt = '/test/project';
+      grantUnattendedFixes('test-session-id', {
+        pr: 2,
+        worktree: canonicalWorktreePath(wt),
+        check: async () => true,
+        open: async () => ({ task: 't' }),
+        close: async () => {},
+      });
+      recordConfirmedWatch('test-session-id', {
+        pr: 2,
+        repo: 'o/r',
+        host: null,
+        targetDir: '/test',
+        preparedAt: null,
+        worktree: canonicalWorktreePath(wt),
+        authorCanPush: true,
+      });
+      recordWatchTask('test-session-id', 2, {
+        task: 't',
+        reply: true,
+        instructions: '',
+      });
+      try {
+        await openBackgroundFix(
+          'test-session-id',
+          wt,
+          new AbortController().signal,
+        );
+        const spawnTeammate = activeTeam();
+        const result = await buildAndRun({
+          description: 'Review',
+          prompt: 'Review the diff',
+          subagent_type: 'file-search',
+          name: 'reviewer',
+        });
+        expect(spawnTeammate).not.toHaveBeenCalled();
+        expect(textOf(result)).toMatch(
+          /a background fix agent of \/autofix-pr is working/,
+        );
+      } finally {
+        resetUnattendedFixGrantsForTests();
+      }
+    });
+
     it('aborts a named teammate after working_dir validation', async () => {
       const controller = new AbortController();
       const spies = await stubWorktreeProbes(async () => {
