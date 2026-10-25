@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -677,7 +677,11 @@ describe('Mod session ownership', () => {
     await session.initialize(new AbortController().signal);
     expect(session.startTurn('hi', turnSignal, abortHost)).toBeUndefined();
     runtime.turnHooks = { start: false, complete: ['hello-mod'] };
-    expect(session.startTurn('hi', turnSignal, abortHost)).toBeDefined();
+    const turn = session.startTurn('hi', turnSignal, abortHost);
+    expect(turn).toBeDefined();
+    // A turn.start would have queued ahead of the turn's end.
+    await turn!.complete();
+    expect(runtime.completeTurn).toHaveBeenCalledOnce();
     expect(runtime.startTurn).not.toHaveBeenCalled();
   });
 
@@ -786,6 +790,10 @@ describe('Mod session ownership', () => {
       { type: LlmEventType.Error, value: { error: { message: 'boom' } } },
       { type: LlmEventType.LoopDetected },
       { type: LlmEventType.MaxSessionTurns },
+      {
+        type: LlmEventType.SessionTokenLimitExceeded,
+        value: { currentTokens: 2, limit: 1, message: 'limit' },
+      },
     ] as ServerLlmStreamEvent[]) {
       const turn = session.startTurn('', turnSignal, abortHost)!;
       turn.saw(event);
@@ -816,6 +824,11 @@ describe('Mod session ownership', () => {
         candidatesTokenCount: 10,
         thoughtsTokenCount: 5,
       }),
+    );
+    // A fallback: the model that answered last names the turn.
+    uiTelemetryService.addEvent(
+      apiResponse({ model: 'qwen-max' }),
+      'session-1',
     );
     uiTelemetryService.addEvent(
       apiResponse({ model: 'qwen-plus' }),
@@ -959,8 +972,52 @@ describe('Mod session ownership', () => {
     ]);
   });
 
+  it('keeps a turn.complete text to its own 4,096 in a terminal', async () => {
+    const log = vi.fn();
+    const { session, runtime } = setup(
+      { isInteractive: () => true },
+      {
+        surface: 'terminal',
+        log,
+        presentation: () => ({ isFullscreen: false, columns: 80 }),
+      },
+    );
+    runtime.turnHooks = { start: false, complete: ['hello-mod'] };
+    await session.initialize(new AbortController().signal);
+    runtime.completeTurn.mockResolvedValueOnce('x'.repeat(3000));
+    await session.startTurn('', turnSignal, abortHost)!.complete();
+    // Unlike a $.ui.log line, which a terminal cuts at 2,000.
+    expect(log).toHaveBeenLastCalledWith(
+      {
+        text: 'x'.repeat(3000),
+        to: 'transcript',
+        plugin: 'hello-mod',
+        sessionId: 'session-1',
+      },
+      'hello-mod',
+      'session-1',
+    );
+  });
+
   it('writes a text-mode note beneath the answer', async () => {
-    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const order: string[] = [];
+    // Each write answers its callback, as a drained stream does.
+    const spyWrite = (stream: NodeJS.WriteStream, name: string) => {
+      const spy = vi.spyOn(stream, 'write').mockImplementation(((
+        chunk: unknown,
+        encoding?: unknown,
+        callback?: unknown,
+      ) => {
+        order.push(String(chunk).includes('TL;DR') ? 'note' : name);
+        const done = typeof encoding === 'function' ? encoding : callback;
+        if (typeof done === 'function') done();
+        return true;
+      }) as typeof stream.write);
+      onTestFinished(() => spy.mockRestore());
+      return spy;
+    };
+    const stderr = spyWrite(process.stderr, 'stderr');
+    spyWrite(process.stdout, 'stdout');
     const { session, runtime } = await loadTurns(['hello-mod'], {
       getOutputFormat: () => OutputFormat.TEXT,
     });
@@ -972,9 +1029,54 @@ describe('Mod session ownership', () => {
     expect(notes()).toEqual([]);
     await session.close();
     expect(notes()).toEqual([]);
+    order.length = 0;
     await session.flushOutput();
     expect(notes()).toEqual([['[Mod hello-mod] TL;DR\n']]);
-    stderr.mockRestore();
+    // stdout, which holds the answer, drains before the note is written.
+    expect(order.slice(0, 2)).toEqual(['stdout', 'note']);
+  });
+
+  it('ends the turn a close cuts short before session.end', async () => {
+    const { session, runtime, ended } = await loadTurns();
+    const order: string[] = [];
+    runtime.completeTurn.mockImplementation(async (input) => {
+      order.push(`complete ${input.reason}`);
+      return input.answer;
+    });
+    runtime.end.mockImplementation(async () => {
+      order.push('end');
+    });
+    const turn = session.startTurn('Fix it', turnSignal, abortHost)!;
+    turn.saw(content('Halfway'));
+    await session.close();
+    expect(order).toEqual(['complete aborted', 'end']);
+    expect(ended()).toMatchObject({
+      answer: 'Halfway',
+      isAborted: true,
+      turnId: turn.id,
+    });
+    expect(runtime.completeTurn.mock.calls[0][1].aborted).toBe(false);
+    // A host that ends it afterwards adds no second end.
+    await turn.complete();
+    expect(order).toEqual(['complete aborted', 'end']);
+  });
+
+  it('runs no end again at close once it ran', async () => {
+    const { session, runtime } = await loadTurns();
+    await session.startTurn('Fix it', turnSignal, abortHost)!.complete();
+    await session.close();
+    expect(runtime.completeTurn).toHaveBeenCalledOnce();
+  });
+
+  it('runs an end the close overtook, with its own reason', async () => {
+    const { session, runtime, ended } = await loadTurns();
+    const turn = session.startTurn('Fix it', turnSignal, abortHost)!;
+    turn.saw(content('Done.'));
+    turn.saw(finished());
+    void turn.complete();
+    await session.close();
+    expect(runtime.completeTurn).toHaveBeenCalledOnce();
+    expect(ended()).toMatchObject({ answer: 'Done.', reason: 'answer' });
   });
 
   it('ends only the running turn from $.turn.abort', async () => {

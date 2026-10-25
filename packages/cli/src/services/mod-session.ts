@@ -107,6 +107,8 @@ interface RunningTurn {
   failed: boolean;
   usage?: Omit<ModTurnUsage, 'model'>;
   model?: string;
+  // Its turn.complete dispatch, once the turn has ended.
+  end?: (signal: AbortSignal) => Promise<void>;
 }
 
 export class ModSession implements ICommandLoader {
@@ -121,7 +123,8 @@ export class ModSession implements ICommandLoader {
   private closing?: Promise<void>;
   private logsReady = false;
   private readonly pendingLogs: Array<
-    ModLog & { plugin: string; sessionId: string }
+    // A turn.complete text is already cut to its own 4,096.
+    ModLog & { plugin: string; sessionId: string; isTurnNote?: true }
   > = [];
   // Text mode prints the answer as the run ends; a turn's note goes beneath.
   private readonly notes: string[] = [];
@@ -136,6 +139,8 @@ export class ModSession implements ICommandLoader {
   private recorder?: ChatRecordingService;
   private context = { tokens: 0, window: 0 };
   private turn?: RunningTurn;
+  // An ended turn whose turn.complete has not run yet.
+  private unheard?: RunningTurn;
   // Also runs on every API response, so a session that no hook saw still has
   // its figures when it ends. A subagent's response emits from inside its
   // agent frame, whose model would otherwise answer for the main session.
@@ -650,7 +655,8 @@ export class ModSession implements ICommandLoader {
         : {}),
       ...(answer.truncated && { isAnswerTruncated: true as const }),
     };
-    return this.queueTurnEvent(turn, async (signal) => {
+    turn.end = async (signal) => {
+      if (this.unheard === turn) this.unheard = undefined;
       const text = await this.runtime!.completeTurn(input, signal);
       // A different text is shown beneath the answer; the record keeps it.
       if (text === input.answer || !text.trim()) return;
@@ -659,13 +665,16 @@ export class ModSession implements ICommandLoader {
         to: 'transcript' as const,
         plugin: plugins.join('+'),
         sessionId: turn.sessionId,
+        isTurnNote: true as const,
       };
       if (!this.terminal && this.config.getOutputFormat() === OutputFormat.TEXT)
         this.notes.push(
           `[Mod ${note.plugin}] ${stripAnsiAndControl(note.text)}`,
         );
       else this.pendingLogs.push(note);
-    });
+    };
+    this.unheard = turn;
+    return this.queueTurnEvent(turn, turn.end);
   }
 
   private queueTurnEvent(
@@ -722,8 +731,9 @@ export class ModSession implements ICommandLoader {
         ? sanitizeTerminalText(stripUnsafeCharacters(entry.text))
         : stripAnsiAndControl(entry.text);
       if ('surface' in this.output) {
+        const { isTurnNote, ...log } = entry;
         this.output.log(
-          { ...entry, text: cpSlice(text, 0, 2000) },
+          { ...log, text: isTurnNote ? text : cpSlice(text, 0, 2000) },
           entry.plugin,
           entry.sessionId,
         );
@@ -739,6 +749,9 @@ export class ModSession implements ICommandLoader {
   }
 
   async flushOutput(): Promise<void> {
+    // The answer on stdout drains first, so a note lands beneath it.
+    if (this.notes.length && !this.terminal)
+      await flushOutput(process.stdout, AbortSignal.timeout(1_500));
     for (const note of this.notes.splice(0)) process.stderr.write(`${note}\n`);
     await this.flushStreams();
   }
@@ -823,6 +836,21 @@ export class ModSession implements ICommandLoader {
       await this.initialization?.catch(() => {});
       try {
         await this.toolQueue;
+        // The queue is shut by now. A turn the close cut short, or one whose
+        // end had not run, still ends before session.end, bounded as it is.
+        if (this.turn) void this.completeTurn(this.turn, 'aborted');
+        const unheard = this.unheard;
+        if (
+          unheard?.end &&
+          unheard.sessionId === this.sessionId &&
+          this.allowed() &&
+          this.active()
+        ) {
+          await unheard
+            .end(AbortSignal.timeout(MOD_END_TIMEOUT_MS))
+            .catch((error) => logger.debug(`Mod turn event: ${String(error)}`));
+          this.flushLogs();
+        }
         await this.end('other');
       } finally {
         this.lifetime.abort();
