@@ -276,9 +276,7 @@ const getEventBillableOutputTokens = (event: ApiResponseEvent): number => {
   ) {
     return derived;
   }
-  return event.auth_type === 'openai' ||
-    event.auth_type === 'openai-responses' ||
-    event.auth_type === 'qwen-oauth'
+  return outputIncludesThoughts(event.auth_type)
     ? candidates
     : candidates + thoughts;
 };
