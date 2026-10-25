@@ -2749,11 +2749,7 @@ describe('AgentTool', () => {
         const registered = () =>
           vi
             .mocked(config.getBackgroundTaskRegistry().register)
-            .mock.calls.at(-1)?.[0] as
-            | (AgentTaskRegistration & {
-                notificationFollowUp?: () => string | undefined;
-              })
-            | undefined;
+            .mock.calls.at(-1)?.[0] as AgentTaskRegistration | undefined;
 
         it("takes working_dir with run_in_background only for a granted worktree's general-purpose agent", () => {
           const wt = '/test/project/.qwen/tmp/autofix-pr-7';
@@ -2795,8 +2791,10 @@ describe('AgentTool', () => {
             expect(open).toHaveBeenCalledOnce();
             expect(childConfig().getApprovalMode()).toBe(YOLO);
             const entry = registered()!;
-            // Its inputs (a Monitor it starts) reach it while it runs.
+            // Its inputs (a Monitor it starts) reach it while it runs; no
+            // message does.
             expect(entry.resumeBlockedReason).toBeUndefined();
+            expect(entry.messagesBlockedReason).toMatch(/never continued/);
             // Its saved record: never resumed, and the mode it would have
             // had without the grant, should anything read it back.
             const meta = writeMeta.mock.calls[0]?.[1];

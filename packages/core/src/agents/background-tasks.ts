@@ -341,6 +341,11 @@ export interface AgentTask extends TaskBase {
    * adds to it for the model, outside the agent's own result, or undefined.
    */
   notificationFollowUp?: () => string | undefined;
+  /**
+   * Present when `send_message` must not reach the running task, though
+   * its own inputs (a Monitor it started) still do.
+   */
+  messagesBlockedReason?: string;
   stats?: AgentCompletionStats;
   toolUseId?: string;
   /**

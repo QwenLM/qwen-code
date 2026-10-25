@@ -1080,15 +1080,10 @@ class AutofixPrInvocation extends BaseToolInvocation<
     if (this.params.pr !== undefined && this.params.command !== 'status') {
       await settleBackgroundFix({ pr: this.params.pr });
     }
-    const found =
+    const fix =
       this.params.pr === undefined || this.params.command === 'status'
         ? undefined
         : backgroundFixOf(sessionId, this.params.pr);
-    // This clone's: after a `/cd`, a PR of that number elsewhere is not it.
-    const fix =
-      found && preparedWatch(this.config, found.pr)?.worktree === found.worktree
-        ? found
-        : undefined;
     if (this.params.command === 'fix-end') return this.claim(fix, signal);
     if (fix && this.params.command === 'cleanup') {
       const refused = await this.stopFix(fix, signal);

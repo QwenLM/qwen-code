@@ -1962,7 +1962,10 @@ function runGate(args: SnapshotArgs): void {
   // An attempt opened while GitHub was asked. Read once: a marker written
   // between two reads would be reported as one its session left behind.
   const marker = ownFix ? readFixMarker(paths) : null;
-  if (freshAttempt(marker)) return;
+  if (freshAttempt(marker)) {
+    if (session !== '') markChecked(paths.checkedPath);
+    return;
+  }
   const reported = withAbandonedFix(result, marker, {
     headSha: pr.headRefOid,
     isDraft: pr.isDraft,

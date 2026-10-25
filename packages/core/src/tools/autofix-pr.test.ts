@@ -1453,20 +1453,9 @@ describe('background fixes', () => {
     fix.drop();
   });
 
-  it("claims under the task this session scheduled, whatever the turn copied, and only this clone's fix", async () => {
+  it('claims under the task this session scheduled, whatever the turn copied', async () => {
     await granted();
     const fix = await launched();
-    // After a `/cd`, the PR of that number in another clone is not its.
-    const other = fs.mkdtempSync(path.join(os.tmpdir(), 'autofix-other-'));
-    try {
-      const elsewhere = registryConfig({ getTargetDir: () => other });
-      expect(
-        (await run({ command: 'push', pr: 12 }, elsewhere)).error,
-      ).toBeUndefined();
-      expect(cancel).not.toHaveBeenCalled();
-    } finally {
-      fs.rmSync(other, { recursive: true, force: true });
-    }
     fix.end({ status: 'completed', report: '' });
     fix.bodySettled();
     expect(

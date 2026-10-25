@@ -1199,7 +1199,8 @@ every `--once` round (even on a PR whose watch runs unattended: the grant
 and the attempt are the watch's, with its options), a round restarted within its
 turn, and the fix of a round whose previous attempt was abandoned (below).
 `status`, run through the tool, says which watches this session runs
-unattended (`unattended`).
+unattended (`unattended`); a YOLO session records no grant, so its fixes
+stay in the foreground.
 
 **The launch.** The `agent` tool refuses `working_dir` with
 `run_in_background` because the caller owns the worktree and could remove it
@@ -1236,9 +1237,14 @@ grant no longer holds or no round has a fix to start; any other refusal (a
 fix in flight, one left behind, a watch no longer the round's) ends the
 round. So every background agent at a worktree has an attempt tied to the
 round that prepared it, and while one lives no other agent, teammate or
-workflow agent launches there, in the foreground or the background.
+workflow agent launches there, in the foreground or the background. Only this process
+knows of the attempt: an agent another process pins to the worktree is not
+refused, and the launch does not see one pinned there before it — as two
+sessions' foreground fixes of one watch before this step.
 
-A background fix agent is never continued: once it ends, `send_message` to
+A background fix agent takes no `send_message` while it runs (its registry
+entry carries a reason that refuses it, though the events of a Monitor it
+starts still reach it), and is never continued: once it ends, `send_message` to
 it, a revival of its transcript and a resume after a restart are refused,
 through the reason its saved record carries and, once it ends, its
 registry entry (not while it runs, which would refuse the events of a

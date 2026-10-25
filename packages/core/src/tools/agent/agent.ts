@@ -3931,6 +3931,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               resumeBlockedReason: bgSubagent.continuationBlockedReason,
               ...(backgroundFix
                 ? {
+                    // Its brief alone drives it: no message reaches it.
+                    messagesBlockedReason: BACKGROUND_FIX_CONTINUATION_BLOCKED,
                     notificationFollowUp: endBackgroundFixFollowUp(
                       backgroundFix,
                       registry,
