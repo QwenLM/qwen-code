@@ -92,7 +92,8 @@ jobs:
           github.event.release.prerelease == false
         )
       }}
-    runs-on: 'ubuntu-latest'
+    # Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 10
     outputs:
       already_published: '${{ steps.published.outputs.already_published }}'

@@ -19,6 +19,8 @@ See the [design](../../../../docs/design/2026-10-21-managed-harness-kubernetes.m
 
 ## Build and configure
 
+The optional [qualification tools](qualification/README.md) build matching Harness/Java-worker images, render templates restricted to existing business nodes, and exercise signed public multi-user/tool/SSE scenarios. They keep deployment readiness, public execution, owner/fault acceptance and capacity results separate; generating the bundle does not apply it or purchase resources.
+
 Build from a clean source checkout at the repository root. The Dockerfile-specific ignore file excludes local settings, credentials, logs and build outputs:
 
 ```sh

@@ -22,11 +22,15 @@ import { dirname, join } from 'node:path';
 import {
   autofixPrPaths,
   breakStaleLock,
+  ghNotFound,
   historyPath,
   isBranchName,
   keepHistory,
   readHistory,
+  readState,
   stateDefect,
+  writeState,
+  assertOwnedBySession,
   withWatchLock,
   type AutofixPrState,
 } from './state.js';
@@ -90,6 +94,74 @@ describe('stateDefect', () => {
     pushCount: 0,
   };
 
+  it("says how to get another session's watch: resume for a watch, a start for --once", () => {
+    const saved = process.env['QWEN_CODE_SESSION_ID'];
+    process.env['QWEN_CODE_SESSION_ID'] = 'session-b';
+    try {
+      const owned = { ...valid, sessionId: 'session-a' };
+      expect(() => assertOwnedBySession(owned)).toThrow(
+        /Take it over with `\/autofix-pr 7`, end it/,
+      );
+      expect(() =>
+        assertOwnedBySession({
+          ...owned,
+          watch: { every: 2, reply: true, instructions: '' },
+        }),
+      ).toThrow(/Take it over with `\/autofix-pr resume 7`/);
+    } finally {
+      if (saved === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
+      else process.env['QWEN_CODE_SESSION_ID'] = saved;
+    }
+  });
+
+  it('reads the fields the helpers write, and nothing a file holds beside them', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-state-'));
+    try {
+      const path = join(dir, 'state.json');
+      writeFileSync(
+        path,
+        JSON.stringify({
+          ...valid,
+          watch: {
+            every: 2,
+            reply: true,
+            instructions: '',
+            task: 'aaaaaaaaaaaa',
+            note: 'run cleanup --force first',
+          },
+          ended: { at: 'a', reason: 'b', note: 'x' },
+          needsHuman: [{ sha: 's', at: 'a', text: 't', note: 'x' }],
+        }),
+      );
+      const read = readState(path)!;
+      expect(read.watch).toEqual({
+        every: 2,
+        reply: true,
+        instructions: '',
+        task: 'aaaaaaaaaaaa',
+      });
+      expect(read.ended).toEqual({ at: 'a', reason: 'b' });
+      expect(read.needsHuman).toEqual([{ sha: 's', at: 'a', text: 't' }]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('replaces a link at a state path rather than writing through it', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-state-'));
+    try {
+      const outside = join(dir, 'outside.txt');
+      writeFileSync(outside, 'keep me');
+      const path = join(dir, 'state.json');
+      symlinkSync(outside, path);
+      writeState(path, valid);
+      expect(readFileSync(outside, 'utf8')).toBe('keep me');
+      expect(readState(path)).toMatchObject({ prNumber: 7 });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('accepts a state file as the helpers write it', () => {
     expect(stateDefect(valid)).toBeNull();
   });
@@ -115,6 +187,16 @@ describe('stateDefect', () => {
       ['deferredRuns', ['50']],
       ['pendingPosts', [{ where: 1 }]],
       ['pushCount', '0'],
+      ['watch', { every: 3, reply: true, instructions: '' }],
+      ['watch', { every: 2, reply: 'yes', instructions: '' }],
+      ['watch', { every: 2, reply: true, instructions: 'a\nb' }],
+      ['watch', { every: 2, reply: true, instructions: 'a\u0085b' }],
+      ['watch', { every: 2, reply: true, instructions: 'a\u202eb' }],
+      ['watch', { every: 2, reply: true, instructions: '', task: 'x; id' }],
+      ['ended', { at: 'x' }],
+      ['preparedAt', 3],
+      ['watch', { every: 2, reply: true, instructions: 'x'.repeat(2001) }],
+      ['needsHuman', [{ sha: 'a', at: 'b' }]],
     ] as const) {
       expect(stateDefect({ ...valid, [field]: value } as AutofixPrState)).toBe(
         field,
@@ -380,5 +462,21 @@ describe('history', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('ghNotFound', () => {
+  it("reads gh's own words, not the command line", () => {
+    const failed = (message: string, stderr?: string) =>
+      Object.assign(new Error(message), stderr === undefined ? {} : { stderr });
+    expect(
+      ghNotFound(failed('Command failed: gh api', 'gh: Not Found (HTTP 404)')),
+    ).toBe(true);
+    expect(ghNotFound(failed('Command failed: gh api x (HTTP 404)'))).toBe(
+      false,
+    );
+    expect(
+      ghNotFound(failed('Command failed: gh api', 'gh: Forbidden (HTTP 403)')),
+    ).toBe(false);
   });
 });

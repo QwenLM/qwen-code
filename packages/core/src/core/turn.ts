@@ -38,6 +38,7 @@ import {
   type LlmPreparedRequestCallback,
 } from './llm-chat.js';
 import type { RetryInfo } from '../utils/rateLimit.js';
+import type { RetryDiagnostics } from '../utils/retryErrorClassification.js';
 import {
   getThoughtSummary,
   type ThoughtSummary,
@@ -96,6 +97,9 @@ export { LlmEventType as GeminiEventType };
 export type ServerLlmRetryEvent = {
   type: LlmEventType.Retry;
   retryInfo?: RetryInfo;
+  /** Allowlisted scalar classification for headless/operator diagnostics.
+   * Present only on retry decisions that otherwise surface no reason. */
+  retryDiagnostics?: RetryDiagnostics;
   /** When true, the retry is a continuation (recovery) rather than a fresh
    *  restart. The UI should keep accumulated text so the continuation appends. */
   isContinuation?: boolean;
@@ -722,6 +726,7 @@ export class Turn {
     private readonly promptIdentity?: string,
     private readonly retractDeliveredOutputOnRetry?: boolean,
     private readonly onPreparedRequest?: LlmPreparedRequestCallback,
+    private readonly suppressedHookContext?: string,
   ) {
     this.goalContext = goalContext ? { ...goalContext } : undefined;
   }
@@ -740,10 +745,14 @@ export class Turn {
       const sendOptions =
         this.promptIdentity !== undefined ||
         this.retractDeliveredOutputOnRetry === true ||
-        this.onPreparedRequest !== undefined
+        this.onPreparedRequest !== undefined ||
+        this.suppressedHookContext !== undefined
           ? {
               ...(this.onPreparedRequest
                 ? { onPreparedRequest: this.onPreparedRequest }
+                : {}),
+              ...(this.suppressedHookContext
+                ? { suppressedHookContext: this.suppressedHookContext }
                 : {}),
               ...(this.promptIdentity ? { promptId: this.promptIdentity } : {}),
               ...(this.retractDeliveredOutputOnRetry
@@ -786,6 +795,7 @@ export class Turn {
           yield {
             type: LlmEventType.Retry,
             retryInfo: streamEvent.retryInfo,
+            retryDiagnostics: streamEvent.retryDiagnostics,
             isContinuation: streamEvent.isContinuation,
           };
           continue; // Skip to the next event in the stream

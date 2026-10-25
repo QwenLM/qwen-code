@@ -17,6 +17,7 @@ import {
 } from '../core/turn.js';
 import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
 import { getCompressionPrompt } from '../core/prompts.js';
+import { withoutAutoMemorySnapshots } from '../memory/request-context.js';
 import { runSideQuery } from '../utils/sideQuery.js';
 import { buildModelIdContext, resolveModelId } from '../utils/modelId.js';
 import { supportsOpenAIPrefixCaching } from '../core/openaiContentGenerator/prefix-caching.js';
@@ -673,15 +674,16 @@ export class ChatCompressionService {
       lastCurated.parts?.some((part) => !!part.functionCall)
         ? curatedHistory.slice(0, -1)
         : curatedHistory;
-    const sideQueryHistory = pendingToolResult
-      ? [...sideQueryBase, opts.pendingUserMessage!]
-      : sideQueryBase;
-    const pendingToolResultTokenCount = pendingToolResult
-      ? estimateContentTokens(
-          [opts.pendingUserMessage!],
-          slimmingConfig.imageTokenEstimate,
-        )
-      : 0;
+    const pendingHistory = pendingToolResult ? [opts.pendingUserMessage!] : [];
+    // Keep raw pending input intact for replay and compression checkpoints.
+    const visiblePendingHistory = config.getAutoMemoryContext?.()
+      ? pendingHistory
+      : withoutAutoMemorySnapshots(pendingHistory);
+    const sideQueryHistory = [...sideQueryBase, ...visiblePendingHistory];
+    const pendingToolResultTokenCount = estimateContentTokens(
+      visiblePendingHistory,
+      slimmingConfig.imageTokenEstimate,
+    );
 
     // Lazy: the cold fallback input is slimmed on demand. The original
     // history keeps its media: the shared request needs it for cache-prefix
