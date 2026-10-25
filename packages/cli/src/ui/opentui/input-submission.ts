@@ -91,7 +91,7 @@ export type OpenTuiCancelSettled = (
         prompt: OpenTuiInputSubmission | null;
       }
     | { kind: 'reset' },
-) => void;
+) => boolean | void;
 
 export interface OpenTuiComposerHandle {
   getText(): string;

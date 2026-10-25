@@ -109,11 +109,12 @@ import {
   OpenTuiDiffDialog,
   OpenTuiEditorDialog,
   OpenTuiResumeDialog,
-  OpenTuiRewindDialog,
   OpenTuiSubagentCreateDialog,
   OpenTuiSubagentListDialog,
   OpenTuiTrustDialog,
 } from './dialogs-misc.js';
+import { OpentuiRewindSelector, type RestoreOption } from './session-rewind.js';
+import type { RewindTurn } from './session-rewind-model.js';
 import { OpenTuiHooksDialog } from './dialogs-hooks.js';
 
 export interface OpenTuiDialogMountProps {
@@ -133,6 +134,8 @@ export interface OpenTuiDialogMountProps {
   /** Notifies the shell that the approval mode changed (spinner/prompt sync). */
   onApprovalModeChanged?: (mode: ApprovalMode) => void;
   statusLineState?: StatusLineState;
+  rewindTurns?: readonly RewindTurn[];
+  onRewind?: (turn: RewindTurn, option: RestoreOption) => Promise<void>;
   /** Row budget of the popup region, handed to every dialog leg — the legs
    * that window a body (model, theme, approval mode, settings, effort,
    * output style, the permission rule and directory lists, the hooks and
@@ -528,6 +531,7 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
       return (
         <OpenTuiDeleteDialog
           config={config}
+          logger={host.logger}
           settings={settings}
           onClose={onClose}
           notify={(text, level) => reportResult(null, text, level)}
@@ -619,15 +623,18 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
       );
 
     case 'rewind':
-      // The real turn-scoped rewind selector needs the host's committed turn
-      // list + a rewind action that is not part of the command-host surface;
-      // Batch 5 mounts the self-contained placeholder (Batch 6 wires the
-      // full selector into the shell transcript).
       return (
-        <OpenTuiRewindDialog
-          settings={settings}
-          onClose={onClose}
+        <OpentuiRewindSelector
           availableTerminalHeight={props.availableTerminalHeight}
+          turns={props.rewindTurns ?? []}
+          fileCheckpointingEnabled={config.getFileCheckpointingEnabled()}
+          getDiffStats={(promptId) =>
+            config.getFileHistoryService().getDiffStats(promptId)
+          }
+          onRewind={async (turn, option) => {
+            await props.onRewind?.(turn, option);
+          }}
+          onCancel={onClose}
         />
       );
 
