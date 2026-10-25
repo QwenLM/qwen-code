@@ -362,6 +362,7 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
       // 1. Read current todos (for change detection)
       const previousPlan = await readTodoPlanFromFile(sessionId);
       const oldTodos = previousPlan.todos;
+      const oldTodosMap = new Map(oldTodos.map((todo) => [todo.id, todo]));
       let candidateTodos: unknown;
 
       if (modified_by_user && modified_content !== undefined) {

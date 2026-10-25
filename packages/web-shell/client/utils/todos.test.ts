@@ -153,6 +153,59 @@ describe('getFloatingTodos', () => {
     ]);
   });
 
+  it('reads a top-level blockedBy when _meta is absent', () => {
+    const tool: ACPToolCall = {
+      callId: 'call-flat',
+      toolName: 'todo_write',
+      status: 'completed',
+      rawOutput: {
+        entries: [
+          { content: 'Deploy', status: 'pending', blockedBy: ['build'] },
+        ],
+      },
+    };
+    const state = getFloatingTodos([
+      { id: 'message-flat', role: 'tool_group', tools: [tool] },
+    ]);
+    expect(state.todos).toEqual([
+      {
+        id: 'plan-0',
+        content: 'Deploy',
+        status: 'pending',
+        blockedBy: ['build'],
+      },
+    ]);
+  });
+
+  it('lets _meta.qwenTodo.blockedBy win when both sources are present', () => {
+    const tool: ACPToolCall = {
+      callId: 'call-both',
+      toolName: 'todo_write',
+      status: 'completed',
+      rawOutput: {
+        entries: [
+          {
+            content: 'Deploy',
+            status: 'pending',
+            blockedBy: ['stale-top-level'],
+            _meta: { qwenTodo: { id: 'deploy', blockedBy: ['build'] } },
+          },
+        ],
+      },
+    };
+    const state = getFloatingTodos([
+      { id: 'message-both', role: 'tool_group', tools: [tool] },
+    ]);
+    expect(state.todos).toEqual([
+      {
+        id: 'deploy',
+        content: 'Deploy',
+        status: 'pending',
+        blockedBy: ['build'],
+      },
+    ]);
+  });
+
   it('tracks the source message for plan messages', () => {
     const state = getFloatingTodos([planMessage('p1', [todo('1', 'pending')])]);
     expect(state.sourceMessageId).toBe('p1');
@@ -1474,9 +1527,9 @@ it('uses committed Managed Todo output, ignoring requested, failed and cancelled
   failed.tools[0].status = 'failed';
   cancelled.tools[0].wasCancelled = true;
   const requested = todoWriteMessage('requested', []);
-  expect(getLatestSuccessfulTodos([first, failed, cancelled, requested])).toEqual([
-    expect.objectContaining({ id: 'a', status: 'pending' }),
-  ]);
+  expect(
+    getLatestSuccessfulTodos([first, failed, cancelled, requested]),
+  ).toEqual([expect.objectContaining({ id: 'a', status: 'pending' })]);
   expect(getLatestSuccessfulTodos([first, committed('clear', [])])).toEqual([]);
   expect(getLatestSuccessfulTodos([requested])).toBeUndefined();
 });
