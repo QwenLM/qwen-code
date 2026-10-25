@@ -6279,6 +6279,11 @@ export class LlmClient {
     // the old history (legacy recall exclusions, prefetched-body refs) must
     // be dropped exactly as on the LLM compression path.
     this.resetManagedAutoMemoryDeliveryState();
+    // compressFast() rewrites history via LlmChat.setHistory, bypassing both
+    // shrink hooks: the parked snapshot describes turns now gone.
+    this.config
+      .getMemoryManager()
+      .invalidatePendingExtract(this.config.getSessionId());
     this.forceFullIdeContext = true;
 
     return info;

@@ -4116,7 +4116,7 @@ describe('Gemini Client (client.ts)', () => {
       expect(client.getTrustedUserAnswers()).toEqual([]);
     });
 
-    it('drops the parked cadence snapshot when a rewrite discards its timeline', () => {
+    it('drops the parked cadence snapshot when a rewrite discards its timeline', async () => {
       setChat({ setHistory: vi.fn() });
       client.setHistory([userText('replaced')]);
       expect(mockMemoryManager.invalidatePendingExtract).toHaveBeenCalled();
@@ -4130,6 +4130,27 @@ describe('Gemini Client (client.ts)', () => {
       mockMemoryManager.invalidatePendingExtract.mockClear();
       client['chat'] = mockChatWithLengths(2, 2);
       client.truncateHistory(99);
+      expect(mockMemoryManager.invalidatePendingExtract).not.toHaveBeenCalled();
+
+      // The fast path rewrites history through LlmChat.setHistory, so neither
+      // this client's setHistory hook nor ChatCompressionService sees it.
+      mockMemoryManager.invalidatePendingExtract.mockClear();
+      setChat({
+        compressFast: vi.fn().mockReturnValue({
+          info: compressionInfo(CompressionStatus.COMPRESSED, 1000, 200),
+        }),
+      });
+      await client.tryCompressChatFast();
+      expect(mockMemoryManager.invalidatePendingExtract).toHaveBeenCalled();
+
+      // A NOOP fast compression shrinks nothing and rewrites no history.
+      mockMemoryManager.invalidatePendingExtract.mockClear();
+      setChat({
+        compressFast: vi.fn().mockReturnValue({
+          info: compressionInfo(CompressionStatus.NOOP, 100, 100),
+        }),
+      });
+      await client.tryCompressChatFast();
       expect(mockMemoryManager.invalidatePendingExtract).not.toHaveBeenCalled();
     });
 
