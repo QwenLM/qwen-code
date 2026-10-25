@@ -130,7 +130,8 @@ with unit tests; judgment stays in the skill.
   ├─ qwen autofix-pr schedule  record the watch's task, print its cron, gate and prompt
   ├─ qwen autofix-pr status    every watch of the clone, read from its files
   ├─ qwen autofix-pr cleanup   remove worktree, branch and state file when safe
-  └─ cron_create               session-only, recurring, gate:
+  └─ cron_create               recurring, gate (session-only; durable and bound
+                               to the session in a daemon):
                                "qwen autofix-pr snapshot <n> --gate --repo <owner>/<repo> --host <host> --session <sessionId> --task <task>";
                                the prompt says how to handle the events the gate printed
 
@@ -1050,11 +1051,16 @@ command does — in auto mode the classifier decides. Rules match on
   session and not ended. The state file the helper reads sits in reach of
   the code a round runs, so it can only make a call `unconfirmed`; none of
   the record is read back from it. Any other helper call is
-  `watch:unconfirmed`. `status` through the tool marks each watch with
-  `preparedHere`, and a round starts by checking it: a task left running
-  after `/clear` or `/resume` ends there, asking nothing, instead of at a
-  helper that would ask. The record ends with `cleanup` of the PR through
-  the tool and with the session.
+  `watch:unconfirmed`. A round starts with `status` through the tool: a
+  task left running for a watch that is no longer this session's (after a
+  `/clear`, or a take-over) ends there, asking nothing, instead of at a
+  helper that would ask. `status` also marks each watch with
+  `preparedHere`; when it is false for this session's watch — a durable task
+  a daemon restart brought back (Section 6.11), or a `/resume` back into the
+  session — the round goes on with its helpers and its fix under the
+  approval mode, as without the tool, and its report says that
+  `/autofix-pr resume <n>` confirms the watch again. The record ends with
+  `cleanup` of the PR through the tool and with the session.
 - **`watch:take-over`**, for `prepare --take-over` and `cleanup
 --take-over` (which `/autofix-pr stop <n>` runs, and so asks). `prepare`
   and `status` have `watch:none`.
@@ -1148,7 +1154,7 @@ its events in the gate output, so a quiet check never becomes a turn.
 
 ```text
 snapshot --gate (in the gate)
-  ├─ stop     → cron_delete, cleanup, report outcome
+  ├─ stop     → cleanup, cron_delete, report outcome
   ├─ wait     → end the turn with no message
   ├─ resync   → fetch, fast-forward the worktree to the new head, set cursor,
   │             then handle the other events of the same output (the gate
@@ -1279,17 +1285,24 @@ Replies are on by default; `--no-reply` turns them off.
   (Section 6.11), once `status` shows the watch still records it — what the
   round's fix agent could have written to the state file never reaches the
   task: a
-  session-only recurring job, cron `*/<every> * * * *` (default `*/2`), the
+  recurring job — session-only in a terminal session, durable and bound to the
+  session in a daemon (`QWEN_CODE_SERVE=1`), whose idle reclaim would otherwise
+  take a session-only task's in-memory scheduler with it — cron
+  `*/<every> * * * *` (default `*/2`), the
   gate `qwen autofix-pr snapshot <n> --gate --repo <owner>/<repo> --host <host> --session <sessionId> --task <task>`
   (the host it passed to `prepare`, the session that owns the watch), and a
   prompt that tells the model how to handle the events in the gate output
   (`Run /autofix-pr tick <owner>/<repo>#<n> --task <task>`). The first
   round runs under that task too. The gate
-  is confirmed once, like a Monitor command, when the task is created.
+  is confirmed once, like a Monitor command, when the task is created. A
+  daemon conversation carries one scheduled task, so a second watch there
+  needs a conversation of its own.
 - Fires that arrive while the session is busy wait in the notification queue;
   the probe runs once when the session is idle and prints everything new
   since its previous run.
-- The job ends with the process. The state file stays, owned by the session
+- The job ends with the process, except in a daemon session: there the task is
+  durable and bound to its session, so the daemon keeps it resident and
+  rehydrates it after a restart. The state file stays, owned by the session
   that wrote it, and a new session's `prepare` refuses it (Section 6.1).
   A later session takes the watch over, its pushes and budgets kept, with
   `prepare --take-over` once the user agrees (Section 6.1, step 5).
@@ -1431,9 +1444,7 @@ Delivery plan:
    `unattended` (Section 6.13) lets the fix agent of a confirmed watch run
    its commands without asking too. Still to come: the fix agent in the background with an `inFlight`
    record, and the budgets of Section 10 not enforced yet.
-5. Follow-ups: durable watching in daemon sessions (`durable` with
-   `sessionMode: "current"`, once the gate supports it), and a configurable
-   bot allowlist.
+5. Follow-ups: a configurable bot allowlist.
 
 Open questions:
 

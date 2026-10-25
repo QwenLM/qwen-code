@@ -19,6 +19,8 @@ Java 新建页直接复用标准 Web Shell 的欢迎标题、输入框、原生�
 
 Java 工作区查询返回 `capabilities.workspaceCreation: true` 时，工作区菜单提供“新建工作区 → 从空目录开始”。输入名称后，服务端创建并登记独立的空目录、授权给当前用户，页面自动选中它并保留任务草稿与模型。创建请求在发送前保存在当前标签页；响应不确定时，关闭弹窗或刷新页面后仍可重试同一请求。该能力默认关闭，需要服务端配置 `qwen.managed-agent.runtime-broker.workspace-creation-root` 及相应的已验证 Workspace 执行依赖；浏览器不选择服务器路径。
 
+本地守护进程通告 `git_workspace_clone` 时，“添加工作区”对话框额外提供“Git 仓库”来源：输入 clone 地址和必须尚不存在的绝对目标路径后，`POST /workspaces { kind: "git", url, target }` 返回 `202` 与任务 id，对话框通过 `/workspace-git-clone-jobs/:id` 轮询进度并可取消。clone 成功后对话框复用现有 `POST /workspaces { cwd }` 注册该目录，因此容量、嵌套、持久化和信任策略与手动添加已有目录一致；clone 本身不授予信任。该来源只对当前连接的守护进程开放；私有仓库可用 SSH agent 认证，或把 token 放进粘贴的 URL（由守护进程转交 Git，不写入克隆仓库的配置）。clone 子进程不读取宿主上已配置的 Git 凭据（`credential.helper`、`url.*.insteadOf`、`http.*` 均不生效）。失败、取消或超时会删除守护进程创建的目标目录。
+
 本地 Vite Java 演示可添加 `managedWorkspace=1`，或设置 `VITE_MANAGED_AGENT_WORKSPACE_BINDING=true`。`VITE_MANAGED_AGENT_MODEL_PRESETS` 为上述预设数组的 JSON；`VITE_MANAGED_AGENT_ACTOR_ID` 可通过 `X-Qwen-Actor-Id` 提供本地用户身份，同时进入存储隔离 scope。Java 列出当前用户已有授权的工作区，创建能力按上述服务端配置开启；本地演示需显式配置 `QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER=X-Qwen-Actor-Id`，该配置仅用于可信 loopback 环境。文件工具执行还需要 Java 文档中的 Workspace files、Session Store、Broker mounts 和 Harness Broker 连接配置。
 
 ## Managed 工具结果
