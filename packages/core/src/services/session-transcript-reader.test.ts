@@ -59,7 +59,10 @@ import {
   ChatRecordingService,
   type ChatRecord,
 } from './chatRecordingService.js';
-import { buildSessionHistoryFromConversation } from './session-api-history.js';
+import {
+  buildSessionHistoryFromConversation,
+  getApiHistoryPromptId,
+} from './session-api-history.js';
 import { ApprovalMode } from '../config/approval-mode.js';
 import {
   buildApiHistoryFromConversation,
@@ -673,9 +676,12 @@ describe('SessionTranscriptReader', () => {
         { ...output, parentUuid: 'invocation' },
       ]);
       const custom = await service.readRestoreProjection(sessionId, NONE);
-      expect(custom?.runtime.apiHistory).toEqual([
-        answer.message,
-        user.message,
+      expect(
+        custom?.runtime.apiHistory.map(({ role, parts }) => ({ role, parts })),
+      ).toEqual([answer.message, user.message]);
+      expect(custom?.runtime.apiHistory.map(getApiHistoryPromptId)).toEqual([
+        undefined,
+        'legacy-record:u1',
       ]);
       expect(detectTurnInterruption(custom!.runtime.apiHistory).kind).toBe(
         'interrupted_prompt',
@@ -1388,6 +1394,7 @@ describe('SessionTranscriptReader', () => {
     expect(runtime?.recording.turnParentUuids).toEqual(
       turnState.turnParentUuids,
     );
+    expect(runtime?.recording.turnPromptIds).toEqual([`${sessionId}########3`]);
     expect(runtime?.initialTurn).toBe(turnState.initialTurn);
     expect(runtime?.backgroundNotificationTaskIds).toEqual(
       turnState.backgroundNotificationTaskIds,
@@ -1925,9 +1932,9 @@ describe('SessionTranscriptReader', () => {
       executionContext,
     );
     const restored = await service.readRestoreProjection(sessionId, NONE);
-    expect(restored?.runtime.apiHistory).toEqual(
-      messages.map((message) => message.message),
-    );
+    expect(
+      restored?.runtime.apiHistory.map(({ role, parts }) => ({ role, parts })),
+    ).toEqual(messages.map((message) => message.message));
     expect(restored?.runtime.recording.sessionModel).toBeUndefined();
     expect(restored?.runtime.recording.sessionApprovalMode).toBeUndefined();
 
@@ -2505,9 +2512,15 @@ describe('SessionTranscriptReader', () => {
 
     const projection = await coldProjection();
 
-    expect(projection?.runtime.apiHistory).toEqual([
-      first.message,
-      second.message,
+    expect(
+      projection?.runtime.apiHistory.map(({ role, parts }) => ({
+        role,
+        parts,
+      })),
+    ).toEqual([first.message, second.message]);
+    expect(projection?.runtime.apiHistory.map(getApiHistoryPromptId)).toEqual([
+      'legacy-record:u1',
+      undefined,
     ]);
     expect(selectedReads).toEqual([
       { offset: 0, length: jsonBytes(first, second) },

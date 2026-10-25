@@ -28,6 +28,8 @@ import {
   type LlmPreparedRequest,
   type LlmPreparedRequestCallback,
   InvalidStreamError,
+  ORPHAN_TOOL_USE_REPAIR_REASON,
+  isSynthesizedRepairPart,
   approvedPlanRedactionText,
   redactApprovedPlansInHistory,
   redactStructuredOutputArgsForRecording,
@@ -6362,6 +6364,90 @@ describe('LlmChat', async () => {
     });
   });
 
+  describe('getHistoryReplacementRevision', () => {
+    it.each(['same array', 'new array retaining the same entries'] as const)(
+      'invalidates a captured revision when %s keeps the same raw tail and length',
+      (kind) => {
+        const history: Content[] = [userText('saved'), modelText('pending')];
+        chat.setHistory(history);
+        const tail = chat.peekLastHistoryEntry();
+        const length = chat.getHistoryLength();
+        const revision = chat.getHistoryReplacementRevision();
+
+        chat.setHistory(kind === 'same array' ? history : [...history]);
+
+        expect(chat.peekLastHistoryEntry()).toBe(tail);
+        expect(chat.getHistoryLength()).toBe(length);
+        expect(chat.getHistoryReplacementRevision()).toBe(revision + 1);
+      },
+    );
+
+    it.each([
+      'setHistory',
+      'clearHistory',
+      'truncateHistory',
+      'stripThoughtsFromHistory',
+    ] as const)('advances for every %s, including a no-op repeat', (method) => {
+      const history: Content[] = [userText('saved'), modelText('pending')];
+      chat.setHistory(history);
+      const revision = chat.getHistoryReplacementRevision();
+      const mutate = () => {
+        switch (method) {
+          case 'setHistory':
+            chat.setHistory(history);
+            break;
+          case 'clearHistory':
+            chat.clearHistory();
+            break;
+          case 'truncateHistory':
+            chat.truncateHistory(chat.getHistoryLength());
+            break;
+          case 'stripThoughtsFromHistory':
+            chat.stripThoughtsFromHistory();
+            break;
+          default:
+            throw new Error(`Unexpected history operation: ${method}`);
+        }
+      };
+
+      mutate();
+      expect(chat.getHistoryReplacementRevision()).toBe(revision + 1);
+      mutate();
+      expect(chat.getHistoryReplacementRevision()).toBe(revision + 2);
+    });
+
+    it('advances only when stripping orphaned users actually removes an entry', () => {
+      const kept = modelText('kept');
+      const orphan = userText('not delivered');
+      chat.setHistory([userText('saved'), kept, orphan]);
+      const revision = chat.getHistoryReplacementRevision();
+
+      expect(chat.stripOrphanedUserEntriesFromHistory()).toEqual([orphan]);
+      expect(chat.getHistoryReplacementRevision()).toBe(revision + 1);
+      expect(chat.peekLastHistoryEntry()).toBe(kept);
+      expect(chat.getHistoryLength()).toBe(2);
+      expect(chat.stripOrphanedUserEntriesFromHistory()).toEqual([]);
+      expect(chat.getHistoryReplacementRevision()).toBe(revision + 1);
+    });
+
+    it('keeps the replacement revision on append while the raw tail and length change', () => {
+      const initial = userText('saved');
+      chat.setHistory([initial]);
+      const revision = chat.getHistoryReplacementRevision();
+      const tail = chat.peekLastHistoryEntry();
+      const length = chat.getHistoryLength();
+      const appended = modelText('append');
+
+      chat.addHistory(appended);
+
+      expect(chat.getHistoryReplacementRevision()).toBe(revision);
+      expect(chat.peekLastHistoryEntry()).toBe(appended);
+      expect(chat.peekLastHistoryEntry()).not.toBe(tail);
+      expect(chat.getHistoryLength()).toBe(length + 1);
+      expect(chat.getHistory()).toEqual([initial, appended]);
+    });
+  });
+
   describe('getHistoryLength', () => {
     it('returns 0 for an empty history', () => {
       expect(chat.getHistoryLength()).toBe(0);
@@ -11910,6 +11996,22 @@ describe('LlmChat', async () => {
       return { result, history: chat.getHistory() };
     }
 
+    it('reports synthesized ids back through getSynthesizedRepairCallIds', () => {
+      chat.setHistory([
+        userText('open /tmp/a.txt'),
+        callTurn('call-rt'),
+        userText('unrelated'),
+      ]);
+
+      expect(chat.repairOrphanedToolUseTurns().injected).toEqual([
+        { callId: 'call-rt', name: 'read_file' },
+      ]);
+      // Nothing else binds the shape `applyRepair` synthesizes to the shape
+      // `isSynthesizedRepairPart` accepts. If the two drift, a late real
+      // result stops replacing the placeholder and #15297 silently returns.
+      expect(chat.getSynthesizedRepairCallIds()).toEqual(new Set(['call-rt']));
+    });
+
     it('keeps a tool result adjacent across a removable degraded placeholder', () => {
       const history = [
         userText('open /tmp/a.txt'),
@@ -12224,6 +12326,144 @@ describe('LlmChat', async () => {
         )
         .filter((id): id is string => Boolean(id));
       expect(allFrIds).toEqual(['cid_adj_dup']);
+    });
+  });
+
+  describe('replaceSynthesizedToolResponse / getSynthesizedRepairCallIds', () => {
+    it('replaces the placeholder in place, preserving its slot and neighbours', () => {
+      const realParts: Part[] = [
+        fnResponse('read_file', { output: 'real contents' }, 'call-1'),
+        { text: '[tool output persisted]' },
+      ];
+      chat.setHistory([
+        userText('open /tmp/a.txt'),
+        content('model', fnCall('read_file', { path: '/tmp/a.txt' }, 'call-1')),
+        content(
+          'user',
+          fnResponse('read_file', { output: 'other' }, 'call-0'),
+          fnResponse(
+            'read_file',
+            { error: ORPHAN_TOOL_USE_REPAIR_REASON },
+            'call-1',
+          ),
+          { text: 'interleaved' },
+        ),
+      ]);
+
+      expect(chat.getSynthesizedRepairCallIds()).toEqual(new Set(['call-1']));
+      expect(chat.replaceSynthesizedToolResponse('call-1', realParts)).toBe(
+        true,
+      );
+
+      const userParts = chat.getHistory()[2]!.parts!;
+      // The placeholder's slot now holds the real parts, in order, and the
+      // surrounding parts are untouched.
+      expect(userParts.map((p) => p.functionResponse?.id)).toEqual([
+        'call-0',
+        'call-1',
+        undefined,
+        undefined,
+      ]);
+      expect(userParts[1]).toEqual(realParts[0]);
+      expect(userParts[2]).toEqual(realParts[1]);
+      expect(userParts[3]).toEqual({ text: 'interleaved' });
+      // The pair stays closed and is no longer flagged as synthesized.
+      expect(chat.getHistoryFunctionResponseIds()).toContain('call-1');
+      expect(chat.getSynthesizedRepairCallIds()).toEqual(new Set());
+    });
+
+    it('refuses to overwrite a genuine response for the same callId', () => {
+      chat.setHistory([
+        content('model', fnCall('read_file', {}, 'call-1')),
+        content('user', fnResponse('read_file', { output: 'real' }, 'call-1')),
+      ]);
+
+      expect(chat.getSynthesizedRepairCallIds()).toEqual(new Set());
+      expect(
+        chat.replaceSynthesizedToolResponse('call-1', [
+          fnResponse('read_file', { output: 'late duplicate' }, 'call-1'),
+        ]),
+      ).toBe(false);
+      expect(
+        chat.getHistory()[1]!.parts![0]!.functionResponse?.response,
+      ).toEqual({ output: 'real' });
+    });
+
+    it('returns false when the callId is unanswered', () => {
+      chat.setHistory([
+        content('model', fnCall('read_file', {}, 'call-1')),
+        userText('nothing here'),
+      ]);
+
+      expect(
+        chat.replaceSynthesizedToolResponse('call-1', [
+          fnResponse('read_file', { output: 'late' }, 'call-1'),
+        ]),
+      ).toBe(false);
+      expect(chat.getHistoryFunctionResponseIds().size).toBe(0);
+    });
+
+    it('sends the real result — not the sentinel — on the next request (issue #15297)', async () => {
+      chat.setHistory([
+        content('model', fnCall('read_file', { path: '/tmp/a.txt' }, 'call-1')),
+        content(
+          'user',
+          fnResponse(
+            'read_file',
+            { error: ORPHAN_TOOL_USE_REPAIR_REASON },
+            'call-1',
+          ),
+        ),
+      ]);
+      expect(
+        chat.replaceSynthesizedToolResponse('call-1', [
+          fnResponse('read_file', { output: 'real contents' }, 'call-1'),
+        ]),
+      ).toBe(true);
+      mockStream(textStream('understood'));
+
+      await sendDrain('next', 'prompt-after-replace');
+
+      const contents = requestAt(0).contents as Content[];
+      const responses = contents
+        .flatMap((entry) => entry.parts ?? [])
+        .filter((part) => part.functionResponse?.id === 'call-1');
+      // Exactly one response for the callId (pairing intact) and it is
+      // the real output — the synthesized sentinel is gone from the wire.
+      expect(responses).toHaveLength(1);
+      expect(responses[0]!.functionResponse?.response).toEqual({
+        output: 'real contents',
+      });
+      expect(JSON.stringify(contents)).not.toContain('was not recorded');
+    });
+  });
+
+  describe('isSynthesizedRepairPart', () => {
+    it('matches only the exact single-key sentinel shape', () => {
+      const sentinel = (extra: Record<string, unknown> = {}) =>
+        fnResponse(
+          'read_file',
+          { error: ORPHAN_TOOL_USE_REPAIR_REASON, ...extra },
+          'call-1',
+        );
+
+      expect(isSynthesizedRepairPart(sentinel())).toBe(true);
+      // A genuine failure that quotes the sentinel inside a richer
+      // response object is not a placeholder.
+      expect(isSynthesizedRepairPart(sentinel({ output: 'partial' }))).toBe(
+        false,
+      );
+      expect(
+        isSynthesizedRepairPart(
+          fnResponse('read_file', { error: 'some other error' }, 'call-1'),
+        ),
+      ).toBe(false);
+      expect(
+        isSynthesizedRepairPart(
+          fnResponse('read_file', { output: 'ok' }, 'call-1'),
+        ),
+      ).toBe(false);
+      expect(isSynthesizedRepairPart({ text: 'not a response' })).toBe(false);
     });
   });
 

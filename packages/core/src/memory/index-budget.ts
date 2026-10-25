@@ -21,6 +21,7 @@ export interface IndexTrimResult {
 
 export function trimIndexToBudgetDetailed(
   lines: readonly string[],
+  priorityPrefixLength = 0,
 ): IndexTrimResult {
   const entries = lines.slice(0, MAX_INDEX_LINES);
   const overLineCap = lines.slice(MAX_INDEX_LINES);
@@ -32,17 +33,26 @@ export function trimIndexToBudgetDetailed(
   // Reserve space for ordinary entries before long links, then restore order.
   const kept = new Set<number>();
   let size = 0;
-  for (const limit of [MAX_INDEX_LINE_CHARS, MAX_INDEX_CHARS]) {
-    for (const [index, line] of entries.entries()) {
-      if (kept.has(index) || line.length > limit) {
-        continue;
+  // Imported user entries may use spare capacity, but must not displace
+  // native entries, including long links the ordinary pass reserves last.
+  const boundary = Math.min(priorityPrefixLength, entries.length);
+  for (const [start, end] of [
+    [0, boundary],
+    [boundary, entries.length],
+  ]) {
+    for (const limit of [MAX_INDEX_LINE_CHARS, MAX_INDEX_CHARS]) {
+      for (let index = start; index < end; index++) {
+        const line = entries[index];
+        if (kept.has(index) || line.length > limit) {
+          continue;
+        }
+        const next = size + (kept.size > 0 ? 1 : 0) + line.length;
+        if (next > MAX_INDEX_CHARS) {
+          continue;
+        }
+        size = next;
+        kept.add(index);
       }
-      const next = size + (kept.size > 0 ? 1 : 0) + line.length;
-      if (next > MAX_INDEX_CHARS) {
-        continue;
-      }
-      size = next;
-      kept.add(index);
     }
   }
   const surviving: string[] = [];
@@ -56,6 +66,9 @@ export function trimIndexToBudgetDetailed(
   };
 }
 
-export function trimIndexToBudget(lines: readonly string[]): string {
-  return trimIndexToBudgetDetailed(lines).content;
+export function trimIndexToBudget(
+  lines: readonly string[],
+  priorityPrefixLength = 0,
+): string {
+  return trimIndexToBudgetDetailed(lines, priorityPrefixLength).content;
 }
