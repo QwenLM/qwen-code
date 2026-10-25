@@ -151,6 +151,13 @@ spins out its budget. In the bare-lock fallback, only `flock`'s timeout
 status is tolerated; any other status is an unknown setup failure and stays
 fatal.
 
+A red suite still reaches the write-back. The test job's Maven runs record a
+failure in `mvn_status` instead of aborting under errexit, the failure stops
+the remaining suites, and that deferred status fails the step after the copy.
+The downloads the failed run made are therefore published instead of
+re-fetched by the next leg, and a tolerated skip of the copy reports the same
+status rather than turning the step green.
+
 The 9600 s test-lane and 5400 s write-back budgets are unchanged by this PR.
 They bound the queue, not the hold; the test lane's 9600 s is carried from
 the pre-split topology where its suite could queue behind several holds, and

@@ -243,6 +243,9 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(preludes[1]).toContain('sdk_java_lock_acquire 5400 >&7');
     expect(preludes[0]).toContain('flock --wait 9600 9');
     expect(preludes[1]).toContain('flock --wait 5400 9');
+    // The test job alone defers its Maven status to the end of the step, so
+    // its tolerated-skip arms exit with that status rather than 0; normalize
+    // that one intended difference before comparing the rest byte for byte.
     expect(
       preludes[1]
         .replace(
@@ -250,13 +253,18 @@ describe('SDK Java self-hosted workflow guards', () => {
           'sdk_java_lock_acquire 9600 "${TIER}" >&7',
         )
         .replace('flock --wait 5400 9', 'flock --wait 9600 9'),
-    ).toBe(preludes[0]);
+    ).toBe(preludes[0].replaceAll('exit "${mvn_status}"', 'exit 0'));
     const tails = runs.map((run) => {
       const start = run.indexOf('mkdir -p "${HOME}/.m2/repository" 9>&-');
       expect(start).toBeGreaterThan(-1);
       return run.slice(start);
     });
-    expect(tails[1]).toBe(tails[0]);
+    // The test job appends the deferred exit after the write-back; the
+    // MariaDB lane's steps fail inline and keep their inline exits.
+    const deferredAt = tails[0].indexOf('\n# Deferred so a failed suite');
+    expect(deferredAt).toBeGreaterThan(-1);
+    expect(tails[1]).toBe(tails[0].slice(0, deferredAt));
+    expect(tails[0].slice(deferredAt)).toContain('exit "${mvn_status}"');
   });
 
   it('keeps the seeded coordinate drops and write-back prunes in step', () => {
@@ -620,7 +628,13 @@ describe('SDK Java self-hosted workflow guards', () => {
         ).run;
         const start = run.indexOf('lock_setup_fault() {');
         expect(start, name).toBeGreaterThan(-1);
-        const acquisitionAndWriteBack = run.slice(start);
+        // The test job defers its Maven status to the end of the step, so its
+        // skip arms read `mvn_status`; the slice starts below that
+        // assignment. The MariaDB lane's arms stay independent of any status.
+        const slice = run.slice(start);
+        const acquisitionAndWriteBack = slice.includes('exit "${mvn_status}"')
+          ? `mvn_status=0\n${slice}`
+          : slice;
         for (const arm of [
           'helper',
           'helper-capitalised',
@@ -806,19 +820,122 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(block).toContain("MATRIX_JAVA: '${{ matrix.java }}'");
     expect(block).toContain("TIER: '${{ inputs.tier }}'");
     expect(block).toContain(
-      'mvn --batch-mode --no-transfer-progress clean test\n' +
-        '          if [ "${MATRIX_JAVA}" = "21" ]; then\n' +
-        '            mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install\n' +
-        '            cd ../../managed-agent-server\n' +
-        '            # The fast tier skips mysql-integration, which owns the full H2 unit suite.\n' +
-        '            if [ "${TIER}" = "fast" ]; then\n' +
-        '              mvn --batch-mode --no-transfer-progress clean test\n' +
-        '            else\n' +
-        `              mvn --batch-mode --no-transfer-progress '-Dtest=${brokerTestPattern}' clean test\n` +
+      'mvn_status=0\n' +
+        '          mvn --batch-mode --no-transfer-progress clean test || mvn_status=$?\n' +
+        '          if [ "${mvn_status}" -eq 0 ] && [ "${MATRIX_JAVA}" = "21" ]; then\n' +
+        '            mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install || mvn_status=$?\n' +
+        '            if [ "${mvn_status}" -eq 0 ]; then\n' +
+        '              cd ../../managed-agent-server\n' +
+        '              # The fast tier skips mysql-integration, which owns the full H2 unit suite.\n' +
+        '              if [ "${TIER}" = "fast" ]; then\n' +
+        '                mvn --batch-mode --no-transfer-progress clean test || mvn_status=$?\n' +
+        '              else\n' +
+        `                mvn --batch-mode --no-transfer-progress '-Dtest=${brokerTestPattern}' clean test || mvn_status=$?\n` +
+        '              fi\n' +
         '            fi\n' +
         '          fi',
     );
   });
+
+  it('defers the Maven status so a red suite still reaches the write-back', () => {
+    const block = step(job('test'), 'Run Java SDK tests (self-hosted)');
+    const mvnLines = block
+      .split('\n')
+      .filter((line) => /^\s+mvn --batch-mode/.test(line));
+    expect(mvnLines).toHaveLength(4);
+    for (const line of mvnLines) {
+      // A bare `mvn` would stop the step under errexit, so the write-back
+      // below never ran for a red suite — the downloads of that run were
+      // then re-fetched by the next leg.
+      expect(line).toMatch(/ \|\| mvn_status=\$\?$/);
+    }
+    // Every tolerated skip reports the deferred suite status instead of
+    // turning a red suite green: the fault handler, both timeout arms, and
+    // the end of the step.
+    expect(block).not.toMatch(/^\s+exit 0$/m);
+    expect(block.match(/exit "\$\{mvn_status\}"/g)).toHaveLength(4);
+    expect(block.trimEnd().endsWith('exit "${mvn_status}"')).toBe(true);
+  });
+
+  it.skipIf(process.platform !== 'linux')(
+    'publishes the job-local repository when the Maven suite fails',
+    () => {
+      const dir = mkdtempSync(join(tmpdir(), 'sdk-java-failed-suite-'));
+      const workspace = join(dir, 'workspace');
+      const home = join(dir, 'home');
+      const runnerTemp = join(dir, 'runner-temp');
+      const shims = join(dir, 'bin');
+      const cwd = join(dir, 'repo', 'packages', 'sdk-java', 'qwencode');
+      mkdirSync(join(workspace, '.github', 'scripts'), { recursive: true });
+      mkdirSync(join(home, '.m2', 'repository'), { recursive: true });
+      mkdirSync(cwd, { recursive: true });
+      mkdirSync(shims);
+      writeFileSync(
+        join(workspace, '.github', 'scripts', 'sdk-java-lock.sh'),
+        'sdk_java_lock_acquire() { return 0; }\n',
+      );
+      // A failing suite that still downloaded one artifact: the write-back
+      // must publish it, the step must keep Maven's status, and the later
+      // suites must not run.
+      writeFileSync(
+        join(shims, 'mvn'),
+        '#!/bin/sh\n' +
+          'printf "%s\\n" "$*" >> "${RUNNER_TEMP}/mvn-calls"\n' +
+          'mkdir -p "${RUNNER_TEMP}/m2-repo/org/example/newdep/1.0"\n' +
+          'printf data > "${RUNNER_TEMP}/m2-repo/org/example/newdep/1.0/newdep-1.0.jar"\n' +
+          'exit 7\n',
+        { mode: 0o755 },
+      );
+      try {
+        const stepBlock = parse(workflow).jobs.test.steps.find(
+          (candidate) => candidate.name === 'Run Java SDK tests (self-hosted)',
+        );
+        const result = spawnSync(
+          'bash',
+          ['--noprofile', '--norc', '-eo', 'pipefail', '-c', stepBlock.run],
+          {
+            encoding: 'utf8',
+            cwd,
+            timeout: 30_000,
+            env: {
+              ...process.env,
+              PATH: `${shims}:${process.env.PATH}`,
+              GITHUB_WORKSPACE: workspace,
+              HOME: home,
+              RUNNER_TEMP: runnerTemp,
+              MATRIX_JAVA: '21',
+              TIER: 'fast',
+            },
+          },
+        );
+        expect(result.error).toBeUndefined();
+        expect(result.status, result.stderr).toBe(7);
+        expect(
+          existsSync(
+            join(
+              home,
+              '.m2',
+              'repository',
+              'org',
+              'example',
+              'newdep',
+              '1.0',
+              'newdep-1.0.jar',
+            ),
+          ),
+        ).toBe(true);
+        // The failure stops the remaining suites instead of letting a red
+        // lane spend the install and H2 suite on top of it.
+        expect(
+          readFileSync(join(runnerTemp, 'mvn-calls'), 'utf8')
+            .trim()
+            .split('\n'),
+        ).toHaveLength(1);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('runs the Broker suite on hosted Java 21 after installing its SDK dependency', () => {
     const block = step(job('test'), 'Run Runtime Broker state tests');
