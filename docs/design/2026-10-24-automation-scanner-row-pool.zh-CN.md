@@ -40,8 +40,9 @@ NULL OR lease_until < ?`）下逐行上租约，账本写入全部带 fence 校�
    也只会为每个 pending 的 join 空占一条线程。
 5. 关闭时让进行中的工作收尾；绝不中断它。线程池的 `destroy()` 立即返回
    （`awaitTerminationSeconds(0)`），本身不引入任何关闭等待；但卡在 join 里的
-   tick 仍然会拖住关闭：关闭会先等满应用的关闭阶段
-   （`spring.lifecycle.timeout-per-shutdown-phase`，此处 30 秒）才中断该 tick，
+   tick 仍然会拖住关闭：调用它的调度器（`managedAutomationScheduler`）本身是
+   `SmartLifecycle`，关闭时要为这个 Bean 等满
+   `spring.lifecycle.timeout-per-shutdown-phase`（此处 30 秒）才中断该 tick，
    而这个上界在本次改动之前就存在。认领是落库的：丢失的应答会由后续 tick
    重新驱动。
 
@@ -91,7 +92,9 @@ scanner-threads`，它仍是正确的后续方向。
   `theScannerWorksRowsOnItsOwnBoundedPool`、
   `theScannerRowPoolFinishesInFlightWorkInsteadOfInterruptingIt`、
   `theScannerRowPoolStillBootsWithAnUnvalidatedSizeWhileAutomationIsOff`、
-  `twoDefinitionsSharingOneSessionBothFireWhenDueTogether`，以及新属性的
+  `twoDefinitionsSharingOneSessionBothFireWhenDueTogether`、
+  `aRowBothQueriesReturnIsSubmittedOnce`、
+  `anInterruptedJoinReportsTheInterruptAndLeavesTheRowItsClaim`，以及新属性的
   绑定/启动校验。既有的租约与 fence 回归套件经由直接执行器原样运行，钉住
   同一套分发与 join 的串行形态。`aTickJoinsEveryRowBeforeItReportsOneFailure`
   在真实的单线程池上运行，第一个认领抛出时第二个行的认领仍在飞行中：直接执行器

@@ -45,10 +45,11 @@ lease_until < ?`) with fence-checked ledger writes, so working different
 5. Finish in-flight work at shutdown; never interrupt it. The pool's
    `destroy()` returns immediately (`awaitTerminationSeconds(0)`), so the pool
    adds no shutdown wait of its own. A tick caught mid-join still bounds the
-   close, though: the close waits out the application's shutdown phase
-   (`spring.lifecycle.timeout-per-shutdown-phase`, 30 s here) before that tick
-   is interrupted, and that bound predates this change. Claims are durable: an
-   interrupted answer is re-driven by a later tick.
+   close, though: the scheduler that invokes it (`managedAutomationScheduler`)
+   is itself a `SmartLifecycle`, so the close waits out
+   `spring.lifecycle.timeout-per-shutdown-phase` (30 s here) for that bean
+   before the tick is interrupted — a bound that predates this change. Claims
+   are durable: an interrupted answer is re-driven by a later tick.
 
 The asynchronous fire answer is rejected for this change: today's `firing`
 means "answer pending inside this call", and persisting a pending state means
@@ -106,6 +107,8 @@ follow-up if probe durations keep saturating
   `theScannerRowPoolFinishesInFlightWorkInsteadOfInterruptingIt`,
   `theScannerRowPoolStillBootsWithAnUnvalidatedSizeWhileAutomationIsOff`,
   `twoDefinitionsSharingOneSessionBothFireWhenDueTogether`,
+  `aRowBothQueriesReturnIsSubmittedOnce`,
+  `anInterruptedJoinReportsTheInterruptAndLeavesTheRowItsClaim`,
   plus binding/startup validation of the new property. The pre-existing lease
   and fence suite runs unchanged through a direct executor, pinning the serial
   shape of the same fan-out and join. `aTickJoinsEveryRowBeforeItReportsOneFailure`
