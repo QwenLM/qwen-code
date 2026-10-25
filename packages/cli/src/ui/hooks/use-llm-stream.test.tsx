@@ -14130,7 +14130,12 @@ describe('useLlmStream', () => {
       const installModTurn = () => {
         const turn = { id: 'turn-1', saw: vi.fn(), complete: vi.fn() };
         const startTurn = vi.fn(
-          (_text: string, _signal: AbortSignal, _abort: () => boolean) => turn,
+          (
+            _text: string,
+            _signal: AbortSignal,
+            _abort: () => boolean,
+            _promptId?: string,
+          ) => turn,
         );
         vi.spyOn(interactiveMods, 'getInteractiveModSession').mockReturnValue({
           ready: Promise.resolve(),
@@ -14173,6 +14178,7 @@ describe('useLlmStream', () => {
           'Fix it',
           expect.any(AbortSignal),
           expect.any(Function),
+          mockSendMessageStream.mock.calls[0][2],
         );
         expect(turn.saw.mock.calls.map(([event]) => event.type)).toEqual([
           ServerLlmEventType.Content,
@@ -14345,6 +14351,68 @@ describe('useLlmStream', () => {
           rerenderWithToolCalls([]);
           return turn;
         };
+
+        it('ends the turn.start hooks for a cancel in a later round', async () => {
+          const { turn, startTurn } = installModTurn();
+          let sends = 0;
+          mockSendMessageStream.mockImplementation((...args: unknown[]) => {
+            (
+              args[3] as { onPromptAdmitted?: () => void }
+            )?.onPromptAdmitted?.();
+            const signal = args[1] as AbortSignal;
+            const round = sends++;
+            return (async function* () {
+              if (round === 0) {
+                yield {
+                  type: ServerLlmEventType.ToolCallRequest,
+                  value: request,
+                };
+                return;
+              }
+              // The second round streams until it is cancelled.
+              yield { type: ServerLlmEventType.Content, value: 'Reading' };
+              await new Promise((resolve) =>
+                signal.addEventListener('abort', resolve),
+              );
+            })();
+          });
+          const { result, rerenderWithToolCalls, completeToolRound } =
+            renderTestHook();
+          mockScheduleToolCalls.mockImplementation(() =>
+            rerenderWithToolCalls([tool('executing')]),
+          );
+          await act(async () => {
+            await result.current.submitQuery(
+              'Fix it',
+              SendMessageType.UserQuery,
+              promptId,
+            );
+          });
+          const toolRound = completeToolRound([tool('success')]);
+          rerenderWithToolCalls([]);
+          await waitFor(() =>
+            expect(mockSendMessageStream).toHaveBeenCalledTimes(2),
+          );
+          await waitFor(() =>
+            expect(result.current.streamingState).toBe(
+              StreamingState.Responding,
+            ),
+          );
+          const started = startTurn.mock.calls[0][1];
+          expect(started.aborted).toBe(false);
+          act(() => {
+            result.current.cancelOngoingRequest();
+          });
+          // The first round's controller is long done; the turn's own ends.
+          expect(
+            (mockSendMessageStream.mock.calls[0][1] as AbortSignal).aborted,
+          ).toBe(false);
+          expect(started.aborted).toBe(true);
+          await toolRound;
+          await waitFor(() =>
+            expect(turn.complete).toHaveBeenCalledExactlyOnceWith('aborted'),
+          );
+        });
 
         it('ends the turn as aborted when its tools were cancelled', async () => {
           const turn = await runToolTurn(tool('cancelled'));

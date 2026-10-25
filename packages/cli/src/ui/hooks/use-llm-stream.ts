@@ -248,6 +248,25 @@ interface GoalTurnBinding {
 
 type GoalTurnAdmission = Omit<GoalTurnBinding, 'permit'>;
 
+interface ForegroundModTurn {
+  turn: ModTurn;
+  promptId: string;
+  ending?: 'aborted' | 'error';
+  // Ends the turn's turn.start hooks, whichever round the cancel ends.
+  cancel: AbortController;
+}
+
+// Records how the Mod turn of `promptId` ended; the first ending stands.
+function recordModTurnEnding(
+  modTurn: ForegroundModTurn | null,
+  promptId: string | undefined,
+  ending: 'aborted' | 'error',
+): void {
+  if (!modTurn || modTurn.promptId !== promptId) return;
+  modTurn.ending ??= ending;
+  if (ending === 'aborted') modTurn.cancel.abort();
+}
+
 function sameGoalPermit(left: GoalTurnPermit, right: GoalTurnPermit): boolean {
   return (
     left.goalId === right.goalId &&
@@ -973,11 +992,7 @@ export const useLlmStream = (
   const auxiliaryAbortRefsRef = useRef<Set<AbortController>>(new Set());
   // The Mods hear the foreground turn from its admission until the stream
   // goes idle; a cancel or a failure on the way records how it ended.
-  const modTurnRef = useRef<{
-    turn: ModTurn;
-    promptId: string;
-    ending?: 'aborted' | 'error';
-  } | null>(null);
+  const modTurnRef = useRef<ForegroundModTurn | null>(null);
   // Whether the quiet cancel `$.turn.abort` asked for ended anything.
   const cancelForModRef = useRef<() => boolean>(() => false);
   const quietCancelRef = useRef(false);
@@ -1457,7 +1472,10 @@ export const useLlmStream = (
     ) {
       return false;
     }
-    if (modTurnRef.current) modTurnRef.current.ending = 'aborted';
+    if (modTurnRef.current) {
+      modTurnRef.current.ending = 'aborted';
+      modTurnRef.current.cancel.abort();
+    }
     // Flush throttled stream chunks FIRST so anything sitting in the
     // per-turn bufferedEvents lands on `pendingHistoryItemRef.current`
     // before we snapshot. Snapshotting before flush would miss content
@@ -3767,9 +3785,12 @@ export const useLlmStream = (
           submitType === SendMessageType.Cron) &&
         typeof query === 'string' &&
         isSlashCommand(query.trim());
-      if (mods && !dispatchesSlashCommand) {
+      // Whether the Mods started. When they failed, the prompt is refused
+      // with the reason, and the caller releases what it holds.
+      const modsStarted = async (): Promise<boolean> => {
         try {
-          await mods.ready;
+          await mods?.ready;
+          return true;
         } catch {
           addItem(
             {
@@ -3779,10 +3800,13 @@ export const useLlmStream = (
             Date.now(),
           );
           await releaseUndeliveredGoalTurn(metadata?.userAdmission?.turnKey);
-          metadata?.onAdmissionFailed?.();
-          metadata?.onDeliveryFailed?.();
-          return;
+          return false;
         }
+      };
+      if (mods && !dispatchesSlashCommand && !(await modsStarted())) {
+        metadata?.onAdmissionFailed?.();
+        metadata?.onDeliveryFailed?.();
+        return;
       }
       const allowConcurrentBtwDuringResponse =
         submitType === SendMessageType.UserQuery &&
@@ -4117,22 +4141,10 @@ export const useLlmStream = (
         }
         // A slash command that reaches the model waits for the Mods as a
         // typed prompt does.
-        if (mods && dispatchesSlashCommand) {
-          try {
-            await mods.ready;
-          } catch {
-            addItem(
-              {
-                type: MessageType.ERROR,
-                text: 'Mods failed to initialize. Fix the Mod configuration and restart. /help and /quit remain available.',
-              },
-              Date.now(),
-            );
-            await releaseUndeliveredGoalTurn(metadata?.userAdmission?.turnKey);
-            releaseSubmissionLease();
-            metadata?.onDeliveryFailed?.();
-            return;
-          }
+        if (mods && dispatchesSlashCommand && !(await modsStarted())) {
+          releaseSubmissionLease();
+          metadata?.onDeliveryFailed?.();
+          return;
         }
 
         await goalQueueRef?.current?.waitForReservationSettlement?.();
@@ -4338,13 +4350,17 @@ export const useLlmStream = (
                   onPromptAdmitted: () => {
                     // One the stream never left idle for ends first.
                     finishModTurn();
+                    // Each tool round has its own controller; this one
+                    // spans the turn.
+                    const cancel = new AbortController();
                     const turn = mods?.startTurn(
                       metadata?.humanInput?.text ?? submittedPrompt ?? '',
-                      abortSignal,
+                      AbortSignal.any([abortSignal, cancel.signal]),
                       () => cancelForModRef.current(),
+                      prompt_id,
                     );
                     if (!turn) return;
-                    modTurnRef.current = { turn, promptId: prompt_id! };
+                    modTurnRef.current = { turn, promptId: prompt_id!, cancel };
                     setModTurnId(turn.id);
                   },
                 }
@@ -4449,8 +4465,7 @@ export const useLlmStream = (
             cleanupReviewLease = true;
             submitPromptOnCompleteRef.current = null;
             // A Goal preemption cancels the turn without an Esc.
-            if (modTurnRef.current?.promptId === prompt_id)
-              modTurnRef.current.ending ??= 'aborted';
+            recordModTurnEnding(modTurnRef.current, prompt_id, 'aborted');
             metadata?.onDeliveryFailed?.();
             return;
           }
@@ -4552,8 +4567,7 @@ export const useLlmStream = (
           }
           const loopDetected = loopDetectedRef.current;
           if (loopDetected) {
-            if (modTurnRef.current?.promptId === prompt_id)
-              modTurnRef.current.ending ??= 'error';
+            recordModTurnEnding(modTurnRef.current, prompt_id, 'error');
             cleanupReviewLease = true;
             loopDetectedRef.current = false;
             const loopStop = loopStopRef.current;
@@ -4604,14 +4618,14 @@ export const useLlmStream = (
         } catch (error: unknown) {
           cleanupReviewLease = true;
           // Before the delivery callback, which can record an error.
-          if (
-            !allowConcurrentBtwDuringResponse &&
-            modTurnRef.current?.promptId === prompt_id
-          )
-            modTurnRef.current.ending ??=
+          if (!allowConcurrentBtwDuringResponse)
+            recordModTurnEnding(
+              modTurnRef.current,
+              prompt_id,
               isNodeError(error) && error.name === 'AbortError'
                 ? 'aborted'
-                : 'error';
+                : 'error',
+            );
           metadata?.onDeliveryFailed?.();
           if (error instanceof UnauthorizedError) {
             onAuthError('Session expired or is unauthorized.');
@@ -5635,14 +5649,12 @@ export const useLlmStream = (
         errorType?: string,
         endsModTurn = true,
       ) => {
-        const modTurn = modTurnRef.current;
-        if (
-          endsModTurn &&
-          status !== 'ok' &&
-          modTurn &&
-          modTurn.promptId === promptId
-        )
-          modTurn.ending ??= status === 'cancelled' ? 'aborted' : 'error';
+        if (endsModTurn && status !== 'ok')
+          recordModTurnEnding(
+            modTurnRef.current,
+            promptId,
+            status === 'cancelled' ? 'aborted' : 'error',
+          );
         if (continuationOwner?.detachedAbortController) {
           detachedToolContinuationAbortControllersRef.current.delete(
             continuationOwner.detachedAbortController,
