@@ -24,6 +24,7 @@ import {
 import wrapAnsi from 'wrap-ansi';
 import { useRenderer, useTerminalDimensions } from '@opentui/react';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import type { Logger } from '@qwen-code/qwen-code-core/core/logger.js';
 import type { SessionListItem } from '@qwen-code/qwen-code-core/services/sessionService.js';
 import type { EditorType } from '@qwen-code/qwen-code-core/utils/editor.js';
 import {
@@ -413,11 +414,13 @@ export function OpenTuiDeleteDialog({
   onClose,
   notify,
   availableTerminalHeight,
-}: P) {
+  logger,
+}: P & { logger?: Logger | null }) {
   const currentBranch = useGitBranchName(config?.getTargetDir() ?? '');
   const currentSessionId = config?.getSessionId() ?? '';
   const { handleDelete, handleDeleteMany } = useDeleteCommand({
     config: config ?? null,
+    logger,
     addItem: (item) => {
       if ('text' in item) {
         notify?.(String(item.text), item.type === 'error' ? 'error' : 'info');

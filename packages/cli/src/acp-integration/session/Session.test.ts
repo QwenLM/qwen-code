@@ -26,6 +26,8 @@ import {
   markCompressedHistory,
 } from '@qwen-code/qwen-code-core/core/environmentContext.js';
 import { detectTurnInterruption } from '@qwen-code/qwen-code-core/core/turn-interruption.js';
+import { FinishReason } from '@qwen-code/qwen-code-core/core/genai-compat.js';
+import { markToolCallArgumentsIncomplete } from '@qwen-code/qwen-code-core/core/incomplete-tool-call-args.js';
 import { ManagedRuntimeOutcomeUnknownError } from '@qwen-code/qwen-code-core/services/execution-environment.js';
 import type { DaemonToolLoopState } from './Session.js';
 import type {
@@ -118,6 +120,7 @@ const addToolArgumentsAttributesSpy = vi.hoisted(() => vi.fn());
 const addToolCallResultAttributesSpy = vi.hoisted(() => vi.fn());
 const logLoopDetectedSpy = vi.hoisted(() => vi.fn());
 const logRepeatedToolFailureGuardSpy = vi.hoisted(() => vi.fn());
+const logLoopProtectionSpy = vi.hoisted(() => vi.fn());
 const deleteWorkflowSnapshotSpy = vi.hoisted(() => vi.fn());
 const listWorkflowSnapshotsSpy = vi.hoisted(() => vi.fn());
 const agentTelemetry = vi.hoisted(() => ({
@@ -138,6 +141,26 @@ const TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD =
 // Records every LoopTickResolver construction's deps so a test can assert what
 // Session computed (e.g. the home confinement root) without a private-field peek.
 const loopTickResolverDepsSpy = vi.hoisted(() => vi.fn());
+
+// Session imports logLoopProtection from the loggers module, not the barrel.
+vi.mock(
+  '@qwen-code/qwen-code-core/telemetry/loggers.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/telemetry/loggers.js')
+      >();
+    return {
+      ...actual,
+      logLoopProtection: (
+        ...args: Parameters<typeof actual.logLoopProtection>
+      ) => {
+        logLoopProtectionSpy(...args);
+        return actual.logLoopProtection(...args);
+      },
+    };
+  },
+);
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actual =
@@ -795,6 +818,7 @@ describe('Session', () => {
     addToolCallResultAttributesSpy.mockClear();
     logLoopDetectedSpy.mockReset();
     logRepeatedToolFailureGuardSpy.mockReset();
+    logLoopProtectionSpy.mockReset();
     deleteWorkflowSnapshotSpy.mockReset();
     deleteWorkflowSnapshotSpy.mockResolvedValue(true);
     listWorkflowSnapshotsSpy.mockReset();
@@ -1131,6 +1155,7 @@ describe('Session', () => {
       // Mirrors the resolved settings default (cli/config.ts passes
       // `skipLoopDetection ?? true`): heuristics off unless a test opts in.
       getSkipLoopDetection: vi.fn().mockReturnValue(true),
+      getLoopProtection: vi.fn().mockReturnValue('stop'),
       getLlmClient: vi.fn().mockReturnValue(mockLlmClient),
       getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(true),
       getMemoryManager: vi.fn().mockReturnValue(mockMemoryManager),
@@ -4093,6 +4118,262 @@ describe('Session', () => {
     });
   });
 
+  describe('partial edit guard', () => {
+    function useTool(kind: core.Kind, name: string) {
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'done',
+        returnDisplay: 'done',
+      });
+      mockToolRegistry.getTool.mockReturnValue({
+        name,
+        kind,
+        build: vi.fn().mockReturnValue({
+          params: {},
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue(name),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute,
+        }),
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      return execute;
+    }
+
+    function call(id: string, name = 'write_file'): FunctionCall {
+      return { id, name, args: { file_path: '/tmp/notes.txt', content: 'p' } };
+    }
+
+    function cutOff(...calls: FunctionCall[]) {
+      return {
+        type: core.StreamEventType.CHUNK,
+        value: {
+          functionCalls: calls,
+          candidates: [{ finishReason: FinishReason.MAX_TOKENS }],
+        },
+      };
+    }
+
+    /** Runs one prompt and returns the tool-result message sent back. */
+    async function prompt(
+      ...chunks: Array<{ type: unknown; value?: unknown }>
+    ): Promise<string> {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createStreamWithChunks(chunks))
+        .mockResolvedValueOnce(createEmptyStream());
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'write it' }],
+      });
+      return JSON.stringify(
+        vi.mocked(mockChat.sendMessageStream).mock.calls[1][1].message,
+      );
+    }
+
+    it('refuses an edit from a response the output limit cut off', async () => {
+      const execute = useTool(core.Kind.Edit, 'write_file');
+
+      const sent = await prompt(cutOff(call('call-cut')));
+
+      expect(execute).not.toHaveBeenCalled();
+      expect(sent).toContain('truncated due to max_tokens limit');
+    });
+
+    it('refuses an edit whose arguments arrived incomplete', async () => {
+      const execute = useTool(core.Kind.Edit, 'write_file');
+      const incomplete = call('call-incomplete');
+      markToolCallArgumentsIncomplete([{ functionCall: incomplete }]);
+
+      const sent = await prompt({
+        type: core.StreamEventType.CHUNK,
+        value: { functionCalls: [incomplete] },
+      });
+
+      expect(execute).not.toHaveBeenCalled();
+      expect(sent).toContain('arguments arrived incomplete');
+    });
+
+    it('still runs a read from a response the output limit cut off', async () => {
+      const execute = useTool(core.Kind.Read, 'read_file');
+
+      await prompt(cutOff(call('call-read', 'read_file')));
+
+      expect(execute).toHaveBeenCalledTimes(1);
+    });
+
+    it('runs the edit a retry produces after a cut-off attempt', async () => {
+      const execute = useTool(core.Kind.Edit, 'write_file');
+
+      const sent = await prompt(
+        cutOff(call('call-cut')),
+        { type: core.StreamEventType.RETRY },
+        {
+          type: core.StreamEventType.CHUNK,
+          value: { functionCalls: [call('call-full')] },
+        },
+      );
+
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(sent).not.toContain('truncated due to max_tokens limit');
+    });
+
+    it('counts a cut-off response with several edits once', async () => {
+      const execute = useTool(core.Kind.Edit, 'write_file');
+      const calls = ['a', 'b', 'c'].map((content, i) => ({
+        ...call(`call-cut-${i}`),
+        args: { file_path: `/tmp/notes-${i}.txt`, content },
+      }));
+
+      const sent = await prompt(cutOff(...calls));
+
+      expect(execute).not.toHaveBeenCalled();
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      expect(sent).toContain('truncated due to max_tokens limit');
+      expect(sent).not.toContain('RETRY LOOP DETECTED');
+    });
+
+    it('warns on the second cut-off response and stops on the third', async () => {
+      const execute = useTool(core.Kind.Edit, 'write_file');
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(
+          createStreamWithChunks([cutOff(call('call-cut-1'))]),
+        )
+        .mockResolvedValueOnce(
+          createStreamWithChunks([cutOff(call('call-cut-2'))]),
+        )
+        .mockResolvedValueOnce(
+          createStreamWithChunks([cutOff(call('call-cut-3'))]),
+        )
+        .mockResolvedValueOnce(createEmptyStream());
+
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'write it' }],
+        }),
+      ).rejects.toMatchObject({
+        data: {
+          code: 'LOOP_DETECTED',
+          loopType: core.LoopType.INVALID_TOOL_PARAMS_STAGNATION,
+        },
+      });
+
+      expect(execute).not.toHaveBeenCalled();
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
+      const warned = JSON.stringify(
+        vi.mocked(mockChat.sendMessageStream).mock.calls[2][1].message,
+      );
+      expect(warned).toContain('RETRY LOOP DETECTED');
+      expect(warned).toContain('Another refused write stops this turn.');
+      expect(warned).not.toContain('parameter schema');
+      expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'Stopping ACP turn after repeated refused partial edits from write_file',
+        ),
+      );
+    });
+
+    it('starts the count again after the model recovers', async () => {
+      const execute = useTool(core.Kind.Edit, 'write_file');
+      const full = (id: string) =>
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: { functionCalls: [call(id)] },
+          },
+        ]);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(
+          createStreamWithChunks([cutOff(call('call-cut-1'))]),
+        )
+        .mockResolvedValueOnce(full('call-full-1'))
+        .mockResolvedValueOnce(
+          createStreamWithChunks([cutOff(call('call-cut-2'))]),
+        )
+        .mockResolvedValueOnce(full('call-full-2'))
+        .mockResolvedValueOnce(
+          createStreamWithChunks([cutOff(call('call-cut-3'))]),
+        )
+        .mockResolvedValueOnce(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'write it' }],
+      });
+
+      expect(execute).toHaveBeenCalledTimes(2);
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(6);
+      const last = JSON.stringify(
+        vi.mocked(mockChat.sendMessageStream).mock.calls[5][1].message,
+      );
+      expect(last).toContain('truncated due to max_tokens limit');
+      expect(last).not.toContain('RETRY LOOP DETECTED');
+    });
+
+    it('starts the count again when the cause changes', async () => {
+      useTool(core.Kind.Edit, 'write_file');
+      const incomplete = call('call-incomplete');
+      markToolCallArgumentsIncomplete([{ functionCall: incomplete }]);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: { functionCalls: [incomplete] },
+            },
+          ]),
+        )
+        .mockResolvedValueOnce(
+          createStreamWithChunks([cutOff(call('call-cut'))]),
+        )
+        .mockResolvedValueOnce(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'write it' }],
+      });
+
+      const second = JSON.stringify(
+        vi.mocked(mockChat.sendMessageStream).mock.calls[2][1].message,
+      );
+      expect(second).toContain('truncated due to max_tokens limit');
+      expect(second).not.toContain('RETRY LOOP DETECTED');
+    });
+
+    it('logs repeated refusals as observed when loop protection is off', async () => {
+      useTool(core.Kind.Edit, 'write_file');
+      mockConfig.getLoopProtection = vi.fn().mockReturnValue('off');
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(
+          createStreamWithChunks([cutOff(call('call-cut-1'))]),
+        )
+        .mockResolvedValueOnce(
+          createStreamWithChunks([cutOff(call('call-cut-2'))]),
+        )
+        .mockResolvedValueOnce(
+          createStreamWithChunks([cutOff(call('call-cut-3'))]),
+        )
+        .mockResolvedValueOnce(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'write it' }],
+      });
+
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(4);
+      expect(
+        logLoopProtectionSpy.mock.calls.map(([, event]) => [
+          event.loop_type,
+          event.decision,
+        ]),
+      ).toEqual([[core.LoopType.INVALID_TOOL_PARAMS_STAGNATION, 'observed']]);
+    });
+  });
+
   describe('Managed Runtime batch close', () => {
     function driveToolTurn() {
       const execute = vi.fn().mockResolvedValue({
@@ -6515,6 +6796,58 @@ describe('Session', () => {
       });
     });
     expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+  });
+
+  it('titles a gated per-run fire’s fresh session from the task prompt, not the gate’s text', async () => {
+    const annotateRunSession = vi.fn().mockResolvedValue(undefined);
+    const scheduler = {
+      hasPendingWork: true,
+      enableDurable: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn(
+        (
+          callback: (job: {
+            id: string;
+            prompt: string;
+            taskPrompt: string;
+            cronExpr: string;
+            lastFiredAt: number;
+            sessionMode: 'per_run';
+          }) => void,
+        ) => {
+          callback({
+            id: 'task-1',
+            prompt:
+              'Summarize new PR comments\n\nGate output. The task’s gate command printed this.',
+            taskPrompt: 'Summarize new PR comments',
+            cronExpr: '0 * * * *',
+            lastFiredAt: 123,
+            sessionMode: 'per_run',
+          });
+        },
+      ),
+      stop: vi.fn(),
+      annotateRunSession,
+      getExitSummary: vi.fn().mockReturnValue(undefined),
+    };
+    mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+    mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+    vi.mocked(mockClient.extMethod).mockResolvedValueOnce({
+      sessionId: 'child-session',
+    });
+
+    session.startCronScheduler();
+
+    await vi.waitFor(() => {
+      expect(mockClient.extMethod).toHaveBeenCalledWith(
+        SERVE_CONTROL_EXT_METHODS.createSubSession,
+        expect.objectContaining({
+          prompt: expect.stringContaining('Gate output.'),
+          name: expect.stringMatching(
+            /^Summarize new PR comments · \d{2}-\d{2} \d{2}:\d{2}$/,
+          ),
+        }),
+      );
+    });
   });
 
   it('runs a per-run scheduled task in the task session when the daemon cannot create a fresh one', async () => {
@@ -17923,6 +18256,50 @@ describe('Session', () => {
       );
     });
 
+    it('forwards a gate to the daemon only when the task has one', async () => {
+      vi.mocked(mockClient.extMethod).mockResolvedValue({
+        id: 'cron-1',
+        cron: '*/2 * * * *',
+      });
+      vi.mocked(mockClient.extMethod).mockResolvedValueOnce({
+        id: 'cron-1',
+        cron: '*/2 * * * *',
+        gate: './probe.sh --gate',
+      });
+      const create = vi.mocked(mockConfig.setCurrentSessionScheduledTaskCreator)
+        .mock.calls[0]?.[0];
+      expect(create).toBeTypeOf('function');
+
+      // The daemon's echo of the stored gate reaches cron_create; an older
+      // daemon's answer has none, which cron_create reads as a dropped gate.
+      await expect(
+        create?.({
+          cron: '*/2 * * * *',
+          prompt: 'handle the events below',
+          recurring: true,
+          promptId: 'prompt-1',
+          gate: './probe.sh --gate',
+        }),
+      ).resolves.toEqual({
+        id: 'cron-1',
+        cron: '*/2 * * * *',
+        gate: './probe.sh --gate',
+      });
+      expect(mockClient.extMethod).toHaveBeenLastCalledWith(
+        'qwen/control/scheduled-task/create-current',
+        expect.objectContaining({ gate: './probe.sh --gate' }),
+      );
+      await create?.({
+        cron: '*/2 * * * *',
+        prompt: 'plain',
+        recurring: true,
+        promptId: 'prompt-1',
+      });
+      expect(
+        vi.mocked(mockClient.extMethod).mock.lastCall?.[1],
+      ).not.toHaveProperty('gate');
+    });
+
     it('reports an explicit unavailable error for an older daemon bridge', async () => {
       vi.mocked(mockClient.extMethod).mockRejectedValueOnce({
         code: -32601,
@@ -20447,6 +20824,21 @@ describe('Session', () => {
 
         expect(build).toHaveBeenCalledTimes(3);
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
+        // The 2nd invalid call's results carry the loop-protection reminder.
+        const remindersSent = (n: number) =>
+          (
+            vi.mocked(mockChat.sendMessageStream).mock.calls[n]?.[1] as {
+              message: Part[];
+            }
+          ).message.filter((part) =>
+            part.text?.includes('has rejected its arguments'),
+          );
+        expect(remindersSent(1)).toHaveLength(0);
+        expect(remindersSent(2)).toEqual([
+          {
+            text: "System: `ask_user_question` has rejected its arguments 2 times in this turn. Check the tool's parameter schema before calling it again, or use a different approach. Another invalid call stops this turn.",
+          },
+        ]);
         const stopHookCalls = messageBus.request.mock.calls.filter(
           ([request]) =>
             typeof request === 'object' &&
@@ -20482,6 +20874,71 @@ describe('Session', () => {
           ],
         });
       });
+
+      it.each([
+        { mode: 'warn', reminders: 1 },
+        { mode: 'off', reminders: 0 },
+      ])(
+        'keeps a $mode ACP prompt running past repeated invalid tool parameters',
+        async ({ mode, reminders }) => {
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          mockConfig.getLoopProtection = vi.fn().mockReturnValue(mode);
+          const build = vi.fn().mockImplementation(() => {
+            throw new Error('Parameter "questions" must be an array.');
+          });
+          mockToolRegistry.getTool.mockReturnValue({
+            name: 'ask_user_question',
+            kind: core.Kind.Other,
+            displayName: 'Ask User Question',
+            description: 'Ask user question',
+            build,
+            canUpdateOutput: false,
+            isOutputMarkdown: true,
+          });
+          const invalidCall = (n: number) =>
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: `ask_${n}`,
+                      name: 'ask_user_question',
+                      args: { questions: 'not an array' },
+                    },
+                  ],
+                },
+              },
+            ]);
+          const sendMessageStream = vi.fn();
+          for (let n = 1; n <= 5; n++) {
+            sendMessageStream.mockResolvedValueOnce(invalidCall(n));
+          }
+          sendMessageStream.mockResolvedValueOnce(createEmptyStream());
+          mockChat.sendMessageStream = sendMessageStream;
+
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'ask me before continuing' }],
+            }),
+          ).resolves.toMatchObject({ stopReason: 'end_turn' });
+
+          expect(build).toHaveBeenCalledTimes(5);
+          const sent = vi
+            .mocked(mockChat.sendMessageStream)
+            .mock.calls.flatMap(
+              (call) => (call[1] as { message: Part[] }).message,
+            );
+          expect(
+            sent.filter((part) =>
+              part.text?.includes('has rejected its arguments'),
+            ),
+          ).toHaveLength(reminders);
+        },
+      );
 
       it.each([
         {
@@ -22713,6 +23170,58 @@ describe('Session', () => {
               );
             }),
           ).toBe(false);
+        } finally {
+          restoreGuardMode();
+        }
+      });
+
+      it('does not log a loop reminder as reminded when the batch stops', async () => {
+        recreateSessionWithGuardMode('enforce');
+        try {
+          installFailingTool();
+          mockConfig.getLoopProtection = vi.fn().mockReturnValue('warn');
+          mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(2);
+          mockConfig.isMaxToolCallsPerTurnExplicit = vi
+            .fn()
+            .mockReturnValue(false);
+          // The stopping batch also repeats one call past the soft cap,
+          // which queues a cap reminder in the same batch.
+          const repeatedBatch = createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: Array.from({ length: 4 }, (_, index) => ({
+                  id: `failure_3_${index}`,
+                  name: 'failing_tool',
+                  args: { attempt: 'same' },
+                })),
+              },
+            },
+          ]);
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(streamForBatch(1, 4))
+            .mockResolvedValueOnce(streamForBatch(2, 4))
+            .mockResolvedValueOnce(repeatedBatch)
+            .mockResolvedValueOnce(createEmptyStream());
+
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'run the failing tool' }],
+            }),
+          ).rejects.toMatchObject({
+            data: {
+              loopType: core.LoopType.REPEATED_TOOL_EXECUTION_FAILURE,
+            },
+          });
+
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
+          expect(
+            logLoopProtectionSpy.mock.calls.filter(
+              ([, event]) => event.decision === 'reminded',
+            ),
+          ).toEqual([]);
         } finally {
           restoreGuardMode();
         }

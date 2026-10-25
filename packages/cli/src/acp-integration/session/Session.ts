@@ -7,16 +7,36 @@
 import { removeFileHistorySnapshots } from '@qwen-code/qwen-code-core/utils/file-history-snapshots.js';
 import { getRequestModel } from '@qwen-code/qwen-code-core/core/request-model.js';
 import { resolveWorkflowIntent } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
-import { logWorkflowKeyword } from '@qwen-code/qwen-code-core/telemetry/loggers.js';
+import {
+  logLoopProtection,
+  logWorkflowKeyword,
+} from '@qwen-code/qwen-code-core/telemetry/loggers.js';
 import {
   WorkflowKeywordEvent,
+  LoopProtectionEvent,
   LoopReason,
 } from '@qwen-code/qwen-code-core/telemetry/types.js';
 import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
-import { isToolCallConcurrencySafe } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
+import {
+  INCOMPLETE_ARGS_EDIT_REJECTION,
+  INCOMPLETE_ARGS_RETRY_LOOP_DIRECTIVE,
+  isToolCallConcurrencySafe,
+  TRUNCATION_EDIT_REJECTION,
+  TRUNCATION_RETRY_LOOP_DIRECTIVE,
+} from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
+import { FinishReason } from '@qwen-code/qwen-code-core/core/genai-compat.js';
+import { toolCallArgumentsWereIncomplete } from '@qwen-code/qwen-code-core/core/incomplete-tool-call-args.js';
 import { codeModeToolResultStamp } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
 import { collectText } from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
-import { getTurnToolCallCapHalt } from '@qwen-code/qwen-code-core/services/loopDetectionService.js';
+import {
+  getTurnToolCallCapHalt,
+  shouldRemindTurnToolCallCap,
+} from '@qwen-code/qwen-code-core/services/loopDetectionService.js';
+import {
+  buildLoopReminder,
+  INVALID_PARAMS_REMINDER_AT,
+} from '@qwen-code/qwen-code-core/services/loop-protection.js';
+import type { LoopReminderInput } from '@qwen-code/qwen-code-core/services/loop-protection.js';
 import {
   captureHookExecutionOwner,
   runWithHookExecutionOwner,
@@ -873,9 +893,31 @@ export type DaemonToolLoopState = {
   loopType?: LoopType;
   /** Reason and tool-call numbers of the stop, for shared loop types. */
   loopDetail?: LoopStopDetail;
+  /** Tool of the (tool, args) pair behind maxToolCallKeyRepeat. */
+  maxToolCallKeyName?: string;
+  /** Loop-protection patterns already reminded or observed this turn. */
+  loopProtectionHandled?: Set<string>;
+  /** Reminders for the next model request that carries tool results. */
+  pendingLoopReminders?: Array<{
+    text: string;
+    loopType: LoopType;
+    detail: LoopStopDetail;
+  }>;
   repeatedToolFailureMode: RepeatedToolFailureGuardMode;
   repeatedToolFailureState: RepeatedToolFailureGuardState;
   explorationBudget?: ToolExplorationBudget;
+  /**
+   * Per-tool count of refused partial edits, one per model response, for the
+   * rejection the tool last got.
+   */
+  partialEditRefusals?: Map<string, { cause: string; count: number }>;
+};
+
+/** What the send wrapper knows about one model response, for its calls. */
+type ModelResponseFacts = {
+  outputTruncated: boolean;
+  /** Tools whose refused partial edit this response already counted. */
+  refusedPartialEdits: Set<string>;
 };
 
 const DAEMON_INVALID_TOOL_PARAMS_THRESHOLD = 3;
@@ -1119,6 +1161,133 @@ function isLoopDetectedTurnError(error: unknown): boolean {
   );
 }
 
+function logDaemonLoopProtection(
+  config: Config,
+  promptId: string,
+  loopType: LoopType,
+  decision: 'reminded' | 'stopped' | 'observed',
+  detail: LoopStopDetail,
+): void {
+  try {
+    logLoopProtection(
+      config,
+      new LoopProtectionEvent({
+        prompt_id: promptId,
+        loop_type: loopType,
+        decision,
+        mode: config.getLoopProtection(),
+        loop_reason: detail.loopReason,
+      }),
+    );
+  } catch (error) {
+    debugLogger.debug(
+      '[Session] Failed to record loop protection telemetry',
+      error,
+    );
+  }
+}
+
+// One reminder per pattern.
+function remindDaemonLoop(
+  loopState: DaemonToolLoopState,
+  key: string,
+  input: LoopReminderInput,
+  detail: LoopStopDetail,
+): void {
+  const handled = (loopState.loopProtectionHandled ??= new Set());
+  if (handled.has(key)) return;
+  handled.add(key);
+  (loopState.pendingLoopReminders ??= []).push({
+    text: buildLoopReminder(input),
+    loopType: input.loopType,
+    detail,
+  });
+}
+
+// Takes the queued reminders for the next request, logging them as
+// delivered.
+function takeDaemonLoopReminders(
+  config: Config,
+  promptId: string,
+  loopState: DaemonToolLoopState,
+): string | undefined {
+  const pending = loopState.pendingLoopReminders;
+  if (!pending?.length) return undefined;
+  loopState.pendingLoopReminders = undefined;
+  for (const { loopType, detail } of pending) {
+    logDaemonLoopProtection(config, promptId, loopType, 'reminded', detail);
+  }
+  return pending.map(({ text }) => text).join('\n\n');
+}
+
+// A governed detector reached its reminder point (#14828).
+function remindDaemonLoopBeforeStop(
+  config: Config,
+  loopState: DaemonToolLoopState,
+  key: string,
+  input: Omit<LoopReminderInput, 'stops'>,
+  detail: LoopStopDetail = {},
+): void {
+  const mode = config.getLoopProtection();
+  if (mode === 'off') return;
+  remindDaemonLoop(
+    loopState,
+    key,
+    { ...input, stops: mode === 'stop' },
+    detail,
+  );
+}
+
+// A governed detector reached its stop point: `stop` halts, `warn` reminds,
+// `off` only records. Returns whether to halt.
+function onDaemonLoopStopPoint(
+  config: Config,
+  promptId: string,
+  loopState: DaemonToolLoopState,
+  key: string,
+  input: Omit<LoopReminderInput, 'stops'>,
+  detail: LoopStopDetail,
+  stopMessage: string,
+): boolean {
+  switch (config.getLoopProtection()) {
+    case 'stop':
+      if (loopState.loopDetected) return true;
+      recordDaemonLoopDetected(
+        config,
+        promptId,
+        input.loopType,
+        stopMessage,
+        loopState,
+        { loopDetail: detail },
+      );
+      logDaemonLoopProtection(
+        config,
+        promptId,
+        input.loopType,
+        'stopped',
+        detail,
+      );
+      return true;
+    case 'warn':
+      remindDaemonLoop(loopState, key, { ...input, stops: false }, detail);
+      return false;
+    default: {
+      const handled = (loopState.loopProtectionHandled ??= new Set());
+      if (!handled.has(key)) {
+        handled.add(key);
+        logDaemonLoopProtection(
+          config,
+          promptId,
+          input.loopType,
+          'observed',
+          detail,
+        );
+      }
+      return false;
+    }
+  }
+}
+
 function recordDaemonToolCalls(
   config: Config,
   promptId: string,
@@ -1134,6 +1303,7 @@ function recordDaemonToolCalls(
     loopState.toolCallKeyCounts.set(key, count);
     if (count > loopState.maxToolCallKeyRepeat) {
       loopState.maxToolCallKeyRepeat = count;
+      loopState.maxToolCallKeyName = call.name ?? '';
     }
   }
   // Same per-turn cap semantics as the core LoopDetectionService — the
@@ -1152,27 +1322,64 @@ function recordDaemonToolCalls(
   // daemon stream loops discard the failed attempt's accumulated calls
   // (functionCalls.length = 0) before re-streaming, so a failed attempt's
   // calls never reach this function to be double-counted.
+  const cap = config.getMaxToolCallsPerTurn();
+  const isExplicitCap = config.isMaxToolCallsPerTurnExplicit();
   const capHalt = getTurnToolCallCapHalt(
     loopState.totalToolCalls,
     loopState.maxToolCallKeyRepeat,
-    config.getMaxToolCallsPerTurn(),
-    config.isMaxToolCallsPerTurnExplicit(),
+    cap,
+    isExplicitCap,
   );
+  const capMessage = `Stopping ACP turn after ${loopState.totalToolCalls} tool calls in one turn.`;
+  const stuck = {
+    loopType: LoopType.TURN_TOOL_CALL_CAP,
+    toolName: loopState.maxToolCallKeyName,
+    count: loopState.maxToolCallKeyRepeat,
+    softCap: cap,
+  };
   if (capHalt) {
-    return recordDaemonLoopDetected(
-      config,
-      promptId,
-      LoopType.TURN_TOOL_CALL_CAP,
-      `Stopping ACP turn after ${loopState.totalToolCalls} tool calls in one turn.`,
-      loopState,
-      {
-        loopDetail: {
-          loopReason: capHalt.reason,
-          toolCallCount: loopState.totalToolCalls,
-          toolCallLimit: capHalt.limit,
-        },
-      },
-    );
+    const loopDetail = {
+      loopReason: capHalt.reason,
+      toolCallCount: loopState.totalToolCalls,
+      toolCallLimit: capHalt.limit,
+    };
+    // Budgets (an explicit cap, the backstop) stop in every mode.
+    if (capHalt.reason !== LoopReason.STUCK_REPETITION) {
+      return recordDaemonLoopDetected(
+        config,
+        promptId,
+        LoopType.TURN_TOOL_CALL_CAP,
+        capMessage,
+        loopState,
+        { loopDetail },
+      );
+    }
+    if (
+      onDaemonLoopStopPoint(
+        config,
+        promptId,
+        loopState,
+        'cap',
+        stuck,
+        loopDetail,
+        capMessage,
+      )
+    ) {
+      return true;
+    }
+  } else if (
+    shouldRemindTurnToolCallCap(
+      loopState.totalToolCalls,
+      loopState.maxToolCallKeyRepeat,
+      cap,
+      isExplicitCap,
+    )
+  ) {
+    remindDaemonLoopBeforeStop(config, loopState, 'cap', stuck, {
+      loopReason: LoopReason.STUCK_REPETITION,
+      toolCallCount: loopState.totalToolCalls,
+      toolCallLimit: cap,
+    });
   }
   // Mirror of core's checkGlobalDuplicate: the same (tool, args) pair
   // repeated GLOBAL_DUPLICATE_THRESHOLD times anywhere in the turn halts
@@ -1187,16 +1394,18 @@ function recordDaemonToolCalls(
   // would ship this halt on.
   if (
     !config.getSkipLoopDetection() &&
-    loopState.maxToolCallKeyRepeat >= GLOBAL_DUPLICATE_THRESHOLD
-  ) {
-    return recordDaemonLoopDetected(
+    loopState.maxToolCallKeyRepeat >= GLOBAL_DUPLICATE_THRESHOLD &&
+    onDaemonLoopStopPoint(
       config,
       promptId,
-      LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
-      `Stopping ACP turn after the same tool call repeated ${loopState.maxToolCallKeyRepeat} times.`,
       loopState,
-      { loopDetail: { loopReason: LoopReason.REPEATED_CALL } },
-    );
+      LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+      { loopType: LoopType.GLOBAL_TOOL_CALL_DUPLICATE },
+      { loopReason: LoopReason.REPEATED_CALL },
+      `Stopping ACP turn after the same tool call repeated ${loopState.maxToolCallKeyRepeat} times.`,
+    )
+  ) {
+    return true;
   }
   // Deliberately after both halt checks: a halted batch is skipped whole and
   // never executes, so its calls must not feed the exploration budget (nor
@@ -1227,14 +1436,55 @@ function recordDaemonInvalidToolParams(
   const key = toolName;
   const count = (loopState.invalidToolParamErrors.get(key) ?? 0) + 1;
   loopState.invalidToolParamErrors.set(key, count);
+  const invalid = {
+    loopType: LoopType.INVALID_TOOL_PARAMS_STAGNATION,
+    toolName,
+    count,
+  };
+  if (
+    count >= INVALID_PARAMS_REMINDER_AT &&
+    count < DAEMON_INVALID_TOOL_PARAMS_THRESHOLD
+  ) {
+    remindDaemonLoopBeforeStop(
+      config,
+      loopState,
+      `invalid:${toolName}`,
+      invalid,
+    );
+  }
   if (count < DAEMON_INVALID_TOOL_PARAMS_THRESHOLD) return false;
-  return recordDaemonLoopDetected(
+  return onDaemonLoopStopPoint(
     config,
     promptId,
-    LoopType.INVALID_TOOL_PARAMS_STAGNATION,
-    `Stopping ACP turn after repeated tool parameter errors from ${toolName}: ${error.message}`,
     loopState,
+    `invalid:${toolName}`,
+    invalid,
+    {},
+    `Stopping ACP turn after repeated tool parameter errors from ${toolName}: ${error.message}`,
   );
+}
+
+// Counted apart from schema errors and once per response and tool, as the
+// scheduler counts per batch: a response cut off mid-batch refuses every edit
+// in it before the model has seen a single refusal. As in the scheduler, a
+// change of cause restarts the count, and a call from the tool that builds
+// clears it, so only refusals the model has not recovered from add up.
+function recordDaemonPartialEditRefusal(
+  loopState: DaemonToolLoopState,
+  toolName: string,
+  cause: string,
+  response: ModelResponseFacts | undefined,
+): number {
+  const counts = (loopState.partialEditRefusals ??= new Map());
+  const previous = counts.get(toolName);
+  const sameCause = previous?.cause === cause;
+  if (sameCause && response?.refusedPartialEdits.has(toolName)) {
+    return previous.count;
+  }
+  response?.refusedPartialEdits.add(toolName);
+  const count = (sameCause ? previous.count : 0) + 1;
+  counts.set(toolName, { cause, count });
+  return count;
 }
 
 // The drain is served from an in-memory queue, so a conforming client answers
@@ -1745,6 +1995,8 @@ interface CronFire {
   modelServiceId?: string;
   groupId?: string;
   name?: string;
+  /** A gated fire's task prompt; `prompt` is then the gate's delivered text. */
+  taskPrompt?: string;
   delivery?: CronTaskDelivery;
   todoWorkChainId?: string;
 }
@@ -2522,6 +2774,15 @@ export class Session implements SessionContext {
     string,
     Promise<{ recordId: string; created: boolean; deferred?: boolean }>
   >();
+
+  /**
+   * The model response each call came from, with whether the output limit cut
+   * it off — the fact `turn.ts` puts on `wasOutputTruncated`. This executor
+   * bypasses the scheduler, so `runTool` applies the scheduler's partial-edit
+   * guard itself. Keyed by identity: the call `runTool` gets must be the object
+   * the stream emitted.
+   */
+  readonly #callResponses = new WeakMap<FunctionCall, ModelResponseFacts>();
 
   /**
    * Call ids of the ask_user_question being re-hung by the current restore
@@ -3863,6 +4124,7 @@ export class Session implements SessionContext {
             cron: req.cron,
             prompt: req.prompt,
             recurring: req.recurring,
+            ...(req.gate ? { gate: req.gate } : {}),
           },
         );
       } catch (error) {
@@ -3898,7 +4160,14 @@ export class Session implements SessionContext {
           'cron_create: bridge returned an invalid scheduled-task result',
         );
       }
-      return { id: resp['id'], cron: resp['cron'] };
+      // A daemon that predates gated tasks echoes no `gate`; cron_create
+      // reads the absence as a dropped gate.
+      const gate = resp['gate'];
+      return {
+        id: resp['id'],
+        cron: resp['cron'],
+        ...(typeof gate === 'string' || gate === null ? { gate } : {}),
+      };
     });
   }
 
@@ -9550,10 +9819,17 @@ export class Session implements SessionContext {
       llmClient.discardManagedAutoMemoryRecallDelivery(memoryDelivery);
       return { responseStream: null, stopReason: 'end_turn' };
     }
+    const callResponses = this.#callResponses;
     const responseStream = (async function* () {
       let committed = false;
       let receivedChunk = false;
       let memoryDeliveryStateInvalidated = false;
+      // As in `turn.ts`: a max-tokens finish marks the calls of the current
+      // attempt, and a retry or fallback starts a new attempt.
+      let attempt: ModelResponseFacts = {
+        outputTruncated: false,
+        refusedPartialEdits: new Set(),
+      };
       const commitMemoryDelivery = () => {
         llmClient.commitManagedAutoMemoryRecallDelivery(memoryDelivery);
         if (memoryDeliveryStateInvalidated) {
@@ -9565,6 +9841,15 @@ export class Session implements SessionContext {
         for await (const event of sourceStream) {
           if (event.type === StreamEventType.CHUNK) {
             receivedChunk = true;
+            for (const call of event.value.functionCalls ?? []) {
+              callResponses.set(call, attempt);
+            }
+            if (
+              event.value.candidates?.[0]?.finishReason ===
+              FinishReason.MAX_TOKENS
+            ) {
+              attempt.outputTruncated = true;
+            }
           } else if (event.type === StreamEventType.COMPRESSED) {
             llmClient.resetManagedAutoMemoryAfterCompression();
             memoryDeliveryStateInvalidated = true;
@@ -9573,6 +9858,10 @@ export class Session implements SessionContext {
             event.type === StreamEventType.MODEL_FALLBACK
           ) {
             receivedChunk = false;
+            attempt = {
+              outputTruncated: false,
+              refusedPartialEdits: new Set(),
+            };
           }
           yield event;
         }
@@ -9866,6 +10155,11 @@ export class Session implements SessionContext {
         `[repeated-tool-failure-guard] mode=${toolLoopState.repeatedToolFailureMode} decision=${repeatedToolFailureDecision.kind} phase=${state.phase} candidate=${state.candidateOrdinal} failures=${state.failureCount} batches=${state.batchCount}`,
       );
     }
+    // A stop sends nothing, so its batch leaves the reminders unlogged.
+    const loopReminder =
+      repeatedToolFailureDecision.kind === 'stop'
+        ? undefined
+        : takeDaemonLoopReminders(this.config, promptId, toolLoopState);
     const parts = [
       ...toolRun.parts,
       ...(activeTodoReminder ? [{ text: activeTodoReminder }] : []),
@@ -9874,6 +10168,7 @@ export class Session implements SessionContext {
       )
         ? [{ text: TOOL_EXPLORATION_REMINDER }]
         : []),
+      ...(loopReminder ? [{ text: loopReminder }] : []),
       ...(repeatedToolFailureDecision.kind === 'warn'
         ? [{ text: REPEATED_TOOL_FAILURE_REMINDER }]
         : []),
@@ -10795,7 +11090,7 @@ export class Session implements SessionContext {
           // the built prompt, whose first line is the execution-context
           // header. Same shape the manual-run route gives its children.
           name: scheduledTaskRunSessionName(
-            job.name ?? job.prompt,
+            job.name ?? job.taskPrompt ?? job.prompt,
             triggeredAt,
           ),
           ...(job.id
@@ -15091,6 +15386,73 @@ export class Session implements SessionContext {
           );
         }
 
+        // ---- Partial edit: the scheduler's guard, at the scheduler's step ----
+        // Repaired arguments can be schema-valid and still hold only part of
+        // the content, so an Edit-kind call is refused instead of written.
+        const response = this.#callResponses.get(fc);
+        const outputTruncated = response?.outputTruncated === true;
+        if (
+          (outputTruncated || toolCallArgumentsWereIncomplete(fc)) &&
+          tool.kind === Kind.Edit
+        ) {
+          const rejection = outputTruncated
+            ? TRUNCATION_EDIT_REJECTION
+            : INCOMPLETE_ARGS_EDIT_REJECTION;
+          // A model cut off on every attempt sends different partial content
+          // each time, so only this count can stop the turn.
+          const count =
+            toolLoopState && !activeToolAbortSignal.aborted
+              ? recordDaemonPartialEditRefusal(
+                  toolLoopState,
+                  toolName,
+                  rejection,
+                  response,
+                )
+              : 0;
+          const loopProtection = this.config.getLoopProtection();
+          const stops = loopProtection === 'stop';
+          const refusal = await earlyErrorResponse(
+            new Error(
+              count >= INVALID_PARAMS_REMINDER_AT
+                ? `${rejection}${
+                    outputTruncated
+                      ? TRUNCATION_RETRY_LOOP_DIRECTIVE
+                      : INCOMPLETE_ARGS_RETRY_LOOP_DIRECTIVE
+                  }${stops ? ' Another refused write stops this turn.' : ''}`
+                : rejection,
+            ),
+            toolName,
+            {
+              status: 'error',
+              errorType: outputTruncated
+                ? ToolErrorType.OUTPUT_TRUNCATED
+                : ToolErrorType.INVALID_TOOL_PARAMS,
+              executionStatus: 'not_started',
+            },
+          );
+          // `warn` skips the stop point, which would queue the schema reminder
+          // and misread a cut-off write; the refusal already carries the
+          // directive. `off` still logs the loop as observed.
+          const loopDetected =
+            loopProtection !== 'warn' &&
+            toolLoopState !== undefined &&
+            count >= DAEMON_INVALID_TOOL_PARAMS_THRESHOLD &&
+            onDaemonLoopStopPoint(
+              this.config,
+              promptId,
+              toolLoopState,
+              `partial-edit:${toolName}`,
+              {
+                loopType: LoopType.INVALID_TOOL_PARAMS_STAGNATION,
+                toolName,
+                count,
+              },
+              {},
+              `Stopping ACP turn after repeated refused partial edits from ${toolName}`,
+            );
+          return loopDetected ? { ...refusal, loopDetected } : refusal;
+        }
+
         // ---- PreToolUse: once, before every input-dependent check ----
         // A replacement input then goes through the same gates, validation,
         // permission and approval as the model's input; the checks above fix
@@ -15244,6 +15606,9 @@ export class Session implements SessionContext {
           let invocation = buildInvocation(args);
           builtInvocation = invocation;
           toolBuildSucceeded = true;
+          // A complete call that builds is the model's recovery, as when the
+          // scheduler clears a tool's retry counts on passing validation.
+          toolLoopState?.partialEditRefusals?.delete(toolName);
 
           if (this.config.getSessionSourceType?.() === 'agent-host') {
             // Keep upstream authority at the final execution boundary.

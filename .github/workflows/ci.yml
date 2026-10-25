@@ -49,6 +49,7 @@ on:
         type: 'choice'
         options:
           - 'self-hosted'
+          - 'self-hosted-arm64'
           - 'hosted'
 
 concurrency:
@@ -99,8 +100,8 @@ env:
   # re-runs every suite after `npm ci`, and a push to main always classifies
   # `full` (classify_pr computes a profile only for pull_request), so what
   # the fast lane skips is still re-checked post-merge.
-  HELPER_TESTS_DEP_FREE: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/update-ecs-runner-qwen-workflow.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/check-lint-gate-freshness.test.mjs .github/scripts/review-runner-schedule.test.mjs .github/scripts/ecs-runner/qwen-docker-cleanup.test.mjs .github/scripts/check-test-growth.test.mjs .github/scripts/check-ci-budget.test.mjs'
-  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/update-ecs-runner-qwen-workflow.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/assign-pr-owner.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/check-lint-gate-freshness.test.mjs .github/scripts/ci-disk-pressure.test.mjs .github/scripts/e2e-build.test.mjs integration-tests/concurrent-runner/export-html-from-chatrecord-jsonl.test.mjs .github/scripts/review-runner-schedule.test.mjs .github/scripts/ecs-runner/qwen-docker-cleanup.test.mjs .github/scripts/ecs-runner/review-scratch-cleanup.test.mjs .github/scripts/check-test-growth.test.mjs .github/scripts/check-ci-budget.test.mjs'
+  HELPER_TESTS_DEP_FREE: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/update-ecs-runner-qwen-workflow.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/check-lint-gate-freshness.test.mjs .github/scripts/review-runner-schedule.test.mjs .github/scripts/ecs-runner/qwen-docker-cleanup.test.mjs .github/scripts/check-test-growth.test.mjs .github/scripts/check-ci-budget.test.mjs .github/scripts/ecs-runner/check-font-baseline.test.mjs'
+  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/update-ecs-runner-qwen-workflow.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/assign-pr-owner.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/check-lint-gate-freshness.test.mjs .github/scripts/ci-disk-pressure.test.mjs .github/scripts/e2e-build.test.mjs integration-tests/concurrent-runner/export-html-from-chatrecord-jsonl.test.mjs .github/scripts/review-runner-schedule.test.mjs .github/scripts/ecs-runner/qwen-docker-cleanup.test.mjs .github/scripts/ecs-runner/review-scratch-cleanup.test.mjs .github/scripts/check-test-growth.test.mjs .github/scripts/check-ci-budget.test.mjs .github/scripts/ecs-runner/check-font-baseline.test.mjs'
   # The growth ratchet and its vitest mirror compare each workflow against
   # the PR's base commit to tell "this PR grew the file" apart from "the
   # baseline went stale on main" (#9904). Wired once here so every lane
@@ -191,6 +192,10 @@ jobs:
           SAME_REPO: '${{ github.event.pull_request.head.repo.full_name == github.repository }}'
           AUTHOR_ASSOCIATION: '${{ github.event.pull_request.author_association }}'
           ECS_DISABLED: '${{ vars.MAINTAINER_ECS_RUNNER_DISABLED }}'
+          # Optional fleet selector: 'hosted' forces github.com-hosted runners,
+          # 'arm64' routes to the experimental ARM64 ECS fleet, anything else
+          # keeps the x64 ecs-qwen fleet. Empty/unset keeps current behavior.
+          LINUX_RUNNER_FLEET: '${{ vars.LINUX_RUNNER_FLEET }}'
           EVENT_NAME: '${{ github.event_name }}'
           DISPATCH_LINUX_RUNNER: '${{ github.event.inputs.linux_runner }}'
         run: |-
@@ -199,12 +204,25 @@ jobs:
           case "${AUTHOR_ASSOCIATION}" in
             OWNER|MEMBER|COLLABORATOR) trusted_author=true ;;
           esac
+          # Dispatch input wins over the fleet variable; MAINTAINER_ECS_RUNNER_
+          # DISABLED=true still hard-forces hosted runners everywhere.
           if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
             if [[ "${ECS_DISABLED}" != "true" && "${DISPATCH_LINUX_RUNNER}" == "self-hosted" ]]; then
               ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'
+            elif [[ "${ECS_DISABLED}" != "true" && "${DISPATCH_LINUX_RUNNER}" == "self-hosted-arm64" ]]; then
+              # Experimental ARM64 ECS fleet (Hangzhou, ecs.q8y). No arch label
+              # set is required by any production lane; this only selects the
+              # fleet that self-identifies as ARM64.
+              ubuntu_runner='["self-hosted", "linux", "arm64"]'
             fi
-          elif [[ "${ECS_DISABLED}" != "true" && ( "${SAME_REPO}" == "true" || "${trusted_author}" == "true" || "${EVENT_NAME}" == "merge_group" || "${EVENT_NAME}" == "push" ) ]]; then
-            ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'
+          elif [[ "${ECS_DISABLED}" == "true" || "${LINUX_RUNNER_FLEET}" == "hosted" ]]; then
+            ubuntu_runner='["ubuntu-latest"]'
+          elif [[ "${SAME_REPO}" == "true" || "${trusted_author}" == "true" || "${EVENT_NAME}" == "merge_group" || "${EVENT_NAME}" == "push" ]]; then
+            if [[ "${LINUX_RUNNER_FLEET}" == "arm64" ]]; then
+              ubuntu_runner='["self-hosted", "linux", "arm64"]'
+            else
+              ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'
+            fi
           fi
           echo "ubuntu_runner=${ubuntu_runner}" >> "${GITHUB_OUTPUT}"
           echo "Selected Linux runner: ${ubuntu_runner}"
@@ -610,6 +628,10 @@ jobs:
           package-manager-cache: false
           registry-url: 'https://registry.npmjs.org/'
 
+      - name: 'Cache pnpm store (hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'github-hosted' }}"
+        uses: './.github/actions/pnpm-store-cache'
+
       - name: 'Use pre-installed Node.js (self-hosted)'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
         uses: './.github/actions/self-hosted-node'
@@ -621,6 +643,19 @@ jobs:
           mkdir -p "${cache_dir}"
           echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
           echo "Using persistent npm cache at ${cache_dir}"
+          du -sh "${cache_dir}" 2>/dev/null || true
+
+      # test:scripts runs the standalone runtime regression against pinned
+      # Node and Bun archives. Keep them on the persistent host so only the
+      # first run per host downloads them: the download cost minutes per run,
+      # and a 502 from npm once reddened an otherwise green run. Exported here
+      # because the test step overrides HOME.
+      - name: 'Configure persistent standalone runtime cache (self-hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
+        run: |-
+          cache_dir="${HOME}/.cache/qwen-code/standalone-runtimes"
+          echo "QWEN_STANDALONE_RUNTIME_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
+          echo "Using persistent standalone runtime cache at ${cache_dir}"
           du -sh "${cache_dir}" 2>/dev/null || true
 
       - name: 'Configure npm for rate limiting'
@@ -839,6 +874,14 @@ jobs:
       - name: 'Publish Test Report (for non-forks)'
         if: |-
           ${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && steps.unit_tests.outcome != 'skipped' && (github.event.pull_request.head.repo.full_name == github.repository) }}
+        # The parser rejects the whole step when any matched file is not
+        # well-formed XML, and vitest's JUnit writer can leave
+        # packages/cli/junit.xml truncated at the tail when the suite exits
+        # mid-write: #15305 (attempt 1) failed at line 47397 and #15261 at
+        # 47232 with "Invalid character in entity name", while both runs'
+        # tests had passed. The report is advisory (`fail-on-error: false`),
+        # so a broken artifact must not turn a green suite red.
+        continue-on-error: true
         uses: 'dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2' # ratchet:dorny/test-reporter@v3
         with:
           name: 'Test Results (ubuntu-latest, Node 22.x)'
@@ -846,13 +889,20 @@ jobs:
           reporter: 'java-junit'
           fail-on-error: 'false'
 
-      - name: 'Upload Test Results Artifact (for forks)'
+      - name: 'Upload Test Results Artifact'
         if: |-
-          ${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
+          ${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}
+        # Advisory like the publisher above: a transient artifact-service
+        # failure must not turn a green suite red. `always()` also fires on a
+        # run cancelled mid-suite, so a partial report can be retained under
+        # the complete run's name.
+        continue-on-error: true
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
-          name: 'test-results-fork-22.x-ubuntu-latest'
+          name: "${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'test-results-fork-22.x-ubuntu-latest' || 'test-results-22.x-ubuntu-latest' }}"
           path: 'packages/*/junit.xml'
+          if-no-files-found: 'ignore'
+          retention-days: 7
 
       # Push only: that is the one lane where QWEN_CI_COVERAGE turns
       # collection on, so a pull-request run has nothing to upload.
@@ -896,6 +946,8 @@ jobs:
     # only the warm half of that reality. Hosted runners keep the tighter
     # ceiling so a genuine hang there does not burn the ECS allowance.
     timeout-minutes: '${{ fromJSON(contains(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'', ''ecs-qwen'') && ''90'' || ''45'') }}'
+    env:
+      LINT_BASE_SHA: "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}"
     permissions:
       contents: 'read'
       pull-requests: 'read'
@@ -1163,6 +1215,21 @@ jobs:
           HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
         run: 'node .github/scripts/check-test-growth.mjs'
 
+      # Stays below the two steps above that refetch shallow history: a
+      # depth-1 fetch of the base ref grafts the commit LINT_BASE_SHA names and
+      # `merge-base` then fails closed to a silent full scan (design doc,
+      # "PR-lane history"). The helper-checks step that runs lint.js is below.
+      - name: 'Fetch incremental lint history'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && github.event_name == 'pull_request' && steps.ci_profile.outputs.ci_profile != 'docs_only' }}"
+        timeout-minutes: 2
+        continue-on-error: true
+        env:
+          LINT_HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
+        run: |-
+          # Bound transfer on the shared runners. lint-scope falls back to full
+          # checks when this history cannot prove the PR's merge base.
+          git fetch --no-tags --depth=100 origin "${LINT_BASE_SHA}" "${LINT_HEAD_SHA}"
+
       # Avoid setup-node downloads on ECS, where nodejs.org may be unreachable
       # through the egress proxy; reuse the machine's Node instead.
       - name: 'Set up Node.js 22.x (hosted)'
@@ -1172,6 +1239,10 @@ jobs:
           node-version: '22.x'
           package-manager-cache: false
           registry-url: 'https://registry.npmjs.org/'
+
+      - name: 'Cache pnpm store (hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'github-hosted' }}"
+        uses: './.github/actions/pnpm-store-cache'
 
       - name: 'Use pre-installed Node.js (self-hosted)'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
@@ -1205,6 +1276,9 @@ jobs:
 
       - name: 'Install dependencies'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        env:
+          QWEN_SKIP_PREPARE: '1'
+          QWEN_SKIP_NOTICE_GENERATION: '1'
         run: |-
           DISK_SAMPLES="${RUNNER_TEMP}/disk-pressure-samples.log"
           echo "DISKCONTEXT $(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) runner[${RUNNER_NAME:-unknown}] run[${GITHUB_RUN_ID:-local}/${GITHUB_RUN_ATTEMPT:-1}] job[${GITHUB_JOB:-test}] cpus[$(nproc 2>/dev/null || echo unknown)]" > "$DISK_SAMPLES" 2>/dev/null || true
@@ -1282,6 +1356,24 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: 'node scripts/lint.js --sensitive-keywords'
 
+      # Keep this Linux-only PR gate explicit. macOS/Windows merge-queue jobs run
+      # npm run test:ci only, so they intentionally do not repeat this
+      # platform-independent bundle closure check.
+      - name: 'Check serve fast-path bundle closure'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: 'npm run check:serve-fast-path-bundle'
+
+      # cli sources name core modules by path (`.../config/storage.js`). In the
+      # repo those resolve through tsconfig paths or vitest aliases; in the
+      # published package neither exists and Node resolves them against core's
+      # `exports`, where one `./*` entry carries all of them. Nothing else
+      # exercises that entry, so without this a change to it — or to the
+      # dist layout — leaves every suite green and breaks `qwen` at startup.
+      # Runs after the step above has already built the workspace.
+      - name: 'Check core subpath exports resolve'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: 'npm run check:core-subpath-exports'
+
       - name: 'Run i18n check'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: 'npm run check-i18n'
@@ -1320,26 +1412,6 @@ jobs:
             exit 1
           fi
           echo "NOTICES.txt is up-to-date"
-
-      # Keep this Linux-only PR gate explicit. macOS/Windows merge-queue jobs run
-      # npm run test:ci only, so they intentionally do not repeat this
-      # platform-independent bundle closure check.
-      - name: 'Check serve fast-path bundle closure'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
-        run: 'npm run check:serve-fast-path-bundle'
-
-      # cli sources name core modules by path (`.../config/storage.js`). In the
-      # repo those resolve through tsconfig paths or vitest aliases; in the
-      # published package neither exists and Node resolves them against core's
-      # `exports`, where one `./*` entry carries all of them. Nothing else
-      # exercises that entry, so without this a change to it — or to the
-      # dist layout — leaves every suite green and breaks `qwen` at startup.
-      # Runs after the step above has already built the workspace.
-      - name: 'Check core subpath exports resolve'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
-        run: |-
-          npm run build --workspace=packages/core
-          npm run check:core-subpath-exports
 
       # The `github_ci_only` profile runs the .github/scripts helper tests, but a
       # `full` PR that touches those scripts skips that path and `npm run
@@ -1380,9 +1452,9 @@ jobs:
           DISK_SAMPLES="${RUNNER_TEMP}/disk-pressure-samples.log"
           {
             echo "DISKCONTEXT failure-dump $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            df -hT || true
+            df -hT || df -h || true
             df -i || true
-            grep -E 'MemTotal|MemAvailable' /proc/meminfo || true
+            grep -E 'MemTotal|MemAvailable|SwapTotal|SwapFree' /proc/meminfo || true
           } 2>/dev/null | tee -a "$DISK_SAMPLES" || true
       # Collector for the #10035 telemetry, kept as the LAST step: failure()
       # is evaluated when the step is reached and never revisited, so at its
@@ -1406,24 +1478,30 @@ jobs:
 
   web_shell_e2e_smoke:
     name: 'web-shell E2E Smoke (ubuntu-latest, Node 22.x)'
+    # Gate on the classifier's own profile output instead of the copy `test`
+    # re-derives: it is the same value (the classifier already forces an
+    # unknown one to `full`), and dropping the `test` edge lets this
+    # 35-minute lane run beside Test instead of behind it. `|| 'full'`
+    # extends that fail-safe to a classifier that emitted nothing at all.
     needs:
       - 'classify_pr'
-      - 'test'
     if: |-
       ${{
         !cancelled() &&
         (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') &&
         needs.classify_pr.outputs.skip_ci != 'true' &&
-        needs.test.outputs.ci_profile == 'full'
+        (needs.classify_pr.outputs.ci_profile || 'full') == 'full'
       }}
-    # Routed like test's: trusted runs use the ECS pool, untrusted fork PRs
-    # stay hosted. #11250 moved it hosted after four pool attempts failed
-    # (run 34081409590). Three ran the smoke unpinned at 8 workers, half the
-    # host's 16 cores, against hosted's 2, and timed out broadly on
+    # Keep the classifier's trust and hosted overrides, but use ARM64 for
+    # this lane independently of the ordinary Linux CI fleet. The history
+    # below is x64-specific, not a verdict on ARM64, but it is why this lane
+    # is fragile: #11250 moved it back to hosted after four pool attempts
+    # failed (run 34081409590). Three ran the smoke unpinned at 8 workers,
+    # half the host's 16 cores, against hosted's 2, and timed out broadly on
     # visibility and clock waits. The fourth's transcript gate took 73 s
     # against its 60 s budget while npm install alone took 28 min on that
     # host. The smoke step pins the hosted worker count.
-    runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
+    runs-on: '${{ contains(fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]''), ''self-hosted'') && fromJSON(''["self-hosted", "linux", "arm64"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     # Slow hosted mirrors kept downloading past 23 min; reserve time for
     # the 208 smoke tests and artifact cleanup after installation.
     timeout-minutes: 60
@@ -1592,6 +1670,23 @@ jobs:
       - name: 'Disk floor gate (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
         run: 'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"'
+
+      # The smoke suite asserts exact text layout, which follows the host's
+      # default sans-serif (#15383). Checking it here turns a font-drifted
+      # host into a five-second actionable error instead of two failures 26
+      # minutes into the suite. See .github/scripts/ecs-runner/README.md.
+      - name: 'Check host font baseline (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          # A pull request whose head predates the guard does not carry the
+          # script in its checkout (this lane checks out the PR head, not the
+          # merge commit). Skip instead of failing that lane on a file it
+          # never had; every branch cut after the guard landed includes it.
+          if [ ! -f .github/scripts/ecs-runner/check-font-baseline.sh ]; then
+            echo 'font baseline check: skipped (script not present in this checkout)'
+            exit 0
+          fi
+          bash .github/scripts/ecs-runner/check-font-baseline.sh
 
       - name: 'Install dependencies'
         run: |-
@@ -1907,7 +2002,7 @@ jobs:
       - name: 'Verify temp paths carry no short alias'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         run: |-
-          node -e "const fs = require('node:fs'); for (const key of ['TEMP', 'TMP']) { const value = process.env[key]; if (!value) { console.error(key + ' is not set'); process.exitCode = 1; continue; } const real = fs.realpathSync(value); if (real === value) continue; if (real.toLowerCase() === value.toLowerCase()) { console.log('::warning::' + key + ' differs from its real path only by casing: ' + value + ' -> ' + real); continue; } console.error(key + ' carries a short alias: ' + value + ' -> ' + real); process.exitCode = 1; }"
+          node -e "const fs = require('node:fs'); for (const key of ['TEMP', 'TMP']) { const value = process.env[key]; if (!value) { console.error('::error::' + key + ' is not set'); process.exitCode = 1; continue; } const real = fs.realpathSync(value); if (real === value) continue; if (real.toLowerCase() === value.toLowerCase()) { console.log('::warning::' + key + ' differs from its real path only by casing: ' + value + ' -> ' + real); continue; } console.error('::error::' + key + ' carries a short alias: ' + value + ' -> ' + real); process.exitCode = 1; }"
 
       - name: 'Configure persistent npm cache (self-hosted)'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' }}"
@@ -1929,6 +2024,7 @@ jobs:
           npm config set fetch-timeout 300000
 
       - name: 'Install dependencies'
+        id: 'install'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         run: |-
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
@@ -1992,9 +2088,11 @@ jobs:
       # Unlike macOS, whose E2E legs run this file in full, no other Windows
       # lane runs the Hosted cases, so this one runs all of them and fails if
       # any is skipped. It runs after the unit tests so that a Hosted failure
-      # cannot hide their results.
+      # cannot hide their results, but only after a successful install: without
+      # node_modules and dist the suite cannot even collect and the red is then
+      # attributed to a test file that never ran.
       - name: 'Hosted process suite'
-        if: "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' }}"
+        if: "${{ !cancelled() && steps.install.outcome == 'success' && needs.classify_pr.outputs.skip_ci != 'true' }}"
         timeout-minutes: 10
         run: |-
           npm run test:integration:hosted:sandbox:none -- --reporter=default --reporter=json --outputFile.json=hosted-process-suite.json
