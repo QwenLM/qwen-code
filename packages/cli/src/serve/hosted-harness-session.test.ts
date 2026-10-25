@@ -378,6 +378,7 @@ vi.mock(
         resourceStore,
         toolResultResources: state.toolResults ?? resourceStore,
         assertWritable: state.assertWritable,
+        claimUserMessages: async () => [],
         setLifecycleAuthority: state.setLifecycleAuthority,
         authorizeOrdinary: state.authorizeOrdinary,
         authorizeLifecycle: state.authorizeLifecycle,
@@ -518,6 +519,10 @@ const listeners = new Set<Server>();
 
 beforeEach(() => {
   wakeDeps.runTurnGate = undefined;
+  vi.spyOn(
+    HostedWorkspaceBroker.prototype,
+    'resolveCapabilities',
+  ).mockResolvedValue();
   state.approvalSelections.clear();
   state.approvalQueries.length = 0;
   vi.spyOn(
@@ -1686,13 +1691,19 @@ describe('Hosted Harness no-tool session', () => {
         payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
       })
       .expect(202);
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', created.body.clientId);
-      expect(status.body.hasActivePrompt).toBe(false);
-      expect(status.body.recoveryBlocked).toBe(true);
-    });
+    // The slow-host settle budget, not vitest's 1 s default: at load ~90 with
+    // ~100 concurrent vitest processes the recovery-blocked state had not
+    // settled before the default expired (#15528's post-merge run).
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', created.body.clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(true);
+      },
+      { timeout: SETTLE_TIMEOUT_MS },
+    );
     await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
       .set('X-Qwen-Client-Id', created.body.clientId)
       .expect(204);
@@ -1702,14 +1713,19 @@ describe('Hosted Harness no-tool session', () => {
     )
       .send({ managedSessionStore: store(), driveRuntimeRecovery: true })
       .expect(200);
-    await vi.waitFor(() => expect(state.model).toHaveBeenCalledTimes(2));
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(replacement).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', loaded.body.clientId);
-      expect(status.body.hasActivePrompt).toBe(false);
-      expect(status.body.recoveryBlocked).toBe(false);
+    await vi.waitFor(() => expect(state.model).toHaveBeenCalledTimes(2), {
+      timeout: SETTLE_TIMEOUT_MS,
     });
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(replacement).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', loaded.body.clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(false);
+      },
+      { timeout: SETTLE_TIMEOUT_MS },
+    );
     expect(
       state.model.mock.calls.map(([input]) => input.modelSelection),
     ).toEqual([modelSelection, modelSelection]);
@@ -16363,7 +16379,6 @@ describe('Hosted Harness no-tool session', () => {
       'edit',
       'web_fetch',
       'run_shell_command',
-      'monitor',
       'glob',
       // H4b: a Shell-laned root Session advertises its Agent tool,
       // and (H4d-b) messages the child tasks it launched.
@@ -16430,7 +16445,6 @@ describe('Hosted Harness no-tool session', () => {
       'edit',
       'web_fetch',
       'run_shell_command',
-      'monitor',
       'glob',
       // H4b: a Shell-laned root Session advertises its Agent tool,
       // and (H4d-b) messages the child tasks it launched.
@@ -25795,6 +25809,34 @@ describe('Hosted Harness refusal reasons', () => {
     expect(created.status).toBe(200);
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   }
+
+  // The lifecycle protocol is why a Shell Session cannot be retired by
+  // default, so the refusal has to name itself instead of reading like a
+  // missing guard: protocol 1 commits one effects phase and stays with the
+  // files profile, protocol 2 only admits the profiles the Harness contract
+  // lists.
+  it('names a lifecycle protocol the Session profile is not admitted for', async () => {
+    const server = await app(true);
+    const load = (toolProfile: string, lifecycleProtocolVersion: 1 | 2) =>
+      headers(supertest(server).post(`/session/${SESSION_ID}/load`)).send({
+        managedSessionStore: store(),
+        toolProfile,
+        lifecycleProtocolVersion,
+        lifecycleAuthority: {
+          operationId: `lifecycle-${lifecycleProtocolVersion}`,
+          claimGeneration: 1,
+        },
+      });
+    // files/1 is a real profile, but the contract admits only shell/1 and
+    // mcp/1 for protocol 2.
+    const v2 = await load('hosted-workspace-files/1', 2);
+    expect(v2.status).toBe(409);
+    expect(v2.body.code).toBe('hosted_lifecycle_profile_unavailable');
+    // shell/1 is a lifecycle-v2 profile, but protocol 1 stays with files/1.
+    const v1 = await load('hosted-workspace-shell/1', 1);
+    expect(v1.status).toBe(409);
+    expect(v1.body.code).toBe('hosted_lifecycle_profile_unavailable');
+  });
 
   it('names a blocked restore bundle on a cold load', async () => {
     await createAndDetach();
@@ -38603,12 +38645,15 @@ describe('Hosted Harness stored definitions', () => {
       agentDefinition: definition,
       agentInstructions: 'D8_PINNED_INSTRUCTIONS',
     });
-    await vi.waitFor(async () => {
-      const response = await headers(
-        supertest(server).delete(`/session/${SESSION_ID}`),
-      );
-      expect(response.status).toBe(204);
-    });
+    await vi.waitFor(
+      async () => {
+        const response = await headers(
+          supertest(server).delete(`/session/${SESSION_ID}`),
+        );
+        expect(response.status).toBe(204);
+      },
+      { timeout: SETTLE_TIMEOUT_MS },
+    );
   });
 
   it('loads published Skills from the saved resource after detach and rejects unbound Skill definitions', async () => {
@@ -38772,12 +38817,15 @@ describe('Hosted Harness stored definitions', () => {
         payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
       })
       .expect(202);
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', created.body.clientId);
-      expect(status.body.hasActivePrompt).toBe(false);
-    });
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', created.body.clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: SETTLE_TIMEOUT_MS },
+    );
     expect(state.model).toHaveBeenCalledOnce();
     await expect(state.model.mock.results[0].value).resolves.toMatchObject({
       text: 'read only',
@@ -38855,13 +38903,16 @@ describe('Hosted Harness stored definitions', () => {
         payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
       })
       .expect(202);
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(replacement).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', loaded.body.clientId);
-      expect(status.body.hasActivePrompt).toBe(false);
-      expect(status.body.recoveryBlocked).toBe(false);
-    });
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(replacement).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', loaded.body.clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(false);
+      },
+      { timeout: SETTLE_TIMEOUT_MS },
+    );
     expect(state.model).toHaveBeenCalledOnce();
     await expect(state.model.mock.results[0].value).resolves.toMatchObject({
       text: 'read only',

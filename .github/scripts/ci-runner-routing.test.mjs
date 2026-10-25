@@ -1080,3 +1080,108 @@ describe('control-plane jobs moved off the hosted queue', () => {
     }
   }
 });
+
+describe('credential-free release fanout routing (#15465)', () => {
+  const reference = parse(
+    readFileSync(join(workflowsDir, 'repo-hygiene.yml'), 'utf8'),
+  ).jobs.dedup['runs-on'];
+  it('keeps the Desktop reusable caller limited to schedule and dispatch', () => {
+    const caller = parse(
+      readFileSync(join(workflowsDir, 'desktop-packaging-check.yml'), 'utf8'),
+    );
+    assert.deepEqual(Object.keys(caller.on).sort(), [
+      'schedule',
+      'workflow_dispatch',
+    ]);
+    assert.equal(
+      caller.jobs.package.uses,
+      './.github/workflows/desktop-release.yml',
+    );
+  });
+  for (const [file, jobId, events] of [
+    ['desktop-release.yml', 'prepare', ['release', 'workflow_dispatch']],
+    ['live-host-release.yml', 'prepare', ['workflow_dispatch']],
+    [
+      'dsw-swe-verified-release.yml',
+      'release_gate',
+      ['release', 'workflow_dispatch'],
+    ],
+    [
+      'release-managed-runtime.yml',
+      'prepare',
+      ['release', 'workflow_dispatch'],
+    ],
+  ]) {
+    const doc = parse(readFileSync(join(workflowsDir, file), 'utf8'));
+    const job = doc.jobs[jobId];
+    const expression = job['runs-on'];
+    it(`${file}: routes release preparation to ECS with hosted fallbacks`, () => {
+      assert.equal(
+        expression,
+        file === 'live-host-release.yml'
+          ? reference.replace(
+              "vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'",
+              "vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && github.event_name != 'pull_request'",
+            )
+          : reference,
+      );
+      for (const eventName of events) {
+        assert.ok(Object.hasOwn(doc.on, eventName));
+        assert.deepEqual(
+          evalRunsOn(expression, { eventName, ecsDisabled: false }),
+          JSON.parse(ECS),
+        );
+        assert.deepEqual(
+          evalRunsOn(expression, { eventName, ecsDisabled: true }),
+          JSON.parse(HOSTED),
+        );
+        assert.deepEqual(
+          evalRunsOn(
+            expression.replace(
+              "github.repository == 'QwenLM/qwen-code'",
+              'false',
+            ),
+            { eventName, ecsDisabled: false },
+          ),
+          JSON.parse(HOSTED),
+        );
+      }
+    });
+    it(`${file}: keeps release secrets and PR execution outside this migration`, () => {
+      assert.doesNotMatch(JSON.stringify([doc.env, job]), /secrets(?:\.|\[)/);
+      assert.equal(job.environment, undefined);
+      assert.equal((job.permissions ?? doc.permissions).contents, 'read');
+      assert.doesNotMatch(
+        expression,
+        /ECS_RELEASE_HOST_RUNNER_ENABLED|ecs-qwen-release-host/,
+      );
+      if (file === 'live-host-release.yml') {
+        assert.ok(Object.hasOwn(doc.on, 'pull_request'));
+        assert.deepEqual(
+          evalRunsOn(expression, {
+            eventName: 'pull_request',
+            ecsDisabled: false,
+            sameRepo: true,
+            assoc: 'OWNER',
+          }),
+          JSON.parse(HOSTED),
+        );
+        assert.deepEqual(
+          evalRunsOn(expression, {
+            eventName: 'pull_request',
+            ecsDisabled: false,
+            sameRepo: false,
+            assoc: 'NONE',
+          }),
+          JSON.parse(HOSTED),
+        );
+      } else {
+        assert.ok(
+          !Object.keys(doc.on).some((event) =>
+            event.startsWith('pull_request'),
+          ),
+        );
+      }
+    });
+  }
+});

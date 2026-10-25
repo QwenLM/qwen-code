@@ -47,6 +47,7 @@ import {
 } from './contentGenerator.js';
 import { BaseLlmClient } from './baseLlmClient.js';
 import { MemoryManager } from '../memory/manager.js';
+import { getAutoMemorySnapshot } from '../memory/request-context.js';
 import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
 import { LlmChat, userContentPushSnapshotKey } from './llm-chat.js';
 import { DEFAULT_TOKEN_LIMIT } from './tokenLimits.js';
@@ -126,6 +127,10 @@ import {
   getInitialChatHistory,
   wrapSystemReminder,
 } from './environmentContext.js';
+import {
+  createUserPromptSubmitContextPart,
+  hasUserPromptSubmitContext,
+} from '../hooks/user-prompt-submit-context.js';
 import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
 import type { AvailableSkillEntry } from '../tools/skill-utils.js';
 import { ToolNames } from '../tools/tool-names.js';
@@ -300,31 +305,8 @@ vi.mock('./environmentContext', async (importOriginal) => {
           ? null
           : `<system-reminder>\nchanged agents: added=${addedAgents.map((agent) => agent.name).join(', ')} removed=${removedAgentNames.join(', ')}\n</system-reminder>`,
     ),
-    getStartupContextLength: vi.fn((history) => {
-      const first = history?.[0];
-      if (first?.role !== 'user') return 0;
-      const text = first.parts?.[0]?.text;
-      if (typeof text === 'string' && text.startsWith('<system-reminder>')) {
-        return 1;
-      }
-      if (
-        history?.[1]?.role === 'model' &&
-        history?.[1]?.parts?.[0]?.text === 'Got it. Thanks for the context!'
-      ) {
-        return 2;
-      }
-      return 0;
-    }),
-    isSystemReminderContent: vi.fn((content) => {
-      const parts = content?.parts;
-      if (!parts || parts.length === 0) return false;
-      return parts.every(
-        (part: { text?: string }) =>
-          typeof part.text === 'string' &&
-          part.text.startsWith('<system-reminder>') &&
-          part.text.includes('</system-reminder>'),
-      );
-    }),
+    getStartupContextLength: vi.fn(actual.getStartupContextLength),
+    isSystemReminderContent: vi.fn(actual.isSystemReminderContent),
   };
 });
 vi.mock('../utils/generateContentResponseUtilities', () => ({
@@ -711,6 +693,9 @@ describe('Gemini Client (client.ts)', () => {
       getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
       getHistory: vi.fn(() => structuredClone(history)),
       getHistoryShallow: vi.fn(() => history.map((c) => ({ ...c }))),
+      findLastHistoryEntry: vi.fn((predicate: (entry: Content) => boolean) =>
+        [...history].reverse().find(predicate),
+      ),
       setHistory: vi.fn(),
     });
   /** Installs a message bus answering hook requests with `request`. */
@@ -761,6 +746,7 @@ describe('Gemini Client (client.ts)', () => {
     const chat = {
       addHistory: vi.fn(),
       getHistory: vi.fn().mockReturnValue([]),
+      findLastHistoryEntry: vi.fn().mockReturnValue(undefined),
       ...overrides,
     };
     client['chat'] = chat as unknown as LlmChat;
@@ -1404,7 +1390,7 @@ describe('Gemini Client (client.ts)', () => {
       await run([{ text: 'expanded request' }], 'dw03-human', options);
       expect(notices()).toHaveLength(1);
       const parts = mockTurnRunFn.mock.lastCall?.[1] as Array<string | Part>;
-      expect(parts).toContain('expanded request');
+      expect(parts).toContainEqual({ text: 'expanded request' });
       expect(
         parts.some(
           (part) =>
@@ -1501,6 +1487,70 @@ describe('Gemini Client (client.ts)', () => {
       expect(mockTurnRunFn).not.toHaveBeenCalled();
       expect(applied).not.toHaveBeenCalled();
       expect(bus.request.mock.calls[0][0].input.prompt).toBe('ultracode raw');
+    });
+  });
+
+  describe('onPromptAdmitted', () => {
+    beforeEach(() => {
+      mockTurnRunFn.mockImplementation(() => textTurn('ok'));
+    });
+
+    it('reports an admitted prompt once, before its model request', async () => {
+      const order: string[] = [];
+      const bus = installMessageBus(
+        vi.fn(async () => {
+          order.push('hook');
+          return { output: {} };
+        }),
+        'UserPromptSubmit',
+      );
+      mockTurnRunFn.mockImplementation(() => {
+        order.push('request');
+        return textTurn('ok');
+      });
+      await run([{ text: 'hello' }], 'admitted', {
+        type: SendMessageType.UserQuery,
+        onPromptAdmitted: () => order.push('admitted'),
+      });
+      expect(bus.request).toHaveBeenCalledOnce();
+      expect(order).toEqual(['hook', 'admitted', 'request']);
+    });
+
+    it('does not report the turn again for a continuation it sends', async () => {
+      const { checkNextSpeaker } = await import(
+        '../utils/nextSpeakerChecker.js'
+      );
+      vi.mocked(checkNextSpeaker)
+        .mockResolvedValueOnce({ reasoning: 'forced', next_speaker: 'model' })
+        .mockResolvedValue(null);
+      const admitted = vi.fn();
+      await run([{ text: 'hello' }], 'continued', {
+        type: SendMessageType.UserQuery,
+        onPromptAdmitted: admitted,
+      });
+      expect(mockTurnRunFn).toHaveBeenCalledTimes(2);
+      expect(admitted).toHaveBeenCalledOnce();
+    });
+
+    it('does not report a prompt a hook blocks', async () => {
+      installMessageBus(
+        vi.fn().mockResolvedValue({
+          output: { decision: 'block', reason: 'blocked by fixture' },
+        }),
+        'UserPromptSubmit',
+      );
+      const admitted = vi.fn();
+      const events = await run([{ text: 'hello' }], 'blocked', {
+        type: SendMessageType.UserQuery,
+        onPromptAdmitted: admitted,
+      });
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: LlmEventType.UserPromptSubmitBlocked,
+        }),
+      );
+      expect(admitted).not.toHaveBeenCalled();
+      expect(mockTurnRunFn).not.toHaveBeenCalled();
     });
   });
 
@@ -2455,8 +2505,14 @@ describe('Gemini Client (client.ts)', () => {
 
       const reminder = formatOmniMemorySideQueryReminder(recallResult);
       expect(request).toContain(reminder);
-      // The user's text is a bare string by now; the reminder must precede it.
-      const userPartIndex = request.indexOf('what changed in this clip?');
+      // The reminder must precede the preserved user Part.
+      const userPartIndex = request.findIndex(
+        (part) =>
+          typeof part === 'object' &&
+          part !== null &&
+          'text' in part &&
+          part.text === 'what changed in this clip?',
+      );
       expect(userPartIndex).toBeGreaterThanOrEqual(0);
       expect(request.indexOf(reminder)).toBeLessThan(userPartIndex);
 
@@ -2466,7 +2522,9 @@ describe('Gemini Client (client.ts)', () => {
         { requestParts: unknown[]; promptId?: string },
       ];
       expect(params.promptId).toBe('prompt-omni-recall');
-      expect(params.requestParts).toContain('what changed in this clip?');
+      expect(params.requestParts).toContainEqual({
+        text: 'what changed in this clip?',
+      });
       expect(params.requestParts).not.toContain(reminder);
     });
 
@@ -4331,6 +4389,177 @@ describe('Gemini Client (client.ts)', () => {
       expect(client['forceFullIdeContext']).toBe(false);
     });
 
+    it.each(['catalog V2', 'catalog V3', ''])(
+      'preserves replay snapshot metadata through chat with current catalog %j',
+      async (currentCatalog) => {
+        const snapshot = getAutoMemorySnapshot([], 'catalog V2')!;
+        const parts = [{ text: 'retry me' }, snapshot];
+        client.setHistory([
+          userText('earlier'),
+          modelText('ack'),
+          { role: 'user', parts },
+        ]);
+        vi.mocked(mockConfig.getAutoMemoryContext).mockReturnValue(
+          currentCatalog,
+        );
+        mockConfig.getAutoCompactThreshold = vi.fn().mockReturnValue(undefined);
+        const { Turn: ActualTurn } =
+          await vi.importActual<typeof import('./turn.js')>('./turn.js');
+        mockTurnRunFn.mockImplementation((...args: Parameters<Turn['run']>) =>
+          new ActualTurn(client.getChat(), 'catalog-replay').run(...args),
+        );
+        const requests: Content[][] = [];
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async (params) => {
+          requests.push(structuredClone(params.contents as Content[]));
+          return (async function* () {
+            yield {
+              candidates: [
+                { content: modelText('done'), finishReason: 'STOP' },
+              ],
+            } as GenerateContentResponse;
+          })();
+        });
+
+        const events = await run(parts, 'catalog-replay', {
+          type: SendMessageType.Retry,
+        });
+
+        expect(
+          events.filter((event) => event.type === LlmEventType.Error),
+        ).toEqual([]);
+        expect(requests).toHaveLength(1);
+        const retained = client
+          .getChat()
+          .getHistory()
+          .flatMap((entry) => entry.parts ?? []);
+        expect(retained.filter((part) => part.text === snapshot.text)).toEqual([
+          snapshot,
+        ]);
+        const sent = requests[0].flatMap((entry) => entry.parts ?? []);
+        expect(sent.filter((part) => part.text === snapshot.text)).toEqual(
+          currentCatalog ? [snapshot] : [],
+        );
+        const marked = sent.filter(
+          (part) => part.partMetadata?.['qwen-code:memory-catalog-snapshot'],
+        );
+        expect(marked).toEqual(
+          currentCatalog === 'catalog V3'
+            ? [snapshot, getAutoMemorySnapshot([], currentCatalog)!]
+            : currentCatalog
+              ? [snapshot]
+              : [],
+        );
+        expect(parts).toEqual([{ text: 'retry me' }, snapshot]);
+      },
+    );
+
+    it('keeps a replayed snapshot exact when IDE context is added', async () => {
+      const snapshot = getAutoMemorySnapshot([], 'catalog V2')!;
+      const parts = [
+        { inlineData: { mimeType: 'image/png', data: 'AAAA' } },
+        snapshot,
+      ];
+      client.setHistory([
+        userText('earlier'),
+        modelText('ack'),
+        { role: 'user', parts },
+      ]);
+      vi.mocked(mockConfig.getAutoMemoryContext).mockReturnValue('catalog V2');
+      mockConfig.getAutoCompactThreshold = vi.fn().mockReturnValue(undefined);
+      vi.mocked(ideContextStore.get).mockReturnValue(
+        ideContext([
+          {
+            path: '/path/to/active/file.ts',
+            timestamp: Date.now(),
+            isActive: true,
+          },
+        ]),
+      );
+      vi.spyOn(client['config'], 'getIdeMode').mockReturnValue(true);
+      const { Turn: ActualTurn } =
+        await vi.importActual<typeof import('./turn.js')>('./turn.js');
+      mockTurnRunFn.mockImplementation((...args: Parameters<Turn['run']>) =>
+        new ActualTurn(client.getChat(), 'catalog-ide-replay').run(...args),
+      );
+      const requests: Content[][] = [];
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async (params) => {
+          requests.push(structuredClone(params.contents as Content[]));
+          return (async function* () {
+            yield {
+              candidates: [
+                { content: modelText('done'), finishReason: 'STOP' },
+              ],
+            } as GenerateContentResponse;
+          })();
+        },
+      );
+
+      await run(parts, 'catalog-ide-replay', { type: SendMessageType.Retry });
+
+      const sent = requests[0].flatMap((entry) => entry.parts ?? []);
+      expect(
+        sent.filter(
+          (part) => part.partMetadata?.['qwen-code:memory-catalog-snapshot'],
+        ),
+      ).toEqual([snapshot]);
+      expect(JSON.stringify(sent)).toContain('/path/to/active/file.ts');
+    });
+
+    it('keeps a snapshot-only trailing entry through the retry strip', async () => {
+      // The trailing entry is structural, not an orphaned failed turn: its
+      // only part is a marked memory catalog snapshot. A real Retry send runs
+      // LlmChat.stripOrphanedUserEntriesFromHistory, which must classify it
+      // through isSystemReminderContent's partMetadata branch and leave it in
+      // history. The pre-PR text-only rule would pop it and lose the snapshot.
+      const snapshot = getAutoMemorySnapshot([], 'catalog')!;
+      client.setHistory([
+        userText('earlier'),
+        modelText('ack'),
+        { role: 'user', parts: [snapshot] },
+      ]);
+      // No current catalog, so no fresh snapshot is appended and the only
+      // marked snapshot on the wire can be the replayed one.
+      vi.mocked(mockConfig.getAutoMemoryContext).mockReturnValue('');
+      mockConfig.getAutoCompactThreshold = vi.fn().mockReturnValue(undefined);
+      const { Turn: ActualTurn } =
+        await vi.importActual<typeof import('./turn.js')>('./turn.js');
+      mockTurnRunFn.mockImplementation((...args: Parameters<Turn['run']>) =>
+        new ActualTurn(client.getChat(), 'snapshot-only-retry').run(...args),
+      );
+      const requests: Content[][] = [];
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async (params) => {
+          requests.push(structuredClone(params.contents as Content[]));
+          return (async function* () {
+            yield {
+              candidates: [
+                { content: modelText('done'), finishReason: 'STOP' },
+              ],
+            } as GenerateContentResponse;
+          })();
+        },
+      );
+
+      await run([{ text: 'retry me' }], 'snapshot-only-retry', {
+        type: SendMessageType.Retry,
+      });
+
+      expect(requests).toHaveLength(1);
+      const retainedSnapshots = client
+        .getChat()
+        .getHistory()
+        .filter((entry) =>
+          entry.parts?.some(
+            (part) =>
+              part.partMetadata?.['qwen-code:memory-catalog-snapshot'] === true,
+          ),
+        );
+      expect(retainedSnapshots).toEqual([{ role: 'user', parts: [snapshot] }]);
+    });
+
     it('retry strips orphaned trailing user entries and clears the cache', async () => {
       const cacheClear = mockFileReadCacheClear();
       const stripOrphanedUserEntriesFromHistory = vi.fn();
@@ -5984,7 +6213,9 @@ Other open files:
         'test-model',
         [
           dateReminder(),
-          `<system-reminder>\n${expectedContext}\n</system-reminder>\n\nHi`,
+          {
+            text: `<system-reminder>\n${expectedContext}\n</system-reminder>\n\nHi`,
+          },
         ],
         expect.any(AbortSignal),
       );
@@ -7039,10 +7270,9 @@ Other open files:
         }),
       );
       expect(mockTurnRunFn).toHaveBeenCalledWith(
-        ...requestWith(
-          expect.stringContaining('## Memory overview'),
-          'Please answer tersely',
-        ),
+        ...requestWith(expect.stringContaining('## Memory overview'), {
+          text: 'Please answer tersely',
+        }),
       );
     });
 
@@ -9210,7 +9440,7 @@ Other open files:
       expect(mockMemoryManager.recall).not.toHaveBeenCalled();
       // The main request carries no memory content.
       expect(mockTurnRunFn).toHaveBeenCalledWith(
-        ...exactRequest(dateReminder(), 'Quick question'),
+        ...exactRequest(dateReminder(), { text: 'Quick question' }),
       );
 
       vi.mocked(mockConfig.isManagedMemoryAvailable).mockReturnValue(true);
@@ -9224,7 +9454,7 @@ Other open files:
       await helloTurn('Quick question', 'prompt-id-recall-fail');
 
       expect(mockTurnRunFn).toHaveBeenCalledWith(
-        ...exactRequest(dateReminder(), 'Quick question'),
+        ...exactRequest(dateReminder(), { text: 'Quick question' }),
       );
     });
 
@@ -9867,7 +10097,9 @@ Other open files:
 
       // The date reminder, wrapped in <system-reminder> tags, comes first.
       expect(mockTurnRunFn).toHaveBeenCalledWith(
-        ...exactRequest(dateReminder('June 5, 2026'), 'What day is it?'),
+        ...exactRequest(dateReminder('June 5, 2026'), {
+          text: 'What day is it?',
+        }),
       );
     });
 
@@ -10096,7 +10328,9 @@ Other open files:
       await run([{ text: 'First question' }], 'prompt-id-date-first');
 
       expect(mockTurnRunFn).toHaveBeenLastCalledWith(
-        ...exactRequest(dateReminder('June 5, 2026'), 'First question'),
+        ...exactRequest(dateReminder('June 5, 2026'), {
+          text: 'First question',
+        }),
       );
 
       // Second query the same day: no date prefix again.
@@ -10108,7 +10342,7 @@ Other open files:
       await run([{ text: 'Second question' }], 'prompt-id-date-second');
 
       const secondCall = mockTurnRunFn.mock.calls[1];
-      expect(secondCall[1][0]).toBe('Second question');
+      expect(secondCall[1][0]).toEqual({ text: 'Second question' });
     });
 
     it('should re-inject date when session spans midnight', async () => {
@@ -10118,7 +10352,7 @@ Other open files:
       await run([{ text: 'Day one' }], 'prompt-id-date-day-one');
 
       expect(mockTurnRunFn).toHaveBeenLastCalledWith(
-        ...exactRequest(dateReminder('June 4, 2026'), 'Day one'),
+        ...exactRequest(dateReminder('June 4, 2026'), { text: 'Day one' }),
       );
 
       // Advance to June 5: the new date is injected.
@@ -10157,7 +10391,9 @@ Other open files:
       await run([{ text: 'User question' }], 'prompt-id-cron-user');
 
       expect(mockTurnRunFn).toHaveBeenLastCalledWith(
-        ...exactRequest(dateReminder('June 5, 2026'), 'User question'),
+        ...exactRequest(dateReminder('June 5, 2026'), {
+          text: 'User question',
+        }),
       );
     });
 
@@ -12301,24 +12537,24 @@ Other open files:
           },
         );
 
-        expect(recordUserMessage).toHaveBeenCalledWith(
+        const [recordedParts, goalContext, payload, promptId] =
+          recordUserMessage.mock.calls[0]!;
+        expect(
+          recordedParts.map((part: { text: string }) => part.text),
+        ).toEqual([
+          'expanded model prompt',
           [
-            { text: 'expanded model prompt' },
-            {
-              text: [
-                '<qwen:user-prompt-submit-context>',
-                '&lt;hook-only context&gt;',
-                '</qwen:user-prompt-submit-context>',
-              ].join('\n'),
-            },
-          ],
-          undefined,
-          {
-            displayText: 'raw @file prompt',
-            hookContext: '&lt;hook-only context&gt;',
-          },
-          'prompt-hook-display-text',
-        );
+            '<qwen:user-prompt-submit-context>',
+            '&lt;hook-only context&gt;',
+            '</qwen:user-prompt-submit-context>',
+          ].join('\n'),
+        ]);
+        expect(goalContext).toBeUndefined();
+        expect(payload).toEqual({
+          displayText: 'raw @file prompt',
+          hookContext: '&lt;hook-only context&gt;',
+        });
+        expect(promptId).toBe('prompt-hook-display-text');
         expect(mockMemoryManager.recall).toHaveBeenCalledWith(
           '/test/project/root',
           'expanded model prompt',
@@ -12389,7 +12625,10 @@ Other open files:
           const taggedContext =
             '<qwen:user-prompt-submit-context>\nextra hook context\n</qwen:user-prompt-submit-context>';
           expect(recordUserMessage).toHaveBeenCalledWith(
-            [{ text: 'expanded body' }, { text: taggedContext }],
+            [
+              { text: 'expanded body' },
+              createUserPromptSubmitContextPart('extra hook context'),
+            ],
             undefined,
             { displayText: '/deploy prod', hookContext: 'extra hook context' },
             'prompt-admitted',
@@ -12604,15 +12843,103 @@ Other open files:
 
         // The recorded message is the exact model-bound request, with the
         // user-authored projection preserved separately.
+        const [recordedParts, goalContext, payload, promptId] =
+          recordUserMessage.mock.calls[0]!;
+        expect(
+          recordedParts.map((part: { text: string }) => part.text),
+        ).toEqual(['my prompt', taggedContext]);
+        expect(goalContext).toBeUndefined();
+        expect(payload).toEqual({
+          displayText: 'my prompt',
+          hookContext: 'extra hook context',
+        });
+        expect(promptId).toBe('prompt-hook-context-tag');
+      });
+
+      it('does not re-append an unchanged UserPromptSubmit context block already delivered in history', async () => {
+        installHistoryChat([
+          {
+            role: 'user',
+            parts: [
+              { text: 'earlier prompt' },
+              createUserPromptSubmitContextPart('extra hook context'),
+            ],
+          },
+        ]);
+        promptSubmitBus(extraHookContext());
+        const recordUserMessage = vi.fn();
+        vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+          recordUserMessage,
+          recordCronPrompt: vi.fn(),
+          recordAttributionSnapshot: vi.fn(),
+        } as unknown as ReturnType<Config['getChatRecordingService']>);
+        mockTurnRunFn.mockReturnValue(textTurn('ok'));
+
+        await run([{ text: 'my prompt' }], 'prompt-hook-context-dedup');
+
+        // The identical block from the earlier turn is not appended again, so
+        // this turn records no hook provenance — but the user-authored
+        // projection still reaches the transcript.
+        const requestText = getLastTurnRequestText();
+        expect(requestText).toContain('my prompt');
+        expect(requestText).not.toContain('extra hook context');
+
         expect(recordUserMessage).toHaveBeenCalledWith(
-          [{ text: 'my prompt' }, { text: taggedContext }],
+          [{ text: 'my prompt' }],
           undefined,
           {
             displayText: 'my prompt',
-            hookContext: 'extra hook context',
+            hookContext: '',
           },
-          'prompt-hook-context-tag',
+          'prompt-hook-context-dedup',
         );
+      });
+
+      it('still appends when caller-authored tagged text merely matches in shape', async () => {
+        // A user message can end in the wrapped block byte-for-byte; without
+        // injector-owned provenance that is not evidence of a prior
+        // delivery, so the fresh hook context must still be appended.
+        const taggedContext =
+          '<qwen:user-prompt-submit-context>\nextra hook context\n</qwen:user-prompt-submit-context>';
+        installHistoryChat([
+          {
+            role: 'user',
+            parts: [{ text: 'earlier prompt' }, { text: taggedContext }],
+          },
+        ]);
+        promptSubmitBus(extraHookContext());
+        const recordUserMessage = vi.fn();
+        vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+          recordUserMessage,
+          recordCronPrompt: vi.fn(),
+          recordAttributionSnapshot: vi.fn(),
+        } as unknown as ReturnType<Config['getChatRecordingService']>);
+        mockTurnRunFn.mockReturnValue(textTurn('ok'));
+
+        await run([{ text: 'my prompt' }], 'prompt-hook-context-forged');
+
+        const requestText = getLastTurnRequestText();
+        expect(requestText).toContain('my prompt');
+        expect(requestText).toContain('extra hook context');
+        // The part handed to the model call must stay injector-owned after
+        // text flattening, or live history cannot prove it on the next turn.
+        expect(
+          hasUserPromptSubmitContext(
+            { role: 'user', parts: mockTurnRunFn.mock.calls.at(-1)?.[1] },
+            'extra hook context',
+          ),
+        ).toBe(true);
+        const [recordedParts, goalContext, payload, promptId] =
+          recordUserMessage.mock.calls[0]!;
+        expect(
+          recordedParts.map((part: { text: string }) => part.text),
+        ).toEqual(['my prompt', taggedContext]);
+        expect(goalContext).toBeUndefined();
+        expect(payload).toEqual({
+          displayText: 'my prompt',
+          hookContext: 'extra hook context',
+        });
+        expect(promptId).toBe('prompt-hook-context-forged');
       });
 
       it('uses the pre-injection prompt for managed auto-memory recall', async () => {

@@ -6,11 +6,14 @@
 // @vitest-environment jsdom
 import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createShowResult } from '../contracts.js';
-import type { ViewState } from './controller.js';
+import { createShowResult, parseToolResult } from '../contracts.js';
+import type { GeneratedDocument } from '../contracts.js';
+import type { CaptureResult, ViewState } from './controller.js';
 
 const presentation = vi.hoisted(() => ({
   onStatus: undefined as ((state: ViewState) => void) | undefined,
+  onDocument: undefined as ((document: GeneratedDocument) => void) | undefined,
+  capture: vi.fn<() => CaptureResult>(),
 }));
 vi.mock('./controller.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./controller.js')>();
@@ -22,6 +25,10 @@ vi.mock('./controller.js', async (importOriginal) => {
       ) {
         super(...args);
         presentation.onStatus = args[3];
+        presentation.onDocument = args[2];
+      }
+      override captureSnapshot() {
+        return presentation.capture();
       }
     },
   };
@@ -31,6 +38,9 @@ const bridge = vi.hoisted(() => ({
   events: new Map<string, (value?: unknown) => void>(),
   connect: vi.fn(),
   getHostContext: vi.fn(),
+  getHostVersion: vi.fn(),
+  getHostCapabilities: vi.fn(),
+  sendMessage: vi.fn(),
   onteardown: undefined as (() => Promise<object>) | undefined,
 }));
 vi.mock('@modelcontextprotocol/ext-apps', () => ({
@@ -75,9 +85,250 @@ beforeEach(async () => {
   bridge.events.clear();
   bridge.connect.mockResolvedValue(undefined);
   bridge.getHostContext.mockReturnValue({});
+  bridge.getHostVersion.mockReturnValue({ name: 'qwen-code-web-shell' });
+  bridge.getHostCapabilities.mockReturnValue({ message: { text: {} } });
+  bridge.sendMessage.mockResolvedValue({});
+  presentation.capture.mockReturnValue({ ok: false, reason: 'not-ready' });
   vi.stubGlobal('Worker', undefined);
   document.body.innerHTML = readFileSync('src/app/index.html', 'utf8');
   await import('./main.js');
+});
+
+const continuation = () =>
+  document.getElementById('continue-analysis') as HTMLButtonElement;
+const capture = (value = '8'): Extract<CaptureResult, { ok: true }> => ({
+  ok: true,
+  snapshot: {
+    schemaVersion: 1,
+    documentId: 'g1-example',
+    activationId: 'one',
+    appliedSequence: 2,
+    baseInputRevision: 1,
+    inputRevision: 1,
+    inputs: { workers: { value, checked: false } },
+  },
+  rejectedEvents: 0,
+});
+function ready() {
+  presentation.onDocument!(parseToolResult(createShowResult(input)));
+  presentation.capture.mockImplementation(() => {
+    present({});
+    return capture();
+  });
+  present({});
+}
+function deferred() {
+  let resolve!: (result: { isError?: boolean }) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<{ isError?: boolean }>((yes, no) => {
+    resolve = yes;
+    reject = no;
+  });
+  return { promise, resolve, reject };
+}
+
+describe('continue analysis from the trusted App', () => {
+  it('captures only on explicit activation, freezes text and locks repeated activation', async () => {
+    const pending = deferred();
+    bridge.sendMessage.mockReturnValue(pending.promise);
+    ready();
+    present({});
+    expect(presentation.capture).not.toHaveBeenCalled();
+    continuation().click();
+    continuation().click();
+    continuation().dispatchEvent(new MouseEvent('click'));
+    expect(presentation.capture).toHaveBeenCalledTimes(1);
+    expect(bridge.sendMessage).toHaveBeenCalledTimes(1);
+    const [message, options] = bridge.sendMessage.mock.calls[0];
+    expect(message.role).toBe('user');
+    expect(message.content).toHaveLength(1);
+    expect(message.content[0].type).toBe('text');
+    expect(message.content[0].text).toContain('"value": "8"');
+    expect(message.content[0].text).toContain('"title": "Verified capacity"');
+    expect(message.content[0].text).not.toContain(input.summary);
+    expect(options.timeout).toBe(210_000);
+    expect(options.signal.aborted).toBe(false);
+    const frozen = message.content[0].text;
+    presentation.capture.mockReturnValue(capture('12'));
+    present({ phase: 'dirty', rejectedEvents: 3 });
+    present({});
+    expect(continuation().disabled).toBe(true);
+    expect(message.content[0].text).toBe(frozen);
+    pending.resolve({});
+    await vi.waitFor(() =>
+      expect(text('continuation-status')).toContain('session accepted'),
+    );
+    expect(text('continuation-status')).toContain('may still be running');
+    expect(continuation().disabled).toBe(false);
+    continuation().click();
+    expect(bridge.sendMessage).toHaveBeenCalledTimes(2);
+    expect(bridge.sendMessage.mock.calls[1][0].content[0].text).toContain(
+      '"value": "12"',
+    );
+  });
+
+  it.each([
+    'waiting',
+    'starting',
+    'running',
+    'dirty',
+    'stopped',
+    'error',
+  ] as const)('does not capture or send in %s', (phase) => {
+    present({ phase });
+    continuation().click();
+    expect(continuation().disabled).toBe(true);
+    expect(presentation.capture).not.toHaveBeenCalled();
+    expect(bridge.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it.each(['dirty', 'busy', 'not-ready'] as const)(
+    'rechecks %s when a ready button is stale',
+    (reason) => {
+      ready();
+      presentation.capture.mockReturnValue({ ok: false, reason });
+      continuation().click();
+      expect(bridge.sendMessage).not.toHaveBeenCalled();
+      expect(text('continuation-status')).toContain('Parameters are not ready');
+    },
+  );
+
+  it('rejects an oversized complete message before RPC', () => {
+    ready();
+    const large = {
+      ...capture(),
+      snapshot: {
+        ...capture().snapshot,
+        inputs: Object.fromEntries(
+          Array.from({ length: 8 }, (_, i) => [
+            `value${i}`,
+            { value: 'a'.repeat(1950), checked: false },
+          ]),
+        ),
+      },
+    };
+    presentation.capture.mockReturnValue(large);
+    continuation().click();
+    expect(bridge.sendMessage).not.toHaveBeenCalled();
+    expect(text('continuation-status')).toContain('exceeds 16 KiB');
+    expect(continuation().disabled).toBe(false);
+  });
+
+  it.each(['result', 'rejection'] as const)(
+    'requires an explicit fresh review after an unconfirmed %s',
+    async (kind) => {
+      ready();
+      if (kind === 'result')
+        bridge.sendMessage.mockResolvedValue({ isError: true });
+      else bridge.sendMessage.mockRejectedValue(new Error('connection lost'));
+      continuation().click();
+      await vi.waitFor(() =>
+        expect(text('continuation-status')).toContain(
+          'Acceptance could not be confirmed',
+        ),
+      );
+      expect(text('continuation-status')).toContain('could duplicate');
+      expect(text('continuation-status')).toContain('cancelled or rejected');
+      expect(text('continue-analysis')).toContain('checking the session');
+      present({});
+      expect(bridge.sendMessage).toHaveBeenCalledTimes(1);
+      presentation.capture.mockReturnValue(capture('new'));
+      continuation().click();
+      expect(bridge.sendMessage).toHaveBeenCalledTimes(2);
+      expect(bridge.sendMessage.mock.calls[1][0].content[0].text).toContain(
+        '"value": "new"',
+      );
+    },
+  );
+
+  it.each(['stop', 'error', 'toolcancelled', 'pagehide', 'teardown'])(
+    'aborts waiting and ignores late success after %s',
+    async (reason) => {
+      const pending = deferred();
+      bridge.sendMessage.mockReturnValue(pending.promise);
+      ready();
+      continuation().click();
+      const signal = bridge.sendMessage.mock.calls[0][1].signal;
+      if (reason === 'stop') stop().click();
+      else if (reason === 'error') present({ phase: 'error' });
+      else if (reason === 'toolcancelled')
+        bridge.events.get('toolcancelled')!();
+      else if (reason === 'pagehide')
+        globalThis.dispatchEvent(new Event('pagehide'));
+      else await bridge.onteardown!();
+      expect(signal.aborted).toBe(true);
+      expect(text('continuation-status')).toContain('does not withdraw');
+      const terminalText = text('continuation-status');
+      pending.resolve({});
+      await pending.promise;
+      expect(text('continuation-status')).toBe(terminalText);
+      expect(continuation().disabled).toBe(true);
+      expect(bridge.sendMessage).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('handles a terminal status published synchronously during capture', () => {
+    ready();
+    presentation.capture.mockImplementation(() => {
+      present({ phase: 'error' });
+      return { ok: false, reason: 'error' };
+    });
+    continuation().click();
+    expect(bridge.sendMessage).not.toHaveBeenCalled();
+    expect(continuation().disabled).toBe(true);
+    expect(
+      document.getElementById('continuation-status')!.dataset['state'],
+    ).toBe('terminal');
+    expect(text('continuation-status')).not.toContain('already sent');
+  });
+
+  it('preserves accepted semantics when the card subsequently stops', async () => {
+    ready();
+    continuation().click();
+    await vi.waitFor(() =>
+      expect(text('continuation-status')).toContain('session accepted'),
+    );
+    stop().click();
+    expect(text('continuation-status')).toContain('session accepted');
+    expect(continuation().disabled).toBe(true);
+  });
+
+  it.each(['connecting', 'other-host', 'no-text'])(
+    'keeps local interaction available but does not send with %s',
+    async (mode) => {
+      await bridge.onteardown!();
+      vi.resetModules();
+      if (mode === 'connecting')
+        bridge.connect.mockReturnValue(new Promise(() => {}));
+      if (mode === 'other-host')
+        bridge.getHostVersion.mockReturnValue({ name: 'other' });
+      if (mode === 'no-text')
+        bridge.getHostCapabilities.mockReturnValue({ message: {} });
+      await import('./main.js');
+      ready();
+      expect(frame().hidden).toBe(false);
+      expect(stop().disabled).toBe(false);
+      continuation().click();
+      expect(bridge.sendMessage).not.toHaveBeenCalled();
+      expect(continuation().disabled).toBe(true);
+    },
+  );
+
+  it('does not announce unchanged continuation status on every view update', () => {
+    bridge.sendMessage.mockReturnValue(deferred().promise);
+    ready();
+    continuation().click();
+    const observer = new MutationObserver(() => {});
+    observer.observe(document.getElementById('continuation-status')!, {
+      childList: true,
+      characterData: true,
+      subtree: true,
+    });
+    present({});
+    present({ phase: 'dirty' });
+    expect(observer.takeRecords()).toHaveLength(0);
+    observer.disconnect();
+  });
 });
 afterEach(async () => {
   await bridge.onteardown?.();
