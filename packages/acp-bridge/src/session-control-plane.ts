@@ -13797,8 +13797,11 @@ export function createSessionControlPlane(
           reason: params?.['reason'] ?? 'all',
         } as T;
       }
+      // Workspace directory management must work before the first session
+      // exists: the Settings panel edits it for a freshly opened workspace.
       const startsWorkspaceChannel =
         method === SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart ||
+        method === SERVE_CONTROL_EXT_METHODS.workspaceDirectories ||
         method === SERVE_CONTROL_EXT_METHODS.workspaceMemoryImportPlan;
       const invoke = async (info: ChannelInfo) => {
         const timeout = invokeOpts?.timeoutMs ?? initTimeoutMs;

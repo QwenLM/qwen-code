@@ -1217,6 +1217,36 @@ export function createDaemonWorkspaceActions({
       return result as DaemonWorkspaceDirectoryPickerResult;
     },
 
+    async listWorkspaceDirectories(workspaceSelector) {
+      const client = requireClient(
+        getClient,
+        'List workspace directories failed',
+      );
+      return withActionTimeout(
+        client.workspaceByCwd(workspaceSelector).directories(),
+        'List workspace directories timed out',
+      );
+    },
+
+    async addWorkspaceDirectory(workspaceSelector, path) {
+      const client = requireClient(getClient, 'Add workspace directory failed');
+      return withActionTimeout(
+        client.workspaceByCwd(workspaceSelector).addDirectory(path),
+        'Add workspace directory timed out',
+      );
+    },
+
+    async removeWorkspaceDirectory(workspaceSelector, path) {
+      const client = requireClient(
+        getClient,
+        'Remove workspace directory failed',
+      );
+      return withActionTimeout(
+        client.workspaceByCwd(workspaceSelector).removeDirectory(path),
+        'Remove workspace directory timed out',
+      );
+    },
+
     async updateWorkspace(workspaceSelector, update) {
       const client = requireClient(getClient, 'Update workspace failed');
       return withActionTimeout(

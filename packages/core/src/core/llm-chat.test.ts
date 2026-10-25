@@ -78,6 +78,7 @@ import {
   estimateContentTokens,
   estimatePromptTokens,
 } from '../services/tokenEstimation.js';
+import { clampOutputTokensToWindow } from './tokenLimits.js';
 import { getAutoMemorySnapshot } from '../memory/request-context.js';
 import {
   isSystemReminderContent,
@@ -97,6 +98,10 @@ import {
 } from '../utils/api-history-metadata.js';
 import { formatAgentMessageModelText } from '../agents/session-agents/envelope.js';
 import { SessionStartSource } from '../hooks/types.js';
+import {
+  createUserPromptSubmitContextPart,
+  wrapUserPromptSubmitContext,
+} from '../hooks/user-prompt-submit-context.js';
 import * as sideQueryModule from '../utils/sideQuery.js';
 import {
   getToolCallPreparations,
@@ -3936,6 +3941,107 @@ describe('LlmChat', async () => {
       );
     });
 
+    it('re-appends a suppressed hook block when the send compacts', async () => {
+      mockCompressOnce(
+        compressed(1000, 200, [userText('summary'), modelText('ok')]),
+      );
+      mockStream(textStream('answer'));
+
+      await drain(
+        await chat.sendMessageStream(
+          'test-model',
+          { message: 'go' },
+          'prompt-id-hook-compaction',
+          undefined,
+          { suppressedHookContext: 'CTX' },
+        ),
+      );
+
+      expect(
+        chat
+          .getHistory()
+          .flatMap((entry) => entry.parts ?? [])
+          .filter((part) => part.text === wrapUserPromptSubmitContext('CTX')),
+      ).toHaveLength(1);
+    });
+
+    it('does not append a second suppressed hook block when the request already carries it', async () => {
+      mockCompressOnce(
+        compressed(1000, 200, [userText('summary'), modelText('ok')]),
+      );
+      mockStream(textStream('answer'));
+
+      // The ACP send re-appends the block after a compaction of its own and
+      // still forwards the option, so this rescue must not add a second copy.
+      await drain(
+        await chat.sendMessageStream(
+          'test-model',
+          {
+            message: [{ text: 'go' }, createUserPromptSubmitContextPart('CTX')],
+          },
+          'prompt-id-hook-already-present',
+          undefined,
+          { suppressedHookContext: 'CTX' },
+        ),
+      );
+
+      expect(
+        chat
+          .getHistory()
+          .flatMap((entry) => entry.parts ?? [])
+          .filter((part) => part.text === wrapUserPromptSubmitContext('CTX')),
+      ).toHaveLength(1);
+    });
+
+    it('leaves a suppressed hook block unappended when the send does not compact', async () => {
+      mockCompress(noop());
+      mockStream(textStream('answer'));
+
+      await drain(
+        await chat.sendMessageStream(
+          'test-model',
+          { message: 'go' },
+          'prompt-id-hook-no-compaction',
+          undefined,
+          { suppressedHookContext: 'CTX' },
+        ),
+      );
+
+      // The COMPRESSED conjunct is the whole gate: `compressionInfo` is
+      // assigned on every send (NOOP on the exact-route arm), so without it
+      // the rescue would re-append on every suppressed turn.
+      expect(
+        chat
+          .getHistory()
+          .flatMap((entry) => entry.parts ?? [])
+          .filter((part) => part.text === wrapUserPromptSubmitContext('CTX')),
+      ).toHaveLength(0);
+    });
+
+    it('re-appends a suppressed hook block when a reactive compaction replaces history', async () => {
+      reactiveCompaction(135_000);
+      mockRequests(tooLong(), textStream('answer after compaction'));
+
+      await drain(
+        await chat.sendMessageStream(
+          'test-model',
+          { message: 'latest' },
+          'prompt-id-hook-reactive-compaction',
+          undefined,
+          { suppressedHookContext: 'CTX' },
+        ),
+      );
+
+      const sentParts = (
+        requestAt(1) as { contents: Content[] }
+      ).contents.flatMap((entry) => entry.parts ?? []);
+      expect(
+        sentParts.filter(
+          (part) => part.text === wrapUserPromptSubmitContext('CTX'),
+        ),
+      ).toHaveLength(1);
+    });
+
     it('yields a COMPRESSED stream event as the first event after auto-compression succeeds', async () => {
       mockCompressOnce(
         compressed(1000, 200, [userText('summary'), modelText('ok')]),
@@ -5146,6 +5252,34 @@ describe('LlmChat', async () => {
         compressSpy.mock.calls[2][1].precomputedEffectiveTokens,
       ).toBeLessThan(100_000);
     });
+
+    it.each([
+      { catalog: 'c'.repeat(75_000), aborts: true },
+      { catalog: '', aborts: false },
+    ])(
+      'counts the pending catalog in the post-compression hard-rescue decision (catalog=$aborts)',
+      async ({ catalog, aborts }) => {
+        mockConfig.getAutoMemoryContext = () => catalog;
+        mockCompress(compressed(180_000, 175_000));
+        streamMock().mockImplementation(async () => textStream('after rescue'));
+        chat.setLastPromptTokenCount(176_999);
+
+        const send = sendDrain(
+          'next question',
+          `prompt-catalog-hard-${aborts}`,
+        );
+
+        if (aborts) {
+          await expect(send).rejects.toThrow(/hard limit/i);
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).not.toHaveBeenCalled();
+        } else {
+          await send;
+          expectStreamCalls(1);
+        }
+      },
+    );
 
     it('stops pre-send hard-rescue after repeated failed hard-tier compactions', async () => {
       const compressSpy = mockCompress(failedRescue());
@@ -8039,7 +8173,15 @@ describe('LlmChat', async () => {
         );
         expectStreamCalls(2);
         expect(eventsOfType(events, StreamEventType.RETRY)).toEqual([
-          { type: StreamEventType.RETRY, isContinuation: true },
+          {
+            type: StreamEventType.RETRY,
+            retryDiagnostics: {
+              kind: 'transport',
+              reason: 'transport-error',
+              transportCode: 'UND_ERR_SOCKET',
+            },
+            isContinuation: true,
+          },
         ]);
         expectWarned('Server stream retry not taken', {
           retryDecision: 'skipped_after_content',
@@ -9995,7 +10137,16 @@ describe('LlmChat', async () => {
         );
         const events = await collectStreamWithFakeTimers(stream, 5_000);
         const retries = eventsOfType(events, StreamEventType.RETRY);
-        expect(retries).toEqual([{ type: StreamEventType.RETRY }]);
+        expect(retries).toEqual([
+          {
+            type: StreamEventType.RETRY,
+            retryDiagnostics: {
+              kind: 'transport',
+              reason: 'transport-error',
+              transportCode: 'UND_ERR_SOCKET',
+            },
+          },
+        ]);
         expectStreamCalls(2);
         // The replay re-sends the original request: no synthetic model/user
         // turns carrying the delivered prefix or the resume instruction.
@@ -12707,8 +12858,10 @@ describe('LlmChat', async () => {
         streamOf(modelChunk([{ text: 'still truncated' }], 'MAX_TOKENS')),
         streamOf(modelChunk([{ text: ' …and done.' }], 'STOP')),
       ];
+      const requests: Content[][] = [];
       let served = 0;
-      streamMock().mockImplementation(async () => {
+      streamMock().mockImplementation(async (request) => {
+        requests.push(structuredClone(request.contents as Content[]));
         const stream = streams[served]!;
         served += 1;
         // The escalated request is assembled before this point and reuses the
@@ -12731,6 +12884,71 @@ describe('LlmChat', async () => {
         'catalog A',
       );
       expect(JSON.stringify(target.getHistory())).not.toContain('catalog B');
+      // The durable request carries the snapshot; the recovery control prompt
+      // carries the request-only catalog instead, so the wire never receives
+      // two competing catalogs and the discarded turn owns no snapshot.
+      const marked = (parts: Part[]) =>
+        parts.filter(
+          (part) =>
+            part.partMetadata?.['qwen-code:memory-catalog-snapshot'] === true,
+        );
+      expect(
+        marked(requests[0]!.flatMap((entry) => entry.parts ?? [])),
+      ).toHaveLength(1);
+      const recoveryParts = requests[2]!.flatMap((entry) => entry.parts ?? []);
+      expect(marked(recoveryParts)).toEqual([]);
+      expect(
+        recoveryParts.some(
+          (part) =>
+            part.partMetadata?.['qwen-code:reattach-boundary'] === true &&
+            part.text === 'catalog B',
+        ),
+      ).toBe(true);
+    });
+
+    it('budgets the recovery request from the catalog-bearing walk without usage', async () => {
+      mockGeneratorConfig({
+        model: 'claude-sonnet-4-6',
+        contextWindowSize: 131_072,
+      });
+      mockCompress(noop());
+      let catalog = 'CATALOG_A' + 'x'.repeat(40_000);
+      mockConfig.getAutoMemoryContext = () => catalog;
+      const target = newChat();
+      const streams = [
+        streamOf(textChunk('partial essay…', 'MAX_TOKENS')),
+        streamOf(modelChunk([{ text: 'still truncated' }], 'MAX_TOKENS')),
+        streamOf(modelChunk([{ text: ' …and done.' }], 'STOP')),
+      ];
+      const requests: Content[][] = [];
+      const maxOutputTokens: Array<number | undefined> = [];
+      let served = 0;
+      streamMock().mockImplementation(async (request) => {
+        requests.push(structuredClone(request.contents as Content[]));
+        maxOutputTokens.push(request.config?.maxOutputTokens);
+        const stream = streams[served]!;
+        served += 1;
+        if (served === 2) catalog = 'CATALOG_B' + 'y'.repeat(40_000);
+        return stream;
+      });
+
+      await drain(await sendPro('answer', 'recovery-catalog-budget', target));
+
+      expectStreamCalls(3);
+      // No usage ever arrived, so only the walk sizes the recovery request.
+      const recovery = requests[2]!;
+      const serialized = JSON.stringify(recovery);
+      // The request-only catalog replaces the superseded snapshot, so the
+      // stale catalog is gone and the current one appears exactly once.
+      expect(serialized.split('CATALOG_B')).toHaveLength(2);
+      expect(serialized).not.toContain('CATALOG_A');
+      expect(maxOutputTokens[2]).toBe(
+        clampOutputTokensToWindow(
+          maxOutputTokens[1]!,
+          131_072,
+          estimateContentTokens(recovery) + 20_000,
+        ),
+      );
     });
 
     it('escalates an empty MAX_TOKENS response instead of retrying it as an empty stream', async () => {
