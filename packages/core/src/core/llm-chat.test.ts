@@ -9030,7 +9030,16 @@ describe('LlmChat', async () => {
         );
         const events = await collectStreamWithFakeTimers(stream, 5_000);
         const retries = eventsOfType(events, StreamEventType.RETRY);
-        expect(retries).toEqual([{ type: StreamEventType.RETRY }]);
+        expect(retries).toEqual([
+          {
+            type: StreamEventType.RETRY,
+            retryDiagnostics: {
+              kind: 'transport',
+              reason: 'transport-error',
+              transportCode: 'UND_ERR_SOCKET',
+            },
+          },
+        ]);
         expectStreamCalls(2);
         // The replay re-sends the original request: no synthetic model/user
         // turns carrying the delivered prefix or the resume instruction.

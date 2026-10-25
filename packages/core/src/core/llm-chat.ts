@@ -61,6 +61,8 @@ import {
   classifyRetryError,
   isFallbackEligible,
   isRetryableUpstreamError,
+  toRetryDiagnostics,
+  type RetryDiagnostics,
   type RetryErrorClassificationContext,
 } from '../utils/retryErrorClassification.js';
 import type { Config } from '../config/config.js';
@@ -607,6 +609,9 @@ export type StreamEvent =
   | {
       type: StreamEventType.RETRY;
       retryInfo?: RetryInfo;
+      /** Allowlisted scalar classification for headless/operator diagnostics.
+       * Present only on retry decisions that otherwise surface no reason. */
+      retryDiagnostics?: RetryDiagnostics;
       /** When true, the retry is a continuation (recovery) rather than a
        *  fresh restart (escalation). The UI should keep the accumulated text
        *  buffer so the continuation appends to it. */
@@ -4320,7 +4325,10 @@ export class LlmChat {
                   }),
                 },
               );
-              yield { type: StreamEventType.RETRY };
+              yield {
+                type: StreamEventType.RETRY,
+                retryDiagnostics: toRetryDiagnostics(classification),
+              };
               // A replay is a fresh restart, so anything a previous
               // continuation had staged must go. Without
               // `retractDeliveredOutputOnRetry` the gate above admits only an

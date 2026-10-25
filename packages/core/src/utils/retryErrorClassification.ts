@@ -38,6 +38,35 @@ export interface RetryErrorClassification {
 }
 
 /**
+ * Allowlisted scalar subset of a classification that is safe to show to users
+ * and CI logs. `kind` and `reason` are fixed identifier strings, `transportCode`
+ * comes from a vetted code set, and `statusCode` is numeric. `providerCode`,
+ * `requestId`, and `providerMessage` are arbitrary upstream strings and must
+ * never be displayed verbatim, so they are intentionally absent here.
+ */
+export interface RetryDiagnostics {
+  kind: RetryErrorKind;
+  reason: string;
+  transportCode?: string;
+  statusCode?: number;
+}
+
+export function toRetryDiagnostics(
+  classification: RetryErrorClassification,
+): RetryDiagnostics {
+  return {
+    kind: classification.kind,
+    reason: classification.reason,
+    ...(classification.transportCode !== undefined
+      ? { transportCode: classification.transportCode }
+      : {}),
+    ...(classification.statusCode !== undefined
+      ? { statusCode: classification.statusCode }
+      : {}),
+  };
+}
+
+/**
  * Classifies retry-related failures.
  *
  * The result is primarily diagnostic — it labels the observed error shape for

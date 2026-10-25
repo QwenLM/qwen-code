@@ -1817,10 +1817,17 @@ export async function runNonInteractive(
         }
         if (event.type !== LlmEventType.Retry) return;
         if (!event.retryInfo) {
+          const diagnostics = event.retryDiagnostics;
+          const diagnosticText = diagnostics
+            ? ` [kind=${diagnostics.kind}, reason=${diagnostics.reason}` +
+              `${diagnostics.transportCode ? `, transportCode=${diagnostics.transportCode}` : ''}` +
+              `${diagnostics.statusCode !== undefined ? `, statusCode=${diagnostics.statusCode}` : ''}` +
+              ']'
+            : '';
           process.stderr.write(
             `Retrying provider attempt (${discardedToolCallCount} buffered tool call(s) discarded${
               preserveText ? '; preserving delivered text' : ''
-            }).\n`,
+            })${diagnosticText}.\n`,
           );
           return;
         }

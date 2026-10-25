@@ -12,6 +12,7 @@ import {
   classifyRetryError,
   isFallbackEligible,
   isRetryableUpstreamError,
+  toRetryDiagnostics,
   type RetryErrorClassificationContext,
   type RetryErrorDiagnosis,
 } from './retryErrorClassification.js';
@@ -907,5 +908,53 @@ describe('isFallbackEligible', () => {
     expect(classification).toMatchObject({ kind: 'provider', ...UPSTREAM });
     expect(classification.statusCode).toBeUndefined();
     expect(isFallbackEligible(classification)).toBe(false);
+  });
+});
+
+describe('toRetryDiagnostics', () => {
+  it('keeps only the allowlisted scalar fields', () => {
+    expect(
+      toRetryDiagnostics({
+        kind: 'http',
+        diagnosis: 'retryable',
+        reason: 'server-error',
+        statusCode: 503,
+        providerCode: 'arbitrary-upstream-code',
+        providerMessage: 'provider text with user content',
+        requestId: 'req-123',
+      }),
+    ).toEqual({
+      kind: 'http',
+      reason: 'server-error',
+      statusCode: 503,
+    });
+  });
+
+  it('omits optional fields instead of printing undefined', () => {
+    expect(
+      toRetryDiagnostics({
+        kind: 'transport',
+        diagnosis: 'retryable',
+        reason: 'transport-error',
+      }),
+    ).toEqual({ kind: 'transport', reason: 'transport-error' });
+  });
+
+  it('carries a vetted transport code and status code when present', () => {
+    expect(
+      toRetryDiagnostics(
+        classifyRetryError(
+          Object.assign(new TypeError('terminated'), {
+            cause: Object.assign(new Error('other side closed'), {
+              code: 'UND_ERR_SOCKET',
+            }),
+          }),
+        ),
+      ),
+    ).toEqual({
+      kind: 'transport',
+      reason: 'transport-error',
+      transportCode: 'UND_ERR_SOCKET',
+    });
   });
 });
