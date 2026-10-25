@@ -1343,7 +1343,17 @@ export class MemoryManager {
     } finally {
       this.extractCurrentTaskId.delete(params.projectRoot);
       this.extractRunning.delete(params.projectRoot);
-      void this.startQueuedExtract(params.projectRoot);
+      // Fire-and-forget: startQueuedExtract's own promise has no consumer.
+      // track() handles the rejection of the run it wraps, but the await
+      // inside startQueuedExtract derives a second rejection that `void`
+      // would drop unattached, escaping as an unhandled rejection that can
+      // fail the process (vitest counts it as an error). The queued run
+      // still records its own failure on its task record.
+      void this.startQueuedExtract(params.projectRoot).catch(
+        (error: unknown) => {
+          debugLogger.warn('Queued memory extraction failed:', error);
+        },
+      );
     }
   }
 

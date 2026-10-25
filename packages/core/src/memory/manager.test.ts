@@ -2063,6 +2063,55 @@ describe('MemoryManager', () => {
       expect(vi.mocked(runAutoMemoryExtract)).toHaveBeenCalledTimes(2);
     });
 
+    it('does not emit an unhandled rejection when a queued trailing extract fails', async () => {
+      const first = deferred<ExtractResult>();
+      vi.mocked(runAutoMemoryExtract)
+        .mockReturnValueOnce(first.promise)
+        .mockRejectedValueOnce(new Error('queued-boom'));
+
+      const mgr = new MemoryManager();
+      const firstPromise = mgr.scheduleExtract(
+        extractParams(tmp.projectRoot, 'sess-1', 'first'),
+      );
+
+      // Second call while first is in-flight gets queued; its
+      // fire-and-forget start in the first run's finally has no consumer.
+      const queued = await mgr.scheduleExtract(
+        extractParams(tmp.projectRoot, 'sess-1', 'second'),
+      );
+      expect(queued.skippedReason).toBe('queued');
+
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown) => {
+        unhandled.push(reason);
+      };
+      process.on('unhandledRejection', onUnhandled);
+      try {
+        first.resolve(extractResult('sess-1', ['user']));
+        await firstPromise;
+
+        // Wait for the queued run to start; its mock rejects immediately.
+        await vi.waitFor(() => {
+          expect(vi.mocked(runAutoMemoryExtract)).toHaveBeenCalledTimes(2);
+        });
+
+        // Let the fire-and-forget chain settle, then give the process a
+        // macrotask to report any unattached rejection.
+        await mgr.drain({ timeoutMs: 1_000 });
+        await new Promise((resolve) => setTimeout(resolve, 50));
+
+        expect(unhandled).toEqual([]);
+        // The failure is still recorded on the queued run's task record.
+        const tasks = mgr.listTasksByType('extract', tmp.projectRoot);
+        expect(tasks.map((t) => t.status).sort()).toEqual([
+          'completed',
+          'failed',
+        ]);
+      } finally {
+        process.removeListener('unhandledRejection', onUnhandled);
+      }
+    });
+
     it('isolates state between manager instances', async () => {
       vi.mocked(runAutoMemoryExtract).mockResolvedValue(
         extractResult('sess-1', ['user']),
