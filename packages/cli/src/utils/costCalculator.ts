@@ -53,7 +53,9 @@ export function calculateCost(args: {
 }
 
 /**
- * Billable output tokens from an accumulated token record.
+ * Legacy estimate for snapshots without per-event billable output counts.
+ * An aggregate cannot detect partial usage inside the band; live telemetry
+ * supplies an authoritative count computed before accumulation instead.
  *
  * `total - prompt` is the output under both usage conventions (reasoning
  * folded into `candidates`, or `thoughts` disjoint from it). Trust it only

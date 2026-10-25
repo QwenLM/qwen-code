@@ -789,10 +789,12 @@ export const statsCommand: SlashCommand = {
             if (buckets.length === 0) buckets.push(modelMetrics);
             const cost = calculateCost({
               inputTokens: modelMetrics.tokens.prompt,
-              outputTokens: buckets.reduce(
-                (sum, bucket) => sum + billableOutputTokens(bucket.tokens),
-                0,
-              ),
+              outputTokens:
+                metrics.billableOutputTokens?.[modelName]?.total ??
+                buckets.reduce(
+                  (sum, bucket) => sum + billableOutputTokens(bucket.tokens),
+                  0,
+                ),
               pricing: pricing?.[modelName],
             });
             if (cost != null) {

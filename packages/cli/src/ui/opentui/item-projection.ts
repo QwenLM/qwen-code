@@ -214,6 +214,7 @@ export function projectSkillsList(
 }
 
 interface FlatModelEntry {
+  billableOutputTokens?: number;
   /** Structured key (raw model name + optional `::source` suffix). */
   key: string;
   label: string;
@@ -231,7 +232,11 @@ interface FlatModelEntry {
 
 /** Active-model rows; `flattenModelsBySource` already labels + filters. */
 function flattenActiveModels(metrics: SessionMetrics): FlatModelEntry[] {
-  return flattenModelsBySource(metrics.models).map((entry) => ({
+  return flattenModelsBySource(
+    metrics.models,
+    metrics.billableOutputTokens,
+  ).map((entry) => ({
+    billableOutputTokens: entry.billableOutputTokens,
     key: entry.key,
     label: entry.label,
     metrics: entry.metrics as FlatModelEntry['metrics'],
@@ -247,7 +252,8 @@ function entryCost(
 ): number | null {
   return calculateCost({
     inputTokens: entry.metrics.tokens.prompt,
-    outputTokens: billableOutputTokens(entry.metrics.tokens),
+    outputTokens:
+      entry.billableOutputTokens ?? billableOutputTokens(entry.metrics.tokens),
     pricing: (modelPricing ?? {})[entry.key.split('::')[0]] as Parameters<
       typeof calculateCost
     >[0]['pricing'],

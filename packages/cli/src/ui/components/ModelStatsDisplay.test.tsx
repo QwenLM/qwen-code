@@ -463,6 +463,26 @@ describe('<ModelStatsDisplay />', () => {
           pricing,
         );
 
+      it.each([0, 180_000])(
+        'uses authoritative output %i instead of raw aggregate arithmetic',
+        (output) => {
+          const core = makeCore(120_000, 60_000, 120_000);
+          core.tokens.total = 270_000;
+          const { lastFrame } = renderWithMockedStats(
+            {
+              models: { model: mainOnly(core) },
+              tools: baseTools,
+              files: baseFiles,
+              billableOutputTokens: {
+                model: { total: output, bySource: { main: output } },
+              },
+            },
+            { model: { outputPerMillionTokens: 1 } },
+          );
+          expect(lastFrame()).toContain(`$${(output / 1_000_000).toFixed(4)}`);
+        },
+      );
+
       it('should not display Cost section when no pricing and no thoughts', () => {
         const { lastFrame } = renderCostTest(
           { 'gemini-2.5-pro': mainOnly(makeCore(10, 20, 0)) },

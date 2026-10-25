@@ -543,6 +543,46 @@ describe('statsCommand', () => {
       expect(result.content).not.toContain('$0.2700');
     });
 
+    it.each([0, 180_000])(
+      'stats model prefers authoritative output %i',
+      async (output) => {
+        const modelSubCommand = statsCommand.subCommands?.find(
+          (sc) => sc.name === 'model',
+        );
+        if (!modelSubCommand?.action)
+          throw new Error('Subcommand has no action');
+        const context = createMockCommandContext({
+          executionMode: 'non_interactive',
+        });
+        (context.services.settings as unknown as Record<string, unknown>)[
+          'merged'
+        ] = {
+          modelPricing: { model: { outputPerMillionTokens: 1 } },
+        };
+        context.session.stats.metrics.models = {
+          model: toModelMetrics({
+            api: { totalRequests: 2, totalErrors: 0, totalLatencyMs: 0 },
+            tokens: {
+              prompt: 120_000,
+              candidates: 60_000,
+              thoughts: 120_000,
+              cached: 0,
+              total: 270_000,
+            },
+          }),
+        };
+        context.session.stats.metrics.billableOutputTokens = {
+          model: { total: output, bySource: { main: output } },
+        };
+        const result = (await modelSubCommand.action(context, '')) as {
+          content: string;
+        };
+        expect(result.content).toContain(
+          `Estimated cost: $${(output / 1_000_000).toFixed(4)}`,
+        );
+      },
+    );
+
     it('stats model bills each source bucket, not the model aggregate (#15444)', async () => {
       const modelSubCommand = statsCommand.subCommands?.find(
         (sc) => sc.name === 'model',

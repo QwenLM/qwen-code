@@ -11,6 +11,12 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import {
+  UiTelemetryService,
+  EVENT_API_RESPONSE,
+  type UiEvent,
+} from '@qwen-code/qwen-code-core/telemetry/uiTelemetry.js';
+import { ApiResponseEvent } from '@qwen-code/qwen-code-core/telemetry/types.js';
+import {
   CompressionStatus,
   ToolDisplayNames,
   type Config,
@@ -1347,6 +1353,57 @@ describe('cost does not double-count included reasoning tokens (#15444)', () => 
         },
       },
     }) as unknown as SessionMetrics;
+
+  it('renders accumulated event costs for mixed completeness and missing OpenAI totals', () => {
+    const telemetry = new UiTelemetryService();
+    const add = (
+      auth: string,
+      usage: ConstructorParameters<typeof ApiResponseEvent>[5],
+    ) =>
+      telemetry.addEvent({
+        ...new ApiResponseEvent('r', 'qwen3-max-001', 1, 'p', auth, usage),
+        'event.name': EVENT_API_RESPONSE,
+      } as UiEvent);
+    add('gemini', {
+      promptTokenCount: 100_000,
+      candidatesTokenCount: 50_000,
+      thoughtsTokenCount: 120_000,
+      totalTokenCount: 270_000,
+    });
+    expect(projectModelStats(telemetry.getMetrics(), PRICING)).toContain(
+      'Estimated $0.1700',
+    );
+    add('gemini', { promptTokenCount: 20_000, candidatesTokenCount: 10_000 });
+    expect(projectModelStats(telemetry.getMetrics(), PRICING)).toContain(
+      'Estimated $0.1800',
+    );
+    // Legacy history cannot recover the missing total; its estimate stays unchanged.
+    const legacy = structuredClone(telemetry.getMetrics());
+    delete legacy.billableOutputTokens;
+    expect(projectModelStats(legacy, PRICING)).toContain('Estimated $0.1500');
+    telemetry.reset();
+    add('openai', {
+      promptTokenCount: 100_000,
+      candidatesTokenCount: 150_000,
+      thoughtsTokenCount: 120_000,
+    });
+    expect(projectModelStats(telemetry.getMetrics(), PRICING)).toContain(
+      'Estimated $0.1500',
+    );
+  });
+
+  it('honors an authoritative zero instead of falling back to raw thoughts', () => {
+    const metrics = metricsWith({
+      prompt: 100,
+      candidates: 0,
+      thoughts: 1000,
+      total: 0,
+    });
+    metrics.billableOutputTokens = {
+      'qwen3-max-001': { total: 0, bySource: {} },
+    };
+    expect(projectModelStats(metrics, PRICING)).toContain('Estimated $0.0000');
+  });
 
   it('bills total − prompt when reasoning is already inside candidates', () => {
     // OpenAI-style usage: the provider's `total` already counts the reasoning
