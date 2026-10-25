@@ -256,7 +256,7 @@ function assembleIndex(
       `${charCount} UTF-16 code units (limit: ${MAX_INDEX_CHARS}) — ${
         overlongEntriesCauseOverflow
           ? 'index entries are too long'
-          : 'too many index entries'
+          : 'cumulative index entry length'
       }`,
     );
   }
@@ -266,7 +266,9 @@ function assembleIndex(
       ? ''
       : overlongEntriesCauseOverflow
         ? ' Overlong entries already omit descriptions. Shorten their topic-file paths or frontmatter names, or merge topic files/remove obsolete ones. Editing only the generated index will not survive a rebuild.'
-        : ' Merge topic files or remove obsolete ones to reduce the index. Editing only the generated index will not survive a rebuild.';
+        : charCount > MAX_INDEX_CHARS
+          ? ' Shorten topic-file paths or frontmatter names/descriptions, or merge/remove topic files. Editing only the generated index will not survive a rebuild.'
+          : ' Merge topic files or remove obsolete ones to reduce the index. Editing only the generated index will not survive a rebuild.';
   const scanLever =
     scanOmitted > 0
       ? ' Merge topic files or remove obsolete ones to reduce the file count.'

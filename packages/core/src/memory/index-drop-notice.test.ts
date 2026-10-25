@@ -70,7 +70,7 @@ describe('memory index omission diagnostics', () => {
     expect(kept).toHaveLength(165);
     expect(kept.every((line) => line.length === 150)).toBe(true);
     expect(kept.join('\n').length).toBe(24_914);
-    expect(index).toContain('too many index entries');
+    expect(index).toContain('cumulative index entry length');
     expect(index).not.toContain('index entries are too long');
     const notice =
       'Dropped 5 of 170 entries: "Topic 165", "Topic 166", "Topic 167", +2 more.';
@@ -79,6 +79,27 @@ describe('memory index omission diagnostics', () => {
     expect(prompt).toContain(notice);
     expect(prompt).not.toContain('Only part of it was loaded.');
     for (const line of kept) expect(prompt).toContain(line);
+  });
+
+  it('offers description edits when legal entries collectively exceed the character budget', () => {
+    const docs = Array.from({ length: 170 }, (_, i) => doc(i));
+    const index = buildManagedAutoMemoryIndex(docs);
+    expect(entries(index)).toHaveLength(165);
+    expect(entries(index).every((line) => line.length === 150)).toBe(true);
+    expect(index).toContain('cumulative index entry length');
+    expect(index).not.toContain('too many index entries');
+    expect(index).toContain('frontmatter names/descriptions');
+
+    const shortened = buildManagedAutoMemoryIndex(
+      docs.map((item) => ({
+        ...item,
+        description: item.description.slice(0, 95),
+      })),
+    );
+    expect(entries(shortened)).toHaveLength(170);
+    expect(shortened).not.toContain('> WARNING:');
+    for (const item of docs)
+      expect(shortened).toContain(`](${item.relativePath})`);
   });
 
   it('reports line-cap omissions with a bounded name sample', () => {
@@ -106,7 +127,7 @@ describe('memory index omission diagnostics', () => {
     expect(index).toContain('Dropped 5 of 205 topic files: "Topic 200"');
     expect(index).not.toContain('in total across both limits');
     expect(index).toContain(
-      'Merge topic files or remove obsolete ones to reduce the index.',
+      'Shorten topic-file paths or frontmatter names/descriptions, or merge/remove topic files.',
     );
     expect(index).toContain(
       'Merge topic files or remove obsolete ones to reduce the file count.',
@@ -195,7 +216,7 @@ describe('memory index omission diagnostics', () => {
     });
     const index = buildManagedAutoMemoryIndex(docs);
     expect(entries(index)).toHaveLength(165);
-    expect(index).toContain('too many index entries');
+    expect(index).toContain('cumulative index entry length');
     expect(index).not.toContain('index entries are too long');
     expect(index).toContain('Dropped 36 of 201 entries:');
   });
@@ -289,9 +310,9 @@ describe('review follow-up diagnostics', () => {
     const index = buildManagedAutoMemoryIndex(
       Array.from({ length: 170 }, (_, i) => doc(i)),
     );
-    expect(index).toContain('too many index entries');
+    expect(index).toContain('cumulative index entry length');
     expect(index).toContain(
-      'Merge topic files or remove obsolete ones to reduce the index.',
+      'Shorten topic-file paths or frontmatter names/descriptions, or merge/remove topic files.',
     );
     expect(index).toContain(
       'Editing only the generated index will not survive a rebuild.',
@@ -335,7 +356,7 @@ describe('review follow-up diagnostics', () => {
   });
 
   it.each([false, true])(
-    'keeps count advice when a dropped overlong candidate is not the cause (extra entry=%s)',
+    'keeps cumulative-length advice when a dropped overlong candidate is not the cause (extra entry=%s)',
     (extraEntry) => {
       const ordinary = Array.from({ length: 199 }, (_, i) => doc(i));
       const hidden = {
@@ -349,13 +370,13 @@ describe('review follow-up diagnostics', () => {
       expect(kept).toHaveLength(165);
       expect(kept.every((line) => line.length === 150)).toBe(true);
       expect(kept.some((line) => line.includes('[Hidden]'))).toBe(false);
-      expect(index).toContain('too many index entries');
+      expect(index).toContain('cumulative index entry length');
       expect(index).not.toContain('index entries are too long');
       expect(index).not.toContain(
         'Overlong entries already omit descriptions.',
       );
       expect(index).toContain(
-        'Merge topic files or remove obsolete ones to reduce the index.',
+        'Shorten topic-file paths or frontmatter names/descriptions, or merge/remove topic files.',
       );
       expect(
         entries(
