@@ -29,9 +29,15 @@ import {
 import { findHostedApprovalContinuation } from './hosted-approval-continuation.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { hostedPublicPlanActive } from './hosted-plan-mode.js';
+import { slowHostBudgetMs } from '../test-utils/slow-test-host.js';
 import type { HttpToolPublicationOwner } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 
 afterEach(() => vi.restoreAllMocks());
+
+// The observed chain is a serial run of fsync-backed publishes and journal
+// commits; a fixed 10s budget flaked on a loaded runner (#15176).
+const WAIT_TIMEOUT_MS = slowHostBudgetMs(10_000, 45_000);
+const TEST_TIMEOUT_MS = slowHostBudgetMs(20_000, 75_000);
 
 it.each(
   ['allow', 'deny', 'cancelled', 'expired']
@@ -50,6 +56,16 @@ it.each(
       ),
     )
     .concat(
+      ['allow', 'deny', 'cancelled', 'expired'].map((decision) => ({
+        decision,
+        promptId: randomUUID(),
+        round: 1,
+        planMode: false,
+        publicTool: 'web_fetch',
+        profile: 'hosted-workspace-files/1',
+      })),
+    )
+    .concat(
       ['allow', 'deny', 'cancelled', 'expired'].flatMap((decision) =>
         ['hosted-workspace-files/1', 'hosted-workspace-shell/1'].map(
           (profile) => ({
@@ -65,14 +81,16 @@ it.each(
     )
     .concat(
       ['allow', 'deny', 'cancelled', 'expired'].flatMap((decision) =>
-        ['write_file', 'agent', 'run_shell_command'].map((publicTool) => ({
-          decision,
-          promptId: randomUUID(),
-          round: 1,
-          planMode: false,
-          profile: 'hosted-workspace-shell/1',
-          publicTool,
-        })),
+        ['write_file', 'web_fetch', 'agent', 'run_shell_command'].map(
+          (publicTool) => ({
+            decision,
+            promptId: randomUUID(),
+            round: 1,
+            planMode: false,
+            profile: 'hosted-workspace-shell/1',
+            publicTool,
+          }),
+        ),
       ),
     ),
 )(
@@ -256,7 +274,9 @@ it.each(
               }
             : publicTool === 'run_shell_command'
               ? { command: 'printf once' }
-              : { file_path: 'original.txt', content: 'one original batch' },
+              : publicTool === 'web_fetch'
+                ? { url: 'https://example.com/docs', prompt: 'Summarize' }
+                : { file_path: 'original.txt', content: 'one original batch' },
         isClientInitiated: false,
         prompt_id: promptId,
       };
@@ -295,7 +315,7 @@ it.each(
           requestId = authorization.checkpoint.approval!.requestId;
           expect(first.authority.action(requestId)?.state).toBe('requested');
         },
-        { timeout: 10_000 },
+        { timeout: WAIT_TIMEOUT_MS },
       );
       const action = first.authority.action(requestId)!;
       const descriptor = JSON.parse(
@@ -448,5 +468,5 @@ it.each(
       await rm(root, { recursive: true, force: true });
     }
   },
-  20_000,
+  TEST_TIMEOUT_MS,
 );

@@ -39,6 +39,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -443,7 +444,9 @@ public class LocalProcessRuntimeProvisionerTest {
                 worker.destroyForcibly();
             }
             worker.onExit().get(10, TimeUnit.SECONDS);
-            assertFalse(provisioner.isUsable(first));
+            // ProcessHandle exit can precede the Process object's exit update.
+            await().atMost(10, TimeUnit.SECONDS)
+                    .untilAsserted(() -> assertFalse(provisioner.isUsable(first)));
             if (release) {
                 provisioner.release(request, first).toCompletableFuture()
                         .get(10, TimeUnit.SECONDS);
@@ -846,7 +849,8 @@ public class LocalProcessRuntimeProvisionerTest {
                     .findFirst().orElseThrow();
             worker.destroyForcibly();
             worker.onExit().get(10, TimeUnit.SECONDS);
-            assertFalse(provisioner.isUsable(lease));
+            await().atMost(10, TimeUnit.SECONDS)
+                    .untilAsserted(() -> assertFalse(provisioner.isUsable(lease)));
             RuntimeObservation lost = provisioner
                     .reconcile(request, seed, handle, lease)
                     .toCompletableFuture().get(10, TimeUnit.SECONDS);

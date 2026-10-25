@@ -69,7 +69,7 @@ describe('npm OpenTUI package construction', () => {
     const version = /const DEFAULT_BUN_VERSION = '([^']+)'/.exec(
       standalone,
     )?.[1];
-    expect(version).toBe('1.3.14');
+    expect(version).toBe('1.4.4');
     expect(Object.keys(NPM_BUN_OPTIONAL_DEPENDENCIES)).toEqual([
       '@oven/bun-darwin-aarch64',
       '@oven/bun-darwin-x64',
