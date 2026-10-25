@@ -135,7 +135,7 @@ class SessionRowLockOrderTest {
     // unaudited.
     private static final Set<String> SIBLING_SESSION_LOCKERS = Set.of(
             "HarnessPlacementStore.java",
-            "ManagedActionStore.java", "ManagedExtensionRecordStore.java",
+            "ManagedActionStore.java", "ManagedExtensionAgentLaunch.java", "ManagedExtensionRecordStore.java",
             "ManagedLegacySessionGuard.java",
             "ManagedProjectionResourceCollector.java",
             "ManagedRuntimeRetentionGuard.java",
@@ -398,6 +398,7 @@ class SessionRowLockOrderTest {
         assertThat(audit.lockers()).containsExactlyInAnyOrder(
                 "insertTurnCommand", "insertCancelCommand", "changeSessionModel", "changeSessionApproval",
                 "requireMcpManagement", "requireMcpSettingsCommit",
+                "requireConfigurationCommit", "requireExtensionManagement",
                 "insertSessionCommand", "insertWorkspaceSessionCommand",
                 "insertChildSessionCommand", "insertPublicChildSessionCommand",
                 "insertInternalTeamLeadSessionCommand",
@@ -489,6 +490,7 @@ class SessionRowLockOrderTest {
                         "recordHarnessEvents", "recordRecoveryAdmission",
                         "releaseTurnLease", "renewTurn", "requireTurn",
                         "requireTurnForUpdate", "requirePolicyChange", "requireMcpManagement", "requireMcpSettingsCommit",
+                        "requireConfigurationCommit", "requireExtensionManagement", "requireChildExtensionBootstrap",
                         "requireMcpManagementIdle", "retractContinuationOutput",
                         "retractHarnessTurnOutput", "scheduleTurnRetry",
                         "settleTurnCommands",

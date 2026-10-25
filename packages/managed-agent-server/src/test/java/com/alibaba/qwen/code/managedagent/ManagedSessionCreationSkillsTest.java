@@ -163,6 +163,8 @@ class ManagedSessionCreationSkillsTest {
             definition.putObject("model");
             definition.put("instructions", "");
             definition.putArray("tools").addObject().put("type", "hosted_profile").put("profile", "hosted-workspace-mcp/1");
+            definition.putArray("mcp_servers").addObject().put("server_id", "docs").put("server_revision", 1)
+                    .put("definition_digest", "a".repeat(64));
             definition.putObject("permission_policy").put("approval_mode", "default");
             var response = mvc.perform(post("/v1/agents").principal(actor("actor"))
                             .header(TenantContextFilter.HEADER, tenant).header("Idempotency-Key", "mcp-definition")

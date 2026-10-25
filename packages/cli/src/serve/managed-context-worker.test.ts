@@ -7,7 +7,10 @@
 import { createHash, randomUUID } from 'node:crypto';
 import * as tar from 'tar';
 import { compileManagedExtensionPackage } from '@qwen-code/qwen-code-core/extension/managed-package.js';
-import { MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST } from './managed-extension-profile.js';
+import {
+  MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST,
+  MANAGED_EXTENSION_LINUX_CAPABILITY_DIGEST,
+} from './managed-extension-profile.js';
 import { extensionToolInput } from './hosted-extension-tool-context.js';
 import express from 'express';
 import fs from 'node:fs';
@@ -3518,50 +3521,67 @@ describe('selectShellCapturePublisher', () => {
   });
 });
 
-it('admits extension command control through the negotiated strict worker gate', async () => {
-  const mountRoot = workspace();
-  const cacheDirectory = fs.mkdtempSync(
-    path.join(os.tmpdir(), 'review-extension-route-'),
-  );
-  onTestFinished(() =>
-    fs.rmSync(cacheDirectory, { recursive: true, force: true }),
-  );
-  const origin = await startWorker({
-    ...BOOT,
-    mountRoot,
-    capabilityDigest: MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST,
-    managedExtensions: {
-      enabled: true,
-      mode: 'developer-process-group',
-      cacheDirectory,
-    },
-  });
-  const observations = [];
-  for (const action of ['execute', 'status', 'cancel']) {
-    const response = await post(
-      origin,
-      '/internal/managed-runtime/v3/extensions/commands',
-      {
-        protocolVersion: 1,
-        runtimeSessionId: 'test-runtime-session',
-        operation: { kind: 'extension-command', action },
-      },
+it.skipIf(!['darwin', 'linux'].includes(process.platform))(
+  'admits extension command control through the negotiated strict worker gate',
+  async () => {
+    const mountRoot = workspace();
+    const cacheDirectory = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'review-extension-route-'),
     );
-    observations.push({
-      action,
-      status: response.status,
-      body: await response.text(),
+    onTestFinished(() =>
+      fs.rmSync(cacheDirectory, { recursive: true, force: true }),
+    );
+    const origin = await startWorker({
+      ...BOOT,
+      mountRoot,
+      capabilityDigest:
+        process.platform === 'linux'
+          ? MANAGED_EXTENSION_LINUX_CAPABILITY_DIGEST
+          : MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST,
+      managedExtensions: {
+        enabled: true,
+        mode:
+          process.platform === 'linux'
+            ? 'linux-cgroup'
+            : 'developer-process-group',
+        cacheDirectory,
+        ...(process.platform === 'linux'
+          ? { cgroupRoot: path.join(cacheDirectory, 'cgroup') }
+          : {}),
+      },
     });
-  }
-  for (const entry of observations) {
-    expect(entry.status).toBe(409);
-    expect(JSON.parse(entry.body)).toEqual({
-      code: 'managed_extension_command_refused',
-    });
-  }
-  const legacy = await startWorker({ ...BOOT, mountRoot });
-  expect(
-    (await post(legacy, '/internal/managed-runtime/v3/extensions/commands', {}))
-      .status,
-  ).toBe(404);
-});
+    const observations = [];
+    for (const action of ['execute', 'status', 'cancel']) {
+      const response = await post(
+        origin,
+        '/internal/managed-runtime/v3/extensions/commands',
+        {
+          protocolVersion: 1,
+          runtimeSessionId: 'test-runtime-session',
+          operation: { kind: 'extension-command', action },
+        },
+      );
+      observations.push({
+        action,
+        status: response.status,
+        body: await response.text(),
+      });
+    }
+    for (const entry of observations) {
+      expect(entry.status).toBe(409);
+      expect(JSON.parse(entry.body)).toEqual({
+        code: 'managed_extension_command_refused',
+      });
+    }
+    const legacy = await startWorker({ ...BOOT, mountRoot });
+    expect(
+      (
+        await post(
+          legacy,
+          '/internal/managed-runtime/v3/extensions/commands',
+          {},
+        )
+      ).status,
+    ).toBe(404);
+  },
+);
