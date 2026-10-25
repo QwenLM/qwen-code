@@ -92,6 +92,16 @@ final class WorkspaceCsiApplicationInventory {
                     + "projection_version:INT,snapshot_stale_since:BIGINT,current_snapshot_id:VARBINARY,"
                     + "artifact_refs_resource_key:CHAR,output_ranges_json:LONGTEXT,projection_pending:BOOLEAN,"
                     + "gmt_modified:BIGINT"),
+            declaration("ma_extension_operation", "operation_key",
+                    "operation_key:CHAR,scope_key:CHAR,tenant_id:VARBINARY,workspace_id:VARBINARY,actor_key:CHAR,"
+                    + "operation_id:VARCHAR,extension_id:VARBINARY,operation_kind:VARCHAR,revision:BIGINT,"
+                    + "package_digest:CHAR,request_digest:CHAR,state:VARCHAR,gmt_create:BIGINT"),
+            declaration("ma_extension_package", "package_key",
+                    "package_key:CHAR,scope_key:CHAR,tenant_id:VARBINARY,workspace_id:VARBINARY,extension_id:VARBINARY,"
+                    + "package_revision:BIGINT,package_digest:CHAR,manifest_json:LONGTEXT,byte_length:BIGINT,state:VARCHAR,gmt_create:BIGINT"),
+            declaration("ma_extension_settings", "settings_key",
+                    "settings_key:CHAR,scope_key:CHAR,tenant_id:VARBINARY,workspace_id:VARBINARY,extension_id:VARBINARY,"
+                    + "settings_revision:BIGINT,encryption_key_id:VARBINARY,encrypted_values:LONGTEXT,configured_keys_json:LONGTEXT,gmt_create:BIGINT"),
             declaration("ma_message", "tenant_id,session_id,item_id",
                     "tenant_id:VARBINARY,session_id:VARBINARY,item_id:VARBINARY,turn_id:VARBINARY,item_type:VARCHAR,"
                     + "item_role:VARCHAR,item_status:VARCHAR,attributes_json:LONGTEXT,first_sequence:BIGINT,"
@@ -284,6 +294,16 @@ final class WorkspaceCsiApplicationInventory {
                     + "retry_count:INT,consecutive_failures:INT,budget_exempt_failures:INT,retry_after:BIGINT,"
                     + "model_id:VARBINARY,model_revision:BIGINT,approval_mode:VARCHAR,approval_revision:BIGINT,"
                     + "plan_enabled:BOOLEAN,permission_rules_json:LONGTEXT"),
+            declaration("ma_user_message", "tenant_id,session_id,message_id",
+                    "tenant_id:VARBINARY,session_id:VARBINARY,message_id:VARBINARY,sequence_number:BIGINT,"
+                    + "revision:BIGINT,actor_id:VARBINARY,input_json:LONGTEXT,state:VARCHAR,context_revision:BIGINT,"
+                    + "turn_id:VARBINARY,prompt_id:VARBINARY,consumed_sequence:BIGINT"),
+            declaration("ma_user_message_command", "tenant_id,session_id,command_key",
+                    "tenant_id:VARBINARY,session_id:VARBINARY,command_key:CHAR,actor_id:VARBINARY,"
+                    + "request_digest:VARCHAR,result_json:LONGTEXT"),
+            declaration("ma_user_message_queue", "tenant_id,session_id",
+                    "tenant_id:VARBINARY,session_id:VARBINARY,paused:BOOLEAN,resumed_turn_id:VARBINARY,"
+                    + "next_sequence:BIGINT,last_dispatch_at:BIGINT"),
             declaration("ma_workspace", "tenant_id,workspace_id",
                     "tenant_id:VARBINARY,workspace_id:VARBINARY,workspace_generation:BIGINT,storage_id:VARBINARY,"
                     + "display_name:VARCHAR,config_ref:VARBINARY,policy_ref:VARBINARY,state:VARCHAR,workspace_kind:VARCHAR,"
@@ -2319,13 +2339,15 @@ final class WorkspaceCsiApplicationInventory {
                 case "ma_session" -> query(table, "tenant_id=T&session_id=sessions", "runtime_request_key=requests",
                         "tenant_id=T&parent_session_id=sessions", "tenant_id=T&root_session_id=sessions");
                 case "ma_session_head" -> query(table, "tenant_key=BT&harness_key=BS", "tenant_id=T&session_id=sessions");
-                case "ma_public_event", "ma_turn", "ma_session_record" ->
+                case "ma_public_event", "ma_turn", "ma_session_record", "ma_user_message",
+                        "ma_user_message_command", "ma_user_message_queue" ->
                         query(table, "tenant_id=T&session_id=sessions");
                 case "ma_event_stream" -> query(table, "tenant_id=T&session_id=sessions", "artifact_refs_resource_key=resourceKeys");
                 case "ma_message" -> query(table, "tenant_id=T&session_id=sessions", "body_resource_key=resourceKeys");
                 case "ma_snapshot" -> query(table, "tenant_id=T&session_id=sessions", "manifest_resource_key=resourceKeys");
                 case "ma_agent_definition" -> query(table, "tenant_id=T&agent_id=agent&revision=agentRevision");
-                case "ma_workspace_access", "ma_channel_instance" -> query(table, "tenant_id=T&workspace_id=W");
+                case "ma_workspace_access", "ma_channel_instance", "ma_extension_operation", "ma_extension_package",
+                        "ma_extension_settings" -> query(table, "tenant_id=T&workspace_id=W");
                 case "ma_workspace" -> query(table, "tenant_id=T&workspace_id=W", "tenant_id=T&storage_id=D",
                         "tenant_id=T&parent_session_id=sessions");
                 case "ma_storage" -> query(table, "alias_key=A", "physical_key=F", "tenant_id=T&storage_id=D");
@@ -2382,7 +2404,8 @@ final class WorkspaceCsiApplicationInventory {
             }
             return switch (table) {
                 case "ma_tenant_guard", "ma_agent_definition" -> true;
-                case "ma_workspace_access", "ma_channel_instance" -> workspace.equals(row.text("workspace_id"));
+                case "ma_workspace_access", "ma_channel_instance", "ma_extension_operation", "ma_extension_package",
+                        "ma_extension_settings" -> workspace.equals(row.text("workspace_id"));
                 case "ma_workspace" -> "ROOT".equals(row.text("workspace_kind"))
                         && row.cell("parent_session_id").isNull() && row.cell("parent_workspace_id").isNull();
                 case "ma_request_receipt" -> "SESSION_CREATE_MODE".equals(row.text("namespace"))
@@ -3189,7 +3212,8 @@ final class WorkspaceCsiApplicationInventory {
                 }
                 case "ma_tenant_guard" -> expect(table, row, tenant.equals(row.text("tenant_id"))
                         && has("BT", row.text("tenant_key")) && oneOf(row.text("guard_domain"), "runtime_placement", "output_publication"));
-                case "ma_workspace_access", "ma_channel_instance" -> expect(table, row, tenant.equals(row.text("tenant_id")) && workspace.equals(row.text("workspace_id")));
+                case "ma_workspace_access", "ma_channel_instance", "ma_extension_operation", "ma_extension_package",
+                        "ma_extension_settings" -> expect(table, row, tenant.equals(row.text("tenant_id")) && workspace.equals(row.text("workspace_id")));
                 case "ma_agent_definition" -> {
                     Row parent = originalRow("ma_session");
                     expect(table, row, parent != null && tenant.equals(row.text("tenant_id"))

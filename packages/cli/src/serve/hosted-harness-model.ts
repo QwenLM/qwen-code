@@ -303,7 +303,9 @@ export async function runHostedHarnessTextTurn(input: {
         | 'setToolOutputBudget'
         | 'capturesChildModelRoute'
         | 'setChildModelRoute'
+        | 'setChildModelResolver'
         | 'planModeInstructions'
+        | 'todoInstructions'
       >
     >;
   workspaceContext?: { read(): string | undefined };
@@ -311,6 +313,7 @@ export async function runHostedHarnessTextTurn(input: {
   modelSelection?: HostedModelSelection;
   publicChildModelRoute?: PublicChildModelRoute;
   agentInstructions?: string;
+  extensionInstructions?: string;
   skills?: HostedSkillCatalog;
   textDeltas?: HostedHarnessTextDeltas;
   completeFinalOutput?: (
@@ -346,17 +349,6 @@ export async function runHostedHarnessTextTurn(input: {
   const outputBudget = config.getToolOutputBatchBudget?.();
   if (outputBudget !== undefined)
     input.toolTurn?.setToolOutputBudget?.(outputBudget);
-  const contextWithInstructions = (context: string | undefined) =>
-    [
-      input.agentInstructions
-        ? `# Agent instructions\n\n${input.agentInstructions}`
-        : undefined,
-      input.skills?.instructions(),
-      input.toolTurn?.planModeInstructions?.(),
-      context,
-    ]
-      .filter(Boolean)
-      .join('\n\n');
   const model = input.modelSelection
     ? { id: input.modelSelection.modelId }
     : input.agentDefinition?.model;
@@ -373,30 +365,32 @@ export async function runHostedHarnessTextTurn(input: {
     // Config falls back to its own generator until authentication fills this frame.
     const view = {} as RuntimeContentGeneratorView;
     return runWithRuntimeContentGenerator(view, () =>
-      runPreparedHostedHarnessTextTurn(
-        input,
-        config,
-        model,
-        contextWithInstructions,
-        view,
-      ),
+      runPreparedHostedHarnessTextTurn(input, config, model, view),
     );
   }
-  return runPreparedHostedHarnessTextTurn(
-    input,
-    config,
-    model,
-    contextWithInstructions,
-  );
+  return runPreparedHostedHarnessTextTurn(input, config, model);
 }
 
 async function runPreparedHostedHarnessTextTurn(
   input: Parameters<typeof runHostedHarnessTextTurn>[0],
   config: Awaited<ReturnType<typeof loadCliConfig>>,
   model: HostedAgentDefinition['model'] | undefined,
-  contextWithInstructions: (context: string | undefined) => string,
   runtimeView?: RuntimeContentGeneratorView,
 ): Promise<HostedHarnessModelResult> {
+  let todoContext = await input.toolTurn?.todoInstructions?.();
+  const contextWithInstructions = (context: string | undefined) =>
+    [
+      input.agentInstructions
+        ? `# Agent instructions\n\n${input.agentInstructions}`
+        : undefined,
+      input.extensionInstructions,
+      input.skills?.instructions(),
+      input.toolTurn?.planModeInstructions?.(),
+      todoContext,
+      context,
+    ]
+      .filter(Boolean)
+      .join('\n\n');
   let runPromptHook: HostedPromptHookRunner | undefined;
   let modelReady = false;
   let historyReady = false;
@@ -509,7 +503,7 @@ async function runPreparedHostedHarnessTextTurn(
     await input.hooks?.ensureReady(input.signal);
     // Seed instructions when memory reload is skipped; restore them after
     // initialize() when its hierarchical memory refresh replaces user memory.
-    if (input.agentInstructions || input.skills)
+    if (input.agentInstructions || input.extensionInstructions || input.skills)
       config.setUserMemory(
         contextWithInstructions(input.workspaceContext?.read()),
       );
@@ -526,7 +520,11 @@ async function runPreparedHostedHarnessTextTurn(
     const authType = config.getModelsConfig().getCurrentAuthType();
     if (!authType)
       throw new Error('Hosted Harness model authentication is unavailable.');
-    if (input.agentInstructions || input.skills) {
+    if (
+      input.agentInstructions ||
+      input.extensionInstructions ||
+      input.skills
+    ) {
       config.setUserMemory(
         contextWithInstructions(input.workspaceContext?.read()),
       );
@@ -634,6 +632,31 @@ async function runPreparedHostedHarnessTextTurn(
             }
           : {}),
       });
+      input.toolTurn.setChildModelResolver?.(async (selector) => {
+        const resolved = await config
+          .getBaseLlmClient()
+          .resolveForModel(selector, { failClosed: true });
+        const selected = resolved.contentGeneratorConfig;
+        if (!selected.authType) throw new HostedModelUnavailableError();
+        return {
+          modelId: resolved.model,
+          route: {
+            authType: selected.authType,
+            endpointDigest: createHash('sha256')
+              .update(selected.baseUrl ?? '')
+              .digest('hex'),
+            providerPin: llmPreparedProviderPin(selected),
+            origin: {
+              modelId: config.getModel(),
+              authType: active.authType!,
+              endpointDigest: createHash('sha256')
+                .update(active.baseUrl ?? '')
+                .digest('hex'),
+              providerPin: llmPreparedProviderPin(active),
+            },
+          },
+        };
+      });
     };
     if (
       [...initialMessages, ...(input.resumeModel?.prepared.history ?? [])].some(
@@ -645,7 +668,7 @@ async function runPreparedHostedHarnessTextTurn(
       config.getEffectiveInputModalities().image !== true
     )
       throw new HostedImageInputUnsupportedError();
-    if (input.agentInstructions || input.skills)
+    if (input.agentInstructions || input.extensionInstructions || input.skills)
       await config.getLlmClient().refreshSystemInstruction();
     await input.modelScope?.bindBudget(config.getTurnBudget(), input.prompt);
     runPromptHook = input.modelScope
@@ -880,7 +903,7 @@ async function runPreparedHostedHarnessTextTurn(
       const calls: ToolCallRequestInfo[] = selectedSkills.map((skill) => ({
         callId: randomUUID(),
         name: 'skill',
-        args: { skill },
+        args: { skill, ...input.skills?.userArguments(skill, effectivePrompt) },
         isClientInitiated: true,
         origin: { kind: 'client' },
         prompt_id: input.promptId,
@@ -974,6 +997,7 @@ async function runPreparedHostedHarnessTextTurn(
           declarations.length ? [{ functionDeclarations: declarations }] : [],
         );
       if (!preparedRecovery) {
+        todoContext = await input.toolTurn?.todoInstructions?.();
         const toolNames = new Set(
           declarations
             .map(({ name }) => name)
