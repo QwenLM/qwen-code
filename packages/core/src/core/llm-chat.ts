@@ -61,6 +61,8 @@ import {
   classifyRetryError,
   isFallbackEligible,
   isRetryableUpstreamError,
+  toRetryDiagnostics,
+  type RetryDiagnostics,
   type RetryErrorClassificationContext,
 } from '../utils/retryErrorClassification.js';
 import type { Config } from '../config/config.js';
@@ -613,6 +615,9 @@ export type StreamEvent =
   | {
       type: StreamEventType.RETRY;
       retryInfo?: RetryInfo;
+      /** Allowlisted scalar classification for headless/operator diagnostics.
+       * Present only on retry decisions that otherwise surface no reason. */
+      retryDiagnostics?: RetryDiagnostics;
       /** When true, the retry is a continuation (recovery) rather than a
        *  fresh restart (escalation). The UI should keep the accumulated text
        *  buffer so the continuation appends to it. */
@@ -4427,7 +4432,10 @@ export class LlmChat {
                   }),
                 },
               );
-              yield { type: StreamEventType.RETRY };
+              yield {
+                type: StreamEventType.RETRY,
+                retryDiagnostics: toRetryDiagnostics(classification),
+              };
               // A replay is a fresh restart, so anything a previous
               // continuation had staged must go. Without
               // `retractDeliveredOutputOnRetry` the gate above admits only an
@@ -4525,7 +4533,11 @@ export class LlmChat {
               // attempt's chunks append to what is already on screen instead
               // of replacing it. The delivered text and the resume
               // instruction ride along in `buildAttemptContents()`.
-              yield { type: StreamEventType.RETRY, isContinuation: true };
+              yield {
+                type: StreamEventType.RETRY,
+                retryDiagnostics: toRetryDiagnostics(classification),
+                isContinuation: true,
+              };
               suppressNextRetryEvent = true;
               await delay(delayMs, params.config?.abortSignal).promise;
               rearmQuietAcceptanceIfBudgetSpent();
@@ -5886,6 +5898,25 @@ export class LlmChat {
   }
 
   /**
+   * Base history for a `curated` projection.
+   *
+   * Marked catalog snapshots are request-only data. While legacy memory is
+   * enabled they stay visible, because the next request sends them; while it is
+   * suppressed they are dropped, so a curated read matches what the next
+   * request will actually send. Raw reads (`curated = false`) keep their
+   * serialization, writeback and index contract and must not use this base.
+   *
+   * Every curated projection goes through here so a reader cannot silently
+   * keep a suppressed catalog; that omission is the defect this helper exists
+   * to prevent.
+   */
+  private curatedBaseHistory(): Content[] {
+    return this.config.getAutoMemoryContext?.()
+      ? this.history
+      : withoutAutoMemorySnapshots(this.history);
+  }
+
+  /**
    * Returns the chat history.
    *
    * @remarks
@@ -5909,13 +5940,9 @@ export class LlmChat {
    * chat session.
    */
   getHistory(curated: boolean = false): Content[] {
-    const visibleHistory =
-      curated && !this.config.getAutoMemoryContext?.()
-        ? withoutAutoMemorySnapshots(this.history)
-        : this.history;
     const history = curated
-      ? extractCuratedHistory(visibleHistory)
-      : visibleHistory;
+      ? extractCuratedHistory(this.curatedBaseHistory())
+      : this.history;
     // Deep copy the history to avoid mutating the history outside of the
     // chat session.
     return cloneApiHistory(history);
@@ -5927,13 +5954,9 @@ export class LlmChat {
    */
   getHistoryTail(count: number, curated: boolean = false): Content[] {
     if (count <= 0) return [];
-    const visibleHistory =
-      curated && !this.config.getAutoMemoryContext?.()
-        ? withoutAutoMemorySnapshots(this.history)
-        : this.history;
     const history = curated
-      ? extractCuratedHistory(visibleHistory)
-      : visibleHistory;
+      ? extractCuratedHistory(this.curatedBaseHistory())
+      : this.history;
     return cloneApiHistory(history.slice(-count));
   }
 
@@ -5943,13 +5966,9 @@ export class LlmChat {
    * payload objects.
    */
   getHistoryShallow(curated: boolean = false): Content[] {
-    const visibleHistory =
-      curated && !this.config.getAutoMemoryContext?.()
-        ? withoutAutoMemorySnapshots(this.history)
-        : this.history;
     const history = curated
-      ? extractCuratedHistory(visibleHistory)
-      : visibleHistory;
+      ? extractCuratedHistory(this.curatedBaseHistory())
+      : this.history;
     return history.map((content) => {
       const copied = copyContentContainer(content);
       // Startup restoration and microcompaction reinstall these defensive copies.
@@ -5978,13 +5997,9 @@ export class LlmChat {
    */
   getHistoryTailShallow(count: number, curated: boolean = false): Content[] {
     if (count <= 0) return [];
-    const visibleHistory =
-      curated && !this.config.getAutoMemoryContext?.()
-        ? withoutAutoMemorySnapshots(this.history)
-        : this.history;
     const history = curated
-      ? extractCuratedHistory(visibleHistory)
-      : visibleHistory;
+      ? extractCuratedHistory(this.curatedBaseHistory())
+      : this.history;
     return history.slice(-count).map(copyContentContainer);
   }
 
