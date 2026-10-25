@@ -3277,10 +3277,11 @@ describe('generic tool card details', () => {
   });
 
   it('offers Show more when pretty-printing grows a payload past the cap', () => {
-    const items = Array.from({ length: 160 }, (_, i) => ({
-      id: i,
-      name: 'x',
-    }));
+    const tail = 'TAIL-MARKER';
+    const items = [
+      ...Array.from({ length: 160 }, (_, i) => ({ id: i, name: 'x' })),
+      { id: 160, name: tail },
+    ];
     const compact = JSON.stringify(items);
     // Guard the fixture: the raw payload fits inline, the formatted one does
     // not, so the button must follow the formatted length.
@@ -3292,7 +3293,32 @@ describe('generic tool card details', () => {
       { forceExpanded: true },
     );
 
-    expect(container.textContent).toContain('Show more');
+    expect(container.textContent).not.toContain(tail);
+    const more = [...container.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Show more',
+    );
+    expect(more).toBeDefined();
+    act(() => more?.click());
+    expect(container.textContent).toContain(tail);
+  });
+
+  it('stops at the expanded cap and keeps the truncation notice', () => {
+    const pastCap = 'PAST-40K-MARKER';
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__huge',
+        rawOutput: `${'x'.repeat(40_000)}${pastCap}`,
+      }),
+      { forceExpanded: true },
+    );
+
+    const more = [...container.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Show more',
+    );
+    expect(more).toBeDefined();
+    act(() => more?.click());
+    expect(container.textContent).not.toContain(pastCap);
+    expect(container.textContent).toContain('Content truncated');
   });
 
   it('keeps the header description out of the expanded body', () => {
@@ -3309,6 +3335,23 @@ describe('generic tool card details', () => {
     const occurrences = (container.textContent ?? '').split(
       'Inspect check runs',
     ).length;
+    expect(occurrences - 1).toBe(1);
+  });
+
+  it('keeps a long description in the expanded card detail', () => {
+    const title =
+      `Inspect check runs ${'and report failures '.repeat(4)}`.trim();
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__inspect',
+        title,
+        args: { method: 'get_check_runs' },
+        rawOutput: '{"total_count":38}',
+      }),
+      { forceExpanded: true },
+    );
+
+    const occurrences = (container.textContent ?? '').split(title).length;
     expect(occurrences - 1).toBe(1);
   });
 
@@ -3357,7 +3400,21 @@ describe('generic tool card details', () => {
     expect(container.textContent).toContain('second block');
   });
 
-  it('shows a single waiting placeholder for a pending call', () => {
+  it('shows a waiting Result for a pending call with arguments', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__ping',
+        status: 'in_progress',
+        args: { method: 'ping' },
+      }),
+      { forceExpanded: true },
+    );
+
+    expect(container.textContent).toContain('Result');
+    expect(container.textContent).toContain('Waiting for output…');
+  });
+
+  it('shows a waiting Result for a pending call with no payload', () => {
     const container = renderToolLine(
       makeTool({ toolName: 'mcp__demo__slow', status: 'in_progress' }),
       { forceExpanded: true },
@@ -3367,6 +3424,7 @@ describe('generic tool card details', () => {
       'Waiting for output…',
     ).length;
     expect(occurrences - 1).toBe(1);
+    expect(container.textContent).toContain('Result');
   });
 
   it('shows the full payload without Show more in document mode', () => {
