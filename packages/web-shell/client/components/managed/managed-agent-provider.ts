@@ -306,6 +306,22 @@ export interface ManagedAgentPendingAction {
 }
 
 export interface ManagedAgentProvider {
+  readonly userMessages?: {
+    query(
+      sessionId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<
+      import('./use-managed-user-messages').ManagedUserMessageSnapshot
+    >;
+    command(
+      sessionId: string,
+      command: import('./use-managed-user-messages').ManagedUserMessageCommand,
+      options: { idempotencyKey: string; signal?: AbortSignal },
+    ): Promise<
+      import('./use-managed-user-messages').ManagedUserMessageSnapshot
+    >;
+  };
+
   readonly lifecycle?: {
     submit(
       kind: ManagedLifecycleKind,
