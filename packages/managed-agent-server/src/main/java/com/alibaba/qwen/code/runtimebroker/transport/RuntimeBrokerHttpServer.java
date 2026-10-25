@@ -217,6 +217,25 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                 throw notFound();
             }
             String relative = path.substring(ROUTE_PREFIX.length());
+            if ("POST".equals(exchange.getRequestMethod()) && relative.startsWith("/harness-sessions/")
+                    && relative.endsWith("/mcp-definitions")) {
+                String sessionId = pathId(relative.substring("/harness-sessions/".length(),
+                        relative.length() - "/mcp-definitions".length()));
+                Map<String, Object> body = requestBody(exchange, "MCP definitions request");
+                requireProtocol(body);
+                JsonCodec.requiredString(body, "requestId", "MCP definitions request");
+                if (!sessionId.equals(JsonCodec.requiredString(body, "harnessSessionId", "MCP definitions request"))
+                        || lifecycleAuthority(exchange) != null
+                        || !Set.of("protocolVersion", "requestId", "harnessSessionId", "runtimeSessionId").containsAll(body.keySet())) {
+                    throw new IllegalArgumentException("Invalid MCP definitions request");
+                }
+                String runtimeSessionId = body.containsKey("runtimeSessionId")
+                        ? JsonCodec.requiredString(body, "runtimeSessionId", "MCP definitions request") : null;
+                exchange.getResponseHeaders().set("Cache-Control", "no-store");
+                complete(exchange, service.mcpDefinitions(sessionId, runtimeSessionId), definitions -> Map.of(
+                        "protocolVersion", 1, "harnessSessionId", sessionId, "servers", definitions));
+                return;
+            }
             if ("POST".equals(exchange.getRequestMethod())
                     && "/runtimes:warm".equals(relative)) {
                 Map<String, Object> body = requestBody(exchange, "warm request");

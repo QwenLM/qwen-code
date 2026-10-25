@@ -236,6 +236,26 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/managed-local-runtime.ts',
+    {
+      reason:
+        'The foreground Managed launcher resolves its version-matched runtime and Java from deployment-owned process settings before any Workspace exists.',
+      accesses: {
+        'key:JAVA_HOME': 1,
+        'key:PATH': 1,
+        'key:QWEN_MANAGED_LOCAL_RUNTIME_DIR': 1,
+      },
+    },
+  ],
+  [
+    'packages/cli/src/serve/managed-local-serve.ts',
+    {
+      reason:
+        'The foreground Managed launcher starts its private Java and Hosted Harness processes from its own deployment environment, before any Workspace environment is resolved.',
+      accesses: { whole: 2 },
+    },
+  ],
+  [
     'packages/cli/src/serve/managed-mcp-runtime.ts',
     {
       reason:

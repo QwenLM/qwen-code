@@ -8,6 +8,7 @@ export function useManagedMcp(
   provider: ManagedAgentProvider,
   clientId: string,
   sessionId: string | undefined,
+  catalogScope = '',
 ) {
   const { t } = useI18n();
   const scope = useMemo(
@@ -16,12 +17,13 @@ export function useManagedMcp(
         provider.storageKey,
         clientId,
         sessionId,
+        catalogScope,
         managedRequestId(),
       ]),
       active: false,
       requests: new Set<AbortController>(),
     }),
-    [provider, clientId, sessionId],
+    [provider, clientId, sessionId, catalogScope],
   );
   useEffect(() => {
     scope.active = true;
