@@ -28,7 +28,6 @@ import {
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type {
-  Part,
   PartListUnion,
   Part,
   Content,
