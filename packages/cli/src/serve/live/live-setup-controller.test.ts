@@ -24,6 +24,7 @@ function createHarness(
     modelProviders?: Record<string, unknown[]>;
     env?: Record<string, string | undefined>;
     nativeHost?: boolean;
+    allowedBaseUrls?: string[];
   } = {},
 ) {
   const initiallyEnabled = options.initiallyEnabled ?? false;
@@ -38,6 +39,9 @@ function createHarness(
     },
     ...(options.modelProviders
       ? { modelProviders: options.modelProviders }
+      : {}),
+    ...(options.allowedBaseUrls
+      ? { model: { allowedBaseUrls: options.allowedBaseUrls } }
       : {}),
   } as unknown as Settings;
   let enabled = initiallyEnabled;
@@ -563,6 +567,28 @@ describe('LiveSetupController', () => {
       const status = await harness.controller.getStatus();
       expect(status.endpointError).toMatch(/^The endpoint must be a DashScope/);
       expect(status.endpointError).not.toContain('experimental.liveVoice');
+    });
+
+    it('names a free-standing endpoint the managed allowlist refuses (R5-18)', async () => {
+      // The dial path refuses it; the status card must not report it ready.
+      const refused = createHarness({
+        apiKey: 'realtime-secret',
+        endpoint: intlBase,
+        allowedBaseUrls: ['https://corp.example'],
+      });
+      const status = await refused.controller.getStatus();
+      expect(status.endpointError).toContain(
+        "is not in the managed allowlist 'model.allowedBaseUrls'",
+      );
+
+      const allowed = createHarness({
+        apiKey: 'realtime-secret',
+        endpoint: intlBase,
+        allowedBaseUrls: ['https://dashscope-intl.aliyuncs.com'],
+      });
+      expect((await allowed.controller.getStatus()).endpointError).toBe(
+        undefined,
+      );
     });
 
     it('stores a base URL as entered', async () => {

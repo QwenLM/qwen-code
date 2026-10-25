@@ -328,6 +328,29 @@ function assertLiveEndpointAllowed(
   }
 }
 
+/**
+ * The managed-allowlist refusal for a free-standing Live endpoint (a
+ * normalized Realtime URL), worded exactly as the dial path raises it, or
+ * `undefined` when allowed or no policy is set — so the setup status card
+ * shows the refusal the dial path enforces (issue #12805).
+ */
+export function liveEndpointPolicyError(
+  settings: Settings,
+  endpoint: string,
+): string | undefined {
+  try {
+    assertLiveEndpointAllowed(
+      endpoint,
+      settings.model?.allowedBaseUrls,
+      `Live Voice endpoint '${endpoint}'`,
+    );
+    return undefined;
+  } catch (error) {
+    if (error instanceof LiveProviderConfigError) return error.message;
+    throw error;
+  }
+}
+
 function resolveRouteCredential(
   settings: Settings,
   route: LiveRealtimeRoute,
