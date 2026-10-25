@@ -466,7 +466,7 @@ export function registerTodosRoutes(
         : String(dueDate)
       : undefined;
 
-    void withTodoWriteLock(async () => {
+    return withTodoWriteLock(async () => {
       const todoDir = getTodoDir();
       const filePath = path.join(todoDir, `${sessionId}.json`);
       try {

@@ -105,6 +105,37 @@ export function TodosDialog() {
     [t],
   );
 
+  // Flattened items — computed early so the bulk callback can reference it
+  // in its dependency array without a temporal-dead-zone error.
+  const items: FlatTodo[] = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const flat: FlatTodo[] = [];
+    for (const group of snapshot?.groups ?? []) {
+      for (const session of group.sessions) {
+        for (const todo of session.todos) {
+          if (
+            q &&
+            !todo.content.toLowerCase().includes(q) &&
+            !group.project.toLowerCase().includes(q)
+          ) {
+            continue;
+          }
+          flat.push({
+            key: `${session.sessionId}:${todo.id}`,
+            sessionId: session.sessionId,
+            todoId: todo.id,
+            content: todo.content,
+            status: todo.status,
+            dueDate: todo.dueDate ?? null,
+            project: group.project,
+            mtimeMs: session.mtimeMs,
+          });
+        }
+      }
+    }
+    return flat;
+  }, [snapshot, query]);
+
   // Kanban needs the completed column, so the page always loads the full
   // snapshot — relevance is handled by the views, not by the aggregate.
   const load = useCallback(async () => {
@@ -194,35 +225,6 @@ export function TodosDialog() {
   );
 
   const today = todayIso();
-
-  const items: FlatTodo[] = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    const flat: FlatTodo[] = [];
-    for (const group of snapshot?.groups ?? []) {
-      for (const session of group.sessions) {
-        for (const todo of session.todos) {
-          if (
-            q &&
-            !todo.content.toLowerCase().includes(q) &&
-            !group.project.toLowerCase().includes(q)
-          ) {
-            continue;
-          }
-          flat.push({
-            key: `${session.sessionId}:${todo.id}`,
-            sessionId: session.sessionId,
-            todoId: todo.id,
-            content: todo.content,
-            status: todo.status,
-            dueDate: todo.dueDate ?? null,
-            project: group.project,
-            mtimeMs: session.mtimeMs,
-          });
-        }
-      }
-    }
-    return flat;
-  }, [snapshot, query]);
 
   const projects = useMemo(
     () => (snapshot?.groups ?? []).map((g) => g.project),
