@@ -30,6 +30,7 @@ import {
 import { findHostedApprovalContinuation } from './hosted-approval-continuation.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { hostedPublicPlanActive } from './hosted-plan-mode.js';
+import { HostedSkillCatalog } from './hosted-skill-catalog.js';
 import { slowHostBudgetMs } from '../test-utils/slow-test-host.js';
 import type { HttpToolPublicationOwner } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 
@@ -79,6 +80,16 @@ it.each(
           }),
         ),
       ),
+    )
+    .concat(
+      ['allow', 'deny'].map((decision) => ({
+        decision,
+        promptId: randomUUID(),
+        round: 1,
+        planMode: false,
+        profile: 'hosted-workspace-shell/1',
+        publicTool: 'skill',
+      })),
     )
     .concat(
       ['allow', 'deny', 'cancelled', 'expired'].flatMap((decision) =>
@@ -211,6 +222,34 @@ it.each(
       const prepare = vi.spyOn(HostedWorkspaceBroker.prototype, 'prepare');
       const execute = vi.spyOn(HostedWorkspaceBroker.prototype, 'execute');
       const publicShell = profile === 'hosted-workspace-shell/1' && !planMode;
+      const commandSkills =
+        publicTool === 'skill'
+          ? new HostedSkillCatalog(
+              [],
+              [
+                {
+                  name: 'sample:run',
+                  description: 'Run once',
+                  prompt: '!{printf %s {{args}}}',
+                  extensionId: 'sample',
+                  modelInvocable: true,
+                },
+              ],
+            )
+          : undefined;
+      const extensionConfig = {
+        revision: 1,
+        packages: [
+          {
+            pin: {
+              extensionId: 'sample',
+              packageRevision: 1,
+              packageDigest: 'a'.repeat(64),
+            },
+            assetRoot: 'extension://sample/',
+          },
+        ],
+      };
       const publication = publicShell
         ? {
             owner: {
@@ -251,6 +290,7 @@ it.each(
         },
         {
           profile,
+          ...(commandSkills ? { skills: commandSkills, extensionConfig } : {}),
           publicPlanMode: planMode,
           ...(profile === 'hosted-workspace-shell/1' && !planMode
             ? {
@@ -276,17 +316,22 @@ it.each(
         callId: 'original-call',
         args: planMode
           ? { plan: '# Plan\nRead the files, then update original.txt.' }
-          : publicTool === 'agent'
-            ? {
-                description: 'audit',
-                prompt: 'review the file',
-                run_in_background: true,
-              }
-            : publicTool === 'run_shell_command'
-              ? { command: 'printf once' }
-              : publicTool === 'web_fetch'
-                ? { url: 'https://example.com/docs', prompt: 'Summarize' }
-                : { file_path: 'original.txt', content: 'one original batch' },
+          : publicTool === 'skill'
+            ? { skill: 'sample:run', args: 'argument' }
+            : publicTool === 'agent'
+              ? {
+                  description: 'audit',
+                  prompt: 'review the file',
+                  run_in_background: true,
+                }
+              : publicTool === 'run_shell_command'
+                ? { command: 'printf once' }
+                : publicTool === 'web_fetch'
+                  ? { url: 'https://example.com/docs', prompt: 'Summarize' }
+                  : {
+                      file_path: 'original.txt',
+                      content: 'one original batch',
+                    },
         isClientInitiated: false,
         prompt_id: promptId,
       };
@@ -411,6 +456,45 @@ it.each(
             continuation: { phase: 'model_output_committed' },
           },
         });
+        if (publicTool === 'skill') {
+          expect(saved!.plan.commandStep).toMatchObject({
+            toolName: 'shell',
+            configRevision: 1,
+          });
+          if (decision === 'allow') {
+            const commandExecute = vi
+              .spyOn(HostedWorkspaceBroker.prototype, 'extensionCommand')
+              .mockResolvedValue({
+                state: 'settled',
+                result: {
+                  executionStatus: 'success',
+                  responseParts: [{ text: 'ran once' }],
+                },
+              });
+            const resumed = new HostedWorkspaceToolTurn(
+              { baseUrl: 'http://127.0.0.1:1', token: 'fixture-no-traffic' },
+              replacement,
+              harness,
+              promptId,
+              vi.fn().mockResolvedValue('unused'),
+              () => true,
+              publication,
+              undefined,
+              {
+                settings: { mode: 'default', timeoutMs: 60_000 },
+                waiters: new HostedApprovalWaiters(),
+              },
+              { profile, skills: commandSkills, extensionConfig },
+            );
+            const result = await resumed.resumeSavedNativeBatch(
+              saved!,
+              1,
+              new AbortController().signal,
+            );
+            expect(JSON.stringify(result)).toContain('ran once');
+            expect(commandExecute).toHaveBeenCalledTimes(1);
+          }
+        }
         if (publicShell && publicTool === 'run_shell_command') {
           expect(saved!.plan.calls[0].publicationId).toMatch(
             /^[a-f0-9-]{36}$/u,
