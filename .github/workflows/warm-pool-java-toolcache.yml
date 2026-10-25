@@ -22,7 +22,7 @@ env:
   JDK17_DIR: '17.0.20-101'
   JDK21_URL: 'https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.13%2B9/OpenJDK21U-jdk_aarch64_linux_hotspot_21.0.13_9.tar.gz'
   JDK21_SHA256: 'e3522e707fc7dbe2a72c30746b1e7068301a0213ecd213d4491f35a14eb55578'
-  JDK21_DIR: '21.0.13-9'
+  JDK21_DIR: '21.0.13-9.0.LTS'
 
 jobs:
   seed:
