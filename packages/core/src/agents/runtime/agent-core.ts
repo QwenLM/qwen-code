@@ -1417,6 +1417,12 @@ export class AgentCore {
               0,
               { text: loopReminder },
             );
+            // This loop continues straight into the next round's model call
+            // with no consumer-visible suspension after the take, so the
+            // delivery commits here; the core client instead defers the
+            // commit to its model-acceptance boundary and rolls the take
+            // back when a send is abandoned before acceptance.
+            loopDetector.commitLoopReminderDelivery();
           }
         } else {
           const immediateExternalInputs = this.drainExternalInputs(options);
