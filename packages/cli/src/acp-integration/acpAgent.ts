@@ -15798,22 +15798,34 @@ class QwenAgent implements Agent {
               (entry): entry is string => typeof entry === 'string',
             )
           : [];
-        // `settings` is the layer with environment variables resolved by normal
-        // settings loading; `originalSettings` keeps the spelling to persist.
+        // `workspaceFile.settings` is the MERGED layer, and
+        // `context.includeDirectories` merges with `MergeStrategy.CONCAT`, so
+        // a user-scope value would land ahead of the workspace entries. Pairing
+        // the two arrays by index would therefore resolve a workspace entry
+        // with an unrelated user entry. Position them instead by removing this
+        // layer's own leading entries and taking the next `existing.length`.
         const resolvedConfigured =
           workspaceFile.settings.context?.includeDirectories;
-        const resolvedExisting = Array.isArray(resolvedConfigured)
+        const mergedResolved = Array.isArray(resolvedConfigured)
           ? resolvedConfigured.filter(
               (entry): entry is string => typeof entry === 'string',
             )
           : [];
+        // `existing` (unresolved, workspace scope) sits at the END of the
+        // merged array, after every other scope's entries. Locate that tail by
+        // its unresolved spelling: an entry resolved from another scope cannot
+        // equal a workspace spelling unless it is that same entry.
+        const resolvedForExisting =
+          mergedResolved.length === existing.length
+            ? mergedResolved
+            : mergedResolved.slice(mergedResolved.length - existing.length);
         // Existing entries may be relative, use `~`, contain environment
         // variables, be non-canonical, or already be deleted. Resolve the
         // runtime value for matching and display while persisting the original
         // spelling.
         const entries = await Promise.all(
           existing.map(async (entry, index) => {
-            const resolved = resolvedExisting[index] ?? entry;
+            const resolved = resolvedForExisting[index] ?? entry;
             return {
               entry,
               resolved,

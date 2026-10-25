@@ -37347,6 +37347,30 @@ describe('sessionLanguage multi-session propagation', () => {
         }),
       ).rejects.toMatchObject({ data: { errorKind: 'initial_directory' } });
 
+      // A user-scope `context.includeDirectories` merges CONCAT ahead of the
+      // workspace ones, so the merged layer this handler reads is longer than
+      // the workspace layer it mutates. Each workspace entry must still resolve
+      // to ITSELF: pairing the two arrays by index would resolve the workspace
+      // entry below to '/user/a' and leave the real directory live.
+      const wsOnly = path.join(scratch, 'ws-only');
+      await fs.mkdir(wsOnly);
+      workspaceContext.addDirectory(wsOnly);
+      sessionContext.addDirectory(wsOnly);
+      settings.workspace.originalSettings = {
+        context: { includeDirectories: [wsOnly] },
+      };
+      settings.workspace.settings = {
+        context: { includeDirectories: ['/user/a', '/user/b', wsOnly] },
+      };
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceDirectories, {
+          action: 'remove',
+          path: wsOnly,
+        }),
+      ).resolves.toMatchObject({ directories: [], changed: true });
+      expect(workspaceContext.getDirectories()).not.toContain(wsOnly);
+      expect(sessionContext.getDirectories()).not.toContain(wsOnly);
+
       mockConnectionState.resolve();
       await runningAgent;
     } finally {
