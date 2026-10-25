@@ -13,16 +13,20 @@ export interface ModelPricing {
 
 interface CostTokenMetrics {
   prompt: number;
+  cached: number;
   candidates: number;
   total: number;
   thoughts: number;
 }
 
+// Normalize each source before summing; missing-total fallbacks are not additive.
 export function getCostOutputTokens(tokens: CostTokenMetrics): number {
+  const prompt = tokens.prompt > 0 ? tokens.prompt : tokens.cached;
   return getUsageOutputTokenCountForPromptEstimate({
-    promptTokenCount: tokens.prompt,
-    // An absent or inconsistent aggregate must not clamp output cost to zero.
-    totalTokenCount: tokens.total > tokens.prompt ? tokens.total : undefined,
+    promptTokenCount: prompt,
+    // Raw buckets coerce missing prompt counts to zero; a total alone is not output.
+    totalTokenCount:
+      prompt > 0 && tokens.total > prompt ? tokens.total : undefined,
     candidatesTokenCount: tokens.candidates,
     thoughtsTokenCount: tokens.thoughts,
   });

@@ -21,6 +21,7 @@ import { statsCommand } from './statsCommand.js';
 import { type CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import { MessageType } from '../types.js';
+import { projectModelStats } from '../opentui/item-projection.js';
 import { setLanguageAsync } from '../../i18n/index.js';
 import {
   ApiResponseEvent,
@@ -464,6 +465,134 @@ describe('statsCommand', () => {
       expect(result.content).toContain('Estimated cost: $0.2000');
       expect(result.content).not.toContain('Estimated cost: $0.2700');
     });
+
+    it('stats model does not bill cached input as output when prompt is absent', async () => {
+      const modelSubCommand = statsCommand.subCommands?.find(
+        (sc) => sc.name === 'model',
+      );
+      if (!modelSubCommand?.action) throw new Error('Subcommand has no action');
+
+      const context = createMockCommandContext({
+        executionMode: 'non_interactive',
+      });
+      (context.services.settings as unknown as Record<string, unknown>)[
+        'merged'
+      ] = {
+        modelPricing: {
+          'cached-only-openai': {
+            inputPerMillionTokens: 0,
+            outputPerMillionTokens: 1,
+          },
+        },
+      };
+      context.session.stats.metrics.models = {
+        'cached-only-openai': toModelMetrics({
+          tokens: {
+            prompt: 0,
+            candidates: 200,
+            cached: 5000,
+            total: 5200,
+            thoughts: 0,
+          },
+          api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
+        }),
+      };
+
+      const result = (await modelSubCommand.action(context, '')) as {
+        type: string;
+        content: string;
+      };
+
+      expect(result.content).toContain('Estimated cost: $0.0002');
+      expect(result.content).not.toContain('Estimated cost: $0.0052');
+    });
+
+    it.each([
+      {
+        name: 'one source omits total',
+        main: {
+          prompt: 100000,
+          candidates: 150000,
+          thoughts: 120000,
+          total: 250000,
+        },
+        subagent: {
+          prompt: 100000,
+          candidates: 50000,
+          thoughts: 20000,
+          total: 0,
+        },
+        expected: 0.2,
+      },
+      {
+        name: 'sources use different fallback branches',
+        main: { prompt: 40000, candidates: 50000, thoughts: 40000, total: 0 },
+        subagent: {
+          prompt: 60000,
+          candidates: 10000,
+          thoughts: 50000,
+          total: 0,
+        },
+        expected: 0.11,
+      },
+      {
+        name: 'one source reports total without an output breakdown',
+        main: { prompt: 100, candidates: 0, thoughts: 0, total: 1000 },
+        subagent: { prompt: 2000, candidates: 500, thoughts: 0, total: 0 },
+        expected: 0.0014,
+      },
+    ])(
+      'stats model sums the same source costs as the panel: $name',
+      async ({ main, subagent, expected }) => {
+        const modelSubCommand = statsCommand.subCommands?.find(
+          (sc) => sc.name === 'model',
+        );
+        if (!modelSubCommand?.action)
+          throw new Error('Subcommand has no action');
+        const context = createMockCommandContext({
+          executionMode: 'non_interactive',
+        });
+        const pricing = {
+          'test-model': { inputPerMillionTokens: 0, outputPerMillionTokens: 1 },
+        };
+        (context.services.settings as unknown as Record<string, unknown>)[
+          'merged'
+        ] = {
+          modelPricing: pricing,
+        };
+        const api = { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 };
+        context.session.stats.metrics.models = {
+          'test-model': {
+            api: { ...api, totalRequests: 2 },
+            tokens: {
+              prompt: main.prompt + subagent.prompt,
+              candidates: main.candidates + subagent.candidates,
+              thoughts: main.thoughts + subagent.thoughts,
+              total: main.total + subagent.total,
+              cached: 0,
+            },
+            bySource: {
+              [MAIN_SOURCE]: { api, tokens: { ...main, cached: 0 } },
+              researcher: { api, tokens: { ...subagent, cached: 0 } },
+            },
+          },
+        };
+        const panel = projectModelStats(context.session.stats.metrics, pricing);
+        const costs = [...panel.matchAll(/Estimated \$(\d+\.\d+)/g)];
+        expect(costs).toHaveLength(2);
+        expect(
+          costs.reduce((sum, match) => sum + Number(match[1]), 0),
+        ).toBeCloseTo(expected);
+
+        const result = (await modelSubCommand.action(context, '')) as {
+          type: string;
+          content: string;
+        };
+        expect(result.content).toContain(
+          `Estimated cost: $${expected.toFixed(4)}`,
+        );
+      },
+    );
 
     it('stats model does not show cost when pricing is not configured', async () => {
       const modelSubCommand = statsCommand.subCommands?.find(

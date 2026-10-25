@@ -9,6 +9,7 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { MessageType } from '../types.js';
 import { formatDuration } from '../utils/formatters.js';
+import { flattenModelsBySource } from '../utils/modelsBySource.js';
 import {
   type CommandContext,
   type SlashCommand,
@@ -784,7 +785,12 @@ export const statsCommand: SlashCommand = {
             );
             const cost = calculateCost({
               inputTokens: modelMetrics.tokens.prompt,
-              outputTokens: getCostOutputTokens(modelMetrics.tokens),
+              outputTokens: flattenModelsBySource({
+                [modelName]: modelMetrics,
+              }).reduce(
+                (sum, { metrics }) => sum + getCostOutputTokens(metrics.tokens),
+                0,
+              ),
               pricing: pricing?.[modelName],
             });
             if (cost != null) {

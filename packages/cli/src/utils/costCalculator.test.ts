@@ -268,6 +268,41 @@ describe('calculateCost', () => {
 describe('getCostOutputTokens', () => {
   it.each([
     {
+      name: 'cached input remains input when the prompt count is absent',
+      tokens: {
+        prompt: 0,
+        cached: 5000,
+        candidates: 200,
+        thoughts: 0,
+        total: 5200,
+      },
+      expected: 200,
+    },
+    {
+      name: 'an aggregate total alone is not evidence of output usage',
+      tokens: {
+        prompt: 0,
+        cached: 0,
+        candidates: 200,
+        thoughts: 0,
+        total: 5200,
+      },
+      expected: 200,
+    },
+    {
+      name: 'a total-only report does not invent output tokens',
+      tokens: { prompt: 0, cached: 0, candidates: 0, thoughts: 0, total: 5 },
+      expected: 0,
+    },
+  ])(
+    'does not bill unaccounted input as output: $name',
+    ({ tokens, expected }) => {
+      expect(getCostOutputTokens(tokens)).toBe(expected);
+    },
+  );
+
+  it.each([
+    {
       name: 'OpenAI reasoning included in candidates',
       tokens: {
         prompt: 100000,
@@ -287,10 +322,30 @@ describe('getCostOutputTokens', () => {
       },
       expected: 170000,
     },
+    {
+      name: 'reported total overrides the fallback when candidates exceed thoughts',
+      tokens: {
+        prompt: 100000,
+        candidates: 150000,
+        total: 300000,
+        thoughts: 50000,
+      },
+      expected: 200000,
+    },
+    {
+      name: 'reported total overrides the fallback when reasoning equals candidates',
+      tokens: {
+        prompt: 100000,
+        candidates: 120000,
+        total: 220000,
+        thoughts: 120000,
+      },
+      expected: 120000,
+    },
   ])(
     'derives output from the aggregate total: $name',
     ({ tokens, expected }) => {
-      expect(getCostOutputTokens(tokens)).toBe(expected);
+      expect(getCostOutputTokens({ cached: 0, ...tokens })).toBe(expected);
     },
   );
 
@@ -323,7 +378,7 @@ describe('getCostOutputTokens', () => {
   ])(
     'uses the existing fallback when total is unavailable or unusable: $name',
     ({ tokens, expected }) => {
-      expect(getCostOutputTokens(tokens)).toBe(expected);
+      expect(getCostOutputTokens({ cached: 0, ...tokens })).toBe(expected);
     },
   );
 });
