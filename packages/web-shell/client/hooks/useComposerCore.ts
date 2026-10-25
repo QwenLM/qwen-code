@@ -158,7 +158,7 @@ interface ComposerDraftAssignment {
   storageKey: string | undefined;
   assignedSessionId?: string;
   editsAtSubmit: number | undefined;
-  isCurrentDraft(): boolean;
+  canMigrate(): boolean;
 }
 
 function markComposerDraftEdited(key: string | undefined): void {
@@ -1290,6 +1290,7 @@ function validDraftReferences(draft: ComposerReferenceDraft) {
 function hoistInlineDraftReferences(
   draft: ComposerReferenceDraft,
 ): ComposerReferenceDraft {
+  if (draft.inlineTags.length === 0) return draft;
   const inlineTags = validDraftReferences(draft);
   let nextText = draft.text;
   for (const { start, end } of [...inlineTags].sort(
@@ -3352,8 +3353,27 @@ export function useComposerCore(
     const restoredInputAnnotationsAtSubmit =
       restoredInputAnnotationsRef.current;
     const shellModeAtSubmit = shellModeRef.current;
-    const isCurrentDraft = (options?: { allowSessionAssignment?: boolean }) =>
+    const isComposerUnchanged = () =>
       viewRef.current === view &&
+      (view
+        ? view.state.doc === editorDocAtSubmit
+        : mobileTextVersionRef.current === mobileTextVersionAtSubmit) &&
+      composerTagsRef.current === composerTagsAtSubmit &&
+      // Removing submitted attachments must not leave their siblings staged.
+      // Any newly added object still identifies a different draft.
+      pastedImagesRef.current.every((image) =>
+        pastedImagesAtSubmit.includes(image),
+      ) &&
+      pastedFilesRef.current.every((file) =>
+        pastedFilesAtSubmit.includes(file),
+      ) &&
+      restoredInputAnnotationsRef.current ===
+        restoredInputAnnotationsAtSubmit &&
+      shellModeRef.current === shellModeAtSubmit &&
+      (sharedDraftRef.current?.session.pendingBatches ??
+        imageIngestionLaneRef.current.pendingBatches) === 0;
+    const isCurrentDraft = (options?: { allowSessionAssignment?: boolean }) =>
+      isComposerUnchanged() &&
       (composerIdentityRef.current.sessionId === submissionIdentity.sessionId ||
         (options?.allowSessionAssignment === true &&
           submissionIdentity.sessionId === undefined &&
@@ -3362,23 +3382,14 @@ export function useComposerCore(
             draftAssignment.assignedSessionId)) &&
       composerIdentityRef.current.promptHistoryStorageKey ===
         submissionIdentity.promptHistoryStorageKey &&
-      (view
-        ? view.state.doc === editorDocAtSubmit
-        : mobileTextVersionRef.current === mobileTextVersionAtSubmit) &&
-      composerTagsRef.current === composerTagsAtSubmit &&
       pastedImagesRef.current === pastedImagesAtSubmit &&
-      pastedFilesRef.current === pastedFilesAtSubmit &&
-      restoredInputAnnotationsRef.current ===
-        restoredInputAnnotationsAtSubmit &&
-      shellModeRef.current === shellModeAtSubmit &&
-      (sharedDraftRef.current?.session.pendingBatches ??
-        imageIngestionLaneRef.current.pendingBatches) === 0;
+      pastedFilesRef.current === pastedFilesAtSubmit;
     const draftAssignment: ComposerDraftAssignment = {
       storageKey: submissionIdentity.draftStorageKey,
       editsAtSubmit: submissionIdentity.draftStorageKey
         ? composerDraftEdits.get(submissionIdentity.draftStorageKey)
         : undefined,
-      isCurrentDraft: () => isCurrentDraft({ allowSessionAssignment: true }),
+      canMigrate: isComposerUnchanged,
     };
     const retainDraftDuringSessionCreation = async (
       operation: (
@@ -3444,26 +3455,8 @@ export function useComposerCore(
         historyActionsRef.current.push(text);
         historyActionsRef.current.reset();
       }
-      const composerUnchanged =
-        (view
-          ? view.state.doc === editorDocAtSubmit
-          : mobileTextVersionRef.current === mobileTextVersionAtSubmit) &&
-        composerTagsRef.current === composerTagsAtSubmit &&
-        // Removing submitted attachments must not leave their siblings staged.
-        // Any newly added object still identifies a different draft.
-        pastedImagesRef.current.every((image) =>
-          pastedImagesAtSubmit.includes(image),
-        ) &&
-        pastedFilesRef.current.every((file) =>
-          pastedFilesAtSubmit.includes(file),
-        ) &&
-        restoredInputAnnotationsRef.current ===
-          restoredInputAnnotationsAtSubmit &&
-        shellModeRef.current === shellModeAtSubmit &&
-        (sharedDraftRef.current?.session.pendingBatches ??
-          imageIngestionLaneRef.current.pendingBatches) === 0;
       historyBrowseActiveRef.current = false;
-      if (!composerUnchanged) return;
+      if (!isComposerUnchanged()) return;
 
       saveComposerDraft(submissionIdentity.draftStorageKey, '');
       if (draftAssignment.assignedSessionId)
@@ -4319,7 +4312,7 @@ export function useComposerCore(
         saveComposerDraft(assignment.storageKey, '');
         forgetDraftAttachments(assignment.storageKey);
       }
-      if (assignment.isCurrentDraft()) {
+      if (assignment.canMigrate()) {
         assignment.storageKey = composerDraftStorageKey;
         assignment.editsAtSubmit = composerDraftStorageKey
           ? composerDraftEdits.get(composerDraftStorageKey)

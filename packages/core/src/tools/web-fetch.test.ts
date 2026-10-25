@@ -161,6 +161,136 @@ describe('WebFetchTool', () => {
     return { result, sent };
   }
 
+  describe('managed execution', () => {
+    const managedRun = (url = 'https://example.com/docs') =>
+      new WebFetchTool(mockConfig, 'managed')
+        .build({ url, prompt: 'Summarize', format: 'markdown' })
+        .execute(new AbortController().signal);
+
+    it('returns normalized text without a side query, cache or host files', async () => {
+      const fetch = stubFetch({
+        body: Buffer.from('<h1>Docs</h1><p>Details</p>'),
+      });
+      await run('https://example.com/docs');
+      const localFetches = fetch.mock.calls.length;
+      mockGetBaseLlmClient.mockClear();
+      const result = await managedRun();
+      await managedRun();
+      expect(result.llmContent).toContain('Docs\n====');
+      expect(result.llmContent).toContain('Details');
+      expect(result.llmContent).toContain('Status: 200');
+      expect(result.error).toBeUndefined();
+      expect(fetch).toHaveBeenCalledTimes(localFetches + 2);
+      expect(fetch).toHaveBeenLastCalledWith(
+        'https://example.com/docs',
+        expect.objectContaining({
+          networkPolicy: 'public',
+          headers: expect.objectContaining({
+            Accept: 'text/markdown, */*;q=0.1',
+          }),
+        }),
+      );
+      expect(mockGetBaseLlmClient).not.toHaveBeenCalled();
+      expect(fs.readdirSync(toolResultsDir)).toEqual([]);
+    });
+
+    it.each(['http://example.com', 'https://user:secret@example.com'])(
+      'refuses %s before fetching',
+      async (url) => {
+        const fetch = stubFetch();
+        expect(() =>
+          new WebFetchTool(mockConfig, 'managed').build({
+            url,
+            prompt: 'Summarize',
+          }),
+        ).toThrow();
+        expect(fetch).not.toHaveBeenCalled();
+      },
+    );
+
+    it('refuses binary downloads without writing a file', async () => {
+      stubFetch(PDF);
+      const result = await managedRun();
+      expect(result.error?.message).toContain('text content only');
+      expect(fs.readdirSync(toolResultsDir)).toEqual([]);
+      expect(mockExtractPDFText).not.toHaveBeenCalled();
+      expect(mockGetBaseLlmClient).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      { kind: 'Unicode', content: '文档😀'.repeat(20_000) },
+      { kind: 'escaped', content: '\u0001"\\'.repeat(20_000) },
+    ])(
+      'bounds $kind output without spilling large pages',
+      async ({ content }) => {
+        stubFetch({ contentType: 'text/plain', body: Buffer.from(content) });
+        const result = await managedRun();
+        expect(result.error).toBeUndefined();
+        expect(result.llmContent).toContain(content.slice(0, 30));
+        expect(result.llmContent).toContain('Content truncated');
+        expect(
+          Buffer.byteLength(JSON.stringify(result.llmContent)),
+        ).toBeLessThanOrEqual(16 * 1024);
+        expect(fs.readdirSync(toolResultsDir)).toEqual([]);
+      },
+    );
+
+    it('does not downgrade after a TLS failure', async () => {
+      const fetch = vi
+        .spyOn(fetchUtils, 'fetchWithPolicy')
+        .mockRejectedValue(
+          new fetchUtils.FetchError('TLS failed', 'ECONNREFUSED'),
+        );
+      expect((await managedRun()).error).toBeDefined();
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps a redirect destination visible even with a large original URL', async () => {
+      const url = `https://example.com/?q=${'x'.repeat(50_000)}`;
+      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue({
+        kind: 'cross-host-redirect',
+        originalUrl: url,
+        redirectUrl: 'https://other.example/docs',
+        status: 302,
+      });
+      const result = await managedRun(url);
+      expect(result.llmContent).toContain('https://other.example/docs');
+      expect(
+        Buffer.byteLength(JSON.stringify(result.llmContent)),
+      ).toBeLessThanOrEqual(16 * 1024);
+    });
+
+    it('bounds failure text and error metadata within the durable result budget', async () => {
+      const url = `https://example.com/?q=${'x'.repeat(33_500)}`;
+      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockRejectedValue(
+        new Error('Connection failed'),
+      );
+      const result = await managedRun(url);
+      expect(result.error).toBeDefined();
+      expect(result.llmContent).toContain('Content truncated');
+      expect(
+        Buffer.byteLength(JSON.stringify(result.llmContent)),
+      ).toBeLessThanOrEqual(16 * 1024);
+      expect(
+        Buffer.byteLength(JSON.stringify(result.error!.message)),
+      ).toBeLessThanOrEqual(16 * 1024);
+      expect(
+        Buffer.byteLength(
+          JSON.stringify({
+            executionCallId: 'call',
+            functionResponse: {
+              response: {
+                error: result.llmContent,
+                runtimeError: result.error,
+                executionStatus: 'error',
+              },
+            },
+          }),
+        ),
+      ).toBeLessThan(64 * 1024);
+    });
+  });
+
   describe('execute', () => {
     it('should throw validation error when url parameter is missing', async () => {
       const tool = new WebFetchTool(mockConfig);

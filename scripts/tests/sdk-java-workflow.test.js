@@ -140,16 +140,23 @@ describe('SDK Java self-hosted workflow guards', () => {
     );
     // The ticketed queue makes the wake order deterministic and the fast
     // class puts this tier's ticket ahead of waiting full-tier tickets, so
-    // the pin is the sourced helper, its budget, and the tier argument.
+    // the pin is the sourced helper, its budget, and the tier argument. The
+    // 9600 s budget is headroom for about ten chained test-lane holds, sized
+    // from the hold length rather than an observed chain; no constant budget
+    // bounds the queue (#14566, #15031). Run 39754359013 burned the old
+    // 5400 s behind the MariaDB lane's verify hold, a shape #15128 removed.
     expect(block).toContain(
       'source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"',
     );
-    expect(block).toContain('sdk_java_lock_acquire 5400 "${TIER}"');
+    expect(block).toContain('sdk_java_lock_acquire 9600 "${TIER}"');
     // release-sdk-java.yml resumes an existing tag by checking out that
     // immutable commit, which may predate this helper; the guarded bare-lock
     // fallback keeps acquisition independent of the checkout's ref.
-    expect(block).toContain('flock --wait 5400 9');
+    expect(block).toContain('flock --wait 9600 9');
     expect(block).toContain('::error::sdk-java host lock not acquired within');
+    expect(block).toContain(
+      '::error::sdk-java host lock not acquired within 160 minutes',
+    );
     expect(block).toContain(
       'if: "${{ runner.environment == \'github-hosted\' }}"',
     );
@@ -367,6 +374,58 @@ describe('SDK Java self-hosted workflow guards', () => {
         'fi',
     );
   });
+
+  it.each([
+    {
+      name: 'test',
+      artifact:
+        'sdk-java-test-reports-${{ matrix.os }}-java-${{ matrix.java }}',
+      paths: [
+        'packages/sdk-java/qwencode/target/surefire-reports/*.txt',
+        'packages/sdk-java/qwencode/target/surefire-reports/*.dumpstream',
+        'packages/managed-agent-server/target/surefire-reports/*.txt',
+        'packages/managed-agent-server/target/surefire-reports/*.dumpstream',
+      ],
+      testStep: 'Run Runtime Broker state tests',
+    },
+    {
+      name: 'mysql-integration',
+      artifact:
+        'sdk-java-test-reports-${{ matrix.database }}-integration-java-21',
+      paths: [
+        'packages/managed-agent-server/target/surefire-reports/*.txt',
+        'packages/managed-agent-server/target/surefire-reports/*.dumpstream',
+        'packages/managed-agent-server/target/failsafe-reports/*.txt',
+        'packages/managed-agent-server/target/failsafe-reports/*.dumpstream',
+      ],
+      testStep:
+        'Install and verify Managed Agent dependencies, tests, Checkstyle, and MySQL integration',
+    },
+  ])(
+    'preserves Surefire text reports on $name test failure',
+    ({ name, artifact, paths, testStep }) => {
+      const steps = parse(workflow).jobs[name].steps;
+      const upload = steps.find(
+        (s) => s.name === 'Upload Maven test reports on failure',
+      );
+      expect(upload.if).toBe('failure() || cancelled()');
+      expect(upload.uses).toBe(
+        'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a',
+      );
+      expect(upload.with.name).toBe(artifact);
+      const legs = parse(workflow).jobs[name].strategy?.matrix?.include;
+      if (!Array.isArray(legs) || legs.length > 1) {
+        // Only a literal single-leg matrix can omit matrix interpolation.
+        expect(artifact).toMatch(/\$\{\{\s*matrix\./);
+      }
+      expect(upload.with.path.trim().split('\n')).toEqual(paths);
+      expect(upload.with['if-no-files-found']).toBe('ignore');
+      expect(upload.with['retention-days']).toBe(7);
+      const testIndex = steps.findIndex((s) => s.name === testStep);
+      expect(testIndex).toBeGreaterThan(-1);
+      expect(steps.indexOf(upload)).toBeGreaterThan(testIndex);
+    },
+  );
 
   it('builds the JavaScript the full module suite loads before the fast tier runs it', () => {
     const steps = parse(workflow).jobs.test.steps;
@@ -1227,11 +1286,16 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     expect(step.run).toContain(
       '::error::sdk-java host lock not acquired within',
     );
+    expect(step.run).toContain(
+      '::error::sdk-java host lock not acquired within 90 minutes',
+    );
     const seconds = Number(step.run.match(/sdk_java_lock_acquire (\d+)/)?.[1]);
     // The fast tier owns the same lock: it overtakes this job only while
-    // this ticket still waits, then waits out its hold, so one acquisition
-    // budget applies to every lane; run 39229303984 died at the old
-    // 60-minute wait before Maven started.
+    // this ticket still waits, then waits out its hold. This write-back
+    // keeps the shorter budget because its hold is the bounded copy and it
+    // waits after the ~3-hour verify; the sibling test lane carries the
+    // longer budget pinned below. Run 39229303984 died at the old 60-minute
+    // wait before Maven started.
     expect(seconds).toBe(90 * 60);
     // This site stays in the normal class: a tier argument here would put
     // full-tier MariaDB holds ahead of fast PR-feedback work.
@@ -1273,11 +1337,22 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     expect(
       parsed.jobs['mysql-integration']['timeout-minutes'] * 60,
     ).toBeGreaterThanOrEqual(seconds + 3 * 60 * 60 + writeBackBound + 30 * 60);
-    // The sibling test job shares the same per-host lock: its ceiling must
-    // cover one full wait plus its own measured hold (the sdk-java suite plus
-    // the managed-agent H2 suite, 925 s) and ~11 minutes of setup.
+    // The sibling test job shares the same per-host lock but carries a longer
+    // budget, because a waiting test leg can queue behind several holds. Its
+    // ceiling must cover that full wait plus its own hold (the sdk-java suite
+    // plus the managed-agent H2 suite) and ~11 minutes of setup; the design
+    // doc's Goals sizes the hold.
+    const testBudget = Number(
+      parsed.jobs.test.steps
+        .map(
+          (s) => s.run?.match(/sdk_java_lock_acquire (\d+) "\$\{TIER\}"/)?.[1],
+        )
+        .find(Boolean),
+    );
+    expect(testBudget).toBe(9600);
+    expect(testBudget).toBeGreaterThan(seconds);
     expect(parsed.jobs.test['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
-      seconds + 925 + 11 * 60,
+      testBudget + 925 + 11 * 60,
     );
   });
 

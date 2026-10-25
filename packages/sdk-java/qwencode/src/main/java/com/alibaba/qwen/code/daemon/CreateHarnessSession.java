@@ -8,6 +8,7 @@ import java.util.stream.Collectors;
 /** Input for creating a Hosted Harness session with a caller-owned UUID. */
 public final class CreateHarnessSession {
     private final String harnessSessionId;
+    private final HostedHarnessPlacement harnessPlacement;
     private final String approvalMode;
     private final ManagedSessionStoreConnection managedSessionStore;
     private final String toolProfile;
@@ -29,6 +30,7 @@ public final class CreateHarnessSession {
         this.harnessSessionId = HostedHarnessClient.requireUuid(
                 builder.harnessSessionId, "harnessSessionId");
         this.approvalMode = builder.approvalMode;
+        this.harnessPlacement = builder.harnessPlacement;
         this.managedSessionStore = builder.managedSessionStore;
         this.toolProfile = builder.toolProfile;
         this.approvalTimeoutMs = builder.approvalTimeoutMs;
@@ -58,6 +60,9 @@ public final class CreateHarnessSession {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("sessionId", harnessSessionId);
         result.put("sessionScope", "thread");
+        if (harnessPlacement != null) {
+            result.put("harnessPlacement", harnessPlacement.toJson());
+        }
         if (approvalMode != null) {
             result.put("approvalMode", approvalMode);
         }
@@ -111,6 +116,7 @@ public final class CreateHarnessSession {
 
     public static final class Builder {
         private String harnessSessionId;
+        private HostedHarnessPlacement harnessPlacement;
         private String approvalMode;
         private ManagedSessionStoreConnection managedSessionStore;
         private String toolProfile;
@@ -189,6 +195,11 @@ public final class CreateHarnessSession {
         }
 
         private Builder() {
+        }
+
+        public Builder harnessPlacement(HostedHarnessPlacement value) {
+            this.harnessPlacement = value;
+            return this;
         }
 
         public Builder harnessSessionId(String harnessSessionId) {

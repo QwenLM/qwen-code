@@ -222,6 +222,8 @@ class ManagedAgentApiContractTest {
                             List.of("AutomationDefinitionRequest")),
                     entry(ApiModels.PublicAutomation.class,
                             List.of("PublicAutomation")),
+                    entry(ApiModels.PublicAutomationGateStatus.class,
+                            List.of("AutomationGateStatus")),
                     entry(ApiModels.PublicAutomationRun.class,
                             List.of("PublicAutomationRun")),
                     entry(ApiModels.PublicChannel.class,
@@ -1504,6 +1506,10 @@ class ManagedAgentApiContractTest {
         exchange(drift, "changeWebShellSessionApproval", 409,
                 post(WEB_SHELL + "/session-approval/change").header(TENANT, workspaceTenant).principal(actor),
                 "{\"sessionId\":\"" + webBoundId + "\",\"approvalMode\":\"yolo\",\"expectedRevision\":0,\"idempotencyKey\":\"approval-key\"}");
+        exchange(drift, "changeWebShellSessionApproval", 400,
+                post(WEB_SHELL + "/session-approval/change").header(TENANT, workspaceTenant).principal(actor),
+                "{\"sessionId\":\"" + webBoundId + "\",\"approvalMode\":\"default\",\"expectedRevision\":0,\"idempotencyKey\":\"invalid-rules\","
+                        + "\"permissionRules\":{\"allow\":[\"Read(/tmp/**)\"],\"ask\":[],\"deny\":[]}}");
         exchange(drift, "changeWebShellSessionApproval", 401,
                 post(WEB_SHELL + "/session-approval/change").header(TENANT, workspaceTenant),
                 "{\"sessionId\":\"" + webBoundId + "\",\"approvalMode\":\"yolo\",\"expectedRevision\":0,\"idempotencyKey\":\"approval-key\"}");
@@ -2475,6 +2481,40 @@ class ManagedAgentApiContractTest {
         assertThat(created.path("definition_revision").asLong()).isEqualTo(1);
         assertThat(created.path("state").asText()).isEqualTo("live");
         assertThat(created.path("session_id").asText()).isEqualTo(sessionId);
+        assertThat(created.has("gate")).isFalse();
+        assertThat(created.has("gate_status")).isFalse();
+        // A gated definition: the command is carried and mirrored, an
+        // explicit null clears it, and the request's own bounds refuse.
+        JsonNode gatedCreate = json(exchange(drift, "createAgentAutomation", 202,
+                post("/v1/agent-automations").header(TENANT, tenant)
+                        .principal(actor)
+                        .header(IDEMPOTENCY_KEY, "automation-create-gated"),
+                body.replace("\"prompt\"",
+                        "\"gate\":\"./probe.sh --gate\",\"prompt\"")));
+        String gatedId = gatedCreate.path("id").asText();
+        assertThat(gatedCreate.path("gate").asText()).isEqualTo("./probe.sh --gate");
+        assertThat(gatedCreate.has("gate_status")).isFalse();
+        JsonNode gatedRead = json(exchange(drift, "getAgentAutomation", 200,
+                get("/v1/agent-automations/{id}", gatedId)
+                        .header(TENANT, tenant).principal(actor), null));
+        assertThat(gatedRead.path("gate").asText()).isEqualTo("./probe.sh --gate");
+        JsonNode ungated = json(exchange(drift, "updateAgentAutomation", 202,
+                post("/v1/agent-automations/{id}", gatedId)
+                        .header(TENANT, tenant).principal(actor)
+                        .header(IDEMPOTENCY_KEY, "automation-gate-clear"),
+                "{\"gate\":null}"));
+        assertThat(ungated.has("gate")).isFalse();
+        assertThat(ungated.path("definition_revision").asLong()).isEqualTo(2);
+        exchange(drift, "updateAgentAutomation", 400,
+                post("/v1/agent-automations/{id}", gatedId)
+                        .header(TENANT, tenant).principal(actor)
+                        .header(IDEMPOTENCY_KEY, "automation-gate-long"),
+                "{\"gate\":\"" + "x".repeat(2049) + "\"}");
+        exchange(drift, "updateAgentAutomation", 400,
+                post("/v1/agent-automations/{id}", gatedId)
+                        .header(TENANT, tenant).principal(actor)
+                        .header(IDEMPOTENCY_KEY, "automation-gate-blank"),
+                "{\"gate\":\"   \"}");
         exchange(drift, "createAgentAutomation", 202,
                 post("/v1/agent-automations").header(TENANT, tenant)
                         .principal(actor)
@@ -2532,9 +2572,9 @@ class ManagedAgentApiContractTest {
         JsonNode list = json(exchange(drift, "listAgentAutomations", 200,
                 get("/v1/agent-automations").header(TENANT, tenant)
                         .principal(actor).param("limit", "10"), null));
-        assertThat(list.path("data")).hasSize(1);
-        assertThat(list.path("data").get(0).path("id").asText())
-                .isEqualTo(automationId);
+        assertThat(list.path("data")).hasSize(2);
+        assertThat(list.path("data").findValuesAsText("id"))
+                .containsExactlyInAnyOrder(automationId, gatedId);
         exchange(drift, "listAgentAutomations", 400,
                 get("/v1/agent-automations").header(TENANT, tenant)
                         .principal(actor).param("cursor", "!!"), null);
@@ -2994,6 +3034,28 @@ class ManagedAgentApiContractTest {
                          "input":[{"type":"input_text","text":"hi"}],
                          "metadata":{"clientId":"client-1","other":"trace"}}
                         """))).isEmpty();
+    }
+
+    @Test
+    void sessionPolicyContractsCarryClassifierRulesAndOmitAnEmptySelection() throws Exception {
+        var rules = Map.of("allow", List.of("Read"), "ask", List.<String>of(), "deny", List.of("Bash(rm *)"));
+        var options = new ApiModels.WebShellSessionApproval("auto", 1, List.of("default", "auto"), true,
+                false, false, true, true, rules);
+        JsonNode selected = objectMapper.valueToTree(options);
+        assertThat(CONTRACT.validate("#/components/schemas/WebShellSessionApproval", selected)).isEmpty();
+        assertThat(selected.path("permissionRulesSupported").asBoolean()).isTrue();
+        var result = new ApiModels.WebShellApprovalChangeResult("session", "auto", 1, false, false, rules);
+        assertThat(CONTRACT.validate("#/components/schemas/WebShellApprovalChangeResult", objectMapper.valueToTree(result))).isEmpty();
+        JsonNode legacy = objectMapper.valueToTree(new ApiModels.WebShellApprovalChangeResult("session", "default", 1, false));
+        assertThat(legacy.has("permissionRules")).isFalse();
+        assertThat(CONTRACT.validate("#/components/schemas/WebShellApprovalChangeResult", legacy)).isEmpty();
+        assertThat(CONTRACT.validate("#/components/schemas/WebShellChangeApprovalRequest", objectMapper.readTree("""
+                {"sessionId":"session","approvalMode":"auto","expectedRevision":0,"idempotencyKey":"rules",
+                 "permissionRules":{"allow":[],"ask":[],"deny":[]}}
+                """))).isEmpty();
+        assertThat(CONTRACT.validate("#/components/schemas/ManagedPermissionRules", objectMapper.readTree("""
+                {"allow":["Read","Read"],"ask":[],"deny":[]}
+                """))).isNotEmpty();
     }
 
     @Test
