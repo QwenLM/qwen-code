@@ -23,6 +23,7 @@ import {
   ToolConfirmationOutcome,
   type Config,
   type Logger,
+  type ServerLlmStreamEvent,
 } from '@qwen-code/qwen-code-core';
 import type {
   LivePromptOptions,
@@ -56,6 +57,7 @@ import {
   imagePathsToParts,
   useOpenTuiLiveTurn,
 } from './live-turn.js';
+import * as interactiveMods from '../../services/interactive-mod-session.js';
 
 // Stream-layer stub: records what each turn was handed and holds the first
 // turn open until the test releases it, so a second submission lands mid-turn.
@@ -1987,6 +1989,197 @@ describe('useOpenTuiLiveTurn submit paths', () => {
       result.current.resetTranscript([]);
     });
     expect(result.current.messageQueue).toEqual([]);
+  });
+});
+
+describe('useOpenTuiLiveTurn Mod turns', () => {
+  beforeEach(() => {
+    live.turns.length = 0;
+    live.waiters.length = 0;
+    live.declines.clear();
+    live.signals.length = 0;
+    live.script.clear();
+    live.holds.clear();
+    live.errors.clear();
+    live.holdAfterEvents.clear();
+    vi.restoreAllMocks();
+  });
+
+  const installMods = () => {
+    const turn = { id: 'turn-1', saw: vi.fn(), complete: vi.fn() };
+    const startTurn = vi.fn(
+      (
+        _text: string,
+        _signal: AbortSignal,
+        _abort: () => boolean,
+        _promptId?: string,
+      ) => turn,
+    );
+    vi.spyOn(interactiveMods, 'getInteractiveModSession').mockReturnValue({
+      startTurn,
+    } as unknown as ReturnType<
+      typeof interactiveMods.getInteractiveModSession
+    >);
+    return { turn, startTurn };
+  };
+  const options = (turn: number) =>
+    live.turns[turn - 1].options as LivePromptOptions;
+  async function settle(result: { current: { streaming: boolean } }) {
+    await act(async () => {
+      for (const wake of live.waiters.splice(0)) wake();
+    });
+    await vi.waitFor(() => expect(result.current.streaming).toBe(false));
+  }
+
+  it('hears the turn from its admission and ends it once', async () => {
+    const { turn, startTurn } = installMods();
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    act(() => {
+      result.current.submit('Fix it', undefined, {
+        submittedPrompt: 'Fix [pasted]',
+        humanInput: { text: 'Fix it' },
+      });
+    });
+    expect(startTurn).not.toHaveBeenCalled();
+    options(1).onPromptAdmitted?.();
+    expect(startTurn).toHaveBeenCalledExactlyOnceWith(
+      'Fix it',
+      expect.any(AbortSignal),
+      expect.any(Function),
+      options(1).promptId,
+    );
+    expect(options(1).promptId).toEqual(expect.any(String));
+    // The turn's own signal, so Esc ends its turn.start hooks.
+    expect(startTurn.mock.calls[0][1]).toBe(live.signals[0]);
+    const event = { type: 'content', value: 'Done.' } as ServerLlmStreamEvent;
+    options(1).onStreamEvent?.(event);
+    expect(turn.saw).toHaveBeenCalledExactlyOnceWith(event);
+    await settle(result);
+    expect(turn.complete).toHaveBeenCalledExactlyOnceWith(undefined);
+  });
+
+  it('reports an interrupted or failed turn as such', async () => {
+    const { turn } = installMods();
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    act(() => result.current.submit('first'));
+    options(1).onPromptAdmitted?.();
+    act(() => result.current.interrupt());
+    await settle(result);
+    expect(turn.complete).toHaveBeenLastCalledWith('aborted');
+
+    live.errors.set(2, new Error('boom'));
+    live.holds.add(2);
+    act(() => result.current.submit('second'));
+    options(2).onPromptAdmitted?.();
+    await settle(result);
+    expect(turn.complete).toHaveBeenLastCalledWith('error');
+  });
+
+  it('ends the turn as aborted when every tool was declined', async () => {
+    const { turn } = installMods();
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    act(() => result.current.submit('first'));
+    options(1).onPromptAdmitted?.();
+    options(1).onToolsCancelled?.();
+    await settle(result);
+    expect(turn.complete).toHaveBeenCalledExactlyOnceWith('aborted');
+  });
+
+  it('lets a Mod end the turn and still runs the queued prompt', async () => {
+    const { turn, startTurn } = installMods();
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    act(() => {
+      result.current.submit('first');
+      result.current.submit('queued');
+    });
+    options(1).onPromptAdmitted?.();
+    act(() => expect(startTurn.mock.calls[0][2]()).toBe(true));
+    expect(live.signals[0].aborted).toBe(true);
+    expect(startTurn.mock.calls[0][2]()).toBe(false);
+    await settle(result);
+    expect(turn.complete).toHaveBeenCalledWith('aborted');
+    // Unlike Esc, nothing returns to the composer: the queue goes on.
+    await vi.waitFor(() =>
+      expect(live.turns.map((entry) => entry.prompt)).toEqual([
+        'first',
+        'queued',
+      ]),
+    );
+  });
+
+  it.each(['Esc', 'the Mod'])(
+    'settles an Esc as a cancel when %s ends the turn first',
+    async (first) => {
+      const { turn, startTurn } = installMods();
+      const { result } = renderHook(() =>
+        useOpenTuiLiveTurn({ config: {} as Config }),
+      );
+      act(() => {
+        result.current.submit('first');
+        result.current.submit('queued');
+      });
+      options(1).onPromptAdmitted?.();
+      const settled = vi.fn();
+      const endByMod = () => startTurn.mock.calls[0][2]();
+      const esc = () => result.current.interrupt(settled);
+      act(() => {
+        if (first === 'Esc') {
+          esc();
+          endByMod();
+        } else {
+          endByMod();
+          esc();
+        }
+      });
+      await settle(result);
+      expect(turn.complete).toHaveBeenCalledExactlyOnceWith('aborted');
+      // The queued prompt goes back to the composer instead of running.
+      expect(settled).toHaveBeenCalledExactlyOnceWith({
+        kind: 'cancelled',
+        queued: expect.objectContaining({ text: 'queued' }),
+        prompt: expect.objectContaining({ text: 'first' }),
+      });
+      expect(live.turns).toHaveLength(1);
+    },
+  );
+
+  it('hears a retry as a turn with no typed prompt', async () => {
+    const { startTurn } = installMods();
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    live.errors.set(1, new Error('provider failed'));
+    act(() => {
+      result.current.submit('Fix it', undefined, {
+        humanInput: { text: 'Fix it' },
+      });
+    });
+    options(1).onPromptAdmitted?.();
+    await settle(result);
+    live.holds.add(2);
+    await act(async () => result.current.retryLastPrompt());
+    expect(options(2).retry).toBeDefined();
+    options(2).onPromptAdmitted?.();
+    expect(startTurn.mock.calls.map(([text]) => text)).toEqual(['Fix it', '']);
+    await settle(result);
+  });
+
+  it('offers no turn hooks without a Mod session', () => {
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    act(() => result.current.submit('plain'));
+    expect(options(1).onPromptAdmitted).toBeUndefined();
+    expect(options(1).onStreamEvent).toBeUndefined();
+    expect(options(1).onToolsCancelled).toBeUndefined();
   });
 });
 
