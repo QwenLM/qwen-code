@@ -57,6 +57,8 @@ describe('Hosted Harness private contract', () => {
         'context-compression/1',
         'public-child-agents/1',
         'approval-selection/1',
+        'auto-approval/1',
+        'permission-rules/1',
         'live-approval-selection/1',
         'agent-definition-approval-selection/1',
         'plan-mode/1',
@@ -68,6 +70,7 @@ describe('Hosted Harness private contract', () => {
         'recovery-cleanup/1',
         'targeted-cancel/1',
         'event-keepalive/1',
+        'web-fetch/1',
       ],
     });
     expect(Object.isFrozen(contract)).toBe(true);

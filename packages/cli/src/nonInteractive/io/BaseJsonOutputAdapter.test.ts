@@ -800,6 +800,41 @@ describe('BaseJsonOutputAdapter', () => {
       },
     );
 
+    it.each([
+      ['a fresh retry', { type: LlmEventType.Retry, isContinuation: false }],
+      ['a continuation', { type: LlmEventType.Retry, isContinuation: true }],
+      [
+        'a model fallback',
+        {
+          type: LlmEventType.ModelFallback,
+          fromModel: 'primary',
+          toModel: 'fallback',
+          statusCode: 503,
+          fallbackIndex: 1,
+        },
+      ],
+    ] satisfies Array<[string, ServerLlmStreamEvent]>)(
+      'clears the prior finish reason on %s without discarding content',
+      (_, event) => {
+        adapter.processEvent({ type: LlmEventType.Content, value: 'Partial' });
+        adapter.processEvent({
+          type: LlmEventType.Finished,
+          value: { reason: FinishReason.MAX_TOKENS, usageMetadata: undefined },
+        });
+
+        adapter.processEvent(event);
+        adapter.processEvent({
+          type: LlmEventType.Content,
+          value: ' continued',
+        });
+
+        expect(adapter.finalizeAssistantMessage().message).toMatchObject({
+          content: [{ type: 'text', text: 'Partial continued' }],
+          stop_reason: null,
+        });
+      },
+    );
+
     it('reports truncated tool arguments without leaking into the next message', () => {
       adapter.processEvent({
         type: LlmEventType.ToolCallRequest,

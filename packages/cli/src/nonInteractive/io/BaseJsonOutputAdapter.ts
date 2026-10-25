@@ -705,6 +705,9 @@ export abstract class BaseJsonOutputAdapter {
         }
         this.finalizePendingBlocks(state, null);
         break;
+      case LlmEventType.Retry:
+        state.finishReason = undefined;
+        break;
       case LlmEventType.Error: {
         // Format the error message using parseAndFormatApiError for consistency
         // with interactive mode error display
@@ -716,6 +719,7 @@ export abstract class BaseJsonOutputAdapter {
         break;
       }
       case LlmEventType.ModelFallback:
+        state.finishReason = undefined;
         // Surface model fallback transitions so non-interactive consumers
         // (CI pipelines, SDK clients) can observe capacity-driven model
         // switches without parsing assistant content.

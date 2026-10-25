@@ -50,7 +50,11 @@ class ManagedSchemaConfigurationTest {
                 .containsEntry("model_id", null)
                 .containsEntry("model_revision", 0L)
                 .containsEntry("selected_approval_mode", null)
-                .containsEntry("approval_revision", 0L);
+                .containsEntry("approval_revision", 0L)
+                .containsEntry("harness_instance_id", null)
+                .containsEntry("harness_owner_boot_id", null)
+                .containsEntry("harness_placement_epoch", 0L)
+                .containsEntry("harness_placement_state", "UNASSIGNED");
         assertThat(jdbc.queryForList("SELECT * FROM \"flyway_schema_history\" ORDER BY \"installed_rank\""))
                 .isEqualTo(history);
         assertThat(jdbc.queryForList("SELECT \"version\" FROM \"flyway_schema_history\""
