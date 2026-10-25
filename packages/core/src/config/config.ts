@@ -6349,7 +6349,7 @@ export class Config {
    * and should be displayed to the user during startup.
    */
   getWarnings(): string[] {
-    // Include the request-only catalog as well as the system memory policy.
+    // Include the current catalog as well as the system memory policy.
     const memoryContextWarning = this.buildMemoryContextWarning(
       [
         this.getUserMemory(),
@@ -9289,7 +9289,7 @@ export class Config {
     return this.autoMemoryPrompt;
   }
 
-  /** Latest legacy catalog, sent only at the request tail, never stored history. */
+  /** Latest legacy catalog; scoped maintenance configs suppress it. */
   getAutoMemoryContext(): string {
     // Scoped maintenance configs override the policy getter to suppress session
     // memory. Respect that override rather than inheriting the parent's catalog.
