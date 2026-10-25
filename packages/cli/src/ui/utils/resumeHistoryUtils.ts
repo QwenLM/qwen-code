@@ -34,7 +34,7 @@ import type {
 } from '../types.js';
 import { ToolCallStatus, MessageType } from '../types.js';
 import { t } from '../../i18n/index.js';
-import { isCollapsibleTool } from '../components/messages/CompactToolGroupDisplay.js';
+import { isCollapsibleTool } from './tool-group-summary.js';
 import {
   formatHistoryGapNotice,
   indexGapsByChild,
