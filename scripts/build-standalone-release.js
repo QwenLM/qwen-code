@@ -63,7 +63,7 @@ const RELEASE_TARGETS = [
 // falls back to ink). --include-opentui-preview adds the bun flavor's
 // archives (suffixed -opentui-preview) to the same release directory.
 const DEFAULT_RUNTIME = 'node';
-const DEFAULT_BUN_VERSION = '1.3.14';
+const DEFAULT_BUN_VERSION = '1.4.4';
 const BUN_RELEASE_BASE_URL = 'https://github.com/oven-sh/bun/releases/download';
 // The runtime downloads are the publish job's least reliable leg: one
 // transient download failure aborted the v0.23.4 publish while the
