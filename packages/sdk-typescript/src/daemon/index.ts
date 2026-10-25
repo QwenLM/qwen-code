@@ -542,6 +542,8 @@ export type {
   DaemonWorkspaceTrustStatusResponse,
   DaemonWorkspaceTrustStatusV2,
   DaemonWorkspaceTrustReconciliationState,
+  DaemonGitCloneJob,
+  DaemonGitCloneJobStatus,
   DaemonWorkspaceCapability,
   DaemonWorkspaceUpdate,
   DaemonWorkspaceGitStatus,

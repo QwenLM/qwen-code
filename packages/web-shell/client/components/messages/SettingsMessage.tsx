@@ -109,6 +109,13 @@ interface SettingsMessageProps {
   embedded?: boolean;
   /** Category to select on open (deep link, e.g. 'Daemon'). */
   initialCategory?: string;
+  /**
+   * Whether the active session may write workspace settings. Standalone
+   * sessions cannot: their `/language ui --project` is refused, so the UI
+   * language row is offered only under the User tab, the one scope it can
+   * persist.
+   */
+  workspaceSettingsWritable?: boolean;
 }
 
 export interface SettingsMessageSettingsState {
@@ -706,6 +713,7 @@ export function SettingsMessage({
   workspaceDirectoriesSection,
   embedded = false,
   initialCategory,
+  workspaceSettingsWritable = true,
 }: SettingsMessageProps) {
   const { language: selectedLanguage, t } = useI18n();
   const selectedTheme = useTheme();
@@ -716,7 +724,12 @@ export function SettingsMessage({
   }, [refreshNotificationPermission]);
   const { status, settings, loading, error, reload, setValue, liveSetup } =
     settingsState;
-  const [scope, setScope] = useState<Scope>('workspace');
+  // A standalone session has no workspace to write, so opening the panel on
+  // the Workspace tab would only offer rows whose session-routed writes are
+  // refused (the UI language row). Start on the User tab there instead.
+  const [scope, setScope] = useState<Scope>(
+    workspaceSettingsWritable ? 'workspace' : 'user',
+  );
   const [activeCategory, setActiveCategory] = useState('');
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -1319,6 +1332,17 @@ export function SettingsMessage({
                                 <LocalControlSettingsCard />
                               </div>
                             );
+                          }
+
+                          if (
+                            item.setting.key === LANGUAGE_SETTING_KEY &&
+                            scope === 'workspace' &&
+                            !workspaceSettingsWritable
+                          ) {
+                            // `/language ui --project` is refused in a
+                            // standalone session, so a workspace row here
+                            // could only fail after the user picked a value.
+                            return null;
                           }
 
                           if (

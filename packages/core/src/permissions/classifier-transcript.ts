@@ -30,6 +30,7 @@
  * be wiped before the classifier saw it.
  */
 
+import { AUTO_MEMORY_SNAPSHOT_METADATA } from '../core/environmentContext.js';
 import type { Content, Part } from '@google/genai';
 import type { ToolRegistry } from '../tools/tool-registry.js';
 import {
@@ -140,6 +141,8 @@ export function buildClassifierContents(
         textParts = [];
       };
       for (const part of msg.parts ?? []) {
+        if (part.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true)
+          continue;
         if (typeof (part as Part).text === 'string') {
           textParts.push({ text: (part as Part).text });
           continue;

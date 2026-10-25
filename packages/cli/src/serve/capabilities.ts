@@ -482,6 +482,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // runtimes. Workspace ids and canonical paths remain the routing identities.
   workspace_display_name: { since: 'v1' },
   scratch_workspace_registration: { since: 'v1' },
+  // Clone a workspace from a Git URL into a new directory
+  // (`POST /workspaces { kind: "git" }` plus the clone job routes).
+  // Advertised only when dynamic registration and the daemon host's `git`
+  // binary are both available.
+  git_workspace_clone: { since: 'v1' },
   workspace_runtime_removal: { since: 'v1' },
   // A native OS directory picker can be opened on the daemon host
   // (osascript on macOS, PowerShell on Windows, zenity on a Linux host
@@ -676,6 +681,7 @@ export interface AdvertiseFeatureToggles {
   dynamicWorkspaceRegistrationAvailable?: boolean;
   persistentWorkspaceRegistrationAvailable?: boolean;
   scratchWorkspaceRegistrationAvailable?: boolean;
+  gitWorkspaceCloneAvailable?: boolean;
   workspaceRuntimeRemovalAvailable?: boolean;
   workspaceDirectoriesAvailable?: boolean;
   nativeDirectoryPickerAvailable?: boolean;
@@ -848,6 +854,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   [
     'scratch_workspace_registration',
     (toggles) => toggles.scratchWorkspaceRegistrationAvailable === true,
+  ],
+  [
+    'git_workspace_clone',
+    (toggles) => toggles.gitWorkspaceCloneAvailable === true,
   ],
   [
     'workspace_runtime_removal',

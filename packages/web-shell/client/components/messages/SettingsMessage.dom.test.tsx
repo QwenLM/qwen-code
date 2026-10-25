@@ -110,6 +110,18 @@ function themeSetting(): DaemonSettingDescriptor {
   };
 }
 
+function languageSetting(): DaemonSettingDescriptor {
+  return {
+    key: 'general.language',
+    type: 'enum',
+    label: 'Language: UI',
+    category: 'General',
+    requiresRestart: true,
+    default: 'auto',
+    values: { effective: 'en' },
+  };
+}
+
 function subDialogSetting(): DaemonSettingDescriptor {
   return {
     key: 'fastModel',
@@ -232,12 +244,17 @@ function renderPanel(
   state: SettingsMessageSettingsState,
   overrides: Partial<{
     onSubDialog: (key: string, scope: 'workspace' | 'user') => void;
+    onLanguageChange: (
+      language: 'en' | 'zh-CN',
+      scope: 'workspace' | 'user',
+    ) => void;
     onThemeChange: (theme: 'dark' | 'light') => void;
     onOutputLanguageChange: (language: string) => void;
     modelManagementSectionProps: ModelManagementProps;
     initialCategory: string;
     presentation: WebShellSettingsOptions;
     connections: ReactNode;
+    workspaceSettingsWritable: boolean;
   }> = {},
 ): HTMLElement {
   return render(
@@ -247,7 +264,7 @@ function renderPanel(
         embedded
         initialCategory={overrides.initialCategory}
         presentation={overrides.presentation}
-        onLanguageChange={noop}
+        onLanguageChange={overrides.onLanguageChange ?? noop}
         onOutputLanguageChange={overrides.onOutputLanguageChange ?? noop}
         onThemeChange={overrides.onThemeChange ?? noop}
         onSubDialog={overrides.onSubDialog ?? noop}
@@ -255,6 +272,7 @@ function renderPanel(
         onChatWidthModeChange={noop}
         modelManagementSectionProps={overrides.modelManagementSectionProps}
         connections={overrides.connections}
+        workspaceSettingsWritable={overrides.workspaceSettingsWritable}
       />
     </I18nProvider>,
   );
@@ -427,6 +445,61 @@ describe('SettingsMessage initialCategory', () => {
     renderWith(makeState([boolSetting(), daemonSetting()], vi.fn()));
     expect(activeCategoryButton(container).textContent).toContain('General');
     vi.unstubAllGlobals();
+  });
+});
+
+describe('SettingsMessage UI language scope', () => {
+  function languageTrigger(container: HTMLElement): HTMLButtonElement | null {
+    return container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Language: UI"]',
+    );
+  }
+
+  it('starts on the User tab and writes user scope when the session cannot write workspace settings', async () => {
+    const onLanguageChange = vi.fn();
+    const container = renderPanel(makeState([languageSetting()], vi.fn()), {
+      onLanguageChange,
+      workspaceSettingsWritable: false,
+    });
+
+    const tabs = container.querySelectorAll<HTMLButtonElement>('[role="tab"]');
+    expect(tabs[0]?.getAttribute('aria-selected')).toBe('false');
+    expect(tabs[1]?.getAttribute('aria-selected')).toBe('true');
+    expect(languageTrigger(container)).not.toBeNull();
+
+    await act(async () => languageTrigger(container)?.click());
+    const option = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="option"]'),
+    ).find((item) => item.textContent?.includes('[zh-CN]'));
+    if (!option) throw new Error('zh-CN language option not found');
+    await act(async () => option.click());
+
+    expect(onLanguageChange).toHaveBeenCalledWith('zh-CN', 'user');
+  });
+
+  it('hides the UI language row on the Workspace tab when the session cannot write workspace settings', () => {
+    const container = renderPanel(makeState([languageSetting()], vi.fn()), {
+      workspaceSettingsWritable: false,
+    });
+
+    const workspaceTab =
+      container.querySelectorAll<HTMLButtonElement>('[role="tab"]')[0];
+    if (!workspaceTab) throw new Error('Workspace scope tab not found');
+    act(() => {
+      workspaceTab.focus();
+      workspaceTab.click();
+    });
+
+    expect(workspaceTab.getAttribute('aria-selected')).toBe('true');
+    expect(languageTrigger(container)).toBeNull();
+  });
+
+  it('keeps the UI language row on the Workspace tab in a workspace session', () => {
+    const container = renderPanel(makeState([languageSetting()], vi.fn()));
+
+    const tabs = container.querySelectorAll<HTMLButtonElement>('[role="tab"]');
+    expect(tabs[0]?.getAttribute('aria-selected')).toBe('true');
+    expect(languageTrigger(container)).not.toBeNull();
   });
 });
 

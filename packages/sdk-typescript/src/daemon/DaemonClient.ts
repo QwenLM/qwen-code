@@ -166,6 +166,7 @@ import type {
   DaemonWorkspaceCapability,
   DaemonWorkspaceRemovalResult,
   DaemonWorkspaceUpdate,
+  DaemonGitCloneJob,
   HeartbeatResult,
   GoalControlRequest,
   GoalStateResponse,
@@ -7071,6 +7072,59 @@ export class DaemonClient {
           trusted: boolean;
           persisted: false;
         };
+      },
+    );
+  }
+
+  /** Starts an asynchronous clone of `url` into a new `target` directory. */
+  async startGitWorkspaceClone(input: {
+    url: string;
+    target: string;
+  }): Promise<{ jobId: string }> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspaces`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ kind: 'git', ...input }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /workspaces { kind: "git" }');
+        }
+        return (await res.json()) as { jobId: string };
+      },
+    );
+  }
+
+  async getGitWorkspaceCloneJob(jobId: string): Promise<DaemonGitCloneJob> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace-git-clone-jobs/${urlEncode(jobId)}`,
+      { method: 'GET', headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'GET /workspace-git-clone-jobs/:jobId',
+          );
+        }
+        return (await res.json()) as DaemonGitCloneJob;
+      },
+    );
+  }
+
+  async cancelGitWorkspaceClone(jobId: string): Promise<DaemonGitCloneJob> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace-git-clone-jobs/${urlEncode(jobId)}`,
+      { method: 'DELETE', headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'DELETE /workspace-git-clone-jobs/:jobId',
+          );
+        }
+        return (await res.json()) as DaemonGitCloneJob;
       },
     );
   }
