@@ -23,6 +23,10 @@ Mount the selected node's real machine identity read-only. Never manufacture a
 machine ID to pass admission. The existing Workspace creation API prepares the
 root, registers physical storage, and grants the fixed caller OWNER access.
 
+The legacy cwd `/workspace` uses the first 16 SHA-256 hex characters of its
+canonical path as its Workspace ID in both modes, matching Runtime Broker
+admission and keeping that identity stable when tools are enabled.
+
 Workspace creation roots, legacy cwd, private Runtime state, and Runtime home
 must be separate. Runtime records retain exact owner-private permissions; a
 private child directory, rather than a PVC root, holds state. Enable durable

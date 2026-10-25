@@ -20,6 +20,9 @@ Runtime state PVC。服务端镜像组合 JRE 21、Node 22、同 revision 的 bu
 machine ID 来绕过准入。复用 Workspace creation API 准备目录、注册物理存储，
 并授予固定调用者 OWNER 权限。
 
+两种模式的 legacy cwd `/workspace` 都使用其规范路径 SHA-256 十六进制摘要的前
+16 位作为 Workspace ID，满足 Runtime Broker 准入，并在启用工具时保持该身份稳定。
+
 Workspace creation root、legacy cwd、私有 Runtime state 和 Runtime home 必须
 彼此分离。Runtime 记录保持精确的 owner-private 权限；state 放在卷内私有子目录，
 不直接使用 PVC 根目录。开启 durable LOCAL Session isolation、verified recovery、

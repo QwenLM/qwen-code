@@ -83,7 +83,7 @@ spec:
             - name: QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL
               value: 'http://127.0.0.1:8081'
             - name: QWEN_MANAGED_AGENT_WORKSPACE_ID
-              value: {{ printf "%s-text" .Release.Name | quote }}
+              value: {{ "/workspace" | sha256sum | trunc 16 | quote }}
             - name: QWEN_MANAGED_AGENT_WORKSPACE_CWD
               value: /workspace
             - name: QWEN_MANAGED_AGENT_HARNESS_ENABLED

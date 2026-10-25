@@ -7,6 +7,7 @@
 import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -62,6 +63,13 @@ test('renders isolated signed API and private Harness/Store with safe probes', a
   const serverEnv = env(server);
   const harnessEnv = env(harness);
   assert.equal(serverEnv.QWEN_MANAGED_AGENT_AUTH_MODE.value, 'signed');
+  assert.equal(
+    serverEnv.QWEN_MANAGED_AGENT_WORKSPACE_ID.value,
+    createHash('sha256')
+      .update(serverEnv.QWEN_MANAGED_AGENT_WORKSPACE_CWD.value)
+      .digest('hex')
+      .slice(0, 16),
+  );
   assert.equal(
     serverEnv.QWEN_MANAGED_AGENT_INTERNAL_SERVER_ADDRESS.value,
     '127.0.0.1',
@@ -214,6 +222,13 @@ test('LOCAL tools require a fixed node and persist private state outside Workspa
   assert.equal(pod.securityContext.fsGroupChangePolicy, 'OnRootMismatch');
   const [server, harness] = pod.containers;
   const serverEnv = env(server);
+  assert.equal(
+    serverEnv.QWEN_MANAGED_AGENT_WORKSPACE_ID.value,
+    createHash('sha256')
+      .update(serverEnv.QWEN_MANAGED_AGENT_WORKSPACE_CWD.value)
+      .digest('hex')
+      .slice(0, 16),
+  );
   for (const key of [
     'QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED',
     'QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED',
