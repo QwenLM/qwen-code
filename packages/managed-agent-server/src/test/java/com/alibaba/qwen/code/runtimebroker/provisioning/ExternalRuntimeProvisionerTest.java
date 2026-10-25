@@ -153,7 +153,7 @@ class ExternalRuntimeProvisionerTest {
         var seed = RuntimeProvisionSeed.create("binding", 1);
         var request = request(provider);
         var handle = join(provider.ensureResource(request, seed, null));
-        api.closing = provider;
+        api.closing = provider::close;
         assertEquals(RuntimeObservation.Outcome.UNKNOWN,
                 join(provider.reconcile(request, seed, handle, null)).getOutcome());
     }
@@ -165,7 +165,7 @@ class ExternalRuntimeProvisionerTest {
         var seed = RuntimeProvisionSeed.create("binding", 1);
         var request = request(provider);
         join(provider.ensureResource(request, seed, null));
-        api.closing = provider;
+        api.closing = provider::close;
         var failure = (RuntimeBrokerException) assertThrows(CompletionException.class,
                 () -> join(provider.provision(request, seed))).getCause();
         assertEquals("runtime_external_unavailable", failure.getCode());
@@ -205,6 +205,24 @@ class ExternalRuntimeProvisionerTest {
     }
 
     @Test
+    void abandonedPreCreateAdmissionsDoNotConsumePlacementCapacity() {
+        var api = new Provider();
+        try (var provider = provisioner(api)) {
+            var request = request(provider);
+            for (int n = 0; n <= ExternalRuntimeProvisioner.MAX_PLACEMENTS; n++) {
+                var bindings = new InMemoryRuntimeBindingRepository();
+                var binding = bindings.claimOperation(bindings.findOrCreate(request).getBindingId(),
+                        "broker", Duration.ofMinutes(1));
+                provider.reserveResource(binding);
+            }
+            var seed = RuntimeProvisionSeed.create("binding", 1);
+            join(provider.ensureResource(request, seed, null));
+            assertEquals(0, api.provisions);
+            assertEquals(0, api.observations);
+        }
+    }
+
+    @Test
     void placementCapacityRejectsFreshSeedsButReadmitsAdmittedOnes() {
         var api = new Provider();
         var seed = RuntimeProvisionSeed.create("binding", 1);
@@ -225,6 +243,11 @@ class ExternalRuntimeProvisionerTest {
             assertEquals(503, failure.getStatusCode());
             assertEquals("runtime_external_capacity", failure.getCode());
             assertTrue(failure.isRetryable());
+            var lateFailure = (RuntimeBrokerException) assertThrows(CompletionException.class,
+                    () -> join(provider.ensureResource(request, fresh.getProvisionSeed(), null))).getCause();
+            assertEquals("runtime_external_capacity", lateFailure.getCode());
+            assertTrue(lateFailure.isRetryable());
+            assertEquals(admittedHandle, join(provider.ensureResource(request, seed, admittedHandle)));
         }
     }
 
@@ -295,7 +318,29 @@ class ExternalRuntimeProvisionerTest {
     }
 
     @Test
-    void brokerRetriesUnknownConfirmationOnOriginalLeaseAndRejectsEndpointDrift() throws Exception {
+    void brokerShutdownDuringConfirmationDoesNotInvalidateTheReadyBinding() throws Exception {
+        var api = new Provider();
+        var bindings = new InMemoryRuntimeBindingRepository();
+        var worker = worker(api);
+        try (var provider = provisioner(api);
+                var broker = broker(provider, bindings)) {
+            var ready = join(broker.warm("harness"));
+            api.closing = broker::close;
+            var failure = (RuntimeBrokerException) assertThrows(CompletionException.class,
+                    () -> join(broker.warm("harness"))).getCause();
+            assertEquals("runtime_external_unavailable", failure.getCode());
+            assertTrue(failure.isRetryable());
+            assertEquals(RuntimeBindingRecord.State.READY, bindings.findById(ready.getBindingId()).getState());
+            assertFalse(provider.isUsable(ready.getLease()));
+            assertTrue(provider.canRetryFailedConfirm(ready.getLease()));
+            assertEquals(1, api.provisions);
+        } finally {
+            worker.stop(0);
+        }
+    }
+
+    @Test
+    void brokerRetriesUncertainConfirmationOnOriginalLeaseAndRejectsEndpointDrift() throws Exception {
         var api = new Provider();
         var bindings = new InMemoryRuntimeBindingRepository();
         var worker = worker(api);
@@ -314,12 +359,18 @@ class ExternalRuntimeProvisionerTest {
             assertFalse(provider.canRetryFailedConfirm(forged));
             api.failure = null;
             assertSameLease(lease, join(broker.warm("harness")).getLease());
-            api.state = "UNKNOWN";
-            assertThrows(CompletionException.class, () -> join(broker.warm("harness")));
-            assertEquals(RuntimeBindingRecord.State.READY, bindings.findById(ready.getBindingId()).getState());
-            assertTrue(provider.isUsable(lease));
-            api.state = "RUNNING";
-            assertSameLease(lease, join(broker.warm("harness")).getLease());
+            for (String state : new String[] {"UNKNOWN", "STARTING"}) {
+                api.state = state;
+                var failure = (RuntimeBrokerException) assertThrows(CompletionException.class,
+                        () -> join(broker.warm("harness"))).getCause();
+                assertEquals("runtime_external_unavailable", failure.getCode());
+                assertTrue(failure.isRetryable());
+                assertEquals(RuntimeBindingRecord.State.READY, bindings.findById(ready.getBindingId()).getState());
+                assertTrue(provider.isUsable(lease));
+                assertTrue(provider.canRetryFailedConfirm(lease));
+                api.state = "RUNNING";
+                assertSameLease(lease, join(broker.warm("harness")).getLease());
+            }
             api.endpoint = "https://replacement.example/";
             assertThrows(CompletionException.class, () -> join(broker.warm("harness")));
             assertEquals(RuntimeBindingRecord.State.LOST, bindings.findById(ready.getBindingId()).getState());
@@ -388,7 +439,7 @@ class ExternalRuntimeProvisionerTest {
         private volatile Map<String, Object> observeRequest;
         private RuntimeBrokerException failure;
         private RuntimeBrokerException provisionFailure;
-        private ExternalRuntimeProvisioner closing;
+        private Runnable closing;
         private String endpoint = "https://worker.example/";
         private String state = "RUNNING";
         private int startingLeft;
@@ -411,7 +462,7 @@ class ExternalRuntimeProvisionerTest {
             observations++;
             observeRequest = request;
             if (closing != null) {
-                closing.close();
+                closing.run();
             }
             if (failure != null) {
                 return CompletableFuture.failedFuture(failure);

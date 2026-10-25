@@ -83,7 +83,7 @@ public final class ExternalRuntimeProvisioner implements RuntimeProvisioner {
         if (binding.getResourceHandle() != null) {
             validateHandle(binding.getRequest(), binding.getProvisionSeed(), binding.getResourceHandle());
         }
-        admitPlacement(binding.getRequest(), binding.getProvisionSeed(), binding.getResourceHandle());
+        admitPlacement(binding.getRequest(), binding.getProvisionSeed(), binding.getResourceHandle(), false);
     }
 
     @Override
@@ -94,7 +94,7 @@ public final class ExternalRuntimeProvisioner implements RuntimeProvisioner {
             if (knownHandle != null) {
                 validateHandle(request, seed, knownHandle);
             }
-            Placement retained = admitPlacement(request, seed, knownHandle);
+            Placement retained = admitPlacement(request, seed, knownHandle, true);
             RuntimeResourceHandle original = knownHandle != null ? knownHandle : retained.handle();
             RuntimeResourceHandle handle = original != null ? original
                     : new RuntimeResourceHandle(KIND, HANDLE_VERSION, Map.of(
@@ -212,10 +212,11 @@ public final class ExternalRuntimeProvisioner implements RuntimeProvisioner {
     public CompletionStage<Void> confirm(RuntimeProvisionRequest request, RuntimeLease lease) {
         Placement saved = placement(lease);
         if (saved == null || !saved.request().equals(request) || !lease.getEndpoint().equals(saved.endpoint())) {
-            return CompletableFuture.failedFuture(conflict());
+            return CompletableFuture.failedFuture(executor.isShutdown() ? unavailable() : conflict());
         }
         return reconcile(request, saved.seed(), saved.handle(), lease).thenCompose(observation -> {
-            if (observation.getOutcome() == RuntimeObservation.Outcome.UNKNOWN) {
+            if (observation.getOutcome() == RuntimeObservation.Outcome.UNKNOWN
+                    || observation.getOutcome() == RuntimeObservation.Outcome.STARTING) {
                 throw unavailable();
             }
             if (observation.getOutcome() != RuntimeObservation.Outcome.READY
@@ -229,7 +230,7 @@ public final class ExternalRuntimeProvisioner implements RuntimeProvisioner {
 
     @Override
     public boolean canRetryFailedConfirm(RuntimeLease lease) {
-        return isUsable(lease);
+        return executor.isShutdown() || isUsable(lease);
     }
 
     @Override
@@ -280,7 +281,7 @@ public final class ExternalRuntimeProvisioner implements RuntimeProvisioner {
     }
 
     private Placement admitPlacement(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
-            RuntimeResourceHandle handle) {
+            RuntimeResourceHandle handle, boolean retain) {
         synchronized (placements) {
             if (executor.isShutdown()) {
                 throw unavailable();
@@ -301,8 +302,10 @@ public final class ExternalRuntimeProvisioner implements RuntimeProvisioner {
                         "External Runtime placement capacity is exhausted.", true);
             }
             Placement pending = new Placement(request, seed, handle, null);
-            placements.put(seed, pending);
-            placementsByLease.put(ownershipKey(seed), pending);
+            if (retain) {
+                placements.put(seed, pending);
+                placementsByLease.put(ownershipKey(seed), pending);
+            }
             return pending;
         }
     }
