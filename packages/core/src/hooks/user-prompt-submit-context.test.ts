@@ -100,13 +100,16 @@ describe('restoreUserPromptSubmitContextReceipt', () => {
     };
     restoreUserPromptSubmitContextReceipt(entry, 'ctx');
     expect(hasUserPromptSubmitContext(entry, 'ctx')).toBe(false);
+  });
 
+  it('re-stamps a sole matching part from recorded hook provenance', () => {
     const sole = {
       role: 'user',
       parts: [{ text: wrapUserPromptSubmitContext('ctx') }],
     };
-    restoreUserPromptSubmitContextReceipt(sole, 'ctx');
     expect(hasUserPromptSubmitContext(sole, 'ctx')).toBe(false);
+    restoreUserPromptSubmitContextReceipt(sole, 'ctx');
+    expect(hasUserPromptSubmitContext(sole, 'ctx')).toBe(true);
   });
 });
 
@@ -151,10 +154,18 @@ describe('hasUserPromptSubmitContext', () => {
     expect(hasUserPromptSubmitContext(entry, 'ctx')).toBe(false);
   });
 
-  it('does not match a sole tagged part, which is treated as user-authored', () => {
+  it('matches a receipt-stamped sole part rescued after compaction', () => {
     const entry = {
       role: 'user',
       parts: [createUserPromptSubmitContextPart('ctx')],
+    };
+    expect(hasUserPromptSubmitContext(entry, 'ctx')).toBe(true);
+  });
+
+  it('does not match a caller-authored sole tagged part', () => {
+    const entry = {
+      role: 'user',
+      parts: [{ text: wrapUserPromptSubmitContext('ctx') }],
     };
     expect(hasUserPromptSubmitContext(entry, 'ctx')).toBe(false);
   });
