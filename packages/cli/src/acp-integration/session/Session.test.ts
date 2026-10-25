@@ -4472,9 +4472,14 @@ describe('Session', () => {
       expect(send.mock.calls[0][3]).toMatchObject({
         type: core.SendMessageType.UserQuery,
         userTurnRecordedByHost: true,
+        stopHookRunByHost: true,
+        interactionSpanByHost: true,
+        toolLoopGuardsByHost: true,
         promptAdmission: { blocked: false },
       });
       expect(agentText()).toContain('Hello');
+      // The client ran the memory tasks after the response.
+      expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
     });
 
     it("runs the requested tools with the session's executor and sends their results", async () => {
@@ -4669,11 +4674,23 @@ describe('Session', () => {
         status: 500,
       };
       structuredErrorCauses.set(structured, providerError);
-      useSharedRounds([
-        { type: core.LlmEventType.Error, value: { error: structured } },
-      ]);
+      useSharedRounds([]);
+      let clientFinished = false;
+      Object.assign(mockLlmClient, {
+        sendMessageStream: vi.fn(() =>
+          (async function* () {
+            yield {
+              type: core.LlmEventType.Error,
+              value: { error: structured },
+            };
+            // The client's own work after an error, such as ending the turn.
+            clientFinished = true;
+          })(),
+        ),
+      });
 
       await expect(prompt()).rejects.toBe(providerError);
+      expect(clientFinished).toBe(true);
     });
 
     it('keeps a retry on the current path', async () => {
@@ -27767,6 +27784,9 @@ describe('Session', () => {
               expect(sends[1][3]).toMatchObject({
                 type: core.SendMessageType.Steer,
               });
+              // The client ran no memory tasks for the cut response or the
+              // Steer round, so the session schedules them.
+              expect(mockMemoryManager.scheduleExtract).toHaveBeenCalledOnce();
             },
           );
 

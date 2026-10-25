@@ -291,6 +291,17 @@ export interface SendMessageOptions {
   toolCallPreparations?: boolean;
   /** The host fires the Stop hook after the round, so this send does not. */
   stopHookRunByHost?: boolean;
+  /**
+   * The host keeps the interaction span open around its turn, so this send
+   * neither starts nor ends one.
+   */
+  interactionSpanByHost?: boolean;
+  /**
+   * The host runs its own tool-call guards and exploration budget, so this
+   * send checks no tool-call patterns and adds no exploration reminder; the
+   * content and thought heuristics still run.
+   */
+  toolLoopGuardsByHost?: boolean;
   /** Returns user input waiting to steer the active turn at a model boundary. */
   getSteerInput?: (signal: AbortSignal) => Promise<SteerInput | undefined>;
   /** Steer lease already appended to this request, settled after history push. */
@@ -3721,9 +3732,11 @@ export class LlmClient {
       messageType === SendMessageType.Notification ||
       messageType === SendMessageType.Teammate ||
       messageType === SendMessageType.Goal;
-    let interactionOwner = startsInteraction
-      ? undefined
-      : getActiveInteractionSpan(prompt_id);
+    const interactionSpanByHost = options?.interactionSpanByHost === true;
+    let interactionOwner =
+      startsInteraction || interactionSpanByHost
+        ? undefined
+        : getActiveInteractionSpan(prompt_id);
     if (interactionOwner) {
       recordInteractionActivity(prompt_id, interactionOwner);
     }
@@ -4065,12 +4078,14 @@ export class LlmClient {
       // New input starts this interaction, so its first Stop is not
       // hook-forced even when a retry or goal turn reuses the prompt id.
       this.clearStopHookChain(prompt_id);
-      startInteractionSpan(this.config, {
-        promptId: prompt_id,
-        model: options?.modelOverride ?? this.config.getModel(),
-        messageType,
-      });
-      interactionOwner = getActiveInteractionSpan(prompt_id);
+      if (!interactionSpanByHost) {
+        startInteractionSpan(this.config, {
+          promptId: prompt_id,
+          model: options?.modelOverride ?? this.config.getModel(),
+          messageType,
+        });
+        interactionOwner = getActiveInteractionSpan(prompt_id);
+      }
       this.interactionStartTypes.clear();
       this.interactionStartTypes.set(prompt_id, messageType);
       if (
@@ -4433,6 +4448,8 @@ export class LlmClient {
     const ownsExplorationBudget =
       !options?.isConcurrentSideQuery &&
       prompt_id === this.toolExplorationBudgetPromptId;
+    const ownsToolLoopGuards =
+      ownsExplorationBudget && !options?.toolLoopGuardsByHost;
     // The delivery was prepared before the request went out, so commit vs
     // discard rides on whether the model accepted the request (any streamed
     // event). A loop-detection halt after acceptance must commit: the memory
@@ -4948,7 +4965,10 @@ export class LlmClient {
         }
       }
 
-      if (messageType === SendMessageType.ToolResult) {
+      if (
+        messageType === SendMessageType.ToolResult &&
+        !options?.toolLoopGuardsByHost
+      ) {
         // Record executed tool results for stateful read tools (task_list)
         // so the loop guards can distinguish productive re-polling — the
         // shared task board changed between identical calls — from a stuck
@@ -5071,7 +5091,7 @@ export class LlmClient {
           ? this.config.takeActiveTodoReminder(prompt_id, true)
           : this.config.takeActiveTodoReminder(prompt_id);
         const explorationReminder =
-          this.loopDetector.isDisabledForSession() || !ownsExplorationBudget
+          this.loopDetector.isDisabledForSession() || !ownsToolLoopGuards
             ? undefined
             : this.toolExplorationBudget.takeReminder(
                 this.config.getMaxToolCallsPerTurn(),
@@ -5247,6 +5267,7 @@ export class LlmClient {
           // whether they remind or stop.
           const alwaysOnLoop =
             !duplicateLoopGuardRequest &&
+            !options?.toolLoopGuardsByHost &&
             this.loopDetector.checkAlwaysOnSafeties(event, {
               queueReminders: ownsExplorationBudget,
             });
@@ -5258,7 +5279,7 @@ export class LlmClient {
           // never executed. Ownership-gated like every other entrypoint: a
           // concurrent side turn's stream neither feeds this turn's phase nor
           // rolls it back.
-          if (ownsExplorationBudget) {
+          if (ownsToolLoopGuards) {
             if (
               event.type === LlmEventType.ToolCallRequest &&
               !duplicateLoopGuardRequest
@@ -5329,6 +5350,7 @@ export class LlmClient {
             !skipLoopDetection &&
             this.loopDetector.addAndCheckHeuristicLoops(event, {
               queueReminders: ownsExplorationBudget,
+              toolCallPatterns: !options?.toolLoopGuardsByHost,
             });
           if (heuristicLoop) {
             for (const goalEvent of await finalizeInterruptedGoalTurn(

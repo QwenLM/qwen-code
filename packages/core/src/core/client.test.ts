@@ -7420,6 +7420,27 @@ Other open files:
       value: { reason: 'STOP' },
     });
 
+    it('leaves the interaction span to a host that keeps one open', async () => {
+      const promptId = 'prompt-host-span';
+      ownerFor(promptId);
+      mockTurnRunFn.mockReturnValueOnce(
+        turnStream(toolCallRequest('call-1', 'read_file', {}, promptId)),
+      );
+
+      await run([{ text: 'use a tool' }], promptId, {
+        type: SendMessageType.UserQuery,
+        interactionSpanByHost: true,
+      });
+      mockTurnRunFn.mockReturnValueOnce(textTurn('done'));
+      await run([fnResponse('read_file', { ok: true })], promptId, {
+        type: SendMessageType.ToolResult,
+        interactionSpanByHost: true,
+      });
+
+      expect(tel.startInteractionSpan).not.toHaveBeenCalled();
+      expect(tel.endInteractionSpan).not.toHaveBeenCalled();
+    });
+
     it('keeps one interaction open across multiple tool-result continuations', async () => {
       const promptId = 'prompt-tool-loop';
       const owner = ownerFor(promptId);
@@ -8599,6 +8620,31 @@ Other open files:
           toolCallLimit: 2,
         },
       });
+    });
+
+    it('leaves the tool-call guards to a host that runs its own', async () => {
+      // Past an explicit cap of 2, and an alternating pattern for the
+      // heuristics, which are on here.
+      vi.mocked(mockConfig.getMaxToolCallsPerTurn).mockReturnValue(2);
+      vi.mocked(mockConfig.isMaxToolCallsPerTurnExplicit).mockReturnValue(true);
+      vi.spyOn(client['config'], 'getSkipLoopDetection').mockReturnValue(false);
+      const calls = Array.from({ length: 10 }, (_, i) =>
+        toolCallRequest(`call-${i}`, 'read_file', { path: i % 2 ? 'a' : 'b' }),
+      );
+      mockTurnRunFn.mockReturnValueOnce(turnStream(...calls));
+      installChat();
+
+      const events = await run([{ text: 'read the files' }], 'prompt-cap', {
+        type: SendMessageType.UserQuery,
+        toolLoopGuardsByHost: true,
+      });
+
+      expect(events).not.toContainEqual(
+        expect.objectContaining({ type: LlmEventType.LoopDetected }),
+      );
+      expect(
+        events.filter((event) => event.type === LlmEventType.ToolCallRequest),
+      ).toHaveLength(10);
     });
 
     it('always-on consecutive halt clears all pending calls (uniform with the turn cap)', async () => {

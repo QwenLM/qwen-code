@@ -128,19 +128,21 @@ function modelRequests(server: FakeOpenAIServer, dir: string): unknown[] {
   return streamingMessages(server).map((messages) =>
     messages
       .filter((message) => message['role'] !== 'system')
-      .map((message) => ({
-        ...message,
-        content: withoutDateReminder(message['content']),
-      }))
+      .map(
+        (message): JsonObject => ({
+          ...message,
+          content: withoutDateReminder(message['content']),
+        }),
+      )
       .filter(
         (message) =>
-          !Array.isArray(message.content) || message.content.length > 0,
+          !Array.isArray(message['content']) || message['content'].length > 0,
       )
       .map((message) =>
         normalize(
           {
             role: message['role'],
-            content: message.content,
+            content: message['content'],
             tool_calls: message['tool_calls'],
             tool_call_id: message['tool_call_id'],
           },
@@ -436,6 +438,26 @@ const allowOnce = () => ({
                 ],
               }
             : { content: 'Both read.' },
+      },
+      {
+        name: 'reads past the per-turn tool-call cap',
+        prompts: ['Read the files one by one.'],
+        settings: { model: { maxToolCallsPerTurn: 2 } },
+        prepare: (r) => {
+          r.createFile('a.txt', 'alpha\n');
+          r.createFile('b.txt', 'beta\n');
+          r.createFile('c.txt', 'gamma\n');
+        },
+        reply: (messages, dir) => {
+          const done = toolResults(messages);
+          return done < 3
+            ? {
+                toolCalls: [
+                  read(join(dir, `${'abc'[done]}.txt`), `call_${done}`),
+                ],
+              }
+            : { content: 'All read.' };
+        },
       },
       {
         name: 'an approved write between reads',

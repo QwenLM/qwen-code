@@ -213,23 +213,25 @@ if (config.isUnifiedAgentLoopEnabled()) {
 
 PR 2 分三步迁移 ACP。PR 2a 迁移全新用户 prompt 的模型轮：不是 retry、continue 或 restore，也不是 Goal、channel 或 Goal 提案审批轮次的 prompt。模型轮就是共享 loop 自己的 `runModelRound`：一次 `LlmClient.sendMessageStream` 调用，事件交给 ACP，终止事件变成停止原因。ACP 保留自己的工具步骤（`runToolCalls`、工具之后的下一条消息、daemon 工具循环守卫）以及轮次前后的全部逻辑。PR 2b 迁移其他轮次，PR 2c 把工具批迁到 scheduler 上。
 
-| ACP 现在                                                                                  | 设置开启后                                                                                                                                                        |
-| ----------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 通过 `#sendMessageStreamWithAutoCompression` 调用 `chat.sendMessageStream`                | 通过 `runModelRound` 调用 `LlmClient.sendMessageStream`：第一轮是 `UserQuery`，工具之后的一轮是 `ToolResult`，回复流式输出期间收到的输入是 `Steer`                |
-| 原始 chunk：文本、thought、usage、函数调用、工具调用准备                                  | client 的事件：`Content`、带原始 `text` 的 `Thought`、`Finished` 上的 usage、带来源 `functionCall` 的 `ToolCallRequest`、`ToolCallPreparation`                    |
-| 经 message bus 触发 UserPromptSubmit                                                      | `admitUserPrompt`，输入和时机都不变；第一轮应用这个结果，被拦截的 prompt 由这一轮报告，不发请求                                                                   |
-| 用户消息记录和 todo 工作链                                                                | 仍由 ACP 处理；第一轮用 `userTurnRecordedByHost` 告知 client                                                                                                      |
-| 记忆召回、文件历史快照、plan、arena 与 output-style 提醒、workflow intent、MessageDisplay | 由 client 处理                                                                                                                                                    |
-| 发送前压缩及其提示；session token 限制                                                    | client 在发送过程中压缩，收到 `ChatCompressed` 时显示同样的提示；限制由 client 检查，报告方式不变（`max_tokens`）                                                 |
-| 外部 Stop hook、它的上限和续发                                                            | 仍由 ACP 的 Stop 循环处理，这个循环也负责 Todo Stop Guard 和当前轮次的后台结果；模型轮用 `stopHookRunByHost` 告知 client。这个 hook 在 PR 2b 中随这些续发一起迁移 |
-| 请求失败时的 StopFailure hook 和 429 映射                                                 | 仍由 ACP 处理，流中的 `Error` 事件也一样，抛出的是 provider 原本抛出的错误                                                                                        |
-| 轮次结束后的托管记忆任务                                                                  | 由 client 在轮次最后一次模型轮之后安排；`terminateTurn` 结果结束轮次时仍由 ACP 安排                                                                               |
-| 没有内容循环检测，也没有会话轮数上限                                                      | client 的 `LoopDetected` 以循环为由拒绝这个 prompt（`LOOP_DETECTED`）；`MaxSessionTurns` 以 `max_turn_requests` 结束它                                            |
+| ACP 现在                                                                                  | 设置开启后                                                                                                                                                                                      |
+| ----------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 通过 `#sendMessageStreamWithAutoCompression` 调用 `chat.sendMessageStream`                | 通过 `runModelRound` 调用 `LlmClient.sendMessageStream`：第一轮是 `UserQuery`，工具之后的一轮是 `ToolResult`，回复流式输出期间收到的输入是 `Steer`                                              |
+| 原始 chunk：文本、thought、usage、函数调用、工具调用准备                                  | client 的事件：`Content`、带原始 `text` 的 `Thought`、`Finished` 上的 usage、带来源 `functionCall` 的 `ToolCallRequest`、`ToolCallPreparation`                                                  |
+| 经 message bus 触发 UserPromptSubmit                                                      | `admitUserPrompt`，输入和时机都不变；第一轮应用这个结果，被拦截的 prompt 由这一轮报告，不发请求                                                                                                 |
+| 用户消息记录和 todo 工作链                                                                | 仍由 ACP 处理；第一轮用 `userTurnRecordedByHost` 告知 client                                                                                                                                    |
+| 记忆召回、文件历史快照、plan、arena 与 output-style 提醒、workflow intent、MessageDisplay | 由 client 处理                                                                                                                                                                                  |
+| 发送前压缩及其提示；session token 限制                                                    | client 在发送过程中压缩，收到 `ChatCompressed` 时显示同样的提示；限制由 client 检查，报告方式不变（`max_tokens`）                                                                               |
+| 外部 Stop hook、它的上限和续发                                                            | 仍由 ACP 的 Stop 循环处理，这个循环也负责 Todo Stop Guard 和当前轮次的后台结果；模型轮用 `stopHookRunByHost` 告知 client。这个 hook 在 PR 2b 中随这些续发一起迁移                               |
+| 请求失败时的 StopFailure hook 和 429 映射                                                 | 仍由 ACP 处理，流中的 `Error` 事件也一样，抛出的是 provider 原本抛出的错误                                                                                                                      |
+| 轮次结束后的托管记忆任务                                                                  | `UserQuery` 或 `ToolResult` 模型轮结束回复时由 client 安排；其他情况仍由 ACP 安排，例如排队输入打断了回复，或 `terminateTurn` 结果结束了轮次                                                    |
+| interaction span                                                                          | 仍由 ACP 处理；模型轮用 `interactionSpanByHost` 告知 client                                                                                                                                     |
+| daemon 工具循环守卫：每轮工具调用上限、重复调用、探索提醒                                 | 仍由 ACP 处理；模型轮用 `toolLoopGuardsByHost` 告知 client，client 因此不检查工具调用模式，也不添加探索提醒                                                                                     |
+| 没有内容和 thought 循环启发式检测，也没有会话轮数上限                                     | `model.skipLoopDetection` 为 false 时启用 client 的内容和 thought 启发式检测，它的 `LoopDetected` 以循环为由拒绝这个 prompt（`LOOP_DETECTED`）；`MaxSessionTurns` 以 `max_turn_requests` 结束它 |
 
 这一步对 core 的改动都是增量的，不使用它们的调用方不受影响：
 
 - `Turn` 给 `Thought` 带上 chunk 的原始 `text`，给 `ToolCallRequest` 带上它所依据的 `functionCall`；发送时用 `toolCallPreparations` 要求后，模型开始流式输出一个调用时会产出 `ToolCallPreparation`；
-- `SendMessageOptions.userTurnRecordedByHost` 和 `stopHookRunByHost`；
+- `SendMessageOptions.userTurnRecordedByHost`、`stopHookRunByHost`、`interactionSpanByHost` 和 `toolLoopGuardsByHost`，以及循环检测器的检查选项 `toolCallPatterns`；
 - `getStructuredErrorCause` 返回 `Turn` 的 `Error` 事件所依据的原始错误；
 - `admitUserPrompt` 接受 hook 的 `submitted_prompt` 和取消信号；
 - 导出 `runModelRound`。
@@ -287,6 +289,7 @@ PR 2 分三步迁移 ACP。PR 2a 迁移全新用户 prompt 的模型轮：不是
 - 纯文本，以及带 thought 的流式文本；
 - 一个工具，以及一次回复中的两个读取；
 - 两次读取之间一次获准的写入，以及一次被拒绝的写入；
+- 超过每轮工具调用上限的读取；
 - 被输出上限截断的编辑；
 - 中途断流后重试的流；
 - 同一会话中的两个 prompt；
@@ -316,10 +319,9 @@ PR 2 分三步迁移 ACP。PR 2a 迁移全新用户 prompt 的模型轮：不是
   - 日期与上次不同时，prompt 会带上 client 的日期提醒；系统提醒改由 client 生成，包括 advisor 与已暂停 Goal 的提醒，并且排在 ACP 一次性提示的前面，而不是后面；
   - UserPromptSubmit 也会为这一轮的工具结果请求运行，输入是请求的文本，与其他入口相同（#9511）；
   - session token 限制在 client 压缩历史之前检查，而不是之后；
-  - client 的循环检测和会话轮数上限对 ACP prompt 生效，启用时 next-speaker 检查也一样（#14114）；
+  - client 的会话轮数上限对 ACP prompt 生效；`model.skipLoopDetection` 为 false 时它的内容和 thought 循环启发式检测也生效，启用时 next-speaker 检查也一样（#14114）；
   - 记忆召回使用请求的文本，托管记忆任务（包括 skill review）由 client 安排，prompt 计入提交署名；
   - 每次压缩都会显示压缩提示，发送过程中的压缩也一样；
-  - 开启遥测时，client 的 interaction span 与 ACP 的并存。
 
   ACP 对拍测试覆盖了保持不变的常见场景，并对日期提醒和工具结果上的 UserPromptSubmit 做了断言。
 
@@ -360,7 +362,6 @@ PR 2 分三步迁移 ACP。PR 2a 迁移全新用户 prompt 的模型轮：不是
 - `model.maxSessionTurns: 0` 应该表示“不允许任何轮次”，还是应该被拒绝？目前各 loop 的理解不一致（#15325）。
 - 对拍测试按顺序比较各帧，目前还没有场景并发运行带实时输出的调用；这类调用的进度帧在两份 loop 中都没有固定顺序。这类场景是否应该按调用分别比较进度帧？
 - 被 `beforeToolLaunch` 拒绝的调用，对 PostToolBatch 来说仍是所在批次的成员，因此 hook 附加在它上面的停止指令或补充上下文不会到达模型。headless 只在运行结束时才拒绝调用，所以这在 headless 中不会表现出来。在其他入口使用 `beforeToolLaunch` 之前，应该让被拒绝的调用离开 hook 看到的批次，还是把 hook 的输出移到最后一个实际运行的调用上？
-- ACP 的 prompt 轮次保留自己的 interaction span（挂在 daemon 的 trace 下），client 又为同一个 prompt 开启一个。client 是否应该挂到宿主已经开启的 span 上？
 
 ## 后续工作
 

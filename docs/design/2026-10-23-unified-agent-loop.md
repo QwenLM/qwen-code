@@ -223,13 +223,15 @@ PR 2 moves ACP in three steps. PR 2a moves the model round of a fresh user promp
 | compaction before the send and its notice; the session token gate                                                 | the client's compaction inside the send, with the same notice on `ChatCompressed`; the client's gate, reported as today (`max_tokens`)                                                                          |
 | the external Stop hook, its cap and its continuation                                                              | ACP's Stop loop, as today, which also runs the Todo Stop Guard and the current turn's background results; the round tells the client with `stopHookRunByHost`. The hook moves with those continuations in PR 2b |
 | the StopFailure hook and the 429 mapping when a request fails                                                     | ACP, as today, also for a stream `Error` event, with the error the provider threw                                                                                                                               |
-| the managed memory tasks after the turn                                                                           | the client, after the turn's last model round; ACP's when a `terminateTurn` result ends the turn                                                                                                                |
-| no content loop detection, no session turn cap                                                                    | the client's `LoopDetected` rejects the prompt as a loop (`LOOP_DETECTED`); `MaxSessionTurns` ends it with `max_turn_requests`                                                                                  |
+| the managed memory tasks after the turn                                                                           | the client, when a `UserQuery` or `ToolResult` round ends the response; ACP's otherwise, as when queued input cut the response short or a `terminateTurn` result ends the turn                                  |
+| the interaction span                                                                                              | ACP's, as today; the round tells the client with `interactionSpanByHost`                                                                                                                                        |
+| the daemon tool-loop guards: the per-turn tool-call cap, repeated calls, the exploration reminder                 | ACP's, as today; the round tells the client with `toolLoopGuardsByHost`, so the client checks no tool-call patterns and adds no exploration reminder                                                            |
+| no content or thought loop heuristics, no session turn cap                                                        | the client's content and thought heuristics when `model.skipLoopDetection` is false, whose `LoopDetected` rejects the prompt as a loop (`LOOP_DETECTED`); `MaxSessionTurns` ends it with `max_turn_requests`    |
 
 The core changes of this step are additive and change nothing for a caller that does not use them:
 
 - `Turn` gives `Thought` the chunk's raw `text` and `ToolCallRequest` the `functionCall` it was built from, and yields `ToolCallPreparation` for a call the model started streaming when the send asks for it with `toolCallPreparations`;
-- `SendMessageOptions.userTurnRecordedByHost` and `stopHookRunByHost`;
+- `SendMessageOptions.userTurnRecordedByHost`, `stopHookRunByHost`, `interactionSpanByHost` and `toolLoopGuardsByHost`, and the loop detector's `toolCallPatterns` check option;
 - `getStructuredErrorCause` returns the error a `Turn` `Error` event was built from;
 - `admitUserPrompt` takes the hook's `submitted_prompt` and a signal;
 - `runModelRound` is exported.
@@ -287,6 +289,7 @@ A difference fails the scenario unless it is listed with a linked issue.
 - plain text, and streamed text with a thought;
 - one tool, and two reads in one response;
 - an approved write between reads, and a denied write;
+- reads past the per-turn tool-call cap;
 - an edit cut off by the output limit;
 - a stream that drops and is retried;
 - two prompts in one session;
@@ -316,10 +319,9 @@ The suite runs in the integration job. A scheduled job also runs the whole headl
   - a prompt carries the client's date reminder when the date changed since the last one, and its system reminders are the client's, the advisor and paused-Goal reminders included; they come before ACP's one-shot notices instead of after them;
   - UserPromptSubmit also runs for the turn's tool-result requests, with their text, as on the other surfaces (#9511);
   - the session token limit is checked before the client compacts the history instead of after;
-  - the client's loop detection and session turn cap apply to ACP prompts, and so does the next-speaker check when it is enabled (#14114);
+  - the client's session turn cap applies to ACP prompts, and so do its content and thought loop heuristics when `model.skipLoopDetection` is false and the next-speaker check when it is enabled (#14114);
   - memory recall uses the request's text, the client schedules the managed memory tasks, skill review included, and the prompt counts toward commit attribution;
   - every compaction shows the compaction notice, also one inside a send;
-  - with telemetry on, the client's interaction span exists beside ACP's.
 
   The ACP parity suite covers the common cases unchanged and asserts the date reminder and UserPromptSubmit on tool results.
 
@@ -360,7 +362,6 @@ End state:
 - Should `model.maxSessionTurns: 0` mean "no turns" or be rejected? Today the loops disagree (#15325).
 - The parity suite compares frames in order, and no scenario yet runs concurrent calls with live output, whose progress frames have no fixed order in either loop. Should such scenarios compare progress frames per call?
 - A call `beforeToolLaunch` refuses is still a member of its batch for PostToolBatch, so a stop or added context the hook attaches to it does not reach the model. Headless refuses a call only when the run ends, so this does not show there. Before another surface uses `beforeToolLaunch`, should refused calls leave the batch the hook sees, or should the hook's output move to the last call that ran?
-- An ACP prompt turn keeps its own interaction span, parented to the daemon's trace, and the client starts another for the same prompt. Should the client attach to a span the host already started?
 
 ## Follow-up
 

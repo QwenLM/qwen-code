@@ -7227,8 +7227,9 @@ export class Session implements SessionContext {
             // the shared agent loop's round. `LlmClient` then does the steps
             // the current path does here itself: UserPromptSubmit on the
             // admitted verdict, memory recall, the file-history snapshot,
-            // system reminders and workflow intent. The Stop hook stays with
-            // ACP's Stop loop, which also runs ACP's own continuations.
+            // system reminders and workflow intent. ACP keeps the interaction
+            // span, its tool step with the tool-call guards, and the Stop hook
+            // in its Stop loop, which also runs ACP's own continuations.
             const sharedModelRound =
               this.config.isUnifiedAgentLoopEnabled?.() === true &&
               isFreshUserTurn &&
@@ -7236,6 +7237,9 @@ export class Session implements SessionContext {
               !channelTurn &&
               !responseCapture.goalProposalTurn;
             let promptAdmission: UserPromptAdmission | undefined;
+            // The client runs the managed memory tasks when a UserQuery or
+            // ToolResult round ends the response without tool calls.
+            let memoryTasksRanInClient = false;
             if (sharedModelRound) {
               promptAdmission = await this.config
                 .getLlmClient()
@@ -7257,6 +7261,7 @@ export class Session implements SessionContext {
                       type: SendMessageType.UserQuery,
                       promptAdmission,
                       userTurnRecordedByHost: true,
+                      interactionSpanByHost: true,
                     },
                   },
                   pendingSend.signal,
@@ -7755,40 +7760,41 @@ export class Session implements SessionContext {
                   const cutForInput = () =>
                     responseInterrupt.signal.aborted &&
                     !pendingSend.signal.aborted;
+                  // Input taken while a response streamed is user text at a
+                  // model boundary.
+                  const roundType =
+                    turnCount === 1
+                      ? SendMessageType.UserQuery
+                      : message.parts?.some((part) => part.functionResponse)
+                        ? SendMessageType.ToolResult
+                        : SendMessageType.Steer;
+                  // The error a response reported, thrown once the client has
+                  // finished the round.
+                  let streamError: StructuredError | undefined;
                   try {
                     ({ stop: roundStop } = await runModelRound(
                       this.config.getLlmClient(),
                       {
                         parts: message.parts ?? [],
                         promptId,
-                        options:
-                          turnCount === 1
-                            ? {
-                                type: SendMessageType.UserQuery,
-                                modelOverride: fullTurnModelOverride,
-                                userTurnRecordedByHost: true,
-                                stopHookRunByHost: true,
-                                toolCallPreparations: true,
-                                promptAdmission,
-                                ...(workflowHumanInput && {
-                                  humanInput: workflowHumanInput,
-                                }),
-                                ...(submittedPrompt.trim().length > 0 && {
-                                  submittedPrompt,
-                                }),
-                              }
-                            : {
-                                // Input taken while a response streamed is
-                                // user text at a model boundary.
-                                type: message.parts?.some(
-                                  (part) => part.functionResponse,
-                                )
-                                  ? SendMessageType.ToolResult
-                                  : SendMessageType.Steer,
-                                modelOverride: fullTurnModelOverride,
-                                stopHookRunByHost: true,
-                                toolCallPreparations: true,
-                              },
+                        options: {
+                          type: roundType,
+                          modelOverride: fullTurnModelOverride,
+                          stopHookRunByHost: true,
+                          interactionSpanByHost: true,
+                          toolLoopGuardsByHost: true,
+                          toolCallPreparations: true,
+                          ...(roundType === SendMessageType.UserQuery && {
+                            userTurnRecordedByHost: true,
+                            promptAdmission,
+                            ...(workflowHumanInput && {
+                              humanInput: workflowHumanInput,
+                            }),
+                            ...(submittedPrompt.trim().length > 0 && {
+                              submittedPrompt,
+                            }),
+                          }),
+                        },
                       },
                       responseInterrupt.signal,
                       {
@@ -7907,13 +7913,15 @@ export class Session implements SessionContext {
                               loopStop = event.value;
                               break;
                             case LlmEventType.Error:
-                              throw modelStreamError(event.value.error);
+                              streamError = event.value.error;
+                              break;
                             default:
                               break;
                           }
                         },
                       },
                     ));
+                    if (streamError) throw modelStreamError(streamError);
                   } catch (error) {
                     streamFailed = true;
                     if (!cutForInput()) {
@@ -7972,6 +7980,14 @@ export class Session implements SessionContext {
                       });
                     }
                     return { stopReason: 'end_turn' };
+                  }
+                  if (
+                    roundType !== SendMessageType.Steer &&
+                    functionCalls.length === 0 &&
+                    !streamFailed &&
+                    !cutForInput()
+                  ) {
+                    memoryTasksRanInClient = true;
                   }
                 } else {
                   try {
@@ -8318,7 +8334,7 @@ export class Session implements SessionContext {
                 result,
                 responseCapture,
                 isFreshUserTurn,
-                sharedModelRound,
+                memoryTasksRanInClient,
               );
               return { stopReason: result.stopReason };
             } finally {
