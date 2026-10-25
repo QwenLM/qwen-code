@@ -662,6 +662,10 @@ describe('post-merge push lane', () => {
     expect(fetchCode).toContain(
       'git config --unset remote.origin.partialclonefilter',
     );
+    // A fixed window is not enough: main moves 50-100 commits a day, so a
+    // 100-commit depth expires in about a day and every longer-lived PR paid
+    // for a full scan. The deepen retry is what keeps them incremental.
+    expect(fetchCode).toContain('--deepen=');
   });
 
   it("pins the disk-pressure collector's upload-artifact revision", () => {
