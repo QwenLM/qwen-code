@@ -360,6 +360,9 @@ public class HarnessPoolConnector implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsUserMessageQueue() { return feature("user-message-queue/1"); }
+
+    @Override
     public boolean supportsContextCompression() {
         return feature("context-compression/1");
     }

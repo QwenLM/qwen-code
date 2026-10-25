@@ -736,6 +736,15 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsUserMessageQueue() {
+        try {
+            return client().capabilities().getFeatures().contains("user-message-queue/1");
+        } catch (RuntimeException unavailable) {
+            return false;
+        }
+    }
+
+    @Override
     public boolean supportsContextCompression() {
         try {
             return client().capabilities().getFeatures().contains("context-compression/1");

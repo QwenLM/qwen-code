@@ -14,6 +14,8 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  readdirSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -182,6 +184,21 @@ describe.skipIf(process.platform === 'win32')(
       },
     );
 
+    it('selects from commits and trees even when a blob is missing', async () => {
+      // The PR lane may leave a blobless checkout behind (Report test growth
+      // fetches the merge base with --filter=blob:none). Selection must never
+      // need file content: this deletes the changed file's blob object, so any
+      // command that reads it would fail instead of narrowing the scope.
+      put('changed.ts');
+      commit();
+      const blob = git('rev-parse', 'HEAD:changed.ts');
+      rmSync(join(repo, '.git', 'objects', blob.slice(0, 2), blob.slice(2)));
+      expect(() => git('show', 'HEAD:changed.ts')).toThrow();
+      const result = await scope();
+      expect(result.full).toBe(false);
+      expect(result.eslint).toEqual(['changed.ts']);
+    });
+
     it('does not extend the shell lane to paths that lane excludes', async () => {
       // The full lane greps terminal-bench out of its candidates, but the
       // escalation arm was evaluated over every changed path, so a PR whose
@@ -260,7 +277,62 @@ describe.skipIf(process.platform === 'win32')(
 describe.skipIf(process.platform === 'win32')(
   'incremental lint subprocesses',
   () => {
-    const run = (lanes, fail = '', script = lintScript) => {
+    // A PATH the child can actually run on, with the ambient yamllint removed:
+    // the mock bin, then a fixture bin mirroring every system executable except
+    // `yamllint*`. The installers need the real coreutils and tar, so dropping
+    // the system directories outright would fail the child — but leaving them
+    // in would let the pool's own yamllint (in both /usr/local/bin and
+    // /usr/bin on the ECS images) satisfy `command -v` and hide the installer
+    // this case exists to observe. HOME is pinned to a fixture with no
+    // `.local/bin`, so the entry the child appends on Linux cannot supply one
+    // either.
+    const hermeticEnv = () => {
+      const home = join(root, 'home');
+      const bin = join(home, 'strict-bin');
+      mkdirSync(bin, { recursive: true });
+      for (const directory of [
+        '/bin',
+        '/sbin',
+        '/usr/bin',
+        '/usr/sbin',
+        '/usr/local/bin',
+        '/usr/local/sbin',
+      ]) {
+        if (!existsSync(directory)) continue;
+        for (const name of readdirSync(directory)) {
+          if (name.startsWith('yamllint')) continue;
+          const link = join(bin, name);
+          if (existsSync(link)) continue;
+          try {
+            symlinkSync(join(directory, name), link);
+          } catch {
+            // A non-symlinkable entry (an existing name, a broken link) is not
+            // needed by the child.
+          }
+        }
+      }
+      for (const [name, command] of [
+        ['node', process.execPath],
+        ['env', 'command -v env'],
+        ['git', 'command -v git'],
+      ]) {
+        const link = join(bin, name);
+        rmSync(link, { force: true });
+        symlinkSync(
+          command.startsWith('/')
+            ? command
+            : execFileSync('sh', ['-c', command], { encoding: 'utf8' }).trim(),
+          link,
+        );
+      }
+      return {
+        HOME: home,
+        PATH: [join(repo, 'node_modules', '.bin'), bin].join(':'),
+      };
+    };
+
+    const run = (lanes, fail = '', script = lintScript, options = {}) => {
+      const { env: envOverrides = {}, omit = [], extra = [] } = options;
       const bin = join(repo, 'node_modules', '.bin');
       const log = join(root, 'calls.jsonl');
       mkdirSync(bin, { recursive: true });
@@ -271,7 +343,9 @@ describe.skipIf(process.platform === 'win32')(
         'yamllint',
         'actionlint',
         'npm',
+        ...extra,
       ]) {
+        if (omit.includes(name)) continue;
         const file = join(bin, name);
         writeFileSync(
           file,
@@ -298,6 +372,7 @@ describe.skipIf(process.platform === 'win32')(
             LINT_BASE_SHA: baseSha,
             LINT_LOG: log,
             FAIL_LINTER: fail,
+            ...envOverrides,
           },
         },
       );
@@ -437,6 +512,83 @@ describe.skipIf(process.platform === 'win32')(
       expect(result.stdout).toContain('Skipping eslint');
       expect(result.stdout).toContain('Skipping prettier');
       expect(result.stdout).toContain('Skipping shellcheck');
+    });
+
+    it('announces a history fallback on a workflow run but not a config one', () => {
+      put('changed.ts');
+      commit();
+      const summary = join(root, 'step-summary.md');
+      const never = 'deadbeef'.repeat(5);
+      const history = run(['eslint'], '', lintScript, {
+        env: {
+          LINT_BASE_SHA: never,
+          GITHUB_ACTIONS: 'true',
+          GITHUB_STEP_SUMMARY: summary,
+        },
+      });
+      expect(history.status, history.stderr).toBe(0);
+      expect(history.stdout).toContain(
+        '::warning::Incremental selection unavailable',
+      );
+      expect(readFileSync(summary, 'utf8')).toContain(
+        'Incremental lint unavailable: Incremental selection unavailable',
+      );
+
+      // A configuration/dependency fallback is routine: no annotation, no
+      // summary line, or the signal becomes noise nobody reads.
+      rmSync(summary, { force: true });
+      put('eslint.config.js', 'export default [];\n');
+      commit();
+      const config = run(['eslint'], '', lintScript, {
+        env: { GITHUB_ACTIONS: 'true', GITHUB_STEP_SUMMARY: summary },
+      });
+      expect(config.status, config.stderr).toBe(0);
+      expect(config.stdout).not.toContain('::warning::');
+      expect(existsSync(summary)).toBe(false);
+    });
+
+    it('installs only the linters a changed file needs', () => {
+      put('changed.yml', 'name: test\n');
+      commit();
+      const env = hermeticEnv();
+      expect(() =>
+        execFileSync('sh', ['-c', 'command -v yamllint'], {
+          env,
+          stdio: 'ignore',
+        }),
+      ).toThrow();
+      // The child does not use this PATH verbatim: it applies getLinterPath(),
+      // which appends $HOME/.local/bin on Linux — where this repository's own
+      // `pip3 install --user yamllint` lands. The fixture home has no such
+      // directory, so the net above and the PATH under test still agree.
+      expect(existsSync(join(env.HOME, '.local', 'bin'))).toBe(false);
+      const result = run(['setup'], '', lintScript, {
+        // Hermetic PATH: an ambient yamllint from a developer venv or a runner
+        // image would satisfy `command -v` and hide the installer.
+        env,
+        omit: ['yamllint'],
+        extra: ['pip3'],
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.calls).toEqual([
+        { name: 'pip3', args: ['install', '--user', 'yamllint==1.35.1'] },
+      ]);
+    });
+
+    it('runs no installer when the diff selects no lane', () => {
+      git('rm', 'unchanged.ts');
+      put('image.png', Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+      commit();
+      const result = run(['setup'], '', lintScript, {
+        env: hermeticEnv(),
+        omit: ['eslint', 'prettier', 'shellcheck', 'actionlint', 'yamllint'],
+        extra: ['pip3'],
+      });
+      expect(result.status, result.stderr).toBe(0);
+      // setupLinters must skip a lane with nothing to lint *before* checking for
+      // its binary; otherwise every PR pays the tarball and pip installs this
+      // optimization removed, and no assertion could see it.
+      expect(result.calls).toEqual([]);
     });
 
     it('keeps the spawned linter temp dir inside the fixture', () => {

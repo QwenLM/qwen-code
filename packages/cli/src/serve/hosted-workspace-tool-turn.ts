@@ -10,6 +10,7 @@ import {
   confirmReplacedHostedTurnOwner,
 } from './hosted-turn-cleanup.js';
 import { probeNeverStarted } from './hosted-never-started-reconcile.js';
+import { RESIDENT_WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 
 import {
   readHostedFileHistory,
@@ -25,6 +26,11 @@ import {
   checkHostedGlobPattern,
   HOSTED_GLOB_TOO_COMPLEX,
 } from './hosted-glob-pattern.js';
+import {
+  HostedTodoInputError,
+  hostedTodoInstructions,
+  writeHostedTodos,
+} from './hosted-todo-session.js';
 import {
   checkHostedTodoWriteInput,
   HOSTED_TODO_CONTENT_MAX_CHARS,
@@ -686,14 +692,14 @@ const HOSTED_GLOB_TOOL: FunctionDeclaration = {
     additionalProperties: false,
   },
 };
-// #15076: `todo_write`, declared only on `files/3`. The Worker keeps the
-// list, which writes no Workspace file. `web_fetch` is not part of this
-// declaration: `main` adds it to the same files lane under its own argument
+// #15076: `todo_write`, declared only on `files/3`. The Harness persists
+// the Session list without writing a Workspace file. `web_fetch` is not part
+// of this declaration: `main` adds it to the same files lane under its own argument
 // and destination checks, so this array appends only the todo tool.
 export const HOSTED_TODO_WRITE_TOOL: FunctionDeclaration = {
   name: 'todo_write',
   description:
-    'Create or replace the task list for complex or multi-step work in this turn. Send the whole list each time: the call replaces the stored list, and while the plan has unfinished items an omitted `blockedBy` is preserved for an id that already exists.',
+    'Create or replace the task list of this Session for complex or multi-step work. Send the whole list each time: the call replaces the stored list, and while the plan has unfinished items an omitted `blockedBy` is preserved for an id that already exists.',
   parametersJsonSchema: {
     type: 'object',
     properties: {
@@ -1772,6 +1778,7 @@ interface HostedPreparedRequest {
   command: boolean;
   skill: boolean;
   planExit?: boolean;
+  todo?: boolean;
 }
 
 export class HostedWorkspaceToolTurn {
@@ -1786,6 +1793,7 @@ export class HostedWorkspaceToolTurn {
 
   private readonly publicPlanMode: boolean;
   private planning: boolean;
+  private residentWorkspace = false;
   private logicalRound = 0;
   private nativeBatch?: {
     messageId: string;
@@ -2050,11 +2058,61 @@ export class HostedWorkspaceToolTurn {
     );
   }
 
+  private backgroundShellAdmitted(): boolean {
+    return (
+      this.publication !== undefined &&
+      this.childRuns !== undefined &&
+      childRunAdmissionsEnabled()
+    );
+  }
+
+  private monitorsAdmitted(): boolean {
+    return (
+      this.monitors !== undefined &&
+      this.publication !== undefined &&
+      monitorRunAdmissionsEnabled()
+    );
+  }
+
   async declarations(signal: AbortSignal): Promise<FunctionDeclaration[]> {
     signal.throwIfAborted();
+    if (
+      this.profile === HOSTED_WORKSPACE_FILE_PROFILE ||
+      (this.profile === undefined &&
+        !this.mcp &&
+        !this.hooks &&
+        !this.shell &&
+        !this.publication)
+    ) {
+      try {
+        await waitForTurn(this.broker.resolveCapabilities(), signal);
+      } catch (cause) {
+        if (
+          !(cause instanceof HostedWorkspaceBrokerRejection) ||
+          cause.status !== 404
+        )
+          throw cause;
+        await waitForTurn(this.warmed, signal);
+      }
+      this.residentWorkspace =
+        this.broker.capabilityDigest === RESIDENT_WORKSPACE_CAPABILITY_DIGEST;
+    }
     this.planning =
       this.publicPlanMode &&
       (await hostedPublicPlanActive(this.session, this.promptId));
+    if (this.residentWorkspace) {
+      this.advertised = hostedWorkspaceDeclarations(
+        HOSTED_WORKSPACE_FILE_TOOLS,
+        !this.fileBackupsEnabled,
+      );
+      if (this.publicPlanMode) this.advertised.push(HOSTED_PUBLIC_PLAN_TOOL);
+      return this.planning
+        ? this.advertised.filter(
+            (tool) =>
+              tool.name === 'read_file' || tool.name === 'exit_plan_mode',
+          )
+        : this.advertised;
+    }
     // #13753 I3: a snapshot child's read profile declares its two read
     // tools and nothing else, whatever lanes, orchestration or MCP the
     // Session has; the refusal of every other call rests on this alone.
@@ -2079,9 +2137,12 @@ export class HostedWorkspaceToolTurn {
         ...(search ? [HOSTED_GLOB_TOOL] : []),
         ...(todoTool ? [HOSTED_TODO_WRITE_TOOL] : []),
       ]
-        .filter((tool) => !this.foregroundOnly || tool.name !== 'monitor')
+        .filter((tool) => tool.name !== 'monitor' || this.monitorsAdmitted())
         .map((tool) => {
-          if (this.foregroundOnly && tool.name === 'run_shell_command') {
+          if (
+            tool.name === 'run_shell_command' &&
+            !this.backgroundShellAdmitted()
+          ) {
             const schema = structuredClone(tool.parametersJsonSchema) as {
               properties?: Record<string, unknown>;
             };
@@ -2089,7 +2150,7 @@ export class HostedWorkspaceToolTurn {
             return {
               ...tool,
               description:
-                'Run one foreground shell command in the saved Session working directory. Timeout is 1..600000 ms.',
+                'Run one foreground shell command in the saved Session working directory. Timeout is 1..600000 ms. Shell file mutations are not backed up. Changing tracked file content or permissions can cause subsequent Write/Edit and undo conflicts.',
               parametersJsonSchema: schema,
             };
           }
@@ -2196,6 +2257,14 @@ export class HostedWorkspaceToolTurn {
             HOSTED_PUBLIC_PLAN_READS.has(tool.name ?? ''),
         )
       : this.advertised;
+  }
+
+  async todoInstructions(): Promise<string> {
+    // A planning round withholds `todo_write` from `declarations()`, so it must
+    // not inject an instruction to keep the list current with it.
+    return this.declaresTodoTool() && !this.planning
+      ? hostedTodoInstructions(this.session)
+      : '';
   }
 
   planModeInstructions(): string {
@@ -2959,6 +3028,7 @@ export class HostedWorkspaceToolTurn {
         // A team tool commits only to the journal and answers a refusal as
         // its error, so its committed answer is its own dispatch evidence.
         (((call.name === 'skill' && this.skills !== undefined) ||
+          (call.name === 'todo_write' && this.declaresTodoTool()) ||
           HOSTED_TEAM_TOOL_NAMES.includes(call.name) ||
           (call.name === 'exit_plan_mode' &&
             this.commands?.command(
@@ -3455,6 +3525,7 @@ export class HostedWorkspaceToolTurn {
     if (
       !batch ||
       batch.uncaptured ||
+      batch.requests.some((request) => request.todo) ||
       !runtime ||
       (isHostedWorkspaceShellProfile(this.profile) &&
         !singlePlanExit &&
@@ -3760,9 +3831,7 @@ export class HostedWorkspaceToolTurn {
             // The admitted family runs v3 only: a shell-mode turn has no
             // publication to drive it, so admitting there would only re-
             // send the request into the background-refusing v2 path.
-            this.publication !== undefined &&
-            this.childRuns !== undefined &&
-            childRunAdmissionsEnabled();
+            this.backgroundShellAdmitted();
           if (typeof args['command'] !== 'string' || !args['command'].trim()) {
             validationError = 'Hosted Shell requires a nonempty command.';
           } else if (unsupportedKey !== undefined) {
@@ -3898,10 +3967,7 @@ export class HostedWorkspaceToolTurn {
           // owns its monitor_run orchestrator and the detached family has
           // its v3 flow — publication — without it the request refuses at
           // admission rather than travelling v2 and never landing.
-          monitorAdmitted =
-            this.monitors !== undefined &&
-            this.publication !== undefined &&
-            monitorRunAdmissionsEnabled();
+          monitorAdmitted = this.monitorsAdmitted();
           if (typeof args['command'] !== 'string' || !args['command'].trim()) {
             validationError = 'Hosted Monitor requires a nonempty command.';
           } else if (unsupportedKey !== undefined) {
@@ -4364,6 +4430,7 @@ export class HostedWorkspaceToolTurn {
           command,
           skill,
           planExit,
+          todo: call.name === 'todo_write',
         };
       });
     };
@@ -4379,6 +4446,29 @@ export class HostedWorkspaceToolTurn {
     const unicodeErrors = calls.map((call) =>
       hostedShellInputError(call.name, call.args),
     );
+    if (
+      !restored &&
+      this.residentWorkspace &&
+      calls.some(
+        (call) =>
+          !HOSTED_WORKSPACE_FILE_TOOLS.some(
+            (tool) => tool.name === call.name,
+          ) && !(this.publicPlanMode && call.name === 'exit_plan_mode'),
+      )
+    ) {
+      return this.refuseBatch(
+        calls,
+        calls.map((call) =>
+          HOSTED_WORKSPACE_FILE_TOOLS.some((tool) => tool.name === call.name) ||
+          (this.publicPlanMode && call.name === 'exit_plan_mode')
+            ? undefined
+            : 'Resident Workspace supports only read_file, write_file and edit.',
+        ),
+        parts,
+        model,
+        skillOrigin,
+      );
+    }
     if (unicodeErrors.some((error) => error !== undefined)) {
       // Profile, duplicate-id and truncated-input hard refusals still win.
       const requests = prepareRequests(calls);
@@ -4425,7 +4515,11 @@ export class HostedWorkspaceToolTurn {
         skillOrigin,
       );
     }
-    if (this.hooks || this.mcp || requests.some((request) => !request.skill))
+    if (
+      this.hooks ||
+      this.mcp ||
+      requests.some((request) => !request.skill && !request.todo)
+    )
       await waitForTurn(this.warmed, signal);
     // H4b: an agent-only batch runs entirely inside its own Sessions and
     // needs no Runtime at all — holding the parent's mount across the
@@ -4445,7 +4539,8 @@ export class HostedWorkspaceToolTurn {
           request.message !== true &&
           !request.team &&
           request.command !== true &&
-          !request.skill,
+          !request.skill &&
+          !request.todo,
       )
     ) {
       // Acquisition may have taken effect even when its reply is lost.
@@ -4700,6 +4795,7 @@ export class HostedWorkspaceToolTurn {
           request.command ||
           request.planExit ||
           request.skill ||
+          request.todo ||
           request.workflow
         )
           continue;
@@ -5177,6 +5273,44 @@ export class HostedWorkspaceToolTurn {
             );
           await this.commit('tool_result', converted, model);
           this.planning = false;
+          responses.push(...converted);
+          continue;
+        }
+        if (request.todo) {
+          let converted: Part[];
+          try {
+            const todos = await writeHostedTodos(
+              this.session,
+              this.promptId,
+              request.call.callId,
+              request.input,
+            );
+            converted = convertToFunctionResponse(
+              request.call.name,
+              request.call.callId,
+              [{ text: 'Todo list updated.' }],
+            );
+            const response = converted[0]?.functionResponse;
+            if (!response) throw new Error('Hosted Todo result is missing.');
+            response.response = {
+              ...response.response,
+              todos,
+              executionStatus: 'success',
+            };
+          } catch (cause) {
+            if (!(cause instanceof HostedTodoInputError)) throw cause;
+            converted = convertToFunctionErrorResponse(
+              request.call.name,
+              request.call.callId,
+              [],
+              cause.message,
+            );
+          }
+          if (!this.messageFitsInline('tool_result', converted, model))
+            throw new Error(
+              'Hosted Todo result exceeds the inline Session Store limit.',
+            );
+          await this.commit('tool_result', converted, model);
           responses.push(...converted);
           continue;
         }
