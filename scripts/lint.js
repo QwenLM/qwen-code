@@ -8,7 +8,13 @@
 
 import { execSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { appendFileSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import {
+  appendFileSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+} from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { getLintScope } from './lint-scope.js';
@@ -375,6 +381,34 @@ export function runPrettier() {
   }
 }
 
+// Prettier's experimental CLI only discovers a config or ignore file in the
+// directory it starts from, so the lane has to chdir. One spawn per touched
+// directory pays a cold start each (0.24 s measured, against a 37 s whole-repo
+// run), which inverts on a wide diff: this repository holds 655 directories
+// with prettier-eligible files. Group by the nearest ancestor that actually
+// carries one instead, so a diff without nested configuration costs a single
+// spawn.
+const PRETTIER_CONFIG_FILE =
+  /^(?:\.prettierrc(?:\.[^/]+)?|prettier\.config\.(?:js|cjs|mjs|ts)|\.prettierignore|\.gitignore)$/;
+
+function prettierGroupFor(cwd, file, cache) {
+  for (let directory = dirname(file); ; directory = dirname(directory)) {
+    if (!cache.has(directory)) {
+      let carriesConfig = false;
+      try {
+        carriesConfig = readdirSync(join(cwd, directory)).some((name) =>
+          PRETTIER_CONFIG_FILE.test(name),
+        );
+      } catch {
+        // An unreadable directory carries nothing this lane could load.
+      }
+      cache.set(directory, carriesConfig);
+    }
+    if (cache.get(directory)) return directory;
+    if (directory === '.' || directory === '') return '.';
+  }
+}
+
 function runChangedFiles(command, options, files) {
   if (files.length === 0) {
     console.log(`Skipping ${command}: no relevant changed files.`);
@@ -382,10 +416,16 @@ function runChangedFiles(command, options, files) {
   }
   console.log(`\nRunning ${command} on ${files.length} selected files...`);
   // Explicit targets do not make the experimental Prettier CLI discover
-  // nested config/ignore files. Start in each target directory to load them.
+  // nested config/ignore files. Start in the nearest directory that carries
+  // one (see prettierGroupFor) and keep basename targets, so the config and
+  // ignore files that apply to the file are the ones Prettier loads.
+  const root = process.cwd();
+  const configCache = new Map();
   const groups =
     command === 'prettier'
-      ? Object.groupBy(files, (file) => dirname(file))
+      ? Object.groupBy(files, (file) =>
+          prettierGroupFor(root, file, configCache),
+        )
       : { '.': files };
   // Accumulate failures instead of exiting on the first non-zero status:
   // Prettier runs per directory with basename targets, so its own output never
@@ -398,6 +438,7 @@ function runChangedFiles(command, options, files) {
         ? selected.map((file) => basename(file))
         : selected;
     if (command === 'prettier') console.log(`\nChecking ${directory}`);
+    // 50 keeps argv far below the OS limit while leaving room for long paths.
     for (let index = 0; index < targets.length; index += 50) {
       const result = spawnSync(
         command,
@@ -409,7 +450,7 @@ function runChangedFiles(command, options, files) {
           ...targets.slice(index, index + 50).map((file) => `./${file}`),
         ],
         {
-          cwd: join(process.cwd(), directory),
+          cwd: join(root, directory),
           env: { ...process.env, PATH: getLinterPath() },
           stdio: 'inherit',
           encoding: 'utf8',
