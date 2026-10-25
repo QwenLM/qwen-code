@@ -144,9 +144,9 @@ function openMonitorDetailsOnce(
 
 // Tools whose expanded row renders a kind-specific detail view (shell output /
 // diff / file content / Q&A). Must stay in sync with the renderers in
-// ToolLine's lineDetail block below. Tools NOT in this set have nothing extra
-// to show when expanded, so they keep their one-line result summary instead of
-// hiding it behind an empty detail area.
+// ToolLine's lineDetail block below. Tools NOT in this set render the call's
+// own arguments and recorded output in their expanded card; the collapsed row
+// still shows the one-line summary from getToolResultSummary.
 function hasDetailView(tool: ACPToolCall): boolean {
   const name = tool.toolName.toLowerCase();
   return (
@@ -369,18 +369,22 @@ function ToolPayloadBlock({
   const { t } = useI18n();
   const renderMode = useTranscriptRenderMode();
   const truncated = payload.text.length > limit;
-  const displayed = truncated
-    ? `${payload.text.slice(0, limit)}...`
-    : payload.text;
+  const displayed = truncateText(payload.text, limit);
+  const renderAsMarkdown =
+    payload.json &&
+    displayed.length <= MAX_MARKDOWN_READ_CHARS &&
+    !exceedsLineLimit(displayed, MAX_MARKDOWN_READ_LINES);
   return (
     <>
-      {payload.json ? (
+      {renderAsMarkdown ? (
         <div className={styles.payloadJson}>
           <Markdown content={fencedCodeBlock('json', displayed)} />
         </div>
       ) : (
         <pre className={styles.payloadText}>
-          {renderWithSessionLinks(displayed, renderMode)}
+          {payload.json
+            ? displayed
+            : renderWithSessionLinks(displayed, renderMode)}
         </pre>
       )}
       {truncated && (
@@ -390,6 +394,16 @@ function ToolPayloadBlock({
       )}
     </>
   );
+}
+
+function toolResultText(tool: ACPToolCall): string {
+  const texts: string[] = [];
+  for (const block of tool.content ?? []) {
+    if (block.type === 'content' && typeof block.content?.text === 'string') {
+      texts.push(block.content.text);
+    }
+  }
+  return texts.length > 0 ? texts.join('\n') : (extractText(tool) ?? '');
 }
 
 function GenericToolDetails({
@@ -402,10 +416,14 @@ function GenericToolDetails({
   pending: boolean;
 }) {
   const { t } = useI18n();
+  const renderMode = useTranscriptRenderMode();
+  const documentMode = renderMode === 'document';
   const [expanded, setExpanded] = useState(false);
-  const limit = expanded
-    ? EXPANDED_TOOL_PAYLOAD_LENGTH
-    : MAX_TOOL_PAYLOAD_LENGTH;
+  const limit = documentMode
+    ? Number.POSITIVE_INFINITY
+    : expanded
+      ? EXPANDED_TOOL_PAYLOAD_LENGTH
+      : MAX_TOOL_PAYLOAD_LENGTH;
   // Pretty-printing grows a compact payload, and the blocks truncate what they
   // render, so the "Show more" decision has to use the formatted lengths.
   const argumentsPayload = useMemo(
@@ -417,6 +435,7 @@ function GenericToolDetails({
     [resultText],
   );
   const canExpand =
+    !documentMode &&
     !expanded &&
     (argumentsPayload.text.length > MAX_TOOL_PAYLOAD_LENGTH ||
       resultPayload.text.length > MAX_TOOL_PAYLOAD_LENGTH);
@@ -1530,8 +1549,8 @@ export const ToolLine = memo(function ToolLine({
     );
   };
   // Whether the expanded row renders a kind-specific detail view. When it does
-  // not (e.g. grep/glob/web_fetch with a long description), keep the result
-  // summary visible instead of replacing it with an empty detail area.
+  // not, the expanded card renders the call's own arguments and recorded
+  // output; the collapsed row still shows the one-line result summary.
   const detailView = hasDetailView(tool);
   const showDescriptionInDetail = expanded && descExpandable;
   const useMarkdownDetail = isRead || isAdvisor;
@@ -1541,18 +1560,20 @@ export const ToolLine = memo(function ToolLine({
   // Contentless tools still get a titled card when the user opens them.
   const showExpandedSummaryPanel =
     expanded && !detailView && (!isTodo || (!hasTodoList && !result));
+  const showGenericDetails = !mcpApp && showExpandedSummaryPanel;
   // A card outside the built-in detail renderers shows the call itself rather
   // than repeating the header summary. The values are already redacted at the
   // daemon boundary and carried by the ACP tool call; no extra read is needed.
-  const genericArguments = showExpandedSummaryPanel
-    ? stringifyValue(tool.args)
-    : '';
-  const genericResult = showExpandedSummaryPanel
-    ? extractText(tool) || stringifyValue(tool.rawOutput) || ''
+  const genericArguments =
+    showGenericDetails && tool.args && Object.keys(tool.args).length > 0
+      ? stringifyValue(tool.args)
+      : '';
+  const genericResult = showGenericDetails
+    ? toolResultText(tool) || stringifyValue(tool.rawOutput) || ''
     : '';
   const hasGenericPayload =
     Boolean(genericArguments || genericResult) ||
-    (showExpandedSummaryPanel && isActiveToolStatus(tool.status));
+    (showGenericDetails && isActiveToolStatus(tool.status));
 
   return (
     <div className={styles.line} data-transcript-tool-call-id={tool.callId}>
@@ -1674,7 +1695,11 @@ export const ToolLine = memo(function ToolLine({
       {!mcpApp && showExpandedSummaryPanel && (
         <ToolExpandedCard
           title={displayName}
-          detail={hasGenericPayload ? undefined : expandedCardDetail}
+          detail={
+            hasGenericPayload && !hideDescriptionInHeader && !hideHeader
+              ? undefined
+              : expandedCardDetail
+          }
           status={tool.status}
           action={filePreviewAction}
         >
@@ -1684,15 +1709,7 @@ export const ToolLine = memo(function ToolLine({
               resultText={genericResult}
               pending={isActiveToolStatus(tool.status)}
             />
-          ) : (
-            result && (
-              <div
-                className={`${styles.lineOutput} ${styles.expandedLineOutput}`}
-              >
-                {renderWithSessionLinks(result, transcriptRenderMode)}
-              </div>
-            )
-          )}
+          ) : null}
         </ToolExpandedCard>
       )}
       {!mcpApp &&

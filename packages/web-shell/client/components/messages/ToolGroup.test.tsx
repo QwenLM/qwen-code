@@ -3311,4 +3311,97 @@ describe('generic tool card details', () => {
     ).length;
     expect(occurrences - 1).toBe(1);
   });
+
+  it('keeps a long description when a single-tool card hides its header', () => {
+    const description = `Inspect check runs ${'and report failures '.repeat(8)}`;
+    const container = renderToolGroup(
+      [
+        makeTool({
+          toolName: 'mcp__demo__inspect',
+          title: description,
+          args: { method: 'get_check_runs' },
+          rawOutput: '{"total_count":38}',
+        }),
+      ],
+      {},
+      undefined,
+      'document',
+    );
+
+    expect(container.textContent).toContain(description.trim());
+  });
+
+  it('does not render an empty Arguments section', () => {
+    const container = renderToolLine(
+      makeTool({ toolName: 'mcp__demo__empty', args: {}, rawOutput: 'ok' }),
+      { forceExpanded: true },
+    );
+
+    expect(container.textContent).not.toContain('Arguments');
+    expect(container.textContent).toContain('Result');
+  });
+
+  it('joins every text content block in the Result', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__multi',
+        content: [
+          { type: 'content', content: { type: 'text', text: 'first block' } },
+          { type: 'content', content: { type: 'text', text: 'second block' } },
+        ],
+      }),
+      { forceExpanded: true },
+    );
+
+    expect(container.textContent).toContain('first block');
+    expect(container.textContent).toContain('second block');
+  });
+
+  it('shows a single waiting placeholder for a pending call', () => {
+    const container = renderToolLine(
+      makeTool({ toolName: 'mcp__demo__slow', status: 'in_progress' }),
+      { forceExpanded: true },
+    );
+
+    const occurrences = (container.textContent ?? '').split(
+      'Waiting for output…',
+    ).length;
+    expect(occurrences - 1).toBe(1);
+  });
+
+  it('shows the full payload without Show more in document mode', () => {
+    const tail = 'DOCUMENT-TAIL';
+    const container = renderToolGroup(
+      [
+        makeTool({
+          toolName: 'mcp__demo__dump',
+          rawOutput: `${'x'.repeat(4200)}${tail}`,
+        }),
+      ],
+      {},
+      undefined,
+      'document',
+    );
+
+    expect(container.textContent).toContain(tail);
+    expect(container.textContent).not.toContain('Show more');
+  });
+
+  it('falls back to plain text for a many-line JSON result', () => {
+    const items = Array.from({ length: 400 }, (_, i) => ({ id: i }));
+    const container = renderToolGroup(
+      [
+        makeTool({
+          toolName: 'mcp__demo__many',
+          rawOutput: JSON.stringify(items),
+        }),
+      ],
+      {},
+      undefined,
+      'document',
+    );
+
+    expect(container.querySelector('[class*="payloadText"]')).not.toBeNull();
+    expect(container.querySelector('[class*="payloadJson"]')).toBeNull();
+  });
 });

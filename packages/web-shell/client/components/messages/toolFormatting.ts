@@ -226,34 +226,29 @@ function safeJson(value: unknown): string {
 }
 
 /**
- * Pretty-prints a JSON object or array for display. Anything else — plain
- * text, a primitive, an already truncated document, JSON Lines — is returned
- * unchanged so the caller can fall back to text; JSON Lines are re-indented
- * per line but stay plain text because they are not one JSON document.
+ * Pretty-prints a single JSON object or array for display. Anything else —
+ * plain text, a primitive, an already truncated document, JSON Lines or a
+ * mixed JSON/text log — is returned exactly as recorded so the caller can
+ * fall back to plain text.
  *
- * Numbers that JSON.parse cannot round-trip (beyond 2^53 or non-finite) keep
+ * Numbers that JSON.parse cannot round-trip (beyond 2^53, non-finite) keep
  * the payload unformatted rather than silently changing the recorded values.
  */
 export function formatJsonPayload(text: string): {
   text: string;
   json: boolean;
 } {
+  // Pretty-printing can expand a compact payload well past the render cap, and
+  // parsing a multi-megabyte string is not worth it for output the card will
+  // never show in full.
+  if (text.length > EXPANDED_TOOL_PAYLOAD_LENGTH) {
+    return { text, json: false };
+  }
   const trimmed = text.trim();
   if (!trimmed) return { text, json: false };
 
   const document = formatJsonDocument(trimmed);
   if (document !== undefined) return { text: document, json: true };
-
-  const lines = trimmed.split(/\r?\n/);
-  if (lines.length > 1) {
-    const formatted = lines.map((line) => {
-      const entry = line.trim();
-      return entry ? formatJsonDocument(entry) : '';
-    });
-    if (formatted.every((entry) => entry !== undefined)) {
-      return { text: formatted.join('\n'), json: false };
-    }
-  }
 
   return { text, json: false };
 }
@@ -282,6 +277,7 @@ function containsUnsafeNumber(root: unknown): boolean {
     if (typeof value === 'number') {
       if (!Number.isFinite(value)) return true;
       if (Number.isInteger(value) && !Number.isSafeInteger(value)) return true;
+      if (Object.is(value, -0)) return true;
     } else if (Array.isArray(value)) {
       for (const entry of value) stack.push(entry);
     } else if (value !== null && typeof value === 'object') {

@@ -662,6 +662,12 @@
   overflow-wrap: anywhere;
 }
 
+:global([data-transcript-render-mode='document']) .payloadJson,
+:global([data-transcript-render-mode='document']) .payloadText {
+  max-height: none;
+  overflow: visible;
+}
+
 .payloadEmpty,
 .payloadTruncated {
   margin: 0;

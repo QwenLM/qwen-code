@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ACPToolCall } from '../../adapters/types';
 import {
+  EXPANDED_TOOL_PAYLOAD_LENGTH,
   extractRawOutputText,
   formatJsonPayload,
   formatToolDisplayName,
@@ -615,11 +616,14 @@ describe('formatJsonPayload', () => {
     });
   });
 
-  it('formats JSON Lines per line but leaves them plain text', () => {
-    expect(formatJsonPayload('{"a":1}\n{"b":2}')).toEqual({
-      text: '{\n  "a": 1\n}\n{\n  "b": 2\n}',
-      json: false,
-    });
+  it('leaves JSON Lines exactly as recorded', () => {
+    const text = '{"a":1}\n{"b":2}';
+    expect(formatJsonPayload(text)).toEqual({ text, json: false });
+  });
+
+  it('leaves a mixed JSON-lines payload untouched', () => {
+    const text = '{"a":1}\nnot json';
+    expect(formatJsonPayload(text)).toEqual({ text, json: false });
   });
 
   it.each(['hello', '42', '"text"', 'null', '{"a":'])(
@@ -634,9 +638,18 @@ describe('formatJsonPayload', () => {
       '{"id":12345678901234567890}',
       '{"n":1e400}',
       '{"nested":{"id":-9007199254740993}}',
+      '{"n":-0}',
     ]) {
       expect(formatJsonPayload(text)).toEqual({ text, json: false });
     }
+  });
+
+  it('leaves an oversized payload alone instead of parsing it', () => {
+    const text = JSON.stringify({
+      value: 'x'.repeat(EXPANDED_TOOL_PAYLOAD_LENGTH),
+    });
+    expect(text.length).toBeGreaterThan(EXPANDED_TOOL_PAYLOAD_LENGTH);
+    expect(formatJsonPayload(text)).toEqual({ text, json: false });
   });
 });
 
