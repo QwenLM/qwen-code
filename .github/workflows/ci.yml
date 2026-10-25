@@ -60,19 +60,12 @@ concurrency:
   # repo's namespace and PR runs DO cancel in progress, so a fork whose
   # default branch is `main` cancels a victim PR's run on every push.
   # Supersede within a PR is kept: one branch backs one open PR per fork.
-  # `main` never cancels in progress, and that is intended rather than
-  # accidental: a shared group holds at most one running plus one pending
-  # run, and a newer pending run REPLACES the older one even with
-  # cancel-in-progress: false, so back-to-back merges still coalesce onto the
-  # newest tree — but the in-flight run always finishes and reports. Merges
-  # land every ~18min (median) against this ~30min lane, and with no merge
-  # queue this run is the only fast witness of a merged tree; cancelling it
-  # starved the suite once already — e2e.yml measured 67 of 100 push runs
-  # cancelled and only 25 ever reported (#5859). The coverage upload is
-  # `always()`-gated, so a cancelled run would also publish partial coverage
-  # under the complete run's artifact name. Release branches are treated the
-  # same way.
-  group: '${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref }}'
+  # A ref-only group replaces older pending main pushes even when cancellation
+  # is disabled. Give each push-tip SHA its own group so every merged tree can
+  # report independently. Repeated pushes/reruns of one SHA still share a group.
+  # Keep running main and release validations uncancellable.
+  group: |-
+    ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.sha || github.head_ref || github.ref }}
   cancel-in-progress: |-
     ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/heads/release/') }}
 
@@ -645,11 +638,12 @@ jobs:
           echo "Using persistent npm cache at ${cache_dir}"
           du -sh "${cache_dir}" 2>/dev/null || true
 
-      # test:scripts runs the standalone runtime regression against pinned
-      # Node and Bun archives. Keep them on the persistent host so only the
-      # first run per host downloads them: the download cost minutes per run,
-      # and a 502 from npm once reddened an otherwise green run. Exported here
-      # because the test step overrides HOME.
+      # The test step's side lane (.github/scripts/ci/run-unit-test-lanes.sh)
+      # runs the standalone runtime regression against pinned Node and Bun
+      # archives. Keep them on the persistent host so only the first run per
+      # host downloads them: the download cost minutes per run, and a 502 from
+      # npm once reddened an otherwise green run. Exported here because the
+      # test step overrides HOME.
       - name: 'Configure persistent standalone runtime cache (self-hosted)'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
         run: |-
@@ -833,12 +827,11 @@ jobs:
             retry_arg=(--retry="${VITEST_RETRY}")
           fi
           set +e
-          "${test_runner[@]}" npm run test:ci:workspaces -- "${retry_arg[@]}"
+          # Every workspace suite, the standalone regression and scripts/tests,
+          # in two concurrent lanes; the script says why. Each command it runs
+          # inherits the capabilities test_runner drops.
+          "${test_runner[@]}" .github/scripts/ci/run-unit-test-lanes.sh "${retry_arg[@]}"
           RC=$?
-          if [ "$RC" -eq 0 ]; then
-            "${test_runner[@]}" npm run test:scripts -- "${retry_arg[@]}"
-            RC=$?
-          fi
           set -e
           pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true
           kill "$SAMPLER_PID" 2>/dev/null || true
