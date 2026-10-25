@@ -1074,7 +1074,18 @@ class HostedPublicWorkspaceIT {
         residentPublicHandoff(true);
     }
 
+    @Test
+    @EnabledOnOs(OS.MAC)
+    @Timeout(180)
+    void residentUnsupportedToolRefusalAllowsCloseAndAnotherFileSession() throws Exception {
+        residentPublicHandoff(false, true);
+    }
+
     private void residentPublicHandoff(boolean reconstruct) throws Exception {
+        residentPublicHandoff(reconstruct, false);
+    }
+
+    private void residentPublicHandoff(boolean reconstruct, boolean unsupportedTool) throws Exception {
         assertThat(System.getProperty("mysql.url")).as("ordinary H2 scope only").isNull();
         resident = true;
         residentRestart = reconstruct;
@@ -1156,6 +1167,21 @@ class HostedPublicWorkspaceIT {
             assertThat(fixture.workerAlive()).isTrue();
             assertThat(fixture.starts).hasValue(1);
             saveResidentOwnership("after-application-reconstruction");
+        }
+        if (unsupportedTool) {
+            String refused = request("POST", "/v1/agents/sessions", Map.of("agent_id", "qwen-code",
+                    "input", List.of(Map.of("type", "input_text", "text", "G0_RESIDENT_UNSUPPORTED")),
+                    "workspace", Map.of("workspace_id", "workspace-0", "cwd_relative", "child")),
+                    "resident-unsupported", "actor", 202).path("id").asText();
+            await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> {
+                assertThat(modelFailure.get()).isNull();
+                assertThat(jdbc.queryForObject("SELECT status FROM ma_turn WHERE session_id = ?",
+                        String.class, refused)).isEqualTo("COMPLETED");
+            });
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE harness_session_id = ?",
+                    Long.class, refused)).isZero();
+            assertThat(Files.readString(roots.getFirst().resolve("child/proof.txt"))).isEqualTo("after-first-" + tenant);
+            closeResidentSession(refused, "resident-unsupported-close");
         }
         String second = residentSession("G0_RESIDENT_SECOND", "resident-second");
         saveResidentOwnership("after-second-turn");
@@ -1873,6 +1899,8 @@ class HostedPublicWorkspaceIT {
                         assertThat(tool.at("/function/parameters/properties").has("is_background")).isFalse();
                     }
                 });
+            } else if (resident) {
+                assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit");
             } else {
                 assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit", "web_fetch");
             }
@@ -1904,6 +1932,10 @@ class HostedPublicWorkspaceIT {
                 assertThat(results.get(2).toString()).contains("after");
             }
             boolean residentSecond = resident && prompt.get().contains("G0_RESIDENT_SECOND");
+            boolean residentUnsupported = resident && prompt.get().contains("G0_RESIDENT_UNSUPPORTED");
+            if (residentUnsupported && step >= 1) {
+                assertThat(results.getFirst().toString()).contains("Resident Workspace supports only");
+            }
             if (residentSecond && step >= 1) {
                 assertThat(results.getFirst().toString()).contains("after-first-" + tenant);
             }
@@ -1916,7 +1948,7 @@ class HostedPublicWorkspaceIT {
             var delta = choice.putObject("delta").put("role", "assistant");
             boolean publicParent = publicChildren && tools.contains("agent");
             boolean toolCall = publicChildren ? publicParent ? step == 0 && prompt.get().contains("G0_PUBLIC_PARENT") : step < 2
-                    : step < (definitionTurn ? 2 : runShell ? 1 : 3);
+                    : step < (residentUnsupported ? 1 : definitionTurn ? 2 : runShell ? 1 : 3);
             if (toolCall) {
                 String name = runShell ? "run_shell_command"
                         : (residentSecond ? List.of("read_file", "edit", "read_file")
@@ -1932,6 +1964,10 @@ class HostedPublicWorkspaceIT {
                     args = step == 1
                             ? Map.of("file_path", "proof.txt", "old_string", "after-first-" + tenant, "new_string", "after-second-" + tenant)
                             : Map.of("file_path", "proof.txt");
+                }
+                if (residentUnsupported) {
+                    name = "web_fetch";
+                    args = Map.of("url", "https://resident.invalid/never-requested", "prompt", "Unsupported resident tool");
                 }
                 if (definitionTurn) {
                     String marker = prompt.get().split("[^A-Z0-9_]", 2)[0];

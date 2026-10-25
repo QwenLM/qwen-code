@@ -84,8 +84,13 @@ import {
   HostedSkillCatalog,
 } from './hosted-skill-catalog.js';
 import { answerResumedTurnCalls } from './hosted-runtime-recovery.js';
+import { writeHostedTodos } from './hosted-todo-session.js';
 import * as hostedPlan from './hosted-plan-mode.js';
 import { isSlowTestHost } from '../test-utils/slow-test-host.js';
+import {
+  RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
+  WORKSPACE_CAPABILITY_DIGEST,
+} from './managed-workspace-activation.js';
 
 const broker = vi.hoisted(() => ({
   capabilityDigest:
@@ -94,6 +99,7 @@ const broker = vi.hoisted(() => ({
   authorizeLifecycle: vi.fn(),
   workspaceContext: vi.fn(),
   warm: vi.fn(),
+  resolveCapabilities: vi.fn(),
   acquire: vi.fn(),
   prepare: vi.fn(),
   prepareV3: vi.fn(),
@@ -129,6 +135,7 @@ vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
     authorizeLifecycle = broker.authorizeLifecycle;
     workspaceContext = broker.workspaceContext;
     warm = broker.warm;
+    resolveCapabilities = broker.resolveCapabilities;
     acquire = (...args: unknown[]) => {
       this.claim = `claim-${broker.acquire.mock.calls.length + 1}`;
       return broker.acquire(...args);
@@ -254,11 +261,13 @@ const parts: Part[] = calls.map((call) => ({
 
 beforeEach(async () => {
   vi.resetAllMocks();
+  broker.capabilityDigest = WORKSPACE_CAPABILITY_DIGEST;
   broker.backgroundProcessStatus.mockResolvedValue({ state: 'unknown' });
   expectWritesStopped = false;
   for (const method of [
     broker.authorizeLifecycle,
     broker.warm,
+    broker.resolveCapabilities,
     broker.acquire,
     broker.cancel,
     broker.release,
@@ -1640,6 +1649,186 @@ it('does not dispatch a denied web_fetch', async () => {
   expect(broker.prepare).not.toHaveBeenCalled();
 });
 
+it('declares only resident file tools without waiting for runtime warmup', async () => {
+  broker.capabilityDigest = RESIDENT_WORKSPACE_CAPABILITY_DIGEST;
+  broker.warm.mockReturnValueOnce(new Promise(() => {}));
+  const resident = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+  );
+  expect(
+    (await resident.declarations(new AbortController().signal)).map(
+      (tool) => tool.name,
+    ),
+  ).toEqual(['read_file', 'write_file', 'edit']);
+  expect(broker.resolveCapabilities).toHaveBeenCalledOnce();
+  expect(broker.acquire).not.toHaveBeenCalled();
+});
+
+it('refuses unresolved capability instead of advertising ordinary tools', async () => {
+  broker.resolveCapabilities.mockRejectedValueOnce(
+    new Error('scope unavailable'),
+  );
+  await expect(turn.declarations(new AbortController().signal)).rejects.toThrow(
+    'scope unavailable',
+  );
+  expect(broker.acquire).not.toHaveBeenCalled();
+});
+
+it.each([
+  'hosted-workspace-shell/1',
+  'hosted-workspace-files/2',
+  'hosted-workspace-files/3',
+  'hosted-workspace-read/1',
+  'hosted-workspace-mcp/1',
+])(
+  'keeps %s declarations independent of capability lookup and warmup',
+  async (profile) => {
+    broker.warm.mockReturnValueOnce(new Promise(() => {}));
+    broker.resolveCapabilities.mockRejectedValue(new Error('must not query'));
+    const ordinary = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      undefined,
+      undefined,
+      undefined,
+      { profile },
+    );
+    expect(
+      await ordinary.declarations(new AbortController().signal),
+    ).not.toEqual([]);
+    expect(broker.resolveCapabilities).not.toHaveBeenCalled();
+    expect(broker.acquire).not.toHaveBeenCalled();
+  },
+);
+
+it.each([WORKSPACE_CAPABILITY_DIGEST, RESIDENT_WORKSPACE_CAPABILITY_DIGEST])(
+  'uses the existing warm capability after a legacy route 404 (%s)',
+  async (digest) => {
+    broker.capabilityDigest = digest;
+    broker.warm.mockClear();
+    turn = createTurn();
+    broker.resolveCapabilities.mockRejectedValueOnce(
+      new HostedWorkspaceBrokerRejection(404, 'not_found'),
+    );
+    const names = (await turn.declarations(new AbortController().signal)).map(
+      (tool) => tool.name,
+    );
+    expect(names).toEqual([
+      'read_file',
+      'write_file',
+      'edit',
+      ...(digest === WORKSPACE_CAPABILITY_DIGEST ? ['web_fetch'] : []),
+    ]);
+    expect(broker.warm).toHaveBeenCalledOnce();
+    expect(broker.acquire).not.toHaveBeenCalled();
+  },
+);
+
+it.each([403, 503])(
+  'does not downgrade a capability HTTP %s to completed warm metadata',
+  async (status) => {
+    const refusal = new HostedWorkspaceBrokerRejection(status, 'unavailable');
+    broker.resolveCapabilities.mockRejectedValueOnce(refusal);
+    await expect(turn.declarations(new AbortController().signal)).rejects.toBe(
+      refusal,
+    );
+    expect(broker.acquire).not.toHaveBeenCalled();
+  },
+);
+
+it('preserves resident public Plan approval before restoring file mutations', async () => {
+  broker.capabilityDigest = RESIDENT_WORKSPACE_CAPABILITY_DIGEST;
+  const active = vi
+    .spyOn(hostedPlan, 'hostedPublicPlanActive')
+    .mockResolvedValue(true);
+  turn = createTurn(
+    false,
+    { mode: 'auto-edit' },
+    undefined,
+    undefined,
+    'public',
+  );
+  const signal = new AbortController().signal;
+  expect((await turn.declarations(signal)).map((tool) => tool.name)).toEqual([
+    'read_file',
+    'exit_plan_mode',
+  ]);
+  expect(
+    JSON.stringify(await turn.execute([calls[1]], [parts[1]], 'model', signal)),
+  ).toContain('Plan mode is read-only');
+  const plan = {
+    ...calls[0],
+    name: 'exit_plan_mode',
+    callId: 'plan',
+    args: { plan: 'Read the file, then edit it after approval.' },
+  };
+  const running = turn.execute(
+    [plan],
+    [{ functionCall: { id: plan.callId, name: plan.name, args: plan.args } }],
+    'model',
+    signal,
+  );
+  const requestId = await requested();
+  active.mockResolvedValue(false);
+  await resolveHostedAction(session, waiters, requestId, answer('allow'));
+  expect(JSON.stringify(await running)).toContain('The user approved the plan');
+  expect(broker.prepare).not.toHaveBeenCalled();
+  expect(broker.execute).not.toHaveBeenCalled();
+  expect((await turn.declarations(signal)).map((tool) => tool.name)).toEqual([
+    'read_file',
+    'write_file',
+    'edit',
+    'exit_plan_mode',
+  ]);
+  const edit = { ...calls[1], callId: 'approved-edit' };
+  await turn.execute(
+    [edit],
+    [{ functionCall: { id: edit.callId, name: edit.name, args: edit.args } }],
+    'model',
+    signal,
+  );
+  expect(broker.execute).toHaveBeenCalledOnce();
+});
+
+it.each(['web_fetch', 'run_shell_command', 'glob', 'todo_write', 'skill'])(
+  'records a resident %s refusal before acquiring or preparing any work',
+  async (name) => {
+    broker.capabilityDigest = RESIDENT_WORKSPACE_CAPABILITY_DIGEST;
+    const resident = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+    );
+    const call = { ...calls[0], name, args: {}, isClientInitiated: true };
+    const response = await resident.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name, args: call.args } }],
+      'model',
+      new AbortController().signal,
+    );
+    expect(JSON.stringify(response)).toContain(
+      'Resident Workspace supports only',
+    );
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+    await resident.consumeResults();
+    await resident.finish();
+  },
+);
+
 it('offers glob under the unified Shell, file-search and read profiles', async () => {
   const signal = new AbortController().signal;
   const advertised = async (profile?: string, shell = false) =>
@@ -1902,7 +2091,10 @@ it('refuses a glob call the files/1 profile never advertised', async () => {
 });
 
 // #15076: `todo_write` ships only with the `/3` profiles.
-function createV3Turn(profile = 'hosted-workspace-files/3') {
+function createV3Turn(
+  profile = 'hosted-workspace-files/3',
+  hooks?: HostedHookSession,
+) {
   return new HostedWorkspaceToolTurn(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
     session,
@@ -1913,7 +2105,7 @@ function createV3Turn(profile = 'hosted-workspace-files/3') {
     undefined,
     undefined,
     undefined,
-    { profile },
+    { profile, hooks },
   );
 }
 
@@ -2041,25 +2233,106 @@ it.each([
   },
 );
 
-it('dispatches an admitted todo_write with its argument payload', async () => {
+it('persists Todo without a Worker and restores the latest state after reopen', async () => {
   turn = createV3Turn();
-  const args = { todos: [{ id: 'a', content: 'audit', status: 'pending' }] };
-  const call = { ...calls[0], name: 'todo_write', args };
+  const first = { todos: [{ id: 'a', content: 'first', status: 'pending' }] };
+  const call = { ...calls[0], name: 'todo_write', args: first };
   const responses = await turn.execute(
     [call],
-    [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+    [{ functionCall: { id: call.callId, name: call.name, args: first } }],
     'model',
     new AbortController().signal,
   );
-  expect(responses[0].functionResponse?.response?.['error']).toBeUndefined();
-  expect(broker.acquire).toHaveBeenCalled();
-  expect(
-    broker.execute.mock.calls.map((entry: unknown[]) =>
-      JSON.parse(entry[1] as string),
-    ),
-  ).toEqual([{ toolName: 'todo_write', input: args }]);
-  await turn.consumeResults();
-  await turn.finish();
+  expect(responses[0].functionResponse?.response?.['todos']).toEqual(
+    first.todos,
+  );
+  expect(broker.acquire).not.toHaveBeenCalled();
+  expect(broker.prepare).not.toHaveBeenCalled();
+  expect(broker.execute).not.toHaveBeenCalled();
+  const latest = {
+    todos: [{ id: 'a', content: 'first', status: 'completed' }],
+  };
+  await writeHostedTodos(session, 'prompt', 'next-call', latest);
+  expect(await writeHostedTodos(session, 'prompt', call.callId, first)).toEqual(
+    first.todos,
+  );
+  await expect(
+    writeHostedTodos(session, 'prompt', call.callId, latest),
+  ).rejects.toThrow();
+  const key = session.authority.sessionHeader.sessionKey;
+  await turn.close();
+  await session.close();
+  session = await openManagedSession({
+    runtimeBaseDir: root,
+    cwd: root,
+    transcriptPath: path.join(root, 'transcript.jsonl'),
+    sessionId: key.sessionId,
+    sessionKey: key,
+    version: 'test',
+    workerId: 'reopened-worker',
+    activationLeaseDurationMs: 60_000,
+  });
+  harness = createManagedHarnessHandle(session);
+  await harness.ensureRunnable();
+  turn = createV3Turn();
+  expect(await turn.todoInstructions()).toContain(JSON.stringify(latest.todos));
+});
+
+it.each(['default', 'auto-edit', 'yolo'] as const)(
+  'pre-approves todo_write under %s',
+  (mode) => {
+    expect(hostedApprovalAsks({ mode, timeoutMs: 60_000 }, 'todo_write')).toBe(
+      false,
+    );
+  },
+);
+
+it('fires the success hook for journal-only Todo writes', async () => {
+  const fire = vi.fn<HostedHookSession['fire']>(async () => undefined);
+  turn = createV3Turn('hosted-workspace-files/3', hookSession(fire));
+  const args = { todos: [{ id: 'a', content: 'first', status: 'pending' }] };
+  const call = { ...calls[0], name: 'todo_write', args };
+  await turn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name: call.name, args } }],
+    'model',
+    new AbortController().signal,
+  );
+  const events = fire.mock.calls.map(([event]) => event);
+  expect(events).toContain(HookEventName.PostToolUse);
+  expect(events).not.toContain(HookEventName.PostToolUseFailure);
+  expect(broker.prepare).not.toHaveBeenCalled();
+  expect(broker.execute).not.toHaveBeenCalled();
+});
+
+it('preserves omitted dependencies and replays the original committed list', async () => {
+  const first = {
+    todos: [
+      { id: 'a', content: 'first', status: 'pending' },
+      { id: 'b', content: 'second', status: 'pending', blockedBy: ['a'] },
+    ],
+  };
+  await writeHostedTodos(session, 'prompt', 'first', first);
+  const next = {
+    todos: [
+      { id: 'a', content: 'first', status: 'completed' },
+      { id: 'b', content: 'second', status: 'in_progress' },
+    ],
+  };
+  const stored = await writeHostedTodos(session, 'prompt', 'next', next);
+  expect(stored[1].blockedBy).toEqual(['a']);
+  await writeHostedTodos(session, 'prompt', 'clear', { todos: [] });
+  expect(await writeHostedTodos(session, 'prompt', 'next', next)).toEqual(
+    stored,
+  );
+  await expect(
+    writeHostedTodos(session, 'prompt', 'cycle', {
+      todos: [
+        { id: 'a', content: 'a', status: 'pending', blockedBy: ['b'] },
+        { id: 'b', content: 'b', status: 'pending', blockedBy: ['a'] },
+      ],
+    }),
+  ).rejects.toThrow('cycle');
 });
 
 it('declares the preservation rule for omitted dependencies', async () => {
@@ -2080,18 +2353,6 @@ it('declares the preservation rule for omitted dependencies', async () => {
     schema?.properties?.todos?.items?.properties?.['blockedBy']?.description;
   expect(description).toContain('preserved');
   expect(description).toContain('[]');
-});
-
-it('pre-approves todo_write under default and auto-edit, and yolo never asks', () => {
-  expect(
-    hostedApprovalAsks({ mode: 'default', timeoutMs: 60_000 }, 'todo_write'),
-  ).toBe(false);
-  expect(
-    hostedApprovalAsks({ mode: 'auto-edit', timeoutMs: 60_000 }, 'todo_write'),
-  ).toBe(false);
-  expect(
-    hostedApprovalAsks({ mode: 'yolo', timeoutMs: 60_000 }, 'todo_write'),
-  ).toBe(false);
 });
 
 it.each([
@@ -5066,7 +5327,7 @@ it('asks before Shell in auto-edit mode and runs the edit when Shell is denied',
   ]);
 });
 
-it('admits exactly the declared native tools to the version 2 input preview', () => {
+it('admits exactly the declared native tools to the version 3 input preview', () => {
   // The Java reader admits a closed set. A name missing on either side degrades
   // to "Tool arguments are unavailable for this approval." with no error, so the
   // set is pinned here and each name must still be a declared native tool —
@@ -7917,31 +8178,38 @@ it('completes and replays durable Hook results after a live pending approval cha
     readSettings: async () => ({ mode, timeoutMs: 60_000 }),
   };
   turn = createTurn(false, approval, create());
-  const signal = new AbortController().signal;
+  const controller = new AbortController();
+  const { signal } = controller;
   const running = turn.execute([calls[1]], [parts[1]], 'model', signal);
-  const requestId = await requested();
-  mode = 'yolo';
-  const responses = await running;
-  expect(session.authority.action(requestId)?.state).toBe('decided');
-  expect(broker.execute).toHaveBeenCalledOnce();
-  expect(JSON.parse(broker.execute.mock.calls[0][1]).input).toEqual(editB);
-  expect(
-    seen.find(({ event }) => event === HookEventName.PreToolUse)?.input,
-  ).toMatchObject({ permission_mode: 'default' });
-  expect(
-    seen.find(({ event }) => event === HookEventName.PostToolUse)?.input,
-  ).toMatchObject({ permission_mode: 'yolo' });
-  const history = await session.sink.project();
-  await expect(
-    createTurn(false, approval, create()).resumeHookResults(
-      responses,
-      'model',
-      signal,
-    ),
-  ).resolves.toEqual(responses);
-  expect(seen).toHaveLength(4);
-  expect(await session.sink.project()).toEqual(history);
-  expect(broker.execute).toHaveBeenCalledOnce();
+  const settled = running.catch(() => undefined);
+  try {
+    const requestId = await requested();
+    mode = 'yolo';
+    const responses = await running;
+    expect(session.authority.action(requestId)?.state).toBe('decided');
+    expect(broker.execute).toHaveBeenCalledOnce();
+    expect(JSON.parse(broker.execute.mock.calls[0][1]).input).toEqual(editB);
+    expect(
+      seen.find(({ event }) => event === HookEventName.PreToolUse)?.input,
+    ).toMatchObject({ permission_mode: 'default' });
+    expect(
+      seen.find(({ event }) => event === HookEventName.PostToolUse)?.input,
+    ).toMatchObject({ permission_mode: 'yolo' });
+    const history = await session.sink.project();
+    await expect(
+      createTurn(false, approval, create()).resumeHookResults(
+        responses,
+        'model',
+        signal,
+      ),
+    ).resolves.toEqual(responses);
+    expect(seen).toHaveLength(4);
+    expect(await session.sink.project()).toEqual(history);
+    expect(broker.execute).toHaveBeenCalledOnce();
+  } finally {
+    controller.abort();
+    await settled;
+  }
 });
 
 it('preserves each durable Hook mode when the live selection changes within a batch', async () => {
