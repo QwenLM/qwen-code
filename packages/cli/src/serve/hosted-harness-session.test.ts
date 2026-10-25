@@ -1692,8 +1692,8 @@ describe('Hosted Harness no-tool session', () => {
       })
       .expect(202);
     // The slow-host settle budget, not vitest's 1 s default: at load ~90 with
-    // ~100 concurrent vite processes the recovery-blocked state was still on
-    // its way when the default expired (#15528's post-merge run).
+    // ~100 concurrent vitest processes the recovery-blocked state had not
+    // settled before the default expired (#15528's post-merge run).
     await vi.waitFor(
       async () => {
         const status = await headers(
