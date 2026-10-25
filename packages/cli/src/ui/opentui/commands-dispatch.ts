@@ -27,6 +27,7 @@
  * applies, where ink returned `SlashCommandProcessorResult` to AppContainer.
  */
 
+import type { RestoreToolResponseBinding } from '../utils/restore-tool-response.js';
 import type { PartListUnion } from '@google/genai';
 import {
   createDebugLogger,
@@ -165,6 +166,7 @@ export type OpenTuiDispatchOutcome =
       kind: 'schedule_tool';
       toolName: string;
       toolArgs: Record<string, unknown>;
+      restoreResponseBinding?: RestoreToolResponseBinding;
     }
   | {
       kind: 'submit_prompt';
@@ -735,6 +737,9 @@ export class OpenTuiSlashDispatcher {
             ...baseContext,
             ui: {
               ...baseContext.ui,
+              get history() {
+                return baseContext.ui.history;
+              },
               addItem: (item, timestamp) =>
                 addItemWithRecording(item, timestamp),
             },
@@ -742,6 +747,7 @@ export class OpenTuiSlashDispatcher {
               raw: trimmed,
               name: commandToExecute.name,
               args,
+              historyItemId: invocationItemId,
             },
             overwriteConfirmed: options.overwriteConfirmed,
             abortSignal: abortController.signal,
@@ -792,6 +798,9 @@ export class OpenTuiSlashDispatcher {
                   kind: 'schedule_tool',
                   toolName: result.toolName,
                   toolArgs: result.toolArgs,
+                  ...(result.restoreResponseBinding
+                    ? { restoreResponseBinding: result.restoreResponseBinding }
+                    : {}),
                 };
               case 'message': {
                 // Picker-shaped commands can still reject their arguments

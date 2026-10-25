@@ -24,6 +24,7 @@
  * queue instead of dropping them.
  */
 
+import type { RestoreToolResponseBinding } from '../utils/restore-tool-response.js';
 import { expandPendingPastePlaceholders } from '../utils/paste-placeholders.js';
 import { stripSuppressOnRestore } from '../utils/resumeHistoryUtils.js';
 import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
@@ -51,8 +52,13 @@ import type { DualOutputBridge } from '../../dualOutput/DualOutputBridge.js';
 import {
   foldLiveEvent,
   settleOpenTools,
+  snapshotCanonicalHistory,
+  allocateCanonicalHistoryId,
   type LiveHistoryItem,
 } from './live-session-model.js';
+import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
+import type { ModTurn } from '../../services/mod-session.js';
+import type { ServerLlmStreamEvent } from '@qwen-code/qwen-code-core';
 import {
   livePromptEvents,
   nextLivePromptId,
@@ -122,6 +128,11 @@ export interface UseOpenTuiLiveTurnOptions {
  */
 export interface OpenTuiSubmitOptions {
   promptId?: string;
+  toolCall?: {
+    name: string;
+    args: Record<string, unknown>;
+    restoreResponseBinding?: RestoreToolResponseBinding;
+  };
   deferUntilIdle?: boolean;
   modelOverride?: string;
   refreshContextFilesOnWrite?: boolean;
@@ -176,6 +187,11 @@ export interface OpenTuiLiveTurn {
   interrupt(onSettled?: OpenTuiCancelSettled): void;
   retryLastPrompt(): void;
   notifyInputProcessed(): void;
+  scheduleTool(
+    name: string,
+    args: Record<string, unknown>,
+    restoreResponseBinding?: RestoreToolResponseBinding,
+  ): boolean;
   isCurrentHistory(snapshot: readonly LiveHistoryItem[]): boolean;
   rewindTranscript(userId: string): readonly LiveHistoryItem[] | undefined;
   /** Replaces the transcript from a replay batch (session switch/resume). */
@@ -237,6 +253,8 @@ export function useOpenTuiLiveTurn(
     toolStarted: boolean;
     meaningfulContent: boolean;
     canUndoLog: boolean;
+    // Set by Esc or another interrupt, even after a Mod ended the turn.
+    interrupted?: boolean;
     onCancelSettled?: OpenTuiCancelSettled;
   } | null>(null);
   const mountedRef = useRef(true);
@@ -322,13 +340,19 @@ export function useOpenTuiLiveTurn(
       const active: NonNullable<typeof activeTurnRef.current> = {
         seq,
         prompt: editablePrompt,
-        toolStarted: false,
+        toolStarted: turnOptions?.toolCall !== undefined,
         meaningfulContent: false,
         canUndoLog: Boolean(editablePrompt && logger),
       };
       activeTurnRef.current = active;
       const abort = new AbortController();
       abortRef.current = abort;
+      // The Mods hear the turn from its admission to its end below.
+      const mods = getInteractiveModSession(config);
+      let modTurn: ModTurn | undefined;
+      let modEnded = false;
+      // Declining every tool ends the turn as a cancel, as it does in ink.
+      let toolsCancelled = false;
       // A runTurn is a new user query, so the counter restarts; tool-result
       // continuations happen inside this same loop and keep accumulating.
       streamingCharsRef.current = 0;
@@ -350,8 +374,22 @@ export function useOpenTuiLiveTurn(
         if (seq !== turnSeqRef.current || abort.signal.aborted) return;
         for await (const ev of livePromptEvents(config, prompt, abort.signal, {
           promptId,
+          checkpointHistory: {
+            allocateId: () => allocateCanonicalHistoryId(itemsRef.current),
+            snapshot: () =>
+              snapshotCanonicalHistory(
+                itemsRef.current.filter(
+                  (item) =>
+                    item.canonicalPending !== true &&
+                    !(item.kind === 'assistant' && item.streaming) &&
+                    !(item.kind === 'thinking' && !item.done) &&
+                    !(item.kind === 'tool' && !item.done),
+                ),
+              ),
+          },
           dualOutput,
           modelOverride: turnOptions?.modelOverride,
+          toolCall: turnOptions?.toolCall,
           retry,
           onAcceptedSteering: (messages) => {
             if (seq !== turnSeqRef.current) return;
@@ -371,6 +409,31 @@ export function useOpenTuiLiveTurn(
           humanInput: turnOptions?.humanInput,
           refreshContextFilesOnWrite: turnOptions?.refreshContextFilesOnWrite,
           isCurrentTurn: () => seq === turnSeqRef.current,
+          ...(mods && {
+            onPromptAdmitted: () => {
+              // A retry, like ink's, has no typed prompt.
+              modTurn = mods.startTurn(
+                retry
+                  ? ''
+                  : (turnOptions?.humanInput?.text ??
+                      turnOptions?.submittedPrompt ??
+                      ''),
+                abort.signal,
+                () => {
+                  if (abort.signal.aborted) return false;
+                  // Ends the turn as Esc does; nothing returns to the composer.
+                  modEnded = true;
+                  abort.abort();
+                  return true;
+                },
+                promptId,
+              );
+            },
+            onStreamEvent: (event: ServerLlmStreamEvent) => modTurn?.saw(event),
+            onToolsCancelled: () => {
+              toolsCancelled = true;
+            },
+          }),
           drainSteering: () => (seq === turnSeqRef.current ? drainQueue() : []),
           restoreSteering: (submissions) => {
             if (seq === turnSeqRef.current) restoreQueue(submissions);
@@ -435,6 +498,7 @@ export function useOpenTuiLiveTurn(
           void turnOptions?.onComplete?.().catch(() => {});
         }
       } catch (error) {
+        failed = true;
         if (seq !== turnSeqRef.current) return;
         if (abort.signal.aborted) {
           // Esc: ink settles every open tool as interrupted.
@@ -444,7 +508,6 @@ export function useOpenTuiLiveTurn(
           );
           setItems(itemsRef.current);
         } else {
-          failed = true;
           apply({ type: 'thinking-end' });
           apply({ type: 'segment-end' });
           apply({
@@ -453,6 +516,13 @@ export function useOpenTuiLiveTurn(
           });
         }
       } finally {
+        void modTurn?.complete(
+          abort.signal.aborted || toolsCancelled
+            ? 'aborted'
+            : failed
+              ? 'error'
+              : undefined,
+        );
         // A stale turn must not clear a successor's controller.
         if (abortRef.current === abort) abortRef.current = null;
         if (seq === turnSeqRef.current) {
@@ -472,7 +542,9 @@ export function useOpenTuiLiveTurn(
           setWaitingCalls([]);
           setBusy(false);
           if (activeTurnRef.current === active) activeTurnRef.current = null;
-          if (abort.signal.aborted) {
+          // An interrupt settles as a cancel whether or not a Mod ended the
+          // turn first; only a Mod's end alone lets the queue go on.
+          if (abort.signal.aborted && (!modEnded || active.interrupted)) {
             const settled = active.onCancelSettled;
             const queued = settled ? popQueue() : null;
             queueRef.current = queueRef.current.filter(
@@ -714,12 +786,32 @@ export function useOpenTuiLiveTurn(
     failedRequestRef.current = null;
     const active = activeTurnRef.current;
     if (active && active.seq === turnSeqRef.current) {
+      active.interrupted = true;
       active.onCancelSettled ??= onSettled;
       abortRef.current?.abort();
     } else {
       onSettled?.({ kind: 'cancelled', queued: null, prompt: null });
     }
   }, []);
+
+  const scheduleTool = useCallback(
+    (
+      name: string,
+      args: Record<string, unknown>,
+      restoreResponseBinding?: RestoreToolResponseBinding,
+    ) => {
+      if (!mountedRef.current || streamingRef.current) return false;
+      void runTurn([], nextLivePromptId(config), {
+        toolCall: {
+          name,
+          args,
+          ...(restoreResponseBinding ? { restoreResponseBinding } : {}),
+        },
+      });
+      return true;
+    },
+    [config, runTurn],
+  );
 
   const notifyInputProcessed = useCallback(() => {
     if (activeTurnRef.current) activeTurnRef.current.canUndoLog = false;
@@ -796,24 +888,6 @@ export function useOpenTuiLiveTurn(
     [dualOutput, setBusy, syncQueue],
   );
 
-  const settleWaitingCall = useCallback((callId: string) => {
-    setWaitingCalls((prev) => prev.filter((c) => c.callId !== callId));
-  }, []);
-
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-      skipRetryDelayRef.current = undefined;
-      failedRequestRef.current = null;
-      dualOutput?.finalizeAssistantMessage();
-      turnSeqRef.current += 1;
-      activeTurnRef.current = null;
-      queueRef.current = [];
-      abortRef.current?.abort();
-    };
-  }, [dualOutput]);
-
   const rewindTranscript = useCallback(
     (userId: string) => {
       const index = itemsRef.current.findIndex((item) => item.id === userId);
@@ -838,6 +912,24 @@ export function useOpenTuiLiveTurn(
     [],
   );
 
+  const settleWaitingCall = useCallback((callId: string) => {
+    setWaitingCalls((prev) => prev.filter((c) => c.callId !== callId));
+  }, []);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      skipRetryDelayRef.current = undefined;
+      failedRequestRef.current = null;
+      dualOutput?.finalizeAssistantMessage();
+      turnSeqRef.current += 1;
+      activeTurnRef.current = null;
+      queueRef.current = [];
+      abortRef.current?.abort();
+    };
+  }, [dualOutput]);
+
   return {
     items,
     streaming,
@@ -850,6 +942,7 @@ export function useOpenTuiLiveTurn(
     interrupt,
     retryLastPrompt,
     notifyInputProcessed,
+    scheduleTool,
     isCurrentHistory,
     rewindTranscript,
     resetTranscript,

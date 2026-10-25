@@ -148,6 +148,12 @@ export interface CsiApplicationRetirementStatus {
   readonly finalizeReceiptSha256: string | null;
 }
 
+export interface ManagedQueuedUserMessage {
+  readonly id: string;
+  readonly revision: number;
+  readonly input: readonly unknown[];
+}
+
 export interface HttpManagedSessionStores {
   readonly journalStore: ManagedSessionJournalStore;
   readonly resourceStore: ManagedSessionResourceStore;
@@ -170,8 +176,14 @@ export interface HttpManagedSessionStores {
   close(): Promise<void>;
   setLifecycleAuthority(authority?: ManagedSessionLifecycleAuthority): void;
   authorizeLifecycle(kind?: 'close' | 'delete'): Promise<void>;
-  authorizeOrdinary(kind?: 'legacy-close'): Promise<void>;
+  authorizeOrdinary(
+    kind?: 'legacy-close' | `configuration:${string}`,
+  ): Promise<void>;
   approvalSelection(): Promise<ManagedSessionApprovalSelection | undefined>;
+  claimUserMessages(
+    promptId: string,
+    initialOnly?: boolean,
+  ): Promise<ManagedQueuedUserMessage[]>;
 }
 
 export interface ManagedSessionApprovalSelection {
@@ -270,6 +282,8 @@ export function createHttpManagedSessionStores(
     authorizeLifecycle: (kind) => client.authorizeLifecycle(kind),
     authorizeOrdinary: (kind) => client.authorizeOrdinary(kind),
     approvalSelection: () => client.approvalSelection(),
+    claimUserMessages: (promptId, initialOnly) =>
+      client.claimUserMessages(promptId, initialOnly),
   };
 }
 
@@ -796,13 +810,58 @@ class ManagedSessionStoreHttpClient {
     this.lifecycleAuthority = authority;
   }
 
-  async authorizeOrdinary(kind?: 'legacy-close'): Promise<void> {
+  async authorizeOrdinary(
+    kind?: 'legacy-close' | `configuration:${string}`,
+  ): Promise<void> {
     await this.assertWritable();
     await this.json('/execution:authorize', 'POST', {
       ...(kind ? { kind } : {}),
       workspaceId: this.sessionKey.workspaceId,
       writerId: this.writerId,
       writerGeneration: this.grant!.writerGeneration,
+    });
+  }
+
+  async claimUserMessages(
+    promptId: string,
+    initialOnly?: boolean,
+  ): Promise<ManagedQueuedUserMessage[]> {
+    await this.assertWritable();
+    let value: unknown;
+    try {
+      value = await this.json('/user-messages:claim', 'POST', {
+        workspaceId: this.sessionKey.workspaceId,
+        writerId: this.writerId,
+        writerGeneration: this.grant!.writerGeneration,
+        promptId,
+        initialOnly: initialOnly ?? false,
+      });
+    } catch (error) {
+      if (
+        error instanceof ManagedSessionStoreHttpError &&
+        error.status === 404 &&
+        error.remoteCode === 'not_found'
+      )
+        return [];
+      throw error;
+    }
+    if (!Array.isArray(value) || value.length > 32)
+      throw corrupt('invalid user message queue.');
+    return value.map((entry) => {
+      const message = asRecord(entry, 'queued user message');
+      if (
+        typeof message['id'] !== 'string' ||
+        !message['id'].startsWith('umsg_') ||
+        !Number.isSafeInteger(message['revision']) ||
+        Number(message['revision']) < 1 ||
+        !Array.isArray(message['input'])
+      )
+        throw corrupt('invalid queued user message.');
+      return {
+        id: message['id'],
+        revision: Number(message['revision']),
+        input: message['input'],
+      };
     });
   }
 

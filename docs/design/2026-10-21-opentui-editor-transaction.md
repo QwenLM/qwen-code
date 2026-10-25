@@ -12,6 +12,8 @@ integrated commit and is still pending.
 
 ## Status and boundary
 
+The [clipboard/source lifecycle batch](2026-10-24-opentui-clipboard-source-lifetime.md) keeps external editing on the same raw expanded draft and final submit owner. Model-facing framing is applied only after pending paste settlement, never by the editor or prepared Retry. Its candidate verification is separate from the historical results below.
+
 This A batch starts at U2A `269600799782a5c507d62f3ae0db011c768be234`
 ([#14946](https://github.com/QwenLM/qwen-code/pull/14946)). It is split from the
 preserved U2B v10 candidate to keep one complete transaction within the intended

@@ -1,3 +1,12 @@
+import type {
+  ManagedExtensionManifest,
+  ManagedExtensionPin,
+  ManagedExtensionCatalog,
+  ManagedExtensionPackageOperation,
+  ManagedExtensionSettings,
+  ManagedExtensionSnapshot,
+  ManagedExtensionSelection,
+} from './managed-extension-types';
 import type { components } from './generated/managed-agent-api';
 import type { ManagedMcpManagementSnapshot } from './managed-mcp-management-types';
 import type {
@@ -420,6 +429,133 @@ export class JavaManagedAgentClient {
     );
   }
 
+  listExtensionPackages(workspaceId: string, signal?: AbortSignal) {
+    return this.post<ManagedExtensionCatalog>(
+      '/workspace-extensions/query',
+      { workspaceId },
+      signal,
+    );
+  }
+
+  async publishExtensionPackage(
+    workspaceId: string,
+    extensionId: string | undefined,
+    packageDigest: string,
+    manifest: ManagedExtensionManifest,
+    archive: Blob,
+    idempotencyKey: string,
+    signal?: AbortSignal,
+  ): Promise<ManagedExtensionPackageOperation> {
+    if (archive.size > 100 * 1024 * 1024)
+      throw new Error('Managed package exceeds 100 MiB');
+    const encoded = btoa(
+      String.fromCharCode(
+        ...new TextEncoder().encode(JSON.stringify(manifest)),
+      ),
+    )
+      .replaceAll('+', '-')
+      .replaceAll('/', '_')
+      .replace(/=+$/, '');
+    const query = new URLSearchParams({
+      workspaceId,
+      packageDigest,
+      manifest: encoded,
+    });
+    if (extensionId) query.set('extensionId', extensionId);
+    const headers = new Headers(await this.options.getHeaders?.());
+    headers.set('Content-Type', 'application/octet-stream');
+    headers.set('Idempotency-Key', idempotencyKey);
+    const response = await this.fetchImpl(
+      `${this.baseUrl}${API_PREFIX}/workspace-extensions/publish?${query}`,
+      {
+        method: 'POST',
+        headers,
+        body: archive,
+        credentials: this.credentials,
+        signal,
+      },
+    );
+    if (!response.ok) throw await toHttpError(response);
+    return response.json();
+  }
+
+  getExtensionSettings(
+    workspaceId: string,
+    extensionId: string,
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedExtensionSettings>(
+      '/workspace-extensions/settings/query',
+      { workspaceId, extensionId },
+      signal,
+    );
+  }
+
+  saveExtensionSettings(
+    workspaceId: string,
+    extensionId: string,
+    expectedRevision: number,
+    values: Record<string, string>,
+    idempotencyKey: string,
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedExtensionPackageOperation>(
+      '/workspace-extensions/settings/submit',
+      { workspaceId, extensionId, expectedRevision, values, idempotencyKey },
+      signal,
+    );
+  }
+
+  queryExtensionConfiguration(
+    sessionId: string,
+    operationId?: string,
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedExtensionSnapshot>(
+      '/session-extensions/query',
+      { sessionId, ...(operationId ? { operationId } : {}) },
+      signal,
+    );
+  }
+
+  applyExtensionConfiguration(
+    sessionId: string,
+    command: ManagedExtensionSelection,
+    idempotencyKey: string,
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedExtensionSnapshot>(
+      '/session-extensions/submit',
+      { sessionId, command, idempotencyKey },
+      signal,
+    );
+  }
+
+  resumeExtensionConfiguration(
+    sessionId: string,
+    operationId: string,
+    recoverPrevious: boolean,
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedExtensionSnapshot>(
+      `/session-extensions/${recoverPrevious ? 'recover-previous' : 'continue'}`,
+      { sessionId, operationId },
+      signal,
+    );
+  }
+
+  getExtensionPackage(
+    workspaceId: string,
+    pin: ManagedExtensionPin,
+    signal?: AbortSignal,
+  ) {
+    return this.post<ManagedExtensionCatalog['extensions'][number]>(
+      '/workspace-extensions/packages/query',
+      { workspaceId, pin },
+      signal,
+    );
+  }
+
   queryMcpManagement(
     request: Schemas['WebShellMcpManagementQuery'],
     signal?: AbortSignal,
@@ -790,6 +926,23 @@ export class JavaManagedAgentClient {
     } finally {
       await reader.cancel().catch(() => undefined);
     }
+  }
+
+  queryUserMessages(sessionId: string, signal?: AbortSignal) {
+    return this.post<
+      import('./use-managed-user-messages').ManagedUserMessageSnapshot
+    >('/user-messages/query', { sessionId }, signal);
+  }
+
+  commandUserMessages(
+    sessionId: string,
+    command: import('./use-managed-user-messages').ManagedUserMessageCommand,
+    idempotencyKey: string,
+    signal?: AbortSignal,
+  ) {
+    return this.post<
+      import('./use-managed-user-messages').ManagedUserMessageSnapshot
+    >('/user-messages/command', { sessionId, command, idempotencyKey }, signal);
   }
 
   private async post<T>(

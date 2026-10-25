@@ -264,13 +264,10 @@ describe('e2e workflow', () => {
     );
   });
 
-  it('scopes the concurrency group by event and ref', () => {
-    // Scoping by event keeps main pushes coalescing with each other without
-    // touching the nightly schedule or a manual dispatch on the same ref.
-    const group = yml.concurrency.group;
-    expect(group).toContain('github.workflow');
-    expect(group).toContain('github.event_name');
-    expect(group).toContain('github.head_ref || github.ref_name');
+  it('scopes main pushes by SHA and other events by ref', () => {
+    expect(yml.concurrency.group.trim()).toBe(
+      "${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.sha || github.head_ref || github.ref_name }}",
+    );
   });
 
   it('isolates child-process-heavy suites from the three parallel forks', () => {
@@ -931,5 +928,39 @@ describe('e2e workflow', () => {
   it('routes Linux E2E scratch files away from /tmp', () => {
     expect(e2eRunScript).toContain('mktemp -d /var/tmp/qwen-ci-XXXXXX');
     expect(e2eRunScript).toContain('rm -rf "$QWEN_CI_TMPDIR"');
+  });
+});
+
+describe('installed npm acceptance workflow', () => {
+  const workflow = parse(
+    readFileSync('.github/workflows/tui-parity.yml', 'utf8'),
+  );
+  const job = workflow.jobs['installed-npm'];
+  it('keeps installed setup independent of the original source parity budget', () => {
+    expect(workflow.jobs.parity['timeout-minutes']).toBe(45);
+    expect(job['timeout-minutes']).toBe(60);
+    expect(
+      job.steps.some((step) => step.uses?.startsWith('oven-sh/setup-bun')),
+    ).toBe(false);
+  });
+  it('runs the full installed file without retries or ignored unhandled errors', () => {
+    const step = job.steps.find(
+      (entry) => entry.name === 'Nine installed npm acceptance cases',
+    );
+    expect(step.run).toContain(
+      '--config integration-tests/vitest.installed.config.ts',
+    );
+    expect(step.run).toContain('--retry=0');
+    expect(step.run).toContain('--dangerouslyIgnoreUnhandledErrors=false');
+    expect(step.run).not.toContain(' -t ');
+  });
+  it('always retains unique attempt evidence', () => {
+    const upload = job.steps.find(
+      (entry) => entry.name === 'Upload installed npm evidence',
+    );
+    expect(upload.if).toContain('always()');
+    expect(upload.with.name).toContain('github.run_id');
+    expect(upload.with.name).toContain('github.run_attempt');
+    expect(upload.with['if-no-files-found']).toBe('error');
   });
 });
