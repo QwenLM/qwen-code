@@ -23,9 +23,11 @@ export interface AnthropicTokenParts {
  * `input_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`.
  * The full prompt is the sum.
  *
- * `cache_creation_input_tokens` is unique to Anthropic's protocol — OpenAI
- * has no equivalent — so its presence is a strong signal the response
- * follows real Anthropic semantics. Use that as the primary discriminator:
+ * The Anthropic wire field `cache_creation_input_tokens` signals the summed
+ * input semantics above. OpenAI Chat also reports cache creation, but as
+ * `prompt_tokens_details.cache_write_tokens` within `prompt_tokens`; the Chat
+ * converters preserve that breakdown separately without summing it again.
+ * This discriminator keys only on the Anthropic wire field:
  *
  *   - cache_creation field reported → Anthropic semantics, sum all three
  *   - else if cache_read > 0 and input ≥ cache_read → OpenAI-style on the

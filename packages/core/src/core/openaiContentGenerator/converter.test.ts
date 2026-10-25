@@ -2270,21 +2270,34 @@ describe('OpenAIContentConverter', () => {
       ).toBe(256);
     });
 
-    it('distinguishes an absent cache-write field from an explicitly reported zero', () => {
-      const absent = toLlm([], { usage: usage(3, 1, 4) });
-      const zero = toLlm([], {
-        usage: usage(3, 1, 4, {
+    it.each([
+      [
+        'non-streaming',
+        (extra: Record<string, unknown>) =>
+          toLlm([], { usage: usage(3, 1, 4, extra) }),
+      ],
+      [
+        'streaming usage-only',
+        (extra: Record<string, unknown>) =>
+          usageChunk(withStreamParser(), usage(3, 1, 4, extra)),
+      ],
+    ])(
+      'distinguishes absent and explicit-zero cache-write fields for %s usage',
+      (_title, convert) => {
+        const absent = convert({});
+        const zero = convert({
           prompt_tokens_details: { cache_write_tokens: 0 },
-        }),
-      });
+        });
 
-      expect(
-        getGenAiUsageProvenance(absent.usageMetadata)?.cacheCreationInputTokens,
-      ).toBeUndefined();
-      expect(
-        getGenAiUsageProvenance(zero.usageMetadata)?.cacheCreationInputTokens,
-      ).toBe(0);
-    });
+        expect(
+          getGenAiUsageProvenance(absent.usageMetadata)
+            ?.cacheCreationInputTokens,
+        ).toBeUndefined();
+        expect(
+          getGenAiUsageProvenance(zero.usageMetadata)?.cacheCreationInputTokens,
+        ).toBe(0);
+      },
+    );
 
     it.each([
       [
