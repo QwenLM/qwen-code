@@ -206,6 +206,27 @@ describe('TUI product evidence', () => {
     }
   });
 
+  it('runs durable session recovery in every runtime leg', () => {
+    const product = steps.find((step) =>
+      step.name?.startsWith('Three-leg product acceptance'),
+    );
+    expect(product.run).toMatch(/for leg in node:ink bun:ink bun:opentui; do/);
+    const runtimeLoop = product.run.match(
+      /for leg[^\n]*; do([\s\S]*?)\n\s*done/,
+    );
+    expect(runtimeLoop).not.toBeNull();
+    const commands = runtimeLoop[1]
+      .split('\n')
+      .filter((line) => line.includes('npx vitest run'));
+    expect(commands).toHaveLength(1);
+    expect(commands[0].split(/\s+/)).toContain(
+      'interactive/tui-session-recovery.test.ts',
+    );
+    expect(
+      existsSync('integration-tests/interactive/tui-session-recovery.test.ts'),
+    ).toBe(true);
+  });
+
   it('keeps fresh evidence retrievable when the same head is rerun', () => {
     const upload = steps.find(
       (step) => step.name === 'Upload product acceptance evidence',
@@ -910,5 +931,39 @@ describe('e2e workflow', () => {
   it('routes Linux E2E scratch files away from /tmp', () => {
     expect(e2eRunScript).toContain('mktemp -d /var/tmp/qwen-ci-XXXXXX');
     expect(e2eRunScript).toContain('rm -rf "$QWEN_CI_TMPDIR"');
+  });
+});
+
+describe('installed npm acceptance workflow', () => {
+  const workflow = parse(
+    readFileSync('.github/workflows/tui-parity.yml', 'utf8'),
+  );
+  const job = workflow.jobs['installed-npm'];
+  it('keeps installed setup independent of the original source parity budget', () => {
+    expect(workflow.jobs.parity['timeout-minutes']).toBe(45);
+    expect(job['timeout-minutes']).toBe(60);
+    expect(
+      job.steps.some((step) => step.uses?.startsWith('oven-sh/setup-bun')),
+    ).toBe(false);
+  });
+  it('runs the full installed file without retries or ignored unhandled errors', () => {
+    const step = job.steps.find(
+      (entry) => entry.name === 'Nine installed npm acceptance cases',
+    );
+    expect(step.run).toContain(
+      '--config integration-tests/vitest.installed.config.ts',
+    );
+    expect(step.run).toContain('--retry=0');
+    expect(step.run).toContain('--dangerouslyIgnoreUnhandledErrors=false');
+    expect(step.run).not.toContain(' -t ');
+  });
+  it('always retains unique attempt evidence', () => {
+    const upload = job.steps.find(
+      (entry) => entry.name === 'Upload installed npm evidence',
+    );
+    expect(upload.if).toContain('always()');
+    expect(upload.with.name).toContain('github.run_id');
+    expect(upload.with.name).toContain('github.run_attempt');
+    expect(upload.with['if-no-files-found']).toBe('error');
   });
 });
