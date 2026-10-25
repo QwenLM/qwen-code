@@ -264,13 +264,10 @@ describe('e2e workflow', () => {
     );
   });
 
-  it('scopes the concurrency group by event and ref', () => {
-    // Scoping by event keeps main pushes coalescing with each other without
-    // touching the nightly schedule or a manual dispatch on the same ref.
-    const group = yml.concurrency.group;
-    expect(group).toContain('github.workflow');
-    expect(group).toContain('github.event_name');
-    expect(group).toContain('github.head_ref || github.ref_name');
+  it('scopes main pushes by SHA and other events by ref', () => {
+    expect(yml.concurrency.group.trim()).toBe(
+      "${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.sha || github.head_ref || github.ref_name }}",
+    );
   });
 
   it('isolates child-process-heavy suites from the three parallel forks', () => {
