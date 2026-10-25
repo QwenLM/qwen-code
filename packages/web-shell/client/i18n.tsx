@@ -166,6 +166,22 @@ const EN: Messages = {
   'managed.titleSearch': 'Search session titles',
   'managed.titleSearchPlaceholder': 'Filter by title…',
   'managed.prompt': 'Message the managed agent',
+  'managed.queue.title': 'Queued messages',
+  'managed.queue.paused': 'Paused',
+  'managed.queue.resume': 'Continue sending',
+  'managed.queue.edit': 'Edit',
+  'managed.queue.withdraw': 'Withdraw',
+  'managed.queue.discard': 'Discard from queue',
+  'managed.queue.unknownDelivery':
+    'Delivery is unconfirmed. Discarding stops this message from blocking the queue; it does not undo any input already received. Continue sending explicitly afterward.',
+  'managed.queue.save': 'Save',
+  'managed.queue.cancelEdit': 'Cancel edit',
+  'managed.queue.waiting': 'Waiting to insert',
+  'managed.queue.claimed': 'Preparing delivery',
+  'managed.queue.blocked': 'Delivery needs recovery',
+  'managed.queue.imagesIdleOnly':
+    'Wait for the current Turn to finish before sending images.',
+  'managed.queue.placeholder': 'Add guidance to the running Turn',
   'managed.runtime': 'Environment',
   'managed.unavailable': 'Managed Agents is unavailable on this daemon.',
   'managed.send': 'Send',
@@ -309,6 +325,18 @@ const EN: Messages = {
     'Approval policy changed elsewhere. Review the current selection.',
   'managed.approvalChange.failed':
     'Approval change was refused. Review the available policies.',
+  'managed.permissionRules.title': 'Permission rules',
+  'managed.permissionRules.description':
+    'Rules belong to this conversation. Edit while idle. Deny takes priority, and explicit Ask always requires your approval, including in YOLO.',
+  'managed.permissionRules.syntax':
+    'One rule per line: Read, Bash(git status*), WebFetch(domain:example.com), or mcp__server__tool. Path rules are not supported. Up to 32 per list and 64 in total.',
+  'managed.permissionRules.allow': 'Allow',
+  'managed.permissionRules.ask': 'Ask every time',
+  'managed.permissionRules.deny': 'Deny',
+  'managed.permissionRules.invalid':
+    'Check the rule syntax, duplicates and limits: 512 UTF-8 bytes per rule, 8 KiB in total.',
+  'managed.permissionRules.clear': 'Clear rules',
+  'managed.permissionRules.save': 'Save rules',
   'managed.model.loading': 'Loading available models…',
   'managed.model.optionsError': 'Could not load available models.',
   'managed.model.reload': 'Reload models',
@@ -2115,6 +2143,36 @@ const EN: Messages = {
   'sidebar.addWorkspacePersistHint':
     'Persist this workspace registration in the daemon configuration.',
   'sidebar.addWorkspaceAdding': 'Adding…',
+  'sidebar.addWorkspaceSource': 'Source',
+  'sidebar.addWorkspaceSourceDirectory': 'Existing directory',
+  'sidebar.addWorkspaceSourceGit': 'Git repository',
+  'sidebar.gitCloneUrl': 'Repository URL',
+  'sidebar.gitCloneUrlPlaceholder': 'https://github.com/org/repo.git',
+  'sidebar.gitCloneUrlHint':
+    'Public URLs, SSH-agent addresses, and URLs that carry their own token work. The daemon passes the token to Git and never writes it into the cloned repository; Git credentials configured on the host are not used.',
+  'sidebar.gitCloneTarget': 'Clone into',
+  'sidebar.gitCloneTargetPlaceholder': '/absolute/path/for/new/repo',
+  'sidebar.gitCloneTargetHint':
+    'An absolute path that does not exist yet. Its parent directory must already exist.',
+  'sidebar.gitCloneTargetSuggestHint':
+    'Type a parent path to pick from its subfolders.',
+  'sidebar.gitCloneSubmit': 'Clone and add',
+  'sidebar.gitCloneProgress': (vars) => `Cloning… ${vars?.percent}%`,
+  'sidebar.gitCloneProgressLabel': 'Clone progress',
+  'sidebar.gitCloneCancel': 'Cancel clone',
+  'sidebar.gitCloneCancelled': 'Clone cancelled.',
+  'sidebar.gitCloneFailed': 'Clone failed',
+  'sidebar.gitCloneInvalidInput':
+    'Enter a Git URL and an absolute target path.',
+  'sidebar.gitCloneInvalidTarget': 'Enter an absolute target path.',
+  'sidebar.gitCloneUnknown':
+    'Could not confirm the clone result. Check the workspace list before cloning again.',
+  'sidebar.gitCloneJobGone':
+    'This clone job is no longer available, so its result cannot be confirmed. Check the workspace list or whether the target exists before cloning again.',
+  'sidebar.gitCloneRecheck': 'Check again',
+  'sidebar.gitCloneBack': 'Back',
+  'sidebar.gitCloneRegisterRetry': (vars) =>
+    `Cloned to ${vars?.path}. Submit to register it.`,
   'workspaceHost.source': 'Folder source',
   'workspaceHost.thisComputer': 'This computer',
   'workspaceHost.folderOn': (vars) => `Folder on ${vars?.address}`,
@@ -2588,6 +2646,8 @@ const EN: Messages = {
   'local.summary': 'Generate a project summary file',
   'local.workflows':
     'List workflow runs or cooperatively pause/resume a live run',
+  'skilldesc.autofixPr':
+    'Watch a pull request and fix its CI, review feedback and conflicts',
   'skilldesc.batch': 'Run batch operations across many files in parallel',
   'skilldesc.dataviz': 'Design guidance for charts and data visualizations',
   'skilldesc.extensionCreator':
@@ -4623,6 +4683,21 @@ const ZH: Messages = {
   'managed.titleSearch': '搜索会话标题',
   'managed.titleSearchPlaceholder': '按标题筛选…',
   'managed.prompt': '向托管 Agent 发送消息',
+  'managed.queue.title': '待发消息',
+  'managed.queue.paused': '已暂停',
+  'managed.queue.resume': '继续发送',
+  'managed.queue.edit': '编辑',
+  'managed.queue.withdraw': '撤回',
+  'managed.queue.discard': '从队列丢弃',
+  'managed.queue.unknownDelivery':
+    '投递结果不明。丢弃可解除该消息对队列的阻塞，但不会撤销已收到的输入；随后需显式继续发送。',
+  'managed.queue.save': '保存',
+  'managed.queue.cancelEdit': '取消编辑',
+  'managed.queue.waiting': '等待插入',
+  'managed.queue.claimed': '正在准备投递',
+  'managed.queue.blocked': '投递需要恢复',
+  'managed.queue.imagesIdleOnly': '请等待当前 Turn 结束后再发送图片。',
+  'managed.queue.placeholder': '向进行中的 Turn 补充消息',
   'managed.runtime': '执行环境',
   'managed.unavailable': '当前 daemon 未启用托管 Agent。',
   'managed.send': '发送',
@@ -4747,6 +4822,18 @@ const ZH: Messages = {
   'managed.approvalChange.conflict':
     '审批策略已在其他页面修改，请检查当前选择。',
   'managed.approvalChange.failed': '审批策略切换被拒绝，请检查可用策略。',
+  'managed.permissionRules.title': '权限规则',
+  'managed.permissionRules.description':
+    '规则仅属于当前会话，空闲时可编辑。拒绝优先，显式询问始终需要人工确认，包括 YOLO 模式。',
+  'managed.permissionRules.syntax':
+    '每行一条：Read、Bash(git status*)、WebFetch(domain:example.com) 或 mcp__server__tool。暂不支持路径规则；每类最多 32 条，合计 64 条。',
+  'managed.permissionRules.allow': '允许',
+  'managed.permissionRules.ask': '每次询问',
+  'managed.permissionRules.deny': '拒绝',
+  'managed.permissionRules.invalid':
+    '请检查语法、重复项与容量：每条最多 512 UTF-8 字节，合计最多 8 KiB。',
+  'managed.permissionRules.clear': '清除规则',
+  'managed.permissionRules.save': '保存规则',
   'managed.model.loading': '正在加载可用模型…',
   'managed.model.optionsError': '加载可用模型失败。',
   'managed.model.reload': '重新加载模型',
@@ -6502,6 +6589,32 @@ const ZH: Messages = {
   'sidebar.addWorkspacePersist': '服务重启后保留',
   'sidebar.addWorkspacePersistHint': '将此工作区注册持久化到守护进程配置中。',
   'sidebar.addWorkspaceAdding': '添加中…',
+  'sidebar.addWorkspaceSource': '来源',
+  'sidebar.addWorkspaceSourceDirectory': '已有目录',
+  'sidebar.addWorkspaceSourceGit': 'Git 仓库',
+  'sidebar.gitCloneUrl': '仓库地址',
+  'sidebar.gitCloneUrlPlaceholder': 'https://github.com/org/repo.git',
+  'sidebar.gitCloneUrlHint':
+    '支持公开地址、SSH agent 地址，以及自带 token 的地址：守护进程把 token 交给 Git，不会写入克隆仓库的配置；宿主上已配置的 Git 凭据不会被使用。',
+  'sidebar.gitCloneTarget': '克隆到',
+  'sidebar.gitCloneTargetPlaceholder': '/绝对路径/新目录',
+  'sidebar.gitCloneTargetHint':
+    '必须是尚不存在的绝对路径，其父目录需要已经存在。',
+  'sidebar.gitCloneTargetSuggestHint': '输入父目录可从中选择子目录。',
+  'sidebar.gitCloneSubmit': '克隆并添加',
+  'sidebar.gitCloneProgress': (vars) => `正在克隆… ${vars?.percent}%`,
+  'sidebar.gitCloneProgressLabel': '克隆进度',
+  'sidebar.gitCloneCancel': '取消克隆',
+  'sidebar.gitCloneCancelled': '克隆已取消。',
+  'sidebar.gitCloneFailed': '克隆失败',
+  'sidebar.gitCloneInvalidInput': '请输入 Git 地址和绝对目标路径。',
+  'sidebar.gitCloneInvalidTarget': '请输入绝对目标路径。',
+  'sidebar.gitCloneUnknown':
+    '无法确认克隆结果。请先检查工作区列表，再决定是否重新克隆。',
+  'sidebar.gitCloneRecheck': '重新检查',
+  'sidebar.gitCloneBack': '返回',
+  'sidebar.gitCloneRegisterRetry': (vars) =>
+    `已克隆到 ${vars?.path}，点击提交完成注册。`,
   'workspaceHost.source': '目录来源',
   'workspaceHost.thisComputer': '这台计算机',
   'workspaceHost.folderOn': (vars) => `${vars?.address} 上的目录`,
@@ -6934,6 +7047,7 @@ const ZH: Messages = {
   'local.remember': '将持久记忆保存到记忆系统',
   'local.summary': '生成项目摘要文件',
   'local.workflows': '列出工作流运行，或协作式暂停/恢复运行中的任务',
+  'skilldesc.autofixPr': '盯住一个 PR，修复其 CI、评审意见和冲突',
   'skilldesc.batch': '并行批量处理多个文件',
   'skilldesc.dataviz': '图表与数据可视化设计指南',
   'skilldesc.extensionCreator': '创建、测试和定制 Qwen Code 扩展',

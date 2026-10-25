@@ -61,8 +61,10 @@ CREATE TABLE ma_session (
     CONSTRAINT ck_ma_session_model_selection CHECK ((model_id IS NULL AND model_revision = 0) OR (model_id IS NOT NULL AND model_revision >= 1 AND model_revision <= 9007199254740991)),
     selected_approval_mode VARCHAR(32),
     approval_revision BIGINT NOT NULL DEFAULT 0,
-    CONSTRAINT ck_ma_session_approval_selection CHECK ((selected_approval_mode IS NULL AND approval_revision = 0) OR (selected_approval_mode IS NOT NULL AND approval_revision >= 1 AND approval_revision <= 9007199254740991 AND (CASE selected_approval_mode WHEN 'default' THEN 7 WHEN 'auto-edit' THEN 9 WHEN 'yolo' THEN 4 ELSE -1 END = CHAR_LENGTH(selected_approval_mode)))),
+    CONSTRAINT ck_ma_session_approval_selection CHECK ((selected_approval_mode IS NULL AND approval_revision = 0) OR (selected_approval_mode IS NOT NULL AND approval_revision >= 1 AND approval_revision <= 9007199254740991 AND (CASE selected_approval_mode WHEN 'default' THEN 7 WHEN 'auto' THEN 4 WHEN 'auto-edit' THEN 9 WHEN 'yolo' THEN 4 ELSE -1 END = CHAR_LENGTH(selected_approval_mode)))),
     plan_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    permission_rules_json LONGTEXT,
+    CONSTRAINT ck_ma_session_permission_rules CHECK (permission_rules_json IS NULL OR (selected_approval_mode IS NOT NULL AND approval_revision >= 1 AND OCTET_LENGTH(permission_rules_json) <= 8192)),
     CONSTRAINT ck_ma_session_plan CHECK (plan_enabled = FALSE OR (selected_approval_mode IS NOT NULL AND approval_revision >= 1)),
     public_child_agents_version INT NOT NULL DEFAULT 0,
     CONSTRAINT ck_ma_public_child_agents CHECK (public_child_agents_version >= 0 AND public_child_agents_version <= 1),
@@ -78,6 +80,48 @@ CREATE INDEX ix_ma_harness_owner ON ma_session (harness_instance_id, harness_own
 CREATE INDEX ix_ma_session_retirement ON ma_session (retired_at, recovery_protected);
 
 CREATE INDEX ix_ma_session_storage_scope ON ma_session (tenant_id, workspace_storage_id, resource_gc_completed, session_id);
+
+CREATE TABLE ma_user_message_queue (
+    tenant_id VARBINARY(512) NOT NULL,
+    session_id VARBINARY(512) NOT NULL,
+    paused BOOLEAN NOT NULL DEFAULT FALSE,
+    resumed_turn_id VARBINARY(256),
+    next_sequence BIGINT NOT NULL DEFAULT 1,
+    last_dispatch_at BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    PRIMARY KEY (tenant_id, session_id),
+    FOREIGN KEY (tenant_id, session_id) REFERENCES ma_session (tenant_id, session_id)
+) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+
+CREATE TABLE ma_user_message (
+    tenant_id VARBINARY(512) NOT NULL,
+    session_id VARBINARY(512) NOT NULL,
+    message_id VARBINARY(144) NOT NULL,
+    sequence_number BIGINT NOT NULL,
+    revision BIGINT NOT NULL,
+    actor_id VARBINARY(512) NOT NULL,
+    input_json LONGTEXT NOT NULL,
+    state VARCHAR(32) NOT NULL,
+    context_revision BIGINT,
+    turn_id VARBINARY(256),
+    prompt_id VARBINARY(144),
+    consumed_sequence BIGINT,
+    PRIMARY KEY (tenant_id, session_id, message_id),
+    UNIQUE (tenant_id, session_id, sequence_number),
+    FOREIGN KEY (tenant_id, session_id) REFERENCES ma_session (tenant_id, session_id)
+) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+
+CREATE INDEX ix_ma_user_message_pending ON ma_user_message (state, tenant_id, session_id, sequence_number);
+
+CREATE TABLE ma_user_message_command (
+    tenant_id VARBINARY(512) NOT NULL,
+    session_id VARBINARY(512) NOT NULL,
+    command_key CHAR(64) NOT NULL,
+    actor_id VARBINARY(512) NOT NULL,
+    request_digest VARCHAR(71) NOT NULL,
+    result_json LONGTEXT NOT NULL,
+    PRIMARY KEY (tenant_id, session_id, command_key),
+    FOREIGN KEY (tenant_id, session_id) REFERENCES ma_session (tenant_id, session_id)
+) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
 CREATE TABLE ma_turn (
     tenant_id VARBINARY(512) NOT NULL,
@@ -111,8 +155,10 @@ CREATE TABLE ma_turn (
     CONSTRAINT ck_ma_turn_model_selection CHECK ((model_id IS NULL AND model_revision IS NULL) OR (model_id IS NOT NULL AND model_revision IS NOT NULL AND model_revision >= 1 AND model_revision <= 9007199254740991)),
     approval_mode VARCHAR(32),
     approval_revision BIGINT,
-    CONSTRAINT ck_ma_turn_approval_selection CHECK ((approval_mode IS NULL AND approval_revision IS NULL) OR (approval_mode IS NOT NULL AND approval_revision IS NOT NULL AND approval_revision >= 0 AND approval_revision <= 9007199254740991 AND (CASE approval_mode WHEN 'default' THEN 7 WHEN 'auto-edit' THEN 9 WHEN 'yolo' THEN 4 ELSE -1 END = CHAR_LENGTH(approval_mode)))),
+    CONSTRAINT ck_ma_turn_approval_selection CHECK ((approval_mode IS NULL AND approval_revision IS NULL) OR (approval_mode IS NOT NULL AND approval_revision IS NOT NULL AND approval_revision >= 0 AND approval_revision <= 9007199254740991 AND (CASE approval_mode WHEN 'default' THEN 7 WHEN 'auto' THEN 4 WHEN 'auto-edit' THEN 9 WHEN 'yolo' THEN 4 ELSE -1 END = CHAR_LENGTH(approval_mode)))),
     plan_enabled BOOLEAN,
+    permission_rules_json LONGTEXT,
+    CONSTRAINT ck_ma_turn_permission_rules CHECK (permission_rules_json IS NULL OR (approval_mode IS NOT NULL AND approval_revision >= 1 AND OCTET_LENGTH(permission_rules_json) <= 8192)),
     CONSTRAINT ck_ma_turn_plan CHECK (plan_enabled IS NULL OR (approval_mode IS NOT NULL AND approval_revision IS NOT NULL AND (plan_enabled = FALSE OR approval_revision >= 1)))
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 

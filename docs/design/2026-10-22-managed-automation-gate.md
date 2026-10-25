@@ -282,9 +282,14 @@ api graphql` with the worker's environment.
 - **20 seconds.** A probe must finish within the Managed gate's 20 s limit
   (§5.2), a third of the scheduled-task gate's 60 s. The first GraphQL query
   takes about 3 s and each further page about 1.5 s. `snapshot` reads up to
-  ten pages each of check contexts and review threads, all before it writes
-  its cursor, so a PR too big to read in 20 s fails every slot the same way (a
-  `gate_failed` streak) without losing events. These times depend on the
+  ten pages each of check contexts and review threads and five of check
+  suites, and asks REST about up to 20 bot comments that open a thread, but
+  starts no new read after 15 s: a PR too big to read in time is watched in
+  part rather than failing, and what it did not read waits for a later fire
+  ([`/autofix-pr` design](2026-10-21-autofix-pr-command.md), Section 6.2). A
+  read already under way can still carry a run past 20 s; that fire fails
+  before its cursor is written, and the next one reads again. These times
+  depend on the
   Runtime host's path to GitHub: a separate check from a workstation measured
   a quiet run on the merged PR below at 9–10 s through a proxy and 21–29 s
   over a direct connection, past the limit.
@@ -296,30 +301,23 @@ api graphql` with the worker's environment.
   recent conversation comments, answered or not. For the open PR below that
   comes to about 35 fires in all, an estimate from `deferred` falling by about
   13 a fire. The Managed cap is applied after sanitizing (§5.5), which writes
-  each `<` as four bytes, while the probes' budget counts raw bytes. So output
-  dense with `<` can pass 16 KiB and be cut after the cursor has moved.
+  each `<` as four bytes; the probes' budget counts each `<` as four bytes
+  too, so sanitizing cannot push their output past the cap.
 - **A definition to stop.** After `stop` (the PR merged or closed) the
   definition keeps probing every slot until it is disabled (a revision with
   `"enabled": false`) or retired (`DELETE /v1/agent-automations/{id}`); both
-  take an `Idempotency-Key`. The probing is quiet but not free: after its
-  `stop`, the merged PR below still read every page of its checks each slot,
-  10.6–11.5 s on the scanner thread.
+  take an `Idempotency-Key`. The probing is quiet and cheap: `snapshot` reads
+  a merged or closed PR with one GraphQL call. (Before #15385 it read every
+  page of its checks each slot: 10.6–11.5 s on the scanner thread for the
+  merged PR below.)
 
-#15385, unmerged on 2026-10-24, changes several of these; its version of the
-`/autofix-pr` design describes the probes as they will be. For a Managed gate
-the main changes are these:
+The probe's prepared watch (the `/autofix-pr` watch a CLI session starts)
+belongs to that CLI session and is not for Managed Sessions, where each turn
+and each gate run is a Runtime Session of its own. On a Managed Session the
+probe serves as the gate alone: a gate that names no `--session` makes no
+owner check.
 
-- It reads a merged or closed PR with one GraphQL call.
-- For an open PR it adds check-suite pages and REST lookups of bot comments
-  (up to 20 a fire), but starts no new read after 15 s. A PR too big for 20 s
-  is then watched in part instead of failing, though a read already under way
-  can still carry the run past 20 s.
-- It counts each `<` as four bytes.
-- Its prepared watch belongs to one CLI session and is not for Managed
-  Sessions, where each turn and each gate run is a Runtime Session of its own.
-  On a Managed Session the probe serves as the gate alone.
-
-Measured on a local hosted rig on 2026-10-24: main `9e16932bee`, one Session
+Measured on a local hosted rig on 2026-10-24, before #15385: main `9e16932bee`, one Session
 and one definition per probe, all due every minute, four slots, with the rig's
 `scan-delay` of 1 s:
 
@@ -333,7 +331,8 @@ The gates ran one after another in each slot, so each time is the gap between
 its execution's settle time and the previous one's (for the first, the tick's
 start). So each after the first also includes the previous gate's release and
 settle, and each includes its own Runtime Session acquire. The merged PR's
-probe read every page of its head's 569 check contexts. Every probe holds its
+probe then read every page of its head's 569 check contexts; it now makes one
+call. Every probe holds its
 node's scanner thread while it runs, which bounds how many watches one node
 serves (§10, scanner capacity).
 
@@ -747,12 +746,12 @@ One PR, stacked on #15069 (it reuses `cron-gate.ts`):
   So the probes due at one slot, plus `scan-delay`, have to fit before the
   next slot. With gate runs of 10–13 s, as on PRs that take five or six
   GraphQL calls to read, that is about four PR watches due every minute (five
-  at 10 s, three at 13 s), or about nine due every two minutes. On `main`, a
-  whole run on a PR read in one call takes about 4 s, process start and `gh
-auth status` included (estimated from the call trace), which allows about
-  twelve a minute. #15385 adds reads for open PRs and stops starting them
-  after 15 s, so a large open PR's run can still take 15 s or more, which
-  brings the per-minute count to two or three. Within the bound, a slot fires
+  at 10 s, three at 13 s), or about nine due every two minutes. A whole run
+  on a PR read in one call (a merged or closed PR always is) takes about 4 s,
+  process start and `gh auth status` included (estimated from the call
+  trace), which allows about twelve a minute. An open PR's run starts no new
+  read after 15 s but can still take 15 s or more on a large PR, which brings
+  the per-minute count to two or three. Within the bound, a slot fires
   within about a minute of its time (about two when two-minute watches all
   fall due together).
 
@@ -768,4 +767,7 @@ auth status` included (estimated from the call trace), which allows about
   that a Harness has already served (after a control-plane or Harness restart,
   for example). And a tick longer than the 60 s `lease` hands out leases that
   have already expired, since they run from the tick's start, so another node
-  can take those rows (#15418).
+  can take those rows (#15418). Resolved by the
+  [automation scanner row pool](2026-10-24-automation-scanner-row-pool.md)
+  (#15442) through the bounded-pool route, lease fix included; the
+  asynchronous fire answer stays open there.

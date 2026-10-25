@@ -628,6 +628,26 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsAutoApproval() {
+        try {
+            var features = client().capabilities().getFeatures();
+            return features.contains("approval-selection/1") && features.contains("auto-approval/1");
+        } catch (RuntimeException unavailable) {
+            return false;
+        }
+    }
+
+    @Override
+    public boolean supportsPermissionRules() {
+        try {
+            var features = client().capabilities().getFeatures();
+            return features.contains("approval-selection/1") && features.contains("permission-rules/1");
+        } catch (RuntimeException unavailable) {
+            return false;
+        }
+    }
+
+    @Override
     public boolean supportsAgentDefinitionApprovalSelection() {
         try {
             var features = client().capabilities().getFeatures();
@@ -716,6 +736,15 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsUserMessageQueue() {
+        try {
+            return client().capabilities().getFeatures().contains("user-message-queue/1");
+        } catch (RuntimeException unavailable) {
+            return false;
+        }
+    }
+
+    @Override
     public boolean supportsContextCompression() {
         try {
             return client().capabilities().getFeatures().contains("context-compression/1");
@@ -793,11 +822,12 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         var policy = sessions.findTurnApprovalSelection(tenantId, sessionId, promptId);
         // Revision zero uses the immutable definition on every Harness generation.
         if (policy != null && policy.revision() > 0) {
+            requireExtendedApprovalSupport(policy);
             if (supportsApprovalSelection(session)) {
                 if (policy.planMode() && !supportsPlanMode()) {
                     throw new IllegalStateException("Hosted Plan mode is unavailable");
                 }
-                builder.approvalSelection(policy.mode(), policy.revision(), policy.planMode());
+                builder.approvalSelection(policy.mode(), policy.revision(), policy.planMode(), policy.permissionRules());
             } else {
                 throw new IllegalStateException("Hosted approval selection is unavailable");
             }
@@ -1869,6 +1899,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             return;
         }
         var selected = sessions.findApprovalSelections(session.tenantId(), List.of(session.sessionId())).get(session.sessionId());
+        requireExtendedApprovalSupport(selected);
         if (selected != null && selected.planMode() && !supportsPlanMode()) {
             throw new IllegalStateException("Hosted Plan mode is unavailable");
         }
@@ -1883,6 +1914,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 if (policy == null) {
                     throw new IllegalStateException("The active Turn approval snapshot is missing");
                 }
+                requireExtendedApprovalSupport(policy);
                 if (policy.revision() < selected.revision() && !supportsLiveApprovalSelection()) {
                     throw new IllegalStateException("Hosted live approval selection is unavailable");
                 }
@@ -1890,6 +1922,15 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     throw new IllegalStateException("Hosted Plan mode is unavailable");
                 }
             }
+        }
+    }
+
+    private void requireExtendedApprovalSupport(com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellApprovalSelection policy) {
+        if (policy != null && "auto".equals(policy.mode()) && !supportsAutoApproval()) {
+            throw new IllegalStateException("Hosted classifier approval is unavailable");
+        }
+        if (policy != null && policy.permissionRules() != null && !supportsPermissionRules()) {
+            throw new IllegalStateException("Hosted permission rules are unavailable");
         }
     }
 
