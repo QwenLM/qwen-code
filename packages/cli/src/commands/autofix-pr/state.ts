@@ -6,7 +6,6 @@
 
 import { randomUUID } from 'node:crypto';
 import {
-  existsSync,
   linkSync,
   lstatSync,
   readFileSync,
@@ -80,7 +79,50 @@ export interface AutofixPrState {
   /** Replies `reply` is about to post, written before each POST: one whose
    * answer is lost is recognized on the PR by these, never by a new plan. */
   pendingPosts?: PendingPost[];
+  /** The watch's scheduled task, recorded by `schedule`: a later session
+   * starts the same task again from it (`/autofix-pr resume`). Absent for
+   * `--once`, which schedules nothing. */
+  watch?: AutofixPrWatchOptions;
+  /** What rounds left for a person, newest last, for `status`. */
+  needsHuman?: NeedsHumanItem[];
+  /** When `prepare` made this state (ISO 8601): a gate cursor older than
+   * it is a former watch's, which `status` does not report. */
+  preparedAt?: string;
+  /** Set by a `cleanup` that kept the worktree: the watch is over, and the
+   * helpers of its rounds refuse until a start (`prepare`) resumes it. */
+  ended?: { at: string; reason: string };
 }
+
+export interface AutofixPrWatchOptions {
+  /** Minutes between fires, one of `WATCH_INTERVALS`. */
+  every: number;
+  /** False with `--no-reply`: rounds record what they handled, posting nothing. */
+  reply: boolean;
+  /** The user's instructions for every round, on one line; '' for none. */
+  instructions: string;
+  /** The task that drives the watch, minted by every `schedule`: the gate of
+   * any other task of the watch — a copy in a second process of the same
+   * session, one a later start replaced — answers stop. */
+  task?: string;
+}
+
+export interface NeedsHumanItem {
+  /** The head the round answered it on. */
+  sha: string;
+  /** When `reply` recorded it (ISO 8601). */
+  at: string;
+  /** One line: what it is and what a person has to decide. */
+  text: string;
+}
+
+/** The fire intervals a watch may use, in minutes (`--every`). */
+export const WATCH_INTERVALS: readonly number[] = [1, 2, 5, 10, 15, 30, 60];
+
+/** Items `needsHuman` keeps: the newest, as `status` lists them. */
+export const MAX_NEEDS_HUMAN = 20;
+
+/** Longest instructions a watch's task carries in its prompt. */
+export const MAX_INSTRUCTIONS_CHARS = 2000;
 
 export interface PendingPost {
   /** A review thread's `replyTo`, or `summary` for the PR comment. */
@@ -179,12 +221,17 @@ export interface AutofixPrPaths {
   statePath: string;
   /** `snapshot --gate` cursor; separate from the state file on purpose. */
   gatePath: string;
+  /** Touched by every run of the watch's own gate that read the PR. */
+  checkedPath: string;
   /** The last prepared snapshot, whole: too long for a line of output. */
   snapshotPath: string;
   /** What GitHub said of bot comments: whether each answers another. */
   repliesPath: string;
   /** Held while a helper reads and writes the state file. */
   lockPath: string;
+  /** The user's instructions for every round, written by the skill for
+   * `schedule` to read. */
+  instructionsPath: string;
   branch: string;
 }
 
@@ -210,17 +257,33 @@ export function autofixPrPaths(root: string, prNumber: number): AutofixPrPaths {
     worktreePath: join(tmp, `autofix-pr-${prNumber}`),
     statePath: join(tmp, `autofix-pr-${prNumber}-state.json`),
     gatePath: join(tmp, `autofix-pr-${prNumber}-gate.json`),
+    checkedPath: join(tmp, `autofix-pr-${prNumber}-gate.checked`),
     snapshotPath: join(tmp, `autofix-pr-${prNumber}-snapshot.json`),
     repliesPath: join(tmp, `autofix-pr-${prNumber}-replies.json`),
     // Not `autofix-pr-<n>-…`: cleanup's sweep of the watch's files must not
     // take a lock another helper holds.
     lockPath: join(tmp, `autofix-pr-${prNumber}.lock`),
+    instructionsPath: join(tmp, `autofix-pr-${prNumber}-instructions.txt`),
     branch: `qwen-autofix/pr-${prNumber}`,
   };
 }
 
+/**
+ * Whether `path` is a regular file. The files of a watch sit beside its
+ * worktree, in reach of the code a round runs: a FIFO planted under one of
+ * their names would block whatever reads it, the lock held.
+ */
+export function isRegularFile(path: string): boolean {
+  return lstatSync(path, { throwIfNoEntry: false })?.isFile() === true;
+}
+
 export function readGateCursor(gatePath: string): AutofixPrGateCursor | null {
-  if (!existsSync(gatePath)) return null;
+  if (lstatSync(gatePath, { throwIfNoEntry: false }) === undefined) {
+    return null;
+  }
+  if (!isRegularFile(gatePath)) {
+    throw new Error(`${gatePath} is not a regular file`);
+  }
   const parsed = JSON.parse(
     readFileSync(gatePath, 'utf8'),
   ) as AutofixPrGateCursor;
@@ -236,7 +299,9 @@ export function writeGateCursor(
   gatePath: string,
   cursor: AutofixPrGateCursor,
 ): void {
-  atomicWriteFileSync(gatePath, `${JSON.stringify(cursor, null, 2)}\n`);
+  atomicWriteFileSync(gatePath, `${JSON.stringify(cursor, null, 2)}\n`, {
+    noFollow: true,
+  });
 }
 
 /**
@@ -399,11 +464,73 @@ export function stateDefect(state: AutofixPrState): string | null {
   ) {
     return 'pushCount';
   }
+  // `schedule` puts these into the scheduled task's prompt.
+  if (state.watch !== undefined && !isWatchOptions(state.watch)) {
+    return 'watch';
+  }
+  if (
+    state.needsHuman !== undefined &&
+    !(
+      Array.isArray(state.needsHuman) &&
+      state.needsHuman.every(isNeedsHumanItem)
+    )
+  ) {
+    return 'needsHuman';
+  }
+  if (state.preparedAt !== undefined && typeof state.preparedAt !== 'string') {
+    return 'preparedAt';
+  }
+  if (
+    state.ended !== undefined &&
+    !(
+      typeof state.ended === 'object' &&
+      state.ended !== null &&
+      typeof state.ended.at === 'string' &&
+      typeof state.ended.reason === 'string'
+    )
+  ) {
+    return 'ended';
+  }
   return null;
 }
 
+function isWatchOptions(value: unknown): value is AutofixPrWatchOptions {
+  const watch = value as AutofixPrWatchOptions | null;
+  return (
+    typeof watch === 'object' &&
+    watch !== null &&
+    WATCH_INTERVALS.includes(watch.every) &&
+    typeof watch.reply === 'boolean' &&
+    typeof watch.instructions === 'string' &&
+    watch.instructions.length <= MAX_INSTRUCTIONS_CHARS &&
+    // A prompt is one line, and says what it shows.
+    !/[\p{Cc}\p{Cf}\u2028\u2029]/u.test(watch.instructions) &&
+    // It goes into the gate command.
+    (watch.task === undefined || /^[0-9a-f]{12}$/.test(watch.task))
+  );
+}
+
+function isNeedsHumanItem(value: unknown): value is NeedsHumanItem {
+  const item = value as NeedsHumanItem | null;
+  return (
+    typeof item === 'object' &&
+    item !== null &&
+    typeof item.sha === 'string' &&
+    typeof item.at === 'string' &&
+    typeof item.text === 'string'
+  );
+}
+
 export function readState(statePath: string): AutofixPrState | null {
-  if (!existsSync(statePath)) return null;
+  // A FIFO planted under the name would block every helper; a link, even
+  // one to nothing, is no state the helpers wrote.
+  const entry = lstatSync(statePath, { throwIfNoEntry: false });
+  if (entry === undefined) return null;
+  if (!entry.isFile()) {
+    throw new Error(
+      `${statePath} is not a regular file; \`qwen autofix-pr cleanup <pr> --force\` discards it.`,
+    );
+  }
   const parsed = JSON.parse(readFileSync(statePath, 'utf8')) as AutofixPrState;
   if (parsed.version !== 1) {
     throw new Error(
@@ -416,11 +543,47 @@ export function readState(statePath: string): AutofixPrState | null {
       `${statePath} has an invalid ${defect}; run \`qwen autofix-pr cleanup ${String(parsed.prNumber)} --force\` and prepare the watch again.`,
     );
   }
-  return parsed;
+  // The fields these hold, and nothing else: what reaches `status`, a
+  // rebuilt state and the next write is what the helpers wrote.
+  const { watch, ended, needsHuman } = parsed;
+  return {
+    ...parsed,
+    ...(watch
+      ? {
+          watch: {
+            every: watch.every,
+            reply: watch.reply,
+            instructions: watch.instructions,
+            ...(watch.task !== undefined ? { task: watch.task } : {}),
+          },
+        }
+      : {}),
+    ...(ended ? { ended: { at: ended.at, reason: ended.reason } } : {}),
+    ...(needsHuman
+      ? {
+          needsHuman: needsHuman.map(({ sha, at, text }) => ({
+            sha,
+            at,
+            text,
+          })),
+        }
+      : {}),
+  };
 }
 
+/**
+ * Writes of a watch's files replace a link rather than follow it: the code
+ * a round runs could plant one there to have a helper write outside
+ * `.qwen/tmp`.
+ */
+export const NO_FOLLOW = { noFollow: true } as const;
+
 export function writeState(statePath: string, state: AutofixPrState): void {
-  atomicWriteFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
+  atomicWriteFileSync(
+    statePath,
+    `${JSON.stringify(state, null, 2)}\n`,
+    NO_FOLLOW,
+  );
 }
 
 /**
@@ -454,7 +617,9 @@ export function historyPrefix(paths: AutofixPrPaths): string {
 }
 
 export function readHistory(path: string): AutofixPrHistory | null {
-  if (!existsSync(path)) return null;
+  if (lstatSync(path, { throwIfNoEntry: false }) === undefined) return null;
+  // Its callers replace an unreadable history.
+  if (!isRegularFile(path)) throw new Error(`${path} is not a regular file`);
   const parsed = JSON.parse(readFileSync(path, 'utf8')) as AutofixPrHistory;
   if (parsed.version !== 1) {
     throw new Error(
@@ -522,7 +687,12 @@ export function keepHistory(
     deferredRuns: state.deferredRuns ?? earlier?.deferredRuns ?? [],
     heldChecks: state.heldChecks ?? earlier?.heldChecks ?? [],
   };
-  atomicWriteFileSync(path, `${JSON.stringify(history, null, 2)}\n`);
+  // A directory planted under the name would refuse the write forever.
+  const entry = lstatSync(path, { throwIfNoEntry: false });
+  if (entry && !entry.isFile() && !entry.isSymbolicLink()) {
+    rmSync(path, { recursive: true, force: true });
+  }
+  atomicWriteFileSync(path, `${JSON.stringify(history, null, 2)}\n`, NO_FOLLOW);
   return path;
 }
 
@@ -736,13 +906,65 @@ export function requireState(
   return state;
 }
 
+/** `--task` of a round's helpers: the scheduled task that woke the round. */
+export const TASK_OPTION = {
+  type: 'string',
+  describe:
+    "The scheduled task that woke the round (its prompt's --task): refused unless it still drives the watch",
+} as const;
+
+/** The `--task` a helper was given, or undefined. */
+export function taskArg(argv: Record<string, unknown>): string | undefined {
+  return argv['task'] === undefined ? undefined : String(argv['task']);
+}
+
+/**
+ * The checks of a round's helpers: the session owns the watch, a `cleanup`
+ * that kept the worktree has not ended it, and — given the task that woke
+ * the round — that task still drives it. A fire queued before a later
+ * `schedule` replaced its task, or before the watch was stopped, is refused
+ * here rather than act on the PR with options the user has since changed.
+ */
+export function assertWatching(state: AutofixPrState, task?: string): void {
+  // First: a stopped watch says so to whichever session asks.
+  if (state.ended) {
+    throw new Error(
+      `PR #${state.prNumber}'s watch was stopped (${state.ended.reason}); ` +
+        `its worktree was kept. Start it again with /autofix-pr ${state.prNumber}.`,
+    );
+  }
+  assertOwnedBySession(state);
+  if (task !== undefined && state.watch?.task !== task) {
+    throw new Error(
+      `task ${task} no longer drives PR #${state.prNumber}'s watch; ` +
+        `delete the task whose gate has --task ${task}` +
+        (state.watch?.task
+          ? `, not the one with --task ${state.watch.task}, which drives it.`
+          : '.'),
+    );
+  }
+}
+
+/** `gh` answered that what it asked for is not there: its own words, not
+ * the command line, which names what was asked. */
+export function ghNotFound(err: unknown): boolean {
+  const stderr = (err as { stderr?: unknown }).stderr;
+  return /\(HTTP 404\)/.test(typeof stderr === 'string' ? stderr : '');
+}
+
 export function assertOwnedBySession(state: AutofixPrState): void {
   const sessionId = currentSessionId();
   if (state.sessionId !== sessionId) {
     throw new Error(
       `PR #${state.prNumber} is watched by another session ` +
-        `(${state.sessionId || 'no session'}). Stop it there, or run ` +
-        `\`qwen autofix-pr cleanup ${state.prNumber} --force\` to discard that watch.`,
+        `(${state.sessionId || 'no session'}). Take it over with ` +
+        (state.watch
+          ? `\`/autofix-pr resume ${state.prNumber}\``
+          : `\`/autofix-pr ${state.prNumber}\``) +
+        `, end it keeping its work with ` +
+        `\`qwen autofix-pr cleanup ${state.prNumber} --take-over\` (what ` +
+        `\`/autofix-pr stop ${state.prNumber}\` runs), or discard it with ` +
+        `\`cleanup ${state.prNumber} --force\`.`,
     );
   }
 }
