@@ -361,4 +361,23 @@ describe('billableOutputTokens', () => {
       }),
     ).toBe(170_000);
   });
+
+  it('rejects the band when the bucket mixed a total-less event', () => {
+    // Event A alone: derived 170_000 in band [50_000, 170_000] → 170_000.
+    // After a total-less event B, the cumulative total stayed at 270_000
+    // while prompt and candidates grew, so derived fell to 150_000 —
+    // still inside the widened band [60_000, 180_000]. Without the
+    // totalMissing gate this would bill 150_000 after additional usage,
+    // turning a monotone quantity (more usage ⇒ higher bill) non-monotone.
+    // With totalMissing the band is untrustworthy and falls back to the sum.
+    expect(
+      billableOutputTokens({
+        prompt: 120_000,
+        candidates: 60_000,
+        thoughts: 120_000,
+        total: 270_000,
+        totalMissing: 1,
+      }),
+    ).toBe(180_000);
+  });
 });
