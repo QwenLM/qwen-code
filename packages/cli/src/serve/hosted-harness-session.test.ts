@@ -1691,9 +1691,9 @@ describe('Hosted Harness no-tool session', () => {
         payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
       })
       .expect(202);
-    // 15 s, not the 1 s default: this suite shares a 64-core host with ~100
-    // concurrent vite processes; this poll flipped at load ~90 on #15528's
-    // post-merge run while the recovery-blocked state was still on its way.
+    // The slow-host settle budget, not vitest's 1 s default: at load ~90 with
+    // ~100 concurrent vite processes the recovery-blocked state was still on
+    // its way when the default expired (#15528's post-merge run).
     await vi.waitFor(
       async () => {
         const status = await headers(
@@ -1702,7 +1702,7 @@ describe('Hosted Harness no-tool session', () => {
         expect(status.body.hasActivePrompt).toBe(false);
         expect(status.body.recoveryBlocked).toBe(true);
       },
-      { timeout: 15_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
       .set('X-Qwen-Client-Id', created.body.clientId)
@@ -1714,7 +1714,7 @@ describe('Hosted Harness no-tool session', () => {
       .send({ managedSessionStore: store(), driveRuntimeRecovery: true })
       .expect(200);
     await vi.waitFor(() => expect(state.model).toHaveBeenCalledTimes(2), {
-      timeout: 15_000,
+      timeout: SETTLE_TIMEOUT_MS,
     });
     await vi.waitFor(
       async () => {
@@ -1724,7 +1724,7 @@ describe('Hosted Harness no-tool session', () => {
         expect(status.body.hasActivePrompt).toBe(false);
         expect(status.body.recoveryBlocked).toBe(false);
       },
-      { timeout: 15_000 },
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     expect(
       state.model.mock.calls.map(([input]) => input.modelSelection),
