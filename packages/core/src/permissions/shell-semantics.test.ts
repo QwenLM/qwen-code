@@ -1233,3 +1233,46 @@ describe('R2 review round: comment-continuation desync, merge flag union', () =>
     },
   );
 });
+
+describe('R6 review round: redirect provenance and cwd uncertainty', () => {
+  it.each([
+    ['cd sub 3> log3.txt', [write('/repo/log3.txt')]],
+    ['cd sub 3>> app3.log', [write('/repo/app3.log')]],
+    ['cd sub {fd}> namedfd.log', [write('/repo/namedfd.log')]],
+    ['echo hi 3> e3.txt', [write('/repo/e3.txt')]],
+    ['cat 3>> settings.json', [write('/repo/settings.json')]],
+  ])('extracts the real arbitrary-fd redirect in `%s`', (command, expected) => {
+    expect(across(command)).toEqual(expected);
+  });
+
+  it('keeps a quoted fd-shaped prefix as an operand while reading the bare operator', () => {
+    expect(ops("echo hi '2'>/etc/motd")).toEqual([write('/etc/motd')]);
+    expect(across("cd sub '2'> log ; echo {} > settings.json")).toEqual([
+      write('/repo/log'),
+      uncertainWrite('/repo/settings.json'),
+    ]);
+    expect(across("cd .qwen ; echo {} ''>settings.json")).toEqual([
+      write(REPO_SETTINGS),
+    ]);
+  });
+
+  it('does not consume the next word for a glued empty redirect target', () => {
+    expect(ops("echo >'' settings.json")).toEqual([]);
+    expect(ops("echo ''> settings.json")).toEqual([
+      write(`${CWD}/settings.json`),
+    ]);
+    expect(across("cd sub >'' foo ; echo {} > settings.json")).toEqual([
+      uncertainWrite('/repo/settings.json'),
+    ]);
+  });
+
+  it.each([
+    ['cd $D ; cd sub > log', uncertainWrite('/repo/log')],
+    ['cd $D ; cd sub > /tmp/log', uncertainWrite('/tmp/log', false)],
+  ])(
+    'marks a cd-carried redirect with the incoming cwd uncertainty: `%s`',
+    (command, expected) => {
+      expect(across(command)).toEqual([expected]);
+    },
+  );
+});

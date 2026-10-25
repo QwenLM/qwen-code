@@ -1916,21 +1916,13 @@ describe('PermissionManager', () => {
       ).toBe('deny');
     });
 
-    it('deny rule still cites a quoted dir holding both backslash and metacharacter (#R7-1)', async () => {
-      pm = makePm({
-        permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
-        permissionsDeny: ['Write(C:/Users/me/R&D/settings.json)'],
-        cwd: '/repo',
-        projectRoot: '/repo',
-      });
-      // Both readings segment `cd 'C:\Users\me\R&D'` identically, so the
-      // directory keeps its static cwd and the Write deny still fires.
-      expect(
-        await pm.evaluate({
-          toolName: 'run_shell_command',
-          command: `cd 'C:\\Users\\me\\R&D' && echo {} > settings.json`,
+    it('resolves a quoted drive-letter dir holding backslash and metacharacter (#R7-1)', () => {
+      const command = `cd 'C:\\Users\\me\\R&D' && echo {} > settings.json`;
+      expect(extractShellOperationsAcrossCommand(command, '/repo')).toEqual([
+        expect.objectContaining({
+          filePath: 'C:/Users/me/R&D/settings.json',
         }),
-      ).toBe('deny');
+      ]);
     });
 
     it('does not hard-deny the write a multi-operand cd never redirects (#R7-2)', async () => {
@@ -2019,19 +2011,13 @@ describe('PermissionManager', () => {
       ).toBe('deny');
     });
 
-    it('deny rule still cites a quoted dir whose closing quote follows a backslash (#R7-1)', async () => {
-      pm = makePm({
-        permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
-        permissionsDeny: ['Write(C:/Users/me/R&D/settings.json)'],
-        cwd: '/repo',
-        projectRoot: '/repo',
-      });
-      expect(
-        await pm.evaluate({
-          toolName: 'run_shell_command',
-          command: `cd 'C:\\Users\\me\\R&D\\' && echo {} > settings.json`,
+    it('resolves a quoted drive-letter dir whose closing quote follows a backslash (#R7-1)', () => {
+      const command = `cd 'C:\\Users\\me\\R&D\\' && echo {} > settings.json`;
+      expect(extractShellOperationsAcrossCommand(command, '/repo')).toEqual([
+        expect.objectContaining({
+          filePath: 'C:/Users/me/R&D/settings.json',
         }),
-      ).toBe('deny');
+      ]);
     });
 
     it('deny rule survives an unrelated quote divergence elsewhere (#R7-1)', async () => {
@@ -2224,6 +2210,51 @@ describe('PermissionManager', () => {
           }),
         ).toBe('deny');
       }
+    });
+
+    it('denies a write whose redirect has only quoting before the bare operator (#12280-R3-1)', async () => {
+      pm = makePm({
+        permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+        permissionsDeny: ['Write(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      });
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: "cd .qwen ; echo {} ''>settings.json",
+        }),
+      ).toBe('deny');
+    });
+
+    it('denies a separate arbitrary-fd redirect target (#12280-R6-2)', async () => {
+      pm = makePm({
+        permissionsAllow: ['Bash(cd *)'],
+        permissionsDeny: ['Write(log3.txt)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      });
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'cd sub 3> log3.txt',
+        }),
+      ).toBe('deny');
+    });
+
+    it('asks instead of trusting a cd redirect under an unknown incoming cwd (#12280-R6-1)', async () => {
+      pm = makePm({
+        permissionsAllow: ['Bash(cd *)'],
+        permissionsDeny: ['Write(.env)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      });
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'cd $D ; cd sub > log',
+        }),
+      ).toBe('ask');
     });
 
     it('denies the write a process substitution used to erase from the cd (#12280-R2-1)', async () => {
@@ -2455,22 +2486,13 @@ describe('PermissionManager', () => {
       ).toBe('deny');
     });
 
-    it('deny rule still cites a directory whose text contains a sibling segment (#12280-R1-2)', async () => {
-      pm = makePm({
-        permissionsAllow: ['Bash(cd *)', 'Bash(build *)', 'Bash(echo *)'],
-        permissionsDeny: ['Write(C:/build/R&D/settings.json)'],
-        cwd: '/repo',
-        projectRoot: '/repo',
-      });
-      // The inert `build` segment's text occurs inside the cd target, but no
-      // reading cuts inside the segment's span, so the directory keeps its
-      // static cwd and the Write deny still fires.
-      expect(
-        await pm.evaluate({
-          toolName: 'run_shell_command',
-          command: `cd 'C:\\build\\R&D' && build && echo {} > settings.json`,
+    it('resolves a drive-letter directory containing a sibling segment (#12280-R1-2)', () => {
+      const command = `cd 'C:\\build\\R&D' && build && echo {} > settings.json`;
+      expect(extractShellOperationsAcrossCommand(command, '/repo')).toEqual([
+        expect.objectContaining({
+          filePath: 'C:/build/R&D/settings.json',
         }),
-      ).toBe('deny');
+      ]);
     });
 
     it('semicolon compound: deny in second → deny', async () => {

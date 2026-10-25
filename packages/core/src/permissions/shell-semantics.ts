@@ -89,12 +89,10 @@ export interface ShellOperation {
 
 /**
  * A shell word with its quoting provenance. `bare` is false when any part of
- * the word was quoted or backslash-escaped. `barePrefix` is the length of the
- * leading run of characters that appeared before the first quote or escape:
- * quoting that starts before the operator characters makes the whole word an
- * operand (`'>y'`), while quoting after a bare operator prefix only quotes the
- * operand, so `<<'EOF'` is still a heredoc and `2>'log'` still a redirect
- * (#12280 R3-1, R4-2).
+ * the word was quoted or backslash-escaped. `bareChars` records that same fact
+ * per output character, so a quoted operator stays an operand while a bare
+ * operator after an empty quoted span remains a redirect. `trailingSyntax`
+ * keeps a glued empty target (`>''`) distinct from a separate operator.
  */
 interface TokenProvenance {
   unquotedGlob: boolean;
@@ -105,7 +103,8 @@ interface TokenProvenance {
 interface ShellToken extends TokenProvenance {
   text: string;
   bare: boolean;
-  barePrefix: number;
+  bareChars: boolean[];
+  trailingSyntax: boolean;
 }
 
 /**
@@ -119,7 +118,8 @@ function tokenizeDetailed(command: string): ShellToken[] {
   const tokens: ShellToken[] = [];
   let current = '';
   let bare = true;
-  let prefixLen: number | null = null;
+  let bareChars: boolean[] = [];
+  let trailingSyntax = false;
   let inSingle = false;
   let inDouble = false;
   let escaped = false;
@@ -140,44 +140,49 @@ function tokenizeDetailed(command: string): ShellToken[] {
 
     if (escaped) {
       current += ch;
+      bareChars.push(false);
+      trailingSyntax = false;
       escaped = false;
       continue;
     }
     if (ch === '\\' && !inSingle) {
       escaped = true;
       bare = false;
-      if (prefixLen === null) prefixLen = current.length;
+      trailingSyntax = true;
       continue;
     }
     if (ch === "'" && !inDouble) {
       inSingle = !inSingle;
       bare = false;
-      if (prefixLen === null) prefixLen = current.length;
+      trailingSyntax = true;
       continue;
     }
     if (ch === '"' && !inSingle) {
       inDouble = !inDouble;
       bare = false;
-      if (prefixLen === null) prefixLen = current.length;
+      trailingSyntax = true;
       continue;
     }
     if (!inSingle && !inDouble && (ch === ' ' || ch === '\t')) {
-      pushToken(tokens, current, bare, prefixLen ?? current.length, {
+      pushToken(tokens, current, bare, bareChars, trailingSyntax, {
         unquotedGlob,
         quotedTilde,
         unquotedSyntax,
       });
       current = '';
       bare = true;
-      prefixLen = null;
+      bareChars = [];
+      trailingSyntax = false;
       unquotedGlob = false;
       quotedTilde = false;
       unquotedSyntax = false;
       continue;
     }
     current += ch;
+    bareChars.push(!inSingle && !inDouble);
+    trailingSyntax = false;
   }
-  pushToken(tokens, current, bare, prefixLen ?? current.length, {
+  pushToken(tokens, current, bare, bareChars, trailingSyntax, {
     unquotedGlob,
     quotedTilde,
     unquotedSyntax,
@@ -189,19 +194,18 @@ function pushToken(
   tokens: ShellToken[],
   token: string,
   bare: boolean,
-  barePrefix: number,
+  bareChars: boolean[],
+  trailingSyntax: boolean,
   provenance: TokenProvenance,
 ): void {
   const normalized = trimShellSyntax(token, bare);
-  // trimShellSyntax drops leading `(`s only for a wholly bare token, so the
-  // prefix window shifts only under that same condition.
   let leadTrim = 0;
   if (bare) {
     while (leadTrim < token.length && token[leadTrim] === '(') leadTrim++;
   }
-  const adjPrefix = Math.max(
-    0,
-    Math.min(barePrefix - leadTrim, normalized.length),
+  const normalizedBareChars = bareChars.slice(
+    leadTrim,
+    leadTrim + normalized.length,
   );
   // A word that quotes away to nothing (`''`) is still a word: bash counts it
   // as an operand and `cd ''` errors without moving the cwd, so erasing it
@@ -210,7 +214,8 @@ function pushToken(
     tokens.push({
       text: normalized,
       bare,
-      barePrefix: adjPrefix,
+      bareChars: normalizedBareChars,
+      trailingSyntax,
       ...provenance,
     });
   }
@@ -549,146 +554,109 @@ function isProcessSubstitutionFragment(target: string): boolean {
   );
 }
 
+const REDIRECT_OPERATORS = [
+  '&>>',
+  '&>',
+  '<<<',
+  '<<-',
+  '<<',
+  '<>',
+  '>>',
+  '>|',
+  '>',
+  '<',
+] as const;
+
+interface RedirectTokenMatch {
+  operator: (typeof REDIRECT_OPERATORS)[number];
+  target: string;
+  targetInToken: boolean;
+  prefix: string;
+  prefixIsOperand: boolean;
+}
+
+function parseRedirectToken(token: ShellToken): RedirectTokenMatch | null {
+  for (let start = 0; start < token.text.length; start++) {
+    const prefix = token.text.slice(0, start);
+    if (start > 0 && !/^(?:\d+|\{\w+\})$/.test(prefix)) continue;
+    const operator = REDIRECT_OPERATORS.find((candidate) =>
+      token.text.startsWith(candidate, start),
+    );
+    if (!operator) continue;
+    if (!token.bareChars.slice(start, start + operator.length).every(Boolean)) {
+      continue;
+    }
+    const target = token.text.slice(start + operator.length);
+    return {
+      operator,
+      target,
+      targetInToken: target !== '' || token.trailingSyntax,
+      prefix,
+      prefixIsOperand:
+        start > 0 && !token.bareChars.slice(0, start).every(Boolean),
+    };
+  }
+  return null;
+}
+
 function extractRedirects(
   tokens: string[],
-  barePrefix: number[],
+  detailed: ShellToken[],
   cwd: string,
 ): RedirectResult {
   const readFiles: string[] = [];
   const writeFiles: string[] = [];
   const toRemove = new Set<number>();
+  const remainingPrefixes = new Map<number, string>();
 
   for (let i = 0; i < tokens.length; i++) {
-    const tok = tokens[i]!;
-    // Only characters outside quotes/escapes can be an operator bash performs:
-    // a quoted or escaped spelling like '>y' is an operand (#12280 R3-1). But
-    // quoting after a bare operator prefix only quotes the operand, so
-    // `<<'EOF'` is still a heredoc and `2>'log'` still a redirect. A token
-    // whose bare prefix covers the whole spelling is matched exactly; shorter
-    // prefixes fall through to the combined-form check below.
-    const wholeBare = barePrefix[i]! >= tok.length;
+    const match = parseRedirectToken(detailed[i]!);
+    if (!match) continue;
+    const combined = match.targetInToken;
+    const target = combined ? match.target : tokens[i + 1];
+    const removeOperator = (): void => {
+      if (match.prefixIsOperand) remainingPrefixes.set(i, match.prefix);
+      else toRemove.add(i);
+    };
 
-    // ── Separate-token redirect operators ─────────────────────────────────
-    if (wholeBare && (tok === '>' || tok === '1>')) {
-      const target = tokens[i + 1];
-      if (
-        target &&
-        looksLikePath(target) &&
-        !isProcessSubstitutionFragment(target)
-      ) {
-        if (!isNetworkPseudoDevice(target)) {
-          writeFiles.push(resolvePath(target, cwd));
-        }
-        toRemove.add(i);
+    if (match.operator.startsWith('<<')) {
+      removeOperator();
+      if (!combined && target !== undefined) {
         toRemove.add(i + 1);
         i++;
       }
-    } else if (wholeBare && (tok === '>>' || tok === '1>>')) {
-      const target = tokens[i + 1];
-      if (
-        target &&
-        looksLikePath(target) &&
-        !isProcessSubstitutionFragment(target)
-      ) {
-        if (!isNetworkPseudoDevice(target)) {
-          writeFiles.push(resolvePath(target, cwd));
-        }
-        toRemove.add(i);
-        toRemove.add(i + 1);
-        i++;
-      }
-    } else if (wholeBare && (tok === '<<' || tok === '<<-')) {
-      toRemove.add(i);
-      if (tokens[i + 1]) {
-        toRemove.add(i + 1);
-        i++;
-      }
-    } else if (wholeBare && tok === '<') {
-      const target = tokens[i + 1];
-      if (
-        target &&
-        looksLikePath(target) &&
-        !isProcessSubstitutionFragment(target)
-      ) {
-        if (!isNetworkPseudoDevice(target)) {
-          readFiles.push(resolvePath(target, cwd));
-        }
-        toRemove.add(i);
-        toRemove.add(i + 1);
-        i++;
-      }
-    } else if (
-      wholeBare &&
-      (tok === '2>' || tok === '2>>' || tok === '&>' || tok === '&>>')
+      continue;
+    }
+    if (target === undefined || target === '') continue;
+
+    removeOperator();
+    if (!combined) {
+      toRemove.add(i + 1);
+      i++;
+    }
+    if (
+      target === '/dev/null' ||
+      /^&(?:\d+|-)$/.test(target) ||
+      !looksLikePath(target) ||
+      isProcessSubstitutionFragment(target) ||
+      isNetworkPseudoDevice(target)
     ) {
-      // stderr / combined redirect — consume target
-      const target = tokens[i + 1];
-      if (target) {
-        if (
-          target !== '/dev/null' &&
-          looksLikePath(target) &&
-          !isProcessSubstitutionFragment(target) &&
-          !isNetworkPseudoDevice(target)
-        ) {
-          writeFiles.push(resolvePath(target, cwd));
-        }
-        toRemove.add(i);
-        toRemove.add(i + 1);
-        i++;
-      }
+      continue;
     }
-    // ── Read-write redirect: `<> file` (with or without fd prefix) ─────────
-    else if (wholeBare && /^(?:\d+|\{[^}]*\})?<>$/.test(tok)) {
-      const target = tokens[i + 1];
-      if (
-        target &&
-        looksLikePath(target) &&
-        !isProcessSubstitutionFragment(target) &&
-        !isNetworkPseudoDevice(target)
-      ) {
-        const resolved = resolvePath(target, cwd);
-        readFiles.push(resolved);
-        writeFiles.push(resolved);
-        toRemove.add(i);
-        toRemove.add(i + 1);
-        i++;
-      }
-    }
-    // ── Combined redirect tokens without space: `>file`, `>>file`, etc. ───
-    else {
-      const m = tok.match(
-        /^(?:(\d+|\{[^}]*\}))?(&>>|&>|<<-?|<>|>>|<|>)([\s\S]+)$/,
-      );
-      const opLen = m ? (m[1]?.length ?? 0) + m[2]!.length : 0;
-      if (m && barePrefix[i]! >= opLen) {
-        const op = m[2]!;
-        const target = m[3]!;
-        if (op.startsWith('<<')) {
-          toRemove.add(i);
-          continue;
-        }
-        if (
-          target !== '/dev/null' &&
-          looksLikePath(target) &&
-          !isProcessSubstitutionFragment(target) &&
-          !isNetworkPseudoDevice(target)
-        ) {
-          if (op === '<') {
-            readFiles.push(resolvePath(target, cwd));
-          } else if (op === '<>') {
-            readFiles.push(resolvePath(target, cwd));
-            writeFiles.push(resolvePath(target, cwd));
-          } else {
-            writeFiles.push(resolvePath(target, cwd));
-          }
-        }
-        toRemove.add(i);
-      }
-    }
+
+    const resolved = resolvePath(target, cwd);
+    if (match.operator === '<') readFiles.push(resolved);
+    else if (match.operator === '<>') {
+      readFiles.push(resolved);
+      writeFiles.push(resolved);
+    } else writeFiles.push(resolved);
   }
 
-  // Remove redirect tokens from the array in-place
-  const filtered = tokens.filter((_, idx) => !toRemove.has(idx));
+  const filtered = tokens.flatMap((token, index) => {
+    if (toRemove.has(index)) return [];
+    const prefix = remainingPrefixes.get(index);
+    return prefix === undefined ? [token] : [prefix];
+  });
   tokens.length = 0;
   tokens.push(...filtered);
 
@@ -2317,12 +2285,10 @@ export function extractShellOperations(
   if (tokens.length === 0) return [];
 
   // Extract I/O redirections before dispatching to the command handler.
-  // This mutates `tokens` in-place by removing redirect tokens; `barePrefix`
-  // runs parallel so only characters bash really reads as operators (those
-  // outside quotes/escapes) are treated as redirects.
-  const barePrefix = detailed.map((t) => t.barePrefix);
+  // This mutates `tokens` in-place by removing redirect tokens while keeping
+  // a quoted fd-shaped prefix as an operand.
   const { readFiles: redirectReads, writeFiles: redirectWrites } =
-    extractRedirects(tokens, barePrefix, cwd);
+    extractRedirects(tokens, detailed, cwd);
 
   while (tokens[0] && isEnvAssignmentToken(tokens[0])) {
     tokens.shift();
@@ -2451,26 +2417,16 @@ function isDynamicShellPath(word: string, artifactSegment: boolean): boolean {
   return artifactSegment;
 }
 
-// Every redirection spelling bash accepts, with an optional fd (`3>`),
-// both-streams (`&>>`) or named-fd (`{fd}>log`) prefix. Hand-listing the
-// fd-1/2 forms left `3>`, `4>log`, `5>&2`, `<>` and `{fd}>log` behind as fake
-// `cd` operands that de-resolve a `cd` bash really performs (#12280 R7-2).
-const REDIRECT_OPERATOR_TOKEN =
-  /^(?:(?:\d+|&|\{\w+\})?(?:<<<|<<-?|>>|<>|>|<)|>\|)$/;
+// Redirect-looking cd operands are rejected conservatively even when their
+// operator spelling is glued to the target.
 const REDIRECT_OPERATOR_PREFIX =
-  /^(?:(?:\d+|&|\{\w+\})?(?:<<<|<<-?|>>|<>|>|<)|>\|)/;
+  /^(?:(?:\d+|&|\{\w+\})?(?:<<<|<<-?|>>|<>|>\||>|<))/;
 
 /**
  * Drop every redirection a simple command carries so only real words remain
- * for `cd` operand classification: separate (`> file`) and combined
- * (`>file`) operators, fd duplications (`>&2`, `>& 2`), here-docs (`<<EOF`,
- * `<< EOF`) and here-strings (`<<< word`). extractRedirects is not reused
- * here — it is built to REPORT redirect targets, so it consumes a
- * separate-token operator only when the target passes looksLikePath, parses
- * a separate `<<<` as a combined `<<` and keeps the here-string word, and
- * loses an fd-duplication `&` to trimShellSyntax; every one of those
- * leftovers reads as an extra `cd` operand and de-resolves a `cd` bash
- * really performs (#12280 R7-2).
+ * for `cd` operand classification. This shares parseRedirectToken with the
+ * reporting path, but also drops dynamic targets, heredocs and fd duplication
+ * so none of them becomes a fake `cd` operand (#12280 R7-2, R6-2).
  */
 function stripRedirectsForOperandCount(tokens: ShellToken[]): {
   words: ShellToken[];
@@ -2480,23 +2436,23 @@ function stripRedirectsForOperandCount(tokens: ShellToken[]): {
   let invalidRedirect = false;
   for (let i = 0; i < tokens.length; i++) {
     const tok = tokens[i]!;
-    // Only an unquoted, unescaped operator spelling is a redirect: `cd '>'
-    // sub` hands bash two operands, no redirect (#12280 R3-1).
-    if (tok.bare && REDIRECT_OPERATOR_TOKEN.test(tok.text)) {
-      // Separate-token operator: its target/delimiter is the next word.
-      const redirectTarget = tokens[i + 1];
-      if (redirectTarget === undefined || redirectTarget.text === '') {
-        invalidRedirect = true;
-      }
-      i++;
+    const match = parseRedirectToken(tok);
+    if (!match) {
+      words.push(tok);
       continue;
     }
-    if (tok.bare && REDIRECT_OPERATOR_PREFIX.test(tok.text)) {
-      // Combined operator+target in one token (`>file`, `2>/dev/null`,
-      // `>&2`, `<<EOF`).
-      continue;
+    if (match.prefixIsOperand) {
+      words.push({
+        ...tok,
+        text: match.prefix,
+        bareChars: tok.bareChars.slice(0, match.prefix.length),
+      });
     }
-    words.push(tok);
+    const redirectTarget = match.targetInToken
+      ? match.target
+      : tokens[i + 1]?.text;
+    if (!redirectTarget) invalidRedirect = true;
+    if (!match.targetInToken) i++;
   }
   return { words, invalidRedirect };
 }
@@ -3040,7 +2996,10 @@ function walkCompoundCommand(
       // they resolve against the cwd the segment starts in. Process
       // substitutions are erased first — bash expands them to an fd path, not a
       // file this analyzer can name.
-      ops.push(...cdRedirectOps(sub, effectiveCwd));
+      const cdOps = cdRedirectOps(sub, effectiveCwd);
+      ops.push(
+        ...(cwdUnknown ? markCwdUnknownOps(cdOps, sub, effectiveCwd) : cdOps),
+      );
       if (!backgrounded) {
         effectiveCwd = cdTarget.cwd;
         cwdUnknown = cdTarget.cwdUnknown;
@@ -3048,7 +3007,10 @@ function walkCompoundCommand(
       continue;
     }
     if (cdTarget.kind === 'dynamic') {
-      ops.push(...cdRedirectOps(sub, effectiveCwd));
+      const cdOps = cdRedirectOps(sub, effectiveCwd);
+      ops.push(
+        ...(cwdUnknown ? markCwdUnknownOps(cdOps, sub, effectiveCwd) : cdOps),
+      );
       if (!backgrounded) {
         cwdUnknown = true;
       }
