@@ -1325,7 +1325,6 @@ describe('canonical resumed tool projection', () => {
   });
 });
 
-
 describe('cost does not double-count included reasoning tokens (#15444)', () => {
   // Priced so the rendered dollar figure isolates the OUTPUT term: input at
   // $0/M and output at $1/M makes `$X` exactly outputTokens / 1_000_000.

@@ -543,6 +543,70 @@ describe('statsCommand', () => {
       expect(result.content).not.toContain('$0.2700');
     });
 
+    it('stats model bills each source bucket, not the model aggregate (#15444)', async () => {
+      const modelSubCommand = statsCommand.subCommands?.find(
+        (sc) => sc.name === 'model',
+      );
+      if (!modelSubCommand?.action) throw new Error('Subcommand has no action');
+
+      const context = createMockCommandContext({
+        executionMode: 'non_interactive',
+      });
+      (context.services.settings as unknown as Record<string, unknown>)[
+        'merged'
+      ] = {
+        modelPricing: { 'qwen3-max-001': { outputPerMillionTokens: 1 } },
+      };
+      // The clamp is per record, so it is not additive over bySource:
+      // `researcher` cached its whole prompt, its derived 52_000 lands above
+      // its band [10_000, 12_000] and falls back to 12_000, while the same
+      // tokens summed into the aggregate give an in-band 202_000.
+      const api = { totalRequests: 1, totalErrors: 0, totalLatencyMs: 0 };
+      context.session.stats.metrics.models = {
+        'qwen3-max-001': {
+          api: { totalRequests: 2, totalErrors: 0, totalLatencyMs: 0 },
+          tokens: {
+            prompt: 100_000,
+            candidates: 160_000,
+            cached: 40_000,
+            total: 302_000,
+            thoughts: 122_000,
+          },
+          bySource: {
+            [MAIN_SOURCE]: {
+              api,
+              tokens: {
+                prompt: 100_000,
+                candidates: 150_000,
+                cached: 0,
+                total: 250_000,
+                thoughts: 120_000,
+              },
+            },
+            researcher: {
+              api,
+              tokens: {
+                prompt: 0,
+                candidates: 10_000,
+                cached: 40_000,
+                total: 52_000,
+                thoughts: 2_000,
+              },
+            },
+          },
+        },
+      };
+
+      const result = (await modelSubCommand.action(context, '')) as {
+        type: string;
+        content: string;
+      };
+
+      // 150_000 + 12_000. The aggregate would print $0.2020.
+      expect(result.content).toContain('Estimated cost: $0.1620');
+      expect(result.content).not.toContain('$0.2020');
+    });
+
     it('stats model shows cost only for models with pricing', async () => {
       const modelSubCommand = statsCommand.subCommands?.find(
         (sc) => sc.name === 'model',
