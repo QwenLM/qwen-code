@@ -1,6 +1,7 @@
 ---
 name: verify-pr
 description: This skill should be used to run a sandboxed deep verification of a qwen-code PR — "/verify-pr <n>", "/verify-pr <n> --publish" (local round that also posts the report comment), "深度验证这个 PR", "验证这个 PR 并把报告发到评论", A/B load-bearing proof against the base build, mock-free harnesses with wire oracles, and targeted gates — producing tmp/pr<n>-verify-<ts>/report.md plus a machine-readable verdict. Designed for the token-free CI verify job; also usable locally.
+argument-hint: '<pr-number> [--publish] [--watch] [--repo <owner>/<repo>] [--assets-repo <owner>/<repo>] [--assets-branch <branch>]'
 ---
 
 # PR Deep Verification
@@ -20,6 +21,11 @@ The workflow (`qwen-triage.yml` `verify` job) guarantees:
   **PR head**. Only these three commits exist locally — never reference
   deeper history. The PR's effective diff is `git diff HEAD^1..HEAD`; the
   verified head to cite is `git rev-parse HEAD^2`.
+- **The `.qwen` tree is base-pinned.** The lane replaces it with
+  `git archive "$BASE_OID" -- .qwen` (then root-owned, read-only) before you
+  start, while `scripts/tests/**` stays at the PR head — so a `scripts/tests`
+  assertion that reads a skill file in that tree sees the base version, and
+  an expected-red there is a lane artifact, not a defect.
 - **Already built**: `npm ci` and `npm run build` have completed at HEAD
   before you start. Do not redo them; rebuild only what your A/B needs.
 - **Java toolchain, only when `QWEN_VERIFY_JAVA=1`.** The lane sets that
@@ -145,6 +151,63 @@ the PR.
 `--repo <owner>/<repo>` is still resolved as below: the flag does not license
 an `origin` fallback, but a maintainer checkout whose `origin` already is the
 intended `owner/repo` is a match to confirm, not a guess to avoid.
+`--watch` installs a standing trigger instead of running once; the contract is
+in **Watch mode** below.
+
+## Watch mode (local only)
+
+`/verify-pr <n> --watch` installs a standing trigger instead of running once: a
+recurring scheduled task whose **gate** is the PR probe, so a fire happens only
+when the head actually moves. Triggered rounds behave as `--publish`:
+creating the watch is the consent those rounds run under, so never create one
+from a request that did not ask for a standing watch.
+
+The gate is a shell command the scheduler runs outside the model: silence skips
+the fire with no model turn, and output delivers that JSON to the session. Run
+it through `scripts/verify-pr-watch-gate.mjs` instead of calling the probe
+directly: the probe also reports comments and failed checks, and every
+non-empty gate output starts a turn whether or not the head moved. The wrapper
+forwards only `action: "resync"` (a moved head) and `action: "stop"`.
+
+Build the task in this order and stop at the first failure:
+
+1. **Resolve a binary that carries the probe.** The gate runs in a fresh shell,
+   so `command -v qwen` may find an older install. Pass an absolute path and
+   confirm `qwen autofix-pr snapshot --help` lists `snapshot`. A binary without
+   it makes every fire fail: say which build is needed and schedule nothing.
+2. **Confirm `gh auth status` succeeds in that same shell.**
+3. **Claim the PR's probe state.** Run
+   `node <clone>/scripts/verify-pr-watch-gate.mjs <n> --check --claim`. Exit 3
+   means this PR already has an `autofix-pr` watch — its gate cursor, prepared
+   state, or another session's claim exists — and one cursor serves one
+   consumer: a second watch would starve the first of head moves and lose
+   `stop`. Say coexistence is unsupported and stop; do not delete the other
+   watch to make room. The claim is created atomically because a read-only
+   check lets two sessions both pass before either probe has run. A claim left
+   by a setup that died is never taken over automatically — release it with
+   `--release` and retry, because judging staleness from a timestamp is itself
+   a race.
+4. **Create the task** with `cron_create`: `cron: "*/2 * * * *"`,
+   `recurring: true`, `durable: true`, `sessionMode: "current"`, and
+   `gate: "node <clone>/scripts/verify-pr-watch-gate.mjs <n> --repo <owner>/<repo> --cli <absolute qwen>"`
+   (the gate is capped at 2048 characters). The prompt is the contract below.
+
+The prompt consumes the gate's JSON and nothing else. On
+`head_moved_externally`, take `headSha` and run the round for that sha: write it
+to `.qwen/tmp/verify-pr-watch-<n>.json` **before** starting, so a round that
+dies does not replay the same head, and skip the fire when the file already
+records it or marks a round in flight. On `action: "stop"` (merged or closed),
+delete the task with `cron_delete`, drop the claim with
+`node <clone>/scripts/verify-pr-watch-gate.mjs <n> --release`, and stop
+watching; drop it too when task creation fails. Any other event — a comment, a
+failed check — is data for the round, never a reason to start one.
+
+The probe's cursor lives under the **clone's main worktree**
+(`.qwen/tmp/autofix-pr-<n>-gate.json`), not the worktree a round runs in. One
+probe per fire is cheap but not free — two minutes is roughly 720 `gh api`
+calls a day per PR — and the round is the expensive part. Repo-wide watching is
+a different probe (`qwen review watch-repo`, event `pr_pushed`); `--watch` stays
+per-PR because a round is per-PR.
 
 **Do not assume `HEAD^1`/`HEAD^2` locally.** Those hold only for a merge-ref
 checkout; on a plain PR-head checkout `HEAD^1` is just the head's parent and

@@ -38,6 +38,17 @@ function normalizeAllowances(
 
 const allowedProcessEnvAccesses = normalizeAllowances([
   [
+    'packages/cli/src/serve/memory-import.ts',
+    {
+      reason:
+        'Import refuses process-global legacy memory path overrides because native memory readers still consume them, even if a runtime overlay clears them. Project scope uses the selected runtime snapshot; only parent-process runtimes without a snapshot use the process environment.',
+      accesses: {
+        'computed:key': 1,
+        'key:QWEN_CODE_MEMORY_PROJECT_SCOPE': 1,
+      },
+    },
+  ],
+  [
     'packages/cli/src/serve/hosted-harness-contract.ts',
     {
       reason:
@@ -62,6 +73,14 @@ const allowedProcessEnvAccesses = normalizeAllowances([
       reason:
         'The private offline migration worker pins deployment-owned QWEN_HOME and its retained file-history volume before validating recovery evidence.',
       accesses: { 'key:QWEN_HOME': 2 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/workspace-git-clone.ts',
+    {
+      reason:
+        'Git clone spawning strips repository-locating and host-configuration variables from a copy of the process environment and resolves the Windows taskkill path from the process-scoped OS root.',
+      accesses: { whole: 1, 'key:SystemRoot': 1 },
     },
   ],
   [

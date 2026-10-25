@@ -527,7 +527,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Change the execution approval policy of an eligible Workspace Session: built-in qwen-code or a stored AgentDefinition on exactly hosted-workspace-files/1 or hosted-workspace-shell/1. With liveSupported, execution policy changes affect subsequent current-Turn permission checks and permit eligible pending ordinary tool approvals. Otherwise the Session must be idle. Plan changes remain idle-only. Requires its recorded owner, current OPERATOR or OWNER access and Session-specific Harness feature support. Changes are revision-checked and actor/session-scoped idempotent. Definition creation policy and pins remain immutable. */
+        /** @description Change the execution approval policy of an eligible Workspace Session: built-in qwen-code or a stored AgentDefinition on exactly hosted-workspace-files/1, hosted-workspace-files/3 or hosted-workspace-shell/1. With liveSupported, execution policy changes affect subsequent current-Turn permission checks and permit eligible pending ordinary tool approvals. Otherwise the Session must be idle. Plan changes remain idle-only. Requires its recorded owner, current OPERATOR or OWNER access and Session-specific Harness feature support. Changes are revision-checked and actor/session-scoped idempotent. Definition creation policy and pins remain immutable. Classifier auto requires auto-approval/1. Optional permissionRules requires permission-rules/1 and an idle Session. Omitted rules preserve the current selection; three empty arrays clear it. Mode, Plan and rules share one approval revision and receipt. Persisted rules are also snapshotted at Turn admission; replay preserves the original policy. Empty rules are omitted from responses and Harness payloads. */
         post: operations["changeWebShellSessionApproval"];
         delete?: never;
         options?: never;
@@ -832,6 +832,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/user-messages/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Query or mutate the durable Session user message queue */
+        post: operations["webShellQueryUserMessages"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/user-messages/command": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Query or mutate the durable Session user message queue */
+        post: operations["webShellCommandUserMessages"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1038,7 +1072,7 @@ export interface components {
              * @description Current effective approval policy; initialApprovalMode retains the immutable creation policy.
              * @enum {string}
              */
-            approvalMode?: "default" | "auto-edit" | "yolo";
+            approvalMode?: "default" | "auto" | "auto-edit" | "yolo";
             modelContext?: components["schemas"]["WebShellModelContext"];
             modelSelection?: components["schemas"]["WebShellModelSelection"];
             /** Format: int64 */
@@ -1103,7 +1137,7 @@ export interface components {
             foregroundShell?: boolean;
             /** @description The caller may request an idle Session model change using the server model catalog. Missing means unsupported; authorization and revision admission still apply. */
             modelChange?: boolean;
-            /** @description The caller owns this eligible Workspace Session with current OPERATOR or OWNER access. Built-in qwen-code requires approval-selection/1; stored AgentDefinitions on exactly hosted-workspace-files/1 or hosted-workspace-shell/1 also require agent-definition-approval-selection/1. Idle-state admission is checked separately. Missing means false. */
+            /** @description The caller owns this eligible Workspace Session with current OPERATOR or OWNER access. Built-in qwen-code requires approval-selection/1; stored AgentDefinitions on exactly hosted-workspace-files/1, hosted-workspace-files/3 or hosted-workspace-shell/1 also require agent-definition-approval-selection/1. Idle-state admission is checked separately. Missing means false. */
             approvalModeChange?: boolean;
             /** @description Optional deployment capability; missing means false. */
             inputAttachments?: boolean;
@@ -1748,15 +1782,19 @@ export interface components {
             /** @description Execution approval can change during a Turn when true. Missing means idle-only; Plan changes remain idle-only. */
             liveSupported?: boolean;
             /** @enum {string} */
-            approvalMode: "default" | "auto-edit" | "yolo";
+            approvalMode: "default" | "auto" | "auto-edit" | "yolo";
             /** Format: int64 */
             approvalRevision: number;
-            availableApprovalModes: ("default" | "auto-edit" | "yolo")[];
+            availableApprovalModes: ("default" | "auto" | "auto-edit" | "yolo")[];
             supported: boolean;
             /** @description Persisted public Plan overlay, independent of execution permission. Omission on a change preserves the selected state. */
             planMode?: boolean;
             /** @description Optional deployment capability; missing means false. */
             planModeSupported?: boolean;
+            /** @description Persisted rules, including when execution capability is unavailable. Omitted when empty. */
+            permissionRules?: components["schemas"]["ManagedPermissionRules"];
+            /** @description Owner-authorized Session rule editing is available only with Harness permission-rules/1 support. Missing means false. Rule changes require an idle Session. */
+            permissionRulesSupported?: boolean;
         };
         WebShellChangeApprovalRequest: {
             sessionId: string;
@@ -1765,19 +1803,23 @@ export interface components {
             idempotencyKey: string;
             requestId?: string;
             /** @enum {string} */
-            approvalMode: "default" | "auto-edit" | "yolo";
+            approvalMode: "default" | "auto" | "auto-edit" | "yolo";
             /** @description Persisted public Plan overlay, independent of execution permission. Omission on a change preserves the selected state. */
             planMode?: boolean;
+            /** @description Omission preserves the persisted rules. Supplying three empty arrays clears them. Rule edits require an idle Session, and share the approval revision and idempotency receipt with mode changes. */
+            permissionRules?: components["schemas"]["ManagedPermissionRules"];
         };
         WebShellApprovalChangeResult: {
             sessionId: string;
             /** @enum {string} */
-            approvalMode: "default" | "auto-edit" | "yolo";
+            approvalMode: "default" | "auto" | "auto-edit" | "yolo";
             /** Format: int64 */
             approvalRevision: number;
             replayed: boolean;
             /** @description Persisted public Plan overlay, independent of execution permission. Omission on a change preserves the selected state. */
             planMode?: boolean;
+            /** @description Committed rules; omitted when empty. Replayed requests return their original policy receipt. */
+            permissionRules?: components["schemas"]["ManagedPermissionRules"];
         };
         WebShellRuntimeNode: {
             nodeId: string;
@@ -2108,6 +2150,49 @@ export interface components {
              * @enum {string}
              */
             deliveryState: "pending" | "leased" | "confirmed" | "blocked";
+        };
+        /** @description Session-scoped portable permission-rules/1. Each rule must be trimmed, nonempty, free of control characters, and at most 512 UTF-8 bytes. At most 32 unique strings per list, 64 across all lists and 8192 UTF-8 bytes of compact JSON. Tool names and aliases match whole tools; MCP names may end with a wildcard. Bash/Shell/run_shell_command/monitor command globs and WebFetch/web_fetch(domain:host) are supported; file-path specifiers and arbitrary tool predicates are rejected. Deny takes precedence over ask, then allow, in every mode. Rules do not provide filesystem or process isolation. */
+        ManagedPermissionRules: {
+            allow: string[];
+            ask: string[];
+            deny: string[];
+        };
+        UserMessage: {
+            id: string;
+            sequence: number;
+            revision: number;
+            /** @enum {string} */
+            state: "queued" | "claimed" | "recovery_blocked";
+            input: {
+                type: string;
+                text?: string;
+                resource?: {
+                    uri: string;
+                    text: string;
+                    mimeType: string;
+                };
+            }[];
+            turnId?: string | null;
+        };
+        UserMessageSnapshot: {
+            paused: boolean;
+            messages: components["schemas"]["UserMessage"][];
+        };
+        /** @description submit queues input; edit only changes queued input. withdraw removes queued input or explicitly discards recovery_blocked input without replaying it. Unknown delivery may already have reached the original Turn: discarding does not undo it, preserves late durable receipts and keeps the queue paused until resume. In-flight claimed input remains immutable. Commands replay the actor-scoped recorded result before checking new-work availability. */
+        UserMessageCommand: {
+            /** @enum {string} */
+            action: "submit" | "edit" | "withdraw" | "resume";
+            messageId?: string;
+            expectedRevision?: number;
+            input?: components["schemas"]["InputBlock"][];
+        };
+        WebShellUserMessageQuery: {
+            sessionId: string;
+        };
+        WebShellUserMessageCommand: {
+            sessionId: string;
+            idempotencyKey: string;
+            command: components["schemas"]["UserMessageCommand"];
         };
     };
     responses: {
@@ -3848,6 +3933,68 @@ export interface operations {
             404: components["responses"]["NotFound"];
             409: components["responses"]["CursorExpired"];
             413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    webShellQueryUserMessages: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellUserMessageQuery"];
+            };
+        };
+        responses: {
+            /** @description Authoritative queue snapshot */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserMessageSnapshot"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    webShellCommandUserMessages: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellUserMessageCommand"];
+            };
+        };
+        responses: {
+            /** @description Authoritative queue snapshot */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserMessageSnapshot"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+            503: components["responses"]["Unavailable"];
         };
     };
 }

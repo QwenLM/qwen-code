@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { mountMemoryImportRoutes } from './memory-import.js';
+
 import express from 'express';
 import { registerWorkspaceRuntimeStopRoutes } from './routes/workspace-runtime-stop.js';
 import type { Application } from 'express';
@@ -311,6 +313,8 @@ import {
   type WorkspaceRuntimeRemovalController,
 } from './routes/workspace-management.js';
 import { isNativeDirectoryPickerAvailable } from './native-directory-picker.js';
+import { isGitAvailable } from './git-availability.js';
+import { createWorkspaceGitCloner } from './workspace-git-clone.js';
 import {
   isLocalPathOpenAvailable,
   isLocalTerminalAvailable,
@@ -1235,6 +1239,8 @@ export function createServeApp(
               deps.managedScratchRoot!.canonicalRoot,
             ),
           ),
+      gitWorkspaceCloneAvailable:
+        deps.createWorkspaceRuntime !== undefined && isGitAvailable(),
       // `realtime_voice` keeps meaning "a native Host can attach": shipped
       // clients answer it with a macOS install prompt.
       realtimeVoiceEnabled: () =>
@@ -3017,6 +3023,7 @@ export function createServeApp(
   });
 
   // Workspace memory + agents CRUD routes.
+  mountMemoryImportRoutes(app, { workspaceRegistry, mutate });
   mountWorkspaceMemoryRoutes(app, {
     bridge: primaryBridge,
     boundWorkspace: primaryBoundWorkspace,
@@ -3238,6 +3245,10 @@ export function createServeApp(
   });
 
   // Dynamic workspace registration.
+  const workspaceGitCloner =
+    deps.createWorkspaceRuntime !== undefined && isGitAvailable()
+      ? createWorkspaceGitCloner()
+      : undefined;
   const workspaceManagementHandle = registerWorkspaceManagementRoutes(app, {
     maxRegisteredWorkspaces,
     workspaceRegistry,
@@ -3245,6 +3256,7 @@ export function createServeApp(
     safeBody,
     createWorkspaceRuntime: deps.createWorkspaceRuntime,
     managedScratchRoot: deps.managedScratchRoot,
+    workspaceGitCloner,
     validateWorkspaceRuntimeForPublication:
       deps.validateWorkspaceRuntimeForPublication,
     runWorkspaceTrustOperation: deps.runWorkspaceTrustOperation,
