@@ -24954,25 +24954,37 @@ describe('createAcpSessionBridge', () => {
       }
     });
 
-    it('exit fired on planned shutdown does NOT trigger the unexpected-cleanup path', async () => {
-      const handles: ChannelHandle[] = [];
-      const factory: ChannelFactory = async () => {
-        const h = makeChannel();
-        handles.push(h);
-        return h.channel;
-      };
-      const bridge = makeBridge({ channelFactory: factory });
-      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    it('exit fired on planned shutdown does NOT trigger cleanup or channel-exit logs', async () => {
+      const handle = makeChannel();
+      const diagnostics: Array<{ line: string; level?: string }> = [];
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        onDiagnosticLine: (line, level) => diagnostics.push({ line, level }),
+      });
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
-      // No subscribers; planned shutdown removes the entry first, THEN
-      // calls channel.kill() which resolves channel.exited. The cleanup
-      // .then() handler runs but sees byId.get(sessionId) === undefined
-      // (already removed), so it no-ops and doesn't double-publish.
-      await bridge.shutdown();
+        await bridge.shutdown();
+        await handle.channel.exited;
 
-      // Re-subscribing throws SessionNotFoundError (not a stale state).
-      expect(() => bridge.subscribeEvents(session.sessionId)).toThrow();
-      expect(bridge.sessionCount).toBe(0);
+        expect(handle.killed).toBe(true);
+        expect(() => bridge.subscribeEvents(session.sessionId)).toThrow();
+        expect(bridge.sessionCount).toBe(0);
+        expect(
+          diagnostics.filter((d) => d.line.includes('channel exited')),
+        ).toEqual([]);
+        expect(
+          stderr.mock.calls.filter(([chunk]) =>
+            String(chunk).includes('channel exited'),
+          ),
+        ).toEqual([]);
+      } finally {
+        await bridge.shutdown();
+        stderr.mockRestore();
+      }
     });
   });
 
