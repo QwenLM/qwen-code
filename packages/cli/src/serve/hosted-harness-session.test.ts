@@ -3877,6 +3877,7 @@ describe('Hosted Harness no-tool session', () => {
   async function prewriteAutomationParkedWakeSession(
     tooling: 'read_file' | 'run_shell_command' = 'read_file',
   ): Promise<string> {
+    state.approvalSelections.set(SESSION_ID, { mode: 'yolo', revision: 0 });
     const shellArg = tooling === 'run_shell_command';
     const key = {
       tenantId: 'tenant',
@@ -7763,6 +7764,7 @@ describe('Hosted Harness no-tool session', () => {
     kind: 'child_agent' | 'workflow',
     interrupted = false,
   ): Promise<string> {
+    state.approvalSelections.set(SESSION_ID, { mode: 'yolo', revision: 0 });
     const key = {
       tenantId: 'tenant',
       workspaceId: 'workspace',
@@ -9475,6 +9477,7 @@ describe('Hosted Harness no-tool session', () => {
       managed: Awaited<ReturnType<typeof openManagedSession>>;
     }) => Promise<void>,
   ): Promise<void> {
+    state.approvalSelections.set(SESSION_ID, { mode: 'yolo', revision: 0 });
     const key = {
       tenantId: 'tenant',
       workspaceId: 'workspace',
@@ -23578,7 +23581,6 @@ describe('Hosted Harness tool approvals', () => {
       });
     for (const extra of [
       { approvalMode: 'plan' },
-      { approvalMode: 'auto' },
       { approvalMode: null },
       { approvalMode: 'default', approvalTimeoutMs: 999 },
     ]) {
@@ -23684,7 +23686,7 @@ describe('Hosted Harness tool approvals', () => {
     ]);
   });
 
-  it.each(['default', 'auto-edit', 'yolo'] as const)(
+  it.each(['default', 'auto-edit', 'auto', 'yolo'] as const)(
     'keeps custom initial %s identity and timeout while applying live and cold Turn overrides',
     async (initialMode) => {
       const identity = {
