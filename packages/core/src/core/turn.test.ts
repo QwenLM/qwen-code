@@ -1017,12 +1017,26 @@ describe('Turn', () => {
 
     it('should yield a Retry event when it receives one from the chat stream', async () => {
       const events = await run([
-        { type: StreamEventType.RETRY },
+        {
+          type: StreamEventType.RETRY,
+          retryDiagnostics: {
+            kind: 'transport',
+            reason: 'transport-error',
+            transportCode: 'UND_ERR_SOCKET',
+          },
+        },
         textChunk('Success'),
       ]);
 
       expect(events).toEqual([
-        { type: LlmEventType.Retry },
+        {
+          type: LlmEventType.Retry,
+          retryDiagnostics: {
+            kind: 'transport',
+            reason: 'transport-error',
+            transportCode: 'UND_ERR_SOCKET',
+          },
+        },
         contentEvent('Success'),
       ]);
     });

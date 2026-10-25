@@ -392,6 +392,10 @@ public enum SurfaceRegistry {
             Surface.WEBSHELL, RuleClass.OWNER,
             EnumSet.of(Capability.SESSION_APPROVAL_CHANGE)),
     // ManagedSessionStoreController: internal writer routes.
+    INTERNAL_EXTERNAL_STORAGE_REGISTER(Method.POST,
+            "/internal/managed-workspaces/v1/storage:register-external",
+            Surface.INTERNAL, RuleClass.INTERNAL_OPERATOR,
+            EnumSet.of(Capability.EXTERNAL_STORAGE_REGISTER)),
     INTERNAL_APPROVAL_QUERY(Method.POST,
             "/internal/managed-session-store/v1/sessions/{sessionId}/approval:query",
             Surface.INTERNAL, RuleClass.INTERNAL_WRITER,
@@ -611,6 +615,7 @@ public enum SurfaceRegistry {
      * carries both {@link #TURN_SUBMIT} and {@link #TURN_CANCEL}.
      */
     public enum Capability {
+        EXTERNAL_STORAGE_REGISTER,
         USER_MESSAGE_QUERY, USER_MESSAGE_COMMAND, STORE_USER_MESSAGE_CLAIM,
         SESSION_CREATE,
         SESSION_LIST,
@@ -856,6 +861,7 @@ public enum SurfaceRegistry {
          * read). On a dedicated internal listener the routing filter
          * answers a public-connector caller {@code 404}.
          */
-        INTERNAL_WRITER
+        INTERNAL_WRITER,
+        INTERNAL_OPERATOR
     }
 }

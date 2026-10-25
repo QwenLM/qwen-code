@@ -170,6 +170,7 @@ import {
 
 // Utilities
 import {
+  AUTO_MEMORY_SNAPSHOT_METADATA,
   formatDateForContext,
   buildChangedAgentsReminder,
   buildChangedMcpToolsReminder,
@@ -196,10 +197,7 @@ import {
   UnauthorizedError,
 } from '../utils/errors.js';
 import { checkNextSpeaker } from '../utils/nextSpeakerChecker.js';
-import {
-  flatMapTextParts,
-  prependToFirstTextPart,
-} from '../utils/partUtils.js';
+import { prependToFirstTextPart } from '../utils/partUtils.js';
 import { promptIdContext } from '../utils/promptIdContext.js';
 import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
 import { subagentNameContext } from '../utils/subagentNameContext.js';
@@ -4796,11 +4794,18 @@ export class LlmClient {
       // user prompt's first text part, then on UserQuery / Cron turns
       // the system reminders block is prepended in front of everything
       // so the final shape is: [systemReminders..., ideContext + user prompt].
-      let requestToSend = await flatMapTextParts(request, async (text) => [
-        text,
-      ]);
+      // Replay Parts carry snapshot metadata needed by history deduplication.
+      let requestToSend = Array.isArray(request) ? [...request] : [request];
       if (ideContextText) {
-        requestToSend = prependToFirstTextPart(requestToSend, ideContextText);
+        const firstText = requestToSend.find(
+          (part) => typeof part === 'string' || 'text' in part,
+        );
+        // A marked catalog snapshot must keep its exact text for deduplication.
+        requestToSend =
+          typeof firstText === 'object' &&
+          firstText.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true
+            ? [{ text: ideContextText }, ...requestToSend]
+            : prependToFirstTextPart(requestToSend, ideContextText);
       }
       if (
         messageType === SendMessageType.UserQuery ||

@@ -47,6 +47,7 @@ import {
 } from './contentGenerator.js';
 import { BaseLlmClient } from './baseLlmClient.js';
 import { MemoryManager } from '../memory/manager.js';
+import { getAutoMemorySnapshot } from '../memory/request-context.js';
 import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
 import { LlmChat, userContentPushSnapshotKey } from './llm-chat.js';
 import { DEFAULT_TOKEN_LIMIT } from './tokenLimits.js';
@@ -300,31 +301,8 @@ vi.mock('./environmentContext', async (importOriginal) => {
           ? null
           : `<system-reminder>\nchanged agents: added=${addedAgents.map((agent) => agent.name).join(', ')} removed=${removedAgentNames.join(', ')}\n</system-reminder>`,
     ),
-    getStartupContextLength: vi.fn((history) => {
-      const first = history?.[0];
-      if (first?.role !== 'user') return 0;
-      const text = first.parts?.[0]?.text;
-      if (typeof text === 'string' && text.startsWith('<system-reminder>')) {
-        return 1;
-      }
-      if (
-        history?.[1]?.role === 'model' &&
-        history?.[1]?.parts?.[0]?.text === 'Got it. Thanks for the context!'
-      ) {
-        return 2;
-      }
-      return 0;
-    }),
-    isSystemReminderContent: vi.fn((content) => {
-      const parts = content?.parts;
-      if (!parts || parts.length === 0) return false;
-      return parts.every(
-        (part: { text?: string }) =>
-          typeof part.text === 'string' &&
-          part.text.startsWith('<system-reminder>') &&
-          part.text.includes('</system-reminder>'),
-      );
-    }),
+    getStartupContextLength: vi.fn(actual.getStartupContextLength),
+    isSystemReminderContent: vi.fn(actual.isSystemReminderContent),
   };
 });
 vi.mock('../utils/generateContentResponseUtilities', () => ({
@@ -1404,7 +1382,7 @@ describe('Gemini Client (client.ts)', () => {
       await run([{ text: 'expanded request' }], 'dw03-human', options);
       expect(notices()).toHaveLength(1);
       const parts = mockTurnRunFn.mock.lastCall?.[1] as Array<string | Part>;
-      expect(parts).toContain('expanded request');
+      expect(parts).toContainEqual({ text: 'expanded request' });
       expect(
         parts.some(
           (part) =>
@@ -2441,8 +2419,14 @@ describe('Gemini Client (client.ts)', () => {
 
       const reminder = formatOmniMemorySideQueryReminder(recallResult);
       expect(request).toContain(reminder);
-      // The user's text is a bare string by now; the reminder must precede it.
-      const userPartIndex = request.indexOf('what changed in this clip?');
+      // The reminder must precede the preserved user Part.
+      const userPartIndex = request.findIndex(
+        (part) =>
+          typeof part === 'object' &&
+          part !== null &&
+          'text' in part &&
+          part.text === 'what changed in this clip?',
+      );
       expect(userPartIndex).toBeGreaterThanOrEqual(0);
       expect(request.indexOf(reminder)).toBeLessThan(userPartIndex);
 
@@ -2452,7 +2436,9 @@ describe('Gemini Client (client.ts)', () => {
         { requestParts: unknown[]; promptId?: string },
       ];
       expect(params.promptId).toBe('prompt-omni-recall');
-      expect(params.requestParts).toContain('what changed in this clip?');
+      expect(params.requestParts).toContainEqual({
+        text: 'what changed in this clip?',
+      });
       expect(params.requestParts).not.toContain(reminder);
     });
 
@@ -4380,6 +4366,177 @@ describe('Gemini Client (client.ts)', () => {
       expect(client['forceFullIdeContext']).toBe(false);
     });
 
+    it.each(['catalog V2', 'catalog V3', ''])(
+      'preserves replay snapshot metadata through chat with current catalog %j',
+      async (currentCatalog) => {
+        const snapshot = getAutoMemorySnapshot([], 'catalog V2')!;
+        const parts = [{ text: 'retry me' }, snapshot];
+        client.setHistory([
+          userText('earlier'),
+          modelText('ack'),
+          { role: 'user', parts },
+        ]);
+        vi.mocked(mockConfig.getAutoMemoryContext).mockReturnValue(
+          currentCatalog,
+        );
+        mockConfig.getAutoCompactThreshold = vi.fn().mockReturnValue(undefined);
+        const { Turn: ActualTurn } =
+          await vi.importActual<typeof import('./turn.js')>('./turn.js');
+        mockTurnRunFn.mockImplementation((...args: Parameters<Turn['run']>) =>
+          new ActualTurn(client.getChat(), 'catalog-replay').run(...args),
+        );
+        const requests: Content[][] = [];
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async (params) => {
+          requests.push(structuredClone(params.contents as Content[]));
+          return (async function* () {
+            yield {
+              candidates: [
+                { content: modelText('done'), finishReason: 'STOP' },
+              ],
+            } as GenerateContentResponse;
+          })();
+        });
+
+        const events = await run(parts, 'catalog-replay', {
+          type: SendMessageType.Retry,
+        });
+
+        expect(
+          events.filter((event) => event.type === LlmEventType.Error),
+        ).toEqual([]);
+        expect(requests).toHaveLength(1);
+        const retained = client
+          .getChat()
+          .getHistory()
+          .flatMap((entry) => entry.parts ?? []);
+        expect(retained.filter((part) => part.text === snapshot.text)).toEqual([
+          snapshot,
+        ]);
+        const sent = requests[0].flatMap((entry) => entry.parts ?? []);
+        expect(sent.filter((part) => part.text === snapshot.text)).toEqual(
+          currentCatalog ? [snapshot] : [],
+        );
+        const marked = sent.filter(
+          (part) => part.partMetadata?.['qwen-code:memory-catalog-snapshot'],
+        );
+        expect(marked).toEqual(
+          currentCatalog === 'catalog V3'
+            ? [snapshot, getAutoMemorySnapshot([], currentCatalog)!]
+            : currentCatalog
+              ? [snapshot]
+              : [],
+        );
+        expect(parts).toEqual([{ text: 'retry me' }, snapshot]);
+      },
+    );
+
+    it('keeps a replayed snapshot exact when IDE context is added', async () => {
+      const snapshot = getAutoMemorySnapshot([], 'catalog V2')!;
+      const parts = [
+        { inlineData: { mimeType: 'image/png', data: 'AAAA' } },
+        snapshot,
+      ];
+      client.setHistory([
+        userText('earlier'),
+        modelText('ack'),
+        { role: 'user', parts },
+      ]);
+      vi.mocked(mockConfig.getAutoMemoryContext).mockReturnValue('catalog V2');
+      mockConfig.getAutoCompactThreshold = vi.fn().mockReturnValue(undefined);
+      vi.mocked(ideContextStore.get).mockReturnValue(
+        ideContext([
+          {
+            path: '/path/to/active/file.ts',
+            timestamp: Date.now(),
+            isActive: true,
+          },
+        ]),
+      );
+      vi.spyOn(client['config'], 'getIdeMode').mockReturnValue(true);
+      const { Turn: ActualTurn } =
+        await vi.importActual<typeof import('./turn.js')>('./turn.js');
+      mockTurnRunFn.mockImplementation((...args: Parameters<Turn['run']>) =>
+        new ActualTurn(client.getChat(), 'catalog-ide-replay').run(...args),
+      );
+      const requests: Content[][] = [];
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async (params) => {
+          requests.push(structuredClone(params.contents as Content[]));
+          return (async function* () {
+            yield {
+              candidates: [
+                { content: modelText('done'), finishReason: 'STOP' },
+              ],
+            } as GenerateContentResponse;
+          })();
+        },
+      );
+
+      await run(parts, 'catalog-ide-replay', { type: SendMessageType.Retry });
+
+      const sent = requests[0].flatMap((entry) => entry.parts ?? []);
+      expect(
+        sent.filter(
+          (part) => part.partMetadata?.['qwen-code:memory-catalog-snapshot'],
+        ),
+      ).toEqual([snapshot]);
+      expect(JSON.stringify(sent)).toContain('/path/to/active/file.ts');
+    });
+
+    it('keeps a snapshot-only trailing entry through the retry strip', async () => {
+      // The trailing entry is structural, not an orphaned failed turn: its
+      // only part is a marked memory catalog snapshot. A real Retry send runs
+      // LlmChat.stripOrphanedUserEntriesFromHistory, which must classify it
+      // through isSystemReminderContent's partMetadata branch and leave it in
+      // history. The pre-PR text-only rule would pop it and lose the snapshot.
+      const snapshot = getAutoMemorySnapshot([], 'catalog')!;
+      client.setHistory([
+        userText('earlier'),
+        modelText('ack'),
+        { role: 'user', parts: [snapshot] },
+      ]);
+      // No current catalog, so no fresh snapshot is appended and the only
+      // marked snapshot on the wire can be the replayed one.
+      vi.mocked(mockConfig.getAutoMemoryContext).mockReturnValue('');
+      mockConfig.getAutoCompactThreshold = vi.fn().mockReturnValue(undefined);
+      const { Turn: ActualTurn } =
+        await vi.importActual<typeof import('./turn.js')>('./turn.js');
+      mockTurnRunFn.mockImplementation((...args: Parameters<Turn['run']>) =>
+        new ActualTurn(client.getChat(), 'snapshot-only-retry').run(...args),
+      );
+      const requests: Content[][] = [];
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async (params) => {
+          requests.push(structuredClone(params.contents as Content[]));
+          return (async function* () {
+            yield {
+              candidates: [
+                { content: modelText('done'), finishReason: 'STOP' },
+              ],
+            } as GenerateContentResponse;
+          })();
+        },
+      );
+
+      await run([{ text: 'retry me' }], 'snapshot-only-retry', {
+        type: SendMessageType.Retry,
+      });
+
+      expect(requests).toHaveLength(1);
+      const retainedSnapshots = client
+        .getChat()
+        .getHistory()
+        .filter((entry) =>
+          entry.parts?.some(
+            (part) =>
+              part.partMetadata?.['qwen-code:memory-catalog-snapshot'] === true,
+          ),
+        );
+      expect(retainedSnapshots).toEqual([{ role: 'user', parts: [snapshot] }]);
+    });
+
     it('retry strips orphaned trailing user entries and clears the cache', async () => {
       const cacheClear = mockFileReadCacheClear();
       const stripOrphanedUserEntriesFromHistory = vi.fn();
@@ -6033,7 +6190,9 @@ Other open files:
         'test-model',
         [
           dateReminder(),
-          `<system-reminder>\n${expectedContext}\n</system-reminder>\n\nHi`,
+          {
+            text: `<system-reminder>\n${expectedContext}\n</system-reminder>\n\nHi`,
+          },
         ],
         expect.any(AbortSignal),
       );
@@ -7088,10 +7247,9 @@ Other open files:
         }),
       );
       expect(mockTurnRunFn).toHaveBeenCalledWith(
-        ...requestWith(
-          expect.stringContaining('## Memory overview'),
-          'Please answer tersely',
-        ),
+        ...requestWith(expect.stringContaining('## Memory overview'), {
+          text: 'Please answer tersely',
+        }),
       );
     });
 
@@ -9305,7 +9463,7 @@ Other open files:
       expect(mockMemoryManager.recall).not.toHaveBeenCalled();
       // The main request carries no memory content.
       expect(mockTurnRunFn).toHaveBeenCalledWith(
-        ...exactRequest(dateReminder(), 'Quick question'),
+        ...exactRequest(dateReminder(), { text: 'Quick question' }),
       );
 
       vi.mocked(mockConfig.isManagedMemoryAvailable).mockReturnValue(true);
@@ -9319,7 +9477,7 @@ Other open files:
       await helloTurn('Quick question', 'prompt-id-recall-fail');
 
       expect(mockTurnRunFn).toHaveBeenCalledWith(
-        ...exactRequest(dateReminder(), 'Quick question'),
+        ...exactRequest(dateReminder(), { text: 'Quick question' }),
       );
     });
 
@@ -9962,7 +10120,9 @@ Other open files:
 
       // The date reminder, wrapped in <system-reminder> tags, comes first.
       expect(mockTurnRunFn).toHaveBeenCalledWith(
-        ...exactRequest(dateReminder('June 5, 2026'), 'What day is it?'),
+        ...exactRequest(dateReminder('June 5, 2026'), {
+          text: 'What day is it?',
+        }),
       );
     });
 
@@ -10191,7 +10351,9 @@ Other open files:
       await run([{ text: 'First question' }], 'prompt-id-date-first');
 
       expect(mockTurnRunFn).toHaveBeenLastCalledWith(
-        ...exactRequest(dateReminder('June 5, 2026'), 'First question'),
+        ...exactRequest(dateReminder('June 5, 2026'), {
+          text: 'First question',
+        }),
       );
 
       // Second query the same day: no date prefix again.
@@ -10203,7 +10365,7 @@ Other open files:
       await run([{ text: 'Second question' }], 'prompt-id-date-second');
 
       const secondCall = mockTurnRunFn.mock.calls[1];
-      expect(secondCall[1][0]).toBe('Second question');
+      expect(secondCall[1][0]).toEqual({ text: 'Second question' });
     });
 
     it('should re-inject date when session spans midnight', async () => {
@@ -10213,7 +10375,7 @@ Other open files:
       await run([{ text: 'Day one' }], 'prompt-id-date-day-one');
 
       expect(mockTurnRunFn).toHaveBeenLastCalledWith(
-        ...exactRequest(dateReminder('June 4, 2026'), 'Day one'),
+        ...exactRequest(dateReminder('June 4, 2026'), { text: 'Day one' }),
       );
 
       // Advance to June 5: the new date is injected.
@@ -10252,7 +10414,9 @@ Other open files:
       await run([{ text: 'User question' }], 'prompt-id-cron-user');
 
       expect(mockTurnRunFn).toHaveBeenLastCalledWith(
-        ...exactRequest(dateReminder('June 5, 2026'), 'User question'),
+        ...exactRequest(dateReminder('June 5, 2026'), {
+          text: 'User question',
+        }),
       );
     });
 

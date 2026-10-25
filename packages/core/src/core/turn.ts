@@ -38,6 +38,7 @@ import {
   type LlmPreparedRequestCallback,
 } from './llm-chat.js';
 import type { RetryInfo } from '../utils/rateLimit.js';
+import type { RetryDiagnostics } from '../utils/retryErrorClassification.js';
 import {
   getThoughtSummary,
   getThoughtText,
@@ -102,6 +103,9 @@ export { LlmEventType as GeminiEventType };
 export type ServerLlmRetryEvent = {
   type: LlmEventType.Retry;
   retryInfo?: RetryInfo;
+  /** Allowlisted scalar classification for headless/operator diagnostics.
+   * Present only on retry decisions that otherwise surface no reason. */
+  retryDiagnostics?: RetryDiagnostics;
   /** When true, the retry is a continuation (recovery) rather than a fresh
    *  restart. The UI should keep accumulated text so the continuation appends. */
   isContinuation?: boolean;
@@ -814,6 +818,7 @@ export class Turn {
           yield {
             type: LlmEventType.Retry,
             retryInfo: streamEvent.retryInfo,
+            retryDiagnostics: streamEvent.retryDiagnostics,
             isContinuation: streamEvent.isContinuation,
           };
           continue; // Skip to the next event in the stream
