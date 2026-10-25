@@ -853,11 +853,7 @@ async function runPreparedHostedHarnessTextTurn(
           ? history
           : history.filter((entry, index) =>
               entry.role === 'user'
-                ? answered(
-                    history
-                      .slice(index + 1)
-                      .find((next) => next.role !== 'user'),
-                  )
+                ? answered(history[index + 1])
                 : answered(entry),
             ),
       );
