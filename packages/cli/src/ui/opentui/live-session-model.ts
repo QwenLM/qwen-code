@@ -20,16 +20,24 @@ import type {
 } from './event-adapter.js';
 import type { TodoItem } from '../components/TodoDisplay.js';
 import type { GoalLegacyCardData } from '../utils/goal-card-view.js';
+import { stripSuppressOnRestore } from '../utils/resumeHistoryUtils.js';
+import { isSyntheticHistoryItem } from '../utils/historyUtils.js';
 import type { AnsiToken } from '@qwen-code/qwen-code-core';
-import type { ArenaAgentCardData, CompressionProps } from '../types.js';
+import type {
+  ArenaAgentCardData,
+  CompressionProps,
+  HistoryItem as CanonicalHistoryItem,
+} from '../types.js';
 
 export type ToolConfirmState = 'pending' | 'approved' | 'rejected';
 
 export type LiveToolItem = Extract<HistoryItem, { kind: 'tool' }> & {
+  renderId?: string;
   args?: string;
   /** Real invocation description (scheduler's getDescription, ink
    * mapToDisplay parity) — takes precedence over the args-based fallback. */
   description?: string;
+  detailedDisplay?: string;
   confirm?: ToolConfirmState;
   /** The scheduler reports the call as 'scheduled' — approved, but not
    * started because the batch still holds another approval. ink reads the
@@ -82,6 +90,7 @@ export type LiveInfoItem = {
   kind: 'info';
   id: string;
   text: string;
+  historyIsSynthetic?: false;
 };
 
 /** Error notice row (ink HistoryItemError + ErrorMessage: `✕` + error color,
@@ -186,7 +195,7 @@ export type LiveAssistantItem = Extract<HistoryItem, { kind: 'assistant' }> & {
   timestamp?: number;
 };
 
-export type LiveHistoryItem =
+type LiveHistoryItemData =
   | Exclude<
       HistoryItem,
       | { kind: 'tool' }
@@ -194,7 +203,9 @@ export type LiveHistoryItem =
       | { kind: 'assistant' }
       | { kind: 'user' }
     >
-  | (Extract<HistoryItem, { kind: 'user' }> & { recallText?: string })
+  | (Extract<HistoryItem, { kind: 'user' }> & {
+      recallText?: string;
+    })
   | LiveAssistantItem
   | LiveThinkingItem
   | LiveToolItem
@@ -212,18 +223,25 @@ export type LiveHistoryItem =
   | LiveArenaSessionItem
   | LiveGoalItem;
 
+export type LiveHistoryItem = LiveHistoryItemData & {
+  historyId?: number;
+  canonicalHistoryItem?: CanonicalHistoryItem;
+  canonicalOnly?: true;
+  display?: CanonicalHistoryItem['display'];
+};
+
 let uid = 0;
 const nid = (p: string) => `${p}${++uid}`;
 
 function findToolIndex(items: readonly LiveHistoryItem[], id: string): number {
-  return items.findIndex((it) => it.kind === 'tool' && it.id === id);
+  return items.findLastIndex((it) => it.kind === 'tool' && it.id === id);
 }
 
 /**
  * Pure fold: returns the next items array for one event (input is never
  * mutated). Unknown tool ids are ignored.
  */
-export function foldLiveEvent(
+function foldLiveEventData(
   prev: readonly LiveHistoryItem[],
   ev: OpenTuiStreamEvent,
 ): readonly LiveHistoryItem[] {
@@ -231,14 +249,34 @@ export function foldLiveEvent(
   const last = items[items.length - 1];
 
   switch (ev.type) {
+    case 'history-expanded':
+      return items
+        .filter((item) => item.display?.kind !== 'collapse-summary')
+        .map(stripSuppressOnRestore);
     case 'user': {
-      // Both `addItem` implementations collapse a user item identical to the
-      // one before it, and this is the chokepoint the projected and live
-      // echoes share: two identical steers in a row are one row.
+      if (ev.historyId !== undefined) {
+        const index = items.findIndex(
+          (item) => item.kind === 'user' && item.historyId === ev.historyId,
+        );
+        const existing = items[index];
+        if (existing?.kind === 'user') {
+          items[index] = {
+            ...existing,
+            text: ev.text,
+            recallText: ev.recallText,
+            promptId: ev.promptId,
+            sentToModel: ev.sentToModel,
+          };
+          return items;
+        }
+      }
+      // Repeated echoes can collapse; distinct identified turns cannot.
       if (
         last?.kind === 'user' &&
         last.text === ev.text &&
-        last.recallText === ev.recallText
+        last.recallText === ev.recallText &&
+        last.promptId === ev.promptId &&
+        last.historyId === ev.historyId
       ) {
         return prev;
       }
@@ -251,6 +289,7 @@ export function foldLiveEvent(
         ...(ev.recallText === undefined ? {} : { recallText: ev.recallText }),
         promptId: ev.promptId,
         sentToModel: ev.sentToModel,
+        ...(ev.historyId === undefined ? {} : { historyId: ev.historyId }),
       });
       return items;
     }
@@ -275,7 +314,7 @@ export function foldLiveEvent(
       return items;
     }
     case 'thinking-end': {
-      if (last?.kind === 'thinking')
+      if (last?.kind === 'thinking' && !last.done)
         items[items.length - 1] = {
           ...last,
           done: true,
@@ -299,7 +338,7 @@ export function foldLiveEvent(
     }
     case 'tool-start': {
       const i = findToolIndex(items, ev.id);
-      if (i >= 0) {
+      if (i >= 0 && !(items[i] as LiveToolItem).done) {
         // A confirmation card for this call already exists → approved.
         const t = items[i] as LiveToolItem;
         items[i] = {
@@ -315,6 +354,7 @@ export function foldLiveEvent(
       items.push({
         kind: 'tool',
         id: ev.id,
+        ...(i >= 0 ? { renderId: nid('tool-card') } : {}),
         tool: ev.tool,
         title: ev.title,
         output: '',
@@ -358,6 +398,7 @@ export function foldLiveEvent(
           todos: structured?.todos,
           ansi: structured?.ansi,
           subagentSummary: structured?.subagentSummary,
+          detailedDisplay: structured?.detailedDisplay,
         };
         if (ev.type === 'tool-result' && ev.visionBridgeNotice) {
           next.visionBridgeNotice = ev.visionBridgeNotice;
@@ -381,7 +422,7 @@ export function foldLiveEvent(
     }
     case 'confirm': {
       const i = findToolIndex(items, ev.id);
-      if (i >= 0) {
+      if (i >= 0 && !(items[i] as LiveToolItem).done) {
         const t = items[i] as LiveToolItem;
         items[i] = { ...t, title: ev.title, confirm: 'pending' };
         return items;
@@ -391,6 +432,7 @@ export function foldLiveEvent(
       items.push({
         kind: 'tool',
         id: ev.id,
+        ...(i >= 0 ? { renderId: nid('tool-card') } : {}),
         tool: ev.tool,
         title: ev.title,
         output: '',
@@ -470,7 +512,14 @@ export function foldLiveEvent(
       // content before addItem — settle a still-streaming assistant block.
       if (last?.kind === 'assistant' && last.streaming)
         items[items.length - 1] = { ...last, streaming: false };
-      items.push({ kind: 'info', id: nid('info'), text: ev.text });
+      items.push({
+        kind: 'info',
+        id: nid('info'),
+        text: ev.text,
+        ...(ev.historyIsSynthetic !== undefined
+          ? { historyIsSynthetic: ev.historyIsSynthetic }
+          : {}),
+      });
       return items;
     }
     case 'error': {
@@ -678,3 +727,136 @@ export {
   type GoalCardView,
   type LegacyGoalCardView,
 } from '../utils/goal-card-view.js';
+
+/** Snapshot-only rewind boundary: IDs remain positions in the full live list. */
+export function rewindBoundaryHistory(
+  items: readonly LiveHistoryItem[],
+): CanonicalHistoryItem[] {
+  return items.flatMap((item, id): CanonicalHistoryItem[] => {
+    if (item.kind === 'user')
+      return [
+        {
+          id,
+          type: 'user',
+          text: item.text,
+          promptId: item.promptId,
+          ...(item.canonicalHistoryItem?.type === 'user' &&
+          item.canonicalHistoryItem.rewindId
+            ? { rewindId: item.canonicalHistoryItem.rewindId }
+            : {}),
+          sentToModel: item.sentToModel,
+          display: item.display,
+        },
+      ];
+    if (item.kind === 'compaction')
+      return [
+        {
+          id,
+          type: 'compression',
+          compression: item.compression,
+          display: item.display,
+        },
+      ];
+    return [];
+  });
+}
+
+export function foldLiveEvent(
+  prev: readonly LiveHistoryItem[],
+  event: OpenTuiStreamEvent,
+): readonly LiveHistoryItem[] {
+  if (event.type === 'canonical-history-replace') {
+    const first = prev.findIndex(
+      (item) => item.canonicalHistoryItem?.id === event.item.id,
+    );
+    const retained = prev.filter(
+      (item) => item.canonicalHistoryItem?.id !== event.item.id,
+    );
+    let replacement: readonly LiveHistoryItem[] = [];
+    for (const projected of event.events)
+      replacement = foldLiveEvent(replacement, {
+        ...projected,
+        historyId: event.item.id,
+        canonicalHistoryItem: event.item,
+      });
+    if (replacement.length === 0)
+      replacement = foldLiveEvent([], {
+        type: 'canonical-history',
+        historyId: event.item.id,
+        canonicalHistoryItem: event.item,
+      });
+    const index = first < 0 ? retained.length : first;
+    return [
+      ...retained.slice(0, index),
+      ...replacement,
+      ...retained.slice(index),
+    ];
+  }
+  const source = event.canonicalHistoryItem;
+  if (source) {
+    const previous =
+      prev.at(-1)?.canonicalHistoryItem?.id === source.id
+        ? prev
+        : foldLiveEventData(foldLiveEventData(prev, { type: 'segment-end' }), {
+            type: 'thinking-end',
+          });
+    const first = previous.findIndex(
+      (item) => item.canonicalHistoryItem?.id === source.id,
+    );
+    const block = previous.filter(
+      (item) => item.canonicalHistoryItem?.id === source.id,
+    );
+    const retained = previous.filter(
+      (item) => item.canonicalHistoryItem?.id !== source.id,
+    );
+    const next =
+      event.type === 'canonical-history'
+        ? block.length
+          ? block
+          : [
+              {
+                kind: 'info' as const,
+                id: nid('canonical'),
+                text: '',
+                canonicalOnly: true as const,
+                ...(isSyntheticHistoryItem(source)
+                  ? {}
+                  : { historyIsSynthetic: false as const }),
+              },
+            ]
+        : foldLiveEventData(block, event);
+    const captured = next.map((item) => ({
+      ...item,
+      ...(item.kind === 'tool'
+        ? { renderId: item.renderId ?? `history-${source.id}` }
+        : {}),
+      historyId: source.id,
+      canonicalHistoryItem: source,
+      ...(event.historyDisplay ? { display: event.historyDisplay } : {}),
+    }));
+    const index = first < 0 ? retained.length : first;
+    return [...retained.slice(0, index), ...captured, ...retained.slice(index)];
+  }
+  const next = foldLiveEventData(prev, event);
+  if (event.type === 'history-expanded')
+    return next.map((item) => {
+      const source = item.canonicalHistoryItem;
+      if (!source) return item;
+      const expanded = stripSuppressOnRestore(source);
+      return expanded === source
+        ? item
+        : { ...item, canonicalHistoryItem: expanded };
+    });
+  if (event.historyId === undefined) return next;
+  const changed = next.findLastIndex((item, index) => item !== prev[index]);
+  if (changed < 0) return next;
+  return next.map((item, index) =>
+    index === changed
+      ? {
+          ...item,
+          historyId: event.historyId,
+          ...(event.historyDisplay ? { display: event.historyDisplay } : {}),
+        }
+      : item,
+  );
+}
