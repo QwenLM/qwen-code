@@ -14,6 +14,7 @@ import {
   type AgentResultDisplay,
 } from '@qwen-code/qwen-code-core';
 import type { Part, GenerateContentResponseUsageMetadata } from '@google/genai';
+import { FinishReason } from '@google/genai';
 import type {
   CLIMessage,
   CLIAssistantMessage,
@@ -783,6 +784,80 @@ describe('BaseJsonOutputAdapter', () => {
   describe('processEvent', () => {
     beforeEach(() => {
       adapter.startAssistantMessage();
+    });
+
+    it.each([FinishReason.MAX_TOKENS, FinishReason.STOP, undefined])(
+      'preserves the terminal output-limit reason %s',
+      (reason) => {
+        adapter.processEvent({ type: LlmEventType.Content, value: 'answer' });
+        adapter.processEvent({
+          type: LlmEventType.Finished,
+          value: { reason, usageMetadata: undefined },
+        });
+        expect(adapter.finalizeAssistantMessage().message.stop_reason).toBe(
+          reason === FinishReason.MAX_TOKENS ? 'max_tokens' : null,
+        );
+      },
+    );
+
+    it.each([
+      ['a fresh retry', { type: LlmEventType.Retry, isContinuation: false }],
+      ['a continuation', { type: LlmEventType.Retry, isContinuation: true }],
+      [
+        'a model fallback',
+        {
+          type: LlmEventType.ModelFallback,
+          fromModel: 'primary',
+          toModel: 'fallback',
+          statusCode: 503,
+          fallbackIndex: 1,
+        },
+      ],
+    ] satisfies Array<[string, ServerLlmStreamEvent]>)(
+      'clears the prior finish reason on %s without discarding content',
+      (_, event) => {
+        adapter.processEvent({ type: LlmEventType.Content, value: 'Partial' });
+        adapter.processEvent({
+          type: LlmEventType.Finished,
+          value: { reason: FinishReason.MAX_TOKENS, usageMetadata: undefined },
+        });
+
+        adapter.processEvent(event);
+        adapter.processEvent({
+          type: LlmEventType.Content,
+          value: ' continued',
+        });
+
+        expect(adapter.finalizeAssistantMessage().message).toMatchObject({
+          content: [{ type: 'text', text: 'Partial continued' }],
+          stop_reason: null,
+        });
+      },
+    );
+
+    it('reports truncated tool arguments without leaking into the next message', () => {
+      adapter.processEvent({
+        type: LlmEventType.ToolCallRequest,
+        value: {
+          callId: 'truncated-tool',
+          name: 'write_file',
+          args: { file_path: '/tmp/output.txt' },
+          isClientInitiated: false,
+          prompt_id: 'truncated-turn',
+          wasOutputTruncated: true,
+        },
+      });
+      adapter.processEvent({
+        type: LlmEventType.Finished,
+        value: { reason: FinishReason.MAX_TOKENS, usageMetadata: undefined },
+      });
+      expect(adapter.finalizeAssistantMessage().message.stop_reason).toBe(
+        'max_tokens',
+      );
+
+      adapter.startAssistantMessage();
+      adapter.processEvent({ type: LlmEventType.Content, value: 'recovered' });
+      expect(adapter.finalizeAssistantMessage().message.stop_reason).toBeNull();
     });
 
     it('should process Content events', () => {

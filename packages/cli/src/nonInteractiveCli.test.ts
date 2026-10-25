@@ -20,7 +20,7 @@ import type {
   SessionMetrics,
   WorkflowApprovalRequestCallback,
 } from '@qwen-code/qwen-code-core';
-import type { CLIUserMessage } from './nonInteractive/types.js';
+import type { CLIMessage, CLIUserMessage } from './nonInteractive/types.js';
 import {
   executeToolCall,
   isTelemetrySdkInitialized,
@@ -58,7 +58,10 @@ import {
   GoalPersistenceUnavailableError,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part } from '@google/genai';
+import { FinishReason } from '@google/genai';
 import { LlmChat } from '@qwen-code/qwen-code-core/core/llm-chat.js';
+import { Turn } from '@qwen-code/qwen-code-core/core/turn.js';
+import { BackgroundTaskRegistry } from '@qwen-code/qwen-code-core/agents/background-tasks.js';
 import { markApiHistoryPrompt } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import { EventEmitter } from 'node:events';
 import {
@@ -91,6 +94,7 @@ import { SkillCommandLoader } from './services/SkillCommandLoader.js';
 import type { ICommandLoader } from './services/types.js';
 import {
   _resetCleanupFunctionsForTest,
+  registerCleanup,
   runExitCleanup,
 } from './utils/cleanup.js';
 import { cleanupReviewWorktreeLeases } from './services/review-worktree-lease.js';
@@ -541,11 +545,617 @@ describe('runNonInteractive', () => {
 
   async function* createStreamFromEvents(
     events: ServerLlmStreamEvent[],
-  ): AsyncGenerator<ServerLlmStreamEvent> {
+  ): AsyncGenerator<ServerLlmStreamEvent, Turn> {
+    // sendMessageStream returns its final Turn as well as yielding events.
+    const turn = new Turn(mockLlmClient.getChat(), 'test-prompt');
     for (const event of events) {
+      if (event.type === LlmEventType.Finished) {
+        turn.finishReason = event.value.reason;
+      } else if (
+        event.type === LlmEventType.Retry ||
+        event.type === LlmEventType.ModelFallback
+      ) {
+        turn.finishReason = undefined;
+        turn.pendingToolCalls.length = 0;
+      } else if (event.type === LlmEventType.ToolCallRequest) {
+        turn.pendingToolCalls.push(event.value);
+      }
       yield event;
     }
+    return turn;
   }
+
+  describe.each(bothLoops)('output token limits ($loop)', ({ shared }) => {
+    const finished = (reason?: FinishReason): ServerLlmStreamEvent => ({
+      type: LlmEventType.Finished,
+      value: { reason, usageMetadata: { totalTokenCount: 10 } },
+    });
+
+    function readMessages(format: OutputFormat): CLIMessage[] {
+      const stdout = processStdoutSpy.mock.calls
+        .map(([text]) => String(text))
+        .join('');
+      return format === OutputFormat.JSON
+        ? JSON.parse(stdout)
+        : stdout
+            .trim()
+            .split('\n')
+            .map((line) => JSON.parse(line));
+    }
+
+    function queueDrainTurn(): void {
+      mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+        cb?.('Monitor ready', '<task-notification>ready</task-notification>', {
+          monitorId: 'mon_output_limit',
+          toolUseId: 'tool_monitor',
+          status: 'running',
+          eventCount: 1,
+        });
+      });
+      mockLlmClient.sendMessageStream.mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: LlmEventType.Content, value: 'Complete main answer' },
+          finished(FinishReason.STOP),
+        ]),
+      );
+    }
+
+    beforeEach(() => {
+      setupMetricsMock();
+      mockGetCommands.mockReturnValue([]);
+      if (shared) useSharedLoopWithModToolHooks();
+    });
+
+    it.each(
+      [OutputFormat.TEXT, OutputFormat.JSON, OutputFormat.STREAM_JSON].flatMap(
+        (format) => [
+          { format, text: '', reason: FinishReason.MAX_TOKENS, exitCode: 1 },
+          {
+            format,
+            text: 'Unfinished answer',
+            reason: FinishReason.MAX_TOKENS,
+            exitCode: 1,
+          },
+          {
+            format,
+            text: 'Complete answer without tools',
+            reason: FinishReason.STOP,
+            exitCode: 0,
+          },
+        ],
+      ),
+    )(
+      'reports $reason for "$text" in $format',
+      async ({ format, text, reason, exitCode }) => {
+        vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+        mockLlmClient.sendMessageStream.mockReturnValueOnce(
+          createStreamFromEvents([
+            text
+              ? { type: LlmEventType.Content, value: text }
+              : {
+                  type: LlmEventType.Thought,
+                  value: {
+                    subject: 'Thinking',
+                    description: 'Still reasoning',
+                  },
+                },
+            finished(reason),
+          ]),
+        );
+
+        await expect(
+          runNonInteractive(mockConfig, mockSettings, 'test', 'output-limit'),
+        ).resolves.toBe(exitCode);
+        expect(mockCoreExecuteToolCall).not.toHaveBeenCalled();
+        expect(process.exit).not.toHaveBeenCalled();
+        if (format === OutputFormat.TEXT) {
+          if (exitCode === 1) {
+            expect(processStderrSpy).toHaveBeenCalledExactlyOnceWith(
+              'Response truncated due to token limits.\n',
+            );
+            expect(processStdoutSpy).not.toHaveBeenCalled();
+          } else {
+            expect(processStdoutSpy).toHaveBeenCalledWith(`${text}\n`);
+            expect(processStderrSpy).not.toHaveBeenCalled();
+          }
+          return;
+        }
+        const messages = readMessages(format);
+        const results = messages.filter((message) => message.type === 'result');
+        expect(results).toHaveLength(1);
+        expect(results[0]).toMatchObject(
+          exitCode === 1
+            ? {
+                is_error: true,
+                subtype: 'error_during_execution',
+                error: { message: 'Response truncated due to token limits.' },
+              }
+            : { is_error: false, result: text },
+        );
+        expect(
+          messages.findLast((message) => message.type === 'assistant')?.message
+            .stop_reason,
+        ).toBe(reason === FinishReason.MAX_TOKENS ? 'max_tokens' : null);
+        if (text) {
+          expect(messages).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: 'assistant',
+                message: expect.objectContaining({
+                  content: expect.arrayContaining([{ type: 'text', text }]),
+                }),
+              }),
+            ]),
+          );
+        }
+      },
+    );
+
+    it.each([OutputFormat.TEXT, OutputFormat.JSON, OutputFormat.STREAM_JSON])(
+      'reports a truncated monitor drain after a complete main answer in %s',
+      async (format) => {
+        vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+        vi.mocked(mockConfig.getIncludePartialMessages).mockReturnValue(true);
+        queueDrainTurn();
+        mockLlmClient.sendMessageStream.mockReturnValueOnce(
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'Partial monitor response' },
+            finished(FinishReason.MAX_TOKENS),
+          ]),
+        );
+
+        await expect(
+          runNonInteractive(
+            mockConfig,
+            mockSettings,
+            'test',
+            'drain-output-limit',
+          ),
+        ).resolves.toBe(1);
+
+        expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
+        if (format === OutputFormat.TEXT) {
+          expect(processStdoutSpy).not.toHaveBeenCalled();
+          expect(processStderrSpy).toHaveBeenCalledExactlyOnceWith(
+            'Response truncated due to token limits.\n',
+          );
+          return;
+        }
+        const messages = readMessages(format);
+        expect(messages.filter((message) => message.type === 'result')).toEqual(
+          [
+            expect.objectContaining({
+              is_error: true,
+              subtype: 'error_during_execution',
+            }),
+          ],
+        );
+        const assistants = messages.filter(
+          (message) => message.type === 'assistant',
+        );
+        expect(assistants[0].message.content).toEqual([
+          { type: 'text', text: 'Complete main answer' },
+        ]);
+        expect(assistants.at(-1)?.message).toMatchObject({
+          content: [{ type: 'text', text: 'Partial monitor response' }],
+          stop_reason: 'max_tokens',
+        });
+        const streamEvents = messages.flatMap((message) =>
+          message.type === 'stream_event' ? [message.event.type] : [],
+        );
+        expect(
+          streamEvents.filter((type) => type === 'message_start').length,
+        ).toBe(streamEvents.filter((type) => type === 'message_stop').length);
+      },
+    );
+
+    it.each([
+      { restart: 'retry', drain: false, reason: FinishReason.STOP },
+      { restart: 'continuation', drain: false, reason: undefined },
+      { restart: 'fallback', drain: false, reason: FinishReason.STOP },
+      { restart: 'retry', drain: true, reason: undefined },
+      { restart: 'continuation', drain: true, reason: FinishReason.STOP },
+      { restart: 'fallback', drain: true, reason: undefined },
+    ])(
+      'accepts recovery through $restart (drain=$drain, reason=$reason)',
+      async ({ restart, drain, reason }) => {
+        vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+          OutputFormat.STREAM_JSON,
+        );
+        if (drain) queueDrainTurn();
+        const restartEvent: ServerLlmStreamEvent =
+          restart === 'fallback'
+            ? {
+                type: LlmEventType.ModelFallback,
+                fromModel: 'primary',
+                toModel: 'fallback',
+                fallbackIndex: 0,
+              }
+            : {
+                type: LlmEventType.Retry,
+                isContinuation: restart === 'continuation',
+              };
+        mockLlmClient.sendMessageStream.mockReturnValueOnce(
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'Partial ' },
+            finished(FinishReason.MAX_TOKENS),
+            restartEvent,
+            { type: LlmEventType.Content, value: 'recovered answer' },
+            ...(reason ? [finished(reason)] : []),
+          ]),
+        );
+
+        await expect(
+          runNonInteractive(
+            mockConfig,
+            mockSettings,
+            'test',
+            'recovered-limit',
+          ),
+        ).resolves.toBe(0);
+
+        const messages = readMessages(OutputFormat.STREAM_JSON);
+        expect(messages.filter((message) => message.type === 'result')).toEqual(
+          [
+            expect.objectContaining({
+              is_error: false,
+              result:
+                restart === 'continuation'
+                  ? 'Partial recovered answer'
+                  : 'recovered answer',
+            }),
+          ],
+        );
+        const lastAssistant = messages.findLast(
+          (message) => message.type === 'assistant',
+        );
+        expect(lastAssistant?.message.stop_reason).not.toBe('max_tokens');
+      },
+    );
+
+    it.each([false, true])(
+      'lets truncated tools receive recovery feedback before finishing (drain=%s)',
+      async (drain) => {
+        vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+          OutputFormat.JSON,
+        );
+        if (drain) queueDrainTurn();
+        const request: ToolCallRequestInfo = {
+          callId: 'truncated-tool',
+          name: 'test-tool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'tool-output-limit',
+          wasOutputTruncated: true,
+        };
+        const responseParts: Part[] = [
+          {
+            functionResponse: {
+              id: request.callId,
+              name: request.name,
+              response: { error: 'Arguments were truncated; retry the call.' },
+            },
+          },
+        ];
+        mockCoreExecuteToolCall.mockResolvedValueOnce({
+          callId: request.callId,
+          responseParts,
+          resultDisplay: 'Arguments were truncated; retry the call.',
+          error: new Error('Arguments were truncated; retry the call.'),
+          errorType: ToolErrorType.INVALID_TOOL_PARAMS,
+        });
+        mockLlmClient.sendMessageStream
+          .mockReturnValueOnce(
+            createStreamFromEvents([
+              { type: LlmEventType.ToolCallRequest, value: request },
+              finished(FinishReason.MAX_TOKENS),
+            ]),
+          )
+          .mockReturnValueOnce(
+            createStreamFromEvents([
+              { type: LlmEventType.Content, value: 'Recovered after feedback' },
+              finished(FinishReason.STOP),
+            ]),
+          );
+
+        await expect(
+          runNonInteractive(
+            mockConfig,
+            mockSettings,
+            'test',
+            'tool-output-limit',
+          ),
+        ).resolves.toBe(0);
+
+        expect(mockCoreExecuteToolCall).toHaveBeenCalledOnce();
+        expect(mockCoreExecuteToolCall.mock.calls[0][1]).toBe(request);
+        expect(mockLlmClient.sendMessageStream).toHaveBeenLastCalledWith(
+          expect.arrayContaining(responseParts),
+          expect.any(AbortSignal),
+          expect.any(String),
+          expect.objectContaining({ type: SendMessageType.ToolResult }),
+        );
+        expect(
+          readMessages(OutputFormat.JSON).filter(
+            (message) => message.type === 'result',
+          ),
+        ).toEqual([expect.objectContaining({ is_error: false })]);
+      },
+    );
+
+    it.each([
+      { finalReason: FinishReason.STOP, exitCode: 0 },
+      { finalReason: FinishReason.MAX_TOKENS, exitCode: 1 },
+    ])(
+      'waits for a teammate after truncation and reports the final $finalReason',
+      async ({ finalReason, exitCode }) => {
+        vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+          OutputFormat.STREAM_JSON,
+        );
+        let leaderMessageCallback: ((message: string) => void) | null = null;
+        let active = true;
+        const teamEvents = new EventEmitter();
+        const teamManager = {
+          setLeaderMessageCallback: vi.fn(
+            (callback: typeof leaderMessageCallback) => {
+              leaderMessageCallback = callback;
+            },
+          ),
+          getEventEmitter: () => teamEvents,
+          hasActiveTeammates: () => active,
+          allRemainingStalled: () => false,
+          waitForTeammateActivity: vi.fn(async () => {
+            active = false;
+            leaderMessageCallback?.('Teammate completed the work.');
+            return 'message';
+          }),
+          drainLeaderInbox: vi.fn().mockResolvedValue(undefined),
+        };
+        vi.mocked(mockConfig.getTeamManager).mockReturnValue(
+          teamManager as unknown as ReturnType<Config['getTeamManager']>,
+        );
+        mockLlmClient.sendMessageStream
+          .mockReturnValueOnce(
+            createStreamFromEvents([
+              { type: LlmEventType.Content, value: 'Waiting for worker' },
+              finished(FinishReason.MAX_TOKENS),
+            ]),
+          )
+          .mockReturnValueOnce(
+            createStreamFromEvents([
+              { type: LlmEventType.Content, value: 'Answer after worker' },
+              finished(finalReason),
+            ]),
+          );
+
+        await expect(
+          runNonInteractive(mockConfig, mockSettings, 'test', 'team-limit'),
+        ).resolves.toBe(exitCode);
+
+        expect(teamManager.waitForTeammateActivity).toHaveBeenCalledOnce();
+        expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
+        expect(mockLlmClient.sendMessageStream).toHaveBeenLastCalledWith(
+          [{ text: 'Teammate completed the work.' }],
+          expect.any(AbortSignal),
+          expect.any(String),
+          expect.objectContaining({ type: SendMessageType.Teammate }),
+        );
+        expect(
+          readMessages(OutputFormat.STREAM_JSON).filter(
+            (message) => message.type === 'result',
+          ),
+        ).toEqual([expect.objectContaining({ is_error: exitCode === 1 })]);
+      },
+    );
+
+    it('runs the next queued Goal turn after a truncated segment', async () => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+        OutputFormat.STREAM_JSON,
+      );
+      mockGetCommands.mockReturnValue([goalCommand]);
+      await prepareGoalState('paused');
+      // Let Core schedule one continuation, then stop scheduling new turns.
+      const realFinishTurn = goalRuntime.finishTurn.bind(goalRuntime);
+      const finishTurn = vi
+        .spyOn(goalRuntime, 'finishTurn')
+        .mockImplementationOnce(realFinishTurn)
+        .mockResolvedValue(undefined);
+      mockLlmClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'First Goal segment' },
+            finished(FinishReason.MAX_TOKENS),
+          ]),
+        )
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'Continued Goal segment' },
+            finished(FinishReason.STOP),
+          ]),
+        );
+
+      await expect(
+        runNonInteractive(
+          mockConfig,
+          mockSettings,
+          '/goal resume',
+          'goal-output-limit',
+        ),
+      ).resolves.toBe(0);
+
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
+      expect(finishTurn).toHaveBeenCalledTimes(2);
+      const firstOptions = mockLlmClient.sendMessageStream.mock.calls[0]![3];
+      const secondOptions = mockLlmClient.sendMessageStream.mock.calls[1]![3];
+      expect(secondOptions.type).toBe(SendMessageType.Goal);
+      expect(secondOptions.goalPermit.turnId).not.toBe(
+        firstOptions.goalPermit.turnId,
+      );
+      expect(
+        readMessages(OutputFormat.STREAM_JSON).filter(
+          (message) => message.type === 'result',
+        ),
+      ).toEqual([
+        expect.objectContaining({
+          is_error: false,
+          result: 'Continued Goal segment',
+        }),
+      ]);
+    });
+
+    it.each([false, true])(
+      'settles one-shot background tasks before the truncation result (drain=%s)',
+      async (drain) => {
+        vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+          OutputFormat.STREAM_JSON,
+        );
+        const registry = new BackgroundTaskRegistry();
+        vi.mocked(mockConfig.getBackgroundTaskRegistry).mockReturnValue(
+          registry,
+        );
+        const abortAll = vi.spyOn(registry, 'abortAll');
+        const controller = new AbortController();
+        const agentId = 'output-limit-worker';
+        mockCoreExecuteToolCall.mockImplementationOnce(async () => {
+          registry.register({
+            agentId,
+            toolUseId: 'launch-worker',
+            description: 'pending worker',
+            status: 'running',
+            startTime: Date.now(),
+            abortController: controller,
+            isBackgrounded: true,
+            outputFile: path.join(os.tmpdir(), `${agentId}.jsonl`),
+          });
+          return {
+            callId: 'launch-worker',
+            responseParts: [{ text: 'worker started' }],
+            resultDisplay: 'worker started',
+          };
+        });
+        mockLlmClient.sendMessageStream.mockReturnValueOnce(
+          createStreamFromEvents([
+            {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: 'launch-worker',
+                name: 'test-tool',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: 'worker-output-limit',
+              },
+            },
+            finished(FinishReason.STOP),
+          ]),
+        );
+        if (drain) queueDrainTurn();
+        mockLlmClient.sendMessageStream.mockReturnValueOnce(
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'Partial response' },
+            finished(FinishReason.MAX_TOKENS),
+          ]),
+        );
+
+        await expect(
+          runNonInteractive(mockConfig, mockSettings, 'test', 'worker-limit'),
+        ).resolves.toBe(1);
+
+        expect(abortAll).toHaveBeenCalledOnce();
+        expect(controller.signal.aborted).toBe(true);
+        expect(registry.hasUnfinalizedTasks()).toBe(false);
+        const messages = readMessages(OutputFormat.STREAM_JSON);
+        const taskFrames = messages.filter(
+          (message) =>
+            message.type === 'system' &&
+            (message.data as { task_id?: string } | undefined)?.task_id ===
+              agentId,
+        );
+        expect(taskFrames).toEqual([
+          expect.objectContaining({ subtype: 'task_started' }),
+          expect.objectContaining({
+            subtype: 'task_notification',
+            data: expect.objectContaining({ status: 'cancelled' }),
+          }),
+        ]);
+        const results = messages.filter((message) => message.type === 'result');
+        expect(results).toEqual([expect.objectContaining({ is_error: true })]);
+        expect(messages.indexOf(taskFrames[1])).toBeLessThan(
+          messages.indexOf(results[0]),
+        );
+      },
+    );
+
+    it('keeps a shared stream-json session and its background tasks usable after a truncated turn', async () => {
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+        OutputFormat.STREAM_JSON,
+      );
+      const sessionCleanup = vi.fn();
+      registerCleanup(sessionCleanup);
+      const registry = new BackgroundTaskRegistry();
+      vi.mocked(mockConfig.getBackgroundTaskRegistry).mockReturnValue(registry);
+      const abortAll = vi.spyOn(registry, 'abortAll');
+      const controller = new AbortController();
+      const adapter = new StreamJsonOutputAdapter(mockConfig);
+      const options = {
+        adapter,
+        captureMonitorNotifications: false,
+        captureMonitorRegistrations: false,
+        recoverableCancellation: true,
+      };
+      mockLlmClient.sendMessageStream
+        .mockImplementationOnce(() => {
+          registry.register({
+            agentId: 'session-worker',
+            description: 'session-owned worker',
+            status: 'running',
+            startTime: Date.now(),
+            abortController: controller,
+            isBackgrounded: true,
+            outputFile: path.join(os.tmpdir(), 'session-worker.jsonl'),
+          });
+          return createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'Incomplete first response' },
+            finished(FinishReason.MAX_TOKENS),
+          ]);
+        })
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            { type: LlmEventType.Content, value: 'Second response' },
+            finished(FinishReason.STOP),
+          ]),
+        );
+
+      await expect(
+        runNonInteractive(mockConfig, mockSettings, 'first', 'first', options),
+      ).resolves.toBe(1);
+      expect(abortAll).not.toHaveBeenCalled();
+      expect(controller.signal.aborted).toBe(false);
+      expect(registry.get('session-worker')?.status).toBe('running');
+      registry.complete('session-worker', 'Finished independently');
+      await expect(
+        runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'second',
+          'second',
+          options,
+        ),
+      ).resolves.toBe(0);
+
+      expect(sessionCleanup).not.toHaveBeenCalled();
+      expect(process.exit).not.toHaveBeenCalled();
+      expect(abortAll).not.toHaveBeenCalled();
+      expect(mockMonitorRegistry.abortAll).not.toHaveBeenCalled();
+      expect(
+        readMessages(OutputFormat.STREAM_JSON).filter(
+          (message) => message.type === 'result',
+        ),
+      ).toEqual([
+        expect.objectContaining({ is_error: true }),
+        expect.objectContaining({ is_error: false, result: 'Second response' }),
+      ]);
+    });
+  });
 
   it.each([false, true])(
     'scopes review lease cleanup to the ordinary runtime (sandbox=%s)',

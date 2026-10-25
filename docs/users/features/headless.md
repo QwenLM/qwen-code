@@ -325,6 +325,26 @@ establish compatibility with a provider's context limit.
 
 Headless / CI runs combined with `--yolo` (or `--approval-mode=yolo`) auto-approve every tool call, including `shell`, `write`, and `edit`. **`--yolo` does not enable a sandbox** — those tools run at the host process's privilege level. When Qwen Code detects this combination with no sandbox configured, it prints a one-line warning to stderr at startup. Suppress the warning with `QWEN_CODE_SUPPRESS_YOLO_WARNING=1` once you've reviewed the trade-off.
 
+### Output-token truncation
+
+A one-shot run exits with code `1` when the final model response explicitly
+reports `MAX_TOKENS` with no pending tool calls, after any applicable automatic
+recovery. This also applies when you set an explicit output-token cap, and when
+the final response to a queued background notification is truncated after the
+main answer has completed.
+
+For this failure, text mode writes `Response truncated due to token limits.` to
+stderr and does not flush buffered response text to stdout. JSON modes retain
+the assistant content already produced and emit an `error_during_execution`
+result with `is_error: true`. Any final assistant message emitted for the
+truncated response carries `stop_reason: "max_tokens"`. Reusable stream-json
+sessions report the failed turn and remain available for subsequent messages.
+
+This check requires an explicit final `MAX_TOKENS` finish reason. It does not
+detect truncation when core reports `STOP` or omits the finish reason, including
+when core replaces a recovery failure with `STOP`. A complete answer that needed
+no tool call still exits `0`.
+
 ### Run-level budgets
 
 Qwen Code can abort an unattended run when it crosses one of the following thresholds. Each is `-1` (unlimited) by default; setting any one is enough to bound runaway behavior. They are enforced cooperatively against the same `AbortController` that already carries SIGINT, so a budget abort emits a structured `FatalBudgetExceededError` (exit code **55**) — distinct from the turn-cap exit code 53 and SIGINT's 130 so CI scripts can branch on the reason.

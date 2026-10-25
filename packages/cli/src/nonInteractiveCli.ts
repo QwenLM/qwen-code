@@ -98,6 +98,7 @@ import {
   buildGoalContinuationParts,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
+import { FinishReason } from '@google/genai';
 import type { CLIUserMessage, PermissionMode } from './nonInteractive/types.js';
 import type { JsonOutputAdapterInterface } from './nonInteractive/io/BaseJsonOutputAdapter.js';
 import { JsonOutputAdapter } from './nonInteractive/io/JsonOutputAdapter.js';
@@ -129,6 +130,13 @@ export class TurnInterruptedError extends Error {
   constructor() {
     super('Operation cancelled.');
     this.name = 'TurnInterruptedError';
+  }
+}
+
+class OutputTruncatedError extends Error {
+  constructor() {
+    super('Response truncated due to token limits.');
+    this.name = 'OutputTruncatedError';
   }
 }
 
@@ -2904,6 +2912,7 @@ export async function runNonInteractive(
             : {}),
         };
         let shouldFinalizeTurn: boolean;
+        let outputTruncated = false;
         if (sharedAgentLoop) {
           const result = await runOnSharedLoop(
             {
@@ -2936,6 +2945,9 @@ export async function runNonInteractive(
               tracksPreview: true,
             },
           );
+          outputTruncated =
+            result.reason === 'completed' &&
+            result.turn?.finishReason === FinishReason.MAX_TOKENS;
           switch (result.reason) {
             case 'surface_ended':
               return emitStructuredSuccess();
@@ -2994,6 +3006,7 @@ export async function runNonInteractive(
           }
         } else {
           const toolCallRequests: ToolCallRequestInfo[] = [];
+          let finishReason: FinishReason | undefined;
           const attemptPreviewLength = plainTextPreview.length;
           const apiStartTime = Date.now();
           const responseStream = llmClient.sendMessageStream(
@@ -3009,6 +3022,15 @@ export async function runNonInteractive(
           adapter.startAssistantMessage();
 
           for await (const event of responseStream) {
+            // Match core's Turn: a replacement attempt clears the prior reason.
+            if (event.type === LlmEventType.Finished) {
+              finishReason = event.value.reason;
+            } else if (
+              event.type === LlmEventType.Retry ||
+              event.type === LlmEventType.ModelFallback
+            ) {
+              finishReason = undefined;
+            }
             captureActiveInteractionOwner();
             if (abortController.signal.aborted) {
               // Pair the startAssistantMessage() above so stream-json mode
@@ -3078,6 +3100,8 @@ export async function runNonInteractive(
           }
 
           shouldFinalizeTurn = toolCallRequests.length === 0;
+          outputTruncated =
+            shouldFinalizeTurn && finishReason === FinishReason.MAX_TOKENS;
           if (toolCallRequests.length > 0) {
             // Dispatch the per-turn tool-call batch through the shared
             // helper (see processToolCallBatch above). The helper handles
@@ -3271,6 +3295,11 @@ export async function runNonInteractive(
             continue;
           }
 
+          // Goal and teammate continuations may still complete a truncated round.
+          if (outputTruncated) {
+            throw new OutputTruncatedError();
+          }
+
           // Drain-turns count toward getMaxSessionTurns() for symmetry with the main
           // loop — otherwise a looping cron or a model that keeps replying to
           // notifications could exceed the cap silently in headless runs.
@@ -3360,6 +3389,12 @@ export async function runNonInteractive(
                   tracksPreview: false,
                 },
               );
+              if (
+                result.reason === 'completed' &&
+                result.turn?.finishReason === FinishReason.MAX_TOKENS
+              ) {
+                throw new OutputTruncatedError();
+              }
               if (result.reason === 'duplicate_provider_call') {
                 loopDetectedMessage = emitLoopDetectedMessage(
                   config,
@@ -3400,8 +3435,17 @@ export async function runNonInteractive(
               itemIsFirstTurn = false;
 
               adapter.startAssistantMessage();
+              let finishReason: FinishReason | undefined;
 
               for await (const event of itemStream) {
+                if (event.type === LlmEventType.Finished) {
+                  finishReason = event.value.reason;
+                } else if (
+                  event.type === LlmEventType.Retry ||
+                  event.type === LlmEventType.ModelFallback
+                ) {
+                  finishReason = undefined;
+                }
                 captureActiveInteractionOwner();
                 if (abortController.signal.aborted) {
                   // Pair the startAssistantMessage() above so stream-json
@@ -3464,6 +3508,13 @@ export async function runNonInteractive(
 
               if (loopDetected) {
                 return;
+              }
+
+              if (
+                finishReason === FinishReason.MAX_TOKENS &&
+                itemToolCallRequests.length === 0
+              ) {
+                throw new OutputTruncatedError();
               }
 
               if (itemToolCallRequests.length > 0) {
@@ -3532,11 +3583,10 @@ export async function runNonInteractive(
                 if (structuredSubmission !== undefined) return;
                 await drainBatch();
               }
-            })();
-            drainPromise = p;
-            void p.finally(() => {
+            })().finally(() => {
               if (drainPromise === p) drainPromise = null;
             });
+            drainPromise = p;
             return p;
           };
 
@@ -3810,6 +3860,10 @@ export async function runNonInteractive(
         // Expected when no message was started or already finalized
       }
 
+      if (error instanceof OutputTruncatedError && ownsAdapter) {
+        // Pair task_started before this invocation removes its callbacks.
+        config.getBackgroundTaskRegistry().abortAll();
+      }
       flushQueuedNotificationsToSdk(localQueue);
       finalizeOneShotMonitors();
 
@@ -3887,6 +3941,10 @@ export async function runNonInteractive(
       }
       if (recoverableCancellation) {
         return 130;
+      }
+      if (error instanceof OutputTruncatedError) {
+        // Reusable stream-json sessions own process-wide cleanup and exit.
+        return 1;
       }
       await handleError(error, config);
     } finally {

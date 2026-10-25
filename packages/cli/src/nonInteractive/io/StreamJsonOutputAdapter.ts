@@ -100,6 +100,7 @@ export class StreamJsonOutputAdapter
     discardedToolCalls: ToolCallRequestInfo[],
   ): void {
     if (preserveText && discardedToolCalls.length === 0) {
+      super.restartAttempt(preserveText, discardedToolCalls);
       return;
     }
     // Stream frames cannot be retracted. Close the abandoned assistant first,
