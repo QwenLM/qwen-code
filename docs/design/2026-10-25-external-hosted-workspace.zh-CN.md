@@ -87,16 +87,17 @@
 
 ## 6. Worker 准入：容器内 boot‑v2（CLI 变更）
 
-今天容器模式会拒绝 boot‑v2。本阶段在 CLI 增加 `ManagedRuntimeWorkerBoot` v2 的容器准入，并配置**存储侧的偏执校验**：
+今天容器模式会拒绝 boot‑v2。本阶段在 CLI 增加 `managed-runtime-boot/2` 的容器准入（一份新的闭合文档，不是既有 boot‑v2 键集的扩展），并配置**存储侧的偏执校验**：
 
-- boot 文档只新增一个 **provider 中立**的存储成员 `storage: {kind: "external", storageRef, mountNonce, aliasPath, mountRoot}`，不含任何 provider 侧分配的字段：`storageRef` 是注册 `ExternalStorageIdentity` 的 canonical‑JSON sha256（沿用 §3 摘要规则），`mountNonce` 是控制面下发的不透明值——闭合的 boot 文档里既没有 `physicalKey` 也没有 provider ID，阶段一"不要把 provider 专属字段塞进闭合 boot 文档"的规则因此成立。revision 漂移已经包含在 `storageRef` 里，重新注册只会改变 worker 唯一能看到的那一个存储标识。
+- 本阶段引入一份**新的闭合 boot 文档** `managed-runtime-boot/2`，而不是往既有的 `ManagedContextBoot` boot‑v2 键集里加字段。那份文档由精确键列表校验解析（`readClosed` 会拒绝排序后键列表不等于预期十六项的文档），往里加成员会让所有已发布的 boot‑v2 文档、以及包着它们的 CSI v3–v6 信封全部解析失败。新文档有自己的版本号和自己的闭合键列表，既有 boot‑v2 解析完全不变 —— 这才是"对已发布 worker 惰性"的含义。
+- 新文档携带一个 **provider 中立**的存储成员 `externalStorage: {kind: "external", storageRef, mountNonce, aliasPath, mountRoot}`，其中 `aliasPath` 与 `mountRoot` 是这个对象内部的成员，不是新文档的第二个顶层 mount 根。成员名为 `externalStorage` 而非 `storage`：已发布的 `ManagedCsiBoot.storage` 已经承载 `physicalKey`、`registrationRevision`、`driver` 等 provider 专属字段，同名会让同一个信封家族里出现两套不兼容的定义。`storageRef` 是注册 `ExternalStorageIdentity` 的 canonical‑JSON sha256（沿用 §3 摘要规则），`mountNonce` 是控制面下发的不透明值 —— 因此**本文件**既不出现 `physicalKey` 也不出现 provider ID，阶段一"不要把 provider 专属字段塞进闭合 boot 文档"的规则对它成立；CSI 文档自带的 provider 字段不受影响。revision 漂移已包含在 `storageRef` 里，重新注册只会改变 worker 唯一能看到的那一个存储标识。
 - 绑定证明（不变式：绝不挂载与被 Broker 绑定的那份存储不同的存储树），worker 必须在对外服务前逐项通过：
   1. 路径属性：绝对、规范化、落在允许的根之下、`0700`、属主可写。
-  2. 由控制面落地而非由 worker 创建：存储树落地时由控制面创建 mount 根并写入 `<mountRoot>/.qwen-storage-binding.json`（`0600`，属主为 worker uid，组/其他不可写）。worker 永不创建 mount 根，原先"已存在或能被它创建"的捷径因此被替换：目录不存在或是空目录一律拒绝，不做补齐。
+  2. 由控制面落地而非由 worker 创建：控制面创建 mount 根，并把绑定 marker 写到**containment 根之外的、仅控制面可写的兄弟路径** `<aliasPath>/../.qwen-storage/<alias>.json`（`0600`，属主为 worker uid，组/其他不可写），绝不放在 session 的文件工具与 shell 能够触达的树里。§5 的 containment 以 mount 根为界，因此该 marker 无法被 `write_file`/`edit`/`run_shell_command` 写入或删除：租户负载拥有的是那棵树，不是它的父目录。worker 永不创建 mount 根，原先"已存在或能被它创建"的捷径因此被替换：目录不存在或是空目录一律拒绝，不做补齐。
   3. marker 比对：marker 里的 `storageRef` 与 `mountNonce` 必须等于 boot 断言，而该断言随既有的闭合、带 token 签名信封下发。旧 boot 文档被重放到后来重新落地的存储树时，会在新签发的 `mountNonce` 上失败；别人的目录或空目录则根本拿不出 marker。
   4. 回执：worker 记录 mount 根的 device 与 inode，随 publication 端点一起回传 `{storageRef, mountNonce, mountRoot, rootDevice, rootInode}`。这组坐标只是佐证；marker 才是绑定证明。
-  5. 无兜底：任何一项失败都在 publication 服务启动之前、任何工具调用被服务之前闭合拒绝，绝不退化成落本地目录，也绝不退化成未落地的 alias 路径。
-- Broker 在报 `READY` 或允许写入前，会从注册记录里重读 `storageRef`/`mountNonce`（nonce 是控制面落地存储树时签发的），与 boot 回执及 `storage:observe` 两处对齐；回执里的 `rootDevice`/`rootInode` 随绑定一起落库，供之后的重新 attest 或 `storage:observe` 证明仍是同一次落地。不一致是需要操作方重新注册的硬冲突，绝不换一个根重试，也绝不替换 worker。
+  5. 无兜底：任何一项失败都在 publication 服务启动之前、任何工具调用被服务之前闭合拒绝，绝不退化成落本地目录，也绝不退化成未落地的 alias 路径。若是**轮换后**的 worker 上 marker 缺失或对不上，本次 boot 直接拒绝并要求控制面重新落地 marker；这既不是下面那种需要操作方介入的重新注册冲突，也不会把 alias 永久锁死。
+- Broker 在报 `READY` 或允许写入前，会从注册记录里重读 `storageRef`/`mountNonce`（nonce 是控制面落地存储树时签发的），与 boot 回执及 `storage:observe` 两处对齐；回执里的 `rootDevice`/`rootInode` 随绑定一起落库，供之后的重新 attest 或 `storage:observe` 证明仍是同一次落地。与**注册记录**不一致时需要操作方重新注册，属硬冲突，绝不换一个根重试，也绝不替换 worker；轮换后仅 marker 不一致的情况走上面的重新落地路径。
 - Worker 同时跑 **publication 服务**（`/internal/managed-runtime/v2/publication:*`，见§7）并把这个面写进就绪回执；`observe` 在向 Broker 报 `READY` 前会先打 publication 就绪 probe。
 - `isolationClass: session` 已锁定一台 worker 一个 session；任何一个新 alias 都只会在这台 worker 上激活存储 context。
 
@@ -132,26 +133,26 @@ worker 是闭合 boot 路径里的可信代码：这些校验用来拒绝缺失�
 
 1. 完全复现已实测过的机制：durable create‑only journal、writer lock、boot 上传、run‑up 等待、无 mode 上传、单次 launch、request‑ID 去重、attest probe。阶段一的 provision/observe 语义一字不改。
 2. `storage:provision` / `storage:observe` 实现：第一版要求**操作方预注册 physical key**（申请即建存储池只留到第二阶段后期）。
-3. 启动 worker 时使用 boot‑v2 的说明书；在向 Broker 报 `READY` 前先做一次 publication ingress probe。
+3. 启动 worker 时使用 `managed-runtime-boot/2` 文档；在向 Broker 报 `READY` 前先做一次 publication ingress probe。
 4. TTL 处理扩增：adapter 的 observe 顺带返回 `remaining_seconds`；central 在 sandbox 到期之前先做一次 stopDrained，用来做证据整理和归属闸门判断。
 
 这些 API 不需要上游感知 Aone 的任何元数据；认证/令牌/线上形状与阶段一一致。
 
 ## 10. 验证矩阵
 
-| 层面                 | 必备证据                                                                                                      | 证明路径                          |
-| -------------------- | ------------------------------------------------------------------------------------------------------------- | --------------------------------- |
-| 存储注册单元         | alias/tenant/revision 冲突注册被拒绝；预 commit 落库；续注册保持身份                                          | 新增 guard/store/resolver 单测    |
-| worker 准入单元      | boot‑v2 合法接受；marker/绑定不匹配被拒绝；mount root containment                                             | CLI container 单测                |
-| publication/capture  | begin/read/receipt 语义；字节上限；过期 lease 拒绝                                                            | worker 单测                       |
-| stopDrained          | drained/undrained/unknown 与 close gating                                                                     | worker+Broker IT                  |
-| Broker + 真实 worker | Aone 上全流程：注册 → 摆放 → attest → write/read/edit/shell 前台 → drain 后 close                             | 扩充阶段一的 full-tier fault 套件 |
-| 公开 Hosted E2E      | Session 工作流中模型可见工具；approval 卡片可据捕获输入重建；restartBroker + restartAdapter 保持 storage 谱系 | 完整 Public Hosted 验收           |
+| 层面                 | 必备证据                                                                                                                                                  | 证明路径                          |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------- |
+| 存储注册单元         | alias/tenant/revision 冲突注册被拒绝；预 commit 落库；续注册保持身份                                                                                      | 新增 guard/store/resolver 单测    |
+| worker 准入单元      | `managed-runtime-boot/2` 被接受，且已发布 boot‑v2 文档仍能解析；containment 根之外的 marker 无法通过工具调用写入或删除；marker 缺失、伪造或对不上均被拒绝 | CLI container 单测                |
+| publication/capture  | begin/read/receipt 语义；字节上限；过期 lease 拒绝                                                                                                        | worker 单测                       |
+| stopDrained          | drained/undrained/unknown 与 close gating                                                                                                                 | worker+Broker IT                  |
+| Broker + 真实 worker | Aone 上全流程：注册 → 摆放 → attest → write/read/edit/shell 前台 → drain 后 close                                                                         | 扩充阶段一的 full-tier fault 套件 |
+| 公开 Hosted E2E      | Session 工作流中模型可见工具；approval 卡片可据捕获输入重建；restartBroker + restartAdapter 保持 storage 谱系                                             | 完整 Public Hosted 验收           |
 
 ## 11. 提议推进顺序
 
 1. guard/store/resolver 扩展和注册 REST（仅引入兼容 API，默认不接线启用）。
-2. CLI boot‑v2 容器准入和 publication 服务（没有消费者，默认无效）。
+2. CLI `managed-runtime-boot/2` 容器准入与 publication 服务（暂无消费者，且既有 boot‑v2 解析不变 —— 在此意义上惰性）。
 3. provisioner 档案 `external-workspace` 和 `storage:*` 端点（灰色开启，部署方显式勾选）。
 4. stopDrained + close gating；之后用显式开关才启用 Hosted 工具列表。
 5. full-tier 公共 Hosted E2E；此时才在文档里写"该档案可生产**文件/命令**功能"。
