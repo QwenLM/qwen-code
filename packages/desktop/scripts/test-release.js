@@ -1493,10 +1493,13 @@ function testUpdaterMirrorConfiguration() {
   // The runtime must be stopped before the Windows installer is spawned, and
   // the plugin's default cleanup hook must survive: on_before_exit replaces
   // rather than appends, so dropping either half re-opens #15276 or skips
-  // Tauri's cleanup. Nothing else pins this closure.
+  // Tauri's cleanup. Match inside the function body so relocating the hook or
+  // commenting out a call cannot keep the gate green.
+  const checkForUpdate =
+    main.match(/async fn check_for_update[\s\S]*?\n\}\n/)?.[0] ?? '';
   assert.match(
-    main,
-    /async fn check_for_update[\s\S]*?\.on_before_exit\(move \|\| \{[\s\S]*?stop_runtime\(&exit_handle\);[\s\S]*?exit_handle\.cleanup_before_exit\(\);[\s\S]*?\}\)/,
+    checkForUpdate,
+    /\.on_before_exit\(move \|\| \{\s*stop_runtime\(&exit_handle\);\s*exit_handle\.cleanup_before_exit\(\);\s*\}\)/,
     'check_for_update must stop the bundled runtime and keep the default cleanup hook before the installer exits the app.',
   );
   assert.match(main, /"QWEN_DESKTOP_DISABLE_UPDATES"/);
