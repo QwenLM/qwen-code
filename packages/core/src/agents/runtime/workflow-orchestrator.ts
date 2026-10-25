@@ -93,6 +93,7 @@ import { toModelVisibleSubagentResult } from '../subagent-result.js';
 import { SUBAGENT_PLAN_LIFECYCLE_TOOLS } from './subagent-plan-tool-policy.js';
 import {
   backgroundFixAt,
+  backgroundFixHolding,
   settleBackgroundFix,
 } from '../../tools/autofix-pr-grants.js';
 import { getCurrentAgentId, runWithAgentContext } from './agent-context.js';
@@ -1393,6 +1394,16 @@ async function runOverridePath(
       'agent({workingDir, isolation}): incompatible options. workingDir ' +
         'pins the agent to a worktree you already own; isolation creates ' +
         'a fresh one and removes it afterwards. Pass one.',
+    );
+  }
+  // In the session's own directory, after a `/cd` into the worktree of a
+  // background fix of /autofix-pr: beside it.
+  if (
+    opts.workingDir === undefined &&
+    backgroundFixHolding(config.getTargetDir(), getCurrentAgentId())
+  ) {
+    throw new Error(
+      `agent(): a background fix agent of /autofix-pr is working in ${config.getTargetDir()}; its round goes on when it ends.`,
     );
   }
   if (opts.isolation === 'worktree') {

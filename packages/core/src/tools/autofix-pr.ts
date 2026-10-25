@@ -1080,23 +1080,12 @@ class AutofixPrInvocation extends BaseToolInvocation<
     if (this.params.pr !== undefined && this.params.command !== 'status') {
       await settleBackgroundFix({ pr: this.params.pr });
     }
-    const found =
+    // By the PR: the session's directory may be a linked worktree of the
+    // clone, whose helpers keep the watch beside its main one.
+    const fix =
       this.params.pr === undefined || this.params.command === 'status'
         ? undefined
         : backgroundFixOf(sessionId, this.params.pr);
-    // This clone's — the one holding its worktree, whatever `/cd` within
-    // it — not a PR of that number in another clone.
-    const clone = found
-      ? path.dirname(path.dirname(path.dirname(found.worktree)))
-      : '';
-    const within = path.relative(
-      clone,
-      canonicalWorktreePath(this.config.getTargetDir()),
-    );
-    const fix =
-      found && !within.startsWith('..') && !path.isAbsolute(within)
-        ? found
-        : undefined;
     if (this.params.command === 'fix-end') return this.claim(fix, signal);
     if (fix && this.params.command === 'cleanup') {
       const refused = await this.stopFix(fix, signal);

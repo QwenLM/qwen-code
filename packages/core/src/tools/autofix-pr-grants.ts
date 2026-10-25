@@ -21,8 +21,10 @@ import {
   constants,
   fstatSync,
   futimesSync,
+  lstatSync,
   openSync,
   readFileSync,
+  readlinkSync,
   realpathSync,
 } from 'node:fs';
 import path from 'node:path';
@@ -520,15 +522,61 @@ export function backgroundFixAt(worktree: string): BackgroundFix | undefined {
   return live(fixes.get(canonicalWorktreePath(worktree)));
 }
 
-/** A path's real form, through its nearest ancestor that exists. */
+/**
+ * A path as the kernel resolves it: segment by segment, each link followed
+ * (a dangling one too) before a `..` after it applies, the missing tail
+ * kept as written.
+ */
 function canonicalPathOf(file: string): string {
-  const absolute = path.resolve(file);
+  // Not `path.resolve`: it drops `link/..` as text, where the kernel goes
+  // through the link first.
+  const absolute = path.isAbsolute(file)
+    ? file
+    : `${process.cwd()}${path.sep}${file}`;
+  const { root } = path.parse(absolute);
+  const pending = absolute
+    .slice(root.length)
+    .split(/[\\/]+/)
+    .filter(Boolean);
+  let current = root;
+  for (let hops = 0; pending.length > 0; ) {
+    const segment = pending.shift()!;
+    if (segment === '.') continue;
+    if (segment === '..') {
+      current = path.dirname(current);
+      continue;
+    }
+    const next = path.join(current, segment);
+    let target: string | null = null;
+    try {
+      if (lstatSync(next).isSymbolicLink() && hops++ < 40) {
+        target = readlinkSync(next);
+      }
+    } catch {
+      // Missing: kept as written.
+    }
+    if (target === null) {
+      current = next;
+      continue;
+    }
+    // The link's target, then what came after it.
+    const resolved = path.resolve(current, target);
+    const { root: linkRoot } = path.parse(resolved);
+    pending.unshift(
+      ...resolved
+        .slice(linkRoot.length)
+        .split(/[\\/]+/)
+        .filter(Boolean),
+    );
+    current = linkRoot;
+  }
+  // In the file system's own case, through the deepest part that exists.
   const rest: string[] = [];
-  for (let dir = absolute; ; dir = path.dirname(dir)) {
+  for (let dir = current; ; dir = path.dirname(dir)) {
     try {
       return path.join(realpathSync.native(dir), ...rest.reverse());
     } catch {
-      if (path.dirname(dir) === dir) return absolute;
+      if (path.dirname(dir) === dir) return current;
       rest.push(path.basename(dir));
     }
   }
@@ -546,9 +594,15 @@ export function backgroundFixHolding(
   const target = canonicalPathOf(file);
   for (const fix of fixes.values()) {
     const rel = path.relative(fix.worktree, target);
+    // `..foo` is a name inside it, not its parent.
     const inside =
-      rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
-    if (inside && fix.agentId !== callerAgentId) return live(fix);
+      rel === '' ||
+      (rel !== '..' &&
+        !rel.startsWith(`..${path.sep}`) &&
+        !path.isAbsolute(rel));
+    // Before the agent attaches, it has no id: no caller is it.
+    const caller = fix.agentId === null || fix.agentId !== callerAgentId;
+    if (inside && caller) return live(fix);
   }
   return undefined;
 }

@@ -2841,6 +2841,30 @@ describe('AgentTool', () => {
         );
 
         itInRepo(
+          "refuses an agent in the session's own directory inside a running fix's worktree",
+          async (repo) => {
+            const wt = addWorktree(repo);
+            vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+            grant(wt, true);
+            vi.mocked(mockAgent.getCore).mockReturnValue(
+              emitterCore() as never,
+            );
+            Object.assign(mockAgent, messagingHooks());
+            expect(await llm(bgFix(wt))).toContain('Background agent launched');
+            // A `/cd` into the worktree: the next agent would work beside it.
+            vi.mocked(config.getTargetDir).mockReturnValue(wt);
+            for (const params of [fg(), fg({ isolation: 'worktree' })]) {
+              expect(textOf(await run(params))).toMatch(
+                /a background fix agent of \/autofix-pr is working/,
+              );
+            }
+            expect(
+              mockSubagentManager.createAgentHeadless,
+            ).toHaveBeenCalledOnce();
+          },
+        );
+
+        itInRepo(
           'refuses rather than run in the background when the grant no longer holds',
           async (repo) => {
             const wt = addWorktree(repo);

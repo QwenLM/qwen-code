@@ -3417,7 +3417,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // worktree of a background fix, would work beside it too.
       if (
         this.params.working_dir === undefined &&
-        this.params.isolation !== 'worktree' &&
         backgroundFixHolding(this.config.getTargetDir(), getCurrentAgentId())
       ) {
         return failWorktreeProvisioning(
@@ -5335,6 +5334,17 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
     try {
       let cwd = this.config.getCwd();
+      // In the session's own directory, after a `/cd` into the worktree of a
+      // background fix: beside it.
+      if (
+        !this.params.working_dir &&
+        backgroundFixHolding(cwd, getCurrentAgentId())
+      ) {
+        return this.buildSpawnBlockedResult(
+          `Error: a background fix agent of /autofix-pr is working in ${cwd}; its round goes on when it ends.`,
+          'Worktree in use by a background fix',
+        );
+      }
       if (this.params.working_dir) {
         const resolved = await resolveExternalWorktreeDir(
           this.config,

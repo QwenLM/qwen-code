@@ -461,10 +461,9 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
    */
   requiresUserInteraction(): boolean {
     return (
-      backgroundFixHolding(
-        path.resolve(this.params.file_path),
-        getCurrentAgentId(),
-      ) !== undefined
+      // As written: resolved as the kernel will.
+      backgroundFixHolding(this.params.file_path, getCurrentAgentId()) !==
+      undefined
     );
   }
 

@@ -24,6 +24,7 @@ import {
   type AutofixPrParams,
 } from './autofix-pr.js';
 import {
+  backgroundFixHolding,
   backgroundFixOf,
   canonicalWorktreePath,
   confirmedWatch,
@@ -1507,6 +1508,40 @@ describe('background fixes', () => {
     fix.attach('agent-1', () => cancel('agent-1'));
     expect(cancel).toHaveBeenCalledWith('agent-1');
     expect(fix.followUp()).toBeUndefined();
+  });
+
+  it("finds a path in a running fix's worktree as the kernel resolves it, for anyone but its agent", async () => {
+    await granted();
+    const fix = await openBackgroundFix('session-a', worktree, signal());
+    // Before its agent attaches, no caller is it.
+    expect(backgroundFixHolding(path.join(worktree, 'a.ts'), null)).toBe(fix);
+    fix.attach('agent-1', () => cancel('agent-1'));
+    const held = (p: string, caller: string | null = null) =>
+      backgroundFixHolding(p, caller) === fix;
+    expect(held(worktree)).toBe(true);
+    expect(held(path.join(worktree, 'src', 'new', 'a.ts'))).toBe(true);
+    expect(held(path.join(worktree, '..foo', 'x'))).toBe(true);
+    expect(held(path.join(worktree, 'a.ts'), 'agent-1')).toBe(false);
+    expect(
+      held(path.join(path.dirname(worktree), 'autofix-pr-12-plan.json')),
+    ).toBe(false);
+    expect(held(path.join(worktree, '..', 'autofix-pr-1'))).toBe(false);
+    // Through a link, and a `..` after it, as the kernel goes.
+    const out = fs.mkdtempSync(path.join(os.tmpdir(), 'autofix-out-'));
+    try {
+      fs.mkdirSync(path.join(worktree, 'src'), { recursive: true });
+      fs.symlinkSync(path.join(worktree, 'src'), path.join(out, 'link'));
+      expect(held(path.join(out, 'link', 'a.ts'))).toBe(true);
+      expect(
+        held(`${path.join(out, 'link')}${path.sep}..${path.sep}package.json`),
+      ).toBe(true);
+      // A link to a file not made yet.
+      fs.symlinkSync(path.join(worktree, 'new.sh'), path.join(out, 'dangling'));
+      expect(held(path.join(out, 'dangling'))).toBe(true);
+      expect(held(path.join(out, 'other.ts'))).toBe(false);
+    } finally {
+      fs.rmSync(out, { recursive: true, force: true });
+    }
   });
 
   it('says in status which watches run their fixes unattended', async () => {
