@@ -185,8 +185,20 @@ describe('bundled autofix-pr skill', () => {
       "They were printed before the round, so nothing the round's fix agent did can change them.",
     );
     expect(body).toContain(
-      "create the task with `cron_create` from step 6's `cron`, `recurring`, `gate` and `prompt`, exactly as printed",
+      "create the task with `cron_create` from step 6's `cron`, `recurring`, `gate` and `prompt`",
     );
+    // A daemon session reclaims an idle one, which would stop a session-only
+    // watch with no report: the task it prints is durable and bound there.
+    expect(body).toContain(
+      'prints `durable: true` with `sessionMode: "current"`',
+    );
+    // A daemon conversation binds one task, so a second watch says so.
+    expect(body).toContain('`session_already_bound`');
+    // A durable task of another session is project-visible: a bare stop must
+    // leave it, and resume must warn about it, before anything is deleted.
+    expect(body).toContain('A task whose watch another session still runs');
+    expect(body).toContain('delete no task of that PR');
+    expect(body).toContain("whose gate names the watch's session");
   });
 
   it("forbids the fix agent's brief every write to GitHub, which only the main session makes", () => {
