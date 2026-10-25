@@ -4659,7 +4659,7 @@ In the workflow `env:` block.
 The workflow file has a hard 470 KB start-runs gate, so the long-form commentary on the constants below lives here verbatim. Each entry names the constant it documents; the workflow keeps a one-line summary plus a pointer.
 
 ```text
-# The review bot's thread lifecycle replies
+# FIXED_RULING_FILTER — The review bot's thread lifecycle replies
   # The review bot's thread lifecycle replies `R<id> fixed by <what>` into a
   # thread — a NOTE, never a finding: it carries its own marker
   # (FIXED_RULING_MARKER in lib/review-footer.ts) at the end of its first
@@ -4682,7 +4682,7 @@ The workflow file has a hard 470 KB start-runs gate, so the long-form commentary
   # shell value, to "neither backslash nor n" and let a `by` clause with an
   # `n` in it count (#9940 review, round 29).
 
-# Checks the "wait for checks to settle" gate does NOT wait for.
+# NON_BLOCKING_CHECKS — Checks the "wait for checks to settle" gate does NOT wait for.
   # Checks the "wait for checks to settle" gate does NOT wait for. The gate
   # exists so a FAILED check can be read as feedback, which is why build/test/
   # lint are still waited for. `review-pr` is the LLM code review: its output
@@ -4693,7 +4693,7 @@ The workflow file has a hard 470 KB start-runs gate, so the long-form commentary
   # invisible to the scan even when it already had unaddressed feedback.
   # Names must match job ids in qwen-code-pr-review.yml; a test pins that.
 
-# Hard cap on automated review-address rounds per PR.
+# MAX_ROUNDS — Hard cap on automated review-address rounds per PR.
   # Hard cap on automated review-address rounds per PR. After this the bot stops
   # and leaves the PR for a human. Raised from 5: across the last 40 bot PRs
   # only 3 ever reached the cap and all 3 merged AT it (one having spent two of
@@ -4702,16 +4702,16 @@ The workflow file has a hard 470 KB start-runs gate, so the long-form commentary
   # exists to stop an unproductive LOOP, not to ration ordinary iteration —
   # a genuinely stuck PR still stops, just later.
 
-# Comment-command sugar over TAKEOVER_LABEL
+# TAKEOVER_COMMAND — Comment-command sugar over TAKEOVER_LABEL
   # Comment-command sugar over TAKEOVER_LABEL ('<cmd>' applies it, '<cmd>
   # stop' removes it). Matched EXACTLY against the trimmed comment body —
-  # with ONE parameterized form, '<cmd> from N', which applies the label and
-  # additionally seeds this window's round counter at N (see
-  # CRITICAL_ONLY_AFTER_ROUND). The literal prefix still has to match this
-  # constant byte-for-byte; only a bounded 1-2 digit integer is read out of
-  # the body, and it reaches nothing but an integer comparison.
+  # with TWO parameterized forms: '<cmd> from N' seeds this window's round
+  # counter at N (af-002), and '<cmd> for N' records a round budget which the
+  # scan reads back as a ceiling (af-159). The literal prefix still has to
+  # match this constant byte-for-byte; only a bounded 1-2 digit integer is
+  # read out of the body.
 
-# Round cap while TAKEOVER_LABEL is present.
+# TAKEOVER_MAX_ROUNDS — Round cap while TAKEOVER_LABEL is present.
   # Round cap while TAKEOVER_LABEL is present. Large managed PRs routinely
   # need dozens of feedback rounds — that is the point of takeover — so the
   # unattended cap (MAX_ROUNDS) would strangle it. The circuit breaker stays
@@ -4719,21 +4719,21 @@ The workflow file has a hard 470 KB start-runs gate, so the long-form commentary
   # explicitly delegated work; removing the label restores the strict cap,
   # and re-engaging opens a fresh counting window (see REARM_KEY below).
 
-# Re-arm sugar. Recovering a stranded PR
+# RETRY_COMMAND — Re-arm sugar. Recovering a stranded PR
   # Re-arm sugar. Recovering a stranded PR previously meant DELETING the
   # bot's autofix-eval marker comment by hand (undiscoverable, destructive,
   # and it erases the audit trail). This command instead posts an
   # 'autofix-rearm' marker that supersedes the earlier evaluation markers:
   # the scan re-reads the feedback from scratch and the round counter resets.
 
-# Escalation label: applied when the loop STOPS
+# NEEDS_HUMAN_LABEL — Escalation label: applied when the loop STOPS
   # Escalation label: applied when the loop STOPS on a PR (round cap,
   # consecutive-failure or time-budget breaker) and a human must act —
   # re-arm, split, merge, or close. It makes paused PRs filterable and lets
   # the fleet shepherd age out unanswered stops. Removed wherever management
   # resumes (engage/re-arm) or a human releases the PR.
 
-# Maintainer-facing engagement labels
+# TAKEOVER_LABEL / SKIP_LABEL — Maintainer-facing engagement labels
   # Maintainer-facing engagement labels (applying labels requires GitHub
   # triage+, so the permission gate is GitHub's own): TAKEOVER opts a PR —
   # including a human-authored one — into the loop; SKIP opts any PR out
