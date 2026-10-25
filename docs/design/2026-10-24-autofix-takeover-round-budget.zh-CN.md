@@ -62,7 +62,8 @@
 
 ## 影响文件
 
-- `.github/workflows/qwen-autofix.yml` —— 解析器、route 输出接线、engage / re-arm ack 标记、scan 的预算读取与上限覆盖、cap 分支的释放。
+- `.github/workflows/qwen-autofix.yml` —— 解析器、route 输出接线、engage / re-arm ack 标记、scan 与 prepare 的预算读取、上限覆盖、cap 分支的释放。
+- `.github/scripts/autofix-push-and-report.sh` —— growth-audit 标记助手（自动 re-arm 的预算携带）与释放通知。
 - `.github/workflows/qwen-autofix-round-seed.md` —— 两种参数化形式的操作指南。
 - `.github/workflows/qwen-autofix.md` —— 设计依据记录。
 - `.github/workflows/.size-baseline` —— 体积棘轮条目。
@@ -81,6 +82,8 @@ workflow 文件紧贴 GitHub 的 470,000 字节启动门禁，因此本次改动
 - 在 prepare 之前就被取消的运行不会写标记，那一轮因此免费。误差方向是"释放延后"，从不提前；替代方案（在 always() 收尾里写专用计数器）为一个边界情况换来大得多的改动面。
 - "预算已用完"通知先于 DELETE 发布，并按窗口去重：DELETE 失败时，下一次扫描只重试 DELETE。
 - 预算低于 `CRITICAL_ONLY_AFTER_ROUND` 时，每一轮都保留 Suggestions 通道。这是有意的：预算要缩短的是托管时长，不是范围。
+- 预算只在 `autofix/takeover` 存在时读取，因此 `stop` 与手工摘标签都会结束它；没有这道门时，已耗尽的标记会活过标签，让 bot 创建的 PR 在每次扫描时被重新停在 N/N。
+- 释放通知先发、DELETE 后做：通知失败仍会释放 PR，而"下次扫描重试"的承诺在标签消失后无法兑现。
 - 预算寄存在 engage ack 上，ack 发不出去就等于丢了预算、退化成无上限托管。这不是新增的失败模式，而是 seed 标记本来就有暴露：命令 job 会重试一次并大声告警，扫描侧的补发 ack（仅在没有任何 ack 时发）不带预算，因此维护者看到的 ack 里不会有那句预算说明。要在别处持久化这个数字，就得为"标签本身已经可见"的情形再加一个写入方。
 
 ## 验证
