@@ -299,6 +299,30 @@ describe('Mod session band renders', () => {
     expect(runtime.render).toHaveBeenCalledOnce();
   });
 
+  it('leaves the queue to the hooks behind a render whose drawing throws', async () => {
+    const { session, runtime, host, order, renderHost } = setup();
+    runtime.hasToolHooks = true;
+    await session.initialize(new AbortController().signal);
+    runtime.render.mockRejectedValueOnce(new Error('Mod worker exited (1).'));
+    host.draw.mockImplementationOnce(() => {
+      throw new Error('listener failed');
+    });
+    session.setRenderInput(input());
+    await vi.advanceTimersByTimeAsync(100);
+    await session.toolCall(() => {})!(
+      { tool: 'write_file' },
+      async () => {
+        order.push('tool');
+        return { result: {} };
+      },
+      new AbortController().signal,
+    );
+    renderHost()!.invalidate('token-weather');
+    await vi.advanceTimersByTimeAsync(100);
+    expect(order).toEqual(['tool', 'render 80']);
+    expect(host.draw).toHaveBeenLastCalledWith(line('80'), 'token-weather');
+  });
+
   it('clears the band once its plugin is disabled', async () => {
     const { session, runtime, host, renderHost, extension } = setup();
     await session.initialize(new AbortController().signal);

@@ -96,9 +96,12 @@ const UNMAPPED_KEYS = new Set([
   'diffAddedWord',
   'diffRemovedWord',
 ]);
-// Ink calls any name chalk holds, so only its colors pass by name.
-const NAMED = new Set(
-  [
+// Ink calls any name chalk holds, so only its colors pass by name. chalk has
+// gray and grey but no bright form of either.
+const NAMED = new Set([
+  'gray',
+  'grey',
+  ...[
     'black',
     'red',
     'green',
@@ -107,10 +110,8 @@ const NAMED = new Set(
     'magenta',
     'cyan',
     'white',
-    'gray',
-    'grey',
   ].flatMap((name) => [name, `${name}Bright`]),
-);
+]);
 const CODED = [
   /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i,
   /^rgb\(\s?\d+,\s?\d+,\s?\d+\s?\)$/,

@@ -42,6 +42,7 @@ import type {
 } from '@qwen-code/qwen-code-core/mods/types.js';
 import { runOutsideAgentContext } from '@qwen-code/qwen-code-core/agents/runtime/agent-context.js';
 import type { ChatRecordingService } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
+import { stableJson } from '@qwen-code/qwen-code-core/services/execution-environment.js';
 import type { GenerateContentResponseUsageMetadata } from '@google/genai';
 import {
   LlmEventType,
@@ -597,8 +598,11 @@ export class ModSession implements ICommandLoader {
       return;
     }
     band.state = 'waiting';
-    const task = this.toolQueue.then(() => this.render());
-    this.toolQueue = task;
+    // A render that fails, even in drawing its fallback, leaves the queue to
+    // the hooks behind it.
+    this.toolQueue = this.toolQueue
+      .then(() => this.render())
+      .catch((error) => logger.debug(`Mod ui.render: ${String(error)}`));
   }
 
   private async render(): Promise<void> {
@@ -626,7 +630,6 @@ export class ModSession implements ICommandLoader {
       logger.debug(`Mod ui.render: ${String(error)}`);
       if (!this.closing) this.terminal?.draw?.(ENGINE_NODE, owner);
     } finally {
-      this.flushLogs();
       if (Date.now() - band.startedAt > RENDER_LIVE_MS)
         band.steadyUntil = Date.now() + RENDER_SLOW_MS;
       band.state = 'idle';
@@ -634,6 +637,7 @@ export class ModSession implements ICommandLoader {
         band.again = false;
         this.requestRender();
       }
+      this.flushLogs();
     }
   }
 
@@ -1060,20 +1064,6 @@ function addTurnUsage(
     cache_creation_input_tokens:
       (usage?.cache_creation_input_tokens ?? 0) + written,
   };
-}
-
-// JSON with sorted keys, so props compare by value.
-function stableJson(value: unknown): string {
-  if (value === null || typeof value !== 'object')
-    return JSON.stringify(value) ?? 'null';
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
-  return `{${Object.keys(value)
-    .sort()
-    .map(
-      (key) =>
-        `${JSON.stringify(key)}:${stableJson((value as Record<string, unknown>)[key])}`,
-    )
-    .join(',')}}`;
 }
 
 // A text too long for a Mod payload keeps its head and tail around a marker,

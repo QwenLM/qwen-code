@@ -136,6 +136,8 @@ describe('ModBand', () => {
       ['permission', undefined],
       ['diffAdded', undefined],
       ['cyanBright', 'cyanBright'],
+      ['grey', 'grey'],
+      ['grayBright', undefined],
       ['#0af', '#0af'],
       ['rgb(1, 2, 3)', 'rgb(1, 2, 3)'],
       ['ansi256(42)', 'ansi256(42)'],
