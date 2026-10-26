@@ -188,6 +188,52 @@ describe('workspace Skill management', () => {
     ).rejects.toThrow();
   });
 
+  it('does not copy its own staging directory into a folder package', async () => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+    await fs.writeFile(path.join(workspace, 'SKILL.md'), skillMarkdown('self'));
+    await fs.writeFile(path.join(workspace, 'A0.txt'), 'must survive');
+
+    // Force the source walk to descend into .qwen after the two root files
+    // are staged, which is the order that exposes the self-copy.
+    const nativeReaddir = fs.readdir.bind(fs);
+    const readdirSpy = vi.spyOn(fs, 'readdir').mockImplementation(((
+      ...args: Parameters<typeof fs.readdir>
+    ) =>
+      Promise.resolve(nativeReaddir(...args)).then((entries) => {
+        if (String(args[0]) !== workspace || !Array.isArray(entries)) {
+          return entries;
+        }
+        const nameOf = (entry: unknown) =>
+          typeof entry === 'string' ? entry : (entry as { name: string }).name;
+        return [...entries].sort((left, right) => {
+          if (nameOf(left) === '.qwen') return 1;
+          if (nameOf(right) === '.qwen') return -1;
+          return 0;
+        });
+      })) as typeof fs.readdir);
+
+    try {
+      await installWorkspaceSkill(workspace, {
+        name: 'self',
+        scope: 'workspace',
+        source: { type: 'folder', path: workspace },
+      });
+    } finally {
+      readdirSpy.mockRestore();
+    }
+
+    const entries = (
+      await fs.readdir(path.join(workspace, '.qwen', 'skills', 'self'), {
+        recursive: true,
+      })
+    ).map(String);
+    expect(entries.filter((entry) => entry.includes('.installing-'))).toEqual(
+      [],
+    );
+    expect(entries.some((entry) => entry.startsWith('.qwen'))).toBe(false);
+    expect(entries.sort()).toEqual(['A0.txt', 'SKILL.md']);
+  });
+
   it('does not create Skill directories after the generation closes', async () => {
     const workspace = await temporaryDirectory('qwen-skill-workspace-');
     const source = await temporaryDirectory('qwen-skill-source-');
@@ -424,7 +470,13 @@ describe('workspace Skill management', () => {
     // Names shaped exactly like reinstall artifacts are skipped by the
     // skill loaders, so creating one must fail loudly instead of reporting
     // success for a skill that would never load.
-    for (const name of ['foo.backup-1-2', 'foo.installing-12345-67890']) {
+    for (const name of [
+      'foo.backup-1-2',
+      'foo.installing-12345-67890',
+      'foo.backup-1-2-extra',
+      '.probe.installing-123456',
+      'release.installing-notes',
+    ]) {
       await expect(
         installWorkspaceSkill(workspace, {
           name,
@@ -442,7 +494,11 @@ describe('workspace Skill management', () => {
     const workspace = await temporaryDirectory('qwen-skill-workspace-');
     const source = await temporaryDirectory('qwen-skill-source-');
 
-    for (const name of ['foo.backup-1-2-extra', 'foo-backup-1-2']) {
+    for (const name of [
+      'foo-backup-1-2',
+      'foo.backup.notes',
+      'foo.backup-1_2',
+    ]) {
       await fs.writeFile(path.join(source, 'SKILL.md'), skillMarkdown(name));
 
       await expect(
@@ -453,6 +509,37 @@ describe('workspace Skill management', () => {
         }),
       ).resolves.toMatchObject({ skillName: name });
     }
+  });
+
+  it('keeps the base Skill install whole after rejecting an artifact-shaped name', async () => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+    const artifact = await temporaryDirectory('qwen-skill-source-');
+    const source = await temporaryDirectory('qwen-skill-source-');
+    await fs.writeFile(
+      path.join(artifact, 'SKILL.md'),
+      skillMarkdown('.probe.installing-123456'),
+    );
+    await fs.writeFile(path.join(source, 'SKILL.md'), skillMarkdown('probe'));
+
+    await expect(
+      installWorkspaceSkill(workspace, {
+        name: '.probe.installing-123456',
+        scope: 'workspace',
+        source: { type: 'folder', path: artifact },
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_skill_name' });
+
+    const installed = await installWorkspaceSkill(workspace, {
+      name: 'probe',
+      scope: 'workspace',
+      source: { type: 'folder', path: source },
+    });
+    await expect(
+      fs.readFile(installed.installedPath!, 'utf8'),
+    ).resolves.toContain('name: probe');
+    expect(
+      (await fs.readdir(path.join(workspace, '.qwen', 'skills'))).sort(),
+    ).toEqual(['probe']);
   });
 
   it('rejects relative folder paths before reading files', async () => {

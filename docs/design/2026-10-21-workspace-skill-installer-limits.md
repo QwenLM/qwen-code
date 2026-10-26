@@ -310,8 +310,14 @@ package array. No new type of temp directory and no new route.
 to git, empty the same staging directory and reset paths, file count, and
 byte count together. Artifact cleanup matches the complete suffix after
 the skill-specific prefix, so installing `foo` cannot sweep the staging
-or backup of `foo.backup-1` or `foo.installing-abc123`. Existing skill-name
-rules remain unchanged. This does not introduce cross-process install locks.
+or backup of `foo.backup-1` or `foo.installing-abc123`. Requested names
+that the sweep itself would recognise — a `.backup-` or `.installing-`
+suffix whose trailing characters are limited to `[A-Za-z0-9-]` — are
+rejected with `invalid_skill_name`; without that reservation a committed
+install named `.foo.installing-123456` would be deleted by a later install
+of `foo`. The tightening also rejects names such as
+`release.installing-notes`, which the sweep cannot distinguish from a
+crash artifact. This does not introduce cross-process install locks.
 
 **Keep one size error code.** `skill_package_too_large` (413) still covers
 the archive, one file, and the package total. Messages stay specific.

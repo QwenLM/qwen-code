@@ -263,7 +263,11 @@ MAX_ZIP_ARCHIVE_BYTES   = 3 * floor(10_485_430 / 4) // 7_864_071
 **重试与清理隔离。** Contents API 失败后回退到 git 之前，就地清空暂存
 目录，同时重置路径集合、文件数与字节数。清理安装产物时匹配技能专属
 前缀后的完整后缀，安装 `foo` 不会误删 `foo.backup-1` 或
-`foo.installing-abc123` 的暂存和备份。现有技能名规则保持不变。
+`foo.installing-abc123` 的暂存和备份。请求名若本身命中清扫语言——以
+`.backup-` 或 `.installing-` 结尾，且其后缀字符限于 `[A-Za-z0-9-]`——
+会以 `invalid_skill_name` 拒绝；否则，一个名为 `.foo.installing-123456`
+的已提交安装会被后来安装 `foo` 的请求删除。该收紧也会拒绝
+`release.installing-notes` 这类名字，因为清扫无法把它与崩溃残留区分开。
 本次不引入跨进程安装锁。
 
 **保留一个大小错误码。** `skill_package_too_large`（413）仍覆盖压缩包、

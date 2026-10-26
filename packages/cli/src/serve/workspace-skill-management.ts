@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { createWriteStream, promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -92,7 +93,7 @@ export function validateWorkspaceSkillName(name: string): string {
 }
 
 function rejectInstallArtifactSkillName(name: string): void {
-  if (/\.(backup|installing)-\d+-\d+$/.test(name)) {
+  if (/\.(backup|installing)-[A-Za-z0-9-]+$/.test(name)) {
     skillError(
       'invalid_skill_name',
       'Skill name ends with a reserved install-artifact suffix',
@@ -749,12 +750,14 @@ async function copyFolder(
   assertGenerationOpen?: () => void,
 ): Promise<void> {
   const root = await validatedFolderRoot(folderPath);
+  const stagingReal = await fs.realpath(staging);
   const visit = async (directory: string, relativeRoot = '', depth = 0) => {
     if (depth > MAX_PATH_DEPTH)
       skillError('invalid_skill_package', 'Skill folder is nested too deeply');
     for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
       if (depth === 0 && entry.name === '.git') continue;
       const absolutePath = path.join(directory, entry.name);
+      if (path.resolve(absolutePath) === stagingReal) continue;
       const relativePath = relativeRoot
         ? `${relativeRoot}/${entry.name}`
         : entry.name;
@@ -1034,7 +1037,10 @@ export async function installWorkspaceSkill(
     path.join(workDir, `${workPrefix}.installing-`),
   );
   liveInstallArtifacts.add(staging);
-  const backup = path.join(workDir, `${workPrefix}.backup-${Date.now()}`);
+  const backup = path.join(
+    workDir,
+    `${workPrefix}.backup-${process.pid}-${randomUUID().slice(0, 8).replaceAll('-', '')}`,
+  );
   let movedExisting = false;
   let committedStaging = false;
   try {

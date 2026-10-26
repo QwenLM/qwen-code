@@ -116,7 +116,7 @@ describe('workspace Skill install recovery', () => {
     expect(await fs.readdir(path.join(workspace, '.qwen'))).toEqual(['skills']);
   });
 
-  it.each(['foo.backup-1', 'foo.installing-abc123', 'bar.backup-1'])(
+  it.each(['foo.reference-1', 'foo.notes-abc123', 'bar.reference-1'])(
     'preserves all staged files while installing another skill (%s)',
     async (name) => {
       const workspace = await temporary();
@@ -550,6 +550,74 @@ describe('workspace Skill install recovery', () => {
       expect(env['PATH']).toBe(process.env['PATH']);
       expect(env['HOME']).toBe(process.env['HOME']);
       expect(env['QWEN_SERVER_TOKEN']).toBeUndefined();
+    }
+  });
+
+  it('restores the original Skill when aliased installs share a backup timestamp', async () => {
+    const workspace = await temporary();
+    const source = await temporary();
+    const invalid = await temporary();
+    await fs.writeFile(path.join(source, 'SKILL.md'), markdown('foo'));
+    await fs.writeFile(path.join(invalid, 'SKILL.md'), markdown('other'));
+    const previousQwenHome = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = path.join(workspace, '.qwen');
+    vi.spyOn(Date, 'now').mockReturnValue(1_785_000_000_000);
+    const destination = path.join(workspace, '.qwen', 'skills', 'foo');
+    let release!: () => void;
+    let parked!: () => void;
+    const pause = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const ready = new Promise<void>((resolve) => {
+      parked = resolve;
+    });
+    try {
+      await installWorkspaceSkill(workspace, {
+        name: 'foo',
+        scope: 'workspace',
+        source: { type: 'folder', path: source },
+      });
+      const original = await fs.readFile(
+        path.join(destination, 'SKILL.md'),
+        'utf8',
+      );
+      const nativeRename = fs.rename.bind(fs);
+      vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
+        if (
+          String(from).includes('.installing-') &&
+          String(to) === destination
+        ) {
+          parked();
+          await pause;
+          throw new Error('commit failed');
+        }
+        await nativeRename(from, to);
+      });
+      const victim = installWorkspaceSkill(workspace, {
+        name: 'foo',
+        scope: 'workspace',
+        source: { type: 'folder', path: source },
+      });
+      await ready;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        await expect(
+          installWorkspaceSkill(workspace, {
+            name: 'foo',
+            scope: 'global',
+            source: { type: 'folder', path: invalid },
+          }),
+        ).rejects.toMatchObject({ code: 'skill_name_mismatch' });
+      }
+      release();
+      await expect(victim).rejects.toThrow('commit failed');
+      await expect(
+        fs.readFile(path.join(destination, 'SKILL.md'), 'utf8'),
+      ).resolves.toBe(original);
+    } finally {
+      release();
+      vi.restoreAllMocks();
+      if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = previousQwenHome;
     }
   });
 });
