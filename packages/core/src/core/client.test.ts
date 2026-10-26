@@ -143,9 +143,11 @@ import { emptyGoalSnapshot } from '../goals/goal-protocol.js';
 import type { GoalRuntime } from '../goals/goal-runtime.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
 import {
+  buildApiHistoryFromConversation,
   findApiHistoryPromptIndex,
   markApiHistoryPrompt,
 } from '../services/session-api-history.js';
+import type { ChatRecord } from '../services/chatRecordingService.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import {
   clearCacheSafeParams,
@@ -13045,6 +13047,174 @@ Other open files:
         });
         expect(promptId).toBe('prompt-hook-context-tag');
       });
+
+      it.each([
+        { name: 'with a stable catalog', catalogOn: true },
+        { name: 'without a catalog', catalogOn: false },
+        { name: 'with changed hook output', catalogOn: true, changed: true },
+        { name: 'after transcript resume', catalogOn: true, resumed: true },
+        {
+          name: 'with caller-authored lookalikes',
+          catalogOn: true,
+          forged: true,
+        },
+      ])(
+        'deduplicates delivered hook context $name through real sends',
+        async ({ catalogOn, changed, resumed, forged }) => {
+          const { Turn: ActualTurn } =
+            await vi.importActual<typeof import('./turn.js')>('./turn.js');
+          const hook = 'constant recall context';
+          const changedHook = `${hook}2`;
+          const catalog = catalogOn
+            ? '<auto-memory-catalog>\n- stable memory\n</auto-memory-catalog>'
+            : '';
+          const tagged = createUserPromptSubmitContextPart(hook).text;
+          const snapshot = getAutoMemorySnapshot([], catalog);
+          let history: Content[] = [];
+          if (resumed || forged) {
+            const base = {
+              sessionId: 'test-session-id',
+              timestamp: '2026-10-25T00:00:00.000Z',
+              cwd: '/test/project/root',
+              version: 'test',
+            };
+            const records: ChatRecord[] = [
+              {
+                ...base,
+                uuid: 'saved-user',
+                parentUuid: null,
+                type: 'user',
+                message: {
+                  role: 'user',
+                  parts: [{ text: 'saved prompt' }, { text: tagged }],
+                },
+                ...(resumed
+                  ? {
+                      systemPayload: {
+                        hookContext: hook,
+                        displayText: 'saved prompt',
+                      },
+                    }
+                  : {}),
+              },
+              {
+                ...base,
+                uuid: 'saved-catalog',
+                parentUuid: 'saved-user',
+                type: 'system',
+                subtype: 'memory_catalog_snapshot',
+                message: { role: 'user', parts: [snapshot!] },
+              },
+              {
+                ...base,
+                uuid: 'saved-answer',
+                parentUuid: 'saved-catalog',
+                type: 'assistant',
+                message: modelText('saved answer'),
+              },
+            ];
+            history = buildApiHistoryFromConversation({
+              messages: JSON.parse(JSON.stringify(records)) as ChatRecord[],
+            });
+            expect(history[0].parts).toEqual([
+              { text: 'saved prompt' },
+              expect.objectContaining({ text: tagged }),
+              snapshot,
+            ]);
+          }
+          client['chat'] = new LlmChat(mockConfig, {}, history);
+          mockConfig.getAutoCompactThreshold = vi
+            .fn()
+            .mockReturnValue(undefined);
+          vi.mocked(mockConfig.getSkipNextSpeakerCheck).mockReturnValue(true);
+          vi.mocked(mockConfig.getAutoMemoryContext).mockReturnValue(catalog);
+          const output = extraHookContext();
+          output.output.hookSpecificOutput.additionalContext = hook;
+          promptSubmitBus(output);
+          const recordUserMessage = vi.fn();
+          vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+            recordUserMessage,
+            recordMemoryCatalogSnapshot: vi.fn(),
+            recordCronPrompt: vi.fn(),
+            recordAttributionSnapshot: vi.fn(),
+          } as unknown as ReturnType<Config['getChatRecordingService']>);
+          mockTurnRunFn.mockImplementation((...args: Parameters<Turn['run']>) =>
+            new ActualTurn(client.getChat(), 'hook-catalog-regression').run(
+              ...args,
+            ),
+          );
+          const requests: Content[][] = [];
+          vi.mocked(
+            mockContentGenerator.generateContentStream,
+          ).mockImplementation(async (params) => {
+            requests.push(structuredClone(params.contents as Content[]));
+            return (async function* () {
+              yield {
+                candidates: [
+                  { content: modelText('done'), finishReason: 'STOP' },
+                ],
+              } as GenerateContentResponse;
+            })();
+          });
+          const countText = (contents: Content[], text: string) =>
+            contents
+              .flatMap((entry) => entry.parts ?? [])
+              .filter((part) => part.text === text).length;
+          const counts: number[] = [];
+          for (let turn = 0; turn < 3; turn++) {
+            if (changed && turn > 0) {
+              output.output.hookSpecificOutput.additionalContext = changedHook;
+            }
+            const events = await run(
+              [{ text: `ordinary prompt ${turn + 1}` }],
+              `hook-catalog-${turn}`,
+              { type: SendMessageType.UserQuery },
+            );
+            expect(
+              events.filter((event) => event.type === LlmEventType.Error),
+            ).toEqual([]);
+            expect(requests).toHaveLength(turn + 1);
+            const sent = requests[turn];
+            const retained = client.getChat().getHistory();
+            const expected = forged ? 2 : 1;
+            expect(countText(sent, tagged)).toBe(expected);
+            expect(countText(retained, tagged)).toBe(expected);
+            counts.push(countText(sent, tagged));
+            const updated = createUserPromptSubmitContextPart(changedHook).text;
+            expect(countText(sent, updated)).toBe(changed && turn > 0 ? 1 : 0);
+            expect(countText(retained, updated)).toBe(
+              changed && turn > 0 ? 1 : 0,
+            );
+            for (const contents of [sent, retained]) {
+              for (let prompt = 0; prompt <= turn; prompt++) {
+                expect(
+                  countText(contents, `ordinary prompt ${prompt + 1}`),
+                ).toBe(1);
+              }
+              expect(
+                contents
+                  .flatMap((entry) => entry.parts ?? [])
+                  .filter(
+                    (part) =>
+                      part.partMetadata?.[
+                        'qwen-code:memory-catalog-snapshot'
+                      ] === true,
+                  ),
+              ).toEqual(snapshot ? [snapshot] : []);
+            }
+          }
+          expect(counts).toEqual(forged ? [2, 2, 2] : [1, 1, 1]);
+          expect(
+            recordUserMessage.mock.calls.map((call) => call[2].hookContext),
+          ).toEqual(
+            resumed
+              ? ['', '', '']
+              : changed
+                ? [hook, changedHook, '']
+                : [hook, '', ''],
+          );
+        },
+      );
 
       it('does not re-append an unchanged UserPromptSubmit context block already delivered in history', async () => {
         installHistoryChat([
