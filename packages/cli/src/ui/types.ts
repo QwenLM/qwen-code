@@ -212,6 +212,8 @@ export type HistoryItemUser = HistoryItemBase & {
   type: 'user';
   text: string;
   promptId?: string;
+  /** Source-record link for conversation rewind, never for file restore. */
+  rewindId?: string;
   /**
    * Whether this UI history item represents a user turn that reached the model.
    *
@@ -243,11 +245,15 @@ export type HistoryItemLlmThought = HistoryItemBase & {
   type: 'gemini_thought';
   text: string;
   durationMs?: number;
+  isStreaming?: boolean;
+  thoughtGroupId?: number;
 };
 
 export type HistoryItemLlmThoughtContent = HistoryItemBase & {
   type: 'gemini_thought_content';
   text: string;
+  isStreaming?: boolean;
+  thoughtGroupId?: number;
 };
 
 export type HistoryItemInfo = HistoryItemBase & {

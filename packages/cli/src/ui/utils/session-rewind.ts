@@ -5,6 +5,7 @@
  */
 
 import type { Config } from '@qwen-code/qwen-code-core';
+import type { FileHistorySnapshot } from '@qwen-code/qwen-code-core/services/fileHistoryService.js';
 import type {
   HistoryItem,
   HistoryItemUser,
@@ -14,8 +15,7 @@ import type { RestoreOption } from '../components/RewindSelector.js';
 import { t } from '../../i18n/index.js';
 import {
   computeApiTruncationIndex,
-  isIdentifiedRetainedTurn,
-  isRealUserTurn,
+  isRetainedUserTurn,
 } from './historyMapping.js';
 import { expandCollapsedHistory } from './resumeHistoryUtils.js';
 import { recoalesceFindingsHistoryItems } from './findings-coalescing.js';
@@ -48,7 +48,10 @@ export async function rewindSession(
   // the conversation stays at the newer state.
   const needsConversation = option === 'conversation' || option === 'both';
   const llmClient = needsConversation ? config.getLlmClient() : null;
+  const recordingService = config.getChatRecordingService();
   let apiTruncateIndex = -1;
+  let recordingTurnIndex = -1;
+  let survivingFileHistorySnapshots: FileHistorySnapshot[] | undefined;
   let conversationSkippedNoClient = false;
   if (needsConversation) {
     if (!llmClient) {
@@ -71,7 +74,7 @@ export async function rewindSession(
       if (apiTruncateIndex < 0) {
         messages.push({
           type: 'error',
-          text: isIdentifiedRetainedTurn(history, userItem.id)
+          text: isRetainedUserTurn(history, userItem.id)
             ? t(
                 'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.',
               )
@@ -84,6 +87,57 @@ export async function rewindSession(
           return { stale: false, messages };
         }
         return { stale: false, messages };
+      }
+      if (recordingService) {
+        const rewindId =
+          userItem.type === 'user'
+            ? (userItem.promptId ?? userItem.rewindId)
+            : undefined;
+        recordingTurnIndex = rewindId
+          ? recordingService.getRewindTurnIndex(rewindId)
+          : -1;
+        if (recordingTurnIndex < 0) {
+          messages.push({
+            type: 'error',
+            text: t('Rewind failed: {{error}}', {
+              error: 'This turn has no unique recorded boundary.',
+            }),
+          });
+          return { stale: false, messages };
+        }
+        const snapshots = config.getFileHistoryService().getSnapshots();
+        const checkpointPromptId =
+          userItem.type === 'user' ? userItem.promptId : undefined;
+        const targetCheckpointIndex = checkpointPromptId
+          ? snapshots.findIndex((s) => s.promptId === checkpointPromptId)
+          : -1;
+        const snapshotTurnIndices =
+          targetCheckpointIndex < 0
+            ? snapshots.map((s) =>
+                recordingService.getRewindTurnIndex(s.promptId),
+              )
+            : [];
+        if (
+          (targetCheckpointIndex >= 0 &&
+            snapshots.findLastIndex(
+              (s) => s.promptId === checkpointPromptId,
+            ) !== targetCheckpointIndex) ||
+          snapshotTurnIndices.some((index) => index < 0)
+        ) {
+          messages.push({
+            type: 'error',
+            text: t('Rewind failed: {{error}}', {
+              error: 'This turn has no unique checkpoint association.',
+            }),
+          });
+          return { stale: false, messages };
+        }
+        survivingFileHistorySnapshots =
+          targetCheckpointIndex >= 0
+            ? snapshots.slice(0, targetCheckpointIndex + 1)
+            : snapshots.filter(
+                (_, index) => snapshotTurnIndices[index]! <= recordingTurnIndex,
+              );
       }
     }
   }
@@ -154,12 +208,6 @@ export async function rewindSession(
       ? originalHistory.length - 1
       : originalHistory.length;
 
-    let targetTurnIndex = 0;
-    for (const h of originalHistory) {
-      if (h.id === userItem.id) break;
-      if (isRealUserTurn(h)) targetTurnIndex++;
-    }
-
     llmClient.truncateHistory(apiTruncateIndex);
 
     // Strip suppressOnRestore flags and filter out collapse-summary items
@@ -172,15 +220,10 @@ export async function rewindSession(
       userItem.type === 'user' ? userItem.text : '',
     );
 
-    config.getChatRecordingService()?.rewindRecording(
-      targetTurnIndex,
+    recordingService?.rewindRecording(
+      recordingTurnIndex,
       { truncatedCount: removedCount ?? effectiveLength - truncatedUi.length },
-      !hasRestoreFailure
-        ? config
-            .getFileHistoryService()
-            .getSnapshots()
-            .slice(0, targetTurnIndex + 1)
-        : undefined,
+      !hasRestoreFailure ? survivingFileHistorySnapshots : undefined,
     );
   }
 

@@ -66,6 +66,14 @@ const nodeReplPackage = JSON.parse(
 const cuaSdkPackage = JSON.parse(
   readFileSync('packages/cua-driver/typescript/package.json', 'utf8'),
 );
+const cuaSdkInstallScript = readFileSync(
+  'packages/cua-driver/typescript/scripts/install-native.mjs',
+  'utf8',
+);
+const testSignWorkerScript = readFileSync(
+  '.github/scripts/test-sign-cua-windows-worker.ps1',
+  'utf8',
+);
 const browserUsePackage = JSON.parse(
   readFileSync('packages/browser-use/package.json', 'utf8'),
 );
@@ -171,9 +179,86 @@ describe('CUA release workflow', () => {
     expect(cuaReleaseWorkflow).toMatch(
       /Build \(release\)[\s\S]*?Verify unsigned UIAccess worker[\s\S]*?Get-AuthenticodeSignature[\s\S]*?NotSigned[\s\S]*?qwen-cua-driver-uia\.exe[\s\S]*?release artifact contract/,
     );
-    expect(cuaReleaseWorkflow).not.toMatch(/WINDOWS_CERTIFICATE|WIN_CSC_LINK/);
+    expect(cuaReleaseWorkflow).not.toMatch(
+      /WINDOWS_CERTIFICATE|WIN_CSC_LINK|New-SelfSignedCertificate/,
+    );
     expect(cuaReleaseWorkflow).toContain(
       '- **Windows**: unsigned UIAccess worker + native SDK payload',
+    );
+  });
+
+  it('test-signs the Windows worker only for branch dry runs', () => {
+    const job = cuaReleaseJobs['build-windows'];
+    const steps = job.steps;
+    const index = (name) => steps.findIndex((step) => step.name === name);
+    const verifyIndex = index('Verify unsigned UIAccess worker');
+    const signIndex = index('Test-sign UIAccess worker (dry run)');
+    const packageIndex = index('Package');
+    const installIndex = index(
+      'Clean-install Windows SDK from packaged payload',
+    );
+    const uploadIndex = steps.findIndex(
+      (step) => step.uses === 'actions/upload-artifact@v4',
+    );
+
+    expect(job.permissions).toEqual({ contents: 'read' });
+    expect(job.env.CUA_TEST_SIGNING).toBe(
+      "${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == true && !startsWith(github.ref, 'refs/tags/') }}",
+    );
+    expect(cuaReleaseJobs.release.if).toContain(
+      "startsWith(github.ref, 'refs/tags/cua-driver-rs-v')",
+    );
+    expect(verifyIndex).toBeGreaterThan(-1);
+    expect(signIndex).toBeGreaterThan(verifyIndex);
+    expect(packageIndex).toBeGreaterThan(signIndex);
+    expect(installIndex).toBeGreaterThan(packageIndex);
+    expect(uploadIndex).toBeGreaterThan(installIndex);
+
+    const signStep = steps[signIndex];
+    expect(signStep.if).toBe("env.CUA_TEST_SIGNING == 'true'");
+    expect(signStep.env.SIGNPATH_API_TOKEN).toBe(
+      '${{ secrets.SIGNPATH_API_TOKEN }}',
+    );
+    expect(signStep.run).toContain(
+      '.github/scripts/test-sign-cua-windows-worker.ps1',
+    );
+    expect(cuaReleaseWorkflow).not.toContain(
+      'github-action-submit-signing-request',
+    );
+    expect(testSignWorkerScript).toContain(
+      '/SigningRequests/SubmitWithArtifact',
+    );
+    expect(testSignWorkerScript).toContain(
+      "signingPolicySlug         = 'test-signing'",
+    );
+    expect(testSignWorkerScript).toContain(
+      "-ne '0B27B4BA9D646BCDB1FD59B4F229C0DAA7E8EEF0'",
+    );
+    expect(testSignWorkerScript).toMatch(
+      /Thumbprint -ne[\s\S]*?Cert:\\LocalMachine\\Root[\s\S]*?\.Status -ne 'Valid'[\s\S]*?Copy-Item/,
+    );
+
+    const install = steps[installIndex];
+    expect(install.env.CUA_DRIVER_USE_UIACCESS).toBe(
+      "${{ env.CUA_TEST_SIGNING == 'true' && '1' || '0' }}",
+    );
+    expect(install.run).toContain('npm install');
+    expect(install.run).toContain('--ignore-scripts=false');
+    expect(job.needs).toContain('verify-browser-package');
+    expect(install.run).toContain('qwen-code-browser-use-');
+    expect(install.run).toContain("throw 'Windows SDK postinstall failed'");
+    expect(install.run).toContain(
+      "if ((Get-AuthenticodeSignature -LiteralPath $worker).Status -ne 'Valid') {",
+    );
+    expect(install.run).toContain(
+      "throw 'Ordinary installation must not deploy the UIAccess worker'",
+    );
+    expect(cuaSdkInstallScript).toContain('await run("powershell", args');
+    expect(cuaSdkInstallScript).toMatch(
+      /CouldNotAutoloadMatchingModule[\s\S]*?run\("pwsh"/,
+    );
+    expect(cuaSdkInstallScript).toContain(
+      'if (!String(error?.stderr).includes("CouldNotAutoloadMatchingModule")) {',
     );
   });
 
@@ -575,6 +660,10 @@ describe('release workflow', () => {
   });
 
   it('keeps the workflow focused on orchestration', () => {
+    // 880, raised from 870 for quality_scripts' standalone runtime cache
+    // step: the same four-line export of a host-wide cache path as ci.yml's
+    // test job — orchestration; the cache logic lives in
+    // scripts/lib/runtime-archive-cache.js.
     // 870, raised from 850 for moving publish/collect onto the opt-in
     // ecs-qwen-release-host lane and quality onto the pool its checks already
     // use: the added lines are two runs-on expressions, two anchored steps,
@@ -588,7 +677,7 @@ describe('release workflow', () => {
     // is the job that reports their failure, so its last-resort issue filing
     // is deliberately inline. Every other step stays under the per-step cap
     // below, which is the rule that actually keeps logic out of the YAML.
-    expect(workflow.split('\n').length).toBeLessThan(870);
+    expect(workflow.split('\n').length).toBeLessThan(880);
     for (const [jobId, job] of Object.entries(releaseYaml.jobs)) {
       for (const step of job.steps ?? []) {
         if (step.name === 'Restore workspace ownership' || !step.run) continue;
@@ -3030,6 +3119,121 @@ exit 0`,
     );
     expect(publishSetupNode?.with.cache).toBeUndefined();
     expect(publishSetupNode?.with['package-manager-cache']).toBe(false);
+  });
+
+  it('keeps the standalone runtime spawn inside the quality_scripts budget', () => {
+    const source = readFileSync('scripts/test-standalone-runtimes.mjs', 'utf8');
+    const worker = /^const WORKER_TIMEOUT_MS = ([\d_]+);$/m.exec(source);
+    const setup = /^const SETUP_TIMEOUT_MS = ([\d_]+);$/m.exec(source);
+    const derived =
+      /^const CI_TIMEOUT_MS = 2 \* WORKER_TIMEOUT_MS \+ SETUP_TIMEOUT_MS;$/m.exec(
+        source,
+      );
+    expect(
+      worker,
+      'WORKER_TIMEOUT_MS must stay a plain constant',
+    ).not.toBeNull();
+    expect(setup, 'SETUP_TIMEOUT_MS must stay a plain constant').not.toBeNull();
+    expect(
+      derived,
+      'CI_TIMEOUT_MS must derive from the worker and setup caps',
+    ).not.toBeNull();
+    // Pin the wiring, not just the declarations: these constants exist to
+    // bound exactly two spawnSync options, and every setup phase must spend
+    // the shared setup budget instead of inheriting the 300 s run() default.
+    expect(source.match(/timeout: WORKER_TIMEOUT_MS,/g)).toHaveLength(1);
+    expect(source.match(/timeout: CI_TIMEOUT_MS,/g)).toHaveLength(1);
+    // spawnSync treats timeout 0 as "no timeout", so a spent setup budget
+    // must fail the next phase at 1 ms rather than disarm its cap.
+    expect(
+      source.match(/Math\.max\(1, deadline - Date\.now\(\)\)/g),
+    ).toHaveLength(1);
+    // Both entry points must take their setup I/O from the one factory, and
+    // that factory must close both wrappers over the shared deadline.
+    expect(
+      source.match(/^ {2}const setup = makeSetupBudget\(\);$/gm),
+    ).toHaveLength(2);
+    expect(source).toMatch(
+      /run: \(bin, args\) =>\s*run\(bin, args, \{ timeout: remaining\(\) \}\),/,
+    );
+    expect(source).toMatch(
+      /fetch: \(url, init\) =>\s*fetch\(url, \{ \.\.\.init, signal: AbortSignal\.timeout\(remaining\(\)\) \}\),/,
+    );
+    const setupSlices = [];
+    let from = 0;
+    while (true) {
+      const start = source.indexOf('const setup = makeSetupBudget();', from);
+      if (start < 0) break;
+      const end = source.indexOf('const result = spawnSync(', start);
+      expect(end, 'setup must be followed by its spawn').toBeGreaterThan(start);
+      setupSlices.push(source.slice(start, end));
+      from = end;
+    }
+    expect(setupSlices).toHaveLength(2);
+    for (const slice of setupSlices) {
+      // A phase that reaches past the budget factory inherits run()'s 300 s
+      // default or escapes the deadline entirely. Naming the escape hatches
+      // avoids enumerating call spellings: budgeted calls are setup.run() /
+      // setup.fetch(), which the leading-dot exclusion leaves alone.
+      expect(
+        slice,
+        'every setup phase must go through the budget wrapper',
+      ).not.toMatch(/(?<![\w.])(?:spawnSync|run|fetch)\s*\(/);
+    }
+    // The slice's fetch must be the implementation the archive fetch uses,
+    // not a helper left behind after the wiring was removed.
+    expect(setupSlices[0]).toMatch(
+      /return fetchVerifiedArchive\(url, filename, pin, \{\s*cacheDir,\s*fetchImpl: setup\.fetch,?\s*\}\)/,
+    );
+    const workerMs = Number(worker[1].replaceAll('_', ''));
+    const setupMs = Number(setup[1].replaceAll('_', ''));
+    const spawnMs = 2 * workerMs + setupMs;
+    // The child spends the same setup budget on its five pre-worker probes
+    // and keygen, so the outer cap must cover setup before either worker
+    // starts. A near-zero margin would let the outer cap fire first and lose
+    // the host-naming diagnostic.
+    expect(
+      spawnMs - 2 * workerMs,
+      'outer cap must leave room for pre-worker probes and keygen',
+    ).toBeGreaterThanOrEqual(60_000);
+    // That margin only matters while a worker killed at its cap still names
+    // the host, so the diagnostic must precede the bare asserts that throw
+    // first on the failure path.
+    const workerLoop = source.slice(
+      source.indexOf('for (const [host, bin] of ['),
+    );
+    const diagnosticAt = workerLoop.indexOf('actualExitCode');
+    expect(
+      diagnosticAt,
+      'worker loop must print the host diagnostic',
+    ).toBeGreaterThanOrEqual(0);
+    expect(workerLoop.indexOf('assert.equal(result.status, 0')).toBeGreaterThan(
+      diagnosticAt,
+    );
+    // package.json is the only link that places this spawn inside the
+    // quality_scripts job, and the budget counts vitest as running after it.
+    const rootScripts = JSON.parse(
+      readFileSync('package.json', 'utf8'),
+    ).scripts;
+    expect(rootScripts['test:scripts']).toMatch(
+      /^npm run test:standalone:runtimes:ci && npm run test:scripts:unit /,
+    );
+    expect(rootScripts['test:scripts:unit']).toMatch(/^vitest run /);
+    expect(rootScripts['test:standalone:runtimes:ci']).toBe(
+      'node scripts/test-standalone-runtimes.mjs --ci',
+    );
+    // Reserve the slow-pool measurements outside the spawn: ~295 s of job
+    // setup and the ~288 s scripts suite, rounded up to 600 s. Re-measure
+    // when scripts/tests/** gains a suite; 600 s is only valid for the suite
+    // as of this commit.
+    const aroundTheSpawnSeconds = 600;
+    // Parent setup and the child spawn are separate caps; both plus the
+    // reserve must fit the job's declared 30-minute budget.
+    expect(
+      setupMs / 1000 + spawnMs / 1000 + aroundTheSpawnSeconds,
+    ).toBeLessThanOrEqual(
+      releaseYaml.jobs.quality_scripts['timeout-minutes'] * 60,
+    );
   });
 
   it('stages every integration package manifest after versioning', () => {

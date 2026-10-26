@@ -14,7 +14,7 @@ import type { HistoryItem } from '../types.js';
 
 export async function writeToolCheckpoint(options: {
   directory: string;
-  request: Pick<ToolCallRequestInfo, 'name' | 'args' | 'prompt_id'>;
+  request: Pick<ToolCallRequestInfo, 'callId' | 'name' | 'args' | 'prompt_id'>;
   isCurrent: () => boolean;
   snapshot: () => {
     history: HistoryItem[];
@@ -31,7 +31,11 @@ export async function writeToolCheckpoint(options: {
   const payload = JSON.stringify(
     {
       ...options.snapshot(),
-      toolCall: { name: options.request.name, args: options.request.args },
+      toolCall: {
+        callId: options.request.callId,
+        name: options.request.name,
+        args: options.request.args,
+      },
       promptId: options.request.prompt_id,
       filePath,
     },

@@ -187,7 +187,7 @@ public final class ManagedHostedRecoveryRecords {
                 ? promptId : "wake-" + ToolPublicationContract.sha256(promptId.getBytes(StandardCharsets.UTF_8));
     }
 
-    private static List<JsonNode> references(JsonNode body) {
+    static List<JsonNode> references(JsonNode body) {
         var refs = new java.util.ArrayList<JsonNode>();
         for (String field : List.of("definitionRef", "rootSnapshotRef", "assistantRef", "inputRef", "continuationRef")) {
             if (body.hasNonNull(field)) {
@@ -199,6 +199,9 @@ public final class ManagedHostedRecoveryRecords {
                 refs.add(call.path("inputRef"));
                 refs.add(call.path("definitionRef"));
             }
+        }
+        if (body.has("commandStep")) {
+            refs.add(body.path("commandStep").path("inputRef"));
         }
         return refs;
     }
@@ -253,6 +256,18 @@ public final class ManagedHostedRecoveryRecords {
                 require(route.path(hash).isTextual() && route.path(hash).asText().matches("[a-f0-9]{64}"), "Invalid public child route digest.");
             }
         }
+        if (!model && body.has("commandStep")) {
+            fields.add("commandStep");
+            JsonNode step = body.get("commandStep");
+            ManagedExtensionRecords.closed(step, Set.of("toolStageId", "toolName", "inputRef", "configRevision"), "command step");
+            ManagedExtensionRecords.id(step.get("toolStageId"), "toolStageId");
+            ManagedExtensionRecords.oneOf(step.get("toolName"), List.of("read_file", "shell"), "command tool");
+            ManagedExtensionRecords.count(step.get("configRevision"), 1, ManagedSessionStoreModels.MAX_SAFE_COUNTER, "command configuration revision");
+            ManagedExtensionRecords.durableRef(step.get("inputRef"), "command input");
+            require("managed-extension-command-input".equals(step.path("inputRef").path("kind").asText())
+                    && step.path("inputRef").path("schemaVersion").asInt() == 1
+                    && "approval".equals(body.path("stage").asText()), "Command continuation conflicts.");
+        }
         ManagedExtensionRecords.closed(body, fields, "Hosted recovery descriptor");
         JsonNode source = body.get("sourceActivation");
         ManagedExtensionRecords.closed(source, Set.of("activationId", "epoch"), "source activation");
@@ -301,13 +316,18 @@ public final class ManagedHostedRecoveryRecords {
             ManagedExtensionRecords.oneOf(body.get("stage"), List.of("approval", "final"), "stage");
             JsonNode runtime = body.get("runtime");
             ManagedExtensionRecords.closed(runtime, Set.of("runtimeSessionId", "bindingId", "generation", "workspaceGeneration"), "native Runtime");
-            require(runtimeSessionId(body.get("promptId").asText()).equals(runtime.path("runtimeSessionId").asText()), "Native Runtime owner conflicts.");
+            if (body.has("commandStep")) {
+                ManagedExtensionRecords.id(runtime.get("runtimeSessionId"), "command Runtime owner");
+            } else {
+                require(runtimeSessionId(body.get("promptId").asText()).equals(runtime.path("runtimeSessionId").asText()), "Native Runtime owner conflicts.");
+            }
             ManagedExtensionRecords.id(runtime.get("bindingId"), "bindingId");
             generation(runtime.get("generation"));
             generation(runtime.get("workspaceGeneration"));
             require(body.path("calls").isArray() && !body.path("calls").isEmpty(), "Native batch is empty.");
             ManagedExtensionRecords.count(body.get("approvalOrdinal"), 0, body.path("calls").size() - 1, "approvalOrdinal");
             for (JsonNode call : body.get("calls")) {
+                require(!body.has("commandStep") || "skill".equals(call.path("call").path("name").asText()), "Command continuation must resume its Skill call.");
                 Set<String> callFields = new HashSet<>(Set.of("call", "runtimeCallId", "inputRef", "definitionRef",
                         "requestDigest", "argsDigest", "prepareKey", "prepareReference", "partIndex", "refusal", "actionId"));
                 if (body.has("publicChildModel") && call.has("publicationId")) {

@@ -152,8 +152,14 @@ import { useResumeCommand } from './hooks/useResumeCommand.js';
 import { useDeleteCommand } from './hooks/useDeleteCommand.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
 import { getInteractiveModSession } from '../services/interactive-mod-session.js';
+import { useModBand } from './hooks/use-mod-band.js';
+import {
+  MOD_BAND_RESERVED_COLUMNS,
+  modBandMaxRows,
+} from './components/ModBand.js';
 import { useDoublePress } from './hooks/useDoublePress.js';
 import { rewindSession } from './utils/session-rewind.js';
+import { isRewindableUserTurn } from './utils/historyMapping.js';
 import { waitForGoalRuntime } from './utils/goal-runtime.js';
 import { sanitizeTerminalLine } from './utils/textUtils.js';
 import {
@@ -1266,7 +1272,7 @@ export const AppContainer = (props: AppContainerProps) => {
       // Restore the transcript before Mod diagnostics, without making input
       // or Mod startup wait for asynchronous session recovery.
       void getInteractiveModSession(config)
-        ?.initialize()
+        ?.initialize(['AbovePrompt'])
         .catch(() => {});
 
       if (resumedSessionData) {
@@ -4337,6 +4343,40 @@ export const AppContainer = (props: AppContainerProps) => {
     : 'hidden';
   const [controlsHeight, setControlsHeight] = useState(0);
 
+  // The Mods' band above the prompt: its input, and its tree, whose height
+  // the controls measurement below takes in.
+  const modBand = useModBand(config);
+  const modBandRows = modBandMaxRows(terminalHeight);
+  const isModWorking = streamingState !== StreamingState.Idle;
+  useEffect(() => {
+    getInteractiveModSession(config)?.setRenderInput({
+      surface: 'terminal',
+      component: 'AbovePrompt',
+      requestId: 'above-prompt',
+      viewport: {
+        columns: terminalWidth,
+        rows: terminalHeight,
+        isFullscreen: useTerminalBuffer,
+      },
+      props: {
+        hasSurvey: isFeedbackDialogOpen,
+        isWorking: isModWorking,
+        maxRows: modBandRows,
+        bodyColumns: Math.max(0, terminalWidth - MOD_BAND_RESERVED_COLUMNS),
+        scroll: { offset: 0, bodyRows: Math.max(0, modBandRows - 1) },
+        view: {},
+      },
+    });
+  }, [
+    config,
+    terminalWidth,
+    terminalHeight,
+    useTerminalBuffer,
+    isFeedbackDialogOpen,
+    isModWorking,
+    modBandRows,
+  ]);
+
   // Re-measure the footer whenever the LiveAgentPanel's height can change
   // (agents launching / finishing / focus), so `controlsHeight` — and thus
   // `availableTerminalHeight` — never goes stale below the composer. See
@@ -4384,6 +4424,7 @@ export const AppContainer = (props: AppContainerProps) => {
     embeddedShellFocused,
     messageQueue.length,
     isInputActive,
+    modBand,
   ]);
 
   // agentViewState is declared earlier (before handleFinalSubmit) so it
@@ -4495,10 +4536,9 @@ export const AppContainer = (props: AppContainerProps) => {
         );
         return;
       }
-      const hasUserTurns = historyManager.history.some(
-        (h) => h.type === 'user',
-      );
-      if (!hasUserTurns) return;
+      const hasRewindableTurns =
+        historyManager.history.some(isRewindableUserTurn);
+      if (!hasRewindableTurns) return;
       setIsRewindSelectorOpen(true);
     },
     [streamingState, config, historyManager],

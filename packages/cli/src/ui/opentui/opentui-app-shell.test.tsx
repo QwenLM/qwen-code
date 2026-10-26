@@ -769,6 +769,192 @@ describe('OpenTuiApp shell wiring', () => {
     expect(mocks.state.dispatcherConstructions).toBe(1);
   });
 
+  it('switches foreground PTY input without losing the composer and consumes focus keys', async () => {
+    const owner = { callId: 'shell', pid: 4300, turn: 1 };
+    const control = {
+      foregroundShell: owner,
+      promoteShellToBackground: vi.fn(() => false),
+      writeShellInput: vi.fn((_owner: typeof owner, _input: string) => true),
+      resizeShell: vi.fn(() => true),
+      scrollShell: vi.fn(() => true),
+    };
+    const config = {
+      ...CONFIG,
+      getShellExecutionConfig: () => ({}),
+      setShellExecutionConfig: vi.fn(),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      setApprovalMode: vi.fn(),
+    } as unknown as Config;
+    const renderMain = vi.fn<NonNullable<AppProps['renderMain']>>(() => null);
+    let draft = '';
+    const composerHandle = {
+      current: {
+        getText: () => draft,
+        setText: (text: string) => {
+          draft = text;
+        },
+      },
+    };
+    const view = renderApp({
+      config,
+      foregroundShellControl: control,
+      composerHandle,
+      renderMain,
+    });
+    await settle();
+    const event = (
+      name: string,
+      sequence: string,
+      ctrl = false,
+      shift = false,
+    ) => ({
+      name,
+      sequence,
+      ctrl,
+      shift,
+      preventDefault: vi.fn(),
+      stopPropagation: vi.fn(),
+    });
+    expect(mocks.state.inputProps?.['focus']).toBe(true);
+    const focus = event('f', '\x06', true);
+    act(() =>
+      expect(
+        (mocks.state.inputProps!['onShellKey'] as (key: unknown) => boolean)(
+          focus,
+        ),
+      ).toBe(true),
+    );
+    expect(mocks.state.inputProps?.['focus']).toBe(false);
+    expect(renderMain.mock.calls.at(-1)?.[0]).toEqual({ owner, focused: true });
+    expect(control.writeShellInput).not.toHaveBeenCalled();
+    for (const key of [
+      event('a', 'a'),
+      event('left', '\x1b[D'),
+      event('return', '\r'),
+    ]) {
+      act(() => mocks.state.keyboardHandlers.at(-1)!(key));
+      expect(key.preventDefault).toHaveBeenCalledOnce();
+      expect(key.stopPropagation).toHaveBeenCalledOnce();
+    }
+    expect(
+      control.writeShellInput.mock.calls.map(([, bytes]) => bytes),
+    ).toEqual(['a', '\x1b[D', '\r']);
+    const paste = mocks.state.inputProps!['onShellPaste'] as (
+      text: string,
+    ) => boolean;
+    act(() => expect(paste('hello\n世界')).toBe(true));
+    expect(control.writeShellInput).toHaveBeenLastCalledWith(
+      owner,
+      'hello\n世界',
+    );
+    act(() =>
+      mocks.state.keyboardHandlers.at(-1)!(event('up', '\x1b[A', true, true)),
+    );
+    expect(control.scrollShell).toHaveBeenCalledExactlyOnceWith(owner, -1);
+    act(() => mocks.state.keyboardHandlers.at(-1)!(focus));
+    expect(mocks.state.inputProps?.['focus']).toBe(true);
+    expect(control.writeShellInput).toHaveBeenCalledTimes(4);
+    act(() =>
+      (mocks.state.inputProps!['onShellKey'] as (key: unknown) => boolean)(
+        focus,
+      ),
+    );
+    for (const exitKey of [
+      event('c', '\x03', true),
+      event('d', '\x04', true),
+    ]) {
+      act(() => mocks.state.keyboardHandlers.at(-1)!(exitKey));
+      expect(control.writeShellInput).toHaveBeenCalledTimes(4);
+      expect(exitKey.preventDefault).not.toHaveBeenCalled();
+      expect(exitKey.stopPropagation).not.toHaveBeenCalled();
+    }
+    const approval = event('tab', '\x1b[Z', false, true);
+    act(() => mocks.state.keyboardHandlers.at(-1)!(approval));
+    expect(config.setApprovalMode).toHaveBeenCalledExactlyOnceWith(
+      ApprovalMode.AUTO_EDIT,
+    );
+    expect(control.writeShellInput).toHaveBeenLastCalledWith(owner, '\t');
+    expect(approval.stopPropagation).not.toHaveBeenCalled();
+    for (const thinking of [
+      event('o', '\x0f', true),
+      { ...event('t', 't'), meta: true },
+    ]) {
+      act(() => mocks.state.keyboardHandlers.at(-1)!(thinking));
+      expect(thinking.stopPropagation).not.toHaveBeenCalled();
+      expect(thinking.preventDefault).not.toHaveBeenCalled();
+    }
+    expect(control.writeShellInput).toHaveBeenLastCalledWith(owner, '\x0f');
+    draft = 'DRAFT';
+    const eof = event('d', '\x04', true);
+    act(() => mocks.state.keyboardHandlers.at(-1)!(eof));
+    expect(control.writeShellInput).toHaveBeenCalledTimes(7);
+    expect(control.writeShellInput).toHaveBeenLastCalledWith(owner, '\x04');
+    expect(eof.preventDefault).not.toHaveBeenCalled();
+    expect(eof.stopPropagation).not.toHaveBeenCalled();
+    expect(config.setShellExecutionConfig).toHaveBeenCalledWith(
+      expect.objectContaining({ terminalWidth: 106 }),
+    );
+    view.unmount();
+  });
+
+  it('keeps a foreground shell behind a dialog and does not transfer focus to a replacement owner', async () => {
+    const config = {
+      ...CONFIG,
+      getShellExecutionConfig: () => ({}),
+      setShellExecutionConfig: vi.fn(),
+    } as unknown as Config;
+    const owner = { callId: 'shell', pid: 4300, turn: 1 };
+    const control = {
+      foregroundShell: owner,
+      promoteShellToBackground: vi.fn(() => true),
+      writeShellInput: vi.fn(() => true),
+      resizeShell: vi.fn(() => true),
+      scrollShell: vi.fn(() => true),
+    };
+    const props = {
+      config,
+      settings: SETTINGS,
+      logger: null,
+      commands: [],
+      getSessionStats,
+      foregroundShellControl: control,
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+    const key = {
+      name: 'f',
+      sequence: '\x06',
+      ctrl: true,
+      preventDefault: vi.fn(),
+      stopPropagation: vi.fn(),
+    };
+    act(() =>
+      (mocks.state.inputProps!['onShellKey'] as (key: unknown) => boolean)(key),
+    );
+    expect(mocks.state.inputProps?.['focus']).toBe(false);
+    view.rerender(
+      <OpenTuiApp
+        {...props}
+        foregroundShellControl={{
+          ...control,
+          foregroundShell: { ...owner, turn: 2 },
+        }}
+      />,
+    );
+    expect(mocks.state.inputProps?.['focus']).toBe(true);
+    mocks.state.handleResult = {
+      kind: 'open_dialog',
+      request: { dialog: 'help' },
+    };
+    await submit('/help');
+    expect(mocks.state.dialogProps).not.toBeNull();
+    const promote = { ...key, name: 'b', sequence: '\x02' };
+    act(() => mocks.state.keyboardHandlers.at(-1)!(promote));
+    expect(control.promoteShellToBackground).not.toHaveBeenCalled();
+    expect(control.writeShellInput).not.toHaveBeenCalled();
+    view.unmount();
+  });
+
   it('routes composer cancellation to the running command without interrupting the model', async () => {
     const onInterrupt = vi.fn();
     renderApp({ onInterrupt });
@@ -1031,199 +1217,222 @@ describe('OpenTuiApp shell wiring', () => {
     expect((mocks.state.host as OpenTuiAppHost).logger).toBe(logger);
   });
 
-  it('rewinds a hidden turn from collapsed real host history and cannot expand discarded command rows', async () => {
-    const api: Content[] = [
-      { role: 'user', parts: [{ text: 'first' }] },
-      { role: 'model', parts: [{ text: 'answer' }] },
-      { role: 'user', parts: [{ text: 'second' }] },
-    ];
-    markApiHistoryPrompt(api[0], 'p1');
-    markApiHistoryPrompt(api[2], 'p2');
-    const truncateHistory = vi.fn();
-    const rewindRecording = vi.fn();
-    const config = {
-      ...CONFIG,
-      getLlmClient: () => ({ getHistoryShallow: () => api, truncateHistory }),
-      getChatRecordingService: () => ({ rewindRecording }),
-      getFileHistoryService: () => ({ getSnapshots: () => [] }),
-      getContextFilePaths: () => ['/repo/AGENTS.md'],
-    } as unknown as Config;
-    const owner = renderHook(() => useOpenTuiLiveTurn({ config }));
-    const setText = vi.fn();
-    const invalidateImportedInput = vi.fn();
-    const props: AppProps = {
-      config,
-      settings: SETTINGS,
-      logger: null,
-      commands: [],
-      startupHistory: [
-        {
-          id: 0,
-          type: 'info',
-          text: 'hidden retained source',
-          display: { suppressOnRestore: true },
+  it.each(['promptId', 'rewindId'] as const)(
+    'rewinds a hidden %s turn from collapsed real host history and cannot expand discarded command rows',
+    async (identityField) => {
+      const targetKey =
+        identityField === 'promptId' ? 'p2' : 'legacy-record:target';
+      const api: Content[] = [
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'answer' }] },
+        { role: 'user', parts: [{ text: 'second' }] },
+      ];
+      markApiHistoryPrompt(api[0], 'p1');
+      markApiHistoryPrompt(api[2], targetKey);
+      const truncateHistory = vi.fn();
+      const rewindRecording = vi.fn();
+      const getRewindTurnIndex = vi.fn((id: string) =>
+        id === targetKey ? 3 : -1,
+      );
+      const config = {
+        ...CONFIG,
+        getLlmClient: () => ({ getHistoryShallow: () => api, truncateHistory }),
+        getChatRecordingService: () => ({
+          rewindRecording,
+          getRewindTurnIndex,
+        }),
+        getFileHistoryService: () => ({ getSnapshots: () => [] }),
+        getContextFilePaths: () => ['/repo/AGENTS.md'],
+      } as unknown as Config;
+      const owner = renderHook(() => useOpenTuiLiveTurn({ config }));
+      const setText = vi.fn();
+      const invalidateImportedInput = vi.fn();
+      const props: AppProps = {
+        config,
+        settings: SETTINGS,
+        logger: null,
+        commands: [],
+        startupHistory: [
+          {
+            id: 0,
+            type: 'info',
+            text: 'hidden retained source',
+            display: { suppressOnRestore: true },
+          },
+        ],
+        getSessionStats,
+        initialDialog: { dialog: 'rewind' },
+        onTranscriptEvent: owner.result.current.applyEvent,
+        onTranscriptReset: owner.result.current.resetTranscript,
+        onRewindTranscript: owner.result.current.rewindTranscript,
+        onSubmitPrompt: vi.fn(() => true),
+        isCurrentHistory: owner.result.current.isCurrentHistory,
+        composerHandle: {
+          current: { getText: () => '', setText, invalidateImportedInput },
         },
-      ],
-      getSessionStats,
-      initialDialog: { dialog: 'rewind' },
-      onTranscriptEvent: owner.result.current.applyEvent,
-      onTranscriptReset: owner.result.current.resetTranscript,
-      onRewindTranscript: owner.result.current.rewindTranscript,
-      onSubmitPrompt: vi.fn(() => true),
-      isCurrentHistory: owner.result.current.isCurrentHistory,
-      composerHandle: {
-        current: { getText: () => '', setText, invalidateImportedInput },
-      },
-    };
-    const view = render(
-      <OpenTuiApp {...props} historyItems={owner.result.current.items} />,
-    );
-    await settle();
-    const host = mocks.state.host as OpenTuiAppHost;
-    let kept: readonly HistoryItem[];
-    await act(async () => {
-      host.addItem(
-        { type: 'user', text: 'first', promptId: 'p1', sentToModel: true },
-        1,
+      };
+      const view = render(
+        <OpenTuiApp {...props} historyItems={owner.result.current.items} />,
       );
-      host.addItem({ type: 'user', text: '/help', sentToModel: false }, 2);
-      host.addItem({ type: 'info', text: 'kept line one\nkept line two' }, 3);
-      kept = [...host.getHistory()];
-      host.addItem(
-        { type: 'user', text: 'second', promptId: 'p2', sentToModel: true },
-        4,
+      await settle();
+      const host = mocks.state.host as OpenTuiAppHost;
+      let kept: readonly HistoryItem[];
+      await act(async () => {
+        host.addItem(
+          { type: 'user', text: 'first', promptId: 'p1', sentToModel: true },
+          1,
+        );
+        host.addItem({ type: 'user', text: '/help', sentToModel: false }, 2);
+        host.addItem({ type: 'info', text: 'kept line one\nkept line two' }, 3);
+        kept = [...host.getHistory()];
+        host.addItem(
+          {
+            type: 'user',
+            text: 'second',
+            [identityField]: targetKey,
+            sentToModel: true,
+          },
+          4,
+        );
+        host.addItem(
+          { type: 'info', text: 'discarded line one\ndiscarded line two' },
+          5,
+        );
+        host.addItem(
+          { type: 'info', text: 'Read context files: /repo/AGENTS.md' },
+          6,
+        );
+        const collapsed = applyCollapsePolicyAndSummary(
+          [...host.getHistory()],
+          true,
+        );
+        host.loadHistory(collapsed);
+        host.resetTranscript(projectHistoryToStreamEvents(collapsed, {}));
+      });
+      view.rerender(
+        <OpenTuiApp {...props} historyItems={owner.result.current.items} />,
       );
-      host.addItem(
-        { type: 'info', text: 'discarded line one\ndiscarded line two' },
-        5,
-      );
-      host.addItem(
-        { type: 'info', text: 'Read context files: /repo/AGENTS.md' },
-        6,
-      );
-      const collapsed = applyCollapsePolicyAndSummary(
-        [...host.getHistory()],
-        true,
-      );
-      host.loadHistory(collapsed);
-      host.resetTranscript(projectHistoryToStreamEvents(collapsed, {}));
-    });
-    view.rerender(
-      <OpenTuiApp {...props} historyItems={owner.result.current.items} />,
-    );
-    const turns = mocks.state.dialogProps!['rewindTurns'] as LiveHistoryItem[];
-    const target = turns.find(
-      (item) => item.kind === 'user' && item.promptId === 'p2',
-    )!;
-    expect(target.display?.suppressOnRestore).toBe(true);
-    expect(turns.filter((item) => item.kind === 'user')).toHaveLength(3);
-    const rewind = mocks.state.dialogProps!['onRewind'] as (
-      turn: { id: string },
-      option: 'conversation',
-    ) => Promise<void>;
-    await act(async () => {
-      await rewind(target, 'conversation');
-    });
-    expect(truncateHistory).toHaveBeenCalledExactlyOnceWith(2);
-    expect(rewindRecording).toHaveBeenCalledExactlyOnceWith(
-      1,
-      { truncatedCount: 3 },
-      [],
-    );
-    expect(host.getHistory()).toEqual(expandCollapsedHistory([...kept!]));
-    expect(owner.result.current.items.at(-1)).toMatchObject({
-      kind: 'info',
-      text: expect.stringContaining('Conversation rewound'),
-    });
-    await vi.waitFor(() =>
-      expect(setText).toHaveBeenCalledExactlyOnceWith('second'),
-    );
-    expect(invalidateImportedInput).toHaveBeenCalledOnce();
-    expect(
-      owner.result.current.items.every(
+      const turns = mocks.state.dialogProps![
+        'rewindTurns'
+      ] as LiveHistoryItem[];
+      const target = turns.find(
         (item) =>
-          !item.display?.suppressOnRestore &&
-          item.display?.kind !== 'collapse-summary',
-      ),
-    ).toBe(true);
-    expect(
-      owner.result.current.items.some(
-        (item) => 'text' in item && item.text.includes('discarded'),
-      ),
-    ).toBe(false);
-    expect(
-      owner.result.current.items.some(
-        (item) => 'text' in item && item.text.includes('kept line two'),
-      ),
-    ).toBe(true);
-    mocks.state.handleResult = false;
-    await submit('continue after rewind');
-    expect(
-      owner.result.current.items.filter(
-        (item) =>
-          item.kind === 'info' &&
-          item.text.startsWith(CONTEXT_FILES_ANNOUNCEMENT_PREFIX),
-      ),
-    ).toHaveLength(1);
-    await act(async () => {
-      owner.result.current.applyEvent({
-        type: 'user',
+          item.kind === 'user' &&
+          item.canonicalHistoryItem?.type === 'user' &&
+          (item.canonicalHistoryItem.promptId ??
+            item.canonicalHistoryItem.rewindId) === targetKey,
+      )!;
+      expect(target.display?.suppressOnRestore).toBe(true);
+      expect(turns.filter((item) => item.kind === 'user')).toHaveLength(2);
+      const rewind = mocks.state.dialogProps!['onRewind'] as (
+        turn: { id: string },
+        option: 'conversation',
+      ) => Promise<void>;
+      await act(async () => {
+        await rewind(target, 'conversation');
+      });
+      expect(truncateHistory).toHaveBeenCalledExactlyOnceWith(2);
+      expect(getRewindTurnIndex).toHaveBeenCalledExactlyOnceWith(targetKey);
+      expect(rewindRecording).toHaveBeenCalledExactlyOnceWith(
+        3,
+        { truncatedCount: 3 },
+        [],
+      );
+      expect(host.getHistory()).toEqual(expandCollapsedHistory([...kept!]));
+      expect(owner.result.current.items.at(-1)).toMatchObject({
+        kind: 'info',
+        text: expect.stringContaining('Conversation rewound'),
+      });
+      await vi.waitFor(() =>
+        expect(setText).toHaveBeenCalledExactlyOnceWith('second'),
+      );
+      expect(invalidateImportedInput).toHaveBeenCalledOnce();
+      expect(
+        owner.result.current.items.every(
+          (item) =>
+            !item.display?.suppressOnRestore &&
+            item.display?.kind !== 'collapse-summary',
+        ),
+      ).toBe(true);
+      expect(
+        owner.result.current.items.some(
+          (item) => 'text' in item && item.text.includes('discarded'),
+        ),
+      ).toBe(false);
+      expect(
+        owner.result.current.items.some(
+          (item) => 'text' in item && item.text.includes('kept line two'),
+        ),
+      ).toBe(true);
+      mocks.state.handleResult = false;
+      await submit('continue after rewind');
+      expect(
+        owner.result.current.items.filter(
+          (item) =>
+            item.kind === 'info' &&
+            item.text.startsWith(CONTEXT_FILES_ANNOUNCEMENT_PREFIX),
+        ),
+      ).toHaveLength(1);
+      await act(async () => {
+        owner.result.current.applyEvent({
+          type: 'user',
+          text: 'new prompt after rewind',
+          promptId: 'p3',
+          sentToModel: true,
+        });
+        owner.result.current.applyEvent({ type: 'text', delta: 'new answer' });
+        owner.result.current.applyEvent({ type: 'done' });
+      });
+      const newLiveRows = owner.result.current.items.slice(-2);
+      // The command-only host has no later model rows. Expanding its restored
+      // prefix must preserve the actual newer live rows and their identities.
+      const afterRewind = [...host.getHistory()];
+      const retained = host
+        .getHistory()
+        .map((item) => ({ ...item, display: { suppressOnRestore: true } }));
+      host.loadHistory(retained);
+      const context = createOpenTuiCommandContext(
+        host,
+        { config, settings: SETTINGS, logger: null },
+        { wasIdleBeforeDispatch: true },
+      );
+      await act(async () => {
+        await historyCommand.subCommands!.find(
+          (command) => command.name === 'expand-now',
+        )!.action!(context, '');
+      });
+      expect(context.ui.history.map((item) => item.id)).toEqual(
+        afterRewind.map((item) => item.id),
+      );
+      for (const item of newLiveRows)
+        expect(owner.result.current.items).toContain(item);
+      expect(owner.result.current.items.at(-2)).toMatchObject({
+        kind: 'user',
         text: 'new prompt after rewind',
         promptId: 'p3',
-        sentToModel: true,
       });
-      owner.result.current.applyEvent({ type: 'text', delta: 'new answer' });
-      owner.result.current.applyEvent({ type: 'done' });
-    });
-    const newLiveRows = owner.result.current.items.slice(-2);
-    // The command-only host has no later model rows. Expanding its restored
-    // prefix must preserve the actual newer live rows and their identities.
-    const afterRewind = [...host.getHistory()];
-    const retained = host
-      .getHistory()
-      .map((item) => ({ ...item, display: { suppressOnRestore: true } }));
-    host.loadHistory(retained);
-    const context = createOpenTuiCommandContext(
-      host,
-      { config, settings: SETTINGS, logger: null },
-      { wasIdleBeforeDispatch: true },
-    );
-    await act(async () => {
-      await historyCommand.subCommands!.find(
-        (command) => command.name === 'expand-now',
-      )!.action!(context, '');
-    });
-    expect(context.ui.history.map((item) => item.id)).toEqual(
-      afterRewind.map((item) => item.id),
-    );
-    for (const item of newLiveRows)
-      expect(owner.result.current.items).toContain(item);
-    expect(owner.result.current.items.at(-2)).toMatchObject({
-      kind: 'user',
-      text: 'new prompt after rewind',
-      promptId: 'p3',
-    });
-    expect(owner.result.current.items.at(-1)).toMatchObject({
-      kind: 'assistant',
-      text: 'new answer',
-      streaming: false,
-    });
-    expect(
-      owner.result.current.items.some(
-        (item) => 'text' in item && item.text === 'hidden retained source',
-      ),
-    ).toBe(true);
-    expect(
-      owner.result.current.items.some(
-        (item) => 'text' in item && item.text.includes('discarded'),
-      ),
-    ).toBe(false);
-    expect(
-      owner.result.current.items.some(
-        (item) => 'text' in item && item.text.includes('kept line two'),
-      ),
-    ).toBe(true);
-  });
+      expect(owner.result.current.items.at(-1)).toMatchObject({
+        kind: 'assistant',
+        text: 'new answer',
+        streaming: false,
+      });
+      expect(
+        owner.result.current.items.some(
+          (item) => 'text' in item && item.text === 'hidden retained source',
+        ),
+      ).toBe(true);
+      expect(
+        owner.result.current.items.some(
+          (item) => 'text' in item && item.text.includes('discarded'),
+        ),
+      ).toBe(false);
+      expect(
+        owner.result.current.items.some(
+          (item) => 'text' in item && item.text.includes('kept line two'),
+        ),
+      ).toBe(true);
+    },
+  );
 
   it.each(['session', 'same-session-resume', 'new-turn'] as const)(
     'discards delayed file rewind after %s without touching the successor',
@@ -1248,7 +1457,10 @@ describe('OpenTuiApp shell wiring', () => {
         ...CONFIG,
         getSessionId: () => sessionId,
         getLlmClient: () => ({ getHistoryShallow: () => api, truncateHistory }),
-        getChatRecordingService: () => ({ rewindRecording }),
+        getChatRecordingService: () => ({
+          rewindRecording,
+          getRewindTurnIndex: (id: string) => (id === 'p1' ? 0 : -1),
+        }),
         getFileHistoryService: () => ({
           rewind: fileRewind,
           getSnapshots: () => [],

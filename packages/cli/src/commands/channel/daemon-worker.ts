@@ -43,6 +43,7 @@ import { normalizeServeChannelSelection } from '../../serve/channel-selection.js
 import {
   CHANNEL_DAEMON_WORKER_SENTINEL,
   CHANNEL_WORKER_HEARTBEAT_INTERVAL_MS,
+  MANAGED_RUNTIME_BROKER_TOKEN_ENV,
   QWEN_DAEMON_TOKEN_ENV,
   QWEN_DAEMON_URL_ENV,
   QWEN_DAEMON_WORKSPACE_ENV,
@@ -914,6 +915,7 @@ function scrubDaemonWorkerEnv(): void {
   delete process.env[QWEN_DAEMON_WORKSPACE_ENV];
   delete process.env[QWEN_SERVER_TOKEN_ENV];
   delete process.env[EXTERNAL_TOOL_GUARD_TOKEN_ENV];
+  delete process.env[MANAGED_RUNTIME_BROKER_TOKEN_ENV];
 }
 
 function readDaemonWorkerEnv(): {

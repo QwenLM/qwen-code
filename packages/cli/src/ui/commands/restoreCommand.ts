@@ -156,7 +156,9 @@ async function restoreAction(
     if (
       !toolCall ||
       typeof toolCall !== 'object' ||
-      typeof toolCall.name !== 'string'
+      typeof toolCall.name !== 'string' ||
+      (toolCall.callId !== undefined &&
+        (typeof toolCall.callId !== 'string' || toolCall.callId.length === 0))
     ) {
       throw new Error('Checkpoint is missing a valid toolCall.');
     }
@@ -176,7 +178,7 @@ async function restoreAction(
       const selected = selectRestoreCheckpointCall(
         checkpointHistory,
         toolCall.name,
-        toolCall.args,
+        toolCall.callId,
       );
       if (selected) {
         if (!config) throw new Error('Configuration is not available.');
@@ -295,6 +297,7 @@ async function restoreAction(
                     promptId: toolCallData.promptId,
                   }
                 : undefined,
+              toolCall.callId,
             )
           : undefined;
       await historyInstalled;

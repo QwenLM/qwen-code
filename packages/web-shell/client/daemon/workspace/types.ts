@@ -25,6 +25,7 @@ import type {
   DaemonChannelUpsertRequest,
   DaemonClient,
   DaemonCreateAgentRequest,
+  DaemonGitCloneJob,
   DaemonWorkspaceGenerationEvent,
   DaemonGeneratedAgentContent,
   DaemonDeviceFlowStartResult,
@@ -65,6 +66,8 @@ import type {
   DaemonWorkspaceFileWriteRequest,
   DaemonWorkspaceFileWriteResult,
   DaemonWorkspaceMcpStatus,
+  DaemonWorkspaceDirectories,
+  DaemonWorkspaceDirectoriesMutation,
   DaemonWorkspaceMcpConfigStatus,
   DaemonMcpConfigMutationResult,
   DaemonMcpConfigScope,
@@ -750,6 +753,12 @@ export interface DaemonWorkspaceActions {
     options?: { persist?: boolean; displayName?: string },
   ): Promise<DaemonAddWorkspaceResult>;
   addScratchWorkspace(): Promise<DaemonAddWorkspaceResult>;
+  startGitWorkspaceClone(input: {
+    url: string;
+    target: string;
+  }): Promise<{ jobId: string }>;
+  getGitWorkspaceCloneJob(jobId: string): Promise<DaemonGitCloneJob>;
+  cancelGitWorkspaceClone(jobId: string): Promise<DaemonGitCloneJob>;
   suggestWorkspacePaths(
     prefix: string,
   ): Promise<DaemonWorkspacePathSuggestions>;
@@ -758,6 +767,17 @@ export interface DaemonWorkspaceActions {
     workspaceSelector: string,
     update: DaemonWorkspaceUpdate,
   ): Promise<DaemonWorkspaceCapability>;
+  listWorkspaceDirectories(
+    workspaceSelector: string,
+  ): Promise<DaemonWorkspaceDirectories>;
+  addWorkspaceDirectory(
+    workspaceSelector: string,
+    path: string,
+  ): Promise<DaemonWorkspaceDirectoriesMutation>;
+  removeWorkspaceDirectory(
+    workspaceSelector: string,
+    path: string,
+  ): Promise<DaemonWorkspaceDirectoriesMutation>;
   removeWorkspace(
     workspaceId: string,
     options?: { force?: boolean; timeoutMs?: number },

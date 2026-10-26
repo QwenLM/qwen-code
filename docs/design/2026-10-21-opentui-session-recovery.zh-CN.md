@@ -4,7 +4,7 @@
 
 ## 状态与依赖
 
-本 B 源码提案依赖完整重放/恢复批次 [#15384](https://github.com/QwenLM/qwen-code/pull/15384) 及 A 的完整共享恢复修复。C 已提交；B 现以 [#15386](https://github.com/QwenLM/qwen-code/pull/15386) 的 A 已提交源码 50b66105 为基座。干净 B 6b92fc5c 的具名本地 session 与冷热 checkpoint suite 已通过；compact-summary 修复及最终 runtime/安装/平台联合仍须独立验证。精确源码绑定记录在候选 manifest 和验证报告中。B 补齐 OpenTUI 的生产消费链，不假定已验收组合产物。历史 aggregate 证据保留在调查目录，不代表本次抽取通过。
+本 B 源码提案依赖完整重放/恢复批次 [#15384](https://github.com/QwenLM/qwen-code/pull/15384) 及 A 的完整共享恢复修复。C 已提交；B 现以 [#15386](https://github.com/QwenLM/qwen-code/pull/15386) 的 A 已提交源码 83213983 进行整合。干净 B 6b92fc5c 的具名本地 session 与冷热 checkpoint suite 已通过；compact-summary 修复及最终 runtime/安装/平台联合仍须独立验证。精确源码绑定记录在候选 manifest 和验证报告中。B 补齐 OpenTUI 的生产消费链，不假定已验收组合产物。历史 aggregate 证据保留在调查目录，不代表本次抽取通过。
 
 ## 问题与交付边界
 
@@ -34,15 +34,15 @@ Canonical 数字 ID 与 host ID 区分。恢复 source 为分配器播种，避�
 
 仅在 checkpointing 开启、模型来源 edit 请求进入真实审批时创建 checkpoint。先排入 scheduler 原始工具组 source 和 confirmation，consumer fold 后再恢复 writer，避免读取未消费的 transcript。真正重新进入审批会替换 capture owner；同一次入口的快批准不会作废已经捕获且正在写入的恢复点。
 
-在文件系统 await 前捕获 UI 历史、API 历史、prompt identity 和原工具参数。在既有 checkpoint 目录使用临时文件与 UUID 后缀最终文件名。发布前复核 turn、session、abort 和审批入口 owner。短 rename 同步执行，最终复核与完整文件发布之间不能插入取消。清理未发布临时文件。关闭功能、client 来源和未提供 snapshot port 的旧 caller 不得访问 checkpoint storage 或写文件。
+在文件系统 await 前捕获 UI 历史、API 历史、prompt identity、原 logical call ID 和获授权的执行参数。API 历史独立保留原模型参数，不受 hook 或审批改写影响。在既有 checkpoint 目录使用临时文件与 UUID 后缀最终文件名。发布前复核 turn、session、abort 和审批入口 owner。短 rename 同步执行，最终复核与完整文件发布之间不能插入取消。清理未发布临时文件。关闭功能、client 来源和未提供 snapshot port 的旧 caller 不得访问 checkpoint storage 或写文件。
 
 ## 本地恢复与共享权威
 
-真实命令 dispatcher 将 A 的 restore binding 和 invocation identity 传给 shell、startup entry 和 live-turn scheduler。本地工具使用新的 physical request ID、client execution origin，以及现有 scheduler 权限/hooks。不产生新的模型 user prompt，不自动请求模型 HTTP。保留 terminal UI、dual-output、取消、后继和排队输入。
+真实命令 dispatcher 将 A 的 restore binding 和 invocation identity 传给 shell、startup entry 和 live-turn scheduler。本地工具使用新的 physical request ID、client execution origin，以及现有 scheduler 权限/hooks。在调度前绑定该 execution ID，让授权参数改写仍能按捕获的原 logical identity 完成。不产生新的模型 user prompt，不自动请求模型 HTTP。保留 terminal UI、dual-output、取消、后继和排队输入。
 
 仅当前捕获 binding 可以完成。复用 A 的合法 scheduler Read、read-generation fence、真实 chat replacement revision、session/turn/abort 与 recorder identity、单次完成准入、原 logical call 匹配和 durable branch 发布。新 physical ID 保留给 UI/telemetry。普通模型/native 结果继续由 C 路径记录一次；本地恢复先通过 A 严格 durable binding，再将真实 response parts 加入 API 历史。
 
-保留完整 assistant 消息与兄弟 calls。重放 A 不能复制已丢弃的 B 旧 success，也不能伪造 B 执行。冷 UI 将缺失结果标为真实的 Error、明确取消标为 Canceled；既有 wire repair 可以报告缺失兄弟。不能新增 single-pending-call 限制。
+保留完整 assistant 消息与兄弟 calls。重放 A 不能复制已丢弃的 B 旧 success，也不能伪造 B 执行。冷 UI 将缺失结果标为真实的 Error、明确取消标为 Canceled；既有 wire repair 可以报告缺失兄弟。新 checkpoint 保留原 call ID，支持多个 pending call；不含 ID 的旧 checkpoint 要求只有一个同名 pending call，不能用参数相等消除授权改写带来的歧义。
 
 ## 测试与验收
 

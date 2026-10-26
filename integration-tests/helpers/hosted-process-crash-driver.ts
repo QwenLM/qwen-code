@@ -250,6 +250,7 @@ const proxy = createServer(async (req, res) => {
         req.method === 'POST' &&
         [
           '/internal/runtime-broker/v1/runtimes:warm',
+          '/internal/runtime-broker/v1/runtimes:capabilities',
           '/internal/runtime-broker/v1/tool-sessions:active-holds',
         ].includes(url.pathname);
       assert.equal(fields.harnessSessionId, config.sessionId);

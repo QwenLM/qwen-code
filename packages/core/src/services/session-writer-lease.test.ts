@@ -37,7 +37,10 @@ import {
 import * as processLiveness from '../utils/process-liveness.js';
 import { SessionService } from './sessionService.js';
 import { prepareTranscriptRecords } from '../utils/transcript-records.js';
-import { buildApiHistoryFromConversation } from './session-api-history.js';
+import {
+  buildApiHistoryFromConversation,
+  getRecordRewindId,
+} from './session-api-history.js';
 import { serializeSnapshot } from './fileHistoryService.js';
 import {
   getSessionWriterLockPath,
@@ -2516,7 +2519,10 @@ describe('SessionWriterLease', () => {
         lockSchema: { schemaVersion: 3, formatVersion: 2 },
       });
       expect(replacement.takeoverCommitProof).toEqual(commitProof);
-      await replacement.release();
+      await expect(replacement.release()).rejects.toBeInstanceOf(
+        SessionWriterUnavailableError,
+      );
+      await replacement.sealForHandoff(commitProof);
     });
 
     it('rebuilds the transcript proof after discarding an uncommitted tail', async () => {
@@ -2620,7 +2626,10 @@ describe('SessionWriterLease', () => {
         ...fixture.options,
         lockSchema: { schemaVersion: 3, formatVersion: 2 },
       });
-      await newer.release();
+      await expect(newer.release()).rejects.toBeInstanceOf(
+        SessionWriterUnavailableError,
+      );
+      await newer.sealForHandoff(commitProof);
     });
 
     it('lets a newer managed format take over an older sealed lock', async () => {
@@ -2646,7 +2655,10 @@ describe('SessionWriterLease', () => {
         state: 'active',
         format_version: 2,
       });
-      await replacement.release();
+      await expect(replacement.release()).rejects.toBeInstanceOf(
+        SessionWriterUnavailableError,
+      );
+      await replacement.sealForHandoff(commitProof);
     });
   });
 
@@ -3344,6 +3356,53 @@ describe('restore checkpoint branch on confirmed real transcript bytes', () => {
     }
   }
 
+  it('keeps retained ancestry when a new prompt is rewound after restoring a tool branch', async () => {
+    await restoreFixture(async ({ fixture, recorder, input }) => {
+      const original = await readRecords(fixture.transcriptPath);
+      const discarded = original.find(
+        (record) =>
+          record.type === 'user' &&
+          record.message?.parts?.some(
+            (part) => part.text === 'DISCARDED_LATER_USER',
+          ),
+      );
+      expect(discarded).toBeDefined();
+      const discardedId = getRecordRewindId(discarded!);
+      expect(discardedId).toBeDefined();
+      expect(await recorder.restoreToolBranch(input)).toBe(true);
+      expect(recorder.getRewindTurnIndex(input.promptId!)).toBe(0);
+      expect(recorder.getRewindTurnIndex(discardedId!)).toBe(-1);
+
+      const nextPromptId = `${input.sessionId}########2`;
+      recorder.recordUserMessage(
+        'NEXT_AFTER_RESTORE',
+        undefined,
+        undefined,
+        nextPromptId,
+      );
+      const index = recorder.getRewindTurnIndex(nextPromptId);
+      expect(index).toBe(1);
+      recorder.rewindRecording(index, { truncatedCount: 1 }, []);
+      recorder.recordUserMessage('SUCCESSOR_AFTER_REWIND');
+      await recorder.flush();
+      await recorder.close();
+
+      const active = prepareTranscriptRecords(
+        await readRecords(fixture.transcriptPath),
+      ).records as ChatRecord[];
+      const resumed = await sessionServiceFor(fixture).loadSession(
+        input.sessionId,
+      );
+      expect(resumed?.conversation.messages).toEqual(active);
+      const text = JSON.stringify(resumed?.conversation.messages);
+      expect(text).toContain('ORIGINAL_USER');
+      expect(text).toContain('NEW_A_ACTUAL_NOT_OLD');
+      expect(text).toContain('SUCCESSOR_AFTER_REWIND');
+      expect(text).not.toContain('DISCARDED_');
+      expect(text).not.toContain('NEXT_AFTER_RESTORE');
+    });
+  });
+
   it('retains all original parallel call parts, persists only selected NEW result and excludes old sibling success', async () => {
     await restoreFixture(async ({ fixture, recorder, input }) => {
       const originalParts = structuredClone(input.responseParts);
@@ -3494,7 +3553,45 @@ describe('restore checkpoint branch on confirmed real transcript bytes', () => {
     });
   });
 
-  it.each(['missing', 'wrong session', 'wrong prompt', 'ambiguous'] as const)(
+  it('keeps the original model anchor when publishing an authorized replay with different execution arguments', async () => {
+    await restoreFixture(async ({ fixture, recorder, input }) => {
+      input.execution.args = { ...input.args, new_string: 'USER_APPROVED' };
+      expect(await recorder.restoreToolBranch(input)).toBe(true);
+      await recorder.flush();
+      const selected = prepareTranscriptRecords(
+        await readRecords(fixture.transcriptPath),
+      ).records as ChatRecord[];
+      const call = selected
+        .flatMap((record) => record.message?.parts ?? [])
+        .find(
+          (part) => part.functionCall?.id === input.originalCallId,
+        )?.functionCall;
+      expect(call?.args).toEqual(input.args);
+      const result = selected.findLast(
+        (record) => record.type === 'tool_result',
+      );
+      expect(result?.message?.parts?.[0].functionResponse?.id).toBe(
+        input.originalCallId,
+      );
+      expect(result?.message?.parts?.[0].functionResponse?.response).toEqual({
+        output: 'NEW_A_ACTUAL_NOT_OLD',
+      });
+      const resumed = await sessionServiceFor(fixture).loadSession(
+        input.sessionId,
+      );
+      expect(
+        resumed?.conversation.messages.map((record) => record.uuid),
+      ).toEqual(selected.map((record) => record.uuid));
+    });
+  });
+
+  it.each([
+    'missing',
+    'wrong session',
+    'wrong prompt',
+    'ambiguous',
+    'wrong original args',
+  ] as const)(
     'pre-effects admission refuses %s without any transcript mutation',
     async (mode) => {
       await restoreFixture(async ({ fixture, recorder, input }) => {
@@ -3517,6 +3614,9 @@ describe('restore checkpoint branch on confirmed real transcript bytes', () => {
             ? { sessionId: 'different-session' }
             : {}),
           ...(mode === 'wrong prompt' ? { promptId: 'wrong-prompt' } : {}),
+          ...(mode === 'wrong original args'
+            ? { args: { ...input.args, new_string: 'NOT_THE_MODEL_CALL' } }
+            : {}),
         };
         expect(() => recorder.assertRestoreToolBranchAnchor(invalid)).toThrow();
         await expect(recorder.restoreToolBranch(invalid)).rejects.toThrow();
