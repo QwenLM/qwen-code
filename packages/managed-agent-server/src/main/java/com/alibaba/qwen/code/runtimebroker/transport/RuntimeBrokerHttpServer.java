@@ -217,6 +217,64 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                 throw notFound();
             }
             String relative = path.substring(ROUTE_PREFIX.length());
+            if ("POST".equals(exchange.getRequestMethod()) && relative.startsWith("/harness-sessions/")
+                    && relative.endsWith("/extensions/control")) {
+                String sessionId = pathId(relative.substring("/harness-sessions/".length(),
+                        relative.length() - "/extensions/control".length()));
+                Map<String, Object> body = requestBody(exchange, "extension metadata control");
+                requireProtocol(body);
+                JsonCodec.requiredString(body, "requestId", "extension metadata control");
+                if (!sessionId.equals(JsonCodec.requiredString(body, "harnessSessionId", "extension metadata control"))
+                        || lifecycleAuthority(exchange) != null
+                        || !Set.of("protocolVersion", "requestId", "harnessSessionId", "operation",
+                                "expectedRuntimeBindingId", "expectedRuntimeGeneration").containsAll(body.keySet())
+                        || body.containsKey("expectedRuntimeBindingId") != body.containsKey("expectedRuntimeGeneration")) {
+                    throw new IllegalArgumentException("Invalid extension metadata control");
+                }
+                String binding = body.containsKey("expectedRuntimeBindingId")
+                        ? JsonCodec.requiredString(body, "expectedRuntimeBindingId", "extension metadata control") : null;
+                Long generation = body.containsKey("expectedRuntimeGeneration")
+                        ? Long.parseLong(JsonCodec.requiredString(body, "expectedRuntimeGeneration", "extension metadata control")) : null;
+                exchange.getResponseHeaders().set("Cache-Control", "no-store");
+                complete(exchange, service.extensionControl(sessionId, binding, generation,
+                        requiredObject(body, "operation", "extension metadata control")), result -> result);
+                return;
+            }
+            if ("POST".equals(exchange.getRequestMethod()) && relative.startsWith("/harness-sessions/")
+                    && relative.endsWith("/mcp-definitions")) {
+                String sessionId = pathId(relative.substring("/harness-sessions/".length(),
+                        relative.length() - "/mcp-definitions".length()));
+                Map<String, Object> body = requestBody(exchange, "MCP definitions request");
+                requireProtocol(body);
+                JsonCodec.requiredString(body, "requestId", "MCP definitions request");
+                if (!sessionId.equals(JsonCodec.requiredString(body, "harnessSessionId", "MCP definitions request"))
+                        || lifecycleAuthority(exchange) != null
+                        || !Set.of("protocolVersion", "requestId", "harnessSessionId", "runtimeSessionId").containsAll(body.keySet())) {
+                    throw new IllegalArgumentException("Invalid MCP definitions request");
+                }
+                String runtimeSessionId = body.containsKey("runtimeSessionId")
+                        ? JsonCodec.requiredString(body, "runtimeSessionId", "MCP definitions request") : null;
+                exchange.getResponseHeaders().set("Cache-Control", "no-store");
+                complete(exchange, service.mcpDefinitions(sessionId, runtimeSessionId), definitions -> Map.of(
+                        "protocolVersion", 1, "harnessSessionId", sessionId, "servers", definitions));
+                return;
+            }
+            if ("POST".equals(exchange.getRequestMethod())
+                    && "/runtimes:capabilities".equals(relative)) {
+                Map<String, Object> body = requestBody(exchange, "capabilities request");
+                requireProtocol(body);
+                JsonCodec.requiredString(body, "requestId", "capabilities request");
+                String sessionId = JsonCodec.requiredString(body, "harnessSessionId", "capabilities request");
+                if (!body.keySet().equals(Set.of("protocolVersion", "requestId", "harnessSessionId"))) {
+                    throw new IllegalArgumentException("Invalid capabilities request");
+                }
+                complete(exchange, service.capabilities(sessionId, lifecycleAuthority(exchange)), scope -> Map.of(
+                        "protocolVersion", 1, "harnessSessionId", sessionId,
+                        "scope", Map.of("tenantId", scope.getTenantId(), "workspaceId", scope.getWorkspaceId(),
+                                "workspaceGeneration", scope.getWorkspaceGeneration(),
+                                "isolationClass", scope.getIsolationClass(), "capabilityDigest", scope.getCapabilityDigest())));
+                return;
+            }
             if ("POST".equals(exchange.getRequestMethod())
                     && "/runtimes:warm".equals(relative)) {
                 Map<String, Object> body = requestBody(exchange, "warm request");

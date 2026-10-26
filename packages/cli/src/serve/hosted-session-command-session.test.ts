@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -34,7 +34,10 @@ import {
   type ManagedSession,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
-import { sessionCommandId } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-command-operations.js';
+import {
+  outboundCommandBody,
+  sessionCommandId,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-session-command-operations.js';
 import { MANAGED_SESSION_COMMAND_LIMITS } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-command-record.js';
 import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import { ManagedSessionAppendUnsettledError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
@@ -59,6 +62,7 @@ import {
 } from './hosted-session-message-session.js';
 import { memberMessageId } from './hosted-member-chain.js';
 import { HostedTeamSession } from './hosted-team-session.js';
+import { isSlowTestHost } from '../test-utils/slow-test-host.js';
 
 // H4e-b3: `session_command` is enabled for real, so this suite drives the
 // funnel with no enablement mock. The member side only needs its own
@@ -68,11 +72,15 @@ import { HostedTeamSession } from './hosted-team-session.js';
 
 const roots: string[] = [];
 const sessions: ManagedSession[] = [];
+const pendingBudgetTests: Array<Promise<void>> = [];
 const PARENT = randomUUID();
 const CHILD = randomUUID();
 const LEAF_RUN = 'run-1';
 
 afterEach(async () => {
+  // Vitest aborts a timed-out body without awaiting its current write. Each
+  // promise is also returned to Vitest, so draining it does not hide failures.
+  await Promise.allSettled(pendingBudgetTests.splice(0));
   planGate.enabled = false;
   for (const session of sessions.splice(0)) await session.close();
   for (const root of roots.splice(0))
@@ -852,38 +860,77 @@ describe('hosted-session-command-session funnel (H4e-b3)', () => {
     expect(record.run.delivery?.state).toBe('rejected');
   });
 
-  it('enforces the per-run command budget with budget_exhausted', async () => {
-    const member = await memberSide();
-    const commandId = commandIdOf('call-8');
-    await member.commands.runCommand({
-      commandId,
-      kind: 'board_read',
-      args: TASK_LIST_ARGS,
-      executionCallId: 'prompt-1:call-8',
-      closing: false,
-    });
-    // Mint 256 entries by hand: a direct count of outbound records is the
-    // rule's own evidence, so the suite plants the history instead of
-    // driving 256 funnels calls.
-    for (let index = 0; index < 255; index += 1) {
-      await member.commands.runCommand({
-        commandId: `cmd_extra_${index}`,
-        kind: 'board_read',
-        args: TASK_LIST_ARGS,
-        executionCallId: `prompt-1:call-extra-${index}`,
-        closing: false,
-      });
-    }
-    await expect(
-      member.commands.runCommand({
-        commandId: commandIdOf('call-9'),
-        kind: 'board_read',
-        args: TASK_LIST_ARGS,
-        executionCallId: 'prompt-1:call-9',
-        closing: false,
-      }),
-    ).rejects.toThrow(/budget_exhausted/);
-  }, 30_000);
+  // The 256 real durable commands require over 1,000 filesystem syncs.
+  it(
+    'enforces the per-run command budget with budget_exhausted',
+    ({ signal }) => {
+      const work = (async () => {
+        signal.throwIfAborted();
+        const member = await memberSide();
+        const commandId = commandIdOf('call-8');
+        signal.throwIfAborted();
+        await member.commands.runCommand({
+          commandId,
+          kind: 'board_read',
+          args: TASK_LIST_ARGS,
+          executionCallId: 'prompt-1:call-8',
+          closing: false,
+        });
+        // Persist history through the real authority, reusing the first command's
+        // immutable arguments instead of publishing the same bytes 254 more times.
+        const argsRef = member.commands.command(commandId)!.argsRef;
+        for (let index = 0; index < 254; index += 1) {
+          signal.throwIfAborted();
+          const seededId = `cmd_extra_${index}`;
+          const record = outboundCommandBody({
+            commandId: seededId,
+            kind: 'board_read',
+            childRunId: LEAF_RUN,
+            senderSessionId: CHILD,
+            argsRef,
+            executionCallId: `prompt-1:call-extra-${index}`,
+          });
+          await member.session.authority.commitExtensionRecord(
+            {
+              operation: 'sendSessionCommand',
+              commandId: `${seededId}:1`,
+              sessionKey: member.session.authority.sessionHeader.sessionKey,
+              contentDigest: createHash('sha256')
+                .update(JSON.stringify(record))
+                .digest('hex'),
+            },
+            { domain: 'session_command', record },
+            { class: 'trusted_entry' },
+          );
+        }
+        signal.throwIfAborted();
+        expect(member.commands.commands()).toHaveLength(255);
+        await member.commands.runCommand({
+          commandId: 'cmd_extra_254',
+          kind: 'board_read',
+          args: TASK_LIST_ARGS,
+          executionCallId: 'prompt-1:call-extra-254',
+          closing: false,
+        });
+        signal.throwIfAborted();
+        expect(member.commands.commands()).toHaveLength(256);
+        await expect(
+          member.commands.runCommand({
+            commandId: commandIdOf('call-9'),
+            kind: 'board_read',
+            args: TASK_LIST_ARGS,
+            executionCallId: 'prompt-1:call-9',
+            closing: false,
+          }),
+        ).rejects.toThrow(/budget_exhausted/);
+        expect(member.commands.commands()).toHaveLength(256);
+        expect(member.commands.command(commandIdOf('call-9'))).toBeUndefined();
+      })();
+      pendingBudgetTests.push(work);
+      return work;
+    },
+    isSlowTestHost() ? 120_000 : 30_000,
+  );
 
   it("commits the leader's receipt against an attached run and refetches its reply", async () => {
     const lead = await leadSideSetup();

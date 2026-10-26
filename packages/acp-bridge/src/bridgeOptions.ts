@@ -791,12 +791,17 @@ export interface CurrentSessionScheduledTaskCreateInfo {
   cron: string;
   prompt: string;
   recurring: boolean;
+  /** Shell command run at each fire outside the model (a scheduled-task gate). */
+  gate?: string;
   assertCallerPromptActive: () => void;
 }
 
 export interface CurrentSessionScheduledTaskCreateResult {
   id: string;
   cron: string;
+  /** The gate stored with the task, or null for none: echoed so the child can
+   * tell a daemon that dropped a requested gate. */
+  gate?: string | null;
 }
 
 export type CurrentSessionScheduledTaskCreateHandler = (

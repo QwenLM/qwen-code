@@ -134,12 +134,14 @@ class SessionRowLockOrderTest {
     // new sibling turn-row access — fails here instead of passing
     // unaudited.
     private static final Set<String> SIBLING_SESSION_LOCKERS = Set.of(
-            "ManagedActionStore.java", "ManagedExtensionRecordStore.java",
+            "HarnessPlacementStore.java",
+            "ManagedActionStore.java", "ManagedExtensionAgentLaunch.java", "ManagedExtensionRecordStore.java",
             "ManagedLegacySessionGuard.java",
             "ManagedProjectionResourceCollector.java",
             "ManagedRuntimeRetentionGuard.java",
             "ManagedSessionRetirementStore.java", "ManagedSessionStore.java",
             "ManagedSnapshotStore.java", "ManagedToolResultStore.java",
+            "ManagedUserMessageStore.java",
             "ResidentWorkspaceRetirementStore.java", "ResidentWorkspaces.java",
             "ToolPublicationRetentionStore.java",
             "WakeRecoveryStore.java",
@@ -147,7 +149,7 @@ class SessionRowLockOrderTest {
     private static final Set<String> SIBLING_TURN_READERS = Set.of(
             "AutomationLedgerStore.java", "ChildResultRelayStore.java",
             "ManagedActionStore.java", "ManagedToolDetailsStore.java",
-            "ManagedToolResultProjector.java",
+            "ManagedToolResultProjector.java", "ManagedUserMessageStore.java",
             "WorkspaceCsiApplicationInventory.java",
             "WorkspaceExecutionStore.java", "WorkspaceMigrationStore.java",
             "WorkspaceRecoveryStore.java");
@@ -180,6 +182,10 @@ class SessionRowLockOrderTest {
                             Set.of("ChildWorkspaceStore.find/3",
                                     "ChildWorkspaceStore.row/2",
                                     "Row.snapshot/0")),
+                    // Same-package lifecycle refusals share this local name;
+                    // both factories only construct an exception.
+                    Map.entry("HarnessPlacementStore.java",
+                            Set.of("HarnessPlacementStore.blocked/1")),
                     Map.entry("JdbcChannelRouteRepository.java",
                             Set.of("JdbcChannelRouteRepository.row/2")),
                     Map.entry("ManagedAgentDefinitionStore.java",
@@ -196,10 +202,20 @@ class SessionRowLockOrderTest {
                                     "ManagedExtensionRecordStore.storedRow/2")),
                     Map.entry("ManagedExtensionRecords.java",
                             Set.of("ManagedExtensionRecords.require/2")),
+                    // The closure callback validates resource/JOURNAL ownership
+                    // under its caller's pinned head; it never locks Session
+                    // rows or accesses Turn rows.
+                    Map.entry("ManagedHostedRecoveryRecords.java",
+                            Set.of("HistoricalResources.checkpointHistory/1")),
+                    // Package configuration delegates to a same-named JSON-only validator.
+                    Map.entry("ManagedMcpSettings.java",
+                            Set.of("ManagedMcpSettings.require/1")),
                     Map.entry("ManagedSchemaJdbcTemplate.java",
                             Set.of("ManagedSchemaJdbcTemplate.getSingleColumnRowMapper/1")),
+                    // Both publisher overloads avoid Session and Turn rows.
                     Map.entry("ManagedSessionStore.java",
-                            Set.of("ManagedSessionStore.sha256/1",
+                            Set.of("ManagedSessionStore.publishAgentResource/6",
+                                    "ManagedSessionStore.sha256/1",
                                     "ManagedSessionStore.storedTransaction/1",
                                     "ManagedSessionStore.usesDataSource/1")),
                     Map.entry("ManagedSnapshotStore.java",
@@ -214,6 +230,9 @@ class SessionRowLockOrderTest {
                     Map.entry("ManagedToolResultStore.java",
                             Set.of("ManagedToolResultStore.artifact/2",
                                     "Source.sessionKey/0")),
+                    // URLDecoder.decode shares the pure JSON helper's name/arity.
+                    Map.entry("ManagedUserMessageStore.java",
+                            Set.of("ManagedUserMessageStore.decode/2")),
                     Map.entry("ManagedWorkspaceRegistry.java",
                             Set.of("ManagedWorkspaceRegistry.findReadable/3")),
                     // Builder/API receiver calls share local names; retirement
@@ -255,8 +274,7 @@ class SessionRowLockOrderTest {
                                     "ReadLease.close/0",
                                     "ToolPublicationRetentionStore.open/4")),
                     Map.entry("ToolPublicationStore.java",
-                            Set.of("HeadActivation.current/5",
-                                    "Original.csi/0",
+                            Set.of("Original.csi/0",
                                     "Row.withState/2",
                                     "ToolPublicationStore.usesDataSource/1")),
                     Map.entry("WorkspaceCreationStore.java",
@@ -384,8 +402,10 @@ class SessionRowLockOrderTest {
         // session-row INSERT is the lock.
         assertThat(audit.lockers()).containsExactlyInAnyOrder(
                 "insertTurnCommand", "insertCancelCommand", "changeSessionModel", "changeSessionApproval",
+                "requireMcpManagement", "requireMcpSettingsCommit",
+                "requireConfigurationCommit", "requireExtensionManagement",
                 "insertSessionCommand", "insertWorkspaceSessionCommand",
-                "insertChildSessionCommand",
+                "insertChildSessionCommand", "insertPublicChildSessionCommand",
                 "insertInternalTeamLeadSessionCommand",
                 "beginSessionMutation",
                 "beginTaskCancelOperation", "completeSessionMutation",
@@ -399,7 +419,8 @@ class SessionRowLockOrderTest {
                 "recordRecoveryAdmission", "retractContinuationOutput",
                 "retractHarnessTurnOutput", "recordHarnessEvents",
                 "cancelUnadmittedTurn", "cancelBeforeAdmission", "failTurn",
-                "failRecoveryBlockedTurn",
+                "failRecoveryBlockedTurn", "markTurnFailureRecovery",
+                "requestRecoveryRecheck",
                 "appendPublicEventIfAbsent", "appendLiveSessionEventIfAbsent",
                 // Main's rename-delivery family (#13682): each takes the
                 // session-row FOR UPDATE before its delivery-row work.
@@ -462,17 +483,20 @@ class SessionRowLockOrderTest {
                         "findRuntimeRecoveryParked",
                         "parkTurnForRuntimeRecovery",
                         "insertCancelCommand", "insertChildSession",
-                        "insertChildSessionCommand", "insertCsiSessionCommand",
+                        "insertChildSessionCommand", "insertPublicChildSessionCommand", "insertCsiSessionCommand",
                         "insertInternalTeamLeadSessionCommand",
                         "insertSession", "insertSessionCommand", "insertTurn",
                         "insertTurnCommand", "insertWorkspaceSessionCommand",
                         "listTurns", "markSubmissionAttempted",
-                        "markTurnRecoveryBlocked",
+                        "markTurnRecoveryBlocked", "markTurnFailureRecovery",
+                        "requestRecoveryRecheck",
                         "materializeEvent", "materializeInput",
                         "materializeNextBatch", "recordAdmission",
                         "recordHarnessEvents", "recordRecoveryAdmission",
                         "releaseTurnLease", "renewTurn", "requireTurn",
-                        "requireTurnForUpdate", "requirePolicyChange", "retractContinuationOutput",
+                        "requireTurnForUpdate", "requirePolicyChange", "requireMcpManagement", "requireMcpSettingsCommit",
+                        "requireConfigurationCommit", "requireExtensionManagement", "requireChildExtensionBootstrap",
+                        "requireMcpManagementIdle", "retractContinuationOutput",
                         "retractHarnessTurnOutput", "scheduleTurnRetry",
                         "settleTurnCommands",
                         // D7-2's journal evidence for a parked input reads
@@ -508,7 +532,8 @@ class SessionRowLockOrderTest {
     void theOrderPinnedEntriesKeepTheirTransactionalBoundary() {
         for (String name : List.of("recordAdmission", "failTurn", "failRecoveryBlockedTurn",
                 "cancelUnadmittedTurn", "cancelBeforeAdmission",
-                "beginContextCompression", "markContextCompressionSubmitted")) {
+                "beginContextCompression", "markContextCompressionSubmitted", "markTurnFailureRecovery",
+                "requestRecoveryRecheck")) {
             List<Method> entries = Arrays.stream(ManagedAgentStore.class
                     .getDeclaredMethods())
                     .filter(method -> method.getName().equals(name))
@@ -558,13 +583,15 @@ class SessionRowLockOrderTest {
         Set<String> orderAudited = new TreeSet<>(sessionLockers);
         orderAudited.retainAll(turnReaders);
         assertThat(orderAudited).containsExactly("ManagedActionStore.java",
+                "ManagedUserMessageStore.java",
                 "WorkspaceRecoveryStore.java");
         // ManagedActionStore.admit takes the tenant lock before the
         // session row and never touches the turn row — the file's single
         // turn read lives in a locker-less query method — and
         // WorkspaceRecoveryStore's conditional source lock precedes its
-        // turn count, so both stay violation-free under the same order
-        // audit the main file gets.
+        // turn count. ManagedUserMessageStore locks the session before
+        // reading turn state. All stay violation-free under the same
+        // order audit the main file gets.
         for (String name : orderAudited) {
             assertThat(audits.get(name).violations())
                     .as("%s keeps the session-first order", name).isEmpty();
