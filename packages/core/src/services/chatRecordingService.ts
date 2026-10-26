@@ -3529,9 +3529,12 @@ export class ChatRecordingService {
    */
   recordChatCompression(payload: ChatCompressionRecordPayload): void {
     try {
-      // Freeze the array so later live-history mutations cannot desynchronize
-      // entries from the parallel promptIds array.
-      const compressedHistory = [...payload.compressedHistory];
+      // Own the containers before hook rescue replaces parts on live entries;
+      // spread preserves the symbol metadata used to derive prompt identities.
+      const compressedHistory = payload.compressedHistory.map((content) => ({
+        ...content,
+        ...(content.parts ? { parts: [...content.parts] } : {}),
+      }));
       const previous = this.activeBranchRecords.findLast(
         (record) => record.subtype === 'chat_compression',
       )?.systemPayload as ChatCompressionRecordPayload | undefined;

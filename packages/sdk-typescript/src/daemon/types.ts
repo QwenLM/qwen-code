@@ -2408,6 +2408,20 @@ export interface DaemonMcpBudgetStatusCell extends DaemonStatusCell {
   refusedCount: number;
 }
 
+/** Extra workspace directories persisted at workspace scope. */
+export interface DaemonWorkspaceDirectories {
+  v: 1;
+  primaryDirectory: string;
+  directories: string[];
+}
+
+/** Result of adding or removing one extra workspace directory. */
+export interface DaemonWorkspaceDirectoriesMutation
+  extends DaemonWorkspaceDirectories {
+  changed: boolean;
+  warnings: string[];
+}
+
 export interface DaemonWorkspaceMcpStatus {
   v: 1;
   workspaceCwd: string;

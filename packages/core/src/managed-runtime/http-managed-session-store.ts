@@ -176,7 +176,9 @@ export interface HttpManagedSessionStores {
   close(): Promise<void>;
   setLifecycleAuthority(authority?: ManagedSessionLifecycleAuthority): void;
   authorizeLifecycle(kind?: 'close' | 'delete'): Promise<void>;
-  authorizeOrdinary(kind?: 'legacy-close'): Promise<void>;
+  authorizeOrdinary(
+    kind?: 'legacy-close' | `configuration:${string}`,
+  ): Promise<void>;
   approvalSelection(): Promise<ManagedSessionApprovalSelection | undefined>;
   claimUserMessages(
     promptId: string,
@@ -808,7 +810,9 @@ class ManagedSessionStoreHttpClient {
     this.lifecycleAuthority = authority;
   }
 
-  async authorizeOrdinary(kind?: 'legacy-close'): Promise<void> {
+  async authorizeOrdinary(
+    kind?: 'legacy-close' | `configuration:${string}`,
+  ): Promise<void> {
     await this.assertWritable();
     await this.json('/execution:authorize', 'POST', {
       ...(kind ? { kind } : {}),

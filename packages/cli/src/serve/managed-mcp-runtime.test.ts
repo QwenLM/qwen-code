@@ -212,6 +212,142 @@ function invoke(
 }
 
 describe('Managed MCP Runtime', () => {
+  it('installs package definitions only for the selected Session and drains that Session', async () => {
+    const instance = runtime([]);
+    instance.installSessionDefinitions(sessionKey.sessionId, {
+      version: 1,
+      servers: [stdioDefinition()],
+    });
+    expect(
+      instance.publishedDefinitions(
+        sessionKey.tenantId,
+        sessionKey.workspaceId,
+      ),
+    ).toEqual([]);
+    const configured = await settled(instance, configure());
+    expect(configured.state).toBe('settled');
+    expect(configured.error).toBeUndefined();
+    expect(instance.hasHolds(runtimeSessionId)).toBe(true);
+    await instance.drainSession('unrelated-session');
+    expect(instance.hasHolds(runtimeSessionId)).toBe(true);
+    expect(() =>
+      instance.installSessionDefinitions(sessionKey.sessionId, {
+        version: 1,
+        servers: [],
+      }),
+    ).toThrow('busy');
+    await instance.drainSession(runtimeSessionId);
+    expect(instance.hasHolds(runtimeSessionId)).toBe(false);
+    instance.installSessionDefinitions(sessionKey.sessionId, {
+      version: 1,
+      servers: [],
+    });
+  });
+
+  it('preserves independent MCP connection identity across another component change and leaves sibling Sessions untouched', async () => {
+    const independent = stdioDefinition();
+    const extension = { ...stdioDefinition(), serverId: 'one:fixture' };
+    const otherKey = { ...sessionKey, sessionId: 'session-b' };
+    const otherOwner = 'mcp:session-b';
+    const instance = new ManagedMcpRuntime(
+      { ...sessionKey, workspaceGeneration: '1' },
+      async () => directory,
+      { version: 1, servers: [independent] },
+    );
+    runtimes.push(instance);
+    instance.installSessionDefinitions(sessionKey.sessionId, {
+      version: 1,
+      servers: [independent, extension],
+    });
+    instance.installSessionDefinitions(otherKey.sessionId, {
+      version: 1,
+      servers: [independent],
+    });
+    const finish = async (owner: string, control: ManagedMcpControl) => {
+      let value =
+        control.kind === 'mcp-invoke' && control.request.kind === 'tool_call'
+          ? await instance.invokeTool(owner, control)
+          : await instance.control(owner, control);
+      await vi.waitFor(
+        async () => {
+          value = await instance.control(owner, {
+            kind: 'mcp-status',
+            sessionKey: control.sessionKey,
+            operationId: 'lookup',
+            targetOperationId: control.operationId,
+          });
+          expect(value.state).not.toBe('running');
+        },
+        { timeout: 15000 },
+      );
+      return value;
+    };
+    const original = (await finish(runtimeSessionId, configure())).catalog!;
+    await finish(runtimeSessionId, {
+      ...configure(),
+      operationId: 'extension-configuration',
+      serverId: extension.serverId,
+      grant: grant('extension-configuration'),
+    });
+    const otherControl = {
+      ...configure(),
+      operationId: 'configuration-2',
+      configRevision: 2,
+      sessionKey: otherKey,
+      grant: { ...grant('configuration-2'), sessionKey: otherKey },
+    };
+    const sibling = (await finish(otherOwner, otherControl)).catalog!;
+    const before = (
+      await readFile(path.join(directory, 'calls-1'), 'utf8')
+    ).split('initialize').length;
+    const next = { version: 1 as const, servers: [independent] };
+    await instance.drainExtensionSession(sessionKey.sessionId, next);
+    instance.installSessionDefinitions(sessionKey.sessionId, next);
+    expect(instance.hasHolds(runtimeSessionId)).toBe(true);
+    expect(instance.hasHolds(otherOwner)).toBe(true);
+    const invokeA = invoke(original, 'same-a', {
+      kind: 'tool_call',
+      name: 'echo',
+      arguments: { preserved: 'a' },
+    });
+    const resultA = await finish(runtimeSessionId, invokeA);
+    expect(resultA.state).toBe('settled');
+    expect(resultA.error).toBeUndefined();
+    const invokeB = invoke(sibling, 'same-b', {
+      kind: 'tool_call',
+      name: 'echo',
+      arguments: { preserved: 'b' },
+    });
+    const resultB = await finish(otherOwner, {
+      ...invokeB,
+      sessionKey: otherKey,
+      grant: { ...invokeB.grant, sessionKey: otherKey },
+    });
+    expect(resultB.state).toBe('settled');
+    expect(resultB.error).toBeUndefined();
+    expect(
+      (await readFile(path.join(directory, 'calls-1'), 'utf8')).split(
+        'initialize',
+      ).length,
+    ).toBe(before);
+    expect(
+      (
+        await finish(runtimeSessionId, {
+          kind: 'mcp-discover',
+          sessionKey,
+          operationId: 'unchanged-discovery',
+          serverId: original.serverId,
+          serverRevision: original.serverRevision,
+          connectionGeneration: original.connectionGeneration,
+          grant: grant('configuration-1'),
+        })
+      ).catalog,
+    ).toMatchObject({
+      configRevision: original.configRevision,
+      connectionGeneration: original.connectionGeneration,
+    });
+  });
+
   it('isolates pending Session lookups while preserving the Workspace drain total', async () => {
     vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(
       path.join(directory, 'global'),
@@ -263,6 +399,12 @@ describe('Managed MCP Runtime', () => {
       expect(instance.getDrainInspection().pendingStarts).toBe(1);
       expect(instance.hasPendingWork(otherRuntime)).toBe(true);
       expect(instance.hasPendingWork(runtimeSessionId)).toBe(false);
+      expect(instance.hasExtensionPendingOperations(sessionKey.sessionId)).toBe(
+        false,
+      );
+      expect(instance.hasExtensionPendingOperations(otherKey.sessionId)).toBe(
+        true,
+      );
       await expect(
         executor.controlFileHistory(sessionKey.sessionId, runtimeSessionId, {
           kind: 'raw-file-history',

@@ -2474,6 +2474,7 @@ function currentServeFeaturesForRunQwenServe(
     channelManagementAvailable: true,
     persistentWorkspaceRegistrationAvailable: true,
     workspaceRuntimeRemovalAvailable: true,
+    workspaceDirectoriesAvailable: opts.experimentalPairedEngines !== true,
     // Advertise the same host-conditional and WS feature flags as the runtime
     // path (serve-features.ts) so the bootstrap `/capabilities` window doesn't
     // briefly under-report them.
@@ -3494,16 +3495,6 @@ async function runQwenServeImpl(
   const hostedCsiSessionStoreUrl =
     optsIn.hostedCsiSessionStoreUrl ??
     process.env[HOSTED_CSI_SESSION_STORE_URL_ENV];
-  const managedRuntimeBrokerUrl =
-    optsIn.managedRuntimeBrokerUrl ??
-    (optsIn.profile === 'hosted-harness'
-      ? process.env['QWEN_HOSTED_HARNESS_BROKER_URL']
-      : undefined);
-  const managedRuntimeBrokerToken =
-    optsIn.managedRuntimeBrokerToken ??
-    (optsIn.profile === 'hosted-harness'
-      ? process.env['QWEN_HOSTED_HARNESS_BROKER_TOKEN']
-      : undefined);
   validateHostedHarnessProfile({
     ...optsIn,
     token,
@@ -3511,8 +3502,6 @@ async function runQwenServeImpl(
       optsIn.profile === 'hosted-harness' ? true : optsIn.requireAuth,
     hostedHarnessCapabilityDigest,
     hostedCsiSessionStoreUrl,
-    managedRuntimeBrokerUrl,
-    managedRuntimeBrokerToken,
   });
   const baseEnv: NodeJS.ProcessEnv = { ...process.env };
   const launchMemoryProjectScopeValue =
@@ -3650,8 +3639,6 @@ async function runQwenServeImpl(
     token,
     hostedHarnessCapabilityDigest,
     hostedCsiSessionStoreUrl,
-    managedRuntimeBrokerUrl,
-    managedRuntimeBrokerToken,
     promptDeadlineMs,
     writerIdleTimeoutMs,
     workspace: rawWorkspace,
@@ -4833,8 +4820,8 @@ async function runQwenServeImpl(
         env: daemonRuntimeBaseEnv,
         token,
         externalToolGuardToken: optsIn.externalToolGuard?.token,
-        managedRuntimeBrokerUrl,
-        managedRuntimeBrokerToken,
+        managedRuntimeBrokerUrl: opts.managedRuntimeBrokerUrl,
+        managedRuntimeBrokerToken: opts.managedRuntimeBrokerToken,
         getPort: () => actualPort,
         close: () => serveAppLifecycle.close(),
       })
