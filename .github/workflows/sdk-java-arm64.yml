@@ -1,0 +1,86 @@
+name: SDK Java ARM64 (experimental)
+
+# An arm64 lane for the self-hosted Hangzhou hosts, dispatched by hand on
+# purpose. It exists to prove the arm64 toolchain end to end — tool-cache JDK,
+# the VPC's Maven mirror, the build and (optionally) the suite — before any
+# required lane is moved onto it. Nothing here gates a pull request.
+on:
+  workflow_dispatch:
+    inputs:
+      run_tests:
+        description: 'Also run the managed-agent-server suite after the build'
+        type: boolean
+        default: false
+
+concurrency:
+  group: 'sdk-java-arm64-${{ github.ref }}'
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  MAVEN_VERSION: '3.9.11'
+
+jobs:
+  arm64:
+    name: 'SDK Java (arm64)'
+    runs-on:
+      - self-hosted
+      - linux
+      - arm64
+      - ecs-qwen
+    timeout-minutes: 90
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+
+      - name: 'Set up Java (pool cache)'
+        env:
+          JAVA_SPEC: '21'
+        run: 'bash .github/scripts/install-pool-jdk.sh'
+
+      - name: 'Point Maven at the pool mirror'
+        run: 'bash .github/scripts/configure-maven-mirror.sh'
+
+      - name: 'Bootstrap Maven'
+        run: |-
+          set -uo pipefail
+          archive="${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+          for base in \
+            http://mirrors.cloud.aliyuncs.com/maven/repository/public/org/apache/maven/apache-maven \
+            https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven; do
+            if curl -fsSL --retry 3 --retry-delay 5 --max-time 300 \
+              "${base}/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "${archive}"; then
+              break
+            fi
+          done
+          test -s "${archive}"
+          mkdir -p "${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}"
+          tar -xzf "${archive}" -C "${RUNNER_TEMP}" --strip-components=0
+          echo "${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}/bin" >> "${GITHUB_PATH}"
+
+      - name: 'Build'
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml -Dmaven.repo.local=${{ runner.temp }}/m2-repo'
+        run: |-
+          mkdir -p "${RUNNER_TEMP}/m2-repo"
+          cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo/" 2>/dev/null || true
+          mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true \
+            -Dmaven.javadoc.skip=true -f packages/sdk-java/qwencode/pom.xml install
+          mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true \
+            -Dmaven.javadoc.skip=true -f packages/managed-agent-server/pom.xml install
+
+      - name: 'Run the suite'
+        if: ${{ inputs.run_tests }}
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml -Dmaven.repo.local=${{ runner.temp }}/m2-repo'
+        run: |-
+          mvn --batch-mode --no-transfer-progress -f packages/managed-agent-server/pom.xml test
+
+      - name: 'Report the platform'
+        if: ${{ always() }}
+        run: |-
+          uname -m
+          java -version || true
+          du -sh "${HOME}/.m2/repository" 2>/dev/null || true
