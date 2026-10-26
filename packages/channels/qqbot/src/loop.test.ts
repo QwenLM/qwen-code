@@ -98,15 +98,21 @@ interface RawChannel {
   router: SessionRouter;
 }
 
+type ChunkListener = (sessionId: string, chunk: string) => void;
+
 function makeBridge(): {
   bridge: ChannelAgentBridge;
   getLoopHandler: () => ChannelLoopToolHandler | undefined;
+  getChunkListener: () => ChunkListener | undefined;
 } {
   let loopHandler: ChannelLoopToolHandler | undefined;
+  let chunkListener: ChunkListener | undefined;
   const bridge = {
     newSession: mockNewSession,
     prompt: mockPrompt,
-    on: vi.fn(),
+    on: vi.fn((event: string, listener: ChunkListener) => {
+      if (event === 'textChunk') chunkListener = listener;
+    }),
     off: vi.fn(),
     registerChannelLoopToolHandler: vi.fn((handler: ChannelLoopToolHandler) => {
       loopHandler = handler;
@@ -115,6 +121,7 @@ function makeBridge(): {
   return {
     bridge: bridge as unknown as ChannelAgentBridge,
     getLoopHandler: () => loopHandler,
+    getChunkListener: () => chunkListener,
   };
 }
 
@@ -158,9 +165,10 @@ function makeChannel(): {
   raw: RawChannel;
   controller: ChannelLoopController;
   getLoopHandler: () => ChannelLoopToolHandler | undefined;
+  getChunkListener: () => ChunkListener | undefined;
 } {
   const { controller } = makeLoopController();
-  const { bridge, getLoopHandler } = makeBridge();
+  const { bridge, getLoopHandler, getChunkListener } = makeBridge();
   const ch = new QQChannel(
     'test-bot',
     {
@@ -183,7 +191,7 @@ function makeChannel(): {
   raw.accessToken = 'test-token';
   raw.tokenExpiresAt = Date.now() + 3_600_000;
   raw.chatTypeMap.set(CHAT_ID, 'group');
-  return { ch, raw, controller, getLoopHandler };
+  return { ch, raw, controller, getLoopHandler, getChunkListener };
 }
 
 function loopJob(): ChannelLoop {
@@ -376,5 +384,67 @@ describe('QQ channel proactive loops', () => {
       message: expect.stringMatching(/Active messages disabled/u),
     });
     expect(mockSendQQMessage).not.toHaveBeenCalled();
+  });
+
+  it('fails the loop when the route block is permanent', async () => {
+    const { ch, raw } = makeChannel();
+    await bindSession(raw);
+    // The chat type was lost (e.g. the bot left the group), so the delivery is
+    // dropped before the wire and must not be recorded as delivered.
+    raw.chatTypeMap.delete(CHAT_ID);
+    mockPrompt.mockResolvedValue('Scheduled summary');
+
+    await expect(ch.runLoopPrompt(loopJob())).rejects.toMatchObject({
+      name: 'ChannelProactiveDeliveryError',
+      disposition: 'permanent',
+    });
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+  });
+
+  it('fails the loop when the route block is transient', async () => {
+    const { ch, raw } = makeChannel();
+    await bindSession(raw);
+    raw.tokenExpiresAt = 0;
+    mockFetchAccessToken.mockRejectedValue(new Error('token refresh failed'));
+    mockPrompt.mockResolvedValue('Scheduled summary');
+
+    await expect(ch.runLoopPrompt(loopJob())).rejects.toMatchObject({
+      name: 'ChannelProactiveDeliveryError',
+      disposition: 'transient',
+    });
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+  });
+
+  it('delivers the loop result once, not the streamed chunks as well', async () => {
+    const { ch, raw, getChunkListener } = makeChannel();
+    await bindSession(raw);
+    const chunks = [
+      'A'.repeat(1500),
+      'B'.repeat(1500),
+      'C'.repeat(1500),
+      'D'.repeat(1500),
+    ];
+    const response = chunks.join('');
+    mockPrompt.mockImplementation(async () => {
+      const emit = getChunkListener();
+      expect(emit).toBeDefined();
+      for (const chunk of chunks) emit!(SESSION_ID, chunk);
+      return response;
+    });
+    mockSendQQMessage.mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => '',
+    });
+
+    await expect(ch.runLoopPrompt(loopJob())).resolves.toBe(response);
+
+    // pushProactive is the single delivery arm for an unattended turn: the
+    // streamed chunks must not also be flushed to the group.
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    expect(mockSendQQMessage.mock.calls[0]![3]).toEqual({
+      msg_type: 2,
+      markdown: { content: response },
+    });
   });
 });

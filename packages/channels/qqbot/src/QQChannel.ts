@@ -14,6 +14,7 @@
 
 import {
   ChannelBase,
+  ChannelProactiveDeliveryError,
   SessionRouter,
   getGlobalQwenDir,
   sanitizeSenderName,
@@ -1180,12 +1181,23 @@ export class QQChannel extends ChannelBase {
         'Channel does not support proactive loop messages for threaded targets.',
       );
     }
-    await this.sendMessageWithReplyContext(
+    const blocked = await this.sendMessageWithReplyContext(
       target.chatId,
       text,
       undefined,
       sourceLabel,
     );
+    // A route-blocked send resolves without throwing and never reaches the
+    // wire (see resolveRoute), while runLoopPrompt has already marked the
+    // delivery started — returning here would record an undelivered loop as
+    // delivered. Keep the block's class so the scheduler can tell a permanent
+    // route failure from a retryable one.
+    if (blocked !== undefined) {
+      throw new ChannelProactiveDeliveryError(
+        blocked,
+        `outgoing route ${blocked} blocked for ${target.chatId}`,
+      );
+    }
   }
 
   /**
@@ -2100,6 +2112,10 @@ export class QQChannel extends ChannelBase {
     sessionId: string,
     segment?: ChannelOutputSegmentContext,
   ): void {
+    // Unattended turns (loop/webhook task) deliver their answer once, in full,
+    // through pushProactive; base never calls onResponseComplete for them, so
+    // streaming the chunks here would post the same text to the group twice.
+    if (this.isProactivePromptTurn(sessionId)) return;
     const currentTurn = this.turnCounter.get(sessionId) ?? 0;
     let state = this.streamState.get(sessionId);
     if (state && state.turn !== currentTurn) {

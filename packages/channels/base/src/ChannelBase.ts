@@ -3135,6 +3135,17 @@ export abstract class ChannelBase {
     return this.activePrompts.get(sessionId)?.sourceLabel;
   }
 
+  /**
+   * True while the session's live turn is an unattended one (loop or webhook
+   * task). Base delivers such a turn once, in full, through pushProactive and
+   * never calls onResponseComplete, so an adapter whose sink flushes streamed
+   * chunks would post the same text twice. Adapters without an inbound anchor
+   * (QQ) gate on this; the base chunk bookkeeping still runs either way.
+   */
+  protected isProactivePromptTurn(sessionId: string): boolean {
+    return this.activePrompts.get(sessionId)?.loopPrompt === true;
+  }
+
   protected getInboundErrorSourceLabel(envelope: Envelope): string | undefined {
     return this.inboundErrorSourceLabels.get(envelope);
   }
