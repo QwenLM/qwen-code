@@ -27,7 +27,12 @@ concurrency:
 jobs:
   changes:
     name: 'Check TUI impact'
-    runs-on: 'ubuntu-latest'
+    # Door for the parity/noflicker lanes below: route it like them (#13245) so
+    # a starved hosted queue cannot hold their gate — it sat 40+ minutes there
+    # while the pool stood idle. Untrusted fork PRs stay hosted: for
+    # pull_request events the script below is read from the PR's own YAML.
+    # The job runs no checkout and no PR code, so no pool-hygiene step applies.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     permissions:
       pull-requests: 'read'
