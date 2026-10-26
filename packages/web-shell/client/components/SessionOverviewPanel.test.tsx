@@ -3843,6 +3843,46 @@ describe('SessionOverviewPanel standalone sessions', () => {
     }
   });
 
+  it('renames the open standalone session through the standalone route', async () => {
+    useConversationsRuntimeCapabilities();
+    connectionState.sessionId = 'st1';
+    connectionState.workspaceCwd = undefined;
+    connectionState.sessionContext = { kind: 'standalone' };
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('st1', {
+            workspaceCwd: '/conv',
+            displayName: 'Solo',
+            updatedAt: '2026-07-06T11:00:00.000Z',
+          }),
+        ],
+      },
+    ];
+    render();
+    await flushAsync();
+    const row = rows().find((tr) => tr.textContent?.includes('Solo'))!;
+    expect(row.textContent).toContain('Current');
+    act(() => click(rowActionButton(row, 'Rename')));
+    const input = container!.querySelector(
+      'input[aria-label="Rename: Solo"]',
+    ) as HTMLInputElement;
+    act(() => setInputValue(input, 'Solo Two'));
+    act(() =>
+      input
+        .closest('form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        ),
+    );
+    await flushAsync();
+    expect(workspaceClient.renameStandaloneSession).toHaveBeenCalledWith(
+      'st1',
+      'Solo Two',
+    );
+    expect(workspaceActions.renameSession).not.toHaveBeenCalled();
+  });
+
   it('marks the open standalone session as current and clears it on delete', async () => {
     useConversationsRuntimeCapabilities();
     connectionState.sessionId = 'st1';

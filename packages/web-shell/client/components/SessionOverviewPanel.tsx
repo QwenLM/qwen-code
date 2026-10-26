@@ -1013,17 +1013,20 @@ function SessionOverviewPanelInner({
       // the standalone client route the sidebar uses.
       const standalone = openSessionContext(card) !== undefined;
       try {
-        // The current session renames through its own session actions (the
-        // daemon only allows it there); other sessions update metadata on the
-        // owning workspace client — mirroring the sidebar.
+        // Standalone rows rename through the standalone route even when they
+        // are the open session — the same route App's /rename takes for a
+        // standalone context. The current workspace session renames through
+        // its own session actions (the daemon only allows it there); other
+        // sessions update metadata on the owning workspace client — mirroring
+        // the sidebar.
         let result: SessionMetadataResult | undefined = undefined;
-        if (isCurrentCard(card)) {
-          result = await actions.renameSession(nextName);
-        } else if (standalone) {
+        if (standalone) {
           await workspace.client.renameStandaloneSession(
             card.sessionId,
             nextName,
           );
+        } else if (isCurrentCard(card)) {
+          result = await actions.renameSession(nextName);
         } else if (card.workspaceCwd) {
           result = await workspace.client
             .workspaceByCwd(card.workspaceCwd)
