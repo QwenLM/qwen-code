@@ -198,6 +198,50 @@ public class ManagedNativeJournalSnapshots {
         return new Descriptor(manifest, ref(stored), false);
     }
 
+    public Descriptor select(String tenant, String workspace, String session, String token, RestoreHead frozen) {
+        RestoreHead current = sessions.restore(tenant, workspace, session, token);
+        require(current.writerGeneration() == frozen.writerGeneration()
+                && current.journalRevision() >= frozen.journalRevision(), "managed_session_writer_conflict");
+        if (!"ACTIVE".equals(frozen.state()) || !"READY".equals(frozen.recoveryStatus())
+                || frozen.compactedThroughRevision() != 0 || frozen.journalRevision() == 0) {
+            return null;
+        }
+        var candidates = jdbc.query("SELECT owner_key, owner_revision FROM ma_resource_ref"
+                + " WHERE session_scope_key = ? AND owner_kind = 'NATIVE_SNAPSHOT' AND owner_revision <= ?"
+                + " GROUP BY owner_key, owner_revision ORDER BY owner_revision DESC, owner_key LIMIT 1",
+                (row, index) -> new Candidate(row.getString(1), row.getLong(2)),
+                ManagedSessionStore.sessionScopeKey(tenant, session), frozen.journalRevision());
+        if (candidates.isEmpty()) {
+            return null;
+        }
+        Candidate selected = candidates.getFirst();
+        var roots = jdbc.queryForList("SELECT r.resource_id FROM ma_resource_ref f"
+                + " JOIN ma_resource r ON r.resource_key = f.resource_key WHERE f.session_scope_key = ?"
+                + " AND f.owner_kind = 'NATIVE_SNAPSHOT' AND f.owner_key = ? AND f.owner_revision = ? AND r.kind = ?",
+                String.class, ManagedSessionStore.sessionScopeKey(tenant, session), selected.ownerKey(),
+                selected.coverage(), MANIFEST_KIND);
+        require(roots.size() == 1, "managed_session_snapshot_corrupt");
+        String root = roots.getFirst();
+        Manifest manifest = decode(resource(tenant, workspace, session, root, token).bytes(), Manifest.class);
+        require(manifest.snapshotId() != null, "managed_session_snapshot_corrupt");
+        Descriptor descriptor = read(tenant, workspace, session, token, manifest.snapshotId());
+        require(root.equals(descriptor.manifest().resourceId())
+                && selected.ownerKey().equals(ownerKey(ManagedSessionStore.sessionScopeKey(tenant, session), manifest.snapshotId()))
+                && selected.coverage() == descriptor.snapshot().coveredJournalRevision()
+                && descriptor.snapshot().committedSequence() <= frozen.committedSequence()
+                && descriptor.snapshot().activationEpoch() <= frozen.activationEpoch()
+                && descriptor.snapshot().storageVersion() <= frozen.storageVersion(), "managed_session_snapshot_corrupt");
+        require(sessions.restore(tenant, workspace, session, token).writerGeneration() == frozen.writerGeneration(),
+                "managed_session_writer_conflict");
+        String id = descriptor.snapshot().snapshotId();
+        if (".".equals(id) || "..".equals(id) || id.contains("/") || id.contains("\\")) {
+            return null;
+        }
+        return descriptor;
+    }
+
+    private record Candidate(String ownerKey, long coverage) { }
+
     public Descriptor read(String tenant, String workspace, String session, String token, String snapshotId) {
         sessions.restore(tenant, workspace, session, token);
         Descriptor descriptor = find(tenant, workspace, session, token, snapshotId);

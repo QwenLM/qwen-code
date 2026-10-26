@@ -58,6 +58,46 @@ class ManagedNativeJournalSnapshotsTest {
     }
 
     @Test
+    void selectsOnlyPublishedSnapshotsAtOrBeforeTheFrozenHead() {
+        var firstHead = sessions.restore(TENANT, WORKSPACE, SESSION, TOKEN);
+        assertThat(snapshots.select(TENANT, WORKSPACE, SESSION, TOKEN, firstHead)).isNull();
+        var first = snapshots.publish(TENANT, SESSION, TOKEN, request("first"));
+        var tied = snapshots.publish(TENANT, SESSION, TOKEN, request("tie"));
+        String expected = java.util.List.of(first, tied).stream()
+                .min(java.util.Comparator.comparing(value -> value.manifest().resourceId()))
+                .orElseThrow().snapshot().snapshotId();
+        assertThat(snapshots.select(TENANT, WORKSPACE, SESSION, TOKEN, firstHead).snapshot().snapshotId()).isEqualTo(expected);
+        commitMonitor();
+        var latest = snapshots.publish(TENANT, SESSION, TOKEN, request("latest"));
+        assertThat(snapshots.select(TENANT, WORKSPACE, SESSION, TOKEN,
+                sessions.restore(TENANT, WORKSPACE, SESSION, TOKEN)).snapshot()).isEqualTo(latest.snapshot());
+        assertThat(snapshots.select(TENANT, WORKSPACE, SESSION, TOKEN, firstHead).snapshot().snapshotId()).isEqualTo(expected);
+        assertThatThrownBy(() -> snapshots.select(TENANT, WORKSPACE, SESSION, "wrong-token", firstHead))
+                .isInstanceOf(ManagedAgentException.class);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {".", "..", "folder/snapshot", "folder\\snapshot"})
+    void leavesNamesThatTheHttpRouteCannotAddressUnselected(String id) {
+        snapshots.publish(TENANT, SESSION, TOKEN, request(id));
+        assertThat(snapshots.select(TENANT, WORKSPACE, SESSION, TOKEN,
+                sessions.restore(TENANT, WORKSPACE, SESSION, TOKEN))).isNull();
+    }
+
+    @Test
+    void aSelectedOwnerMissingItsRootFailsInsteadOfFallingBack() {
+        snapshots.publish(TENANT, SESSION, TOKEN, request("older"));
+        commitMonitor();
+        var latest = snapshots.publish(TENANT, SESSION, TOKEN, request("latest"));
+        jdbc.update("DELETE FROM ma_resource_ref WHERE owner_kind = 'NATIVE_SNAPSHOT' AND resource_id = ?",
+                latest.manifest().resourceId());
+        assertThatThrownBy(() -> snapshots.select(TENANT, WORKSPACE, SESSION, TOKEN,
+                sessions.restore(TENANT, WORKSPACE, SESSION, TOKEN)))
+                .isInstanceOf(ManagedAgentException.class).satisfies(error ->
+                        assertThat(((ManagedAgentException) error).getCode()).isEqualTo("managed_session_snapshot_corrupt"));
+    }
+
+    @Test
     void ordinaryPublicationCannotTakeANativeManifestLock() {
         byte[] bytes = new byte[] {1};
         var request = new ManagedSessionStoreModels.PublishToolResultRequest(WORKSPACE, WRITER, 1,

@@ -20,6 +20,8 @@ import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.TransactionPage;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.WriterGrant;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedUserMessageStore;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonUnwrapped;
 import jakarta.validation.Valid;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpHeaders;
@@ -171,14 +173,20 @@ public class ManagedSessionStoreController {
                 writerToken, request, lifecycleAuthority(headers));
     }
 
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record RestoreResponse(@JsonUnwrapped RestoreHead head,
+            ManagedNativeJournalSnapshots.Descriptor nativeSnapshot) { }
+
     @GetMapping("/restore")
-    public RestoreHead restore(TenantContext tenant,
+    public RestoreResponse restore(TenantContext tenant,
             @PathVariable String sessionId,
             @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER)
                     String writerToken,
-            @RequestParam String workspaceId) {
-        return store.restore(tenant.tenantId(), workspaceId, sessionId,
-                writerToken);
+            @RequestParam String workspaceId,
+            @RequestParam(defaultValue = "false") boolean includeNativeSnapshot) {
+        RestoreHead head = store.restore(tenant.tenantId(), workspaceId, sessionId, writerToken);
+        return new RestoreResponse(head, includeNativeSnapshot
+                ? snapshots.select(tenant.tenantId(), workspaceId, sessionId, writerToken, head) : null);
     }
 
     @PostMapping("/tool-results:publish")
