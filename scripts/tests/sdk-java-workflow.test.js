@@ -2181,7 +2181,14 @@ describe('SDK Java runner-local tool-cache repair', () => {
         String(s.uses ?? '').startsWith('actions/checkout'),
       );
       expect(repair, name).toBeGreaterThan(checkout);
-      expect(repair, name).toBe(java - 1);
+      if (name === 'daemon-e2e') {
+        expect(repair, name).toBe(java - 2);
+        expect(steps[repair + 1].name, name).toBe(
+          'Use pre-installed Node.js (self-hosted)',
+        );
+      } else {
+        expect(repair, name).toBe(java - 1);
+      }
       expect(steps[repair].if, name).toBe(
         "${{ runner.environment == 'self-hosted' }}",
       );
