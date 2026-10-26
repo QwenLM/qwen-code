@@ -51,9 +51,11 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Properties;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.regex.Pattern;
 
 /**
@@ -97,12 +99,15 @@ public final class ManagedAgentPreflight {
         loadConfiguration(environment, locations, checks);
         ManagedAgentProperties properties = bind(environment, checks);
         checks.add(javaCheck());
-        checks.add(configFileCheck(locations));
+        AccessCheck access = serviceUserCheck(properties.getServiceUser(),
+                System.getProperty("user.name", ""), ServiceAccount::lookup);
+        checks.add(access.check());
+        checks.add(configFileCheck(locations, access.account()));
         checks.add(startupValidationCheck(properties));
         checks.add(keyRingCheck(properties));
         checks.add(authCheck(environment, properties));
         checks.add(harnessCheck(properties));
-        checks.add(credentialsFileCheck(properties));
+        checks.add(credentialsFileCheck(properties, access.account()));
         checks.add(sessionStoreCheck(properties));
         checks.add(toolPathCheck(properties));
         checks.addAll(brokerChecks(properties));
@@ -243,7 +248,65 @@ public final class ManagedAgentPreflight {
                         "install JDK 21 or later");
     }
 
+    /** The account file rows check access for, or null for this process. */
+    record AccessCheck(Check check, ServiceAccount account) {
+    }
+
+    interface AccountLookup {
+        Optional<ServiceAccount> find(String name) throws IOException;
+    }
+
+    static AccessCheck serviceUserCheck(String name, String runner,
+            AccountLookup lookup) {
+        if (StringUtils.isBlank(name)) {
+            return new AccessCheck(new Check("service-user", Status.SKIP,
+                    "not set; file rows check access as " + runner, null), null);
+        }
+        if (name.equals(runner)) {
+            return new AccessCheck(new Check("service-user", Status.PASS,
+                    name + " (this process)", null), null);
+        }
+        Optional<ServiceAccount> account;
+        try {
+            account = lookup.find(name);
+        } catch (IOException error) {
+            return new AccessCheck(new Check("service-user", Status.WARN,
+                    "cannot look up " + name + "; file rows check access as "
+                            + runner, null), null);
+        }
+        if (account.isEmpty()) {
+            return new AccessCheck(new Check("service-user", Status.FAIL,
+                    name + " does not exist",
+                    "create the account, or correct"
+                            + " QWEN_MANAGED_AGENT_SERVICE_USER"), null);
+        }
+        return new AccessCheck(new Check("service-user", Status.PASS,
+                name + " (groups " + String.join(", ",
+                        new TreeSet<>(account.get().groups())) + ")",
+                null), account.get());
+    }
+
+    // The server reads these files as its service account, which may not be
+    // the account running preflight.
+    private static boolean readable(Path file, ServiceAccount account) {
+        if (account == null) {
+            return Files.isReadable(file);
+        }
+        try {
+            return account.canRead(file);
+        } catch (UnsupportedOperationException error) {
+            return Files.isReadable(file);
+        } catch (IOException error) {
+            return false;
+        }
+    }
+
     static Check configFileCheck(List<String> locations) {
+        return configFileCheck(locations, null);
+    }
+
+    static Check configFileCheck(List<String> locations,
+            ServiceAccount account) {
         if (locations.isEmpty()) {
             return new Check("config", Status.WARN,
                     "no external configuration; environment only",
@@ -261,9 +324,13 @@ public final class ManagedAgentPreflight {
             return new Check("config", Status.WARN,
                     path + " does not exist (optional)", null);
         }
-        if (!Files.isReadable(file)) {
-            return new Check("config", Status.FAIL,
-                    path + " is not readable", "chmod 600 " + path);
+        if (!readable(file, account)) {
+            return account == null
+                    ? new Check("config", Status.FAIL,
+                            path + " is not readable", "chmod 600 " + path)
+                    : new Check("config", Status.FAIL,
+                            path + " is not readable by " + account.name(),
+                            unreadableFix(account, path));
         }
         String content;
         try {
@@ -277,6 +344,12 @@ public final class ManagedAgentPreflight {
                 || content.contains("password");
         return secrets ? sharedSecretFileCheck("config", file, path)
                 : new Check("config", Status.PASS, path, null);
+    }
+
+    private static String unreadableFix(ServiceAccount account, String path) {
+        return "chown " + account.name() + " " + path + ", chmod 600 " + path
+                + ", and let " + account.name()
+                + " enter every directory on its path, following symbolic links";
     }
 
     // One policy for every file that holds a secret: WARN, not FAIL, when
@@ -376,6 +449,11 @@ public final class ManagedAgentPreflight {
     }
 
     static Check credentialsFileCheck(ManagedAgentProperties properties) {
+        return credentialsFileCheck(properties, null);
+    }
+
+    static Check credentialsFileCheck(ManagedAgentProperties properties,
+            ServiceAccount account) {
         ManagedAgentProperties.Harness harness = properties.getHarness();
         if (!harness.isEnabled()) {
             return new Check("credentials", Status.SKIP, "disabled", null);
@@ -396,11 +474,15 @@ public final class ManagedAgentPreflight {
                     file + ": cannot inspect permissions", null);
         }
         // The server reads the file as its service account at startup.
-        if (!Files.isReadable(path)) {
-            return new Check("credentials", Status.FAIL,
-                    file + " is not readable",
-                    "chown it to the service account, then chmod 600 "
-                            + file);
+        if (!readable(path, account)) {
+            return account == null
+                    ? new Check("credentials", Status.FAIL,
+                            file + " is not readable",
+                            "chown it to the service account, then chmod 600 "
+                                    + file)
+                    : new Check("credentials", Status.FAIL,
+                            file + " is not readable by " + account.name(),
+                            unreadableFix(account, file));
         }
         return sharedSecretFileCheck("credentials", path, file);
     }
