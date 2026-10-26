@@ -44,4 +44,6 @@ standalone 行的目录 `workspaceCwd` 是 daemon 内部 Conversations 根目录
 而不是产品工作区，因此面板将其重命名、导出、归档和删除操作路由到
 standalone 客户端接口；workspace 限定接口会打到 Conversations 工作区，
 绕过 standalone 生命周期（工作目录、删除日志、运行时保护）。
+该内部根目录不会作为项目展示：行的工作区标签、其 tooltip、Details 弹层以及
+Conversations 运行时对应的工作区筛选项都显示「无工作区」，与侧栏一致。
 宿主锁定的 shell 隐藏 standalone 目录，与侧栏的范围门控保持一致。

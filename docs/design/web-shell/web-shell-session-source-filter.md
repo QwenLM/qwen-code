@@ -54,5 +54,9 @@ workspace sessions, merged from the standalone client catalog behind the
 workspace, so the panel routes its rename, export, archive, and delete
 actions to the standalone client routes; workspace-qualified calls would
 target the Conversations workspace and bypass the standalone lifecycle
-(working directory, deletion journal, live-runtime guard). A host-locked
-shell hides the standalone catalog, matching the sidebar's scope gate.
+(working directory, deletion journal, live-runtime guard). That internal
+root is never displayed as a project: the row's workspace label, its
+tooltip, the Details popover, and the workspace-filter facet for the
+Conversations runtime all read "No workspace", as the sidebar does. A
+host-locked shell hides the standalone catalog, matching the sidebar's
+scope gate.
