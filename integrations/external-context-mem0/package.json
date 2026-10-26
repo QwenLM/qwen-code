@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/external-context-mem0",
-  "version": "0.26.1",
+  "version": "0.26.1-nightly.20261026.34769f9d41",
   "description": "Configurable Mem0-compatible External Context Extension",
   "repository": {
     "type": "git",
