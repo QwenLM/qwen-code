@@ -470,20 +470,6 @@ public interface AgentStateStore {
             boolean acceptanceKnown, String failureCode, long retryAt) {}
 
     /**
-     * Admits a controlled same-Workspace cwd change (W2) on a bound Session,
-     * or returns the operation the same actor already admitted under the
-     * key. The target directory is already normalized and the request digest
-     * already covers it; admission checks the read grant, replays under the
-     * key, then the caller's Workspace role, the deployment gate, the
-     * Session state, the creator-keyed Registry facts, the expected context
-     * revision and the busy barriers in the pinned order.
-     */
-    OperationAdmission beginCwdChangeOperation(String tenantId,
-            String sessionId, String actorId, String actorDigest,
-            String idempotencyKey, String requestDigest,
-            String targetCwdRelative, long expectedContextRevision);
-
-    /**
      * Settles a claimed cwd change in one transaction: re-verifies the
      * Session facts, updates the binding directory and context revision,
      * marks the operation completed or failed, and appends
