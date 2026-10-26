@@ -35,7 +35,11 @@ import {
   type AutofixPrPaths,
   type AutofixPrState,
 } from './state.js';
-import { remoteRef } from './worktree.js';
+import {
+  remoteRef,
+  untrustedGitfile,
+  untrustedSubmodules,
+} from './worktree.js';
 
 /**
  * The PR head on the remote, when it is reachable and its commit is here.
@@ -63,6 +67,13 @@ export function unsavedWork(
 ): string | null {
   const hasWorktree = existsSync(paths.worktreePath);
   if (hasWorktree) {
+    // The clone's main worktree: the watch's files sit in its `.qwen/tmp`.
+    const root = dirname(dirname(dirname(paths.worktreePath)));
+    const untrusted =
+      untrustedGitfile(paths.worktreePath, root) ??
+      untrustedSubmodules(paths.worktreePath, root);
+    // Not read: git would take the config of a git directory the tree holds.
+    if (untrusted !== null) return untrusted;
     // Inside a directory that is not a worktree of its own, git finds the
     // enclosing clone and would judge that instead.
     const top = gitOpt(
