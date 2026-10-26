@@ -75,6 +75,7 @@ const BUILTIN_IDS = [
   'builtin:local-control',
   'builtin:connections',
   'builtin:archived-sessions',
+  'builtin:workspace-directories',
   'builtin:model-management',
 ] as const;
 

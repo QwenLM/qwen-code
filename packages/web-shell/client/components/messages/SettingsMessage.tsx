@@ -103,6 +103,11 @@ interface SettingsMessageProps {
   /** Browser-local remote computer catalog and connection controls. */
   connections?: ReactNode;
   archivedSessions?: ReactNode;
+  /**
+   * Extra-directory management for the selected workspace. Rendered only on
+   * the Workspace scope tab; omitted when the daemon cannot manage them.
+   */
+  workspaceDirectoriesSection?: ReactNode;
   embedded?: boolean;
   /** Category to select on open (deep link, e.g. 'Daemon'). */
   initialCategory?: string;
@@ -284,6 +289,7 @@ type SettingsPageItem =
   | { type: 'live' }
   | { type: 'connections' }
   | { type: 'archived-sessions' }
+  | { type: 'workspace-directories' }
   | { type: 'model-management' };
 
 interface SettingsPageCategory {
@@ -711,6 +717,7 @@ export function SettingsMessage({
   modelManagementSectionProps,
   connections,
   archivedSessions,
+  workspaceDirectoriesSection,
   embedded = false,
   initialCategory,
   workspaceSettingsWritable = true,
@@ -826,6 +833,15 @@ export function SettingsMessage({
         items: [{ type: 'archived-sessions' }],
       });
     }
+    // Extra directories are a workspace-scope concept; the User tab has no
+    // equivalent list to show.
+    if (workspaceDirectoriesSection && scope === 'workspace') {
+      groups.push({
+        id: 'Workspace',
+        label: t('workspaceDirectories.title'),
+        items: [{ type: 'workspace-directories' }],
+      });
+    }
     return groups
       .map((group) => ({
         ...group,
@@ -846,7 +862,9 @@ export function SettingsMessage({
                     ? 'builtin:connections'
                     : item.type === 'archived-sessions'
                       ? 'builtin:archived-sessions'
-                      : 'builtin:model-management';
+                      : item.type === 'workspace-directories'
+                        ? 'builtin:workspace-directories'
+                        : 'builtin:model-management';
           return isItemVisible(id, presentation);
         }),
       }))
@@ -859,6 +877,8 @@ export function SettingsMessage({
     modelManagementSectionProps,
     connections,
     archivedSessions,
+    workspaceDirectoriesSection,
+    scope,
     presentation,
     showInitialLoading,
   ]);
@@ -927,7 +947,8 @@ export function SettingsMessage({
       (item) =>
         item.type !== 'model-management' &&
         item.type !== 'connections' &&
-        item.type !== 'archived-sessions',
+        item.type !== 'archived-sessions' &&
+        item.type !== 'workspace-directories',
     ) ?? [];
   const showModelManagement = activeGroup?.items.some(
     (item) => item.type === 'model-management',
@@ -935,6 +956,9 @@ export function SettingsMessage({
   const showArchivedSessions = activeGroup?.id === 'Archived';
   const showConnections = activeGroup?.items.some(
     (item) => item.type === 'connections',
+  );
+  const showWorkspaceDirectories = activeGroup?.items.some(
+    (item) => item.type === 'workspace-directories',
   );
 
   const renderSelect = (
@@ -1418,6 +1442,7 @@ export function SettingsMessage({
                     {archivedSessions}
                   </div>
                 )}
+                {showWorkspaceDirectories && workspaceDirectoriesSection}
               </div>
             )}
           </section>

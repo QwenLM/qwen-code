@@ -255,6 +255,7 @@ function renderPanel(
     presentation: WebShellSettingsOptions;
     connections: ReactNode;
     archivedSessions: ReactNode;
+    workspaceDirectoriesSection: ReactNode;
     workspaceSettingsWritable: boolean;
   }> = {},
 ): HTMLElement {
@@ -274,6 +275,7 @@ function renderPanel(
         modelManagementSectionProps={overrides.modelManagementSectionProps}
         connections={overrides.connections}
         archivedSessions={overrides.archivedSessions}
+        workspaceDirectoriesSection={overrides.workspaceDirectoriesSection}
         workspaceSettingsWritable={overrides.workspaceSettingsWritable}
       />
     </I18nProvider>,
@@ -408,6 +410,44 @@ describe('SettingsMessage initialCategory', () => {
       container.querySelector('[data-testid="archive-management"]'),
     ).toBeNull();
     expect(container.querySelectorAll('[role="tab"]')).toHaveLength(2);
+  });
+
+  it('keeps workspace directories and archives in separate categories across scopes', () => {
+    const container = renderPanel(makeState([boolSetting()], vi.fn()), {
+      initialCategory: 'Workspace',
+      archivedSessions: <div data-testid="archive-management" />,
+      workspaceDirectoriesSection: <div data-testid="workspace-directories" />,
+    });
+    expect(
+      container.querySelector('[data-testid="workspace-directories"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="archive-management"]'),
+    ).toBeNull();
+    const archiveCategory = () =>
+      Array.from(
+        container.querySelectorAll<HTMLButtonElement>('nav button'),
+      ).find((button) => button.textContent === 'Archived conversations')!;
+    act(() => archiveCategory().click());
+    expect(
+      container.querySelector('[data-testid="workspace-directories"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-testid="archive-management"]'),
+    ).not.toBeNull();
+    const general = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('nav button'),
+    ).find((button) => button.textContent?.startsWith('General'))!;
+    act(() => general.click());
+    clickUserTab(container);
+    act(() => archiveCategory().click());
+    expect(
+      container.querySelector('[data-testid="archive-management"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="workspace-directories"]'),
+    ).toBeNull();
+    expect(container.querySelectorAll('[role="tab"]')).toHaveLength(0);
   });
 
   it('honors archive host presentation and keeps an empty management slot available', () => {
