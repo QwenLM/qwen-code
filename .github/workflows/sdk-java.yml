@@ -191,6 +191,10 @@ jobs:
       # and the post-job save tars that whole shared repository — 14 to 37
       # minutes per job on 2026-10-16 — only to lose the reservation race to
       # a parallel job and discard the archive.
+      - name: 'Restore runner-local Java tool cache'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/restore-java-tool-cache.sh'
+
       - name: 'Set up Java'
         uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
         with:
@@ -717,6 +721,10 @@ jobs:
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: '${{ inputs.ref || github.sha }}'
+
+      - name: 'Restore runner-local Java tool cache'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/restore-java-tool-cache.sh'
 
       - name: 'Set up Java'
         uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
@@ -1600,6 +1608,10 @@ jobs:
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: '${{ inputs.ref || github.sha }}'
+      - name: 'Restore runner-local Java tool cache'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/restore-java-tool-cache.sh'
+
       - name: 'Set up Java'
         uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
         with:
@@ -1828,6 +1840,10 @@ jobs:
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: '${{ inputs.ref || github.sha }}'
+      - name: 'Restore runner-local Java tool cache'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/restore-java-tool-cache.sh'
+
       - name: 'Set up Java'
         uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
         with:
@@ -2164,6 +2180,10 @@ jobs:
           if [[ "$(node -p 'process.versions.node.split(".")[0]')" != "22" ]]; then
             echo "::warning::Expected Node 22.x but found $(node -v); daemon E2E will run against the runner's Node."
           fi
+
+      - name: 'Restore runner-local Java tool cache'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/restore-java-tool-cache.sh'
 
       - name: 'Set up Java'
         uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0

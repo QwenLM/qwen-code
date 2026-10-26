@@ -2163,6 +2163,34 @@ describe('setup-java Maven cache stays on hosted runners', () => {
   });
 });
 
+describe('SDK Java runner-local tool-cache repair', () => {
+  it('repairs only pool-capable Java installers after checkout', () => {
+    for (const [name, job] of Object.entries(parse(workflow).jobs)) {
+      const steps = job.steps ?? [];
+      const java = steps.findIndex((s) =>
+        String(s.uses ?? '').startsWith('actions/setup-java'),
+      );
+      const repair = steps.findIndex(
+        (s) => s.run === 'bash .github/scripts/restore-java-tool-cache.sh',
+      );
+      if (java < 0 || !String(job['runs-on']).includes('self-hosted')) {
+        expect(repair, name).toBe(-1);
+        continue;
+      }
+      const checkout = steps.findIndex((s) =>
+        String(s.uses ?? '').startsWith('actions/checkout'),
+      );
+      expect(repair, name).toBeGreaterThan(checkout);
+      expect(repair, name).toBe(java - 1);
+      expect(steps[repair].if, name).toBe(
+        "${{ runner.environment == 'self-hosted' }}",
+      );
+      expect(steps[repair]['continue-on-error'], name).toBeUndefined();
+      expect(steps[java].env?.RUNNER_TOOL_CACHE, name).toBeUndefined();
+    }
+  });
+});
+
 // A bare `corepack pnpm install` has no retry. Run 39348512071's daemon E2E
 // lane died in that step before any test ran, inside the workspace build the
 // install's `prepare` re-enters: packages/cli's `tsc --build` exhausted V8's
