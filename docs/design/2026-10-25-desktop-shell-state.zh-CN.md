@@ -53,7 +53,7 @@ WebView2 按 origin 隔离 `localStorage` 与 `sessionStorage`，因此每次启
 
 ### 工作区主机目录规则
 
-`rememberWorkspaceHost` 不持久化页面自身的 origin。在桌面外壳中，该 origin 是临时运行时 origin；在浏览器中，只要页面本身可访问，它就可访问。`useOtherOrigins` 已经会在会话内加入页面 origin，因此侧边栏仍能对本地与远程项目分组。这样可避免每次启动产生一个过期主机。
+`rememberWorkspaceHost` **只在桌面外壳中**不持久化页面自身的 origin。那里的 origin 是临时运行时 origin，持久化会在每次启动时追加一个过期主机。浏览器仍会保存它：当页面 daemon 不可达时，该条目是本地分组的离线快照。`useOtherOrigins` 只保证分组本身留在会话内，而每个分组的项目列表来自该已保存条目。
 
 ## 安全与信任边界
 
@@ -85,7 +85,7 @@ WebView2 按 origin 隔离 `localStorage` 与 `sessionStorage`，因此每次启
 - `cargo clippy --all-targets -- -D warnings`：干净。
 - `npm run typecheck --workspace=@qwen-code/web-shell`：干净。
 - 对改动文件运行 ESLint 与 Prettier：干净。
-- `vitest run client/config --no-file-parallelism`：134 个测试，覆盖桌面水合、迁移、写穿以及工作区主机的页面 origin 规则。
+- `vitest run client/config client/components/workspaces --no-file-parallelism`：覆盖桌面水合、迁移、写穿、仅限桌面外壳的页面 origin 规则，以及浏览器的离线快照。
 - 在 Windows 上使用隔离的应用 identifier 进行手动实跑：通过 IPC 写入目录，重启进程，确认页面 origin 已变化，读回目录，打开 Settings → Connections 并看到已保存主机。同一次实跑先复现了每次启动累积工作区主机的问题，随后验证了修复。
 
 ## 限制与后续

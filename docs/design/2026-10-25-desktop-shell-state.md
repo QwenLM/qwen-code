@@ -53,7 +53,7 @@ Both call `require_runtime_origin`, which compares the calling webview's URL ori
 
 ### Workspace-host catalog rule
 
-`rememberWorkspaceHost` does not persist the page's own origin. In the desktop shell that origin is the ephemeral runtime origin; in the browser it is reachable whenever the page itself is. `useOtherOrigins` already adds the page origin in-session, so the sidebar still groups local and remote projects. This prevents one stale host per launch.
+`rememberWorkspaceHost` does not persist the page's own origin **in the desktop shell**. There the origin is the ephemeral runtime origin, so persisting it would add a stale host on every launch. The browser keeps saving it: the saved entry is the offline snapshot for the local group when the page daemon cannot be reached. `useOtherOrigins` keeps the group itself in-session, but each group's project list comes from that saved entry.
 
 ## Security and trust boundaries
 
@@ -85,7 +85,7 @@ Both call `require_runtime_origin`, which compares the calling webview's URL ori
 - `cargo clippy --all-targets -- -D warnings`: clean.
 - `npm run typecheck --workspace=@qwen-code/web-shell`: clean.
 - ESLint and Prettier on the touched files: clean.
-- `vitest run client/config --no-file-parallelism`: 134 tests, including desktop hydration, migration, write-through, and the workspace-host page-origin rule.
+- `vitest run client/config client/components/workspaces --no-file-parallelism`: covers desktop hydration, migration, write-through, the desktop-only page-origin rule, and the browser offline snapshot.
 - Manual live run on Windows with an isolated app identifier: wrote a catalog over IPC, restarted the process, confirmed the page origin changed, read the catalog back, opened Settings → Connections, and saw the saved host. The same run reproduced, and then verified the fix for, the per-launch workspace-host accumulation.
 
 ## Limitations and follow-ups

@@ -1,5 +1,6 @@
 import { createContext, useEffect, useState } from 'react';
 import type { DaemonWorkspaceCapability } from '@qwen-code/sdk/daemon';
+import { isDesktopShell } from '../utils/externalOpen';
 import {
   buildDaemonConnectionUrl,
   confirmDaemonTarget,
@@ -46,9 +47,10 @@ export function rememberWorkspaceHost(
 ): void {
   // The page origin is this shell's own daemon. In the desktop client it is an
   // ephemeral loopback origin that changes every launch, so persisting it would
-  // add a stale host on every restart; in the browser it is reachable whenever
-  // the page itself is. `useOtherOrigins` still adds it in-session.
-  if (origin === window.location.origin) return;
+  // add a stale host on every restart. The browser keeps it: that entry is the
+  // offline snapshot for the local group when the page daemon cannot be
+  // reached, and `useOtherOrigins` only keeps the group itself in-session.
+  if (isDesktopShell() && origin === window.location.origin) return;
   const hosts = readWorkspaceHosts();
   const index = hosts.findIndex((host) => host.origin === origin);
   const host = {

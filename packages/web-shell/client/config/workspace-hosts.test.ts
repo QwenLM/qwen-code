@@ -8,12 +8,32 @@ describe('workspace host catalog', () => {
     sessionStorage.clear();
   });
 
-  it('does not persist the page origin as a saved host', () => {
+  it('persists the page origin as the local offline snapshot in the browser', () => {
     rememberWorkspaceHost(window.location.origin, [
       { id: 'local', cwd: '/repo' },
     ]);
 
-    expect(readWorkspaceHosts()).toEqual([]);
+    expect(readWorkspaceHosts()).toEqual([
+      {
+        origin: window.location.origin,
+        workspaces: [{ id: 'local', cwd: '/repo' }],
+      },
+    ]);
+  });
+
+  it('does not persist the page origin in the desktop shell', () => {
+    (window as { __TAURI__?: unknown }).__TAURI__ = {
+      core: { invoke: vi.fn() },
+    };
+    try {
+      rememberWorkspaceHost(window.location.origin, [
+        { id: 'local', cwd: '/repo' },
+      ]);
+
+      expect(readWorkspaceHosts()).toEqual([]);
+    } finally {
+      delete (window as { __TAURI__?: unknown }).__TAURI__;
+    }
   });
 
   it('does not notify or reorder hosts on an unchanged refresh', () => {
