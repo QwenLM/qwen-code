@@ -47,6 +47,7 @@ vi.mock('./MessageItem', async () => {
     MessageItem: ({
       message,
       showAssistantActions,
+      assistantFooterAlwaysVisible,
       showAssistantBranch,
       onBranchSession,
       branchRecordId,
@@ -59,6 +60,7 @@ vi.mock('./MessageItem', async () => {
       message: Message;
       assistantFeedbackPromptId?: string;
       showAssistantActions?: boolean;
+      assistantFooterAlwaysVisible?: boolean;
       showAssistantBranch?: boolean;
       onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
       branchRecordId?: string;
@@ -79,6 +81,7 @@ vi.mock('./MessageItem', async () => {
         {
           'data-testid': `msg-${message.id}`,
           'data-assistant-actions': String(Boolean(showAssistantActions)),
+          'data-footer-visible': String(Boolean(assistantFooterAlwaysVisible)),
           'data-feedback-prompt': assistantFeedbackPromptId,
           'data-locate-flashing': isLocateFlashing ? 'true' : undefined,
           'data-send-failed': sendFailed ? 'true' : undefined,
@@ -4561,6 +4564,31 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(
       c.querySelector('[data-testid="assistant-turn-footer"]')?.textContent,
     ).toBe('u1:a1:answer');
+  });
+
+  it('keeps only the newest completed turn footer visible and releases it on the next prompt', () => {
+    const messages = [
+      userMsg('u1'),
+      asstMsg('a1'),
+      userMsg('u2'),
+      asstMsg('a2'),
+    ];
+    const c = mount(messages);
+    c.querySelector<HTMLElement>('[data-web-shell-message-list]')!.scrollTo =
+      vi.fn();
+    const visible = (id: string) =>
+      c
+        .querySelector(`[data-testid="msg-${id}"]`)
+        ?.getAttribute('data-footer-visible');
+    expect(visible('a1')).toBe('false');
+    expect(visible('a2')).toBe('true');
+    rerenderMessages(c, [...messages, userShellMsg('shell')]);
+    expect(visible('a2')).toBe('true');
+    rerenderMessages(c, [...messages, userMsg('u3')], { isResponding: true });
+    expect(visible('a2')).toBe('false');
+    rerenderMessages(c, [...messages, userMsg('u3'), asstMsg('a3')]);
+    expect(visible('a2')).toBe('false');
+    expect(visible('a3')).toBe('true');
   });
 
   it('maps each completed turn footer to its own turn id', () => {
