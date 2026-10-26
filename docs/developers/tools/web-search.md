@@ -63,6 +63,7 @@ Point the tool at a ModelStudio Standard/Token Plan or another verified DashScop
 | `tools.webSearch.model`         | `WEB_SEARCH_MODEL`           | Search model selector for the explicit path (`modelId` or `authType:modelId`). With `WEB_SEARCH_BASE_URL` it is the plain model id for that endpoint; otherwise it must match a declared DashScope-compatible `modelProviders` entry. The automatic path uses `qwen3.8-flash`.                                                                                                                                                                                                                                                                                                         |
 | `tools.webSearch.webExtractor`  | `WEB_SEARCH_EXTRACTOR`       | Let the search agent open result pages for better-grounded answers (default `true`; billed separately by DashScope).                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `tools.webSearch.timeoutMs`     | `WEB_SEARCH_TIMEOUT_MS`      | Total time budget for one search, in milliseconds (default `120000`, max `600000`; other values fall back to the default). A search that runs out of time returns what arrived as a partial result once at least one search call has completed; if the budget expires before the first search call finishes, the tool reports a timeout error instead, because narration with no executed search is not auditable evidence. A per-tool execution cap (`QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS`) below this budget fires first and discards the partial result; keep it above `timeoutMs`. |
+| `tools.webSearch.allowedHosts`  | `WEB_SEARCH_ALLOWED_HOSTS`   | Extra host suffixes trusted for a search backend you configured explicitly — an exact host, or any subdomain of a listed suffix (comma-separated in the env var). Empty by default, so behaviour is unchanged unless set. Only the `WEB_SEARCH_BASE_URL` backend and the `modelProviders` path consult it; automatic derivation never does, so a custom host is used only where your own configuration names it. The configured host receives the API key. Entries are trimmed and lower-cased, and entries without a dot are ignored.                                                 |
 | `tools.webSearch.maxPerSession` | `WEB_SEARCH_MAX_PER_SESSION` | Maximum `web_search` calls in one session (default `200`, max `10000`; other values fall back to the default). The count is shared with subagents and resets when the session changes (`/clear`, `/resume`, branching). Once it is reached, further searches are skipped and the model is told to continue with what it has gathered.                                                                                                                                                                                                                                                  |
 
 ### Env-only configuration (no settings.json)
@@ -75,6 +76,7 @@ variables — no `modelProviders` entry needed:
 export ENABLE_WEB_SEARCH=true
 export WEB_SEARCH_MODEL=qwen3.8-flash
 export WEB_SEARCH_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+export WEB_SEARCH_ALLOWED_HOSTS=llm-gw.example.com   # only for a gateway host
 export DASHSCOPE_API_KEY=sk-...        # or set WEB_SEARCH_API_KEY instead
 ```
 
@@ -82,13 +84,16 @@ export DASHSCOPE_API_KEY=sk-...        # or set WEB_SEARCH_API_KEY instead
 DashScope-compatible endpoint; when it is set, it takes precedence over
 `modelProviders` resolution and `WEB_SEARCH_MODEL` is used as the plain DashScope
 model id. The API key is read from `WEB_SEARCH_API_KEY` if set, otherwise from
-`DASHSCOPE_API_KEY`. Misconfiguration still surfaces as a startup notice.
+`DASHSCOPE_API_KEY`. If the endpoint is a gateway on your own domain, list that
+host in `WEB_SEARCH_ALLOWED_HOSTS` (or `tools.webSearch.allowedHosts`) — the
+built-in list is otherwise the only thing the check accepts. Misconfiguration
+still surfaces as a startup notice.
 
 Notes:
 
 - The selector must resolve to a DashScope-compatible `modelProviders` entry carrying a direct API key via `envKey`. Your main model can be any provider — only the search side request needs a DashScope entry. Qwen OAuth cannot back the tool.
 - Which providers can activate the tool is decided at startup. Once active, the search backend follows the currently selected model on the next search; switching to an unsupported provider makes that invocation fail, while switching from a session where the tool was absent still requires a restart to register it.
-- Automatic host detection intentionally accepts only known DashScope regional hosts, Model Studio and QwenCloud MaaS hosts (including their `token-plan.` subscription subdomains), and internal Alibaba hosts. Generic `*.alicloudapi.com` gateways and `DASHSCOPE_PROXY_BASE_URL` are excluded because they are not known to forward the Responses search tools.
+- Automatic host detection intentionally accepts only known DashScope regional hosts, Model Studio and QwenCloud MaaS hosts (including their `token-plan.` subscription subdomains), and internal Alibaba hosts. Generic `*.alicloudapi.com` gateways, `DASHSCOPE_PROXY_BASE_URL` and any host you only added to `allowedHosts` are excluded from that automatic path, because it runs without your involvement and would otherwise hand your main provider's key to a host nobody declared. For a gateway you do declare, list it in `tools.webSearch.allowedHosts` and point `WEB_SEARCH_BASE_URL` (or a `modelProviders` entry) at it.
 - If enabled explicitly but misconfigured, the tool stays off and a startup notice explains which condition failed. Automatic activation never emits a notice.
 - Searches bill your DashScope key (`usage.x_tools` counts). Auto approval mode (the default) lets the classifier approve searches without prompting; in `default` approval mode the tool asks, and approving with "always allow" persists a standard `WebSearch` permission rule, like other tools.
 - There is no client-side model allowlist; a model the Responses endpoint does not serve fails loudly on first use.

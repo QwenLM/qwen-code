@@ -1001,7 +1001,7 @@ export const useLlmStream = (
   const [pendingHistoryItem, pendingHistoryItemRef, setPendingHistoryItem] =
     useStateAndRef<HistoryItemWithoutId | null>(null);
   // Mixed assistant output needs multiple live rows to preserve
-  // text/image/text ordering. Keep completed runs in the dynamic region until
+  // text/image/reasoning ordering. Keep completed runs in the dynamic region until
   // the response reaches a normal commit boundary so a fresh retry or model
   // fallback can still discard the entire failed attempt.
   const [
@@ -1039,11 +1039,71 @@ export const useLlmStream = (
     return true;
   }, [pendingHistoryItemRef, setPendingAssistantItems, setPendingHistoryItem]);
   // Streamed model reasoning for the current turn. Rendered (height-limited)
-  // above the answer while thinking, then committed to history as a
-  // collapsible `gemini_thought` block when the answer/tool/turn begins.
+  // after preceding assistant output, then stored as a collapsible
+  // `gemini_thought` block when the next answer/tool/turn begins.
   const [pendingThoughtItem, pendingThoughtItemRef, setPendingThoughtItem] =
     useStateAndRef<HistoryItemWithoutId | null>(null);
   const thoughtStartTimeRef = useRef<number | null>(null);
+  const thoughtGroupIdRef = useRef<number | undefined>(undefined);
+  const lastThoughtGroupIdRef = useRef(0);
+  // Commit the streamed reasoning to history as a collapsible block (or drop
+  // it). Called when the answer/tool/turn begins, or on cancel/error.
+  const commitPendingThought = useCallback(
+    (userMessageTimestamp: number, deferForInterleaving = false) => {
+      const pendingThought = pendingThoughtItemRef.current;
+      if (
+        (pendingThought?.type === 'gemini_thought' ||
+          pendingThought?.type === 'gemini_thought_content') &&
+        pendingThought.thoughtGroupId !== undefined
+      ) {
+        setPendingAssistantItems((items) =>
+          items.map((item) =>
+            (item.type === 'gemini_thought' ||
+              item.type === 'gemini_thought_content') &&
+            item.thoughtGroupId === pendingThought.thoughtGroupId
+              ? { ...item, isStreaming: false }
+              : item,
+          ),
+        );
+      }
+      if (!deferForInterleaving) {
+        commitPendingAssistantItems(userMessageTimestamp);
+      }
+      if (pendingThought) {
+        const item = { ...pendingThought };
+        if (
+          (item.type === 'gemini_thought' ||
+            item.type === 'gemini_thought_content') &&
+          item.thoughtGroupId !== undefined
+        ) {
+          item.isStreaming = false;
+        }
+        if (item.type === 'gemini_thought' && thoughtStartTimeRef.current) {
+          item.durationMs = Date.now() - thoughtStartTimeRef.current;
+        }
+        if (
+          deferForInterleaving &&
+          pendingAssistantItemsRef.current.length > 0
+        ) {
+          setPendingAssistantItems((items) => [...items, item]);
+        } else {
+          addItem(item, userMessageTimestamp);
+        }
+      }
+      setPendingThoughtItem(null);
+      thoughtStartTimeRef.current = null;
+      thoughtGroupIdRef.current = undefined;
+    },
+    [
+      addItem,
+      pendingThoughtItemRef,
+      setPendingThoughtItem,
+      commitPendingAssistantItems,
+      pendingAssistantItemsRef,
+      setPendingAssistantItems,
+    ],
+  );
+
   const [
     pendingRetryErrorItem,
     pendingRetryErrorItemRef,
@@ -1554,6 +1614,7 @@ export const useLlmStream = (
     );
     logApiCancel(config, cancellationEvent);
 
+    commitPendingThought(Date.now());
     if (pendingHistoryItemRef.current) {
       commitItemInOrder(pendingHistoryItemRef.current, Date.now());
     }
@@ -1611,6 +1672,7 @@ export const useLlmStream = (
     streamingState,
     addItem,
     commitItemInOrder,
+    commitPendingThought,
     setPendingHistoryItem,
     onCancelSubmit,
     pendingHistoryItemRef,
@@ -2318,6 +2380,23 @@ export const useLlmStream = (
       if (startingNewThought) {
         thoughtStartTimeRef.current = Date.now();
         newThoughtBuffer = description;
+        thoughtGroupIdRef.current = undefined;
+        if (pendingAssistantItemsRef.current.length > 0) {
+          // Keep fold identity across retries, new turns, and the history commit.
+          for (const item of historyRef.current) {
+            if (
+              (item.type === 'gemini_thought' ||
+                item.type === 'gemini_thought_content') &&
+              item.thoughtGroupId !== undefined
+            ) {
+              lastThoughtGroupIdRef.current = Math.min(
+                lastThoughtGroupIdRef.current,
+                item.thoughtGroupId,
+              );
+            }
+          }
+          thoughtGroupIdRef.current = --lastThoughtGroupIdRef.current;
+        }
       }
 
       // Keep the transient `thought` (subject) in sync for the window title.
@@ -2342,17 +2421,16 @@ export const useLlmStream = (
       const buildThoughtItem = (
         type: 'gemini_thought' | 'gemini_thought_content',
         text: string,
-      ): HistoryItemWithoutId =>
-        type === 'gemini_thought'
-          ? {
-              type,
-              text,
-              durationMs: getThoughtDurationMs(),
-            }
-          : {
-              type,
-              text,
-            };
+      ): HistoryItemWithoutId => ({
+        type,
+        text,
+        ...(type === 'gemini_thought'
+          ? { durationMs: getThoughtDurationMs() }
+          : {}),
+        ...(thoughtGroupIdRef.current !== undefined
+          ? { thoughtGroupId: thoughtGroupIdRef.current, isStreaming: true }
+          : {}),
+      });
 
       let splitPoint = findLastSafeSplitPoint(
         newThoughtBuffer,
@@ -2369,10 +2447,12 @@ export const useLlmStream = (
           newThoughtBuffer,
           safeSplitPoint,
         );
-        addItem(
-          buildThoughtItem(pendingThoughtType, beforeText),
-          userMessageTimestamp,
-        );
+        const item = buildThoughtItem(pendingThoughtType, beforeText);
+        if (pendingAssistantItemsRef.current.length > 0) {
+          setPendingAssistantItems((items) => [...items, item]);
+        } else {
+          addItem(item, userMessageTimestamp);
+        }
         pendingThoughtType = 'gemini_thought_content';
         newThoughtBuffer = afterText;
         splitPoint = findLastSafeSplitPoint(
@@ -2387,24 +2467,14 @@ export const useLlmStream = (
 
       return newThoughtBuffer;
     },
-    [addItem, mergeThought, pendingThoughtItemRef, setPendingThoughtItem],
-  );
-
-  // Commit the streamed reasoning to history as a collapsible block (or drop
-  // it). Called when the answer/tool/turn begins, or on cancel/error.
-  const commitPendingThought = useCallback(
-    (userMessageTimestamp: number) => {
-      if (pendingThoughtItemRef.current) {
-        const item = { ...pendingThoughtItemRef.current };
-        if (item.type === 'gemini_thought' && thoughtStartTimeRef.current) {
-          item.durationMs = Date.now() - thoughtStartTimeRef.current;
-        }
-        addItem(item, userMessageTimestamp);
-      }
-      setPendingThoughtItem(null);
-      thoughtStartTimeRef.current = null;
-    },
-    [addItem, pendingThoughtItemRef, setPendingThoughtItem],
+    [
+      addItem,
+      mergeThought,
+      pendingThoughtItemRef,
+      setPendingThoughtItem,
+      pendingAssistantItemsRef,
+      setPendingAssistantItems,
+    ],
   );
 
   const handleUserCancelledEvent = useCallback(
@@ -2926,10 +2996,14 @@ export const useLlmStream = (
             }
           }
 
+          const description = thoughtDescriptions.join('');
+          if (description.trim().length > 0 && stagePendingAssistantItem()) {
+            llmMessageBuffer = '';
+          }
           thoughtBuffer = handleThoughtEvent(
             {
               subject,
-              description: thoughtDescriptions.join(''),
+              description,
             },
             thoughtBuffer,
             userMessageTimestamp,
@@ -2987,7 +3061,7 @@ export const useLlmStream = (
                 bufferedEvents.some((e) => e.kind === 'thought')
               ) {
                 flushBufferedStreamEvents();
-                commitPendingThought(userMessageTimestamp);
+                commitPendingThought(userMessageTimestamp, true);
                 thoughtBuffer = '';
               }
               setThought((prev) => (prev ? null : prev));
@@ -3014,7 +3088,7 @@ export const useLlmStream = (
               // reasoning then commit it to history (collapsed) above the tool
               // output.
               flushBufferedStreamEvents();
-              commitPendingThought(userMessageTimestamp);
+              commitPendingThought(userMessageTimestamp, true);
               thoughtBuffer = '';
               setThought((prev) => (prev ? null : prev));
               if (event.value.goalContext && turnAdmission) {
@@ -3058,6 +3132,9 @@ export const useLlmStream = (
               break;
             case ServerLlmEventType.ChatCompressed:
               flushBufferedStreamEvents();
+              commitPendingThought(userMessageTimestamp);
+              thoughtBuffer = '';
+              setThought(null);
               handleChatCompressionEvent(event.value, userMessageTimestamp);
               llmMessageBuffer = '';
               assistantOutputStarted = false;
@@ -3070,6 +3147,9 @@ export const useLlmStream = (
               break;
             case ServerLlmEventType.MaxSessionTurns:
               flushBufferedStreamEvents();
+              commitPendingThought(userMessageTimestamp);
+              thoughtBuffer = '';
+              setThought(null);
               if (pendingHistoryItemRef.current) {
                 commitItemInOrder(
                   pendingHistoryItemRef.current,
@@ -3083,6 +3163,9 @@ export const useLlmStream = (
               break;
             case ServerLlmEventType.SessionTokenLimitExceeded:
               flushBufferedStreamEvents();
+              commitPendingThought(userMessageTimestamp);
+              thoughtBuffer = '';
+              setThought(null);
               if (pendingHistoryItemRef.current) {
                 commitItemInOrder(
                   pendingHistoryItemRef.current,
@@ -3126,11 +3209,14 @@ export const useLlmStream = (
               break;
             case ServerLlmEventType.Citation:
               flushBufferedStreamEvents();
-              handleCitationEvent(event.value, userMessageTimestamp);
               if (showCitations(settings)) {
+                commitPendingThought(userMessageTimestamp);
+                thoughtBuffer = '';
+                setThought(null);
                 llmMessageBuffer = '';
                 assistantOutputStarted = false;
               }
+              handleCitationEvent(event.value, userMessageTimestamp);
               break;
             case ServerLlmEventType.LoopDetected:
               flushBufferedStreamEvents();
@@ -3149,11 +3235,11 @@ export const useLlmStream = (
               // losing the partial text we meant to preserve.
               if (!event.isContinuation) {
                 discardBufferedStreamEvents();
+                commitPendingThought(userMessageTimestamp, true);
                 setPendingAssistantItems([]);
                 if (pendingHistoryItemRef.current) {
                   setPendingHistoryItem(null);
                 }
-                commitPendingThought(userMessageTimestamp);
                 thoughtBuffer = '';
                 setThought(null);
                 llmMessageBuffer = '';
@@ -3182,11 +3268,11 @@ export const useLlmStream = (
               // switching to the next fallback model. Discard partial content
               // from the failed attempt and show a notification.
               discardBufferedStreamEvents();
+              commitPendingThought(userMessageTimestamp, true);
               setPendingAssistantItems([]);
               if (pendingHistoryItemRef.current) {
                 setPendingHistoryItem(null);
               }
-              commitPendingThought(userMessageTimestamp);
               thoughtBuffer = '';
               setThought(null);
               llmMessageBuffer = '';
@@ -3208,6 +3294,9 @@ export const useLlmStream = (
             }
             case ServerLlmEventType.HookSystemMessage:
               flushBufferedStreamEvents();
+              commitPendingThought(userMessageTimestamp);
+              thoughtBuffer = '';
+              setThought(null);
               // Display system message from Stop hooks with "Stop says:" prefix
               // First commit any pending AI response to ensure correct ordering
               if (pendingHistoryItemRef.current) {
@@ -3229,6 +3318,9 @@ export const useLlmStream = (
               break;
             case ServerLlmEventType.GoalSettlementFailed:
               flushBufferedStreamEvents();
+              commitPendingThought(userMessageTimestamp);
+              thoughtBuffer = '';
+              setThought(null);
               if (pendingHistoryItemRef.current) {
                 commitItemInOrder(
                   pendingHistoryItemRef.current,
@@ -3245,6 +3337,9 @@ export const useLlmStream = (
               break;
             case ServerLlmEventType.UserPromptSubmitBlocked:
               flushBufferedStreamEvents();
+              commitPendingThought(userMessageTimestamp);
+              thoughtBuffer = '';
+              setThought(null);
               userPromptBlocked = true;
               handleUserPromptSubmitBlockedEvent(
                 event.value,
@@ -3255,6 +3350,9 @@ export const useLlmStream = (
               break;
             case ServerLlmEventType.StopHookLoop:
               flushBufferedStreamEvents();
+              commitPendingThought(userMessageTimestamp);
+              thoughtBuffer = '';
+              setThought(null);
               handleStopHookLoopEvent(event.value, userMessageTimestamp);
               llmMessageBuffer = '';
               assistantOutputStarted = false;
@@ -3262,6 +3360,9 @@ export const useLlmStream = (
             case ServerLlmEventType.GoalState:
               if (event.cause && shouldDisplayGoalStateCause(event.cause)) {
                 flushBufferedStreamEvents();
+                commitPendingThought(userMessageTimestamp);
+                thoughtBuffer = '';
+                setThought(null);
                 if (pendingHistoryItemRef.current) {
                   commitItemInOrder(
                     pendingHistoryItemRef.current,
@@ -3290,11 +3391,13 @@ export const useLlmStream = (
         }
       } finally {
         flushBufferedStreamEvents();
-        commitPendingThought(userMessageTimestamp);
+        // A thrown stream must leave interleaved output discardable on retry.
+        commitPendingThought(userMessageTimestamp, true);
         discardBufferedStreamEvents();
         flushBufferedStreamEventsRef.current.delete(flushBufferedStreamEvents);
         dualOutput?.finalizeAssistantMessage();
       }
+      commitPendingAssistantItems(userMessageTimestamp);
       // When a loop was detected, halt without scheduling the calls collected
       // before the guard fired. The core splice/clear only touches
       // turn.pendingToolCalls, which the TUI does not execute from — without
@@ -3484,6 +3587,7 @@ export const useLlmStream = (
       clearRetryCountdown,
       setThought,
       commitPendingThought,
+      commitPendingAssistantItems,
       pendingHistoryItemRef,
       pendingAssistantItemsRef,
       pendingThoughtItemRef,
@@ -6607,26 +6711,31 @@ export const useLlmStream = (
     handleCompletedToolsRef.current = handleCompletedTools;
   }, [handleCompletedTools]);
 
-  const pendingHistoryItems = useMemo(
-    () =>
-      [
-        // Reasoning renders above the streaming answer.
-        pendingThoughtItem,
-        ...pendingAssistantItems,
-        pendingToolCallGroupDisplay,
-        pendingHistoryItem,
-        pendingRetryErrorItem,
-        pendingRetryCountdownItem,
-      ].filter((i) => i !== undefined && i !== null),
-    [
+  const pendingHistoryItems = useMemo(() => {
+    // A completed batch precedes the response that consumes its results.
+    const toolGroupFinished = pendingToolCallGroupDisplay?.tools.every(
+      (tool) =>
+        tool.status === ToolCallStatus.Success ||
+        tool.status === ToolCallStatus.Error ||
+        tool.status === ToolCallStatus.Canceled,
+    );
+    return [
+      toolGroupFinished ? pendingToolCallGroupDisplay : undefined,
+      ...pendingAssistantItems,
       pendingThoughtItem,
-      pendingAssistantItems,
+      toolGroupFinished ? undefined : pendingToolCallGroupDisplay,
       pendingHistoryItem,
       pendingRetryErrorItem,
       pendingRetryCountdownItem,
-      pendingToolCallGroupDisplay,
-    ],
-  );
+    ].filter((i) => i !== undefined && i !== null);
+  }, [
+    pendingThoughtItem,
+    pendingAssistantItems,
+    pendingHistoryItem,
+    pendingRetryErrorItem,
+    pendingRetryCountdownItem,
+    pendingToolCallGroupDisplay,
+  ]);
 
   useEffect(() => {
     const saveRestorableToolCalls = async () => {

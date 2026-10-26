@@ -2,6 +2,8 @@
 
 [English](2026-10-07-managed-agent-actor-roles.md) | [简体中文](2026-10-07-managed-agent-actor-roles.zh-CN.md)
 
+Current status: the cwd submission routes and `SESSION_CWD_CHANGE` entries below describe the historical role matrix. New directory-change admission is retired; existing operation query and settlement remain. See the [retirement design](2026-10-26-retire-managed-cwd-change.md).
+
 Issue: #13535 (R1 actor roles, R2 isolation acceptance). Parent: #12380 production
 enablement. Vocabulary source: #12867 section 10 (`reader`, `operator`, `owner`;
 `404` without read, `403` with read but without operate; idempotency domain
