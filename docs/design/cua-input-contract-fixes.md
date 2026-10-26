@@ -6,7 +6,7 @@
 
 Prepare native driver, CUA SDK, Browser SDK and Node REPL 0.26.1 together, following the existing release contract. Browser behavior and the Qwen Code CLI version are outside this change.
 
-The 22-file input/session correction patch is the same `0b2ec12bab99` patch used by the four running RecreationBench groups, rebased onto current main for release preparation. Those experiments retain their original 0.26.0 package metadata and immutable archive. Release metadata changes do not upgrade or restart them. The user explicitly authorized the full runs before complete macOS case acceptance; results remain pending.
+The original 22-file input/session correction patch is the `0b2ec12bab99` patch used by the four running RecreationBench groups, rebased onto current main for release preparation. The release candidate additionally corrects macOS accessory-app discovery after an offline reproduction of the first R8 startup failures. Those experiments retain their original 0.26.0 package metadata and immutable archive; the additional fix does not upgrade or restart them. The user explicitly authorized the full runs before complete macOS case acceptance; results remain pending.
 
 ## Windows dispatch and cleanup
 
@@ -23,6 +23,8 @@ The foreground SendInput preflight recognizes the actual TokenUIAccess value. Po
 An actual Edit child identifies the editable route in a ComboBoxEx whose inner combo reports a list-only style. Existing value/index readback and unknown-value refusal for lists without an Edit remain in place.
 
 ## macOS identity and input
+
+Application inventory retains live Accessory-policy applications, including menu-bar apps launched outside standard installation directories. Previously those entries were omitted unless the same bundle path appeared in the installation scan, causing exact bundle-ID lookup to fail. Prohibited-policy background processes still require a matching installed bundle, and legacy Regular-only enumeration remains unchanged. Offline source reproduction verifies the discovery defect; historical R8 process activation policy and exact PID/path binding were not retained, so this does not claim complete causal closure or GUI acceptance for the failed guests.
 
 When `PROC_PIDTBSDINFO` is unavailable, `KERN_PROC_PID` can supply the same microsecond process-birth identity. Reject invalid PIDs, incomplete data, PID mismatch and invalid timestamps, retaining subsequent lifetime checks. This historical failure does not establish the cause of every later input with no visible effect.
 

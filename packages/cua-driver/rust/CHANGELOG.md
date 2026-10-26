@@ -2,6 +2,7 @@
 
 - Windows UIA click and secondary actions return an unconfirmed receipt when the target popup closes or an ownerless modal appears. The original native operation retains its window, session and runtime cleanup guards until it ends; ambiguous results are not replayed through another actuator.
 - Bound SDK sessions wait through intermediate `session_cleanup_pending` results and preserve final cleanup failures.
+- macOS discovers live menu-bar Accessory apps outside standard installation directories without including uninstalled Prohibited-policy background helpers.
 - macOS process identity checks can read the same PID/birth identity through `KERN_PROC_PID` when `PROC_PIDTBSDINFO` is unavailable. Synthetic events use the combined-session source, and failed focus-guard setup rolls back without running post-action restoration.
 - Clipboard transactions refuse an unserviced main-thread start after three seconds without a late clipboard write. Already-started transactions retain their completion and restoration semantics.
 - macOS accepts the case-preserved advertised secondary-action aliases. Windows recognizes writable Edit children inside ComboBoxEx controls and honors TokenUIAccess only for the foreground SendInput preflight.
