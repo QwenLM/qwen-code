@@ -24051,4 +24051,138 @@ describe('ChannelBase', () => {
       expect(ch.preflightTexts).toEqual(['while loop runs']);
     });
   });
+
+  describe('mid-turn message injection (inject dispatch mode)', () => {
+    function enableInjection() {
+      const queueMidTurnMessage = vi.fn();
+      (
+        bridge as unknown as {
+          queueMidTurnMessage: typeof queueMidTurnMessage;
+        }
+      ).queueMidTurnMessage = queueMidTurnMessage;
+      return queueMidTurnMessage;
+    }
+
+    function collectBuffers(ch: TestChannel): Map<string, unknown[]> {
+      return (ch as unknown as { collectBuffers: Map<string, unknown[]> })
+        .collectBuffers;
+    }
+
+    function resolvablePrompts() {
+      const resolvers: Array<(value: string) => void> = [];
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+        () =>
+          new Promise<string>((resolve) => {
+            resolvers.push(resolve);
+          }),
+      );
+      return resolvers;
+    }
+
+    it('hands the text to the running turn instead of cancelling or buffering', async () => {
+      const queueMidTurnMessage = enableInjection();
+      const resolvers = resolvablePrompts();
+      const ch = createChannel({ dispatchMode: 'inject' });
+
+      const running = ch.handleInbound(
+        envelope({ text: 'start', messageId: 'm-inject-1' }),
+      );
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+
+      await ch.handleInbound(
+        envelope({ text: 'insert this', messageId: 'm-inject-2' }),
+      );
+
+      expect(queueMidTurnMessage).toHaveBeenCalledWith(
+        sessionId,
+        'insert this',
+      );
+      expect(bridge.cancelSession).not.toHaveBeenCalled();
+      // The injection must not start a second turn or buffer a first one.
+      expect(resolvers).toHaveLength(1);
+      expect(collectBuffers(ch).size).toBe(0);
+      expect(ch.promptBuffers).toEqual([]);
+
+      resolvers[0]!('done');
+      await running;
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
+    });
+
+    it('falls back to collect buffering when the bridge cannot inject', async () => {
+      expect(
+        (bridge as unknown as { queueMidTurnMessage?: unknown })
+          .queueMidTurnMessage,
+      ).toBeUndefined();
+      const resolvers = resolvablePrompts();
+      const ch = createChannel({ dispatchMode: 'inject' });
+
+      const running = ch.handleInbound(
+        envelope({ text: 'start', messageId: 'm-fallback-1' }),
+      );
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+
+      await ch.handleInbound(
+        envelope({ text: 'buffered instead', messageId: 'm-fallback-2' }),
+      );
+
+      expect(
+        collectBuffers(ch)
+          .get(sessionId)
+          ?.map((entry) => (entry as { text: string }).text),
+      ).toEqual(['buffered instead']);
+      expect(ch.promptBuffers).toEqual([
+        expect.objectContaining({ sessionId, messageId: 'm-fallback-2' }),
+      ]);
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
+
+      resolvers[0]!('done');
+      await running;
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+      expect(bridge.prompt.mock.calls[1]?.[1]).toContain('buffered instead');
+      resolvers[1]?.('second done');
+      await vi.waitFor(() => expect(ch.promptEnds).toHaveLength(2));
+    });
+
+    it.each(['collect', 'followup', 'steer'] as const)(
+      'leaves the %s mode unchanged when the bridge can inject',
+      async (mode) => {
+        const queueMidTurnMessage = enableInjection();
+        const resolvers = resolvablePrompts();
+        const ch = createChannel({ dispatchMode: mode });
+
+        const first = ch.handleInbound(
+          envelope({ text: 'first', messageId: `m-${mode}-1` }),
+        );
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+        const second = ch.handleInbound(
+          envelope({ text: 'second', messageId: `m-${mode}-2` }),
+        );
+        if (mode === 'steer') {
+          await vi.waitFor(() =>
+            expect(bridge.cancelSession).toHaveBeenCalledTimes(1),
+          );
+        }
+        if (mode === 'collect') {
+          await second;
+          expect(collectBuffers(ch).size).toBe(1);
+        }
+
+        resolvers[0]!('done');
+        await first;
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+        expect(queueMidTurnMessage).not.toHaveBeenCalled();
+        if (mode !== 'collect') {
+          expect(collectBuffers(ch).size).toBe(0);
+        }
+
+        resolvers[1]?.('done');
+        await second;
+        await vi.waitFor(() => expect(ch.promptEnds).toHaveLength(2));
+      },
+    );
+  });
 });

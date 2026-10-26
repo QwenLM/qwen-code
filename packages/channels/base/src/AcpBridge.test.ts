@@ -128,6 +128,7 @@ type TestableAcpBridge = AcpBridge & {
   };
   knownSessionIds: Set<string>;
   sessionBindingTokens: Map<string, object | undefined>;
+  midTurnMessageQueues: Map<string, string[]>;
   toolCallKindsBySession: Map<string, Map<string, string>>;
   channelLoopMcpServer: unknown;
   channelLoopToolHandlers: ChannelLoopToolHandler[];
@@ -351,6 +352,112 @@ describe('AcpBridge', () => {
         sessionId: 's-1',
       }),
     ).resolves.toStrictEqual({ messages: [], hasQueuedPrompt: false });
+  });
+
+  it('returns queued mid-turn messages once, per session', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.knownSessionIds.add('s-1');
+    bridge.knownSessionIds.add('s-2');
+    bridge.queueMidTurnMessage('s-1', 'first');
+    bridge.queueMidTurnMessage('s-1', 'second');
+    bridge.queueMidTurnMessage('s-2', 'other');
+
+    await expect(
+      bridge.handleExtMethod('craft/drainMidTurnQueue', { sessionId: 's-1' }),
+    ).resolves.toStrictEqual({
+      messages: ['first', 'second'],
+      hasQueuedPrompt: false,
+    });
+    await expect(
+      bridge.handleExtMethod('craft/drainMidTurnQueue', { sessionId: 's-1' }),
+    ).resolves.toStrictEqual({ messages: [], hasQueuedPrompt: false });
+    await expect(
+      bridge.handleExtMethod('craft/drainMidTurnQueue', { sessionId: 's-2' }),
+    ).resolves.toStrictEqual({
+      messages: ['other'],
+      hasQueuedPrompt: false,
+    });
+  });
+
+  it('ignores mid-turn messages for unknown sessions', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+
+    bridge.queueMidTurnMessage('s-unknown', 'lost');
+
+    expect(bridge.midTurnMessageQueues.size).toBe(0);
+    await expect(
+      bridge.handleExtMethod('craft/drainMidTurnQueue', {
+        sessionId: 's-unknown',
+      }),
+    ).resolves.toStrictEqual({ messages: [], hasQueuedPrompt: false });
+  });
+
+  it('bounds the mid-turn queue by message count', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.knownSessionIds.add('s-1');
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      for (let index = 0; index < 25; index += 1) {
+        bridge.queueMidTurnMessage('s-1', `m${index}`);
+      }
+
+      await expect(
+        bridge.handleExtMethod('craft/drainMidTurnQueue', { sessionId: 's-1' }),
+      ).resolves.toStrictEqual({
+        messages: Array.from({ length: 20 }, (_value, index) => `m${index}`),
+        hasQueuedPrompt: false,
+      });
+      expect(
+        stderr.mock.calls.some(([line]) =>
+          String(line).includes('Dropped mid-turn message'),
+        ),
+      ).toBe(true);
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('clears queued mid-turn messages when a session is discarded', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.knownSessionIds.add('s-1');
+    bridge.knownSessionIds.add('s-2');
+    bridge.queueMidTurnMessage('s-1', 'dropped with the session');
+    bridge.queueMidTurnMessage('s-2', 'kept');
+
+    await bridge.discardSession('s-1');
+
+    expect(bridge.midTurnMessageQueues.has('s-1')).toBe(false);
+    await expect(
+      bridge.handleExtMethod('craft/drainMidTurnQueue', { sessionId: 's-2' }),
+    ).resolves.toStrictEqual({
+      messages: ['kept'],
+      hasQueuedPrompt: false,
+    });
+  });
+
+  it('clears every mid-turn queue on stop', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.knownSessionIds.add('s-1');
+    bridge.queueMidTurnMessage('s-1', 'queued');
+
+    bridge.stop();
+
+    expect(bridge.midTurnMessageQueues.size).toBe(0);
   });
 
   it('claims Guard continuations only for a session owned by this bridge', async () => {
