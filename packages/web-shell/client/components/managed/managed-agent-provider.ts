@@ -193,7 +193,6 @@ export interface ManagedAgentSessionSummary {
     artifacts?: boolean;
     /** The caller may submit later Turns to this Workspace-bound Session. */
     workspaceTurns?: boolean;
-    cwdChange?: boolean;
     modelChange?: boolean;
     contextCompression?: boolean;
     approvalModeChange?: boolean;
@@ -259,7 +258,6 @@ export interface ManagedAgentCommandOptions extends ManagedAgentRequestOptions {
   idempotencyKey: string;
 }
 
-export type ManagedCwdOperation = components['schemas']['WebShellCwdOperation'];
 export type ManagedContextCompressionOperation =
   components['schemas']['WebShellContextCompressionOperation'];
 export type ManagedTask = components['schemas']['WebShellTask'];
@@ -501,18 +499,6 @@ export interface ManagedAgentProvider {
         options: ManagedAgentRequestOptions,
       ): Promise<ManagedTaskCancelOperation>;
     };
-  };
-  readonly cwdChange?: {
-    submit(
-      sessionId: string,
-      request: { cwdRelative: string; expectedContextRevision: number },
-      options: ManagedAgentCommandOptions,
-    ): Promise<ManagedCwdOperation>;
-    query(
-      sessionId: string,
-      operationId: string,
-      options: ManagedAgentRequestOptions,
-    ): Promise<ManagedCwdOperation>;
   };
   readonly contextCompression?: {
     submit(

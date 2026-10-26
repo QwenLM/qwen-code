@@ -206,7 +206,6 @@ export function WorkspaceBindingCreator({
   onWorkspaceCreated,
   interactive = true,
   creationSkills,
-  onManageSkills,
   handoff,
   onOpenHandoffSource,
 }: {
@@ -225,7 +224,6 @@ export function WorkspaceBindingCreator({
   onWorkspaceCreated?: (workspaceId: string) => void;
   interactive?: boolean;
   creationSkills?: ManagedCreationSkillsSource;
-  onManageSkills?: () => void;
   handoff?: import('./managed-recovery-handoff').ManagedRecoveryHandoff;
   onOpenHandoffSource?: () => void;
 }) {
@@ -1331,25 +1329,6 @@ export function WorkspaceBindingCreator({
             ))}
           </fieldset>
         )}
-      {(supportedSkillsSource || pending?.skills?.length) && (
-        <p className="my-2 text-sm text-muted-foreground">
-          {pending?.skills?.length
-            ? t('managed.creationSkillsPinned', {
-                count: pending.skills.length,
-              })
-            : t('managed.creationSkillsFromSettings')}
-          {onManageSkills && (
-            <Button
-              type="button"
-              variant="link"
-              title={supportedSkillsSource?.workspaceCwd}
-              onClick={onManageSkills}
-            >
-              {t('managed.creationSkillsManage')}
-            </Button>
-          )}
-        </p>
-      )}
       {pending && !busy ? (
         <div className="space-y-2 text-sm">
           <p>{t('managed.workspaceUncertain')}</p>

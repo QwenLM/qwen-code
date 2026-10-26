@@ -691,7 +691,8 @@ export async function runManagedRuntimeAttestationWorker(
     undefined,
     contextBoot.version === 2 &&
       !('storage' in contextBoot) &&
-      contextBoot.capabilityDigest === WORKSPACE_CAPABILITY_DIGEST
+      (contextBoot.capabilityDigest === WORKSPACE_CAPABILITY_DIGEST ||
+        contextBoot.managedExtensions !== undefined)
       ? new ManagedShellPublisherRegistry()
       : undefined,
     containerBootPath !== undefined,
