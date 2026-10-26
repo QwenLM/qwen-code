@@ -42,9 +42,10 @@ lease_until < ?`) with fence-checked ledger writes, so working different
    `managedAutomationScheduler`. The tick holds the scheduler's thread while
    joining, so scanning on its own scheduler deadlocks at pool size 1 and
    parks one thread per pending join otherwise.
-5. Finish in-flight work at shutdown; never interrupt it. The pool's
-   `destroy()` returns immediately (`awaitTerminationSeconds(0)`), so the pool
-   adds no shutdown wait of its own. A tick caught mid-join is still bounded by
+5. The row pool never interrupts tasks at shutdown, but it does not wait for
+   their completion or guarantee it before JVM exit. Its `destroy()` returns
+   immediately (`awaitTerminationSeconds(0)`), so it adds no shutdown wait of
+   its own. A tick caught mid-join is still bounded by
    the scheduler that invokes it (`managedAutomationScheduler`, itself a
    `SmartLifecycle`): the lifecycle processor caps that bean's stop at
    `spring.lifecycle.timeout-per-shutdown-phase` (30 s here). That is an upper

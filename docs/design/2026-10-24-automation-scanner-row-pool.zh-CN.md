@@ -38,8 +38,9 @@ NULL OR lease_until < ?`）下逐行上租约，账本写入全部带 fence 校�
    `managedAutomationScheduler`。tick 在 join 期间占着调度器的线程，因此用
    同一个调度器跑扫描会在池大小为 1 时把 tick 锁死在自己唯一的线程上，调大
    也只会为每个 pending 的 join 空占一条线程。
-5. 关闭时让进行中的工作收尾；绝不中断它。线程池的 `destroy()` 立即返回
-   （`awaitTerminationSeconds(0)`），本身不引入任何关闭等待。卡在 join 里的
+5. 关闭时线程池不会中断任务，但也不等待任务完成，更不保证它们能在 JVM 退出前
+   完成。`destroy()` 立即返回（`awaitTerminationSeconds(0)`），本身不引入任何
+   关闭等待。卡在 join 里的
    tick 仍受调用它的调度器约束（`managedAutomationScheduler`，本身是
    `SmartLifecycle`）：生命周期处理器把该 Bean 的 stop 上限设为
    `spring.lifecycle.timeout-per-shutdown-phase`（此处 30 秒）。这是关闭的上界，
