@@ -533,6 +533,73 @@ class ExternalWorkspaceProvisionerTest {
         assertEquals(1, client.provisions.size());
     }
 
+    @Test
+    void acquisitionRequiresPositiveContinuityButProvisionOnlyParityDoesNot() throws Exception {
+        var subject = provisioner(registration(PROVIDER, 1, MOUNT));
+        var original = place(subject, "acquire-missing");
+        var ready = draining(original.request(), original.seed(), original.handle(), original.lease(), false)
+                .withState(RuntimeBindingRecord.State.READY, original.lease(), Instant.now());
+        int before = client.observes.size();
+        assertEquals("runtime_external_unavailable", failure(subject.verifyAcquisition(ready)).getCode());
+        assertEquals(before + 1, client.observes.size(), "One response supplies readiness and storage evidence");
+        assertEquals(1, client.provisions.size());
+        assertTrue(subject.isUsable(original.lease()), "Unknown acquisition evidence retains the original placement");
+        client.storage = evidence("confirms", 1);
+        failure(subject.verifyAcquisition(ready.withDrainRequested(true, Instant.now())));
+        assertEquals(before + 1, client.observes.size(), "Drain refuses acquisition before observing");
+        assertTrue(ExternalWorkspaceProvisioner.isWorkspaceRequest(original.request()));
+        assertFalse(ExternalWorkspaceProvisioner.isWorkspaceRequest(new RuntimeProvisionRequest(scope(CAPABILITY),
+                "isolation-a", ExternalRuntimeProvisioner.KIND, ALIAS)));
+    }
+
+    @Test
+    void acquisitionAfterRestartObservesOriginalOnceThenIndependentlyAttests() throws Exception {
+        var subject = provisioner(registration(PROVIDER, 1, MOUNT));
+        var request = request();
+        var seed = seed("acquisition");
+        var handle = join(subject.ensureResource(request, seed, null));
+        subject.close();
+        subject = provisioner(registration(PROVIDER, 1, MOUNT));
+        AtomicInteger attestations = new AtomicInteger();
+        AtomicReference<Map<String, Object>> attestation = new AtomicReference<>(
+                ManagedContextProtocol.attestationResponse(ManagedContextProtocol.boot(request, seed)));
+        HttpServer worker = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        worker.createContext(ManagedContextProtocol.ATTEST_PATH, exchange -> {
+            exchange.getRequestBody().readAllBytes();
+            attestations.incrementAndGet();
+            byte[] bytes = JsonCodec.encode(attestation.get());
+            exchange.getResponseHeaders().set("Cache-Control", "no-store");
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        worker.start();
+        try {
+            client.endpoint = "http://127.0.0.1:" + worker.getAddress().getPort();
+            client.observeState = "RUNNING";
+            client.storage = evidence("confirms", 1);
+            var lease = new RuntimeLease(seed.getProvisionalRuntimeId(), URI.create(client.endpoint), seed.getToken(), seed.getLeaseId(), seed.getEpoch());
+            var ready = draining(request, seed, handle, lease, false).withState(RuntimeBindingRecord.State.READY, lease, Instant.now());
+            join(subject.verifyAcquisition(ready));
+            assertEquals(1, client.observes.size());
+            assertEquals(Map.of("protocolVersion", 1, "provisionRequestId", seed.getProvisionRequestId(),
+                    "identity", handle.getValue().get("identity"), "handle", handle.getValue().get("provider")), client.observes.get(0));
+            assertEquals(1, attestations.get());
+            assertTrue(client.provisions.isEmpty());
+            Map<String, Object> changed = new LinkedHashMap<>(attestation.get());
+            changed.put("runtimeIncarnation", "another-incarnation");
+            attestation.set(changed);
+            failure(subject.verifyAcquisition(ready));
+            assertEquals(2, attestations.get(), "Provider readiness alone cannot establish worker identity");
+            client.storage = evidence("unknown", 1);
+            failure(subject.verifyAcquisition(ready));
+            assertEquals(2, attestations.get(), "Missing continuity refuses before worker acquisition attestation");
+        } finally {
+            worker.stop(0);
+        }
+    }
+
     private Map<String, Object> evidence(String continuity, long revision) {
         ExternalStorageRegistry.RegisteredExternalStorage storage =
                 registration(PROVIDER, revision, MOUNT);
@@ -548,6 +615,7 @@ class ExternalWorkspaceProvisionerTest {
         private Map<String, Object> provisionResponse = Map.of("protocolVersion", 1,
                 "handle", Map.of("requestId", "request-a"), "endpoint", ENDPOINT);
         private String observeState = "STARTING";
+        private String endpoint = ENDPOINT;
         private Map<String, Object> storage;
 
         @Override
@@ -563,7 +631,7 @@ class ExternalWorkspaceProvisionerTest {
             response.put("protocolVersion", 1);
             response.put("state", observeState);
             if ("RUNNING".equals(observeState)) {
-                response.put("endpoint", ENDPOINT);
+                response.put("endpoint", endpoint);
             }
             if (storage != null) {
                 response.put("storage", storage);
