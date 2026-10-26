@@ -134,15 +134,16 @@ this recovery exception.
 | Commands   | Register during `session.start` using name, description and optional argumentHint; intercept registered Mod commands across plugins; return `{text}` or `{}`                            |
 | Tools      | In headless and local terminal model turns, intercept existing main-session tools with `tool.call`; inspect and restrict native permission decisions with `tool.check`                  |
 | Middleware | Patterns and recursive matchers; explicit, repeatable `next(e)`; `.catch` and per-plugin failure recovery; frozen input and host identity                                               |
-| API events | `command.register`, `ui.log` and the session and clock methods pass through the middleware chain with host-supplied origin                                                              |
+| API events | `command.register`, `ui.log`, `ui.invalidate` and the session and clock methods pass through the middleware chain with host-supplied origin                                             |
 | Session    | `$.plugin`, read-only `$.session` facts, `$.clock.now` and `$.clock.sleep`, described in [Session facts and clock](#session-facts-and-clock)                                            |
 | Turns      | `turn.start`, `turn.complete` and `$.turn.abort` for the prompts a person submits, described in [Turn events](#turn-events)                                                             |
 | Logging    | `$.ui.log` returns void and queues delivery; transcript logs use stderr in text mode or `system/ui_log` in JSON modes; debug logs stay in the debug logger; neither becomes model input |
+| Elements   | `$.ui.resolve`, `$.ui.invalidate` and the `h` and `Fragment` globals, described in [Elements](#elements); no host draws `ui.render` yet                                                 |
 | Isolation  | Separate QuickJS environment per plugin inside a session worker; no Node, filesystem or network APIs; memory, stack, source/output and execution limits                                 |
 
 This is a supported subset, not full compatibility with existing Claude Mods.
 JSX/TSX, runtime package imports, built-in command interception, tool registration and active `$.tool` APIs, context,
-`$.session.messages` and `repo`, state/store, `$.clock.after` and `every`, rendering, streaming events and hot reload are not implemented.
+`$.session.messages` and `repo`, state/store, `$.clock.after` and `every`, drawing `ui.render`, streaming events and hot reload are not implemented.
 Commands cannot return `context`, `exitCode` or engine references yet. Hooks for
 other Claude Code events load without running, as described in
 [Middleware and recovery](#middleware-and-recovery).
@@ -393,7 +394,7 @@ recovery are not available.
 
 API events begin at the chain head. Their input is the command specification,
 the `{text, to}` log payload, `{ms}` for `clock.sleep`, the `{breakdown, columns}`
-arguments of `session.usage`, `{turnId}` for `turn.abort`, or `{}` for the other session and clock methods. Return `next(e)`,
+arguments of `session.usage`, `{turnId}` for `turn.abort`, `{event}` for `ui.invalidate`, or `{}` for the other session and clock methods. Return `next(e)`,
 `{value}` to answer, or `{deny: reason}` to reject the API call. Registrations
 already in the event's call chain are skipped, including their catches. Other
 registrations in the same plugin remain eligible. This re-entry behavior follows
@@ -431,6 +432,7 @@ supports:
       "turn.abort",
       "turn.complete",
       "turn.start",
+      "ui.invalidate",
       "ui.log"
     ],
     "methods": [
@@ -447,7 +449,9 @@ supports:
       "session.usage",
       "session.version",
       "turn.abort",
-      "ui.log"
+      "ui.invalidate",
+      "ui.log",
+      "ui.resolve"
     ]
   }
 }
@@ -615,6 +619,32 @@ ending. In a headless run the turn ends with the error result
 `A Mod ended the turn.` and exit code 130, and a stream-json session goes on to
 its next message. Qwen Code has no `$.prompt.submit` yet, so a Mod cannot send a
 prompt after it ends a turn.
+
+## Elements
+
+`$.ui.resolve(e)` returns the element table of the terminal: a frozen object
+with no prototype that holds Claude Code's eleven terminal constructors,
+`Box`, `Text`, `Button`, `Input`, `Select`, `Link`, `Code`, `Markdown`,
+`Client`, `Raster` and `Image`. It reads the table without a dispatch. `e` is a
+`ui.render` event; any argument whose `surface` is not `"terminal"` throws.
+
+A constructor takes the props, `children` among them, and returns a frozen
+plain-data element `{ type, props?, hover?, children? }`. Children are
+flattened: `null`, `undefined` and booleans are dropped, arrays are spread and
+numbers become strings. `key` is kept only on a `Box`. The `h(tag, props,
+...children)` and `Fragment` globals build the same elements, as Claude Code's
+JSX factory does; `Fragment` is a column `Box`. `h` calls a function tag with
+its props and throws for a string tag other than `Box` or `Text`.
+
+No host draws `ui.render` yet, so its hooks are skipped and listed at startup,
+and `$.session.version()` leaves it out. A tree a hook returns is judged with
+Claude Code 2.1.310's rules for `Box` and `Text`, and any other element refuses
+it with `<Element> is not drawn by Qwen Code yet`.
+
+`$.ui.invalidate("ui.render")` returns at once and asks for a redraw of the
+sites the plugin's `ui.render` hooks may draw. The cached-answer events
+Claude Code also accepts, such as `prompt.section`, do nothing in Qwen Code.
+Any other name throws.
 
 ## TypeScript and relative imports
 

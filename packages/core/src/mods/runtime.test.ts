@@ -441,6 +441,7 @@ describe('ModRuntime with the real QuickJS worker', () => {
             'turn.abort',
             'turn.complete',
             'turn.start',
+            'ui.invalidate',
             'ui.log',
           ],
           methods: [
@@ -457,7 +458,9 @@ describe('ModRuntime with the real QuickJS worker', () => {
             'session.usage',
             'session.version',
             'turn.abort',
+            'ui.invalidate',
             'ui.log',
+            'ui.resolve',
           ],
         },
       },
