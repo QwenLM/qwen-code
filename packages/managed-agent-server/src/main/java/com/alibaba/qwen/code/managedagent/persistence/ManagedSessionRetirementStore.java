@@ -28,6 +28,17 @@ final class ManagedSessionRetirementStore {
             throw new IllegalStateException("Session has not been permanently retired");
         }
         String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
+        var nativeSnapshots = jdbc.queryForList("SELECT owner_key, owner_revision, resource_key FROM ma_resource_ref"
+                + " WHERE session_scope_key = ? AND owner_kind = 'NATIVE_SNAPSHOT'"
+                + " ORDER BY owner_key, owner_revision, resource_key LIMIT ? FOR UPDATE", scope, limit);
+        for (var row : nativeSnapshots) {
+            jdbc.update("DELETE FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind = 'NATIVE_SNAPSHOT'"
+                    + " AND owner_key = ? AND owner_revision = ? AND resource_key = ?",
+                    scope, row.get("owner_key"), row.get("owner_revision"), row.get("resource_key"));
+        }
+        if (!nativeSnapshots.isEmpty()) {
+            return true;
+        }
         var snapshots =
                 jdbc.queryForList(
                         "SELECT snapshot_id, snapshot_version FROM ma_snapshot WHERE tenant_id = ?"
@@ -277,6 +288,10 @@ final class ManagedSessionRetirementStore {
                         session)
                 .isEmpty()) {
             throw new IllegalStateException("Session journal collection is incomplete");
+        }
+        if (!jdbc.queryForList("SELECT resource_key FROM ma_resource_ref WHERE session_scope_key = ?"
+                + " AND owner_kind = 'NATIVE_SNAPSHOT' LIMIT 1", ManagedSessionStore.sessionScopeKey(tenant, session)).isEmpty()) {
+            throw new IllegalStateException("Native snapshot collection is incomplete");
         }
         var operations =
                 jdbc.queryForList(
