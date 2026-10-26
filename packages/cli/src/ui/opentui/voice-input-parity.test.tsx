@@ -272,6 +272,11 @@ vi.mock('../hooks/useMcpApproval.js', () => ({
     pendingMcpApprovals: [],
   }),
 }));
+vi.mock('../hooks/use-project-hooks-approval.js', () => ({
+  useProjectHooksApproval: () => ({
+    isProjectHooksApprovalDialogOpen: false,
+  }),
+}));
 vi.mock('../hooks/useWorktreeSession.js', () => ({
   useWorktreeSession: () => null,
 }));
@@ -297,6 +302,7 @@ vi.mock('./dialogs-confirm.js', () => ({
   OpenTuiShellConfirmation: () => null,
   OpenTuiActionConfirmation: () => null,
   OpenTuiMcpApprovalDialog: () => null,
+  OpenTuiProjectHooksApprovalDialog: () => null,
 }));
 vi.mock('./theme.js', () => ({ C: new Proxy({}, { get: () => '#ffffff' }) }));
 
