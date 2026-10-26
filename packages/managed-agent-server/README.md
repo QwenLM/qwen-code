@@ -844,6 +844,12 @@ packaged-stack E2E, which have no ingress,
 then trusted as the actor for the request's tenant. It is disabled by default;
 never enable it where untrusted clients can reach the server.
 
+### Upload files into a Workspace
+
+With Workspace file access enabled and compatible Server, CLI and WebShell artifacts, select a persisted LOCAL or SSH_LOCAL Workspace and choose **Add file → Upload to workspace**. Uploads accept binary and empty files up to 8 MiB each, use an existing destination directory, and reject occupied paths without overwriting them. The composer inserts a scoped path reference for tools to use; binary bytes are not converted into a small-text snapshot or message attachment. Old CLIs leave upload disabled. CSI, folder uploads and automatic directory creation are unsupported.
+
+Uploads require an authenticated actor with OPERATOR or OWNER access and verified storage. An execution-storage member, including a retained MCP Runtime, keeps the Workspace busy. A durable physical-storage hold excludes new execution and retirement until the original upload has a definite result. If the response is uncertain, query the original upload ID; recovery does not replay the write on another Runtime. Cancelling the browser request does not delete a file already committed. See the [English design](../../docs/design/2026-10-26-managed-workspace-upload.md) and [Chinese design](../../docs/design/2026-10-26-managed-workspace-upload.zh-CN.md) for the protocol, recovery and acceptance boundaries.
+
 ### Create empty Workspaces from WebShell
 
 Set `QWEN_MANAGED_AGENT_WORKSPACE_CREATION_ROOT` to an existing canonical, server-owned directory to enable **New workspace → Start from scratch** in the Managed composer. The default is disabled. The root must be separate from static Workspace mounts, the default Workspace cwd, and private Runtime state. Enable Workspace files, the Session Store, the durable Session-isolated local-process Broker and verified local Workspace recovery first. Enabling this setting authorizes authenticated tenant actors to allocate independent empty roots and receive OWNER access; only enable it for tenants allowed to consume this host's storage.
@@ -1583,6 +1589,55 @@ still stop all contexts and child processes. State is preserved between methods,
 nested classes, and context restarts inside one class. See the
 [isolation design](../../docs/design/2026-10-20-hosted-it-database-isolation.md)
 ([简体中文](../../docs/design/2026-10-20-hosted-it-database-isolation.zh-CN.md)).
+
+## Managed extension packages
+
+Complete package distribution and the seven-component Managed profile are opt-in.
+Set `QWEN_MANAGED_AGENT_EXTENSION_PACKAGES_ENABLED=true`,
+`QWEN_MANAGED_AGENT_EXTENSION_ARTIFACT_DIRECTORY` to a durable private directory,
+and `QWEN_MANAGED_AGENT_EXTENSION_ALLOWED_ACTORS` to the permitted operator actor
+keys. The configured Workspace OPERATOR grant is also required. See the
+[configuration example](distribution/config/application.example.yml) for the
+separate Runtime execution profile: Linux LOCAL and SSH require delegated cgroup
+v2; native macOS requires the explicit `developer-process-group` mode. Existing
+Runtime bindings do not acquire the new execution contract automatically.
+Replicas must share the authoritative artifact directory. A Runtime cache is
+reconstructible and cannot replace that directory. Published versions and encrypted
+settings revisions are retained; this increment does not implement garbage
+collection.
+
+In WebShell, select the Managed Workspace and Session, open Extensions, prepare an
+original Git/npm/directory/archive source for its target platform, then publish it.
+An update explicitly selects the catalog extension ID. Select package versions and
+an exact saved settings revision before applying to an idle Session. Saving settings
+creates a complete immutable revision; values never appear in read responses.
+Upgrading a package preserves its selected settings revision. An unfinished apply
+has separate Continue original operation and Restore previous version controls;
+unknown outcomes continue to block inference until the original owner reconciles.
+
+Public clients use `/v1/agents/workspaces/{workspaceId}/extensions` for bounded
+binary publication and catalog queries and `/v1/agents/sessions/{sessionId}/extensions`
+for configuration queries and application. The OpenAPI contract documents the
+settings and operation subresources. The Java SDK exposes `ManagedExtensionsClient`;
+the TypeScript daemon SDK can prepare and stream an original package. Creation's
+optional `extensionPins` freezes the initial selection before the first model call.
+Omitting it retains the existing Session path.
+
+Package assets use an explicit read-only extension source. Model tool schemas list
+the selected public pins; `read_file` and `glob` accept package-relative paths or
+`extension://<extensionId>/<path>`. Shell selects `extension_context` and receives
+`QWEN_EXTENSION_ROOT`, while its working directory remains the Session directory.
+Ordinary Workspace tools retain their existing containment rules. Executable
+preflight checks target interpreters and directly resolvable commands without
+running Hooks or connecting MCP; complex authored Shell expressions are checked
+when their approved invocation executes. Argument placeholders inside nested Shell
+substitution, backticks or heredocs are rejected explicitly.
+
+See the linked [English design](../../docs/design/2026-10-24-managed-extension-packages.md)
+and [Chinese design](../../docs/design/2026-10-24-managed-extension-packages.zh-CN.md).
+Local focused tests, macOS developer receipts and the existing Linux static-extension
+gate below establish different boundaries. Complete package Linux/SSH cleanup,
+fault injection and real-provider qualification remain separate acceptance gates.
 
 ## Linux extension process acceptance
 

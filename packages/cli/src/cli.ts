@@ -589,12 +589,17 @@ export async function runCliEntry(
 ): Promise<void> {
   if (
     rawArgv[0] === 'managed-runtime-bootstrap' &&
-    (rawArgv.length === 1 || (rawArgv.length === 2 && rawArgv[1] === '--help'))
+    (rawArgv.length === 1 ||
+      (rawArgv.length === 2 &&
+        ['--help', '--workspace-file-upload'].includes(rawArgv[1]!)))
   ) {
     const { runManagedRuntimeBootstrap } = await import(
       './serve/managed-runtime-bootstrap.js'
     );
-    await runManagedRuntimeBootstrap(rawArgv[1] === '--help');
+    await runManagedRuntimeBootstrap(
+      rawArgv[1] === '--help',
+      rawArgv[1] === '--workspace-file-upload',
+    );
     return;
   }
   if (

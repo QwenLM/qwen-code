@@ -4593,7 +4593,7 @@
           "default": false
         },
         "unifiedAgentLoop": {
-          "description": "Run headless sessions (`-p` and stream-json) on the shared agent loop (experimental). Other surfaces keep their current loop for now. Can also be enabled via QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=1 environment variable.",
+          "description": "Run headless sessions (`-p` and stream-json) and the model rounds of ACP user prompts (Zed, VS Code, Web Shell) on the shared agent loop (experimental). Other turns and surfaces keep their current loop for now. Can also be enabled via QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=1 environment variable.",
           "type": "boolean",
           "default": false
         },

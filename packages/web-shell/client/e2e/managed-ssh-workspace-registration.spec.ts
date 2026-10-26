@@ -34,6 +34,8 @@ for (const width of [1280, 390]) {
             capabilities: { workspaceBinding: true },
           },
         });
+      if (path.endsWith('/workspace-extensions/query'))
+        return route.fulfill({ json: { supported: false, extensions: [] } });
       if (path.endsWith('/runtime-nodes/query'))
         return route.fulfill({
           json: {
