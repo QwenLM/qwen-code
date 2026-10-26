@@ -247,6 +247,21 @@ export function resolvePromptImages(
 }
 
 /**
+ * Per-session bounds on undrained mid-turn input: a turn with no drain point
+ * (a long tool-free generation) must not let a sender pin unbounded text in
+ * memory for the rest of the session. Shared by the bridge queue and the
+ * channel's inject→collect fallback so the two layers cannot drift apart.
+ */
+export const MID_TURN_QUEUE_MAX_MESSAGES = 20;
+export const MID_TURN_QUEUE_MAX_CHARS = 20_000;
+/**
+ * Most messages a single drain response may carry. The ACP child that consumes
+ * `craft/drainMidTurnQueue` caps one response at this many items and DROPS the
+ * rest, so the bridge must batch the queue rather than hand over everything.
+ */
+export const MID_TURN_DRAIN_BATCH = 10;
+
+/**
  * Outcome of handing a message to the bridge's mid-turn queue. When
  * `accepted` is false the bridge did NOT queue the text, so the caller owns
  * fallback delivery (or an explicit refusal); it must not report delivery.
@@ -311,6 +326,19 @@ export interface ChannelAgentBridge {
    * directly.
    */
   queueMidTurnMessage?(sessionId: string, text: string): MidTurnQueueReceipt;
+  /**
+   * Take back accepted mid-turn messages the owning turn never drained, at its
+   * turn boundary, so the channel can replay them as a new turn instead of
+   * leaking them into whatever turn runs next. Called after the turn's prompt
+   * has settled; bridges that settle the queue themselves omit it.
+   */
+  takeUndrainedMidTurnMessages?(sessionId: string): string[];
+  /**
+   * Drop the session's not-yet-drained mid-turn messages when the owning turn
+   * is cancelled. Callers surface the drop through the same buffer-drop
+   * notification `collect` uses.
+   */
+  dropMidTurnMessages?(sessionId: string): void;
   cancelSession(sessionId: string): Promise<void>;
   /** Release a bridge-owned session that will not be routed to a caller. */
   discardSession?(

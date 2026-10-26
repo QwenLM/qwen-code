@@ -76,7 +76,11 @@ import type {
   SessionDiedEvent,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
-import { ChannelPromptCancelledError } from './ChannelAgentBridge.js';
+import {
+  ChannelPromptCancelledError,
+  MID_TURN_QUEUE_MAX_CHARS,
+  MID_TURN_QUEUE_MAX_MESSAGES,
+} from './ChannelAgentBridge.js';
 import type { ChannelLoop, ChannelLoopInput } from './ChannelLoopStore.js';
 import { ChannelLoopSkippedError } from './ChannelLoopScheduler.js';
 import {
@@ -120,11 +124,9 @@ const CURRENT_MESSAGE_MARKER = '[Current message - respond to this]';
 const GROUP_HISTORY_ENTRY_TEXT_LIMIT = 1000;
 const GROUP_HISTORY_ENTRY_METADATA_LIMIT = 256;
 const LOOP_CANCEL_GRACE_MS = 5000;
-// Mirrors the mid-turn queue bounds in AcpBridge. Applied only to messages the
-// inject→collect fallback retains, so plain collect-mode buffering is
-// unchanged.
-const INJECT_FALLBACK_MAX_MESSAGES = 20;
-const INJECT_FALLBACK_MAX_CHARS = 20_000;
+// Bounds the collect fallback that retains messages a bridge REJECTED from its
+// mid-turn queue (mirrors the bridge's own bounds, shared from
+// ChannelAgentBridge). Plain collect-mode buffering is unbounded and unchanged.
 const CHANNEL_MEMORY_PROMPT_CODE_POINT_LIMIT = 12_000;
 const CHANNEL_MEMORY_PAGE_SIZE = 20;
 const CHANNEL_MEMORY_PREVIEW_CODE_POINT_LIMIT = 160;
@@ -364,6 +366,11 @@ type CollectBufferEntry = {
   /** Admitted by the bounded inject-rejection fallback, not plain `collect`. */
   injectFallback?: boolean;
 };
+/** A message handed to the running turn's mid-turn queue, in arrival order. */
+type PendingInjectedMessage = {
+  text: string;
+  envelope: Envelope;
+};
 type NamedTurnBinding = {
   sessionId: string | null;
   generation: number;
@@ -535,6 +542,22 @@ export abstract class ChannelBase {
   private readonly activeBtw: Map<string, ActiveBtw> = new Map();
   /** Per-session message buffer for collect mode. */
   private collectBuffers: Map<string, CollectBufferEntry[]> = new Map();
+  /**
+   * Accepted mid-turn injections of the session's RUNNING turn, in arrival
+   * order. At the turn boundary the channel takes back whatever the bridge
+   * never drained and replays it as a new turn instead of letting it leak into
+   * the next one.
+   */
+  private readonly midTurnInjections: Map<string, PendingInjectedMessage[]> =
+    new Map();
+  /**
+   * Sessions whose current turn already routed a message to the bounded
+   * inject→collect fallback: subsequent messages must follow it there, or a
+   * later injected instruction could overtake an earlier parked one.
+   */
+  private readonly injectDegradedSessions = new Set<string>();
+  /** Sessions already told (once) that their bridge cannot inject at all. */
+  private readonly injectUnsupportedNotified = new Set<string>();
   private readonly preflightedEnvelopes = new WeakSet<Envelope>();
   private readonly bridgeToolCallListener = (event: ToolCallEvent): void => {
     this.dispatchToolCall(event);
@@ -1506,6 +1529,7 @@ export abstract class ChannelBase {
         }
         this.cancelBtw(sessionId);
         this.dropCollectBuffer(sessionId);
+        this.dropMidTurnInjections(sessionId);
         this.instructedSessions.delete(sessionId);
         this.unattendedMemorySessions.delete(sessionId);
         this.removePendingPermissionsForSession(sessionId);
@@ -2109,13 +2133,74 @@ export abstract class ChannelBase {
     }
   }
 
+  /**
+   * Settle the turn's accepted mid-turn injections at its boundary: whatever
+   * the bridge never drained (a tool-free turn drains nothing, and a turn that
+   * ends before the child's next drain would otherwise leak the text into the
+   * NEXT turn) is taken back and queued for replay as its own turn. Runs after
+   * the prompt settled and only while this turn still owns the session.
+   */
+  private settleUndrainedMidTurnInjections(sessionId: string): void {
+    this.injectDegradedSessions.delete(sessionId);
+    const pending = this.midTurnInjections.get(sessionId);
+    if (!pending || pending.length === 0) return;
+    this.midTurnInjections.delete(sessionId);
+    const undrained = this.bridge.takeUndrainedMidTurnMessages?.(sessionId);
+    if (!undrained || undrained.length === 0) return;
+    // A drain always consumes from the head of the queue, so the leftovers are
+    // exactly the tail of this turn's accepted injections.
+    const replay = pending.slice(
+      Math.max(0, pending.length - undrained.length),
+    );
+    if (replay.length === 0) return;
+    let buffer = this.collectBuffers.get(sessionId);
+    if (!buffer) {
+      buffer = [];
+      this.collectBuffers.set(sessionId, buffer);
+    }
+    for (const entry of replay) {
+      buffer.push({ text: entry.text, envelope: entry.envelope });
+    }
+    process.stderr.write(
+      `[${this.name}] inject: ${replay.length} mid-turn message(s) were not drained before the turn ended; replaying as a new turn for session ${sessionId}\n`,
+    );
+  }
+
+  /**
+   * Drop the session's queued (not yet drained) mid-turn injections, e.g. when
+   * the running turn is cancelled: they are already invalid for the cancelled
+   * turn and must not surface in the next one out of context. Surfaces the drop
+   * through the same buffer-drop notification the collect path uses.
+   */
+  private dropMidTurnInjections(sessionId: string): void {
+    this.injectDegradedSessions.delete(sessionId);
+    this.injectUnsupportedNotified.delete(sessionId);
+    const pending = this.midTurnInjections.get(sessionId);
+    this.midTurnInjections.delete(sessionId);
+    this.bridge.dropMidTurnMessages?.(sessionId);
+    if (!pending || pending.length === 0) return;
+    const chatId = pending[0]!.envelope.chatId;
+    const messageIds = pending
+      .map((entry) => entry.envelope.messageId)
+      .filter((id): id is string => id !== undefined);
+    try {
+      this.onPromptBufferDropped(chatId, sessionId, messageIds);
+    } catch (err) {
+      process.stderr.write(
+        `[${this.name}] onPromptBufferDropped threw for injected messages in session ${sessionId}: ${err instanceof Error ? err.message : err}\n`,
+      );
+    }
+  }
+
   private drainCollectBufferForCurrentPrompt(
     sessionId: string,
     stillCurrent: boolean,
     taskLabel: string,
   ): void {
+    if (!stillCurrent) return;
+    this.settleUndrainedMidTurnInjections(sessionId);
     const buffer = this.collectBuffers.get(sessionId);
-    if (!stillCurrent || !buffer || buffer.length === 0) {
+    if (!buffer || buffer.length === 0) {
       return;
     }
     this.collectBuffers.delete(sessionId);
@@ -2127,6 +2212,8 @@ export abstract class ChannelBase {
       ...lastEnvelope,
       text: coalesced,
       alreadyPrefixed: true,
+      // The replay must become its own turn; `inject` skips it by this marker.
+      collectReplay: true,
       referencedText: undefined,
       mentionedMemberIds: undefined,
       attachments: undefined,
@@ -2909,6 +2996,10 @@ export abstract class ChannelBase {
         }
         active.cancelled = true;
         this.dropCollectBuffer(sessionId);
+        // The cancelled turn can still drain its mid-turn queue as it winds
+        // down, so its queued injections are dropped with the collect buffer —
+        // otherwise they would surface in the user's NEXT turn out of context.
+        this.dropMidTurnInjections(sessionId);
         this.removePendingPermissionsForSession(sessionId, 'run_cancelled');
         this.emitTaskCancellation(active, sessionId, reason);
         return true;
@@ -2964,6 +3055,65 @@ export abstract class ChannelBase {
       .filter((id): id is string => typeof id === 'string' && id.length > 0);
   }
 
+  /** The running turn's output route is bound to its originating chat/thread. */
+  private runningTurnOwnsEnvelope(
+    active: ActivePrompt,
+    envelope: Envelope,
+  ): boolean {
+    return (
+      active.chatId === envelope.chatId &&
+      (active.threadId ?? undefined) === (envelope.threadId ?? undefined)
+    );
+  }
+
+  private recordInjectedMessage(
+    sessionId: string,
+    text: string,
+    envelope: Envelope,
+  ): void {
+    let pending = this.midTurnInjections.get(sessionId);
+    if (!pending) {
+      pending = [];
+      this.midTurnInjections.set(sessionId, pending);
+    }
+    pending.push({ text, envelope });
+  }
+
+  private notifyPromptInjected(
+    chatId: string,
+    sessionId: string,
+    messageId?: string,
+  ): void {
+    try {
+      this.onPromptInjected(chatId, sessionId, messageId);
+    } catch (err) {
+      process.stderr.write(
+        `[${this.name}] onPromptInjected threw for session ${sessionId}: ${err instanceof Error ? err.message : err}\n`,
+      );
+    }
+  }
+
+  private logInjectUnsupported(sessionId: string): void {
+    if (this.injectUnsupportedNotified.has(sessionId)) return;
+    this.injectUnsupportedNotified.add(sessionId);
+    process.stderr.write(
+      `[${this.name}] inject: bridge for session ${sanitizeLogText(sessionId, 64)} cannot queue mid-turn messages; buffering as collect (inject requires an ACP-bridge-backed channel)\n`,
+    );
+  }
+
+  private async notifyInjectRefused(
+    envelope: Envelope,
+    text: string,
+  ): Promise<void> {
+    try {
+      await this.sendThreadMessage(envelope.chatId, envelope.threadId, text);
+    } catch (err) {
+      process.stderr.write(
+        `[${this.name}] inject: failed to tell ${envelope.senderId} their message was refused: ${err instanceof Error ? err.message : err}\n`,
+      );
+    }
+  }
+
   private logCancelSessionFailure(sessionId: string, err: unknown): void {
     process.stderr.write(
       `[${sanitizeLogText(this.name, 64)}] cancelSession failed for session=${sanitizeLogText(sessionId, 64)}: ${this.lifecycleError(err)}\n`,
@@ -2998,6 +3148,9 @@ export abstract class ChannelBase {
     this.router.handleSessionDied(sessionId);
     this.instructedSessions.delete(sessionId);
     this.unattendedMemorySessions.delete(sessionId);
+    this.midTurnInjections.delete(sessionId);
+    this.injectDegradedSessions.delete(sessionId);
+    this.injectUnsupportedNotified.delete(sessionId);
     this.removePendingPermissionsForSession(sessionId);
   }
 
@@ -3046,6 +3199,19 @@ export abstract class ChannelBase {
   }
 
   protected onPromptBuffered(
+    _chatId: string,
+    _sessionId: string,
+    _messageId?: string,
+  ): void {}
+
+  /**
+   * Called when the running turn ACCEPTED this message into its mid-turn queue.
+   * Unlike `onPromptBuffered` the message starts no turn of its own, so an
+   * adapter must keep any resources the message still references (e.g. a
+   * downloaded attachment directory) until the running turn's `onPromptEnd`
+   * fires — that is the turn which reads the injected text.
+   */
+  protected onPromptInjected(
     _chatId: string,
     _sessionId: string,
     _messageId?: string,
@@ -4261,6 +4427,7 @@ export abstract class ChannelBase {
           // or resurrect via collect-drain — the just-cleared session.
           const active = this.activePrompts.get(id);
           this.dropCollectBuffer(id);
+          this.dropMidTurnInjections(id);
           if (active) {
             // Bounded cancel + wind-down wait; purge regardless of the result.
             const settled = await this.cancelAndAwaitActive(active, id);
@@ -7103,23 +7270,99 @@ export abstract class ChannelBase {
           case 'inject': {
             // `inject` hands the text to the bridge's mid-turn queue so the
             // agent reads it inside the RUNNING turn, at its next drain
-            // boundary. A bridge without that capability falls through to the
-            // collect buffering below (drained as a new turn once this one
-            // ends), so the message is never lost. The same fallback keeps a
-            // REJECTED injection from being reported as delivered; it is
-            // bounded so it cannot pin unbounded text in memory.
+            // boundary. The queue carries plain text only and the RUNNING
+            // turn's route decides where the answer goes, so a message that
+            // cannot be represented that way (media, a recognized slash
+            // command, a chat/thread its turn does not own, an unauthorized
+            // member's text, a collect replay) is NOT injected. A bridge
+            // without the capability, or one rejecting injections, also falls
+            // back. Every fallback below lands in `collectBuffers` and is
+            // replayed as its own turn once this one ends, so nothing parked
+            // here is reported as delivered.
             let injectFallback = false;
-            if (mode === 'inject' && this.bridge.queueMidTurnMessage) {
-              const receipt = this.bridge.queueMidTurnMessage(
-                sessionId,
-                promptText,
-              );
-              if (receipt.accepted) {
+            let injectRejectReason: string | undefined;
+            if (mode === 'inject' && !envelope.collectReplay) {
+              if (!this.bridge.queueMidTurnMessage) {
+                // Daemon-managed bridges have no mid-turn surface. Say so once
+                // per session so a configured `inject` is not silently `collect`
+                // with no operator-visible reason.
+                this.logInjectUnsupported(sessionId);
+              } else if (images.length > 0) {
+                // A dropped image would make the injected text contentless
+                // (or advertise a picture the model cannot see). The house
+                // convention for a text-only mid-turn path is a visible
+                // refusal, as /btw does.
                 process.stderr.write(
-                  `[${this.name}] inject: delivered mid-turn message from ${envelope.senderId} into session ${sessionId}\n`,
+                  `[${this.name}] inject: refusing message with image(s) from ${envelope.senderId} for session ${sessionId} (mid-turn injection is text-only)\n`,
+                );
+                await this.notifyInjectRefused(
+                  envelope,
+                  'Mid-turn injection supports text-only messages. Send this again after the current task finishes, or use a different dispatch mode.',
                 );
                 return;
+              } else if (envelope.attachments?.length) {
+                // The attachment lines (a `saved to:` path) are plain text, so
+                // buffer the message: the adapter keeps the file for the
+                // buffered message and the replay turn reads it from the path.
+              } else if (recognizedSlashCommand) {
+                // A command only executes on the prompt path; injected it
+                // reaches the model as prose with a prefix that defeats slash
+                // parsing. Let it become its own turn.
+              } else if (!this.isAuthorizedForSharedSession(envelope)) {
+                process.stderr.write(
+                  `[${this.name}] inject denied for ${envelope.senderId} in shared session (chat=${sanitizeLogText(envelope.chatId, 64)}); buffering instead\n`,
+                );
+              } else if (!this.runningTurnOwnsEnvelope(active, envelope)) {
+                // The running turn's output route is bound to its originating
+                // chat; injecting another chat's (session-scope-collapsed)
+                // message would answer it in the wrong chat.
+                process.stderr.write(
+                  `[${this.name}] inject skipped for ${envelope.senderId}: chat ${sanitizeLogText(envelope.chatId, 64)}/thread ${sanitizeLogText(envelope.threadId ?? '', 64)} is not the running turn's target; buffering instead\n`,
+                );
+              } else if (this.injectDegradedSessions.has(sessionId)) {
+                // An earlier message of this turn is already parked in the
+                // bounded fallback; keep arrival order instead of letting this
+                // one overtake it into the running turn.
+                injectFallback = true;
+                injectRejectReason = 'ordered after a parked message';
+              } else {
+                // The injected text must carry the same group-history backfill
+                // a queued turn would get, or the agent answers a reference
+                // ("the third one") it cannot resolve. Drained only once the
+                // inject path is actually taken; a rejected injection keeps the
+                // composed text so the backfill is not lost.
+                const injectText = this.prependGroupHistoryContext(
+                  envelope,
+                  promptText,
+                  this.drainPendingGroupHistory(envelope),
+                );
+                const receipt = this.bridge.queueMidTurnMessage(
+                  sessionId,
+                  injectText,
+                );
+                if (receipt.accepted) {
+                  this.recordInjectedMessage(sessionId, injectText, envelope);
+                  process.stderr.write(
+                    `[${this.name}] inject: delivered mid-turn message from ${envelope.senderId} into session ${sessionId}\n`,
+                  );
+                  this.notifyPromptInjected(
+                    envelope.chatId,
+                    sessionId,
+                    envelope.messageId,
+                  );
+                  return;
+                }
+                // A rejected injection opens the fallback for the rest of this
+                // turn: messages must stay in arrival order.
+                this.injectDegradedSessions.add(sessionId);
+                promptText = injectText;
+                injectFallback = true;
+                injectRejectReason = receipt.reason;
               }
+            }
+            if (injectFallback) {
+              // Bounded fallback: retained only until this turn ends, then
+              // replayed in arrival order. The bounds mirror the bridge's.
               const fallbackEntries = (
                 this.collectBuffers.get(sessionId) ?? []
               ).filter((entry) => entry.injectFallback);
@@ -7127,19 +7370,36 @@ export abstract class ChannelBase {
                 (total, entry) => total + entry.text.length,
                 0,
               );
-              if (
-                fallbackEntries.length >= INJECT_FALLBACK_MAX_MESSAGES ||
-                fallbackChars + promptText.length > INJECT_FALLBACK_MAX_CHARS
-              ) {
+              const overBound =
+                fallbackEntries.length >= MID_TURN_QUEUE_MAX_MESSAGES ||
+                (fallbackEntries.length > 0 &&
+                  fallbackChars + promptText.length > MID_TURN_QUEUE_MAX_CHARS);
+              if (overBound) {
                 process.stderr.write(
-                  `[${this.name}] inject: could not queue mid-turn message (${receipt.reason}) and the fallback buffer is full; refusing message from ${envelope.senderId} for session ${sessionId}\n`,
+                  `[${this.name}] inject: could not queue mid-turn message (capacity) and the fallback buffer is full; refusing message from ${envelope.senderId} for session ${sessionId}: ${sanitizeLogText(promptText, 256)}\n`,
+                );
+                await this.notifyInjectRefused(
+                  envelope,
+                  'This message was not delivered: the current task is still running and too many follow-up messages are already waiting. Please resend it once the current task finishes.',
                 );
                 return;
               }
-              injectFallback = true;
-              process.stderr.write(
-                `[${this.name}] inject: NOT delivered mid-turn (${receipt.reason}); buffered for the next turn from ${envelope.senderId} into session ${sessionId}\n`,
-              );
+              if (
+                fallbackEntries.length === 0 &&
+                promptText.length > MID_TURN_QUEUE_MAX_CHARS
+              ) {
+                // A single message larger than the fallback's whole budget
+                // cannot be held there without defeating the bound's purpose;
+                // plain collect retains it unbounded, like every other mode.
+                process.stderr.write(
+                  `[${this.name}] inject: message from ${envelope.senderId} for session ${sessionId} exceeds the fallback bound; buffering as plain collect\n`,
+                );
+                injectFallback = false;
+              } else {
+                process.stderr.write(
+                  `[${this.name}] inject: NOT delivered mid-turn (${injectRejectReason}); buffered for the next turn from ${envelope.senderId} into session ${sessionId}\n`,
+                );
+              }
             }
             // Buffer the message; it will be coalesced when the active prompt finishes
             let buffer = this.collectBuffers.get(sessionId);

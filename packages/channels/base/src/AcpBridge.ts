@@ -26,6 +26,9 @@ import {
   CHANNEL_TASK_RESULT_PARTIAL_META_KEY,
   CHANNEL_TASK_OUTPUT_META_KEY,
   ChannelPromptCancelledError,
+  MID_TURN_DRAIN_BATCH,
+  MID_TURN_QUEUE_MAX_CHARS,
+  MID_TURN_QUEUE_MAX_MESSAGES,
   parseBackgroundResponseContext,
   resolvePromptImages,
   type AvailableCommand,
@@ -49,11 +52,6 @@ import { sanitizeLogText } from './sanitize.js';
 export type { AvailableCommand, ToolCallEvent } from './ChannelAgentBridge.js';
 
 const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
-// Per-session bounds on undrained mid-turn input: a turn with no drain point
-// (a long tool-free generation) must not let a sender pin unbounded text in
-// memory for the rest of the session.
-const MID_TURN_QUEUE_MAX_MESSAGES = 20;
-const MID_TURN_QUEUE_MAX_CHARS = 20_000;
 const TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD =
   'craft/claimTodoStopGuardContinuation';
 
@@ -113,10 +111,19 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
   /**
    * Text queued by `queueMidTurnMessage` and handed to the ACP child on its
    * next `craft/drainMidTurnQueue`, when the child asks between tool batches.
-   * The drain consumes it; session teardown (discard, process exit, stop)
-   * clears it.
+   * A drain consumes at most `MID_TURN_DRAIN_BATCH` per response; whatever the
+   * owning turn never drained is taken back by the channel at the turn boundary
+   * (`takeUndrainedMidTurnMessages`) and replayed as a new turn. Session
+   * teardown (discard, process exit, stop) clears it.
    */
   private readonly midTurnMessageQueues = new Map<string, string[]>();
+  /**
+   * Messages the owning turn ended without draining. They belong to that turn,
+   * NOT to whatever turn runs next: the channel takes them back at the turn
+   * boundary and replays them as a new turn. Held here so a drain request can
+   * never leak them into the next turn in the window before that happens.
+   */
+  private readonly undrainedMidTurnMessages = new Map<string, string[]>();
   private readonly pendingPermissions = new Map<
     string,
     {
@@ -180,6 +187,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       this.knownSessionIds.clear();
       this.sessionBindingTokens.clear();
       this.midTurnMessageQueues.clear();
+      this.undrainedMidTurnMessages.clear();
       this.toolCallKindsBySession.clear();
       this.connection = null;
       this.child = null;
@@ -318,6 +326,10 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     options?: ChannelAgentBridgePromptOptions,
   ): Promise<string> {
     const conn = this.ensureConnection();
+    // A new turn must never inherit text the previous turn left queued: the
+    // channel takes undrained messages at the turn boundary, so anything still
+    // here was abandoned and is dropped rather than read as this turn's input.
+    this.dropStaleUndrainedMidTurnMessages(sessionId);
 
     const chunks: string[] = [];
     let slashCommandOutput = '';
@@ -385,6 +397,11 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       this.off('textChunk', onChunk);
       this.off('slashCommandOutput', onSlashCommandOutput);
       this.off('responseBoundary', clearChunks);
+      // The turn boundary: anything still queued belongs to THIS turn and must
+      // not be read by the next one. Hand it back through the settled slot so
+      // the channel can replay it as its own turn (the drain response can no
+      // longer return it).
+      this.settleUndrainedMidTurnQueue(sessionId);
     }
   }
 
@@ -440,17 +457,56 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       queue.length >= MID_TURN_QUEUE_MAX_MESSAGES ||
       queuedChars + text.length > MID_TURN_QUEUE_MAX_CHARS
     ) {
-      // Drop rather than truncate: a half instruction can steer the running
-      // turn wrong, while a dropped one is visible to the operator here and to
-      // the caller through the returned receipt.
+      // Reject rather than truncate: a half instruction can steer the running
+      // turn wrong. The bridge does NOT know whether the caller can still
+      // deliver the text (it owns a bounded fallback and may replay it next
+      // turn), so only report the refusal here; the CALLER's log states the
+      // outcome.
       process.stderr.write(
-        `[AcpBridge] Dropped mid-turn message for session ${sanitizeLogText(sessionId, 128)} (reason=capacity, queue=${queue.length}/${MID_TURN_QUEUE_MAX_MESSAGES} messages, ${queuedChars}/${MID_TURN_QUEUE_MAX_CHARS} chars): ${sanitizeLogText(text, 256)}\n`,
+        `[AcpBridge] Mid-turn queue at capacity for session ${sanitizeLogText(sessionId, 128)} (reason=capacity, queue=${queue.length}/${MID_TURN_QUEUE_MAX_MESSAGES} messages, ${queuedChars}/${MID_TURN_QUEUE_MAX_CHARS} chars); caller owns fallback: ${sanitizeLogText(text, 256)}\n`,
       );
       return { accepted: false, reason: 'capacity' };
     }
     queue.push(text);
     this.midTurnMessageQueues.set(sessionId, queue);
     return { accepted: true };
+  }
+
+  takeUndrainedMidTurnMessages(sessionId: string): string[] {
+    const settled = this.undrainedMidTurnMessages.get(sessionId) ?? [];
+    // A message accepted in the window between the turn settling and the
+    // channel taking back ownership still belongs to that turn, so it is
+    // included rather than left for the next drain.
+    const queued = this.midTurnMessageQueues.get(sessionId) ?? [];
+    if (settled.length === 0 && queued.length === 0) return [];
+    this.undrainedMidTurnMessages.delete(sessionId);
+    this.midTurnMessageQueues.delete(sessionId);
+    return [...settled, ...queued];
+  }
+
+  dropMidTurnMessages(sessionId: string): void {
+    this.undrainedMidTurnMessages.delete(sessionId);
+    this.midTurnMessageQueues.delete(sessionId);
+  }
+
+  private settleUndrainedMidTurnQueue(sessionId: string): void {
+    const queued = this.midTurnMessageQueues.get(sessionId);
+    if (!queued || queued.length === 0) return;
+    this.midTurnMessageQueues.delete(sessionId);
+    const settled = this.undrainedMidTurnMessages.get(sessionId);
+    this.undrainedMidTurnMessages.set(
+      sessionId,
+      settled ? [...settled, ...queued] : queued,
+    );
+  }
+
+  private dropStaleUndrainedMidTurnMessages(sessionId: string): void {
+    const settled = this.undrainedMidTurnMessages.get(sessionId);
+    if (!settled || settled.length === 0) return;
+    this.undrainedMidTurnMessages.delete(sessionId);
+    process.stderr.write(
+      `[AcpBridge] Dropped ${settled.length} undrained mid-turn message(s) for session ${sanitizeLogText(sessionId, 128)}: the channel never took them back\n`,
+    );
   }
 
   async discardSession(
@@ -466,6 +522,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     if (!this.knownSessionIds.delete(sessionId)) return;
     this.sessionBindingTokens.delete(sessionId);
     this.midTurnMessageQueues.delete(sessionId);
+    this.undrainedMidTurnMessages.delete(sessionId);
     this.toolCallKindsBySession.delete(sessionId);
     this.resolvePendingPermissions(sessionId);
 
@@ -497,6 +554,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     this.knownSessionIds.clear();
     this.sessionBindingTokens.clear();
     this.midTurnMessageQueues.clear();
+    this.undrainedMidTurnMessages.clear();
     this.toolCallKindsBySession.clear();
     if (this.child) {
       this.child.kill();
@@ -794,10 +852,20 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
         sessionId && this.knownSessionIds.has(sessionId)
           ? this.midTurnMessageQueues.get(sessionId)
           : undefined;
+      // One response may carry at most what the ACP child consumes
+      // (MAX_MID_TURN_DRAIN_ITEMS in the child); it DROPS the overflow rather
+      // than deferring it, so anything past the batch stays queued for the
+      // child's next drain request.
+      const batch = queued?.slice(0, MID_TURN_DRAIN_BATCH) ?? [];
       if (queued) {
-        this.midTurnMessageQueues.delete(sessionId);
+        const rest = queued.slice(MID_TURN_DRAIN_BATCH);
+        if (rest.length > 0) {
+          this.midTurnMessageQueues.set(sessionId, rest);
+        } else {
+          this.midTurnMessageQueues.delete(sessionId);
+        }
       }
-      return { messages: queued ?? [], hasQueuedPrompt: false };
+      return { messages: batch, hasQueuedPrompt: false };
     }
     if (method === TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD) {
       const sessionId =

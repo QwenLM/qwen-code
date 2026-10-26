@@ -175,6 +175,13 @@ export interface Envelope {
    * flag does not bypass sanitization.
    */
   alreadyPrefixed?: true;
+  /**
+   * Marks the synthetic envelope a collect-buffer drain replays. The replay
+   * MUST become its own turn: `inject` must not hand it back to a running turn
+   * (that would fold parked messages into somebody else's turn, or destroy
+   * them if the re-offer is rejected against the now-empty buffer).
+   */
+  collectReplay?: true;
 }
 
 export interface SessionTarget {
