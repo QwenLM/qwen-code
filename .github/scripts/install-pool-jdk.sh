@@ -44,10 +44,24 @@ esac
 url="https://mirrors.tuna.tsinghua.edu.cn/Adoptium/${spec}/jdk/${arch}/linux/${file}"
 tool="${RUNNER_TOOL_CACHE:?}/Java_Temurin-Hotspot_jdk/${dir}/${arch}"
 
+tool_dir="$(dirname -- "${tool}")"
+mkdir -p -- "${tool_dir}" || { echo "::error::cannot create ${tool_dir}"; exit 1; }
+
+# Every runner on the host shares RUNNER_TOOL_CACHE, and the stall this
+# fallback exists for is common-mode: one host's egress fails, so every
+# concurrent job reaches this script at once. Serialise the install and only
+# ever replace an entry that carries no .complete marker — a job that is
+# building with a JDK has already seen that marker, so nothing in use is
+# removed.
+exec 9>"${RUNNER_TOOL_CACHE:?}/.jdk-toolcache.lock"
+if ! flock --wait 900 9; then
+  echo "::error::timed out waiting for the tool-cache lock"
+  exit 1
+fi
 if [[ ! -f "${tool}/.complete" ]]; then
-  work="$(mktemp -d)"
+  work="$(mktemp -d "${tool_dir}/install.XXXXXX")" || { echo "::error::cannot stage the download"; exit 1; }
   echo "downloading Temurin ${spec} (${arch}) from the mirror"
-  if ! curl -fsSL --retry 5 --retry-delay 5 --retry-max-time 300 --max-time 1800 "${url}" -o "${work}/jdk.tgz"; then
+  if ! curl -fsSL --retry 3 --retry-delay 5 --retry-max-time 300 --max-time 600 "${url}" -o "${work}/jdk.tgz"; then
     echo "::error::could not download ${url}"
     rm -rf "${work}"
     exit 1
@@ -57,15 +71,23 @@ if [[ ! -f "${tool}/.complete" ]]; then
     rm -rf "${work}"
     exit 1
   fi
-  tar -xzf "${work}/jdk.tgz" -C "${work}"
+  tar -xzf "${work}/jdk.tgz" -C "${work}" || { echo "::error::cannot unpack ${url}"; rm -rf "${work}"; exit 1; }
   src="$(find "${work}" -maxdepth 1 -mindepth 1 -type d -name 'jdk-*' -print -quit)"
   [[ -n "${src}" ]] || { echo "::error::unexpected archive layout"; rm -rf "${work}"; exit 1; }
-  rm -rf "${tool}"
-  mkdir -p "$(dirname "${tool}")"
-  mv -- "${src}" "${tool}"
-  touch "${tool}/.complete"
+  rm -rf -- "${tool}"
+  if ! mv -- "${src}" "${tool}"; then
+    echo "::error::cannot publish ${tool}"
+    rm -rf "${work}"
+    exit 1
+  fi
+  if ! touch "${tool}/.complete"; then
+    echo "::error::cannot mark ${tool} complete"
+    rm -rf "${work}"
+    exit 1
+  fi
   rm -rf "${work}"
 fi
+flock -u 9
 
 # setup-java normally writes these two files; MAVEN_ARGS points Maven at them.
 settings_dir="${RUNNER_TEMP:?}/setup-java-m2"

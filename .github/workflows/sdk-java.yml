@@ -2184,6 +2184,10 @@ jobs:
 
       - name: 'Set up Java (pool fallback)'
         if: "${{ steps.setup_java.outcome != 'success' }}"
+        # Bounded like the attempt it replaces: a host that reaches neither
+        # Adoptium nor the mirror must not hold a runner for the download
+        # budget.
+        timeout-minutes: 10
         env:
           JAVA_SPEC: '11'
         run: 'bash .github/scripts/install-pool-jdk.sh'
