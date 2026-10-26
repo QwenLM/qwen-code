@@ -528,7 +528,8 @@ class SurfaceAdmissionAcceptanceTest {
             }
             case WORKSPACE_FILES -> {
                 expect(entry, null, 401, "actor_required");
-                expect(entry, STRANGER, 404, entry.capabilities().contains(Capability.WORKSPACE_FILES_UPLOAD_QUERY)
+                expect(entry, STRANGER, 404, entry.capabilities().contains(
+                        Capability.WORKSPACE_FILES_UPLOAD_QUERY)
                         ? "workspace_upload_not_found" : "workspace_not_found");
             }
             case WORKSPACE_ALLOCATION -> {
@@ -1539,12 +1540,13 @@ class SurfaceAdmissionAcceptanceTest {
         }
         List<String> query = new ArrayList<>();
         if (entry.capabilities().contains(Capability.WORKSPACE_FILES_UPLOAD)) {
-            query.add("workspaceId=ws");
+            query.add("workspaceId=workspace");
             query.add("cwdRelative=.");
-            query.add("path=probe.txt");
+            query.add("path=file.txt");
             query.add("expectedScopeRevision=" + digest());
             query.add("uploadId=11111111-1111-4111-8111-111111111111");
-        } else if (entry.capabilities().contains(Capability.EXTENSION_PUBLISH)) {
+        }
+        if (entry.capabilities().contains(Capability.EXTENSION_PUBLISH)) {
             String manifest = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
                     ("{\"schemaVersion\":1,\"compilerVersion\":1,\"name\":\"example\",\"version\":\"1\","
                     + "\"target\":{\"platform\":\"linux\",\"arch\":\"any\"},\"components\":[]}")
@@ -1728,10 +1730,9 @@ class SurfaceAdmissionAcceptanceTest {
                     + "\",\"artifactId\":\"" + artifactId + "\"}";
             case ARTIFACT_LIST -> "{\"sessionId\":\"" + session + "\"}";
             case WORKSPACE_CREATE -> "{\"displayName\":\"New workspace\",\"idempotencyKey\":\"create-key\"}";
-            case WORKSPACE_FILES_UPLOAD -> "x";
-            case WORKSPACE_FILES_UPLOAD_QUERY -> "{\"uploadId\":\"11111111-1111-4111-8111-111111111111\"}";
             case WORKSPACE_FILES_QUERY -> "{\"workspaceId\":\"workspace\",\"cwdRelative\":\".\",\"directory\":\".\"}";
             case WORKSPACE_FILES_READ -> "{\"workspaceId\":\"workspace\",\"cwdRelative\":\".\",\"path\":\"file.txt\",\"expectedScopeRevision\":\"revision\"}";
+            case WORKSPACE_FILES_UPLOAD_QUERY -> "{\"uploadId\":\"11111111-1111-4111-8111-111111111111\"}";
             case WORKSPACE_DIRECTORIES -> "{\"workspaceId\":\"workspace\",\"cwdRelative\":\".\"}";
             case SESSION_OPTIONS -> "{\"agentId\":\"qwen-code\"}";
             case SESSION_APPROVAL, SESSION_MODELS, SESSION_SKILLS, SESSION_MCP -> "{\"sessionId\":\"" + session + "\"}";
