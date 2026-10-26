@@ -21,3 +21,5 @@ Managed 对话提供了普通 daemon WebShell 没有的 Change directory 操作�
 ## 范围
 
 不移除 Workspace 本地导入、文件上传、目录浏览、工具级工作目录、daemon 迁移、历史操作记录或恢复。不新增配置、兼容转发层或替代 UI。
+
+后续项：待历史操作清算完毕且其余消费者完成迁移后，再通过单独的契约版本变更移除已废弃、始终为 false 的 `cwdChange` 响应字段。

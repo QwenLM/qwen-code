@@ -42,7 +42,10 @@ import {
   testInternals,
 } from './managed-runtime-ledger.js';
 import { ManagedToolExecutor } from './managed-runtime-tool-executor.js';
-import { MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST } from './managed-extension-profile.js';
+import {
+  MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST,
+  MANAGED_EXTENSION_LINUX_CAPABILITY_DIGEST,
+} from './managed-extension-profile.js';
 import { MANAGED_SHELL_PUBLISHER_ROUTE } from './managed-shell-publisher.js';
 import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 import { MANAGED_TOOL_RESULT_PROTOCOL } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
@@ -488,7 +491,9 @@ describe('Managed Runtime attestation worker', () => {
 
   it.each([
     'workspace',
-    ...(process.platform === 'darwin' ? ['extensions'] : []),
+    ...(process.platform === 'darwin' || process.platform === 'linux'
+      ? ['extensions']
+      : []),
   ])(
     'registers the Shell publisher in the native %s worker and requires an active Session',
     async (profile) => {
@@ -501,14 +506,22 @@ describe('Managed Runtime attestation worker', () => {
         mountRoot: workspace,
         capabilityDigest:
           profile === 'extensions'
-            ? MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST
+            ? process.platform === 'linux'
+              ? MANAGED_EXTENSION_LINUX_CAPABILITY_DIGEST
+              : MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST
             : WORKSPACE_CAPABILITY_DIGEST,
         ...(profile === 'extensions'
           ? {
               managedExtensions: {
                 enabled: true,
-                mode: 'developer-process-group',
+                mode:
+                  process.platform === 'linux'
+                    ? 'linux-cgroup'
+                    : 'developer-process-group',
                 cacheDirectory: path.join(directory, 'private-cache'),
+                ...(process.platform === 'linux'
+                  ? { cgroupRoot: directory }
+                  : {}),
               },
             }
           : {}),

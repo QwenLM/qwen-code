@@ -21,3 +21,5 @@ The focused plan is `.qwen/e2e-tests/remove-managed-directory-change/plan.md`. V
 ## Scope
 
 This change does not remove Workspace-local import, file upload, directory listing, tool-level working directories, daemon relocation, historical operation records or recovery. No new setting, compatibility shim or speculative replacement UI is added.
+
+Follow-up: remove the deprecated, always-false `cwdChange` response field only after historical operations have drained and remaining consumers have migrated, as a separately versioned contract change.
