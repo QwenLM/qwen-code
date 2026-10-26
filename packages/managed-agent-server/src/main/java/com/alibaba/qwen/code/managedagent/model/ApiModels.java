@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.model;
 
+import com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionPackages.Pin;
 import com.fasterxml.jackson.annotation.JsonAnySetter;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
@@ -71,7 +72,12 @@ public final class ApiModels {
             Map<String, Object> metadata,
             Boolean stream,
             JsonNode workspace,
-            @Size(max = 256) List<@NotNull Map<String, Object>> skills) {
+            @Size(max = 256) List<@NotNull Map<String, Object>> skills,
+            @Size(max = 32) List<@NotNull @Valid Pin> extensionPins) {
+        public CreateSessionRequest(String agentId, String agentRevision, List<InputBlock> input,
+                Map<String, Object> metadata, Boolean stream, JsonNode workspace, List<Map<String, Object>> skills) {
+            this(agentId, agentRevision, input, metadata, stream, workspace, skills, null);
+        }
     }
 
     public record SessionEventRequest(@NotBlank String type,
@@ -412,7 +418,13 @@ public final class ApiModels {
             @Size(max = 100) List<@Valid InputBlock> input,
             Map<String, Object> metadata,
             JsonNode workspace, String approvalMode, Boolean planMode, String modelId,
-            @Size(max = 256) List<@NotNull Map<String, Object>> skills) {
+            @Size(max = 256) List<@NotNull Map<String, Object>> skills,
+            @Size(max = 32) List<@NotNull @Valid Pin> extensionPins) {
+        public WebShellCreateRequest(String requestId, String idempotencyKey, String agentId, String title,
+                List<InputBlock> input, Map<String, Object> metadata, JsonNode workspace, String approvalMode,
+                Boolean planMode, String modelId, List<Map<String, Object>> skills) {
+            this(requestId, idempotencyKey, agentId, title, input, metadata, workspace, approvalMode, planMode, modelId, skills, null);
+        }
     }
 
     public record WebShellSessionOptionsRequest(@NotBlank @Size(max = 128) String agentId) {

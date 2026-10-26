@@ -207,6 +207,10 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   cron_delete: 'cron_delete',
   CronDelete: 'cron_delete',
 
+  // /autofix-pr helper tool
+  autofix_pr: 'autofix_pr',
+  AutofixPr: 'autofix_pr',
+
   // Loop wakeup tool
   loop_wakeup: 'loop_wakeup',
   LoopWakeup: 'loop_wakeup',

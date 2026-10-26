@@ -79,13 +79,17 @@ curl --fail http://127.0.0.1:8080/actuator/health
 
 ## 生成凭据
 
-`bin/qwen-managed-agent-bootstrap` 生成共享的 Harness token 与 capability digest、broker token 以及 Runtime 凭据密钥。它写出 `config/harness.env`、`config/server.env` 与 `config/application.yml`，权限为 0600；目标文件已存在时除非传入 `--force` 否则拒绝覆盖；只打印路径，不打印 secret：
+`bin/qwen-managed-agent-bootstrap` 生成共享的 Harness token 与 capability digest、broker token、Runtime 凭据密钥以及数据库密码。它写出 `config/harness.env`、`config/server.env`、`config/application.yml` 与 `config/mysql-setup.sql`，权限为 0600；目标文件已存在时除非传入 `--force` 否则拒绝覆盖；只打印路径，不打印 secret：
 
 ```bash
 bin/qwen-managed-agent-bootstrap
 ```
 
-token 与 digest，以及工具路径所需的 Broker URL 和 token，只写入 `harness.env`：`server.env` 通过 `QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE` 指向该文件，控制面从中读取这些值。若该文件与 `QWEN_MANAGED_AGENT_HARNESS_TOKEN` 或 `QWEN_MANAGED_AGENT_CAPABILITY_DIGEST` 同时设置，或文件中的 Broker token 与 `QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN` 同时设置，控制面拒绝启动，因此轮换时只需修改一个文件。生成的 `harness.env` 与 `server.env` 既可直接被 shell source，也可作为 systemd 的 `EnvironmentFile`。systemd 布局下传入 `--directory /etc/qwen-managed-agent`，随后填写 `SPRING_DATASOURCE_PASSWORD`，并把文件属主调整为服务账号。
+token 与 digest，以及工具路径所需的 Broker URL 和 token，只写入 `harness.env`：`server.env` 通过 `QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE` 指向该文件，控制面从中读取这些值。若该文件与 `QWEN_MANAGED_AGENT_HARNESS_TOKEN` 或 `QWEN_MANAGED_AGENT_CAPABILITY_DIGEST` 同时设置，或文件中的 Broker token 与 `QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN` 同时设置，控制面拒绝启动，因此轮换时只需修改一个文件。生成的 `harness.env` 与 `server.env` 既可直接被 shell source，也可作为 systemd 的 `EnvironmentFile`。
+
+`mysql-setup.sql` 创建 `qwen_managed_agent` 数据库和 `server.env` 中写明的 `qwen` 账号（`localhost` 与 `127.0.0.1` 各一个），并授予 Flyway 需要的 `performance_schema` 权限。以 MySQL 管理员身份运行一次，例如 `mysql -u root < config/mysql-setup.sql`，然后删除它；密码保存在 `server.env` 中。它遇到第一条失败的语句就停止，因此不会改动已有的数据库或账号。容器中的 MySQL 看到的是网关地址而不是 `127.0.0.1`，此时请为那个主机创建账号。
+
+systemd 布局下，以 root 身份运行并传入 `--directory /etc/qwen-managed-agent --service-user qwen-managed-agent`。此时 `harness.env` 与 `application.yml` 归服务账号所有，`server.env` 为 `0640 root:qwen-managed-agent`，新建的目录为 `0750 root:qwen-managed-agent`，`mysql-setup.sql` 仍归 root。账号不存在、或账号无法进入该目录时，bootstrap 拒绝执行。`server.env` 还会记录 `QWEN_MANAGED_AGENT_SERVICE_USER`，因此即使以 root 身份运行预检，它也会按该账号检查文件访问权限。
 
 ## 预检
 
@@ -95,7 +99,7 @@ token 与 digest，以及工具路径所需的 Broker URL 和 token，只写入 
 bin/qwen-managed-agent-server --check
 ```
 
-检查范围包括 JDK、配置文件及其权限、凭据密钥环、启动期属性校验、auth 与绑定组合、Harness 可达性、Workspace files 与 Shell 的交叉配置（含 mount、creation root 或 SSH 节点要求）、Broker 凭据与目录、Workspace `cwd`、端口占用，以及 MySQL 连通性、`performance_schema` 授权和 Flyway 版本与 `manifest.json` 的一致性。`WARN` 与 `SKIP` 不导致失败；任一 `FAIL` 退出码为 1。端口检查会实际绑定配置地址，因此应先停止服务。该命令不校验 Harness capability digest，也不校验原生 Workspace storage 注册。
+检查范围包括 JDK、服务账号、配置文件及其权限、凭据密钥环、启动期属性校验、auth 与绑定组合、Harness 可达性、Workspace files 与 Shell 的交叉配置（含 mount、creation root 或 SSH 节点要求）、Broker 凭据与目录、Workspace `cwd`、端口占用，以及 MySQL 连通性、`performance_schema` 授权和 Flyway 版本与 `manifest.json` 的一致性。`WARN` 与 `SKIP` 不导致失败；任一 `FAIL` 退出码为 1。端口检查会实际绑定配置地址，因此应先停止服务。该命令不校验 Harness capability digest，也不校验原生 Workspace storage 注册。
 
 ## systemd
 

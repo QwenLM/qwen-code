@@ -18,6 +18,11 @@ import { ToolConfirmationOutcome } from '../tools.js';
 import type { ResidentBackgroundAgent } from '../../agents/background-tasks.js';
 import { ToolNames } from '../tool-names.js';
 import {
+  canonicalWorktreePath,
+  grantUnattendedFixes,
+  resetUnattendedFixGrantsForTests,
+} from '../autofix-pr-grants.js';
+import {
   Config,
   ApprovalMode,
   deriveApprovalModeConfig,
@@ -2553,6 +2558,126 @@ describe('AgentTool', () => {
         );
       },
     );
+
+    describe('unattended fixes of an autofix-pr watch', () => {
+      afterEach(() => resetUnattendedFixGrantsForTests());
+      const grant = (wt: string, allowed: boolean) => {
+        const check = vi.fn().mockResolvedValue(allowed);
+        grantUnattendedFixes('test-session-id', {
+          pr: 7,
+          worktree: canonicalWorktreePath(wt),
+          check,
+        });
+        return check;
+      };
+      const fix = (wt: string) =>
+        review(wt, { subagent_type: 'general-purpose' });
+      /** The built-in general-purpose definition, as the registry gives it. */
+      const builtin = (extra: Partial<SubagentConfig> = {}) =>
+        vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue({
+          ...mockSubagents[0],
+          name: 'general-purpose',
+          isBuiltin: true,
+          ...extra,
+        });
+      beforeEach(() => builtin());
+
+      itInRepo(
+        'runs the agent of a granted worktree in YOLO mode once its watch checks out',
+        async (repo) => {
+          const wt = addWorktree(repo);
+          vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+          const check = grant(wt, true);
+          await run(fix(wt));
+          expect(check).toHaveBeenCalledOnce();
+          expect(childConfig().getApprovalMode()).toBe(YOLO);
+        },
+      );
+
+      itInRepo(
+        'ends the grant when the watch no longer allows it, leaving the usual mode',
+        async (repo) => {
+          const wt = addWorktree(repo);
+          vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+          const check = grant(wt, false);
+          await run(fix(wt));
+          expect(childConfig().getApprovalMode()).toBe(AUTO_EDIT);
+          check.mockResolvedValue(true);
+          await run(fix(wt));
+          expect(check).toHaveBeenCalledOnce();
+          expect(childConfig(1).getApprovalMode()).toBe(AUTO_EDIT);
+        },
+      );
+
+      itInRepo(
+        'keeps plan mode, and grants nothing to another worktree',
+        async (repo) => {
+          const wt = addWorktree(repo);
+          const other = addWorktree(
+            repo,
+            path.join(repo, '.qwen', 'tmp', 'review-pr-2'),
+            ['-b', 'review-pr-2'],
+          );
+          vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+          const check = grant(wt, true);
+          await run(fix(other));
+          expect(childConfig().getApprovalMode()).toBe(AUTO_EDIT);
+          Object.assign(config, { getPrePlanMode: () => DEFAULT });
+          vi.mocked(config.getApprovalMode).mockReturnValue(PLAN);
+          await run(fix(wt));
+          expect(childConfig(1).getApprovalMode()).toBe(PLAN);
+          expect(check).not.toHaveBeenCalled();
+        },
+      );
+
+      itInRepo(
+        "gives an agent the granted fix agent starts the session's own mode",
+        async (repo) => {
+          const wt = addWorktree(repo);
+          vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+          grant(wt, true);
+          await run(fix(wt));
+          const granted = childConfig();
+          expect(granted.getApprovalMode()).toBe(YOLO);
+          // Its own agent, of whatever executor: the session's mode, not YOLO.
+          await runWithAgentContext('fix-agent', () =>
+            invoke(fg(), new AgentTool(granted)).execute(
+              new AbortController().signal,
+            ),
+          );
+          expect(childConfig(1).getApprovalMode()).toBe(AUTO_EDIT);
+        },
+      );
+
+      itInRepo(
+        "grants nothing to a project's own general-purpose agent",
+        async (repo) => {
+          const wt = addWorktree(repo);
+          vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+          const check = grant(wt, true);
+          builtin({ isBuiltin: false });
+          await run(fix(wt));
+          expect(childConfig().getApprovalMode()).toBe(AUTO_EDIT);
+          expect(check).not.toHaveBeenCalled();
+        },
+      );
+
+      itInRepo(
+        'grants nothing to another kind of agent, or to one a subagent starts',
+        async (repo) => {
+          const wt = addWorktree(repo);
+          vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+          const check = grant(wt, true);
+          await run(review(wt));
+          expect(childConfig().getApprovalMode()).toBe(AUTO_EDIT);
+          // A background agent asks no one; it must not reach YOLO through
+          // a foreground agent it starts in the worktree.
+          await runIn(fix(wt), 'background-parent');
+          expect(childConfig(1).getApprovalMode()).toBe(AUTO_EDIT);
+          expect(check).not.toHaveBeenCalled();
+        },
+      );
+    });
 
     itInRepo(
       'executes a review agent when strict providers send working_dir and isolation together',
