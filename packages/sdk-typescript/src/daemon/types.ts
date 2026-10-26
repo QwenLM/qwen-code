@@ -4545,6 +4545,8 @@ export interface DaemonMidTurnMessagesResult {
  * the full payload (text + images) instead of just the text.
  */
 export interface DaemonPendingPromptSummary {
+  queueDraft?: { prompt: PromptContentBlock[]; _meta?: { context?: unknown } };
+  restoreComplete?: boolean;
   promptId: string;
   text: string;
   content?: PromptContentBlock[];
@@ -5294,6 +5296,7 @@ export interface PermissionResponse {
 }
 
 export interface DaemonRewindSnapshotInfo {
+  sourceRecordId?: string;
   promptId: string;
   turnIndex: number;
   timestamp: string;

@@ -10102,6 +10102,7 @@ export function registerSessionRoutes(
         const pendingPrompts = runtime.bridge.getPendingPrompts(
           sessionId,
           clientId !== undefined ? { clientId } : undefined,
+          req.query['includeDraft'] === 'true',
         );
         res.status(200).json({ pendingPrompts });
       },
@@ -10291,6 +10292,17 @@ export function registerSessionRoutes(
           });
           return;
         }
+        const expectedRecordId = body['expectedRecordId'];
+        if (
+          expectedRecordId !== undefined &&
+          (typeof expectedRecordId !== 'string' || expectedRecordId.length === 0)
+        ) {
+          res.status(400).json({
+            error: '`expectedRecordId` must be a non-empty string',
+            code: 'invalid_expected_record_id',
+          });
+          return;
+        }
         const rewindFiles = body['rewindFiles'];
         if (rewindFiles !== undefined && typeof rewindFiles !== 'boolean') {
           res.status(400).json({
@@ -10303,7 +10315,11 @@ export function registerSessionRoutes(
         if (clientId === null) return;
         const response = await runtime.bridge.rewindSession(
           sessionId,
-          { promptId, rewindFiles: rewindFiles !== false },
+          {
+            promptId,
+            rewindFiles: rewindFiles !== false,
+            ...(typeof expectedRecordId === 'string' ? { expectedRecordId } : {}),
+          },
           clientId !== undefined ? { clientId } : undefined,
         );
         if (daemonLog) {
