@@ -5,7 +5,7 @@
  */
 
 import path from 'node:path';
-import { promises as fs, unlinkSync } from 'node:fs';
+import { promises as fs, readFileSync, unlinkSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 
 import type { IQwenOAuth2Client } from './qwenOAuth2.js';
@@ -150,6 +150,12 @@ export class SharedTokenManager {
   private cleanupFunction: (() => void) | null = null;
 
   /**
+   * Ownership token of the lock file this instance currently holds, or null
+   * when it holds no lock. Used to avoid deleting another process's lock.
+   */
+  private lockOwnerId: string | null = null;
+
+  /**
    * Lock configuration for testing purposes
    */
   private lockConfig: LockConfig = DEFAULT_LOCK_CONFIG;
@@ -181,13 +187,23 @@ export class SharedTokenManager {
     }
 
     this.cleanupFunction = () => {
+      if (this.lockOwnerId === null) {
+        return;
+      }
+
       try {
         const lockPath = this.getLockFilePath();
-        // Use synchronous unlink for process exit handlers
-        unlinkSync(lockPath);
+        // Only remove the lock while this process still owns it. Our lock may
+        // have been evicted as stale and replaced by another process's lock.
+        if (readFileSync(lockPath, 'utf8') === this.lockOwnerId) {
+          // Use synchronous unlink for process exit handlers
+          unlinkSync(lockPath);
+        }
       } catch (_error) {
         // Ignore cleanup errors - lock file might not exist or already be cleaned up
       }
+
+      this.lockOwnerId = null;
     };
 
     process.on('exit', this.cleanupFunction);
@@ -708,6 +724,7 @@ export class SharedTokenManager {
       try {
         // Attempt to create lock file atomically (exclusive mode)
         await fs.writeFile(lockPath, lockId, { flag: 'wx' });
+        this.lockOwnerId = lockId;
         return; // Successfully acquired lock
       } catch (error: unknown) {
         if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
@@ -780,6 +797,8 @@ export class SharedTokenManager {
           `Failed to release lock file ${lockPath}: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
+    } finally {
+      this.lockOwnerId = null;
     }
   }
 
