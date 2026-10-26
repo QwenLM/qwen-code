@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ChannelLoopStore, SessionRouter } from '@qwen-code/channel-base';
@@ -8,6 +8,7 @@ import type {
   ChannelLoopController,
   ChannelLoopToolHandler,
 } from '@qwen-code/channel-base';
+import { nextFireTime } from '@qwen-code/qwen-code-core/utils/cronParser.js';
 
 const { mockNewSession, mockPrompt } = vi.hoisted(() => ({
   mockNewSession: vi.fn(),
@@ -33,6 +34,8 @@ function makeController(store: ChannelLoopStore): ChannelLoopController {
         throw new Error('expected a five-field cron expression');
       }
     },
+    nextFireTime: (job) =>
+      nextFireTime(job.cron, new Date(job.lastFiredAt ?? job.createdAt)),
   };
 }
 
@@ -41,6 +44,7 @@ function makeChannel(
   persistPath: string,
 ): {
   ch: InstanceType<typeof QQChannel>;
+  router: SessionRouter;
   getLoopHandler: () => ChannelLoopToolHandler | undefined;
 } {
   let loopHandler: ChannelLoopToolHandler | undefined;
@@ -77,7 +81,7 @@ function makeChannel(
     bridge as unknown as ChannelAgentBridge,
     { loopController: controller, registerBridgeEvents: false, router },
   );
-  return { ch, getLoopHandler: () => loopHandler };
+  return { ch, router, getLoopHandler: () => loopHandler };
 }
 
 beforeEach(() => {
@@ -89,16 +93,20 @@ describe('QQ channel loop store integration', () => {
   it('persists create, list, and cancel through a real ChannelLoopStore', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'qq-loop-store-'));
     const storePath = join(dir, 'loops.json');
+    const previousQwenHome = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = dir;
     try {
       const store = new ChannelLoopStore({
         filePath: storePath,
         idFactory: () => 'store-job-1',
+        now: () => new Date('2026-01-01T00:02:30.000Z'),
       });
-      const { ch, getLoopHandler } = makeChannel(
+      const { router, getLoopHandler } = makeChannel(
         makeController(store),
         join(dir, 'sessions.json'),
       );
-      const sessionId = await ch.router.resolve(
+      expect(existsSync(join(dir, 'channels'))).toBe(true);
+      const sessionId = await router.resolve(
         'store-bot',
         SENDER_ID,
         CHAT_ID,
@@ -124,6 +132,7 @@ describe('QQ channel loop store integration', () => {
       const listed = await handler!.list(sessionId);
       expect(listed).toContain('store-job-1');
       expect(listed).toContain('enabled');
+      expect(listed).toContain('next=2026-01-01T00:05:00.000Z');
 
       await expect(handler!.cancel(sessionId, 'store-job-1')).resolves.toBe(
         'Cancelled loop store-job-1.',
@@ -135,6 +144,8 @@ describe('QQ channel loop store integration', () => {
         enabled: false,
       });
     } finally {
+      if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = previousQwenHome;
       rmSync(dir, { recursive: true, force: true });
     }
   });
