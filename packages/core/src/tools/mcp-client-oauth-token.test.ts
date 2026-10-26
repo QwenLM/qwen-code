@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2025 Qwen Team
+ * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -17,21 +17,19 @@ const storage = vi.hoisted(() => ({
   deleteCredentials: vi.fn(),
 }));
 
-// A real MCPOAuthProvider runs against this in-memory storage; only the
-// storage backend (file / keychain) is replaced.
-vi.mock('../mcp/oauth-token-storage.js', () => ({
-  MCPOAuthTokenStorage: class {
-    getCredentials = storage.getCredentials;
-    saveToken = storage.saveToken;
-    deleteCredentials = storage.deleteCredentials;
-    isTokenExpired(token: { expiresAt?: number }) {
-      return (
-        token.expiresAt !== undefined &&
-        Date.now() + 5 * 60 * 1000 >= token.expiresAt
-      );
-    }
-  },
-}));
+// A real MCPOAuthProvider runs against the real storage class (including its
+// expiry rule); only the backend (file / keychain) is replaced.
+vi.mock('../mcp/oauth-token-storage.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../mcp/oauth-token-storage.js')>();
+  return {
+    MCPOAuthTokenStorage: class extends actual.MCPOAuthTokenStorage {
+      override getCredentials = storage.getCredentials;
+      override saveToken = storage.saveToken;
+      override deleteCredentials = storage.deleteCredentials;
+    },
+  };
+});
 
 const SERVER = 'oauth-refresh-server';
 const TOKEN_URL = 'https://auth.example/token';
@@ -46,7 +44,7 @@ type TransportInternals = Transport & {
  * Authorization server that rotates refresh tokens: each refresh token works
  * once, and replaying a consumed one is an invalid_grant, like the real thing.
  */
-function stubAuthorizationServer() {
+function stubAuthorizationServer(expiresIn = 3600) {
   let generation = 0;
   let validRefreshToken = 'refresh-0';
   const refreshBodies: URLSearchParams[] = [];
@@ -69,7 +67,7 @@ function stubAuthorizationServer() {
       JSON.stringify({
         access_token: `access-${generation}`,
         token_type: 'Bearer',
-        expires_in: 3600,
+        expires_in: expiresIn,
         refresh_token: validRefreshToken,
       }),
       { status: 200, headers: { 'content-type': 'application/json' } },
@@ -91,14 +89,14 @@ function stubMcpNetwork() {
   return sent;
 }
 
-function seedCredentials(clientId = 'client-id') {
+function seedCredentials(clientId = 'client-id', lifetimeMs = HOUR_MS) {
   storage.creds = {
     serverName: SERVER,
     token: {
       accessToken: 'access-0',
       tokenType: 'Bearer',
       refreshToken: 'refresh-0',
-      expiresAt: Date.now() + HOUR_MS,
+      expiresAt: Date.now() + lifetimeMs,
     },
     clientId,
     tokenUrl: TOKEN_URL,
@@ -167,12 +165,13 @@ describe('createTransport OAuth bearer token per request', () => {
       httpUrl: 'https://mcp.example/mcp',
     });
 
+    // The connect-time token seeds the cache: no storage read for request 1.
+    const readsBefore = storage.getCredentials.mock.calls.length;
     await send(transport);
     expect(sent.at(-1)?.authorization).toBe('Bearer access-0');
 
     // Still outside the 5 minute buffer: no refresh, no storage read.
     vi.setSystemTime(Date.now() + 30 * 60 * 1000);
-    const readsBefore = storage.getCredentials.mock.calls.length;
     await send(transport);
     await send(transport);
     expect(sent.at(-1)?.authorization).toBe('Bearer access-0');
@@ -306,5 +305,113 @@ describe('createTransport OAuth bearer token per request', () => {
       'Bearer access-1',
     ]);
     expect(storage.deleteCredentials).not.toHaveBeenCalled();
+  });
+  it('does not refresh on every request when the token lives under the buffer', async () => {
+    const { handler } = stubAuthorizationServer(300);
+    const sent = stubMcpNetwork();
+    seedCredentials('client-id', 300 * 1000);
+    // Connecting refreshes once: a 300s token is inside the 5 minute buffer.
+    const transport = await transportFor({
+      httpUrl: 'https://mcp.example/mcp',
+    });
+    expect(handler).toHaveBeenCalledOnce();
+
+    for (let i = 0; i < 5; i++) {
+      await send(transport);
+    }
+    vi.setSystemTime(Date.now() + 100 * 1000);
+    await send(transport);
+    expect(handler).toHaveBeenCalledOnce();
+    expect(sent.at(-1)?.authorization).toBe('Bearer access-1');
+
+    // Past half of the lifetime the next request refreshes, once.
+    vi.setSystemTime(Date.now() + 60 * 1000);
+    await Promise.all([send(transport), send(transport)]);
+    expect(handler).toHaveBeenCalledTimes(2);
+    expect(sent.at(-1)?.authorization).toBe('Bearer access-2');
+    expect(storage.deleteCredentials).not.toHaveBeenCalled();
+  });
+
+  it('refreshes a dynamically registered client that has no clientId in config', async () => {
+    const { refreshBodies } = stubAuthorizationServer();
+    const sent = stubMcpNetwork();
+    seedCredentials('registered-id');
+    const transport = await transportFor({
+      httpUrl: 'https://mcp.example/mcp',
+      oauth: { enabled: true },
+    });
+
+    vi.setSystemTime(Date.now() + 56 * 60 * 1000);
+    await send(transport);
+
+    expect(refreshBodies[0].get('client_id')).toBe('registered-id');
+    expect(sent.at(-1)?.authorization).toBe('Bearer access-1');
+    expect(storage.deleteCredentials).not.toHaveBeenCalled();
+  });
+
+  it('refreshes stored credentials with the configured client secret', async () => {
+    const { handler, refreshBodies } = stubAuthorizationServer();
+    const sent = stubMcpNetwork();
+    const config = {
+      httpUrl: 'https://mcp.example/mcp',
+      oauth: { enabled: false, clientSecret: 'secret', scopes: ['read'] },
+    };
+    const first = await transportFor(config);
+    const second = await transportFor(config);
+
+    vi.setSystemTime(Date.now() + 56 * 60 * 1000);
+    await Promise.all([send(first), send(second)]);
+
+    // Whichever caller starts the shared refresh presents the full config.
+    expect(handler).toHaveBeenCalledOnce();
+    expect(refreshBodies[0].get('client_id')).toBe('client-id');
+    expect(refreshBodies[0].get('client_secret')).toBe('secret');
+    expect(refreshBodies[0].get('scope')).toBe('read');
+    expect(sent.map((r) => r.authorization)).toEqual(
+      Array(2).fill('Bearer access-1'),
+    );
+  });
+
+  it('keeps the cached token while a due refresh fails to read storage', async () => {
+    stubAuthorizationServer();
+    const transport = await transportFor({ url: 'https://mcp.example/sse' });
+    const sent: Array<string | null> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        sent.push(new Headers(init?.headers).get('authorization'));
+        return new Response(null, { status: 202 });
+      }),
+    );
+    storage.getCredentials.mockRejectedValue(new Error('keychain locked'));
+
+    // Due (inside the buffer) but not yet expired: the cached token is fine.
+    vi.setSystemTime(Date.now() + 56 * 60 * 1000);
+    await sendRaw(transport);
+    // Expired: nothing usable is left, so the request goes out unchanged.
+    vi.setSystemTime(Date.now() + 10 * 60 * 1000);
+    await sendRaw(transport);
+
+    expect(sent).toEqual(['Bearer access-0', null]);
+  });
+
+  it('keeps the headers of a Request passed as the fetch input', async () => {
+    stubAuthorizationServer();
+    const transport = await transportFor({ url: 'https://mcp.example/sse' });
+    const seen: Headers[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_input: unknown, init?: RequestInit) => {
+        seen.push(new Headers(init?.headers));
+        return new Response(null, { status: 202 });
+      }),
+    );
+
+    await transport._fetch(
+      new Request('https://mcp.example/sse', { headers: { 'X-Req': '1' } }),
+    );
+
+    expect(seen[0].get('x-req')).toBe('1');
+    expect(seen[0].get('authorization')).toBe('Bearer access-0');
   });
 });
