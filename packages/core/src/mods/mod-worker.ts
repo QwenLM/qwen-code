@@ -399,12 +399,14 @@ async function bounded(
 
 // The engine names the plugin behind an ask it made or reworded; an answer
 // passed up as heard keeps the owner it had, and a hook cannot write one.
+// `setting` names a host option's own check, which Qwen Code does not report,
+// so a hook's is dropped too.
 async function ownCheck(
   value: ModToolCheckResult,
   below: Promise<unknown> | undefined,
   plugin: string,
 ): Promise<ModToolCheckResult> {
-  const { plugin: _written, ...answer } = value;
+  const { plugin: _written, setting: _setting, ...answer } = value;
   if (answer.decision !== 'ask') return answer;
   const heard = (await below?.catch(() => undefined)) as
     | ModToolCheckResult

@@ -100,6 +100,7 @@ import { formatAgentMessageModelText } from '../agents/session-agents/envelope.j
 import { SessionStartSource } from '../hooks/types.js';
 import {
   createUserPromptSubmitContextPart,
+  hasUserPromptSubmitContext,
   wrapUserPromptSubmitContext,
 } from '../hooks/user-prompt-submit-context.js';
 import * as sideQueryModule from '../utils/sideQuery.js';
@@ -4040,6 +4041,11 @@ describe('LlmChat', async () => {
           (part) => part.text === wrapUserPromptSubmitContext('CTX'),
         ),
       ).toHaveLength(1);
+      expect(
+        chat.findLastHistoryEntry((entry) =>
+          hasUserPromptSubmitContext(entry, 'CTX'),
+        ),
+      ).toBeDefined();
     });
 
     it('yields a COMPRESSED stream event as the first event after auto-compression succeeds', async () => {
