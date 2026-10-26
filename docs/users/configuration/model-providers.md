@@ -776,9 +776,10 @@ Until you do, a value containing a placeholder is **dropped** rather than sent,
 and Qwen Code prints a warning at startup naming the header and this setting.
 The header is never sent with a literal `${session_id}` in it.
 
-**One header is reserved.** On the 千问AI平台 / QwenCloud MaaS endpoints Qwen
-Code owns `X-DashScope-Source-Config` and writes the first-party attribution
-value into it. An entry under that name — any casing — is removed before the
+**One header is reserved.** On the QwenCloud MaaS endpoints — the `/auth`
+entries `China — 千问AI平台` and `International — QwenCloud` — Qwen Code owns
+`X-DashScope-Source-Config` and writes the first-party attribution value into
+it. An entry under that name — any casing — is removed before the
 request is built, so a `${session_id}` placeholder in it never survives and
 `allowDynamicHeaderValues` does not change that. The header itself is still
 sent; only your value is replaced. See
