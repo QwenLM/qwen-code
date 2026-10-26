@@ -4,7 +4,7 @@
 
 ## Problem and current state
 
-Issue [#13184](https://github.com/QwenLM/qwen-code/issues/13184) needs a native restore boundary before journal deletion or authority eviction is safe. The Java public message snapshot cannot restore a Harness. The native journal currently exposes a head and transaction pages starting at revision zero. Its `compacted_through_revision` remains zero for live Sessions.
+Issue [#13184](https://github.com/QwenLM/qwen-code/issues/13184) needs a native restore boundary before journal deletion or authority eviction is safe. The Java public message snapshot cannot restore a Harness. Before the protocol and HTTP recovery increments, the native journal exposed a head and transaction pages starting at revision zero. Its `compacted_through_revision` remains zero for live Sessions.
 
 The authority reconstructs command replay, event identities, receipts, checkpoints, Actions, domain revisions, extension uniqueness, Hook once keys and occurrences, and child continuations from the native committed prefix. Neither a Harness checkpoint nor Java's latest-record projections contain all these facts.
 
@@ -12,7 +12,9 @@ The authority reconstructs command replay, event identities, receipts, checkpoin
 
 PR1 (activation/inbox identity lookup) and this PR2 can be developed independently. PR3 (Hosted HTTP recovery) and PR4 (local lease-aware replacement) depend on the snapshot contract; PR5 enables resident windows only after durable identity lookup and both restore paths are verified. This updates the earlier serial development recommendation in the [bounded-retention design](2026-10-19-managed-session-bounded-retention.md).
 
-This increment provides publishing, immutable storage, integrity checks, resource ownership, and bounded page reads. It does not enable automatic publishing, switch existing restore readers, delete native transactions, change public event snapshots, or evict authority state. The first payload format is explicitly `committed-prefix-v1`: a lossless replay image, rather than a claim of compact authority state. Its size and replay work remain proportional to history. A future compact format must explicitly preserve every authority index and historical query contract; it cannot reinterpret this version.
+PR3 [#15599](https://github.com/QwenLM/qwen-code/pull/15599) is merged into the PR2 branch. [#15569](https://github.com/QwenLM/qwen-code/pull/15569) delivers both increments together to main. This document describes the protocol/storage slice; the linked [HTTP recovery design](2026-10-26-managed-http-snapshot-recovery.md) describes its production consumer. Acceptance of the combined PR requires both slices.
+
+The storage slice provides publishing, immutable storage, integrity checks, resource ownership, and bounded page reads. The HTTP slice connects Core journal restoration to an already-published snapshot and its continuous tail, while preserving head-only settlement and legacy restoration when no eligible snapshot is advertised. Automatic publishing, native transaction deletion, public event snapshot changes, local journal replacement, and authority eviction remain out of scope. The first payload format is explicitly `committed-prefix-v1`: a lossless replay image, rather than a claim of compact authority state. Its size and replay work remain proportional to history. A future compact format must explicitly preserve every authority index and historical query contract; it cannot reinterpret this version.
 
 ## Protocol
 
@@ -42,7 +44,7 @@ The manifest claim validates an existing row's scope, kind, schema, storage, and
 
 Each page and each page response is capped at 16 MiB of decoded page bytes, with at most 100 pages per response. Base64 increases the wire size. The first format still duplicates native record storage; metadata pinning and large-history runtime need CI and deployment qualification before any automatic publisher is enabled.
 
-The initial publisher uses the existing publication lane, which refuses private original-CSI mutation. CSI qualification and recovery are therefore pending the dedicated native consumer work; no legacy fallback is introduced. Snapshot resources cannot be submitted through ordinary commit resource publication.
+The initial publisher uses the existing publication lane, which refuses private original-CSI mutation. The HTTP consumer does not broaden that admission; production CSI recovery and qualification remain separate acceptance work. Snapshot resources cannot be submitted through ordinary commit resource publication.
 
 Until the first formal Managed Agent release, the shared V1 baseline is edited in place to add the owner kind; the schema version is unchanged. Development catalogs must be recreated. Server and Broker use the same baseline and closed owner-kind contract.
 
@@ -54,9 +56,9 @@ Snapshot ownership persists across writer takeover; the new writer can read an e
 
 ## Affected components and consumers
 
-Implementation is confined to the Java Session store API/persistence, resource-owner baseline/contract, retirement, and focused tests. The public OpenAPI and WebShell types do not change; the internal surface registry gains the three routes.
+The storage slice changes the Java Session store API/persistence, resource-owner baseline/contract, retirement, and focused tests. The combined PR also adds selection on the existing restore route and snapshot reconstruction in the Core HTTP journal adapter. The public OpenAPI and WebShell types do not change; the internal surface registry gains the three snapshot routes.
 
-Before any future journal deletion, migrate `WakeRecoveryStore`, cancel evidence, lifecycle cleanup, command/model/history reads, tool details/results, publication admission/proofs, child relays, original-CSI admission/qualification, CSI inventory/history/images, CSI snapshot/recovery exports, the Core HTTP journal adapter, and the CLI recovery worker. Local replacement additionally requires `SessionWriterLease` inode/hash/seal proof support. This PR leaves those readers on their complete original journal.
+HTTP snapshot reconstruction does not authorize journal deletion. Before any future deletion, migrate or qualify every remaining original-history path: `WakeRecoveryStore`, cancel evidence, lifecycle cleanup, command/model/history reads, tool details/results, publication admission/proofs, child relays, original-CSI admission/qualification, CSI inventory/history/images, CSI snapshot/recovery exports, the remaining Core HTTP query paths, and the CLI recovery worker. Local replacement additionally requires `SessionWriterLease` inode/hash/seal proof support. These remaining readers retain their complete original journal.
 
 ## Validation and acceptance
 
@@ -65,8 +67,9 @@ Before any future journal deletion, migrate `WakeRecoveryStore`, cancel evidence
 - Reject stale writer/generation, wrong scope/token, wrong revision/sequence/digest, blocked or retired Sessions, missing/corrupt transactions/pages/resources, and ID conflicts.
 - Inject failures during resource and ownership insertion; reopening must see either the original state or the entire snapshot, with no partial pins.
 - Verify page count/byte limits and cursor continuity, resource closure, and bounded permanent-retirement cleanup.
+- Restore a published prefix plus a newer tail through Core HTTP, preserving command replay and rejecting conflicting reuse. An exact-head snapshot must avoid prefix transaction reads; selected corruption must fail without fallback, and head-only settlement must not consult snapshot selection.
 - Run focused H2 and real MySQL 8.4 cases plus style, shared schema and API surface checks within the module's shared ten-minute local budget. Complete profiles remain CI gates; H2 does not prove MySQL concurrency or physical process recovery.
 
-Acceptance of PR2 means the native protocol/storage increment passes its required gates. It does not close #13184 or establish HTTP/local snapshot recovery, compact payloads, bounded authority memory, or production acceptance. No open behavior decisions remain for this increment.
+Storage acceptance means the native protocol/storage slice passes its required gates. Acceptance of combined #15569 additionally requires the HTTP prefix-plus-tail, legacy compatibility, corruption refusal, and writer-fence checks defined in the HTTP recovery design. It does not close #13184 or establish local snapshot recovery, compact payloads, bounded authority memory, or production Hosted/CSI acceptance. No open behavior decisions remain for these two slices.
 
-Local evidence on macOS includes the pre-review H2/MySQL 8.4 increment (24 focused cases), API/schema/surface checks, 202 CLI parity cases, build, typecheck, bundle, ESLint, and Checkstyle. Review then corrected dependency enumeration, lock ordering, and the reserved resource namespace, and added regression cases. The final Java revision has not been rerun locally: the shared ten-minute verification budget was conservatively closed at 574 seconds and its disposable MySQL was stopped. Final Java compilation, H2/MySQL cases, concurrency/fault profiles, large-history behavior, and Linux/Windows qualification remain CI/release gates; earlier Java passes are not acceptance evidence for those subsequent fixes.
+Local storage evidence on macOS includes the pre-review H2/MySQL 8.4 increment (24 focused cases), API/schema/surface checks, 202 CLI parity cases, build, typecheck, bundle, ESLint, and Checkstyle. Review then corrected dependency enumeration, lock ordering, and the reserved resource namespace, and added regression cases. The storage task's shared ten-minute verification budget was conservatively closed at 574 seconds and its disposable MySQL was stopped; combining the increments does not reset it. The separate PR3 report records its own earlier local evidence and final real-process gap. Compilation, H2 and style results must be tied to exact-revision CI; full MySQL/concurrency/fault profiles, final integrated recovery, large-history behavior, and platform qualification remain separate gates. Earlier selected passes do not establish combined acceptance.

@@ -133,6 +133,8 @@ authority window depends on identity storage and both verified replay paths.
 See the [PR2 protocol design](2026-10-26-managed-native-journal-snapshots.md)
 for its implementation boundary and the lossless first payload format.
 
+PR3 [#15599](https://github.com/QwenLM/qwen-code/pull/15599) is merged into the PR2 branch; [#15569](https://github.com/QwenLM/qwen-code/pull/15569) delivers native snapshot storage and [HTTP recovery](2026-10-26-managed-http-snapshot-recovery.md) together to main. These remain separate design and acceptance slices within that PR. Local lease-aware recovery, complete historical-reader migration, compact state and the authority window remain follow-ups; the combined delivery does not enable journal deletion or memory eviction.
+
 1. **Identity storage:** move terminal bodies and deduplication evidence to a
    durable lookup/archival structure before removing them from resident maps.
    `enqueue` and `admit` must still return the original result for an old key and

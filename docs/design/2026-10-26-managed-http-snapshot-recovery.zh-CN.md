@@ -4,9 +4,9 @@
 
 ## 问题与基线
 
-本次是 [#13184](https://github.com/QwenLM/qwen-code/issues/13184) 的 HTTP 恢复切片，消费 [PR2 原生快照契约](2026-10-26-managed-native-journal-snapshots.zh-CN.md)。PR2 提供具名 `committed-prefix-v1` 快照，但现有 HTTP 恢复仍从 revision zero 读取全部事务，生产路径没有快照选择器。仅增加没有生产者的客户端选项不能接通恢复。
+本次是 [#13184](https://github.com/QwenLM/qwen-code/issues/13184) 的 HTTP 恢复切片，消费 [PR2 原生快照契约](2026-10-26-managed-native-journal-snapshots.zh-CN.md)。在只有 PR2 的基线中，具名 `committed-prefix-v1` 快照已经可用，但 HTTP 恢复仍从 revision zero 读取全部事务，生产路径没有快照选择器。仅增加没有生产者的客户端选项不能接通恢复。
 
-初始依赖为 PR2 [#15569](https://github.com/QwenLM/qwen-code/pull/15569)，head `c144d2fa65ff1f31e616fd73d205eabdff7dbf18`。PR3 按该契约开发；最终集成验收还依赖被接受的 PR2 版本。本次传输无损前缀，不是紧凑 authority 状态；快照体积、重放成本和驻留历史仍与历史量成正比。
+HTTP 切片按 PR2 [#15569](https://github.com/QwenLM/qwen-code/pull/15569) 的契约开发，初始版本为 `c144d2fa65ff1f31e616fd73d205eabdff7dbf18`。PR3 [#15599](https://github.com/QwenLM/qwen-code/pull/15599) 现已合入该分支，#15569 将协议/存储与 HTTP 恢复两个切片一起交付到 main。本文保留 HTTP 切片设计；合并验收要求最终接受的集成版本通过两份设计的 gate。本次传输无损前缀，不是紧凑 authority 状态；快照体积、重放成本和驻留历史仍与历史量成正比。
 
 ## 范围与决策
 
@@ -55,7 +55,7 @@
 - 覆盖最新可用快照、确定性平局、未 pin claim、冻结上界、旧 writer 拒绝及原 JSON 形状不变。在模块共享十分钟本地验证预算内运行定向真实 MySQL 选择/HTTP 检查，保留完整 CI gate，记录不能执行的真实路径。
 - 运行受影响 Core/CLI 消费者测试、全仓 build/typecheck/bundle、Java 编译/样式和定向测试、双语/引用检查、两轮干净自审与独立审查。分别报告本地通过、HTTP 测试替身证据和真实 MySQL/进程证据。
 
-验收目标是无损 HTTP 快照恢复路径，不代表紧凑快照、服务内存有界、物理崩溃耐久、Java 历史读取器迁移或生产 Hosted/CSI 恢复完成。
+HTTP 验收目标是无损快照恢复路径。合并 #15569 还须通过原生协议/存储设计中的发布、ownership、fence 与退休 gate。定向本地或 fast-CI 通过不能替代所需完整 profile 和最终集成版本成功的真实进程恢复检查。验收不代表紧凑快照、服务内存有界、物理崩溃耐久、Java 历史读取器迁移或生产 Hosted/CSI 恢复完成。
 
 ## 风险与后续
 

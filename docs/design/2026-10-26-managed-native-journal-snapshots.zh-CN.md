@@ -4,7 +4,7 @@
 
 ## 问题与当前状态
 
-Issue [#13184](https://github.com/QwenLM/qwen-code/issues/13184) 需要先建立原生恢复边界，才能安全删除 journal 或淘汰 authority 状态。Java 公共消息快照不能恢复 Harness。当前原生 journal 提供 head 与从 revision 0 开始的事务分页；活跃 Session 的 `compacted_through_revision` 仍为零。
+Issue [#13184](https://github.com/QwenLM/qwen-code/issues/13184) 需要先建立原生恢复边界，才能安全删除 journal 或淘汰 authority 状态。Java 公共消息快照不能恢复 Harness。在协议与 HTTP 恢复增量之前，原生 journal 提供 head 与从 revision 0 开始的事务分页；活跃 Session 的 `compacted_through_revision` 仍为零。
 
 Authority 从原生已提交前缀重建命令重放、事件身份、receipt、checkpoint、Action、领域版本、扩展唯一性、Hook once key 与 occurrence，以及 child continuation。Harness checkpoint 和 Java 最新记录投影都不包含全部这些事实。
 
@@ -12,7 +12,9 @@ Authority 从原生已提交前缀重建命令重放、事件身份、receipt、
 
 PR1（activation/inbox 身份查询）与本 PR2 可以独立开发。PR3（Hosted HTTP 恢复）与 PR4（本地租约感知替换）依赖快照契约；PR5 必须等持久身份查询和两条恢复路径验证完成后才启用驻留窗口。这更新了[有界保留设计](2026-10-19-managed-session-bounded-retention.zh-CN.md)中此前建议的串行开发顺序。
 
-本增量提供发布、不可变存储、完整性检查、资源 ownership 与有界分页读取。它不启用自动发布、不切换现有恢复读取器、不删除原生事务、不修改公共事件快照，也不淘汰 authority 状态。首个 payload 格式明确命名为 `committed-prefix-v1`：无损重放映像，不声称是紧凑 authority 状态。其大小和重放工作量仍与历史成正比。未来紧凑格式必须明确保留每个 authority 索引和历史查询契约，不能重新解释本版本。
+PR3 [#15599](https://github.com/QwenLM/qwen-code/pull/15599) 已合入 PR2 分支。[#15569](https://github.com/QwenLM/qwen-code/pull/15569) 将两个增量一起交付到 main。本文描述协议/存储切片，配套的 [HTTP 恢复设计](2026-10-26-managed-http-snapshot-recovery.zh-CN.md)描述生产消费者。合并 PR 的验收要求两个切片均通过。
+
+存储切片提供发布、不可变存储、完整性检查、资源 ownership 与有界分页读取。HTTP 切片让 Core journal 从已发布快照与连续尾部恢复，同时保留仅查询 head 的结果核验，以及没有符合条件且已公布快照时的旧恢复路径。自动发布、原生事务删除、公共事件快照修改、本地 journal 替换和 authority 淘汰继续不在范围内。首个 payload 格式明确命名为 `committed-prefix-v1`：无损重放映像，不声称是紧凑 authority 状态。其大小和重放工作量仍与历史成正比。未来紧凑格式必须明确保留每个 authority 索引和历史查询契约，不能重新解释本版本。
 
 ## 协议
 
@@ -42,7 +44,7 @@ Manifest claim 复用已有行前验证其 scope、kind、schema、storage 和 s
 
 每页和每次页面响应最多包含 16 MiB 解码后的页面 bytes，每次最多 100 页。Base64 会增加线上传输体积。首版格式仍会复制原生 record 存储；启用自动发布前，元数据 pin 与大历史运行时间还需 CI 及部署资格验证。
 
-初版发布器使用现有 publication 通道，该通道拒绝 private original-CSI mutation。因此 CSI 资格验证与恢复仍待专门的原生消费者工作，不引入 legacy 回退。普通 commit 资源发布不能提交快照专用资源。
+初版发布器使用现有 publication 通道，该通道拒绝 private original-CSI mutation。HTTP 消费者不扩大该准入；生产 CSI 恢复与资格验证仍属于独立验收工作。普通 commit 资源发布不能提交快照专用资源。
 
 首个正式 Managed Agent 版本前，在共享 V1 baseline 原地添加 owner kind，不改变 schema version。开发 catalog 必须重建。Server 与 Broker 使用同一个 baseline 及封闭 owner-kind 契约。
 
@@ -54,9 +56,9 @@ Descriptor 与页面读取认证当前 writer，校验 manifest 完整性和 own
 
 ## 受影响组件与消费者
 
-实现限于 Java Session store API/持久层、resource owner baseline/契约、退休流程与定向测试。公共 OpenAPI 和 WebShell 类型不变；internal surface registry 新增三个路由。
+存储切片修改 Java Session store API/持久层、resource owner baseline/契约、退休流程与定向测试。合并 PR 还在现有 restore 路由增加选择逻辑，并在 Core HTTP journal adapter 中重建快照。公共 OpenAPI 和 WebShell 类型不变；internal surface registry 新增三个快照路由。
 
-未来删除任何 journal 前，必须迁移 `WakeRecoveryStore`、取消证据、生命周期清理、命令/model/history 读取、工具详情/结果、publication 准入/证明、child relay、original-CSI 准入/资格验证、CSI inventory/history/image、CSI snapshot/recovery export、Core HTTP journal adapter 和 CLI recovery worker。本地替换还需要 `SessionWriterLease` inode/hash/seal proof 支持。本 PR 让这些消费者继续读取完整原 journal。
+HTTP 快照重建不授权删除 journal。未来删除任何 journal 前，必须迁移或验证所有剩余原历史路径：`WakeRecoveryStore`、取消证据、生命周期清理、命令/model/history 读取、工具详情/结果、publication 准入/证明、child relay、original-CSI 准入/资格验证、CSI inventory/history/image、CSI snapshot/recovery export、Core HTTP 剩余查询路径和 CLI recovery worker。本地替换还需要 `SessionWriterLease` inode/hash/seal proof 支持。这些剩余读取器继续保留完整原 journal。
 
 ## 验证与验收
 
@@ -65,8 +67,9 @@ Descriptor 与页面读取认证当前 writer，校验 manifest 完整性和 own
 - 拒绝旧 writer/generation、错误 scope/token、错误 revision/sequence/digest、blocked 或 retired Session、缺失/损坏的事务/页面/资源，以及 ID 冲突。
 - 在资源与 ownership 插入中注入故障；重开后只能看到原状态或完整快照，不能存在部分 pin。
 - 验证页面数量/字节限制、游标连续性、资源闭包及有界永久退休清理。
+- 通过 Core HTTP 恢复已发布前缀与较新尾部，保留命令重放并拒绝冲突复用。Exact-head 快照不能读取前缀事务；选中内容损坏时必须失败且不回退，仅查询 head 的结果核验不能执行快照选择。
 - 在本模块共享的十分钟本地预算内运行定向 H2、真实 MySQL 8.4、样式、共享 schema 和 API surface 检查。完整 profile 仍是 CI gate；H2 不证明 MySQL 并发或物理进程恢复。
 
-PR2 验收表示原生协议/存储增量通过所需 gate，不代表关闭 #13184，也不代表 HTTP/本地快照恢复、紧凑 payload、有界 authority 内存或生产验收完成。本增量没有未决的行为选择。
+存储验收表示原生协议/存储切片通过所需 gate。合并 #15569 的验收还要求通过 HTTP 恢复设计中的前缀加尾部、旧路径兼容、损坏拒绝与 writer fence 检查。它不关闭 #13184，也不代表本地快照恢复、紧凑 payload、有界 authority 内存或生产 Hosted/CSI 验收完成。这两个切片没有未决的行为选择。
 
-macOS 本地证据包括审查前的 H2/MySQL 8.4 增量（24 个定向用例）、API/schema/surface 检查、202 个 CLI parity 用例，以及 build、typecheck、bundle、ESLint 和 Checkstyle。审查随后修正了依赖枚举、锁顺序和保留资源命名空间，并增加回归用例。最终 Java 版本没有在本地复跑：共享十分钟验证预算保守地在 574 秒封账，独占 MySQL 已停止。最终 Java 编译、H2/MySQL 用例、并发/故障 profile、大历史行为以及 Linux/Windows 资格验证仍待 CI/发布 gate；较早的 Java 通过结果不能作为这些后续修正的验收证据。
+macOS 本地存储证据包括审查前的 H2/MySQL 8.4 增量（24 个定向用例）、API/schema/surface 检查、202 个 CLI parity 用例，以及 build、typecheck、bundle、ESLint 和 Checkstyle。审查随后修正了依赖枚举、锁顺序和保留资源命名空间，并增加回归用例。存储任务共享十分钟验证预算保守地在 574 秒封账，独占 MySQL 已停止；合并增量不重置该预算。独立 PR3 报告记录其较早本地证据与最终真实进程缺口。编译、H2 和样式结果必须对应准确版本的 CI；完整 MySQL/并发/故障 profile、最终集成恢复、大历史行为与平台资格仍是独立 gate。较早的定向通过结果不能证明合并验收完成。

@@ -4,9 +4,9 @@
 
 ## Problem and baseline
 
-This is the HTTP recovery slice of [#13184](https://github.com/QwenLM/qwen-code/issues/13184), following the [PR2 native snapshot contract](2026-10-26-managed-native-journal-snapshots.md). PR2 provides named `committed-prefix-v1` snapshots, but existing HTTP restoration reads every transaction from revision zero. There is no production snapshot selector. A client option without a producer would not connect recovery to these snapshots.
+This is the HTTP recovery slice of [#13184](https://github.com/QwenLM/qwen-code/issues/13184), following the [PR2 native snapshot contract](2026-10-26-managed-native-journal-snapshots.md). At the PR2-only baseline, named `committed-prefix-v1` snapshots were available, but HTTP restoration still read every transaction from revision zero and had no production snapshot selector. A client option without a producer would not connect recovery to these snapshots.
 
-The initial dependency is PR2 [#15569](https://github.com/QwenLM/qwen-code/pull/15569), head `c144d2fa65ff1f31e616fd73d205eabdff7dbf18`. PR3 is developed against that contract; final integrated acceptance also depends on the accepted PR2 revision. This is a lossless prefix transport, not compact authority state: snapshot size, replay work and resident history remain proportional to history.
+The HTTP slice was developed against PR2 [#15569](https://github.com/QwenLM/qwen-code/pull/15569), initially at `c144d2fa65ff1f31e616fd73d205eabdff7dbf18`. PR3 [#15599](https://github.com/QwenLM/qwen-code/pull/15599) is now merged into that branch, and #15569 delivers the protocol/storage and HTTP recovery slices together to main. This document retains the HTTP slice's design; combined acceptance requires both designs' gates on the accepted integrated revision. This is a lossless prefix transport, not compact authority state: snapshot size, replay work and resident history remain proportional to history.
 
 ## Scope and decisions
 
@@ -55,7 +55,7 @@ Ordinary Hosted attachment and private CSI initialization already construct the 
 - Cover newest-eligible selection, deterministic ties, unpinned claims, frozen upper bounds, old writer refusal and unchanged legacy response shape. Run focused real MySQL selection/HTTP checks within the module's shared ten-minute local verification budget; preserve full CI gates and record unavailable real paths.
 - Run affected Core/CLI consumer tests, repository build/typecheck/bundle, Java compilation/style and selected tests, bilingual/reference checks, two clean self-audits and independent review. Local passes, test-double HTTP evidence and real MySQL/process evidence are reported separately.
 
-Acceptance establishes the lossless HTTP snapshot restore path. It does not qualify compact snapshots, bounded service memory, physical crash durability, migrated Java history readers or production Hosted/CSI recovery.
+HTTP acceptance establishes the lossless snapshot restore path. Combined #15569 must also satisfy the native protocol/storage design's publication, ownership, fencing and retirement gates. Selected local or fast-CI passes do not replace required full profiles or a successful final integrated real-process recovery check. Acceptance does not qualify compact snapshots, bounded service memory, physical crash durability, migrated Java history readers or production Hosted/CSI recovery.
 
 ## Risks and follow-up
 
