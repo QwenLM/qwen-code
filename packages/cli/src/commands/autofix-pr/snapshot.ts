@@ -17,7 +17,13 @@
 //   so the session is woken only for them.
 
 import type { CommandModule } from 'yargs';
-import { mkdirSync, readFileSync } from 'node:fs';
+import {
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core/utils/atomicFileWrite.js';
 import { dirname } from 'node:path';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
@@ -35,9 +41,12 @@ import {
 import { normalizeSegment } from '../review/lib/remote-match.js';
 import {
   REPLY_MARKER,
-  assertOwnedBySession,
+  assertWatching,
   autofixPrPaths,
   checkAttemptKey,
+  ghNotFound,
+  isRegularFile,
+  NO_FOLLOW,
   readGateCursor,
   readState,
   repoRoot,
@@ -1478,6 +1487,8 @@ export interface ReplyCheck {
 }
 
 function readReplyCache(path: string): Record<string, string | null> {
+  // A cache is asked again when missing: a FIFO in its place would block.
+  if (!isRegularFile(path)) return {};
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown;
     return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
@@ -1515,6 +1526,7 @@ function markOrphanReplies(
     atomicWriteFileSync(
       check.cachePath,
       `${JSON.stringify({ ...readReplyCache(check.cachePath), [id]: parent })}\n`,
+      NO_FOLLOW,
     );
   };
   const deadline = check.strict
@@ -1560,10 +1572,8 @@ function markOrphanReplies(
           '.in_reply_to_id',
         ).trim();
       } catch (err) {
-        // gh's own words for a missing comment, not the command line,
-        // which names the repository and the comment.
-        const stderr = (err as { stderr?: unknown }).stderr;
-        if (/\(HTTP 404\)/.test(typeof stderr === 'string' ? stderr : '')) {
+        // A missing comment.
+        if (ghNotFound(err)) {
           first.replyUnknown = true;
           continue;
         }
@@ -1744,6 +1754,63 @@ export interface SnapshotArgs {
   /** With `--gate`: the session whose scheduled task runs this gate, as
    * `prepare` reported it. */
   session?: string;
+  /** The task, as `schedule` minted it: with `--gate`, the task whose gate
+   * this is; without, the task that woke the round. */
+  task?: string;
+}
+
+/** Creates or touches `path`; a link is not followed. */
+function markChecked(path: string): void {
+  try {
+    const now = new Date();
+    if (lstatSync(path, { throwIfNoEntry: false }) === undefined) {
+      writeFileSync(path, '', { flag: 'wx' });
+    } else if (lstatSync(path).isFile()) {
+      utimesSync(path, now, now);
+    }
+  } catch {
+    // A check that ran is not undone by a time that did not move.
+  }
+}
+
+/**
+ * Why a CLI watch's task no longer drives the watch, or null. Its gate names
+ * the session and the task it was made for. A take-over moves the watch to
+ * another session; a later `schedule` replaces the task, a copy of it in a
+ * second process of the same session included; `cleanup` ends the watch.
+ * Such a gate must move no cursor: what it reported would reach a session
+ * that no longer acts on it. It wakes that session once per fire instead, and
+ * the round deletes the task. A gate with no session — a Managed automation,
+ * or a probe run by hand — is no watch's task.
+ */
+function staleTask(
+  state: AutofixPrState | null,
+  target: { host: string; owner: string; repo: string },
+  session: string,
+  task: string | undefined,
+): Record<string, string> | null {
+  if (session === '') return null;
+  const named = { gateSession: session, ...(task ? { gateTask: task } : {}) };
+  // Gone, stopped by a cleanup that kept its worktree, or — for a task made
+  // by `schedule` — no task recorded at all.
+  if (
+    !state ||
+    !sameRepository(state, target) ||
+    state.ended ||
+    (task && !state.watch)
+  ) {
+    return { type: 'watch_ended', ...named };
+  }
+  // A task with no id predates task ids: once one is recorded, it is not
+  // the one recorded either.
+  const recorded = state.watch?.task;
+  if (
+    state.sessionId !== session ||
+    (recorded !== undefined && recorded !== task)
+  ) {
+    return { type: 'watched_elsewhere', session: state.sessionId, ...named };
+  }
+  return null;
 }
 
 function runGate(args: SnapshotArgs): void {
@@ -1814,18 +1881,12 @@ function runGate(args: SnapshotArgs): void {
   // task names its session: the environment cannot, as a Managed
   // automation runs its gate as a session of its own.
   const session = args.session ?? '';
-  if (
-    state &&
-    sameRepository(state, target) &&
-    session !== '' &&
-    state.sessionId !== session
-  ) {
-    writeStdoutLine(
-      JSON.stringify({
-        action: 'stop',
-        events: [{ type: 'watched_elsewhere', session: state.sessionId }],
-      }),
-    );
+  if (args.task !== undefined && session === '') {
+    throw new TypeError('--task names a task of a watch; pass its --session');
+  }
+  const stale = staleTask(state, target, session, args.task);
+  if (stale) {
+    writeStdoutLine(JSON.stringify({ action: 'stop', events: [stale] }));
     return;
   }
 
@@ -1867,19 +1928,14 @@ function runGate(args: SnapshotArgs): void {
   });
   // A take-over while GitHub was asked: what this gate saw is the new
   // owner's to report.
-  const owner = readState(paths.statePath);
-  if (
-    owner &&
-    sameRepository(owner, target) &&
-    session !== '' &&
-    owner.sessionId !== session
-  ) {
-    writeStdoutLine(
-      JSON.stringify({
-        action: 'stop',
-        events: [{ type: 'watched_elsewhere', session: owner.sessionId }],
-      }),
-    );
+  const restale = staleTask(
+    readState(paths.statePath),
+    target,
+    session,
+    args.task,
+  );
+  if (restale) {
+    writeStdoutLine(JSON.stringify({ action: 'stop', events: [restale] }));
     return;
   }
   // The cursor lands before the output: a probe that prints and then dies
@@ -1888,6 +1944,10 @@ function runGate(args: SnapshotArgs): void {
     mkdirSync(dirname(paths.gatePath), { recursive: true });
     writeGateCursor(paths.gatePath, result.cursor);
   }
+  // `status` reads when the watch's own task last checked the PR from this
+  // file, which `cleanup` removes with the watch; a gate with no session is
+  // no watch's, and shares only the cursor.
+  if (session !== '') markChecked(paths.checkedPath);
   if (result.snapshot) writeStdoutLine(JSON.stringify(result.snapshot));
 }
 
@@ -1900,7 +1960,7 @@ export function runSnapshot(args: SnapshotArgs): void {
     autofixPrPaths(repoRoot(), args.pr).statePath,
     args.pr,
   );
-  assertOwnedBySession(state);
+  assertWatching(state, args.task);
   setGhHost(state.host);
   ensureAuthenticated();
   const { pr } = fetchPrData(state, roundReplyCheck(state));
@@ -1926,6 +1986,7 @@ export function runSnapshot(args: SnapshotArgs): void {
         key === 'body' && typeof value === 'string' ? bodyLines(value) : value,
       2,
     )}\n`,
+    NO_FOLLOW,
   );
   const { events, ...rest } = snapshot;
   writeStdoutLine(
@@ -2002,6 +2063,11 @@ export const snapshotCommand: CommandModule = {
         type: 'string',
         describe:
           "With --gate: the session whose scheduled task runs the gate (prepare's sessionId); a watch another session took over answers stop",
+      })
+      .option('task', {
+        type: 'string',
+        describe:
+          "The scheduled task's id (schedule's task): with --gate, a watch another task drives answers stop; without, a round woken by another task is refused",
       }),
   handler: (argv) => {
     runSnapshot({
@@ -2010,6 +2076,7 @@ export const snapshotCommand: CommandModule = {
       host: argv['host'] as string | undefined,
       gate: Boolean(argv['gate']),
       session: argv['session'] as string | undefined,
+      task: argv['task'] as string | undefined,
     });
   },
 };

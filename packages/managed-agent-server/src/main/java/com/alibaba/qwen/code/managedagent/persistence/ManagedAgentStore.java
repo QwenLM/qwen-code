@@ -61,6 +61,7 @@ import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.lang3.StringUtils;
@@ -126,6 +127,9 @@ public class ManagedAgentStore implements AgentStateStore {
     private static final String QUALIFIED_TURN_SUMMARY_COLUMNS =
             "turn_record." + String.join(", turn_record.",
                     TURN_SUMMARY_COLUMNS.split(", "));
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    @org.springframework.context.annotation.Lazy
+    private ManagedExtensionRecordStore configRecords;
     private final JdbcTemplate jdbc;
     private WorkspaceLifecycleStore lifecycle;
 
@@ -152,6 +156,12 @@ public class ManagedAgentStore implements AgentStateStore {
     private final List<WebShellModelOption> modelCatalog;
     private ManagedAgentDefinitionStore definitions;
     private ManagedSessionSkills creationSkills;
+    private com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionPackageService extensionPackages;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public void setExtensionPackages(com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionPackageService value) {
+        this.extensionPackages = value;
+    }
 
     @org.springframework.beans.factory.annotation.Autowired
     public void setManagedSessionSkills(ManagedSessionSkills skills) {
@@ -162,6 +172,7 @@ public class ManagedAgentStore implements AgentStateStore {
     private final boolean workspaceFilesEnabled;
     private final boolean workspaceShellEnabled;
     private final boolean workspaceChildAgentsEnabled;
+    private final boolean managedExtensionExecutionEnabled;
     private final long lifecycleHandoffMillis;
     private final List<ManagedAgentProperties.RuntimeBroker.WorkspaceMount> workspaceMounts;
     private final ResidentWorkspaces residentWorkspaces;
@@ -347,6 +358,7 @@ public class ManagedAgentStore implements AgentStateStore {
         this.workspaceFilesEnabled = properties.getHarness().isWorkspaceFilesEnabled();
         this.workspaceShellEnabled = properties.getHarness().isWorkspaceShellEnabled();
         this.workspaceChildAgentsEnabled = properties.admitsPublicChildAgents();
+        this.managedExtensionExecutionEnabled = properties.getExtensions().isEnabled() && properties.getManagedExtensions().isEnabled();
         this.lifecycleHandoffMillis = properties.getSessionStore().getWriterLeaseDuration().toMillis();
         this.workspaceMounts = properties.getRuntimeBroker().getWorkspaceMounts();
         this.residentWorkspaces = new ResidentWorkspaces(properties.getRuntimeBroker().getResidentWorkspaces());
@@ -453,6 +465,20 @@ public class ManagedAgentStore implements AgentStateStore {
             String title, List<Map<String, Object>> input, String payloadDigest, WorkspaceSelection selection,
             String requestedApprovalMode, boolean approvalSelectionSupported, Boolean requestedPlanMode,
             boolean planModeSupported, List<Map<String, Object>> skills, boolean publicChildrenSupported, String modelId) {
+        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest, agentId, requestedRevision,
+                title, input, payloadDigest, selection, requestedApprovalMode, approvalSelectionSupported,
+                requestedPlanMode, planModeSupported, skills, publicChildrenSupported, modelId, null, Set.of());
+    }
+
+    @Override
+    @Transactional
+    public Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
+            String idempotencyKey, String requestDigest, String agentId, String requestedRevision,
+            String title, List<Map<String, Object>> input, String payloadDigest, WorkspaceSelection selection,
+            String requestedApprovalMode, boolean approvalSelectionSupported, Boolean requestedPlanMode,
+            boolean planModeSupported, List<Map<String, Object>> skills, boolean publicChildrenSupported, String modelId,
+            List<com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionPackages.Pin> extensionPins,
+            Set<String> extensionLifecycleProfiles) {
         if (!input.isEmpty() && !workspaceFilesEnabled) {
             throw workspaceExecutionUnavailable();
         }
@@ -484,6 +510,17 @@ public class ManagedAgentStore implements AgentStateStore {
         requireCreationScope(tenantId, idempotencyKey, true);
         ResolvedBinding workspace = workspaces.resolveForCreation(
                 tenantId, actorId, selection);
+        if (extensionPins != null) {
+            if (extensionPackages == null) {
+                throw workspaceExecutionUnavailable();
+            }
+            if ((!WorkspaceToolProfiles.SHELL.equals(pin.toolProfile()) && !WorkspaceToolProfiles.MCP.equals(pin.toolProfile()))
+                    || !extensionLifecycleProfiles.contains(pin.toolProfile())) {
+                throw new ManagedAgentException(HttpStatus.CONFLICT, "unsupported_feature",
+                        "Extension configuration requires a negotiated Shell or MCP Session lifecycle profile.");
+            }
+            extensionPackages.requireSelection(tenantId, actorId, workspace.binding().getWorkspaceId(), extensionPins);
+        }
         WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, workspace.binding().getStorageId());
         boolean sshWorkspace = isSshWorkspace(workspace.binding());
         if (sshWorkspace) {
@@ -517,14 +554,17 @@ public class ManagedAgentStore implements AgentStateStore {
         Admission admission = insertSession(tenantId, "CREATE_SESSION", idempotencyKey,
                 requestDigest, agentId, title, input, payloadDigest,
                 workspace, actorId, pin, null, planMode, modelId);
-        if (workspaceChildAgentsEnabled && publicChildrenSupported && !resident && !sshWorkspace
-                && "qwen-code".equals(agentId) && pin.digest() == null
+        if (workspaceChildAgentsEnabled && publicChildrenSupported && !resident && (!sshWorkspace || managedExtensionExecutionEnabled)
+                && (managedExtensionExecutionEnabled || "qwen-code".equals(agentId) && pin.digest() == null)
                 && WorkspaceToolProfiles.SHELL.equals(pin.toolProfile())) {
             jdbc.update("UPDATE ma_session SET public_child_agents_version=1 WHERE tenant_id=? AND session_id=?",
                     tenantId, admission.sessionId());
         }
         if (!skills.isEmpty()) {
             creationSkills.save(tenantId, admission.sessionId(), effectiveSkills);
+        }
+        if (extensionPins != null) {
+            creationSkills.saveInitialSelection(tenantId, admission.sessionId(), extensionPins);
         }
         return admission;
     }
@@ -738,8 +778,8 @@ public class ManagedAgentStore implements AgentStateStore {
                     "The parent Session cannot admit a child.");
         }
         if (parent.publicChildAgentsVersion() == 1) {
-            if (snapshot == null || !snapshot.path("version").isIntegralNumber() || snapshot.path("version").asInt() != 1 || lineage.depth() != 1
-                    || childCwdRelative != null || snapshot.size() != 8
+            if (snapshot == null || !snapshot.path("version").isIntegralNumber() || !Set.of(1, 2).contains(snapshot.path("version").asInt()) || lineage.depth() != 1
+                    || childCwdRelative != null || snapshot.size() != (snapshot.path("version").asInt() == 2 ? 9 : 8)
                     || !snapshot.path("sourcePromptId").isTextual() || snapshot.path("sourcePromptId").asText().isBlank()
                     || snapshot.path("sourcePromptId").asText().length() > 144
                     || !Set.of("default", "auto-edit", "yolo").contains(snapshot.path("approvalMode").asText())
@@ -757,6 +797,12 @@ public class ManagedAgentStore implements AgentStateStore {
                     || !snapshot.path("modelRoute").path("providerPin").isTextual()
                     || !snapshot.path("modelRoute").path("providerPin").asText().matches("[a-f0-9]{64}")) {
                 throw new ManagedAgentException(HttpStatus.CONFLICT, "child_launch_snapshot_invalid", "The public child launch snapshot is invalid");
+            }
+            if (snapshot.path("version").asInt() == 2) {
+                if (configRecords == null) {
+                    throw new ManagedAgentException(HttpStatus.CONFLICT, "child_launch_snapshot_invalid", "Package agent validation is unavailable");
+                }
+                ManagedExtensionAgentLaunch.require(jdbc, configRecords, parent, snapshot);
             }
             if (snapshot.path("modelRoute").has("origin")) {
                 var origin = snapshot.path("modelRoute").get("origin");
@@ -1209,6 +1255,7 @@ public class ManagedAgentStore implements AgentStateStore {
                 + " WHERE tenant_id=? AND session_id=? AND command_id=? AND operation='manageMcp' LIMIT 1",
                 tenantId, sessionId, operationId).isEmpty();
         if (operationId != null && !replay) {
+            ManagedConfigInstall.requireOpen(jdbc, tenantId, sessionId);
             requireMcpManagementIdle(session);
         }
         return session;
@@ -1227,6 +1274,120 @@ public class ManagedAgentStore implements AgentStateStore {
         requireMcpManagementIdle(session);
     }
 
+    @Override
+    @Transactional
+    public SessionRecord requireExtensionManagement(String tenantId, String actorId, String sessionId, String operationId, boolean mutation) {
+        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
+        SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
+        if (session.workspace() == null || "DELETED".equals(session.status())) {
+            throw new ManagedAgentException(HttpStatus.NOT_FOUND, "session_not_found", "The Session was not found.");
+        }
+        WorkspaceAccess access = workspaces.accessOf(tenantId, actorId, session.workspace().getWorkspaceId());
+        if (!access.canRead()) {
+            throw new ManagedAgentException(HttpStatus.NOT_FOUND, "session_not_found", "The Session was not found.");
+        }
+        if (mutation && !access.atLeast(WorkspaceAccess.OPERATOR)) {
+            throw new ManagedAgentException(HttpStatus.FORBIDDEN,
+                "session_operation_forbidden", "Only a Workspace operator may apply extensions.");
+        }
+        var lineage = findChildLineage(tenantId, sessionId);
+        JsonNode current = ManagedMcpSettings.find(jdbc, tenantId, sessionId);
+        boolean same = ManagedConfigInstall.isPackageConfig(current) && operationId != null
+                && operationId.equals(current.path("operationId").asText());
+        if (lineage != null && mutation && (!same || !childExtensionBootstrapCommand(session, lineage).equals(current.path("command")))
+                || !workspaceFilesEnabled
+                || !Set.of(WorkspaceToolProfiles.SHELL, WorkspaceToolProfiles.MCP, WorkspaceToolProfiles.FILES, WorkspaceToolProfiles.READ)
+                        .contains(session.toolProfile())) {
+            throw new ManagedAgentException(HttpStatus.CONFLICT, "unsupported_feature", "Extension management is unavailable.");
+        }
+        if (mutation) {
+            requireSessionStatus(session.status(), "ACTIVE");
+            requireCwdChangeRegistryFacts(session);
+            WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
+            if (!same) {
+                ManagedConfigInstall.requireOpen(jdbc, tenantId, sessionId);
+                requireMcpManagementIdle(session);
+            }
+        }
+        return session;
+    }
+
+    @Override
+    @Transactional(propagation = org.springframework.transaction.annotation.Propagation.MANDATORY)
+    public void requireConfigurationCommit(String tenantId, String workspaceId, String sessionId, JsonNode body) {
+        SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
+        if (session.workspace() == null || !workspaceId.equals(session.workspace().getWorkspaceId())) {
+            throw new ManagedAgentException(HttpStatus.CONFLICT, "unsupported_feature", "Extension management is unavailable.");
+        }
+        requireSessionStatus(session.status(), "ACTIVE");
+        var lineage = findChildLineage(tenantId, sessionId);
+        if (lineage != null) {
+            requireChildExtensionBootstrap(session, lineage, body);
+            return;
+        }
+        Map<String, Object> initial = creationSkills.initialSelection(tenantId, sessionId);
+        if (initial != null) {
+            if (initial.get("operationId").equals(body.path("command").path("operationId").asText())) {
+                boolean beforeModel = jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn WHERE tenant_id=? AND session_id=?", Integer.class,
+                        tenantId, sessionId) <= 1
+                        && jdbc.queryForList("SELECT turn_id FROM ma_turn WHERE tenant_id=? AND session_id=? AND submission_attempted=TRUE LIMIT 1 FOR UPDATE",
+                                tenantId, sessionId).isEmpty();
+                if (!beforeModel || !isBootstrapRevision(body)
+                        || !objectMapper.valueToTree(initial).equals(body.path("command"))) {
+                    throw new ManagedAgentException(HttpStatus.CONFLICT, "extension_initialization_conflict", "Initial extension selection conflicts with its creation receipt.");
+                }
+                return;
+            }
+            JsonNode configuration = ManagedMcpSettings.find(jdbc, tenantId, sessionId);
+            if (configuration == null || !Set.of("active", "failed").contains(configuration.path("phase").asText())) {
+                throw new ManagedAgentException(HttpStatus.CONFLICT, "extension_initialization_required", "Initial extension configuration must settle first.");
+            }
+        }
+        // Every phase observes the same locked Session row as Turn admission.
+        // A precommit stage may lose its idle window; it cannot commit over a new Turn.
+        requireMcpManagementIdle(session);
+    }
+
+    private void requireChildExtensionBootstrap(SessionRecord child, StoreModels.SessionLineage lineage, JsonNode body) {
+        JsonNode command = childExtensionBootstrapCommand(child, lineage);
+        boolean onlyInitialTurn = jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn WHERE tenant_id=? AND session_id=?", Integer.class,
+                child.tenantId(), child.sessionId()) <= 1
+                && jdbc.queryForList("SELECT turn_id FROM ma_turn WHERE tenant_id=? AND session_id=? AND submission_attempted=TRUE LIMIT 1 FOR UPDATE",
+                        child.tenantId(), child.sessionId()).isEmpty();
+        if (!onlyInitialTurn || !isBootstrapRevision(body) || !command.equals(body.path("command"))) {
+            throw new ManagedAgentException(HttpStatus.CONFLICT, "child_launch_snapshot_invalid", "Child extension bootstrap conflicts with its launch snapshot");
+        }
+    }
+
+    private static boolean isBootstrapRevision(JsonNode body) {
+        return "apply".equals(body.path("mode").asText()) && body.path("previousConfigRevision").asLong(-1) == 0
+                && body.path("configRevision").asLong(-1) == 1
+                || "recoverPrevious".equals(body.path("mode").asText()) && body.path("previousConfigRevision").asLong(-1) == 1
+                && body.path("configRevision").asLong(-1) == 2;
+    }
+
+    private JsonNode childExtensionBootstrapCommand(SessionRecord child, StoreModels.SessionLineage lineage) {
+        if (configRecords == null) {
+            throw new ManagedAgentException(HttpStatus.CONFLICT, "child_launch_snapshot_invalid", "Package agent validation is unavailable");
+        }
+        var run = configRecords.findRecord(child.tenantId(), lineage.parentSessionId(), "child_run", lineage.parentChildRunId()).orElseThrow();
+        var envelope = configRecords.readRecordResource(child.tenantId(), lineage.parentSessionId(), run.required("inputRef"));
+        var launch = envelope.path("publicLaunch");
+        if (launch.path("version").asInt() != 2) {
+            throw new ManagedAgentException(HttpStatus.CONFLICT, "unsupported_feature", "Child extension updates are unavailable");
+        }
+        var ref = launch.required("extensionAgent").required("bundleRef");
+        var bundle = configRecords.readRecordResource(child.tenantId(), lineage.parentSessionId(), ref);
+        var pins = objectMapper.createArrayNode();
+        for (var entry : bundle.required("packages")) {
+            pins.add(entry.required("pin"));
+        }
+        String operation = ManagedConfigInstall.derivedOperationId("managed-extension-child:", child.sessionId() + ":" + ref.required("digest").asText());
+        return objectMapper.createObjectNode().put("operationId", operation)
+                .put("actorKey", DigestUtils.sha256Hex("managed-extension-child:" + child.sessionId()))
+                .put("expectedRevision", 0).set("extensions", pins);
+    }
+
     private void requireMcpManagementIdle(SessionRecord session) {
         String tenantId = session.tenantId();
         String sessionId = session.sessionId();
@@ -1239,6 +1400,12 @@ public class ManagedAgentStore implements AgentStateStore {
         if (!jdbc.queryForList("SELECT turn_id FROM ma_turn WHERE tenant_id=? AND session_id=?"
                 + " AND status IN ('ACCEPTED', 'RUNNING', 'CANCELLING') LIMIT 1 FOR UPDATE", tenantId, sessionId).isEmpty()) {
             throw new ManagedAgentException(HttpStatus.CONFLICT, "turn_active", "The Session has an active Turn or approval.");
+        }
+        if (!jdbc.queryForList("SELECT record_id FROM ma_session_record WHERE record_kind='DOMAIN'"
+                + " AND session_scope_key=? AND tenant_id=? AND session_id=? AND domain='child_run'"
+                + " AND settled_at IS NULL LIMIT 1 FOR UPDATE", ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                tenantId, sessionId).isEmpty()) {
+            throw new ManagedAgentException(HttpStatus.CONFLICT, "session_context_busy", "The Session has an unsettled child run.");
         }
         long now = lifecycleDatabaseTime();
         for (String options : jdbc.queryForList("SELECT options_json FROM ma_session_record WHERE session_scope_key=?"
@@ -1452,9 +1619,23 @@ public class ManagedAgentStore implements AgentStateStore {
             throw new ManagedAgentException(HttpStatus.CONFLICT, "session_not_active",
                     "The Session does not accept new Turns.");
         }
+        ManagedConfigInstall.requireOpen(jdbc, tenantId, sessionId);
         if (hasActiveTurn(tenantId, sessionId)) {
             throw new ManagedAgentException(HttpStatus.CONFLICT, "turn_active",
                     "The Session already has an active Turn.");
+        }
+        record QueuedInput(String messageId, String state, String turnId, String actorId, String inputJson) { }
+        var queuedInputs = jdbc.query("SELECT message_id, state, turn_id, actor_id, input_json FROM ma_user_message"
+                + " WHERE tenant_id = ? AND session_id = ? AND state IN ('queued', 'claimed', 'recovery_blocked')"
+                + " ORDER BY sequence_number LIMIT 1",
+                (row, index) -> new QueuedInput(row.getString(1), row.getString(2), row.getString(3), row.getString(4), row.getString(5)), tenantId, sessionId);
+        if (!queuedInputs.isEmpty()) {
+            var first = queuedInputs.getFirst();
+            if (!"claimed".equals(first.state()) || first.turnId() != null
+                    || !("user-queue:" + first.messageId()).equals(idempotencyKey) || !Objects.equals(actorId, first.actorId())
+                    || !readInput(first.inputJson()).equals(input)) {
+                throw new ManagedAgentException(HttpStatus.CONFLICT, "user_message_queue_pending", "Send new input through the Session user message queue.");
+            }
         }
         // The W2 handshake: an open execution operation on a bound Session
         // is the busy barrier the settlement re-verifies at commit; a
@@ -3994,6 +4175,9 @@ public class ManagedAgentStore implements AgentStateStore {
     // matching the recovery scan's own population.
     private boolean hasOpenExecutionOperation(String tenantId,
             String sessionId) {
+        if (ManagedConfigInstall.blocked(jdbc, tenantId, sessionId)) {
+            return true;
+        }
         Integer operations = jdbc.queryForObject("SELECT COUNT(*) FROM"
                         + " ma_operation WHERE scope_key = ? AND"
                         + " target_key = ? AND operation_kind IN"
@@ -4005,6 +4189,9 @@ public class ManagedAgentStore implements AgentStateStore {
 
     private boolean hasOpenOperation(String tenantId, String sessionId,
             String excludingOperationId) {
+        if (ManagedConfigInstall.blocked(jdbc, tenantId, sessionId)) {
+            return true;
+        }
         Integer commands =
                 jdbc.queryForObject(
                         "SELECT COUNT(*) FROM ma_request_receipt WHERE namespace ="
@@ -6478,7 +6665,7 @@ public class ManagedAgentStore implements AgentStateStore {
 
     private void materializeEvent(EventRecord event, Map<String, List<ItemPartRecord>> projectedParts) {
         switch (event.type()) {
-            case "turn.accepted" -> materializeInput(event, projectedParts);
+            case "turn.accepted", "item.input.added" -> materializeInput(event, projectedParts);
             case "item.output_text.delta" -> materializeText(event,
                     "output_text", projectedParts);
             case "item.reasoning.delta" -> materializeText(event,
@@ -6515,7 +6702,7 @@ public class ManagedAgentStore implements AgentStateStore {
                 continue;
             }
             replacePart(event, itemId,
-                    "part_" + event.turnId() + "_input_" + index,
+                    "part_" + ("item.input.added".equals(event.type()) ? itemId : event.turnId()) + "_input_" + index,
                     "input_text", text, projectedParts);
         }
     }
