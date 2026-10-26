@@ -164,6 +164,7 @@ function boxProps(props: ModRenderProps): BoxProps {
 
 function textProps(props: ModRenderProps): TextProps {
   const weight = props['weight'];
+  const wrap = props['wrap'];
   return {
     color: color(props['color']),
     backgroundColor: color(props['backgroundColor']),
@@ -173,8 +174,10 @@ function textProps(props: ModRenderProps): TextProps {
     underline: props['underline'] === true,
     strikethrough: props['strikethrough'] === true,
     inverse: props['inverse'] === true,
-    ...(typeof props['wrap'] === 'string' && {
-      wrap: props['wrap'] as TextProps['wrap'],
+    ...(typeof wrap === 'string' && {
+      wrap: (wrap === 'end' || wrap === 'middle'
+        ? `truncate-${wrap}`
+        : wrap) as TextProps['wrap'],
     }),
   };
 }
@@ -248,6 +251,7 @@ export const ModBand = ({ band, maxRows }: ModBandProps) => {
         flexDirection="column"
         flexShrink={0}
         maxHeight={maxRows}
+        overflowX="hidden"
         overflowY="hidden"
       >
         <Box

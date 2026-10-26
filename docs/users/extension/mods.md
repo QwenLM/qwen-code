@@ -697,6 +697,8 @@ waits for it.
 The band is drawn with these conversions:
 
 - A string inside a `Box` is drawn as a `Text`.
+- Text wrap values `end` and `middle` become `truncate-end` and
+  `truncate-middle`.
 - Spacing steps become cells: `xs` and `sm` are 1 across and 0 down, `md` 2 and
   1, `lg` 3 and 1, `xl` 4 and 2.
 - `weight: "semibold"` or `"bold"` draws bold. `size`, `mono`, `tabular` and
@@ -708,6 +710,8 @@ The band is drawn with these conversions:
   color. Other colors draw when they are an ANSI color name such as `cyan` or
   `redBright`, a hex value, `rgb(r, g, b)` or `ansi256(n)`.
 - Text is sanitized for the terminal, as Mod transcript lines are.
+
+The band clips horizontal overflow to the composer's width.
 
 A tree that throws while drawn shows nothing, and the next answer is drawn
 afresh. The debug log records each refused tree and adjustment, such as
@@ -724,7 +728,8 @@ These differ from Claude Code:
 - `$.ui.invalidate` takes effect after the dispatch that called it, since Qwen
   Code Mods have no timers.
 - A render can wait behind a tool call and its approval, and the band keeps its
-  last tree meanwhile.
+  last tree meanwhile. A tool call, command or turn event queued behind a
+  running render waits for it, up to the hook's 10-second budget.
 - Refusal lines go only to the debug log, since Qwen Code has no hot reload.
 - JSX is not compiled yet, although `h` and `Fragment` exist.
 

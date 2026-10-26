@@ -103,9 +103,10 @@ The debug log records each refusal and adjustment in Claude Code's words, such a
 ### 5. Drawing in Ink
 
 - **Place.** The band sits in the composer, between the session feedback survey and the prompt input, and shows only while the input does. A dialog that takes the composer's place hides it. Agent tabs, which use their own composer, do not show it.
-- **Size.** The band is at most `maxRows` rows tall and clips a taller tree. It is laid out `bodyColumns` wide.
+- **Size.** The band is at most `maxRows` rows tall and clips a taller tree. It is laid out `bodyColumns` wide and clips horizontal overflow to the composer's width.
 - **Mapping.** A `Box` becomes an Ink `Box` and a `Text` an Ink `Text`, with these conversions:
   - a string inside a `Box` is drawn as a `Text`;
+  - text wrap values `end` and `middle` become `truncate-end` and `truncate-middle`;
   - spacing steps become cells: `xs` and `sm` are 1 across and 0 down, `md` 2 and 1, `lg` 3 and 1, `xl` 4 and 2;
   - `weight: "semibold"` or `"bold"` draws bold; `size`, `mono`, `tabular` and `dir` are dropped, as Claude Code's terminal drops them;
   - a color that is one of Claude Code's theme keys maps to the active Qwen Code theme: `text` to the primary text color, `subtle` and `inactive` to the secondary one, `success`, `error` and `warning` to the status colors, and `claude` and `suggestion` to the accent;
@@ -141,7 +142,7 @@ These go into the user guide:
 - Only the `AbovePrompt` site is raised, and only in Ink. Elements other than `Box` and `Text` fail the tree.
 - The band has no collapse mark, focus, scrolling or `n more` row. A tree taller than `maxRows` is clipped. `maxRows` is a third of the terminal's rows, where Claude Code gives the bottom slot's remaining rows in fullscreen and the terminal's height otherwise. `bodyColumns` keeps Claude Code's five-column reservation.
 - `$.ui.invalidate` takes effect after the dispatch that called it, since Qwen Code Mods have no timers.
-- A render can wait behind a tool call and its approval, and the band keeps its last tree meanwhile.
+- A render can wait behind a tool call and its approval, and the band keeps its last tree meanwhile. A tool call, command or turn event queued behind a running render waits for it, up to the hook's 10-second budget.
 - `ui.resolve` hooks are skipped as unsupported. `hover` is checked but not drawn.
 - Refusal lines go only to the debug log, since Qwen Code has no hot reload.
 - JSX is not compiled yet, although `h` and `Fragment` exist.

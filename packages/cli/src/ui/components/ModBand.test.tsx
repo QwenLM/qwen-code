@@ -76,6 +76,61 @@ describe('ModBand', () => {
     expect(wide.split('\n')[0]).toBe('y'.repeat(95));
   });
 
+  it('truncates text whose wrap is end or middle, as Claude Code does', () => {
+    const text = 'ab '.repeat(70).trim();
+    for (const [wrap, expected] of [
+      ['end', 'truncate-end'],
+      ['middle', 'truncate-middle'],
+    ] as const) {
+      const truncated = render(
+        <ModBand
+          maxRows={4}
+          band={band({
+            type: 'Box',
+            children: [
+              { type: 'Text', props: { wrap: expected }, children: [text] },
+            ],
+          })}
+        />,
+      ).lastFrame();
+      const frame = render(
+        <ModBand
+          maxRows={4}
+          band={band({
+            type: 'Box',
+            children: [{ type: 'Text', props: { wrap }, children: [text] }],
+          })}
+        />,
+      ).lastFrame()!;
+      // ink-testing-library draws 100 columns.
+      expect(
+        Math.max(...frame.split('\n').map((line) => line.length)),
+      ).toBeLessThanOrEqual(100);
+      expect(frame).toBe(truncated);
+    }
+  });
+
+  it('keeps a tree wider than the terminal within its columns', () => {
+    for (const props of [
+      { width: 500 },
+      { minWidth: 300 },
+      { marginLeft: 200 },
+    ]) {
+      const lines = render(
+        <ModBand
+          maxRows={4}
+          band={band({ type: 'Box', props, children: ['x'.repeat(400)] })}
+        />,
+      )
+        .lastFrame()!
+        .split('\n');
+      // ink-testing-library draws 100 columns.
+      expect(Math.max(...lines.map((line) => line.length))).toBeLessThanOrEqual(
+        100,
+      );
+    }
+  });
+
   it('takes a third of the terminal rows, at least one', () => {
     expect(modBandMaxRows(24)).toBe(8);
     expect(modBandMaxRows(2)).toBe(1);
