@@ -181,6 +181,7 @@ export interface LivePromptOptions {
   onStreamEvent?: (event: ServerLlmStreamEvent) => void;
   /** Called when every tool of a round was cancelled, which ends the turn. */
   onToolsCancelled?: () => void;
+  onExecutingShells?: (calls: readonly ExecutingShellCall[]) => void;
 }
 
 /**
@@ -200,6 +201,12 @@ export interface WaitingCallInfo {
   callId: string;
   name: string;
   confirmationDetails: ToolCallConfirmationDetails;
+}
+
+export interface ExecutingShellCall {
+  callId: string;
+  pid?: number;
+  promoteAbortController?: AbortController;
 }
 
 // ink useGeminiStream EDIT_TOOL_NAMES parity (AUTO_EDIT auto-approves edits only).
@@ -1095,6 +1102,7 @@ export async function* livePromptEvents(
         ),
       });
     };
+    let shellOwnerOpen = true;
     const scheduler = new InteractiveModToolScheduler({
       config,
       onNativeAttempt: (call) =>
@@ -1109,6 +1117,23 @@ export async function* livePromptEvents(
         for (const ev of mapOutputChunk(callId, chunk)) live.push(ev);
       },
       onToolCallsUpdate: (calls) => {
+        if (shellOwnerOpen)
+          options?.onExecutingShells?.(
+            current() && !abort.aborted
+              ? calls.flatMap((call) =>
+                  call.status === 'executing' &&
+                  call.request.name === ToolNames.SHELL
+                    ? [
+                        {
+                          callId: call.request.callId,
+                          pid: call.pid,
+                          promoteAbortController: call.promoteAbortController,
+                        },
+                      ]
+                    : [],
+                )
+              : [],
+          );
         emitPermissionTransitions(calls);
         // Real invocation descriptions (ink mapToDisplay): the card title is
         // the tool's own getDescription() off the tracked call's invocation,
@@ -1205,6 +1230,10 @@ export async function* livePromptEvents(
         }
       },
       onAllToolCallsComplete: async (calls) => {
+        if (shellOwnerOpen) {
+          shellOwnerOpen = false;
+          options?.onExecutingShells?.([]);
+        }
         publishToolHistory(calls);
         emitPermissionTransitions(calls);
         completed = calls.filter(
@@ -1221,6 +1250,10 @@ export async function* livePromptEvents(
     );
     const scheduled = scheduler.schedule(pending as never, abort);
     void scheduled.catch((error: unknown) => {
+      if (shellOwnerOpen) {
+        shellOwnerOpen = false;
+        options?.onExecutingShells?.([]);
+      }
       const cancelled =
         abort.aborted ||
         (error instanceof Error && error.name === 'AbortError');
