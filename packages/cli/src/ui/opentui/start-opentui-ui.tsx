@@ -102,6 +102,7 @@ import {
   foldBatch,
   useOpenTuiLiveTurn,
   type OpenTuiSubmitOptions,
+  type ForegroundShellOwner,
 } from './live-turn.js';
 import type { LiveHistoryItem } from './live-session-model.js';
 import { ensureConfigInitialized } from './live-session.js';
@@ -356,7 +357,7 @@ function OpenTuiEntryApp({
 
   // --- seams handed to the shell ---------------------------------------------
   const renderMain = useCallback(
-    () => (
+    (shell?: { owner: ForegroundShellOwner | null; focused: boolean }) => (
       <box flexDirection="column">
         {/* The transcript box carries two columns of margin on each side, so
             its content budget is 4 short of the terminal width. */}
@@ -372,6 +373,8 @@ function OpenTuiEntryApp({
           }
           mouseTracking={settings.merged.ui?.mouseTracking !== false}
           awaitingCallId={live.waitingCalls[0]?.callId}
+          activeShellCallId={shell?.owner?.callId}
+          focusedShellCallId={shell?.focused ? shell.owner?.callId : undefined}
         />
       </box>
     ),
@@ -485,6 +488,7 @@ function OpenTuiEntryApp({
       approvalMode={config.getApprovalMode()}
       messageQueue={live.messageQueue}
       onPopQueue={live.popQueue}
+      foregroundShellControl={live}
       waitingToolCalls={live.waitingCalls}
       onToolCallSettled={live.settleWaitingCall}
       onRenderError={handleRenderError}

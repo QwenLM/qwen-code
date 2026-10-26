@@ -783,6 +783,7 @@ describe('AppContainer State Management', () => {
           initialize,
           subscribe: () => () => {},
           setPresentation: vi.fn(),
+          setRenderInput: vi.fn(),
         } as unknown as interactiveMods.InteractiveModSession);
       vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
       vi.spyOn(mockConfig, 'isInteractive').mockReturnValue(true);
@@ -7361,6 +7362,70 @@ describe('AppContainer State Management', () => {
       expect(lastCall[2]).toBe(1);
     });
 
+    it('reports the Mod band input and measures the controls again for a new tree', () => {
+      mockedUseTerminalSize.mockReturnValue({ columns: 100, rows: 30 });
+      mockedMeasureElement.mockReturnValue({ width: 100, height: 5 });
+      let band: interactiveMods.ModBand | undefined;
+      let notify = () => {};
+      const setRenderInput = vi.fn();
+      const modSession = {
+        initialize: vi.fn().mockResolvedValue(undefined),
+        subscribe: () => () => {},
+        setPresentation: vi.fn(),
+        setRenderInput,
+        subscribeBand: (listener: () => void) => {
+          notify = listener;
+          return () => {};
+        },
+        getBand: () => band,
+      } as unknown as interactiveMods.InteractiveModSession;
+      const getModSession = interactiveMods.getInteractiveModSession;
+      const owner = vi
+        .spyOn(interactiveMods, 'getInteractiveModSession')
+        .mockImplementation((config) =>
+          config === mockConfig ? modSession : getModSession(config),
+        );
+      try {
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+        expect(setRenderInput).toHaveBeenLastCalledWith({
+          surface: 'terminal',
+          component: 'AbovePrompt',
+          requestId: 'above-prompt',
+          viewport: { columns: 100, rows: 30, isFullscreen: false },
+          props: {
+            hasSurvey: false,
+            isWorking: false,
+            maxRows: 10,
+            bodyColumns: 95,
+            scroll: { offset: 0, bodyRows: 9 },
+            view: {},
+          },
+        });
+        const measured = mockedMeasureElement.mock.calls.length;
+        act(() => {
+          band = {
+            tree: { type: 'Text', children: ['☀'] },
+            owner: 'token-weather',
+            revision: 1,
+          };
+          notify();
+        });
+        expect(mockedMeasureElement.mock.calls.length).toBeGreaterThan(
+          measured,
+        );
+      } finally {
+        owner.mockRestore();
+        mockedMeasureElement.mockReset();
+      }
+    });
+
     it('hands ink the shared STATIC_EXTRA_HEIGHT for its dialog budget', () => {
       render(
         <AppContainer
@@ -7592,6 +7657,7 @@ describe('AppContainer State Management', () => {
         const runtime = {
           initialize: vi.fn().mockResolvedValue(undefined),
           loadCommands: vi.fn().mockResolvedValue([]),
+          setRenderInput: vi.fn(),
           close: vi.fn().mockResolvedValue(undefined),
         };
         const create = vi
@@ -7705,6 +7771,7 @@ describe('AppContainer State Management', () => {
             return () => {};
           },
           setPresentation: vi.fn(),
+          setRenderInput: vi.fn(),
         } as unknown as interactiveMods.InteractiveModSession;
         // Scope the mock to this test's own Config: mount effects from
         // earlier tests can still be in flight (they run the real
