@@ -72,6 +72,7 @@ public final class ManagedSchemaContract {
         STORAGE_MIGRATION,
         CSI_RETIREMENT,
         WORKSPACE_RETIREMENT,
+        WORKSPACE_UPLOAD,
         CHANNEL_INGRESS,
         SUBMIT_INPUT,
         CANCEL

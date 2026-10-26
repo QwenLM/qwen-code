@@ -562,6 +562,21 @@ export interface ManagedAgentProvider {
       request: components['schemas']['WebShellWorkspaceFileReadRequest'],
       options: ManagedAgentRequestOptions,
     ): Promise<components['schemas']['WebShellWorkspaceFileSnapshot']>;
+    upload?(
+      request: {
+        workspaceId: string;
+        cwdRelative: string;
+        path: string;
+        expectedScopeRevision: string;
+        uploadId: string;
+      },
+      data: Blob,
+      options: ManagedAgentRequestOptions,
+    ): Promise<components['schemas']['WebShellWorkspaceFileUploadResult']>;
+    queryUpload?(
+      uploadId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<components['schemas']['WebShellWorkspaceFileUploadStatus']>;
   };
   readonly workspaceBinding?: {
     readonly agentId: string;

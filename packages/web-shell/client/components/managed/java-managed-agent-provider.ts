@@ -215,6 +215,10 @@ export function createJavaManagedAgentProvider(
         client.queryWorkspaceFiles(request, command.signal),
       read: (request, command) =>
         client.readWorkspaceFile(request, command.signal),
+      upload: (request, data, command) =>
+        client.uploadWorkspaceFile(request, data, command.signal),
+      queryUpload: (uploadId, command) =>
+        client.queryWorkspaceFileUpload(uploadId, command.signal),
     },
     canCancel: true,
     titleSearch: true,

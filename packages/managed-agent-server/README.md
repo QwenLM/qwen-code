@@ -844,6 +844,12 @@ packaged-stack E2E, which have no ingress,
 then trusted as the actor for the request's tenant. It is disabled by default;
 never enable it where untrusted clients can reach the server.
 
+### Upload files into a Workspace
+
+With Workspace file access enabled and compatible Server, CLI and WebShell artifacts, select a persisted LOCAL or SSH_LOCAL Workspace and choose **Add file → Upload to workspace**. Uploads accept binary and empty files up to 8 MiB each, use an existing destination directory, and reject occupied paths without overwriting them. The composer inserts a scoped path reference for tools to use; binary bytes are not converted into a small-text snapshot or message attachment. Old CLIs leave upload disabled. CSI, folder uploads and automatic directory creation are unsupported.
+
+Uploads require an authenticated actor with OPERATOR or OWNER access and verified storage. An execution-storage member, including a retained MCP Runtime, keeps the Workspace busy. A durable physical-storage hold excludes new execution and retirement until the original upload has a definite result. If the response is uncertain, query the original upload ID; recovery does not replay the write on another Runtime. Cancelling the browser request does not delete a file already committed. See the [English design](../../docs/design/2026-10-26-managed-workspace-upload.md) and [Chinese design](../../docs/design/2026-10-26-managed-workspace-upload.zh-CN.md) for the protocol, recovery and acceptance boundaries.
+
 ### Create empty Workspaces from WebShell
 
 Set `QWEN_MANAGED_AGENT_WORKSPACE_CREATION_ROOT` to an existing canonical, server-owned directory to enable **New workspace → Start from scratch** in the Managed composer. The default is disabled. The root must be separate from static Workspace mounts, the default Workspace cwd, and private Runtime state. Enable Workspace files, the Session Store, the durable Session-isolated local-process Broker and verified local Workspace recovery first. Enabling this setting authorizes authenticated tenant actors to allocate independent empty roots and receive OWNER access; only enable it for tenants allowed to consume this host's storage.

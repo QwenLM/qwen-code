@@ -182,6 +182,42 @@ public class SshWorkspaceService implements AutoCloseable, AcceptanceEvidence {
         return result;
     }
 
+    public record FileTarget(SshRuntimeNode node, Map<String, Object> request, String qwenVersion) {
+    }
+
+    public FileTarget freezeFiles(ContextBinding binding) {
+        verifyBinding(binding);
+        var storage = runtimeStorage(binding);
+        var node = configuredNode(storage.nodeId()).runtimeNode();
+        Map<String, Object> request = new LinkedHashMap<>();
+        request.put("protocolVersion", 1);
+        request.put("operation", "probe");
+        request.put("nodeId", node.nodeId());
+        request.put("stateDirectory", node.stateDirectory());
+        request.put("root", storage.mountRoot());
+        request.put("allowedRoots", node.allowedRoots());
+        request.put("cwdRelative", binding.getCwdRelative());
+        request.put("identity", storage.registration().get("identity"));
+        request.put("marker", storage.registration().get("marker"));
+        return new FileTarget(node, request, (String) storage.registration().get("qwenVersion"));
+    }
+
+    public Map<String, Object> upload(FileTarget target, Map<String, Object> files) {
+        if (TransactionSynchronizationManager.isActualTransactionActive()) {
+            throw new IllegalStateException("SSH file access must run outside SQL transactions");
+        }
+        if (!configuredNode(target.node().nodeId()).runtimeNode().equals(target.node())) {
+            throw unavailable();
+        }
+        Map<String, Object> request = new LinkedHashMap<>(target.request());
+        request.put("files", files);
+        var result = connections().upload(target.node(), request);
+        if (!target.qwenVersion().equals(result.get("qwenVersion"))) {
+            throw unavailable();
+        }
+        return result;
+    }
+
     private SshRuntimeSettings.Node admit(String tenant, String actor, String id) {
         if (!properties.getRuntimeBroker().getSsh().isEnabled()) {
             throw new ManagedAgentException(HttpStatus.NOT_FOUND, "ssh_runtime_disabled", "SSH Workspace registration is disabled.");

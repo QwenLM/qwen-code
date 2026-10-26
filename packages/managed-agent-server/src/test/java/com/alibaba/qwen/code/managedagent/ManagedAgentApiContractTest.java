@@ -175,6 +175,22 @@ class ManagedAgentApiContractTest {
                     entry(ApiModels.WebShellToolResultRequest.class, List.of("WebShellToolResultRequest")),
                     entry(SshWorkspaceController.DirectoryRequest.class, List.of("WebShellWorkspaceDirectoryRequest")),
                     entry(WorkspaceDiscoveryController.DirectoryRequest.class, List.of("WebShellWorkspaceDirectoryQueryRequest")),
+                    entry(com.alibaba.qwen.code.managedagent.api.WorkspaceFileController.QueryRequest.class,
+                            List.of("WebShellWorkspaceFileQueryRequest")),
+                    entry(com.alibaba.qwen.code.managedagent.api.WorkspaceFileController.ReadRequest.class,
+                            List.of("WebShellWorkspaceFileReadRequest")),
+                    entry(com.alibaba.qwen.code.managedagent.api.WorkspaceFileController.UploadQueryRequest.class,
+                            List.of("WebShellWorkspaceFileUploadQueryRequest")),
+                    entry(com.alibaba.qwen.code.managedagent.persistence.WorkspaceFileStore.QueryResult.class,
+                            List.of("WebShellWorkspaceFilePage")),
+                    entry(com.alibaba.qwen.code.managedagent.persistence.WorkspaceFileStore.FileResult.class,
+                            List.of("WebShellWorkspaceFileSnapshot")),
+                    entry(com.alibaba.qwen.code.managedagent.persistence.WorkspaceFileStore.Entry.class,
+                            List.of("WebShellWorkspaceFileEntry")),
+                    entry(com.alibaba.qwen.code.managedagent.persistence.WorkspaceFileUploadStore.UploadResult.class,
+                            List.of("WebShellWorkspaceFileUploadResult")),
+                    entry(com.alibaba.qwen.code.managedagent.persistence.WorkspaceFileUploadStore.UploadStatus.class,
+                            List.of("WebShellWorkspaceFileUploadStatus")),
                     entry(SshWorkspaceController.CreateRequest.class, List.of("WebShellWorkspaceRegisterRequest")),
                     entry(SshWorkspaceController.OperationRequest.class, List.of("WebShellWorkspaceOperationRequest")),
                     entry(SshWorkspaceService.NodeSummary.class, List.of("WebShellRuntimeNode")),
@@ -1459,6 +1475,16 @@ class ManagedAgentApiContractTest {
                 post(WEB_SHELL + "/workspaces/files/read")
                         .header(TENANT, workspaceTenant).principal(actor),
                 "{\"workspaceId\":\"ws-default\",\"cwdRelative\":\".\",\"path\":\"a.txt\",\"expectedScopeRevision\":\"old\"}");
+        exchange(drift, "webShellWorkspaceFilesUpload", 409,
+                post(WEB_SHELL + "/workspaces/files/upload")
+                        .header(TENANT, workspaceTenant).principal(actor)
+                        .param("workspaceId", "ws-default").param("cwdRelative", ".").param("path", "file.bin")
+                        .param("expectedScopeRevision", "a".repeat(64)).param("uploadId", UUID.randomUUID().toString())
+                        .contentType(MediaType.APPLICATION_OCTET_STREAM).content(new byte[] {0}), null);
+        exchange(drift, "webShellWorkspaceFilesUploadQuery", 404,
+                post(WEB_SHELL + "/workspaces/files/uploads/query")
+                        .header(TENANT, workspaceTenant).principal(actor),
+                "{\"uploadId\":\"" + UUID.randomUUID() + "\"}");
         String publicBoundId = json(exchange(drift, "createSession", 202,
                 post("/v1/agents/sessions").header(TENANT, workspaceTenant)
                         .principal(actor).header(IDEMPOTENCY_KEY, "bound-public"),
