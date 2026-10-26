@@ -2091,7 +2091,7 @@ jobs:
           if [ "$SCRIPTS_RC" -ne 0 ]; then
             echo '::warning::The complete Windows script suite has known baseline failures; its full result remains visible above.'
           fi
-          npx vitest run scripts/tests/install-script.test.js --config scripts/tests/vitest.config.ts
+          npx vitest run scripts/tests/install-script.test.js scripts/tests/opentui-preview-install.test.js --config scripts/tests/vitest.config.ts --retry=0 --bail=1 --maxWorkers=1 --minWorkers=1 --dangerouslyIgnoreUnhandledErrors=false
           INSTALLER_RC=$?
           set -e
           pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true
