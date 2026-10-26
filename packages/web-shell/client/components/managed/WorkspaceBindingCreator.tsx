@@ -1620,6 +1620,7 @@ export function WorkspaceBindingCreator({
               skillsLoadError={skills.error}
               skillsLoaded={skills.loaded}
               fileReferenceActions={fileReferences.actions}
+              fileUploadTarget={fileReferences.uploadTarget}
               persistFileReferences
               existingFolderWorkspaceSupported={
                 registrationAvailable && Boolean(binding.registration)

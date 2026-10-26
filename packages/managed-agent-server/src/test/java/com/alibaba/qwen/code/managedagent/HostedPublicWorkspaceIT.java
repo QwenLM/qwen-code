@@ -1893,10 +1893,14 @@ class HostedPublicWorkspaceIT {
                 assertThat(tools).contains("read_file", "write_file", "edit", "run_shell_command");
                 assertThat(tools).doesNotContain("team_create", "workflow", "send_message");
             } else if (shell) {
-                assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit", "web_fetch", "run_shell_command", "glob");
+                var expectedTools = new ArrayList<>(List.of("read_file", "write_file", "edit", "web_fetch", "run_shell_command", "glob"));
+                if (shellLifecycleV2) {
+                    expectedTools.add("monitor");
+                }
+                assertThat(tools).containsExactlyInAnyOrderElementsOf(expectedTools);
                 body.path("tools").forEach(tool -> {
                     if ("run_shell_command".equals(tool.at("/function/name").asText())) {
-                        assertThat(tool.at("/function/parameters/properties").has("is_background")).isFalse();
+                        assertThat(tool.at("/function/parameters/properties").has("is_background")).isEqualTo(shellLifecycleV2);
                     }
                 });
             } else if (resident) {
