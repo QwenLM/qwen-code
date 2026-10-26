@@ -15,10 +15,10 @@ Qwen Code / any MCP client
 Node.js 22 or later and npm are required. Register the MCP server, then restart Qwen Code:
 
 ```bash
-qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.26.0
+qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.27.0
 ```
 
-The server installs the matching SDK and browser SDK as dependencies. The native SDK payload is downloaded for the current platform and verified against the matching release's SHA-256 checksums. It is cached outside the npm package; no workspace SDK bootstrap command is needed. Version 0.26.0 is a local development target until its release is published.
+The server installs the matching SDK and browser SDK as dependencies. The native SDK payload is downloaded for the current platform and verified against the matching release's SHA-256 checksums. It is cached outside the npm package; no workspace SDK bootstrap command is needed. Version 0.27.0 is a local development target until its release is published.
 
 Windows uses ordinary input delivery by default and does not install a UIAccess
 worker. Opting into UIAccess with `CUA_DRIVER_USE_UIACCESS=1` requires a signed
@@ -69,12 +69,14 @@ The server executes JavaScript with ordinary Node.js permissions and follows the
 
 `js` completes in one call and defaults to a 30-second timeout. A timeout can leave external effects; observe before retrying. `js_reset` discards bindings and gracefully closes the owning native/browser session. After context compaction call `cua.rewriteDocumentation()` before continuing.
 
+The native agent cursor is enabled by default. On macOS, a local PiP refreshes the session's two most recently observed, authorized windows even between actions. Drag its header to move it or close it to stop the preview; the image does not forward input to the target. Reset closes the owning cursor and preview. Add `--no-overlay` or `--no-pip` to the server arguments to disable either surface. PiP is macOS-only.
+
 ## Remote desktop relay
 
 For an existing macOS desktop relay setup, install its matching server:
 
 ```bash
-npx -y @qwen-code/node-repl-mcp@0.26.0 desktop-relay install
+npx -y @qwen-code/node-repl-mcp@0.27.0 desktop-relay install
 ```
 
 This uses the existing local launchd socket at `127.0.0.1:47821`. In a secure Web Shell, choose **Use this computer**, then **Connect this computer**. The desktop prompts for each connection. The remote daemon must enable `QWEN_SERVE_CLIENT_MCP_OVER_WS=1`.

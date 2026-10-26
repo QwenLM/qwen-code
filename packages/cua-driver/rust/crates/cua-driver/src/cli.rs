@@ -616,19 +616,15 @@ pub fn parse_command() -> Command {
         println!("doctor options:");
         println!("  --json                  Emit the probe report as JSON for scripting.");
         println!();
-        println!("experimental options (default: off):");
-        println!("  --experimental-pip          Show a small always-on-top window with the latest");
+        println!("window preview options (macOS, enabled by default):");
+        println!("  --no-pip                    Disable local live window previews.");
+        println!("  --experimental-pip / --pip  Enable previews; retained compatibility aliases.");
         println!(
-            "                              post-action screenshot + a 1-line label. macOS only"
+            "  --experimental-pip-geometry WxH[+X+Y]   Preview size and optional top-left origin."
         );
         println!(
-            "                              today; Win/Linux print a not-yet-implemented notice."
+            "                                          Defaults to 320x200, near the top-right."
         );
-        println!(
-            "  --experimental-pip-geometry WxH[+X+Y]   Override window size (and optional top-left"
-        );
-        println!("                                          origin). Defaults to 480x360 in the top-right");
-        println!("                                          corner of the main display.");
         std::process::exit(0);
     }
 
@@ -1190,6 +1186,17 @@ pub fn launch_daemon_and_wait(
     // pre-existing daemon keeps whatever surface it launched with.
     if claude_code_compat {
         open_args.push("--claude-code-computer-use-compat");
+    }
+    let ui_flags: Vec<_> = std::env::args()
+        .filter(|argument| {
+            matches!(
+                argument.as_str(),
+                "--no-overlay" | "--no-pip" | "--experimental-pip" | "--pip"
+            )
+        })
+        .collect();
+    for flag in &ui_flags {
+        open_args.push(flag.as_str());
     }
     for grant in grants {
         open_args.push("--grant");
@@ -3151,7 +3158,8 @@ fn cli_docs_json() -> serde_json::Value {
                     {"name":"approve-session-policy","short_name":null,"help":"Deprecated alias for approve-capability-manifest.","default_value":false},
                     {"name":"no-permissions-gate","short_name":null,"help":"Skip the macOS first-launch permissions gate.","default_value":false},
                     {"name":"embedded","short_name":null,"help":"Run embedded inside a host app: inherit the host's TCC grants, never prompt or relaunch. Also CUA_DRIVER_EMBEDDED=1.","default_value":false},
-                    {"name":"no-overlay","short_name":null,"help":"Disable the agent cursor overlay for this daemon.","default_value":false}
+                    {"name":"no-overlay","short_name":null,"help":"Disable the agent cursor overlay for this daemon.","default_value":false},
+                    {"name":"no-pip","short_name":null,"help":"Disable local live window previews on macOS.","default_value":false}
                 ],
                 "subcommands": no_subcommands
             },
