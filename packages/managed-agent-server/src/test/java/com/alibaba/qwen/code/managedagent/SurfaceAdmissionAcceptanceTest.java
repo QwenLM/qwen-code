@@ -530,7 +530,7 @@ class SurfaceAdmissionAcceptanceTest {
                 expect(entry, null, 401, "actor_required");
                 expect(entry, STRANGER, 404, entry.capabilities().contains(
                         Capability.WORKSPACE_FILES_UPLOAD_QUERY)
-                                ? "workspace_upload_not_found" : "workspace_not_found");
+                        ? "workspace_upload_not_found" : "workspace_not_found");
             }
             case WORKSPACE_ALLOCATION -> {
                 expect(entry, null, 401, "actor_required");
