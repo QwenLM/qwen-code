@@ -69,6 +69,10 @@ export interface GitWorkspaceCloneControls {
 }
 
 interface AddWorkspaceDialogProps {
+  /** Overrides the default "Add Workspace" heading. */
+  title?: string;
+  /** Overrides the default submit label; the in-flight label is unchanged. */
+  submitLabel?: string;
   executionMode?: WorkspaceExecutionMode;
   onExecutionModeChange?: (mode: WorkspaceExecutionMode) => void;
   executionModeLocked?: boolean;
@@ -131,6 +135,8 @@ function targetBasename(value: string): string {
 }
 
 export function AddWorkspaceDialog({
+  title,
+  submitLabel,
   executionMode,
   onExecutionModeChange,
   executionModeLocked,
@@ -857,7 +863,7 @@ export function AddWorkspaceDialog({
 
   return (
     <DialogShell
-      title={t('sidebar.addWorkspaceTitle')}
+      title={title ?? t('sidebar.addWorkspaceTitle')}
       size="md"
       dismissible={!submitting}
       onClose={onClose}
@@ -1415,7 +1421,8 @@ export function AddWorkspaceDialog({
               >
                 {submitting
                   ? t('sidebar.addWorkspaceAdding')
-                  : t(
+                  : (submitLabel ??
+                    t(
                       source === 'git'
                         ? clonedCwd
                           ? 'sidebar.addWorkspaceRegister'
@@ -1423,7 +1430,7 @@ export function AddWorkspaceDialog({
                         : browseDirectories
                           ? 'workspaceHost.addFolder'
                           : 'sidebar.addWorkspaceRegister',
-                    )}
+                    ))}
               </Button>
             </div>
           </>
