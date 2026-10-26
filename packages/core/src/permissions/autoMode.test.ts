@@ -299,12 +299,42 @@ describe('isAutoModeProtectedWritePath', () => {
           '/home/user/.config/qwen/settings.json',
           '/home/user/.config/qwen/hooks/pre-tool-use.json',
           '/home/user/.config/qwen/skills/review/SKILL.md',
+          '/home/user/.config/qwen/.qwen-global-dir',
         ]);
         expectProtected(['/home/user/.config/qwen/tmp/notes.md'], false);
       } finally {
         globalDir.mockRestore();
       }
     });
+  });
+
+  it('keeps the XDG dir protected while ~/.qwen is the global dir', () => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    restoringQwenHome(() =>
+      inTmpDir('qwen-xdg-home-', (home) => {
+        delete process.env['QWEN_HOME'];
+        vi.stubEnv('HOME', home);
+        vi.stubEnv('USERPROFILE', home);
+        vi.stubEnv('XDG_CONFIG_HOME', undefined);
+        Object.defineProperty(process, 'platform', { value: 'linux' });
+        try {
+          const xdgDir = path.join(home, '.config', 'qwen');
+          expect(Storage.getGlobalQwenDir()).toBe(xdgDir);
+          // Planting the marker here would make the XDG dir win next start,
+          // and a ~/.qwen created mid-session must not unprotect it either.
+          fs.mkdirSync(path.join(home, '.qwen'));
+          expect(Storage.getGlobalQwenDir()).toBe(path.join(home, '.qwen'));
+          expectProtected([
+            path.join(xdgDir, 'settings.json'),
+            path.join(xdgDir, 'hooks', 'pre-tool-use.json'),
+            path.join(xdgDir, '.qwen-global-dir'),
+          ]);
+        } finally {
+          Object.defineProperty(process, 'platform', platform);
+          vi.unstubAllEnvs();
+        }
+      }),
+    );
   });
 
   it('matches real paths under a symlinked custom QWEN_HOME', () => {

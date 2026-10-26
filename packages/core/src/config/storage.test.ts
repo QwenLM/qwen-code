@@ -607,6 +607,24 @@ describe('Storage – default global dir (XDG Base Directory)', () => {
     expect(Storage.getGlobalQwenDir()).toBe(path.join(configHome, 'qwen'));
   });
 
+  it('keeps a marked custom XDG_CONFIG_HOME next to ~/.qwen', () => {
+    const configHome = path.join(home, 'xdg-config');
+    vi.stubEnv('XDG_CONFIG_HOME', configHome);
+    Storage.markDefaultGlobalQwenDir();
+    expect(
+      actualFs.existsSync(path.join(configHome, 'qwen', '.qwen-global-dir')),
+    ).toBe(true);
+    create(legacyDir());
+    expect(Storage.getGlobalQwenDir()).toBe(path.join(configHome, 'qwen'));
+  });
+
+  it('names the XDG directory whether or not it is in use', () => {
+    create(legacyDir());
+    expect(Storage.getXdgGlobalQwenDir()).toBe(xdgDir());
+    Object.defineProperty(process, 'platform', { value: 'darwin' });
+    expect(Storage.getXdgGlobalQwenDir()).toBeUndefined();
+  });
+
   it('ignores a relative XDG_CONFIG_HOME, as the spec requires', () => {
     vi.stubEnv('XDG_CONFIG_HOME', 'relative-config');
     expect(Storage.getGlobalQwenDir()).toBe(xdgDir());

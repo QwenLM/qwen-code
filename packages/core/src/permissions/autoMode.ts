@@ -22,7 +22,7 @@ import path from 'node:path';
 import type { Content } from '@google/genai';
 import type { TrustedUserAnswerSnapshot } from './trusted-user-answers.js';
 import { ApprovalMode, type Config } from '../config/config.js';
-import { Storage } from '../config/storage.js';
+import { GLOBAL_DIR_MARKER, Storage } from '../config/storage.js';
 import {
   getAllMemoryFilenames,
   LOCAL_CONTEXT_FILENAME,
@@ -204,29 +204,36 @@ let qwenHomePrefixesCache: string[] | undefined;
 
 function getNormalizedQwenHomePrefixes(): string[] {
   // The global dir can sit outside a `.qwen` directory (QWEN_HOME, or the XDG
-  // config directory on Linux), which the patterns above miss.
-  const qwenHome = Storage.getGlobalQwenDir();
+  // config directory on Linux), which the patterns above miss. The XDG dir is
+  // covered even while ~/.qwen wins, since a write there can make it win.
+  const qwenHomes = [Storage.getGlobalQwenDir()];
+  const xdgDir = Storage.getXdgGlobalQwenDir();
+  if (xdgDir) qwenHomes.push(xdgDir);
+  const cacheKey = qwenHomes.join('\n');
   if (
-    qwenHomePrefixesCacheKey === qwenHome &&
+    qwenHomePrefixesCacheKey === cacheKey &&
     qwenHomePrefixesCache !== undefined
   ) {
     return qwenHomePrefixesCache;
   }
 
-  const candidates = new Set<string>([path.resolve(qwenHome)]);
-  if (qwenHome.startsWith('/') || /^[A-Za-z]:[\\/]/.test(qwenHome)) {
-    candidates.add(qwenHome);
-  }
-  try {
-    candidates.add(fs.realpathSync.native(qwenHome));
-  } catch {
-    // QWEN_HOME may not exist yet; the configured path still matters.
+  const candidates = new Set<string>();
+  for (const qwenHome of qwenHomes) {
+    candidates.add(path.resolve(qwenHome));
+    if (qwenHome.startsWith('/') || /^[A-Za-z]:[\\/]/.test(qwenHome)) {
+      candidates.add(qwenHome);
+    }
+    try {
+      candidates.add(fs.realpathSync.native(qwenHome));
+    } catch {
+      // QWEN_HOME may not exist yet; the configured path still matters.
+    }
   }
 
   const prefixes = [...candidates].map((candidate) =>
     normalizePathForAutoModePattern(candidate).replace(/\/+$/, ''),
   );
-  qwenHomePrefixesCacheKey = qwenHome;
+  qwenHomePrefixesCacheKey = cacheKey;
   qwenHomePrefixesCache = prefixes;
   return prefixes;
 }
@@ -241,6 +248,7 @@ function matchesQwenHomeSurface(normalizedPath: string): boolean {
       /^settings(?:\.[^/]*)?\.json$/.test(relativePath) ||
       /^qwen\.local\.md$/.test(relativePath) ||
       /^\.mcp\.json$/.test(relativePath) ||
+      relativePath === GLOBAL_DIR_MARKER ||
       /^(rules|commands|agents|skills|hooks|fork-profiles)(?:\/|$)/.test(
         relativePath,
       )
