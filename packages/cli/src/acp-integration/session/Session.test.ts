@@ -8784,7 +8784,7 @@ describe('Session', () => {
       const snapshots = records.slice(24).map((record) => ({
         promptId: record.promptId,
       }));
-      mockChat.getHistoryShallow.mockReturnValue(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
       mockChatRecordingService.readActiveTranscriptChain.mockResolvedValue(
         records,
       );
@@ -8830,7 +8830,7 @@ describe('Session', () => {
         if (failure === 'missing') delete records[34]!.promptId;
         if (failure === 'duplicate') records[33]!.promptId = records[34]!.promptId;
         if (failure === 'compacted') {
-          mockChat.getHistoryShallow.mockReturnValue(history.slice(48));
+          vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history.slice(48));
         }
         if (failure === 'persisted-mismatch') records.pop();
         if (failure === 'duplicate-api') history.push(history[68]!);
