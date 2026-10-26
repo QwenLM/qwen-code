@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  completeRestoreToolResponse,
+  type RestoreToolResponseBinding,
+} from '../utils/restore-tool-response.js';
 import { observeInteractiveModTool } from '../../services/interactive-mod-tool-observer.js';
 import {
   useState,
@@ -89,6 +93,7 @@ import {
 import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
+import type { ModTurn } from '../../services/mod-session.js';
 import type {
   HistoryItem,
   HistoryItemWithoutId,
@@ -178,6 +183,7 @@ interface TeammateQueueEntry {
 }
 
 interface ToolContinuationOwner {
+  restoreResponseBinding?: RestoreToolResponseBinding;
   promptId: string;
   signal: AbortSignal;
   survivesGenerationChange: boolean;
@@ -241,6 +247,25 @@ interface GoalTurnBinding {
 }
 
 type GoalTurnAdmission = Omit<GoalTurnBinding, 'permit'>;
+
+interface ForegroundModTurn {
+  turn: ModTurn;
+  promptId: string;
+  ending?: 'aborted' | 'error';
+  // Ends the turn's turn.start hooks, whichever round the cancel ends.
+  cancel: AbortController;
+}
+
+// Records how the Mod turn of `promptId` ended; the first ending stands.
+function recordModTurnEnding(
+  modTurn: ForegroundModTurn | null,
+  promptId: string | undefined,
+  ending: 'aborted' | 'error',
+): void {
+  if (!modTurn || modTurn.promptId !== promptId) return;
+  modTurn.ending ??= ending;
+  if (ending === 'aborted') modTurn.cancel.abort();
+}
 
 function sameGoalPermit(left: GoalTurnPermit, right: GoalTurnPermit): boolean {
   return (
@@ -584,6 +609,7 @@ export const useLlmStream = (
     overwriteConfirmed?: boolean,
     existingInvocationItemId?: number,
     invocationPromptId?: string,
+    isCurrentSubmission?: () => boolean,
   ) => Promise<SlashCommandProcessorResult | false>,
   shellModeActive: boolean,
   getPreferredEditor: () => EditorType | undefined,
@@ -964,6 +990,14 @@ export const useLlmStream = (
   // before submitQuery installs the next turn controller.
   // cancelOngoingRequest aborts these controllers so Ctrl+C still cancels them.
   const auxiliaryAbortRefsRef = useRef<Set<AbortController>>(new Set());
+  // The Mods hear the foreground turn from its admission until the stream
+  // goes idle; a cancel or a failure on the way records how it ended.
+  const modTurnRef = useRef<ForegroundModTurn | null>(null);
+  // Whether the quiet cancel `$.turn.abort` asked for ended anything.
+  const cancelForModRef = useRef<() => boolean>(() => false);
+  const quietCancelRef = useRef(false);
+  // A turn whose stream ends at once may never render as Responding.
+  const [modTurnId, setModTurnId] = useState<string>();
   const [pendingHistoryItem, pendingHistoryItemRef, setPendingHistoryItem] =
     useStateAndRef<HistoryItemWithoutId | null>(null);
   // Mixed assistant output needs multiple live rows to preserve
@@ -1299,11 +1333,31 @@ export const useLlmStream = (
 
   useEffect(() => () => stopRetryCountdownTimer(), [stopRetryCountdownTimer]);
 
-  const onExec = useCallback(async (done: Promise<void>) => {
-    setIsResponding(true);
-    await done;
-    setIsResponding(false);
-  }, []);
+  const onExec = useCallback(
+    async (done: Promise<void>) => {
+      const shellAbortController = abortControllerRef.current;
+      if (shellAbortController) {
+        detachedToolContinuationAbortControllersRef.current.add(
+          shellAbortController,
+        );
+      }
+      const releaseShellActivity = retainSubmissionActivity(
+        submissionLeaseGenerationRef.current,
+      );
+      setIsResponding(true);
+      try {
+        await done;
+      } finally {
+        if (shellAbortController) {
+          detachedToolContinuationAbortControllersRef.current.delete(
+            shellAbortController,
+          );
+        }
+        releaseShellActivity();
+      }
+    },
+    [retainSubmissionActivity],
+  );
   const { handleShellCommand, activeShellPtyId } = useShellCommandProcessor(
     addItem,
     setPendingHistoryItem,
@@ -1367,6 +1421,14 @@ export const useLlmStream = (
   useEffect(() => {
     if (streamingState === StreamingState.Idle) setWorkflowKeywordActive(false);
   }, [streamingState]);
+  const finishModTurn = useCallback(() => {
+    const current = modTurnRef.current;
+    modTurnRef.current = null;
+    void current?.turn.complete(current.ending);
+  }, []);
+  useEffect(() => {
+    if (streamingState === StreamingState.Idle) finishModTurn();
+  }, [streamingState, modTurnId, finishModTurn]);
   useEffect(() => {
     setWorkflowKeywordActive(false);
   }, [config, sessionStates.sessionId]);
@@ -1390,17 +1452,32 @@ export const useLlmStream = (
     }
   }, [streamingState, config, history]);
 
-  const cancelOngoingRequest = useCallback(() => {
+  const cancelOngoingRequest = useCallback((): boolean => {
+    // Set for one call by `$.turn.abort`: the same cancel, without its
+    // notice, the loop stop or the composer restore.
+    const quiet = quietCancelRef.current;
+    quietCancelRef.current = false;
     setWorkflowKeywordActive(false);
     if (turnCancelledRef.current) {
       for (const controller of detachedToolContinuationAbortControllersRef.current) {
         controller.abort();
       }
       detachedToolContinuationAbortControllersRef.current.clear();
-      return;
+      return false;
     }
-    if (streamingState !== StreamingState.Responding) {
-      return;
+    // A Mod can end its turn before React renders the turn's admission:
+    // the turn and the stream it opened already count.
+    if (
+      quiet
+        ? streamingState === StreamingState.Idle &&
+          !(modTurnRef.current && activeModelStreamsRef.current > 0)
+        : streamingState !== StreamingState.Responding
+    ) {
+      return false;
+    }
+    if (modTurnRef.current) {
+      modTurnRef.current.ending = 'aborted';
+      modTurnRef.current.cancel.abort();
     }
     // Flush throttled stream chunks FIRST so anything sitting in the
     // per-turn bufferedEvents lands on `pendingHistoryItemRef.current`
@@ -1451,8 +1528,9 @@ export const useLlmStream = (
     // wakeups so the loop doesn't resume after the cancelled tick. Only clears
     // session wakeups (never cron jobs); lazily-creating an empty scheduler
     // here is inert.
-    const loopWakeupsCancelled =
-      config.getCronScheduler()?.cancelAllWakeups() ?? 0;
+    const loopWakeupsCancelled = quiet
+      ? 0
+      : (config.getCronScheduler()?.cancelAllWakeups() ?? 0);
     // Cancel any in-flight auxiliary work so its Promise.then doesn't add
     // stale content after the user cancelled.
     for (const ac of auxiliaryAbortRefsRef.current) {
@@ -1479,13 +1557,15 @@ export const useLlmStream = (
     if (pendingHistoryItemRef.current) {
       commitItemInOrder(pendingHistoryItemRef.current, Date.now());
     }
-    addItem(
-      {
-        type: MessageType.INFO,
-        text: 'Request cancelled.',
-      },
-      Date.now(),
-    );
+    if (!quiet) {
+      addItem(
+        {
+          type: MessageType.INFO,
+          text: 'Request cancelled.',
+        },
+        Date.now(),
+      );
+    }
     if (loopWakeupsCancelled > 0) {
       addItem(
         {
@@ -1514,17 +1594,19 @@ export const useLlmStream = (
     // either move the auto-restore check to read functional setState
     // or revisit isSyntheticHistoryItem.
     try {
-      onCancelSubmit({
-        pendingItem: pendingItemAtCancel,
-        lastTurnUserItem: lastTurnUserItemRef.current,
-        canUndoLastLoggedUserMessage: canUndoLastLoggedUserMessageRef.current,
-        turnProducedMeaningfulContent: turnSawContentEventRef.current,
-        wasGoalTurn: activeGoalTurnRef.current !== null,
-      });
+      if (!quiet)
+        onCancelSubmit({
+          pendingItem: pendingItemAtCancel,
+          lastTurnUserItem: lastTurnUserItemRef.current,
+          canUndoLastLoggedUserMessage: canUndoLastLoggedUserMessageRef.current,
+          turnProducedMeaningfulContent: turnSawContentEventRef.current,
+          wasGoalTurn: activeGoalTurnRef.current !== null,
+        });
     } finally {
       setIsResponding(false);
       setShellInputFocused(false);
     }
+    return true;
   }, [
     streamingState,
     addItem,
@@ -1538,6 +1620,16 @@ export const useLlmStream = (
     getPromptCount,
     setSubmissionInFlight,
   ]);
+  // `$.turn.abort` arrives from the Mod worker, outside any render.
+  useLayoutEffect(() => {
+    cancelForModRef.current = () => {
+      // A turn already cancelled is not the Mod's to end; a second cancel
+      // would also abort the detached work the first one spared.
+      if (turnCancelledRef.current) return false;
+      quietCancelRef.current = true;
+      return cancelOngoingRequest();
+    };
+  }, [cancelOngoingRequest]);
 
   const applyVisionBridgeIfNeeded = useCallback(
     async (
@@ -1638,10 +1730,14 @@ export const useLlmStream = (
       humanInput?: HumanPromptInput,
       pasteExpansions?: ReadonlyMap<string, string>,
       hasUnknownInput?: boolean,
+      isCurrentSubmission?: () => boolean,
     ): Promise<{
       queryToSend: PartListUnion | null;
       shouldProceed: boolean;
-      scheduledToolCallId?: string;
+      scheduledClientTool?: {
+        request: ToolCallRequestInfo;
+        restoreResponseBinding?: RestoreToolResponseBinding;
+      };
     }> => {
       if (turnCancelledRef.current && !preserveTurnOwnership) {
         return { queryToSend: null, shouldProceed: false };
@@ -1704,6 +1800,9 @@ export const useLlmStream = (
           submittedPrompt ??
           (isSlash ? trimmedQuery : stripLeadingSystemReminders(trimmedQuery));
         await logger?.logMessage(MessageSenderType.USER, userText);
+        if (abortSignal.aborted) {
+          return { queryToSend: null, shouldProceed: false };
+        }
         canUndoLastLoggedUserMessageRef.current =
           !preserveTurnOwnership && logger != null;
 
@@ -1714,6 +1813,7 @@ export const useLlmStream = (
               undefined,
               undefined,
               submitType === SendMessageType.UserQuery ? prompt_id : undefined,
+              isCurrentSubmission,
             )
           : false;
 
@@ -1733,12 +1833,18 @@ export const useLlmStream = (
                 // gate as model calls, never to fixed-policy semantics.
                 executionOrigin: { kind: 'client' },
               };
-              registerToolBatch(toolCallRequest);
-              scheduleToolCalls([toolCallRequest], abortSignal);
               return {
                 queryToSend: null,
                 shouldProceed: false,
-                scheduledToolCallId: toolCallRequest.callId,
+                scheduledClientTool: {
+                  request: toolCallRequest,
+                  ...(slashCommandResult.restoreResponseBinding
+                    ? {
+                        restoreResponseBinding:
+                          slashCommandResult.restoreResponseBinding,
+                      }
+                    : {}),
+                },
               };
             }
             case 'submit_prompt': {
@@ -1910,8 +2016,6 @@ export const useLlmStream = (
       handleSlashCommand,
       logger,
       shellModeActive,
-      registerToolBatch,
-      scheduleToolCalls,
       applyVisionBridgeIfNeeded,
     ],
   );
@@ -2854,6 +2958,9 @@ export const useLlmStream = (
             }
           }
           dualOutput?.processEvent(event);
+          const modTurn = modTurnRef.current;
+          if (trackInteractionOwner && modTurn && modTurn.promptId === promptId)
+            modTurn.turn.saw(event);
           switch (event.type) {
             case ServerLlmEventType.Thought:
               // Subject-only chunks are discrete status updates for the
@@ -3684,9 +3791,12 @@ export const useLlmStream = (
           submitType === SendMessageType.Cron) &&
         typeof query === 'string' &&
         isSlashCommand(query.trim());
-      if (mods && !dispatchesSlashCommand) {
+      // Whether the Mods started. When they failed, the prompt is refused
+      // with the reason, and the caller releases what it holds.
+      const modsStarted = async (): Promise<boolean> => {
         try {
-          await mods.ready;
+          await mods?.ready;
+          return true;
         } catch {
           addItem(
             {
@@ -3696,10 +3806,13 @@ export const useLlmStream = (
             Date.now(),
           );
           await releaseUndeliveredGoalTurn(metadata?.userAdmission?.turnKey);
-          metadata?.onAdmissionFailed?.();
-          metadata?.onDeliveryFailed?.();
-          return;
+          return false;
         }
+      };
+      if (mods && !dispatchesSlashCommand && !(await modsStarted())) {
+        metadata?.onAdmissionFailed?.();
+        metadata?.onDeliveryFailed?.();
+        return;
       }
       const allowConcurrentBtwDuringResponse =
         submitType === SendMessageType.UserQuery &&
@@ -3945,7 +4058,10 @@ export const useLlmStream = (
         let preparedQuery: {
           queryToSend: PartListUnion | null;
           shouldProceed: boolean;
-          scheduledToolCallId?: string;
+          scheduledClientTool?: {
+            request: ToolCallRequestInfo;
+            restoreResponseBinding?: RestoreToolResponseBinding;
+          };
         };
         try {
           preparedQuery =
@@ -3975,6 +4091,16 @@ export const useLlmStream = (
                     metadata?.humanInput,
                     metadata?.pasteExpansions,
                     metadata?.hasUnknownInput,
+                    () =>
+                      streamingState === StreamingState.Idle &&
+                      workflowConfigRef.current === config &&
+                      !abortSignal.aborted &&
+                      foregroundAbortController !== undefined &&
+                      abortControllerRef.current ===
+                        foregroundAbortController &&
+                      submissionGeneration ===
+                        submissionLeaseGenerationRef.current &&
+                      activeModelStreamsRef.current === 0,
                   );
         } catch (error) {
           await releaseUndeliveredGoalTurn(metadata?.userAdmission?.turnKey);
@@ -3982,21 +4108,46 @@ export const useLlmStream = (
           metadata?.onAdmissionFailed?.();
           throw error;
         }
-        const { queryToSend, shouldProceed, scheduledToolCallId } =
+        const { queryToSend, shouldProceed, scheduledClientTool } =
           preparedQuery;
 
-        if (scheduledToolCallId && foregroundAbortController) {
+        if (scheduledClientTool && foregroundAbortController) {
+          if (scheduledClientTool.restoreResponseBinding) {
+            scheduledClientTool.restoreResponseBinding.executionCallId =
+              scheduledClientTool.request.callId;
+          }
           keepToolContinuationAbortController = true;
-          continuationOwnersByToolCallIdRef.current.set(scheduledToolCallId, {
-            promptId: prompt_id!,
-            signal: abortSignal,
-            survivesGenerationChange: false,
-            foregroundAbortController,
-          });
+          continuationOwnersByToolCallIdRef.current.set(
+            scheduledClientTool.request.callId,
+            {
+              ...(scheduledClientTool.restoreResponseBinding
+                ? {
+                    restoreResponseBinding:
+                      scheduledClientTool.restoreResponseBinding,
+                  }
+                : {}),
+              promptId: prompt_id!,
+              signal: abortSignal,
+              survivesGenerationChange: false,
+              foregroundAbortController,
+            },
+          );
+        }
+
+        if (scheduledClientTool) {
+          registerToolBatch(scheduledClientTool.request);
+          scheduleToolCalls([scheduledClientTool.request], abortSignal);
         }
 
         if (!shouldProceed || queryToSend === null) {
           await releaseUndeliveredGoalTurn(metadata?.userAdmission?.turnKey);
+          releaseSubmissionLease();
+          metadata?.onDeliveryFailed?.();
+          return;
+        }
+        // A slash command that reaches the model waits for the Mods as a
+        // typed prompt does.
+        if (mods && dispatchesSlashCommand && !(await modsStarted())) {
           releaseSubmissionLease();
           metadata?.onDeliveryFailed?.();
           return;
@@ -4190,8 +4341,42 @@ export const useLlmStream = (
             !(typeof query === 'string' && isBtwCommand(query))
               ? metadata?.humanInput
               : undefined;
+          // A prompt the person submitted or retried is a turn the Mods hear.
+          const startsModTurn =
+            mods !== undefined &&
+            !isTurnContinuation &&
+            !allowConcurrentBtwDuringResponse &&
+            !isDetachedToolContinuation &&
+            (submitType === SendMessageType.UserQuery ||
+              submitType === SendMessageType.Retry);
           const sendOptions = {
             type: submitType,
+            ...(startsModTurn
+              ? {
+                  onPromptAdmitted: () => {
+                    // One the stream never left idle for ends first.
+                    finishModTurn();
+                    // Each tool round has its own controller; this one
+                    // spans the turn.
+                    const cancel = new AbortController();
+                    // A retry has no typed prompt. A prompt whose composer
+                    // provenance was lost is heard as it is sent.
+                    const turn = mods?.startTurn(
+                      submitType === SendMessageType.Retry
+                        ? ''
+                        : (metadata?.humanInput?.text ??
+                            submittedPrompt ??
+                            (typeof query === 'string' ? query : '')),
+                      AbortSignal.any([abortSignal, cancel.signal]),
+                      () => cancelForModRef.current(),
+                      prompt_id,
+                    );
+                    if (!turn) return;
+                    modTurnRef.current = { turn, promptId: prompt_id!, cancel };
+                    setModTurnId(turn.id);
+                  },
+                }
+              : {}),
             notificationDisplayText: metadata?.notificationDisplayText,
             todoWorkChainId: metadata?.todoWorkChainId,
             modelOverride: modelOverrideRef.current,
@@ -4291,6 +4476,8 @@ export const useLlmStream = (
           ) {
             cleanupReviewLease = true;
             submitPromptOnCompleteRef.current = null;
+            // A Goal preemption cancels the turn without an Esc.
+            recordModTurnEnding(modTurnRef.current, prompt_id, 'aborted');
             metadata?.onDeliveryFailed?.();
             return;
           }
@@ -4392,6 +4579,7 @@ export const useLlmStream = (
           }
           const loopDetected = loopDetectedRef.current;
           if (loopDetected) {
+            recordModTurnEnding(modTurnRef.current, prompt_id, 'error');
             cleanupReviewLease = true;
             loopDetectedRef.current = false;
             const loopStop = loopStopRef.current;
@@ -4441,6 +4629,15 @@ export const useLlmStream = (
           }
         } catch (error: unknown) {
           cleanupReviewLease = true;
+          // Before the delivery callback, which can record an error.
+          if (!allowConcurrentBtwDuringResponse)
+            recordModTurnEnding(
+              modTurnRef.current,
+              prompt_id,
+              isNodeError(error) && error.name === 'AbortError'
+                ? 'aborted'
+                : 'error',
+            );
           metadata?.onDeliveryFailed?.();
           if (error instanceof UnauthorizedError) {
             onAuthError('Session expired or is unauthorized.');
@@ -4547,6 +4744,8 @@ export const useLlmStream = (
       shellModeActive,
       setModelSwitchedFromQuotaError,
       prepareQueryForLlm,
+      registerToolBatch,
+      scheduleToolCalls,
       processLlmStreamEvents,
       pendingHistoryItemRef,
       addItem,
@@ -4575,6 +4774,7 @@ export const useLlmStream = (
       releaseUndeliveredGoalTurn,
       retainSubmissionActivity,
       setSubmissionInFlight,
+      finishModTurn,
     ],
   );
 
@@ -5271,6 +5471,57 @@ export const useLlmStream = (
           t.request.isClientInitiated &&
           !historyCallIdsWithResponse.has(t.request.callId),
       );
+      for (const toolCall of clientTools) {
+        const owner = continuationOwnersByToolCallIdRef.current.get(
+          toolCall.request.callId,
+        );
+        if (owner?.restoreResponseBinding) {
+          const [final] = await finalizeToolResponses(
+            config,
+            [
+              {
+                callId: toolCall.request.callId,
+                toolName: toolCall.request.name,
+                responseParts: toolCall.response.responseParts,
+                persistedOutputFiles: toolCall.response.persistedOutputFiles,
+                artifacts: toolCall.response.artifacts,
+              },
+            ],
+            new Map(
+              toolCall.request.prompt_id
+                ? [[toolCall.request.callId, toolCall.request.prompt_id]]
+                : [],
+            ),
+          );
+          await completeRestoreToolResponse(
+            owner.restoreResponseBinding,
+            toolCall.request,
+            final.responseParts,
+            () =>
+              workflowConfigRef.current === config &&
+              !owner.signal.aborted &&
+              isCurrentSession() &&
+              owner.foregroundAbortController !== undefined &&
+              abortControllerRef.current === owner.foregroundAbortController,
+            {
+              toolCallResult: {
+                callId: toolCall.request.callId,
+                status: toolCall.status,
+                resultDisplay: toolCall.response.resultDisplay,
+                error: toolCall.response.error,
+                errorType: toolCall.response.errorType,
+                executionStatus: toolCall.response.executionStatus,
+                persistedOutputFiles: final.persistedOutputFiles,
+                artifacts: final.artifacts,
+              },
+              options: goalToolResultProvenance(
+                toolCall.request,
+                final.responseParts,
+              ),
+            },
+          );
+        }
+      }
       if (clientTools.length > 0) {
         markToolsAsSubmitted(clientTools.map((t) => t.request.callId));
       }
@@ -5408,7 +5659,14 @@ export const useLlmStream = (
         status: 'ok' | 'error' | 'cancelled',
         errorMessage?: string,
         errorType?: string,
+        endsModTurn = true,
       ) => {
+        if (endsModTurn && status !== 'ok')
+          recordModTurnEnding(
+            modTurnRef.current,
+            promptId,
+            status === 'cancelled' ? 'aborted' : 'error',
+          );
         if (continuationOwner?.detachedAbortController) {
           detachedToolContinuationAbortControllersRef.current.delete(
             continuationOwner.detachedAbortController,
@@ -6310,10 +6568,13 @@ export const useLlmStream = (
         },
         onDeliveryFailed: () => {
           submissionSettlement?.restore();
+          // The continuation's own failure already marks the Mod turn; a
+          // stale flag from a concurrent /btw must not.
           endToolInteraction(
             'error',
             'tool continuation delivery failed',
             'continuation_delivery_failed',
+            false,
           );
         },
         goalBinding: toolGoalBinding,
@@ -6433,6 +6694,7 @@ export const useLlmStream = (
                   clientHistory,
                   ...(promptIds?.some(Boolean) ? { promptIds } : {}),
                   toolCall: {
+                    callId: toolCall.request.callId,
                     name: toolCall.request.name,
                     args: toolCall.request.args,
                   },

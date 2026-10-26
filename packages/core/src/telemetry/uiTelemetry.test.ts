@@ -235,6 +235,16 @@ describe('UiTelemetryService', () => {
     expect(lastPromptTokenCount).toBe(0);
   });
 
+  it('passes the added event to update listeners', () => {
+    const spy = vi.fn();
+    service.on('update', spy);
+    const event = proResponse();
+
+    service.addEvent(event);
+
+    expect(spy.mock.calls[0][0].event).toBe(event);
+  });
+
   describe('API Response Event Processing', () => {
     it('applies cached-input fallback per session event without changing global metrics', () => {
       const sessionId = 'session-mixed-cache';
@@ -285,6 +295,84 @@ describe('UiTelemetryService', () => {
       expect(metrics.models['gemini-2.5-pro'].api.totalRequests).toBe(1);
       expect(metrics.models['gemini-2.5-flash'].api.totalRequests).toBe(1);
       expect(service.getLastPromptTokenCount()).toBe(0);
+    });
+  });
+
+  describe('Per-event billable output', () => {
+    it.each([
+      { auth: 'openai', output: 150_000 },
+      { auth: 'openai-responses', output: 150_000 },
+      { auth: 'qwen-oauth', output: 150_000 },
+      { auth: 'gemini', output: 270_000 },
+      { auth: undefined, output: 270_000 },
+    ])(
+      'uses the $auth convention when total is missing',
+      ({ auth, output }) => {
+        service.addEvent(
+          apiResponse('model', 1, [100_000, 150_000, 0, 0, 120_000], {
+            auth_type: auth,
+            subagent_name: 'researcher',
+          }),
+          'session-a',
+        );
+        for (const metrics of [
+          service.getMetrics(),
+          service.getMetricsForSession('session-a'),
+        ]) {
+          expect(metrics.billableOutputTokens?.['model']).toEqual({
+            total: output,
+            bySource: { researcher: output },
+          });
+          expect(metrics.models['model'].tokens).toEqual({
+            prompt: 100_000,
+            candidates: 150_000,
+            total: 0,
+            cached: 0,
+            thoughts: 120_000,
+          });
+        }
+      },
+    );
+
+    it('clones billing on rollback, isolates sessions, and resets it with usage', () => {
+      const response = apiResponse('model', 1, [10, 20, 30, 0, 5], {
+        auth_type: 'openai',
+        subagent_name: '__proto__',
+      });
+      service.addEvent(response, 'session-a');
+      const snapshot = service.snapshotForReplay('session-a');
+      service.addEvent(response, 'session-a');
+      service.addEvent(response, 'session-b');
+      expect(snapshot.metrics.billableOutputTokens?.['model'].total).toBe(20);
+      service.restoreFromReplaySnapshot(snapshot);
+      service.addEvent(response, 'session-a');
+      const billable =
+        service.getMetricsForSession('session-a').billableOutputTokens?.[
+          'model'
+        ];
+      expect(billable?.total).toBe(40);
+      expect(billable?.bySource['__proto__']).toBe(40);
+      expect(Object.getPrototypeOf(billable!.bySource)).toBeNull();
+      expect(
+        service.getMetricsForSession('session-b').billableOutputTokens?.[
+          'model'
+        ].total,
+      ).toBe(20);
+      expect(
+        snapshot.sessionMetrics?.billableOutputTokens?.['model'].total,
+      ).toBe(20);
+      service.resetSession('session-a');
+      expect(
+        service.getMetricsForSession('session-a').billableOutputTokens,
+      ).toBeUndefined();
+      service.addEvent(response, 'session-a');
+      expect(
+        service.getMetricsForSession('session-a').billableOutputTokens?.[
+          'model'
+        ].total,
+      ).toBe(20);
+      service.reset();
+      expect(service.getMetrics().billableOutputTokens).toBeUndefined();
     });
   });
 
@@ -651,7 +739,7 @@ describe('UiTelemetryService', () => {
       },
     );
 
-    it.each(['openai', 'qwen-oauth'])(
+    it.each(['openai', 'openai-responses', 'qwen-oauth'])(
       'does not double-count reasoning for %s events',
       (authType) => {
         service.addEvent(
@@ -1382,6 +1470,15 @@ describe('UiTelemetryService.getTotalOutputTokens', () => {
     service.addEvent(response('hook', 20), 'session-a');
     service.restoreSessionModelMetrics('session-a', saved);
     expect(service.getTotalOutputTokens('session-a')).toBe(170);
+    expect(
+      service.getMetricsForSession('session-a').billableOutputTokens,
+    ).toBeUndefined();
+    service.addEvent(response('new-model', 7), 'session-a');
+    expect(
+      service.getMetricsForSession('session-a').billableOutputTokens,
+    ).toEqual({
+      'new-model': { total: 7, bySource: { main: 7 } },
+    });
     expect(service.getTotalOutputTokens('session-b')).toBe(9);
   });
 

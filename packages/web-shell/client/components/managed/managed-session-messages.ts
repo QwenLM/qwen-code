@@ -1,3 +1,4 @@
+import { isTodoWriteToolName } from '../../utils/todos';
 import type { ACPToolCall, Message } from '../../adapters/types';
 import type { ManagedAgentSessionEvent } from './managed-agent-provider';
 import type { ManagedToolResult } from './managed-tool-result-types';
@@ -69,6 +70,23 @@ function record(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
+}
+
+function structuredToolOutput(
+  data: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  const snapshot = data['todoSnapshot'];
+  if (typeof snapshot !== 'string') return undefined;
+  try {
+    const todos: unknown = JSON.parse(snapshot);
+    return Array.isArray(todos) ? { todos } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function hasTodoSnapshot(value: unknown): boolean {
+  return Array.isArray(record(value)['todos']);
 }
 
 // Only these Turn-bearing types may settle a Turn boundary. Control-plane
@@ -267,7 +285,14 @@ function appendManagedEvents(
       tools.set(key, tool);
       if (typeof callId === 'string') tool.toolCallId = callId;
       if (Number.isSafeInteger(data['sourceSequence'])) {
-        tool.toolDetailsRevision = Number(data['sourceSequence']);
+        const revision = Number(data['sourceSequence']);
+        if (
+          isTodoWriteToolName(tool.toolName) &&
+          tool.toolDetailsRevision !== undefined &&
+          revision <= tool.toolDetailsRevision
+        )
+          continue;
+        tool.toolDetailsRevision = revision;
       }
       if (typeof data['toolName'] === 'string')
         tool.toolName = data['toolName'];
@@ -282,6 +307,9 @@ function appendManagedEvents(
         tool.args = record(input);
         if (Object.keys(tool.args).length === 0) tool.args = { input };
       }
+      const structuredOutput = isTodoWriteToolName(tool.toolName)
+        ? structuredToolOutput(data)
+        : undefined;
       if (result) {
         if (
           tool.toolResult &&
@@ -316,13 +344,15 @@ function appendManagedEvents(
             data['output'] +
             (data['truncated'] === true ? `\n${truncatedLabel}` : '');
           if (
-            data['truncated'] !== true ||
-            typeof tool.rawOutput !== 'string' ||
-            output.length > tool.rawOutput.length
+            !hasTodoSnapshot(tool.rawOutput) &&
+            (data['truncated'] !== true ||
+              typeof tool.rawOutput !== 'string' ||
+              output.length > tool.rawOutput.length)
           ) {
             tool.rawOutput = output;
           }
         }
+        if (structuredOutput !== undefined) tool.rawOutput = structuredOutput;
         continue;
       }
       if (event.type === 'tool_started') {
@@ -338,11 +368,15 @@ function appendManagedEvents(
         tool.wasCancelled = data['cancelled'] === true;
         tool.endTime = event.at;
         runtimeFailed.delete(tool);
-        if (typeof data['output'] === 'string') {
+        if (
+          typeof data['output'] === 'string' &&
+          !hasTodoSnapshot(tool.rawOutput)
+        ) {
           tool.rawOutput =
             data['output'] +
             (data['truncated'] === true ? `\n${truncatedLabel}` : '');
         }
+        if (structuredOutput !== undefined) tool.rawOutput = structuredOutput;
       }
     } else if (
       event.type === 'completed' ||

@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent.session;
 
-import com.alibaba.qwen.code.daemon.HostedPermissionRules;
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
+import com.alibaba.qwen.code.daemon.HostedPermissionRules;
 import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
 import com.alibaba.qwen.code.managedagent.catalog.AgentDefinitionExtensions;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
@@ -367,6 +367,16 @@ public class ManagedAgentService {
             String agentRevision, String title, Map<String, Object> metadata,
             List<InputBlock> blocks, WorkspaceSelection selection, String approvalMode, Boolean planMode,
             List<Map<String, Object>> skills, String modelId) {
+        return createWorkspaceSession(tenantId, actorId, idempotencyKey, agentId, agentRevision,
+                title, metadata, blocks, selection, approvalMode, planMode, skills, modelId, null);
+    }
+
+    public CommandAdmission createWorkspaceSession(String tenantId,
+            String actorId, String idempotencyKey, String agentId,
+            String agentRevision, String title, Map<String, Object> metadata,
+            List<InputBlock> blocks, WorkspaceSelection selection, String approvalMode, Boolean planMode,
+            List<Map<String, Object>> skills, String modelId,
+            List<com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionPackages.Pin> extensionPins) {
         validateIdempotencyKey(idempotencyKey);
         var additions = AgentDefinitionExtensions.sessionSkills(skills);
         if (actorId == null || actorId.isEmpty()) {
@@ -398,6 +408,9 @@ public class ManagedAgentService {
         if (modelId != null) {
             semantic.put("modelId", modelId);
         }
+        if (extensionPins != null) {
+            semantic.put("extensionPins", extensionPins);
+        }
         String requestDigest = digests.digest(semantic);
         String payloadDigest = input.isEmpty() ? null
                 : SubmitHarnessTurn.computePayloadDigest(input);
@@ -417,19 +430,26 @@ public class ManagedAgentService {
             throw new ManagedAgentException(HttpStatus.CONFLICT, "unsupported_feature",
                     "The Hosted Harness does not support Session Skills.");
         }
+        if (extensionPins != null && !harness.supportsSessionExtensions()) {
+            throw new ManagedAgentException(HttpStatus.CONFLICT, "unsupported_feature", "The Hosted Harness does not support extension packages.");
+        }
         if (!input.isEmpty() && !harness.isWorkspaceFilesAvailable()) {
             throw new ManagedAgentException(HttpStatus.CONFLICT,
                     "workspace_unavailable",
                     "Hosted Workspace execution is not available.");
         }
         Admission admission;
+        Set<String> extensionLifecycleProfiles = extensionPins == null ? Set.of()
+                : java.util.stream.Stream.of(WorkspaceToolProfiles.SHELL, WorkspaceToolProfiles.MCP)
+                        .filter(harness::supportsLifecycle).collect(java.util.stream.Collectors.toSet());
         try {
             admission = store.insertWorkspaceSessionCommand(tenantId,
                     actorId, idempotencyKey, requestDigest, agentId, agentRevision,
                     effectiveTitle, input, payloadDigest, selection, approvalMode,
                     harness.supportsApprovalSelection() && ("qwen-code".equals(agentId)
                             || harness.supportsAgentDefinitionApprovalSelection()),
-                    planMode, harness.supportsPlanMode(), additions, harness.supportsPublicChildAgents(), modelId);
+                    planMode, harness.supportsPlanMode(), additions, harness.supportsPublicChildAgents(), modelId, extensionPins,
+                    extensionLifecycleProfiles);
         } catch (DuplicateKeyException error) {
             admission = store.replayWorkspaceSessionCommand(tenantId,
                     actorId, idempotencyKey, requestDigest);
@@ -1596,8 +1616,15 @@ public class ManagedAgentService {
         // sweep is the spender, not the rescuer.
         if (admission.turnId() != null && harness.isAvailable()
                 && (!workspaceBound || harness.isWorkspaceFilesAvailable())) {
-            coordinator.dispatch(tenantId, admission.sessionId(),
-                    admission.turnId());
+            if (org.springframework.transaction.support.TransactionSynchronizationManager.isSynchronizationActive()) {
+                org.springframework.transaction.support.TransactionSynchronizationManager.registerSynchronization(
+                        new org.springframework.transaction.support.TransactionSynchronization() {
+                            @Override
+                            public void afterCommit() { coordinator.dispatch(tenantId, admission.sessionId(), admission.turnId()); }
+                        });
+            } else {
+                coordinator.dispatch(tenantId, admission.sessionId(), admission.turnId());
+            }
         }
     }
 
@@ -1977,6 +2004,35 @@ public class ManagedAgentService {
                     "hosted_harness_disabled",
                     "Hosted Harness is not configured.");
         }
+    }
+
+    public boolean supportsUserMessageQueue() { return harness.supportsUserMessageQueue(); }
+
+    public SessionRecord authorizeUserMessageActor(String tenantId, String actorId, String sessionId) {
+        if (actorId == null || actorId.isBlank()) {
+            throw new ManagedAgentException(HttpStatus.UNAUTHORIZED, "actor_required", "An authenticated actor is required.");
+        }
+        SessionRecord session = store.requireSession(tenantId, sessionId);
+        requireSubmitterRole(session, actorId);
+        return session;
+    }
+
+    public SessionRecord authorizeUserMessages(String tenantId, String actorId, String sessionId) {
+        SessionRecord session = authorizeUserMessageActor(tenantId, actorId, sessionId);
+        requireVisibleSession(session);
+        requireSubmitterFacts(session, actorId);
+        if (!"ACTIVE".equals(session.status())) {
+            throw new ManagedAgentException(HttpStatus.CONFLICT, "session_not_active", "The Session does not accept messages.");
+        }
+        return session;
+    }
+
+    public List<Map<String, Object>> userMessageInput(List<InputBlock> blocks) {
+        List<Map<String, Object>> normalized = input(blocks, true);
+        if (normalized.stream().anyMatch(block -> "image".equals(block.get("type")))) {
+            throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "unsupported_input", "Images require an idle Turn.");
+        }
+        return normalized;
     }
 
     private List<Map<String, Object>> input(List<InputBlock> blocks,

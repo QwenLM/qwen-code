@@ -1,3 +1,5 @@
+import { ManagedUserMessageQueue } from './ManagedUserMessageQueue';
+import { useManagedUserMessages } from './use-managed-user-messages';
 import {
   useCallback,
   useEffect,
@@ -85,6 +87,8 @@ import { ManagedTaskPanel, taskCancelMessage } from './ManagedTaskPanel';
 import { useManagedTasks } from './use-managed-tasks';
 import { ManagedChildSessionView } from './ManagedChildSessionView';
 import { useManagedTaskCancel } from './use-managed-task-cancel';
+import { TodoFullList } from '../messages/TodoView';
+import { getLatestSuccessfulTodos } from '../../utils/todos';
 import type {
   ManagedAgentProvider,
   ManagedAgentSessionSummary,
@@ -106,6 +110,7 @@ interface PendingPrompt {
   idempotencyKey: string;
   text: string;
   draftText?: string;
+  queued?: boolean;
   sessionId?: string;
   input?: ManagedInputBlock[];
 }
@@ -141,6 +146,8 @@ function readPending(
     if (
       typeof pending['idempotencyKey'] !== 'string' ||
       typeof pending['text'] !== 'string' ||
+      (pending['queued'] !== undefined &&
+        typeof pending['queued'] !== 'boolean') ||
       (pending['input'] !== undefined && !isManagedInput(pending['input']))
     )
       return undefined;
@@ -356,6 +363,8 @@ function ManagedSessionsContent({
     [provider.storageKey],
   );
   const detail = useManagedSession(provider, clientId, sessionId);
+  const summary = detail.summary;
+  const active = summary && isManagedSessionRunning(summary.phase);
   const recovery = useManagedRecovery(
     provider,
     clientId,
@@ -515,6 +524,10 @@ function ManagedSessionsContent({
   const [discarded, setDiscarded] = useState(false);
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(true);
+  const userMessages = useManagedUserMessages(
+    provider,
+    interactive ? sessionId : undefined,
+  );
   const [pendingRestoreFailed, setPendingRestoreFailed] = useState(false);
   const [outputTarget, setOutputTarget] = useState<{
     sessionId: string;
@@ -681,6 +694,10 @@ function ManagedSessionsContent({
   const messages = useMemo(
     () => messageProjector(detail.events, truncatedLabel),
     [messageProjector, detail.events, truncatedLabel],
+  );
+  const latestSuccessfulTodos = useMemo(
+    () => getLatestSuccessfulTodos(messages),
+    [messages],
   );
   // The caveat sits beside the card rather than inside the panel, so the panel
   // is told about it: without this the dialog describes only the tool name and
@@ -1006,7 +1023,8 @@ function ManagedSessionsContent({
         (!submittedText.trim() && !images?.length && !files?.length) ||
         (sessionId &&
           (!detail.summary?.capabilities.canSend ||
-            recovery.value?.nextTurnAllowed === false))
+            recovery.value?.nextTurnAllowed === false) &&
+          !userMessages.supported)
       )
         return;
       let input: ManagedInputBlock[];
@@ -1018,6 +1036,14 @@ function ManagedSessionsContent({
           files,
           metadata,
         );
+        if (
+          userMessages.supported &&
+          images?.length &&
+          (active ||
+            userMessages.snapshot?.messages.length ||
+            userMessages.snapshot?.paused)
+        )
+          throw new Error(t('managed.queue.imagesIdleOnly'));
         input = await encodeManagedInput(prepared.text, images, prepared.files);
         fileReferences.assertCurrent();
       } catch (failure) {
@@ -1030,12 +1056,18 @@ function ManagedSessionsContent({
       if (abort.signal.aborted || selection.current !== sessionId) return;
       attempt = {
         idempotencyKey: managedRequestId(),
+        queued:
+          !!sessionId &&
+          userMessages.supported &&
+          (!!active ||
+            !!userMessages.snapshot?.messages.length ||
+            !!userMessages.snapshot?.paused),
         text: submittedText,
         draftText: composerRef.current?.getText(),
         sessionId,
         ...(input.some(
           (block) =>
-            block.type === 'input_file' || block.type === 'input_image',
+            block.type !== 'input_text' || block.text !== submittedText,
         )
           ? { input }
           : {}),
@@ -1067,23 +1099,43 @@ function ManagedSessionsContent({
         idempotencyKey: attempt.idempotencyKey,
         signal: abort.signal,
       };
-      const admission = attempt.sessionId
-        ? await provider.submitPrompt(
-            attempt.sessionId,
-            {
-              text: attempt.text,
-              ...(attempt.input ? { input: attempt.input } : {}),
-            },
-            opts,
-          )
-        : await provider.createSession(
-            {
-              text: attempt.text,
-              ...(attempt.input ? { input: attempt.input } : {}),
-            },
-            opts,
-          );
+      if (attempt.queued && !provider.userMessages)
+        throw new Error('User message queue unavailable');
+      const admission =
+        attempt.sessionId && attempt.queued
+          ? await provider
+              .userMessages!.command(
+                attempt.sessionId,
+                {
+                  action: 'submit',
+                  input: attempt.input ?? [
+                    { type: 'input_text', text: attempt.text },
+                  ],
+                },
+                {
+                  idempotencyKey: attempt.idempotencyKey,
+                  signal: abort.signal,
+                },
+              )
+              .then(() => ({ sessionId: attempt.sessionId! }))
+          : attempt.sessionId
+            ? await provider.submitPrompt(
+                attempt.sessionId,
+                {
+                  text: attempt.text,
+                  ...(attempt.input ? { input: attempt.input } : {}),
+                },
+                opts,
+              )
+            : await provider.createSession(
+                {
+                  text: attempt.text,
+                  ...(attempt.input ? { input: attempt.input } : {}),
+                },
+                opts,
+              );
       if (abort.signal.aborted) return;
+      if (attempt.queued) void userMessages.refresh();
       pendingRef.current = undefined;
       setPending(undefined);
       await persistPending(pendingKey, undefined);
@@ -1130,7 +1182,6 @@ function ManagedSessionsContent({
     }
   }
 
-  const summary = detail.summary;
   const attachmentCapability = useRef({ sessionId, enabled: false });
   if (attachmentCapability.current.sessionId !== sessionId)
     attachmentCapability.current = { sessionId, enabled: false };
@@ -1212,9 +1263,6 @@ function ManagedSessionsContent({
     modelContext.contextWindowSize !== undefined &&
     Number.isSafeInteger(modelContext.contextWindowSize) &&
     modelContext.contextWindowSize > 0;
-  const active =
-    summary &&
-    !['created', 'completed', 'failed', 'cancelled'].includes(summary.phase);
   useEffect(() => {
     if (
       !home ||
@@ -1932,6 +1980,24 @@ function ManagedSessionsContent({
                 onAbandoned={() => setListRevision((current) => current + 1)}
               />
             )}
+          {latestSuccessfulTodos !== undefined &&
+            latestSuccessfulTodos.length > 0 && (
+              <section
+                className="max-h-[35vh] shrink-0 overflow-y-auto rounded-md border px-3 py-2"
+                aria-label={t('todo.title')}
+                data-managed-todo-list
+              >
+                <div className="mb-2 text-sm font-medium">
+                  {t('todo.title')}
+                </div>
+                <TodoFullList todos={latestSuccessfulTodos} numbered />
+              </section>
+            )}
+          {sessionId && detail.olderCursor && (
+            <p className="text-xs text-muted-foreground">
+              {t('managed.todo.loadedWindow')}
+            </p>
+          )}
           {!(!sessionId && provider.workspaceBinding) && (
             <div className={shellStyles.content} style={{ flex: '1 1 auto' }}>
               <ToolDetailsContext.Provider value={loadToolDetails}>
@@ -2170,8 +2236,11 @@ function ManagedSessionsContent({
                 skillsLoaded={skills.loaded}
                 workspaceFeaturesEnabled={false}
                 fileReferenceActions={referenceActions}
+                fileUploadTarget={fileReferences.uploadTarget}
                 persistFileReferences
-                attachmentsEnabled={attachmentCapability.current.enabled}
+                attachmentsEnabled={
+                  attachmentCapability.current.enabled && !active
+                }
                 visibleToolbarActions={
                   interactive
                     ? [
@@ -2368,11 +2437,23 @@ function ManagedSessionsContent({
                   Boolean(
                     sessionId &&
                       (!summary?.capabilities.canSend ||
-                        recovery.value?.nextTurnAllowed === false),
+                        recovery.value?.nextTurnAllowed === false) &&
+                      !userMessages.supported,
                   )
                 }
-                placeholderText={t('managed.prompt')}
+                placeholderText={t(
+                  active && userMessages.supported
+                    ? 'managed.queue.placeholder'
+                    : 'managed.prompt',
+                )}
               />
+              {userMessages.snapshot && (
+                <ManagedUserMessageQueue
+                  key={sessionId}
+                  snapshot={userMessages.snapshot}
+                  command={userMessages.command}
+                />
+              )}
               {interactive && compression.blocked && (
                 <div
                   className="flex items-center gap-2 text-xs text-muted-foreground"
@@ -2482,7 +2563,7 @@ function ManagedSessionsContent({
               {interactive &&
                 approvalChange.options?.permissionRulesSupported && (
                   <ManagedPermissionRulesDialog
-                    key={`${provider.storageKey}:${sessionId}`}
+                    key={`permission-rules:${provider.storageKey}:${sessionId}`}
                     rules={approvalChange.options.permissionRules}
                     revision={approvalChange.options.approvalRevision}
                     busy={approvalChange.busy}

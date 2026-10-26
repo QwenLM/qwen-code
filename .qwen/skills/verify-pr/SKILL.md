@@ -1,6 +1,7 @@
 ---
 name: verify-pr
 description: This skill should be used to run a sandboxed deep verification of a qwen-code PR — "/verify-pr <n>", "/verify-pr <n> --publish" (local round that also posts the report comment), "深度验证这个 PR", "验证这个 PR 并把报告发到评论", A/B load-bearing proof against the base build, mock-free harnesses with wire oracles, and targeted gates — producing tmp/pr<n>-verify-<ts>/report.md plus a machine-readable verdict. Designed for the token-free CI verify job; also usable locally.
+argument-hint: '<pr-number> [--publish] [--watch] [--repo <owner>/<repo>] [--assets-repo <owner>/<repo>] [--assets-branch <branch>]'
 ---
 
 # PR Deep Verification
@@ -20,6 +21,11 @@ The workflow (`qwen-triage.yml` `verify` job) guarantees:
   **PR head**. Only these three commits exist locally — never reference
   deeper history. The PR's effective diff is `git diff HEAD^1..HEAD`; the
   verified head to cite is `git rev-parse HEAD^2`.
+- **The `.qwen` tree is base-pinned.** The lane replaces it with
+  `git archive "$BASE_OID" -- .qwen` (then root-owned, read-only) before you
+  start, while `scripts/tests/**` stays at the PR head — so a `scripts/tests`
+  assertion that reads a skill file in that tree sees the base version, and
+  an expected-red there is a lane artifact, not a defect.
 - **Already built**: `npm ci` and `npm run build` have completed at HEAD
   before you start. Do not redo them; rebuild only what your A/B needs.
 - **Java toolchain, only when `QWEN_VERIFY_JAVA=1`.** The lane sets that
