@@ -2,7 +2,7 @@
 
 Design: [docs/design/2026-10-24-xdg-base-directory.md](../../docs/design/2026-10-24-xdg-base-directory.md)
 
-Start every group from a fresh throwaway home, so the operator's real configuration is never read or written and no group sees another group's files. The one exception is the recreated `~/.qwen` group, which continues in the new-install group's home on purpose.
+Start every group from a fresh throwaway home, so the operator's real configuration is never read or written and no group sees another group's files. Two groups continue in the new-install group's home on purpose, because they need the marker its run wrote: the recreated `~/.qwen` group and the `~/.qwen/.env` group.
 
 ```bash
 export HOME=$(mktemp -d)
@@ -41,7 +41,7 @@ Each in its own fresh home: run `qwen mcp list`, and start `qwen serve --port 0`
 
 ### A ~/.qwen/.env left behind on an XDG install
 
-In the new-install group's home, create `~/.qwen/.env` containing `QWEN_HOME=$HOME/legacy` and `DEMO_VAR=1`, then run the command. Expect `~/.config/qwen` to stay in use and nothing under `$HOME/legacy`.
+In the new-install group's home, run `printf 'QWEN_HOME=%s/legacy\nDEMO_VAR=1\n' "$HOME" > ~/.qwen/.env` after `mkdir ~/.qwen`, so the file holds an absolute path (`.env` values are not shell-expanded), then run the command. Expect `~/.config/qwen` to stay in use, no `$HOME/legacy`, and a warning that names `~/.qwen/.env` and `QWEN_HOME`.
 
 ### Custom XDG_CONFIG_HOME with a recreated ~/.qwen
 
@@ -49,7 +49,7 @@ In a fresh home, run the command with `XDG_CONFIG_HOME=$HOME/xdg`. Expect `$HOME
 
 ### Moving an existing install
 
-Create `~/.qwen` with a `settings.json`, then run the migration command from the design note. Expect `~/.config/qwen/settings.json` and `~/.config/qwen/.qwen-global-dir`, and no `~/.qwen`. With `XDG_CONFIG_HOME=relative` it must refuse and leave `~/.qwen` in place.
+Create `~/.qwen` with a `settings.json`, then run the migration command from the design note. Expect `~/.config/qwen/settings.json` and `~/.config/qwen/.qwen-global-dir`, and no `~/.qwen`. With `XDG_CONFIG_HOME=relative`, with `QWEN_HOME` set, on macOS, or when run a second time, it must print why and leave everything in place.
 
 ### QWEN_HOME pointed at the XDG directory
 
