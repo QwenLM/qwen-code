@@ -805,7 +805,6 @@
 
 .atItemSubtitle {
   color: var(--muted-foreground);
-  justify-self: end;
   text-align: right;
 }
 
