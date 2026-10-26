@@ -29,6 +29,8 @@ import {
   McpClient,
   MCPServerStatus,
   updateMCPServerStatus,
+  removeMCPServerStatus,
+  getAllMCPServerStatuses,
 } from './mcp-client.js';
 import { WorkspaceMcpBudget } from './mcp-workspace-budget.js';
 import { listDescendantPids, sigtermPids } from './pid-descendants.js';
@@ -724,6 +726,7 @@ describe('McpTransportPool', () => {
             (error: Error) => (outcome = error.message),
           );
         await vi.advanceTimersByTimeAsync(0);
+        pool.releaseSession(transport === 'stdio' ? 'b' : 'a');
         const draining = pool.drainAll({ timeoutMs: 100 });
         try {
           await vi.advanceTimersByTimeAsync(100);
@@ -733,6 +736,68 @@ describe('McpTransportPool', () => {
         } finally {
           finish();
           await nextOutcome;
+        }
+      },
+    );
+
+    it.each(cleanupTransports)(
+      'does not spawn a $transport replacement after its waiting session is released',
+      async ({ transport, cfg }) => {
+        const mocked = mockMcpSuccess();
+        const connect = vi.spyOn(McpClient.prototype, 'connect');
+        const pool = new McpTransportPool(cliConfig, mkPoolOptions());
+        const r = mkSessionRegistries();
+        const first = await pool.acquire(
+          'srv',
+          cfg,
+          'a',
+          r.tools,
+          r.prompts,
+          r.resources,
+        );
+        let finish!: () => void;
+        vi.spyOn(first.client, 'disconnect').mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve) => {
+              finish = resolve;
+            }),
+        );
+        (mocked as unknown as { onerror: (error: Error) => void }).onerror(
+          new Error('EPIPE'),
+        );
+        let outcome: string | undefined;
+        const nextOutcome = pool
+          .acquire(
+            'srv',
+            cfg,
+            transport === 'stdio' ? 'b' : 'a',
+            r.tools,
+            r.prompts,
+            r.resources,
+          )
+          .then(
+            () => (outcome = 'connected'),
+            (error: Error) => (outcome = error.message),
+          );
+        await vi.advanceTimersByTimeAsync(0);
+        pool.releaseSession(transport === 'stdio' ? 'b' : 'a');
+        finish();
+        await nextOutcome;
+        try {
+          expect(outcome).toContain('was released during cleanup');
+          expect(connect).toHaveBeenCalledTimes(1);
+          const next = await pool.acquire(
+            'srv',
+            cfg,
+            transport === 'stdio' ? 'b' : 'a',
+            r.tools,
+            r.prompts,
+            r.resources,
+          );
+          expect(connect).toHaveBeenCalledTimes(2);
+          next.release();
+        } finally {
+          await pool.drainAll();
         }
       },
     );
@@ -943,6 +1008,31 @@ describe('McpTransportPool', () => {
         ).toBe(0);
       },
     );
+
+    it('does not restore a removed pooled status on late EOF', async () => {
+      const mocked = mockMcpSuccess();
+      const pool = mkPool();
+      const r = mkSessionRegistries();
+      const conn = await pool.acquire(
+        'srv',
+        new MCPServerConfig('node'),
+        'a',
+        r.tools,
+        r.prompts,
+        r.resources,
+      );
+      conn.release();
+      removeMCPServerStatus('srv');
+      try {
+        (mocked as unknown as { onclose: () => void }).onclose();
+        expect(getAllMCPServerStatuses().has('srv')).toBe(false);
+        await pool.drainAll();
+        expect(getAllMCPServerStatuses().has('srv')).toBe(false);
+      } finally {
+        await pool.drainAll();
+        removeMCPServerStatus('srv');
+      }
+    });
 
     it('observes EOF and shares one replacement across sessions', async () => {
       const mocked = mockMcpSuccess({ toolNames: ['count'] });

@@ -38,6 +38,7 @@ import type { McpToolAnnotations } from './mcp-tool.js';
 import { SdkControlClientTransport } from './sdk-control-client-transport.js';
 import {
   MCPServerStatus,
+  getAllMCPServerStatuses,
   recordMCPServerLastError,
   updateMCPServerStatus,
 } from './mcp-status.js';
@@ -575,6 +576,10 @@ export class McpClient {
       if (this.isDisconnecting || !options.trackTransportClose) return;
       // EOF/process exit does not invoke the SDK's onerror callback.
       this.lastTransportError ??= new Error('MCP transport closed');
+      if (!getAllMCPServerStatuses().has(this.serverName)) {
+        this.status = MCPServerStatus.DISCONNECTED;
+        return;
+      }
       this.updateStatus(MCPServerStatus.DISCONNECTED);
     };
   }
@@ -862,7 +867,9 @@ export class McpClient {
     // `discover()` reading `this.status` would otherwise see the stale
     // CONNECTED value and try to register tools that we're about to drop.
     this.status = MCPServerStatus.DISCONNECTED;
-    updateMCPServerStatus(this.serverName, MCPServerStatus.DISCONNECTED);
+    if (getAllMCPServerStatuses().has(this.serverName)) {
+      updateMCPServerStatus(this.serverName, MCPServerStatus.DISCONNECTED);
+    }
     this.isDisconnecting = true;
     const transport = this.transport;
     if (transport) {

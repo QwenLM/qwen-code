@@ -15,6 +15,7 @@ import {
   type DiscoveredMCPResource,
   type McpClient,
   updateMCPServerStatus,
+  getAllMCPServerStatuses,
 } from './mcp-client.js';
 import type { DiscoveredMCPTool } from './mcp-tool.js';
 import {
@@ -1272,6 +1273,7 @@ export class PoolEntry {
    * because only the pool can see sibling entries.
    */
   private updateGlobalStatus(): void {
+    if (!getAllMCPServerStatuses().has(this.serverName)) return;
     const aggregated = this.aggregateStatusByName(this.serverName);
     updateMCPServerStatus(this.serverName, aggregated);
   }

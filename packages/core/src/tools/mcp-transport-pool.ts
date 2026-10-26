@@ -125,6 +125,7 @@ export class McpTransportPool {
    * teardown — once set, a fresh pool is required for further work.
    */
   private draining = false;
+  private readonly cleanupSessionWaiters = new Map<string, Set<() => void>>();
   private readonly drainWaiters = new Set<() => void>();
   /**
    * Monotonic per-server-name index for `entryIndex`. Each
@@ -254,6 +255,17 @@ export class McpTransportPool {
       if (cleanups.length === 0) break;
       // A deadline bounds this caller, not the old transport's lifetime.
       // Keep the barrier on timeout so a later acquire cannot spawn over it.
+      let sessionReleased = false;
+      let wakeForRelease!: () => void;
+      const released = new Promise<void>((resolve) => {
+        wakeForRelease = () => {
+          sessionReleased = true;
+          resolve();
+        };
+        const waiters = this.cleanupSessionWaiters.get(sessionId) ?? new Set();
+        waiters.add(wakeForRelease);
+        this.cleanupSessionWaiters.set(sessionId, waiters);
+      });
       let wakeForDrain!: () => void;
       const drainStarted = new Promise<void>((resolve) => {
         wakeForDrain = resolve;
@@ -261,18 +273,24 @@ export class McpTransportPool {
       });
       try {
         await runWithTimeout(
-          Promise.race([Promise.all(cleanups), drainStarted]),
+          Promise.race([Promise.all(cleanups), drainStarted, released]),
           Math.max(0, cleanupDeadline - Date.now()),
           `MCP cleanup for '${serverName}'`,
         );
       } finally {
         this.drainWaiters.delete(wakeForDrain);
+        const waiters = this.cleanupSessionWaiters.get(sessionId);
+        waiters?.delete(wakeForRelease);
+        if (waiters?.size === 0) this.cleanupSessionWaiters.delete(sessionId);
       }
       for (const cleanup of cleanups) completedCleanups.add(cleanup);
       if (this.draining) {
         throw new Error(
           `McpTransportPool is draining; refusing acquire for ${serverName}`,
         );
+      }
+      if (sessionReleased) {
+        throw new Error(`MCP session ${sessionId} was released during cleanup`);
       }
     }
     if (id !== undefined) {
@@ -582,6 +600,7 @@ export class McpTransportPool {
    * `acpAgent.killSession` to ensure no leaked refs.
    */
   releaseSession(sessionId: string): void {
+    for (const wake of this.cleanupSessionWaiters.get(sessionId) ?? []) wake();
     const seats = this.sessionToEntries.get(sessionId);
     if (!seats) return;
     // One ACP session can own both the parent registry and derived agents.
