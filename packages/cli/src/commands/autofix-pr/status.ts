@@ -29,6 +29,7 @@ import {
   type AutofixPrWatchOptions,
   type NeedsHumanItem,
 } from './state.js';
+import { fixInFlight, fixSnapshotPath, readFixMarker } from './fix.js';
 
 export interface WatchStatus {
   pr: number;
@@ -71,6 +72,15 @@ export interface WatchStatus {
    * `cleanup` judges it without asking the remote, or null. A round that
    * starts on it discards it. */
   worktreeWork: string | null;
+  /** The attempt of a fix agent run in the background, or null: while
+   * `fresh` it has not ended — its agent works in the worktree, or has
+   * ended (finished or stopped) and the round may still claim it — and the
+   * round's helpers refuse; otherwise its session left it behind (Section 6.14). */
+  fix: {
+    attempt: string | null;
+    startedAt: string | null;
+    fresh: boolean;
+  } | null;
 }
 
 export interface StatusOutcome {
@@ -106,6 +116,24 @@ function cursorOf(
   } catch {
     return null;
   }
+}
+
+function latest(a: string | null, b: string | null): string | null {
+  if (a === null || b === null) return a ?? b;
+  return Date.parse(a) >= Date.parse(b) ? a : b;
+}
+
+function fixOf(
+  paths: ReturnType<typeof autofixPrPaths>,
+  now: number,
+): WatchStatus['fix'] {
+  const marker = readFixMarker(paths);
+  if (!marker) return null;
+  return {
+    attempt: marker.attempt?.attempt ?? null,
+    startedAt: marker.attempt?.startedAt ?? null,
+    fresh: fixInFlight(paths, now) !== null,
+  };
 }
 
 function modifiedAt(path: string): string | null {
@@ -173,7 +201,11 @@ export function runStatus(args: {
         checkedRecently:
           lastCheck !== null &&
           now - Date.parse(lastCheck) < 2 * every * 60_000,
-        lastRound: modifiedAt(paths.snapshotPath),
+        // A claimed attempt took its round's snapshot.
+        lastRound: latest(
+          modifiedAt(paths.snapshotPath),
+          modifiedAt(fixSnapshotPath(paths, pr)),
+        ),
         stopped: cursor?.stopped ?? null,
         watch: state.watch ?? null,
         ended: state.ended ?? null,
@@ -189,6 +221,7 @@ export function runStatus(args: {
           args.work === false
             ? null
             : unsavedWork(paths, [state.lastKnownHeadSha, ...state.pushedShas]),
+        fix: fixOf(paths, now),
       });
     } catch (err) {
       const message = (err as Error).message;

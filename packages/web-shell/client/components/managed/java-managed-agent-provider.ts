@@ -587,34 +587,6 @@ export function createJavaManagedAgentProvider(
               };
             },
           },
-          cwdChange: {
-            async submit(sessionId, request, command) {
-              return requireCwdOperation(
-                await client.changeCwd(
-                  {
-                    ...request,
-                    sessionId,
-                    idempotencyKey: command.idempotencyKey,
-                    requestId: managedRequestId(),
-                  },
-                  command.signal,
-                ),
-                sessionId,
-              );
-            },
-            async query(sessionId, operationId, request) {
-              const result = requireCwdOperation(
-                await client.queryOperation(
-                  { sessionId, operationId },
-                  request.signal,
-                ),
-                sessionId,
-              );
-              if (result.operationId !== operationId)
-                throw new Error('Cwd operation identity mismatch');
-              return result;
-            },
-          },
           contextCompression: {
             async submit(sessionId, request, command) {
               return requireContextCompressionOperation(
@@ -1071,7 +1043,6 @@ function toSessionSummary(
         turnStatus !== 'cancelling' &&
         session.recovery?.actions.cancel !== false,
       ...(workspaceTurns ? { workspaceTurns: true } : {}),
-      ...(session.capabilities?.cwdChange === true ? { cwdChange: true } : {}),
       ...(session.capabilities?.modelChange === true
         ? { modelChange: true }
         : {}),
@@ -1148,20 +1119,6 @@ function modelContext(value: unknown): ManagedModelContext | undefined {
       ? { contextWindowSize }
       : {}),
   };
-}
-
-function requireCwdOperation(
-  operation: Awaited<ReturnType<JavaManagedAgentClient['queryOperation']>>,
-  sessionId: string,
-) {
-  if (
-    operation.type !== 'cwd_change' ||
-    operation.sessionId !== sessionId ||
-    !operation.operationId
-  ) {
-    throw new Error('Cwd operation identity mismatch');
-  }
-  return operation;
 }
 
 function requireContextCompressionOperation(
