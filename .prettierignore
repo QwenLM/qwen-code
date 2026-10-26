@@ -32,6 +32,8 @@ packages/cua-driver/
 # "intentionally non-idiomatic ink input/output", so normalising them to
 # house style would corrupt the very data the codemod tests assert on.
 scripts/codemod/fixtures/
+# Preserve the exact Markdown spacing and lengths used by chunking tests.
+packages/channels/base/src/fixtures/synthetic-knowledge-search.md
 packages/live-host/
 packages/desktop/runtime/
 packages/core/src/skills/bundled/browser-use/runtime/

@@ -56,11 +56,13 @@ interface CreateServeFeaturesDeps {
   dynamicWorkspaceRegistrationAvailable: boolean;
   persistentWorkspaceRegistrationAvailable: boolean;
   scratchWorkspaceRegistrationAvailable: () => boolean;
+  gitWorkspaceCloneAvailable?: boolean;
   realtimeVoiceEnabled: () => boolean;
   realtimeVoiceWebEnabled?: () => boolean;
   standaloneSessionsAvailable?: () => boolean;
   acpHttpEnabled?: boolean;
   workspaceRuntimeRemovalAvailable?: boolean;
+  workspaceDirectoriesAvailable?: boolean;
   nativeDirectoryPickerAvailable?: boolean;
   workspaceRuntimeAvailable: () => boolean;
   workspaceRuntimeStopAvailable?: () => boolean;
@@ -99,11 +101,13 @@ export function createServeFeatures(
     dynamicWorkspaceRegistrationAvailable,
     persistentWorkspaceRegistrationAvailable,
     scratchWorkspaceRegistrationAvailable,
+    gitWorkspaceCloneAvailable,
     realtimeVoiceEnabled,
     realtimeVoiceWebEnabled,
     standaloneSessionsAvailable,
     acpHttpEnabled,
     workspaceRuntimeRemovalAvailable,
+    workspaceDirectoriesAvailable,
     nativeDirectoryPickerAvailable,
     workspaceRuntimeAvailable,
     workspaceRuntimeStopAvailable,
@@ -163,7 +167,9 @@ export function createServeFeatures(
         persistentWorkspaceRegistrationAvailable,
         scratchWorkspaceRegistrationAvailable:
           scratchWorkspaceRegistrationAvailable(),
+        gitWorkspaceCloneAvailable: gitWorkspaceCloneAvailable === true,
         workspaceRuntimeRemovalAvailable,
+        workspaceDirectoriesAvailable,
         nativeDirectoryPickerAvailable,
         workspaceRuntimeAvailable: workspaceRuntimeAvailable(),
         workspaceRuntimeStopAvailable:

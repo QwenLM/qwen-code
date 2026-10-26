@@ -524,6 +524,7 @@ describe('team plans', () => {
     );
     expect(answer).toContain('submit-1');
     expect(answer).toContain('stopped before alice was continued');
+    expect(answer).not.toContain('member was continued');
     expect(teams.plan('submit-1')?.decision).toBe('approved');
     expect(children.record('split')).toBeUndefined();
     expect(
@@ -604,6 +605,7 @@ describe('team plans', () => {
       'stale',
     );
     expect(answer).toContain('stopped before alice was continued');
+    expect(answer).not.toContain('member was continued');
     expect(children.record('race-head')).toBeDefined();
     expect(children.record('stale')).toBeUndefined();
     expect(
@@ -728,6 +730,42 @@ describe('team plans', () => {
         message: '界'.repeat(1366),
       }),
     ).toContain('4096');
+  });
+
+  it('names the escaped plan size and the room left, exact at the bound', async () => {
+    await member();
+    const sizes = (message: string) => {
+      const found =
+        /needs (\d+) bytes after XML and JSON escaping and (\d+) fit\./.exec(
+          message,
+        );
+      expect(found).not.toBeNull();
+      return { needed: Number(found![1]), available: Number(found![2]) };
+    };
+    // UTF-8 bytes once escaped: '<' is '&lt;' (4), '界' 3, '😀' 4 and the
+    // newline JSON-encodes as '\n' (2) — 13, though only 9 UTF-16 units.
+    const first = sizes(
+      await refusal(
+        teams.submitPlan('big-1', 'run-alice', '<界😀\n'.repeat(2000)),
+      ),
+    );
+    expect(first.needed).toBe(2000 * 13);
+    expect(first.available).toBeGreaterThan(0);
+    expect(first.available).toBeLessThan(first.needed);
+    expect(
+      sizes(
+        await refusal(
+          teams.submitPlan(
+            'big-2',
+            'run-alice',
+            'B'.repeat(first.available + 1),
+          ),
+        ),
+      ),
+    ).toEqual({ needed: first.available + 1, available: first.available });
+    expect(teams.plans()).toHaveLength(0);
+    await teams.submitPlan('fits', 'run-alice', 'B'.repeat(first.available));
+    expect(teams.plan('fits')?.planRevision).toBe(1);
   });
 });
 

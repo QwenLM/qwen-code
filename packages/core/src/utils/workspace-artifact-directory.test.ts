@@ -21,6 +21,7 @@ import {
   collectRecordableWorkspaceFiles,
   pathHasSkippedDirectoryComponent,
 } from './workspace-artifact-directory.js';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 describe('collectRecordableWorkspaceFiles', () => {
   const dirs: string[] = [];
@@ -145,25 +146,25 @@ describe('collectRecordableWorkspaceFiles', () => {
     expect(collected.depthLimited).toBe(true);
   });
 
-  it('treats an unreadable over-depth directory as depth-limited', async () => {
-    if (process.platform === 'win32' || process.getuid?.() === 0) {
-      return;
-    }
-    const root = await workspace();
-    const deepParts = Array.from(
-      { length: MAX_DIRECTORY_ARTIFACT_DEPTH + 1 },
-      (_, index) => `d${index}`,
-    );
-    const deepDir = path.join(root, ...deepParts);
-    await mkdir(deepDir, { recursive: true });
-    await writeFile(path.join(root, 'shallow.xlsx'), 'shallow');
-    await chmod(deepDir, 0o000);
-    try {
-      const collected = await collectRecordableWorkspaceFiles(root, '', root);
-      expect(collected.files).toEqual(['shallow.xlsx']);
-      expect(collected.depthLimited).toBe(true);
-    } finally {
-      await chmod(deepDir, 0o755);
-    }
-  });
+  it.skipIf(!arePermissionBitsEnforced())(
+    'treats an unreadable over-depth directory as depth-limited',
+    async () => {
+      const root = await workspace();
+      const deepParts = Array.from(
+        { length: MAX_DIRECTORY_ARTIFACT_DEPTH + 1 },
+        (_, index) => `d${index}`,
+      );
+      const deepDir = path.join(root, ...deepParts);
+      await mkdir(deepDir, { recursive: true });
+      await writeFile(path.join(root, 'shallow.xlsx'), 'shallow');
+      await chmod(deepDir, 0o000);
+      try {
+        const collected = await collectRecordableWorkspaceFiles(root, '', root);
+        expect(collected.files).toEqual(['shallow.xlsx']);
+        expect(collected.depthLimited).toBe(true);
+      } finally {
+        await chmod(deepDir, 0o755);
+      }
+    },
+  );
 });

@@ -292,7 +292,7 @@ describe('tool hook additionalContext delivery', () => {
     const result = toolResultFor(server, 'call_ask');
     expect(result).toContain('hello from note');
     expect(count(result, marker('PreToolUse', 'call_ask'))).toBe(1);
-  });
+  }, 360_000); // CI: 5 waits at the 60s default + 60s setup slack.
 
   it('ACP: delivers PreToolUse and PostToolUseFailure context on a returned error', async () => {
     const server = await setup(

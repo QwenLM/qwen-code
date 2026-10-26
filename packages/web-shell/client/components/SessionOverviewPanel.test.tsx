@@ -766,6 +766,15 @@ describe('SessionOverviewPanel', () => {
         states[index]?.querySelector('svg')?.outerHTML,
       );
     }
+    const runningCue = rows()[2]!.querySelector(
+      '[data-web-shell-session-status-cue="running"]',
+    )?.firstElementChild;
+    const statusSpinner = states[2]?.querySelector(
+      '[data-web-shell-session-loading]',
+    );
+    expect(runningCue).toBeInstanceOf(HTMLSpanElement);
+    expect(statusSpinner).toBeInstanceOf(HTMLSpanElement);
+    expect(runningCue?.className).toBe(statusSpinner?.className);
     // An idle row renders no attention cue at all.
     expect(
       rows()[3]!.querySelector('[data-web-shell-session-status-cue]'),
@@ -2717,6 +2726,34 @@ describe('SessionOverviewPanel', () => {
       'b',
     ]);
     expect(container!.textContent).not.toContain('Failed to archive session');
+  });
+
+  it('splits archive batches at the route limit when more than 100 sessions are selected', async () => {
+    const many = Array.from({ length: 101 }, (_, index) =>
+      session(`bulk-${index}`, { displayName: `Bulk ${index}` }),
+    );
+    sessionsState.sessions = many;
+    render();
+    await flushAsync();
+
+    act(() => click(selectAllCheckbox()));
+    act(() => click(footerButton('Archive')!));
+    expect(document.body.textContent).toContain('Archive 101 sessions?');
+    const confirm = document.querySelector(
+      '[data-slot="alert-dialog-action"]',
+    ) as HTMLElement;
+    act(() => click(confirm));
+    await flushAsync();
+
+    expect(workspaceClient.archiveSessionsData).toHaveBeenCalledTimes(2);
+    expect(workspaceClient.archiveSessionsData).toHaveBeenNthCalledWith(
+      1,
+      many.slice(0, 100).map((item) => item.sessionId),
+    );
+    expect(workspaceClient.archiveSessionsData).toHaveBeenNthCalledWith(
+      2,
+      many.slice(100).map((item) => item.sessionId),
+    );
   });
 
   it('disables row actions while a batch mutation is running', async () => {

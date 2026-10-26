@@ -696,3 +696,31 @@ describe('unrecognized diagnostics stay out of the chat transcript', () => {
     expect(selectUnrecognizedDiagnostics(state)).toHaveLength(1);
   });
 });
+
+it('preserves local command identity on read-only status results', () => {
+  const state = reduceDaemonTranscriptEvents(
+    createDaemonTranscriptState({ now: 1 }),
+    [
+      {
+        type: 'user.text.delta',
+        text: '/tools',
+        promptId: 'local-command:tools',
+      },
+      {
+        type: 'status',
+        text: 'Tools list',
+        promptId: 'local-command:tools',
+        clearActiveText: false,
+      },
+    ],
+    { now: 1 },
+  );
+  expect(state.blocks.map((block) => block.promptId)).toEqual([
+    'local-command:tools',
+    'local-command:tools',
+  ]);
+  expect(
+    state.blocks.every((block) => block.id.startsWith('local-command:tools:')),
+  ).toBe(true);
+  expect(new Set(state.blocks.map((block) => block.id)).size).toBe(2);
+});
