@@ -1353,6 +1353,8 @@ describe('Session', () => {
         'teammate_approval_request',
         'teammate_joined',
         'teammate_exited',
+        'teammate_activity',
+        'message_sent',
       ]);
 
       manager.leaderCallback?.(
@@ -1772,6 +1774,181 @@ describe('Session', () => {
         ).status,
       ).toBe('joined');
       release();
+      session.dispose();
+    });
+
+    it('projects teammate activity and inter-teammate messages without waking the leader', async () => {
+      const manager = makeFakeTeamManager();
+      session.dispose();
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      vi.mocked(mockClient.sessionUpdate).mockClear();
+      vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
+      vi.mocked(mockConfig.getTeamManager).mockReturnValue(manager as never);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+
+      manager.emit('teammate_activity', {
+        agentId: 'a1',
+        name: 'researcher',
+        toolName: 'read_file',
+        phase: 'call',
+        description: 'Read notes.md',
+        timestamp: 1,
+      });
+      manager.emit('message_sent', {
+        from: 'writer',
+        to: 'checker',
+        message: 'sky sentence',
+        timestamp: 2,
+      });
+      manager.emit('message_sent', {
+        from: 'checker',
+        to: 'leader',
+        message: 'checked',
+        timestamp: 3,
+      });
+      manager.emit('message_sent', {
+        from: 'unknown',
+        to: 'checker',
+        message: 'unattributed message',
+        timestamp: 4,
+      });
+
+      // Events become client-visible frames with the acting or receiving agent.
+      await vi.waitFor(() =>
+        expect(
+          vi
+            .mocked(mockClient.sessionUpdate)
+            .mock.calls.map(([notification]) => notification.update)
+            .filter(
+              (update) =>
+                (update._meta?.['source'] as string | undefined) ===
+                'teammate_activity',
+            ),
+        ).toHaveLength(3),
+      );
+      const activityFrames = vi
+        .mocked(mockClient.sessionUpdate)
+        .mock.calls.map(([notification]) => notification.update)
+        .filter(
+          (update) =>
+            (update._meta?.['source'] as string | undefined) ===
+            'teammate_activity',
+        );
+      expect(activityFrames[0]).toMatchObject({
+        sessionUpdate: 'agent_message_chunk',
+        content: {
+          type: 'text',
+          text: 'researcher started read_file: Read notes.md',
+        },
+        _meta: {
+          agent: {
+            agentName: '/root/researcher',
+            depth: 1,
+            kind: 'teammate',
+          },
+          backgroundTask: { kind: 'peer', status: 'call' },
+        },
+      });
+      expect(activityFrames[1]).toMatchObject({
+        content: {
+          type: 'text',
+          text: 'writer → checker: sky sentence',
+        },
+        _meta: {
+          // The recipient names the frame, matching OpenAI's agent_message
+          // where `agent.agent_name` is the recipient's path…
+          agent: {
+            agentName: '/root/checker',
+            depth: 1,
+            kind: 'teammate',
+          },
+          backgroundTask: {
+            kind: 'peer',
+            status: 'message',
+            // …and the sender travels as the structured author field.
+            author: {
+              agentName: '/root/writer',
+              depth: 1,
+              kind: 'teammate',
+            },
+          },
+        },
+      });
+
+      expect(activityFrames[2]).toMatchObject({
+        _meta: {
+          agent: { agentName: '/root/checker', depth: 1, kind: 'teammate' },
+        },
+      });
+      expect(activityFrames[2]?._meta?.['backgroundTask']).not.toHaveProperty(
+        'author',
+      );
+
+      // …but the leader is never prompted: activity is observational and
+      // must not queue a turn the way a report does.
+      expect(vi.mocked(mockChat.sendMessageStream)).not.toHaveBeenCalled();
+
+      session.dispose();
+      expect(manager.listenerCount('teammate_activity')).toBe(0);
+      expect(manager.listenerCount('message_sent')).toBe(0);
+    });
+
+    it('projects a failed teammate tool call as a failure the client can render', async () => {
+      const manager = makeFakeTeamManager();
+      session.dispose();
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      vi.mocked(mockClient.sessionUpdate).mockClear();
+      vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
+      vi.mocked(mockConfig.getTeamManager).mockReturnValue(manager as never);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+
+      manager.emit('teammate_activity', {
+        agentId: 'a1',
+        name: 'researcher',
+        toolName: 'write_file',
+        phase: 'result',
+        success: false,
+        description: 'EACCES',
+        timestamp: 1,
+      });
+
+      const frames = () =>
+        vi
+          .mocked(mockClient.sessionUpdate)
+          .mock.calls.map(([notification]) => notification.update)
+          .filter(
+            (update) =>
+              (update._meta?.['source'] as string | undefined) ===
+              'teammate_activity',
+          );
+      await vi.waitFor(() => expect(frames()).toHaveLength(1));
+      // `SystemMessage.tsx` switches `backgroundTask.status` on exactly
+      // `completed` / `failed` / `cancelled`; a raw `result` phase renders the
+      // neutral row and `description` is the only carrier of the error text.
+      expect(frames()[0]).toMatchObject({
+        content: {
+          type: 'text',
+          text: 'researcher finished write_file: EACCES',
+        },
+        _meta: {
+          backgroundTask: { kind: 'peer', status: 'failed' },
+        },
+      });
+
       session.dispose();
     });
 

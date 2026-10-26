@@ -17,6 +17,7 @@ import {
   LoopReason,
 } from '@qwen-code/qwen-code-core/telemetry/types.js';
 import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
+import { LEADER_NAME } from '@qwen-code/qwen-code-core/agents/team/types.js';
 import { escapeXml } from '@qwen-code/qwen-code-core/utils/xml.js';
 import {
   INCOMPLETE_ARGS_EDIT_REJECTION,
@@ -2023,12 +2024,26 @@ export interface BackgroundNotificationQueueItem {
    * message structurally instead of parsing the sender out of the text.
    */
   agent?: AgentIdentity;
-  /** Structured fields for i18n rendering on the frontend. */
+  /**
+   * Structured fields for i18n rendering on the frontend. `author` and the
+   * tool fields serve inter-agent frames: OpenAI's Responses multi-agent
+   * contract identifies an `agent_message`'s direction with `author` and
+   * `recipient` — this wire spells them camelCase under `AgentIdentity`'s
+   * borrow-shape-not-spelling rule.
+   */
   structured?: {
     description?: string;
     commandLabel?: string;
     eventCount?: number;
     droppedLines?: number;
+    author?: {
+      agentName: string;
+      depth: number;
+      kind: 'root' | 'teammate';
+    };
+    toolName?: string;
+    phase?: 'call' | 'result';
+    success?: boolean;
   };
 }
 
@@ -12483,6 +12498,8 @@ export class Session implements SessionContext {
       injectLeaderMessage: (modelText, displayText, senders) =>
         this.#enqueueTeammateMessage(modelText, displayText, senders),
       reportRosterChange: (change) => this.#enqueueTeamRosterChange(change),
+      reportTeammateActivity: (activity) =>
+        this.#emitTeammateActivity(activity),
       // Not `#requestPermissionQueued`: a teammate approval is session-scoped,
       // so no leader turn ending bounds it — one ignored card left on the
       // shared tail would wedge every later prompt, including the leader's own.
@@ -12580,6 +12597,95 @@ export class Session implements SessionContext {
       },
       label: change.name,
       continuesTodoStopGuardWorkChain: false,
+    });
+  }
+
+  /**
+   * Teammate progress and inter-teammate messages as display-only frames.
+   * Unlike roster changes and reports these never enter the notification
+   * queue — they carry nothing the leader must act on, and each would
+   * otherwise wake it into an automatic turn. Persistence is skipped for the
+   * same reason: the frames are ephemeral activity, while the report the
+   * teammate eventually sends is what the transcript must keep.
+   */
+  #emitTeammateActivity(activity: {
+    kind: 'tool' | 'message';
+    name: string;
+    toolName?: string;
+    phase?: 'call' | 'result';
+    success?: boolean;
+    description?: string;
+    from?: string;
+    to?: string;
+    message?: string;
+  }): void {
+    if (this.disposed || this.closing) return;
+    // The Web Shell system row switches `backgroundTask.status` on exactly
+    // `completed` / `failed` / `cancelled` and renders anything else with a
+    // neutral icon, so a failed tool result must not stay a raw phase string.
+    const toolFailed =
+      activity.phase === 'result' && activity.success === false;
+    const text =
+      activity.kind === 'tool'
+        ? `${activity.name} ${activity.phase === 'result' ? 'finished' : 'started'} ${activity.toolName ?? 'a tool'}${activity.description && (activity.phase === 'call' || toolFailed) ? `: ${activity.description}` : ''}`
+        : `${activity.from} → ${activity.to}: ${activity.message ?? ''}`;
+    // Inter-agent messages carry OpenAI's Responses multi-agent semantics —
+    // `agent_message` items identify direction with `author` and `recipient`,
+    // and the item's own `agent` names the recipient — spelled in this wire's
+    // camelCase, the same borrow-shape-not-spelling rule `AgentIdentity`
+    // documents.
+    const agentName = (name: string): string =>
+      name === LEADER_NAME
+        ? ROOT_AGENT_IDENTITY.agentName
+        : `${ROOT_AGENT_IDENTITY.agentName}/${name}`;
+    const recipient =
+      activity.kind === 'message' && activity.to ? activity.to : activity.name;
+    void this.#emitBackgroundNotificationDisplay(
+      {
+        displayText: text,
+        modelText: text,
+        taskId: `teammate-activity-${this.teammateIdPrefix}-${++this.teammateMessageSeq}`,
+        status:
+          activity.kind === 'tool'
+            ? toolFailed
+              ? 'failed'
+              : (activity.phase ?? 'call')
+            : 'message',
+        kind: 'peer',
+        agent: {
+          agentName: agentName(recipient),
+          depth: recipient === LEADER_NAME ? 0 : 1,
+          kind: recipient === LEADER_NAME ? 'root' : 'teammate',
+        },
+        structured: {
+          ...(activity.kind === 'message' &&
+          activity.from &&
+          activity.from !== 'unknown'
+            ? {
+                author: {
+                  agentName: agentName(activity.from),
+                  depth: activity.from === LEADER_NAME ? 0 : 1,
+                  kind:
+                    activity.from === LEADER_NAME
+                      ? ('root' as const)
+                      : ('teammate' as const),
+                },
+              }
+            : {}),
+          ...(activity.kind === 'tool'
+            ? {
+                toolName: activity.toolName,
+                phase: activity.phase,
+                ...(activity.success !== undefined
+                  ? { success: activity.success }
+                  : {}),
+              }
+            : {}),
+        },
+      },
+      'teammate_activity',
+    ).catch((error) => {
+      debugLogger.warn('Failed to publish teammate activity:', error);
     });
   }
 

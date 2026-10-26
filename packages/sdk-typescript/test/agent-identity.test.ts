@@ -182,4 +182,88 @@ describe('agent identity transcript reduction', () => {
     expect(tool).toMatchObject({ agent: SECURITY });
   });
 
+  it('preserves teammate status identity and keeps activity out of leader text and usage', () => {
+    const teammate = {
+      agentName: '/root/checker',
+      depth: 1,
+      kind: 'teammate',
+    } as const;
+    const backgroundTask = {
+      taskId: 'teammate-message-1',
+      kind: 'peer',
+      status: 'message',
+    };
+    const completed = normalizeDaemonEvent(
+      text('checker reported back', {
+        source: 'background_task_completed',
+        qwenDiscreteMessage: true,
+        backgroundTask,
+        agent: teammate,
+      }) as never,
+    );
+    expect(completed).toEqual([
+      expect.objectContaining({
+        type: 'status',
+        source: 'background_task_completed',
+        data: backgroundTask,
+        agent: teammate,
+      }),
+    ]);
+    const completedState = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState(),
+      completed,
+    );
+    expect(completedState.blocks).toEqual([
+      expect.objectContaining({ kind: 'status', agent: teammate }),
+    ]);
+
+    for (const activityIndex of [1, 2]) {
+      const frames = [
+        text('Leader '),
+        text('answer'),
+        text('', { usage: { inputTokens: 7, outputTokens: 3 } }),
+      ];
+      frames.splice(
+        activityIndex,
+        0,
+        text('writer → checker: sky sentence', {
+          source: 'teammate_activity',
+          qwenDiscreteMessage: true,
+          backgroundTask: { ...backgroundTask, taskId: 'teammate-activity-1' },
+          agent: teammate,
+        }),
+      );
+      const events = frames.flatMap((event, index) =>
+        normalizeDaemonEvent({ ...event, id: index + 1 } as never),
+      );
+      expect(events[activityIndex]).toMatchObject({
+        type: 'status',
+        source: 'teammate_activity',
+        agent: teammate,
+        clearActiveText: false,
+      });
+      const state = reduceDaemonTranscriptEvents(
+        createDaemonTranscriptState(),
+        events,
+      );
+      const assistant = state.blocks.find(
+        (block) => block.kind === 'assistant',
+      );
+      expect(state.blocks).toHaveLength(2);
+      expect(assistant).toMatchObject({
+        text: 'Leader answer',
+        streaming: true,
+        usage: { inputTokens: 7, outputTokens: 3 },
+      });
+      expect(assistant).not.toHaveProperty('agent');
+      expect(state.activeAssistantBlockId).toBe(assistant?.id);
+      const status = state.blocks.find((block) => block.kind === 'status');
+      expect(status).toMatchObject({
+        source: 'teammate_activity',
+        agent: teammate,
+        data: { ...backgroundTask, taskId: 'teammate-activity-1' },
+      });
+      expect(status).not.toHaveProperty('usage');
+    }
+  });
 });

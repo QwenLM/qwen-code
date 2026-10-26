@@ -1011,7 +1011,8 @@ function normalizeSessionUpdate(
       const meta = extractUpdateMeta(update);
       if (
         meta?.['source'] === 'background_task_completed' ||
-        meta?.['source'] === 'background_notification_turn_started'
+        meta?.['source'] === 'background_notification_turn_started' ||
+        meta?.['source'] === 'teammate_activity'
       ) {
         return [
           {
@@ -1020,10 +1021,13 @@ function normalizeSessionUpdate(
             source: meta['source'],
             text: text ?? '',
             data:
-              meta['source'] === 'background_task_completed'
-                ? meta['backgroundTask']
-                : meta['backgroundTurn'],
+              meta['source'] === 'background_notification_turn_started'
+                ? meta['backgroundTurn']
+                : meta['backgroundTask'],
             ...(agent ? { agent } : {}),
+            ...(meta['source'] === 'teammate_activity'
+              ? { clearActiveText: false }
+              : {}),
           },
         ];
       }

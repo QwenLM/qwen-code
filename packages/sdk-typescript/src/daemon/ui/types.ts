@@ -494,10 +494,9 @@ export interface DaemonUiStatusEvent extends DaemonUiEventBase {
    */
   debugReason?: DaemonUiDebugReason;
   /**
-   * Client-dispatch opt-out: `false` inserts the status block without
-   * finalizing the active assistant/thought block, so read-only command
-   * output dispatched mid-turn does not split a streaming answer or orphan
-   * its usage frames. Daemon-emitted events leave this unset.
+   * `false` inserts the status block without finalizing the active
+   * assistant/thought block, so observational teammate activity and read-only
+   * command output do not split a streaming answer or orphan its usage frames.
    */
   clearActiveText?: boolean;
 }

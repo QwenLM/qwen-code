@@ -12,11 +12,14 @@ import type {
 import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import {
   TeamEventType,
+  type MessageSentEvent,
+  type TeammateActivityEvent,
   type TeammateApprovalRequestEvent,
   type TeammateExitedEvent,
   type TeammateJoinedEvent,
 } from '@qwen-code/qwen-code-core/agents/team/team-events.js';
 import type { TeamManager } from '@qwen-code/qwen-code-core/agents/team/TeamManager.js';
+import { LEADER_NAME } from '@qwen-code/qwen-code-core/agents/team/types.js';
 import {
   ToolConfirmationOutcome,
   type ToolCallConfirmationDetails,
@@ -62,6 +65,23 @@ export interface TeamSinkDeps {
     name: string;
     status?: string;
   }) => void;
+  /**
+   * Observational teammate progress (tool calls/results) and inter-teammate
+   * messages, for UI display only. Emitted as display frames without entering
+   * the notification queue, so they never wake the leader into an automatic
+   * turn.
+   */
+  readonly reportTeammateActivity: (activity: {
+    kind: 'tool' | 'message';
+    name: string;
+    toolName?: string;
+    phase?: 'call' | 'result';
+    success?: boolean;
+    description?: string;
+    from?: string;
+    to?: string;
+    message?: string;
+  }) => void;
   readonly retireTeamBinding: (bindingId: number) => Promise<void>;
   /**
    * Retires a single teammate's pending approvals on the host. A teammate's
@@ -100,6 +120,8 @@ export function attachTeamSink(deps: TeamSinkDeps): () => void {
     null;
   let joinedListener: ((event: TeammateJoinedEvent) => void) | null = null;
   let exitedListener: ((event: TeammateExitedEvent) => void) | null = null;
+  let activityListener: ((event: TeammateActivityEvent) => void) | null = null;
+  let messageSentListener: ((event: MessageSentEvent) => void) | null = null;
   let detached = false;
 
   const detachFromManager = (manager: TeamManager): void => {
@@ -121,6 +143,14 @@ export function attachTeamSink(deps: TeamSinkDeps): () => void {
     if (exitedListener) {
       emitter.off(TeamEventType.TEAMMATE_EXITED, exitedListener);
       exitedListener = null;
+    }
+    if (activityListener) {
+      emitter.off(TeamEventType.TEAMMATE_ACTIVITY, activityListener);
+      activityListener = null;
+    }
+    if (messageSentListener) {
+      emitter.off(TeamEventType.MESSAGE_SENT, messageSentListener);
+      messageSentListener = null;
     }
   };
 
@@ -276,11 +306,33 @@ export function attachTeamSink(deps: TeamSinkDeps): () => void {
     });
   };
 
+  const handleActivity = (event: TeammateActivityEvent): void => {
+    deps.reportTeammateActivity({
+      kind: 'tool',
+      name: event.name,
+      toolName: event.toolName,
+      phase: event.phase,
+      success: event.success,
+      description: event.description,
+    });
+  };
+
+  const handleMessageSent = (event: MessageSentEvent): void => {
+    if (event.to === LEADER_NAME) return;
+    deps.reportTeammateActivity({
+      kind: 'message',
+      name: event.from,
+      from: event.from,
+      to: event.to,
+      message: event.message,
+    });
+  };
+
   const handleManagerChange = (manager: TeamManager | null): void => {
     if (detached) return;
     // Same-instance re-notification: Config.setTeamManager fires the change
     // callbacks even when the manager object is identical, so without this
-    // guard the three emitter.on() calls below would register a second copy of
+    // guard the five emitter.on() calls below would register a second copy of
     // every listener — one approval request would prompt the host twice and
     // race two respond() calls, and detach() would leave one copy leaked.
     if (boundManager === manager) return;
@@ -305,6 +357,10 @@ export function attachTeamSink(deps: TeamSinkDeps): () => void {
     emitter.on(TeamEventType.TEAMMATE_JOINED, joinedListener);
     exitedListener = handleExited;
     emitter.on(TeamEventType.TEAMMATE_EXITED, exitedListener);
+    activityListener = handleActivity;
+    emitter.on(TeamEventType.TEAMMATE_ACTIVITY, activityListener);
+    messageSentListener = handleMessageSent;
+    emitter.on(TeamEventType.MESSAGE_SENT, messageSentListener);
   };
 
   deps.config.onTeamManagerChange(handleManagerChange);

@@ -127,6 +127,7 @@ describe('attachTeamSink', () => {
   let injectLeaderMessage: ReturnType<typeof vi.fn>;
   let requestPermission: ReturnType<typeof vi.fn>;
   let reportRosterChange: ReturnType<typeof vi.fn>;
+  let reportTeammateActivity: ReturnType<typeof vi.fn>;
   let retireTeamBinding: ReturnType<typeof vi.fn>;
   let retireTeammateApprovals: ReturnType<typeof vi.fn>;
   let deps: TeamSinkDeps;
@@ -143,6 +144,7 @@ describe('attachTeamSink', () => {
     injectLeaderMessage = vi.fn();
     requestPermission = vi.fn();
     reportRosterChange = vi.fn();
+    reportTeammateActivity = vi.fn();
     retireTeamBinding = vi.fn(async () => {});
     retireTeammateApprovals = vi.fn(async () => {});
     deps = {
@@ -151,6 +153,7 @@ describe('attachTeamSink', () => {
       signal: new AbortController().signal,
       injectLeaderMessage,
       reportRosterChange,
+      reportTeammateActivity,
       retireTeamBinding,
       retireTeammateApprovals,
       requestPermission,
@@ -517,9 +520,86 @@ describe('attachTeamSink', () => {
     expect(emitter.listenerCount('teammate_approval_request')).toBe(1);
     expect(emitter.listenerCount('teammate_joined')).toBe(1);
     expect(emitter.listenerCount('teammate_exited')).toBe(1);
+    expect(emitter.listenerCount('teammate_activity')).toBe(1);
+    expect(emitter.listenerCount('message_sent')).toBe(1);
 
     detach();
     expect(emitter.listenerCount('teammate_approval_request')).toBe(0);
   });
 
+  it('reports teammate tool activity and inter-teammate messages, and retracts them on detach', () => {
+    const detach = attachTeamSink(deps);
+
+    manager.emitter.emit(TeamEventType.TEAMMATE_ACTIVITY, {
+      agentId: 'a1',
+      name: 'researcher',
+      toolName: 'read_file',
+      phase: 'call',
+      description: 'Read notes.md',
+      timestamp: 1,
+    });
+    manager.emitter.emit(TeamEventType.TEAMMATE_ACTIVITY, {
+      agentId: 'a1',
+      name: 'researcher',
+      toolName: 'read_file',
+      phase: 'result',
+      success: false,
+      description: 'file not found',
+      timestamp: 2,
+    });
+    manager.emitter.emit(TeamEventType.MESSAGE_SENT, {
+      from: 'writer',
+      to: 'leader',
+      message: 'leader mailbox report',
+      timestamp: 3,
+    });
+    expect(reportTeammateActivity).toHaveBeenCalledTimes(2);
+    manager.emitter.emit(TeamEventType.MESSAGE_SENT, {
+      from: 'writer',
+      to: 'checker',
+      message: 'sky sentence',
+      timestamp: 3,
+    });
+
+    expect(reportTeammateActivity).toHaveBeenNthCalledWith(1, {
+      kind: 'tool',
+      name: 'researcher',
+      toolName: 'read_file',
+      phase: 'call',
+      success: undefined,
+      description: 'Read notes.md',
+    });
+    expect(reportTeammateActivity).toHaveBeenNthCalledWith(2, {
+      kind: 'tool',
+      name: 'researcher',
+      toolName: 'read_file',
+      phase: 'result',
+      success: false,
+      description: 'file not found',
+    });
+    expect(reportTeammateActivity).toHaveBeenNthCalledWith(3, {
+      kind: 'message',
+      name: 'writer',
+      from: 'writer',
+      to: 'checker',
+      message: 'sky sentence',
+    });
+
+    detach();
+    manager.emitter.emit(TeamEventType.TEAMMATE_ACTIVITY, {
+      agentId: 'a1',
+      name: 'researcher',
+      toolName: 'read_file',
+      phase: 'call',
+      description: 'Read notes.md',
+      timestamp: 4,
+    });
+    manager.emitter.emit(TeamEventType.MESSAGE_SENT, {
+      from: 'writer',
+      to: 'checker',
+      message: 'again',
+      timestamp: 5,
+    });
+    expect(reportTeammateActivity).toHaveBeenCalledTimes(3);
+  });
 });
