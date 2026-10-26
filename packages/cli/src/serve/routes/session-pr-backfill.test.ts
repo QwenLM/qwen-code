@@ -4135,6 +4135,122 @@ describe('backfillWorkspaceSessionPrs', () => {
     });
   });
 
+  it('declines a qualified number the named repository does not host', async () => {
+    // Fork layout with a trusted parent page: 77 exists only as the parent's
+    // PR while the user named the fork, and 78 is absent from the parent page
+    // the user named. Neither may be substituted with the other side's PR.
+    fetchRemoteWebUrlMock.mockResolvedValue('https://github.com/me/fork');
+    fetchAttributionRepoKeysMock.mockResolvedValue({
+      resolved: 'github.com/me/fork',
+      parent: 'github.com/parent/repo',
+    });
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/verify-pr 77 --repo me/fork');
+    await seedSession(SESSION_B);
+    await appendUserText(SESSION_B, '/verify-pr 78 --repo parent/repo');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [
+        {
+          ...pr(77, 'f77'),
+          url: 'https://github.com/parent/repo/pull/77',
+        },
+      ],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 0, written: 0, repoDeclined: 2 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_B, 'active'),
+      ),
+    ).toBeNull();
+  });
+
+  it('keeps an earlier unqualified claim above a later foreign qualifier', async () => {
+    // `/review 77` settled the number as this workspace's; a later
+    // `--repo other/repo` must not take that meaning away.
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/review 77');
+    await appendUserText(SESSION_A, '/verify-pr 77 --repo other/repo');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'f77')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 1 });
+    expect(
+      (
+        await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+        )
+      )?.[0],
+    ).toMatchObject({ number: 77, url: 'https://github.com/o/r/pull/77' });
+  });
+
+  it('keeps an unreadable qualifier beside a url form', async () => {
+    // A url form named another repo's PR 77 and the bare claim is qualified to
+    // something unreadable: neither command named this workspace's 77.
+    await seedSession(SESSION_A);
+    await appendUserText(
+      SESSION_A,
+      '/review https://github.com/other/repo/pull/77',
+    );
+    await appendUserText(SESSION_A, '/verify-pr 77 -R other/repo');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'f77')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 0, written: 0 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+  });
+
+  it('requires the whole path when the qualifier names a host', async () => {
+    // `host/sub/cli` is a different full path from `host/group/sub/cli`: an
+    // explicit host must match every segment, not just the tail.
+    fetchRemoteWebUrlMock.mockResolvedValue(
+      'https://gitlab.corp.com/group/sub/cli',
+    );
+    await seedSession(SESSION_A);
+    await appendUserText(
+      SESSION_A,
+      '/verify-pr 77 --repo https://gitlab.corp.com/sub/cli',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [
+        {
+          ...pr(77, 'f77'),
+          url: 'https://gitlab.corp.com/group/sub/cli/pull/77',
+        },
+      ],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 0, repoDeclined: 1 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+  });
+
   it('declines a /review url form the sidecar reader would reject', async () => {
     // The capture is unbounded user text; an over-long or control-
     // character url passes the repo gate (only the first two path

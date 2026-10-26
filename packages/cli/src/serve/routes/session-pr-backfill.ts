@@ -280,25 +280,41 @@ function collectCommandPrNumbers(raw: string): {
 } {
   const mentions: CommandMention[] = [];
   const mentionByNumber = new Map<number, CommandMention>();
+  // A number an unqualified claim (`/review N`) named is THIS workspace's for
+  // good: a later `--repo` claim must not overwrite that meaning, or a session
+  // that reviewed PR N and then asked about another repo's N would lose the
+  // binding it already earned.
+  const ownClaimed = new Set<number>();
   const noteMention = (mention: CommandMention): void => {
     const known = mentionByNumber.get(mention.number);
     if (known) {
       // The position stays with the first mention: it is the cap trim's age
-      // proxy. A bare claim's qualifiers ACCUMULATE — a later `/verify-pr N`
-      // naming this workspace's repo must bind after an earlier one named
-      // another — while an unqualified claim (`/review N`) reads the number as
-      // this workspace's for good.
+      // proxy. Qualifiers ACCUMULATE — a later `/verify-pr N` naming this
+      // workspace's repo must bind after an earlier one named another —
+      // unless an unqualified claim already settled the meaning.
       if (mention.bare) {
         known.bare = true;
         if (mention.repoForms === undefined) {
+          ownClaimed.add(mention.number);
           delete known.repoForms;
+        } else if (ownClaimed.has(mention.number)) {
+          // Settled as this workspace's; the later qualifier changes nothing.
         } else if (mention.repoForms.length > 0) {
           known.repoForms = [
             ...new Set([...(known.repoForms ?? []), ...mention.repoForms]),
           ];
+        } else {
+          // A qualifier this grammar cannot read: the number is qualified but
+          // its repository is unknown, which must stay distinct from "no
+          // qualifier at all" so it declines rather than binding this
+          // workspace's number.
+          known.repoForms ??= [];
         }
       }
       return;
+    }
+    if (mention.bare && mention.repoForms === undefined) {
+      ownClaimed.add(mention.number);
     }
     mentionByNumber.set(mention.number, mention);
     mentions.push(mention);
@@ -668,21 +684,56 @@ export async function backfillWorkspaceSessionPrs(
       ownedIdentities.push({ host, path: [owner, repo] });
     }
   }
+  // One comparison for the two questions this file asks of a repository name:
+  // whether a `--repo` qualifier names this workspace, and whether a resolved
+  // PR URL landed in the repository the qualifier named. A qualifier that
+  // spells a HOST must match the whole path — suffix matching would admit
+  // `host/sub/cli` for `host/group/sub/cli`, a different project — while the
+  // skill's `[--repo [HOST/]OWNER/REPO]` form keeps owner/repo suffix matching
+  // against a nested-group origin.
+  const segmentsMatch = (
+    form: { host?: string; path: string[] },
+    identity: { host?: string; path: string[] },
+    exactPath: boolean,
+  ): boolean => {
+    if (form.host !== undefined) {
+      if (identity.host === undefined) return false;
+      if (!hostsEquivalent(form.host, identity.host)) return false;
+    }
+    if (form.path.length > identity.path.length) return false;
+    if (exactPath && form.path.length !== identity.path.length) return false;
+    const tail = identity.path.slice(-form.path.length);
+    return form.path.every((segment, index) => segment === tail[index]);
+  };
+  /** The repository a PR URL belongs to: host plus the path above its PR/MR id. */
+  const identityFromUrl = (
+    prUrl: string,
+  ): { host: string; path: string[] } | undefined => {
+    try {
+      const parsed = new URL(prUrl);
+      const parts = parsed.pathname.split('/').filter(Boolean);
+      const marker = parts.findIndex(
+        (segment) =>
+          segment === 'pull' ||
+          segment === 'merge_requests' ||
+          segment === 'codereview',
+      );
+      const repoPath = (marker >= 2 ? parts.slice(0, marker) : parts).map(
+        normalizeSegment,
+      );
+      return repoPath.length >= 2
+        ? { host: parsed.host, path: repoPath }
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  };
   const repoFormMatches = (repoForm: string): boolean => {
     const form = repoSegments(repoForm);
     if (form === undefined) return false;
-    return ownedIdentities.some((identity) => {
-      if (
-        form.host !== undefined &&
-        (identity.host === undefined ||
-          !hostsEquivalent(form.host, identity.host))
-      ) {
-        return false;
-      }
-      if (form.path.length > identity.path.length) return false;
-      const tail = identity.path.slice(-form.path.length);
-      return form.path.every((segment, index) => segment === tail[index]);
-    });
+    return ownedIdentities.some((identity) =>
+      segmentsMatch(form, identity, form.host !== undefined),
+    );
   };
 
   for (const candidate of candidates) {
@@ -776,6 +827,30 @@ export async function backfillWorkspaceSessionPrs(
       numbers.length = 0;
       numbers.push(...rest, conventionNumber);
     }
+    // Numbers whose meaning is ONLY qualified — no unqualified claim, no
+    // convention, no url form. The resolver's page and remote fallbacks can
+    // point at the other side of a fork, which is a different PR with the same
+    // number, so their resolved URL has to land in a repository the user
+    // named.
+    const qualifiedForms = new Map<number, string[]>();
+    for (const mention of candidate.mentions) {
+      if (mention.repoForms === undefined) continue;
+      qualifiedForms.set(mention.number, [
+        ...(qualifiedForms.get(mention.number) ?? []),
+        ...mention.repoForms,
+      ]);
+    }
+    const urlMatchesQualifier = (prUrl: string, forms: string[]): boolean => {
+      const identity = identityFromUrl(prUrl);
+      if (identity === undefined) return false;
+      return forms.some((form) => {
+        const parsed = repoSegments(form);
+        return (
+          parsed !== undefined &&
+          segmentsMatch(parsed, identity, parsed.host !== undefined)
+        );
+      });
+    };
     // The legacy-repair pass below must stay reachable for a session with
     // nothing planned this run, so only the GitHub path — which has no
     // repairs — skips on empty numbers before reading the sidecar.
@@ -885,6 +960,22 @@ export async function backfillWorkspaceSessionPrs(
       // declines what the reader would reject.
       if (url === undefined || !isValidSessionPrUrl(url)) {
         result.unresolved += 1;
+        continue;
+      }
+      // A number named only through `--repo` must bind in the repository the
+      // user named. `me/fork` beside a trusted parent page resolves to the
+      // parent's same-numbered PR, and `parent/repo` for a number the page
+      // lacks falls back to the fork's — both are different PRs, so the URL is
+      // declined rather than substituted. A url form names its own repository
+      // explicitly and is not gated here.
+      const forms = qualifiedForms.get(number);
+      if (
+        forms !== undefined &&
+        forms.length > 0 &&
+        !formUrlByNumber.has(number) &&
+        !urlMatchesQualifier(url, forms)
+      ) {
+        result.repoDeclined = (result.repoDeclined ?? 0) + 1;
         continue;
       }
       urls.set(number, url);

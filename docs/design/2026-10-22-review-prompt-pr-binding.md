@@ -48,7 +48,10 @@ Bind the PR when the daemon admits a `/review` or `/verify-pr` prompt.
   `--repo a/b` on a pre-existing `/review <N>` also fails closed instead of
   binding this workspace's N, and matching needs the workspace repository key:
   a workspace whose `origin` cannot be resolved declines a qualified number
-  even when the qualifier is correct.
+  even when the qualifier is correct. A number named only through `--repo`
+  binds only when the resolved PR belongs to the repository the qualifier
+  named — the other side of a fork hosts a different PR with the same number —
+  so an unresolvable match declines rather than substitutes.
 - **Source.** Only the local user's typed prompt binds. A channel-relayed turn
   is skipped on its raw channel marker, so an external sender cannot write a
   PR binding into the local session.
