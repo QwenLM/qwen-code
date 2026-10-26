@@ -49,6 +49,11 @@ rotates refresh tokens. Log the server's token endpoint and MCP requests.
   `clientId`) refreshes with the client id stored at registration.
 - Custom `headers` from the server config still reach the server.
 - A server with no stored credentials sends no `Authorization` header.
+- A due token that cannot be refreshed keeps being sent until it actually
+  expires. After that (or once the credentials are gone when the token is
+  next due), HTTP and SSE requests carry no OAuth bearer rather than the
+  connect-time one; an `Authorization` header from the server config is then
+  sent unchanged.
 - A failed refresh still removes the stored credentials and the next
   connection asks the user to authenticate again.
 

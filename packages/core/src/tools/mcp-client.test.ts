@@ -671,6 +671,8 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
           ),
         );
       stubGlobalFetch(401);
+      const fetchSpy = vi.fn(async () => new Response(null, { status: 202 }));
+      _setMcpFetchForTest(fetchSpy as unknown as typeof fetch);
 
       await expect(connectHttp()).resolves.toBeDefined();
 
@@ -679,11 +681,19 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       expect(getValidToken).toHaveBeenCalledWith('http-server', creds());
       expect(connect).toHaveBeenCalledTimes(2);
       const oauthTransport = connect.mock.calls[1][0] as {
+        _fetch: typeof fetch;
         _requestInit?: { headers?: Record<string, string> };
       };
-      expect(oauthTransport._requestInit?.headers).toMatchObject({
-        Authorization: 'Bearer access-token',
-      });
+      // The token goes on each request, not into the connect-time headers.
+      expect(oauthTransport._requestInit?.headers).toBeUndefined();
+      await oauthTransport._fetch('http://test-server/mcp', { method: 'POST' });
+      const sentInit = fetchSpy.mock.calls[0] as unknown as [
+        unknown,
+        RequestInit,
+      ];
+      expect(new Headers(sentInit[1].headers).get('authorization')).toBe(
+        'Bearer access-token',
+      );
     });
 
     it('falls back to base-url OAuth discovery when www-authenticate lacks resource metadata', async () => {

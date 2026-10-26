@@ -438,20 +438,25 @@ function createBearerTokenGetter(
   return async () => {
     if (Date.now() >= dueAt) {
       try {
-        cached = await authProvider.getValidOAuthToken(
+        const fresh = await authProvider.getValidOAuthToken(
           mcpServerName,
           oauthConfig,
         );
-        dueAt = refreshAfter(cached);
+        if (fresh) {
+          cached = fresh;
+          dueAt = refreshAfter(fresh);
+          return fresh.accessToken;
+        }
       } catch (error) {
         debugLogger.warn(
           `Failed to get OAuth token for MCP server '${mcpServerName}': ${getErrorMessage(error)}`,
         );
-        // Keep using the cached token while the server would still accept it.
-        const stillValid =
-          cached && (!cached.expiresAt || Date.now() < cached.expiresAt);
-        return stillValid ? cached!.accessToken : null;
       }
+      // No new token (no refresh token, refresh failed, storage unreadable):
+      // keep using the cached one while the server would still accept it.
+      const stillValid =
+        cached && (!cached.expiresAt || Date.now() < cached.expiresAt);
+      return stillValid ? cached!.accessToken : null;
     }
     return cached?.accessToken ?? null;
   };
@@ -473,7 +478,11 @@ function storedOAuthConfig(
 /**
  * Wraps `baseFetch` so every request carries the current OAuth bearer token
  * rather than the one captured when the transport was created, which would go
- * stale on a long-lived connection. Without a token the request is sent as is.
+ * stale on a long-lived connection. This is the only writer of the OAuth
+ * header: transports must not also put it in `requestInit`, or a request made
+ * when no usable token is left would still carry the connect-time one. Without
+ * a token the request is sent as is, so it has no OAuth bearer; an
+ * `Authorization` header the user configured is left untouched.
  */
 function withBearerToken(
   baseFetch: typeof fetch,
@@ -1439,17 +1448,19 @@ export async function attemptAutomaticMcpOAuth(
  *
  * @param mcpServerName The name of the MCP server
  * @param mcpServerConfig The MCP server configuration
- * @param accessToken The OAuth access token valid at connect time
- * @param getToken Supplies the current token for each later request
+ * @param getToken Supplies the current token for every request, starting with
+ *   the one obtained at connect time
  * @returns The transport with OAuth token, or null if creation fails
  */
 async function createTransportWithOAuth(
   mcpServerName: string,
   mcpServerConfig: MCPServerConfig,
-  accessToken: string,
   getToken: BearerTokenGetter,
 ): Promise<StreamableHTTPClientTransport | SSEClientTransport | null> {
   try {
+    const requestInit = mcpServerConfig.headers
+      ? { headers: mcpServerConfig.headers }
+      : undefined;
     if (mcpServerConfig.httpUrl) {
       // Create HTTP transport with OAuth token
       const oauthTransportOptions: StreamableHTTPClientTransportOptions = {
@@ -1457,12 +1468,7 @@ async function createTransportWithOAuth(
           createMcpStreamableHttpFetch(mcpServerName, mcpServerConfig),
           getToken,
         ),
-        requestInit: {
-          headers: {
-            ...mcpServerConfig.headers,
-            Authorization: `Bearer ${accessToken}`,
-          },
-        },
+        requestInit,
       };
 
       return new StreamableHTTPClientTransport(
@@ -1473,12 +1479,7 @@ async function createTransportWithOAuth(
       // Create SSE transport with OAuth token in Authorization header
       return new SSEClientTransport(new URL(mcpServerConfig.url), {
         fetch: withBearerToken((input, init) => fetch(input, init), getToken),
-        requestInit: {
-          headers: {
-            ...mcpServerConfig.headers,
-            Authorization: `Bearer ${accessToken}`,
-          },
-        },
+        requestInit,
       });
     }
 
@@ -2390,7 +2391,6 @@ export async function connectToMcpServer(
               const oauthTransport = await createTransportWithOAuth(
                 mcpServerName,
                 mcpServerConfig,
-                token.accessToken,
                 createBearerTokenGetter(
                   mcpServerName,
                   oauthConfig,
@@ -2528,7 +2528,6 @@ export async function connectToMcpServer(
                 const oauthTransport = await createTransportWithOAuth(
                   mcpServerName,
                   mcpServerConfig,
-                  token.accessToken,
                   createBearerTokenGetter(
                     mcpServerName,
                     oauthConfig,
@@ -2762,22 +2761,14 @@ export async function createTransport(
       mcpServerConfig,
     );
     const transportOptions: StreamableHTTPClientTransportOptions = {
-      fetch: baseFetch,
+      // The OAuth token, if any, is set per request by the fetch wrapper.
+      fetch:
+        hasOAuthConfig && accessToken && getToken
+          ? withBearerToken(baseFetch, getToken)
+          : baseFetch,
     };
 
-    // Set up headers with OAuth token if available
-    if (hasOAuthConfig && accessToken) {
-      // Refresh the token per request; the header below only covers connect.
-      if (getToken) {
-        transportOptions.fetch = withBearerToken(baseFetch, getToken);
-      }
-      transportOptions.requestInit = {
-        headers: {
-          ...mcpServerConfig.headers,
-          Authorization: `Bearer ${accessToken}`,
-        },
-      };
-    } else if (mcpServerConfig.headers) {
+    if (mcpServerConfig.headers) {
       transportOptions.requestInit = {
         headers: mcpServerConfig.headers,
       };
@@ -2792,22 +2783,14 @@ export async function createTransport(
   if (mcpServerConfig.url) {
     const transportOptions: SSEClientTransportOptions = {};
 
-    // Set up headers with OAuth token if available
-    if (hasOAuthConfig && accessToken) {
-      // Refresh the token per request; the header below only covers connect.
-      if (getToken) {
-        transportOptions.fetch = withBearerToken(
-          (input, init) => fetch(input, init),
-          getToken,
-        );
-      }
-      transportOptions.requestInit = {
-        headers: {
-          ...mcpServerConfig.headers,
-          Authorization: `Bearer ${accessToken}`,
-        },
-      };
-    } else if (mcpServerConfig.headers) {
+    // The OAuth token, if any, is set per request by the fetch wrapper.
+    if (hasOAuthConfig && accessToken && getToken) {
+      transportOptions.fetch = withBearerToken(
+        (input, init) => fetch(input, init),
+        getToken,
+      );
+    }
+    if (mcpServerConfig.headers) {
       transportOptions.requestInit = {
         headers: mcpServerConfig.headers,
       };
