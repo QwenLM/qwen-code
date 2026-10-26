@@ -391,6 +391,14 @@ checkout cost is no longer limited to 429/5xx retries. Do not treat
 A failed install must still delete staging. A partial entry that crossed
 the cap lives only inside that staging directory.
 
+**Rejected installs may leave the base directory.** The skills base
+directory is created before the source is acquired, so a missing source
+folder, a GitHub 404, or a ZIP that fails to decode fails after
+`<workspace>/.qwen/skills` (or the global equivalent) exists. Only the
+invalid-base64 ZIP shape is rejected before the directory is created.
+The leftover empty directory is deliberate: staging must live beside the
+destination so the final rename stays on one filesystem.
+
 **Misleading UI if the mapping is left alone.** Today's ZIP sentence is
 already wrong for GitHub, folder, and per-file failures. Pointing it at
 7,864,071 bytes without a separate package sentence would keep that bug.
@@ -433,6 +441,10 @@ the allowed size`.
 - More than 2000 installed files: `400 skill_too_many_files`. Messages:
   `Skill package has too many files (max 2000)` and `Skill ZIP contains
 too many files (max 2000)`.
+- A staging write fault (an errno in `ENOSPC`, `EDQUOT`, `EROFS`, `EIO`,
+  `EMFILE`, `ENFILE`, `EBUSY`) whose path is the staging directory:
+  `500 skill_staging_failed`. Source-side `ENOENT`, `ENOTDIR`, and
+  `EACCES` keep the per-source 400/502 mapping.
 - Empty package, bad paths, duplicates, and excess depth: unchanged
   `invalid_skill_package` messages and status 400.
 - A folder or ZIP whose expanded size is over 6 MiB and within the new

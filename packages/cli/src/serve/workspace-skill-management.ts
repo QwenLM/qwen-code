@@ -101,10 +101,14 @@ function rejectInstallArtifactSkillName(name: string): void {
   }
 }
 
-function decodeBase64(value: string): Buffer {
+function assertBase64Shape(value: string): void {
   if (!value || !/^[A-Za-z0-9+/]*={0,2}$/.test(value)) {
     skillError('invalid_skill_source', 'Invalid base64 skill content');
   }
+}
+
+function decodeBase64(value: string): Buffer {
+  assertBase64Shape(value);
   const content = Buffer.from(value, 'base64');
   if (content.length > MAX_ZIP_ARCHIVE_BYTES) {
     skillError(
@@ -114,6 +118,43 @@ function decodeBase64(value: string): Buffer {
     );
   }
   return content;
+}
+
+const STAGING_DISK_ERRNOS = new Set([
+  'ENOSPC',
+  'EDQUOT',
+  'EROFS',
+  'EIO',
+  'EMFILE',
+  'ENFILE',
+  'EBUSY',
+]);
+
+function isStagingFailure(
+  error: unknown,
+  staging: string,
+): error is NodeJS.ErrnoException {
+  if (!(error instanceof Error)) return false;
+  const { code } = error as NodeJS.ErrnoException;
+  if (!code || !STAGING_DISK_ERRNOS.has(code)) return false;
+  return [
+    (error as NodeJS.ErrnoException).path,
+    (error as { dest?: unknown }).dest,
+  ].some(
+    (failedPath) =>
+      typeof failedPath === 'string' &&
+      (failedPath === staging ||
+        failedPath.startsWith(`${staging}${path.sep}`)),
+  );
+}
+
+function rethrowStagingFailure(error: unknown, staging: string): void {
+  if (!isStagingFailure(error, staging)) return;
+  throw new WorkspaceSkillManagementError(
+    'skill_staging_failed',
+    error.message,
+    500,
+  );
 }
 
 function normalizeRelativePath(value: string): string {
@@ -449,6 +490,7 @@ async function downloadGitHubDirectoryWithGit(
     ) {
       throw error;
     }
+    rethrowStagingFailure(error, staging);
     throw new WorkspaceSkillManagementError(
       'github_skill_download_failed',
       `Failed to download GitHub Skill: ${error instanceof Error ? error.message : String(error)}`,
@@ -915,6 +957,7 @@ async function stageSkillSource(
     ) {
       throw error;
     }
+    rethrowStagingFailure(error, staging);
     const code =
       source.type === 'github'
         ? 'github_skill_download_failed'
@@ -1020,6 +1063,9 @@ export async function installWorkspaceSkill(
     skillError('invalid_skill_folder', 'Skill folder path must be absolute');
   }
   if (request.source.type === 'github') resolveGitHubSkill(request.source.url);
+  if (request.source.type === 'zip') {
+    assertBase64Shape(request.source.contentBase64);
+  }
   const baseDir = skillBaseDir(workspace, request.scope);
   assertGenerationOpen?.();
   await ensureDirectoryWithoutSymlinks(baseDir, assertGenerationOpen);

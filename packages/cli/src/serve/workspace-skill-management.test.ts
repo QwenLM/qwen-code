@@ -554,6 +554,26 @@ describe('workspace Skill management', () => {
     ).rejects.toThrow('must be absolute');
   });
 
+  it.each([
+    ['invalid characters', 'not base64!'],
+    ['an empty string', ''],
+  ])(
+    'rejects ZIP base64 with %s before creating Skill directories',
+    async (_label, contentBase64) => {
+      const workspace = await temporaryDirectory('qwen-skill-workspace-');
+
+      await expect(
+        installWorkspaceSkill(workspace, {
+          name: 'bad-zip',
+          scope: 'workspace',
+          source: { type: 'zip', contentBase64 },
+        }),
+      ).rejects.toMatchObject({ code: 'invalid_skill_source' });
+
+      await expect(fs.access(path.join(workspace, '.qwen'))).rejects.toThrow();
+    },
+  );
+
   it('reports malformed GitHub URLs as invalid sources', async () => {
     const workspace = await temporaryDirectory('qwen-skill-workspace-');
 
@@ -735,6 +755,53 @@ describe('workspace Skill management', () => {
         source: { type: 'folder', path: sourceLink },
       }),
     ).rejects.toMatchObject({ code: 'invalid_skill_folder' });
+  });
+
+  it('reports a staging disk fault as a server error', async () => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+    const source = await temporaryDirectory('qwen-skill-source-');
+    await fs.writeFile(
+      path.join(source, 'SKILL.md'),
+      skillMarkdown('staging-fault'),
+    );
+    vi.spyOn(fs, 'copyFile').mockImplementationOnce(async (_source, target) => {
+      throw Object.assign(new Error('no space left on device'), {
+        code: 'ENOSPC',
+        dest: String(target),
+      });
+    });
+
+    await expect(
+      installWorkspaceSkill(workspace, {
+        name: 'staging-fault',
+        scope: 'workspace',
+        source: { type: 'folder', path: source },
+      }),
+    ).rejects.toMatchObject({
+      code: 'skill_staging_failed',
+      statusCode: 500,
+    });
+  });
+
+  it('keeps a source-side errno on the invalid-input path', async () => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+    const source = await temporaryDirectory('qwen-skill-source-');
+    const sourceFile = path.join(source, 'SKILL.md');
+    await fs.writeFile(sourceFile, skillMarkdown('source-fault'));
+    vi.spyOn(fs, 'copyFile').mockImplementationOnce(async () => {
+      throw Object.assign(new Error('input/output error'), {
+        code: 'EIO',
+        path: sourceFile,
+      });
+    });
+
+    await expect(
+      installWorkspaceSkill(workspace, {
+        name: 'source-fault',
+        scope: 'workspace',
+        source: { type: 'folder', path: source },
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_skill_folder', statusCode: 400 });
   });
 
   it('installs a ZIP entry larger than the previous 2 MiB file cap', async () => {

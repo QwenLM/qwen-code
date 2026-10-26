@@ -272,6 +272,64 @@ describe('workspace Skill install recovery', () => {
     ).toEqual([]);
   });
 
+  it('reports a staging fault during the git fallback as a server error', async () => {
+    const workspace = await temporary();
+    const fixture = await temporary();
+    await fs.writeFile(path.join(fixture, 'SKILL.md'), markdown('foo'));
+    execFileMock.mockImplementation(
+      (
+        _file: string,
+        args: string[],
+        _options: unknown,
+        callback: (error: Error | null, stdout: string, stderr: string) => void,
+      ) => {
+        const operation =
+          args[0] === 'clone'
+            ? fs.cp(fixture, args[args.length - 1], { recursive: true })
+            : Promise.resolve();
+        void operation.then(
+          () => callback(null, '', ''),
+          (error: Error) => callback(error, '', ''),
+        );
+      },
+    );
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string) => {
+        if (input.includes('/contents?ref=main')) {
+          return new Response('rate limited', { status: 429 });
+        }
+        throw new Error(`Unexpected fetch: ${input}`);
+      }),
+    );
+    const copyFile = vi
+      .spyOn(fs, 'copyFile')
+      .mockImplementationOnce(async (_source, target) => {
+        throw Object.assign(new Error('no space left on device'), {
+          code: 'ENOSPC',
+          dest: String(target),
+        });
+      });
+
+    try {
+      await expect(
+        installWorkspaceSkill(workspace, {
+          name: 'foo',
+          scope: 'workspace',
+          source: {
+            type: 'github',
+            url: 'https://github.com/owner/repo/blob/main/SKILL.md',
+          },
+        }),
+      ).rejects.toMatchObject({
+        code: 'skill_staging_failed',
+        statusCode: 500,
+      });
+    } finally {
+      copyFile.mockRestore();
+    }
+  });
+
   it('excludes a root-level .git directory from a folder install', async () => {
     const workspace = await temporary();
     const source = await temporary();

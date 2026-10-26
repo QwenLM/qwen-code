@@ -325,6 +325,12 @@ MAX_ZIP_ARCHIVE_BYTES   = 3 * floor(10_485_430 / 4) // 7_864_071
 失败的安装仍必须
 删除暂存目录。越过上限的半截条目只能留在该暂存目录内。
 
+**被拒绝的安装可能留下基础目录。** 技能基础目录在获取来源之前创建，因此
+来源文件夹不存在、GitHub 404，或 ZIP 解码失败时，失败发生在
+`<workspace>/.qwen/skills`（或全局对应位置）已经存在之后。只有非法 base64
+的 ZIP 形状会在创建目录之前被拒绝。留下空目录是有意为之：暂存目录必须与
+目标同盘，最后的 rename 才能不跨文件系统。
+
 **如果错误映射不改，界面会误导。** 今天的 ZIP 句子对 GitHub、文件夹和单文件
 失败已经是错的。只把它改成 7,864,071 字节、却不单独写包大小的句子，这个
 错误还会留下。
@@ -364,6 +370,9 @@ closes` 在第三次 `assertGenerationOpen` 时抛出，并期望不存在 `.qwe
 - 已安装文件超过 2000 个：`400 skill_too_many_files`。文案：
   `Skill package has too many files (max 2000)` 和
   `Skill ZIP contains too many files (max 2000)`。
+- 暂存目录发生写入故障（errno 为 `ENOSPC`、`EDQUOT`、`EROFS`、`EIO`、
+  `EMFILE`、`ENFILE`、`EBUSY`）：`500 skill_staging_failed`。来源侧
+  `ENOENT`、`ENOTDIR`、`EACCES` 保持按来源映射为 400/502。
 - 空包、非法路径、重复路径和过深目录：`invalid_skill_package` 的文案和
   HTTP 400 不变。
 - 展开后超过 6 MiB、但仍在新上限内的文件夹或 ZIP 可以安装。2 MiB 再加
