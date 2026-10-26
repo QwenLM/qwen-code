@@ -6558,8 +6558,13 @@ describe('Settings Loading and Merging', () => {
           isTrusted: true,
           source: 'file',
         });
+        // ~/.qwen exists, so it is the default global dir on Linux too.
         (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
-          [USER_SETTINGS_PATH, userQwenEnvPath].includes(p.toString()),
+          [
+            USER_SETTINGS_PATH,
+            userQwenEnvPath,
+            path.dirname(userQwenEnvPath),
+          ].includes(p.toString()),
         );
         (fs.readFileSync as Mock).mockImplementation(
           (p: fs.PathOrFileDescriptor) => {
@@ -6869,11 +6874,15 @@ describe('Settings Loading and Merging', () => {
           source: 'file',
         });
         // Only the legacy ~/.qwen/.env exists; <QWEN_HOME>/.env, the active
-        // settings.json under <QWEN_HOME>, and ~/.env all do not.
+        // settings.json under <QWEN_HOME>, and ~/.env all do not. ~/.qwen
+        // itself exists, so it is the default global dir on Linux too.
         (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
-          [USER_SETTINGS_PATH, customSettingsPath, userQwenEnvPath].includes(
-            p.toString(),
-          ),
+          [
+            USER_SETTINGS_PATH,
+            customSettingsPath,
+            userQwenEnvPath,
+            path.dirname(userQwenEnvPath),
+          ].includes(p.toString()),
         );
         (fs.readFileSync as Mock).mockImplementation(
           (p: fs.PathOrFileDescriptor) => {

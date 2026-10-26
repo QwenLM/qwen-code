@@ -17,6 +17,7 @@ import { V1_INDICATOR_KEYS } from '../config/migration/versions/v1-to-v2-shared.
 import {
   DEFAULT_EXCLUDED_ENV_VARS,
   HOME_ENV_BOOTSTRAP_KEYS,
+  isGlobalDirEnvKey,
   isHardcodedProjectEnvExclusion,
   isLoaderEnvKey,
   isPrivateProvenanceEnvKey,
@@ -315,9 +316,7 @@ export function loadServeFastPathEnvironment(
         // would otherwise freeze into daemonRuntimeBaseEnv and hand to every
         // spawned session — needs its own every-scope rejection here.
         if (isPrivateProvenanceEnvKey(key)) continue;
-        // Mirrors environment.ts: the global dir is resolved before .env files
-        // load, so they cannot move it.
-        if (key === 'XDG_CONFIG_HOME') continue;
+        if (isGlobalDirEnvKey(key)) continue;
         if (!isHomeScopedEnvFile && isHardcodedProjectEnvExclusion(key)) {
           continue;
         }

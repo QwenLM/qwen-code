@@ -2234,4 +2234,39 @@ describe('home .env with the global dir in the XDG config directory', () => {
     expect(process.env['XDG_CONFIG_HOME']).toBeUndefined();
     expect(Storage.getGlobalQwenDir()).toBe(before);
   });
+
+  it('lets a legacy ~/.qwen/.env fill in keys but not set QWEN_HOME', () => {
+    fs.mkdirSync(xdgDir(), { recursive: true });
+    fs.writeFileSync(path.join(xdgDir(), '.qwen-global-dir'), '');
+    const legacyDir = path.join(os.homedir(), '.qwen');
+    fs.mkdirSync(legacyDir);
+    fs.writeFileSync(
+      path.join(legacyDir, '.env'),
+      `QWEN_HOME=${path.join(os.homedir(), 'legacy')}\nDEMO_VAR=legacy\n`,
+    );
+
+    preResolveHomeEnvOverrides();
+    loadEnvironment(testSettings({}), makeWorkspace());
+
+    expect(process.env['DEMO_VAR']).toBe('legacy');
+    expect(process.env['QWEN_HOME']).toBeUndefined();
+    expect(Storage.getGlobalQwenDir()).toBe(xdgDir());
+  });
+
+  // On Windows os.homedir() reads USERPROFILE, so unsetting it would leave
+  // the fake home.
+  it.skipIf(platform.value === 'win32')(
+    'does not let a home .env set USERPROFILE',
+    () => {
+      delete process.env['USERPROFILE'];
+      fs.writeFileSync(
+        path.join(os.homedir(), '.env'),
+        'USERPROFILE=/elsewhere\n',
+      );
+
+      loadEnvironment(testSettings({}), makeWorkspace());
+
+      expect(process.env['USERPROFILE']).toBeUndefined();
+    },
+  );
 });

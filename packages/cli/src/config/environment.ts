@@ -13,6 +13,7 @@ import { isWorkspaceTrusted } from './trustedFolders.js';
 import {
   DEFAULT_EXCLUDED_ENV_VARS,
   HOME_ENV_BOOTSTRAP_KEYS,
+  isGlobalDirEnvKey,
   isHardcodedProjectEnvExclusion,
   isLoaderEnvKey,
   isPrivateProvenanceEnvKey,
@@ -179,10 +180,11 @@ let lastReloadSnapshotSeeded = false;
  * Returns the set of normalized .env file paths that count as user-level.
  *
  * User-level paths cover the home `.env` and the global Qwen config dir
- * `.env` (which respects `QWEN_HOME`). When `QWEN_HOME` redirects elsewhere,
- * the legacy `<homedir>/.qwen/.env` is also included so credentials users
- * left there continue to load (and the trust check in untrusted workspaces
- * still allows reading it).
+ * `.env` (which respects `QWEN_HOME`). The legacy `<homedir>/.qwen/.env` is
+ * always included, for compatibility: the docs pointed users at it for years,
+ * so credentials left there keep loading wherever the global dir is (and the
+ * trust check in untrusted workspaces still allows reading it). It is not
+ * the previous default dir's `.env`, and it cannot move the global dir.
  */
 function getUserLevelEnvPaths(): Set<string> {
   const homeDir = os.homedir();
@@ -591,9 +593,7 @@ function canApplyParsedEnvKey(
   // hardcoded project tier they are rejected at every scope — a home `.env`
   // must not be able to forge sandbox or Conversations runtime state either.
   if (isPrivateProvenanceEnvKey(key)) return false;
-  // It decides where the global dir is, which is resolved before any .env file
-  // loads; applying it afterwards would split global state across two dirs.
-  if (key === 'XDG_CONFIG_HOME') return false;
+  if (isGlobalDirEnvKey(key)) return false;
   if (options.reload && isReloadExcludedKey(key)) return false;
   if (!envFile.isHomeScopedEnvFile && isHardcodedProjectEnvExclusion(key)) {
     return false;

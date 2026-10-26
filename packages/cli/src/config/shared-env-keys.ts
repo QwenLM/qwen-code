@@ -368,6 +368,21 @@ export function isPrivateProvenanceEnvKey(key: string): boolean {
   return PRIVATE_PROVENANCE_ENV_KEYS.has(key.toLowerCase());
 }
 
+// These decide where the global dir is. It is settled before .env files load
+// (QWEN_HOME from the home .env through HOME_ENV_BOOTSTRAP_KEYS), so no env
+// file at any scope may set them later: that would split global state across
+// two dirs.
+const GLOBAL_DIR_ENV_KEYS: ReadonlySet<string> = new Set([
+  'qwen_home',
+  'xdg_config_home',
+  'home',
+  'userprofile',
+]);
+
+export function isGlobalDirEnvKey(key: string): boolean {
+  return GLOBAL_DIR_ENV_KEYS.has(key.toLowerCase());
+}
+
 export const HOME_ENV_BOOTSTRAP_KEYS = [
   'QWEN_HOME',
   'QWEN_RUNTIME_DIR',
