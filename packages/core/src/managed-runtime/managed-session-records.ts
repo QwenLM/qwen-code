@@ -128,6 +128,7 @@ export type ManagedSessionDomain = (typeof MANAGED_SESSION_DOMAINS)[number];
  */
 export const MANAGED_SESSION_ENABLED_DOMAINS: readonly ManagedSessionDomain[] =
   [
+    'tool_stage',
     'config_install',
     'goal_state',
     'todo_state',

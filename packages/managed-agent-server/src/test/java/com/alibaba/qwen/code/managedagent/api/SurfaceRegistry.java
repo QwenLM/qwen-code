@@ -162,6 +162,52 @@ public enum SurfaceRegistry {
     PUBLIC_WORKSPACE_GET(Method.GET, "/v1/agents/workspaces/{workspaceId}",
             Surface.PUBLIC, RuleClass.WORKSPACE_DISCOVERY,
             EnumSet.of(Capability.WORKSPACE_GET)),
+    PUBLIC_SESSION_EXTENSIONS_GET(Method.GET, "/v1/agents/sessions/{sessionId}/extensions",
+            Surface.PUBLIC, RuleClass.SESSION_EXTENSION_READER, EnumSet.of(Capability.EXTENSION_CONFIG_GET)),
+    PUBLIC_SESSION_EXTENSIONS_APPLY(Method.POST, "/v1/agents/sessions/{sessionId}/extensions",
+            Surface.PUBLIC, RuleClass.SESSION_EXTENSION_OPERATOR, EnumSet.of(Capability.EXTENSION_CONFIG_APPLY)),
+    PUBLIC_SESSION_EXTENSIONS_OPERATION(Method.GET, "/v1/agents/sessions/{sessionId}/extensions/operations/{operationId}",
+            Surface.PUBLIC, RuleClass.SESSION_EXTENSION_READER, EnumSet.of(Capability.EXTENSION_CONFIG_GET)),
+    PUBLIC_SESSION_EXTENSIONS_CONTINUE(Method.POST, "/v1/agents/sessions/{sessionId}/extensions/operations/{operationId}/continue",
+            Surface.PUBLIC, RuleClass.SESSION_EXTENSION_OPERATOR, EnumSet.of(Capability.EXTENSION_CONFIG_APPLY)),
+    PUBLIC_SESSION_EXTENSIONS_RECOVER(Method.POST, "/v1/agents/sessions/{sessionId}/extensions/operations/{operationId}/recover-previous",
+            Surface.PUBLIC, RuleClass.SESSION_EXTENSION_OPERATOR, EnumSet.of(Capability.EXTENSION_CONFIG_APPLY)),
+    WEBSHELL_SESSION_EXTENSIONS_GET(Method.POST, "/api/agent/web-shell/v1/session-extensions/query",
+            Surface.WEBSHELL, RuleClass.SESSION_EXTENSION_READER, EnumSet.of(Capability.EXTENSION_CONFIG_GET)),
+    WEBSHELL_SESSION_EXTENSIONS_APPLY(Method.POST, "/api/agent/web-shell/v1/session-extensions/submit",
+            Surface.WEBSHELL, RuleClass.SESSION_EXTENSION_OPERATOR, EnumSet.of(Capability.EXTENSION_CONFIG_APPLY)),
+    WEBSHELL_SESSION_EXTENSIONS_CONTINUE(Method.POST, "/api/agent/web-shell/v1/session-extensions/continue",
+            Surface.WEBSHELL, RuleClass.SESSION_EXTENSION_OPERATOR, EnumSet.of(Capability.EXTENSION_CONFIG_APPLY)),
+    WEBSHELL_SESSION_EXTENSIONS_RECOVER(Method.POST, "/api/agent/web-shell/v1/session-extensions/recover-previous",
+            Surface.WEBSHELL, RuleClass.SESSION_EXTENSION_OPERATOR, EnumSet.of(Capability.EXTENSION_CONFIG_APPLY)),
+    PUBLIC_EXTENSION_LIST(Method.GET, "/v1/agents/workspaces/{workspaceId}/extensions",
+            Surface.PUBLIC, RuleClass.WORKSPACE_EXTENSION_READER, EnumSet.of(Capability.EXTENSION_LIST)),
+    PUBLIC_EXTENSION_CREATE(Method.POST, "/v1/agents/workspaces/{workspaceId}/extensions",
+            Surface.PUBLIC, RuleClass.WORKSPACE_EXTENSION_OPERATOR, EnumSet.of(Capability.EXTENSION_PUBLISH)),
+    PUBLIC_EXTENSION_PUBLISH(Method.PUT, "/v1/agents/workspaces/{workspaceId}/extensions/{extensionId}/packages/{packageDigest}",
+            Surface.PUBLIC, RuleClass.WORKSPACE_EXTENSION_OPERATOR, EnumSet.of(Capability.EXTENSION_PUBLISH)),
+    PUBLIC_EXTENSION_GET(Method.GET, "/v1/agents/workspaces/{workspaceId}/extensions/{extensionId}/packages/{packageRevision}",
+            Surface.PUBLIC, RuleClass.WORKSPACE_EXTENSION_READER, EnumSet.of(Capability.EXTENSION_GET)),
+    PUBLIC_EXTENSION_ARCHIVE(Method.GET, "/v1/agents/workspaces/{workspaceId}/extensions/{extensionId}/packages/{packageRevision}/archive",
+            Surface.PUBLIC, RuleClass.WORKSPACE_EXTENSION_READER, EnumSet.of(Capability.EXTENSION_ARCHIVE)),
+    PUBLIC_EXTENSION_SETTINGS_GET(Method.GET, "/v1/agents/workspaces/{workspaceId}/extensions/{extensionId}/settings",
+            Surface.PUBLIC, RuleClass.WORKSPACE_EXTENSION_READER, EnumSet.of(Capability.EXTENSION_SETTINGS_GET)),
+    PUBLIC_EXTENSION_SETTINGS_SET(Method.POST, "/v1/agents/workspaces/{workspaceId}/extensions/{extensionId}/settings",
+            Surface.PUBLIC, RuleClass.WORKSPACE_EXTENSION_OPERATOR, EnumSet.of(Capability.EXTENSION_SETTINGS_SET)),
+    PUBLIC_EXTENSION_OPERATION(Method.GET, "/v1/agents/workspaces/{workspaceId}/extensions/operations/{operationId}",
+            Surface.PUBLIC, RuleClass.WORKSPACE_EXTENSION_READER, EnumSet.of(Capability.EXTENSION_OPERATION)),
+    WEBSHELL_EXTENSION_LIST(Method.POST, "/api/agent/web-shell/v1/workspace-extensions/query",
+            Surface.WEBSHELL, RuleClass.WORKSPACE_EXTENSION_READER, EnumSet.of(Capability.EXTENSION_LIST)),
+    WEBSHELL_EXTENSION_PUBLISH(Method.POST, "/api/agent/web-shell/v1/workspace-extensions/publish",
+            Surface.WEBSHELL, RuleClass.WORKSPACE_EXTENSION_OPERATOR, EnumSet.of(Capability.EXTENSION_PUBLISH)),
+    WEBSHELL_EXTENSION_GET(Method.POST, "/api/agent/web-shell/v1/workspace-extensions/packages/query",
+            Surface.WEBSHELL, RuleClass.WORKSPACE_EXTENSION_READER, EnumSet.of(Capability.EXTENSION_GET)),
+    WEBSHELL_EXTENSION_SETTINGS_GET(Method.POST, "/api/agent/web-shell/v1/workspace-extensions/settings/query",
+            Surface.WEBSHELL, RuleClass.WORKSPACE_EXTENSION_READER, EnumSet.of(Capability.EXTENSION_SETTINGS_GET)),
+    WEBSHELL_EXTENSION_SETTINGS_SET(Method.POST, "/api/agent/web-shell/v1/workspace-extensions/settings/submit",
+            Surface.WEBSHELL, RuleClass.WORKSPACE_EXTENSION_OPERATOR, EnumSet.of(Capability.EXTENSION_SETTINGS_SET)),
+    WEBSHELL_EXTENSION_OPERATION(Method.POST, "/api/agent/web-shell/v1/workspace-extensions/operations/query",
+            Surface.WEBSHELL, RuleClass.WORKSPACE_EXTENSION_READER, EnumSet.of(Capability.EXTENSION_OPERATION)),
     // ManagedChannelController: tenant-scoped channel resources (H5c), read
     // over the registered connections and filtered below the Workspace read
     // grant inside the service.
@@ -589,7 +635,7 @@ public enum SurfaceRegistry {
 
     /** HTTP methods as the mapping annotations declare them. */
     private enum Method {
-        GET("GET"), POST("POST"), PATCH("PATCH"), DELETE("DELETE");
+        GET("GET"), POST("POST"), PUT("PUT"), PATCH("PATCH"), DELETE("DELETE");
 
         private final String value;
 
@@ -664,6 +710,15 @@ public enum SurfaceRegistry {
         SESSION_MODEL_CHANGE,
         WORKSPACE_LIST,
         WORKSPACE_GET,
+        EXTENSION_CONFIG_GET,
+        EXTENSION_CONFIG_APPLY,
+        EXTENSION_LIST,
+        EXTENSION_PUBLISH,
+        EXTENSION_GET,
+        EXTENSION_ARCHIVE,
+        EXTENSION_SETTINGS_GET,
+        EXTENSION_SETTINGS_SET,
+        EXTENSION_OPERATION,
         RUNTIME_NODE_LIST,
         WORKSPACE_DIRECTORY_CHECK,
         WORKSPACE_REGISTER,
@@ -714,6 +769,12 @@ public enum SurfaceRegistry {
      * acceptance suite walks these classes to build its probe matrix.
      */
     public enum RuleClass {
+        /** Trusted actor with a read grant on the persisted Workspace; operation reads also retain actor ownership. */
+        SESSION_EXTENSION_READER,
+        SESSION_EXTENSION_OPERATOR,
+        WORKSPACE_EXTENSION_READER,
+        /** ACTIVE Workspace operator plus the explicit extension publication deployment allowlist. */
+        WORKSPACE_EXTENSION_OPERATOR,
         /**
          * Bound-Session creation: a trusted actor ({@code 401
          * actor_required} without one) holding READER or above ({@code
