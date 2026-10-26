@@ -128,7 +128,7 @@ this recovery exception.
 
 | Surface    | Behavior                                                                                                                                                                                |
 | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Packaging  | One `.js`, `.mjs`, `.cjs`, `.ts`, `.mts` or `.cts` ESM entry; relative static imports and re-exports inside the installed plugin                                                        |
+| Packaging  | One `.ts`, `.tsx`, `.jsx`, `.js`, `.mjs`, `.cjs`, `.mts` or `.cts` ESM entry; relative static imports and re-exports inside the installed plugin; JSX in `.tsx` and `.jsx` files        |
 | Entry      | `register(on, options)`; async registration is awaited; typed non-secret options are copied and deeply frozen                                                                           |
 | Lifecycle  | All modules register before the initial `session.start` chain; `session.end` on exit and conversation replacement; clear/resume do not reload modules                                   |
 | Commands   | Register during `session.start` using name, description and optional argumentHint; intercept registered Mod commands across plugins; return `{text}` or `{}`                            |
@@ -142,7 +142,7 @@ this recovery exception.
 | Isolation  | Separate QuickJS environment per plugin inside a session worker; no Node, filesystem or network APIs; memory, stack, source/output and execution limits                                 |
 
 This is a supported subset, not full compatibility with existing Claude Mods.
-JSX/TSX, runtime package imports, built-in command interception, tool registration and active `$.tool` APIs, context,
+Runtime package imports, built-in command interception, tool registration and active `$.tool` APIs, context,
 `$.session.messages` and `repo`, state/store, `$.clock.after` and `every`, drawing `ui.render`, streaming events and hot reload are not implemented.
 Commands cannot return `context`, `exitCode` or engine references yet. Hooks for
 other Claude Code events load without running, as described in
@@ -637,6 +637,8 @@ numbers become strings. `key` is kept only on a `Box`. The `h(tag, props,
 ...children)` and `Fragment` globals build the same elements, as Claude Code's
 JSX factory does; `Fragment` is a column `Box`. `h` calls a function tag with
 its props and its children flattened into an array, and throws for a string tag other than `Box` or `Text`.
+JSX in a `.tsx` or `.jsx` file compiles to these calls, as described in
+[TypeScript, JSX and relative imports](#typescript-jsx-and-relative-imports).
 
 No host draws `ui.render` yet, so its hooks are skipped and listed at startup,
 and `$.session.version()` leaves it out. A tree a hook returns is judged with
@@ -648,22 +650,46 @@ sites the plugin's `ui.render` hooks may draw. The cached-answer events
 Claude Code also accepts, such as `prompt.section`, do nothing in Qwen Code.
 Any other name throws.
 
-## TypeScript and relative imports
+## TypeScript, JSX and relative imports
 
-Change the hooks entry to `./register.ts` to use TypeScript. Imports and
-re-exports may use relative paths, extensionless paths, directory `index` files,
-or JavaScript spellings of TypeScript files (`./helper.js` can resolve to
-`helper.ts`). Exact files win. Next come `.js` → `.ts`, `.mjs` → `.mts`, and
-`.cjs` → `.cts` substitutions, followed by `.ts`, `.js`, `.mjs`, `.cjs`, `.mts`,
-`.cts` candidates, trying each file and then its directory index. All six
-suffixes use ESM, including `.cjs` and `.cts`. Module cycles and shared imported
-state within one plugin are supported.
+Change the hooks entry to `./register.ts` to use TypeScript, or to
+`./register.tsx` or `./register.jsx` to write JSX. Imports and re-exports may
+use relative paths, extensionless paths, directory `index` files, or JavaScript
+spellings of TypeScript files (`./helper.js` can resolve to `helper.ts`). Exact
+files win. Next come `.js` → `.ts` or `.tsx`, `.jsx` → `.tsx`, `.mjs` → `.mts`
+and `.cjs` → `.cts` substitutions, followed by `.ts`, `.tsx`, `.jsx`, `.js`,
+`.mjs`, `.cjs`, `.mts`, `.cts` candidates, trying each file and then its
+directory index. This is Claude Code's order. All eight suffixes use ESM,
+including `.cjs` and `.cts`. Module cycles and shared imported state within one
+plugin are supported.
+
+JSX compiles with the classic runtime to calls of the `h` and `Fragment`
+globals, as Claude Code compiles it, so `<>...</>` is a column `Box`. A tag is
+one of the constructors `$.ui.resolve(e)` returns, or a function component:
+
+```tsx
+on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
+  const { Box, Text } = $.ui.resolve(e);
+  return (
+    <Box flexDirection="row" paddingX={1}>
+      <Text bold>☀ Clear</Text>
+      <Text dimColor> {e.props.bodyColumns} columns</Text>
+    </Box>
+  );
+});
+```
+
+Only `.tsx` and `.jsx` files take JSX. As in Claude Code, a module that declares
+its own `h` or `Fragment`, or carries a `@jsx` pragma, points its JSX away from
+the globals. A file that fails to compile reports the first error with its line
+and column, such as
+`Invalid Mod JSX: view.jsx: JSX element 'Text' has no corresponding closing tag. (line 4, column 12).`
 
 Compilation uses fixed options inside the cancellable worker; it does not
 type-check or load `tsconfig.json`, package resolvers or build plugins. Type-only
 imports, including types from `claude-code`, are erased. Runtime value imports
 from `claude-code` require APIs outside this subset and are rejected, as are
-package/Node/URL imports, dynamic imports, `require`, JSX and imported top-level
+package/Node/URL imports, dynamic imports, `require` and imported top-level
 `await`. Guest code continues to execute only in QuickJS.
 
 ## Plugin options
