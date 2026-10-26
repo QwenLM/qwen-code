@@ -25,13 +25,13 @@ const content =
 
 for (const language of ['en', 'zh-CN'] as const) {
   for (const theme of ['light', 'dark'] as const) {
-    test(`assistant footer copies complete Markdown beside Copy (${language}, ${theme})`, async ({
+    test(`assistant footer copies complete Markdown beside Copy (${language}, ${theme})${language === 'en' && theme === 'light' ? ' @smoke' : ''}`, async ({
       page,
       context,
     }, info) => {
       const copyLabel = language === 'en' ? 'Copy content' : '复制内容';
       const markdownLabel =
-        language === 'en' ? 'Copy Markdown' : '复制 Markdown';
+        language === 'en' ? 'Copy Markdown source' : '复制 Markdown 源文';
       const newChatLabel =
         language === 'en' ? 'New chat from here' : '从此处新建对话';
       await context.grantPermissions(['clipboard-read', 'clipboard-write']);
@@ -90,8 +90,21 @@ for (const language of ['en', 'zh-CN'] as const) {
       await expect(olderMarkdown.locator('..')).toHaveCSS('opacity', '0');
       await olderMarkdown.hover();
       await expect(olderMarkdown.locator('..')).toHaveCSS('opacity', '1');
-      await page.mouse.move(0, 0, { steps: 12 });
+      const olderCopy = olderMarkdown
+        .locator('..')
+        .getByRole('button', { name: copyLabel, exact: true });
+      await hoverAction(page, olderCopy);
+      const tooltipBubble = page.locator('[data-slot="tooltip-content"]');
+      await expect(tooltipBubble).toBeVisible();
+      const bubbleBox = (await tooltipBubble.boundingBox())!;
+      await page.mouse.move(
+        bubbleBox.x + bubbleBox.width / 2,
+        bubbleBox.y + bubbleBox.height / 2,
+        { steps: 6 },
+      );
+      await expect(tooltipBubble).toHaveCount(0);
       await expect(olderMarkdown.locator('..')).toHaveCSS('opacity', '0');
+      await page.mouse.move(0, 0, { steps: 12 });
       expect(
         await copy.evaluate((button) =>
           button.nextElementSibling?.getAttribute('aria-label'),
@@ -105,6 +118,7 @@ for (const language of ['en', 'zh-CN'] as const) {
       await expect(icon).toHaveCSS('width', '13px');
       await expect(icon).toHaveCSS('height', '13px');
       await expect(icon).toHaveCSS('transform', 'matrix(0, 1, -1, 0, 0, 0)');
+      await expect(icon).toHaveCSS('stroke-width', '2.4px');
       for (const [button, label] of [
         [copy, copyLabel],
         [markdown, markdownLabel],

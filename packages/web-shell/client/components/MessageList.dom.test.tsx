@@ -4582,6 +4582,8 @@ describe('MessageList — turn collapse (DOM)', () => {
         ?.getAttribute('data-footer-visible');
     expect(visible('a1')).toBe('false');
     expect(visible('a2')).toBe('true');
+    rerenderMessages(c, [...messages, userShellMsg('shell')]);
+    expect(visible('a2')).toBe('true');
     rerenderMessages(c, [...messages, userMsg('u3')], { isResponding: true });
     expect(visible('a2')).toBe('false');
     rerenderMessages(c, [...messages, userMsg('u3'), asstMsg('a3')]);

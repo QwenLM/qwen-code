@@ -12,11 +12,13 @@ keeps its footer actions visible.
 
 ## Solution and decisions
 
-Add a Markdown M↓ icon immediately after Copy in `AssistantMessage.tsx`, reusing
-`assistant.copyMarkdown` for its localized tooltip and accessible name. Label
+Add a Markdown M↓ icon immediately after Copy in `AssistantMessage.tsx`, with
+its own `assistant.copyMarkdownSource` translation key so the footer label does
+not collide with the selection menu's `assistant.copyMarkdown`. Label
 the first action Copy content / 复制内容 with its own footer-specific translation
-key. It extracts the entire rendered body through the existing selection-copy
-serializer using a local Range, without changing the user's selection. This
+key. It extracts the entire rendered body through the text-only entry point of
+the existing selection-copy serializer using a local Range, without changing
+the user's selection. This
 preserves paragraph/code line breaks, math source and image descriptions while
 excluding controls and Markdown formatting. The second action copies the exact
 original `content`. Both use the existing clipboard helper, including HTTP
@@ -41,9 +43,9 @@ questions remain.
 ## Latest turn visibility
 
 Keep the built-in footer actions of the latest completed assistant turn visible
-without hover. Compare its existing final-turn id to the latest turn-start id,
-pass the visibility flag through MessageItem (including its memo comparison),
-and apply a local CSS class. Older turns retain hover/focus visibility; starting
+without hover. Compare its existing final-turn id to the latest turn that
+produced a final assistant answer, pass the visibility flag through MessageItem
+(including its memo comparison), and apply a local CSS class. Older turns retain hover/focus visibility; starting
 a new user turn clears the previous footer's persistent visibility. Existing
 streaming, background-work and document-mode gates remain authoritative. Verify
 multiple turns, hover on older turns and transition to the next prompt in the
@@ -52,7 +54,7 @@ browser and focused MessageList tests.
 ## Footer tooltips and new-chat label
 
 Use the shared Tooltip provider, trigger and content for all five icon actions
-(Copy content, Copy Markdown, satisfied, not satisfied and new chat). Remove native title
+(Copy content, Copy Markdown source, satisfied, not satisfied and new chat). Remove native title
 attributes, retain accessible names and route tooltip portals through the shared
 Web Shell portal root. Reuse native button children so Radix refs remain valid
 on React 18 and 19. The new-chat action uses the Lucide Split icon and is labeled

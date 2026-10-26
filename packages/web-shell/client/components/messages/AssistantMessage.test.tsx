@@ -2,10 +2,12 @@
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import TurndownService from 'turndown';
 import { WebShellCustomizationProvider } from '../../customization';
-import { I18nProvider } from '../../i18n';
+import { getTranslator, I18nProvider } from '../../i18n';
 import { getSelectedReplyContent } from '../../utils/selectionClipboard';
 import { WebShellPortalRootContext } from '../../portalRoot';
+import styles from './AssistantMessage.module.css';
 import {
   TranscriptDocumentExpandedProvider,
   TranscriptRenderModeProvider,
@@ -522,7 +524,7 @@ describe('AssistantMessage footer tooltips', () => {
       'en',
       [
         'Copy content',
-        'Copy Markdown',
+        'Copy Markdown source',
         'Satisfied',
         'Not satisfied',
         'New chat from here',
@@ -530,7 +532,7 @@ describe('AssistantMessage footer tooltips', () => {
     ],
     [
       'zh-CN',
-      ['复制内容', '复制 Markdown', '满意', '不满意', '从此处新建对话'],
+      ['复制内容', '复制 Markdown 源文', '满意', '不满意', '从此处新建对话'],
     ],
   ] as const)(
     'shows localized tooltips in the Web Shell portal on keyboard focus in %s',
@@ -674,8 +676,8 @@ describe('AssistantMessage markdown tables', () => {
 
 describe('AssistantMessage Markdown copy', () => {
   it.each([
-    ['en', 'Copy content', 'Copy Markdown'],
-    ['zh-CN', '复制内容', '复制 Markdown'],
+    ['en', 'Copy content', 'Copy Markdown source'],
+    ['zh-CN', '复制内容', '复制 Markdown 源文'],
   ] as const)(
     'copies rendered content and source Markdown with independent feedback in %s',
     async (language, copyLabel, markdownLabel) => {
@@ -697,6 +699,9 @@ describe('AssistantMessage Markdown copy', () => {
         )!;
         expect(copy.nextElementSibling).toBe(markdown);
         expect(markdown.hasAttribute('title')).toBe(false);
+        expect(markdown.getAttribute('aria-label')).not.toBe(
+          getTranslator(language)('assistant.copyMarkdown'),
+        );
         await act(async () => markdown.click());
         expect(writeText).toHaveBeenCalledWith(content);
         expect(markdown.querySelector('rect')).toBeNull();
@@ -747,7 +752,7 @@ describe('AssistantMessage Markdown copy', () => {
   ])('honors footer visibility: %j', (props) => {
     const container = render(<AssistantMessage {...props} />);
     expect(
-      container.querySelector('button[aria-label="Copy Markdown"]'),
+      container.querySelector('button[aria-label="Copy Markdown source"]'),
     ).toBeNull();
   });
 
@@ -758,8 +763,69 @@ describe('AssistantMessage Markdown copy', () => {
       'document',
     );
     expect(
-      container.querySelector('button[aria-label="Copy Markdown"]'),
+      container.querySelector('button[aria-label="Copy Markdown source"]'),
     ).toBeNull();
+  });
+
+  it('falls back to the raw source when the reply renders no plain text', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    try {
+      const content = '![](https://example.com/a.png)';
+      const container = render(
+        <AssistantMessage content={content} showFooterActions />,
+      );
+      const button = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Copy content"]',
+      )!;
+      await act(async () => button.click());
+      expect(writeText).toHaveBeenCalledWith(content);
+      expect(writeText).not.toHaveBeenCalledWith('');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('copies rendered text without running the Markdown converter', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    const turndown = vi.spyOn(TurndownService.prototype, 'turndown');
+    try {
+      const container = render(
+        <AssistantMessage content="Before **bold** after." showFooterActions />,
+      );
+      const button = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Copy content"]',
+      )!;
+      await act(async () => button.click());
+      expect(turndown).not.toHaveBeenCalled();
+      expect(writeText).toHaveBeenCalledWith('Before bold after.');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('marks the footer persistently visible only when asked', () => {
+    const shown = render(
+      <AssistantMessage
+        content="answer"
+        showFooterActions
+        footerAlwaysVisible
+      />,
+    );
+    expect(
+      shown
+        .querySelector(`.${styles.messageFooter}`)
+        ?.classList.contains(styles.messageFooterVisible),
+    ).toBe(true);
+    const resting = render(
+      <AssistantMessage content="answer" showFooterActions />,
+    );
+    expect(
+      resting
+        .querySelector(`.${styles.messageFooter}`)
+        ?.classList.contains(styles.messageFooterVisible),
+    ).toBe(false);
   });
 
   it('reports clipboard failure without a success flash', async () => {
@@ -774,7 +840,7 @@ describe('AssistantMessage Markdown copy', () => {
         <AssistantMessage content="answer" showFooterActions />,
       );
       const markdown = container.querySelector<HTMLButtonElement>(
-        'button[aria-label="Copy Markdown"]',
+        'button[aria-label="Copy Markdown source"]',
       )!;
       await act(async () => markdown.click());
       expect(warn).toHaveBeenCalledWith(
@@ -790,7 +856,7 @@ describe('AssistantMessage Markdown copy', () => {
 });
 
 describe('AssistantMessage copy reset timer', () => {
-  it.each(['Copy content', 'Copy Markdown'])(
+  it.each(['Copy content', 'Copy Markdown source'])(
     'cleans up the %s timer on unmount',
     async (label) => {
       vi.useFakeTimers();
@@ -831,7 +897,7 @@ describe('AssistantMessage copy reset timer', () => {
 });
 
 describe('AssistantMessage copy without the async Clipboard API (issue #9485)', () => {
-  it.each(['Copy content', 'Copy Markdown'])(
+  it.each(['Copy content', 'Copy Markdown source'])(
     'falls back to execCommand for %s',
     async (label) => {
       const descriptor = Object.getOwnPropertyDescriptor(

@@ -33,7 +33,7 @@ import {
   writeClipboardText,
 } from '../../utils/clipboard';
 import { useCopiedFlash } from '../../hooks/useCopiedFlash';
-import { getSelectedReplyContent } from '../../utils/selectionClipboard';
+import { getSelectedReplyText } from '../../utils/selectionClipboard';
 import type {
   DaemonSessionGenerationEvent,
   QwenAgentMessageMeta,
@@ -141,7 +141,8 @@ export const AssistantMessage = memo(function AssistantMessage({
         if (!body) return;
         const range = body.ownerDocument.createRange();
         range.selectNodeContents(body);
-        value = getSelectedReplyContent(body, range)?.text ?? '';
+        const extracted = getSelectedReplyText(body, range);
+        value = extracted && extracted.trim() ? extracted : content;
       }
       void writeClipboardText(value)
         .then(format === 'text' ? flashCopied : flashMarkdownCopied)
@@ -254,7 +255,7 @@ export const AssistantMessage = memo(function AssistantMessage({
         <div className={styles.customFooter}>{customFooter}</div>
       )}
       {showFooter && (
-        <TooltipProvider delayDuration={300}>
+        <TooltipProvider delayDuration={300} disableHoverableContent>
           <div
             className={`${styles.messageFooter}${footerAlwaysVisible ? ` ${styles.messageFooterVisible}` : ''}`}
           >
@@ -280,14 +281,14 @@ export const AssistantMessage = memo(function AssistantMessage({
                     <button
                       type="button"
                       className={styles.copyButton}
-                      aria-label={t('assistant.copyMarkdown')}
+                      aria-label={t('assistant.copyMarkdownSource')}
                       onClick={() => handleCopy('markdown')}
                     >
                       {markdownCopied ? <CheckIcon /> : <MarkdownIcon />}
                     </button>
                   </TooltipTrigger>
                   <TooltipContent side="top" variant="black">
-                    {t('assistant.copyMarkdown')}
+                    {t('assistant.copyMarkdownSource')}
                   </TooltipContent>
                 </Tooltip>
               </>
@@ -338,7 +339,7 @@ export const AssistantMessage = memo(function AssistantMessage({
                     disabled={branchPending}
                     onClick={() => void handleBranch()}
                   >
-                    <SplitIcon strokeWidth={1.5} aria-hidden="true" />
+                    <SplitIcon aria-hidden="true" />
                   </button>
                 </TooltipTrigger>
                 <TooltipContent side="top" variant="black">
