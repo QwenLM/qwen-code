@@ -102,7 +102,12 @@ Rename 前崩溃保留旧 journal，之后崩溃保留新快照；两者描述�
 
 ## 剩余原生 journal 与 authority 设计
 
-以下是必须串行推进的后续工作，第 1 片不包含其实现：
+以下是必须完成的后续工作，第 1 片不包含其实现。身份存储和原生快照契约可以
+并行开发；快照契约稳定后，HTTP 与本地重放可以并行推进。Authority 窗口
+依赖身份存储以及经过验证的两条重放路径。
+实现边界及无损首版 payload 见 [PR2 协议设计](2026-10-26-managed-native-journal-snapshots.zh-CN.md)。
+
+PR3 [#15599](https://github.com/QwenLM/qwen-code/pull/15599) 已合入 PR2 分支；[#15569](https://github.com/QwenLM/qwen-code/pull/15569) 将原生快照存储和 [HTTP 恢复](2026-10-26-managed-http-snapshot-recovery.zh-CN.md)一起交付到 main。它们仍是该 PR 内独立的设计与验收切片。本地租约感知恢复、完整历史读取器迁移、紧凑状态与 authority 窗口仍是后续工作；合并交付不启用 journal 删除或内存淘汰。
 
 1. **身份存储：** 从驻留 Map 移除终态前，先把终态正文与去重证据放入可持久查询
    的存储或归档结构。`enqueue` 与 `admit` 对旧 key 仍返回原结果，并拒绝冲突复用。
