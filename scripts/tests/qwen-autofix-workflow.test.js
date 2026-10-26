@@ -6398,8 +6398,9 @@ exit 1
   });
 
   it('behaviorally parses the takeover round seed and keeps every other body closed', () => {
-    // '@qwen-code /takeover from N' is the ONE parameterized command form, so
-    // it is also the one place a value is read out of a comment body. Replay
+    // '@qwen-code /takeover from N' is one of the TWO parameterized command
+    // forms, so it is one of the two places a value is read out of a comment
+    // body. Replay
     // the issue_comment branch VERBATIM (drift fails) and pin both halves:
     // the literal prefix must still match TAKEOVER_COMMAND byte-for-byte, and
     // the tail must be a bounded integer. Everything else — a prefixed body, a
