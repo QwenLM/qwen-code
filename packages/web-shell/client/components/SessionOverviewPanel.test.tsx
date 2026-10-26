@@ -3731,6 +3731,31 @@ describe('SessionOverviewPanel standalone sessions', () => {
     }
   });
 
+  it('drops a standalone walk superseded by a host lock', async () => {
+    useStandaloneCapabilities();
+    let resolvePage!: (value: {
+      sessions: DaemonStandaloneSessionSummary[];
+    }) => void;
+    standaloneListPage.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolvePage = resolve;
+        }),
+    );
+    render();
+    await flushAsync();
+    expect(standaloneListPage).toHaveBeenCalledTimes(1);
+    // The lock lands while the walk's page is still pending: the walk's
+    // effect is gone, so its page must not repopulate the hidden catalog.
+    rerender({ workspaceCwd: '/w' });
+    await flushAsync();
+    resolvePage({
+      sessions: [standaloneSession('st1', { displayName: 'LeakedSolo' })],
+    });
+    await flushAsync();
+    expect(rowTitles()).not.toContain('LeakedSolo');
+  });
+
   it('routes standalone rename and export to the standalone client routes', async () => {
     useConversationsRuntimeCapabilities();
     // Page 1 feeds the initial walk; page 2 feeds the post-rename refresh.
