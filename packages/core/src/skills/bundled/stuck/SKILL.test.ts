@@ -33,13 +33,17 @@ describe.skipIf(process.platform === 'win32')(
 
     // Runs the preamble with `uname -s` reporting `system`, and returns the
     // runtime dir it resolves.
-    const runPreamble = (system: string, env: Record<string, string> = {}) => {
+    const runPreamble = (
+      system: string,
+      env: Record<string, string> = {},
+      shellOptions = '',
+    ) => {
       fs.writeFileSync(path.join(bin, 'uname'), `#!/bin/sh\necho ${system}\n`, {
         mode: 0o755,
       });
       const result = spawnSync(
         'bash',
-        ['-c', `${readPreamble()}\nprintf %s "$RUNTIME_DIR"`],
+        ['-c', `${shellOptions}${readPreamble()}\nprintf %s "$RUNTIME_DIR"`],
         {
           env: {
             PATH: `${bin}${path.delimiter}${process.env['PATH'] ?? ''}`,
@@ -100,9 +104,37 @@ describe.skipIf(process.platform === 'win32')(
       );
     });
 
+    it('resolves under set -u with nothing configured', () => {
+      expect(runPreamble('Linux', {}, 'set -u\n')).toBe(coreDir('linux'));
+    });
+
+    it('uses QWEN_HOME over the XDG config directory', () => {
+      const qwenHome = path.join(home, 'custom-qwen');
+      vi.stubEnv('QWEN_HOME', qwenHome);
+      expect(runPreamble('Linux', { QWEN_HOME: qwenHome })).toBe(qwenHome);
+      expect(runPreamble('Linux', { QWEN_HOME: qwenHome })).toBe(
+        coreDir('linux'),
+      );
+    });
+
+    it('uses an absolute XDG_CONFIG_HOME', () => {
+      const configHome = path.join(home, 'xdg-config');
+      vi.stubEnv('XDG_CONFIG_HOME', configHome);
+      expect(runPreamble('Linux', { XDG_CONFIG_HOME: configHome })).toBe(
+        path.join(configHome, 'qwen'),
+      );
+      expect(runPreamble('Linux', { XDG_CONFIG_HOME: configHome })).toBe(
+        coreDir('linux'),
+      );
+    });
+
     it('keeps ~/.qwen on macOS', () => {
       expect(runPreamble('Darwin')).toBe(path.join(home, '.qwen'));
       expect(runPreamble('Darwin')).toBe(coreDir('darwin'));
+    });
+
+    it('keeps ~/.qwen under a Windows shell', () => {
+      expect(runPreamble('MINGW64_NT-10.0-22631')).toBe(coreDir('win32'));
     });
   },
 );

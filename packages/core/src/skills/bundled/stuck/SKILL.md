@@ -36,8 +36,8 @@ If the user gave an argument, treat it as a PID **only if it consists entirely o
 ```
 QWEN_DIR="${QWEN_HOME:-$HOME/.qwen}"
 # Mirror Storage.getGlobalQwenDir(): without QWEN_HOME, Linux may use the XDG config directory
-if [ -z "$QWEN_HOME" ]; then case "$(uname -s)" in Darwin|MINGW*|MSYS*|CYGWIN*) ;; *)
-  case "$XDG_CONFIG_HOME" in /*) XDG_QWEN_DIR="$XDG_CONFIG_HOME/qwen" ;; *) XDG_QWEN_DIR="$HOME/.config/qwen" ;; esac
+if [ -z "${QWEN_HOME:-}" ]; then case "$(uname -s)" in Darwin|MINGW*|MSYS*|CYGWIN*) ;; *)
+  case "${XDG_CONFIG_HOME:-}" in /*) XDG_QWEN_DIR="$XDG_CONFIG_HOME/qwen" ;; *) XDG_QWEN_DIR="$HOME/.config/qwen" ;; esac
   { [ ! -e "$HOME/.qwen" ] || [ -e "$XDG_QWEN_DIR/.qwen-global-dir" ]; } && QWEN_DIR="$XDG_QWEN_DIR" ;;
 esac; fi
 RUNTIME_DIR="${QWEN_RUNTIME_DIR:-}"
