@@ -80,11 +80,17 @@ export function outputClampMargin(contextWindowSize: number): TokenCount {
  * @param promptTokens - Estimated prompt size; use the API-authoritative
  *   count where available (a fresh chars/4 estimate under-counts CJK and
  *   tool-heavy prompts, which is the one way a residual 400 could return).
+ * @param floorPromptTokens - Prompt size the floor is capped by. Defaults to
+ *   `promptTokens`. A caller that padded `promptTokens` for overhead its
+ *   estimate already carries passes the unpadded estimate, so the pad can
+ *   shrink the room but cannot by itself push the request below the floor
+ *   (#15486).
  */
 export function clampOutputTokensToWindow(
   outputCeiling: number,
   contextWindowSize: number,
   promptTokens: number,
+  floorPromptTokens: number = promptTokens,
 ): TokenCount {
   const room =
     contextWindowSize - promptTokens - outputClampMargin(contextWindowSize);
@@ -94,10 +100,12 @@ export function clampOutputTokensToWindow(
   // window 8192 / prompt 5000 the 10K margin floor drives room to −6808 and
   // the request goes out at 4000, i.e. 9000 > 8192 (#13252). Still ≥ 1 so
   // `max_tokens` stays provider-valid when the prompt already fills the
-  // window.
+  // window. A padded estimate must not set this cap: on a window smaller
+  // than the pad it is negative for any prompt, and the request goes out
+  // with max_tokens 1 although the prompt fits.
   const floor = Math.max(
     1,
-    Math.min(MIN_CLAMPED_OUTPUT_TOKENS, contextWindowSize - promptTokens),
+    Math.min(MIN_CLAMPED_OUTPUT_TOKENS, contextWindowSize - floorPromptTokens),
   );
   // Floor the ROOM, then cap by the ceiling — never the other way around: an
   // explicit ceiling below the floor (e.g.

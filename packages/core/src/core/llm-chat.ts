@@ -553,6 +553,23 @@ function consolidateModelResponseParts(allModelParts: Part[]): Part[] {
   return consolidatedHistoryParts;
 }
 
+/**
+ * Counts for a compression record whose snapshot appends the pending message
+ * to the compacted history. Resume replays that snapshot and seeds its count
+ * from the record, so the record counts the message; the live counts leave
+ * it out because the next send adds it (#15486).
+ */
+function withPendingMessageCounted(
+  info: ChatCompressionInfo,
+  pendingMessageTokens: number,
+): ChatCompressionInfo {
+  return {
+    ...info,
+    originalTokenCount: info.originalTokenCount + pendingMessageTokens,
+    newTokenCount: info.newTokenCount + pendingMessageTokens,
+  };
+}
+
 function shouldStopAfterHardRescue(
   shouldForceFromHard: boolean,
   hardLimit: number,
@@ -847,6 +864,14 @@ interface TryCompressOptions {
    * counts from double-counting the previous model output.
    */
   precomputedEffectiveTokens?: number;
+  /**
+   * The same estimate without this send's pending content (the pending
+   * message plus a memory snapshot sent with it). Compression sizes the
+   * compacted count from it, since the post-compaction estimates add the
+   * pending content back (#15486). Without it, only the pending message is
+   * subtracted from `precomputedEffectiveTokens`.
+   */
+  precomputedBaselineTokens?: number;
   /**
    * Context ceiling the server itself reported when it rejected the request
    * with a context-overflow error (#13432). Forwarded to the compression
@@ -3228,18 +3253,32 @@ export class LlmChat {
         ? originalTokenCountOverride.isEstimated
         : options?.precomputedEffectiveTokens !== undefined ||
           this.promptCountIsEstimateDerived();
+    // The service reads `originalTokenCount` as the prompt before the pending
+    // message (its gate adds that message itself) and keeps the message out
+    // of `newTokenCount` only on that reading. A precomputed effective count
+    // folds the pending message in, so take it back out: otherwise the
+    // compacted count carries the message and every later estimate adds it a
+    // second time (#15486).
+    const imageTokenEstimate = resolveSlimmingConfig(
+      this.config.getChatCompression(),
+    ).imageTokenEstimate;
+    const pendingUserMessageTokens = options?.pendingUserMessage
+      ? estimateContentTokens([options.pendingUserMessage], imageTokenEstimate)
+      : 0;
     const originalTokenCount =
       originalTokenCountOverride !== undefined
         ? originalTokenCountOverride.count
         : originalTokenCountIsEstimated
-          ? (options?.precomputedEffectiveTokens ??
-            estimateContentTokens(
-              options?.pendingUserMessage
-                ? [...this.getHistoryShallow(true), options.pendingUserMessage]
-                : this.getHistoryShallow(true),
-              resolveSlimmingConfig(this.config.getChatCompression())
-                .imageTokenEstimate,
-            ))
+          ? options?.precomputedEffectiveTokens !== undefined
+            ? (options.precomputedBaselineTokens ??
+              Math.max(
+                0,
+                options.precomputedEffectiveTokens - pendingUserMessageTokens,
+              ))
+            : estimateContentTokens(
+                this.getHistoryShallow(true),
+                imageTokenEstimate,
+              )
           : this.lastPromptTokenCount;
     debugLogger.debug(
       `[compaction] token-count provenance: prompt_id=${promptId}, ` +
@@ -3293,7 +3332,9 @@ export class LlmChat {
         // Resume replaces history with this snapshot, so include the pending
         // question and do not share the live array mutated later in the turn.
         await this.recordCompression({
-          info,
+          info: options?.pendingUserMessage
+            ? withPendingMessageCounted(info, pendingUserMessageTokens)
+            : info,
           compressedHistory: options?.pendingUserMessage
             ? [...newHistory, options.pendingUserMessage]
             : newHistory,
@@ -3818,6 +3859,7 @@ export class LlmChat {
         const estimatePendingPrompt = (
           pending: Content,
           conservative = false,
+          withPendingContent = true,
         ): number => {
           const catalog = this.config.getAutoMemoryContext?.() ?? '';
           const snapshot = getAutoMemorySnapshot(
@@ -3846,7 +3888,9 @@ export class LlmChat {
               : [];
           return estimatePromptTokens(
             this.lastPromptTokenCount > 0 ? [] : this.getHistoryShallow(true),
-            visiblePendingContent,
+            withPendingContent
+              ? visiblePendingContent
+              : { ...visiblePendingContent, parts: [] },
             this.lastPromptTokenCount +
               estimateContentTokens([
                 { role: 'user', parts: unaccountedSnapshots },
@@ -4167,6 +4211,11 @@ export class LlmChat {
             {
               pendingUserMessage: userContent,
               precomputedEffectiveTokens: effectiveTokens,
+              precomputedBaselineTokens: estimatePendingPrompt(
+                userContent,
+                false,
+                false,
+              ),
               requestGenerationConfig: params.config,
               requestRouteKey,
               deferChatCompressionRecord: shouldForceFromHard,
@@ -4282,7 +4331,10 @@ export class LlmChat {
         ) {
           // Keep the pending question with the compressed answer on resume.
           await this.recordCompression({
-            info: compressionInfo,
+            info: withPendingMessageCounted(
+              compressionInfo,
+              estimateContentTokens([userContent], imageTokenEstimate),
+            ),
             compressedHistory: [...this.getHistoryShallow(), userContent],
             summaryPrefixLength:
               compressionInfo.summaryPrefixLength ??
@@ -4395,6 +4447,14 @@ export class LlmChat {
         // self-corrects when provider usage arrives. An under-count is the ONE
         // way `prompt + max_tokens` can still overflow the window, so keep the
         // pad until provider usage replaces the estimate.
+        // A count-based estimate already carries the overhead the pad stands
+        // for (API usage, or the remainder compaction keeps), so the pad may
+        // shrink its grant but must not also cap the floor: on a window
+        // smaller than the pad that left max_tokens 1 for a prompt that fits
+        // (#15486). A fresh walk misses that overhead, so its padded estimate
+        // still caps the floor.
+        const floorPromptTokensForClamp =
+          this.lastPromptTokenCount > 0 ? promptTokensForClamp : undefined;
         if (this.promptCountIsEstimateDerived()) {
           promptTokensForClamp += ESTIMATE_CLAMP_OVERHEAD_PAD;
           debugLogger.debug(
@@ -4408,6 +4468,7 @@ export class LlmChat {
           outputCeiling,
           contextWindowForClamp,
           promptTokensForClamp,
+          floorPromptTokensForClamp,
         );
         this.lastRequestMaxOutputTokens = clampedMaxOutputTokens;
         params = {
@@ -5800,15 +5861,22 @@ export class LlmChat {
               false,
             );
             self.history.pop();
-            const walkRecoveryEstimate =
-              estimateContentTokens(
-                recoveryContents,
-                recoveryImageTokenEstimate,
-              ) + ESTIMATE_CLAMP_OVERHEAD_PAD;
+            const unpaddedWalkRecoveryEstimate = estimateContentTokens(
+              recoveryContents,
+              recoveryImageTokenEstimate,
+            );
             const recoveryPromptEstimate = Math.max(
               countBasedRecoveryEstimate,
-              walkRecoveryEstimate,
+              unpaddedWalkRecoveryEstimate + ESTIMATE_CLAMP_OVERHEAD_PAD,
             );
+            // As on the first send: a count that already covers the walk
+            // carries the overhead the pad stands for, so the pad must not
+            // also cap the floor (#15486). Without such a count, the padded
+            // walk still does.
+            const floorRecoveryPromptEstimate =
+              countBasedRecoveryEstimate >= unpaddedWalkRecoveryEstimate
+                ? countBasedRecoveryEstimate
+                : undefined;
             // recoveryParams is always `params` or `escalatedParams`, both of
             // which have maxOutputTokens set; the `?? outputCeiling` is a
             // defensive fallback that never fires in practice.
@@ -5818,6 +5886,7 @@ export class LlmChat {
               recoveryCeiling,
               contextWindowForClamp,
               recoveryPromptEstimate,
+              floorRecoveryPromptEstimate,
             );
             // Refresh the per-response limit the Turn reads (#16417): a
             // recovery iteration can end at MAX_TOKENS, and the rejection

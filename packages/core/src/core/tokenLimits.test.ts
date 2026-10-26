@@ -726,6 +726,36 @@ describe('clampOutputTokensToWindow', () => {
     expect(clampOutputTokensToWindow(32_000, 40_000, 60_000)).toBe(1);
   });
 
+  it('caps the floor by the unpadded estimate when the prompt count carries an overhead pad (#15486)', () => {
+    // 16K window after a compaction: the compacted prompt is 4,807 tokens and
+    // the 20K overhead pad makes the padded count 24,807, larger than the
+    // window. Capping the floor by `window − padded` returned 1 for a prompt
+    // that fits; capping it by the unpadded estimate keeps the 4,000 floor,
+    // and 4,807 + 4,000 still fits the window.
+    expect(clampOutputTokensToWindow(32_000, 16_000, 24_807)).toBe(1);
+    expect(clampOutputTokensToWindow(32_000, 16_000, 24_807, 4_807)).toBe(
+      MIN_CLAMPED_OUTPUT_TOKENS,
+    );
+  });
+
+  it('keeps the padded room wherever it already reaches the floor', () => {
+    // 40K window, first send: a 1-token estimate plus the 20K pad. The pad
+    // still sizes the grant; the unpadded estimate only matters below the
+    // floor.
+    expect(clampOutputTokensToWindow(64_000, 40_000, 20_001, 1)).toBe(9_999);
+  });
+
+  it('caps the floor by the room the unpadded estimate leaves (issue #13252)', () => {
+    // 8192 window, 5000-token unpadded prompt, padded far past the window:
+    // the floor is 8192 − 5000 = 3192, so the unpadded prompt plus max_tokens
+    // stays inside the window.
+    expect(clampOutputTokensToWindow(32_000, 8_192, 25_000, 5_000)).toBe(3_192);
+  });
+
+  it('respects an explicit ceiling below the floor with a padded count', () => {
+    expect(clampOutputTokensToWindow(2_000, 16_000, 24_807, 4_807)).toBe(2_000);
+  });
+
   it('scales the margin at 5% for huge windows', () => {
     expect(outputClampMargin(200_000)).toBe(10_000);
     expect(outputClampMargin(1_000_000)).toBe(50_000);
