@@ -4168,6 +4168,7 @@ export class LlmClient {
             captureHookExecutionOwner(this.config),
             promptText,
             submittedPrompt,
+            signal,
           )),
         };
       }

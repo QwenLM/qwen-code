@@ -351,13 +351,13 @@ The suite runs in the integration job. A scheduled job also runs the whole headl
 
 - With the setting on, an ACP prompt turn differs from today in these intended ways. Most follow from the client doing for ACP what it does for the other surfaces:
   - a prompt carries the client's date reminder when the date changed since the last one, and its system reminders are the client's, the advisor and paused-Goal reminders included; they come before ACP's one-shot notices instead of after them;
-  - UserPromptSubmit also runs for the turn's tool-result requests, with their text, as on the other surfaces (#9511); a block there ends the turn with the block notice and closes the round's tool calls with a result saying the hook blocked it, keeping the input taken with the results in history;
+  - UserPromptSubmit also runs for the turn's tool-result requests, with their text (empty when the request carries only tool results), as on the other surfaces (#9511); cancelling the turn stops a hook still running there; a block there ends the turn with the block notice and closes the round's tool calls with a result saying the hook blocked it, keeping the input taken with the results in history;
   - the session token limit is checked before the client compacts the history instead of after;
   - the client's session turn cap applies to ACP prompts, and so do its content and thought loop heuristics when `model.skipLoopDetection` is false and the next-speaker check when it is enabled (#14114);
   - a tool-result request carries the recall and the queued loop reminder and runs the client's size-only microcompaction, the managed memory tasks are the client's, skill review included, and the prompt counts toward commit attribution;
   - every compaction shows the compaction notice, also one inside a send;
 
-  The ACP parity suite covers the common cases unchanged and asserts the date reminder and UserPromptSubmit on tool results.
+  The ACP parity suite covers the common cases unchanged and asserts the date reminder, UserPromptSubmit on tool results and cancelling while that hook runs.
 
 - Later surfaces bring their own fixes: #15324 (ACP), #15326 (OpenTUI), #14114 and #12209 (ACP).
 

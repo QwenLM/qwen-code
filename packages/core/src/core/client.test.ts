@@ -12687,6 +12687,30 @@ Other open files:
         });
       });
 
+      it("gives a tool-result request's hook the send's signal", async () => {
+        const mockMessageBus = promptSubmitBus({ output: undefined });
+        const controller = new AbortController();
+
+        await run(
+          [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'read_file',
+                response: { output: 'body' },
+              },
+            },
+          ],
+          'prompt-tool-result-signal',
+          { type: SendMessageType.ToolResult },
+          controller.signal,
+        );
+
+        const [request] = mockMessageBus.request.mock.calls[0];
+        expect(request.eventName).toBe('UserPromptSubmit');
+        expect(request.signal).toBe(controller.signal);
+      });
+
       describe('admission before expansion', () => {
         const submitCalls = (bus: { request: Mock }) =>
           bus.request.mock.calls.filter(

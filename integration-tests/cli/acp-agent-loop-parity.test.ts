@@ -13,7 +13,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -41,6 +41,8 @@ interface Scenario {
   settings?: JsonObject;
   /** Answers each `session/request_permission`; allows once by default. */
   permission?: (request: JsonObject) => JsonObject;
+  /** Sends `session/cancel` once this file exists in the test directory. */
+  cancelOnFile?: string;
   /**
    * The model's reply to a streaming request, from its message history;
    * `index` counts this run's streaming requests, retries included.
@@ -330,6 +332,17 @@ const allowOnce = () => ({
           mcpServers: [],
         })) as { sessionId: string });
         for (const text of scenario.prompts) {
+          let settled = false;
+          const cancelFile = scenario.cancelOnFile;
+          if (cancelFile) {
+            void (async () => {
+              while (!settled && !existsSync(join(dir, cancelFile))) {
+                await new Promise((resolve) => setTimeout(resolve, 50));
+              }
+              if (!settled)
+                send({ method: 'session/cancel', params: { sessionId } });
+            })();
+          }
           try {
             const result = (await request('session/prompt', {
               sessionId,
@@ -338,6 +351,8 @@ const allowOnce = () => ({
             stopReasons.push(result['stopReason']);
           } catch (error) {
             stopReasons.push({ error: (error as Error).message });
+          } finally {
+            settled = true;
           }
         }
       } finally {
@@ -624,6 +639,44 @@ const allowOnce = () => ({
       expect(shared.updates).toEqual(current.updates);
       // Hook calls by each run's second model request, the tool result's.
       expect(hookCalls).toEqual([1, 2]);
+    }, 120_000);
+
+    it('cancels a tool-result request whose UserPromptSubmit hook is still running', async () => {
+      const scenario: Scenario = {
+        name: 'cancel during a tool-result hook',
+        prompts: ['Read the readme.'],
+        settings: { hooks: hooks('UserPromptSubmit', 'slow-hook.mjs') },
+        cancelOnFile: 'hook-waiting',
+        prepare: (r) => {
+          r.createFile('readme.txt', 'readme body\n');
+          r.createFile(
+            'slow-hook.mjs',
+            [
+              "import { writeFileSync } from 'node:fs';",
+              "let input = ''; for await (const chunk of process.stdin) input += chunk;",
+              // The tool-result request's hook has no prompt text.
+              'if (JSON.parse(input).prompt === "") {',
+              "  writeFileSync('hook-waiting', '');",
+              '  await new Promise((resolve) => setTimeout(resolve, 45_000));',
+              '}',
+              'process.stdout.write("{}");',
+              '',
+            ].join('\n'),
+          );
+        },
+        reply: (messages, dir) =>
+          toolResults(messages) === 0
+            ? { toolCalls: [read(join(dir, 'readme.txt'), 'call_read')] }
+            : { content: 'It says readme body.' },
+      };
+
+      const started = Date.now();
+      const shared = await run(scenario, true);
+
+      expect(shared.stopReasons).toEqual(['cancelled']);
+      // The tool result never reached the model.
+      expect(shared.requests).toHaveLength(1);
+      expect(Date.now() - started).toBeLessThan(30_000);
     }, 120_000);
 
     it('sends the date reminder with a prompt, as other surfaces do', async () => {
