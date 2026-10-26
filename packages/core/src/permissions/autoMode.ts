@@ -366,12 +366,29 @@ function hasRawProtectedRedirect(command: string, cwd: string): boolean {
       i++;
     }
 
-    const target = stripRawRedirectTargetToken(token);
+    const target = expandGlobalDirEnvVar(stripRawRedirectTargetToken(token));
     if (!target || target.startsWith('&')) continue;
     const resolved = path.isAbsolute(target) ? target : path.join(cwd, target);
     if (isAutoModeProtectedWritePath(resolved)) return true;
   }
   return false;
+}
+
+const GLOBAL_DIR_ENV_VARS = new Set([
+  'HOME',
+  'USERPROFILE',
+  'XDG_CONFIG_HOME',
+  'QWEN_HOME',
+]);
+
+// The global dir's prefix match needs the real path: `> $HOME/.config/qwen/...`
+// has no `.qwen/` segment for the patterns above to catch.
+function expandGlobalDirEnvVar(target: string): string {
+  const match = /^\$(?:\{(\w+)\}|(\w+))["']?/.exec(target);
+  const name = match?.[1] ?? match?.[2];
+  const value =
+    name && GLOBAL_DIR_ENV_VARS.has(name) ? process.env[name] : undefined;
+  return value ? value + target.slice(match![0].length) : target;
 }
 
 function hasRawProtectedWriteCommand(command: string, cwd: string): boolean {
