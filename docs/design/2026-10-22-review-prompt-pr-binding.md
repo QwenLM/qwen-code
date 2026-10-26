@@ -36,8 +36,10 @@ Bind the PR when the daemon admits a `/review` or `/verify-pr` prompt.
 
 - **Explicit command only.** The shared grammar reads `/review` and
   `/verify-pr`, each with `<N|#N|PR URL>`, at command position. Assistant prose
-  and tool output cannot create a binding. The command token closes against
-  filename characters, so `/verify-pr-watch` is another command.
+  and tool output cannot create a binding. The command name must be followed by
+  a space or tab, so `/verify-pr-watch` and `/review77` are other commands; the
+  filename-character closure applies to the number — `/verify-pr
+001_init.sql` is a file, not PR 1.
 - **`--repo` scope.** `/verify-pr` accepts `--repo <owner>/<repo>` (gh's
   `[HOST/]OWNER/REPO` form). A number qualified with a repository that is not
   this workspace's own — or the page's confirmed fork parent — is another
@@ -96,11 +98,25 @@ Bind the PR when the daemon admits a `/review` or `/verify-pr` prompt.
 - The prompt-route tests cover the hand-off of the first text block, the
   rejection of a later block, the untrusted workspace, channel-relayed
   prompts, binder rejection/hang, and the coordinator hand-off.
+- `/verify-pr` coverage: the live accept/decline pair (a `--repo` naming this
+  workspace binds; one naming another repository declines and reports
+  `repoDeclined`), quoted and `-R` spellings of a qualifier the value grammar
+  cannot read, the `--repo=` form, `--assets-repo` left alone, a later
+  qualified claim on this workspace's repo winning over an earlier foreign one,
+  an unqualified `/review` claim clearing the qualifier, the divergent-page
+  binding to the repo the number was qualified to, the transcript
+  `slash_command` sweep, and the separator that rejects `/verify-pr-watch` and
+  `/review77`.
 - `packages/cli` typecheck, ESLint, and Prettier pass.
 
 ## Acceptance criteria
 
 - `/review 15172` in a Web Shell session adds PR #15172 to the session badge
   and search after the normal catalog refresh.
+- `/verify-pr 15172` binds PR #15172 exactly as `/review 15172` does, live and
+  from the transcript sweep.
+- A `/verify-pr` number qualified to another repository binds nothing, writes
+  no sidecar and marks no catalog change; the decline is counted in
+  `repoDeclined` and reaches the live hook's warning.
 - A prompt that is not an explicit PR review creates no binding and no platform
   query.

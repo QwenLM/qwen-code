@@ -32,8 +32,9 @@ daemon 接纳 `/review` 或 `/verify-pr` 提示词时，立即绑定 PR。
 ## 护栏
 
 - **只认显式命令。** 共享语法只读命令位置上的 `/review` 与 `/verify-pr`，
-  各自支持 `<N|#N|PR URL>`。assistant 散文与工具输出不能创建绑定。命令 token
-  按文件名字符收口，因此 `/verify-pr-watch` 是另一条命令。
+  各自支持 `<N|#N|PR URL>`。assistant 散文与工具输出不能创建绑定。命令名之后必须
+  紧跟空格或制表符，因此 `/verify-pr-watch` 与 `/review77` 都是另一条命令；按文件名
+  字符收口的是号码——`/verify-pr 001_init.sql` 是文件，不是 PR 1。
 - **`--repo` 作用域。** `/verify-pr` 接受 `--repo <owner>/<repo>`（gh 的
   `[HOST/]OWNER/REPO` 形态）。号码被限定到既非本 workspace 自身、也非 gh 页
   已确认 fork 父仓库时，它是另一个仓库的 PR，不产生绑定；本 workspace 的同号
@@ -74,10 +75,20 @@ daemon 接纳 `/review` 或 `/verify-pr` 提示词时，立即绑定 PR。
   仅目标会话/非 review 场景、归档/删除/位置解析失败的生命周期竞争。
 - 提示路由测试覆盖：首个文本块的传递、后续文本块、untrusted workspace、渠道
   提示词、binder 拒绝/挂起、coordinator 交接。
+- `/verify-pr` 覆盖：实时接受/拒绝成对（`--repo` 指向本 workspace 时绑定；指向
+  另一仓库时拒绝并上报 `repoDeclined`）、取值语法读不出的引号与 `-R` 写法、
+  `--repo=` 形态、`--assets-repo` 不受影响、后一次指向本 workspace 的声明胜过
+  先前的他仓声明、不带限定的 `/review` 声明清除限定、分歧页面下绑定到号码被限定
+  的那个仓库、transcript `slash_command` 扫描，以及拒绝 `/verify-pr-watch` 与
+  `/review77` 的分隔符。
 - `packages/cli` 的 typecheck、ESLint、Prettier 通过。
 
 ## 验收标准
 
 - Web Shell 会话里执行 `/review 15172` 后，PR #15172 在正常 catalog 刷新后出现在
   会话徽标与搜索中。
+- `/verify-pr 15172` 与 `/review 15172` 绑定同一枚徽标，实时路径与 transcript
+  回填路径都成立。
+- 被限定到另一仓库的 `/verify-pr` 号码不产生绑定、不写 sidecar、不标记 catalog
+  变更；拒绝会计入 `repoDeclined` 并进入 live 钩子的告警。
 - 非显式 PR 审查的提示词不创建绑定，也不发起平台查询。

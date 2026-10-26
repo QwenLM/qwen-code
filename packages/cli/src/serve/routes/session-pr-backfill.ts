@@ -25,6 +25,10 @@ import {
   type SessionPr,
   type SessionPrSource,
 } from '@qwen-code/qwen-code-core';
+import {
+  hostsEquivalent,
+  normalizeSegment,
+} from '../../commands/review/lib/remote-match.js';
 import type { SendBridgeError } from '../server/error-response.js';
 import {
   AONE_MAX_MR_VIEW_CALLS_PER_RUN,
@@ -111,6 +115,14 @@ export interface SessionPrBackfillWorkspaceResult {
    */
   unresolved: number;
   /**
+   * Numbers (or url forms) a `/verify-pr` claim named for ANOTHER
+   * repository, so the binding was declined by the `--repo` gate rather
+   * than failing to resolve. A zero `bound` count with this above zero is a
+   * policy decline, not a degraded run — without it the two are
+   * indistinguishable in the result.
+   */
+  repoDeclined?: number;
+  /**
    * GitHub only: whether the workspace's `gh pr list` succeeded. False
    * means URL/state resolution degraded to the `/review <url>` forms and
    * the remote-web-URL fallback, so a zero `bound` count is a degraded
@@ -150,11 +162,13 @@ interface CommandMention {
   number: number;
   bare: boolean;
   /**
-   * `[HOST/]OWNER/REPO` from the `--repo` qualifier `/verify-pr` accepts: the
-   * number names THAT repo's PR, not this workspace's. Absent means this
-   * workspace's, the only reading `/review` has.
+   * Every `[HOST/]OWNER/REPO` spelling a `/verify-pr` claim on this number
+   * carried: the number names THAT repo's PR, not this workspace's. Absent
+   * means this workspace's, the only reading `/review` has. Kept as a list —
+   * not the first spelling alone — so a later claim on this workspace's own
+   * repository binds after an earlier one named another.
    */
-  repoForm?: string;
+  repoForms?: readonly string[];
 }
 
 // `/review 9584`, `/review #9584`, `/review https://…/pull/9584 …` and the
@@ -178,11 +192,16 @@ const PR_COMMAND_PATTERN =
 
 // `/verify-pr --repo <owner>/<repo>` scopes the number to another repository;
 // a bare number beside it must never bind this workspace's same-numbered PR.
-// `--assets-repo` is a different flag and does not match. `/review` takes no
-// `--repo`, so a stray occurrence in its prompt still reads as a qualifier —
-// the safer reading, and never a binding this workspace's number.
-const REPO_FORM_PATTERN =
-  /--repo(?:[ \t]+|=)([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)?)/;
+// The flag is recognised by its TOKEN, not by whether its value parses: the
+// value capture below tolerates quotes, but a URL, an scp form, a
+// `host:port`, gh's `-R`, or a value on the next line would otherwise parse
+// as no qualifier at all — and an unread qualifier must decline, never fall
+// through to this workspace's PR. `--assets-repo` is a different flag of the
+// same command and must not count as one. `/review` takes no `--repo`, so a
+// stray occurrence in its prompt reads as a qualifier too — the safer
+// reading, and never a binding this workspace's number.
+const REPO_FLAG_PATTERN = /(?:^|[^-\w])--repo(?![\w-])|(?:^|[\s])-R(?![\w-])/;
+const REPO_FORM_PATTERN = /--repo(?:[ \t]+|=)[ \t]*["']?([^\s"']+)/;
 
 /**
  * Longest prompt the grammar scans. The lazy URL alternative in
@@ -208,11 +227,20 @@ function parsePrCommand(prompt: string): {
     // declines it, so it must never count as a binding.
     if (Number(bareNumber) <= 0) return {};
     const repoForm = REPO_FORM_PATTERN.exec(prompt)?.[1];
+    // The token decides, not the value: a qualifier this grammar cannot read
+    // is still a qualifier, so the number must decline. It keeps an EMPTY
+    // list rather than no mention, so the decline is countable instead of
+    // looking like a prompt that named no PR at all.
+    if (repoForm === undefined && REPO_FLAG_PATTERN.test(prompt)) {
+      return {
+        mention: { number: Number(bareNumber), bare: true, repoForms: [] },
+      };
+    }
     return {
       mention: {
         number: Number(bareNumber),
         bare: true,
-        ...(repoForm !== undefined ? { repoForm } : {}),
+        ...(repoForm !== undefined ? { repoForms: [repoForm] } : {}),
       },
     };
   }
@@ -255,17 +283,19 @@ function collectCommandPrNumbers(raw: string): {
   const noteMention = (mention: CommandMention): void => {
     const known = mentionByNumber.get(mention.number);
     if (known) {
-      // The position stays with the first mention. A first bare claim adopts
-      // its own `--repo` qualifier — a url form carries none, and dropping it
-      // would plan this repo's same-numbered PR instead of the named one. An
-      // unqualified bare claim (`/review N`) re-reads an already-bare number
-      // as this repo's for good.
+      // The position stays with the first mention: it is the cap trim's age
+      // proxy. A bare claim's qualifiers ACCUMULATE — a later `/verify-pr N`
+      // naming this workspace's repo must bind after an earlier one named
+      // another — while an unqualified claim (`/review N`) reads the number as
+      // this workspace's for good.
       if (mention.bare) {
-        if (!known.bare) {
-          known.bare = true;
-          if (mention.repoForm !== undefined) known.repoForm = mention.repoForm;
-        } else if (mention.repoForm === undefined) {
-          delete known.repoForm;
+        known.bare = true;
+        if (mention.repoForms === undefined) {
+          delete known.repoForms;
+        } else if (mention.repoForms.length > 0) {
+          known.repoForms = [
+            ...new Set([...(known.repoForms ?? []), ...mention.repoForms]),
+          ];
         }
       }
       return;
@@ -589,14 +619,70 @@ export async function backfillWorkspaceSessionPrs(
   if (pageMapTrusted && pageRepoKey !== undefined) {
     sameRepoKeys.add(pageRepoKey);
   }
-  // `/verify-pr --repo <owner>/<repo>` is gh's `[HOST/]OWNER/REPO` form; the
-  // keys above are full `host/owner/repo`, so a two-segment form matches by
-  // suffix and a three-segment one exactly.
+  // `/verify-pr --repo <owner>/<repo>` is gh's `[HOST/]OWNER/REPO` form. The
+  // comparison runs on the qualifier, against the workspace's FULL origin
+  // path: `repoKeyFromWebUrl` keeps only two path segments, so a nested group
+  // (`group/sub/cli`) collapses to `sub/cli` and the collapsed key cannot tell
+  // the only correct spelling from a sibling project or from a bare group.
+  // Segments and hosts normalize through the shared review helpers; the keys
+  // stay exactly as their source built them.
+  const repoSegments = (
+    form: string,
+  ): { host?: string; path: string[] } | undefined => {
+    let v = form.trim().replace(/^["']|["']$/g, '');
+    v = v.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '');
+    v = v.replace(/^[^@/\s]+@/, '');
+    // scp syntax `host:group/...`; a port keeps its colon.
+    v = v.replace(/^([^/:@\s]+):(?!\d+\/)/, '$1/');
+    v = v.replace(/[.,;]+$/, '').replace(/\/+$/, '');
+    const parts = v.split('/').filter(Boolean);
+    if (parts.length < 2) return undefined;
+    if (/[.:]/.test(parts[0])) {
+      const path = parts.slice(1).map(normalizeSegment);
+      return path.length >= 2 ? { host: parts[0], path } : undefined;
+    }
+    return { path: parts.map(normalizeSegment) };
+  };
+  const ownedIdentities: Array<{ host?: string; path: string[] }> = [];
+  if (remote !== undefined) {
+    try {
+      const url = new URL(remote);
+      const path = url.pathname
+        .split('/')
+        .filter(Boolean)
+        .map(normalizeSegment);
+      if (path.length >= 2) ownedIdentities.push({ host: url.host, path });
+    } catch {
+      // A remote that will not parse falls back to the collapsed key below.
+    }
+  }
+  if (ownedIdentities.length === 0 && workspaceRepoKey !== undefined) {
+    const [host, owner, repo] = workspaceRepoKey.split('/');
+    if (owner !== undefined && repo !== undefined) {
+      ownedIdentities.push({ host, path: [owner, repo] });
+    }
+  }
+  if (pageMapTrusted && pageRepoKey !== undefined) {
+    const [host, owner, repo] = pageRepoKey.split('/');
+    if (owner !== undefined && repo !== undefined) {
+      ownedIdentities.push({ host, path: [owner, repo] });
+    }
+  }
   const repoFormMatches = (repoForm: string): boolean => {
-    const form = repoForm.toLowerCase();
-    return [...sameRepoKeys].some(
-      (key) => key === form || key.endsWith(`/${form}`),
-    );
+    const form = repoSegments(repoForm);
+    if (form === undefined) return false;
+    return ownedIdentities.some((identity) => {
+      if (
+        form.host !== undefined &&
+        (identity.host === undefined ||
+          !hostsEquivalent(form.host, identity.host))
+      ) {
+        return false;
+      }
+      if (form.path.length > identity.path.length) return false;
+      const tail = identity.path.slice(-form.path.length);
+      return form.path.every((segment, index) => segment === tail[index]);
+    });
   };
 
   for (const candidate of candidates) {
@@ -626,33 +712,45 @@ export async function backfillWorkspaceSessionPrs(
     // comparison, because the two-segment repo key collapses nested groups
     // and would let a sibling project's form through — and it supplies
     // the NUMBER only: the URL always comes from `mr view`.
-    const formUrlByNumber = new Map<number, string>(
-      candidate.urlForms
-        .filter((form) => {
-          if (!isValidSessionPrUrl(form.url)) return false;
-          if (isLegacyFabricated) {
-            return isLegacyFabricated(form.url, form.number);
-          }
-          const repoKey = repoKeyFromWebUrl(form.url);
-          return repoKey !== undefined && allowedRepoKeys.has(repoKey);
-        })
-        .map((form) => [form.number, form.url]),
-    );
+    const formUrlByNumber = new Map<number, string>();
+    for (const form of candidate.urlForms) {
+      if (!isValidSessionPrUrl(form.url)) continue;
+      if (isLegacyFabricated) {
+        if (isLegacyFabricated(form.url, form.number)) {
+          formUrlByNumber.set(form.number, form.url);
+        }
+        continue;
+      }
+      const repoKey = repoKeyFromWebUrl(form.url);
+      if (repoKey !== undefined && allowedRepoKeys.has(repoKey)) {
+        formUrlByNumber.set(form.number, form.url);
+      } else {
+        // A url form naming another repository: declined, not unresolved.
+        result.repoDeclined = (result.repoDeclined ?? 0) + 1;
+      }
+    }
     const numbers: number[] = [];
-    // A bare number names this workspace's PR N unless `/verify-pr --repo`
-    // scoped it to a repository: that repo must then be this workspace's own
-    // (or the page's trusted fork parent), or the number is another repo's
-    // PR with no URL to bind.
+    // A bare number names this workspace's PR N unless EVERY `/verify-pr
+    // --repo` claim on it names another repository: one claim on this
+    // workspace's own repo (or the page's trusted fork parent) is enough, so
+    // a later correct spelling is not lost to an earlier foreign one.
     const ownsBareNumber = (mention: CommandMention): boolean =>
       mention.bare &&
-      (mention.repoForm === undefined || repoFormMatches(mention.repoForm));
+      (mention.repoForms === undefined ||
+        mention.repoForms.some((form) => repoFormMatches(form)));
     for (const mention of candidate.mentions) {
       // A number mentioned ONLY through url forms is planned only when a
       // form passed the gate; a bare mention names this repo's PR N and
       // plans regardless.
-      if (ownsBareNumber(mention) || formUrlByNumber.has(mention.number)) {
-        numbers.push(mention.number);
+      const owned = ownsBareNumber(mention);
+      const plannedByForm = formUrlByNumber.has(mention.number);
+      if (!owned && mention.bare) {
+        // Counted even when a form still supplies the number: the BARE claim
+        // was declined, and a zero-`bound` run caused by that must be
+        // distinguishable from a silent miss.
+        result.repoDeclined = (result.repoDeclined ?? 0) + 1;
       }
+      if (owned || plannedByForm) numbers.push(mention.number);
     }
     // Numbers named as THIS repo's PR N (bare or convention): a form may
     // lend such a number its URL only when it names the same PR.
