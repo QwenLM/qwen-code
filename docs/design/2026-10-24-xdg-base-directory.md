@@ -45,19 +45,29 @@ This change moves only the default location of the global directory. `QWEN_HOME`
 
 - Existing installs keep using `~/.qwen`, with nothing to migrate.
 - New Linux installs use `~/.config/qwen`.
-- To move an existing install, run this with `QWEN_HOME` unset:
+- To move an existing install on Linux, run:
 
   ```sh
-  case "${XDG_CONFIG_HOME:-}" in
-    "" | /*)
-      dest="${XDG_CONFIG_HOME:-$HOME/.config}/qwen"
-      mkdir -p "$(dirname "$dest")" && [ ! -e "$dest" ] && mv ~/.qwen "$dest" &&
-        touch "$dest/.qwen-global-dir" ;;
-    *) echo "XDG_CONFIG_HOME must be unset or absolute" >&2; false ;;
-  esac
+  dest="${XDG_CONFIG_HOME:-$HOME/.config}/qwen"
+  if uname -s | grep -qE '^(Darwin|MINGW|MSYS|CYGWIN)'; then
+    echo "macOS and Windows keep using ~/.qwen" >&2; false
+  elif [ -n "${QWEN_HOME:-}" ]; then
+    echo "unset QWEN_HOME first" >&2; false
+  elif [ -z "${HOME:-}" ]; then
+    echo "HOME is not set" >&2; false
+  elif [ "${dest#/}" = "$dest" ]; then
+    echo "XDG_CONFIG_HOME must be unset or absolute" >&2; false
+  elif [ -e "$dest" ]; then
+    echo "$dest already exists; merge it with ~/.qwen by hand" >&2; false
+  elif [ ! -d "$HOME/.qwen" ]; then
+    echo "there is no ~/.qwen to move" >&2; false
+  else
+    mkdir -p "$(dirname "$dest")" && mv "$HOME/.qwen" "$dest" &&
+      touch "$dest/.qwen-global-dir"
+  fi
   ```
 
-  It writes the marker after the move, so a `~/.qwen` recreated before the next start cannot take the install back. It refuses a relative `XDG_CONFIG_HOME`, and does nothing if the destination already exists; merge the two directories by hand instead. A copy that leaves `~/.qwen` in place keeps using `~/.qwen`.
+  It writes the marker after the move, so a `~/.qwen` recreated before the next start cannot take the install back. It changes nothing and says why on macOS and Windows, with `QWEN_HOME` set or `HOME` unset, with a relative `XDG_CONFIG_HOME`, when there is no `~/.qwen`, or when the destination already exists; in that last case, merge the two directories by hand. A copy that leaves `~/.qwen` in place keeps using `~/.qwen`. While both directories exist, deleting `.qwen-global-dir` from the XDG directory makes Qwen Code use `~/.qwen` again.
 
 - To keep `~/.qwen` on a new machine, set `QWEN_HOME=~/.qwen` or create `~/.qwen` before the first run. The standalone installer does the latter when given `--source`, because it writes `~/.qwen/source.json`.
 - A custom `XDG_CONFIG_HOME` applies only where it is set. A launch context without it, such as a desktop launcher, a systemd user service or cron, resolves `~/.config/qwen` and, when there is no `~/.qwen`, uses it as a separate install. The marker rule only protects `~/.qwen`.
