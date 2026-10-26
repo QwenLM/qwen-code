@@ -46,6 +46,7 @@ import {
   type AutofixPrState,
   type PendingPost,
 } from './state.js';
+import { assertNoFixInFlight, fixSnapshotPath } from './fix.js';
 
 /** GitHub refuses a comment body longer than this. */
 const MAX_BODY_CHARS = 65_536;
@@ -343,6 +344,14 @@ function replyLocked(
 ): ReplyOutcome {
   let state = requireState(paths.statePath, args.pr);
   assertWatching(state, args.task);
+  assertNoFixInFlight(paths, args.pr);
+  // The option the watch was started with holds for its rounds, whatever
+  // a round's turn remembers of it; a `--once` round has options of its own.
+  if (args.post && args.task !== undefined && state.watch?.reply === false) {
+    throw new Error(
+      `PR #${args.pr}'s watch was started with --no-reply: run reply with --no-post.`,
+    );
+  }
   setGhHost(state.host);
   ensureAuthenticated();
   // Every bot thread the plan may name was asked about by the round's
@@ -444,7 +453,13 @@ function replyLocked(
   // pushed while it ran — is history: prepared snapshots read only the
   // current head, so it is not recorded.
   const knownChecks = new Set(state.handledChecks ?? []);
-  const roundChecks = snapshotChecks(paths.snapshotPath);
+  // The round of a background fix claimed its snapshot under another
+  // name, and no round prepared one since.
+  const roundChecks = snapshotChecks(
+    isRegularFile(paths.snapshotPath)
+      ? paths.snapshotPath
+      : fixSnapshotPath(paths, args.pr),
+  );
   const held = heldKeys(pr, state);
   const currentChecks: string[] = [];
   let ignoredChecks = 0;

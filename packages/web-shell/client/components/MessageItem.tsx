@@ -82,6 +82,7 @@ interface MessageItemProps {
   onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
   branchRecordId?: string;
   showAssistantActions?: boolean;
+  assistantFooterAlwaysVisible?: boolean;
   showAssistantBranch?: boolean;
   /** Turn id marks are keyed by; unset hides the marks for this message. */
   assistantFeedbackTurnId?: string;
@@ -122,6 +123,7 @@ export const MessageItem = memo(function MessageItem({
   onBranchSession,
   branchRecordId,
   showAssistantActions = false,
+  assistantFooterAlwaysVisible = false,
   showAssistantBranch = false,
   assistantFeedbackTurnId,
   assistantFeedbackPromptId,
@@ -231,6 +233,7 @@ export const MessageItem = memo(function MessageItem({
             timestamp={message.timestamp}
             onBranchSession={boundBranchSession}
             showFooterActions={showAssistantActions}
+            footerAlwaysVisible={assistantFooterAlwaysVisible}
             showBranchAction={showAssistantBranch}
             showAssistantFeedback={assistantFeedbackPromptId !== undefined}
             assistantFeedbackRating={assistantFeedbackRating}
@@ -500,6 +503,8 @@ function areMessageItemPropsEqual(
   if (prev.onBranchSession !== next.onBranchSession) return false;
   if (prev.branchRecordId !== next.branchRecordId) return false;
   if (prev.showAssistantActions !== next.showAssistantActions) return false;
+  if (prev.assistantFooterAlwaysVisible !== next.assistantFooterAlwaysVisible)
+    return false;
   if (prev.showAssistantBranch !== next.showAssistantBranch) return false;
   if (prev.assistantFeedbackTurnId !== next.assistantFeedbackTurnId)
     return false;

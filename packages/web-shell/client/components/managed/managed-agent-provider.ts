@@ -193,7 +193,6 @@ export interface ManagedAgentSessionSummary {
     artifacts?: boolean;
     /** The caller may submit later Turns to this Workspace-bound Session. */
     workspaceTurns?: boolean;
-    cwdChange?: boolean;
     modelChange?: boolean;
     contextCompression?: boolean;
     approvalModeChange?: boolean;
@@ -259,7 +258,6 @@ export interface ManagedAgentCommandOptions extends ManagedAgentRequestOptions {
   idempotencyKey: string;
 }
 
-export type ManagedCwdOperation = components['schemas']['WebShellCwdOperation'];
 export type ManagedContextCompressionOperation =
   components['schemas']['WebShellContextCompressionOperation'];
 export type ManagedTask = components['schemas']['WebShellTask'];
@@ -502,18 +500,6 @@ export interface ManagedAgentProvider {
       ): Promise<ManagedTaskCancelOperation>;
     };
   };
-  readonly cwdChange?: {
-    submit(
-      sessionId: string,
-      request: { cwdRelative: string; expectedContextRevision: number },
-      options: ManagedAgentCommandOptions,
-    ): Promise<ManagedCwdOperation>;
-    query(
-      sessionId: string,
-      operationId: string,
-      options: ManagedAgentRequestOptions,
-    ): Promise<ManagedCwdOperation>;
-  };
   readonly contextCompression?: {
     submit(
       sessionId: string,
@@ -562,6 +548,21 @@ export interface ManagedAgentProvider {
       request: components['schemas']['WebShellWorkspaceFileReadRequest'],
       options: ManagedAgentRequestOptions,
     ): Promise<components['schemas']['WebShellWorkspaceFileSnapshot']>;
+    upload?(
+      request: {
+        workspaceId: string;
+        cwdRelative: string;
+        path: string;
+        expectedScopeRevision: string;
+        uploadId: string;
+      },
+      data: Blob,
+      options: ManagedAgentRequestOptions,
+    ): Promise<components['schemas']['WebShellWorkspaceFileUploadResult']>;
+    queryUpload?(
+      uploadId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<components['schemas']['WebShellWorkspaceFileUploadStatus']>;
   };
   readonly workspaceBinding?: {
     readonly agentId: string;

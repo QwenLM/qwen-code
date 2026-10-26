@@ -215,6 +215,10 @@ export function createJavaManagedAgentProvider(
         client.queryWorkspaceFiles(request, command.signal),
       read: (request, command) =>
         client.readWorkspaceFile(request, command.signal),
+      upload: (request, data, command) =>
+        client.uploadWorkspaceFile(request, data, command.signal),
+      queryUpload: (uploadId, command) =>
+        client.queryWorkspaceFileUpload(uploadId, command.signal),
     },
     canCancel: true,
     titleSearch: true,
@@ -581,34 +585,6 @@ export function createJavaManagedAgentProvider(
                 modelSelection: selection,
                 replayed: result.replayed,
               };
-            },
-          },
-          cwdChange: {
-            async submit(sessionId, request, command) {
-              return requireCwdOperation(
-                await client.changeCwd(
-                  {
-                    ...request,
-                    sessionId,
-                    idempotencyKey: command.idempotencyKey,
-                    requestId: managedRequestId(),
-                  },
-                  command.signal,
-                ),
-                sessionId,
-              );
-            },
-            async query(sessionId, operationId, request) {
-              const result = requireCwdOperation(
-                await client.queryOperation(
-                  { sessionId, operationId },
-                  request.signal,
-                ),
-                sessionId,
-              );
-              if (result.operationId !== operationId)
-                throw new Error('Cwd operation identity mismatch');
-              return result;
             },
           },
           contextCompression: {
@@ -1067,7 +1043,6 @@ function toSessionSummary(
         turnStatus !== 'cancelling' &&
         session.recovery?.actions.cancel !== false,
       ...(workspaceTurns ? { workspaceTurns: true } : {}),
-      ...(session.capabilities?.cwdChange === true ? { cwdChange: true } : {}),
       ...(session.capabilities?.modelChange === true
         ? { modelChange: true }
         : {}),
@@ -1144,20 +1119,6 @@ function modelContext(value: unknown): ManagedModelContext | undefined {
       ? { contextWindowSize }
       : {}),
   };
-}
-
-function requireCwdOperation(
-  operation: Awaited<ReturnType<JavaManagedAgentClient['queryOperation']>>,
-  sessionId: string,
-) {
-  if (
-    operation.type !== 'cwd_change' ||
-    operation.sessionId !== sessionId ||
-    !operation.operationId
-  ) {
-    throw new Error('Cwd operation identity mismatch');
-  }
-  return operation;
 }
 
 function requireContextCompressionOperation(

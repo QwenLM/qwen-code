@@ -20,6 +20,7 @@ import {
 } from '../../../tools/autofix-pr.js';
 import { parseSkillContent } from '../../skill-load.js';
 import { BuiltinAgentRegistry } from '../../../subagents/builtin-agents.js';
+import { BackgroundFix } from '../../../tools/autofix-pr-grants.js';
 
 const PROJECT = '/work/repo';
 
@@ -97,6 +98,7 @@ describe('bundled autofix-pr skill', () => {
       'push',
       'reply',
       'rerun',
+      'fix-end',
       'status',
       'cleanup',
     ] as const) {
@@ -104,7 +106,13 @@ describe('bundled autofix-pr skill', () => {
     }
     // A watch this session did not start or resume asks, as the start, a
     // re-schedule, a take-over and unattended do.
-    for (const command of ['push', 'reply', 'sync', 'cleanup'] as const) {
+    for (const command of [
+      'push',
+      'reply',
+      'sync',
+      'fix-end',
+      'cleanup',
+    ] as const) {
       await expect(helper({ command, pr: 7 }, false)).resolves.toBe('ask');
     }
     for (const params of [
@@ -290,6 +298,65 @@ describe('bundled autofix-pr skill', () => {
     }
     // The merge a later push needs is made by a second call, held to it too.
     expect(body).toContain('whose `## Never` it is told to follow too');
+  });
+
+  it("lists every item step 3 sets aside under the brief's own items, which the after-fix turn answers from", () => {
+    const { body } = loadSkill();
+    const ciLogs = /3\. \*\*CI logs\.\*\*([^\n]*)/.exec(body)?.[1] ?? '';
+    // A workflow that could not start, a run with no log, a log unavailable.
+    expect(
+      ciLogs.match(
+        /out of the brief's events, list (?:it|them) under `## The round's own items`/g,
+      ),
+    ).toHaveLength(2);
+    expect(ciLogs).toContain(
+      "never goes into the brief's events — only under `## The round's own items`",
+    );
+    expect(ciLogs).not.toMatch(/out of the brief[ ,.]|into the brief[;.]/);
+    expect(body).toContain(
+      "and `## The round's own items`, when there, the ones step 3",
+    );
+  });
+
+  it('runs a fix in the background only as step 5 says, and goes on from the follow-up Qwen Code writes', () => {
+    const { body } = loadSkill();
+    const step5 = /\n5\. \*\*Fix\*\*([\s\S]*?)\n6\. /.exec(body)?.[1] ?? '';
+    for (const condition of [
+      'not a `--once` one',
+      'its `status` said `unattended: true`',
+      'step 1 reported no `abandonedFix`',
+      'did not restart in this turn',
+      'add `run_in_background: true`',
+    ]) {
+      expect(step5).toContain(condition);
+    }
+    expect(body).toContain(
+      '- `after-fix <owner>/<repo>#<n> --task <id> --attempt <id>` followed by optional `--no-reply` and `-- <instructions>`',
+    );
+    const after =
+      /\n## After a background fix\n([\s\S]*?)(?:\n## |$)/.exec(body)?.[1] ??
+      '';
+    expect(after).toContain(
+      'autofix-pr fix-end <n> --task <task> --attempt <attempt>',
+    );
+    // What the session writes into the notification has that shape.
+    const fix = new BackgroundFix(
+      'session-a',
+      12,
+      'o/r',
+      '/work/repo/.qwen/tmp/autofix-pr-12',
+      { task: 'feedc0ffee12', reply: false, instructions: 'keep the API' },
+      {
+        pr: 12,
+        worktree: '/work/repo/.qwen/tmp/autofix-pr-12',
+        check: async () => true,
+        open: async () => ({ task: 'feedc0ffee12' }),
+        close: async () => {},
+      },
+    );
+    expect(fix.followUp()!.split('\n').at(-1)).toMatch(
+      /^after-fix o\/r#12 --task feedc0ffee12 --attempt [0-9a-f]{12} --no-reply -- keep the API$/,
+    );
   });
 
   it('names a built-in subagent type for the fix agent, as working_dir requires', () => {
