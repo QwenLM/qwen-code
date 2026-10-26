@@ -272,6 +272,17 @@ describe('ModBand', () => {
     expect(lastFrame()).toBe('abcd');
   });
 
+  it('expands tabs to the next 8-column stop, as Claude Code does', () => {
+    // Ink measures a tab as no columns while the terminal jumps to a stop.
+    const { lastFrame } = render(
+      <ModBand
+        maxRows={2}
+        band={band({ type: 'Text', children: ['ctx\t42%'] })}
+      />,
+    );
+    expect(lastFrame()).toBe('ctx     42%');
+  });
+
   it('shows nothing for an answer that throws while drawn, and draws the next afresh', () => {
     const broken = band({
       type: 'Text',

@@ -112,7 +112,7 @@ The debug log records each refusal and adjustment in Claude Code's words, such a
   - a color that is one of Claude Code's theme keys maps to the active Qwen Code theme: `text` to the primary text color, `subtle` and `inactive` to the secondary one, `success`, `error` and `warning` to the status colors, and `claude` and `suggestion` to the accent;
   - Claude Code's other theme keys, such as `permission` or `diffAdded`, draw in the default color in this stage;
   - any other color draws when Ink accepts it (a name or hex value) and otherwise draws in the default color;
-  - all text is sanitized for the terminal, as Mod transcript lines are.
+  - all text is sanitized for the terminal, as Mod transcript lines are; tabs become spaces to the next 8-column stop, as Claude Code's Ink expands them.
 - **Failures.** An error boundary wraps the band. A tree that throws while drawn shows nothing, and that answer is not drawn again. The next answer is drawn afresh.
 - **Layout.** Ink measures the controls under the transcript to size the transcript's viewport. The band's height joins the inputs of that measurement, as the live agent panel's already does, so the alternate screen does not clip the prompt.
 - **Wiring.** The interactive Mod session gains a small store of the band's last tree. The band reads it with `useSyncExternalStore`, and Ink reports the site's input to the session, which keys and queues the renders.

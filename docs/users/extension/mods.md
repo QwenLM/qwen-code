@@ -709,7 +709,8 @@ The band is drawn with these conversions:
   other theme keys, such as `permission` or `diffAdded`, draw in the default
   color. Other colors draw when they are an ANSI color name such as `cyan` or
   `redBright`, a hex value, `rgb(r, g, b)` or `ansi256(n)`.
-- Text is sanitized for the terminal, as Mod transcript lines are.
+- Text is sanitized for the terminal, as Mod transcript lines are. Tabs
+  become spaces to the next 8-column stop, as in Claude Code.
 
 The band clips horizontal overflow to the composer's width.
 

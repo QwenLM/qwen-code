@@ -15,6 +15,7 @@ import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.j
 import type { ModBand as ModBandAnswer } from '../../services/interactive-mod-session.js';
 import { theme } from '../semantic-colors.js';
 import {
+  getCachedStringWidth,
   sanitizeTerminalText,
   stripUnsafeCharacters,
 } from '../utils/textUtils.js';
@@ -182,8 +183,27 @@ function textProps(props: ModRenderProps): TextProps {
   };
 }
 
+// Ink measures a tab as no columns while the terminal moves to the next
+// stop, so tabs become spaces to 8-column stops, as Claude Code's Ink does.
+function expandTabs(text: string): string {
+  if (!text.includes('\t')) return text;
+  let column = 0;
+  return text
+    .split(/(\t|\n)/)
+    .map((part) => {
+      if (part === '\t') {
+        const spaces = 8 - (column % 8);
+        column += spaces;
+        return ' '.repeat(spaces);
+      }
+      column = part === '\n' ? 0 : column + getCachedStringWidth(part);
+      return part;
+    })
+    .join('');
+}
+
 const clean = (text: string) =>
-  sanitizeTerminalText(stripUnsafeCharacters(text));
+  expandTabs(sanitizeTerminalText(stripUnsafeCharacters(text)));
 
 function drawNode(
   node: ModRenderNode,
