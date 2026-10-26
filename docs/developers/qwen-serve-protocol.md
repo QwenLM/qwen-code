@@ -1549,10 +1549,17 @@ Returns `404 workspace_registration_not_found`, `500 workspace_registration_stor
 These routes report daemon-side runtime snapshots. They are additive v1 routes,
 do not mutate state, and do not change the serve protocol version. Workspace
 status routes intentionally do **not** start the ACP child process just because
-a client polls a GET route: if the daemon is idle, they return
-`initialized: false` with an empty snapshot. Session status routes require a
-live session and return `404 { code: "session_not_found", ... }` for unknown
-ids.
+a client polls a GET route. `GET /workspace/mcp` returns `initialized: false`
+with an empty snapshot when the daemon is idle. `GET /workspace/skills` instead
+serves a retained daemon observation or daemon-local enumeration, and reports
+`initialized: false` **with an `errors` entry** (retryable unavailability, not
+an empty catalog) only when no retained observation exists and both sources are
+unavailable (or a cold read is throttled) — see
+[`GET /workspace/skills`](#get-workspaceskills).
+`GET /workspace/providers` is answered daemon-locally and reports
+`initialized: true` regardless of ACP state, with `acpChannelLive` as the
+liveness signal. Session status routes require a live session and return
+`404 { code: "session_not_found", ... }` for unknown ids.
 
 Capability tags:
 
@@ -1784,7 +1791,7 @@ but keeps the retained inventory because startup may still be incomplete; the
 next read returns that retained data, and background revalidation replaces it
 once the one-second start throttle allows. Skill deletion and enablement
 identity reads bypass the snapshot and throttle, awaiting a new observation
-with local fallback.
+with local fallback and then the retained snapshot when both sources fail.
 
 Inventory responses carrying a retained daemon observation additionally include
 optional snapshot metadata. Direct config/runtime status reads, session resource
@@ -4060,7 +4067,7 @@ Counts describe the selected sessions and the shared/session configurations refr
 
 Capability tag: `workspace_skill_settings_toggle`. The workspace-qualified form is `POST /workspaces/:workspace/skills/:name/enable`.
 
-Update the workspace Skill settings for a name. On enable, the daemon first resolves extension-authored names against a fresh catalog observation, bypassing retained data and read throttling and awaiting ACP plus daemon-local fallback if needed. An unavailable catalog falls back to the legacy name heuristic; names are not validated against the catalog. Disable does not read the catalog. The trimmed request name is passed to persistence and returned in the response. Enabling any name records a workspace `skills.enabled` opt-in, even before installation; disabling removes that opt-in and adds a workspace `skills.disabled` entry. Existing entries for Skills that are no longer loaded are preserved, and duplicate/case-variant entries for the target are collapsed. A hard `skills.disabled` entry inherited from a higher scope remains authoritative for effective availability, but does not prevent the workspace scope from recording or removing its own declaration. Workspace declarations otherwise participate in the usual `skills.disabled > skills.enabled > skills.defaultDisabled` resolution and can override higher-scope `skills.defaultDisabled` or `skills.enabled` entries.
+Update the workspace Skill settings for a name. On enable, the daemon first resolves extension-authored names against a fresh catalog observation, bypassing retained data and read throttling and awaiting ACP plus daemon-local fallback if needed; if both fresh sources fail, a retained observation is used before the legacy name heuristic. Names are not validated against the catalog. Disable does not read the catalog. The trimmed request name is passed to persistence and returned in the response. Enabling any name records a workspace `skills.enabled` opt-in, even before installation; disabling removes that opt-in and adds a workspace `skills.disabled` entry. Existing entries for Skills that are no longer loaded are preserved, and duplicate/case-variant entries for the target are collapsed. A hard `skills.disabled` entry inherited from a higher scope remains authoritative for effective availability, but does not prevent the workspace scope from recording or removing its own declaration. Workspace declarations otherwise participate in the usual `skills.disabled > skills.enabled > skills.defaultDisabled` resolution and can override higher-scope `skills.defaultDisabled` or `skills.enabled` entries.
 
 This is different from the ACP `qwen/skills/setEnabled` managed-skill operation and the `disable-model-invocation` frontmatter field. For an active Extension parent, effective Skill availability follows `skills.disabled` > `skills.enabled` > `skills.defaultDisabled` > workspace internal override > manifest `skillStates` > enabled. Both hard and default disables remove the skill from slash-command/model availability and reject later skill execution. `disable-model-invocation: true` keeps direct user invocation available and only hides the skill from model invocation.
 
@@ -4097,7 +4104,7 @@ The mutation reuses the workspace-scoped `settings_changed` event for each chang
 
 Capability tag: `workspace_skill_settings_batch_toggle`. The workspace-qualified form is `POST /workspaces/:workspace/skills/enable`.
 
-Update workspace Skill settings for up to 100 names in one request; the cap counts the raw `skillNames` entries before deduplication. Names are trimmed and deduplicated case-insensitively while preserving first-seen order and casing. On enable, the daemon first resolves extension-authored names against a fresh catalog observation, bypassing retained data and read throttling and awaiting ACP plus daemon-local fallback if needed. An unavailable catalog falls back to the legacy name heuristic; names are not validated against the catalog. Disable does not read the catalog. It applies all resulting declaration changes in at most one locked settings write and, when anything changed, refreshes active sessions once. Enabling always records an explicit workspace `skills.enabled` opt-in, including names not yet installed, so it can override an Extension's internal disablement. Repeating an identical declaration remains a no-op. Unexpected persistence or runtime-generation failures fail the whole request.
+Update workspace Skill settings for up to 100 names in one request; the cap counts the raw `skillNames` entries before deduplication. Names are trimmed and deduplicated case-insensitively while preserving first-seen order and casing. On enable, the daemon first resolves extension-authored names against a fresh catalog observation, bypassing retained data and read throttling and awaiting ACP plus daemon-local fallback if needed; if both fresh sources fail, a retained observation is used before the legacy name heuristic. Names are not validated against the catalog. Disable does not read the catalog. It applies all resulting declaration changes in at most one locked settings write and, when anything changed, refreshes active sessions once. Enabling always records an explicit workspace `skills.enabled` opt-in, including names not yet installed, so it can override an Extension's internal disablement. Repeating an identical declaration remains a no-op. Unexpected persistence or runtime-generation failures fail the whole request.
 
 Request:
 

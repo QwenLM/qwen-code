@@ -76,7 +76,10 @@ import type {
   BridgeDaemonStatusSnapshot,
   HttpAcpBridge,
 } from '@qwen-code/acp-bridge/bridgeTypes';
-import type { ServeWorkspaceSkillStatus } from '@qwen-code/acp-bridge/status';
+import type {
+  ServeWorkspaceSkillsStatus,
+  ServeWorkspaceSkillStatus,
+} from '@qwen-code/acp-bridge/status';
 import * as qwenCore from '@qwen-code/qwen-code-core';
 import * as serverModule from './server.js';
 import type { IdleAcpReclaimer } from './idle-acp-reclamation.js';
@@ -91,6 +94,7 @@ import * as trustedFoldersRuntime from '../config/trustedFolders.js';
 import * as trustPolicyRuntime from '../config/daemon-trust-policy.js';
 import * as trustPolicyMonitorRuntime from '../config/daemon-trust-policy-monitor.js';
 import * as workspaceServiceRuntime from './workspace-service/index.js';
+import type { QueryWorkspaceStatusFn } from './workspace-service/types.js';
 import {
   ChannelWorkerStartupError,
   type ChannelWorkerSnapshot,
@@ -1537,6 +1541,138 @@ describe('workspace skill settings persistence', () => {
 
     expect(outcome).toBe('written');
   });
+
+  it.each(['single', 'batch'] as const)(
+    'keeps a later disable behind a %s enable awaiting the catalog',
+    async (mode) => {
+      writeSkillSettings([]);
+      let resolveCatalog: (status: ServeWorkspaceSkillsStatus) => void = () =>
+        undefined;
+      const catalog = new Promise<ServeWorkspaceSkillsStatus>((resolve) => {
+        resolveCatalog = resolve;
+      });
+      const queryMock = vi.fn(() => catalog);
+      const query = queryMock as unknown as QueryWorkspaceStatusFn;
+      const original = workspaceServiceRuntime.createDaemonWorkspaceService;
+      vi.spyOn(
+        workspaceServiceRuntime,
+        'createDaemonWorkspaceService',
+      ).mockImplementation((deps) =>
+        original({
+          ...deps,
+          queryWorkspaceStatus: query,
+          workspaceSkillsStatusProvider: undefined,
+        }),
+      );
+      const { persistDisabledSkills, persistDisabledSkillsBatch } =
+        await captureSkillPersistence([]);
+
+      const enable =
+        mode === 'single'
+          ? persistDisabledSkills!(workspace, 'rust:chat', true)
+          : persistDisabledSkillsBatch!(workspace, ['rust:chat'], true);
+      await vi.waitFor(() => expect(queryMock).toHaveBeenCalled());
+      const disable =
+        mode === 'single'
+          ? persistDisabledSkills!(workspace, 'rust:chat', false)
+          : persistDisabledSkillsBatch!(workspace, ['rust:chat'], false);
+      resolveCatalog({
+        v: 1,
+        workspaceCwd: workspace,
+        initialized: true,
+        skills: [skillStatus('rust:chat', 'project')],
+      });
+
+      await expect(enable).resolves.toMatchObject(
+        mode === 'single'
+          ? { changed: true }
+          : {
+              outcomes: [{ skillName: 'rust:chat', changed: true }],
+            },
+      );
+      await expect(disable).resolves.toMatchObject(
+        mode === 'single'
+          ? { changed: true }
+          : {
+              outcomes: [{ skillName: 'rust:chat', changed: true }],
+            },
+      );
+      expect(
+        JSON.parse(
+          fs.readFileSync(
+            path.join(workspace, '.qwen', 'settings.json'),
+            'utf8',
+          ),
+        ).skills,
+      ).toEqual({ disabled: ['rust:chat'] });
+    },
+  );
+
+  it.each(['single', 'batch'] as const)(
+    'resolves a %s enable from the retained catalog when fresh sources fail',
+    async (mode) => {
+      writeSkillSettings(['rust:chat'], ['chat']);
+      const idle = {
+        v: 1,
+        workspaceCwd: workspace,
+        initialized: false,
+        skills: [],
+      };
+      const warm = {
+        v: 1,
+        workspaceCwd: workspace,
+        initialized: true,
+        skills: [skillStatus('rust:chat', 'project')],
+      };
+      const query = vi.fn().mockResolvedValueOnce(warm).mockResolvedValue(idle);
+      const original = workspaceServiceRuntime.createDaemonWorkspaceService;
+      vi.spyOn(
+        workspaceServiceRuntime,
+        'createDaemonWorkspaceService',
+      ).mockImplementation((deps) =>
+        original({
+          ...deps,
+          queryWorkspaceStatus: query,
+          workspaceSkillsStatusProvider: vi
+            .fn()
+            .mockRejectedValue(new Error('enumeration failed')),
+          isChannelLive: () => false,
+        }),
+      );
+      const {
+        persistDisabledSkills,
+        persistDisabledSkillsBatch,
+        workspaceRegistry,
+      } = await captureSkillPersistence([]);
+      const service = workspaceRegistry!.primary.workspaceService;
+      await service.getWorkspaceSkillsStatus({
+        route: 'TEST',
+        workspaceCwd: workspace,
+      });
+
+      const result =
+        mode === 'single'
+          ? await persistDisabledSkills!(workspace, 'rust:chat', true)
+          : await persistDisabledSkillsBatch!(workspace, ['rust:chat'], true);
+
+      expect(result).toMatchObject(
+        mode === 'single'
+          ? { changed: true, disabled: [] }
+          : {
+              outcomes: [{ skillName: 'rust:chat', changed: true }],
+            },
+      );
+      expect(result).not.toHaveProperty('block');
+      expect(
+        JSON.parse(
+          fs.readFileSync(
+            path.join(workspace, '.qwen', 'settings.json'),
+            'utf8',
+          ),
+        ).skills,
+      ).toEqual({ enabled: ['rust:chat'] });
+    },
+  );
 
   it('preserves the legacy bare-name block for extensions and uncatalogued skills', async () => {
     writeSkillSettings([], ['pdf', 'legacy']);

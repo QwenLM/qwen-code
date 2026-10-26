@@ -348,6 +348,20 @@ export function createDaemonWorkspaceService(
     ],
   });
 
+  const skillsSnapshot = (): ServeWorkspaceSkillsStatus | undefined => {
+    if (!lastWorkspaceSkillsStatus) return undefined;
+    const ageMs = Math.max(0, Date.now() - lastWorkspaceSkillsStatusAt);
+    return {
+      ...lastWorkspaceSkillsStatus,
+      snapshot: {
+        observedAt: lastWorkspaceSkillsStatusAt,
+        ageMs,
+        stale: ageMs >= WORKSPACE_SKILLS_STALE_AFTER_MS,
+        refreshing: inFlightWorkspaceSkillsStatus !== undefined,
+      },
+    };
+  };
+
   const readWorkspaceSkillsStatus = async (
     allowRetainedSnapshot = true,
   ): Promise<ServeWorkspaceSkillsStatus> => {
@@ -406,22 +420,17 @@ export function createDaemonWorkspaceService(
         );
       }
     }
-    if (status.errors?.length) return { ...status, initialized: false };
-    return status.initialized ? status : unavailableWorkspaceSkillsStatus();
-  };
-
-  const skillsSnapshot = (): ServeWorkspaceSkillsStatus | undefined => {
-    if (!lastWorkspaceSkillsStatus) return undefined;
-    const ageMs = Math.max(0, Date.now() - lastWorkspaceSkillsStatusAt);
-    return {
-      ...lastWorkspaceSkillsStatus,
-      snapshot: {
-        observedAt: lastWorkspaceSkillsStatusAt,
-        ageMs,
-        stale: ageMs >= WORKSPACE_SKILLS_STALE_AFTER_MS,
-        refreshing: inFlightWorkspaceSkillsStatus !== undefined,
-      },
-    };
+    if (!status.initialized || status.errors?.length) {
+      // Fresh sources failed. A valid retained observation still answers, and
+      // the degraded read must not publish itself over it.
+      return (
+        skillsSnapshot() ??
+        (status.errors?.length
+          ? { ...status, initialized: false }
+          : unavailableWorkspaceSkillsStatus())
+      );
+    }
+    return status;
   };
 
   const revalidateWorkspaceSkillsStatus =

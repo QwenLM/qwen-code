@@ -281,10 +281,15 @@ and does not start the ACP child. Use `GET /daemon/status?detail=full` for
 per-session diagnostics, ACP connection details, auth device-flow counts, and
 workspace status sections when you are actively investigating a problem.
 
-`GET /workspace/mcp` and `GET /workspace/providers` report the live ACP
-runtime and do not start the ACP child when idle; an idle daemon returns
-`initialized: false` with an empty snapshot. Once a session is alive they
-switch to `initialized: true` and surface the real state.
+`GET /workspace/mcp` reports the live ACP runtime and does not start the ACP
+child when idle; an idle daemon returns `initialized: false` with an empty
+snapshot. Once a session is alive it switches to `initialized: true` and
+surfaces the real state.
+
+`GET /workspace/providers` is answered daemon-locally from workspace settings
+and environment: it returns `initialized: true` whether or not an ACP child is
+live, and `acpChannelLive` is the liveness signal. The route falls back to the
+live ACP snapshot only when no daemon-local provider is configured.
 
 `GET /workspace/skills` returns a retained daemon observation immediately and
 revalidates it in the background, so a warm read does not wait for the ACP

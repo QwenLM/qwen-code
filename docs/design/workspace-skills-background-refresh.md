@@ -65,7 +65,9 @@ serves that retained data and background revalidation replaces it once the
 one-second start throttle allows.
 Destructive Skill deletion and Skill-toggle identity resolution bypass both
 the retained snapshot and read throttling. They await an independent observation
-and try local enumeration if ACP is unavailable, even if a snapshot exists.
+and try local enumeration if ACP is unavailable, even if a snapshot exists;
+only when both fresh sources fail does the retained snapshot answer instead of
+degrading identity resolution to the legacy name heuristic.
 That foreground fallback invalidates the local enumerator's cache so it observes
 out-of-band installations, while preserving the retained facade snapshot.
 A refused runtime deletion leaves retained inventory intact; successful
