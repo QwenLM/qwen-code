@@ -111,8 +111,9 @@ public final class ManagedAgentPreflight {
                 check.status() == Status.FAIL) ? 1 : 0;
     }
 
-    // --online, or --online=true like the server's other --key=value
-    // arguments; any other value fails rather than silently checking offline.
+    // --online, --online=true like the server's other --key=value arguments,
+    // or --online=false to check offline; any other value fails, and the
+    // remaining rows still run offline.
     static boolean online(String[] args, List<Check> checks) {
         boolean online = false;
         for (String arg : args) {
@@ -122,7 +123,9 @@ public final class ManagedAgentPreflight {
                 String value = arg.substring(ONLINE_ARG.length() + 1);
                 if ("true".equalsIgnoreCase(value)) {
                     online = true;
-                } else if (!"false".equalsIgnoreCase(value)) {
+                } else if ("false".equalsIgnoreCase(value)) {
+                    online = false;
+                } else {
                     checks.add(new Check("online", Status.FAIL,
                             arg + " is not true or false",
                             "pass --online, or leave it out while the service is stopped"));
@@ -532,10 +535,6 @@ public final class ManagedAgentPreflight {
         return sharedSecretFileCheck("credentials", path, file);
     }
 
-    static Check harnessCheck(ManagedAgentProperties properties) {
-        return harnessCheck(properties, null);
-    }
-
     /**
      * Probes the Harness, then negotiates with it as the first Session does,
      * and compares its Qwen Code version with the distribution's manifest.
@@ -590,7 +589,14 @@ public final class ManagedAgentPreflight {
             return new Check("harness", Status.FAIL, "base URL is empty",
                     "set QWEN_MANAGED_AGENT_HARNESS_BASE_URL");
         }
-        String url = trimTrailingSlash(baseUrl) + "/capabilities";
+        // A URL the probe cannot use fails on its setting alone: the parser's
+        // own message quotes the value, credentials included.
+        String base = baseUrl.strip();
+        URI origin = harnessOrigin(base);
+        if (origin == null) {
+            return unusableHarnessUrl();
+        }
+        String url = trimTrailingSlash(base) + "/capabilities";
         // Credentials in a mistyped URL stay out of the report.
         String shown = withoutUserInfo(url);
         try {
@@ -617,7 +623,7 @@ public final class ManagedAgentPreflight {
                         shown + " answered " + response.statusCode(),
                         "start a compatible Hosted Harness");
             }
-            return compatibilityCheck(shown, response.body(), properties,
+            return compatibilityCheck(shown, origin, response.body(), properties,
                     tokenSetting, StringUtils.isBlank(file), digestSetting,
                     expectedQwenCodeVersion);
         } catch (IOException | RuntimeException error) {
@@ -631,7 +637,7 @@ public final class ManagedAgentPreflight {
         }
     }
 
-    private static Check compatibilityCheck(String url, String body,
+    private static Check compatibilityCheck(String url, URI origin, String body,
             ManagedAgentProperties properties, String tokenSetting,
             boolean environmentDigest, String digestSetting,
             String expectedQwenCodeVersion) {
@@ -643,7 +649,7 @@ public final class ManagedAgentPreflight {
         HostedHarnessCapabilities capabilities;
         // The same client and rules the first Session uses.
         try (HostedHarnessClient negotiation = HostedHarnessClient.builder()
-                .baseUri(URI.create(harness.getBaseUrl()))
+                .baseUri(origin)
                 .bearerToken(harness.getToken())
                 .capabilityDigest(harness.getCapabilityDigest())
                 .connectTimeout(Duration.ofMillis(TIMEOUT_MILLIS))
@@ -695,23 +701,29 @@ public final class ManagedAgentPreflight {
                 + ", capability digest matches"
                 + (version == null ? "" : ", Qwen Code " + version);
         List<String> warnings = new ArrayList<>();
+        List<String> fixes = new ArrayList<>();
         if (expectedQwenCodeVersion != null && version == null) {
             warnings.add("it does not advertise a readable Qwen Code version, so"
                     + " it was not compared with " + expectedQwenCodeVersion);
+            fixes.add(install);
         } else if (expectedQwenCodeVersion != null
                 && !version.equals(expectedQwenCodeVersion)) {
             warnings.add("this distribution was built for " + expectedQwenCodeVersion);
+            fixes.add(install);
         }
         // The connector refuses a Shell Session that pins MCP servers without it.
         if (harness.isWorkspaceShellEnabled()
                 && !capabilities.getFeatures().contains(SHELL_MCP_FEATURE)) {
             warnings.add("it does not offer " + SHELL_MCP_FEATURE
                     + ", so Shell Sessions whose agent pins MCP servers fail");
+            fixes.add("upgrade the Harness to a build that offers " + SHELL_MCP_FEATURE
+                    + ", or disable Shell for agents that pin MCP servers");
         }
         return warnings.isEmpty()
                 ? new Check("harness", Status.PASS, detail, null)
                 : new Check("harness", Status.WARN,
-                        detail + ", but " + String.join("; ", warnings), install);
+                        detail + ", but " + String.join("; ", warnings),
+                        String.join("; ", fixes));
     }
 
     // Each Workspace profile the deployment may admit needs its lifecycle, by
@@ -825,38 +837,70 @@ public final class ManagedAgentPreflight {
                             + " so they cannot be told apart from leftovers", null);
         }
         long self = ProcessHandle.current().pid();
-        List<Long> alive = processes.get().stream()
-                .filter(process -> isWorkerOf(process, state, self))
-                // The running server's own workers are its children.
-                .filter(process -> !online || isOrphan(process))
-                .map(ProcessHandle::pid).sorted()
-                .collect(Collectors.toList());
-        if (alive.isEmpty()) {
-            return new Check("workers", Status.PASS, online
-                    ? "online: no Runtime worker outlived an earlier run"
-                    : "no Runtime worker of an earlier run is alive", null);
+        List<Long> alive = new ArrayList<>();
+        long uninspected = 0;
+        for (ProcessHandle process : processes.get()) {
+            WorkerMatch match = workerMatch(process, state, self);
+            if (match == WorkerMatch.UNREADABLE) {
+                uninspected++;
+            } else if (match == WorkerMatch.MATCH
+                    // The running server's own workers are its children.
+                    && (!online || isOrphan(process))) {
+                alive.add(process.pid());
+            }
         }
-        return new Check("workers", Status.WARN, alive.size()
-                + " Runtime worker(s) of an earlier run are alive (pid "
-                + alive.stream().map(String::valueOf)
-                        .collect(Collectors.joining(", "))
-                + ")",
-                durable
-                        ? "a durable Broker adopts them when the server starts; to"
-                                + " start clean, as an upgrade does, stop them first:"
-                                + " systemctl kill --kill-whom=all -s TERM"
-                                + " qwen-managed-agent-server"
-                        : "stop them before starting the server: systemctl kill"
-                                + " --kill-whom=all -s TERM qwen-managed-agent-server,"
-                                + " or kill those pids");
+        alive.sort(Long::compare);
+        if (!alive.isEmpty()) {
+            String fix;
+            if (durable) {
+                fix = "a durable Broker adopts them when the server starts; to"
+                        + " start clean, as an upgrade does, stop them first:"
+                        + " systemctl kill --kill-whom=all -s TERM"
+                        + " qwen-managed-agent-server";
+            } else if (online) {
+                fix = "online: to reap them without stopping the service, kill"
+                        + " those pids; systemctl kill --kill-whom=all -s TERM"
+                        + " qwen-managed-agent-server would also stop the running"
+                        + " server";
+            } else {
+                fix = "stop them before starting the server: systemctl kill"
+                        + " --kill-whom=all -s TERM qwen-managed-agent-server,"
+                        + " or kill those pids";
+            }
+            return new Check("workers", Status.WARN, alive.size()
+                    + " Runtime worker(s) of an earlier run are alive (pid "
+                    + alive.stream().map(String::valueOf)
+                            .collect(Collectors.joining(", "))
+                    + ")", fix);
+        }
+        // Another account's workers look exactly like this: argv readable,
+        // /proc/<pid>/exe and cwd not.
+        if (uninspected > 0) {
+            return new Check("workers", Status.WARN, uninspected
+                    + " process(s) matching the Runtime worker command line could"
+                    + " not be inspected, so leftover workers were not ruled out",
+                    "run --check as root or as the service account");
+        }
+        return new Check("workers", Status.PASS, online
+                ? "online: no Runtime worker outlived an earlier run"
+                : "no Runtime worker of an earlier run is alive", null);
     }
 
-    static boolean isWorkerOf(ProcessHandle process, Path state, long self) {
+    enum WorkerMatch {
+        MATCH, UNREADABLE, OTHER
+    }
+
+    static WorkerMatch workerMatch(ProcessHandle process, Path state, long self) {
         ProcessHandle.Info info = process.info();
-        if (process.pid() == self || info.command().isEmpty()
-                || info.arguments().isEmpty()
-                || !isWorkerCommand(info.command().get(), info.arguments().get())) {
-            return false;
+        if (process.pid() == self || info.arguments().isEmpty()) {
+            return WorkerMatch.OTHER;
+        }
+        if (info.command().isEmpty()) {
+            return isWorkerArguments(info.arguments().get())
+                    ? WorkerMatch.UNREADABLE : WorkerMatch.OTHER;
+        }
+        if (!isWorkerCommand(info.command().get(), info.arguments().get())) {
+            return WorkerMatch.OTHER;
         }
         try {
             String cwd = Files.readSymbolicLink(Path.of("/proc",
@@ -864,9 +908,10 @@ public final class ManagedAgentPreflight {
             if (cwd.endsWith(DELETED_SUFFIX)) {
                 cwd = cwd.substring(0, cwd.length() - DELETED_SUFFIX.length());
             }
-            return Path.of(cwd).equals(state);
+            return Path.of(cwd).equals(state)
+                    ? WorkerMatch.MATCH : WorkerMatch.OTHER;
         } catch (IOException | RuntimeException unreadable) {
-            return false;
+            return WorkerMatch.UNREADABLE;
         }
     }
 
@@ -874,18 +919,31 @@ public final class ManagedAgentPreflight {
     // the executable's real path, and the arguments leave out argv[0], so the
     // marker follows the entry's absolute path.
     static boolean isWorkerCommand(String command, String[] arguments) {
-        int last = arguments.length - 1;
         return Path.of(command).getFileName().toString().startsWith("node")
-                && last >= 1 && WORKER_ARG.equals(arguments[last])
+                && isWorkerArguments(arguments);
+    }
+
+    private static boolean isWorkerArguments(String[] arguments) {
+        int last = arguments.length - 1;
+        return last >= 1 && WORKER_ARG.equals(arguments[last])
                 && arguments[last - 1].startsWith("/");
     }
 
     // KillMode=process reparents a stopped server's workers to init.
     private static boolean isOrphan(ProcessHandle process) {
         return process.parent().map(parent -> !parent.info().command()
-                .map(command -> Path.of(command).getFileName().toString()
-                        .equals("java"))
+                .map(command -> isServerCommand(
+                        Path.of(command).getFileName().toString()))
                 .orElse(false)).orElse(true);
+    }
+
+    // A replaced JDK binary keeps its inode, and the kernel marks the link.
+    static boolean isServerCommand(String fileName) {
+        String name = fileName.endsWith(DELETED_SUFFIX)
+                ? fileName.substring(0, fileName.length()
+                        - DELETED_SUFFIX.length())
+                : fileName;
+        return name.equals("java");
     }
 
     // --online: the running server holds the ports, so check that it
@@ -1613,11 +1671,37 @@ public final class ManagedAgentPreflight {
     }
 
     private static String withoutUserInfo(String url) {
-        return url.replaceFirst("^([A-Za-z][A-Za-z0-9+.-]*://)[^/?#@]*@", "$1");
+        return url.strip().replaceFirst(
+                "^([A-Za-z][A-Za-z0-9+.-]*://)?[^/?#@]*@", "$1");
+    }
+
+    // Nothing the URL contains reaches the report, so a typo cannot print
+    // credentials. Null unless it is an HTTP origin without user information,
+    // a query or a fragment.
+    private static URI harnessOrigin(String base) {
+        try {
+            URI origin = URI.create(base);
+            String scheme = origin.getScheme();
+            return ("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme))
+                    && origin.getHost() != null
+                    && origin.getUserInfo() == null
+                    && origin.getQuery() == null
+                    && origin.getFragment() == null
+                    ? origin : null;
+        } catch (IllegalArgumentException unusable) {
+            return null;
+        }
+    }
+
+    private static Check unusableHarnessUrl() {
+        return new Check("harness", Status.FAIL,
+                "the Harness base URL is not usable",
+                "set QWEN_MANAGED_AGENT_HARNESS_BASE_URL to the Harness origin,"
+                        + " without credentials, a query or a fragment");
     }
 
     // Text another process controls, kept to one bounded line.
-    private static String printable(String text) {
+    static String printable(String text) {
         String line = text.codePoints()
                 .map(c -> Character.isISOControl(c) ? '?' : c)
                 .collect(StringBuilder::new, StringBuilder::appendCodePoint,

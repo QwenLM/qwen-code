@@ -56,8 +56,10 @@ describes the Harness negotiation, the `workers` row and `--online`.
 
 ## Non-goals
 
-- It does not negotiate with each endpoint of a Harness pool; the `harness`
-  row skips a pool.
+- It does not negotiate with each endpoint of a Harness pool. With
+  `harness.pool.enabled`, the `harness` row skips a pool's endpoints once the
+  Session Store is enabled with a binding key, and fails until then, mirroring
+  the startup guard.
 - It does not verify Workspace mount registration or storage identity; those
   remain the "Verified physical Workspace recovery" procedure's responsibility.
 - It never repairs, migrates or writes. Read-only probes only.

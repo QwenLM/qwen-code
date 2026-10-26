@@ -25,7 +25,7 @@ Status: proposed and implemented in the same change.
 
 - Starting a Session or a Turn from preflight.
 - Killing workers. Preflight only reports them.
-- Negotiating with each endpoint of a Harness pool. With `harness.pool.enabled`, the `harness` row keeps its SKIP, and pool readiness is verified after startup.
+- Negotiating with each endpoint of a Harness pool. With `harness.pool.enabled`, the `harness` row skips a pool's endpoints once the Session Store is enabled with a binding key, and fails until then; pool readiness is verified after startup.
 - Checking the Harness's optional features. The control plane turns most of them off when they are absent. The one it cannot turn off, `workspace-shell-mcp/1` for Shell Sessions that pin MCP servers, gets a WARN, because preflight cannot see which agents pin MCP servers.
 
 ## Design
@@ -79,7 +79,7 @@ It is a WARN rather than a FAIL because a durable Broker can adopt its workers. 
 
 ### Online mode
 
-`--online`, or `--online=true`, marks a run against a live service. Any other `--online=` value fails an `online` row instead of checking offline.
+`--online`, or `--online=true`, marks a run against a live service; `--online=false` checks offline. Any other `--online=` value fails an `online` row, and the remaining rows still run offline, so the port and worker rows can report the live service's own state.
 
 - The `server-port` and `broker-port` rows connect to the configured address, with a wildcard address mapped to `127.0.0.1`, instead of binding it. They pass when something listens. An unresolvable host fails as "cannot resolve", and a failed connect names its cause.
 - The `workers` row depends on the Broker:

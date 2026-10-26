@@ -41,7 +41,7 @@
 
 ## 非目标
 
-- 不与 Harness pool 的每个端点协商；`harness` 行对 pool 为 SKIP。
+- 不与 Harness pool 的每个端点协商。开启 `harness.pool.enabled` 时，只有在 Session Store 已启用且配置了 binding key 后，`harness` 行才对 pool 的端点 SKIP，否则为 FAIL，与启动期守卫一致。
 - 不校验 Workspace mount 注册与 storage identity；这些仍由 “Verified physical Workspace recovery” 流程负责。
 - 不执行修复、migration 或任何写入，只做只读探测。
 

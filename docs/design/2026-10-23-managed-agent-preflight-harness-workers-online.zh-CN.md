@@ -25,7 +25,7 @@
 
 - 由预检创建 Session 或运行 Turn。
 - 结束 worker 进程。预检只报告它们。
-- 与 Harness pool 的每个端点协商。开启 `harness.pool.enabled` 时，`harness` 行仍为 SKIP，pool 的就绪状态在启动后确认。
+- 与 Harness pool 的每个端点协商。开启 `harness.pool.enabled` 时，只有在 Session Store 已启用且配置了 binding key 后，`harness` 行才对 pool 的端点 SKIP，否则为 FAIL；pool 的就绪状态在启动后确认。
 - 检查 Harness 的可选 feature。缺少大多数这类 feature 时，控制面会自行关闭相应功能。唯一不能关闭的是 `workspace-shell-mcp/1`：缺少它时，固定了 MCP server 的 Shell Session 会失败。由于预检看不到哪些 agent 固定了 MCP server，这种情况只报 WARN。
 
 ## 设计
@@ -79,7 +79,7 @@ PASS 信息为"compatible: Hosted Harness protocol 1, capability digest matches,
 
 ### 在线模式
 
-`--online` 或 `--online=true` 表示针对运行中的服务执行检查。`--online=` 取其他值时，会让 `online` 行失败，而不是按离线方式检查。
+`--online` 或 `--online=true` 表示针对运行中的服务执行检查，`--online=false` 按离线检查。`--online=` 取其他值时会让 `online` 行失败，其余各行仍按离线执行，因此端口与 worker 行可能报告运行中服务自身的状态。
 
 - `server-port` 和 `broker-port` 行改为连接配置的地址（通配地址映射为 `127.0.0.1`），而不是绑定它；有进程监听时通过。主机无法解析时报"cannot resolve"，连接失败时给出原因。
 - `workers` 行的行为取决于 Broker：
