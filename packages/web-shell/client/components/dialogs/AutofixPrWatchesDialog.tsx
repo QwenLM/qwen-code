@@ -28,8 +28,14 @@ import styles from './AutofixPrWatchesDialog.module.css';
 interface AutofixPrWatchesDialogProps {
   /** Run a prompt in a session of this Web Shell, as the scheduled-tasks
    * page runs a task: `/autofix-pr stop <n>` in the watch's own session. */
-  onRunPrompt: (prompt: string, sessionId: string) => void | Promise<void>;
-  onOpenSession: (sessionId: string) => void;
+  onRunPrompt: (
+    prompt: string,
+    sessionId: string,
+    workspaceCwd?: string,
+  ) => void | Promise<void>;
+  /** `workspaceCwd`: the workspace of the session's task, where its
+   * session is restored (absent on a single-workspace page). */
+  onOpenSession: (sessionId: string, workspaceCwd?: string) => void;
   /** Registered workspaces (multi-workspace daemons): every operable one's
    * watches are listed, each under its workspace. */
   workspaces?: DaemonWorkspaceCapability[];
@@ -45,6 +51,9 @@ interface Row {
   /** The session of this Web Shell that owns the watch: the one its
    * scheduled task is bound to. */
   owner: string | null;
+  /** The workspace of that task, which may not be the one the watch is
+   * listed under. */
+  ownerCwd?: string;
 }
 
 /**
@@ -113,8 +122,14 @@ export function AutofixPrWatchesDialog({
 
   const rows = useMemo<Row[]>(() => {
     // A watch's task may be in any workspace of its clone: two checkouts of
-    // one clone can both be registered. The session it is bound to tells.
-    const allTasks = [...tasks.values()].flat();
+    // one clone can both be registered. The session it is bound to tells,
+    // and the task's workspace is where that session is restored.
+    const allTasks = workspaceIds.flatMap((id, index) =>
+      (tasks.get(autofixPrWatchesKey(id)) ?? []).map((task) => ({
+        task,
+        cwd: operable[index]?.cwd,
+      })),
+    );
     const seen = new Set<string>();
     const out: Row[] = [];
     workspaceIds.forEach((id, index) => {
@@ -126,19 +141,18 @@ export function AutofixPrWatchesDialog({
         const identity = `${list.root ?? key}\n${watch.repo}#${watch.pr}`;
         if (seen.has(identity)) continue;
         seen.add(identity);
-        const task = allTasks.find((candidate) => {
-          const match = watchOfTask(candidate.prompt, [watch]);
+        const owning = allTasks.find(({ task }) => {
+          const match = watchOfTask(task.prompt, [watch]);
           return (
-            match !== null &&
-            !match.stale &&
-            candidate.sessionId === watch.session
+            match !== null && !match.stale && task.sessionId === watch.session
           );
         });
         out.push({
           key: `${key}:${watch.repo}#${watch.pr}`,
           ...(isMultiWorkspace ? { workspaceCwd: operable[index]?.cwd } : {}),
           watch,
-          owner: task?.sessionId ?? null,
+          owner: owning?.task.sessionId ?? null,
+          ...(owning?.cwd ? { ownerCwd: owning.cwd } : {}),
         });
       }
     });
@@ -166,7 +180,11 @@ export function AutofixPrWatchesDialog({
       if (stopping !== null || !row.owner) return;
       setStopping(row.key);
       try {
-        await onRunPrompt(stopCommand(row.watch), row.owner);
+        await onRunPrompt(
+          stopCommand(row.watch),
+          row.owner,
+          ...(row.ownerCwd !== undefined ? [row.ownerCwd] : []),
+        );
       } catch (err) {
         onError(err, t('autofixPrWatches.stopFailed'));
       } finally {
@@ -212,7 +230,11 @@ export function AutofixPrWatchesDialog({
                 outsideDaemon={!row.owner && elsewhere}
                 {...(row.owner
                   ? {
-                      onOpenSession: () => onOpenSession(row.owner!),
+                      onOpenSession: () =>
+                        onOpenSession(
+                          row.owner!,
+                          ...(row.ownerCwd !== undefined ? [row.ownerCwd] : []),
+                        ),
                       onStop: () => void stop(row),
                     }
                   : {})}

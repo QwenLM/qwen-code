@@ -22,7 +22,9 @@ import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import {
+  createWorkspaceGenerationGuard,
   createWorkspaceRegistry,
+  WorkspaceGenerationClosedError,
   type WorkspaceRuntime,
 } from '../workspace-registry.js';
 import {
@@ -279,5 +281,42 @@ describe('autofix-pr watch routes', () => {
     // Refused before anything is read, as every qualified route refuses it.
     expect(unknown.status).toBeGreaterThanOrEqual(400);
     expect(unknown.body).not.toHaveProperty('watches');
+  });
+
+  it('lists nothing for a workspace removed or replaced while git was asked', async () => {
+    // Open as the request starts, closed by the time git answers.
+    let calls = 0;
+    const closesDuringGit = () => {
+      calls += 1;
+      if (calls > 1) throw new WorkspaceGenerationClosedError();
+    };
+    await expect(listAutofixPrWatches(root, closesDuringGit)).rejects.toThrow(
+      WorkspaceGenerationClosedError,
+    );
+
+    const primary = express();
+    calls = 0;
+    registerAutofixPrWatchesRoutes(primary, {
+      boundWorkspace: root,
+      captureGenerationAssertion: () => closesDuringGit,
+    });
+    const fromPrimary = await request(primary).get('/autofix-pr/watches');
+    expect(fromPrimary.status).toBe(503);
+    expect(fromPrimary.body.code).toBe('workspace_runtime_unavailable');
+    expect(fromPrimary.body).not.toHaveProperty('watches');
+
+    const closed = createWorkspaceGenerationGuard();
+    closed.close();
+    const qualified = express();
+    registerWorkspaceQualifiedAutofixPrWatchesRoutes(qualified, {
+      workspaceRegistry: createWorkspaceRegistry([
+        { ...runtime('primary', root, true), generationGuard: closed },
+      ]),
+    });
+    const fromQualified = await request(qualified).get(
+      '/workspaces/primary/autofix-pr/watches',
+    );
+    expect(fromQualified.status).toBe(503);
+    expect(fromQualified.body).not.toHaveProperty('watches');
   });
 });

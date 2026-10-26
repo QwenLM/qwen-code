@@ -1433,8 +1433,9 @@ task is known by the prompt `schedule` writes,
 watch of that repository and number in the task's workspace. The task is
 stale as its gate judges it: the watch ended, it records no task where the
 task has an id, or it records another task (a later `schedule` replaced
-it; a task from before task ids is not the one recorded either). Its gate
-stops it at its next fire, and the card says so.
+it; a task from before task ids is not the one recorded either), or the
+watch is another session's (a take-over moved it). Its gate stops it at its
+next fire, and the card says so.
 
 **What is shown.** The PR, as a link, with where the watch is, the first
 that holds:

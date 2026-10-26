@@ -16944,7 +16944,13 @@ export function App({
     );
   }, [clearPendingBoundRun, enqueueManualRun]);
   const runTaskManually = useCallback(
-    (prompt: string, sessionId: string | null): Promise<void> => {
+    (
+      prompt: string,
+      sessionId: string | null,
+      // The workspace the bound session lives in: restoring it from another
+      // workspace's conversation would name the wrong one.
+      workspaceCwd?: string,
+    ): Promise<void> => {
       showChat();
       if (!sessionId) {
         // Unbound: runs in the current session — resolves at admission.
@@ -16966,7 +16972,7 @@ export function App({
           reject,
         };
         pendingBoundRunRef.current = pending;
-        loadSidebarSession(sessionId)
+        loadSidebarSession(sessionId, workspaceCwd)
           // Fire immediately when the session was already active (no dep change
           // to trigger the effect); a no-op if the load is still settling, in
           // which case the effect picks it up.
@@ -23007,11 +23013,12 @@ export function App({
                           }, 0);
                         });
                       }}
-                      onOpenSession={(sessionId) => {
+                      onOpenSession={(sessionId, workspaceCwd) => {
                         // The task's bound session IS its run history — switch
-                        // to the chat view and load that session's transcript.
+                        // to the chat view and load that session's transcript,
+                        // in the task's own workspace.
                         showChat();
-                        loadSidebarSession(sessionId).catch(
+                        loadSidebarSession(sessionId, workspaceCwd).catch(
                           (error: unknown) => {
                             reportError(error, 'Failed to open session');
                           },
@@ -23127,9 +23134,9 @@ export function App({
                             : ordinaryWorkspaces
                         }
                         lockedWorkspace={lockedWorkspaceCapability}
-                        onOpenSession={(sessionId) => {
+                        onOpenSession={(sessionId, workspaceCwd) => {
                           showChat();
-                          loadSidebarSession(sessionId).catch(
+                          loadSidebarSession(sessionId, workspaceCwd).catch(
                             (error: unknown) => {
                               reportError(error, 'Failed to open session');
                             },

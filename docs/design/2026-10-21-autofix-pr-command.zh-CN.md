@@ -410,7 +410,7 @@ Web Shell 在监视的主人本来就会看的地方显示它——它的定时�
 
 **daemon 提供什么。** `GET /autofix-pr/watches`（主工作区）和 `GET /workspaces/:workspace/autofix-pr/watches`（已注册且受信任的工作区），以 `autofix_pr_watches` 声明，返回 `status` 为该工作区的 clone 列出的内容。主 worktree 用 `git worktree list` 找到，所以工作区是 linked worktree 或子目录时，读到的也是这个 clone 的监视，答复里会写明它（`root`）。`runStatus` 接收这个根目录、不带会话，而不是用 daemon 自己的目录和环境，并且不运行任何 git 命令（`git: false`）：daemon 在自己的线程上列出监视，一条卡住的 git 命令会拖住所有请求。它只读文件，每个文件都以不跟随链接、不阻塞的方式打开，所以有人把某个文件换成 FIFO 也拖不住 daemon（辅助命令也这样读）。不取锁、不询问 GitHub，所以辅助命令运行期间也能回答。不返回的有：`thisSession`（daemon 不是会话）、worktree 的路径，以及只有 git 才能给出的 `gitTrusted`、`worktreeWork`。找不到该工作区的 git 仓库、或那里无法运行 git 时，`available` 为 false。这些路由不修改任何东西。
 
-**哪个监视属于哪个任务。** 定时任务没有类型字段：监视的任务按 `schedule` 写的提示词识别——`Run /autofix-pr tick <owner>/<repo>#<n> [--task <id>]…`——与任务所在工作区里同仓库、同编号的监视对应。任务是否过时，按它的闸门的判断：监视已结束、任务带 id 而监视没有记录任务，或监视记录的是另一个任务（之后的 `schedule` 替换了它；早于任务 id 的任务也不算记录的那个）。过时的任务会被它的闸门在下次触发时停止，卡片上也会说明。
+**哪个监视属于哪个任务。** 定时任务没有类型字段：监视的任务按 `schedule` 写的提示词识别——`Run /autofix-pr tick <owner>/<repo>#<n> [--task <id>]…`——与任务所在工作区里同仓库、同编号的监视对应。任务是否过时，按它的闸门的判断：监视已结束、任务带 id 而监视没有记录任务，监视记录的是另一个任务（之后的 `schedule` 替换了它；早于任务 id 的任务也不算记录的那个），或监视已属于另一个会话（被接管了）。过时的任务会被它的闸门在下次触发时停止，卡片上也会说明。
 
 **显示什么。** PR（链接），以及监视所处的状态，按以下顺序取第一个成立的：
 

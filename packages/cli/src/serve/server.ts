@@ -3783,6 +3783,7 @@ export function createServeApp(
   registerAutofixPrWatchesRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
     isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
   });
 
   // Being joined as a runtime (`hosts/service`, `hosts/connect`) needs only

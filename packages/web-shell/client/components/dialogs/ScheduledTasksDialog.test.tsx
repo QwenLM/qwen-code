@@ -2557,6 +2557,34 @@ describe('ScheduledTasksDialog autofix-pr watches', () => {
     expect(onRunPrompt).toHaveBeenCalledWith('/autofix-pr stop 12', SESSION);
   });
 
+  it("stops a watch of another workspace in its task's workspace", async () => {
+    actions.listAutofixPrWatches.mockResolvedValue({
+      available: true,
+      watches: [watch()],
+    });
+    const onRunPrompt = vi.fn().mockResolvedValue(undefined);
+    await mount([watchTask()], {
+      autofixPrWatchesAvailable: true,
+      onRunPrompt,
+      lockedWorkspace: {
+        id: 'second',
+        cwd: '/w/second',
+        primary: false,
+        trusted: true,
+        kind: 'ordinary',
+      },
+    });
+    await flush();
+    expect(actions.listAutofixPrWatches).toHaveBeenCalledWith('second');
+    click(findButton('Stop watch'));
+    await flush();
+    expect(onRunPrompt).toHaveBeenCalledWith(
+      '/autofix-pr stop 12',
+      SESSION,
+      '/w/second',
+    );
+  });
+
   it('offers no stop for a task an earlier schedule replaced, or another session took over', async () => {
     for (const [task, recorded] of [
       [
@@ -2574,8 +2602,8 @@ describe('ScheduledTasksDialog autofix-pr watches', () => {
       await mount([task], { autofixPrWatchesAvailable: true });
       await flush();
       expect(
-        document.querySelector('[data-testid="autofix-pr-watch"]'),
-      ).not.toBeNull();
+        document.querySelector('[data-testid="autofix-pr-watch"]')?.textContent,
+      ).toContain('it stops at its next fire');
       expect(findButton('Stop watch')).toBeUndefined();
       act(() => root?.unmount());
       root = null;

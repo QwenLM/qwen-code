@@ -165,13 +165,16 @@ interface ScheduledTasksDialogProps {
   onRunPrompt: (
     prompt: string,
     sessionId: string | null,
+    /** The task's workspace, on a multi-workspace page: its session is
+     * restored there, not in the current conversation's. */
+    workspaceCwd?: string,
   ) => void | Promise<void>;
   /** Switch to the chat view with the composer primed to describe a task, so
    * the agent can create it conversationally via its cron_create tool. */
   onCreateViaChat: () => void;
   /** Open a task's bound session — its transcript IS the task's run history.
    * When absent, tasks fall back to the inline fire-timestamp list. */
-  onOpenSession?: (sessionId: string) => void;
+  onOpenSession?: (sessionId: string, workspaceCwd?: string) => void;
   /** Registered workspaces on a multi-workspace daemon (from capabilities).
    * When more than one is present the page aggregates every trusted workspace's
    * tasks (each card tagged with its workspace) and the New-task form offers a
@@ -189,6 +192,12 @@ interface ScheduledTasksDialogProps {
    * `/autofix-pr` watch's task shows the watch's state, and can stop it. */
   autofixPrWatchesAvailable?: boolean;
   onError: (error: unknown, fallback: string) => void;
+}
+
+/** The workspace a task's session is restored in, as an argument: only on
+ * a page that tags tasks with theirs (several workspaces, or a locked one). */
+function inWorkspace(task: DaemonScheduledTask): [] | [string] {
+  return task.workspaceCwd !== undefined ? [task.workspaceCwd] : [];
 }
 
 /** The text a manual run sends: the prompt, or for a gated task the
@@ -1410,7 +1419,7 @@ export function ScheduledTasksDialog({
       if (stoppingWatch !== null || runningTaskId !== null) return;
       setStoppingWatch(taskKey(task));
       try {
-        await onRunPrompt(stopCommand(watch), sessionId);
+        await onRunPrompt(stopCommand(watch), sessionId, ...inWorkspace(task));
       } catch (err) {
         onError(err, t('autofixPrWatches.stopFailed'));
       } finally {
@@ -1458,7 +1467,11 @@ export function ScheduledTasksDialog({
           // if the session can't be opened), record AFTER — so a failed enqueue
           // leaves no false "ran" entry. A record failure is surfaced but the
           // history still catches up on the next refresh.
-          await onRunPrompt(manualRunPrompt(fresh), fresh.sessionId);
+          await onRunPrompt(
+            manualRunPrompt(fresh),
+            fresh.sessionId,
+            ...inWorkspace(task),
+          );
           try {
             await actions.runScheduledTask(fresh.id, task.workspaceId);
             await reload();
@@ -1475,7 +1488,11 @@ export function ScheduledTasksDialog({
           await actions.runScheduledTask(fresh.id, task.workspaceId);
           await reload();
           try {
-            await onRunPrompt(manualRunPrompt(fresh), fresh.sessionId);
+            await onRunPrompt(
+              manualRunPrompt(fresh),
+              fresh.sessionId,
+              ...inWorkspace(task),
+            );
           } catch (err) {
             onError(err, t('scheduledTasks.error.oneShotConsumedButFailed'));
             return;
@@ -2146,16 +2163,16 @@ export function ScheduledTasksDialog({
                   )?.watches,
                 );
                 if (!match) return null;
-                // Stopped in the session that owns the watch, which a task
-                // left behind by a take-over is not.
-                const owner =
-                  !match.stale && task.sessionId === match.watch.session
-                    ? task.sessionId
-                    : null;
+                // A task left behind by a take-over stops at its next fire,
+                // as its gate sees another session owns the watch; the stop
+                // goes to the session that owns it, which this task's is not.
+                const stale =
+                  match.stale || task.sessionId !== match.watch.session;
+                const owner = !stale ? task.sessionId : null;
                 return (
                   <AutofixPrWatchSummary
                     watch={match.watch}
-                    stale={match.stale}
+                    stale={stale}
                     showPr
                     stopping={stoppingWatch === taskKey(task)}
                     {...(owner
@@ -2247,7 +2264,9 @@ export function ScheduledTasksDialog({
                   <button
                     type="button"
                     className={styles.runsToggle}
-                    onClick={() => onOpenSession(task.sessionId!)}
+                    onClick={() =>
+                      onOpenSession(task.sessionId!, ...inWorkspace(task))
+                    }
                     title={t('scheduledTasks.viewHistoryHint')}
                   >
                     {task.runs.length > 0
@@ -2288,7 +2307,9 @@ export function ScheduledTasksDialog({
                         <button
                           type="button"
                           className={styles.runLink}
-                          onClick={() => onOpenSession(run.sessionId!)}
+                          onClick={() =>
+                            onOpenSession(run.sessionId!, ...inWorkspace(task))
+                          }
                           title={t('scheduledTasks.openRunSession')}
                         >
                           {describeRun(run, t)}

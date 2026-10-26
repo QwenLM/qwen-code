@@ -258,7 +258,11 @@ describe('AutofixPrWatchesDialog', () => {
     actions.listScheduledTasks.mockImplementation(async (id?: string) =>
       id === 'linked' ? [task()] : [],
     );
+    const onRunPrompt = vi.fn().mockResolvedValue(undefined);
+    const onOpenSession = vi.fn();
     await mount({
+      onRunPrompt,
+      onOpenSession,
       workspaces: [
         {
           id: 'main',
@@ -279,7 +283,15 @@ describe('AutofixPrWatchesDialog', () => {
     expect(
       container!.querySelectorAll('[data-testid="autofix-pr-watch"]'),
     ).toHaveLength(1);
-    expect(button('Stop watch')).toBeDefined();
+    // Restored in the workspace of its task, not the one it is listed under.
+    act(() => button('Open session')!.click());
+    expect(onOpenSession).toHaveBeenCalledWith(SESSION, '/w/linked');
+    await act(async () => button('Stop watch')!.click());
+    expect(onRunPrompt).toHaveBeenCalledWith(
+      '/autofix-pr stop 12',
+      SESSION,
+      '/w/linked',
+    );
   });
 
   it('sends a watch no gate checks to a session here, not to a terminal', async () => {

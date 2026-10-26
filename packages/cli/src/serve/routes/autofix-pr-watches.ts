@@ -17,8 +17,10 @@ import type { WorkspaceRegistry } from '../workspace-registry.js';
 import {
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeFromParam,
+  sendGenerationClosedError,
   sendUntrustedWorkspaceResponse,
 } from '../workspace-route-runtime.js';
+import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { applyReadHeaders } from './workspace-file-read.js';
 
 const execFileAsync = promisify(execFile);
@@ -87,8 +89,13 @@ export async function cloneRootOf(cwd: string): Promise<string | null> {
  */
 export async function listAutofixPrWatches(
   cwd: string,
+  /** Throws once the workspace's runtime generation closed: a workspace
+   * removed or replaced while git was asked lists nothing. */
+  assertGenerationOpen?: () => void,
 ): Promise<AutofixPrWatchesView> {
+  assertGenerationOpen?.();
   const root = await cloneRootOf(cwd);
+  assertGenerationOpen?.();
   if (root === null) return { v: 1, available: false, watches: [] };
   const outcome = runStatus({ root, git: false, session: null });
   return {
@@ -110,12 +117,21 @@ export async function listAutofixPrWatches(
   };
 }
 
-async function respond(res: Response, cwd: string): Promise<void> {
+async function respond(
+  res: Response,
+  cwd: string,
+  assertGenerationOpen?: () => void,
+): Promise<void> {
   applyReadHeaders(res);
   try {
-    res.status(200).json(await listAutofixPrWatches(cwd));
-  } catch {
-    // What went wrong stays in the daemon's own terms.
+    res.status(200).json(await listAutofixPrWatches(cwd, assertGenerationOpen));
+  } catch (err) {
+    if (sendGenerationClosedError(res, err)) return;
+    // The reason goes to the daemon's log; the answer names none of its
+    // paths.
+    writeStderrLine(
+      `autofix-pr watches of ${cwd}: ${err instanceof Error ? err.message : String(err)}`,
+    );
     res.status(500).json({
       error: 'Could not read the autofix-pr watches of this workspace',
       code: 'autofix_pr_watches_failed',
@@ -126,14 +142,23 @@ async function respond(res: Response, cwd: string): Promise<void> {
 /** `GET /autofix-pr/watches`: the primary workspace's. */
 export function registerAutofixPrWatchesRoutes(
   app: Application,
-  deps: { boundWorkspace: string; isWorkspaceTrusted?: () => boolean },
+  deps: {
+    boundWorkspace: string;
+    isWorkspaceTrusted?: () => boolean;
+    /** The primary runtime's generation, captured as a request starts. */
+    captureGenerationAssertion?: () => (() => void) | undefined;
+  },
 ): void {
   app.get('/autofix-pr/watches', async (_req, res) => {
     if (deps.isWorkspaceTrusted && !deps.isWorkspaceTrusted()) {
       sendUntrustedWorkspaceResponse(res);
       return;
     }
-    await respond(res, deps.boundWorkspace);
+    await respond(
+      res,
+      deps.boundWorkspace,
+      deps.captureGenerationAssertion?.(),
+    );
   });
 }
 
@@ -150,6 +175,8 @@ export function registerWorkspaceQualifiedAutofixPrWatchesRoutes(
     );
     if (!runtime) return;
     if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
-    await respond(res, runtime.workspaceCwd);
+    await respond(res, runtime.workspaceCwd, () =>
+      runtime.generationGuard?.assertOpen(),
+    );
   });
 }
