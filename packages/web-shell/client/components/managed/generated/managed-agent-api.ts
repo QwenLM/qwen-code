@@ -1036,6 +1036,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/workspaces/files/upload": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Upload one binary file to a persisted Workspace
+         * @description Requires a trusted actor with OPERATOR or OWNER access, enabled Workspace files, verified LOCAL or SSH_LOCAL storage and an updated CLI. Uploads are limited to 8 MiB, require an existing parent directory and never overwrite an occupied path. A durable physical storage hold excludes tool execution and retirement until the original upload has a definite terminal result. Repeating the same upload ID reconciles its original command without replaying mutation; changed requests conflict. CSI is unsupported and never falls back to a primary Workspace. An uncertain result returns 503 workspace_upload_pending and must be queried by the original upload ID.
+         */
+        post: operations["webShellWorkspaceFilesUpload"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/workspaces/files/uploads/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reconcile the original Workspace upload
+         * @description Only the admitting actor with a current Workspace operator grant can query the upload. Status checks use the frozen original storage target and never execute an upload or select a replacement Runtime. Reconciliation remains available through storage fencing; pending commands retain their durable hold. The server also reconciles pending uploads after client cancellation or restart.
+         */
+        post: operations["webShellWorkspaceFilesUploadQuery"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -2106,6 +2146,8 @@ export interface components {
             directory: string;
             entries: components["schemas"]["WebShellWorkspaceFileEntry"][];
             truncated: boolean;
+            /** @description Present only when the selected CLI supports durable Workspace uploads. */
+            maxUploadBytes?: number;
         };
         WebShellWorkspaceFileSnapshot: {
             scopeRevision: string;
@@ -2483,6 +2525,29 @@ export interface components {
             sessionId: string;
             idempotencyKey: string;
             command: components["schemas"]["ManagedExtensionApplySelection"];
+        };
+        WebShellWorkspaceFileUploadResult: {
+            scopeRevision: string;
+            /** Format: uuid */
+            uploadId: string;
+            path: string;
+            sizeBytes: number;
+            sha256: string;
+        };
+        WebShellWorkspaceFileUploadStatus: {
+            scopeRevision: string;
+            /** Format: uuid */
+            uploadId: string;
+            path: string;
+            sizeBytes: number;
+            sha256: string;
+            /** @enum {string} */
+            state: "completed" | "failed" | "pending";
+            code?: string;
+        };
+        WebShellWorkspaceFileUploadQueryRequest: {
+            /** Format: uuid */
+            uploadId: string;
         };
     };
     responses: {
@@ -4630,6 +4695,90 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
+        };
+    };
+    webShellWorkspaceFilesUpload: {
+        parameters: {
+            query: {
+                workspaceId: string;
+                cwdRelative: string;
+                path: string;
+                expectedScopeRevision: string;
+                uploadId: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/octet-stream": string;
+            };
+        };
+        responses: {
+            /** @description Workspace upload result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellWorkspaceFileUploadResult"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            /** @description The upload exceeds the 8 MiB binary limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Uploads require unencoded application/octet-stream bytes. */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    webShellWorkspaceFilesUploadQuery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellWorkspaceFileUploadQueryRequest"];
+            };
+        };
+        responses: {
+            /** @description Workspace upload result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellWorkspaceFileUploadStatus"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            503: components["responses"]["Unavailable"];
         };
     };
 }

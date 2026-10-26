@@ -307,7 +307,10 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     standing: 'managed',
     evidence: 'tool:write_file,tool:edit',
   },
-  workspace_file_upload: NO_MANAGED_EQUIVALENT('no Managed file upload route'),
+  workspace_file_upload: {
+    standing: 'managed',
+    evidence: 'surface:WORKSPACE_FILES_UPLOAD',
+  },
   workspace_file_delete: NO_MANAGED_EQUIVALENT('no Managed file delete route'),
   workspace_directory_create: NO_MANAGED_EQUIVALENT(
     'no Managed directory create route',
@@ -570,6 +573,7 @@ export const MANAGED_ONLY_NOT_A_GAP = new Set([
   'WORKSPACE_DIRECTORY_CHECK',
   'WORKSPACE_FILES_QUERY',
   'WORKSPACE_FILES_READ',
+  'WORKSPACE_FILES_UPLOAD_QUERY',
   // Tenant resources and admission the daemon has no counterpart for.
   'AGENT_DEFINITION_GET',
   'AGENT_DEFINITION_UPDATE',
