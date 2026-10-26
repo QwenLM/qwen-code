@@ -1130,6 +1130,25 @@ describe('WorkspaceChannelSettingsStore', () => {
     });
   });
 
+  it('accepts inject as a channel and group dispatch mode', async () => {
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    const next = await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'management-validation-test',
+        clientId: 'client-id',
+        dispatchMode: 'inject',
+        groups: { '*': { dispatchMode: 'inject' } },
+      },
+    });
+
+    expect(next.channels['bot']).toMatchObject({
+      dispatchMode: 'inject',
+      groups: { '*': { dispatchMode: 'inject' } },
+    });
+  });
+
   it.each([
     ['blockStreaming', 'on', 'off'],
     ['blockStreamingChunk', { minChars: 400 }, { minChars: 100 }],

@@ -73,7 +73,7 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 | `operators`         | No               | Who may operate a shared session (`/approve`, `/clear`, `/loop`, ...). Unset or empty grants no shared-session operator permissions. See [Shared-Session Operators](#shared-session-operators)                                                                                                                                                        |
 | `groupHistoryLimit` | No               | Opt-in group history backfill. `0` or omitted disables it. A positive number persists that many unmentioned group messages from senders admitted by the group member policy for the next bot mention/reply.                                                                                                                                           |
 | `groups`            | No               | Per-group settings. Keys are group chat IDs or `"*"` for defaults. See [Group Chats](#group-chats)                                                                                                                                                                                                                                                    |
-| `dispatchMode`      | No               | What happens when you send a message while the bot is busy: `steer` (default), `collect`, or `followup`. See [Dispatch Modes](#dispatch-modes)                                                                                                                                                                                                        |
+| `dispatchMode`      | No               | What happens when you send a message while the bot is busy: `steer` (default), `collect`, `followup`, or `inject`. See [Dispatch Modes](#dispatch-modes)                                                                                                                                                                                              |
 
 ### Message Routes
 
@@ -479,6 +479,9 @@ Controls what happens when you send a new message while the bot is still process
 - **`steer`** (default) — The bot cancels the current request and starts working on your new message. Best for normal chat, where a follow-up usually means you want to correct or redirect the bot.
 - **`collect`** — Your new messages are buffered. When the current request finishes, all buffered messages are combined into a single follow-up prompt. Good for async workflows where you want to queue up thoughts.
 - **`followup`** — Each message is queued and processed as its own separate turn, in order. Useful for batch workflows where each message is independent.
+- **`inject`** — Your new message is handed to the turn that is already running instead of cancelling it: the agent reads it at its next tool-batch boundary and continues the same turn with it.
+
+`inject` needs a bridge that can extend a running turn. When the bridge does not support that, the message falls back to `collect` buffering, so it is delivered as a new turn once the current one ends and is never dropped. The agent picks up injected messages at the next tool-batch boundary (the bridge's `craft/drainMidTurnQueue` request). The queue for a running turn is capped at 20 messages or 20,000 characters, whichever is reached first; a message that would exceed either bound is dropped and logged.
 
 ```json
 {
