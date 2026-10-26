@@ -2,7 +2,7 @@
 
 [English](2026-10-21-autofix-pr-command.md) | [简体中文](2026-10-21-autofix-pr-command.zh-CN.md)
 
-状态：进行中。2026-10-21，同日在定时任务闸门（[2026-10-21-scheduled-task-gate.md](2026-10-21-scheduled-task-gate.md)，PR #15069）取代模型驱动的 tick 之后修订：触发层是定时任务上的 `gate`，本命令的探针——作者侧的 `snapshot --gate` 和评审者侧的 `review watch-repo`——已实现，与之一起实现的还有 `prepare`、`ci-log` 和 `cleanup` 辅助命令。交付第 3 步（2026-10-24）加上了反应层：`push`、`sync`、`reply`、`rerun` 辅助命令，以及带 `--once` 和 watch 模式的 bundled `/autofix-pr` skill。第 4 步已开始（2026-10-25）：`status`、`schedule` 辅助命令和 `/autofix-pr resume`。评审者监视、第 4 步的其余部分和第 5 步的后续工作仍是提案。[已定决策](#11-已定决策)中的四项产品决策于 2026-10-21 确定；第四项在该节中修订。
+状态：进行中。2026-10-21，同日在定时任务闸门（[2026-10-21-scheduled-task-gate.md](2026-10-21-scheduled-task-gate.md)，PR #15069）取代模型驱动的 tick 之后修订：触发层是定时任务上的 `gate`，本命令的探针——作者侧的 `snapshot --gate` 和评审者侧的 `review watch-repo`——已实现，与之一起实现的还有 `prepare`、`ci-log` 和 `cleanup` 辅助命令。交付第 3 步（2026-10-24）加上了反应层：`push`、`sync`、`reply`、`rerun` 辅助命令，以及带 `--once` 和 watch 模式的 bundled `/autofix-pr` skill。第 4 步已开始（2026-10-25）：`status`、`schedule` 辅助命令、`/autofix-pr resume`，以及运行这些辅助命令的 `autofix_pr` 工具。评审者监视、第 4 步的其余部分和第 5 步的后续工作仍是提案。[已定决策](#11-已定决策)中的四项产品决策于 2026-10-21 确定；第四项在该节中修订。
 
 ## 1. 问题
 
@@ -95,7 +95,7 @@ qwen review watch-repo         the reviewer's probe: PRs opened, pushed or marke
                                ready since the last run, behind a gate of its own
 ```
 
-辅助命令放在 `packages/cli/src/commands/autofix-pr.ts` 和 `packages/cli/src/commands/autofix-pr/` 下；评审者探针和其他 `qwen review` 辅助命令放在一起。每个 PR 的状态放在 worktree 旁边，不放在 worktree 里面，位于 clone 的主 worktree 下。分支由同一个 clone 的所有 worktree 共享，所以每个辅助命令从其中任何一个 worktree（包括 autofix worktree 本身）运行，都能找到同一次监视：
+辅助命令放在 `packages/cli/src/commands/autofix-pr.ts` 和 `packages/cli/src/commands/autofix-pr/` 下，skill 通过 core 工具 `autofix_pr` 运行它们（第 6.12 节）；评审者探针和其他 `qwen review` 辅助命令放在一起。每个 PR 的状态放在 worktree 旁边，不放在 worktree 里面，位于 clone 的主 worktree 下。分支由同一个 clone 的所有 worktree 共享，所以每个辅助命令从其中任何一个 worktree（包括 autofix worktree 本身）运行，都能找到同一次监视：
 
 - worktree：`.qwen/tmp/autofix-pr-<n>/`
 - 状态：`.qwen/tmp/autofix-pr-<n>-state.json`
@@ -309,17 +309,19 @@ GitHub 只在 run 结束后才能重跑它，而 `snapshot` 在 job 一失败就
 
 ### 6.10 `status [<pr>]`
 
-列出这个 clone 的监视，从主 worktree 的 `.qwen/tmp` 下它们的文件读取：不取锁，也不询问 GitHub，所以辅助命令运行期间也能回答，且不论监视归哪个会话。输出为 `{ "now": "<时间>", "watches": [...] }`；读不了的状态文件放在 `unreadable` 里，带 PR 和原因。每个监视包含：
+列出这个 clone 的监视，从主 worktree 的 `.qwen/tmp` 下它们的文件读取（`--no-work` 让 `worktreeWork` 为 null，跳过它的 git 扫描）：不取锁，也不询问 GitHub，所以辅助命令运行期间也能回答，且不论监视归哪个会话。输出为 `{ "now": "<时间>", "watches": [...] }`；读不了的状态文件放在 `unreadable` 里，带 PR 和原因。每个监视包含：
 
 - PR、它的仓库、host 和 URL；`headRefName`、`pushTarget` 和监视已知的 head（`headSha`）；
 - `pushes` 和 `maxPushes`；
 - `session`（拥有它的会话）和 `thisSession`；
+- `preparedAt`：`prepare` 创建该监视的时间（在它开始记录这个值之前创建的监视为 null），`prepare` 也会报告它；
 - `lastCheck`：监视自己的闸门（带 `--session` 的那个）最近一次读取 PR 的时间——每次这样的运行都会更新 `.qwen/tmp/autofix-pr-<n>-gate.checked`，`cleanup` 会随监视一起删除它；共用游标但不带会话的闸门不碰它；`lastRound`：最近一次已准备快照的时间；首次之前两者都是 null；
 - `checkedRecently`：`lastCheck` 是否在该监视的两个间隔之内，即某个闸门（本会话的或别的会话的）很可能仍在运行。由辅助命令给出而不是由模型判断，因为模型知道日期但不知道时刻；
 - `stopped`：闸门看到 PR 已合并或关闭而监视没有清理时为 `merged` 或 `closed`——以 `lastCheck` 时为准：PR 之后可能已重新打开，所以 skill 只通过会读 GitHub 的一轮来处理它；
 - `watch`：`schedule` 记下的任务，`--once` 为 null；
 - `ended`：保留了 worktree 的 `cleanup` 结束该监视的时间和原因；
 - `needsHuman`（第 6.5 节）；
+- `gitTrusted`：worktree 的 gitfile 和每个已检出子模块的 gitfile 都指向 clone 自己保管的 git 目录，直接读文件判断（第 6.12 节）；
 - worktree 的路径及其是否存在，以及 `worktreeWork`：worktree 或其分支里有而 PR 没有的内容，按 `cleanup` 的方式判断，但不询问远端、也不占用 index 锁，没有则为 null。在它上面开始的一轮会丢弃这些内容，所以接管或 resume 会在提问前说明。
 
 闸门游标比一次监视活得久（第 6.6 节），所以只有它指向该监视的仓库、且不早于该监视（`preparedAt`，由 `prepare` 写入：在 PR 重新打开并再次被监视之前看到它被关闭的游标，属于之前那个监视）时才读取；读不了的游标让 `stopped` 为 null，而不会让这个监视从列表里消失。状态文件只按辅助命令给出的名字读取（不带前导零），并且必须是它自己那个 PR 的；它和游标都只在是普通文件时才读取（同名的 FIFO 会让读取阻塞）；其他情况都放进 `unreadable`，并写明文件和处理办法（`cleanup <n> --force`）。
@@ -340,6 +342,43 @@ GitHub 只在 run 结束后才能重跑它，而 `snapshot` 在 job 一失败就
 - PR 作者无法推送时拒绝——只要状态不是 `authorCanPush: true`：它的代码会在用户凭据可及的环境里运行，这只能按 `--once` 一轮一轮地确认，不能用于监视。
 - `watch`、`ended`、`needsHuman` 里本 CLI 不认识的字段（较新版本写入的）会在读状态时被丢弃，因此也不会被写回。
 - 只有拥有该监视的会话能运行它；任务做不出来时什么也不记录。
+
+### 6.12 `autofix_pr` 工具
+
+由一个 core 工具来运行这些辅助命令，这样权限规则才能点名它们。一次调用运行一个辅助命令：`command` 指明是哪一个（`prepare`、`snapshot`、`ci-log`、`push`、`sync`、`reply`、`rerun`、`schedule`、`status`、`cleanup`），带类型的参数携带它的选项（`pr`、`repo`、`host`、`take_over`、`task`、`run_id`、`lines`、`plan`、`no_post`、`discard`、`every`、`no_reply`、`instructions`、`again`）。工具自己拼参数，选项写成 `--name=value`，并且不经过 shell 启动 CLI，所以参数里的任何内容都不会被当成 shell 语法或选项；某个命令不接受的参数会在运行任何东西之前被拒绝。`reply` 的回复计划必须是 skill 写的那个，即 worktree 旁边的 `.qwen/tmp/autofix-pr-<n>-plan.json`——对本会话准备过的监视，就是那个 worktree 旁边——并且不能在 worktree 里面：PR 自己的代码树带来的文件不能代表用户在 PR 上发言。
+
+- 它运行本会话所用的 CLI：`QWEN_CODE_CLI` 指向可用入口时用它——脚本经 JavaScript 解释器运行，可执行文件直接运行，Windows 的 `.cmd` 或 `.bat` 包装脚本跳过（只有 shell 能启动它们）——否则用解释器加上本进程启动时的入口。环境变量与 shell 给子进程的相同，带调用方会话的 id；工作目录是会话自己的目录，所以第 6.1 节第 7 步的 daemon 检查看到的和 shell 调用时一样。
+- 一次调用最长十分钟，这是辅助命令最长需要的时间（`push` 给 pre-push hook 九分钟），回合被取消时随之停止。同一工作目录下的调用逐个执行——但不取锁的 `status` 不等任何调用，等待中被取消的调用会立即返回；其他进程由辅助命令自己的锁来管。
+- 结果是辅助命令输出的那一行 JSON。非零退出就是辅助命令的拒绝，连同它的消息一起返回。
+- 不提供 `snapshot --gate` 和 `cleanup --force`：闸门在模型之外运行，丢弃 worktree 里的工作只能由用户来做。
+- 只有主会话有这个工具：子 agent、fork、teammate 和 workspace agent 都没有，code mode 的 `exec` 也调用不了它。
+- 在 worktree 里运行任何 git 命令之前，`push`、`sync`、`status` 和 `cleanup` 都会直接读文件检查它的 `.git`：它必须指向本 clone 自己为某个 worktree 建的 admin 条目，而该条目也必须指回它。这个文件按 git 的方式读取（`gitdir: ` 加其余部分），路径按内核的方式解析，没有这个文件的 worktree 也会被拒绝。一轮运行的代码可以改写这个文件；它自己搭出来的 git 目录会把它的 config 交给那里的每一条 git 命令——`core.fsmonitor` 里的命令会在下一次 `git status` 时运行。
+- 用户为 shell 工具配置的 PreToolUse 或 PostToolUse hook 看不到这些调用；为 `autofix_pr` 配置的才看得到。
+- plan 模式下除 `status` 外它什么都不运行：规则会让一轮里的辅助命令绕过 plan 模式本会拦下的弹窗，而它们每个都会写东西。
+
+`status` 只读，不需要审批。其他每次调用都和 shell 命令一样要询问——auto 模式下由分类器决定。规则按 `command` 和 `watch` 匹配；`watch` 由工具推导，模型无法设置：
+
+- **`watch:confirmed`：本会话准备过的监视。** `prepare` 通过工具成功运行后，会话在内存里记下它报告的监视：PR、所属仓库和 host、准备时所在的目录、worktree、它的 `preparedAt`，以及 GitHub 当时说作者能否推送。一次辅助命令调用要算 `confirmed`，需要这条记录属于当前 clone，并且在判定权限时询问的 `status` 仍把该监视列为同一个——仓库、host、`preparedAt` 和 worktree 都相同——归本会话、未结束。这里的 `status` 带 `--no-work` 运行，跳过对 worktree 的 git 扫描；YOLO 模式下（什么都不问）和 plan 模式下（不运行任何辅助命令）则根本不运行。`push` 或 `sync` 只有在 git 不会运行它们触发的任何 hook（`pre-push`、`post-checkout`、`post-merge`、`reference-transaction`），或者该监视的修复已免询问（第 6.13 节）时，才算 `confirmed`：相对的 `core.hooksPath`（husky 的 `.husky`）会在 worktree 里解析，hook 就来自 PR 自己的代码树；而 clone 自己 hooks 目录里的 hook 可能是一个转发脚本（pre-commit、lefthook、husky 4），运行的是代码树里某个配置文件写的命令。这种调用的弹窗会说明这一点。此外，只有 `status` 报告 `gitTrusted` 时调用才算 `confirmed`：worktree 里的命令会读的每个 git 目录——它自己的和每个已检出子模块的——都必须由 clone 自己保管，而不是内嵌在子模块里或放在代码树可写的其他地方，否则 git 会读到 PR 可控的配置；对这样的 worktree，`status` 和 `cleanup` 根本不用 git 扫描。shell 命令的 ask 规则（`Bash(qwen autofix-pr push *)`）也会让工具的调用询问，任何针对该工具的放行规则和 auto 模式的分类器都代替不了，与 shell 写法一致（YOLO 对两者都忽略 ask 规则）。辅助命令读取的状态文件在一轮运行的代码够得着的地方，所以它只能让一次调用变成 `unconfirmed`；记录里的任何内容都不会从它读回。其他辅助命令调用都是 `watch:unconfirmed`。一轮开始时先通过工具运行 `status`：监视已不归本会话（`/clear` 之后，或被接管）时还在运行的任务会在这里结束、什么都不问，而不是走到会询问的辅助命令。`status` 还会给每个监视标上 `preparedHere`；本会话的监视这一项为 false 时——daemon 重启后恢复的持久任务（第 6.11 节），或 `/resume` 回到了这个会话——这一轮照常进行，辅助命令和修复按审批模式运行，与没有这个工具时一样，报告里会说明 `/autofix-pr resume <n>` 可以重新确认这个监视——即使本会话的任务驱动着这样的监视，resume 也会接手它。这条记录在通过工具对该 PR 运行 `cleanup` 时、以及会话结束时消失。
+- **`watch:take-over`**：用于 `prepare --take-over` 和 `cleanup --take-over`（`/autofix-pr stop <n>` 运行的就是后者，所以会询问）。`prepare` 和 `status` 的 `watch` 是 `none`。
+- **只点名 `command` 的规则覆盖该命令的每一次调用**，不论它的 `watch` 是什么：`deny: ["AutofixPr(command:push)"]` 会挡住所有推送。拒绝这次调用对应 shell 写法的规则——`Bash`，或 `Bash(qwen autofix-pr *)`——也一样，因为这个工具运行的是同一个程序，并且会执行仓库的 git hook。
+- **启动、重新排程、接管，以及未确认的辅助命令**不提供"总是允许"：保存下来的规则会放行以后的每一次。`prepare` 的弹窗会说明，此后这个监视的每一轮都会不经询问地推送和回复；在 auto 模式下这个弹窗由用户回答，而不是分类器。其他情况下保存的规则会写明 `watch:confirmed`。
+
+skill 的 `allowedTools` 以 `watch:confirmed` 放行一轮里运行的命令——`snapshot`、`ci-log`、`sync`、`push`、`reply`、`rerun` 和 `cleanup`——再加上 `status`；不放行 `prepare`（它启动或恢复监视），也不放行 `schedule`（一轮里从不运行它，而它会替换监视的任务和选项）。这些规则放行的范围同样由辅助命令划定：每个辅助命令都会拒绝由另一个任务驱动的监视（第 6.1 节第 5 步；第 6.8 节），`push` 检查推送去向并计数，`reply` 只回复有可信作者新评论的 thread。工具运行的 CLI 在每个进程里只确定一次，所以之后环境变化（比如重新加载的 `.env`）不会改变它。
+
+在这个工具没有注册的地方——设置里的工具白名单（`autofix_pr` 属于它所列的 core 工具），或按命令执行的沙箱——skill 照旧通过 shell 工具运行同一个辅助命令。在那个沙箱下修复 agent 本来就无法启动：带 `working_dir` 的 `agent` 在那里会被拒绝。daemon 的 shell 守卫只检查 shell 调用；它从来看不到辅助命令内部运行的 git 命令，而这个工具的工作目录就是会话自己的目录。
+
+### 6.13 修复命令不再询问：`autofix_pr` `unattended`
+
+在 default、auto-edit 和 auto 模式下，修复 agent 每条命令都要先询问，所以此前只有整个会话都允许直接运行命令时，监视才能无人值守。现在启动、接管和恢复的提问里多了一个选项（"Start, fixes run without asking"），选了它，skill 就调用 `command: "unattended"` 加 `pr`：它用自己的弹窗确认这个选择，并记在本会话里。
+
+- 弹窗里没有"总是允许"，授权只来自这个弹窗的回答：保存的规则、hook、auto-edit 的自动批准和 auto 模式的分类器都代替不了它。拒绝它就是取消一次工具调用，回合随之结束，所以 skill 只把它交给刚刚选了这一项的用户；此时监视已准备好但没有任务，重新运行启动或恢复即可。没人能回答时——headless 运行、后台 agent——它被拒绝；stream-json 宿主的回答、以及通过 `--input-file` 驱动会话的程序的回答也被拒绝，它们是程序，真需要这样会以 YOLO 模式运行。YOLO 模式下不需要它，也什么都不记录。在弹窗之前就能确定的拒绝（文件夹、宿主、下面说的监视条件）不弹窗，直接给出。
+- 它只授权本会话通过工具准备过、且 GitHub 当时说作者能推送的监视（第 6.12 节），并且只在 `status <pr>` 仍把它列为本会话的、未结束、属于那个仓库（名字比较不区分大小写）、使用那个 worktree、`preparedAt` 不变时有效——同一会话的另一个进程重新准备过的监视就是另一个监视。授权只给弹窗里点名的那个监视；在回答之前又被重新准备的，会被拒绝。`status` 读的是状态文件，所以它只能收回授权。别人的 PR 永远不会被监视（第 8 节），这类 PR 的 `--once` 一轮每条命令都会询问。不受信任的文件夹和 session-agents 会话会被拒绝：它们的子 agent 拿不到特权模式。
+- 授权保存在 CLI 进程里，以会话 id 和 worktree 的真实路径为键。不写任何文件。
+- 它只作用于一种 agent：内置的 `general-purpose` agent——不是项目或用户自己定义的同名 agent，那种可能运行另一个执行器，本会话的 deny 规则管不到它——并且要由会话本身（而不是它的子 agent）以 `working_dir` 指向已授权 worktree 启动。启动前会再检查一次：文件夹仍受信任，监视仍满足上面的条件。然后这个 agent 以 YOLO 模式运行；它再启动的 agent 用会话自己的模式而不是 YOLO，不论执行器是什么。plan 模式保持 plan 模式；其他执行器（Codex）的 agent、teammate 和 workflow agent 不受影响。
+- `command: "attended"` 收回该 PR 的授权，什么都不问：用户回答普通的"Start""Take over"或"Resume"时，以及带 `--yes` 时，skill 都会调用它，所以之前的选择不会延续过之后的选择。
+- 授权在以下情况结束：通过工具对该 PR 运行 `cleanup`；报告了该 PR 另一个监视的 `prepare`（重新创建的、另一个仓库的，或从另一个会话接管来的；在同一个监视上再次启动或恢复，包括被拒绝的那次，不会结束它）；启动时的检查没有通过；会话结束——`/clear`、`/new` 和 `/resume` 会丢掉会话确认过和授权过的内容，离开的会话和进入的会话都一样；关闭会话也会丢掉，daemon 在重新加载一个会话之前就是这样做的。plan 模式不授予任何东西。
+
+它并不约束这个 agent。agent 的运行方式和 YOLO 会话里的 agent 一样：带着用户的凭据，能访问 worktree 之外的文件，不受用户的 ask 规则约束；deny 规则仍然生效。弹窗会说明这一点；把别人的代码挡在外面的，是第 8 节的信任规则。任务已过期或被删除的监视，授权会一直保留到上面某种情况结束它。
 
 ## 7. 一轮检查（`tick`）
 
@@ -470,9 +509,9 @@ resync 时如果新 head 不包含 worktree 的 `HEAD`（作者 rebase 或 force
 1. 触发层：定时任务闸门（PR #15069）。
 2. 探针（本 PR）：带游标和 check 翻页的 `snapshot --gate`，以及 `review watch-repo`；`prepare`、`ci-log` 和 `cleanup` 一同交付，等待反应层。
 3. 辅助命令 `push` 和 `reply`，带测试；以及 skill：支持 `--once` 的 `/autofix-pr`，然后是作为带闸门任务的 watch 模式，以及对每个事件运行 `/qreview` 或一次验证的评审者监视。状态文件记录已处理过的失败检查 attempt，键与闸门游标相同（检查，head，attempt），这样 agent 已放弃的失败不会被再次派发，而重跑后再次失败的会。
-   除评审者监视外已交付（2026-10-24）：`push`、`sync`（第 6.8 节）、`reply`、`rerun`（第 6.9 节），以及支持 `--once`、watch 模式、`stop` 和简单 `status` 的 bundled skill。这一步里修复 agent 在前台运行：会话等它结束，所以不会有触发再启动第二次尝试，暂时不需要 `inFlight`。它执行的预算是每次启动的推送次数（`push`）、每个检查每个 head 一次重跑（`rerun`），以及每条 review 评论一次尝试（一轮处理过的评论无论结果如何都会被记录；最后一次推送所在的那一轮是监视的最后一轮）；同一轮内两次 resync 会停止监视；一轮没能推送的工作以 `sync --discard` 结束，下一轮不会建立在它之上。第 8 节的沙箱规则在启动时执行，每一轮都先运行 `sync`，所以 GitHub API 尚未显示的推送或回退也会被跟上；推送之前还会再 sync 一次，把修复 agent 的合并留在原处的子模块移过去。skill 的 `allowedTools` 只放行读取它的 `.qwen/tmp` 文件、写它的修复说明、回复计划和用户的附加指令（最后一项由第 4 步加上），以及 `cron_list`——不放行任何 shell 命令。权限匹配器把开头的 `"${QWEN_CODE_CLI:-qwen}"` 读成空词，没有规则能只放行这些辅助命令；而即使是 `gh pr view *` 这样只读命令的放行规则，也会连带放行其后的命令替换、重定向和环境变量前缀。所以在默认审批模式下，每次辅助命令调用——包括推送——都会先询问。
+   除评审者监视外已交付（2026-10-24）：`push`、`sync`（第 6.8 节）、`reply`、`rerun`（第 6.9 节），以及支持 `--once`、watch 模式、`stop` 和简单 `status` 的 bundled skill。这一步里修复 agent 在前台运行：会话等它结束，所以不会有触发再启动第二次尝试，暂时不需要 `inFlight`。它执行的预算是每次启动的推送次数（`push`）、每个检查每个 head 一次重跑（`rerun`），以及每条 review 评论一次尝试（一轮处理过的评论无论结果如何都会被记录；最后一次推送所在的那一轮是监视的最后一轮）；同一轮内两次 resync 会停止监视；一轮没能推送的工作以 `sync --discard` 结束，下一轮不会建立在它之上。第 8 节的沙箱规则在启动时执行，每一轮都先运行 `sync`，所以 GitHub API 尚未显示的推送或回退也会被跟上；推送之前还会再 sync 一次，把修复 agent 的合并留在原处的子模块移过去。skill 的 `allowedTools` 只放行读取它的 `.qwen/tmp` 文件、写它的修复说明、回复计划和用户的附加指令（最后一项由第 4 步加上），以及 `cron_list`——不放行任何 shell 命令。权限匹配器把开头的 `"${QWEN_CODE_CLI:-qwen}"` 读成空词，没有规则能只放行这些辅助命令；而即使是 `gh pr view *` 这样只读命令的放行规则，也会连带放行其后的命令替换、重定向和环境变量前缀。所以在默认审批模式下，每次辅助命令调用——包括推送——都会先询问；第 4 步的 `autofix_pr` 工具改变了这一点（第 6.12 节）。
 4. 循环状态：`status`、`stop`、预算，以及由之后的会话接管状态文件。
-   已开始（2026-10-25）：`status`（第 6.10 节）从文件列出每个监视，包括留给人处理的事项（回复计划里的 `needsHuman`，第 6.5 节）；`schedule`（第 6.11 节）记录监视的任务；`/autofix-pr resume` 接管监视并重新排程该任务。尚未完成：修复 agent 改到后台运行并记录 `inFlight`，以及第 10 节中尚未执行的预算。
+   已开始（2026-10-25）：`status`（第 6.10 节）从文件列出每个监视，包括留给人处理的事项（回复计划里的 `needsHuman`，第 6.5 节）；`schedule`（第 6.11 节）记录监视的任务；`/autofix-pr resume` 接管监视并重新排程该任务。`autofix_pr` 工具（第 6.12 节）运行这些辅助命令，所以 skill 的 `allowedTools` 可以点名一轮里的辅助命令，它们运行时不再询问；`unattended`（第 6.13 节）让已确认监视的修复 agent 运行命令时也不再询问。尚未完成：修复 agent 改到后台运行并记录 `inFlight`，以及第 10 节中尚未执行的预算。
 5. 后续工作：可配置的 bot 允许名单。
 
 待定问题：

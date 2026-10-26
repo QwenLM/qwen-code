@@ -12,7 +12,10 @@ import { ExtensionUpdateState } from './extensionManager.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { redactUrlCredentials } from './redaction.js';
 import { clientForUrl } from './http-client.js';
-import { assertTarArchiveLinksAreSafe } from './archive-safety.js';
+import {
+  assertTarArchiveLinksAreSafe,
+  type TarArchiveSafetyOptions,
+} from './archive-safety.js';
 import { resolveNetworkTarget } from './network-policy.js';
 
 const debugLogger = createDebugLogger('EXT_NPM');
@@ -524,6 +527,7 @@ export async function downloadFromNpmRegistry(
   installMetadata: ExtensionInstallMetadata,
   destination: string,
   signal?: AbortSignal,
+  archiveSafety: TarArchiveSafetyOptions = {},
 ): Promise<NpmDownloadResult> {
   const { name, version: requestedVersion } = parseNpmPackageSource(
     installMetadata.source,
@@ -602,7 +606,7 @@ export async function downloadFromNpmRegistry(
   signal?.throwIfAborted();
 
   // Extract tarball
-  await assertTarArchiveLinksAreSafe(tarballPath);
+  await assertTarArchiveLinksAreSafe(tarballPath, signal, archiveSafety);
   signal?.throwIfAborted();
   await tar.x({
     file: tarballPath,

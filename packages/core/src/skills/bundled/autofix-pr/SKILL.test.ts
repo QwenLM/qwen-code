@@ -14,6 +14,10 @@ import {
 } from '../../../core/permission-helpers.js';
 import { PermissionManager } from '../../../permissions/permission-manager.js';
 import { applySkillAllowedTools } from '../../../tools/skill-utils.js';
+import {
+  autofixPrWatchMatch,
+  type AutofixPrParams,
+} from '../../../tools/autofix-pr.js';
 import { parseSkillContent } from '../../skill-load.js';
 import { BuiltinAgentRegistry } from '../../../subagents/builtin-agents.js';
 
@@ -74,6 +78,43 @@ describe('bundled autofix-pr skill', () => {
       'gh run rerun 50 --failed',
     ]) {
       await expect(shell(command)).resolves.toBe('ask');
+    }
+  });
+
+  it("lets a round's helpers run through autofix_pr, and keeps a start, a take-over and unattended asking", async () => {
+    const pm = grantedManager();
+    // As the tool presents a call: `confirmed` when this session prepared
+    // the PR's watch through it and status still lists it so.
+    const helper = (params: AutofixPrParams, confirmed = true) =>
+      decide(pm, 'autofix_pr', {
+        ...params,
+        watch: autofixPrWatchMatch(params, confirmed),
+      });
+    for (const command of [
+      'snapshot',
+      'ci-log',
+      'sync',
+      'push',
+      'reply',
+      'rerun',
+      'status',
+      'cleanup',
+    ] as const) {
+      await expect(helper({ command, pr: 7 })).resolves.toBe('allow');
+    }
+    // A watch this session did not start or resume asks, as the start, a
+    // re-schedule, a take-over and unattended do.
+    for (const command of ['push', 'reply', 'sync', 'cleanup'] as const) {
+      await expect(helper({ command, pr: 7 }, false)).resolves.toBe('ask');
+    }
+    for (const params of [
+      { command: 'prepare', pr: 7, repo: 'o/r' },
+      { command: 'schedule', pr: 7, again: true },
+      { command: 'prepare', pr: 7, repo: 'o/r', take_over: true },
+      { command: 'cleanup', pr: 7, take_over: true },
+      { command: 'unattended', pr: 7 },
+    ] as AutofixPrParams[]) {
+      await expect(helper(params)).resolves.toBe('ask');
     }
   });
 
@@ -173,6 +214,37 @@ describe('bundled autofix-pr skill', () => {
     // A start that cannot record the user's instructions does not run on.
     expect(body).toContain(
       'if that write is refused or fails, the watch cannot carry them',
+    );
+    // Fixes run unattended only on the user's own answer, confirmed by the
+    // tool's dialog; --yes never makes that choice.
+    expect(body).toContain('"Start, fixes run without asking"');
+    expect(body).toContain('"Resume, fixes run without asking"');
+    expect(body).toContain(
+      'call `autofix_pr` with `command: "unattended"` and `pr`: its dialog confirms the answer',
+    );
+    expect(body).toContain(
+      'and with `--yes` when it skipped the question (so no choice was made), call `autofix_pr` with `command: "attended"` and `pr` instead',
+    );
+    expect(body).toContain(
+      'On plain "Resume": `autofix_pr` with `command: "attended"` and `pr`.',
+    );
+    // A durable task a daemon restart brought back is resumed, not skipped.
+    expect(body).toContain(
+      'unless `status` came through the `autofix_pr` tool with `preparedHere` false',
+    );
+    // A round of a watch no longer this session's (a task left after
+    // /clear) ends at the status that never asks, not at a helper that
+    // would; one this process has not confirmed (a daemon restart) goes on
+    // under the approval mode.
+    expect(body).toContain(
+      'Unless it lists the watch with `thisSession` true and `ended` null, delete (`cron_delete`) this task and end',
+    );
+    expect(body).toContain(
+      'go on with the round, whose helpers and fix follow the approval mode',
+    );
+    // A round's push goes through the tool, never the shell, when it can.
+    expect(body).toContain(
+      'when it has to run through the shell, with no `autofix_pr` tool, set the shell tool',
     );
     // The start reports a watch only when its task exists.
     expect(body).toContain('When step 8 created the task, tell the user');

@@ -19,6 +19,9 @@ public final class ManagedSchemaContract {
                     "ma_snapshot",
                     "ma_session_record",
                     "ma_agent_definition",
+                    "ma_extension_package",
+                    "ma_extension_settings",
+                    "ma_extension_operation",
                     "ma_resource",
                     "ma_resource_ref",
                     "ma_output_capture",
@@ -69,6 +72,7 @@ public final class ManagedSchemaContract {
         STORAGE_MIGRATION,
         CSI_RETIREMENT,
         WORKSPACE_RETIREMENT,
+        WORKSPACE_UPLOAD,
         CHANNEL_INGRESS,
         SUBMIT_INPUT,
         CANCEL

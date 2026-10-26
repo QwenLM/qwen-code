@@ -79,13 +79,17 @@ This base configuration supports text-only Hosted Sessions. Keep the listener on
 
 ## Bootstrap credentials
 
-`bin/qwen-managed-agent-bootstrap` generates the shared Harness token and capability digest, the broker token and the Runtime credential key. It writes `config/harness.env`, `config/server.env` and `config/application.yml` with mode 0600, refuses to overwrite existing files unless `--force` is given, and prints paths only:
+`bin/qwen-managed-agent-bootstrap` generates the shared Harness token and capability digest, the broker token, the Runtime credential key and the database password. It writes `config/harness.env`, `config/server.env`, `config/application.yml` and `config/mysql-setup.sql` with mode 0600, refuses to overwrite existing files unless `--force` is given, and prints paths only:
 
 ```bash
 bin/qwen-managed-agent-bootstrap
 ```
 
-The token and digest, and the Broker URL and token for the tool path, are written only to `harness.env`: `server.env` names that file through `QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE`, and the control plane reads them from it. It refuses to start when the file is set together with `QWEN_MANAGED_AGENT_HARNESS_TOKEN` or `QWEN_MANAGED_AGENT_CAPABILITY_DIGEST`, or when the file's Broker token is set together with `QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN`, so a rotation changes one file. The generated `harness.env` and `server.env` are shell-sourceable and also valid systemd `EnvironmentFile`s. Pass `--directory /etc/qwen-managed-agent` for the systemd layout, fill in `SPRING_DATASOURCE_PASSWORD`, and adjust ownership to the service account.
+The token and digest, and the Broker URL and token for the tool path, are written only to `harness.env`: `server.env` names that file through `QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE`, and the control plane reads them from it. It refuses to start when the file is set together with `QWEN_MANAGED_AGENT_HARNESS_TOKEN` or `QWEN_MANAGED_AGENT_CAPABILITY_DIGEST`, or when the file's Broker token is set together with `QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN`, so a rotation changes one file. The generated `harness.env` and `server.env` are shell-sourceable and also valid systemd `EnvironmentFile`s.
+
+`mysql-setup.sql` creates the `qwen_managed_agent` database and the `qwen` account that `server.env` names, for both `localhost` and `127.0.0.1`, with the `performance_schema` grant Flyway needs. Run it once as a MySQL administrator, for example `mysql -u root < config/mysql-setup.sql`, then delete it; `server.env` keeps the password. It stops at the first statement that fails, so it never changes an existing database or account. A MySQL in a container sees the gateway address rather than `127.0.0.1`; create the account for that host instead.
+
+For the systemd layout, run it as root with `--directory /etc/qwen-managed-agent --service-user qwen-managed-agent`. The account then owns `harness.env` and `application.yml`, `server.env` is `0640 root:qwen-managed-agent`, a new directory is `0750 root:qwen-managed-agent`, and `mysql-setup.sql` stays root's. The bootstrap refuses an account that does not exist, or a directory the account cannot enter. `server.env` also records `QWEN_MANAGED_AGENT_SERVICE_USER`, so the preflight checks file access as that account even when it runs as root.
 
 ## Preflight check
 
@@ -95,7 +99,7 @@ Run the bundled launcher with `--check` before the first start and after install
 bin/qwen-managed-agent-server --check
 ```
 
-It covers the JDK, the configuration file and its permissions, the credential key ring, the startup property validation, the auth/bind combination, Harness reachability, the Workspace files and Shell cross-settings (including the mount, creation-root or SSH-node requirement), broker credentials and directories, the Workspace `cwd`, free ports, and MySQL connectivity, the `performance_schema` grant and the Flyway version against `manifest.json`. `WARN` and `SKIP` do not fail; any `FAIL` exits 1. The port checks bind the configured addresses, so stop the service first. The command does not verify the Harness capability digest or the native Workspace storage registration.
+It covers the JDK, the service account, the configuration file and its permissions, the credential key ring, the startup property validation, the auth/bind combination, Harness reachability, the Workspace files and Shell cross-settings (including the mount, creation-root or SSH-node requirement), broker credentials and directories, the Workspace `cwd`, free ports, and MySQL connectivity, the `performance_schema` grant and the Flyway version against `manifest.json`. `WARN` and `SKIP` do not fail; any `FAIL` exits 1. The port checks bind the configured addresses, so stop the service first. The command does not verify the Harness capability digest or the native Workspace storage registration.
 
 ## systemd
 

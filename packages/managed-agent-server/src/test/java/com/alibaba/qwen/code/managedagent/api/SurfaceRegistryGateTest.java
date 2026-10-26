@@ -78,6 +78,10 @@ class SurfaceRegistryGateTest {
                 .isEqualTo(SurfaceRegistry.RuleClass.WORKSPACE_FILES);
         assertThat(SurfaceRegistry.WEBSHELL_WORKSPACE_FILES_READ.ruleClass())
                 .isEqualTo(SurfaceRegistry.RuleClass.WORKSPACE_FILES);
+        assertThat(SurfaceRegistry.WEBSHELL_WORKSPACE_FILES_UPLOAD.ruleClass())
+                .isEqualTo(SurfaceRegistry.RuleClass.WORKSPACE_FILES);
+        assertThat(SurfaceRegistry.WEBSHELL_WORKSPACE_FILES_UPLOAD_QUERY.ruleClass())
+                .isEqualTo(SurfaceRegistry.RuleClass.WORKSPACE_FILES);
     }
 
     @Test

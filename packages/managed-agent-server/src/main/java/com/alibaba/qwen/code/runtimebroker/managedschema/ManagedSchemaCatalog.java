@@ -104,7 +104,8 @@ final class ManagedSchemaCatalog {
                 || actual.values().stream()
                         .anyMatch(type -> type.toUpperCase(Locale.ROOT).contains("VIEW"))) {
             throw new SQLException(
-                    "Managed schema must contain exactly the 32 target tables: " + actual.keySet());
+                    "Managed schema must contain exactly the " + ManagedSchemaContract.TABLES.size()
+                            + " target tables: " + actual.keySet());
         }
         if ("MySQL".equals(connection.getMetaData().getDatabaseProductName())
                 || isMariaDb(connection)) {
