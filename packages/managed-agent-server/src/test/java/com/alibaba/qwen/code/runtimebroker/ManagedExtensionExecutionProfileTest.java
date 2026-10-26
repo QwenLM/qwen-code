@@ -1,8 +1,8 @@
 package com.alibaba.qwen.code.runtimebroker;
 
-import java.nio.file.Path;
-
 import org.junit.jupiter.api.Test;
+
+import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -11,12 +11,11 @@ class ManagedExtensionExecutionProfileTest {
     void requiresExplicitDelegationAndKeepsDeveloperModeDistinct() {
         String linux = ManagedExtensionExecutionProfile.LINUX_CAPABILITY_DIGEST;
         String developer = ManagedExtensionExecutionProfile.DEVELOPER_CAPABILITY_DIGEST;
-        // Absolute on the host OS. A POSIX literal such as "/private/cache" is
-        // not absolute to WindowsPath, and this suite also runs on the
-        // windows-latest leg of the full tier.
-        String root = Path.of(System.getProperty("java.io.tmpdir")).toAbsolutePath().toString();
-        String cache = Path.of(root, "managed-extension-cache").toString();
-        String cgroup = Path.of(root, "cgroup").toString();
+        // Absolute on every platform: a POSIX literal like "/private/cache" is
+        // relative on Windows, where the profile's own absolute-path check
+        // rejects it before the assertion under test is reached.
+        String cache = Path.of("private-cache").toAbsolutePath().toString();
+        String cgroup = Path.of("cgroup").toAbsolutePath().toString();
         assertThrows(IllegalArgumentException.class, () -> ManagedExtensionExecutionProfile.configuration(linux, cache, ""));
         assertThrows(IllegalArgumentException.class, () -> ManagedExtensionExecutionProfile.configuration(developer, cache, cgroup));
         assertEquals("linux-cgroup", ManagedExtensionExecutionProfile.configuration(linux, cache, cgroup).get("mode"));
