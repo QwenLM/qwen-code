@@ -16,7 +16,7 @@
 
 ## 设计
 
-把macOS cursor的非阻塞初始化与daemon阻塞事件循环分开。主线程host一次初始化AppKit与两个UI设施。Node在native runtime handle存活时持有引用计数、unref的timer；每次有限pump既处理主队列回调，也派发AppKit事件。Worker线程构造不能宣称具备主线程设施。关闭runtime须等待native操作与清理完成后再释放pump lease。进程级UI设施支持runtime重新创建；session内容不能残留。Node package root仅在构造期间声明UI host，并恢复之前的thread-local值；macOS原始Rust/Python embedding默认仍关闭UI。仅使用有期限的原生捕获，底层callback真实完成前保留owner lease。清理失败通过shutdown返回，并保留pump lease。
+把macOS cursor的非阻塞初始化与daemon阻塞事件循环分开。主线程host一次初始化AppKit与两个UI设施。独立宿主处理Core Foundation run loop并显式派发AppKit事件，避免调用会在启动完成后重新激活进程的NSApplication.run。每轮最多等待100ms，并在回调之间限制事件派发数量与耗时；原生拖动tracking可能持续至mouse-up。循环在owner清理期间保持运行，直到协议线程退出进程。Node在native runtime handle存活时持有引用计数、unref的timer；每次有限pump既处理主队列回调，也派发AppKit事件。Worker线程构造不能宣称具备主线程设施。关闭runtime须等待native操作与清理完成后再释放pump lease。进程级UI设施支持runtime重新创建；session内容不能残留。Node package root仅在构造期间声明UI host，并恢复之前的thread-local值；macOS原始Rust/Python embedding默认仍关闭UI。仅使用有期限的原生捕获，底层callback真实完成前保留owner lease。清理失败通过shutdown返回，并保留pump lease。
 
 使用成功窗口观察后的内部preview-target通知，替代同步的动作后截屏推送。目标包含runtime私有session、精确window ID/PID与绑定授权context的liveness谓词。采样不刷新授权idle期限、不改变AX snapshot revision、不猜前台或main window。捕获核对当前归属、几何、权限、授权/session寿命及capture scope。目标消失或身份变化时拒绝，不回退截屏幕。
 

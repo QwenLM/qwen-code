@@ -88,14 +88,7 @@ impl Drop for SampleLease {
 }
 
 pub fn run_appkit_main_loop() {
-    if crate::cursor::overlay::initialize_appkit_on_main_thread().is_err() {
-        return;
-    }
-    unsafe {
-        let app: *mut objc2::runtime::AnyObject =
-            objc2::msg_send![objc2::class!(NSApplication), sharedApplication];
-        let _: () = objc2::msg_send![app, run];
-    }
+    crate::cursor::overlay::run_appkit_main_loop();
 }
 
 impl PipSink for Controller {

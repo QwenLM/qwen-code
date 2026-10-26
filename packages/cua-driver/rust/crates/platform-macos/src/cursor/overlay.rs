@@ -517,34 +517,55 @@ pub fn initialize_appkit_on_main_thread() -> Result<(), String> {
             let _: bool = msg_send![app, setActivationPolicy: 2i64];
             let _: () = msg_send![app, finishLaunching];
             // Consume launch activation while prohibited, preserving AX registration.
-            #[link(name = "CoreFoundation", kind = "framework")]
-            extern "C" {
-                static kCFRunLoopDefaultMode: *mut AnyObject;
-                fn CFRunLoopRunInMode(
-                    mode: *mut AnyObject,
-                    seconds: f64,
-                    return_after_source: u8,
-                ) -> i32;
-            }
-            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.0, 1);
-            let until: *mut AnyObject = msg_send![class!(NSDate), distantPast];
-            for _ in 0..32 {
-                let event: *mut AnyObject = msg_send![app,
-                    nextEventMatchingMask: u64::MAX
-                    untilDate: until
-                    inMode: kCFRunLoopDefaultMode
-                    dequeue: objc2::runtime::Bool::YES
-                ];
-                if event.is_null() {
-                    break;
-                }
-                let _: () = msg_send![app, sendEvent: event];
-            }
+            pump_appkit_events(app, 0.0);
             let _: bool = msg_send![app, setActivationPolicy: 1i64];
         }
     }
     APPKIT_READY.store(true, Ordering::Release);
     Ok(())
+}
+
+unsafe fn pump_appkit_events(app: *mut objc2::runtime::AnyObject, wait_seconds: f64) {
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        static kCFRunLoopDefaultMode: *mut AnyObject;
+        fn CFRunLoopRunInMode(mode: *mut AnyObject, seconds: f64, return_after_source: u8) -> i32;
+    }
+    CFRunLoopRunInMode(kCFRunLoopDefaultMode, wait_seconds, 1);
+    let until: *mut AnyObject = msg_send![class!(NSDate), distantPast];
+    let started = Instant::now();
+    for _ in 0..32 {
+        let event: *mut AnyObject = msg_send![app,
+            nextEventMatchingMask: u64::MAX
+            untilDate: until
+            inMode: kCFRunLoopDefaultMode
+            dequeue: objc2::runtime::Bool::YES
+        ];
+        if event.is_null() {
+            break;
+        }
+        let _: () = msg_send![app, sendEvent: event];
+        if started.elapsed() >= Duration::from_millis(2) {
+            break;
+        }
+    }
+    let _: () = msg_send![app, updateWindows];
+}
+
+pub(crate) fn run_appkit_main_loop() {
+    if initialize_appkit_on_main_thread().is_err() {
+        return;
+    }
+    // NSApplication.run reactivates a standalone host after launch completion.
+    loop {
+        objc2::rc::autoreleasepool(|_| unsafe {
+            let app: *mut objc2::runtime::AnyObject =
+                objc2::msg_send![objc2::class!(NSApplication), sharedApplication];
+            pump_appkit_events(app, 0.1);
+        });
+    }
 }
 
 /// Create the process-owned overlay without taking over the host's event loop.
@@ -579,11 +600,7 @@ pub fn run_on_main_thread() {
             std::thread::park();
         }
     }
-    unsafe {
-        let app: *mut objc2::runtime::AnyObject =
-            objc2::msg_send![objc2::class!(NSApplication), sharedApplication];
-        let _: () = objc2::msg_send![app, run];
-    }
+    run_appkit_main_loop();
 }
 
 // ── Animation / render state ──────────────────────────────────────────────
