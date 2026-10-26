@@ -168,7 +168,7 @@ import {
   readWorkspaceArtifactLibrary,
   removeWorkspaceLibraryArtifact,
 } from '../server/session-artifact-library.js';
-import { bindSessionPrsFromReviewPrompt } from './session-pr-backfill.js';
+import { bindSessionPrsFromPromptCommand } from './session-pr-backfill.js';
 import { acquireWorktreeOwnershipOp } from '../server/worktree-ownership-op.js';
 import {
   exportSessionTranscript,
@@ -8283,7 +8283,7 @@ export function registerSessionRoutes(
               ? (firstTextBlock['text'] as string)
               : undefined;
           if (promptText !== undefined) {
-            void bindSessionPrsFromReviewPrompt(
+            void bindSessionPrsFromPromptCommand(
               runtime,
               sessionId,
               promptText,

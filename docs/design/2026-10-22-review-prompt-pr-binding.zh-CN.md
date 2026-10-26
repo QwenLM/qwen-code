@@ -1,15 +1,17 @@
-# 在 `/review` 被接纳时绑定 PR
+# 在 `/review` 或 `/verify-pr` 被接纳时绑定 PR
 
 [English](2026-10-22-review-prompt-pr-binding.md) | [简体中文](2026-10-22-review-prompt-pr-binding.zh-CN.md)
 
 日期：2026-10-22
 状态：已实现
+更新：2026-10-26 —— `/verify-pr` 复用同一套命令语法与闸门。
 
 ## 问题
 
 Web Shell 的 PR 徽标来自会话 PR sidecar。用户可以在 Web Shell 会话里输入
-`/review 15172`。命令会执行，但会话在这一刻没有 PR 绑定。绑定模型与 sidecar
-格式见[会话 PR 绑定设计](2026-08-20-webshell-session-pr-binding.md)。
+`/review 15172` 或 `/verify-pr 15172 --publish`。命令会执行，但会话在这一刻
+没有 PR 绑定。绑定模型与 sidecar 格式见
+[会话 PR 绑定设计](2026-08-20-webshell-session-pr-binding.md)。
 
 按需回填（`POST /sessions/backfill-prs`）可以从用户输入的命令推导绑定。它读取
 transcript。这个设计有两个缺口：
@@ -19,7 +21,7 @@ transcript。这个设计有两个缺口：
 
 ## 决策
 
-daemon 接纳 `/review` 提示词时，立即绑定 PR。
+daemon 接纳 `/review` 或 `/verify-pr` 提示词时，立即绑定 PR。
 
 - 钩子放在 daemon 的提示词路由（`POST /session/:id/prompt`）。Web Shell 客户端
   不负责会话持久化。
@@ -29,8 +31,13 @@ daemon 接纳 `/review` 提示词时，立即绑定 PR。
 
 ## 护栏
 
-- **只认显式命令。** 共享语法只读命令位置上的 `/review <N|#N|PR URL>`。
-  assistant 散文与工具输出不能创建绑定。
+- **只认显式命令。** 共享语法只读命令位置上的 `/review` 与 `/verify-pr`，
+  各自支持 `<N|#N|PR URL>`。assistant 散文与工具输出不能创建绑定。命令 token
+  按文件名字符收口，因此 `/verify-pr-watch` 是另一条命令。
+- **`--repo` 作用域。** `/verify-pr` 接受 `--repo <owner>/<repo>`（gh 的
+  `[HOST/]OWNER/REPO` 形态）。号码被限定到既非本 workspace 自身、也非 gh 页
+  已确认 fork 父仓库时，它是另一个仓库的 PR，不产生绑定；本 workspace 的同号
+  PR 是另一个 PR。
 - **来源。** 只有本地用户键入的提示词会绑定。渠道转发的轮次按原始渠道标记跳过，
   外部发送者不能把 PR 绑定写进本地会话。
 - **输入上限。** 语法最多扫描 16 KiB。惰性 URL 分支呈二次方回溯，而 live 钩子
@@ -38,8 +45,8 @@ daemon 接纳 `/review` 提示词时，立即绑定 PR。
 - **仓库身份。** GitHub 号经 gh 页与 workspace 仓库 key 解析。fork 父仓库只有
   在确认后才接受。remote URL 是兜底。
 - **Aone。** Aone 号经 `mr view` 解析。代码绝不拼 `<origin>/pull/<N>` 链接。
-- **来源等级。** 绑定写 `source: 'review'`。`create` 与 `worktree` 的等级更高。
-  现有上限裁剪会保留更强的绑定。
+- **来源等级。** 两条命令都写 `source: 'review'`：会话只是看过该 PR，不引入新的
+  sidecar 取值。`create` 与 `worktree` 的等级更高。现有上限裁剪会保留更强的绑定。
 - **上限。** 实时审查加入现有上限计划。旧的 `review` 绑定可被淘汰；`create`、
   `worktree` 与无 provenance 条目保留槽位。满额会话因此替换最旧的 review，
   而不是冻结徽标。

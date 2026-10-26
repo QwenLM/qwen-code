@@ -1,15 +1,16 @@
-# Bind a PR When `/review` Is Admitted
+# Bind a PR When a `/review` or `/verify-pr` Prompt Is Admitted
 
 [English](2026-10-22-review-prompt-pr-binding.md) | [简体中文](2026-10-22-review-prompt-pr-binding.zh-CN.md)
 
 Date: 2026-10-22
 Status: Implemented
+Updated: 2026-10-26 — `/verify-pr` joins the same command grammar and gate.
 
 ## Problem
 
 The Web Shell shows a PR badge from the session PR sidecar. A user can type
-`/review 15172` in a Web Shell session. The command runs, but the session gets
-no PR binding at that moment. See
+`/review 15172` or `/verify-pr 15172 --publish` in a Web Shell session. The
+command runs, but the session gets no PR binding at that moment. See
 [the session PR binding design (in Chinese)](2026-08-20-webshell-session-pr-binding.md)
 for the binding model and the sidecar format.
 
@@ -22,7 +23,7 @@ the typed command. It reads the transcript. That design has two gaps:
 
 ## Decision
 
-Bind the PR when the daemon admits a `/review` prompt.
+Bind the PR when the daemon admits a `/review` or `/verify-pr` prompt.
 
 - The hook is in the daemon prompt route (`POST /session/:id/prompt`). The Web
   Shell client does not own session persistence.
@@ -33,8 +34,15 @@ Bind the PR when the daemon admits a `/review` prompt.
 
 ## Guardrails
 
-- **Explicit command only.** The shared grammar reads `/review <N|#N|PR URL>`
-  at command position. Assistant prose and tool output cannot create a binding.
+- **Explicit command only.** The shared grammar reads `/review` and
+  `/verify-pr`, each with `<N|#N|PR URL>`, at command position. Assistant prose
+  and tool output cannot create a binding. The command token closes against
+  filename characters, so `/verify-pr-watch` is another command.
+- **`--repo` scope.** `/verify-pr` accepts `--repo <owner>/<repo>` (gh's
+  `[HOST/]OWNER/REPO` form). A number qualified with a repository that is not
+  this workspace's own — or the page's confirmed fork parent — is another
+  repository's PR and binds nothing; the workspace's same-numbered PR is a
+  different PR.
 - **Source.** Only the local user's typed prompt binds. A channel-relayed turn
   is skipped on its raw channel marker, so an external sender cannot write a
   PR binding into the local session.
@@ -47,8 +55,10 @@ Bind the PR when the daemon admits a `/review` prompt.
   The remote URL is the fallback.
 - **Aone.** An Aone number resolves through `mr view`. The code never assembles
   an `<origin>/pull/<N>` link.
-- **Provenance.** The binding uses `source: 'review'`. The `create` and
-  `worktree` sources outrank it. The existing cap keeps stronger bindings.
+- **Provenance.** The binding uses `source: 'review'` for both commands: the
+  session merely looked at that PR, and no new sidecar value is introduced.
+  The `create` and `worktree` sources outrank it. The existing cap keeps
+  stronger bindings.
 - **Cap.** A live review joins the existing cap plan. Older `review` bindings
   are evictable; `create`, `worktree`, and pre-provenance entries keep their
   slots. A full session therefore replaces its oldest review instead of

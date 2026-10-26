@@ -47,7 +47,7 @@ import type { SessionPrInfo } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import {
   backfillWorkspaceSessionPrs,
-  bindSessionPrsFromReviewPrompt,
+  bindSessionPrsFromPromptCommand,
   parsePrNumberFromWorktree,
   registerSessionPrBackfillRoutes,
 } from './session-pr-backfill.js';
@@ -2534,7 +2534,7 @@ describe('backfillWorkspaceSessionPrs', () => {
       undefined,
       undefined,
       {
-        liveReview: {
+        liveCommand: {
           sessionId: SESSION_A,
           rawCommand: '/review 77 --comment',
         },
@@ -2570,7 +2570,7 @@ describe('backfillWorkspaceSessionPrs', () => {
       undefined,
       undefined,
       {
-        liveReview: { sessionId: SESSION_A, rawCommand: '/review 77' },
+        liveCommand: { sessionId: SESSION_A, rawCommand: '/review 77' },
       },
     );
 
@@ -2591,7 +2591,7 @@ describe('backfillWorkspaceSessionPrs', () => {
     // `/review 001_init.sql` is a file review, not PR 1 — the shared command
     // grammar must reject it before any platform query.
     await backfillWorkspaceSessionPrs(runtime, undefined, undefined, {
-      liveReview: { sessionId: SESSION_A, rawCommand: '/review 001_init.sql' },
+      liveCommand: { sessionId: SESSION_A, rawCommand: '/review 001_init.sql' },
     });
 
     expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
@@ -2601,6 +2601,175 @@ describe('backfillWorkspaceSessionPrs', () => {
         sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
       ),
     ).toBeNull();
+  });
+
+  it('binds a live /verify-pr number', async () => {
+    // Deep verification names the PR it proves; the session must carry the
+    // same badge a review of that PR would give it.
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'fix/77')],
+    });
+
+    const result = await bindSessionPrsFromPromptCommand(
+      runtime,
+      SESSION_A,
+      '/verify-pr 77 --publish',
+    );
+
+    expect(result).toMatchObject({ scanned: 1, bound: 1 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toMatchObject([
+      {
+        number: 77,
+        url: 'https://github.com/o/r/pull/77',
+        source: 'review',
+      },
+    ]);
+  });
+
+  it('binds a live /verify-pr whose --repo names this workspace', async () => {
+    // `--repo o/r` is how a maintainer states the PR's repository explicitly;
+    // when it is this workspace's own, the number is the same PR N.
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(78, 'fix/78')],
+    });
+
+    const result = await bindSessionPrsFromPromptCommand(
+      runtime,
+      SESSION_A,
+      '/verify-pr 78 --repo o/r',
+    );
+
+    expect(result).toMatchObject({ scanned: 1, bound: 1 });
+    expect(
+      (
+        await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+        )
+      )?.map((entry) => entry.number),
+    ).toEqual([78]);
+  });
+
+  it('does not bind a /verify-pr number scoped to another repository', async () => {
+    // `--repo other/x 77` names another repo's PR 77 — a different PR from
+    // this workspace's 77, which must never take its badge.
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'fix/77')],
+    });
+
+    const result = await bindSessionPrsFromPromptCommand(
+      runtime,
+      SESSION_A,
+      '/verify-pr 77 --repo other/x',
+    );
+
+    expect(result).toMatchObject({ scanned: 1, bound: 0, written: 0 });
+    expect(runtime.bridge.markSessionCatalogChanged).not.toHaveBeenCalled();
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+  });
+
+  it('keeps a url form and a qualified number from binding this repo', async () => {
+    // The url form names another repo's PR 5 and the bare claim is scoped to
+    // the same other repo: merging them must not drop the qualifier and bind
+    // this workspace's PR 5, which is a different PR.
+    const chatsDir = path.join(
+      new Storage(workspaceCwd).getProjectDir(),
+      'chats',
+    );
+    await fsp.mkdir(chatsDir, { recursive: true });
+    const record = (text: string, parent: string | null) =>
+      JSON.stringify({
+        uuid: `${SESSION_A}-${text}`,
+        parentUuid: parent,
+        sessionId: SESSION_A,
+        timestamp: '2026-08-02T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text }] },
+        cwd: workspaceCwd,
+      });
+    await fsp.writeFile(
+      path.join(chatsDir, `${SESSION_A}.jsonl`),
+      `${record('/review https://github.com/other/x/pull/5', null)}\n` +
+        `${record('/verify-pr 5 --repo other/x', `${SESSION_A}-url`)}\n`,
+      'utf8',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(5, 'fix/5')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ scanned: 1, bound: 0, written: 0 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+  });
+
+  it('does not read /verify-pr-watch as the command', async () => {
+    // The command token closes against `[\w./-]`, exactly like `/review-skill`.
+    const result = await bindSessionPrsFromPromptCommand(
+      runtime,
+      SESSION_A,
+      '/verify-pr-watch 77',
+    );
+
+    expect(result).toBeUndefined();
+    expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
+  });
+
+  it('binds a /verify-pr command recorded in the transcript', async () => {
+    // A TUI turn records the typed command in the slash_command system
+    // record; the sweep must read /verify-pr from it, not just /review.
+    const chatsDir = path.join(
+      new Storage(workspaceCwd).getProjectDir(),
+      'chats',
+    );
+    await fsp.mkdir(chatsDir, { recursive: true });
+    await fsp.writeFile(
+      path.join(chatsDir, `${SESSION_A}.jsonl`),
+      `${JSON.stringify({
+        uuid: `${SESSION_A}-verify-88`,
+        parentUuid: null,
+        sessionId: SESSION_A,
+        timestamp: '2026-08-02T00:00:00.000Z',
+        type: 'system',
+        subtype: 'slash_command',
+        systemPayload: {
+          phase: 'invocation',
+          rawCommand: '/verify-pr 88 --publish',
+        },
+        cwd: workspaceCwd,
+      })}\n`,
+      'utf8',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(88, 'fix/88')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ scanned: 1, bound: 1 });
+    expect(
+      (
+        await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+        )
+      )?.map((entry) => entry.number),
+    ).toEqual([88]);
   });
 
   it('binds a live /review into the archive sidecar', async () => {
@@ -2618,7 +2787,7 @@ describe('backfillWorkspaceSessionPrs', () => {
       undefined,
       undefined,
       {
-        liveReview: { sessionId: SESSION_A, rawCommand: '/review 79' },
+        liveCommand: { sessionId: SESSION_A, rawCommand: '/review 79' },
       },
     );
 
@@ -2643,7 +2812,7 @@ describe('backfillWorkspaceSessionPrs', () => {
       undefined,
       undefined,
       {
-        liveReview: {
+        liveCommand: {
           sessionId: SESSION_A,
           rawCommand: '/review https://github.com/o/r/pull/43 --comment',
         },
@@ -2662,7 +2831,7 @@ describe('backfillWorkspaceSessionPrs', () => {
     // The wrapper is exported for the prompt route; the trust gate must hold
     // even if a caller forgets to check it.
     const untrusted = { ...runtime, trusted: false } as WorkspaceRuntime;
-    await bindSessionPrsFromReviewPrompt(untrusted, SESSION_A, '/review 80');
+    await bindSessionPrsFromPromptCommand(untrusted, SESSION_A, '/review 80');
 
     expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
     expect(
@@ -2695,7 +2864,7 @@ describe('backfillWorkspaceSessionPrs', () => {
       undefined,
       undefined,
       {
-        liveReview: { sessionId: SESSION_A, rawCommand: '/review 11' },
+        liveCommand: { sessionId: SESSION_A, rawCommand: '/review 11' },
       },
     );
 
@@ -2738,7 +2907,7 @@ describe('backfillWorkspaceSessionPrs', () => {
       undefined,
       {
         archiveCoordinator,
-        liveReview: { sessionId: SESSION_A, rawCommand: '/review 77' },
+        liveCommand: { sessionId: SESSION_A, rawCommand: '/review 77' },
       },
     );
 
@@ -2784,7 +2953,7 @@ describe('backfillWorkspaceSessionPrs', () => {
       undefined,
       undefined,
       {
-        liveReview: { sessionId: SESSION_A, rawCommand: '/review 77' },
+        liveCommand: { sessionId: SESSION_A, rawCommand: '/review 77' },
       },
     );
 
@@ -2832,7 +3001,7 @@ describe('backfillWorkspaceSessionPrs', () => {
       undefined,
       undefined,
       {
-        liveReview: { sessionId: SESSION_A, rawCommand: '/review 11' },
+        liveCommand: { sessionId: SESSION_A, rawCommand: '/review 11' },
       },
     );
 
@@ -2865,7 +3034,7 @@ describe('backfillWorkspaceSessionPrs', () => {
       undefined,
       undefined,
       {
-        liveReview: { sessionId: SESSION_A, rawCommand: '/review 5' },
+        liveCommand: { sessionId: SESSION_A, rawCommand: '/review 5' },
       },
     );
 
@@ -2910,7 +3079,7 @@ describe('backfillWorkspaceSessionPrs', () => {
         undefined,
         undefined,
         {
-          liveReview: { sessionId: SESSION_A, rawCommand: '/review 77' },
+          liveCommand: { sessionId: SESSION_A, rawCommand: '/review 77' },
         },
       );
 
@@ -2930,7 +3099,7 @@ describe('backfillWorkspaceSessionPrs', () => {
       // makes removing the bound fail rather than merely run slowly.
       const prompt = '/review ' + 'http://a'.repeat(25_000);
       const started = Date.now();
-      await bindSessionPrsFromReviewPrompt(runtime, SESSION_A, prompt);
+      await bindSessionPrsFromPromptCommand(runtime, SESSION_A, prompt);
       expect(Date.now() - started).toBeLessThan(1_000);
 
       expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
@@ -2943,7 +3112,7 @@ describe('backfillWorkspaceSessionPrs', () => {
   );
 
   it('binds only the named session through the trusted wrapper', async () => {
-    // The wrapper must inject liveReview (target-only) and forward the lane.
+    // The wrapper must inject liveCommand (target-only) and forward the lane.
     await seedSession(SESSION_B);
     await seedReviewedNumbers(SESSION_B, 66, 66);
     const coordinator = new SessionArchiveCoordinator();
@@ -2953,7 +3122,7 @@ describe('backfillWorkspaceSessionPrs', () => {
       pullRequests: [pr(66, 'fix/66'), pr(77, 'fix/77')],
     });
 
-    await bindSessionPrsFromReviewPrompt(runtime, SESSION_A, '/review 77', {
+    await bindSessionPrsFromPromptCommand(runtime, SESSION_A, '/review 77', {
       archiveCoordinator: coordinator,
     });
 
@@ -2974,7 +3143,7 @@ describe('backfillWorkspaceSessionPrs', () => {
     // Without the wrapper's parse gate this would sweep and bind pr-123.
     await seedWorktreeSidecar(SESSION_C, 'pr-123', 'worktree-pr-123');
 
-    await bindSessionPrsFromReviewPrompt(runtime, SESSION_C, 'hello there');
+    await bindSessionPrsFromPromptCommand(runtime, SESSION_C, 'hello there');
 
     expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
     expect(
@@ -3014,7 +3183,7 @@ describe('backfillWorkspaceSessionPrs', () => {
         undefined,
         undefined,
         {
-          liveReview: { sessionId: SESSION_A, rawCommand: '/review 77' },
+          liveCommand: { sessionId: SESSION_A, rawCommand: '/review 77' },
         },
       );
 
