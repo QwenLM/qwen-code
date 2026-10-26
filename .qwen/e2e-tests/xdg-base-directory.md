@@ -35,6 +35,22 @@ Create `~/.qwen` and `~/.config/qwen/settings.json` containing `{}`, then run th
 
 In the new-install group's home, `mkdir ~/.qwen` and run the command again. Expect `~/.config/qwen` to stay in use.
 
+### Other entry points on a new install
+
+Each in its own fresh home: run `qwen mcp list`, and start `qwen serve --port 0` and stop it once it prints its listening line. Expect `~/.config/qwen/.qwen-global-dir` after each. `qwen --version` and `qwen --help` still create nothing under `HOME`.
+
+### A ~/.qwen/.env left behind on an XDG install
+
+In the new-install group's home, create `~/.qwen/.env` containing `QWEN_HOME=$HOME/legacy` and `DEMO_VAR=1`, then run the command. Expect `~/.config/qwen` to stay in use and nothing under `$HOME/legacy`.
+
+### Custom XDG_CONFIG_HOME with a recreated ~/.qwen
+
+In a fresh home, run the command with `XDG_CONFIG_HOME=$HOME/xdg`. Expect `$HOME/xdg/qwen/.qwen-global-dir`. Then `mkdir ~/.qwen` and run it again with the same `XDG_CONFIG_HOME`: expect `$HOME/xdg/qwen` to stay in use.
+
+### Moving an existing install
+
+Create `~/.qwen` with a `settings.json`, then run the migration command from the design note. Expect `~/.config/qwen/settings.json` and `~/.config/qwen/.qwen-global-dir`, and no `~/.qwen`. With `XDG_CONFIG_HOME=relative` it must refuse and leave `~/.qwen` in place.
+
 ### QWEN_HOME pointed at the XDG directory
 
 Create `~/.qwen`, run `QWEN_HOME=$HOME/.config/qwen qwen -p "say hi"`, then run `qwen -p "say hi"` without it. Expect the second run to use `~/.qwen`, and no `~/.config/qwen/.qwen-global-dir`.
@@ -67,11 +83,11 @@ That is why neither file can serve as the marker: each is skipped by one of thos
 All runs used a throwaway `HOME` with `QWEN_HOME` and `XDG_CONFIG_HOME` unset.
 
 - `cd packages/core && npx vitest run src/config/storage.test.ts src/permissions/autoMode.test.ts src/skills/bundled/stuck/SKILL.test.ts` and the other suites that read the global directory.
-- `cd packages/cli && npx vitest run src/config/storage-paths-lite.test.ts src/config/environment.test.ts src/config/settings.test.ts src/config/path-freshness.test.ts src/serve/fast-path.test.ts src/serve/run-qwen-serve.test.ts` and the profiler suites.
+- `cd packages/cli && npx vitest run src/cli.test.ts src/llm.test.tsx src/config/storage-paths-lite.test.ts src/config/shared-env-keys.test.ts src/config/environment.test.ts src/config/settings.test.ts src/config/path-freshness.test.ts src/serve/fast-path.test.ts src/serve/run-qwen-serve.test.ts` and the profiler suites.
 - `cd packages/vscode-ide-companion && npx vitest run src/utils/paths.test.ts src/ide-server.test.ts`.
 - `cd packages/channels/base && npx vitest run src/paths.test.ts`.
 - `cd packages/sdk-typescript && npx vitest run test/unit/peer/registry.test.ts`.
-- `npx vitest run --config ./scripts/tests/vitest.config.ts scripts/tests/cli-entry.test.js scripts/tests/global-dir-marker.test.js`.
+- `npx vitest run --config ./scripts/tests/vitest.config.ts scripts/tests/cli-entry.test.js scripts/tests/global-dir-marker.test.js scripts/tests/xdg-migration-command.test.js`.
 - Linux simulation: with the macOS exemption temporarily disabled in every resolver and `dist/` rebuilt, the same suites passed under a throwaway `HOME`. The only failures were the cases that assert macOS keeps `~/.qwen`, which the simulation disables by design.
 
 ## Not run
