@@ -6002,6 +6002,18 @@ async function runQwenServeImpl(
         };
       });
     };
+    // Which standing entries can block is a catalog question (both
+    // spellings), while which entry the write removes is a spelling
+    // question: the workspace routes write the request name and the user
+    // route the registry name, so `pdf` and `rust:pdf` can differ here.
+    const blockSkillIdentity = (
+      identity: { name: string; authoredName?: string; registryName?: string },
+      writtenName: string,
+    ) => ({
+      name: identity.registryName ?? identity.name,
+      ...(identity.authoredName ? { authoredName: identity.authoredName } : {}),
+      writtenName,
+    });
     const persistDisabledToolsFn = (
       workspace: string,
       toolName: string,
@@ -6059,7 +6071,10 @@ async function runQwenServeImpl(
             workspace,
             [skillName],
           );
-          const block = skillToggleBlockForName(fresh, skillIdentity);
+          const block = skillToggleBlockForName(
+            fresh,
+            blockSkillIdentity(skillIdentity, skillName),
+          );
           if (block) {
             return { changed: false, disabled: workspaceDisabled, block };
           }
@@ -6146,7 +6161,7 @@ async function runQwenServeImpl(
             if (enabled) {
               const block = skillToggleBlockForName(
                 fresh,
-                skillIdentities[index],
+                blockSkillIdentity(skillIdentities[index], skillName),
               );
               if (
                 block &&
@@ -6239,15 +6254,6 @@ async function runQwenServeImpl(
         );
         const writtenName = (index: number) =>
           skillIdentities[index]!.registryName ?? skillIdentities[index]!.name;
-        const blockIdentity = (index: number) => {
-          const identity = skillIdentities[index]!;
-          return {
-            name: identity.registryName ?? identity.name,
-            ...(identity.authoredName
-              ? { authoredName: identity.authoredName }
-              : {}),
-          };
-        };
         let next = initial;
         const outcomes: PersistUserSkillActivationResult['outcomes'] =
           skillNames.map((_, index) => ({
@@ -6262,7 +6268,7 @@ async function runQwenServeImpl(
         const stillBlocked = (index: number) => {
           const block = skillToggleBlockForName(
             fresh,
-            blockIdentity(index),
+            blockSkillIdentity(skillIdentities[index]!, writtenName(index)),
             USER_SETTING_SCOPE,
           );
           if (!block || block.scope !== 'User') return block;

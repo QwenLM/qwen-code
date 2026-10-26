@@ -172,6 +172,12 @@ export type SkillToggleTargetScope = SettingScope.User | SettingScope.Workspace;
  * workspace at once, so Workspace entries never block it: they keep gating
  * only their own workspace, and the User file's own entries are the ones
  * the toggle edits rather than a higher lock.
+ *
+ * `writtenName` is the spelling the pending write records when it differs
+ * from the catalog identity (`pdf` for `rust:pdf`). The self-removal
+ * exemptions below key on it: only an entry the write actually removes or
+ * cancels may stop blocking, while every spelling of the identity is still
+ * searched in the higher scopes.
  */
 export function buildHigherDisabled(
   settings: LoadedSettings,
@@ -181,6 +187,7 @@ export function buildHigherDisabled(
   blockIn: (skill: {
     name: string;
     authoredName?: string;
+    writtenName?: string;
   }) => SkillToggleBlock | null;
 } {
   const targetLabel: SkillToggleBlock['scope'] =
@@ -243,8 +250,9 @@ export function buildHigherDisabled(
   const blockIn = (skill: {
     name: string;
     authoredName?: string;
+    writtenName?: string;
   }): SkillToggleBlock | null => {
-    const registry = skill.name.trim().toLowerCase();
+    const written = (skill.writtenName ?? skill.name).trim().toLowerCase();
     const spellings = skillRestrictionNames(skill);
     // A higher-scope hard entry wins the blame before any nearer one:
     // deleting the workspace file's copy cannot unlock while it stands.
@@ -258,7 +266,7 @@ export function buildHigherDisabled(
       const hard = hardEntries.get(spelling);
       if (hard) {
         // The toggle removes an exact-spelling entry in its own scope itself.
-        if (spelling === registry && targetDisabled.has(spelling)) {
+        if (spelling === written && targetDisabled.has(spelling)) {
           continue;
         }
         return {
@@ -272,7 +280,7 @@ export function buildHigherDisabled(
       if (def) {
         // A grant identical to the entry cancels it at resolve time — the
         // persisted qualified one, or any identical-spelling bare one.
-        if (spelling === registry || enabledEntries.has(spelling)) continue;
+        if (spelling === written || enabledEntries.has(spelling)) continue;
         return {
           reason: 'default',
           list: 'defaultDisabled',
@@ -300,7 +308,7 @@ export function buildHigherDisabled(
 
 export function skillToggleBlockForName(
   settings: LoadedSettings,
-  skill: { name: string; authoredName?: string },
+  skill: { name: string; authoredName?: string; writtenName?: string },
   target: SkillToggleTargetScope = SettingScope.Workspace,
 ): SkillToggleBlock | null {
   return buildHigherDisabled(settings, target).blockIn(skill);

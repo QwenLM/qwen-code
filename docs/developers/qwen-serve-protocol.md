@@ -4156,7 +4156,7 @@ Response (200):
 }
 ```
 
-Malformed requests return HTTP 400 with `invalid_skill_names`, `invalid_skill_name`, `invalid_skill_activation_state`, or `invalid_skill_activation_mode`; a client id unknown to every managed runtime fails the batch with `400 {code: 'invalid_client_id'}`. Activation and events follow the single-Skill route; one `mutation.id` covers every event from the request. For these two routes the `mutation` object's `skills[].name` is the resolved spelling that was written, which an enable may report differently from the name in the request.
+Malformed requests return HTTP 400 with `invalid_skill_names`, `invalid_skill_name`, `invalid_skill_activation_state`, or `invalid_skill_activation_mode`; a client id unknown to every managed runtime fails the batch with `400 {code: 'invalid_client_id'}`. Activation and events follow the single-Skill route; one `mutation.id` covers every event from the request. For these two routes the `mutation` object's `skills[].name` is the resolved spelling that was written, which may differ from the name in the request when a bare authored spelling resolves to its registry spelling.
 
 #### `POST /workspace/init`
 

@@ -1426,6 +1426,32 @@ describe('workspace skill settings persistence', () => {
     });
   });
 
+  it('refuses a bare workspace enable a higher scope holds under the registry spelling', async () => {
+    writeSkillSettings([], ['rust:pdf']);
+    const { persistDisabledSkills, persistDisabledSkillsBatch } =
+      await captureSkillPersistence([
+        skillStatus('rust:pdf', 'extension', 'rust'),
+      ]);
+
+    await expect(
+      persistDisabledSkills!(workspace, 'pdf', true),
+    ).resolves.toMatchObject({
+      changed: false,
+      block: {
+        reason: 'hard',
+        list: 'disabled',
+        entry: 'rust:pdf',
+        scope: 'User',
+      },
+    });
+    await expect(
+      persistDisabledSkillsBatch!(workspace, ['pdf'], true),
+    ).resolves.toEqual({
+      outcomes: [{ skillName: 'pdf', changed: false }],
+      settingsChanges: [],
+    });
+  });
+
   it('re-enables a workspace skill disabled by its bare spelling', async () => {
     writeSkillSettings(['pdf']);
     const { persistDisabledSkills, persistDisabledSkillsBatch } =
