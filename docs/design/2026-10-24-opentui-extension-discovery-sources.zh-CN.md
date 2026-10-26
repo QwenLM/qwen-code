@@ -2,9 +2,7 @@
 
 [English](2026-10-24-opentui-extension-discovery-sources.md) | [简体中文](2026-10-24-opentui-extension-discovery-sources.zh-CN.md)
 
-## 状态与证据
-
-**本地验证检查点，2026-10-27；有限范围验证通过。** 保留的 Sources 候选 `3d151a4b20670fa7cfb589a63a76dbec0de11b2d` 已与真实 main `0539160f35f983ba4a6d4d369c0ae18941b2fdb2` 整合，完整继承实际合并 #15655 的 17 文件分发变更，未包含未合并依赖。完整差异为 43 文件、5846 新增加 154 删除，恰为 6000 gross；功能之外的 tracked 路径与该 main 的字节及 mode 相同。实际 WIP index `e395c97870ea38b788a0fe9fa972ddd0f85fb911` 的新 build/typecheck（含 integration）、CLI 604P、core 267P、workflow 89P/4 项平台 skip、lint、bundle 均通过。同一新 Darwin arm64 源码 bundle 的七个完整产品案通过：相同永久 acquisition 在 Node+Ink/Bun+Ink/Bun+strict OpenTUI 三腿，以及 strict source-v4、普通 setting、非默认插件选择、原 absent-USER 敏感 setting。合计 14 次 TUI 自然退出0、模型请求0，source/runtime/完整 34 声明根产物守卫一致，无超时、强制清理或残留。Strict source-v4 观察到可见来源类型、normal 详情完整路径、实测窄窗口 PageDown/PageUp，raw 中无 MaxListenersExceededWarning；敏感案未注入 USER，先通过 hot AES-GCM 实值认证，再实际完成 public cold reader 退出0及 cold native 重开。本次仅更新文档状态，保留该 WIP 的全部 production/test 字节，不是新产品运行或 clean-commit 验收。原 sensitive-v1 AES-GCM FAIL 与 cold NOT_REACHED 继续作为历史收据保留，并与另行设置一致 USER 的 v2 正控严格区分，均不改写或替代。当前证据仅覆盖 Darwin arm64 源码 bundle 的有限 user 流程，不代表 project scope、已安装 npm/standalone、其他平台、全部 Ink 交互或 E1–E10 整体验收；普通 setting/插件选择仅 strict，不能算三 renderer 对照。此前 ca9 build/type 收据保留原范围。历史 global 0.22.0 UI 导航及 2c79 Node+Ink 来源获取仍只是有限正控。历史 005e 来源/普通 setting/非默认插件选择通过、六次自然退出0及模型请求0保持原边界：来源案遗漏可见类型断言并暴露十一项 keypress 监听，其业务 PASS 从未证明完整一致性。当前焦点订阅及类型/完整路径修复保留原 test-only 复现，新的真实观察仅限上述当前 source-v4 范围。本候选原叠在 0cedc015424835c25bf111b5ea37200018e3b327（#15396）之上，其父 B 为 e2e80ab46423a918e1b7f504a5369074e62bc360（#15389）。验收 union 只是参照，不是隐含依赖；后续引用前重新核对精确源码及产物身份。
+实现、验收证据及其范围和未决问题统一记录在 [PR #15671](https://github.com/QwenLM/qwen-code/pull/15671)。下述 E1–E10 仍是最终验收门槛。
 
 ## 问题与现有行为
 
