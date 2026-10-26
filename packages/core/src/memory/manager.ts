@@ -1425,7 +1425,10 @@ export class MemoryManager {
     if (params.belowCompactionWarn !== true) return false;
     // A second skip replaces the parked snapshot, so the span that must fit
     // the next run's tail starts at the snapshot's own base when one is
-    // parked, not at the base a carried settle may have moved forward.
+    // parked, not at the base a carried settle may have moved forward. The
+    // park is cut and stamped from that same base: a carried settle can leave
+    // `lastExtractedLength` past the live history, and slicing there would
+    // park an empty snapshot and drop the turns the entry still owes.
     const pendingFrom = state.pending?.skippedFrom ?? state.lastExtractedLength;
     const pendingEntries = params.history.length - pendingFrom;
     if (
@@ -1437,8 +1440,8 @@ export class MemoryManager {
     state.skips += 1;
     state.pending = this.stampExtractSeq({
       ...params,
-      skippedHistory: params.history.slice(state.lastExtractedLength),
-      skippedFrom: state.lastExtractedLength,
+      skippedHistory: params.history.slice(pendingFrom),
+      skippedFrom: pendingFrom,
     });
     return true;
   }

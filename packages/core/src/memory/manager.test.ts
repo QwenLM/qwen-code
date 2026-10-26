@@ -3073,6 +3073,49 @@ describe('MemoryManager', () => {
       ).toEqual([4, 20, 9]);
     });
 
+    // Regression: the park must be cut from the base the fit test measured. A
+    // carried settle writes `lastExtractedLength` from the hung run's own
+    // longer, pre-compaction index space while the parked snapshot keeps its
+    // older base, so slicing the next park at `lastExtractedLength` comes out
+    // empty and the turns the snapshot exists to preserve are dropped (R19-1).
+    it('keeps the owed turns when a carried settle moves the base past live history', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '3');
+      const mgr = new MemoryManager();
+      await turn(mgr, 4); // arm at 4
+
+      let release!: () => void;
+      vi.mocked(runAutoMemoryExtract).mockImplementationOnce(
+        (params) =>
+          new Promise((resolve) => {
+            release = () =>
+              resolve(engagedNoop(params.sessionId, params.history.length));
+          }),
+      );
+      // A direct run captures the longer, pre-compaction history and hangs.
+      const direct = mgr.scheduleExtract(
+        extractParams(tmp.projectRoot, 'sess', turns(20)),
+      );
+      // The following turn skips and parks slice(4) at length 9.
+      expect((await turn(mgr, 9)).skippedReason).toBe('cadence');
+      // The hung run settles: the carry keeps that snapshot but moves
+      // `lastExtractedLength` to 20, past the live history.
+      release();
+      await direct;
+
+      // The next skip still fits measured from the snapshot's own base (8 - 4),
+      // so it replaces the park.
+      expect((await turn(mgr, 8)).skippedReason).toBe('cadence');
+
+      // Growing past the tail supplements the next run from the replaced park:
+      // it must still hold every owed turn, not an empty slice.
+      await turn(mgr, 50);
+      const supplemented = vi
+        .mocked(runAutoMemoryExtract)
+        .mock.calls.map(([params]) => params)
+        .find((params) => (params.history as Content[]).length === 50);
+      expect(supplemented?.skippedHistory).toEqual(turns(8).slice(4));
+    });
+
     // Regression: a snapshot parked AFTER a compaction shrink, by a skip that
     // landed while the shorter post-shrink run was still in flight, is not a
     // pre-shrink snapshot — the short run's settle must carry it (R13-1).
