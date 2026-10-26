@@ -76,6 +76,10 @@ export interface GitWorkspaceCloneControls {
 }
 
 interface AddWorkspaceDialogProps {
+  /** Overrides the default "Add Workspace" heading. */
+  title?: string;
+  /** Overrides the default submit label; the in-flight label is unchanged. */
+  submitLabel?: string;
   executionMode?: WorkspaceExecutionMode;
   onExecutionModeChange?: (mode: WorkspaceExecutionMode) => void;
   executionModeLocked?: boolean;
@@ -141,6 +145,8 @@ function targetBasename(value: string): string {
 }
 
 export function AddWorkspaceDialog({
+  title,
+  submitLabel,
   executionMode,
   onExecutionModeChange,
   executionModeLocked,
@@ -202,6 +208,27 @@ export function AddWorkspaceDialog({
   const [browsing, setBrowsing] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const browseButtonRef = useRef<HTMLButtonElement>(null);
+  const suggestionListRef = useRef<HTMLUListElement | null>(null);
+  const pickerListSnapshotRef = useRef<
+    | {
+        suggestions: WorkspacePathSuggestion[];
+        scrollTop: number;
+        height: number;
+      }
+    | undefined
+  >(undefined);
+  const setSuggestionListRef = useCallback(
+    (node: HTMLUListElement | null) => {
+      suggestionListRef.current = node;
+      if (!node) return;
+      const snapshot = pickerListSnapshotRef.current;
+      if (snapshot?.suggestions === suggestions) {
+        node.scrollTop = snapshot.scrollTop;
+      }
+      pickerListSnapshotRef.current = undefined;
+    },
+    [suggestions],
+  );
   const listOpenRef = useRef(false);
   listOpenRef.current = listOpen && suggestions.length > 0;
   const suggestSeqRef = useRef(0);
@@ -428,6 +455,10 @@ export function AddWorkspaceDialog({
     cancelPicker();
     const request = new AbortController();
     pickerRequestRef.current = request;
+    const list = suggestionListRef.current;
+    pickerListSnapshotRef.current = list
+      ? { suggestions, scrollTop: list.scrollTop, height: list.offsetHeight }
+      : undefined;
     inputRef.current?.blur();
     // The blur above scheduled the delayed dismiss; cancel it and apply the
     // close + suppress now so the timer cannot fire after the outcome below.
@@ -488,6 +519,7 @@ export function AddWorkspaceDialog({
     source,
     gitUrl,
     path,
+    suggestions,
     closeList,
     cancelBlurDismiss,
     cancelPicker,
@@ -927,7 +959,7 @@ export function AddWorkspaceDialog({
 
   return (
     <DialogShell
-      title={t('sidebar.addWorkspaceTitle')}
+      title={title ?? t('sidebar.addWorkspaceTitle')}
       size="md"
       dismissible={!submitting}
       modal={!(pickerUsesHostUi && browsing)}
@@ -1219,6 +1251,7 @@ export function AddWorkspaceDialog({
                     )}
                     {showList && (
                       <ul
+                        ref={setSuggestionListRef}
                         id={LISTBOX_ID}
                         role="listbox"
                         aria-label={t('sidebar.addWorkspaceSuggestions')}
@@ -1257,6 +1290,18 @@ export function AddWorkspaceDialog({
                         ))}
                       </ul>
                     )}
+                    {browseDirectories &&
+                      browsing &&
+                      pickerListSnapshotRef.current && (
+                        // Keep the body from shrinking and clamping its scroll offset.
+                        <div
+                          aria-hidden="true"
+                          className="mt-1"
+                          style={{
+                            height: pickerListSnapshotRef.current.height,
+                          }}
+                        />
+                      )}
                     {browseDirectories &&
                       !browsing &&
                       suggestionsLoaded &&
@@ -1504,7 +1549,8 @@ export function AddWorkspaceDialog({
               >
                 {submitting
                   ? t('sidebar.addWorkspaceAdding')
-                  : t(
+                  : (submitLabel ??
+                    t(
                       source === 'git'
                         ? clonedCwd
                           ? 'sidebar.addWorkspaceRegister'
@@ -1512,7 +1558,7 @@ export function AddWorkspaceDialog({
                         : browseDirectories
                           ? 'workspaceHost.addFolder'
                           : 'sidebar.addWorkspaceRegister',
-                    )}
+                    ))}
               </Button>
             </div>
           </>

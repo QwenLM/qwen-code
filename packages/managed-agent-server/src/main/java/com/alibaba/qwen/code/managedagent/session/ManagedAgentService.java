@@ -367,6 +367,16 @@ public class ManagedAgentService {
             String agentRevision, String title, Map<String, Object> metadata,
             List<InputBlock> blocks, WorkspaceSelection selection, String approvalMode, Boolean planMode,
             List<Map<String, Object>> skills, String modelId) {
+        return createWorkspaceSession(tenantId, actorId, idempotencyKey, agentId, agentRevision,
+                title, metadata, blocks, selection, approvalMode, planMode, skills, modelId, null);
+    }
+
+    public CommandAdmission createWorkspaceSession(String tenantId,
+            String actorId, String idempotencyKey, String agentId,
+            String agentRevision, String title, Map<String, Object> metadata,
+            List<InputBlock> blocks, WorkspaceSelection selection, String approvalMode, Boolean planMode,
+            List<Map<String, Object>> skills, String modelId,
+            List<com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionPackages.Pin> extensionPins) {
         validateIdempotencyKey(idempotencyKey);
         var additions = AgentDefinitionExtensions.sessionSkills(skills);
         if (actorId == null || actorId.isEmpty()) {
@@ -398,6 +408,9 @@ public class ManagedAgentService {
         if (modelId != null) {
             semantic.put("modelId", modelId);
         }
+        if (extensionPins != null) {
+            semantic.put("extensionPins", extensionPins);
+        }
         String requestDigest = digests.digest(semantic);
         String payloadDigest = input.isEmpty() ? null
                 : SubmitHarnessTurn.computePayloadDigest(input);
@@ -417,19 +430,26 @@ public class ManagedAgentService {
             throw new ManagedAgentException(HttpStatus.CONFLICT, "unsupported_feature",
                     "The Hosted Harness does not support Session Skills.");
         }
+        if (extensionPins != null && !harness.supportsSessionExtensions()) {
+            throw new ManagedAgentException(HttpStatus.CONFLICT, "unsupported_feature", "The Hosted Harness does not support extension packages.");
+        }
         if (!input.isEmpty() && !harness.isWorkspaceFilesAvailable()) {
             throw new ManagedAgentException(HttpStatus.CONFLICT,
                     "workspace_unavailable",
                     "Hosted Workspace execution is not available.");
         }
         Admission admission;
+        Set<String> extensionLifecycleProfiles = extensionPins == null ? Set.of()
+                : java.util.stream.Stream.of(WorkspaceToolProfiles.SHELL, WorkspaceToolProfiles.MCP)
+                        .filter(harness::supportsLifecycle).collect(java.util.stream.Collectors.toSet());
         try {
             admission = store.insertWorkspaceSessionCommand(tenantId,
                     actorId, idempotencyKey, requestDigest, agentId, agentRevision,
                     effectiveTitle, input, payloadDigest, selection, approvalMode,
                     harness.supportsApprovalSelection() && ("qwen-code".equals(agentId)
                             || harness.supportsAgentDefinitionApprovalSelection()),
-                    planMode, harness.supportsPlanMode(), additions, harness.supportsPublicChildAgents(), modelId);
+                    planMode, harness.supportsPlanMode(), additions, harness.supportsPublicChildAgents(), modelId, extensionPins,
+                    extensionLifecycleProfiles);
         } catch (DuplicateKeyException error) {
             admission = store.replayWorkspaceSessionCommand(tenantId,
                     actorId, idempotencyKey, requestDigest);

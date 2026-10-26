@@ -1,3 +1,4 @@
+import { requireExtensionSnapshot } from './managed-extension-types';
 import type { components } from './generated/managed-agent-api';
 import {
   isJavaAgentResyncRequired,
@@ -113,6 +114,7 @@ export function createJavaManagedAgentProvider(
       approvalMode?: ManagedApprovalMode;
       planMode?: boolean;
       skills?: import('./managed-agent-provider').ManagedSessionSkill[];
+      extensionPins?: import('./managed-extension-types').ManagedExtensionPin[];
     },
     command: ManagedAgentCommandOptions,
   ) {
@@ -126,6 +128,9 @@ export function createJavaManagedAgentProvider(
         agentId: request.agentId,
         ...(request.modelId === undefined ? {} : { modelId: request.modelId }),
         ...(request.skills?.length ? { skills: request.skills } : {}),
+        ...(request.extensionPins === undefined
+          ? {}
+          : { extensionPins: request.extensionPins }),
         // Without a title the Session list and header fall back to a UUID
         // prefix, unlike the standard shell's prompt-derived title.
         ...(request.text === undefined
@@ -258,6 +263,74 @@ export function createJavaManagedAgentProvider(
     mcp: {
       list: (sessionId, request) =>
         client.getSessionMcp(sessionId, request.signal),
+    },
+    extensions: {
+      storageScope: options.productScope?.trim()
+        ? storageKey(options)
+        : undefined,
+      list: (workspaceId, request) =>
+        client.listExtensionPackages(workspaceId, request.signal),
+      publish: (workspaceId, extensionId, digest, manifest, archive, request) =>
+        client.publishExtensionPackage(
+          workspaceId,
+          extensionId,
+          digest,
+          manifest,
+          archive,
+          request.idempotencyKey,
+          request.signal,
+        ),
+      settings: (workspaceId, extensionId, request) =>
+        client.getExtensionSettings(workspaceId, extensionId, request.signal),
+      saveSettings: (workspaceId, extensionId, revision, values, request) =>
+        client.saveExtensionSettings(
+          workspaceId,
+          extensionId,
+          revision,
+          values,
+          request.idempotencyKey,
+          request.signal,
+        ),
+      query: async (sessionId, request) =>
+        requireExtensionSnapshot(
+          await client.queryExtensionConfiguration(
+            sessionId,
+            undefined,
+            request.signal,
+          ),
+          sessionId,
+        ),
+      apply: async (sessionId, selection, request) =>
+        requireExtensionSnapshot(
+          await client.applyExtensionConfiguration(
+            sessionId,
+            selection,
+            request.idempotencyKey,
+            request.signal,
+          ),
+          sessionId,
+        ),
+      operation: async (sessionId, operationId, request) =>
+        requireExtensionSnapshot(
+          await client.queryExtensionConfiguration(
+            sessionId,
+            operationId,
+            request.signal,
+          ),
+          sessionId,
+        ),
+      resume: async (sessionId, operationId, recoverPrevious, request) =>
+        requireExtensionSnapshot(
+          await client.resumeExtensionConfiguration(
+            sessionId,
+            operationId,
+            recoverPrevious,
+            request.signal,
+          ),
+          sessionId,
+        ),
+      package: (workspaceId, pin, request) =>
+        client.getExtensionPackage(workspaceId, pin, request.signal),
     },
     mcpManagement: {
       storageScope: options.productScope?.trim()

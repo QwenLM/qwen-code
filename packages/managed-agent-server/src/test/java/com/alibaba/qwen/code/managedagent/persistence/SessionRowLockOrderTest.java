@@ -135,7 +135,7 @@ class SessionRowLockOrderTest {
     // unaudited.
     private static final Set<String> SIBLING_SESSION_LOCKERS = Set.of(
             "HarnessPlacementStore.java",
-            "ManagedActionStore.java", "ManagedExtensionRecordStore.java",
+            "ManagedActionStore.java", "ManagedExtensionAgentLaunch.java", "ManagedExtensionRecordStore.java",
             "ManagedLegacySessionGuard.java",
             "ManagedProjectionResourceCollector.java",
             "ManagedRuntimeRetentionGuard.java",
@@ -207,10 +207,15 @@ class SessionRowLockOrderTest {
                     // rows or accesses Turn rows.
                     Map.entry("ManagedHostedRecoveryRecords.java",
                             Set.of("HistoricalResources.checkpointHistory/1")),
+                    // Package configuration delegates to a same-named JSON-only validator.
+                    Map.entry("ManagedMcpSettings.java",
+                            Set.of("ManagedMcpSettings.require/1")),
                     Map.entry("ManagedSchemaJdbcTemplate.java",
                             Set.of("ManagedSchemaJdbcTemplate.getSingleColumnRowMapper/1")),
+                    // Both publisher overloads avoid Session and Turn rows.
                     Map.entry("ManagedSessionStore.java",
-                            Set.of("ManagedSessionStore.sha256/1",
+                            Set.of("ManagedSessionStore.publishAgentResource/6",
+                                    "ManagedSessionStore.sha256/1",
                                     "ManagedSessionStore.storedTransaction/1",
                                     "ManagedSessionStore.usesDataSource/1")),
                     Map.entry("ManagedSnapshotStore.java",
@@ -398,6 +403,7 @@ class SessionRowLockOrderTest {
         assertThat(audit.lockers()).containsExactlyInAnyOrder(
                 "insertTurnCommand", "insertCancelCommand", "changeSessionModel", "changeSessionApproval",
                 "requireMcpManagement", "requireMcpSettingsCommit",
+                "requireConfigurationCommit", "requireExtensionManagement",
                 "insertSessionCommand", "insertWorkspaceSessionCommand",
                 "insertChildSessionCommand", "insertPublicChildSessionCommand",
                 "insertInternalTeamLeadSessionCommand",
@@ -489,6 +495,7 @@ class SessionRowLockOrderTest {
                         "recordHarnessEvents", "recordRecoveryAdmission",
                         "releaseTurnLease", "renewTurn", "requireTurn",
                         "requireTurnForUpdate", "requirePolicyChange", "requireMcpManagement", "requireMcpSettingsCommit",
+                        "requireConfigurationCommit", "requireExtensionManagement", "requireChildExtensionBootstrap",
                         "requireMcpManagementIdle", "retractContinuationOutput",
                         "retractHarnessTurnOutput", "scheduleTurnRetry",
                         "settleTurnCommands",

@@ -397,6 +397,78 @@ describe('AddWorkspaceDialog', () => {
       },
     );
 
+    it.each(
+      (['host', 'native'] as const).flatMap((picker) =>
+        (['cancel', 'same path', 'new path', 'error'] as const).map(
+          (outcome) => [picker, outcome] as const,
+        ),
+      ),
+    )(
+      'preserves only the unchanged folder list scroll after a %s picker returns %s',
+      async (picker, outcome) => {
+        vi.useFakeTimers();
+        try {
+          const pending = deferredPick();
+          const onAdd = vi.fn();
+          mount(
+            <AddWorkspaceDialog
+              browseDirectories
+              pickerUsesHostUi={picker === 'host'}
+              initialPath="/daemon/original"
+              onClose={vi.fn()}
+              onAdd={onAdd}
+              onPick={() => pending.promise}
+              onSuggest={async (path) => ({
+                dir: path,
+                sep: '/',
+                suggestions: Array.from({ length: 24 }, (_, index) => ({
+                  name: `folder-${index}`,
+                  path: `${path}/folder-${index}`,
+                })),
+                truncated: false,
+              })}
+            />,
+          );
+          const list = () =>
+            document.querySelector<HTMLUListElement>('[role="listbox"]')!;
+          await act(async () => vi.advanceTimersByTimeAsync(200));
+          expect(list().children).toHaveLength(24);
+          list().scrollTop = 180;
+          await act(async () => browseButton().click());
+          expect(list()).toBeNull();
+          expect(input().getAttribute('aria-expanded')).toBe('false');
+          expect(input().hasAttribute('aria-controls')).toBe(false);
+
+          await act(async () => {
+            if (outcome === 'error') pending.reject(new Error('picker failed'));
+            else
+              pending.resolve(
+                outcome === 'cancel'
+                  ? undefined
+                  : outcome === 'same path'
+                    ? '/daemon/original'
+                    : '/daemon/selected',
+              );
+          });
+          await act(async () => vi.advanceTimersByTimeAsync(200));
+          expect(list().children).toHaveLength(24);
+          expect(list().scrollTop).toBe(outcome === 'new path' ? 0 : 180);
+          expect(input().value).toBe(
+            outcome === 'new path' ? '/daemon/selected' : '/daemon/original',
+          );
+          expect(onAdd).not.toHaveBeenCalled();
+
+          // Navigating later must not reuse the picker snapshot for new results.
+          type('/daemon/another');
+          await act(async () => vi.advanceTimersByTimeAsync(200));
+          expect(list().children).toHaveLength(24);
+          expect(list().scrollTop).toBe(0);
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
+
     it('keeps an invocation alive across inline callback rerenders on the same target', async () => {
       const pending = deferredPick();
       let signal: AbortSignal | undefined;

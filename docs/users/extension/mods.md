@@ -136,6 +136,7 @@ this recovery exception.
 | Middleware | Patterns and recursive matchers; explicit, repeatable `next(e)`; `.catch` and per-plugin failure recovery; frozen input and host identity                                               |
 | API events | `command.register`, `ui.log` and the session and clock methods pass through the middleware chain with host-supplied origin                                                              |
 | Session    | `$.plugin`, read-only `$.session` facts, `$.clock.now` and `$.clock.sleep`, described in [Session facts and clock](#session-facts-and-clock)                                            |
+| Turns      | `turn.start`, `turn.complete` and `$.turn.abort` for the prompts a person submits, described in [Turn events](#turn-events)                                                             |
 | Logging    | `$.ui.log` returns void and queues delivery; transcript logs use stderr in text mode or `system/ui_log` in JSON modes; debug logs stay in the debug logger; neither becomes model input |
 | Isolation  | Separate QuickJS environment per plugin inside a session worker; no Node, filesystem or network APIs; memory, stack, source/output and execution limits                                 |
 
@@ -154,7 +155,7 @@ command names are matched against the resulting name.
 ## Middleware and recovery
 
 Patterns select among the engine events `session.start`, `session.end`,
-`command.run`, `tool.call` and `tool.check`, and the API event of each supported
+`command.run`, `tool.call`, `tool.check`, `turn.start` and `turn.complete`, and the API event of each supported
 `$` method, which `$.session.version()` lists. Use an exact name, a prefix such as `command.*`,
 `*`, or a single negation such as `!session.*`. The patterns `!*` and `!!...` are
 rejected.
@@ -392,7 +393,7 @@ recovery are not available.
 
 API events begin at the chain head. Their input is the command specification,
 the `{text, to}` log payload, `{ms}` for `clock.sleep`, the `{breakdown, columns}`
-arguments of `session.usage`, or `{}` for the other session and clock methods. Return `next(e)`,
+arguments of `session.usage`, `{turnId}` for `turn.abort`, or `{}` for the other session and clock methods. Return `next(e)`,
 `{value}` to answer, or `{deny: reason}` to reject the API call. Registrations
 already in the event's call chain are skipped, including their catches. Other
 registrations in the same plugin remain eligible. This re-entry behavior follows
@@ -427,6 +428,9 @@ supports:
       "session.version",
       "tool.call",
       "tool.check",
+      "turn.abort",
+      "turn.complete",
+      "turn.start",
       "ui.log"
     ],
     "methods": [
@@ -442,6 +446,7 @@ supports:
       "session.turns",
       "session.usage",
       "session.version",
+      "turn.abort",
       "ui.log"
     ]
   }
@@ -532,6 +537,84 @@ budget, so a sleep longer than the remaining budget times the hook out. Its
 `signal` option rejects the wait at once when it aborts; pass `next.signal`,
 because the Mod environment has no `AbortController`. A sleep ends with the hook
 that started it, so a sleep the hook does not await cannot hold up the dispatch.
+
+## Turn events
+
+`turn.start` and `turn.complete` follow the main loop's turns: each prompt a
+person submits, from its first model request through its tool calls to the
+answer. A retry with Ctrl+Y and the headless continuation of an interrupted turn
+are turns too. Subagent and teammate turns, scheduled prompts, background
+notifications and goal continuations fire no turn events.
+
+```javascript
+export function register(on) {
+  on('turn.start', ($, e, next) => {
+    $.ui.log(`turn ${e.turnId}: ${e.text}`, { to: 'debug' });
+    return next(e);
+  });
+  on('turn.complete', async ($, e, next) => {
+    const answer = await next(e);
+    if (e.reason !== 'answer') return answer;
+    const { context } = await $.session.usage();
+    return { text: `${context.percent ?? 0}% of the context window used` };
+  });
+}
+```
+
+`turn.start` fires once the prompt is admitted, after UserPromptSubmit hooks let
+it through and before the first model request. A prompt they block has no turn.
+`e.text` is the prompt as submitted, with pasted text expanded, or `""` for a
+retry or a continuation. `e.turnId` is new for each turn. The model request does
+not wait for the hooks, but the turn's tool middleware and its `turn.complete`
+run after them. Cancelling the turn ends the `turn.start` hooks still running,
+including one that calls `$.turn.abort` itself: its code after that call does
+not run.
+
+A prompt longer than 128 KiB as JSON reaches the hooks with its beginning and
+end around the line `[... truncated for Mods ...]`, and `e.isTextTruncated` is
+`true`. A long answer is cut the same way, with `e.isAnswerTruncated`. Claude
+Code passes both whole.
+
+`turn.complete` fires once the turn has ended. A turn still running when the
+session closes ends as `aborted` before `session.end`; a `turn.complete` that is
+already running or queued then still runs, within the same budget. The hook
+receives:
+
+| Field               | Value                                                                                                                                  |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `answer`            | the visible text of the turn's last model response, or `""`                                                                            |
+| `durationMs`        | how long the turn took                                                                                                                 |
+| `reason`            | `answer`; `aborted` when a person or a Mod cancelled the turn; `error` when an API error, a loop detection or a session limit ended it |
+| `isAborted`         | `true` when `reason` is `aborted`                                                                                                      |
+| `turnId`            | the id `turn.start` carried                                                                                                            |
+| `usage`             | `{input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, model}` summed over the turn's model responses    |
+| `isAnswerTruncated` | `true` when `answer` was cut to fit; absent otherwise                                                                                  |
+
+The fields of both events are pinned. `next(e)` resolves to `{text: e.answer}`,
+with `usage` when the turn has it. Return a different, non-blank `text` to show
+it beneath the answer, up to 4,096 characters:
+
+- in a terminal, as the transcript line `[Mod <plugins>] <text>`;
+- in headless text mode, as the same line on stderr after the answer;
+- in JSON modes, as a `system` `ui_log` message before the result.
+
+The conversation record keeps the answer. In a terminal the hooks run after the
+answer, and the next prompt can already start. A headless run waits for them
+before it writes its result.
+
+`usage` counts only the turn's own model requests; requests made by subagents,
+side queries and compaction are left out. It is absent when no response
+finished. `cache_creation_input_tokens` is 0 unless the provider reports cache
+writes separately, as Anthropic's does. `reason` is never `refusal`.
+
+`$.turn.abort({ turnId })` ends the running turn and its running tools as Esc
+does, but leaves no "Request cancelled." notice and does not put the prompt
+back in the composer. Queued prompts then run. The call rejects when no turn is
+running, when `turnId` is not the running turn's id, or when the turn is already
+ending. In a headless run the turn ends with the error result
+`A Mod ended the turn.` and exit code 130, and a stream-json session goes on to
+its next message. Qwen Code has no `$.prompt.submit` yet, so a Mod cannot send a
+prompt after it ends a turn.
 
 ## TypeScript and relative imports
 
