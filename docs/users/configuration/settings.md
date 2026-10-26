@@ -38,7 +38,7 @@ Qwen Code uses JSON settings files for persistent configuration. There are four 
 | Project settings file | `.qwen/settings.json` within your project's root directory.                                                                                                                                                                                                                     | Applies only when running Qwen Code from that specific project. Project settings override user settings.                                                                                                                  |
 | System settings file  | Linux： `/etc/qwen-code/settings.json` <br>Windows: `C:\ProgramData\qwen-code\settings.json` <br>macOS: `/Library/Application Support/QwenCode/settings.json`<br>The path can be overridden using the `QWEN_CODE_SYSTEM_SETTINGS_PATH` environment variable.                    | Applies to all Qwen Code sessions on the system, for all users. System settings override user and project settings. May be useful for system administrators at enterprises to have controls over users' Qwen Code setups. |
 
-On Linux, a new install keeps its global directory in `~/.config/qwen` (or `$XDG_CONFIG_HOME/qwen`), and `QWEN_HOME` can move it anywhere. The user-level `~/.qwen/...` paths elsewhere on this page are in that directory, except the runtime output under `tmp/`, which follows `QWEN_RUNTIME_DIR` when it is set.
+On Linux, a new install keeps its global directory in `~/.config/qwen` (or `$XDG_CONFIG_HOME/qwen`), and `QWEN_HOME` can move it anywhere. The user-level `~/.qwen/...` paths elsewhere on this page are in that directory, except the runtime output under `tmp/` and `debug/`, which follows `QWEN_RUNTIME_DIR` when it is set.
 
 > [!note]
 >
