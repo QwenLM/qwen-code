@@ -1204,6 +1204,11 @@ class Issue13181QueryBudgetTest {
         fixture.ledger.reset();
         try (var verifier = new ToolPublicationVerifier(data, 1)) {
             assertThat(verifier.runOnce()).isTrue();
+            await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+                verifier.runOnce();
+                assertThat(data.operationStatus(binding.path("sessionKey"), "pub-1", PUBLICATION_TOKEN, "async-heartbeat")
+                        .path("state").asText()).isEqualTo("SUCCEEDED");
+            });
         }
         long renewals = fixture.ledger.count("update ma_operation set",
                 "claim_until = ?, verification_next_at = case when");
