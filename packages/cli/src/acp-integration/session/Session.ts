@@ -7519,7 +7519,7 @@ export class Session implements SessionContext {
             // The legacy round bypasses LlmClient's reminder injection.
             // Resolve here before the interrupted-prompt reminder deduplication.
             const workflowIntent = sharedModelRound
-              ? undefined
+              ? null
               : resolveWorkflowIntent(this.config, workflowHumanInput);
             const workflowModeEligible =
               isUserSubmissionTurn &&
@@ -7553,11 +7553,11 @@ export class Session implements SessionContext {
                 }
               }
             }
-            systemReminders.push(
-              ...[...workflowReminders]
-                .filter((text) => !parts.some((part) => part.text === text))
-                .map((text) => ({ text })),
-            );
+            for (const text of workflowReminders) {
+              if (!parts.some((part) => part.text === text)) {
+                systemReminders.push({ text });
+              }
+            }
             if (workflowIntent) {
               logWorkflowKeyword(this.config, new WorkflowKeywordEvent());
             }

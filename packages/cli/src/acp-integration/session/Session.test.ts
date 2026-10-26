@@ -1718,7 +1718,7 @@ describe('Session', () => {
           })
           .mockResolvedValue({ success: true, output: {} }),
       };
-      mockConfig.getMessageBus = vi.fn(() => messageBus);
+      mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
       mockConfig.getDisableAllHooks = vi.fn(() => false);
       mockConfig.hasHooksForEvent = vi.fn(
         (event) => event === 'UserPromptSubmit',
