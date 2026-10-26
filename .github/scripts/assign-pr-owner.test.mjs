@@ -15,7 +15,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { afterEach, describe, it } from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parse } from 'yaml';
 
 import { loadPolicy } from './assign-issue-owner.mjs';
@@ -290,7 +290,15 @@ function runAssign(dryRun, options = {}) {
   const log = join(dir, 'gh.log');
   const gh = join(dir, 'gh');
   const randomPreload = join(dir, 'random.mjs');
-  writeFileSync(randomPreload, `Math.random = () => ${randomValue};\n`);
+  writeFileSync(
+    randomPreload,
+    `let draws = 0;
+Math.random = () => {
+  if (++draws > 1) throw new Error('second Math.random draw');
+  return ${randomValue};
+};
+`,
+  );
   writeFileSync(
     gh,
     `#!/bin/sh
@@ -357,7 +365,7 @@ esac
   chmodSync(gh, 0o755);
   const result = spawnSync(
     process.execPath,
-    ['--import', randomPreload, script],
+    ['--import', pathToFileURL(randomPreload).href, script],
     {
       cwd: repoRoot,
       encoding: 'utf8',
@@ -452,6 +460,10 @@ describe('assign-pr-owner: apply boundary', () => {
       stdout,
       /skipped — GitHub did not accept @DennisYu07 as an assignee/,
     );
+    assert.match(stdout, /Selection: draw 0\.5; loads /);
+    assert.match(stdout, /DennisYu07:0/);
+    assert.match(stdout, /ZijianZhang989:5/);
+    assert.match(stdout, /; unavailable: none/);
     assert.match(stderr, /::warning::GitHub did not add @DennisYu07/);
   });
 

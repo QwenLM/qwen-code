@@ -76,7 +76,7 @@ export function matchAreaByPath(policy, files) {
   return matchedAreasByPath(policy, files)[0] ?? null;
 }
 
-export function pickPrOwner(owners, loadByOwner, randomValue = Math.random()) {
+export function pickPrOwner(owners, loadByOwner, randomValue) {
   const weights = owners.map((owner) => 1 / (loadByOwner.get(owner) + 1));
   const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
   let remaining = randomValue * totalWeight;
@@ -339,6 +339,7 @@ function main() {
     record([
       `Area: ${area.name}`,
       `Assignment: skipped — GitHub did not accept @${assignee} as an assignee`,
+      selectionSummary,
     ]);
     return;
   }
