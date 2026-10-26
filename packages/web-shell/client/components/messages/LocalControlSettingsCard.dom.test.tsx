@@ -484,6 +484,104 @@ describe('LocalControlSettingsCard', () => {
     expect(enableBodies[2]).not.toHaveProperty('address');
   });
 
+  it('keeps a refused grant from becoming a named fallback when a second candidate appears (#14140)', async () => {
+    // The refusal recovered onto the lone fallback while the grant still
+    // stood. A second candidate then makes an address-less enable ambiguous —
+    // but naming the fallback would revoke the grant for the daemon's
+    // lifetime. The grant is the one address the daemon keeps, so the card
+    // must name it and let the daemon refuse it if the host still lacks it.
+    const enableBodies: Array<Record<string, unknown>> = [];
+    const fallback = { interfaceName: 'en0', address: '192.168.1.10' };
+    const twoCandidates = [
+      fallback,
+      { interfaceName: 'en1', address: '192.168.1.20' },
+    ];
+    let refuse = true;
+    let disables = 0;
+    vi.mocked(fetch).mockImplementation(async (input, init) => {
+      const url = String(input);
+      if ((init?.method ?? 'GET') === 'GET') {
+        return localControlResponse({
+          active: true,
+          address: '10.8.0.2',
+          interfaceName: 'utun4',
+          interfaces: [fallback],
+          grantedAddress: '10.8.0.2',
+        });
+      }
+      if (url.includes('/workspace/local-control/disable')) {
+        disables += 1;
+        return localControlResponse({
+          active: false,
+          interfaces: disables === 1 ? [fallback] : twoCandidates,
+          grantedAddress: '10.8.0.2',
+        });
+      }
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      enableBodies.push(body);
+      if (refuse) {
+        return localControlResponse(
+          {
+            error:
+              '10.8.0.2 is not an IPv4 address this host can expose right now.',
+            code: 'unknown_lan_interface',
+            interfaces: disables === 1 ? [fallback] : twoCandidates,
+          },
+          false,
+          409,
+        );
+      }
+      return localControlResponse({
+        active: true,
+        address: '192.168.1.10',
+        interfaceName: 'en0',
+        interfaces: [fallback],
+        grantedAddress: '10.8.0.2',
+      });
+    });
+
+    const container = mount();
+    await flush();
+
+    act(() => {
+      buttonWithText(container, 'Disconnect phone access').click();
+    });
+    await flush();
+
+    act(() => {
+      buttonWithText(container, 'Turn on Local Control').click();
+    });
+    await flush();
+    expect(enableBodies).toHaveLength(1);
+    expect(enableBodies[0]).toMatchObject({ address: '10.8.0.2' });
+
+    // The refusal drops the grant pick and the address-less retry binds the
+    // fallback without superseding the grant.
+    refuse = false;
+    act(() => {
+      buttonWithText(container, 'Turn on Local Control').click();
+    });
+    await flush();
+    expect(enableBodies).toHaveLength(2);
+    expect(enableBodies[1]).not.toHaveProperty('address');
+
+    // A second candidate shows up, so address-less is now ambiguous. Naming
+    // the fallback would revoke the grant; the card names the grant instead
+    // and the daemon refuses it as still-unbindable.
+    refuse = true;
+    act(() => {
+      buttonWithText(container, 'Disconnect phone access').click();
+    });
+    await flush();
+
+    act(() => {
+      buttonWithText(container, 'Turn on Local Control').click();
+    });
+    await flush();
+    expect(enableBodies).toHaveLength(3);
+    expect(enableBodies[2]).toMatchObject({ address: '10.8.0.2' });
+  });
+
   it('does not name the auto-picked fallback on a cold mount while a grant stands (#14140)', async () => {
     // The daemon rebound to a fallback after losing the granted address; a
     // card mounted now sees only the fallback as a candidate. Disable→Enable
@@ -535,6 +633,72 @@ describe('LocalControlSettingsCard', () => {
 
     expect(enableBodies).toHaveLength(1);
     expect(enableBodies[0]).not.toHaveProperty('address');
+  });
+
+  it('keeps a granted address from becoming a named fallback on a cold mount with two candidates (#14140)', async () => {
+    // Same state as above, but two candidates make an address-less enable
+    // ambiguous. The card must name the standing grant — naming the
+    // auto-picked fallback would revoke it, and an address-less enable would
+    // loop on ambiguity 409s. The host still lacks the grant, so the daemon
+    // refuses it and the card recovers to an explicit pick.
+    const enableBodies: Array<Record<string, unknown>> = [];
+    const candidates = [
+      { interfaceName: 'en0', address: '192.168.1.10' },
+      { interfaceName: 'en1', address: '192.168.1.20' },
+    ];
+    vi.mocked(fetch).mockImplementation(async (input, init) => {
+      const url = String(input);
+      if ((init?.method ?? 'GET') === 'GET') {
+        return localControlResponse({
+          active: true,
+          address: '192.168.1.10',
+          interfaceName: 'en0',
+          interfaces: candidates,
+          grantedAddress: '10.8.0.2',
+        });
+      }
+      if (url.includes('/workspace/local-control/disable')) {
+        return localControlResponse({
+          active: false,
+          interfaces: candidates,
+          grantedAddress: '10.8.0.2',
+        });
+      }
+      enableBodies.push(
+        JSON.parse(String(init?.body)) as Record<string, unknown>,
+      );
+      return localControlResponse(
+        {
+          error:
+            '10.8.0.2 is not an IPv4 address this host can expose right now.',
+          code: 'unknown_lan_interface',
+          interfaces: candidates,
+        },
+        false,
+        409,
+      );
+    });
+
+    const container = mount();
+    await flush();
+
+    act(() => {
+      buttonWithText(container, 'Disconnect phone access').click();
+    });
+    await flush();
+
+    act(() => {
+      buttonWithText(container, 'Turn on Local Control').click();
+    });
+    await flush();
+
+    expect(enableBodies).toHaveLength(1);
+    expect(enableBodies[0]).toMatchObject({ address: '10.8.0.2' });
+    // The refusal recovers to a visible pick instead of wedging the card on
+    // an address-less enable into two candidates.
+    expect(buttonWithText(container, 'Turn on Local Control').disabled).toBe(
+      true,
+    );
   });
 
   it('promotes the displayed auto-fill when a 409 makes the choice ambiguous (#14140)', async () => {

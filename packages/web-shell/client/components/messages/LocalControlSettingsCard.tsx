@@ -94,7 +94,15 @@ function reconcileSelection(
   }
   if (
     current.selected &&
-    interfaces.some((c) => c.address === current.selected)
+    interfaces.some((c) => c.address === current.selected) &&
+    // With 2+ candidates an address-less enable is ambiguous, but naming the
+    // auto-filled fallback would revoke the standing grant. Hand the choice
+    // back to the retained grant below instead (#14140).
+    !(
+      interfaces.length > 1 &&
+      retained?.granted &&
+      retained.candidate.address !== current.selected
+    )
   ) {
     // A second row makes an address-less enable ambiguous, so the displayed
     // auto-fill must be posted by name — clicking the row already shown
