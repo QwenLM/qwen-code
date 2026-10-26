@@ -6730,6 +6730,51 @@ describe('runQwenServe deployment profiles', () => {
     }
   });
 
+  it.each([false, true])(
+    'scopes local session recovery to ordinary profiles (Hosted: %s)',
+    async (hosted) => {
+      const workspace = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qws-hosted-local-state-')),
+      );
+      const chats = vi.spyOn(
+        qwenCore.SessionService.prototype,
+        'getWorktreeSessionPath',
+      );
+      let handle: RunHandle | undefined;
+      try {
+        handle = await runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace,
+            serveWebShell: false,
+            ...(hosted
+              ? {
+                  profile: 'hosted-harness' as const,
+                  token: 'hosted-secret',
+                  hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+                  managedRuntimeBrokerUrl: 'https://broker.internal',
+                  managedRuntimeBrokerToken: 'broker-secret',
+                }
+              : {}),
+          },
+          {
+            bridge: makeRuntimeBridge(),
+            trustedWorkspace: true,
+            daemonLogBaseDir: path.join(workspace, 'debug'),
+          },
+        );
+        if (hosted) expect(chats).not.toHaveBeenCalled();
+        else expect(chats).toHaveBeenCalled();
+      } finally {
+        await handle?.close();
+        chats.mockRestore();
+        fs.rmSync(workspace, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('hands the update restarter the Broker pair the Hosted Harness resolved', async () => {
     const workspace = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-hosted-restart-')),
