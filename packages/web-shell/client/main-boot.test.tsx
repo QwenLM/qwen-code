@@ -17,6 +17,7 @@ import { createJavaManagedAgentProvider } from './components/managed/java-manage
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 const testState = vi.hoisted(() => ({
+  bootEvents: [] as string[],
   containers: [] as Array<Element | null>,
   rendered: [] as Array<ReactNode>,
   resolveToken: undefined as ((token: string) => void) | undefined,
@@ -32,6 +33,7 @@ vi.mock('react-dom/client', async (importOriginal) => ({
       return {
         render: vi.fn((element: ReactNode) => {
           testState.rendered.push(element);
+          testState.bootEvents.push('render');
         }),
       };
     },
@@ -59,9 +61,26 @@ vi.mock('./config/daemon', () => ({
       testState.resolveToken = resolve;
     }),
 }));
+vi.mock('./config/shell-state', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./config/shell-state')>();
+  return {
+    ...actual,
+    hydrateShellState: vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          testState.bootEvents.push('hydrate-start');
+          setTimeout(() => {
+            testState.bootEvents.push('hydrate-end');
+            resolve();
+          }, 10);
+        }),
+    ),
+  };
+});
 
 describe('web shell boot', () => {
   beforeEach(() => {
+    testState.bootEvents = [];
     testState.containers = [];
     testState.rendered = [];
     testState.resolveToken = undefined;
@@ -78,6 +97,20 @@ describe('web shell boot', () => {
     document.querySelector('meta[name="qwen-managed-app"]')?.remove();
     window.history.replaceState(null, '', '/');
     vi.unstubAllGlobals();
+  });
+
+  it('hydrates shell state before the first render', async () => {
+    testState.storedToken = 'boot-token';
+    document.body.innerHTML = '<div id="root"></div>';
+    await import('./main');
+
+    await vi.waitFor(() =>
+      expect(testState.bootEvents).toEqual([
+        'hydrate-start',
+        'hydrate-end',
+        'render',
+      ]),
+    );
   });
 
   it('keeps the native HTML update message on unsupported browsers', async () => {
@@ -261,6 +294,7 @@ describe('web shell boot', () => {
     // on screen when the token finally arrives.
     expect(root.querySelector('[data-boot-fallback]')).not.toBeNull();
 
+    await vi.waitFor(() => expect(testState.resolveToken).toBeDefined());
     testState.resolveToken?.('token');
     await vi.waitFor(() => expect(testState.containers).toHaveLength(1));
 
@@ -274,6 +308,7 @@ describe('web shell boot', () => {
     const root = document.getElementById('root') as HTMLElement;
 
     await import('./main');
+    await vi.waitFor(() => expect(testState.resolveToken).toBeDefined());
     testState.resolveToken?.('token');
     await vi.waitFor(() => expect(testState.containers).toHaveLength(1));
 
