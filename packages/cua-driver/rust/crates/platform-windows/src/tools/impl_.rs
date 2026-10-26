@@ -160,6 +160,81 @@ fn minimized_element_refusal(
     })
 }
 
+fn supported_click_pattern<T>(
+    result: windows::core::Result<T>,
+) -> Result<Option<T>, ClickDispatchError> {
+    match result {
+        Ok(pattern) => Ok(Some(pattern)),
+        Err(error)
+            if error.code().is_ok()
+                || error.code() == windows::Win32::Foundation::E_NOINTERFACE
+                || error.code().0 as u32
+                    == windows::Win32::UI::Accessibility::UIA_E_NOTSUPPORTED =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(ClickDispatchError::Refusal(
+            ToolResult::error(format!("UIA pattern lookup failed before input: {error}"))
+                .with_structured(json!({ "code": "uia_pattern_unavailable", "sent": false })),
+        )),
+    }
+}
+
+fn uia_click_ack(
+    result: windows::core::Result<()>,
+    action: &str,
+    index: usize,
+    x: i32,
+    y: i32,
+) -> String {
+    match result {
+        Ok(()) => format!("Performed UIA {action} on [{index}] (screen ({x},{y}))."),
+        Err(error) => format!("UIA {action} on [{index}] returned {error}; input may have been sent. Observe before another action; this request was not replayed."),
+    }
+}
+
+#[cfg(test)]
+mod pending_click_tests {
+    use super::{supported_click_pattern, uia_click_ack};
+    use windows::Win32::Foundation::{E_FAIL, E_NOINTERFACE};
+
+    #[test]
+    fn only_unsupported_pattern_lookup_allows_another_actuator() {
+        assert!(matches!(supported_click_pattern(Ok(7)), Ok(Some(7))));
+        for code in [
+            windows::core::HRESULT(0),
+            E_NOINTERFACE,
+            windows::core::HRESULT(windows::Win32::UI::Accessibility::UIA_E_NOTSUPPORTED as i32),
+        ] {
+            assert!(matches!(
+                supported_click_pattern::<i32>(Err(windows::core::Error::from_hresult(code))),
+                Ok(None)
+            ));
+        }
+        let Err(super::ClickDispatchError::Refusal(result)) =
+            supported_click_pattern::<i32>(Err(windows::core::Error::from_hresult(E_FAIL)))
+        else {
+            panic!("lookup failure must refuse before dispatch")
+        };
+        assert_eq!(result.structured_content.unwrap()["sent"], false);
+    }
+
+    #[test]
+    fn native_error_after_possible_effect_is_unconfirmed_without_replay() {
+        let ack = uia_click_ack(
+            Err(windows::core::Error::from_hresult(E_FAIL)),
+            "Invoke",
+            7,
+            1,
+            2,
+        );
+        assert!(ack.contains("input may have been sent"));
+        assert!(ack.contains("not replayed"));
+        fn assert_send<T: Send>() {}
+        assert_send::<crate::input::NoActivateGuard>();
+    }
+}
+
 enum ClickDispatchError {
     Refusal(ToolResult),
     Failure(anyhow::Error),
@@ -3532,7 +3607,7 @@ impl Tool for ClickTool {
         // foreground — the window still receives the click. Held for the whole
         // invoke; a no-op for delivery_mode:"foreground" (which wants the swap) and
         // when no window_id was given.
-        let _noact = match (delivery != DeliveryMode::Foreground, hwnd_opt) {
+        let mut _noact = match (delivery != DeliveryMode::Foreground, hwnd_opt) {
             (true, Some(h)) => Some(crate::input::NoActivateGuard::arm(
                 windows::Win32::Foundation::HWND(h as *mut _),
             )),
@@ -3670,6 +3745,7 @@ impl Tool for ClickTool {
                 };
             }
 
+            tracing::debug!(target: "click", pid, hwnd, idx, "dispatching indexed click");
             // UIA path: get cached center (no COM call needed — captured at walk time).
             let (cx, cy) = match element_cache.get_element_center(pid, hwnd, idx) {
                 Some(v) => v,
@@ -3865,19 +3941,34 @@ impl Tool for ClickTool {
             //   - count > 1 (double-click semantics aren't an Invoke
             //     concept — PostMessage produces the actual WM_LBUTTONDBLCLK)
             let use_uia_invoke = (btn == "left" || btn == "middle") && count == 1;
-            let result = tokio::task::spawn_blocking(move || -> Result<String, ClickDispatchError> {
-                // Direct Chromium UIA Invoke can return S_OK without firing a
-                // DOM event while occluded. Try the honest coordinate actuator
-                // first: it lands while visible and reports occlusion without
-                // raising the window when hidden.
-                if delivery == DeliveryMode::Background
-                    && crate::input::is_chromium_target_window(hwnd)
-                {
-                    let (cx, cy) = resolve_onscreen_point_with_scroll(
-                        &element_cache, pid, hwnd, idx, cx, cy, "clicking",
-                    )
-                    .map_err(ClickDispatchError::Refusal)?;
-                    return crate::input::inject_click_screen(hwnd, cx, cy, count, &btn)
+            let observe_pending = use_uia_invoke && !crate::uia_worker::is_worker_process();
+            let native_lifetime = cua_driver_core::tool::retain_dispatch_lifetime();
+            let no_activate = if observe_pending { _noact.take() } else { None };
+            let pending_windows = crate::win32::PendingActionWindows::new(hwnd, pid);
+            let invocation_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let invocation_started_in_worker = invocation_started.clone();
+            let mut dispatch = tokio::task::spawn_blocking(
+                move || -> Result<String, ClickDispatchError> {
+                    let _native_lifetime = native_lifetime;
+                    let _no_activate = no_activate;
+                    // Direct Chromium UIA Invoke can return S_OK without firing a
+                    // DOM event while occluded. Try the honest coordinate actuator
+                    // first: it lands while visible and reports occlusion without
+                    // raising the window when hidden.
+                    if delivery == DeliveryMode::Background
+                        && crate::input::is_chromium_target_window(hwnd)
+                    {
+                        let (cx, cy) = resolve_onscreen_point_with_scroll(
+                            &element_cache,
+                            pid,
+                            hwnd,
+                            idx,
+                            cx,
+                            cy,
+                            "clicking",
+                        )
+                        .map_err(ClickDispatchError::Refusal)?;
+                        return crate::input::inject_click_screen(hwnd, cx, cy, count, &btn)
                         .map(|()| format!(
                             "✅ Injected click on [{idx}] (screen ({cx},{cy}), background, no foreground swap)."
                         ))
@@ -3886,115 +3977,135 @@ impl Tool for ClickTool {
                                 "__CUA_BG_UNAVAILABLE_CLICK__{error}"
                             ))
                         });
-                }
-                if use_uia_invoke {
-                    // Retain the element out of the cache (AddRef under the
-                    // cache lock) so it can't be freed by a concurrent
-                    // get_window_state on the same (pid, hwnd) while this click
-                    // is mid-flight (use-after-free → daemon crash). The guard
-                    // lives to the end of this `if let` block, past every UIA
-                    // pattern dispatch below; its Release fires when it drops.
-                    if let Some(element_guard) = element_cache.get_element_retained(pid, hwnd, idx) {
-                        let ptr = element_guard.as_ptr();
-                        use windows::Win32::UI::Accessibility::{
-                            IUIAutomationElement, IUIAutomationInvokePattern,
-                            IUIAutomationTogglePattern, IUIAutomationSelectionItemPattern,
-                            IUIAutomationExpandCollapsePattern,
-                            UIA_InvokePatternId, UIA_TogglePatternId,
-                            UIA_SelectionItemPatternId, UIA_ExpandCollapsePatternId,
-                        };
-                        use windows::core::Interface;
-                        let elem: IUIAutomationElement =
-                            unsafe { IUIAutomationElement::from_raw(ptr as *mut _) };
-
-                        // Try patterns in order of click-semantics specificity:
-                        //   1. Invoke      - buttons / hyperlinks (canonical)
-                        //   2. Toggle      - checkboxes (no Invoke)
-                        //   3. SelectionItem - radio buttons, listbox items
-                        //   4. ExpandCollapse - combo boxes, tree nodes
-                        // Each call is wrapped in the UWP foreground-steal bypass.
-                        //
-                        // Why this order: PR #1699's WinUI3 control parity tests
-                        // surfaced these pattern-dispatch gaps. Without these
-                        // fallthroughs, cua-driver couldn't drive WinUI3
-                        // CheckBox / RadioButton / ComboBox because PostMessage
-                        // doesn't reach their handlers (CoreInput dispatcher).
-                        let invoke_result = unsafe { elem.GetCurrentPattern(UIA_InvokePatternId) };
-                        if let Ok(pattern) = invoke_result {
-                            if let Ok(inv) = pattern.cast::<IUIAutomationInvokePattern>() {
-                                let outcome = crate::uia::fg_bypass::run_with_uwp_bypass(
-                                    hwnd as isize, || unsafe { inv.Invoke() });
-                                match outcome {
-                                    Ok(()) => {
-                                        std::mem::forget(elem);
-                                        return Ok(format!(
-                                            "✅ Performed UIA Invoke on [{idx}] (screen ({cx},{cy}))."
-                                        ));
-                                    }
-                                    Err(e) => tracing::debug!(target: "click",
-                                        "UIA Invoke on [{idx}]: {e}, trying Toggle"),
-                                }
-                            }
-                        }
-                        let toggle_result = unsafe { elem.GetCurrentPattern(UIA_TogglePatternId) };
-                        if let Ok(pattern) = toggle_result {
-                            if let Ok(tg) = pattern.cast::<IUIAutomationTogglePattern>() {
-                                let outcome = crate::uia::fg_bypass::run_with_uwp_bypass(
-                                    hwnd as isize, || unsafe { tg.Toggle() });
-                                if outcome.is_ok() {
-                                    std::mem::forget(elem);
-                                    return Ok(format!(
-                                        "✅ Performed UIA Toggle on [{idx}] (screen ({cx},{cy}))."
-                                    ));
-                                }
-                            }
-                        }
-                        let sel_result = unsafe { elem.GetCurrentPattern(UIA_SelectionItemPatternId) };
-                        if let Ok(pattern) = sel_result {
-                            if let Ok(si) = pattern.cast::<IUIAutomationSelectionItemPattern>() {
-                                let outcome = crate::uia::fg_bypass::run_with_uwp_bypass(
-                                    hwnd as isize, || unsafe { si.Select() });
-                                if outcome.is_ok() {
-                                    std::mem::forget(elem);
-                                    return Ok(format!(
-                                        "✅ Performed UIA SelectionItem.Select on [{idx}] (screen ({cx},{cy}))."
-                                    ));
-                                }
-                            }
-                        }
-                        let exp_result = unsafe { elem.GetCurrentPattern(UIA_ExpandCollapsePatternId) };
-                        if let Ok(pattern) = exp_result {
-                            if let Ok(ec) = pattern.cast::<IUIAutomationExpandCollapsePattern>() {
-                                let outcome = crate::uia::fg_bypass::run_with_uwp_bypass(
-                                    hwnd as isize, || unsafe { ec.Expand() });
-                                if outcome.is_ok() {
-                                    std::mem::forget(elem);
-                                    return Ok(format!(
-                                        "✅ Performed UIA ExpandCollapse.Expand on [{idx}] (screen ({cx},{cy}))."
-                                    ));
-                                }
-                            }
-                        }
-                        std::mem::forget(elem);
                     }
-                }
-                if delivery == DeliveryMode::Background
-                    && crate::input::delivery::would_be_silently_dropped(
-                        hwnd,
-                        EventKind::MouseClick,
-                    )
-                {
-                    let (cx, cy) = resolve_onscreen_point_with_scroll(
-                        &element_cache,
-                        pid,
-                        hwnd,
-                        idx,
-                        cx,
-                        cy,
-                        "clicking",
-                    )
-                    .map_err(ClickDispatchError::Refusal)?;
-                    return crate::input::inject_click_screen(hwnd, cx, cy, count, &btn)
+                    if use_uia_invoke {
+                        // Retain the element out of the cache (AddRef under the
+                        // cache lock) so it can't be freed by a concurrent
+                        // get_window_state on the same (pid, hwnd) while this click
+                        // is mid-flight (use-after-free → daemon crash). The guard
+                        // lives to the end of this `if let` block, past every UIA
+                        // pattern dispatch below; its Release fires when it drops.
+                        if let Some(element_guard) =
+                            element_cache.get_element_retained(pid, hwnd, idx)
+                        {
+                            let ptr = element_guard.as_ptr();
+                            use windows::core::Interface;
+                            use windows::Win32::UI::Accessibility::{
+                                IUIAutomationElement, IUIAutomationExpandCollapsePattern,
+                                IUIAutomationInvokePattern, IUIAutomationSelectionItemPattern,
+                                IUIAutomationTogglePattern, UIA_ExpandCollapsePatternId,
+                                UIA_InvokePatternId, UIA_SelectionItemPatternId,
+                                UIA_TogglePatternId,
+                            };
+                            let elem = std::mem::ManuallyDrop::new(unsafe {
+                                IUIAutomationElement::from_raw(ptr as *mut _)
+                            });
+
+                            // Try patterns in order of click-semantics specificity:
+                            //   1. Invoke      - buttons / hyperlinks (canonical)
+                            //   2. Toggle      - checkboxes (no Invoke)
+                            //   3. SelectionItem - radio buttons, listbox items
+                            //   4. ExpandCollapse - combo boxes, tree nodes
+                            // Each call is wrapped in the UWP foreground-steal bypass.
+                            //
+                            // Why this order: PR #1699's WinUI3 control parity tests
+                            // surfaced these pattern-dispatch gaps. Without these
+                            // fallthroughs, cua-driver couldn't drive WinUI3
+                            // CheckBox / RadioButton / ComboBox because PostMessage
+                            // doesn't reach their handlers (CoreInput dispatcher).
+                            if let Some(inv) = supported_click_pattern(
+                                unsafe { elem.GetCurrentPattern(UIA_InvokePatternId) }.and_then(
+                                    |pattern| pattern.cast::<IUIAutomationInvokePattern>(),
+                                ),
+                            )? {
+                                let outcome = crate::uia::fg_bypass::run_with_uwp_bypass(
+                                    hwnd as isize,
+                                    || unsafe {
+                                        invocation_started_in_worker
+                                            .store(true, std::sync::atomic::Ordering::Release);
+                                        inv.Invoke()
+                                    },
+                                );
+                                return Ok(uia_click_ack(outcome, "Invoke", idx, cx, cy));
+                            }
+                            if let Some(tg) = supported_click_pattern(
+                                unsafe { elem.GetCurrentPattern(UIA_TogglePatternId) }.and_then(
+                                    |pattern| pattern.cast::<IUIAutomationTogglePattern>(),
+                                ),
+                            )? {
+                                let outcome = crate::uia::fg_bypass::run_with_uwp_bypass(
+                                    hwnd as isize,
+                                    || unsafe {
+                                        invocation_started_in_worker
+                                            .store(true, std::sync::atomic::Ordering::Release);
+                                        tg.Toggle()
+                                    },
+                                );
+                                return Ok(uia_click_ack(outcome, "Toggle", idx, cx, cy));
+                            }
+                            if let Some(si) = supported_click_pattern(
+                                unsafe { elem.GetCurrentPattern(UIA_SelectionItemPatternId) }
+                                    .and_then(|pattern| {
+                                        pattern.cast::<IUIAutomationSelectionItemPattern>()
+                                    }),
+                            )? {
+                                let outcome = crate::uia::fg_bypass::run_with_uwp_bypass(
+                                    hwnd as isize,
+                                    || unsafe {
+                                        invocation_started_in_worker
+                                            .store(true, std::sync::atomic::Ordering::Release);
+                                        si.Select()
+                                    },
+                                );
+                                return Ok(uia_click_ack(
+                                    outcome,
+                                    "SelectionItem.Select",
+                                    idx,
+                                    cx,
+                                    cy,
+                                ));
+                            }
+                            if let Some(ec) = supported_click_pattern(
+                                unsafe { elem.GetCurrentPattern(UIA_ExpandCollapsePatternId) }
+                                    .and_then(|pattern| {
+                                        pattern.cast::<IUIAutomationExpandCollapsePattern>()
+                                    }),
+                            )? {
+                                let outcome = crate::uia::fg_bypass::run_with_uwp_bypass(
+                                    hwnd as isize,
+                                    || unsafe {
+                                        invocation_started_in_worker
+                                            .store(true, std::sync::atomic::Ordering::Release);
+                                        ec.Expand()
+                                    },
+                                );
+                                return Ok(uia_click_ack(
+                                    outcome,
+                                    "ExpandCollapse.Expand",
+                                    idx,
+                                    cx,
+                                    cy,
+                                ));
+                            }
+                        }
+                    }
+                    if delivery == DeliveryMode::Background
+                        && crate::input::delivery::would_be_silently_dropped(
+                            hwnd,
+                            EventKind::MouseClick,
+                        )
+                    {
+                        let (cx, cy) = resolve_onscreen_point_with_scroll(
+                            &element_cache,
+                            pid,
+                            hwnd,
+                            idx,
+                            cx,
+                            cy,
+                            "clicking",
+                        )
+                        .map_err(ClickDispatchError::Refusal)?;
+                        return crate::input::inject_click_screen(hwnd, cx, cy, count, &btn)
                         .map(|()| {
                             format!(
                                 "✅ Injected click on [{idx}] (screen ({cx},{cy}), background, no foreground swap)."
@@ -4005,14 +4116,48 @@ impl Tool for ClickTool {
                                 "__CUA_BG_UNAVAILABLE_CLICK__{error}"
                             ))
                         });
+                    }
+                    crate::input::post_click_screen(hwnd, cx, cy, count, &btn)?;
+                    let action_name = match btn.as_str() {
+                        "right" => "ShowMenu",
+                        _ => "PostMessage click",
+                    };
+                    Ok(format!(
+                        "✅ Performed {action_name} on [{idx}] (screen ({cx},{cy}))."
+                    ))
+                },
+            );
+            let result = loop {
+                tokio::select! {
+                    result = &mut dispatch => break result,
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(20)), if observe_pending => {
+                        if !invocation_started.load(std::sync::atomic::Ordering::Acquire) {
+                            continue;
+                        }
+                        if let Some(change) = pending_windows.change() {
+                            let detail = match change {
+                                crate::win32::PendingActionChange::Owned(surface) => format!(
+                                    "a new owned surface HWND 0x{:x}", surface.hwnd
+                                ),
+                                crate::win32::PendingActionChange::Unowned(surface) => format!(
+                                    "a disabled target and new same-process surface HWND 0x{:x}", surface.hwnd
+                                ),
+                                crate::win32::PendingActionChange::TargetUnavailable =>
+                                    "the original target window no longer available".into(),
+                            };
+                            // A synchronous UIA Invoke may wait until its modal closes.
+                            return ToolResult::text(format!(
+                                "Click is pending with {detail}; observe before another action."
+                            ))
+                            .with_structured(json!({
+                                "path": "ax",
+                                "verified": false,
+                                "effect": "unverifiable"
+                            }));
+                        }
+                    }
                 }
-                crate::input::post_click_screen(hwnd, cx, cy, count, &btn)?;
-                let action_name = match btn.as_str() {
-                    "right"  => "ShowMenu",
-                    _        => "PostMessage click",
-                };
-                Ok(format!("✅ Performed {action_name} on [{idx}] (screen ({cx},{cy}))."))
-            }).await;
+            };
             match result {
                 // UIA Invoke/Toggle/SelectionItem (or the PostMessage/injection
                 // fallback) dispatched, but none of these is driver-verifiable —
@@ -6097,14 +6242,22 @@ impl Tool for PerformSecondaryActionTool {
             }
             _ => unreachable!(),
         };
-        let owned_before = crate::win32::visible_owned_windows(hwnd, pid)
-            .into_iter()
-            .map(|window| window.hwnd)
-            .collect::<std::collections::HashSet<_>>();
-        let _no_activate =
-            crate::input::NoActivateGuard::arm(windows::Win32::Foundation::HWND(hwnd as *mut _));
+        let pending_windows = crate::win32::PendingActionWindows::new(hwnd, pid);
+        let mut no_activate = Some(crate::input::NoActivateGuard::arm(
+            windows::Win32::Foundation::HWND(hwnd as *mut _),
+        ));
+        let native_lifetime = cua_driver_core::tool::retain_dispatch_lifetime();
+        let native_no_activate = if !crate::uia_worker::is_worker_process() {
+            no_activate.take()
+        } else {
+            None
+        };
         let action_for_dispatch = action.clone();
+        let invocation_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let invocation_started_in_worker = invocation_started.clone();
         let mut dispatch = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+            let _native_lifetime = native_lifetime;
+            let _no_activate = native_no_activate;
             use windows::core::{Interface, VARIANT};
             use windows::Win32::UI::Accessibility::{
                 IAccessible, IUIAutomationElement, IUIAutomationExpandCollapsePattern,
@@ -6119,6 +6272,7 @@ impl Tool for PerformSecondaryActionTool {
             match kind {
                 SnapshotKind::Msaa => {
                     let accessible = unsafe { IAccessible::from_raw(retained.as_ptr() as *mut _) };
+                    invocation_started_in_worker.store(true, std::sync::atomic::Ordering::Release);
                     let result = unsafe { accessible.accDoDefaultAction(&VARIANT::from(0i32)) };
                     std::mem::forget(accessible);
                     result
@@ -6138,22 +6292,38 @@ impl Tool for PerformSecondaryActionTool {
                     let result =
                         crate::uia::fg_bypass::run_with_uwp_bypass(hwnd as isize, || unsafe {
                             match action_for_dispatch.as_str() {
-                                "invoke" => element
-                                    .GetCurrentPattern(UIA_InvokePatternId)?
-                                    .cast::<IUIAutomationInvokePattern>()?
-                                    .Invoke(),
-                                "toggle" => element
-                                    .GetCurrentPattern(UIA_TogglePatternId)?
-                                    .cast::<IUIAutomationTogglePattern>()?
-                                    .Toggle(),
-                                "select" => element
-                                    .GetCurrentPattern(UIA_SelectionItemPatternId)?
-                                    .cast::<IUIAutomationSelectionItemPattern>()?
-                                    .Select(),
-                                "expand" => element
-                                    .GetCurrentPattern(UIA_ExpandCollapsePatternId)?
-                                    .cast::<IUIAutomationExpandCollapsePattern>()?
-                                    .Expand(),
+                                "invoke" => {
+                                    let pattern = element
+                                        .GetCurrentPattern(UIA_InvokePatternId)?
+                                        .cast::<IUIAutomationInvokePattern>()?;
+                                    invocation_started_in_worker
+                                        .store(true, std::sync::atomic::Ordering::Release);
+                                    pattern.Invoke()
+                                }
+                                "toggle" => {
+                                    let pattern = element
+                                        .GetCurrentPattern(UIA_TogglePatternId)?
+                                        .cast::<IUIAutomationTogglePattern>()?;
+                                    invocation_started_in_worker
+                                        .store(true, std::sync::atomic::Ordering::Release);
+                                    pattern.Toggle()
+                                }
+                                "select" => {
+                                    let pattern = element
+                                        .GetCurrentPattern(UIA_SelectionItemPatternId)?
+                                        .cast::<IUIAutomationSelectionItemPattern>()?;
+                                    invocation_started_in_worker
+                                        .store(true, std::sync::atomic::Ordering::Release);
+                                    pattern.Select()
+                                }
+                                "expand" => {
+                                    let pattern = element
+                                        .GetCurrentPattern(UIA_ExpandCollapsePatternId)?
+                                        .cast::<IUIAutomationExpandCollapsePattern>()?;
+                                    invocation_started_in_worker
+                                        .store(true, std::sync::atomic::Ordering::Release);
+                                    pattern.Expand()
+                                }
                                 _ => unreachable!(),
                             }
                         });
@@ -6168,7 +6338,7 @@ impl Tool for PerformSecondaryActionTool {
 
         enum DispatchOutcome {
             Returned(Result<String, String>),
-            OpenedOwnedSurface(crate::win32::WindowInfo),
+            Pending(crate::win32::PendingActionChange),
         }
         let dispatch = loop {
             tokio::select! {
@@ -6179,11 +6349,10 @@ impl Tool for PerformSecondaryActionTool {
                     });
                 }
                 _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {
-                    if let Some(surface) = crate::win32::visible_owned_windows(hwnd, pid)
-                        .into_iter()
-                        .find(|window| !owned_before.contains(&window.hwnd))
-                    {
-                        break DispatchOutcome::OpenedOwnedSurface(surface);
+                    if invocation_started.load(std::sync::atomic::Ordering::Acquire) {
+                        if let Some(change) = pending_windows.change() {
+                            break DispatchOutcome::Pending(change);
+                        }
                     }
                 }
             }
@@ -6213,32 +6382,49 @@ impl Tool for PerformSecondaryActionTool {
                 .build()
                 .expect("secondary Windows accessibility action record is valid"),
             ),
-            DispatchOutcome::OpenedOwnedSurface(surface) => ToolResult::text(format!(
-                "Performed secondary action '{requested}'; it opened owned surface HWND 0x{:x}.",
-                surface.hwnd
-            ))
-            .with_structured(json!({
-                "effect": "confirmed",
-                "route": "accessibility",
-                "_uia_worker_restart_required": true
-            }))
-            .with_action_record(
-                cua_driver_core::action_record::ActionExecutionRecord::builder(
-                    cua_driver_core::action_record::ActionEffect::Confirmed,
-                    transport,
-                    cua_driver_core::action_record::RequestedDelivery::Background,
-                )
-                .actual_delivery(cua_driver_core::action_record::ActualDelivery::Background)
-                .evidence(cua_driver_core::action_record::ActionEvidence {
-                    kind: cua_driver_core::action_record::EvidenceKind::WindowChange,
-                    detail: format!(
-                        "the exact advertised action opened owned surface HWND 0x{:x}",
-                        surface.hwnd
+            DispatchOutcome::Pending(change) => {
+                let (confirmed, detail) = match change {
+                    crate::win32::PendingActionChange::Owned(surface) => (
+                        true,
+                        format!("opened owned surface HWND 0x{:x}", surface.hwnd),
                     ),
-                })
-                .build()
-                .expect("secondary action window-change record is valid"),
-            ),
+                    crate::win32::PendingActionChange::Unowned(surface) => (
+                        false,
+                        format!(
+                            "is pending with a disabled target and new same-process surface HWND 0x{:x}; observe before another action",
+                            surface.hwnd,
+                        ),
+                    ),
+                    crate::win32::PendingActionChange::TargetUnavailable => (
+                        false,
+                        "is pending with the original target window no longer available; observe before another action".into(),
+                    ),
+                };
+                ToolResult::text(format!("Secondary action '{requested}' {detail}."))
+                    .with_structured(json!({
+                        "effect": if confirmed { "confirmed" } else { "unverifiable" },
+                        "route": "accessibility",
+                        "_uia_worker_restart_required": true
+                    }))
+                    .with_action_record(
+                        cua_driver_core::action_record::ActionExecutionRecord::builder(
+                            if confirmed {
+                                cua_driver_core::action_record::ActionEffect::Confirmed
+                            } else {
+                                cua_driver_core::action_record::ActionEffect::Unverifiable
+                            },
+                            transport,
+                            cua_driver_core::action_record::RequestedDelivery::Background,
+                        )
+                        .actual_delivery(cua_driver_core::action_record::ActualDelivery::Background)
+                        .evidence(cua_driver_core::action_record::ActionEvidence {
+                            kind: cua_driver_core::action_record::EvidenceKind::WindowChange,
+                            detail,
+                        })
+                        .build()
+                        .expect("secondary action window-change record is valid"),
+                    )
+            },
             DispatchOutcome::Returned(Err(error)) => ToolResult::error(error)
                 .with_structured(json!({ "code": "secondary_action_unavailable" })),
         }

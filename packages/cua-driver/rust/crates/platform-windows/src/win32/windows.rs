@@ -163,6 +163,58 @@ pub(crate) fn visible_owned_windows(requested: u64, pid: u32) -> Vec<WindowInfo>
         .collect()
 }
 
+pub(crate) enum PendingActionChange {
+    Owned(WindowInfo),
+    Unowned(WindowInfo),
+    TargetUnavailable,
+}
+
+pub(crate) struct PendingActionWindows {
+    target: u64,
+    pid: u32,
+    before: HashSet<u64>,
+    allow_unowned: bool,
+}
+
+impl PendingActionWindows {
+    pub(crate) fn new(target: u64, pid: u32) -> Self {
+        use windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
+        Self {
+            target,
+            pid,
+            before: list_windows_via_win32(Some(pid))
+                .into_iter()
+                .map(|window| window.hwnd)
+                .collect(),
+            // These hosts are disabled by our foreground shield, not by a modal.
+            allow_unowned: unsafe { IsWindowEnabled(HWND(target as *mut _)) }.as_bool()
+                && !crate::input::is_xaml_host_hwnd(target)
+                && !crate::input::is_chromium_target_window(target),
+        }
+    }
+
+    pub(crate) fn change(&self) -> Option<PendingActionChange> {
+        use windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
+        if window_owner_pid(self.target) != Some(self.pid) {
+            return Some(PendingActionChange::TargetUnavailable);
+        }
+        let disabled = self.allow_unowned
+            && !unsafe { IsWindowEnabled(HWND(self.target as *mut _)) }.as_bool();
+        for window in list_windows_via_win32(Some(self.pid)) {
+            if window.hwnd == self.target || self.before.contains(&window.hwnd) {
+                continue;
+            }
+            if owner_chain_reaches_target(self.target, window.hwnd, window_owner_handle) {
+                return Some(PendingActionChange::Owned(window));
+            }
+            if disabled && window.is_on_screen && !window.minimized {
+                return Some(PendingActionChange::Unowned(window));
+            }
+        }
+        None
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct PostActionForegroundRelation {
     exact_match: bool,
@@ -444,6 +496,81 @@ mod exact_window_tests {
             is_on_screen: true,
             minimized: false,
         }
+    }
+
+    #[test]
+    #[ignore = "requires an isolated interactive Windows desktop"]
+    fn pending_actions_detect_ownerless_modals_and_closed_popups_without_changing_ownership() {
+        use super::{PendingActionChange, PendingActionWindows};
+        use windows::core::w;
+        use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WS_EX_NOACTIVATE, WS_OVERLAPPEDWINDOW,
+            WS_VISIBLE,
+        };
+        struct Window(windows::Win32::Foundation::HWND);
+        impl Drop for Window {
+            fn drop(&mut self) {
+                let _ = unsafe { DestroyWindow(self.0) };
+            }
+        }
+        let create = || {
+            Window(unsafe {
+                CreateWindowExW(
+                    WINDOW_EX_STYLE(WS_EX_NOACTIVATE.0),
+                    w!("STATIC"),
+                    w!("CUA pending test"),
+                    WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                    -30000,
+                    -30000,
+                    100,
+                    100,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap()
+            })
+        };
+        let target = create();
+        let target_hwnd = target.0 .0 as usize as u64;
+        let pid = std::process::id();
+        let existing = create();
+        let pending = PendingActionWindows::new(target_hwnd, pid);
+        let modal = create();
+        let modal_hwnd = modal.0 .0 as usize as u64;
+        assert!(
+            pending.change().is_none(),
+            "an enabled sibling is not a modal"
+        );
+        unsafe {
+            let _ = EnableWindow(target.0, false);
+        }
+        assert!(super::visible_owned_windows(target_hwnd, pid).is_empty());
+        assert!(
+            matches!(pending.change(), Some(PendingActionChange::Unowned(window)) if window.hwnd == modal_hwnd)
+        );
+        let already_disabled = PendingActionWindows::new(target_hwnd, pid);
+        let later = create();
+        assert!(
+            already_disabled.change().is_none(),
+            "preexisting disable is not modal evidence"
+        );
+        assert!(
+            matches!(pending.change(), Some(PendingActionChange::Unowned(window)) if window.hwnd != existing.0.0 as usize as u64)
+        );
+        drop(later);
+        drop(modal);
+        unsafe {
+            let _ = EnableWindow(target.0, true);
+        }
+        let closing_popup = PendingActionWindows::new(target_hwnd, pid);
+        drop(target);
+        assert!(matches!(
+            closing_popup.change(),
+            Some(PendingActionChange::TargetUnavailable)
+        ));
     }
 
     #[test]
