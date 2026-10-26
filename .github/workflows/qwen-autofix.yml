@@ -230,7 +230,7 @@ jobs:
           # parser below). Empty on every other path, which reads as "start
           # this window at round 0" — the pre-existing behaviour.
           TAKEOVER_FROM=''
-          # Window round budget carried by '<cmd> for N'; empty = takeover cap.
+          # Engagement round budget from '<cmd> for N'; empty = takeover cap.
           TAKEOVER_FOR=''
           CMD_PR=''
           RETRY_PR=''
