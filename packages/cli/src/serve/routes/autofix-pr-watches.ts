@@ -26,13 +26,24 @@ const execFileAsync = promisify(execFile);
 /** One `git worktree list`: a hang must not hold the page. */
 const GIT_TIMEOUT_MS = 10_000;
 
-/** A watch as the Web Shell sees it: `thisSession` names no daemon session. */
-export type AutofixPrWatchView = Omit<WatchStatus, 'thisSession'>;
+/**
+ * A watch as the Web Shell sees it: what `status` lists but `thisSession`
+ * (the daemon is no session), the worktree's path and what git alone tells
+ * (`gitTrusted`, `worktreeWork`), which the listing does not run git for.
+ */
+export type AutofixPrWatchView = Omit<
+  WatchStatus,
+  'thisSession' | 'worktreePath' | 'gitTrusted' | 'worktreeWork' | 'pushTarget'
+>;
 
 export interface AutofixPrWatchesView {
   v: 1;
-  /** False when the workspace is in no git repository: it holds no watch. */
+  /** False when no git repository is found for the workspace (or git
+   * cannot be run there): it holds no watch. */
   available: boolean;
+  /** The clone's main worktree: two workspaces of one clone list the same
+   * watches. */
+  root?: string;
   /** When the files were read, for comparing `lastCheck` with. */
   now?: string;
   watches: AutofixPrWatchView[];
@@ -68,21 +79,33 @@ export async function cloneRootOf(cwd: string): Promise<string | null> {
 }
 
 /**
- * What `qwen autofix-pr status --no-work` lists for the clone of `cwd`: read
- * from the files alone, so no lock is taken, GitHub is not asked and no git
- * command runs in a worktree (design Section 6.15).
+ * What `qwen autofix-pr status` lists for the clone of `cwd`, read from the
+ * files alone: no lock is taken, GitHub is not asked, and no git command
+ * runs but the one that finds the clone (design Section 6.15). The files
+ * are read without blocking, so one put in place of a watch's file cannot
+ * hold the daemon.
  */
 export async function listAutofixPrWatches(
   cwd: string,
 ): Promise<AutofixPrWatchesView> {
   const root = await cloneRootOf(cwd);
   if (root === null) return { v: 1, available: false, watches: [] };
-  const outcome = runStatus({ root, work: false, session: null });
+  const outcome = runStatus({ root, git: false, session: null });
   return {
     v: 1,
     available: true,
+    root,
     now: outcome.now,
-    watches: outcome.watches.map(({ thisSession: _none, ...watch }) => watch),
+    watches: outcome.watches.map(
+      ({
+        thisSession: _session,
+        worktreePath: _path,
+        gitTrusted: _trusted,
+        worktreeWork: _work,
+        pushTarget: _target,
+        ...watch
+      }) => watch,
+    ),
     ...(outcome.unreadable ? { unreadable: outcome.unreadable } : {}),
   };
 }
@@ -92,7 +115,7 @@ async function respond(res: Response, cwd: string): Promise<void> {
   try {
     res.status(200).json(await listAutofixPrWatches(cwd));
   } catch {
-    // The files' paths stay on the daemon.
+    // What went wrong stays in the daemon's own terms.
     res.status(500).json({
       error: 'Could not read the autofix-pr watches of this workspace',
       code: 'autofix_pr_watches_failed',

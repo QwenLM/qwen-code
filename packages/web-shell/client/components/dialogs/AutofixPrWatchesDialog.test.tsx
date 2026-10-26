@@ -90,6 +90,13 @@ async function mount(
       trusted: boolean;
       kind: 'ordinary';
     }>;
+    lockedWorkspace?: {
+      id: string;
+      cwd: string;
+      primary: boolean;
+      trusted: boolean;
+      kind: 'ordinary';
+    };
   } = {},
 ) {
   container = document.createElement('div');
@@ -102,6 +109,7 @@ async function mount(
           onRunPrompt={props.onRunPrompt ?? vi.fn()}
           onOpenSession={props.onOpenSession ?? vi.fn()}
           workspaces={props.workspaces as never}
+          lockedWorkspace={props.lockedWorkspace as never}
           onError={vi.fn()}
         />
       </I18nProvider>,
@@ -217,6 +225,74 @@ describe('AutofixPrWatchesDialog', () => {
     const text = container!.textContent ?? '';
     expect(text).toContain('o/r#12');
     expect(text).toContain('o/r#40');
+  });
+
+  it('reads a locked workspace by its own route only', async () => {
+    actions.listAutofixPrWatches.mockResolvedValue({
+      available: true,
+      watches: [],
+    });
+    actions.listScheduledTasks.mockResolvedValue([]);
+    const second = {
+      id: 'second',
+      cwd: '/w/second',
+      primary: false,
+      trusted: true,
+      kind: 'ordinary' as const,
+    };
+    await mount({ workspaces: [second], lockedWorkspace: second });
+    expect(actions.listAutofixPrWatches.mock.calls).toEqual([['second']]);
+    // Read again with every reload of the watches: the same workspace.
+    expect(
+      new Set(actions.listScheduledTasks.mock.calls.map((call) => call[0])),
+    ).toEqual(new Set(['second']));
+  });
+
+  it("lists a clone's watch once, its owner found in whichever workspace holds its task", async () => {
+    // Two checkouts of one clone, both registered: the same watches.
+    actions.listAutofixPrWatches.mockResolvedValue({
+      available: true,
+      root: '/w/main',
+      watches: [watch()],
+    });
+    actions.listScheduledTasks.mockImplementation(async (id?: string) =>
+      id === 'linked' ? [task()] : [],
+    );
+    await mount({
+      workspaces: [
+        {
+          id: 'main',
+          cwd: '/w/main',
+          primary: true,
+          trusted: true,
+          kind: 'ordinary',
+        },
+        {
+          id: 'linked',
+          cwd: '/w/linked',
+          primary: false,
+          trusted: true,
+          kind: 'ordinary',
+        },
+      ],
+    });
+    expect(
+      container!.querySelectorAll('[data-testid="autofix-pr-watch"]'),
+    ).toHaveLength(1);
+    expect(button('Stop watch')).toBeDefined();
+  });
+
+  it('sends a watch no gate checks to a session here, not to a terminal', async () => {
+    actions.listAutofixPrWatches.mockResolvedValue({
+      available: true,
+      watches: [watch({ checkedRecently: false })],
+    });
+    actions.listScheduledTasks.mockResolvedValue([]);
+    await mount();
+    const text = container!.textContent ?? '';
+    expect(text).toContain('Not checked recently');
+    expect(text).not.toContain('outside this Web Shell');
+    expect(text).toContain('/autofix-pr resume 12 starts it again');
   });
 
   it('shows an empty list, and the watches it could not read', async () => {

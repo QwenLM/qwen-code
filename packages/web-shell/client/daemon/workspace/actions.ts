@@ -910,6 +910,7 @@ export function createDaemonWorkspaceActions({
       const data = (await res.json()) as Partial<DaemonAutofixPrWatchList>;
       return {
         available: data.available === true,
+        ...(typeof data.root === 'string' ? { root: data.root } : {}),
         ...(typeof data.now === 'string' ? { now: data.now } : {}),
         watches: Array.isArray(data.watches) ? data.watches : [],
         ...(Array.isArray(data.unreadable)

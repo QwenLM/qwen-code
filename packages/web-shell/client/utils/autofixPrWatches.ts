@@ -32,8 +32,9 @@ export function parseAutofixPrTick(prompt: string): AutofixPrTick | null {
 
 /**
  * The watch a scheduled task drives, among the watches of its workspace's
- * clone. `stale` when the watch records another task: one an earlier
- * `schedule` replaced, which stops at its next fire.
+ * clone. `stale` as the task's gate judges it: the watch ended, records no
+ * task where the task has an id, or records another task — one a later
+ * `schedule` replaced. Such a task stops at its next fire.
  */
 export function watchOfTask(
   prompt: string,
@@ -51,10 +52,11 @@ export function watchOfTask(
   return {
     watch,
     stale:
-      watch.watch === null ||
-      (recorded !== undefined &&
-        tick.task !== undefined &&
-        recorded !== tick.task),
+      watch.ended !== null ||
+      (tick.task !== undefined && watch.watch === null) ||
+      // A task with no id predates task ids: once one is recorded, it is
+      // not the one recorded either.
+      (recorded !== undefined && recorded !== tick.task),
   };
 }
 

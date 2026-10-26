@@ -146,8 +146,12 @@ function modifiedAt(path: string): string | null {
 
 export function runStatus(args: {
   pr?: number;
-  /** false skips `worktreeWork` (null), the one part that runs git. */
+  /** false skips `worktreeWork` (null), a git scan of the worktree. */
   work?: boolean;
+  /** false runs no git command at all: `worktreeWork` is null and
+   * `gitTrusted` false, unchecked. The daemon's listing runs on its own
+   * thread, where a git command that hangs would hold every request. */
+  git?: boolean;
   /** The clone's main worktree: by default, the one the working directory
    * is in. The daemon names it, as its own directory is not the clone's. */
   root?: string;
@@ -221,11 +225,12 @@ export function runStatus(args: {
         worktreePath: paths.worktreePath,
         worktreeExists: existsSync(paths.worktreePath),
         gitTrusted:
+          args.git !== false &&
           existsSync(paths.worktreePath) &&
           (untrustedGitfile(paths.worktreePath, root) ??
             untrustedSubmodules(paths.worktreePath, root)) === null,
         worktreeWork:
-          args.work === false
+          args.work === false || args.git === false
             ? null
             : unsavedWork(paths, [state.lastKnownHeadSha, ...state.pushedShas]),
         fix: fixOf(paths, now),

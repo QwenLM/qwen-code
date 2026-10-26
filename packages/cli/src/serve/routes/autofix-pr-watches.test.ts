@@ -10,6 +10,7 @@ import { execFileSync } from 'node:child_process';
 import {
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   realpathSync,
   rmSync,
   statSync,
@@ -134,13 +135,21 @@ describe('autofix-pr watch routes', () => {
           ],
           watch: { every: 2, task: 'feedc0ffee12' },
           fix: { attempt: '0123456789ab', fresh: true },
-          // No git command in the worktree.
-          worktreeWork: null,
         },
       ],
     });
-    // No daemon session is the session it would name.
-    expect(view.watches[0]).not.toHaveProperty('thisSession');
+    expect(view.root).toBe(root);
+    // No daemon session is the session it would name, and what only git
+    // tells is not asked for.
+    for (const key of [
+      'thisSession',
+      'worktreePath',
+      'gitTrusted',
+      'worktreeWork',
+      'pushTarget',
+    ]) {
+      expect(view.watches[0]).not.toHaveProperty(key);
+    }
     expect(view).not.toHaveProperty('unreadable');
   });
 
@@ -163,6 +172,44 @@ describe('autofix-pr watch routes', () => {
       rmSync(elsewhere, { recursive: true, force: true });
     }
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'runs no git command but the one that finds the clone',
+    async () => {
+      // Work `status` would look for in the worktree, and a gitfile it would
+      // check with git.
+      git(
+        root,
+        'worktree',
+        'add',
+        '-q',
+        '-b',
+        paths.branch,
+        paths.worktreePath,
+      );
+      writeFileSync(join(paths.worktreePath, 'wip.txt'), 'wip');
+      const shim = realpathSync(mkdtempSync(join(tmpdir(), 'autofix-shim-')));
+      const log = join(shim, 'calls.log');
+      const real = execFileSync('sh', ['-c', 'command -v git'], {
+        encoding: 'utf8',
+      }).trim();
+      writeFileSync(
+        join(shim, 'git'),
+        `#!/bin/sh\nprintf '%s\\n' "$*" >> '${log}'\nexec '${real}' "$@"\n`,
+        { mode: 0o755 },
+      );
+      vi.stubEnv('PATH', `${shim}:${process.env['PATH'] ?? ''}`);
+      try {
+        const view = await listAutofixPrWatches(root);
+        expect(view.watches.map((watch) => watch.pr)).toEqual([7]);
+        const calls = readFileSync(log, 'utf8').trim().split('\n');
+        expect(calls).toEqual([`-C ${root} worktree list --porcelain`]);
+      } finally {
+        vi.unstubAllEnvs();
+        rmSync(shim, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('holds no watch outside a git repository, and changes no file it reads', async () => {
     const plain = realpathSync(mkdtempSync(join(tmpdir(), 'autofix-plain-')));

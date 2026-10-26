@@ -33,6 +33,8 @@ interface AutofixPrWatchesDialogProps {
   /** Registered workspaces (multi-workspace daemons): every operable one's
    * watches are listed, each under its workspace. */
   workspaces?: DaemonWorkspaceCapability[];
+  /** Reads only this workspace's, by its own route. */
+  lockedWorkspace?: DaemonWorkspaceCapability;
   onError: (error: unknown, fallback: string) => void;
 }
 
@@ -54,27 +56,30 @@ export function AutofixPrWatchesDialog({
   onRunPrompt,
   onOpenSession,
   workspaces,
+  lockedWorkspace,
   onError,
 }: AutofixPrWatchesDialogProps) {
   const { t } = useI18n();
   const actions = useWorkspaceActions();
   const workspaceList = useMemo(() => workspaces ?? [], [workspaces]);
-  const isMultiWorkspace = workspaceList.length > 1;
+  const isMultiWorkspace = !lockedWorkspace && workspaceList.length > 1;
   // As the scheduled-tasks page reads them: the primary by its unqualified
-  // route, the trusted others by theirs.
+  // route, the trusted others by theirs, a locked one by its own.
   const operable = useMemo(
     () =>
-      isMultiWorkspace
-        ? workspaceList.filter((ws) => ws.primary || ws.trusted)
-        : [],
-    [isMultiWorkspace, workspaceList],
+      lockedWorkspace
+        ? [lockedWorkspace]
+        : isMultiWorkspace
+          ? workspaceList.filter((ws) => ws.primary || ws.trusted)
+          : [],
+    [isMultiWorkspace, lockedWorkspace, workspaceList],
   );
   const workspaceIds = useMemo(
     () =>
-      isMultiWorkspace
+      operable.length > 0
         ? operable.map((ws) => (ws.primary ? undefined : ws.id))
         : [undefined],
-    [isMultiWorkspace, operable],
+    [operable],
   );
   const { lists, error, loaded } = useAutofixPrWatches(true, workspaceIds);
 
@@ -107,25 +112,33 @@ export function AutofixPrWatchesDialog({
   }, [actions, lists, workspaceIds]);
 
   const rows = useMemo<Row[]>(() => {
+    // A watch's task may be in any workspace of its clone: two checkouts of
+    // one clone can both be registered. The session it is bound to tells.
+    const allTasks = [...tasks.values()].flat();
+    const seen = new Set<string>();
     const out: Row[] = [];
     workspaceIds.forEach((id, index) => {
       const key = autofixPrWatchesKey(id);
       const list = lists.get(key);
       if (!list) return;
-      const workspaceTasks = tasks.get(key) ?? [];
       for (const watch of list.watches) {
-        const task = workspaceTasks.find((candidate) => {
+        // Listed once per clone.
+        const identity = `${list.root ?? key}\n${watch.repo}#${watch.pr}`;
+        if (seen.has(identity)) continue;
+        seen.add(identity);
+        const task = allTasks.find((candidate) => {
           const match = watchOfTask(candidate.prompt, [watch]);
-          return match !== null && !match.stale;
+          return (
+            match !== null &&
+            !match.stale &&
+            candidate.sessionId === watch.session
+          );
         });
         out.push({
           key: `${key}:${watch.repo}#${watch.pr}`,
           ...(isMultiWorkspace ? { workspaceCwd: operable[index]?.cwd } : {}),
           watch,
-          owner:
-            task?.sessionId && task.sessionId === watch.session
-              ? task.sessionId
-              : null,
+          owner: task?.sessionId ?? null,
         });
       }
     });
@@ -179,9 +192,12 @@ export function AutofixPrWatchesDialog({
       <div className={styles.list}>
         {rows.map((row) => {
           const phase = watchPhase(row.watch);
-          // A watch nothing runs any more is the owner's to clean up, and
-          // one running elsewhere is stopped there.
-          const live = phase !== 'ended' && phase !== 'unscheduled';
+          // One a gate still checks runs elsewhere, and is stopped there;
+          // one nothing checks is cleaned up or resumed in a session here.
+          const elsewhere =
+            phase !== 'ended' &&
+            phase !== 'unscheduled' &&
+            row.watch.checkedRecently;
           return (
             <div key={row.key} className={styles.card}>
               {row.workspaceCwd && (
@@ -193,7 +209,7 @@ export function AutofixPrWatchesDialog({
                 watch={row.watch}
                 showPr
                 stopping={stopping === row.key}
-                outsideDaemon={!row.owner && live}
+                outsideDaemon={!row.owner && elsewhere}
                 {...(row.owner
                   ? {
                       onOpenSession: () => onOpenSession(row.owner!),
@@ -201,7 +217,7 @@ export function AutofixPrWatchesDialog({
                     }
                   : {})}
               />
-              {!row.owner && !live && (
+              {!row.owner && !elsewhere && (
                 <div className={styles.hint}>
                   {t('autofixPrWatches.noOwner', { pr: row.watch.pr })}
                 </div>

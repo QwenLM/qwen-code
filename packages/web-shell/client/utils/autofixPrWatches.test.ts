@@ -78,19 +78,28 @@ describe('watchOfTask', () => {
     expect(watchOfTask('Run /autofix-pr tick o/r#12', undefined)).toBeNull();
   });
 
-  it('calls a task stale once the watch records another, or none', () => {
-    expect(
-      watchOfTask('Run /autofix-pr tick o/r#12 --task 000000000000', [watch()])
-        ?.stale,
-    ).toBe(true);
-    expect(
-      watchOfTask('Run /autofix-pr tick o/r#12', [watch({ watch: null })])
-        ?.stale,
-    ).toBe(true);
-    // A task from before task ids: nothing says it is not the watch's.
-    expect(watchOfTask('Run /autofix-pr tick o/r#12', [watch()])?.stale).toBe(
-      false,
+  it('calls a task stale as its gate does: an ended watch, another task, or none where it has an id', () => {
+    const staleOf = (prompt: string, over: Partial<DaemonAutofixPrWatch>) =>
+      watchOfTask(prompt, [watch(over)])?.stale;
+    const withId = 'Run /autofix-pr tick o/r#12 --task feedc0ffee12';
+    const noId = 'Run /autofix-pr tick o/r#12';
+    expect(staleOf(withId, {})).toBe(false);
+    expect(staleOf('Run /autofix-pr tick o/r#12 --task 000000000000', {})).toBe(
+      true,
     );
+    expect(staleOf(withId, { watch: null })).toBe(true);
+    expect(
+      staleOf(withId, { ended: { at: '2026-10-26T10:00:00Z', reason: 'x' } }),
+    ).toBe(true);
+    // A task from before task ids is not the one recorded once there is one.
+    expect(staleOf(noId, {})).toBe(true);
+    // Nor stale where nothing says otherwise.
+    expect(
+      staleOf(noId, {
+        watch: { every: 2, reply: true, instructions: '' },
+      }),
+    ).toBe(false);
+    expect(staleOf(noId, { watch: null })).toBe(false);
   });
 });
 

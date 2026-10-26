@@ -10184,6 +10184,16 @@ export function App({
     setMainView('prWatches');
     navigationRef.current?.openPage('pr-watches');
   }, [showChat]);
+  // A daemon that stops listing watches (another daemon behind the same
+  // origin) leaves no page to show.
+  useEffect(() => {
+    if (
+      mainView === 'prWatches' &&
+      (!projectFeaturesAvailable || !prWatchesAvailable)
+    ) {
+      showChat();
+    }
+  }, [mainView, prWatchesAvailable, projectFeaturesAvailable, showChat]);
   const returnToChat = useCallback(() => {
     if (navigationRef.current && navigationRef.current.route.page !== 'chat') {
       navigationRef.current.returnToChat();
@@ -10201,6 +10211,7 @@ export function App({
         if (!projectFeaturesAvailable) return false;
         if (item === 'live') return sidebarOptions.showLive;
         if (item === 'workflows') return workflowsEnabled;
+        if (item === 'prWatches') return prWatchesAvailable;
         return true;
       }) ||
         (sidebarOptions.footer !== false &&
@@ -23115,6 +23126,7 @@ export function App({
                             ? visibleWorkspaces
                             : ordinaryWorkspaces
                         }
+                        lockedWorkspace={lockedWorkspaceCapability}
                         onOpenSession={(sessionId) => {
                           showChat();
                           loadSidebarSession(sessionId).catch(

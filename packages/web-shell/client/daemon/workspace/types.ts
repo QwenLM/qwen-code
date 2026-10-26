@@ -471,8 +471,11 @@ export interface DaemonAutofixPrWatch {
 
 /** The `GET /autofix-pr/watches` payload. */
 export interface DaemonAutofixPrWatchList {
-  /** False when the workspace is in no git repository. */
+  /** False when no git repository is found for the workspace. */
   available: boolean;
+  /** The clone's main worktree: two workspaces of one clone list the same
+   * watches. */
+  root?: string;
   /** When the daemon read the files, for comparing `lastCheck` with. */
   now?: string;
   watches: DaemonAutofixPrWatch[];

@@ -1411,22 +1411,30 @@ watch of the workspaces it reaches.
 
 **What the daemon serves.** `GET /autofix-pr/watches` (the primary
 workspace) and `GET /workspaces/:workspace/autofix-pr/watches` (a registered,
-trusted one), advertised as `autofix_pr_watches`, answer what
-`status --no-work` lists for the workspace's clone: the main worktree is
-found with `git worktree list`, so a workspace that is a linked worktree or
-a subdirectory reads the clone's watches. `runStatus` takes that root and
-no session, rather than the daemon's own directory and environment. It reads
-the files only. No lock is taken, GitHub is not asked and no git command
-runs in a worktree, so the answer comes back while a helper runs.
-`thisSession` is left out: the daemon is no session. `worktreeWork` is
-null. The routes change nothing.
+trusted one), advertised as `autofix_pr_watches`, answer what `status`
+lists for the workspace's clone. The main worktree is found with
+`git worktree list`, so a workspace that is a linked worktree or a
+subdirectory reads the clone's watches, and the answer names it (`root`).
+`runStatus` takes that root and no session, rather than the daemon's own
+directory and environment, and runs no git command (`git: false`): the
+daemon lists the watches on its own thread, where a git command that hangs
+would hold every request. It reads the files only, each opened without
+following a link and without blocking, so a FIFO put in place of one cannot
+hold the daemon either (the helpers read them so too). No lock is taken and
+GitHub is not asked, so the answer comes back while a helper runs. Left out
+are `thisSession` (the daemon is no session), the worktree's path and what
+only git tells (`gitTrusted`, `worktreeWork`). `available` is false when no
+git repository is found for the workspace, or git cannot run there. The
+routes change nothing.
 
 **Which watch is a task's.** A scheduled task carries no kind: a watch's
 task is known by the prompt `schedule` writes,
 `Run /autofix-pr tick <owner>/<repo>#<n> [--task <id>]…`, matched to the
 watch of that repository and number in the task's workspace. The task is
-stale when the watch records another task (a later `schedule` replaced it)
-or none: its gate stops it at its next fire, and the card says so.
+stale as its gate judges it: the watch ended, it records no task where the
+task has an id, or it records another task (a later `schedule` replaced
+it; a task from before task ids is not the one recorded either). Its gate
+stops it at its next fire, and the card says so.
 
 **What is shown.** The PR, as a link, with where the watch is, the first
 that holds:
@@ -1444,8 +1452,9 @@ ran, and the items left for a person (`needsHuman`). The page lists the
 state files it cannot read with their reason, as `status` does.
 
 **Actions.** Only for a watch whose owning session is a session of this Web
-Shell: its task is bound to the session the state file names, and the task
-is not stale.
+Shell: a task of it, not stale, is bound to the session the state file
+names. The page looks for that task in every workspace it lists, and lists
+a clone's watch once, as two checkouts of one clone can both be registered.
 
 - **Open session** opens that conversation.
 - **Stop watch** sends `/autofix-pr stop <n>` to it the way a scheduled
@@ -1454,10 +1463,11 @@ is not stale.
   with every confirmation it asks for there. The Web Shell does not write a
   watch's files or delete its task itself.
 
-A watch owned by another process (a terminal session) is stopped there; the
-page says so. A watch no session runs (ended, or with no task) is cleaned up
-or started again with `/autofix-pr stop <n>` or `resume <n>` in a session of
-its workspace, which the page names.
+A watch no session of this Web Shell runs, but whose gate checked within
+two intervals, runs in another process (a terminal session) and is stopped
+there; the page says so. Any other — ended, with no task, or checked by
+nothing lately — is cleaned up or started again with `/autofix-pr stop <n>`
+or `resume <n>` in a session of its workspace, which the page names.
 
 **Refresh.** The page and the cards read the watches again every 15
 seconds while shown. The cards read them only while a watch's task is
