@@ -14,6 +14,7 @@ import { extractPendingPermission } from '../../adapters/transcriptAdapter';
 import { ToolApproval } from './ToolApproval';
 import type { SessionContentGenerator } from './AssistantMessage';
 import { WebShellCustomizationProvider } from '../../customization';
+import styles from './ToolApproval.module.css';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -1911,7 +1912,10 @@ describe('floating variant scroll layout', () => {
   // diff line list must defer its scroll to the card's content region (one
   // scroll container, decision buttons pinned) instead of capping itself at
   // 400px with a second scrollbar.
-  function renderVariant(variant: 'inline' | 'floating'): void {
+  function renderVariant(
+    variant: 'inline' | 'floating',
+    leadingContent: unknown[] = [],
+  ): void {
     const adapted = extractPendingPermission([
       {
         id: 'permission-edit-float',
@@ -1924,6 +1928,7 @@ describe('floating variant scroll layout', () => {
           kind: 'edit',
           _meta: { toolName: 'replace' },
           content: [
+            ...leadingContent,
             {
               type: 'diff',
               path: '/outside/example.txt',
@@ -1974,6 +1979,31 @@ describe('floating variant scroll layout', () => {
     // diff.
     const wrapper = diffRegion.closest<HTMLElement>('[data-plan-interactive]')!;
     expect(wrapper.parentElement).toBe(dialog);
+  });
+
+  it('keeps every region of a compound card a floored direct child of the sheet', () => {
+    // The issue's own reproduction: an outside-workspace write emits a warning
+    // text block before the diff block, so the card renders two sibling
+    // regions. Both must be direct children of the sheet, outside the
+    // .planContent exemption, so `.floating > .content:not(.planContent)`
+    // gives each one the 3.5em floor (pinned in ToolApproval.css.test.ts) and
+    // the warning cannot be squeezed below a readable height by the diff.
+    renderVariant('floating', [
+      {
+        type: 'content',
+        content: { type: 'text', text: 'Path is outside the workspace' },
+      },
+    ]);
+    const dialog = container!.querySelector('[role="alertdialog"]')!;
+    const regions = Array.from(dialog.children).filter((el) =>
+      el.classList.contains(styles.content),
+    );
+    expect(regions).toHaveLength(2);
+    for (const region of regions) {
+      expect(region.classList.contains(styles.planContent)).toBe(false);
+    }
+    expect(regions[0]!.textContent).toBe('Path is outside the workspace');
+    expect(regions[1]!.hasAttribute('data-plan-interactive')).toBe(true);
   });
 
   it('keeps the inline card self-scrolling', () => {

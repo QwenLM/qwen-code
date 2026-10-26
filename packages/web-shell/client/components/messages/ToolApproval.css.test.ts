@@ -72,9 +72,9 @@ describe('ToolApproval disabled options', () => {
 describe('ToolApproval floating scroll layout', () => {
   // Regression guard for the nested-scrollbar bug: the floating sheet used to
   // stack three scroll containers (sheet, 300px content cap, 400px diff-line
-  // cap). The sheet must stay scroll-free; the command/content region is its
-  // single scroll container so the decision buttons stay pinned.
-  it('keeps the sheet itself out of the scroll path', () => {
+  // cap). The command/content region absorbs the overflow and scrolls itself so
+  // the decision buttons stay pinned; the sheet scrolls only as a fallback.
+  it('keeps a sheet-level scroll fallback for unshrinkable chrome', () => {
     const rules = find('.floating');
     expect(rules).toHaveLength(1);
     const props = rules[0]!.nodes
@@ -86,7 +86,11 @@ describe('ToolApproval floating scroll layout', () => {
       .find((node: { prop: string }) => node.prop === 'overflow-y') as {
       value: string;
     };
-    expect(overflowY.value).toBe('hidden');
+    // Header, description, explain row and options never shrink. When they
+    // alone (plus the region floors) exceed the min(360px, 55vh) cap on a short
+    // viewport, a non-scrolling sheet would clip the decision buttons with no
+    // way to reach them by pointer or touch.
+    expect(overflowY.value).toBe('auto');
   });
 
   it('makes the content and command regions the sheet scroll container', () => {
@@ -100,9 +104,18 @@ describe('ToolApproval floating scroll layout', () => {
     ]);
     expect(declarations(rules[0]!)).toEqual([
       'flex: 1 1 auto',
-      'min-height: 0',
+      'min-height: 3.5em',
       'overflow-y: auto',
     ]);
+    // Both selectors match every co-rendered region (a warning block next to
+    // the diff, the warnings next to a command), so the floor must equal the
+    // inline variant's: `min-height: 0` let a short warning or command shrink
+    // to a sliver, or to nothing, while digit-confirm still fired.
+    const inlineFloor = declarations(find('.content')[0]!).find((decl) =>
+      decl.startsWith('min-height:'),
+    );
+    expect(inlineFloor).toBe('min-height: 3.5em');
+    expect(declarations(find('.code')[0]!)).toContain(inlineFloor);
     // .planContent (the plan-approval text under .floatingWorkflow) keeps its
     // own 240px layout — the :not() guard is load-bearing.
     expect(rules[0]!.selectors[0]).toContain(':not(.planContent)');
