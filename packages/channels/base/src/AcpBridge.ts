@@ -48,6 +48,11 @@ import { sanitizeLogText } from './sanitize.js';
 export type { AvailableCommand, ToolCallEvent } from './ChannelAgentBridge.js';
 
 const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
+// Per-session bounds on undrained mid-turn input: a turn with no drain point
+// (a long tool-free generation) must not let a sender pin unbounded text in
+// memory for the rest of the session.
+const MID_TURN_QUEUE_MAX_MESSAGES = 20;
+const MID_TURN_QUEUE_MAX_CHARS = 20_000;
 const TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD =
   'craft/claimTodoStopGuardContinuation';
 
@@ -104,6 +109,13 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
   >();
   private channelLoopMcpRegistered = false;
   private channelLoopMcpRegistration: Promise<void> | null = null;
+  /**
+   * Text queued by `queueMidTurnMessage` and handed to the ACP child on its
+   * next `craft/drainMidTurnQueue`, when the child asks between tool batches.
+   * The drain consumes it; session teardown (discard, process exit, stop)
+   * clears it.
+   */
+  private readonly midTurnMessageQueues = new Map<string, string[]>();
   private readonly pendingPermissions = new Map<
     string,
     {
@@ -166,6 +178,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       this.resolvePendingPermissions();
       this.knownSessionIds.clear();
       this.sessionBindingTokens.clear();
+      this.midTurnMessageQueues.clear();
       this.toolCallKindsBySession.clear();
       this.connection = null;
       this.child = null;
@@ -413,6 +426,27 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     }
   }
 
+  queueMidTurnMessage(sessionId: string, text: string): void {
+    // A blank entry would make the child treat the whole drain as malformed
+    // (it rejects whitespace-only messages), so it never enters the queue.
+    if (!text.trim() || !this.knownSessionIds.has(sessionId)) return;
+    const queue = this.midTurnMessageQueues.get(sessionId) ?? [];
+    const queuedChars = queue.reduce((total, item) => total + item.length, 0);
+    if (
+      queue.length >= MID_TURN_QUEUE_MAX_MESSAGES ||
+      queuedChars + text.length > MID_TURN_QUEUE_MAX_CHARS
+    ) {
+      // Drop rather than truncate: a half instruction can steer the running
+      // turn wrong, while a dropped one is visible to the operator here.
+      process.stderr.write(
+        `[AcpBridge] Dropped mid-turn message for session ${sanitizeLogText(sessionId, 128)} (queue=${queue.length}/${MID_TURN_QUEUE_MAX_MESSAGES} messages, ${queuedChars}/${MID_TURN_QUEUE_MAX_CHARS} chars): ${sanitizeLogText(text, 256)}\n`,
+      );
+      return;
+    }
+    queue.push(text);
+    this.midTurnMessageQueues.set(sessionId, queue);
+  }
+
   async discardSession(
     sessionId: string,
     expectedBindingToken?: object,
@@ -425,6 +459,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     }
     if (!this.knownSessionIds.delete(sessionId)) return;
     this.sessionBindingTokens.delete(sessionId);
+    this.midTurnMessageQueues.delete(sessionId);
     this.toolCallKindsBySession.delete(sessionId);
     this.resolvePendingPermissions(sessionId);
 
@@ -455,6 +490,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     this.resolvePendingPermissions();
     this.knownSessionIds.clear();
     this.sessionBindingTokens.clear();
+    this.midTurnMessageQueues.clear();
     this.toolCallKindsBySession.clear();
     if (this.child) {
       this.child.kill();
@@ -746,7 +782,16 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       return this.handleClientMcpMessage(params);
     }
     if (method === MID_TURN_QUEUE_DRAIN_METHOD) {
-      return { messages: [], hasQueuedPrompt: false };
+      const sessionId =
+        typeof params['sessionId'] === 'string' ? params['sessionId'] : '';
+      const queued =
+        sessionId && this.knownSessionIds.has(sessionId)
+          ? this.midTurnMessageQueues.get(sessionId)
+          : undefined;
+      if (queued) {
+        this.midTurnMessageQueues.delete(sessionId);
+      }
+      return { messages: queued ?? [], hasQueuedPrompt: false };
     }
     if (method === TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD) {
       const sessionId =

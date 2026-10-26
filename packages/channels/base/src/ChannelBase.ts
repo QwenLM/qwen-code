@@ -7092,7 +7092,20 @@ export abstract class ChannelBase {
       if (active) {
         // A prompt is already running for this session
         switch (mode) {
-          case 'collect': {
+          case 'collect':
+          case 'inject': {
+            // `inject` hands the text to the bridge's mid-turn queue so the
+            // agent reads it inside the RUNNING turn, at its next drain
+            // boundary. A bridge without that capability falls through to the
+            // collect buffering below (drained as a new turn once this one
+            // ends), so the message is never lost.
+            if (mode === 'inject' && this.bridge.queueMidTurnMessage) {
+              this.bridge.queueMidTurnMessage(sessionId, promptText);
+              process.stderr.write(
+                `[${this.name}] inject: delivered mid-turn message from ${envelope.senderId} into session ${sessionId}\n`,
+              );
+              return;
+            }
             // Buffer the message; it will be coalesced when the active prompt finishes
             let buffer = this.collectBuffers.get(sessionId);
             if (!buffer) {

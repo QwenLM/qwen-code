@@ -289,6 +289,13 @@ export interface ChannelAgentBridge {
     question: string,
     signal?: AbortSignal,
   ): Promise<ChannelBtwResult>;
+  /**
+   * Hand a user message to the session's RUNNING turn: the agent sees it at its
+   * next drain boundary (between tool batches), not pre-emptively, and the text
+   * is not carried as an attachment. Bridges that omit it make channels fall
+   * back to buffering (`collect`) so the message is never lost.
+   */
+  queueMidTurnMessage?(sessionId: string, text: string): void;
   cancelSession(sessionId: string): Promise<void>;
   /** Release a bridge-owned session that will not be routed to a caller. */
   discardSession?(
