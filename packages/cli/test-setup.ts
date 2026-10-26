@@ -78,8 +78,13 @@ process.env['QWEN_HOME'] = fs.mkdtempSync(
 );
 
 import { configure } from '@testing-library/react';
+import { beforeEach } from 'vitest';
 
 import './src/test-utils/customMatchers.js';
+
+// Capture the real timer so sync-heavy suites can drain worker RPC replies.
+const realSetTimeout = setTimeout;
+beforeEach(() => new Promise<void>((resolve) => realSetTimeout(resolve, 0)));
 
 // CI and the autofix verification gate run this suite on a shared,
 // oversubscribed host, where the testing-library default 1s async budget is

@@ -4,25 +4,44 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import * as fs from 'node:fs';
-import * as os from 'node:os';
+import { createRequire } from 'node:module';
 import * as path from 'node:path';
 import { expect } from 'vitest';
+
+/** The node:fs calls the probe makes. */
+export interface ProbeFs {
+  mkdtempSync(prefix: string): string;
+  chmodSync(path: string, mode: number): void;
+  readdirSync(path: string): unknown;
+  writeFileSync(path: string, data: string): void;
+  rmSync(path: string, options: { recursive: boolean; force: boolean }): void;
+}
+
+// The real node:fs and node:os, even when the test file that asks has
+// vi.mock()ed them: vitest mocks its own module graph, not a builtin loaded
+// through Node's require. A mocked fs would answer for the mock, not the
+// kernel. A vi.spyOn on node:fs's default export at collection time would
+// still reach the probe, since that export is this same module object.
+const nodeRequire = createRequire(import.meta.url);
+const realFs = nodeRequire('node:fs') as typeof import('node:fs');
+const realOs = nodeRequire('node:os') as typeof import('node:os');
 
 /**
  * Whether file permission bits bind this process, for tests that force a
  * failure with `chmod`. They do not on Windows, which ignores Unix-style
  * bits, nor for root, which bypasses them (on Linux through
  * CAP_DAC_OVERRIDE and CAP_DAC_READ_SEARCH). ci.yml drops both
- * capabilities when it runs unit tests as root, so asking the kernel,
- * rather than checking for uid 0, keeps those tests running there. A
- * probe that cannot measure also answers false, and says so on stderr.
+ * capabilities when it runs unit tests as root (package-scripts.test.js
+ * pins that), so asking the kernel, rather than checking for uid 0, keeps
+ * those tests running there. A probe that cannot measure also answers
+ * false, and says so on stderr.
+ * `fs` is for this helper's own tests; every caller probes the real one.
  */
-export function arePermissionBitsEnforced(): boolean {
+export function arePermissionBitsEnforced(fs: ProbeFs = realFs): boolean {
   if (process.platform === 'win32') return false;
   let dir: string | undefined;
   try {
-    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-permission-probe-'));
+    dir = fs.mkdtempSync(path.join(realOs.tmpdir(), 'qwen-permission-probe-'));
     fs.chmodSync(dir, 0o000);
     const probe = dir;
     return (
@@ -75,11 +94,14 @@ function errnoOf(error: unknown): string | undefined {
  * Names a probe that could not measure, and the test file that asked, so
  * the skips it causes are not mistaken for a Windows or root run. vitest's
  * `silent: true` drops console output, so this writes to stderr directly.
+ * Under GitHub Actions the line opens with a workflow command, so the skips
+ * show in the check UI and not only deep in the log.
  */
 function inconclusive(error: unknown): void {
   try {
     process.stderr.write(
-      `[permission-bits] probe inconclusive (${causeOf(error)})${askedBy()}; ` +
+      `${process.env['GITHUB_ACTIONS'] === 'true' ? '::warning::' : ''}` +
+        `[permission-bits] probe inconclusive (${causeOf(error)})${askedBy()}; ` +
         'treating permission bits as unenforced, so chmod-based tests skip\n',
     );
   } catch {

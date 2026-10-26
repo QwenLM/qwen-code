@@ -4,8 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { useModelRefresh } from '../hooks/useModelRefresh';
 import { CapacityRecoveryDialog } from './workspaces/CapacityRecoveryDialog';
 import { useCapacityRecovery } from '../hooks/useCapacityRecovery';
+import {
+  beginLocalCommand,
+  finishLocalCommand,
+} from '../utils/message-deletion';
 import {
   useCallback,
   useEffect,
@@ -62,6 +67,10 @@ import {
   resolveModelManagement,
   type WebShellModelManagementOptions,
 } from '../modelManagement';
+import type {
+  WebShellUnavailableModel,
+  WebShellUnavailableModelTooltipMount,
+} from '../unavailableModels';
 import { isAskUserPermission } from '../utils/askUserPermission';
 import { isDaemonApprovalMode } from '../utils/sessionPreparation';
 import { isVisibleComposerModel } from '../utils/composerModels';
@@ -116,7 +125,8 @@ import { QueuedPromptDisplay } from './QueuedPromptDisplay';
 import { GoalStatusStrip } from './GoalStatusStrip';
 import composerStatusStyles from './ComposerStatusStack.module.css';
 import { GoalEditDialog } from './dialogs/GoalEditDialog';
-import { parsePlanCommand } from '../utils/planMode';
+import { nextApprovalMode, parsePlanCommand } from '../utils/planMode';
+import { useApprovalModes } from '../hooks/useApprovalModes';
 import { ToolApproval } from './messages/ToolApproval';
 import { AskUserQuestion } from './messages/AskUserQuestion';
 import { createContextUsageMessageData } from './messages/ContextUsageMessage';
@@ -228,6 +238,8 @@ export interface ChatPaneProps {
   /** Host slash-command callback shared with the main chat composer. */
   onSlashCommand?: WebShellSlashCommandHandler;
   modelManagement?: WebShellModelManagementOptions;
+  unavailableModels?: readonly WebShellUnavailableModel[];
+  mountUnavailableModelTooltip?: WebShellUnavailableModelTooltipMount;
   onOpenGoals?: () => void;
   onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
   onOpenMonitor?: (
@@ -257,6 +269,7 @@ export interface ChatPaneProps {
   voiceWorkspaces?: readonly DaemonWorkspaceCapability[];
   /** Enable the app-scoped experimental Session Workflow presentation. */
   sessionWorkflowEnabled?: boolean;
+  showResponseTokensPerSecond?: boolean;
   planControlVisible?: boolean;
 }
 
@@ -281,6 +294,8 @@ export function ChatPane({
   onImageIngestionNotice,
   onSlashCommand,
   modelManagement,
+  unavailableModels,
+  mountUnavailableModelTooltip,
   onOpenGoals,
   onRightPanelOpen,
   onOpenMonitor,
@@ -297,15 +312,29 @@ export function ChatPane({
   voiceWorkspaceRevisions = EMPTY_VOICE_WORKSPACE_REVISIONS,
   voiceWorkspaces,
   sessionWorkflowEnabled = false,
+  showResponseTokensPerSecond = false,
   planControlVisible = false,
 }: ChatPaneProps) {
   const { t } = useI18n();
-  const { renderComposerFooter: CustomComposerFooter, askUserFreeTextLabel } =
-    useWebShellCustomization();
+  const {
+    renderComposerFooter: CustomComposerFooter,
+    askUserFreeTextLabel,
+    onRefreshModels,
+    allowedApprovalModes,
+  } = useWebShellCustomization();
   const connection = useConnection();
+  const modelRefresh = useModelRefresh(onRefreshModels);
   const actions = useActions();
   const sessionOwnerGuard = useDaemonSessionOwnerGuard();
   const workspace = useWorkspace();
+  const paneSettingsCwd =
+    connection.sessionContext?.kind === 'standalone'
+      ? undefined
+      : (workspaceCwd ?? connection.workspaceCwd);
+  const availableApprovalModes = useApprovalModes(
+    paneSettingsCwd,
+    allowedApprovalModes,
+  );
   const capacityRecovery = useCapacityRecovery(
     workspace.client,
     workspace.capabilities?.features,
@@ -390,9 +419,9 @@ export function ChatPane({
   ]);
   const { artifacts } = useSessionArtifacts();
   const openSubagentDetails = useCallback(
-    (tool: ACPToolCall) => {
+    (tool: ACPToolCall, parentSessionId = connection.sessionId) => {
       if (
-        !connection.sessionId ||
+        !parentSessionId ||
         !onRightPanelOpen ||
         getSubagentDetailsUnavailableReason(tool)
       )
@@ -409,12 +438,12 @@ export function ChatPane({
           ? rawOutput['subagentName']
           : undefined);
       onRightPanelOpen({
-        id: `subagent:${connection.sessionId}:${tool.callId}`,
+        id: `subagent:${parentSessionId}:${tool.callId}`,
         kind: 'subagent',
         title: tool.title || subagentType || t('agent.label'),
         turnId: tool.callId,
         tool,
-        sessionId: connection.sessionId,
+        sessionId: parentSessionId,
         workspaceCwd: connection.workspaceCwd ?? workspaceCwd,
       });
     },
@@ -1043,7 +1072,9 @@ export function ChatPane({
           operation.kind === 'set' || operation.kind === 'edit'
             ? operation.objective
             : undefined;
-        store.appendLocalUserMessage(text);
+        store.appendLocalUserMessage(text, undefined, {
+          localCommandId: `local-command:${crypto.randomUUID()}`,
+        });
         void controlGoal(action, objective).catch((error: unknown) => {
           reportError(error, `Failed to ${operation.kind} /goal`);
         });
@@ -1439,16 +1470,20 @@ export function ChatPane({
       return;
     }
     const owner = sessionOwnerGuard.capture();
+    const localCommandId = `local-command:${crypto.randomUUID()}`;
+    beginLocalCommand(store, localCommandId);
     if (streamingStateRef.current === 'idle') {
-      store.appendLocalUserMessage('/context');
+      store.appendLocalUserMessage('/context', undefined, { localCommandId });
     }
     actions
       .getContextUsage({ detail: false })
+      .finally(() => finishLocalCommand(store, localCommandId))
       .then((result) => {
         if (!owner.isCurrent()) return;
         store.dispatch([
           {
             type: 'status',
+            promptId: localCommandId,
             text: t('contextUsage.title'),
             data: createContextUsageMessageData(result),
             clearActiveText: false,
@@ -1477,10 +1512,25 @@ export function ChatPane({
   );
   const handleSelectMode = useCallback(
     (modeId: string) => {
+      if (
+        isDaemonApprovalMode(modeId) &&
+        modeId !== 'plan' &&
+        !availableApprovalModes.some((mode) => mode === modeId)
+      ) {
+        reportError(
+          new Error(`Approval mode not offered here: ${modeId}`),
+          'Failed to set approval mode',
+        );
+        return;
+      }
       void setComposerMode(modeId, planMode);
     },
-    [setComposerMode, planMode],
+    [availableApprovalModes, setComposerMode, planMode, reportError],
   );
+  const handleCycleMode = useCallback(() => {
+    const next = nextApprovalMode(availableApprovalModes, executionMode);
+    if (next) handleSelectMode(next);
+  }, [availableApprovalModes, executionMode, handleSelectMode]);
   const handleTogglePlan = useCallback(() => {
     void setComposerMode(executionMode, !planMode);
   }, [setComposerMode, executionMode, planMode]);
@@ -1852,6 +1902,9 @@ export function ChatPane({
               token count + cancel hint, but no rotating "witty" loading
               phrase. */}
           <StreamingStatus
+            showResponseTokensPerSecond={
+              showResponseTokensPerSecond && !approvalActive
+            }
             startedAt={activeTurnStartedAt}
             showPhrase={false}
             hasActivePrompt={sessionHasActivePrompt}
@@ -1951,12 +2004,17 @@ export function ChatPane({
             workspaceTitle={paneWorkspaceCwd}
             workspaceColor={workspaceAccent}
             currentMode={executionMode}
+            availableModes={availableApprovalModes}
+            onCycleMode={handleCycleMode}
             modeControlsDisabled={modeControlsBusy}
             planMode={planMode}
             onTogglePlan={handleTogglePlan}
             sessionWorkflowEnabled={sessionWorkflowEnabled}
             currentModel={connection.currentModel ?? ''}
+            modelRefresh={modelRefresh}
             availableModels={availableModels}
+            unavailableModels={unavailableModels}
+            mountUnavailableModelTooltip={mountUnavailableModelTooltip}
             onSelectMode={handleSelectMode}
             onSelectModel={handleSelectModel}
             reasoning={connection.reasoning}

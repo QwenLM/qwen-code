@@ -62,14 +62,18 @@ it('runs a relocated bundled worker with TypeScript and relative imports', async
   worker = new Worker(path.join(state.directory, 'mod-worker.js'), {
     workerData: new SharedArrayBuffer(4),
   });
+  let sequence = 0;
   const dispatch = (request) =>
     new Promise((resolve, reject) => {
+      const root = ++sequence;
       const onError = (error) => {
         cleanup();
         reject(error);
       };
       const onMessage = (reply) => {
-        if (reply.type === 'log') return;
+        if (reply.root !== root || reply.type === 'log') return;
+        if (reply.phase !== 0)
+          return onError(new Error('Unexpected Mod phase'));
         cleanup();
         if (reply.type === 'error') reject(new Error(reply.message));
         else resolve(JSON.parse(reply.json));
@@ -80,7 +84,7 @@ it('runs a relocated bundled worker with TypeScript and relative imports', async
       };
       worker.on('error', onError);
       worker.on('message', onMessage);
-      worker.postMessage(request);
+      worker.postMessage({ ...request, root, phase: 0 });
     });
   const commands = await dispatch({
     type: 'load',
@@ -104,6 +108,9 @@ it('runs a relocated bundled worker with TypeScript and relative imports', async
   expect(commands).toEqual({
     tools: false,
     commands: [{ name: 'hello', description: 'Bundled', plugin: 'fixture' }],
+    turnStart: false,
+    turnComplete: [],
+    render: [],
   });
   expect(
     await dispatch({ type: 'command', command: 'hello', args: '' }),

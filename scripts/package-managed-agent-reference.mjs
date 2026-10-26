@@ -104,14 +104,11 @@ function compareMigrationVersions(left, right) {
 }
 
 function migrationRange(root) {
-  const versions = ['runtime-broker', 'managed-agent-server'].flatMap(
-    (module) =>
-      LOCATIONS.flatMap(({ dir, suffix }) =>
-        migrationFiles(
-          path.join(root, 'packages/sdk-java', module, ...dir),
-          suffix,
-        ).map((file) => migrationVersion(path.basename(file))),
-      ),
+  const versions = LOCATIONS.flatMap(({ dir, suffix }) =>
+    migrationFiles(
+      path.join(root, 'packages/managed-agent-server', ...dir),
+      suffix,
+    ).map((file) => migrationVersion(path.basename(file))),
   );
   if (versions.length === 0) throw new Error('No Flyway migrations found.');
   versions.sort(compareMigrationVersions);
@@ -164,6 +161,11 @@ function launcher(jar) {
   return `#!/usr/bin/env sh
 set -eu
 base="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+config="$base/config/application.yml"
+if [ -f "$config" ] && [ -z "\${SPRING_CONFIG_ADDITIONAL_LOCATION:-}" ]; then
+  SPRING_CONFIG_ADDITIONAL_LOCATION="file:\${config}"
+  export SPRING_CONFIG_ADDITIONAL_LOCATION
+fi
 exec java -jar "$base/lib/${jar}" "$@"
 `;
 }
@@ -241,18 +243,10 @@ export async function createReferenceDistribution({
   ]);
   await mkdir(stage, { recursive: true });
 
-  const serverPom = path.join(
-    root,
-    'packages/sdk-java/managed-agent-server/pom.xml',
-  );
-  const brokerPom = path.join(root, 'packages/sdk-java/runtime-broker/pom.xml');
+  const serverPom = path.join(root, 'packages/managed-agent-server/pom.xml');
   const serverVersion = await pomVersion(
     serverPom,
     'qwen-managed-agent-server',
-  );
-  const brokerVersion = await pomVersion(
-    brokerPom,
-    'qwen-managed-runtime-broker',
   );
   const packageJson = JSON.parse(
     await readFile(path.join(root, 'package.json')),
@@ -267,17 +261,14 @@ export async function createReferenceDistribution({
     path.join(root, 'packages/cli/src/serve/capabilities.ts'),
     'utf8',
   );
-  const brokerProvider = await readFile(
-    path.join(
-      root,
-      'packages/cli/src/serve/broker-managed-runtime-provider.ts',
-    ),
+  const brokerClient = await readFile(
+    path.join(root, 'packages/cli/src/serve/managed-runtime-broker-client.ts'),
     'utf8',
   );
   const applicationConfiguration = await readFile(
     path.join(
       root,
-      'packages/sdk-java/managed-agent-server/src/main/resources/application.yml',
+      'packages/managed-agent-server/src/main/resources/application.yml',
     ),
     'utf8',
   );
@@ -300,39 +291,66 @@ export async function createReferenceDistribution({
     /^[ \t]*process\.env\[HOSTED_LIFECYCLE_V2_PROFILES_ENV\][ \t]*\?\?[ \t]*'([^'\r\n]*)'[ \t]*$/gm,
     'Hosted lifecycle v2 profile default',
   );
-  if (lifecycleV2ProfilesDefault !== '') {
-    throw new Error('Hosted lifecycle v2 profiles must default to empty.');
+  if (lifecycleV2ProfilesDefault !== 'hosted-workspace-shell/1') {
+    throw new Error(
+      'Hosted lifecycle v2 profiles must default to canonical Shell only.',
+    );
   }
 
   const serverJar = `qwen-managed-agent-server-${serverVersion}.jar`;
   const recoveryJar = `qwen-managed-agent-server-${serverVersion}-operator-recovery.jar`;
-  const brokerJar = `qwen-managed-runtime-broker-${brokerVersion}.jar`;
   const componentSources = [
     {
       name: 'qwen-managed-agent-server',
       version: serverVersion,
-      source: `packages/sdk-java/managed-agent-server/target/${serverJar}`,
+      source: `packages/managed-agent-server/target/${serverJar}`,
       destination: `lib/${serverJar}`,
       role: 'control-plane',
     },
     {
       name: 'qwen-managed-agent-operator-recovery',
       version: serverVersion,
-      source: `packages/sdk-java/managed-agent-server/target/${recoveryJar}`,
+      source: `packages/managed-agent-server/target/${recoveryJar}`,
       destination: `lib/${recoveryJar}`,
       role: 'operator-recovery',
-    },
-    {
-      name: 'qwen-managed-runtime-broker',
-      version: brokerVersion,
-      source: `packages/sdk-java/runtime-broker/target/${brokerJar}`,
-      destination: `lib/${brokerJar}`,
-      role: 'embedded-runtime-broker',
     },
   ];
 
   for (const component of componentSources) {
     await copy(root, stage, component.source, component.destination);
+  }
+  await copy(
+    root,
+    stage,
+    'packages/managed-agent-server/distribution/config/application.example.yml',
+    'config/application.example.yml',
+  );
+  const systemdFiles = [
+    'qwen-hosted-harness.service',
+    'qwen-managed-agent-server.service',
+    'harness.env.example',
+    'server.env.example',
+    'README.md',
+    'README.zh-CN.md',
+  ];
+  for (const file of systemdFiles) {
+    await copy(
+      root,
+      stage,
+      `packages/managed-agent-server/distribution/systemd/${file}`,
+      `systemd/${file}`,
+    );
+  }
+  for (const file of [
+    'qwen-managed-agent-bootstrap',
+    'qwen-managed-agent-bootstrap.mjs',
+  ]) {
+    await copy(
+      root,
+      stage,
+      `packages/managed-agent-server/distribution/bin/${file}`,
+      `bin/${file}`,
+    );
   }
   const documentation = [
     ['docs/users/managed-agent-reference-deployment.md', 'docs/deployment.md'],
@@ -340,10 +358,7 @@ export async function createReferenceDistribution({
       'docs/users/managed-agent-reference-deployment.zh-CN.md',
       'docs/deployment.zh-CN.md',
     ],
-    [
-      'packages/sdk-java/managed-agent-server/README.md',
-      'docs/server-reference.md',
-    ],
+    ['packages/managed-agent-server/README.md', 'docs/server-reference.md'],
     [
       'docs/users/hosted-workspace-recovery.md',
       'docs/hosted-workspace-recovery.md',
@@ -406,7 +421,7 @@ export async function createReferenceDistribution({
       ),
       managedRuntimeBrokerProtocolVersion: Number(
         match(
-          brokerProvider,
+          brokerClient,
           /MANAGED_RUNTIME_BROKER_PROTOCOL_VERSION = (\d+)/,
           'Runtime Broker protocol version',
         ),
@@ -457,6 +472,9 @@ export async function createReferenceDistribution({
     `${rootName}/SHA256SUMS`,
     `${rootName}/bin/qwen-managed-agent-server`,
     `${rootName}/bin/qwen-managed-agent-operator-recovery`,
+    `${rootName}/bin/qwen-managed-agent-bootstrap`,
+    `${rootName}/config/application.example.yml`,
+    ...systemdFiles.map((file) => `${rootName}/systemd/${file}`),
   ]) {
     if (!entries.split('\n').includes(required)) {
       throw new Error(`Archive is missing ${required}.`);

@@ -153,7 +153,7 @@ Chain identity: `requestId`.
 - `packages/core/src/managed-runtime/contracts/managed-team-record-v1.fixtures.json` (new): the shared cases. `managed-extension-projection-v1.fixtures.json` gains the four domains with a null task kind.
 - `packages/core/src/managed-runtime/managed-extension-projection.ts`: the body registrations.
 - `packages/core/src/managed-runtime/managed-session-authority.ts`: resource closure and the rules of decision 8.
-- `packages/sdk-java/managed-agent-server`:
+- `packages/managed-agent-server`:
   - `ManagedTeamRecords` (new): the validator.
   - `ManagedExtensionProjection`: the body registrations.
   - `ManagedExtensionRecordStore`: closure and the rules of decision 8.

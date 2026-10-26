@@ -21,6 +21,7 @@ import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
+import { arePermissionBitsEnforced } from '../../packages/cli/src/test-utils/permission-bits.js';
 
 const workflow = readFileSync('.github/workflows/qwen-triage.yml', 'utf8');
 const cacheProducerWorkflow = readFileSync(
@@ -2284,12 +2285,13 @@ describe('qwen-triage verify hardening', () => {
     },
   );
 
-  it.skipIf(!hasGnuRealpath || process.getuid?.() === 0)(
+  it.skipIf(!hasGnuRealpath || !arePermissionBitsEnforced())(
     'fails closed when the corrupt workspace cannot be unlinked',
     () => {
       // A swallowed `rm -f` failure would let the mkdir and the wipe run on
-      // a path that is still a symlink. Root bypasses the mode bits, so the
-      // fixture cannot produce the refusal there.
+      // a path that is still a symlink. Root with its DAC capabilities
+      // bypasses the mode bits, so the fixture cannot produce the refusal
+      // there.
       for (const stepName of WIPE_STEPS) {
         const parent = mkdtempSync(join(tmpdir(), 'verify-heal-perm-'));
         const outside = mkdtempSync(join(tmpdir(), 'verify-heal-outside-'));
@@ -4890,7 +4892,7 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(existsSync('scripts/check-flyway-migrations.js')).toBe(true);
     expect(flat).toContain('the module list `sdk-java.yml` passes it');
     expect(readFileSync('.github/workflows/sdk-java.yml', 'utf8')).toContain(
-      'node scripts/check-flyway-migrations.js packages/sdk-java/',
+      'node scripts/check-flyway-migrations.js packages/managed-agent-server packages/sdk-java/qwencode',
     );
 
     // #13352 R5: a `chmod 555` test was red on the clean tree as root and
@@ -5196,6 +5198,82 @@ describe('qwen-triage verify hardening round 2', () => {
       );
       expect(output).toBe('8\n9\n-1\n');
     }
+  });
+
+  // The maintainer's publish round used to be a paragraph retyped every time
+  // ("English comment, collapsed Chinese, screenshots, my assets branch"), so
+  // the request and the report could drift apart. `--publish` has to resolve
+  // every one of those deliverables on its own, without weakening the repo
+  // rule it replaces.
+  it('resolves --publish to the whole local report deliverable', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+
+    expect(flat).toContain('`/verify-pr <n> --publish`');
+    expect(flat).toContain('`--publish` in the invocation is that request');
+    // A stable host is a coordinate, so it resolves once and needs no flag.
+    expect(flat).toContain(
+      'the repository is `--assets-repo`, else `$QWEN_VERIFY_ASSETS_REPO`, else the resolved `--repo`',
+    );
+    expect(flat).toContain(
+      'the branch is `--assets-branch`, else `$QWEN_VERIFY_ASSETS_BRANCH`, else `assets/pr<n>-validation`',
+    );
+    // settings.json fills the same variables, from operator scopes only.
+    expect(flat).toContain(
+      'fill those same variables at startup from operator scopes only',
+    );
+    // Posting is consent, not a coordinate: it stays per-invocation.
+    expect(flat).toContain('Only coordinates like these are defaultable');
+    expect(flat).toContain('posting stays a per-invocation request');
+    // The flag is not a shortcut around the metadata rule.
+    expect(flat).toContain('does not license an `origin` fallback');
+    // ...nor may the image host fall back to a contributor's fork.
+    expect(flat).toContain('Never fall back to `origin` for the host');
+    // Overwriting a published name leaves every older link on the old image.
+    expect(flat).toContain('A published filename is spent');
+    // A contents PUT cannot create the branch the first upload needs.
+    expect(flat).toContain('git/refs');
+    // ...and the sha to create it from is looked up in THAT repository.
+    expect(flat).toContain('.object.sha');
+    // The read-back must query the repository the blob was written to, not
+    // the PR's own repository, whose same path may not exist or may differ.
+    expect(flat).toContain('repos/<assets-repo>/contents/<path>?ref=');
+    // The deliverables are the skill's, not the maintainer's list.
+    expect(flat).toContain('do not ask the maintainer to restate them');
+  });
+
+  // Watch mode composes the shipped gate probe with cron_create. Each piece is
+  // pinned because dropping one turns the watch back into a polling task that
+  // spends a model turn per fire — the cost the design exists to avoid.
+  it('documents the watch mode on the shipped gate probe', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+
+    expect(flat).toContain('`--watch` installs a standing trigger');
+    // The gate runs the wrapper, not the bare probe: the probe also reports
+    // comments and failed checks, and every non-empty gate output wakes the
+    // model whether or not the head moved.
+    expect(flat).toContain('scripts/verify-pr-watch-gate.mjs');
+    expect(flat).toContain('resync');
+    // One cursor serves one consumer; installing over an existing autofix
+    // watch would starve this one of head moves and lose `stop`.
+    expect(flat).toContain('--check');
+    expect(flat).toContain('--claim');
+    expect(flat).toContain('--release');
+    expect(flat).toContain('one cursor serves one consumer');
+    expect(flat).toContain('head_moved_externally');
+    expect(flat).toContain('verify-pr-watch-');
+    expect(flat).toContain('cron_delete');
+    // A binary without the probe must stop the setup, not schedule a dead gate.
+    expect(flat).toContain('schedule nothing');
+  });
+
+  // The TUI renders `argument-hint` beside the command name; without the field
+  // `/verify-pr` looks like it takes no arguments, unlike `/review`.
+  it('declares an argument hint for the command prompt', () => {
+    const frontmatter = parse(/^---\n([\s\S]*?)\n---/.exec(verifySkill)[1]);
+
+    expect(frontmatter['argument-hint']).toBe(
+      '<pr-number> [--publish] [--watch] [--repo <owner>/<repo>] [--assets-repo <owner>/<repo>] [--assets-branch <branch>]',
+    );
   });
 
   // PR #7836's report said "Verdict: merge-ready — the 7 failures are all
@@ -7464,9 +7542,12 @@ describe('qwen-triage verify Java toolchain', () => {
   }
 
   function moduleCoordinates() {
-    return readdirSync('packages/sdk-java', { withFileTypes: true })
-      .filter((entry) => entry.isDirectory())
-      .map((entry) => join('packages/sdk-java', entry.name, 'pom.xml'))
+    return [
+      'packages/managed-agent-server/pom.xml',
+      ...readdirSync('packages/sdk-java', { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => join('packages/sdk-java', entry.name, 'pom.xml')),
+    ]
       .filter((pom) => existsSync(pom))
       .map((pom) => {
         const xml = readFileSync(pom, 'utf8').replace(
@@ -7484,9 +7565,13 @@ describe('qwen-triage verify Java toolchain', () => {
     const resolve = stepIn('verify', 'Resolve PR and snapshot metadata');
     const javaLine = resolve
       .split('\n')
-      .find((line) => line.includes("grep -qE '^packages/sdk-java/'"));
-    expect(javaLine).toContain("grep -qE '^packages/sdk-java/' <<<");
-    expect(javaLine).not.toContain('|');
+      .find((line) =>
+        line.includes("grep -qE '^packages/(sdk-java|managed-agent-server)/'"),
+      );
+    expect(javaLine).toContain(
+      "grep -qE '^packages/(sdk-java|managed-agent-server)/' <<<",
+    );
+    expect(javaLine.trimStart().startsWith('if grep -qE ')).toBe(true);
     expect(resolve).toContain('echo "java=true" >> "$GITHUB_OUTPUT"');
     expect(job('tmux-testing')).not.toContain('Install Java toolchain');
   });
@@ -7585,7 +7670,7 @@ describe('qwen-triage verify Java toolchain', () => {
     expect(restore).toContain('0057852bfaa89a56745cba8c7296529d2fc39830');
   });
 
-  it('strips exactly the artifact ids published by packages/sdk-java', () => {
+  it('strips exactly the artifact ids published by the Maven modules', () => {
     const coords = moduleCoordinates();
     expect(coords.length).toBeGreaterThan(0);
     const strip = mavenRepoProducerWorkflow.slice(
@@ -7603,24 +7688,20 @@ describe('qwen-triage verify Java toolchain', () => {
       expect(coord.groupId).toBe('com.alibaba');
     }
     expect(strip).toContain('${repo}/com/alibaba/${artifact}');
-    const qwencode = mavenRepoProducerWorkflow.indexOf(
-      'packages/sdk-java/qwencode/pom.xml',
+    const buildAt = mavenRepoProducerWorkflow.indexOf(
+      "      - name: 'Populate verify Maven repo'",
     );
-    const broker = mavenRepoProducerWorkflow.indexOf(
-      'packages/sdk-java/runtime-broker/pom.xml',
-    );
-    const server = mavenRepoProducerWorkflow.indexOf(
-      'packages/sdk-java/managed-agent-server/pom.xml',
-    );
-    const client = mavenRepoProducerWorkflow.indexOf(
-      'packages/sdk-java/client/pom.xml',
-    );
-    expect(qwencode).toBeLessThan(broker);
-    expect(broker).toBeLessThan(server);
+    expect(buildAt).toBeGreaterThan(-1);
+    const build = mavenRepoProducerWorkflow.slice(buildAt);
+    const qwencode = build.indexOf('packages/sdk-java/qwencode/pom.xml');
+    const server = build.indexOf('packages/managed-agent-server/pom.xml');
+    const client = build.indexOf('packages/sdk-java/client/pom.xml');
+    expect(qwencode).toBeGreaterThan(-1);
+    expect(qwencode).toBeLessThan(server);
     expect(server).toBeLessThan(client);
-    expect(
-      mavenRepoProducerWorkflow.indexOf('# verify-maven-repo-strip-begin'),
-    ).toBeGreaterThan(client);
+    expect(build.indexOf('# verify-maven-repo-strip-begin')).toBeGreaterThan(
+      client,
+    );
   });
 
   it('installs sibling modules as node, capped, without failing the job', () => {
@@ -7637,7 +7718,7 @@ describe('qwen-triage verify Java toolchain', () => {
     expect(modules).toContain('-u ACTIONS_RUNTIME_TOKEN');
     expect(modules).toContain('-u GITHUB_TOKEN');
     expect(modules).toContain('-Dgpg.skip=true');
-    expect(modules).toContain('-Dspotbugs.skip=true');
+    expect(modules).not.toContain('runtime-broker/pom.xml');
     expect(modules).toContain('java-prepare.log');
     expect(modules).toContain('steps.maven-repo.outputs.cache-hit');
     expect(modules).toContain("GITHUB_TOKEN: ''");

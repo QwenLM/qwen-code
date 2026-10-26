@@ -9,9 +9,10 @@
 //!   { tool, arguments, result_summary, result_error, timestamp,
 //!     t_ms_from_session_start, t_start_ms_from_session_start }
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use std::time::Instant;
 
@@ -109,6 +110,69 @@ pub fn set_ax_snapshot_fn(
     let _ = AX_SNAPSHOT_FN.set(Box::new(f));
 }
 
+/// Cooperative native walk budget; the callback backstop also bounds providers
+/// that do not return control to their walker.
+pub const RECORDING_AX_WALK_BUDGET: Duration = Duration::from_secs(1);
+const AX_CAPTURE_BACKSTOP: Duration = Duration::from_secs(2);
+const MAX_AX_CAPTURE_WORKERS: usize = 4;
+
+fn active_ax_captures() -> &'static Mutex<HashSet<Option<i64>>> {
+    static ACTIVE: OnceLock<Mutex<HashSet<Option<i64>>>> = OnceLock::new();
+    ACTIVE.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+struct AxCaptureSlot(Option<i64>);
+
+impl AxCaptureSlot {
+    fn acquire(pid: Option<i64>) -> Option<Self> {
+        let mut active = active_ax_captures()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if active.len() >= MAX_AX_CAPTURE_WORKERS || !active.insert(pid) {
+            return None;
+        }
+        Some(Self(pid))
+    }
+}
+
+impl Drop for AxCaptureSlot {
+    fn drop(&mut self) {
+        active_ax_captures()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&self.0);
+    }
+}
+
+fn capture_ax_state(
+    window_id: Option<u64>,
+    pid: Option<i64>,
+) -> (Option<Vec<u8>>, Option<&'static str>) {
+    let Some(hook) = AX_SNAPSHOT_FN.get() else {
+        return (None, Some("capture_hook_unavailable"));
+    };
+    let Some(slot) = AxCaptureSlot::acquire(pid) else {
+        return (None, Some("state_capture_busy"));
+    };
+    let context = crate::tool::CapturedDispatchContext::capture();
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let worker = std::thread::Builder::new()
+        .name("cua-recording-state".into())
+        .spawn(move || {
+            let result = context.run_sync(|| hook(window_id, pid));
+            drop(slot);
+            let _ = sender.send(result);
+        });
+    if worker.is_err() {
+        return (None, Some("capture_failed"));
+    }
+    match receiver.recv_timeout(AX_CAPTURE_BACKSTOP) {
+        Ok(Some(bytes)) => (Some(bytes), None),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => (None, Some("state_capture_timeout")),
+        _ => (None, Some("capture_failed")),
+    }
+}
+
 // ── Platform element-bounds callback ─────────────────────────────────────────
 //
 // Resolves an element_index to its center point in window-local screenshot
@@ -116,12 +180,19 @@ pub fn set_ax_snapshot_fn(
 // `CLICK_MARKER_FN`). Used so click.png is also written on element-indexed
 // clicks, not just pixel-addressed ones.
 
-type ElementBoundsFnBox = Box<dyn Fn(u64, i64, u32) -> Option<(f64, f64)> + Send + Sync>;
+type ElementBoundsFnBox = Box<
+    dyn Fn(u64, i64, u32, &crate::element_token::SnapshotBinding) -> Option<(f64, f64)>
+        + Send
+        + Sync,
+>;
 static ELEMENT_BOUNDS_FN: OnceLock<ElementBoundsFnBox> = OnceLock::new();
 
-/// Register the platform-specific element-bounds resolver. Args: (window_id, pid, element_index).
+/// Register the platform-specific element-bounds resolver. Args: (window_id, pid, element_index, snapshot_binding).
 pub fn set_element_bounds_fn(
-    f: impl Fn(u64, i64, u32) -> Option<(f64, f64)> + Send + Sync + 'static,
+    f: impl Fn(u64, i64, u32, &crate::element_token::SnapshotBinding) -> Option<(f64, f64)>
+        + Send
+        + Sync
+        + 'static,
 ) {
     let _ = ELEMENT_BOUNDS_FN.set(Box::new(f));
 }
@@ -129,6 +200,7 @@ pub fn set_element_bounds_fn(
 #[derive(Default)]
 struct TurnCapture {
     state: Option<Vec<u8>>,
+    state_classification: Option<&'static str>,
     screenshot: Option<Vec<u8>>,
     screenshot_classification: Option<&'static str>,
 }
@@ -138,6 +210,7 @@ struct TurnCapture {
 /// one stable `turn-NNNNN` directory even when calls complete out of order.
 pub struct PendingTurn {
     generation: u64,
+    owner: Option<String>,
     turn_dir: PathBuf,
     tool_name: String,
     args: Value,
@@ -150,7 +223,13 @@ pub struct PendingTurn {
     before: TurnCapture,
 }
 
-/// Persistent recording session state (singleton per process).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RecordingCaller<'a> {
+    pub session: Option<&'a str>,
+    pub transport: Option<&'a str>,
+}
+
+/// Persistent recording session state owned by one tool registry.
 pub struct RecordingSession {
     inner: Mutex<RecordingInner>,
 }
@@ -332,9 +411,10 @@ impl RecordingSession {
         // Write initial session.json — final video metadata is rewritten on
         // stop. We mark `present` based on whether ffmpeg actually started,
         // not just whether the caller asked for video.
+        let started_at_ms = now_ms();
         let session_payload = serde_json::json!({
             "schema_version": 1,
-            "started_at_monotonic_ms": now_ms(),
+            "started_at_monotonic_ms": started_at_ms,
             "video": video_session_payload(video_present, video_error.as_deref(), None),
             "cursor": { "present": inner.cursor.is_some(), "sample_count": 0 }
         });
@@ -350,7 +430,7 @@ impl RecordingSession {
         inner.enabled = true;
         inner.output_dir = Some(dir);
         inner.next_turn = 1;
-        inner.session_start_ms = now_ms();
+        inner.session_start_ms = started_at_ms;
         inner.session_monotonic_start = Some(monotonic_start);
         inner.last_error = video_error;
         inner.last_video = None;
@@ -392,6 +472,7 @@ impl RecordingSession {
         }
         inner.owner = None;
         let dir = inner.output_dir.clone();
+        let started_at_ms = inner.session_start_ms;
         let (video_meta, stop_error) = match inner.video.take().map(|rec| rec.stop()) {
             Some(Ok(meta)) => match validate_video_metadata(meta) {
                 Ok(meta) => (Some(meta), None),
@@ -427,7 +508,7 @@ impl RecordingSession {
             };
             let session_payload = serde_json::json!({
                 "schema_version": 1,
-                "started_at_monotonic_ms": now_ms(),
+                "started_at_monotonic_ms": started_at_ms,
                 "video": video_block,
                 "cursor": { "present": cursor_samples > 0, "sample_count": cursor_samples }
             });
@@ -476,8 +557,14 @@ impl RecordingSession {
 
     /// Reserve a turn and capture its target immediately before tool dispatch.
     /// No-op when recording is disabled.
-    pub fn begin_turn(&self, tool_name: &str, args: &Value, start_ms: u64) -> Option<PendingTurn> {
-        self.begin_turn_with_capture(tool_name, args, start_ms, true)
+    pub fn begin_turn(
+        &self,
+        tool_name: &str,
+        args: &Value,
+        start_ms: u64,
+        caller: RecordingCaller<'_>,
+    ) -> Option<PendingTurn> {
+        self.begin_turn_with_capture(tool_name, args, start_ms, caller, true)
     }
 
     /// Reserve a turn while deliberately suppressing visual and accessibility
@@ -489,8 +576,9 @@ impl RecordingSession {
         tool_name: &str,
         args: &Value,
         start_ms: u64,
+        caller: RecordingCaller<'_>,
     ) -> Option<PendingTurn> {
-        self.begin_turn_with_capture(tool_name, args, start_ms, false)
+        self.begin_turn_with_capture(tool_name, args, start_ms, caller, false)
     }
 
     fn begin_turn_with_capture(
@@ -498,11 +586,17 @@ impl RecordingSession {
         tool_name: &str,
         args: &Value,
         start_ms: u64,
+        caller: RecordingCaller<'_>,
         capture_visual_state: bool,
     ) -> Option<PendingTurn> {
-        let (turn_dir, session_start_ms, generation) = {
+        let (turn_dir, session_start_ms, generation, owner) = {
             let mut inner = self.inner.lock().unwrap();
             if !inner.enabled {
+                return None;
+            }
+            if inner.owner.as_deref().is_some_and(|owner| {
+                caller.session != Some(owner) && caller.transport != Some(owner)
+            }) {
                 return None;
             }
             let out = inner.output_dir.clone()?;
@@ -512,6 +606,7 @@ impl RecordingSession {
                 out.join(format!("turn-{idx:05}")),
                 inner.session_start_ms,
                 inner.generation,
+                inner.owner.clone(),
             )
         };
 
@@ -525,30 +620,47 @@ impl RecordingSession {
         let mut window_id = args.opt_u64("window_id");
         let pid = args.opt_i64("pid");
         let mut element_index = args.opt_u64("element_index");
-        if let (Some(pid), Some(token)) = (
-            pid.and_then(|pid| i32::try_from(pid).ok()),
-            args.get("element_token").and_then(Value::as_str),
-        ) {
-            if let Ok((resolved_window, resolved_index)) =
-                crate::element_token::global().resolve(pid, token)
-            {
-                window_id = Some(u64::from(resolved_window));
-                element_index = u64::try_from(resolved_index).ok();
+        let mut binding = None;
+        if let Some(pid) = pid.and_then(|pid| i32::try_from(pid).ok()) {
+            if let Ok(resolved) = crate::element_token::resolve_element_args(
+                pid,
+                element_index.and_then(|index| usize::try_from(index).ok()),
+                args.get("element_token").and_then(Value::as_str),
+                args.get("snapshot_id").and_then(Value::as_str),
+                window_id.and_then(|window| u32::try_from(window).ok()),
+                tool_name,
+            ) {
+                binding = resolved.binding();
+                if let crate::element_token::ResolvedElement::Element {
+                    window_id: Some(window),
+                    element_index: index,
+                    ..
+                } = resolved
+                {
+                    window_id = Some(u64::from(window));
+                    element_index = u64::try_from(index).ok();
+                }
             }
         }
-        let click_point = resolve_click_point(tool_name, &args, window_id, pid, element_index);
+        let click_point = resolve_click_point(
+            tool_name,
+            &args,
+            window_id,
+            pid,
+            element_index,
+            binding.as_ref(),
+        );
         let before = if capture_visual_state {
             capture_turn(window_id, pid)
         } else {
             TurnCapture {
-                state: None,
-                screenshot: None,
                 screenshot_classification: Some("privacy_suppressed"),
+                ..Default::default()
             }
         };
 
         let mut inner = self.inner.lock().unwrap();
-        if !inner.enabled || inner.generation != generation {
+        if !inner.enabled || inner.generation != generation || inner.owner != owner {
             return None;
         }
         if let Err(error) = write_phase_artifacts(&turn_dir, "before", &before) {
@@ -558,6 +670,7 @@ impl RecordingSession {
 
         Some(PendingTurn {
             generation,
+            owner,
             turn_dir,
             tool_name: tool_name.to_owned(),
             args,
@@ -600,15 +713,27 @@ impl RecordingSession {
         action_record: Option<&crate::action_record::ActionExecutionRecord>,
         result_is_error: bool,
     ) {
-        let mut inner = self.inner.lock().unwrap();
-        if !inner.enabled || inner.generation != pending.generation {
-            tracing::warn!(
-                target: "recording",
-                "discarding a turn from an inactive recording generation"
-            );
+        let is_live = |inner: &RecordingInner| {
+            inner.enabled && inner.generation == pending.generation && inner.owner == pending.owner
+        };
+        if !is_live(&self.inner.lock().unwrap()) {
             return;
         }
-        if let Err(error) = write_turn(pending, result_text, action_record, result_is_error) {
+        let after = if pending.capture_visual_state {
+            capture_turn(pending.window_id, pending.pid)
+        } else {
+            TurnCapture {
+                screenshot_classification: Some("privacy_suppressed"),
+                ..Default::default()
+            }
+        };
+        let mut inner = self.inner.lock().unwrap();
+        if !is_live(&inner) {
+            tracing::warn!(target: "recording", "discarding a turn from an inactive recording generation");
+            return;
+        }
+        if let Err(error) = write_turn(pending, after, result_text, action_record, result_is_error)
+        {
             inner.last_error = Some(error.to_string());
         }
     }
@@ -616,8 +741,15 @@ impl RecordingSession {
     /// Compatibility helper for callers that only report completed calls.
     /// New dispatch paths should use `begin_turn` and `finish_turn` so the
     /// before phase is captured before the action changes application state.
-    pub fn record(&self, tool_name: &str, args: &Value, result_text: &str, start_ms: u64) {
-        let Some(pending) = self.begin_turn(tool_name, args, start_ms) else {
+    pub fn record(
+        &self,
+        tool_name: &str,
+        args: &Value,
+        result_text: &str,
+        start_ms: u64,
+        caller: RecordingCaller<'_>,
+    ) {
+        let Some(pending) = self.begin_turn(tool_name, args, start_ms, caller) else {
             return;
         };
         self.finish_turn(pending, result_text);
@@ -637,10 +769,10 @@ fn capture_turn(window_id: Option<u64>, pid: Option<i64>) -> TurnCapture {
         .get()
         .map(|capture| capture(window_id, pid))
         .unwrap_or_else(|| ScreenshotCapture::unavailable("capture_hook_unavailable"));
+    let (state, state_classification) = capture_ax_state(window_id, pid);
     TurnCapture {
-        state: AX_SNAPSHOT_FN
-            .get()
-            .and_then(|capture| capture(window_id, pid)),
+        state,
+        state_classification,
         screenshot: screenshot.png,
         screenshot_classification: screenshot.classification,
     }
@@ -652,6 +784,7 @@ fn resolve_click_point(
     window_id: Option<u64>,
     pid: Option<i64>,
     element_index: Option<u64>,
+    binding: Option<&crate::element_token::SnapshotBinding>,
 ) -> Option<(f64, f64)> {
     use crate::tool_args::ArgsExt;
     if !matches!(tool_name, "click" | "double_click" | "right_click") {
@@ -662,7 +795,7 @@ fn resolve_click_point(
         _ => match (window_id, pid, element_index, ELEMENT_BOUNDS_FN.get()) {
             (Some(wid), Some(pid), Some(index), Some(resolve)) => u32::try_from(index)
                 .ok()
-                .and_then(|index| resolve(wid, pid, index)),
+                .and_then(|index| resolve(wid, pid, index, binding?)),
             _ => None,
         },
     }
@@ -711,7 +844,7 @@ fn write_evidence_manifest(
     let manifest = serde_json::json!({
         "schema": "cua-turn-evidence/v1",
         "before": {
-            "state": capture_status(before.state.is_some(), state_expected, None),
+            "state": capture_status(before.state.is_some(), state_expected, before.state_classification),
             "screenshot": capture_status(
                 before.screenshot.is_some(),
                 true,
@@ -719,7 +852,7 @@ fn write_evidence_manifest(
             ),
         },
         "after": {
-            "state": capture_status(after.state.is_some(), state_expected, None),
+            "state": capture_status(after.state.is_some(), state_expected, after.state_classification),
             "screenshot": capture_status(
                 after.screenshot.is_some(),
                 true,
@@ -758,18 +891,20 @@ fn strip_internal_keys(args: &Value) -> std::borrow::Cow<'_, Value> {
 
 fn write_turn(
     pending: PendingTurn,
+    after: TurnCapture,
     result_text: &str,
     action_record: Option<&crate::action_record::ActionExecutionRecord>,
     result_is_error: bool,
 ) -> anyhow::Result<()> {
     let PendingTurn {
         generation: _,
+        owner: _,
         turn_dir,
         tool_name,
         args,
         start_ms,
         session_start_ms,
-        window_id,
+        window_id: _,
         pid,
         click_point,
         capture_visual_state,
@@ -777,15 +912,6 @@ fn write_turn(
     } = pending;
     std::fs::create_dir_all(&turn_dir)?;
     let now = now_ms();
-    let after = if capture_visual_state {
-        capture_turn(window_id, pid)
-    } else {
-        TurnCapture {
-            state: None,
-            screenshot: None,
-            screenshot_classification: Some("privacy_suppressed"),
-        }
-    };
     let click_family = matches!(tool_name.as_str(), "click" | "double_click" | "right_click");
     let action_refused = action_record
         .is_some_and(|record| record.effect == crate::action_record::ActionEffect::Refused);
@@ -803,7 +929,7 @@ fn write_turn(
         "arguments": args,
         "result_summary": result_text,
         "result_error": result_is_error,
-        "timestamp": iso_now(),
+        "timestamp": iso8601_utc_from_unix_ms(now),
         "t_ms_from_session_start": now.saturating_sub(session_start_ms),
         "t_start_ms_from_session_start": start_ms.saturating_sub(session_start_ms),
     });
@@ -874,12 +1000,19 @@ pub fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-fn iso_now() -> String {
-    let d = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    // Format as fractional Unix seconds (simple, unambiguous, machine-readable).
-    format!("{:.3}", d.as_secs_f64())
+fn iso8601_utc_from_unix_ms(ms: u64) -> String {
+    let t = time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(ms) * 1_000_000)
+        .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        t.year(),
+        u8::from(t.month()),
+        t.day(),
+        t.hour(),
+        t.minute(),
+        t.second(),
+        t.millisecond()
+    )
 }
 
 /// Build the `session.json` `video` field. Three shapes:
@@ -940,6 +1073,93 @@ fn validate_video_metadata(meta: VideoMetadata) -> anyhow::Result<VideoMetadata>
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn recording_turns_require_the_owner_session_or_connection() {
+        let root = tempfile::tempdir().unwrap();
+        let session = RecordingSession::new();
+        {
+            let mut inner = session.inner.lock().unwrap();
+            inner.enabled = true;
+            inner.output_dir = Some(root.path().to_owned());
+            inner.owner = Some("owner".to_owned());
+        }
+        for caller in [
+            RecordingCaller {
+                session: Some("foreign"),
+                transport: Some("other"),
+            },
+            RecordingCaller::default(),
+        ] {
+            assert!(session
+                .begin_private_turn("type_text", &serde_json::json!({}), 0, caller)
+                .is_none());
+            assert_eq!(session.current_state().next_turn, 1);
+        }
+        for caller in [
+            RecordingCaller {
+                session: Some("owner"),
+                transport: Some("connection"),
+            },
+            RecordingCaller {
+                session: Some("named-on-owner-connection"),
+                transport: Some("owner"),
+            },
+        ] {
+            assert!(session
+                .begin_private_turn("type_text", &serde_json::json!({}), 0, caller)
+                .is_some());
+        }
+        assert_eq!(session.current_state().next_turn, 3);
+        session.inner.lock().unwrap().owner = None;
+        assert!(session
+            .begin_private_turn(
+                "type_text",
+                &serde_json::json!({}),
+                0,
+                RecordingCaller::default()
+            )
+            .is_some());
+    }
+
+    #[test]
+    fn recording_timestamps_use_iso8601_and_keep_the_start_baseline() {
+        for (ms, expected) in [
+            (0, "1970-01-01T00:00:00.000Z"),
+            (951_782_400_123, "2000-02-29T00:00:00.123Z"),
+            (1_767_225_600_999, "2026-01-01T00:00:00.999Z"),
+        ] {
+            assert_eq!(iso8601_utc_from_unix_ms(ms), expected);
+        }
+        let root = tempfile::tempdir().unwrap();
+        let session = RecordingSession::new();
+        session
+            .start(root.path().to_str().unwrap(), false, None)
+            .unwrap();
+        let manifest = || -> Value {
+            serde_json::from_slice(&std::fs::read(root.path().join("session.json")).unwrap())
+                .unwrap()
+        };
+        let started = manifest()["started_at_monotonic_ms"].as_u64().unwrap();
+        let pending = session
+            .begin_private_turn(
+                "type_text",
+                &serde_json::json!({}),
+                now_ms(),
+                RecordingCaller::default(),
+            )
+            .unwrap();
+        session.finish_turn(pending, "fixture");
+        let action: Value = serde_json::from_slice(
+            &std::fs::read(root.path().join("turn-00001/action.json")).unwrap(),
+        )
+        .unwrap();
+        let finished = started + action["t_ms_from_session_start"].as_u64().unwrap();
+        assert_eq!(action["timestamp"], iso8601_utc_from_unix_ms(finished));
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        session.stop_owner(None).unwrap();
+        assert_eq!(manifest()["started_at_monotonic_ms"], started);
+    }
+
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -974,7 +1194,7 @@ mod tests {
             Some(format!(r#"{{"phase":{phase}}}"#).into_bytes())
         });
         set_click_marker_fn(|_, _, _| Some(b"click".to_vec()));
-        set_element_bounds_fn(|window_id, pid, element_index| {
+        set_element_bounds_fn(|window_id, pid, element_index, _binding| {
             Some((window_id as f64 + element_index as f64, pid as f64))
         });
 
@@ -995,6 +1215,7 @@ mod tests {
                 "click",
                 &serde_json::json!({"pid": 1, "window_id": 2, "x": 3, "y": 4}),
                 now_ms(),
+                RecordingCaller::default(),
             )
             .expect("recording should reserve a turn");
         let turn = output_dir.join("turn-00001");
@@ -1028,13 +1249,19 @@ mod tests {
         assert_eq!(action["action_truth"]["route"], "synthetic_events");
         assert_eq!(action["action_truth"]["requested_delivery"], "background");
 
-        let snapshot_id = crate::element_token::global().register_snapshot(1, 77, 1);
+        let snapshot_id = crate::element_token::global().register_snapshot_payload(
+            1,
+            77,
+            [0],
+            std::sync::Arc::new(()),
+        );
         let token = crate::element_token::token_for(snapshot_id, 0);
         let pending = session
             .begin_turn(
                 "click",
                 &serde_json::json!({"pid": 1, "element_token": token}),
                 now_ms(),
+                RecordingCaller::default(),
             )
             .expect("token-only click should reserve a targeted turn");
         session.finish_turn(pending, "token click");
@@ -1055,6 +1282,7 @@ mod tests {
                 "click",
                 &serde_json::json!({"pid": 1, "element_token": stale_token}),
                 now_ms(),
+                RecordingCaller::default(),
             )
             .expect("stale-token refusal should reserve an evidence turn");
         session.finish_turn_with_outcome(pending, "stale token", None, true);
@@ -1081,6 +1309,7 @@ mod tests {
                 "click",
                 &serde_json::json!({"pid": 1, "window_id": 2, "x": 3, "y": 4}),
                 now_ms(),
+                RecordingCaller::default(),
             )
             .expect("resolved refusal should reserve an evidence turn");
         let refusal_record = crate::action_record::ActionExecutionRecord::builder(
@@ -1162,7 +1391,12 @@ mod tests {
             inner.session_start_ms = now_ms();
         }
         let pending = session
-            .begin_turn("click", &serde_json::json!({"x": 1, "y": 2}), now_ms())
+            .begin_turn(
+                "click",
+                &serde_json::json!({"x": 1, "y": 2}),
+                now_ms(),
+                RecordingCaller::default(),
+            )
             .expect("reserve first generation turn");
         session.inner.lock().unwrap().generation = 2;
         session.finish_turn(pending, "must be discarded");
@@ -1195,6 +1429,7 @@ mod tests {
                 "browser_prepare",
                 &serde_json::json!({"pid": 1, "window_id": 2}),
                 now_ms(),
+                RecordingCaller::default(),
             )
             .expect("reserve private consent turn");
         session.finish_turn(pending, "attached");

@@ -55,11 +55,11 @@
 
 ## 后续工作
 
-| 项                    | 范围                                                                                                                                                                                                                                          |
-| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| H3 类型               | `background_shell` 与 `monitor` 已启用（#13856），但它们的取消需要先有各自的停止语义：Shell publisher 今天在停止请求后仍结算 `exited`，`monitor_run` 没有停止请求。各自只有在停止路径就绪后才加入 `CANCELLABLE_TASK_KINDS`，按 H4f 设计的表。 |
-| `automation_run`      | 不携带停止请求；归 H6 的 per_run 目标所有。                                                                                                                                                                                                   |
-| Channel delivery 取消 | 随 H5 的公开变更路由（resend 先行）一起做，复用本操作模型 —— 见 [H4f 设计](2026-10-10-managed-task-cancel.zh-CN.md)决策 10。                                                                                                                  |
-| Child 输出事件        | 把 child 任务链接到其 child Session，或在 `read_output` 背后转发其输出 —— H4f 设计推迟的那个独立决策，不变。                                                                                                                                  |
-| WebShell 面板         | 显示 workflow 任务并准纳其取消提交（`ManagedTaskPanel.tsx:103` 的面板过滤与 `use-managed-task-cancel.ts:311` 的提交闸门）。                                                                                                                   |
-| Close 停止 child      | [#13875](https://github.com/QwenLM/qwen-code/issues/13875)，不变：relay 的停止臂仍跳过不再 `ACTIVE` 的父 Session。                                                                                                                            |
+| 项                    | 范围                                                                                                                                                                                                                                                    |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| H3 类型               | **已在 [H4f-c](2026-10-17-managed-h3-task-cancel.zh-CN.md) 交付：** A8（#13889）已把被平台停止的 Shell 结算为 `stop_requested`；两类加入 `CANCELLABLE_TASK_KINDS`，其投递经 Runtime Broker 停止进程，Monitor 的 `stop_requested` 结算即其已记录的停止。 |
+| `automation_run`      | 不携带停止请求；归 H6 的 per_run 目标所有。                                                                                                                                                                                                             |
+| Channel delivery 取消 | **已在 [#13746 F3](2026-10-17-managed-delivery-task-cancel.zh-CN.md) 交付：** 投递投影为其路由 Session 的任务（`channel_delivery`），在尚无适配器认领时走同一条任务取消；不再需要决策 10 所说的独立路由。                                               |
+| Child 输出事件        | 已由 [child Session 链接](2026-10-17-managed-child-task-session-link.zh-CN.md)（#13746 F2）交付：workflow 任务像 child agent 任务一样给出其 child Session。                                                                                             |
+| WebShell 面板         | **已交付：** 面板与其他所有类型一起列出 workflow 任务，并在任务公布取消时接受取消（[面板文档](2026-10-12-managed-child-task-panel.zh-CN.md)）。                                                                                                         |
+| Close 停止 child      | [#13875](https://github.com/QwenLM/qwen-code/issues/13875)，不变：relay 的停止臂仍跳过不再 `ACTIVE` 的父 Session。                                                                                                                                      |

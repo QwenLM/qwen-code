@@ -264,6 +264,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     usageMetadata?: GenerateContentResponseUsageMetadata,
     responseText?: string,
     ttftMs?: number,
+    generationMs?: number,
   ): void {
     const identity = subagentIdentityContext.getStore();
     logApiResponse(
@@ -279,6 +280,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         subagentNameContext.getStore(),
         ttftMs,
         executionId,
+        generationMs,
       ),
       sessionId,
       identity
@@ -378,6 +380,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     usageMetadata?: GenerateContentResponseUsageMetadata,
     responseText?: string,
     ttftMs?: number,
+    generationMs?: number,
   ): void {
     try {
       this._logApiResponse(
@@ -390,6 +393,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         usageMetadata,
         responseText,
         ttftMs,
+        generationMs,
       );
     } catch (loggingError) {
       debugLogger.warn('Failed to log API response:', loggingError);
@@ -853,6 +857,10 @@ export class LoggingContentGenerator implements ContentGenerator {
     // calls (one per ContentGenerator, see contentGenerator.ts:createContentGenerator).
     // See docs/design/telemetry-llm-request-timing-design.md (D1, D2).
     let ttftMs: number | undefined;
+    // From the first to the latest user-visible chunk. Output speed is measured
+    // over this window rather than up to stream end, which also includes the
+    // time the consumer spends on the final chunk.
+    let generationMs: number | undefined;
     let firstChunkObserved = false;
     // Tracks whether the idle timeout fired and ended the span. If so,
     // a resumed-after-timeout consumer must not call endLLMRequestSpan
@@ -971,8 +979,10 @@ export class LoggingContentGenerator implements ContentGenerator {
         // content. hasUserVisibleContent skips role-only / usageMetadata-only
         // chunks, so TTFT reflects "model produced something the operator can
         // attribute to user-perceived latency."
-        if (ttftMs === undefined && hasUserVisibleContent(response)) {
-          ttftMs = Date.now() - startTime;
+        if (hasUserVisibleContent(response)) {
+          const elapsedMs = Date.now() - startTime;
+          ttftMs ??= elapsedMs;
+          generationMs = elapsedMs - ttftMs;
         }
         resetSpanTimeout?.();
         yield response;
@@ -1021,6 +1031,7 @@ export class LoggingContentGenerator implements ContentGenerator {
           lastUsageMetadata,
           streamResponseText,
           ttftMs,
+          generationMs,
         );
         const openaiRequest = await openaiRequestPromise;
         await this.safelyLogOpenAIInteraction(

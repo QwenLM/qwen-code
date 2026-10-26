@@ -1,7 +1,7 @@
 ---
 name: cua-driver
 description: Drive a native GUI app (macOS, Windows, Linux) via the Qwen Cua Driver CLI (default) or MCP server; snapshot its accessibility tree, act through snapshot-bound element tokens, native menu paths, exact window geometry, or pixel coordinates, and verify from fresh state. Use when the user asks you to operate, drive, automate, or perform a GUI task in a real application on the host.
-version: 0.20.11 # x-release-please-version
+version: 0.26.0 # x-release-please-version
 metadata:
   openclaw:
     requires:
@@ -17,9 +17,6 @@ metadata:
       - name: CUA_DRIVER_PATH
         required: false
         description: Optional path to a qwen-cua-driver binary used by an embedding host.
-      - name: CUA_DRIVER_RS_ENABLE_WAYLAND
-        required: false
-        description: Set to 1 to enable the native Wayland backend.
       - name: CUA_DRIVER_RS_MCP_HTTP_PORT
         required: false
         description: Optional port for the local MCP HTTP endpoint.
@@ -52,7 +49,7 @@ directory:
   ApplicationFrameHost hosting, layered UIA+PostMessage click chain,
   Session 0 isolation, Windows-specific focus-steal vectors).
 - **Linux** — read `LINUX.md` (X11 background input via AT-SPI +
-  XSendEvent and compositor-specific Wayland capabilities).
+  XSendEvent (including X11 apps under XWayland)).
 
 Cross-cutting topics also have their own files:
 
@@ -552,13 +549,6 @@ surface like Electron/Chromium/canvas), returns `degraded: true`
 plus an observation-specific escalation hint — normally pointing at pixels (you
 still have the screenshot from the same call to click off).
 
-**Platform nuance for action escalation.** On **Wayland** an unfocused
-window cannot be pixel-targeted in the background (libei →
-`background_unavailable`), so the action target is
-**`foreground`, not `pixel`**. macOS, X11, and most Windows surfaces
-can pixel-target in the background, so they target `pixel`. See
-`LINUX.md` / `WINDOWS.md`.
-
 ## The verify-then-escalate ladder (algorithm)
 
 Every snapshot already hands you both the tree and the screenshot, so
@@ -607,8 +597,6 @@ if resp.effect == "suspected_noop"
 if resp.escalation.target == "foreground"
    or the px action still did nothing:
     re-call the same action with delivery_mode:"foreground"
-    # on Wayland this is the ONLY escalation — px-bg can't target an
-    # unfocused window there; see LINUX.md
     verify again
 
 # Route 5 — per-call desktop fallback
@@ -817,7 +805,7 @@ the response's `snapshot_id` with `element_index`; bare indices fail closed in
 `list_windows.z_index` uses one portable convention: higher integer
 values are closer to the front. Select a frontmost candidate with the
 maximum non-null value. If all values are `null` (as they can be on
-native Wayland), use an explicit fallback; never treat `null` as zero
+unavailable stacking metadata), use an explicit fallback; never treat `null` as zero
 or infer stacking from array order. The `windows` records returned by
 `launch_app` use the same convention.
 
