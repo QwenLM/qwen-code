@@ -184,8 +184,8 @@ public class ManagedNativeJournalSnapshots {
                 + " AND owner_key = ? AND owner_revision = journal_revision AND journal_revision <= ?"
                 + " GROUP BY resource_key, resource_id";
         var arguments = new org.springframework.jdbc.core.ArgumentPreparedStatementSetter(new Object[] {
-            scope, owner, revision, ManagedSchemaKeys.identity(tenant), ManagedSchemaKeys.identity(request.workspaceId()),
-            ManagedSchemaKeys.identity(session), scope, scope, revision
+                scope, owner, revision, ManagedSchemaKeys.identity(tenant), ManagedSchemaKeys.identity(request.workspaceId()),
+                ManagedSchemaKeys.identity(session), scope, scope, revision
         });
         int copied = jdbc.update(copy, statement -> {
             statement.setQueryTimeout(2);
