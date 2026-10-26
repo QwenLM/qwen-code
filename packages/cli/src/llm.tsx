@@ -485,7 +485,10 @@ export async function main() {
 
   // Run before yargs parses subcommands — handlers like `channel status`/`stop`
   // call `process.exit` before `loadSettings()` would otherwise bootstrap.
+  // The marker goes here for the same reason, and ahead of the sandbox
+  // handoff, whose child always runs under QWEN_HOME.
   preResolveHomeEnvOverrides();
+  Storage.markDefaultGlobalQwenDir();
 
   markAcpStartup('argsParseStart');
   let argv = await parseArguments();
@@ -1068,8 +1071,6 @@ export async function main() {
   // to run Qwen Code. It is now safe to perform expensive initialization that
   // may have side effects.
   profileCheckpoint('after_sandbox_check');
-
-  Storage.markDefaultGlobalQwenDir();
 
   // Initialize output language file before config loads to ensure it's included in context
   if (!isBareMode(argv.bare)) {

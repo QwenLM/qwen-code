@@ -236,10 +236,15 @@ vi.mock('./utils/processUtils.js', async (importOriginal) => ({
   superviseInProcess: vi.fn(),
 }));
 
-vi.mock('./config/environment.js', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('./config/environment.js')>()),
-  hasLoadedEnvironmentValues: vi.fn(() => false),
-}));
+vi.mock('./config/environment.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./config/environment.js')>();
+  return {
+    ...actual,
+    hasLoadedEnvironmentValues: vi.fn(() => false),
+    preResolveHomeEnvOverrides: vi.fn(actual.preResolveHomeEnvOverrides),
+  };
+});
 
 vi.mock('./config/sandboxConfig.js', () => ({
   loadSandboxConfig: vi.fn(),
@@ -1729,6 +1734,31 @@ describe('llm.tsx main function', () => {
     } finally {
       vi.unstubAllEnvs();
     }
+  });
+
+  // Subcommand handlers run and exit inside parseArguments(), and the bare
+  // mode and sandbox branches come after it, so this covers every route
+  // through main().
+  it('marks the default global dir from the home .env before parsing arguments', async () => {
+    const { parseArguments } = await import('./config/config.js');
+    const { preResolveHomeEnvOverrides } = await import(
+      './config/environment.js'
+    );
+    const markGlobalDir = vi
+      .spyOn(Storage, 'markDefaultGlobalQwenDir')
+      .mockImplementation(() => {});
+    const parseError = new Error('stop after parsing');
+    vi.mocked(parseArguments).mockRejectedValueOnce(parseError);
+
+    await expect(main()).rejects.toBe(parseError);
+
+    const resolved = vi
+      .mocked(preResolveHomeEnvOverrides)
+      .mock.invocationCallOrder.at(-1);
+    const marked = markGlobalDir.mock.invocationCallOrder.at(-1);
+    const parsed = vi.mocked(parseArguments).mock.invocationCallOrder.at(-1);
+    expect(resolved).toBeLessThan(marked!);
+    expect(marked).toBeLessThan(parsed!);
   });
 
   it('should skip full settings discovery in bare mode', async () => {

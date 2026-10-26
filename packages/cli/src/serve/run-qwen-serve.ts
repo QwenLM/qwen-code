@@ -35,7 +35,10 @@ import {
 } from './hosted-harness-profile.js';
 import { HOSTED_HARNESS_CAPABILITY_DIGEST_ENV } from './hosted-harness-contract.js';
 import { isWithinRoot } from '../config/path-comparison.js';
-import { getDefaultQwenDirLite } from '../config/storage-paths-lite.js';
+import {
+  getDefaultQwenDirLite,
+  markDefaultGlobalQwenDirLite,
+} from '../config/storage-paths-lite.js';
 import { readSshWorkspace } from './ssh-workspace-store.js';
 import {
   acquireInheritedLoaderEnvScrub,
@@ -3472,6 +3475,7 @@ async function runQwenServeImpl(
     );
   }
   preResolveServeFastPathHomeEnvOverrides();
+  markDefaultGlobalQwenDirLite();
   assertExecutionSandboxSupported(
     readOperatorSandboxSettings(),
     'serve / ACP / web terminals',

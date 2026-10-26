@@ -197,6 +197,34 @@ export function getDefaultQwenDirLite(
     : legacyDir;
 }
 
+/**
+ * Core's `Storage.markDefaultGlobalQwenDir()`, for the serve routes that
+ * resolve the global dir without loading core.
+ */
+export function markDefaultGlobalQwenDirLite(): void {
+  const homeDir = os.homedir();
+  if (process.env['QWEN_HOME'] || !homeDir) {
+    return;
+  }
+  const dir = getDefaultQwenDirLite(process.env['XDG_CONFIG_HOME']);
+  const marker = path.join(dir, GLOBAL_DIR_MARKER);
+  if (
+    dir === path.join(homeDir, SETTINGS_DIRECTORY_NAME) ||
+    fs.existsSync(marker)
+  ) {
+    return;
+  }
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      marker,
+      'Qwen Code keeps its global directory here even if ~/.qwen exists.\n',
+    );
+  } catch {
+    // Best effort: the next start tries again.
+  }
+}
+
 export function getSystemSettingsPath(
   env: Readonly<NodeJS.ProcessEnv> = process.env,
 ): string {

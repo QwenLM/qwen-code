@@ -9367,7 +9367,7 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
-  it('falls back to the default global dir, XDG on Linux, for session runtime output', async () => {
+  it('falls back to the default global dir, XDG on Linux, for session runtime output and marks it', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-default-dir-')),
     );
@@ -9422,6 +9422,14 @@ describe('runQwenServe runtime startup failures', () => {
       );
       await handle.runtimeReady;
       expect(primaryRuntime?.sessionRuntimeBaseDir).toBe(
+        path.join(home, '.config', 'qwen'),
+      );
+      expect(
+        fs.existsSync(path.join(home, '.config', 'qwen', '.qwen-global-dir')),
+      ).toBe(true);
+      // e.g. the Live discovery rendezvous, which still uses ~/.qwen.
+      fs.mkdirSync(path.join(home, '.qwen'));
+      expect(qwenCore.Storage.getGlobalQwenDir()).toBe(
         path.join(home, '.config', 'qwen'),
       );
     } finally {

@@ -16,6 +16,7 @@ import {
   getSystemDefaultsPath,
   getSystemSettingsPath,
   isFullyQualifiedPath,
+  markDefaultGlobalQwenDirLite,
   passedEnvironment,
   readEnvironmentVariable,
   spawnedEnvironmentView,
@@ -337,6 +338,28 @@ describe('settings locations in a given environment', () => {
       vi.stubEnv('XDG_CONFIG_HOME', 'relative-config');
       expect(getGlobalQwenDirLite()).toBe(xdgDir);
       expect(getGlobalQwenDirLite()).toBe(Storage.getGlobalQwenDir());
+    });
+
+    it('writes the marker core keeps a new install by', () => {
+      const xdgDir = path.join(userHome, '.config', 'qwen');
+      markDefaultGlobalQwenDirLite();
+      fs.mkdirSync(path.join(userHome, '.qwen'));
+
+      expect(Storage.getGlobalQwenDir()).toBe(xdgDir);
+      expect(getGlobalQwenDirLite()).toBe(xdgDir);
+    });
+
+    it('writes no marker under QWEN_HOME or when ~/.qwen is in use', () => {
+      const xdgDir = path.join(userHome, '.config', 'qwen');
+      vi.stubEnv('QWEN_HOME', xdgDir);
+      markDefaultGlobalQwenDirLite();
+      expect(fs.existsSync(xdgDir)).toBe(false);
+
+      vi.stubEnv('QWEN_HOME', undefined);
+      fs.mkdirSync(path.join(userHome, '.qwen'));
+      markDefaultGlobalQwenDirLite();
+      expect(fs.existsSync(xdgDir)).toBe(false);
+      expect(fs.readdirSync(path.join(userHome, '.qwen'))).toEqual([]);
     });
 
     it('reads XDG_CONFIG_HOME from the given environment', () => {
