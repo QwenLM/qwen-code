@@ -2063,6 +2063,54 @@ describe('MemoryManager', () => {
       expect(vi.mocked(runAutoMemoryExtract)).toHaveBeenCalledTimes(2);
     });
 
+    it('does not emit an unhandled rejection when a queued extraction fails', async () => {
+      // The queued run has no caller: scheduleExtract returned 'queued' before
+      // it started, and runExtract already logged the failure and marked the
+      // task failed. Its rejection must not reach the process handler.
+      const failure = new Error('queued extract failed');
+      const first = deferred<ExtractResult>();
+      vi.mocked(runAutoMemoryExtract)
+        .mockReturnValueOnce(first.promise)
+        .mockRejectedValueOnce(failure);
+
+      const unhandled = vi.fn();
+      process.on('unhandledRejection', unhandled);
+      try {
+        const mgr = new MemoryManager();
+        const firstPromise = mgr.scheduleExtract(
+          extractParams(tmp.projectRoot, 'sess-1', 'first'),
+        );
+        const queued = await mgr.scheduleExtract(
+          extractParams(tmp.projectRoot, 'sess-1', 'second', makeMockConfig()),
+        );
+        expect(queued.skippedReason).toBe('queued');
+
+        first.resolve(extractResult('sess-1', []));
+        await firstPromise;
+        await mgr.drain();
+        // unhandledRejection fires once the microtask queue has drained.
+        await new Promise<void>((resolve) => setImmediate(resolve));
+
+        expect(unhandled).not.toHaveBeenCalled();
+        const tasks = mgr.listTasksByType('extract', tmp.projectRoot);
+        expect(tasks.map((task) => task.status).sort()).toEqual([
+          'completed',
+          'failed',
+        ]);
+        // The record and the telemetry event are the whole trace a failed
+        // queued run leaves: it has no caller to observe its rejection.
+        expect(tasks.find((task) => task.status === 'failed')?.error).toBe(
+          'queued extract failed',
+        );
+        expect(telemetryMocks.logMemoryExtract).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.objectContaining({ status: 'failed' }),
+        );
+      } finally {
+        process.off('unhandledRejection', unhandled);
+      }
+    });
+
     it('isolates state between manager instances', async () => {
       vi.mocked(runAutoMemoryExtract).mockResolvedValue(
         extractResult('sess-1', ['user']),
@@ -3193,35 +3241,6 @@ describe('MemoryManager', () => {
 
       expect(result.status).toBe('skipped');
       expect(result.skippedReason).toBe('memory_pressure');
-    });
-  });
-
-  describe('buildAutoMemoryPrompt', () => {
-    it('forwards options to buildManagedAutoMemoryPrompt', () => {
-      const mgr = new MemoryManager();
-
-      // Without forceFullProtocol (all indexes empty → condensed path)
-      const condensed = mgr.buildAutoMemoryPrompt(
-        '/project/.qwen/memory',
-        null,
-      );
-
-      // With forceFullProtocol → full verbose path
-      const full = mgr.buildAutoMemoryPrompt(
-        '/project/.qwen/memory',
-        null,
-        undefined,
-        undefined,
-        { forceFullProtocol: true },
-      );
-
-      // Condensed path uses short section headers
-      expect(condensed).toContain('## Memory types');
-      expect(condensed).not.toContain('## Types of memory');
-
-      // Full path uses verbose section headers
-      expect(full).toContain('## Types of memory');
-      expect(full).toContain('## What NOT to save in memory');
     });
   });
 });

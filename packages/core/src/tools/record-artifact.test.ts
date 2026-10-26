@@ -24,6 +24,7 @@ import {
   RecordArtifactTool,
   type RecordArtifactParams,
 } from './record-artifact.js';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 const signal = new AbortController().signal;
 const RES = 'https://example.com/resource';
@@ -140,6 +141,10 @@ describe('RecordArtifactTool', () => {
     return secret;
   }
 
+  it('does not point the model at the Artifact tool', () => {
+    expect(makeTool().description).not.toContain('Artifact tool');
+  });
+
   it('records a link artifact without touching the resource', async () => {
     const url = 'https://example.com/tables/orders';
     const metadata = { table: 'orders' };
@@ -168,17 +173,161 @@ describe('RecordArtifactTool', () => {
 
     expectAll(result, [
       {
-        title: 'Workspace report',
+        title: 'summary.html',
+        description: 'Workspace report',
         storage: 'workspace',
         workspacePath: 'reports/summary.html',
         sizeBytes: '<html>ok</html>'.length,
+        metadata: { derivedFromTitle: true },
       },
     ]);
     expectText(result, [
+      'Recorded artifact "summary.html".',
       'status: available',
       'workspacePath: reports/summary.html',
       `resolvedPath: ${path.join(ws.cwd, 'reports/summary.html')}`,
     ]);
+  });
+
+  it('keeps an explicit description for a workspace file', async () => {
+    const ws = await workspace();
+    await ws.write('reports/summary.html', 'ok');
+
+    const result = await run(
+      {
+        title: 'Workspace report',
+        description: 'Daily export',
+        workspacePath: 'reports/summary.html',
+      },
+      ws.tool,
+    );
+
+    expectFirst(result, {
+      title: 'summary.html',
+      description: 'Daily export',
+    });
+    expect(result.artifacts?.[0]?.metadata).toBeUndefined();
+  });
+
+  it('keeps caller metadata when the filename becomes the title', async () => {
+    const ws = await workspace();
+    await ws.write('reports/summary.html', 'ok');
+
+    const result = await run(
+      {
+        title: 'Workspace report',
+        workspacePath: 'reports/summary.html',
+        metadata: { note: 'kept' },
+      },
+      ws.tool,
+    );
+
+    expectFirst(result, {
+      title: 'summary.html',
+      description: 'Workspace report',
+      metadata: { note: 'kept', derivedFromTitle: true },
+    });
+  });
+
+  it('ignores a caller-supplied derivedFromTitle marker', async () => {
+    const ws = await workspace();
+    await ws.write('reports/summary.html', 'ok');
+
+    const result = await run(
+      {
+        title: 'summary.html',
+        description: 'FINAL approved numbers',
+        workspacePath: 'reports/summary.html',
+        metadata: { derivedFromTitle: true, note: 'kept' },
+      },
+      ws.tool,
+    );
+
+    expectFirst(result, {
+      title: 'summary.html',
+      description: 'FINAL approved numbers',
+      metadata: { note: 'kept' },
+    });
+  });
+
+  it('records a full metadata bag without the derived-title marker', async () => {
+    const ws = await workspace();
+    await ws.write('reports/summary.html', 'ok');
+    const overhead = Buffer.byteLength('{"pad":""}', 'utf8');
+    const metadata = { pad: 'x'.repeat(4096 - overhead) };
+    expect(Buffer.byteLength(JSON.stringify(metadata), 'utf8')).toBe(4096);
+
+    const result = await run(
+      {
+        title: 'Q3 report',
+        workspacePath: 'reports/summary.html',
+        metadata,
+      },
+      ws.tool,
+    );
+
+    expect(result.error).toBeUndefined();
+    const stored = result.artifacts?.[0];
+    expect(stored).toMatchObject({
+      title: 'summary.html',
+      workspacePath: 'reports/summary.html',
+      metadata,
+    });
+    expect(stored?.description).toBeUndefined();
+    expect(stored?.metadata).not.toHaveProperty('derivedFromTitle');
+    expect(
+      Buffer.byteLength(JSON.stringify(stored?.metadata), 'utf8'),
+    ).toBeLessThanOrEqual(4096);
+  });
+
+  it('describes a workspace recording by its filename', async () => {
+    const ws = await workspace();
+
+    expect(
+      ws.tool
+        .build({
+          title: 'Workspace report',
+          workspacePath: 'reports/summary.html',
+        })
+        .getDescription(),
+    ).toBe('Recording artifact summary.html');
+    expect(
+      ws.tool.build({ title: 'Table details', url: RES }).getDescription(),
+    ).toBe('Recording artifact Table details');
+  });
+
+  it('does not copy a filename that already matches the caller title into the description', async () => {
+    const ws = await workspace();
+    await ws.write('reports/summary.html', 'ok');
+
+    const result = await ws.record('summary.html', 'reports/summary.html');
+
+    expectFirst(result, { title: 'summary.html' });
+    expect(result.artifacts?.[0]).not.toHaveProperty('description');
+  });
+
+  it('keeps the caller title when the filename has leading whitespace', async () => {
+    const ws = await workspace();
+    await ws.write('reports/ summary.html', 'ok');
+
+    const result = await ws.record('Workspace report', 'reports/ summary.html');
+
+    expectFirst(result, {
+      title: 'Workspace report',
+      workspacePath: 'reports/ summary.html',
+    });
+    expect(result.artifacts?.[0]).not.toHaveProperty('description');
+  });
+
+  it('keeps the caller title when the filename is too long to store', async () => {
+    const ws = await workspace();
+    const name = 'a'.repeat(201);
+    await ws.write(name, 'x');
+
+    const result = await ws.record('Caller title', name);
+
+    expectFirst(result, { title: 'Caller title', workspacePath: name });
+    expect(result.artifacts?.[0]).not.toHaveProperty('description');
   });
 
   it('normalizes a cwd-absolute workspace path to the canonical relative path', async () => {
@@ -216,6 +365,7 @@ describe('RecordArtifactTool', () => {
     await ws.write('reports\\summary.csv', 'a,b\n');
 
     expectFirst(await ws.record('Literal backslash', 'reports\\summary.csv'), {
+      title: 'reports\\summary.csv',
       workspacePath: 'reports\\summary.csv',
     });
   });
@@ -307,21 +457,23 @@ describe('RecordArtifactTool', () => {
     );
   });
 
-  it('classifies an unreadable path as permission denied', async () => {
-    if (process.platform === 'win32' || process.getuid?.() === 0) return;
-    const ws = await workspace();
-    await ws.write('hidden/a.csv', 'x');
-    const hidden = path.join(ws.cwd, 'hidden');
-    await chmod(hidden, 0);
-    try {
-      expectFailed(
-        await ws.record('Hidden', 'hidden/a.csv'),
-        ToolErrorType.PERMISSION_DENIED,
-      );
-    } finally {
-      await chmod(hidden, 0o755);
-    }
-  });
+  it.skipIf(!arePermissionBitsEnforced())(
+    'classifies an unreadable path as permission denied',
+    async () => {
+      const ws = await workspace();
+      await ws.write('hidden/a.csv', 'x');
+      const hidden = path.join(ws.cwd, 'hidden');
+      await chmod(hidden, 0);
+      try {
+        expectFailed(
+          await ws.record('Hidden', 'hidden/a.csv'),
+          ToolErrorType.PERMISSION_DENIED,
+        );
+      } finally {
+        await chmod(hidden, 0o755);
+      }
+    },
+  );
 
   it('rejects a wrong workspace-folder prefix instead of reporting success', async () => {
     const ws = await workspace();

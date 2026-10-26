@@ -5,33 +5,92 @@
  */
 
 /**
- * @fileoverview Accepting work from an authenticated external caller.
+ * @fileoverview Which external tasks belong to which caller.
  *
- * The protocol half of this is frozen in `a2a-contract.ts`; this is the store
- * half, and it exists separately because the two things it has to get right are
+ * The protocol half of A2A is frozen in `a2a-contract.ts`; this is the store
+ * half. An external task is an agent run in a chat session (see the contract),
+ * and neither the session nor the run knows who outside asked for it, so this
+ * file is what does: one JSON file per caller at `<agentsDir>/a2a/<callerId>.json`,
+ * mode 0600, written under the workspace lock. It has to get two things right,
  * both about persistence rather than about A2A:
  *
  *   - a retry must not produce a second piece of work, and
- *   - one caller must not be able to read or steer another's.
+ *   - one caller must not be able to read, steer or continue another's.
  *
- * Neither needs a network to be wrong, so neither waits for one to be checked.
+ * Accepting work is three steps, because starting the run cannot happen
+ * inside the lock (the orchestrator persists runs under the same lock, which
+ * refuses to nest): reserve the request key, then create the session and post
+ * the message outside the lock, then record the run. A reservation without a
+ * run is resumed by a retry of the same request, never duplicated.
  */
 
 import { createHash } from 'node:crypto';
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 
-import { externalRequestKey } from './a2a-contract.js';
+import { atomicWriteJSON } from '../../utils/atomicFileWrite.js';
+import { isNodeError } from '../../utils/errors.js';
+import type { SessionAgentRunStatus } from '../session-agents/contract.js';
+import { isValidSessionAgentsSessionId } from '../session-agents/binding-store.js';
+import { externalRequestKey, type A2ATaskState } from './a2a-contract.js';
 import {
-  prepareThreadInTransaction,
+  STORE_DIR_MODE,
+  STORE_FILE_OPTIONS,
+  getAgentsDir,
+  isValidId,
   withAgentStoreTransaction,
 } from './store.js';
-import { isThreadTerminal } from './types.js';
-import {
-  MessageDispatchRejectedError,
-  postMessageInTransaction,
-} from './thread-actions.js';
-import type { ExternalIntake, Thread } from './types.js';
 
-const EXTERNAL_AUTHOR_ID = 'external';
+const A2A_DIRNAME = 'a2a';
+
+export const A2A_CALLER_FILE_SCHEMA_VERSION = 1 as const;
+
+/** The first terminal view of a task, kept so it outlives the run's records. */
+export interface ExternalTaskResult {
+  state: A2ATaskState;
+  /** Epoch ms the task reached that state. */
+  at: number;
+  /** The granted agent's reply. */
+  answer?: string;
+  error?: string;
+  localStatus?: SessionAgentRunStatus;
+  tokensUsed?: number;
+}
+
+/** One accepted (or reserved) external message. */
+export interface ExternalTaskEntry {
+  /** {@link externalRequestKey} of the request. */
+  key: string;
+  /** Digest of what was asked; a reused key with another digest is refused. */
+  contentHash: string;
+  agentId: string;
+  messageId: string;
+  createdAt: number;
+  /** The chat session (A2A `contextId`); absent until it exists. */
+  sessionId?: string;
+  /**
+   * The agent run (A2A task id); absent until the post was accepted. Two
+   * entries share one when the second message arrived while the first run
+   * was still queued: the orchestrator coalesces them into one run.
+   */
+  taskId?: string;
+  result?: ExternalTaskResult;
+}
+
+/** A chat session the daemon created for this caller and agent. */
+export interface ExternalContextEntry {
+  sessionId: string;
+  agentId: string;
+  createdAt: number;
+}
+
+/** On disk: `<agentsDir>/a2a/<callerId>.json`, mode 0600. */
+export interface ExternalCallerFile {
+  schemaVersion: typeof A2A_CALLER_FILE_SCHEMA_VERSION;
+  callerId: string;
+  contexts: ExternalContextEntry[];
+  tasks: ExternalTaskEntry[];
+}
 
 /**
  * Raised when a caller reuses a key for different content.
@@ -44,19 +103,23 @@ const EXTERNAL_AUTHOR_ID = 'external';
 export class ExternalIntakeConflictError extends Error {
   constructor(
     readonly key: string,
-    readonly existingThreadId: string,
+    readonly existingTaskId: string | undefined,
   ) {
     super(
-      `Request key already accepted for different content (thread ${existingThreadId})`,
+      `Request key already accepted for different content${existingTaskId ? ` (task ${existingTaskId})` : ''}`,
     );
     this.name = 'ExternalIntakeConflictError';
   }
 }
 
-export class ExternalIntakeRefusedError extends Error {
+/**
+ * Raised for a `contextId` that is not a session this caller was given for
+ * this agent. One answer for "no such session" and "someone else's".
+ */
+export class ExternalIntakeUnknownContextError extends Error {
   constructor() {
-    super('External submission could not be dispatched.');
-    this.name = 'ExternalIntakeRefusedError';
+    super('Unknown contextId.');
+    this.name = 'ExternalIntakeUnknownContextError';
   }
 }
 
@@ -67,223 +130,390 @@ export interface ExternalSubmission {
   targetAgentId: string;
   /** `Message.messageId` as the caller minted it. */
   messageId: string;
-  title: string;
-  body: string;
-  acceptanceCriteria?: string;
+  text: string;
+  /** Continue in this chat session; absent starts a new one. */
+  contextId?: string;
 }
 
-export interface ExternalAcceptance {
-  /** `accepted` on first sight; `duplicate` when the same submission returns. */
-  outcome: 'accepted' | 'duplicate';
-  thread: Thread;
+export type ExternalReservation =
+  /** The same request was accepted before; nothing more to do. */
+  | { outcome: 'duplicate'; entry: ExternalTaskEntry }
+  /** New, or a retry of a request whose run was never recorded. */
+  | { outcome: 'reserved'; entry: ExternalTaskEntry };
+
+export function getExternalCallersDir(projectRoot: string): string {
+  return path.join(getAgentsDir(projectRoot), A2A_DIRNAME);
+}
+
+export function getExternalCallerFilePath(
+  projectRoot: string,
+  callerId: string,
+): string {
+  // Caller ids come from grants, which hold the same pattern; anything else
+  // could escape the directory.
+  if (!isValidId(callerId)) {
+    throw new Error(`Invalid caller id: ${JSON.stringify(callerId)}`);
+  }
+  return path.join(getExternalCallersDir(projectRoot), `${callerId}.json`);
+}
+
+function emptyCallerFile(callerId: string): ExternalCallerFile {
+  return {
+    schemaVersion: A2A_CALLER_FILE_SCHEMA_VERSION,
+    callerId,
+    contexts: [],
+    tasks: [],
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isOptionalString(value: unknown): boolean {
+  return value === undefined || typeof value === 'string';
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function isValidResult(value: unknown): boolean {
+  return (
+    value === undefined ||
+    (isRecord(value) &&
+      typeof value['state'] === 'string' &&
+      isFiniteNumber(value['at']) &&
+      isOptionalString(value['answer']) &&
+      isOptionalString(value['error']) &&
+      isOptionalString(value['localStatus']) &&
+      (value['tokensUsed'] === undefined ||
+        isFiniteNumber(value['tokensUsed'])))
+  );
+}
+
+function isValidTaskEntry(value: unknown): value is ExternalTaskEntry {
+  return (
+    isRecord(value) &&
+    typeof value['key'] === 'string' &&
+    typeof value['contentHash'] === 'string' &&
+    typeof value['agentId'] === 'string' &&
+    typeof value['messageId'] === 'string' &&
+    isFiniteNumber(value['createdAt']) &&
+    (value['sessionId'] === undefined ||
+      isValidSessionAgentsSessionId(value['sessionId'])) &&
+    isOptionalString(value['taskId']) &&
+    isValidResult(value['result'])
+  );
+}
+
+function isValidContextEntry(value: unknown): value is ExternalContextEntry {
+  return (
+    isRecord(value) &&
+    isValidSessionAgentsSessionId(value['sessionId']) &&
+    typeof value['agentId'] === 'string' &&
+    isFiniteNumber(value['createdAt'])
+  );
+}
+
+/**
+ * Parses a caller file read from disk. Refuses rather than repairs: treating
+ * an unreadable file as empty would forget every idempotency key in it, and
+ * a retry would then start the work a second time.
+ */
+export function parseExternalCallerFile(
+  value: unknown,
+  callerId: string,
+  filePath: string,
+): ExternalCallerFile {
+  if (!isRecord(value)) {
+    throw new Error(`Malformed A2A caller file ${filePath}.`);
+  }
+  if (value['schemaVersion'] !== A2A_CALLER_FILE_SCHEMA_VERSION) {
+    throw new Error(
+      `Unsupported A2A caller file schema version ${JSON.stringify(value['schemaVersion'])} in ${filePath}; this build supports version ${A2A_CALLER_FILE_SCHEMA_VERSION}.`,
+    );
+  }
+  if (value['callerId'] !== callerId) {
+    throw new Error(
+      `A2A caller file ${filePath} names caller ${JSON.stringify(value['callerId'])}, not ${callerId}.`,
+    );
+  }
+  const contexts = value['contexts'];
+  const tasks = value['tasks'];
+  if (
+    !Array.isArray(contexts) ||
+    !contexts.every(isValidContextEntry) ||
+    !Array.isArray(tasks) ||
+    !tasks.every(isValidTaskEntry)
+  ) {
+    throw new Error(`Malformed A2A caller file ${filePath}.`);
+  }
+  return {
+    schemaVersion: A2A_CALLER_FILE_SCHEMA_VERSION,
+    callerId,
+    contexts: contexts as ExternalContextEntry[],
+    tasks: tasks as ExternalTaskEntry[],
+  };
+}
+
+/**
+ * One caller's file. Read without the lock: writes are atomic renames, and a
+ * reader only ever needs a consistent snapshot. Absent is an empty file.
+ */
+export async function readExternalCallerFile(
+  projectRoot: string,
+  callerId: string,
+): Promise<ExternalCallerFile> {
+  const filePath = getExternalCallerFilePath(projectRoot, callerId);
+  let raw: string;
+  try {
+    raw = await fs.readFile(filePath, 'utf-8');
+  } catch (error) {
+    if (isNodeError(error) && error.code === 'ENOENT') {
+      return emptyCallerFile(callerId);
+    }
+    throw error;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(
+      `Malformed JSON in ${filePath} — fix or delete the file; refusing to treat it as empty.`,
+    );
+  }
+  return parseExternalCallerFile(parsed, callerId, filePath);
+}
+
+/**
+ * Read-modify-write under the workspace lock. Must not be called from inside
+ * another agent store transaction: the lock refuses to nest.
+ */
+async function updateExternalCallerFile<T>(
+  projectRoot: string,
+  callerId: string,
+  mutate: (file: ExternalCallerFile) => T,
+): Promise<T> {
+  const filePath = getExternalCallerFilePath(projectRoot, callerId);
+  return withAgentStoreTransaction(projectRoot, async () => {
+    const file = await readExternalCallerFile(projectRoot, callerId);
+    const result = mutate(file);
+    // Validate what is about to be written with the rules a read uses, so a
+    // bad in-memory value fails here rather than wedging the next read.
+    parseExternalCallerFile(file, callerId, filePath);
+    await fs.mkdir(getExternalCallersDir(projectRoot), {
+      recursive: true,
+      mode: STORE_DIR_MODE,
+    });
+    await atomicWriteJSON(filePath, file, STORE_FILE_OPTIONS);
+    return result;
+  });
 }
 
 /**
  * The digest that decides whether a repeated key is the same request.
  *
- * Length-prefixed for the same reason the key itself is: these are strings from
- * outside, and joining them with a separator would let a caller move content
- * across field boundaries without changing the digest.
+ * Length-prefixed for the same reason the key itself is: these are strings
+ * from outside, and joining them with a separator would let a caller move
+ * content across field boundaries without changing the digest. The context
+ * is part of it: the same message id sent into another session is a
+ * different request.
  */
 function contentHashOf(submission: ExternalSubmission): string {
-  const parts = [
-    submission.title,
-    submission.body,
-    submission.acceptanceCriteria ?? '',
-  ];
   const hash = createHash('sha256');
-  for (const part of parts) hash.update(`${part.length}:${part}`);
+  for (const part of [submission.text, submission.contextId ?? '']) {
+    hash.update(`${part.length}:${part}`);
+  }
   return hash.digest('hex');
 }
 
-function findByKey(
-  threads: readonly Thread[],
-  key: string,
-): Thread | undefined {
-  return threads.find((thread) => thread.externalIntake?.key === key);
-}
-
 /**
- * Accept one external submission, or recognise it as a retry.
+ * Step 1: reserve the request key, or recognise the request as a retry.
  *
- * The lookup, the intake record and the thread are one transaction. Split
- * across two, a retry arriving between them would be looked up, not found, and
- * accepted a second time — which is exactly the failure the key exists to
- * prevent, so writing it afterwards would be writing it too late.
+ * The lookup and the reservation are one write. Split across two, a retry
+ * arriving between them would be looked up, not found, and accepted a second
+ * time — which is exactly the failure the key exists to prevent.
  */
-export async function acceptExternalSubmission(
+export async function reserveExternalSubmission(
   projectRoot: string,
   submission: ExternalSubmission,
-): Promise<ExternalAcceptance> {
+): Promise<ExternalReservation> {
   const key = externalRequestKey({
     callerId: submission.callerId,
     targetAgentId: submission.targetAgentId,
     messageId: submission.messageId,
   });
   const contentHash = contentHashOf(submission);
-
-  return withAgentStoreTransaction(projectRoot, async (transaction) => {
-    const { threads, unreadable } = await transaction.listThreads();
-    if (unreadable.length > 0) {
-      throw new Error(
-        `Cannot accept external work while thread records are unreadable: ${unreadable.join(', ')}.`,
-      );
-    }
-    const existing = findByKey(threads, key);
-    if (existing) {
-      if (existing.externalIntake?.contentHash !== contentHash) {
-        throw new ExternalIntakeConflictError(key, existing.id);
+  return updateExternalCallerFile(
+    projectRoot,
+    submission.callerId,
+    (file): ExternalReservation => {
+      const existing = file.tasks.find((entry) => entry.key === key);
+      if (existing) {
+        if (existing.contentHash !== contentHash) {
+          throw new ExternalIntakeConflictError(key, existing.taskId);
+        }
+        // Deliberately does not post the message again. A retry means the
+        // caller did not hear the answer, not that it wants the work twice.
+        return existing.taskId
+          ? { outcome: 'duplicate', entry: { ...existing } }
+          : { outcome: 'reserved', entry: { ...existing } };
       }
-      // Deliberately does not post the message again. A retry means the caller
-      // did not hear the answer, not that it wants the work done twice.
-      return { outcome: 'duplicate' as const, thread: existing };
-    }
-
-    const intake: ExternalIntake = {
-      key,
-      callerId: submission.callerId,
-      targetAgentId: submission.targetAgentId,
-      messageId: submission.messageId,
-      contentHash,
-      receivedAt: Date.now(),
-    };
-    const created = await prepareThreadInTransaction(transaction, {
-      title: submission.title,
-      body: submission.body,
-      createdBy: EXTERNAL_AUTHOR_ID,
-      assigneeAgentId: submission.targetAgentId,
-      externalIntake: intake,
-      ...(submission.acceptanceCriteria
-        ? { acceptanceCriteria: submission.acceptanceCriteria }
-        : {}),
-    });
-    // The message is what books a run, so it lands in the same write as the
-    // intake record: a thread accepted but never dispatched would report
-    // `SUBMITTED` forever with nothing behind it.
-    try {
-      const posted = await postMessageInTransaction(
-        transaction,
-        created.id,
-        {
-          from: EXTERNAL_AUTHOR_ID,
-          authorKind: 'system',
-          triggerKind: 'external',
-          text: submission.body,
-        },
-        {
-          // The grant is for this agent alone; an @name in the text is not.
-          targets: [submission.targetAgentId],
-          threadOverride: created,
-          requireDispatch: true,
-        },
-      );
-      return { outcome: 'accepted' as const, thread: posted.thread };
-    } catch (error) {
-      if (error instanceof MessageDispatchRejectedError) {
-        throw new ExternalIntakeRefusedError();
+      if (
+        submission.contextId !== undefined &&
+        !file.contexts.some(
+          (context) =>
+            context.sessionId === submission.contextId &&
+            context.agentId === submission.targetAgentId,
+        )
+      ) {
+        throw new ExternalIntakeUnknownContextError();
       }
-      throw error;
-    }
-  });
+      const entry: ExternalTaskEntry = {
+        key,
+        contentHash,
+        agentId: submission.targetAgentId,
+        messageId: submission.messageId,
+        createdAt: Date.now(),
+        ...(submission.contextId ? { sessionId: submission.contextId } : {}),
+      };
+      file.tasks.push(entry);
+      return { outcome: 'reserved', entry: { ...entry } };
+    },
+  );
 }
 
 /**
- * Withdraw one of this caller's tasks.
- *
- * Two writes are deliberately NOT collapsed into one here: this marks the
- * thread terminal, which stops anything further being dispatched for it, but
- * it does not claim the body has stopped. A run already executing keeps
- * running until the dispatcher's own cancellation path reaches it, and the
- * plan is explicit that a cancellation receipt and an actual stop are
- * separately reported — a caller told "cancelled" while the work continues is
- * the failure worth avoiding, so the receipt says what is true: no further
- * work will be started.
- *
- * Returns `undefined` for a thread that is not this caller's, on the same
- * reasoning as {@link getExternalThreadForCaller}: distinguishing "no such
- * task" from "not yours" leaks another client's task ids.
+ * Step 2 (new context only): records the chat session created for a
+ * reservation. Recorded before the message is posted, so a retry after a
+ * crash continues in that session instead of creating another.
  */
-export async function cancelExternalThreadForCaller(
+export async function attachExternalSession(
   projectRoot: string,
   callerId: string,
-  threadId: string,
-): Promise<{ thread: Thread; runsStillLive: number } | undefined> {
-  if (!callerId || !threadId) return undefined;
-  return withAgentStoreTransaction(projectRoot, async (transaction) => {
-    const thread = await transaction.readThread(threadId);
-    if (!thread || thread.externalIntake?.callerId !== callerId) {
-      return undefined;
+  key: string,
+  sessionId: string,
+): Promise<void> {
+  await updateExternalCallerFile(projectRoot, callerId, (file) => {
+    const entry = file.tasks.find((candidate) => candidate.key === key);
+    if (!entry) throw new Error('External reservation disappeared.');
+    entry.sessionId = sessionId;
+    if (!file.contexts.some((context) => context.sessionId === sessionId)) {
+      file.contexts.push({
+        sessionId,
+        agentId: entry.agentId,
+        createdAt: Date.now(),
+      });
     }
-    // The whole tree is the caller's task: a sub-thread the granted agent
-    // split off keeps working otherwise, while the caller is told it stopped.
-    const { threads, unreadable } = await transaction.listThreads();
-    if (unreadable.length > 0)
-      throw new Error('Thread records are unreadable.');
-    const tree = [
-      thread,
-      ...threads.filter(
-        (candidate) =>
-          candidate.rootThreadId === thread.rootThreadId &&
-          candidate.id !== thread.id,
-      ),
-    ];
-    const runsStillLive = tree
-      .flatMap((member) => member.runs)
-      .filter(
-        (run) =>
-          run.status === 'running' ||
-          run.status === 'finishing' ||
-          run.status === 'cancelling',
-      ).length;
-    // Already terminal: report it rather than overwriting a `done` with a
-    // `cancelled`, which would rewrite how the work actually ended.
-    if (isThreadTerminal(thread.status) || thread.externalIntake.result) {
-      return { thread, runsStillLive };
-    }
-    // Retires the runs the same way the "mark done" path does: a queued run
-    // that no selection will ever pick is still shown as pending work on a
-    // task its caller withdrew, and a live one has to be asked to stop rather
-    // than quietly relabelled. `cancelling` is a request, not a report — which
-    // is why `runsStillLive` is returned separately, so the receipt can say
-    // "no further work will start" without claiming the body has stopped.
-    const now = Date.now();
-    const withdraw = (member: Thread): Thread => ({
-      ...member,
-      status: 'cancelled' as const,
-      runs: member.runs.map((run) =>
-        run.status === 'queued'
-          ? { ...run, status: 'cancelled' as const, endedAt: now }
-          : run.status === 'running' || run.status === 'finishing'
-            ? { ...run, status: 'cancelling' as const }
-            : run,
-      ),
-    });
-    for (const member of tree.slice(1)) {
-      if (!isThreadTerminal(member.status)) {
-        await transaction.writeThread(withdraw(member));
-      }
-    }
-    const next = await transaction.writeThread(withdraw(thread));
-    return { thread: next, runsStillLive };
   });
 }
 
 /**
- * One thread, if it is this caller's.
+ * Undoes {@link attachExternalSession} for a session nothing will ever be
+ * posted into, because the post was permanently refused. Without it the
+ * reservation keeps naming an empty chat session in the owner's list and
+ * points every retry at that session. Removing the session itself is the
+ * caller's, and must happen after this: the other order leaves a reservation
+ * naming a session that is already gone.
  *
- * Returns `undefined` for "no such thread" and for "not yours" alike. The
- * transport must not distinguish them either: a caller able to tell a thread
+ * Drops the context only when no other entry names that session. A context is
+ * what makes a `contextId` this caller may continue, so one another task
+ * still needs stays.
+ */
+export async function releaseExternalReservation(
+  projectRoot: string,
+  callerId: string,
+  key: string,
+  sessionId: string,
+): Promise<void> {
+  await updateExternalCallerFile(projectRoot, callerId, (file) => {
+    const entry = file.tasks.find((candidate) => candidate.key === key);
+    if (!entry || entry.sessionId !== sessionId) return;
+    delete entry.sessionId;
+    const stillNamed = file.tasks.some(
+      (candidate) => candidate.sessionId === sessionId,
+    );
+    if (stillNamed) return;
+    file.contexts = file.contexts.filter(
+      (context) => context.sessionId !== sessionId,
+    );
+  });
+}
+
+/** Step 3: records the run the post started. Returns the updated entry. */
+export async function completeExternalSubmission(
+  projectRoot: string,
+  callerId: string,
+  key: string,
+  taskId: string,
+): Promise<ExternalTaskEntry> {
+  return updateExternalCallerFile(projectRoot, callerId, (file) => {
+    const entry = file.tasks.find((candidate) => candidate.key === key);
+    if (!entry) throw new Error('External reservation disappeared.');
+    entry.taskId = taskId;
+    return { ...entry };
+  });
+}
+
+/**
+ * Keeps the first terminal view of a task, on every entry that names it.
+ * Never overwrites one already kept unless `replace`: the owner retried a
+ * failed run and the retry has ended.
+ */
+export async function recordExternalTaskResult(
+  projectRoot: string,
+  callerId: string,
+  taskId: string,
+  result: ExternalTaskResult,
+  options: { replace?: boolean } = {},
+): Promise<ExternalTaskResult> {
+  return updateExternalCallerFile(projectRoot, callerId, (file) => {
+    const entries = file.tasks.filter((entry) => entry.taskId === taskId);
+    const kept =
+      (options.replace
+        ? undefined
+        : entries.find((entry) => entry.result)?.result) ?? result;
+    for (const entry of entries) entry.result = kept;
+    return kept;
+  });
+}
+
+/**
+ * One task, if it is this caller's.
+ *
+ * Returns `undefined` for "no such task" and for "not yours" alike. The
+ * transport must not distinguish them either: a caller able to tell a task
  * exists but belongs to someone else can enumerate another client's work.
  */
-export async function getExternalThreadForCaller(
+export async function getExternalTaskForCaller(
   projectRoot: string,
   callerId: string,
-  threadId: string,
-): Promise<Thread | undefined> {
-  if (!callerId || !threadId) return undefined;
-  const thread = await withAgentStoreTransaction(projectRoot, (t) =>
-    t.readThread(threadId),
-  );
-  if (!thread) return undefined;
-  return thread.externalIntake?.callerId === callerId ? thread : undefined;
+  taskId: string,
+): Promise<ExternalTaskEntry | undefined> {
+  if (!isValidId(callerId) || !taskId) return undefined;
+  const file = await readExternalCallerFile(projectRoot, callerId);
+  return file.tasks.find((entry) => entry.taskId === taskId);
+}
+
+/**
+ * This caller's accepted tasks for one agent, oldest first, one entry per
+ * task (coalesced messages share a task).
+ */
+export async function listExternalTasksForCaller(
+  projectRoot: string,
+  callerId: string,
+  agentId: string,
+): Promise<ExternalTaskEntry[]> {
+  if (!isValidId(callerId)) return [];
+  const file = await readExternalCallerFile(projectRoot, callerId);
+  const seen = new Set<string>();
+  const tasks: ExternalTaskEntry[] = [];
+  for (const entry of file.tasks) {
+    if (entry.agentId !== agentId || !entry.taskId) continue;
+    if (seen.has(entry.taskId)) continue;
+    seen.add(entry.taskId);
+    tasks.push(entry);
+  }
+  return tasks;
 }

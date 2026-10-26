@@ -17,16 +17,23 @@ import type {
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { getCurrentToolCallSource } from '../code-mode/tool-call-runtime.js';
+import type { ReadFileMediaLimits } from '../utils/inline-media.js';
+import { ToolErrorType } from './tool-error.js';
 
 import type { PartListUnion, FunctionDeclaration } from '@google/genai';
 import type { PermissionDecision } from '../permissions/types.js';
 import {
   processSingleFileContent,
+  getFileReadErrorResult,
   getSpecificMimeType,
   isCacheableReadResult,
   type PDFVisionBridgeCandidate,
   type ProcessedFileReadResult,
 } from '../utils/fileUtils.js';
+import {
+  FileReadOpenError,
+  type FileReadSource,
+} from '../utils/file-read-source.js';
 import { parsePDFPageRange, PDF_MAX_PAGES_PER_READ } from '../utils/pdf.js';
 import type { Config } from '../config/config.js';
 import type { InputModalities } from '../core/contentGenerator.js';
@@ -83,9 +90,12 @@ class ReadFileToolInvocation extends BaseToolInvocation<
   ReadFileToolParams,
   ToolResult
 > {
+  private recordedStats: Stats | undefined;
+
   constructor(
     private config: Config,
     params: ReadFileToolParams,
+    private readonly mediaLimits?: ReadFileMediaLimits,
   ) {
     super(params);
   }
@@ -125,13 +135,62 @@ class ReadFileToolInvocation extends BaseToolInvocation<
    * so that external file reads require user confirmation.
    */
   override getDefaultPermission(): Promise<PermissionDecision> {
+    if (this.config.getFileSystemService().textFileIo)
+      return Promise.resolve('ask');
     return Promise.resolve(
       getFileReadDefaultPermission(this.config, this.params.file_path),
     );
   }
 
   async execute(signal: AbortSignal): Promise<ToolResult> {
+    signal.throwIfAborted();
+    this.recordedStats = undefined;
+    const cacheGeneration = this.config.getFileReadCache().getClearGeneration();
+    const fileSystem = this.config.getFileSystemService();
+    if (!fileSystem.withReadFile)
+      return this.executeContent(signal, cacheGeneration);
+    try {
+      const result = await fileSystem.withReadFile(
+        {
+          path: path.resolve(this.params.file_path),
+          mediaDelivery: this.config.isOmniEnabled?.() ? 'omni' : 'inline',
+          signal,
+        },
+        (source) => this.executeContent(signal, cacheGeneration, source),
+      );
+      signal.throwIfAborted();
+      return result;
+    } catch (error) {
+      if (
+        !this.config.getFileReadCacheDisabled() &&
+        this.recordedStats &&
+        this.config.getFileReadCache().getClearGeneration() === cacheGeneration
+      ) {
+        this.config.getFileReadCache().invalidate(this.recordedStats);
+      }
+      signal.throwIfAborted();
+      if (!(error instanceof FileReadOpenError)) throw error;
+      const result = getFileReadErrorResult(
+        error.cause,
+        this.params.file_path,
+        this.config.getTargetDir(),
+      );
+      return {
+        llmContent: result.llmContent,
+        returnDisplay: this.toToolResultDisplay(result, 'Error reading file'),
+        error: { message: result.error, type: result.errorType },
+      };
+    }
+  }
+
+  private async executeContent(
+    signal: AbortSignal,
+    cacheGeneration: number,
+    source?: FileReadSource,
+  ): Promise<ToolResult> {
+    signal.throwIfAborted();
     const absPath = path.resolve(this.params.file_path);
+    const contentPath = source?.kind === 'path' ? source.path : absPath;
     const projectRoot = this.config.getTargetDir();
     // Auto-memory files (AGENTS.md and friends under the auto-memory
     // root) get a per-read freshness `<system-reminder>` prepended in
@@ -140,7 +199,9 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     // file_unchanged placeholder would skip that prepend, silently
     // dropping the staleness warning for the rest of the session.
     // These files are small; re-emit them on every read.
-    const isAutoMem = isAnyAutoMemPath(absPath, projectRoot);
+    const isAutoMem =
+      !this.config.getFileSystemService().textFileIo &&
+      isAnyAutoMemPath(absPath, projectRoot);
     // The cache can be disabled at the Config level (escape hatch for
     // sessions where the "model has already seen the prior tool result"
     // assumption breaks down — e.g. after context compaction or
@@ -165,21 +226,26 @@ class ReadFileToolInvocation extends BaseToolInvocation<
       this.params.limit === undefined &&
       this.params.pages === undefined;
 
-    // Stat up front so we can consult the cache before doing any heavy
-    // work. processSingleFileContent re-stats anyway; the extra syscall
-    // here is microseconds. If stat fails we fall through to the normal
-    // pipeline so its error handling stays the single source of truth.
-    let stats: Stats | undefined;
+    // Descriptor reads reuse admission metadata. Pathname reads stat here
+    // for the cache; a failure falls through to the content pipeline.
+    let stats: Stats | undefined =
+      source?.kind === 'descriptor' ? source.stats : undefined;
     try {
-      stats = await fs.stat(absPath);
+      stats ??= await fs.stat(contentPath);
     } catch (err) {
       debugLogger.debug('stat-failed', {
         path: absPath,
         code: (err as NodeJS.ErrnoException).code,
       });
     }
+    signal.throwIfAborted();
 
-    if (useFastPath && stats && isFullRead) {
+    if (
+      useFastPath &&
+      stats &&
+      isFullRead &&
+      cache.getClearGeneration() === cacheGeneration
+    ) {
       const status = cache.check(stats);
       if (
         status.state === 'fresh' &&
@@ -209,6 +275,8 @@ class ReadFileToolInvocation extends BaseToolInvocation<
         preserveUnsupportedImage: prepareForVisionBridge,
         preparePdfForVisionBridge: prepareForVisionBridge,
         signal,
+        mediaLimits: this.mediaLimits,
+        readSource: source,
       },
     );
     signal.throwIfAborted();
@@ -260,10 +328,9 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     //    truncated notebook render does not authorize structured writes
     //    against unseen cells.
     //
-    // The stat we record is the one taken inside `processSingleFileContent`
-    // and surfaced via `result.stats`. The internal stat happens
-    // immediately before the actual content read, so the fingerprint
-    // it captures is the one closest to the bytes the model received.
+    // Descriptor reads record the metadata captured on admission; pathname
+    // reads use the stat inside `processSingleFileContent`. Both are surfaced
+    // via `result.stats` and refer to the content source used for the read.
     // Falling back to a post-read re-stat would describe a possibly-
     // mutated file rather than the file the read returned: a write
     // landing between the read and the post-stat would let the cache
@@ -275,13 +342,18 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     // a few microseconds wide. Closing it completely needs a content
     // hash on the read pipeline (deferred follow-up — see Risk
     // section in the PR description).
-    if (cacheEnabled && (result.stats ?? stats)) {
+    if (
+      cacheEnabled &&
+      (result.stats ?? stats) &&
+      cache.getClearGeneration() === cacheGeneration
+    ) {
       const cacheable = isCacheableReadResult(result);
       const recordStats: Stats = result.stats ?? stats!;
       cache.recordRead(absPath, recordStats, {
         full: isFullRead && !result.isTruncated,
         cacheable,
       });
+      this.recordedStats = recordStats;
       // Reading into a program does not prove the full text reached history.
       if (nestedRead) cache.markReadEvictedFromHistory(recordStats);
     }
@@ -308,7 +380,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
       // fallback so memory-file behavior survives a stat failure earlier
       // (which would leave `stats` undefined).
       try {
-        const memStat = stats ?? (await fs.stat(absPath));
+        const memStat = stats ?? (await fs.stat(contentPath));
         const note = memoryFreshnessNote(memStat.mtimeMs);
         if (note) {
           llmContent = note + llmContent;
@@ -338,10 +410,41 @@ class ReadFileToolInvocation extends BaseToolInvocation<
       ),
     );
 
-    return {
+    const toolResult: ToolResult = {
       llmContent,
+      // Self-managed paging may have capped this body under a threshold the
+      // scheduler never sees; re-reading just to count the dropped part is
+      // the allocation the paging avoids, so declare the raw size unknown
+      // instead of letting the scheduler measure the capped body (#13652 R5-1).
+      ...(result.isTruncated
+        ? { rawOutputSize: null, truncatedByProducer: true }
+        : {}),
       returnDisplay: this.toToolResultDisplay(result),
     };
+    if (this.mediaLimits) {
+      // Reading caps media bytes; the transport budget also includes metadata.
+      const media = normalizeParts(llmContent).filter(
+        (part) => part.inlineData !== undefined,
+      );
+      if (
+        media.length > 0 &&
+        (media.reduce(
+          (sum, part) => sum + (part.inlineData?.data?.length ?? 0),
+          0,
+        ) > this.mediaLimits.maxInlineMediaBase64Bytes ||
+          Buffer.byteLength(JSON.stringify(toolResult), 'utf8') >
+            this.mediaLimits.maxMediaResultBytes)
+      ) {
+        const message =
+          "File exceeds the inline media result byte limit. For PDFs, use 'pages' with a narrower range; otherwise use a smaller file.";
+        return {
+          llmContent: message,
+          returnDisplay: message,
+          error: { message, type: ToolErrorType.FILE_TOO_LARGE },
+        };
+      }
+    }
+    return toolResult;
   }
 
   private async transcribePdfCandidate(
@@ -587,7 +690,10 @@ export class ReadFileTool extends BaseDeclarativeTool<
     return Number.POSITIVE_INFINITY;
   }
 
-  constructor(private config: Config) {
+  constructor(
+    private config: Config,
+    private readonly mediaLimits?: ReadFileMediaLimits,
+  ) {
     super(
       ReadFileTool.Name,
       ToolDisplayNames.READ_FILE,
@@ -697,6 +803,8 @@ export class ReadFileTool extends BaseDeclarativeTool<
       }
     }
 
+    if (this.config.getFileSystemService().textFileIo) return null;
+
     const fileService = this.config.getFileService();
     if (fileService.shouldQwenIgnoreFile(params.file_path)) {
       return `File path '${filePath}' is ignored by ${fileService.getQwenIgnoreFileDisplayForPath(params.file_path)} pattern(s).`;
@@ -708,6 +816,6 @@ export class ReadFileTool extends BaseDeclarativeTool<
   protected createInvocation(
     params: ReadFileToolParams,
   ): ToolInvocation<ReadFileToolParams, ToolResult> {
-    return new ReadFileToolInvocation(this.config, params);
+    return new ReadFileToolInvocation(this.config, params, this.mediaLimits);
   }
 }

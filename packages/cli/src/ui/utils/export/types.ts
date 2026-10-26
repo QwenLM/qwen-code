@@ -53,6 +53,13 @@ export interface ExportMessage {
   /** Model used for assistant messages */
   model?: string;
 
+  /**
+   * The workspace agent that wrote this message (an `agent_message` reply, or
+   * a message an agent posted into the session). Unset for the user's own
+   * messages and the session's own assistant.
+   */
+  author?: ExportMessageAuthor;
+
   /** Token usage for this message (mainly for assistant messages) */
   usageMetadata?: GenerateContentResponseUsageMetadata;
 
@@ -83,6 +90,12 @@ export interface ExportMessage {
    * are part of why a Goal continued or stopped.
    */
   goalState?: GoalStateRecordPayloadV2;
+}
+
+/** Who wrote a message other than the user or the session's assistant. */
+export interface ExportMessageAuthor {
+  /** The agent's display name. */
+  name: string;
 }
 
 /**

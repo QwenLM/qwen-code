@@ -12,6 +12,7 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { inspect } from 'node:util';
+import { z } from 'zod';
 import {
   APPROVAL_MODES,
   AGENT_WORKTREE_SLUG_PATTERN,
@@ -156,6 +157,7 @@ import {
   assertSessionArchived,
   assertSessionLoadable,
   assertSessionRestorable,
+  DaemonDrainingError,
   deleteDaemonSessionIfOrphan,
   deleteDaemonSessions,
   logSessionArchiveWarning,
@@ -163,6 +165,17 @@ import {
   type SessionArchiveCoordinator,
   unarchiveDaemonSessions,
 } from '../server/session-archive.js';
+import {
+  ArtifactLibraryRequestError,
+  artifactLibraryMemberError,
+  removeWorkspaceLibraryArtifact,
+  removeWorkspaceLibraryArtifacts,
+  type ArtifactLibraryRemovalResult,
+  type WorkspaceSessionArtifactsEnvelope,
+} from '../server/session-artifact-library.js';
+import { WorkspaceArtifactCache } from '../server/workspace-artifact-cache.js';
+import { ArtifactLibraryStream } from '../server/artifact-library-stream.js';
+import { bindSessionPrsFromReviewPrompt } from './session-pr-backfill.js';
 import { acquireWorktreeOwnershipOp } from '../server/worktree-ownership-op.js';
 import {
   exportSessionTranscript,
@@ -228,6 +241,7 @@ import {
   redactWorkflowsFromReplayArrays,
   redactWorkflowsFromSupportedCommands,
 } from '../workflow-session-gate.js';
+import { WorkspaceGenerationClosedError } from '../workspace-registry.js';
 import type {
   WorkspaceEntry,
   WorkspaceRegistry,
@@ -309,6 +323,7 @@ interface RegisterSessionRoutesDeps {
   channelDeliveryAuthorizations?: ChannelDeliveryAuthorizationStore;
   promptDeadlineMs?: number;
   sessionShellCommandEnabled: boolean;
+  sessionArtifactsPersistenceAvailable?: boolean;
   languageCodes: string[];
   virtualSubagentSessions?: VirtualSubagentSessions;
   materializeLiveConversationDirectory?: (sessionId: string) => Promise<string>;
@@ -336,6 +351,7 @@ const TRANSCRIPT_CURSOR_TOO_LARGE_REPLAY_ERROR =
   'Transcript pagination state exceeds the safe limit';
 // Must exceed CHANNEL_DELIVERY_IPC_TIMEOUT_MS (30 s, channel-delivery-ipc.ts) plus scheduling slack.
 const CHANNEL_DELIVERY_AUTHORIZATION_GRACE_MS = 60_000;
+const ARTIFACT_LIBRARY_CONCURRENCY = 4;
 // Media blocks are resolved into inline bytes at dispatch, so an unbounded
 // content array lets one small request fan out into gigabytes of heap (a
 // repeated reference resolves to the same 8 MiB image once per occurrence).
@@ -423,7 +439,6 @@ function mediaBlockParseError(
 const PRIMARY_ONLY_LIVE_SESSION_ROUTES = ['POST /session/:id/cd'] as const;
 const PRIMARY_OR_INTERNAL_LIVE_SESSION_ROUTES = [
   'POST /session/:id/branch',
-  'POST /session/:id/side-task',
   'POST /session/:id/fork',
 ] as const;
 type PrimaryOnlyLiveSessionRoute =
@@ -796,9 +811,9 @@ function parseRequestedSessionSource(
   body: Record<string, unknown>,
   res: Response,
 ): { sourceType?: string; sourceId?: string } | null {
-  // Agent sessions are created by the dispatcher in-process, never through
-  // this route. Accepting the source here would let a client relabel a
-  // session it restores so the dispatcher sends a real run into it.
+  // Agent sessions are created by the session-agents orchestrator
+  // in-process, never through this route. Accepting the source here would let
+  // a client relabel a session it restores so a real run is sent into it.
   if (
     body['sourceType'] === AGENT_HOST_SESSION_SOURCE_TYPE ||
     body['sourceType'] === AGENT_SESSION_SOURCE_TYPE
@@ -842,10 +857,16 @@ function parseRequestedSessionSource(
   return source;
 }
 
+export type ResolveSubagentSessionRuntime = (
+  res: Response,
+  route: string,
+  parentSessionId: string,
+) => Promise<WorkspaceRuntime | undefined>;
+
 export function registerSessionRoutes(
   app: Application,
   deps: RegisterSessionRoutesDeps,
-): void {
+): { resolveSubagentSessionRuntime: ResolveSubagentSessionRuntime } {
   const {
     boundWorkspace,
     workspaceRegistry,
@@ -921,6 +942,18 @@ export function registerSessionRoutes(
     return guard ? () => guard.assertOpen() : undefined;
   };
   const LANGUAGE_CODES = deps.languageCodes;
+  const workspaceArtifactCaches = new WeakMap<
+    WorkspaceRuntime,
+    WorkspaceArtifactCache
+  >();
+  const artifactCache = (runtime: WorkspaceRuntime): WorkspaceArtifactCache => {
+    let cache = workspaceArtifactCaches.get(runtime);
+    if (!cache) {
+      cache = new WorkspaceArtifactCache(runtime);
+      workspaceArtifactCaches.set(runtime, cache);
+    }
+    return cache;
+  };
   const transcriptCursorMasterKey = crypto.randomBytes(32);
   const transcriptCursorCodecs = new Map<
     string,
@@ -1896,6 +1929,19 @@ export function registerSessionRoutes(
     });
   };
 
+  const sendStandaloneActionUnsupported = (
+    res: Response,
+    route: string,
+    sessionId: string,
+  ): void => {
+    res.status(400).json({
+      error: 'This action is not supported in a standalone session.',
+      code: 'unsupported_action',
+      sessionId,
+      route,
+    });
+  };
+
   const isStandaloneOwner = (
     runtime: WorkspaceRuntime,
     sessionId: string,
@@ -1950,6 +1996,7 @@ export function registerSessionRoutes(
       options: {
         cwdBound?: 'always' | 'rewind-files' | 'sync-output-language';
         promptAdmission?: boolean;
+        rejectStandalone?: boolean;
       } = {},
     ): RequestHandler =>
     async (req, res) => {
@@ -1959,6 +2006,10 @@ export function registerSessionRoutes(
         const owner = await resolveOwnerSessionRuntime(sessionId, res, route);
         if (!owner) return;
         const { runtime, standalone } = owner;
+        if (options.rejectStandalone && standalone) {
+          sendStandaloneActionUnsupported(res, route, sessionId);
+          return;
+        }
         const cwdBound =
           options.cwdBound === 'always' ||
           (options.cwdBound === 'rewind-files' &&
@@ -2326,6 +2377,44 @@ export function registerSessionRoutes(
     return throwMissingActiveTranscript();
   };
 
+  const resolveSubagentSessionRuntime: ResolveSubagentSessionRuntime = async (
+    res,
+    route,
+    parentSessionId,
+  ) => {
+    const owner = workspaceRegistry.resolveLiveSessionOwner(parentSessionId);
+    if (owner.kind !== 'not_found') {
+      return requireSessionRuntime({
+        sessionId: parentSessionId,
+        route,
+        res,
+        workspaceRegistry,
+        daemonLog,
+      });
+    }
+    try {
+      return await resolveTranscriptSessionRuntime(
+        res,
+        route,
+        parentSessionId,
+        false,
+      );
+    } catch (error) {
+      if (
+        error instanceof SessionNotFoundError &&
+        error.code === 'session_not_found' &&
+        (workspaceRegistry.primaryEntry.state !== 'active' ||
+          !workspaceRegistry.primaryEntry.current)
+      ) {
+        logSessionRoutingFailure(route, 'workspace_runtime_unavailable', {
+          sessionId: parentSessionId,
+        });
+        return requirePrimarySessionRuntime(workspaceRegistry, res);
+      }
+      throw error;
+    }
+  };
+
   const resolveSessionAnyStateRuntime = async (
     res: Response,
     route: string,
@@ -2612,6 +2701,20 @@ export function registerSessionRoutes(
     return undefined;
   };
 
+  const parseRequireIdle = (
+    req: Request,
+    res: Response,
+  ): boolean | undefined => {
+    const value: unknown = safeBody(req)['requireIdle'];
+    if (value === undefined) return false;
+    if (typeof value === 'boolean') return value;
+    res.status(400).json({
+      error: '`requireIdle` must be a boolean',
+      code: 'invalid_request',
+    });
+    return undefined;
+  };
+
   // Mirrors the bridge's displayName control-character rule (ESLint forbids
   // control-char regexes).
   const hasControlCharacter = (value: string): boolean =>
@@ -2762,6 +2865,7 @@ export function registerSessionRoutes(
     route: string,
     sessionIds: string[],
     resolveConflicts = false,
+    requireIdle = false,
   ) => {
     const run = async (
       runtime: WorkspaceRuntime,
@@ -2784,6 +2888,7 @@ export function registerSessionRoutes(
               coordinator: archiveCoordinator,
               coordinatorLockHeld,
               resolveConflicts,
+              requireIdle,
               assertCanMutate,
             }),
           ),
@@ -2853,12 +2958,7 @@ export function registerSessionRoutes(
         if (!owner) return;
         const { runtime, standalone } = owner;
         if (options.rejectStandalone && standalone) {
-          res.status(400).json({
-            error: 'This action is not supported in a standalone session.',
-            code: 'unsupported_action',
-            sessionId,
-            route,
-          });
+          sendStandaloneActionUnsupported(res, route, sessionId);
           return;
         }
         if (
@@ -3782,17 +3882,15 @@ export function registerSessionRoutes(
           });
           return;
         }
-        const runtime = requireSessionRuntime({
-          sessionId: virtualKey.parentSessionId,
-          route,
-          res,
-          workspaceRegistry,
-          daemonLog,
-        });
-        if (!runtime) return;
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
         try {
+          const runtime = await resolveSubagentSessionRuntime(
+            res,
+            route,
+            virtualKey.parentSessionId,
+          );
+          if (!runtime) return;
           const session = await runOwnerRuntimeActivity(runtime, () =>
             virtualSubagentSessions.load(runtime, sessionId, clientId),
           );
@@ -5394,15 +5492,13 @@ export function registerSessionRoutes(
       });
       return;
     }
-    const runtime = requireSessionRuntime({
-      sessionId,
-      route,
-      res,
-      workspaceRegistry,
-      daemonLog,
-    });
-    if (!runtime) return;
     try {
+      const runtime = await resolveSubagentSessionRuntime(
+        res,
+        route,
+        sessionId,
+      );
+      if (!runtime) return;
       await runOwnerRuntimeActivity(runtime, async () => {
         const resolved = await virtualSubagentSessions.resolve(
           runtime,
@@ -5997,7 +6093,7 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/side-task',
     mutate(),
-    withRestrictedMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/side-task',
       async (req, res, sessionId, runtime) => {
         const body = safeBody(req);
@@ -6857,15 +6953,13 @@ export function registerSessionRoutes(
         next();
         return;
       }
-      const runtime = requireSessionRuntime({
-        sessionId: key.parentSessionId,
-        route: 'GET /session/:id/context',
-        res,
-        workspaceRegistry,
-        daemonLog,
-      });
-      if (!runtime) return;
       try {
+        const runtime = await resolveSubagentSessionRuntime(
+          res,
+          'GET /session/:id/context',
+          key.parentSessionId,
+        );
+        if (!runtime) return;
         await runOwnerRuntimeActivity(runtime, async () => {
           res.status(200).json({
             v: 1,
@@ -6929,15 +7023,13 @@ export function registerSessionRoutes(
         next();
         return;
       }
-      const runtime = requireSessionRuntime({
-        sessionId: key.parentSessionId,
-        route: 'GET /session/:id/supported-commands',
-        res,
-        workspaceRegistry,
-        daemonLog,
-      });
-      if (!runtime) return;
       try {
+        const runtime = await resolveSubagentSessionRuntime(
+          res,
+          'GET /session/:id/supported-commands',
+          key.parentSessionId,
+        );
+        if (!runtime) return;
         await runOwnerRuntimeActivity(runtime, async () => {
           res.status(200).json({
             v: 1,
@@ -6983,6 +7075,25 @@ export function registerSessionRoutes(
               runtime.trusted && req.query['includeWorkflows'] === 'true',
           }),
         );
+      },
+    ),
+  );
+
+  app.get(
+    '/session/:id/tasks/:taskId/runtime',
+    withOwnerReadSession(
+      'GET /session/:id/tasks/:taskId/runtime',
+      async (req, res, sessionId, runtime) => {
+        const taskId = req.params['taskId'];
+        if (!taskId) {
+          res.status(400).json({
+            error: '`taskId` route parameter is required',
+          });
+          return;
+        }
+        res
+          .status(200)
+          .json(await runtime.bridge.getSessionTaskRuntime(sessionId, taskId));
       },
     ),
   );
@@ -7214,6 +7325,403 @@ export function registerSessionRoutes(
       },
     ),
   );
+
+  const artifactSessionId = z
+    .string()
+    .min(1)
+    .max(256)
+    .refine((id) => id.trim().length > 0)
+    .transform(normalizeSessionIdForLookup);
+  const artifactQuery = z
+    .object({
+      sessionIds: z.array(artifactSessionId).min(1).max(100),
+    })
+    .strict();
+  const artifactDeletion = z
+    .object({
+      artifacts: z
+        .array(
+          z
+            .object({
+              sessionId: artifactSessionId,
+              artifactId: z
+                .string()
+                .min(1)
+                .max(200)
+                .refine((id) => id.trim().length > 0),
+            })
+            .strict(),
+        )
+        .min(1)
+        .max(100),
+    })
+    .strict();
+
+  for (const operation of ['all', 'query', 'delete'] as const) {
+    const route =
+      '/workspaces/:workspace/artifact-library' +
+      (operation === 'all' ? '' : `/${operation}`);
+    const handler: RequestHandler = async (req, res) => {
+      const selected = new Map<string, Set<string>>();
+      if (operation === 'query') {
+        const parsed = artifactQuery.safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({
+            code: 'invalid_artifact_library_request',
+            error: 'Expected 1–100 sessionIds.',
+          });
+          return;
+        }
+        for (const id of parsed.data.sessionIds) selected.set(id, new Set());
+      } else if (operation === 'delete') {
+        const parsed = artifactDeletion.safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({
+            code: 'invalid_artifact_library_request',
+            error: 'Expected 1–100 artifacts with sessionId and artifactId.',
+          });
+          return;
+        }
+        for (const { sessionId, artifactId } of parsed.data.artifacts) {
+          const ids = selected.get(sessionId) ?? new Set<string>();
+          ids.add(artifactId);
+          selected.set(sessionId, ids);
+        }
+      }
+      if (deps.sessionArtifactsPersistenceAvailable === false) {
+        res.status(409).json({
+          code: 'artifact_library_unavailable',
+          error: 'Artifact persistence is unavailable',
+        });
+        return;
+      }
+      let stream: ArtifactLibraryStream | undefined;
+      try {
+        const runtime = await resolveQualifiedSessionRuntime(
+          req,
+          res,
+          route,
+          [],
+          'any',
+        );
+        if (!runtime) return;
+        const assertOpen = captureRuntimeGenerationAssertion(runtime);
+        const cache = artifactCache(runtime);
+        const response = await runOwnerRuntimeActivity(runtime, () =>
+          runWithWorkspaceRuntimeStorage(runtime, async () => {
+            assertOpen?.();
+            if (operation === 'all') {
+              for (const id of await cache.sessionIds())
+                selected.set(id, new Set());
+            }
+            const readResults: WorkspaceSessionArtifactsEnvelope[] = [];
+            const errors: Array<
+              ReturnType<typeof artifactLibraryMemberError> & {
+                sessionId: string;
+              }
+            > = [];
+            const removed: ArtifactLibraryRemovalResult[] = [];
+            const groups = [...selected];
+            const processGroup = async ([sessionId, artifactIds]: [
+              string,
+              Set<string>,
+            ]) => {
+              const run = async () => {
+                assertOpen?.();
+                const owner =
+                  workspaceRegistry.resolveLiveSessionOwner(sessionId);
+                if (owner.kind === 'unavailable')
+                  throw new ArtifactLibraryRequestError(
+                    503,
+                    'workspace_runtime_unavailable',
+                    'Session owner is unavailable.',
+                  );
+                if (owner.kind === 'ambiguous')
+                  throw new ArtifactLibraryRequestError(
+                    500,
+                    'ambiguous_session_owner',
+                    'Session has multiple live owners.',
+                  );
+                if (owner.kind === 'found' && owner.runtime !== runtime)
+                  throw new ArtifactLibraryRequestError(
+                    409,
+                    'session_workspace_conflict',
+                    'Session belongs to another workspace.',
+                  );
+                if (isInternalWorkspaceRuntime(runtime)) {
+                  const service = createWorkspaceRuntimeSessionService(runtime);
+                  const location = await service.getSessionLocation(sessionId);
+                  if (location === 'conflict')
+                    throw new SessionConflictError(sessionId);
+                  if (
+                    !location ||
+                    !(await readLoadableLiveConversationMetadata(
+                      sessionId,
+                      service,
+                    ))
+                  )
+                    throw new SessionNotFoundError(sessionId);
+                }
+                assertOpen?.();
+                if (operation !== 'delete')
+                  return { session: await cache.read(sessionId) };
+                cache.invalidate(sessionId);
+                try {
+                  return {
+                    removed: await removeWorkspaceLibraryArtifacts(
+                      runtime,
+                      sessionId,
+                      [...artifactIds],
+                      () => assertOpen?.(),
+                    ),
+                  };
+                } finally {
+                  cache.invalidate(sessionId);
+                }
+              };
+              try {
+                const result =
+                  operation === 'delete'
+                    ? await archiveCoordinator.runExclusiveMany(
+                        [sessionId],
+                        run,
+                      )
+                    : await archiveCoordinator.runSharedMany([sessionId], run);
+                return { sessionId, artifactIds, result };
+              } catch (error) {
+                return {
+                  sessionId,
+                  artifactIds,
+                  error: artifactLibraryMemberError(error),
+                };
+              }
+            };
+            let succeeded = 0;
+            let failed = 0;
+            let skipped = 0;
+            const consume = async (
+              item: Awaited<ReturnType<typeof processGroup>>,
+            ) => {
+              if (item.error) {
+                if (operation === 'delete') {
+                  for (const artifactId of item.artifactIds)
+                    removed.push({
+                      sessionId: item.sessionId,
+                      artifactId,
+                      error: item.error,
+                    });
+                } else if (
+                  operation !== 'all' ||
+                  item.error.code !== 'session_not_found'
+                ) {
+                  failed++;
+                  const error = { sessionId: item.sessionId, ...item.error };
+                  if (stream) await stream.send('session_error', error);
+                  else errors.push(error);
+                } else skipped++;
+              } else if (item.result?.session) {
+                succeeded++;
+                if (stream)
+                  await stream.send('session', { ...item.result.session });
+                else readResults.push(item.result.session);
+              } else if (item.result?.removed) {
+                removed.push(...item.result.removed);
+              }
+            };
+            if (operation === 'delete') {
+              for (
+                let offset = 0;
+                offset < groups.length;
+                offset += ARTIFACT_LIBRARY_CONCURRENCY
+              ) {
+                const batch = await Promise.all(
+                  groups
+                    .slice(offset, offset + ARTIFACT_LIBRARY_CONCURRENCY)
+                    .map(processGroup),
+                );
+                assertOpen?.();
+                for (const item of batch) await consume(item);
+              }
+            } else {
+              if (res.destroyed) return;
+              res.vary('Accept');
+              if (
+                req.accepts(['application/json', 'text/event-stream']) ===
+                'text/event-stream'
+              ) {
+                stream = new ArtifactLibraryStream(res);
+                await stream.send('start', { total: groups.length });
+              }
+              const results: Array<Awaited<ReturnType<typeof processGroup>>> =
+                [];
+              let next = 0;
+              let stopped = false;
+              const worker = async () => {
+                try {
+                  while (
+                    !stopped &&
+                    !res.destroyed &&
+                    !stream?.closed &&
+                    next < groups.length
+                  ) {
+                    assertOpen?.();
+                    const index = next++;
+                    const item = await processGroup(groups[index]!);
+                    assertOpen?.();
+                    if (res.destroyed || stream?.closed) return;
+                    if (stream) await consume(item);
+                    else results[index] = item;
+                  }
+                } catch (error) {
+                  stopped = true;
+                  throw error;
+                }
+              };
+              const workers = await Promise.allSettled(
+                Array.from(
+                  {
+                    length: Math.min(
+                      ARTIFACT_LIBRARY_CONCURRENCY,
+                      groups.length,
+                    ),
+                  },
+                  worker,
+                ),
+              );
+              const rejected = workers.find(
+                (result) => result.status === 'rejected',
+              );
+              if (rejected?.status === 'rejected') throw rejected.reason;
+              if (res.destroyed || stream?.closed) return;
+              assertOpen?.();
+              if (stream) {
+                await stream.send('complete', {
+                  total: groups.length,
+                  succeeded,
+                  failed,
+                  skipped,
+                });
+                return;
+              }
+              for (const item of results) await consume(item);
+            }
+            assertOpen?.();
+            return operation === 'delete'
+              ? { v: 1, results: removed }
+              : { v: 1, sessions: readResults, errors };
+          }),
+        );
+        if (!stream && !res.destroyed)
+          res.status(200).set('Cache-Control', 'no-store').json(response);
+      } catch (error) {
+        if (stream) {
+          if (!stream.closed)
+            await stream
+              .send(
+                'error',
+                error instanceof WorkspaceGenerationClosedError
+                  ? {
+                      status: 503,
+                      code: 'workspace_runtime_unavailable',
+                      message: 'Workspace runtime is not active.',
+                    }
+                  : { ...artifactLibraryMemberError(error) },
+              )
+              .catch(() => undefined);
+        } else if (!res.destroyed) sendBridgeError(res, error, { route });
+      } finally {
+        stream?.end();
+      }
+    };
+    if (operation === 'all') app.get(route, handler);
+    else if (operation === 'delete')
+      app.post(route, mutate({ strict: true }), handler);
+    else app.post(route, handler);
+  }
+
+  // Persisted workspace management neither borrows a session client identity
+  // nor loads cold sessions.
+  for (const operation of ['read', 'remove'] as const) {
+    const route =
+      '/workspaces/:workspace/session/:id/artifact-library' +
+      (operation === 'remove' ? '/:artifactId' : '');
+    const handler: RequestHandler = async (req, res) => {
+      const sessionId = requireSessionId(req, res);
+      if (sessionId === null) return;
+      if (deps.sessionArtifactsPersistenceAvailable === false) {
+        res.status(409).json({
+          code: 'artifact_library_unavailable',
+          error: 'Artifact persistence is unavailable',
+        });
+        return;
+      }
+      try {
+        const runtime = await resolveQualifiedSessionRuntime(
+          req,
+          res,
+          route,
+          [sessionId],
+          'any',
+        );
+        if (!runtime) return;
+        const assertOpen = captureRuntimeGenerationAssertion(runtime);
+        const run = async () => {
+          assertOpen?.();
+          const liveOwner =
+            workspaceRegistry.resolveLiveSessionOwner(sessionId);
+          if (liveOwner.kind === 'unavailable') {
+            sendWorkspaceRuntimeUnavailable(res);
+            return undefined;
+          }
+          if (liveOwner.kind === 'ambiguous') {
+            sendAmbiguousSessionOwner(
+              res,
+              route,
+              sessionId,
+              liveOwner.runtimes,
+            );
+            return undefined;
+          }
+          if (liveOwner.kind === 'found' && liveOwner.runtime !== runtime) {
+            sendSessionWorkspaceConflict(
+              res,
+              route,
+              sessionId,
+              runtime,
+              liveOwner.runtime,
+            );
+            return undefined;
+          }
+          if (operation === 'remove')
+            workspaceArtifactCaches.get(runtime)?.invalidate(sessionId);
+          const result = await runWithWorkspaceRuntimeStorage(runtime, () =>
+            operation === 'read'
+              ? artifactCache(runtime).read(sessionId)
+              : removeWorkspaceLibraryArtifact(
+                  runtime,
+                  sessionId,
+                  req.params['artifactId']!,
+                  () => assertOpen?.(),
+                ),
+          );
+          assertOpen?.();
+          return result;
+        };
+        const result = await runOwnerRuntimeActivity(runtime, () =>
+          operation === 'read'
+            ? archiveCoordinator.runSharedMany([sessionId], run)
+            : archiveCoordinator.runExclusiveMany([sessionId], run),
+        );
+        if (result)
+          res.status(200).set('Cache-Control', 'no-store').json(result);
+      } catch (error) {
+        if (sendArtifactValidationError(res, error)) return;
+        sendBridgeError(res, error, { route, sessionId });
+      }
+    };
+    if (operation === 'read') app.get(route, handler);
+    else app.delete(route, mutate({ strict: true }), handler);
+  }
 
   app.get(
     '/session/:id/artifacts',
@@ -7528,6 +8036,9 @@ export function registerSessionRoutes(
         const promptId = crypto.randomUUID();
         const result = await runtime.bridge.continueSession(sessionId, {
           ...(clientId !== undefined ? { clientId } : {}),
+          ...(typeof req.body?.confirmCancellation === 'string'
+            ? { confirmCancellation: req.body.confirmCancellation }
+            : {}),
           promptId,
         });
         if (daemonLog && result.accepted) {
@@ -8089,6 +8600,58 @@ export function registerSessionRoutes(
         }
         res.off('close', onResClose);
 
+        // A `/review <N|url>` prompt binds the PR to this session as soon as
+        // the turn is admitted, instead of waiting for an on-demand backfill
+        // sweep. Off the prompt path: a failed bind never affects the turn.
+        if (runtime.trusted && channelPrompt === undefined) {
+          // Only the prompt the user typed is a source: take the first text
+          // block. Later blocks can carry @-imported file content whose
+          // line-leading examples would forge a binding; a channel-relayed
+          // turn is an external sender's message, not the local user's.
+          const firstTextBlock: Record<string, unknown> | undefined =
+            prompt.find(
+              (item: unknown) =>
+                (item as Record<string, unknown>)['type'] === 'text',
+            );
+          const promptText =
+            typeof firstTextBlock?.['text'] === 'string'
+              ? (firstTextBlock['text'] as string)
+              : undefined;
+          if (promptText !== undefined) {
+            void bindSessionPrsFromReviewPrompt(
+              runtime,
+              sessionId,
+              promptText,
+              {
+                archiveCoordinator: deps.archiveCoordinator,
+              },
+            )
+              .then((result) => {
+                if (!result) return;
+                if (result.writeErrors || result.unresolved) {
+                  daemonLog?.warn('review PR bind incomplete', {
+                    sessionId,
+                    unresolved: result.unresolved,
+                    writeErrors: result.writeErrors,
+                    overLimit: result.overLimit,
+                  });
+                }
+              })
+              .catch((error) => {
+                if (
+                  error instanceof WorkspaceGenerationClosedError ||
+                  error instanceof DaemonDrainingError
+                ) {
+                  return;
+                }
+                daemonLog?.warn('review PR bind failed', {
+                  sessionId,
+                  error: describePromptTurnFailure(error),
+                });
+              });
+          }
+        }
+
         promptPromise
           .then(
             () => {
@@ -8236,17 +8799,15 @@ export function registerSessionRoutes(
         next();
         return;
       }
-      const runtime = requireSessionRuntime({
-        sessionId: key.parentSessionId,
-        route: 'POST /session/:id/heartbeat',
-        res,
-        workspaceRegistry,
-        daemonLog,
-      });
-      if (!runtime) return;
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) return;
       try {
+        const runtime = await resolveSubagentSessionRuntime(
+          res,
+          'POST /session/:id/heartbeat',
+          key.parentSessionId,
+        );
+        if (!runtime) return;
         await runOwnerRuntimeActivity(runtime, async () => {
           res.status(200).json({
             sessionId,
@@ -8287,17 +8848,15 @@ export function registerSessionRoutes(
         next();
         return;
       }
-      const runtime = requireSessionRuntime({
-        sessionId: key.parentSessionId,
-        route: 'POST /session/:id/detach',
-        res,
-        workspaceRegistry,
-        daemonLog,
-      });
-      if (!runtime) return;
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) return;
       try {
+        const runtime = await resolveSubagentSessionRuntime(
+          res,
+          'POST /session/:id/detach',
+          key.parentSessionId,
+        );
+        if (!runtime) return;
         await runOwnerRuntimeActivity(runtime, async () => {
           res.status(204).end();
         });
@@ -8365,6 +8924,7 @@ export function registerSessionRoutes(
             runtime.bridge.closeSession(
               sessionId,
               clientId !== undefined ? { clientId } : undefined,
+              { cancelReason: 'user' },
             ),
           ),
         ),
@@ -8413,6 +8973,8 @@ export function registerSessionRoutes(
     if (uniqueIds === undefined) return;
     const resolveConflicts = parseResolveConflicts(req, res);
     if (resolveConflicts === undefined) return;
+    const requireIdle = parseRequireIdle(req, res);
+    if (requireIdle === undefined) return;
     if (rejectActiveLiveSessionMutation(res, uniqueIds)) return;
 
     try {
@@ -8422,6 +8984,7 @@ export function registerSessionRoutes(
         'POST /sessions/archive',
         uniqueIds,
         resolveConflicts,
+        requireIdle,
       );
       if (!operation) return;
       const { result } = operation;
@@ -8503,6 +9066,8 @@ export function registerSessionRoutes(
       if (uniqueIds === undefined) return;
       const resolveConflicts = parseResolveConflicts(req, res);
       if (resolveConflicts === undefined) return;
+      const requireIdle = parseRequireIdle(req, res);
+      if (requireIdle === undefined) return;
       if (rejectActiveLiveSessionMutation(res, uniqueIds)) return;
       try {
         const operation = await archiveSessions(
@@ -8511,6 +9076,7 @@ export function registerSessionRoutes(
           route,
           uniqueIds,
           resolveConflicts,
+          requireIdle,
         );
         if (!operation) return;
         const { result } = operation;
@@ -9981,6 +10547,26 @@ export function registerSessionRoutes(
     ),
   );
 
+  // Deliver the queued mid-turn messages now: the agent cuts a streaming
+  // model response short instead of waiting for its next tool boundary,
+  // unless that response has started a tool call.
+  app.post(
+    '/session/:id/mid-turn-messages/send-now',
+    mutate(),
+    withOwnerMutableSession(
+      'POST /session/:id/mid-turn-messages/send-now',
+      (req, res, sessionId, runtime) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const result = runtime.bridge.sendMidTurnMessagesNow(
+          sessionId,
+          clientId !== undefined ? { clientId } : undefined,
+        );
+        res.status(200).json(result);
+      },
+    ),
+  );
+
   app.delete(
     '/session/:id/mid-turn-messages/:messageId',
     mutate(),
@@ -10193,6 +10779,54 @@ export function registerSessionRoutes(
   );
 
   app.get(
+    '/session/:id/message-groups',
+    withOwnerReadSession(
+      'GET /session/:id/message-groups',
+      async (_req, res, sessionId, runtime) => {
+        res.status(200).json(await runtime.bridge.getMessageGroups(sessionId));
+      },
+    ),
+  );
+
+  app.post(
+    '/session/:id/messages/delete',
+    mutate({ strict: true }),
+    withOwnerMutableSession(
+      'POST /session/:id/messages/delete',
+      async (req, res, sessionId, runtime) => {
+        const body = safeBody(req);
+        const snapshot = body['snapshot'];
+        const groupIds = body['groupIds'];
+        if (
+          typeof snapshot !== 'string' ||
+          snapshot.length === 0 ||
+          !Array.isArray(groupIds) ||
+          groupIds.length === 0 ||
+          !groupIds.every((id) => typeof id === 'string' && id.length > 0) ||
+          new Set(groupIds).size !== groupIds.length
+        ) {
+          res.status(400).json({
+            error: 'A snapshot and distinct non-empty groupIds are required',
+            code: 'invalid_message_groups',
+          });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        res
+          .status(200)
+          .json(
+            await runtime.bridge.deleteMessageGroups(
+              sessionId,
+              { snapshot, groupIds },
+              clientId !== undefined ? { clientId } : undefined,
+            ),
+          );
+      },
+    ),
+  );
+
+  app.get(
     '/session/:id/rewind/snapshots',
     withOwnerReadSession(
       'GET /session/:id/rewind/snapshots',
@@ -10367,4 +11001,5 @@ export function registerSessionRoutes(
       { cwdBound: 'sync-output-language' },
     ),
   );
+  return { resolveSubagentSessionRuntime };
 }

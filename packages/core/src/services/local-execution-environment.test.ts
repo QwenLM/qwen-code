@@ -14,21 +14,21 @@ import { LocalExecutionEnvironment } from './local-execution-environment.js';
 
 describe('LocalExecutionEnvironment', () => {
   let workspace: string;
+  let config: Config;
   let environment: LocalExecutionEnvironment;
   const signal = new AbortController().signal;
 
   beforeEach(async () => {
     workspace = await mkdtemp(path.join(os.tmpdir(), 'execution-environment-'));
-    environment = new LocalExecutionEnvironment(
-      new Config({
-        targetDir: workspace,
-        cwd: workspace,
-        debugMode: false,
-        telemetry: { enabled: false },
-        deferTelemetryInitialization: true,
-        shouldUseNodePtyShell: false,
-      }),
-    );
+    config = new Config({
+      targetDir: workspace,
+      cwd: workspace,
+      debugMode: false,
+      telemetry: { enabled: false },
+      deferTelemetryInitialization: true,
+      shouldUseNodePtyShell: false,
+    });
+    environment = new LocalExecutionEnvironment(config);
   });
 
   afterEach(async () => {
@@ -44,6 +44,37 @@ describe('LocalExecutionEnvironment', () => {
     await environment.prepare({ id, toolName, params }, signal);
     return environment.execute(id, signal);
   }
+
+  it('names an admitted tool with its parameter schema as its declaration', async () => {
+    expect(environment.toolDefinition('read_file')).toEqual({
+      name: 'read_file',
+      description: expect.any(String),
+      parametersJsonSchema: expect.anything(),
+    });
+    expect(
+      (environment.toolDefinition('write_file') as { name: unknown }).name,
+    ).toBe('write_file');
+    expect(() => environment.toolDefinition('not_a_tool')).toThrow(
+      'Unsupported execution tool',
+    );
+  });
+
+  it("carries read_file's modality-derived description in its declaration", () => {
+    // ReadFile recomputes its description from the model's current input
+    // modalities on every schema access; the durable declaration publishes
+    // the text the model actually saw.
+    const textOnly = environment.toolDefinition('read_file') as {
+      description: string;
+    };
+    expect(textOnly.description).not.toContain('watch a video');
+    vi.spyOn(config, 'getEffectiveInputModalities').mockReturnValue({
+      video: true,
+    });
+    const multimodal = environment.toolDefinition('read_file') as {
+      description: string;
+    };
+    expect(multimodal.description).toContain('watch a video');
+  });
 
   it('runs a prepared call elsewhere, with its final parameters', async () => {
     const file = path.join(workspace, 'file.txt');
@@ -95,6 +126,49 @@ describe('LocalExecutionEnvironment', () => {
       );
       // The prepared invocation never ran here.
       await expect(readFile(file, 'utf8')).rejects.toThrow();
+    } finally {
+      await elsewhere.dispose();
+    }
+  });
+
+  it("hands the scheduler's call id to the runner when the call carries one", async () => {
+    const run = vi.fn(async () => ({
+      llmContent: 'ran elsewhere',
+      returnDisplay: 'ran elsewhere',
+    }));
+    const elsewhere = new LocalExecutionEnvironment(
+      new Config({
+        targetDir: workspace,
+        cwd: workspace,
+        debugMode: false,
+        telemetry: { enabled: false },
+        deferTelemetryInitialization: true,
+      }),
+      { toolNames: new Set([ToolNames.WRITE_FILE]), run },
+    );
+    try {
+      await elsewhere.prepare(
+        {
+          id: 'invocation-1',
+          callId: 'model-call-1',
+          toolName: ToolNames.WRITE_FILE,
+          params: { file_path: path.join(workspace, 'f.txt'), content: 'x' },
+        },
+        signal,
+      );
+      await elsewhere.execute('invocation-1', signal);
+      expect(run).toHaveBeenCalledExactlyOnceWith(
+        {
+          id: 'invocation-1',
+          callId: 'model-call-1',
+          toolName: ToolNames.WRITE_FILE,
+          params: expect.objectContaining({
+            file_path: path.join(workspace, 'f.txt'),
+          }),
+        },
+        expect.any(AbortSignal),
+        undefined,
+      );
     } finally {
       await elsewhere.dispose();
     }

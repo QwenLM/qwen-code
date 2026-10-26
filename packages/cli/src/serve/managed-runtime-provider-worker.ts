@@ -52,6 +52,8 @@ import {
 } from './managed-runtime-attestation-contract.js';
 import {
   MANAGED_RUNTIME_PROVIDER_ROUTE,
+  MAX_PROVIDER_INLINE_MEDIA_BASE64_BYTES,
+  MAX_PROVIDER_MEDIA_RESULT_BYTES,
   managedRuntimeProviderLimit,
   ManagedRuntimeProviderProtocolError,
   fitManagedRuntimeProviderResult,
@@ -70,6 +72,7 @@ export interface ManagedRuntimeProviderContext {
   readonly directory: string;
   readonly workspaceRoot: string;
   readonly preapproved: boolean;
+  readonly filesOnly?: boolean;
   readonly isActive?: () => boolean;
 }
 
@@ -92,6 +95,7 @@ interface ProviderSession {
   value?: ProviderRuntime;
   pending: number;
   closed: boolean;
+  releaseAttempt: number;
   release?: Promise<boolean>;
   retirement?: Promise<void>;
 }
@@ -103,6 +107,33 @@ function conflict(
   code: ManagedToolConflictError['code'] = 'managed_runtime_provider_operation_failed',
 ): never {
   throw new ManagedToolConflictError(message, code);
+}
+
+/**
+ * A release the worker gives up on must stay retryable: the Broker's own
+ * request timeout is 30 s, so the worker answers first and keeps the decision
+ * in its own hands.
+ */
+const RELEASE_DEADLINE_MS = 20_000;
+
+class ReleaseDeadlineError extends Error {}
+
+function withDeadline<T>(
+  work: Promise<T> | undefined,
+  deadlineMs: number,
+): Promise<T | undefined> {
+  if (!work) return Promise.resolve(undefined);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    work,
+    new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new ReleaseDeadlineError()), deadlineMs);
+    }),
+  ]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+    // The abandoned work keeps running; it must not surface as unhandled.
+    void work.catch(() => undefined);
+  });
 }
 
 /**
@@ -224,7 +255,7 @@ class WorkspaceShellTool extends ShellTool {
   }
 }
 
-class ManagedRuntimeProviderWorker {
+export class ManagedRuntimeProviderWorker {
   private readonly sessions = new Map<string, ProviderSession>();
   /** Released Sessions that still hold their runtime, oldest first. */
   private readonly released: ProviderSession[] = [];
@@ -233,6 +264,7 @@ class ManagedRuntimeProviderWorker {
   constructor(
     private readonly executor: ManagedToolExecutor,
     private readonly contextFor: ContextResolver,
+    private readonly releaseDeadlineMs = RELEASE_DEADLINE_MS,
   ) {}
 
   hasActiveSession(sessionId: string): boolean {
@@ -241,6 +273,28 @@ class ManagedRuntimeProviderWorker {
       session !== undefined &&
       (session.pending > 0 || session.value?.runtime.hasActiveWork() === true)
     );
+  }
+
+  getDrainInspection(): { pendingInvocations: number; hasActivity: boolean } {
+    return {
+      pendingInvocations: [...this.sessions.values()].reduce(
+        (count, session) =>
+          count +
+          session.pending +
+          (session.value?.runtime.hasActiveWork() ? 1 : 0),
+        0,
+      ),
+      hasActivity: [...this.sessions.values()].some(
+        (session) => session.ready !== undefined || session.value !== undefined,
+      ),
+    };
+  }
+
+  private assertAdmissionOpen(): void {
+    if (!this.executor.isAdmissionOpen)
+      throw new ManagedToolUnavailableError(
+        'Managed Runtime admission is sealed.',
+      );
   }
 
   private lookup(identity: ManagedRuntimeProviderSession) {
@@ -262,6 +316,8 @@ class ManagedRuntimeProviderWorker {
     identity: ManagedRuntimeProviderSession,
     operation: ManagedRuntimeProviderOperation,
   ): Promise<unknown> {
+    if (operation.kind === 'workspace-context')
+      return this.executor.readWorkspaceContext(identity.runtimeSessionId);
     if (operation.kind === 'raw-file-history')
       return this.executor.controlFileHistory(
         identity.harnessSessionId,
@@ -277,15 +333,45 @@ class ManagedRuntimeProviderWorker {
           identity,
           closed: true,
           pending: 0,
+          releaseAttempt: 0,
         });
         return true;
       }
       if (session.release) return session.release;
       if (session.pending > 0)
-        conflict('Managed Runtime Session still owns unfinished work.');
+        conflict(
+          'Managed Runtime Session still owns unfinished work.',
+          'managed_runtime_owner_hold_pending',
+        );
       const entry = session;
+      const attempt = ++entry.releaseAttempt;
+      const prepared = entry.value?.runtime.releasePrepared();
       entry.release = (async () => {
-        await entry.value?.runtime.releasePrepared();
+        try {
+          await withDeadline(prepared, this.releaseDeadlineMs);
+        } catch (error) {
+          if (error instanceof ReleaseDeadlineError) {
+            conflict(
+              'Managed Runtime release timed out.',
+              'managed_runtime_release_timeout',
+            );
+          }
+          // Whatever kept preparation from finishing still owns work here.
+          conflict(
+            error instanceof Error
+              ? error.message
+              : 'Managed Runtime release failed.',
+            'managed_runtime_owner_hold_pending',
+          );
+        }
+        // A timed-out attempt can finish after another attempt or a
+        // re-acquire took the identity; it must not retire that Session.
+        if (
+          this.sessions.get(identity.runtimeSessionId) !== entry ||
+          entry.releaseAttempt !== attempt
+        ) {
+          return true;
+        }
         this.executor.closeSessionAdmission(identity.runtimeSessionId);
         forgetSession(identity.runtimeSessionId);
         entry.closed = true;
@@ -293,17 +379,18 @@ class ManagedRuntimeProviderWorker {
         await this.retireReleased();
         return true;
       })().catch((error: unknown) => {
-        entry.release = undefined;
+        if (entry.releaseAttempt === attempt) entry.release = undefined;
         throw error;
       });
       return entry.release;
     }
     if (operation.kind === 'acquire') {
+      this.assertAdmissionOpen();
       if (this.closing || session?.closed || session?.release)
         conflict('Managed Runtime Session is closed.');
       if (!session) {
         this.executor.claimProviderSession(identity.runtimeSessionId);
-        session = { identity, closed: false, pending: 0 };
+        session = { identity, closed: false, pending: 0, releaseAttempt: 0 };
         this.sessions.set(identity.runtimeSessionId, session);
       }
       if (!session.ready) {
@@ -334,13 +421,19 @@ class ManagedRuntimeProviderWorker {
     }
     if (!session?.ready)
       conflict('Managed Runtime Session has not been acquired.');
-    const observes = ['status', 'cancel', 'history'].includes(operation.kind);
+    const observes =
+      ['status', 'cancel', 'history'].includes(operation.kind) ||
+      (this.executor.isAdmissionSealed &&
+        !this.closing &&
+        operation.kind === 'manifest');
+    if (!observes) this.assertAdmissionOpen();
     if ((this.closing || session.closed || session.release) && !observes)
       conflict('Managed Runtime Session is closed.');
     session.pending++;
     try {
       const value = await session.ready;
       if (!observes) await this.assertContext(identity.runtimeSessionId, value);
+      if (!observes) this.assertAdmissionOpen();
       return await sessionIdContext.run(identity.runtimeSessionId, () =>
         this.dispatch(value, operation),
       );
@@ -373,7 +466,8 @@ class ManagedRuntimeProviderWorker {
       context.isActive?.() === false ||
       context.directory !== value.context.directory ||
       context.workspaceRoot !== value.context.workspaceRoot ||
-      context.preapproved !== value.context.preapproved
+      context.preapproved !== value.context.preapproved ||
+      context.filesOnly !== value.context.filesOnly
     ) {
       throw new ManagedToolUnavailableError(
         'Managed context directory is unavailable.',
@@ -383,6 +477,11 @@ class ManagedRuntimeProviderWorker {
 
   private async createRuntime(sessionId: string): Promise<ProviderRuntime> {
     const context = await this.contextFor(sessionId);
+    // Ordinary shutdown completes an acquire already in flight, then retires it.
+    if (this.executor.isAdmissionSealed)
+      throw new ManagedToolUnavailableError(
+        'Managed Runtime admission is sealed.',
+      );
     if (!context || context.isActive?.() === false) {
       throw new ManagedToolUnavailableError(
         'Managed context directory is unavailable.',
@@ -405,13 +504,15 @@ class ManagedRuntimeProviderWorker {
       });
       const toolConfig = deriveConfig(config, {
         getFileHistoryService: () => history(value).service,
+        // Execution workers never upload media through an inherited Omni opt-in.
+        isOmniEnabled: () => false,
       });
       const shell = new WorkspaceShellTool(toolConfig, config);
       const tools = [
         new ReadFileTool(toolConfig),
         new WriteFileTool(toolConfig),
         new EditTool(toolConfig),
-        shell,
+        ...(context.filesOnly ? [] : [shell]),
       ];
       const policyRevision = randomUUID();
       const runtime = new ManagedToolRuntime(
@@ -421,17 +522,30 @@ class ManagedRuntimeProviderWorker {
         {
           prepareTurn: (identity) =>
             history(value).checkpoint(identity.promptId),
-          execute: (action) => history(value).run(action),
+          execute: (action) =>
+            history(value).run(() => {
+              if (this.executor.isAdmissionSealed) this.assertAdmissionOpen();
+              return action();
+            }),
         },
         (tool, media) => {
           if (tool.name !== ReadFileTool.Name)
             conflict('Managed Runtime tool does not support media context.');
           return new ReadFileTool(
             deriveConfig(toolConfig, {
-              getEffectiveInputModalities: () => ({ ...media.inputModalities }),
+              getEffectiveInputModalities: () => ({
+                image: media.inputModalities.image === true,
+                pdf: media.inputModalities.pdf === true,
+                audio: false,
+                video: false,
+              }),
               getFileReadCache: () => toolConfig.getFileReadCache(),
               getFileService: () => toolConfig.getFileService(),
             }),
+            {
+              maxInlineMediaBase64Bytes: MAX_PROVIDER_INLINE_MEDIA_BASE64_BYTES,
+              maxMediaResultBytes: MAX_PROVIDER_MEDIA_RESULT_BYTES,
+            },
           );
         },
       );
@@ -492,6 +606,7 @@ class ManagedRuntimeProviderWorker {
         return runtime.manifest();
       case 'begin-turn':
         await history(value).ready();
+        this.assertAdmissionOpen();
         await runtime.beginTurn(operation.identity);
         return null;
       case 'prepare': {
@@ -584,6 +699,7 @@ export function registerManagedRuntimeProviderRoute(
   identity: ManagedRuntimeRequestIdentity,
   executor: ManagedToolExecutor,
   contextFor: ContextResolver,
+  sshForegroundOnly = false,
 ): void {
   const provider = new ManagedRuntimeProviderWorker(executor, contextFor);
   executor.attachProvider(provider);
@@ -597,6 +713,21 @@ export function registerManagedRuntimeProviderRoute(
     async (req: Request, res: Response) => {
       try {
         const request = parseManagedRuntimeProviderRequest(req.body);
+        if (
+          sshForegroundOnly &&
+          ![
+            'workspace-context',
+            'raw-file-history',
+            'history',
+            'release',
+          ].includes(request.operation.kind)
+        ) {
+          throw new ManagedRuntimeProviderProtocolError(
+            'SSH Runtime provider operation is unsupported.',
+            501,
+            'managed_runtime_provider_unsupported',
+          );
+        }
         const raw: unknown = JSON.parse(
           JSON.stringify(
             await provider.control(request.session, request.operation),

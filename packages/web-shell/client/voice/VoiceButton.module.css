@@ -153,6 +153,31 @@
   color: #fff;
 }
 
+.feedback {
+  max-width: min(280px, calc(100vw - 80px));
+  padding: 8px 34px 8px 10px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  pointer-events: auto;
+}
+
+.dismiss {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  color: inherit;
+}
+
+.error .dismiss:hover {
+  background: rgba(255, 255, 255, 0.16);
+  color: inherit;
+}
+
+.dismiss:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: -2px;
+}
+
 @keyframes voicePulse {
   0%,
   100% {

@@ -1343,7 +1343,18 @@ export class MemoryManager {
     } finally {
       this.extractCurrentTaskId.delete(params.projectRoot);
       this.extractRunning.delete(params.projectRoot);
-      void this.startQueuedExtract(params.projectRoot);
+      // A queued extraction has no caller left to inform: scheduleExtract
+      // already returned a 'queued' result, and the task record plus the
+      // telemetry event carry the failure. Without this handler the rejection
+      // reaches the process-wide unhandledRejection handler.
+      void this.startQueuedExtract(params.projectRoot).catch(
+        (error: unknown) => {
+          debugLogger.warn(
+            'Failed to run queued managed auto-memory extraction.',
+            error,
+          );
+        },
+      );
     }
   }
 
@@ -2407,8 +2418,8 @@ export class MemoryManager {
 
   /**
    * Build the managed auto-memory section of the system prompt. This is the
-   * volatile prompt layer — it is rewritten in-session on every memory save,
-   * so callers must keep it after the stable/context layers. When
+   * policy plus indexes by default. Session callers exclude indexes and send
+   * them as request-only catalog data. When
    * `userSection` is provided, the prompt teaches the model to route saves
    * between the project dir and the user (cross-project) dir using the
    * per-type scope guidance.

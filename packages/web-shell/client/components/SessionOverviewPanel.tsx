@@ -60,6 +60,7 @@ import { useWorkspaceSessionLiveState } from '../session-catalog/workspace-sessi
 import { useSessionCatalogController } from '../session-catalog/session-catalog-hooks';
 import { getDaemonToken } from '../config/daemon';
 import {
+  SESSION_ARCHIVE_BATCH_SIZE,
   SESSION_LIST_PAGE_SIZE,
   SESSION_LIVE_STATE_FEATURE,
   SESSION_ORGANIZATION_FEATURE,
@@ -723,18 +724,26 @@ function SessionOverviewPanelInner({
             group.map((card) => [card.sessionId, card]),
           );
           if (mutation === 'archive') {
-            const result = await client.archiveSessionsData(ids);
-            for (const id of [
-              ...result.archived,
-              ...result.alreadyArchived,
-              ...result.notFound,
-            ]) {
-              const card = cardsById.get(id);
-              if (card) succeededIdentities.add(getSessionIdentity(card));
+            for (
+              let offset = 0;
+              offset < ids.length;
+              offset += SESSION_ARCHIVE_BATCH_SIZE
+            ) {
+              const result = await client.archiveSessionsData(
+                ids.slice(offset, offset + SESSION_ARCHIVE_BATCH_SIZE),
+              );
+              for (const id of [
+                ...result.archived,
+                ...result.alreadyArchived,
+                ...result.notFound,
+              ]) {
+                const card = cardsById.get(id);
+                if (card) succeededIdentities.add(getSessionIdentity(card));
+              }
+              firstError ??= result.errors[0]
+                ? new Error(result.errors[0].error)
+                : undefined;
             }
-            firstError ??= result.errors[0]
-              ? new Error(result.errors[0].error)
-              : undefined;
           } else {
             const result = await client.deleteSessionsData(ids);
             for (const id of [...result.removed, ...result.notFound]) {

@@ -47,6 +47,23 @@ vi.mock('./lib/platform/aone.js', async (importOriginal) => {
   };
 });
 
+// The gh seam — `gh` is the one export that reaches a real `gh pr view`, and
+// it is a plain function on a frozen ESM namespace, so observing it needs a
+// module mock rather than a spy. `...actual` is load-bearing: the handler
+// harness below saves and restores the host through the REAL getGhHost /
+// setGhHost, so mocking those would break it (and asserting on them would be
+// a false red — the harness itself calls them).
+const { ghCallMock } = vi.hoisted(() => ({
+  ghCallMock: vi.fn(() => ''),
+}));
+vi.mock('./lib/gh.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/gh.js')>();
+  return {
+    ...actual,
+    gh: ghCallMock,
+  };
+});
+
 import {
   testPlanCommand,
   extractTestPlanSection,
@@ -239,6 +256,99 @@ describe('extractClaims', () => {
       'expect all four files and 471 tests to pass',
     ).filter((c) => c.kind === 'count');
     expect(claims.map((c) => c.text)).toEqual(['471 tests to pass']);
+  });
+
+  it('reads comma-grouped thousands as the full count', () => {
+    // "2,239 passed" is a claim of 2239 — `\b(\d+)` claimed the tail after the
+    // last comma and the review carried a false `239 passed` note (PR #12250).
+    const claims = extractClaims(
+      '2,239 passed\nexpect 1,234 tests to pass\nTests: 12,345 passed',
+    ).filter((c) => c.kind === 'count');
+    // Claim order is pattern order (future-tense, runner-summary, bare), not
+    // position order — the overlap claim keeps one statement to one claim.
+    expect(claims.map((c) => c.text)).toEqual([
+      '1,234 tests to pass',
+      'Tests: 12,345 passed',
+      '2,239 passed',
+    ]);
+  });
+
+  it('does not read a comma-grouped PR number as a count', () => {
+    // The grouped count is claimed whole; the PR number next to it is not
+    // (red before the fix: the count claimed as `239 passed`). A `#`-prefixed
+    // reference beside the pass word is not a count either (`#13,881`).
+    const claims = extractClaims('See PR 1,234 — 2,239 passed').filter(
+      (c) => c.kind === 'count',
+    );
+    expect(claims.map((c) => c.text)).toEqual(['2,239 passed']);
+    expect(
+      extractClaims('CI on #13,881 passed').filter((c) => c.kind === 'count'),
+    ).toEqual([]);
+  });
+
+  it('does not claim the tail of a malformed grouped number', () => {
+    // The lookbehind is the guard: without it `1,23 passed` claims
+    // `23 passed` at the comma's word boundary. The future-tense pattern
+    // carries the same guard (deleting it there alone otherwise greens).
+    expect(
+      extractClaims('1,23 passed').filter((c) => c.kind === 'count'),
+    ).toEqual([]);
+    expect(
+      extractClaims('1,2345 passed').filter((c) => c.kind === 'count'),
+    ).toEqual([]);
+    expect(
+      extractClaims('1,23 tests to pass').filter((c) => c.kind === 'count'),
+    ).toEqual([]);
+    expect(
+      extractClaims('1,2345 specs to pass').filter((c) => c.kind === 'count'),
+    ).toEqual([]);
+  });
+
+  it('does not glue a count onto the tail of a preceding numeric token', () => {
+    // A numeric token joins its digits with punctuation — a timestamp `:`,
+    // a date `-`, a version `.`, a ratio `/`, a sum `+`; the grouped
+    // alternative would otherwise open a new group there (`30,471`). The
+    // lookbehind keys on a digit before any separator, so these stay silent —
+    // fail-closed beats a fabricated figure.
+    expect(
+      extractClaims('2026-10-11T12:00:30,471 passed').filter(
+        (c) => c.kind === 'count',
+      ),
+    ).toEqual([]);
+    expect(
+      extractClaims('2026-10-11,471 passed').filter((c) => c.kind === 'count'),
+    ).toEqual([]);
+    expect(
+      extractClaims('1.5,239 passed').filter((c) => c.kind === 'count'),
+    ).toEqual([]);
+    expect(
+      extractClaims('2,239/2,500 passed').filter((c) => c.kind === 'count'),
+    ).toEqual([]);
+    expect(
+      extractClaims('12/30,471 passed').filter((c) => c.kind === 'count'),
+    ).toEqual([]);
+    expect(
+      extractClaims('ratio 3/4,471 passed').filter((c) => c.kind === 'count'),
+    ).toEqual([]);
+    expect(
+      extractClaims('1,239+2,500 passed').filter((c) => c.kind === 'count'),
+    ).toEqual([]);
+  });
+
+  it('still reads a count after an unspaced separator comma', () => {
+    // `1 failed,471 passed` — the comma is a segment separator, not a
+    // grouping comma; `observedTestCounts` reads the same line, so the claim
+    // side must not go silent on it. A letter before the separator is the
+    // other half of the guard's pass case (`Tests:2,239`).
+    const claims = extractClaims('Tests: 1 failed,471 passed').filter(
+      (c) => c.kind === 'count',
+    );
+    expect(claims.map((c) => c.text)).toEqual(['471 passed']);
+    expect(
+      extractClaims('Tests:2,239 passed')
+        .filter((c) => c.kind === 'count')
+        .map((c) => c.text),
+    ).toEqual(['2,239 passed']);
   });
 
   it('pulls path arguments out of a repro command', () => {
@@ -439,6 +549,27 @@ describe('observedTestCounts', () => {
     expect(
       observedTestCounts(report(['Tests  1 failed | 40 passed (41)'])),
     ).toEqual([40]);
+  });
+
+  it('reads comma-grouped thousands in a summary', () => {
+    expect(observedTestCounts(report(['Tests  2,239 passed (2,239)']))).toEqual(
+      [2239],
+    );
+    expect(
+      observedTestCounts(
+        report(['Tests:  1 failed, 2,239 passed, 2,240 total']),
+      ),
+    ).toEqual([2239]);
+  });
+
+  it('reads a grouped count in a non-passed summary segment', () => {
+    // The segment class is widened too: a grouped `failed` count must not make
+    // the whole line unparseable and silently drop the observed count.
+    expect(
+      observedTestCounts(
+        report(['Tests  1,234 failed | 2,345 passed (3,579)']),
+      ),
+    ).toEqual([2345]);
   });
 
   it('reads a three-segment summary (failed | skipped | passed)', () => {
@@ -1010,6 +1141,12 @@ describe('runTestPlan', () => {
       expect(verdictOf(r.claims, '471 tests passed')).toBe('reproduces');
     });
 
+    it('reproduces a comma-grouped claim against an ungrouped observed count', () => {
+      // Runners print `2239`; humans paste `2,239`. Same number, same verdict.
+      const r = run('## Test Plan\n\n2,239 passed', [], withCounts(2239));
+      expect(verdictOf(r.claims, '2,239 passed')).toBe('reproduces');
+    });
+
     it('reports a mismatch as `differs`, NOT as a contradiction', () => {
       // The whole point: 471 vs 472 may be two different suites, and this
       // command cannot tell. It must never become a blocker.
@@ -1229,6 +1366,14 @@ describe('the handler wiring — the integration point of the Aone fix', () => {
       29295886,
       'maxcompute/odps_src',
     );
+    // The "never touches gh" half of this pin's title. The two assertions
+    // above are satisfied by the reader alone, so an added `gh pr view`
+    // fallback (a dropped args.host, a handler reverted to runTestPlan)
+    // would still leave them green — only this one observes the gh seam.
+    // Targeted at `gh` itself, NOT getGhHost/setGhHost: the harness in this
+    // describe calls the real getGhHost/setGhHost to save and restore the
+    // host, so asserting on those would fail on the harness's own call.
+    expect(ghCallMock).not.toHaveBeenCalled();
   });
 
   it('a refused gate fails the command (exit 1) with the actionable message, before any fetch', async () => {

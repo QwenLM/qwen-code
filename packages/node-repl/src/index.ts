@@ -29,9 +29,7 @@ async function main(): Promise<void> {
   const shutdown = (code = 0) => {
     if (shuttingDown) return;
     shuttingDown = true;
-    dispose();
-    void server
-      .close()
+    void Promise.all([dispose(), server.close()])
       .catch(() => undefined)
       .finally(() => process.exit(code));
   };
@@ -45,7 +43,9 @@ async function main(): Promise<void> {
   process.stdin.once('end', () => shutdown());
   process.stdin.once('close', () => shutdown());
   // Best-effort synchronous cleanup for any other exit path.
-  process.on('exit', () => dispose());
+  process.on('exit', () => {
+    void dispose();
+  });
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

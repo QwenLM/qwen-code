@@ -16,6 +16,7 @@ import {
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { PassThrough } from 'node:stream';
 import {
   _recoverObjectsFromLine,
   _resetEnsuredDirsCacheForTest,
@@ -281,6 +282,12 @@ describe('read() / readLines() with malformed lines', () => {
     ).resolves.toEqual({ records: [{ i: 1 }, { i: 2 }], complete: true });
   });
 
+  it('does not count blank lines toward the integrity-aware line budget', async () => {
+    await expect(
+      readIntegrity('\n \n{"i":1}{"i":2}\n\t\n{"i":\n{"i":3}\n', 2),
+    ).resolves.toEqual({ records: [{ i: 1 }, { i: 2 }], complete: false });
+  });
+
   it('keeps the plain reader on a record budget after zero-record lines', async () => {
     const file = tmpFile('{"i":\nnull\n{"i":1}\n{"i":2}\n');
 
@@ -308,6 +315,66 @@ describe('read() / readLines() with malformed lines', () => {
 });
 
 describe('reader resource cleanup', () => {
+  it.each([
+    ['record', readLines],
+    ['non-empty line', readLinesWithIntegrity],
+  ])(
+    'stops after its %s budget without consuming the next large line',
+    async (_budget, reader) => {
+      const header = '{"i":1}\n';
+      const nextLine = JSON.stringify({ text: 'x'.repeat(8 * 1024 * 1024) });
+      const file = tmpFile(`${header}${nextLine}\n`);
+      const { spy, captured } = spyOnReadStreams();
+      try {
+        expect(await reader(file, 1)).toEqual(
+          reader === readLines
+            ? [{ i: 1 }]
+            : { records: [{ i: 1 }], complete: true },
+        );
+        expect(captured.stream).toBeDefined();
+        expect(captured.stream!.closed).toBe(true);
+        expect(captured.stream!.bytesRead).toBeLessThanOrEqual(
+          2 * captured.stream!.readableHighWaterMark,
+        );
+      } finally {
+        spy.mockRestore();
+      }
+    },
+  );
+
+  it.each([
+    ['record', readLines],
+    ['non-empty line', readLinesWithIntegrity],
+  ])(
+    'settles its %s budget before the next line is terminated',
+    async (_budget, reader) => {
+      const stream = new PassThrough();
+      const spy = vi
+        .spyOn(fs, 'createReadStream')
+        .mockReturnValueOnce(stream as unknown as fs.ReadStream);
+      let settled = false;
+      const pending = reader('controlled.jsonl', 1).then((result) => {
+        settled = true;
+        return result;
+      });
+      stream.write('{"i":1}\n{"i":');
+      try {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(settled).toBe(true);
+        expect(stream.destroyed).toBe(true);
+        expect(await pending).toEqual(
+          reader === readLines
+            ? [{ i: 1 }]
+            : { records: [{ i: 1 }], complete: true },
+        );
+      } finally {
+        stream.end('2}\n');
+        await pending;
+        spy.mockRestore();
+      }
+    },
+  );
+
   it('propagates the caller abort reason from readLines', async () => {
     const file = tmpFile(
       Array.from({ length: 1_000 }, (_, index) => `{"i":${index}}`).join('\n'),

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { managedExtensionEnvironment } from './managed-extension-environment.js';
 import { createHash } from 'node:crypto';
 import { createAbortController } from '@qwen-code/qwen-code-core/utils/abortController.js';
 import { readFileSync } from 'node:fs';
@@ -40,6 +41,8 @@ import {
   type RegisteredHandlerRef,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-protocol.js';
 import type { ManagedSessionKey } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import type { ManagedExtensionProcessOwners } from './managed-extension-process.js';
+import { executeManagedExtensionCommandHook } from './managed-extension-hook.js';
 
 export interface ManagedHookDefinition
   extends Omit<ManagedHookDescriptor, 'config' | 'handler' | 'plannerKey'> {
@@ -75,10 +78,132 @@ export class ManagedHookError extends Error {
   }
 }
 
+class ManagedHookImportAbortedError extends Error {}
+
+// Module evaluation runs before HookRunner enforces the abort signal, so race
+// it with a budget and the operation signal: a stuck top-level await must not
+// pin an admission slot or hold close() open forever. ESM evaluation itself
+// cannot be cancelled, so a timeout or abort only abandons the wait — the
+// evaluation keeps running, which is why a timeout reports
+// 'managed_hook_module_evaluation_timeout' and an abort that lands
+// mid-evaluation reports 'managed_hook_module_evaluation_abandoned' (the host
+// fences both as outcome_unknown) instead of 'managed_hook_handler_unavailable'
+// or a definite cancellation, which would certify an outcome for code that may
+// still be running.
+function importHookModule(
+  modulePath: string,
+  timeoutMs: number,
+  signal: AbortSignal,
+  entry: Operation,
+): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    let finished = false;
+    const timer = setTimeout(
+      () =>
+        finish(new ManagedHookError('managed_hook_module_evaluation_timeout')),
+      timeoutMs,
+    );
+    const onAbort = () => finish(new ManagedHookImportAbortedError());
+    function finish(error?: Error, module?: Record<string, unknown>) {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+      if (error) reject(error);
+      else resolve(module as Record<string, unknown>);
+    }
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    // Convert before arming the hold: pathToFileURL throws synchronously on
+    // paths that pass manifest validation (Windows UNC shapes), and only the
+    // derived promise's handlers clear moduleEvaluationPending.
+    let href: string;
+    try {
+      href = pathToFileURL(modulePath).href;
+    } catch (cause) {
+      finish(cause instanceof Error ? cause : new Error(String(cause)));
+      return;
+    }
+    signal.addEventListener('abort', onAbort, { once: true });
+    entry.moduleEvaluationPending = true;
+    import(href)
+      .then(
+        (module) => {
+          entry.moduleEvaluationPending = false;
+          settleAbandoned(entry, {
+            state: 'settled',
+            result: {
+              success: false,
+              outcome:
+                entry.view.error?.code ===
+                'managed_hook_module_evaluation_timeout'
+                  ? 'timeout'
+                  : 'cancelled',
+              duration: 0,
+              notStarted: true,
+            },
+          });
+          finish(undefined, module as Record<string, unknown>);
+        },
+        () => {
+          entry.moduleEvaluationPending = false;
+          settleAbandoned(entry, {
+            state: 'settled',
+            error: { code: 'managed_hook_handler_unavailable' },
+          });
+          // The caller's catch maps every import failure to the same code,
+          // so the module's own rejection reason is never read; the terminal
+          // .catch below covers a throw inside this handler.
+          finish(new ManagedHookError('managed_hook_handler_unavailable'));
+        },
+      )
+      // Terminal handler for the derived promise: a throw inside either
+      // settle handler must settle the operation, never escape as an
+      // unhandled rejection.
+      .catch(() => {
+        entry.moduleEvaluationPending = false;
+        settleAbandoned(entry, {
+          state: 'settled',
+          error: { code: 'managed_hook_handler_unavailable' },
+        });
+        finish(new ManagedHookError('managed_hook_handler_unavailable'));
+      });
+  });
+}
+
+const FENCED_EVALUATION_CODES: ReadonlySet<string> = new Set([
+  'managed_hook_module_evaluation_abandoned',
+  'managed_hook_module_evaluation_timeout',
+]);
+
+/**
+ * Neither evaluation fence is terminal. Once the evaluation definitively
+ * ends, republish the receipt so the Harness can reconcile the record: a
+ * module that loaded proves the callback never ran — a cancel outcome for an
+ * abandoned evaluation, a timeout outcome for an over-budget one — and a
+ * module that failed is genuinely unavailable. Without this transition a
+ * cancel or a merely slow cold import leaves the Session fenced for the
+ * worker's lifetime. Publishing happens only after `moduleEvaluationPending`
+ * clears, so no receipt is certified while top-level code is still running.
+ */
+function settleAbandoned(
+  entry: Operation,
+  view: Omit<ManagedHookOperationView, 'operationId'>,
+): void {
+  if (!FENCED_EVALUATION_CODES.has(entry.view.error?.code ?? '')) return;
+  entry.view = { operationId: entry.view.operationId, ...view };
+}
+
 const identifier = /^[a-zA-Z0-9:_.-]{1,512}$/u;
 const MAX_OPERATIONS = 4096;
 const MAX_BYTES = 60 * 1024;
 const FUNCTION_SETTLEMENT_GRACE_MS = 1000;
+// The manifest timeout is declared for the callback; cold-but-healthy module
+// evaluation needs its own floor so it is not judged by a budget written for
+// a different phase.
+const MODULE_EVALUATION_MIN_TIMEOUT_MS = 500;
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value))
     throw new ManagedHookError('managed_hook_invalid');
@@ -381,14 +506,24 @@ interface Operation {
   view: ManagedHookOperationView;
   controller: AbortController;
   done?: Promise<void>;
+  // Stays set after the operation settles when the module's top-level code
+  // outlived the abandoned wait, so hold accounting reflects the unfinished
+  // effects. A never-settling evaluation keeps the hold forever: the slot and
+  // close() stay freed, but workspace release remains fenced — the deliberate
+  // honest-hold trade-off over restoring the availability wedge.
+  moduleEvaluationPending?: boolean;
 }
 
 export class ManagedHookRuntime {
   private readonly manifest: ManagedHookManifest;
+  private readonly sessionManifests = new Map<string, ManagedHookManifest>();
   private readonly operations = new Map<string, Operation>();
   private readonly gates = new ManagedOperationGrantGate();
   private readonly shutdown = createAbortController();
   private closing = false;
+  private admissionSealed = false;
+  private lifecycleStarted = false;
+  private pendingStarts = 0;
 
   constructor(
     private readonly workspace: {
@@ -400,11 +535,84 @@ export class ManagedHookRuntime {
       runtimeSessionId: string,
     ) => Promise<string | undefined>,
     manifest: ManagedHookManifest,
+    private readonly extensionProcesses?: ManagedExtensionProcessOwners,
   ) {
     this.manifest = parseManifest(manifest);
   }
 
+  resolvePinnedCatalog(
+    pin: ManagedHookCatalogPin,
+  ): ManagedHookManifest['catalogs'][number] {
+    const available = [
+      ...this.manifest.catalogs,
+      ...[...this.sessionManifests.values()].flatMap(
+        (manifest) => manifest.catalogs,
+      ),
+    ];
+    const found = available.find(
+      (entry) =>
+        entry.catalogId === pin.catalogId &&
+        entry.catalogRevision === pin.catalogRevision &&
+        entry.definitionDigest === pin.definitionDigest,
+    );
+    if (!found) throw new ManagedHookError('managed_hook_catalog_unavailable');
+    return structuredClone(found);
+  }
+
+  installSessionManifest(
+    runtimeSessionId: string,
+    manifest: ManagedHookManifest,
+  ): void {
+    const parsed = parseManifest(manifest);
+    if (this.hasExtensionHolds(runtimeSessionId))
+      throw new ManagedHookError('managed_hook_session_busy');
+    if (
+      parsed.catalogs.some(
+        (entry) =>
+          entry.tenantId !== this.workspace.tenantId ||
+          entry.workspaceId !== this.workspace.workspaceId,
+      )
+    )
+      throw new ManagedHookError('managed_hook_scope_conflict');
+    this.sessionManifests.set(runtimeSessionId, parsed);
+  }
+
+  sealAdmission(): void {
+    this.admissionSealed = true;
+  }
+
+  getDrainInspection(): {
+    hasActivity: boolean;
+    pendingStarts: number;
+    pendingInvocations: number;
+  } {
+    return {
+      hasActivity: this.lifecycleStarted,
+      pendingStarts: this.pendingStarts,
+      pendingInvocations: [...this.operations.values()].filter(
+        (entry) => entry.view.state !== 'settled',
+      ).length,
+    };
+  }
+
+  private requireAdmission(): void {
+    if (this.closing || this.admissionSealed)
+      throw new ManagedHookError('managed_hook_closed');
+  }
+
   async control(
+    runtimeSessionId: string,
+    value: unknown,
+  ): Promise<ManagedHookOperationView> {
+    this.pendingStarts++;
+    try {
+      return await this.controlAdmitted(runtimeSessionId, value);
+    } finally {
+      this.pendingStarts--;
+    }
+  }
+
+  private async controlAdmitted(
     runtimeSessionId: string,
     value: unknown,
   ): Promise<ManagedHookOperationView> {
@@ -427,7 +635,9 @@ export class ManagedHookRuntime {
       return structuredClone(existing.view);
     }
     const { pin: expected } = control;
-    const catalog = this.manifest.catalogs.find(
+    const catalog = (
+      this.sessionManifests.get(control.sessionKey.sessionId) ?? this.manifest
+    ).catalogs.find(
       (entry) =>
         entry.tenantId === control.sessionKey.tenantId &&
         entry.workspaceId === control.sessionKey.workspaceId &&
@@ -452,8 +662,10 @@ export class ManagedHookRuntime {
         throw new ManagedHookError('managed_hook_operation_conflict');
       return structuredClone(existing.view);
     }
-    if (this.closing) throw new ManagedHookError('managed_hook_closed');
+    this.requireAdmission();
+    this.lifecycleStarted = true;
     const directory = await this.sessionDirectory(runtimeSessionId);
+    this.requireAdmission();
     if (!directory)
       throw new ManagedHookError('managed_hook_session_unavailable');
     if (control.kind === 'hook-catalog') {
@@ -461,6 +673,7 @@ export class ManagedHookRuntime {
         ...expected,
         hooks: await this.descriptors(catalog.hooks),
       };
+      this.requireAdmission();
       if (Buffer.byteLength(JSON.stringify(exposed)) > MAX_BYTES)
         throw new ManagedHookError('managed_hook_catalog_limit');
       return {
@@ -495,7 +708,7 @@ export class ManagedHookRuntime {
       throw new ManagedHookError('managed_hook_grant_invalid');
     if (this.operations.has(key))
       return this.control(runtimeSessionId, control);
-    if (this.closing) throw new ManagedHookError('managed_hook_closed');
+    this.requireAdmission();
     if (this.operations.size >= MAX_OPERATIONS)
       return {
         operationId: control.operationId,
@@ -673,11 +886,32 @@ export class ManagedHookRuntime {
     ];
   }
 
+  hasUnsettledExtensionOperations(): boolean {
+    return (
+      this.pendingStarts > 0 ||
+      [...this.operations.values()].some(
+        (entry) =>
+          entry.view.state !== 'settled' ||
+          entry.moduleEvaluationPending === true,
+      )
+    );
+  }
+
+  hasExtensionHolds(sessionId: string): boolean {
+    return [...this.operations.values()].some(
+      (entry) =>
+        entry.sessionKey.sessionId === sessionId &&
+        (entry.view.state !== 'settled' ||
+          entry.moduleEvaluationPending === true),
+    );
+  }
+
   hasHolds(runtimeSessionId: string): boolean {
     return [...this.operations.values()].some(
       (entry) =>
         entry.runtimeSessionId === runtimeSessionId &&
-        entry.view.state !== 'settled',
+        (entry.view.state !== 'settled' ||
+          entry.moduleEvaluationPending === true),
     );
   }
 
@@ -702,8 +936,14 @@ export class ManagedHookRuntime {
         const handler = definition.handler!;
         let registered: Record<string, unknown>;
         try {
-          const module: Record<string, unknown> = await import(
-            pathToFileURL(handler.modulePath).href
+          const module = await importHookModule(
+            handler.modulePath,
+            Math.max(
+              definition.config.timeout,
+              MODULE_EVALUATION_MIN_TIMEOUT_MS,
+            ),
+            entry.controller.signal,
+            entry,
           );
           registered = object(module[handler.exportName]);
           if (
@@ -713,7 +953,33 @@ export class ManagedHookRuntime {
               typeof registered['onHookSuccess'] !== 'function')
           )
             throw new Error('handler revision unavailable');
-        } catch {
+        } catch (error) {
+          if (error instanceof ManagedHookImportAbortedError) {
+            // An abort that lands while the module's top-level code is still
+            // evaluating is not completion evidence: fence it the way the
+            // evaluation timeout does. The outer catch publishes an error-only
+            // receipt and done still resolves, so close() does not wedge.
+            if (entry.moduleEvaluationPending)
+              throw new ManagedHookError(
+                'managed_hook_module_evaluation_abandoned',
+              );
+            entry.view = {
+              operationId: control.operationId,
+              state: 'settled',
+              result: {
+                success: false,
+                outcome: 'cancelled',
+                duration: 0,
+                notStarted: true,
+              },
+            };
+            return;
+          }
+          if (
+            error instanceof ManagedHookError &&
+            error.code === 'managed_hook_module_evaluation_timeout'
+          )
+            throw error;
           throw new ManagedHookError('managed_hook_handler_unavailable');
         }
         const callback = registered['callback'] as FunctionHookCallback;
@@ -722,9 +988,10 @@ export class ManagedHookRuntime {
           type: HookType.Function,
           id: handler.handlerId,
           callback: (input, context) => {
-            const pending = Promise.resolve().then(() =>
-              callback(input, context),
-            );
+            const pending = Promise.resolve().then(() => {
+              this.requireAdmission();
+              return callback(input, context);
+            });
             functionCompletion = pending.then(
               () => true,
               () => true,
@@ -748,6 +1015,7 @@ export class ManagedHookRuntime {
       const currentDirectory = await this.sessionDirectory(
         entry.runtimeSessionId,
       );
+      this.requireAdmission();
       if (
         !this.gates.admits(
           control.sessionKey,
@@ -762,7 +1030,12 @@ export class ManagedHookRuntime {
         entry.view = {
           operationId: control.operationId,
           state: 'settled',
-          result: { success: false, outcome: 'cancelled', duration: 0 },
+          result: {
+            success: false,
+            outcome: 'cancelled',
+            duration: 0,
+            notStarted: true,
+          },
         };
         return;
       }
@@ -772,53 +1045,71 @@ export class ManagedHookRuntime {
           : undefined,
       );
       dispatched = true;
-      const result = await runner.executeHook(
-        config,
-        definition.eventName,
-        {
-          ...control.input,
-          cwd: directory,
-          session_id: control.sessionKey.sessionId,
-        },
-        {
-          signal: entry.controller.signal,
-          ...(Array.isArray(
-            (control.input as unknown as Record<string, unknown>)['messages'],
-          )
-            ? {
-                messages: (
-                  control.input as unknown as {
-                    messages: Array<Record<string, unknown>>;
-                  }
-                ).messages,
-              }
-            : {}),
-          ...('tool_use_id' in control.input &&
-          typeof control.input.tool_use_id === 'string'
-            ? { toolUseID: control.input.tool_use_id }
-            : {}),
-        },
-        config.type === HookType.Command
-          ? {
-              waitForProcessTree: true,
-              cgroupRoot: process.env['QWEN_MANAGED_HOOK_CGROUP_ROOT'],
-              environment: {
-                PATH: process.env['PATH'] ?? '',
-                HOME: directory,
-                USERPROFILE: directory,
-                ...(process.env['SystemRoot']
-                  ? { SYSTEMROOT: process.env['SystemRoot'] }
+      const result =
+        config.type === HookType.Command && this.extensionProcesses
+          ? await executeManagedExtensionCommandHook(
+              runner,
+              this.extensionProcesses,
+              control.sessionKey.sessionId,
+              control.pin.catalogRevision,
+              config,
+              {
+                ...control.input,
+                cwd: directory,
+                session_id: control.sessionKey.sessionId,
+              },
+              entry.controller.signal,
+              managedExtensionEnvironment(process.env, directory),
+            )
+          : await runner.executeHook(
+              config,
+              definition.eventName,
+              {
+                ...control.input,
+                cwd: directory,
+                session_id: control.sessionKey.sessionId,
+              },
+              {
+                signal: entry.controller.signal,
+                ...(Array.isArray(
+                  (control.input as unknown as Record<string, unknown>)[
+                    'messages'
+                  ],
+                )
+                  ? {
+                      messages: (
+                        control.input as unknown as {
+                          messages: Array<Record<string, unknown>>;
+                        }
+                      ).messages,
+                    }
+                  : {}),
+                ...('tool_use_id' in control.input &&
+                typeof control.input.tool_use_id === 'string'
+                  ? { toolUseID: control.input.tool_use_id }
                   : {}),
               },
-            }
-          : config.type === HookType.Http
-            ? {
-                trackHttpRequest: true,
-                // Preserve the response as completion proof after user cancel.
-                httpRequestSignal: this.shutdown.signal,
-              }
-            : undefined,
-      );
+              config.type === HookType.Command
+                ? {
+                    waitForProcessTree: true,
+                    cgroupRoot: process.env['QWEN_MANAGED_HOOK_CGROUP_ROOT'],
+                    environment: {
+                      PATH: process.env['PATH'] ?? '',
+                      HOME: directory,
+                      USERPROFILE: directory,
+                      ...(process.env['SystemRoot']
+                        ? { SYSTEMROOT: process.env['SystemRoot'] }
+                        : {}),
+                    },
+                  }
+                : config.type === HookType.Http
+                  ? {
+                      trackHttpRequest: true,
+                      // Preserve the response as completion proof after user cancel.
+                      httpRequestSignal: this.shutdown.signal,
+                    }
+                  : undefined,
+            );
       if (result.error instanceof HookCommandIsolationUnavailableError) {
         entry.view = {
           operationId: control.operationId,
@@ -847,7 +1138,12 @@ export class ManagedHookRuntime {
       }
       const uncertain =
         (config.type === HookType.Command &&
-          result.processTreeDrained !== true) ||
+          result.processTreeDrained !== true &&
+          !(
+            this.extensionProcesses?.mode === 'developer-process-group' &&
+            result.processReceipt?.scope === 'process_group' &&
+            result.processReceipt.state === 'stopped'
+          )) ||
         (config.type === HookType.Function && !functionSettled) ||
         (config.type === HookType.Http &&
           (!result.httpRequestState ||

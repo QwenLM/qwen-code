@@ -41,6 +41,7 @@ const LOCAL_OPENAI_NO_PROXY = IS_CONTAINER_SANDBOX
   ? CONTAINER_SANDBOX_NO_PROXY
   : '127.0.0.1,localhost';
 const FAKE_SERVER_OPTIONS = fakeServerHostOptions();
+let isolatedQwenHome: string;
 
 function fakeModelOptions(baseUrl: string) {
   return {
@@ -53,6 +54,7 @@ function fakeModelOptions(baseUrl: string) {
       OPENAI_BASE_URL: baseUrl,
       OPENAI_MODEL: 'fake-model',
       QWEN_MODEL: 'fake-model',
+      QWEN_HOME: isolatedQwenHome,
     },
   };
 }
@@ -175,7 +177,22 @@ describe('Permission Control (E2E)', () => {
 
   beforeEach(async () => {
     helper = new SDKTestHelper();
-    testDir = await helper.setup('permission-control');
+    // This suite scripts the fake model server by request index, so nothing
+    // may issue a model request before the turn under test. Give the file its
+    // own QWEN_HOME and switch managed auto memory off: with the shared
+    // hermetic home, earlier files' memory extraction leaves docs that the
+    // pre-turn recall prefetch picks up, and that selector request consumes
+    // the scripted index-0 tool call (#11394).
+    testDir = await helper.setup('permission-control', {
+      settings: {
+        fastModel: 'openai:fake-model',
+        memory: {
+          enableManagedAutoMemory: false,
+          enableManagedAutoDream: false,
+        },
+      },
+    });
+    isolatedQwenHome = await helper.mkdir('global-qwen-home');
   });
 
   afterEach(async () => {

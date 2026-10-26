@@ -35,6 +35,11 @@ import {
   formatContextFileDisplayPath,
   type CompactionThresholds,
 } from '@qwen-code/qwen-code-core';
+import {
+  AUTO_MEMORY_SNAPSHOT_METADATA,
+  getAutoMemorySnapshot,
+  withoutAutoMemorySnapshots,
+} from '@qwen-code/qwen-code-core/memory/request-context.js';
 import { t } from '../../i18n/index.js';
 import * as path from 'node:path';
 import { getSanitizedExtensionDisplayName } from '../../utils/extension-mention.js';
@@ -400,9 +405,14 @@ export async function collectContextData(
   // `getStartupContextLength` and bill the whole prelude to `messages`.
   const history =
     activeChat?.getHistoryShallow?.() ?? activeChat?.getHistory?.() ?? [];
+  // Determine the boundary before filtering; catalog-only entries can disappear.
   const preludeLength = getStartupContextLength(history);
-  const prelude = measureStartupPrelude(history.slice(0, preludeLength));
-  const conversationHistory = history.slice(preludeLength);
+  const prelude = measureStartupPrelude(
+    withoutAutoMemorySnapshots(history.slice(0, preludeLength)),
+  );
+  const conversationHistory = withoutAutoMemorySnapshots(
+    history.slice(preludeLength),
+  );
   // Skill-listing reminders appended after the prelude are listing cost, not
   // conversation, and are billed with the startup listing under `skills`.
   const tailSkillListings = measureTailSkillListings(conversationHistory);
@@ -461,11 +471,27 @@ export async function collectContextData(
     config.getWorkingDir(),
     extensionContextFileOwners(config, config.getWorkingDir()),
   );
-  const autoMemoryPrompt = config.getAutoMemoryPrompt();
-  if (autoMemoryPrompt) {
+  const catalog = config.getAutoMemoryContext?.() ?? '';
+  // Older snapshots remain in the request too; suppression hides all of them.
+  const snapshots = catalog
+    ? history.flatMap((content) =>
+        (content.parts ?? []).filter(
+          (part) => part.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true,
+        ),
+      )
+    : [];
+  const pendingSnapshot = getAutoMemorySnapshot(history, catalog);
+  if (pendingSnapshot) snapshots.push(pendingSnapshot);
+  const autoMemoryTokens =
+    estimateContextTextTokens(config.getAutoMemoryPrompt()) +
+    snapshots.reduce(
+      (sum, part) => sum + estimateContextTextTokens(part.text ?? ''),
+      0,
+    );
+  if (autoMemoryTokens > 0) {
     memoryFiles.push({
       path: t('auto memory'),
-      tokens: estimateContextTextTokens(autoMemoryPrompt),
+      tokens: autoMemoryTokens,
     });
   }
   const memoryFilesTokens = memoryFiles.reduce((sum, f) => sum + f.tokens, 0);
@@ -634,6 +660,19 @@ export async function collectContextData(
     0,
     allToolsTokens - skillToolDefinitionTokens - clampedMcpTools,
   );
+  // The MCP detail rows sit under the mcp row, so they carry its deficit too.
+  const mcpDetailShare =
+    mcpToolsTotalTokens > 0 ? clampedMcpTools / mcpToolsTotalTokens : 1;
+  const scaleTokens = <T extends { tokens: number }>(
+    items: T[],
+    factor: number,
+  ): T[] =>
+    factor < 1
+      ? items.map((item) => ({
+          ...item,
+          tokens: Math.round(item.tokens * factor),
+        }))
+      : items;
 
   if (!hasTokenCount) {
     totalTokens = 0;
@@ -650,7 +689,7 @@ export async function collectContextData(
     messagesTokens = conversationTokens;
     freeSpace = Math.max(0, contextWindowSize - rawContent - autocompactBuffer);
     detailBuiltinTools = builtinTools;
-    detailMcpTools = mcpTools;
+    detailMcpTools = scaleTokens(mcpTools, mcpDetailShare);
     detailMemoryFiles = memoryFiles;
     detailSkills = skills;
   } else {
@@ -717,17 +756,9 @@ export async function collectContextData(
       contextWindowSize - totalTokens - autocompactBuffer,
     );
 
-    const scaleDetail = <T extends { tokens: number }>(items: T[]): T[] =>
-      scale < 1
-        ? items.map((item) => ({
-            ...item,
-            tokens: Math.round(item.tokens * scale),
-          }))
-        : items;
-
-    detailBuiltinTools = scaleDetail(builtinTools);
-    detailMcpTools = scaleDetail(mcpTools);
-    detailMemoryFiles = scaleDetail(memoryFiles);
+    detailBuiltinTools = scaleTokens(builtinTools, scale);
+    detailMcpTools = scaleTokens(mcpTools, scale * mcpDetailShare);
+    detailMemoryFiles = scaleTokens(memoryFiles, scale);
     detailSkills =
       scale < 1
         ? skills.map((item) => ({

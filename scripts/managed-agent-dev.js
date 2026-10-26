@@ -352,11 +352,10 @@ export function buildSpringRecipeLines({
   springPs1Path,
 }) {
   const lines = [
-    `  # one-time DB/user: mysql -u root -e "CREATE DATABASE qwen_managed_agent CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; CREATE USER 'qwen'@'localhost' IDENTIFIED BY 'replace-me'; CREATE USER 'qwen'@'127.0.0.1' IDENTIFIED BY 'replace-me'; GRANT ALL ON qwen_managed_agent.* TO 'qwen'@'localhost'; GRANT ALL ON qwen_managed_agent.* TO 'qwen'@'127.0.0.1';"`,
+    `  # one-time DB/user: mysql -u root -e "CREATE DATABASE qwen_managed_agent CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; CREATE USER 'qwen'@'localhost' IDENTIFIED BY 'replace-me'; CREATE USER 'qwen'@'127.0.0.1' IDENTIFIED BY 'replace-me'; GRANT ALL ON qwen_managed_agent.* TO 'qwen'@'localhost'; GRANT ALL ON qwen_managed_agent.* TO 'qwen'@'127.0.0.1'; GRANT SELECT ON performance_schema.user_variables_by_thread TO 'qwen'@'localhost'; GRANT SELECT ON performance_schema.user_variables_by_thread TO 'qwen'@'127.0.0.1';"`,
     `  # (official MySQL images enable skip-name-resolve, so 'qwen'@'localhost' alone never matches TCP clients; a containerized MySQL sees the gateway address — grant at 'qwen'@'%' or the container-visible host instead)`,
-    '  # once per clone, and re-run after pulling changes to qwencode/runtime-broker (~12 s):',
+    '  # once per clone, and re-run after pulling Java SDK changes:',
     '  #           mvn -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true install',
-    '  #           mvn -f packages/sdk-java/runtime-broker/pom.xml -DskipTests install',
   ];
   if (isWinPlatform) {
     // `#` starts a comment in PowerShell too, so actionable lines must not
@@ -367,7 +366,7 @@ export function buildSpringRecipeLines({
       "  $env:SPRING_DATASOURCE_URL='jdbc:mysql://127.0.0.1:3306/qwen_managed_agent'",
       "  $env:SPRING_DATASOURCE_USERNAME='qwen'",
       "  $env:SPRING_DATASOURCE_PASSWORD='replace-me'",
-      '  Set-Location packages\\sdk-java\\managed-agent-server; mvn spring-boot:run',
+      '  Set-Location packages\\managed-agent-server; mvn spring-boot:run',
     );
   } else {
     lines.push(
@@ -375,7 +374,7 @@ export function buildSpringRecipeLines({
       "  export SPRING_DATASOURCE_URL='jdbc:mysql://127.0.0.1:3306/qwen_managed_agent'",
       "  export SPRING_DATASOURCE_USERNAME='qwen'",
       "  export SPRING_DATASOURCE_PASSWORD='replace-me'",
-      '  cd packages/sdk-java/managed-agent-server && mvn spring-boot:run',
+      '  cd packages/managed-agent-server && mvn spring-boot:run',
     );
   }
   return lines;
@@ -448,9 +447,10 @@ export function findWebPort(excludedPorts) {
   return findAvailablePort(DEFAULT_WEB_PORT, excludedPorts, WEB_HOST);
 }
 
-// `qwen serve` retries EADDRINUSE by bumping regardless of whether the port
-// was explicitly pinned, so a busy pinned port would leave the launcher
-// polling an address the child never bound. Fail fast instead.
+// Outside --profile hosted-harness, `qwen serve` retries EADDRINUSE by
+// bumping even when the port was pinned, which would leave the launcher
+// polling an address the child never bound; the hosted-harness profile exits
+// instead. Either way, fail fast with a message naming the flag.
 export async function ensurePortFree(port, label) {
   const probe = net.createServer();
   try {
@@ -461,7 +461,7 @@ export async function ensurePortFree(port, label) {
   } catch (err) {
     if (err && typeof err === 'object' && err.code === 'EADDRINUSE') {
       throw new Error(
-        `${label} ${port} is already in use (qwen serve would silently bump past it; free the port or omit the flag to auto-increment).`,
+        `${label} ${port} is already in use (free the port, or omit the flag to auto-increment).`,
       );
     }
     throw err;

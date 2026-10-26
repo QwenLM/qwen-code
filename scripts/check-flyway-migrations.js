@@ -17,6 +17,12 @@
 
 import { existsSync, readdirSync } from 'node:fs';
 import path from 'node:path';
+import {
+  LOCATIONS,
+  isMigrationFile,
+  migrationFiles,
+  migrationVersion,
+} from './flyway-migration-utils.js';
 import { escapeWorkflowCommand } from './release-script-utils.js';
 
 // A `::error::` command's data is runner-DECODED when the downloadable log
@@ -37,22 +43,6 @@ const boundWorkflowPath = (text) =>
     ),
   );
 
-// Both locations resolve into Flyway's classpath:db/migration, so their
-// versions share one namespace. Flyway scans each location AND its
-// subdirectories, and nowhere else — a versioned-migration file anywhere
-// else under the source root is invisible to it, so finding one there means
-// the location moved and the guard must say so instead of passing on what is
-// left. Everything below derives the db roots and source roots from this
-// table, so editing it cannot silently blind the probes.
-const LOCATIONS = [
-  { dir: ['src', 'main', 'resources', 'db', 'migration'], suffix: '.sql' },
-  { dir: ['src', 'main', 'java', 'db', 'migration'], suffix: '.java' },
-];
-
-// A versioned migration is V<version>__<description>; the version is numeric
-// segments joined by dots or underscores.
-const MIGRATION_NAME = /^V(\d+(?:[._]\d+)*)__/;
-
 const modules = [...new Set(process.argv.slice(2))];
 if (modules.length === 0) {
   console.error(
@@ -61,33 +51,6 @@ if (modules.length === 0) {
   process.exit(2);
 }
 
-// Flyway compares versions numerically segment by segment, so V016 collides
-// with V16 and a trailing .0 segment carries no meaning.
-const normalize = (version) =>
-  version
-    .split(/[._]/)
-    .map((segment) => segment.replace(/^0+(?=\d)/, ''))
-    .join('.')
-    .replace(/(\.0)*$/, '');
-
-// Flyway matches the suffix case-insensitively — V1__b.SQL claims version 1
-// exactly like V1__a.sql does.
-const isMigrationFile = (name, suffix) =>
-  name.toLowerCase().endsWith(suffix) && MIGRATION_NAME.test(name);
-
-// Not readdirSync's `recursive`: a Node older than 18.17 ignores it (see
-// check-failsafe-reports.js). Flyway scans a location's subdirectories too.
-const migrationFiles = (dir, suffix) => {
-  if (!existsSync(dir)) return [];
-  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
-    entry.isDirectory()
-      ? migrationFiles(path.join(dir, entry.name), suffix)
-      : isMigrationFile(entry.name, suffix)
-        ? [path.join(dir, entry.name)]
-        : [],
-  );
-};
-
 // Files shaped like a versioned migration of this location's kind, anywhere
 // under the source root EXCEPT inside the configured location. A renamed
 // location (db/migration → db/changelog) leaves the guard scanning an empty
@@ -95,14 +58,16 @@ const migrationFiles = (dir, suffix) => {
 // location whose files moved while its sibling stayed populated.
 const outOfPlaceFiles = (module, location) => {
   const sourceRoot = path.join(module, ...location.dir.slice(0, -2));
-  const configured = path.join(module, ...location.dir);
+  const configured = LOCATIONS.filter(
+    (entry) => entry.suffix === location.suffix,
+  ).map((entry) => path.join(module, ...entry.dir));
   const found = [];
   const walk = (dir) => {
     if (!existsSync(dir)) return;
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const file = path.join(dir, entry.name);
       if (entry.isDirectory()) {
-        if (file !== configured) walk(file);
+        if (!configured.includes(file)) walk(file);
       } else if (isMigrationFile(entry.name, location.suffix)) {
         found.push(file);
       }
@@ -115,7 +80,7 @@ const outOfPlaceFiles = (module, location) => {
 // A db/migration* sibling under the location's OWN db root — including an
 // emptied rename such as db/migrations — marks the location as moved even
 // when nothing migration-shaped survives anywhere. A module with no such
-// directory at all (runtime-broker today) simply has no sequence to check,
+// directory at all simply has no sequence to check,
 // which is what lets one invocation cover every module that shares the
 // classpath namespace below.
 const hasMigrationDir = (module, location) => {
@@ -151,6 +116,7 @@ for (const module of modules) {
   }
   let errored = false;
   let count = 0;
+  const probedRoots = new Set();
   for (const location of LOCATIONS) {
     const files = migrationFiles(
       path.join(module, ...location.dir),
@@ -159,7 +125,11 @@ for (const module of modules) {
     // Out-of-place files must not join the claimants: invisible to Flyway,
     // they cannot collide at runtime — they are the moved location's error,
     // not a second claimant for their version.
-    const misplaced = outOfPlaceFiles(module, location);
+    const rootKey = `${location.dir.slice(0, -2).join('/')}:${location.suffix}`;
+    const misplaced = probedRoots.has(rootKey)
+      ? []
+      : outOfPlaceFiles(module, location);
+    probedRoots.add(rootKey);
     if (misplaced.length > 0 && files.length > 0) {
       // The location IS populated, so nothing moved: a stray file sits
       // outside the only place Flyway scans. Say that — claiming the
@@ -195,7 +165,7 @@ for (const module of modules) {
     }
     for (const file of files) {
       count += 1;
-      const version = normalize(MIGRATION_NAME.exec(path.basename(file))[1]);
+      const version = migrationVersion(path.basename(file));
       const group = claimants.get(version) ?? [];
       group.push({ module, file });
       claimants.set(version, group);

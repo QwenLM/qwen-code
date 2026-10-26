@@ -1,17 +1,22 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { undo } from '@codemirror/commands';
-import { act, type ReactNode } from 'react';
+import { EditorView } from '@codemirror/view';
+import { act, useLayoutEffect, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../i18n';
 import { WebShellPortalRootContext } from '../portalRoot';
 import {
   type ComposerSubmitCommit,
+  clearComposerDraftIfMatches,
+  captureComposerDraftGuard,
+  getInlineComposerTags,
   useComposerCore,
   type UseComposerCoreOptions,
   type UseComposerCoreReturn,
 } from './useComposerCore';
 import { getPromptHistoryStorageKey } from './useInputHistory';
+import { createFakeIndexedDB } from '../test/fake-indexeddb';
 import type {
   UserMessageContentParser,
   WebShellComposerInput,
@@ -35,6 +40,7 @@ function Harness({
   atWorkspaceCwd,
   composerScopeKey,
   disableLegacyHistoryFallback,
+  shellModeEnabled,
   commands,
   allowEmptySlashMenu,
   cycleModeOnTab,
@@ -44,6 +50,7 @@ function Harness({
   workspaceUploadBusy,
   fileDragEnabled,
   attachmentsEnabled,
+  persistFileReferences,
   disabled,
 }: {
   composerInput?: WebShellComposerInput;
@@ -61,6 +68,7 @@ function Harness({
   atWorkspaceCwd?: string;
   composerScopeKey?: string;
   disableLegacyHistoryFallback?: boolean;
+  shellModeEnabled?: boolean;
   commands?: UseComposerCoreOptions['commands'];
   allowEmptySlashMenu?: boolean;
   cycleModeOnTab?: boolean;
@@ -70,6 +78,7 @@ function Harness({
   workspaceUploadBusy?: boolean;
   fileDragEnabled?: UseComposerCoreOptions['fileDragEnabled'];
   attachmentsEnabled?: UseComposerCoreOptions['attachmentsEnabled'];
+  persistFileReferences?: boolean;
   disabled?: UseComposerCoreOptions['disabled'];
 }) {
   const composer = useComposerCore({
@@ -89,12 +98,14 @@ function Harness({
     atWorkspaceCwd,
     composerScopeKey,
     disableLegacyHistoryFallback,
+    shellModeEnabled,
     composerInput,
     composerInputVersion: composerInput ? 1 : undefined,
     onImageIngestionNotice,
     workspaceUploadBusy,
     fileDragEnabled,
     attachmentsEnabled,
+    persistFileReferences,
     disabled,
   });
   latest = composer;
@@ -119,6 +130,7 @@ async function mount({
   atWorkspaceCwd,
   composerScopeKey,
   disableLegacyHistoryFallback,
+  shellModeEnabled,
   commands,
   allowEmptySlashMenu,
   cycleModeOnTab,
@@ -128,6 +140,7 @@ async function mount({
   workspaceUploadBusy,
   fileDragEnabled,
   attachmentsEnabled,
+  persistFileReferences,
   disabled,
 }: {
   composerInput?: WebShellComposerInput;
@@ -145,6 +158,7 @@ async function mount({
   atWorkspaceCwd?: string;
   composerScopeKey?: string;
   disableLegacyHistoryFallback?: boolean;
+  shellModeEnabled?: boolean;
   commands?: UseComposerCoreOptions['commands'];
   allowEmptySlashMenu?: boolean;
   cycleModeOnTab?: boolean;
@@ -154,6 +168,7 @@ async function mount({
   workspaceUploadBusy?: boolean;
   fileDragEnabled?: UseComposerCoreOptions['fileDragEnabled'];
   attachmentsEnabled?: UseComposerCoreOptions['attachmentsEnabled'];
+  persistFileReferences?: boolean;
   disabled?: UseComposerCoreOptions['disabled'];
 } = {}) {
   container = document.createElement('div');
@@ -165,6 +180,7 @@ async function mount({
   let currentCommands = commands;
   let currentAllowEmptySlashMenu = allowEmptySlashMenu;
   let currentWorkspaceCwd = atWorkspaceCwd;
+  let currentComposerScopeKey = composerScopeKey;
   let currentAttachmentsEnabled = attachmentsEnabled;
   const render = () => {
     root!.render(
@@ -180,8 +196,9 @@ async function mount({
             followupState={followupState}
             sessionId={currentSessionId}
             atWorkspaceCwd={currentWorkspaceCwd}
-            composerScopeKey={composerScopeKey}
+            composerScopeKey={currentComposerScopeKey}
             disableLegacyHistoryFallback={disableLegacyHistoryFallback}
+            shellModeEnabled={shellModeEnabled}
             commands={currentCommands}
             allowEmptySlashMenu={currentAllowEmptySlashMenu}
             cycleModeOnTab={cycleModeOnTab}
@@ -191,6 +208,7 @@ async function mount({
             workspaceUploadBusy={workspaceUploadBusy}
             fileDragEnabled={fileDragEnabled}
             attachmentsEnabled={currentAttachmentsEnabled}
+            persistFileReferences={persistFileReferences}
             disabled={disabled}
           />
         </I18nProvider>
@@ -218,9 +236,13 @@ async function mount({
     switchSession(
       nextSessionId: string | undefined,
       nextWorkspaceCwd: string | undefined,
+      nextAttachmentsEnabled = currentAttachmentsEnabled,
+      nextComposerScopeKey = currentComposerScopeKey,
     ) {
       currentSessionId = nextSessionId;
       currentWorkspaceCwd = nextWorkspaceCwd;
+      currentAttachmentsEnabled = nextAttachmentsEnabled;
+      currentComposerScopeKey = nextComposerScopeKey;
       act(() => render());
     },
     rerender() {
@@ -241,6 +263,14 @@ async function waitForImageIngestion() {
     expect(latest!.pendingImageBatchCount).toBe(0);
   });
 }
+
+async function flushDraftAttachments() {
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+}
+
+const SESSION_A_DRAFT_KEY = getSessionDraftKey('session-a');
 
 afterEach(() => {
   act(() => root?.unmount());
@@ -708,6 +738,116 @@ describe('useComposerCore history and drafts', () => {
     expect(localStorage.getItem(getSessionDraftKey('session-b'))).toBeNull();
   });
 
+  it.each(['inline', 'top'] as const)(
+    'persists complete selected-file metadata through a real %s draft remount',
+    async (placement) => {
+      const tag = {
+        id: 'file:a.ts',
+        kind: 'file' as const,
+        value: 'a.ts',
+        serialized: '@a.ts',
+        metadata: {
+          managedFile: {
+            text: '\uFEFF你好\r\noriginal bytes',
+            sha256: 'frozen',
+            source: 'session-a',
+          },
+        },
+      };
+      await mount({ sessionId: 'session-a', persistFileReferences: true });
+      act(() => {
+        latest!.setText('explain');
+        latest!.addTags([tag], { placement, position: 'end' });
+        window.dispatchEvent(new Event('pagehide'));
+      });
+      act(() => root!.unmount());
+      root = null;
+      container?.remove();
+      container = null;
+      const { onSubmit } = await mount({
+        sessionId: 'session-a',
+        persistFileReferences: true,
+      });
+      if (placement === 'inline')
+        expect(getInlineComposerTags(latest!.viewRef.current!)).toEqual([tag]);
+      else expect(latest!.composerTags).toEqual([tag]);
+      act(() => latest!.submitText());
+      expect(onSubmit.mock.calls[0]?.[4]).toMatchObject({
+        inputAnnotations: [
+          expect.objectContaining({
+            reference: expect.objectContaining({ metadata: tag.metadata }),
+          }),
+        ],
+      });
+      expect(localStorage.getItem(getSessionDraftKey('session-a'))).toBeNull();
+    },
+  );
+
+  it.each(['submit', 'clear', 'clearTags'] as const)(
+    'does not resurrect selected-file metadata after %s and immediate unmount',
+    async (action) => {
+      await mount({ sessionId: 'session-a', persistFileReferences: true });
+      act(() => {
+        latest!.setText('explain');
+        latest!.addTags(
+          [
+            {
+              id: 'file:a',
+              kind: 'file',
+              serialized: '@a',
+              metadata: { managedFile: { text: 'selected bytes' } },
+            },
+          ],
+          { placement: 'top' },
+        );
+      });
+      act(() => window.dispatchEvent(new Event('pagehide')));
+      act(() => {
+        if (action === 'submit') latest!.submitText();
+        else
+          latest!.clear(
+            action === 'clearTags' ? { text: false, tags: true } : undefined,
+          );
+        root!.unmount();
+        root = null;
+      });
+      expect(localStorage.getItem(getSessionDraftKey('session-a'))).toBe(
+        action === 'clearTags' ? 'explain' : null,
+      );
+    },
+  );
+
+  it('clears a reloaded snapshot draft after an accepted pending replay', async () => {
+    await mount({ sessionId: 'session-a', persistFileReferences: true });
+    act(() => {
+      latest!.setText('explain');
+      latest!.addTags(
+        [
+          {
+            id: 'file:a',
+            kind: 'file',
+            serialized: '@a',
+            metadata: { managedFile: { text: 'frozen bytes' } },
+          },
+        ],
+        { placement: 'top' },
+      );
+    });
+    act(() => window.dispatchEvent(new Event('pagehide')));
+    act(() => root!.unmount());
+    root = null;
+    container?.remove();
+    container = null;
+    await mount({ sessionId: 'session-a', persistFileReferences: true });
+    expect(latest!.composerTags).toHaveLength(1);
+    act(() => {
+      latest!.handle.clear();
+      root!.unmount();
+      root = null;
+    });
+    expect(localStorage.getItem(getSessionDraftKey('session-a'))).toBeNull();
+  });
+
   it('restores an unsent new-task draft after leaving and returning', async () => {
     vi.useFakeTimers();
     const workspaceCwd = '/workspace/shared';
@@ -1040,6 +1180,54 @@ describe('useComposerCore history and drafts', () => {
     mounted.switchSession('session-b', '/workspace/b');
     expect(latest!.searchState.searchMode).toBe(false);
     expect(latest!.searchState.searchMatches).toEqual([]);
+  });
+
+  it('keeps submitted slash commands out of desktop history search matches', async () => {
+    const workspaceCwd = '/workspace/desktop-slash-filter';
+    localStorage.setItem(
+      getPromptHistoryStorageKey(workspaceCwd),
+      JSON.stringify(['/theme dark', 'plain prompt']),
+    );
+    await mount({
+      sessionId: 'session-desktop-slash',
+      atWorkspaceCwd: workspaceCwd,
+    });
+
+    act(() => latest!.searchState.openHistorySearch());
+    // The desktop panel hides slash entries because the slash completion
+    // menu re-offers them; only the touch backend lists them (pinned by the
+    // mobile suite).
+    expect(latest!.searchState.searchMatches).toEqual(['plain prompt']);
+  });
+
+  it('keeps the stored draft when a history panel recall is followed by a session switch', async () => {
+    const mounted = await mount({
+      sessionId: 'session-a',
+      atWorkspaceCwd: '/workspace/panel-recall',
+    });
+    act(() => {
+      latest!.setText('older saved input');
+      latest!.submitText();
+      latest!.setText('my draft');
+    });
+    act(() => blurEditor());
+    expect(localStorage.getItem(getSessionDraftKey('session-a'))).toBe(
+      'my draft',
+    );
+
+    act(() => latest!.searchState.openHistorySearch());
+    act(() => latest!.searchState.restoreSearchMatch!('older saved input'));
+    expect(latest!.getText()).toBe('older saved input');
+    // The panel click flow closes without restoring the pre-search draft.
+    act(() => latest!.searchState.closeSearch(false));
+
+    mounted.switchSession('session-b', '/workspace/panel-recall');
+    expect(localStorage.getItem(getSessionDraftKey('session-a'))).toBe(
+      'my draft',
+    );
+
+    mounted.switchSession('session-a', '/workspace/panel-recall');
+    expect(latest!.getText()).toBe('my draft');
   });
 
   it('flushes the draft to localStorage on visibilitychange and pagehide', async () => {
@@ -1375,6 +1563,51 @@ describe('useComposerCore paste', () => {
     expect.soft(latest!.getText()).toBe('');
   });
 
+  it('keeps "!" and "?" typed into a focused Managed composer literal', async () => {
+    await mount({
+      shellModeEnabled: false,
+      composerScopeKey: 'managed:tenant:actor:session',
+      disableLegacyHistoryFallback: true,
+    });
+    const view = EditorView.findFromDOM(
+      document.querySelector<HTMLElement>('.cm-content')!,
+    )!;
+    for (const key of ['!', '?']) {
+      const handled = view.state
+        .facet(EditorView.inputHandler)
+        .some((handler) =>
+          handler(view, 0, 0, key, () =>
+            view.state.update({ changes: { from: 0, insert: key } }),
+          ),
+        );
+      expect({ key, handled }).toEqual({ key, handled: false });
+      expect(latest!.shellMode).toBe(false);
+    }
+  });
+
+  it('keeps Managed bang input literal and cannot enter the global Shell history mode', async () => {
+    await mount({
+      shellModeEnabled: false,
+      composerScopeKey: 'managed:tenant:actor:session',
+      disableLegacyHistoryFallback: true,
+    });
+    act(() => latest!.toggleShellMode());
+    expect(latest!.shellMode).toBe(false);
+    act(() => latest!.setShellMode(true));
+    expect(latest!.shellMode).toBe(false);
+    const event = new KeyboardEvent('keydown', {
+      key: '!',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      (document.activeElement as HTMLElement)?.blur();
+      document.body.dispatchEvent(event);
+    });
+    expect(latest!.shellMode).toBe(false);
+    expect(latest!.getText()).toBe('!');
+  });
+
   it('leaves a long paste inline in shell mode', async () => {
     await mount();
     act(() => latest!.toggleShellMode());
@@ -1536,6 +1769,278 @@ describe('useComposerCore paste', () => {
       'warning',
       expect.any(String),
     );
+  });
+
+  it('keeps draft images and pasted files across a session switch', async () => {
+    const fake = createFakeIndexedDB();
+    vi.stubGlobal('indexedDB', fake.factory);
+    const mounted = await mount({ sessionId: 'session-a' });
+    const files = [
+      new File(['png'], 'photo.png', { type: 'image/png' }),
+      new File(['hello'], 'notes.txt', { type: 'text/plain' }),
+    ];
+
+    await act(async () => {
+      expect(latest!.ingestFiles(files)).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    const stagedImages = [...latest!.pastedImages];
+    const stagedFiles = [...latest!.pastedFiles];
+    expect(stagedImages).toHaveLength(1);
+    expect(stagedFiles).toHaveLength(1);
+    await flushDraftAttachments();
+
+    mounted.switchSession('session-b', undefined);
+    await flushDraftAttachments();
+    expect.soft(latest!.pastedImages).toEqual([]);
+    expect.soft(latest!.pastedFiles).toEqual([]);
+    expect(
+      fake.stores.get('attachments')?.has(getSessionDraftKey('session-b')),
+    ).toBe(false);
+
+    mounted.switchSession('session-a', undefined);
+    await flushDraftAttachments();
+
+    expect(latest!.pastedImages).toEqual(stagedImages);
+    expect(latest!.pastedFiles).toEqual(stagedFiles);
+  });
+
+  it('restores draft attachments after the composer remounts', async () => {
+    const fake = createFakeIndexedDB();
+    vi.stubGlobal('indexedDB', fake.factory);
+    await mount({ sessionId: 'session-a' });
+    await act(async () => {
+      expect(
+        latest!.ingestFiles([
+          new File(['png'], 'photo.png', { type: 'image/png' }),
+        ]),
+      ).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    await flushDraftAttachments();
+    const staged = [...latest!.pastedImages];
+    expect(staged).toHaveLength(1);
+
+    act(() => root?.unmount());
+    container?.remove();
+
+    await mount({ sessionId: 'session-a' });
+    await flushDraftAttachments();
+
+    expect(latest!.pastedImages).toEqual(staged);
+  });
+
+  it('drops the stored attachments once the prompt is sent', async () => {
+    const fake = createFakeIndexedDB();
+    vi.stubGlobal('indexedDB', fake.factory);
+    const onSubmit = vi.fn();
+    await mount({ sessionId: 'session-a', onSubmit });
+    act(() => latest!.insertText('hello'));
+    await act(async () => {
+      expect(
+        latest!.ingestFiles([
+          new File(['png'], 'photo.png', { type: 'image/png' }),
+        ]),
+      ).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    await flushDraftAttachments();
+    const stored = fake.stores.get('attachments')!;
+    expect(stored.has(SESSION_A_DRAFT_KEY)).toBe(true);
+
+    act(() => latest!.submitText());
+    await flushDraftAttachments();
+
+    expect(onSubmit).toHaveBeenCalled();
+    expect(stored.has(SESSION_A_DRAFT_KEY)).toBe(false);
+  });
+
+  it('drops the stored attachments when the composer is cleared', async () => {
+    const fake = createFakeIndexedDB();
+    vi.stubGlobal('indexedDB', fake.factory);
+    await mount({ sessionId: 'session-a' });
+    await act(async () => {
+      expect(
+        latest!.ingestFiles([
+          new File(['png'], 'photo.png', { type: 'image/png' }),
+        ]),
+      ).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    await flushDraftAttachments();
+    const stored = fake.stores.get('attachments')!;
+    expect(stored.has(SESSION_A_DRAFT_KEY)).toBe(true);
+
+    act(() => latest!.handle.clear());
+    await flushDraftAttachments();
+
+    expect(stored.has(SESSION_A_DRAFT_KEY)).toBe(false);
+  });
+
+  it('keeps the archive when attachments are unavailable on the first frame', async () => {
+    const fake = createFakeIndexedDB();
+    vi.stubGlobal('indexedDB', fake.factory);
+    await mount({ sessionId: 'session-a' });
+    await act(async () => {
+      expect(
+        latest!.ingestFiles([
+          new File(['png'], 'photo.png', { type: 'image/png' }),
+        ]),
+      ).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    await flushDraftAttachments();
+    expect(fake.stores.get('attachments')?.has(SESSION_A_DRAFT_KEY)).toBe(true);
+
+    act(() => root?.unmount());
+    container?.remove();
+
+    // The daemon has not advertised `session_attachments` yet: the composer
+    // must not delete a draft it has never read.
+    const remounted = await mount({
+      sessionId: 'session-a',
+      attachmentsEnabled: false,
+    });
+    await flushDraftAttachments();
+    expect(fake.stores.get('attachments')?.has(SESSION_A_DRAFT_KEY)).toBe(true);
+    expect(latest!.pastedImages).toEqual([]);
+
+    remounted.setAttachmentsEnabled(true);
+    await flushDraftAttachments();
+    expect(latest!.pastedImages).toHaveLength(1);
+  });
+
+  it('drops stored attachments as chips are removed', async () => {
+    const fake = createFakeIndexedDB();
+    vi.stubGlobal('indexedDB', fake.factory);
+    await mount({ sessionId: 'session-a' });
+    await act(async () => {
+      expect(
+        latest!.ingestFiles([
+          new File(['a'], 'a.png', { type: 'image/png' }),
+          new File(['b'], 'b.png', { type: 'image/png' }),
+        ]),
+      ).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    await flushDraftAttachments();
+    const stored = fake.stores.get('attachments')!;
+    expect(
+      (stored.get(SESSION_A_DRAFT_KEY) as { images: unknown[] }).images,
+    ).toHaveLength(2);
+
+    act(() => latest!.removeImage(0));
+    await flushDraftAttachments();
+    expect(
+      (stored.get(SESSION_A_DRAFT_KEY) as { images: unknown[] }).images,
+    ).toHaveLength(1);
+
+    act(() => latest!.removeImage(0));
+    await flushDraftAttachments();
+    expect(stored.has(SESSION_A_DRAFT_KEY)).toBe(false);
+  });
+
+  it('moves draft attachments onto the session key when the draft materializes', async () => {
+    const fake = createFakeIndexedDB();
+    vi.stubGlobal('indexedDB', fake.factory);
+    const onSubmit = vi.fn(() => false);
+    const mounted = await mount({ onSubmit, atWorkspaceCwd: '/work/b' });
+    await act(async () => {
+      expect(
+        latest!.ingestFiles([
+          new File(['png'], 'photo.png', { type: 'image/png' }),
+        ]),
+      ).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    await flushDraftAttachments();
+    const pendingKey = getPendingTaskDraftKey('/work/b');
+    expect(fake.stores.get('attachments')?.has(pendingKey)).toBe(true);
+
+    act(() => {
+      latest!.setText('original');
+      latest!.submitText();
+    });
+    // A rejected submit keeps the staged attachments as the live draft.
+    expect(latest!.pastedImages).toHaveLength(1);
+    const call = onSubmit.mock.calls[0] as unknown as [
+      string,
+      unknown,
+      unknown,
+      () => void,
+      import('./useComposerCore').ComposerSubmitMetadata,
+    ];
+    await call[4].retainDraftDuringSessionCreation!(
+      async (onSessionAllocated) => {
+        onSessionAllocated('created-session');
+        mounted.switchSession('created-session', '/work/b');
+        await act(async () => {});
+      },
+    );
+    await flushDraftAttachments();
+
+    expect(
+      fake.stores
+        .get('attachments')
+        ?.has(getSessionDraftKey('created-session')),
+    ).toBe(true);
+    expect(fake.stores.get('attachments')?.has(pendingKey)).toBe(false);
+  });
+
+  it('does not leak or delete an archive while its restore is still reading', async () => {
+    const fake = createFakeIndexedDB({ deferGets: true });
+    vi.stubGlobal('indexedDB', fake.factory);
+    const keyA = getSessionDraftKey('session-a');
+    const stored = {
+      images: [{ data: 'c3RvcmVk', media_type: 'image/png' }],
+      files: [],
+    };
+    // Pre-create the store so the schema's upgrade does not replace the seed.
+    fake.db.createObjectStore('attachments');
+    fake.db.seed('attachments', keyA, stored);
+
+    const mounted = await mount({ sessionId: 'session-a' });
+    // A's read is held, so the composer is still empty when we leave for B.
+    mounted.switchSession('session-b', undefined);
+    await flushDraftAttachments();
+
+    fake.releaseLoads();
+    await flushDraftAttachments();
+
+    // A's late read must not land in B, and the empty outgoing snapshot must
+    // not have deleted A's archive.
+    expect(latest!.pastedImages).toEqual([]);
+    expect(fake.stores.get('attachments')?.get(keyA)).toEqual(stored);
+  });
+
+  it('drops the stored attachments when Backspace removes the last chip', async () => {
+    const fake = createFakeIndexedDB();
+    vi.stubGlobal('indexedDB', fake.factory);
+    await mount({ sessionId: 'session-a' });
+    await act(async () => {
+      expect(
+        latest!.ingestFiles([
+          new File(['png'], 'photo.png', { type: 'image/png' }),
+        ]),
+      ).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    await flushDraftAttachments();
+    const stored = fake.stores.get('attachments')!;
+    expect(stored.has(SESSION_A_DRAFT_KEY)).toBe(true);
+
+    act(() => {
+      container!.querySelector('.cm-content')!.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Backspace',
+          code: 'Backspace',
+          bubbles: true,
+        }),
+      );
+    });
+    await flushDraftAttachments();
+
+    expect(stored.has(SESSION_A_DRAFT_KEY)).toBe(false);
   });
 
   it('claims image drops, blocks submit while reading, and submits image-only', async () => {
@@ -2955,5 +3460,1070 @@ it('late acceptance does not clear unrelated existing session draft', async () =
     await act(async () => {});
     act(() => call[3]());
     expect(latest!.getText()).toBe('B draft');
+  });
+});
+
+describe('composer draft attachment races', () => {
+  function seed(
+    fake: ReturnType<typeof createFakeIndexedDB>,
+    session: string,
+    attachments: unknown,
+  ) {
+    if (!fake.stores.has('attachments'))
+      fake.db.createObjectStore('attachments');
+    fake.db.seed('attachments', getSessionDraftKey(session), attachments);
+  }
+
+  it('clears an attachment-only archive when a host accepts after unmount', async () => {
+    const fake = createFakeIndexedDB();
+    vi.stubGlobal('indexedDB', fake.factory);
+    await mount({ sessionId: 'session-a' });
+    await flushDraftAttachments();
+    act(() =>
+      latest!.handle.restoreImages([{ data: 'sent', media_type: 'image/png' }]),
+    );
+    await flushDraftAttachments();
+    act(() => root!.unmount());
+    clearComposerDraftIfMatches(SESSION_A_DRAFT_KEY, '');
+    await flushDraftAttachments();
+    expect(fake.stores.get('attachments')?.has(SESSION_A_DRAFT_KEY)).toBe(
+      false,
+    );
+    root = null;
+  });
+
+  it('invalidates a host cleanup guard when a newer attachment is staged', async () => {
+    vi.stubGlobal('indexedDB', createFakeIndexedDB().factory);
+    await mount({ sessionId: 'session-a' });
+    await flushDraftAttachments();
+    act(() => latest!.setText('same text'));
+    const isDraftUnchanged = captureComposerDraftGuard(SESSION_A_DRAFT_KEY);
+    expect(isDraftUnchanged()).toBe(true);
+    act(() =>
+      latest!.handle.restoreFiles([
+        { name: 'new.txt', media_type: 'text/plain', text: 'unsent' },
+      ]),
+    );
+    expect(isDraftUnchanged()).toBe(false);
+  });
+
+  it.each([
+    'switch',
+    'new pending',
+    'unmount',
+    'attachments-only',
+    'text',
+    'file',
+    'edit before allocation',
+    'unscoped edit before allocation',
+  ])('handles migrated draft acceptance after %s', async (action) => {
+    const fake = createFakeIndexedDB();
+    vi.stubGlobal('indexedDB', fake.factory);
+    const cwd = action.startsWith('unscoped') ? undefined : '/work';
+    const onSubmit = vi.fn(() => false);
+    const mounted = await mount({ onSubmit, atWorkspaceCwd: cwd });
+    await flushDraftAttachments();
+    const image = { data: 'migration-X', media_type: 'image/png' };
+    const file = { name: 'X.txt', media_type: 'text/plain', text: 'X bytes' };
+    const newer = { name: 'Y.txt', media_type: 'text/plain', text: 'Y bytes' };
+    const submittedText =
+      action === 'attachments-only' ? '' : 'submitted draft';
+    act(() => {
+      latest!.setText(submittedText);
+      latest!.handle.restoreImages([image]);
+      latest!.handle.restoreFiles([file]);
+      latest!.submitText();
+    });
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    const call = onSubmit.mock.calls[0] as unknown as [
+      string,
+      unknown,
+      unknown,
+      ComposerSubmitCommit,
+      import('./useComposerCore').ComposerSubmitMetadata,
+    ];
+    expect(call.slice(0, 3)).toEqual([submittedText, [image], [file]]);
+    const editedBefore = action.endsWith('edit before allocation');
+    if (editedBefore) act(() => latest!.setText('new unsent draft'));
+    await call[4].retainDraftDuringSessionCreation!(async (allocated) => {
+      allocated('created-session');
+      mounted.switchSession('created-session', cwd);
+      await flushDraftAttachments();
+      expect(call[4].isCurrentDraft!({ allowSessionAssignment: true })).toBe(
+        !editedBefore,
+      );
+      if (action === 'text') act(() => latest!.setText('new unsent draft'));
+      if (action === 'file') act(() => latest!.handle.restoreFiles([newer]));
+      if (action === 'unmount') act(() => root!.unmount());
+      else
+        mounted.switchSession(
+          action === 'new pending' ? undefined : 'session-b',
+          cwd,
+        );
+      act(() => call[3]());
+      await flushDraftAttachments();
+    });
+    const keepDraft = editedBefore || action === 'text' || action === 'file';
+    if (cwd)
+      expect(localStorage.getItem(getPendingTaskDraftKey(cwd))).toBeNull();
+    expect(
+      fake.stores
+        .get('attachments')
+        ?.get(getSessionDraftKey('created-session')),
+    ).toEqual(
+      keepDraft
+        ? { images: [image], files: action === 'file' ? [file, newer] : [file] }
+        : undefined,
+    );
+    if (action === 'unmount') {
+      container!.remove();
+      await mount({ sessionId: 'created-session', atWorkspaceCwd: cwd });
+    } else mounted.switchSession('created-session', cwd);
+    await flushDraftAttachments();
+    expect(latest!.getText()).toBe(
+      editedBefore || action === 'text'
+        ? 'new unsent draft'
+        : keepDraft
+          ? 'submitted draft'
+          : '',
+    );
+    expect(latest!.pastedImages).toEqual(keepDraft ? [image] : []);
+    expect(latest!.pastedFiles).toEqual(
+      keepDraft ? (action === 'file' ? [file, newer] : [file]) : [],
+    );
+  });
+
+  it.each(['active', 'leave', 'unmount', 'new text', 'edit undo', 'new file'])(
+    'handles allocation after removing a submitted image (%s)',
+    async (action) => {
+      const fake = createFakeIndexedDB();
+      vi.stubGlobal('indexedDB', fake.factory);
+      const onSubmit = vi.fn(() => false);
+      const mounted = await mount({ onSubmit, atWorkspaceCwd: '/work' });
+      await flushDraftAttachments();
+      const image = { data: 'submitted image', media_type: 'image/png' };
+      const file = { name: 'sent.txt', media_type: 'text/plain', text: 'sent' };
+      const newer = { name: 'new.txt', media_type: 'text/plain', text: 'new' };
+      act(() => {
+        latest!.setText('original');
+        latest!.handle.restoreImages([image]);
+        latest!.handle.restoreFiles([file]);
+        latest!.submitText();
+      });
+      const call = onSubmit.mock.calls[0] as unknown as [
+        string,
+        unknown,
+        unknown,
+        ComposerSubmitCommit,
+        import('./useComposerCore').ComposerSubmitMetadata,
+      ];
+      await call[4].retainDraftDuringSessionCreation!(async (allocated) => {
+        act(() => {
+          latest!.removeImage(0);
+          if (action === 'new text' || action === 'edit undo')
+            latest!.setText('new draft');
+          if (action === 'edit undo') latest!.setText('original');
+          if (action === 'new file') latest!.handle.restoreFiles([newer]);
+        });
+        allocated('created-session');
+        mounted.switchSession('created-session', '/work');
+        await flushDraftAttachments();
+        expect(call[4].isCurrentDraft!({ allowSessionAssignment: true })).toBe(
+          false,
+        );
+        if (action === 'leave') mounted.switchSession('session-b', '/work');
+        if (action === 'unmount') act(() => root!.unmount());
+        act(() => call[3]());
+        await flushDraftAttachments();
+      });
+      const keepDraft = ['new text', 'edit undo', 'new file'].includes(action);
+      const text = action === 'new text' ? 'new draft' : 'original';
+      const key = getSessionDraftKey('created-session');
+      expect(localStorage.getItem(getPendingTaskDraftKey('/work'))).toBeNull();
+      expect(localStorage.getItem(key)).toBe(keepDraft ? text : null);
+      expect(fake.stores.get('attachments')?.get(key)).toEqual(
+        keepDraft
+          ? {
+              images: [],
+              files: action === 'new file' ? [file, newer] : [file],
+            }
+          : undefined,
+      );
+      if (action === 'unmount') {
+        container!.remove();
+        await mount({ sessionId: 'created-session', atWorkspaceCwd: '/work' });
+      } else mounted.switchSession('created-session', '/work');
+      await flushDraftAttachments();
+      expect(latest!.getText()).toBe(keepDraft ? text : '');
+      expect(latest!.pastedImages).toEqual([]);
+      expect(latest!.pastedFiles).toEqual(
+        keepDraft ? (action === 'new file' ? [file, newer] : [file]) : [],
+      );
+    },
+  );
+
+  it('keeps a reader busy through allocation for every submission entry', async () => {
+    vi.stubGlobal('indexedDB', createFakeIndexedDB().factory);
+    const onSubmit = vi.fn<UseComposerCoreOptions['onSubmit']>(() => false);
+    localStorage.setItem(
+      getPromptHistoryStorageKey('/work'),
+      JSON.stringify(['prior prompt']),
+    );
+    const mounted = await mount({ onSubmit, atWorkspaceCwd: '/work' });
+    await flushDraftAttachments();
+    act(() => {
+      latest!.setText('submitted');
+      latest!.submitText();
+    });
+    const metadata = onSubmit.mock.calls[0][4]!;
+    let release!: () => void;
+    const read = FileReader.prototype.readAsDataURL;
+    const held = vi
+      .spyOn(FileReader.prototype, 'readAsDataURL')
+      .mockImplementation(function (this: FileReader, blob: Blob) {
+        release = () => read.call(this, blob);
+      });
+    try {
+      act(() =>
+        latest!.ingestFiles([
+          new File(['png'], 'loading.png', { type: 'image/png' }),
+        ]),
+      );
+      await flushDraftAttachments();
+      await metadata.retainDraftDuringSessionCreation!(async (allocated) => {
+        allocated('created-session');
+        mounted.switchSession('created-session', '/work');
+        await flushDraftAttachments();
+        expect(latest!.pendingImageBatchCount).toBe(1);
+        expect(latest!.canSubmit).toBe(false);
+        act(() => {
+          latest!.submitText();
+          latest!.handle.retryLast();
+          latest!.searchState.submitSearchMatch('history');
+        });
+        expect(onSubmit).toHaveBeenCalledTimes(1);
+        release();
+        await waitForImageIngestion();
+        expect(latest!.canSubmit).toBe(true);
+        expect(latest!.pastedImages).toHaveLength(1);
+      });
+    } finally {
+      held.mockRestore();
+    }
+  });
+
+  it.each([false, true])(
+    'clears an accepted draft after removing its submitted image (leave: %s)',
+    async (leave) => {
+      vi.stubGlobal('indexedDB', createFakeIndexedDB().factory);
+      let accepted: ComposerSubmitCommit | undefined;
+      const onSubmit = vi.fn<UseComposerCoreOptions['onSubmit']>(
+        (_text, _images, _files, commit) => {
+          accepted = commit;
+          return false;
+        },
+      );
+      const mounted = await mount({ sessionId: 'session-a', onSubmit });
+      await flushDraftAttachments();
+      act(() => {
+        latest!.setText('sent text');
+        latest!.handle.restoreImages([
+          { data: 'sent-X', media_type: 'image/png' },
+        ]);
+        latest!.submitText();
+        latest!.removeImage(0);
+      });
+      if (leave) mounted.switchSession('session-b', undefined);
+      act(() => accepted!());
+      await flushDraftAttachments();
+      expect(localStorage.getItem(SESSION_A_DRAFT_KEY)).toBeNull();
+      if (leave) mounted.switchSession('session-a', undefined);
+      expect(latest!.getText()).toBe('');
+      expect(latest!.pastedImages).toEqual([]);
+    },
+  );
+
+  it.each([false, true])(
+    'preserves host attachments restored during layout (storage available: %s)',
+    async (storageAvailable) => {
+      const fake = createFakeIndexedDB();
+      vi.stubGlobal('indexedDB', storageAvailable ? fake.factory : undefined);
+      const archived = {
+        name: 'archived.txt',
+        media_type: 'text/plain',
+        text: 'old bytes',
+      };
+      seed(fake, 'session-a', { images: [], files: [archived] });
+      localStorage.setItem(SESSION_A_DRAFT_KEY, 'saved text');
+      const image = { data: 'host image', media_type: 'image/png' };
+      const file = { name: 'host.txt', media_type: 'text/plain', text: 'host' };
+      function Composer() {
+        const composer = useComposerCore({
+          sessionId: 'session-a',
+          onSubmit: vi.fn(),
+          commands: [],
+          editorTheme: {},
+        });
+        latest = composer;
+        useLayoutEffect(() => {
+          composer.handle.restoreImages([image]);
+          composer.handle.restoreFiles([file]);
+        }, [composer.handle]);
+        return <div ref={composer.containerRef} />;
+      }
+      container = document.createElement('div');
+      document.body.append(container);
+      root = createRoot(container);
+      act(() =>
+        root!.render(
+          <I18nProvider language="en">
+            <Composer />
+          </I18nProvider>,
+        ),
+      );
+      await flushDraftAttachments();
+      expect(latest!.getText()).toBe('saved text');
+      expect(latest!.pastedImages).toEqual([image]);
+      expect(latest!.pastedFiles).toEqual(
+        storageAvailable ? [file, archived] : [file],
+      );
+    },
+  );
+
+  it.each([
+    'add',
+    'clear',
+    'submit',
+    'search submit',
+    'managed accept',
+  ] as const)(
+    'shares the session draft between retained main and split composers (%s)',
+    async (edit) => {
+      const fake = createFakeIndexedDB();
+      vi.stubGlobal('indexedDB', fake.factory);
+      const composers = {} as Record<'main' | 'pane', UseComposerCoreReturn>;
+      const submissions = { main: vi.fn(), pane: vi.fn() };
+      let acceptOldMain: ComposerSubmitCommit | undefined;
+      function Composer({
+        slot,
+        sessionId,
+      }: {
+        slot: 'main' | 'pane';
+        sessionId: string;
+      }) {
+        const composer = useComposerCore({
+          sessionId,
+          onSubmit: submissions[slot],
+          commands: [],
+          editorTheme: {},
+        });
+        composers[slot] = composer;
+        useLayoutEffect(() => {
+          if (slot === 'pane') composer.handle.restoreFiles([y]);
+        }, [composer.handle, slot]);
+        return <div ref={composer.containerRef} />;
+      }
+      container = document.createElement('div');
+      document.body.append(container);
+      root = createRoot(container);
+      const render = (mainSession: string, showPane: boolean) => {
+        act(() => {
+          root!.render(
+            <I18nProvider language="en">
+              <Composer key="main" slot="main" sessionId={mainSession} />
+              {showPane && (
+                <Composer key="pane" slot="pane" sessionId="session-a" />
+              )}
+            </I18nProvider>,
+          );
+        });
+      };
+      const x = { data: 'main-X', media_type: 'image/png' };
+      const y = { name: 'Y.txt', media_type: 'text/plain', text: 'pane-Y' };
+      const z = { name: 'Z.txt', media_type: 'text/plain', text: 'main-Z' };
+      render('session-a', false);
+      await flushDraftAttachments();
+      act(() => {
+        composers.main.setText('main text');
+        composers.main.handle.restoreImages([x]);
+      });
+      await flushDraftAttachments();
+      render('session-a', true);
+      await flushDraftAttachments();
+      expect(composers.pane.pastedImages).toEqual([x]);
+      expect(composers.pane.getText()).toBe('main text');
+      act(() => undo(composers.pane.viewRef.current!));
+      expect(composers.pane.getText()).toBe('main text');
+      expect(composers.main.getText()).toBe('main text');
+      expect(composers.main.pastedFiles).toEqual([y]);
+      act(() => composers.pane.removeFile(0));
+      expect(composers.main.pastedFiles).toEqual([]);
+      if (edit === 'add') {
+        submissions.main.mockImplementationOnce(
+          (_text, _images, _files, accepted) => {
+            acceptOldMain = accepted;
+            return false;
+          },
+        );
+        act(() => composers.main.submitText());
+        let release!: () => void;
+        const read = FileReader.prototype.readAsDataURL;
+        const held = vi
+          .spyOn(FileReader.prototype, 'readAsDataURL')
+          .mockImplementation(function (this: FileReader, blob: Blob) {
+            release = () => read.call(this, blob);
+          });
+        act(() =>
+          composers.pane.ingestFiles([
+            new File(['png'], 'loading.png', { type: 'image/png' }),
+          ]),
+        );
+        await flushDraftAttachments();
+        expect(composers.main.canSubmit).toBe(false);
+        expect(composers.pane.canSubmit).toBe(false);
+        act(() => composers.pane.submitText());
+        expect(submissions.pane).not.toHaveBeenCalled();
+        const abort = vi.spyOn(FileReader.prototype, 'abort');
+        act(() => acceptOldMain!());
+        expect(abort).not.toHaveBeenCalled();
+        release();
+        await vi.waitFor(async () => {
+          await flushDraftAttachments();
+          expect(composers.main.pendingImageBatchCount).toBe(0);
+          expect(composers.pane.pendingImageBatchCount).toBe(0);
+          expect(composers.main.canSubmit).toBe(true);
+          expect(composers.pane.canSubmit).toBe(true);
+          expect(composers.pane.pastedImages).toHaveLength(2);
+        });
+        abort.mockRestore();
+        held.mockRestore();
+        act(() => composers.main.removeImage(1));
+        expect(composers.pane.pastedImages).toEqual([x]);
+      }
+      const tag = {
+        id: 'shared-file',
+        kind: 'file' as const,
+        value: 'shared.txt',
+        serialized: '@shared.txt',
+      };
+      act(() => composers.main.addTags([tag], { placement: 'top' }));
+      expect(composers.pane.composerTags).toEqual([tag]);
+      act(() => composers.pane.removeTopTag(tag.id));
+      expect(composers.main.composerTags).toEqual([]);
+      act(() =>
+        composers.main.addTags([tag], { placement: 'inline', position: 'end' }),
+      );
+      expect(
+        getInlineComposerTags(composers.pane.viewRef.current!).map(
+          (entry) => entry.id,
+        ),
+      ).toEqual([tag.id]);
+      act(() =>
+        composers.main.searchState.restoreSearchMatch!('temporary history'),
+      );
+      expect(composers.pane.getText()).toContain('main text');
+      act(() => {
+        composers.pane.setText('pane text');
+        composers.pane.handle.restoreFiles([y]);
+      });
+      expect(composers.main.getText()).toBe('pane text');
+      act(() => {
+        composers.pane.viewRef.current!.dispatch({ selection: { anchor: 4 } });
+        composers.main.setText('pane text!');
+      });
+      expect(composers.pane.viewRef.current!.state.selection.main.anchor).toBe(
+        4,
+      );
+      act(() => composers.main.setText('pane text'));
+      expect(getInlineComposerTags(composers.main.viewRef.current!)).toEqual(
+        [],
+      );
+      expect(composers.main.pastedFiles).toEqual([y]);
+      act(() => composers.main.handle.restoreFiles([z]));
+      expect(composers.pane.pastedFiles).toEqual([y, z]);
+      act(() => composers.pane.removeFile(0));
+      expect(composers.main.pastedFiles).toEqual([z]);
+      const annotation = {
+        start: 0,
+        end: 4,
+        text: 'pane',
+        reference: {
+          id: 'file:shared',
+          kind: 'file' as const,
+          value: 'shared.txt',
+        },
+      };
+      act(() => composers.main.handle.restoreInputAnnotations([annotation]));
+      act(() => {
+        if (edit === 'add') {
+          composers.pane.handle.restoreFiles([y]);
+          expect(acceptOldMain).toBeTypeOf('function');
+          acceptOldMain!();
+        } else if (edit === 'managed accept') {
+          clearComposerDraftIfMatches(SESSION_A_DRAFT_KEY, 'pane text');
+        } else if (edit === 'submit') composers.pane.submitText();
+        else if (edit === 'search submit') {
+          composers.pane.searchState.openHistorySearch();
+          composers.pane.searchState.submitSearchMatch('from history');
+        } else {
+          composers.main.searchState.restoreSearchMatch!('old history');
+          composers.main.handle.clear();
+        }
+      });
+      if (edit === 'submit') {
+        expect(submissions.pane).toHaveBeenCalledWith(
+          'pane text',
+          [x],
+          [z],
+          expect.any(Function),
+          expect.objectContaining({ inputAnnotations: [annotation] }),
+        );
+      }
+      await flushDraftAttachments();
+      const expected =
+        edit === 'add' ? { images: [x], files: [z, y] } : undefined;
+      const archive = () =>
+        fake.stores.get('attachments')?.get(SESSION_A_DRAFT_KEY);
+      expect(archive()).toEqual(expected);
+      render('session-a', false);
+      expect(composers.main.pastedImages).toEqual(edit === 'add' ? [x] : []);
+      expect(composers.main.getText()).toBe(edit === 'add' ? 'pane text' : '');
+      render('session-b', false);
+      await flushDraftAttachments();
+      expect(archive()).toEqual(expected);
+      render('session-a', false);
+      await flushDraftAttachments();
+      expect(composers.main.pastedImages).toEqual(edit === 'add' ? [x] : []);
+      expect(composers.main.pastedFiles).toEqual(edit === 'add' ? [z, y] : []);
+    },
+  );
+
+  it.each(
+    [true, false].flatMap((storageAvailable) =>
+      ['attachment', 'text', 'tag'].map((edit) => ({ storageAvailable, edit })),
+    ),
+  )(
+    'preserves a newer remounted draft when the old instance accepts ($edit edit, storage available: $storageAvailable)',
+    async ({ storageAvailable, edit }) => {
+      const fake = createFakeIndexedDB();
+      vi.stubGlobal('indexedDB', storageAvailable ? fake.factory : undefined);
+      let commit: ComposerSubmitCommit | undefined;
+      const onSubmit = vi.fn<UseComposerCoreOptions['onSubmit']>(
+        (_text, _images, _files, accepted) => {
+          commit = accepted;
+          return false;
+        },
+      );
+      const x = { data: 'submitted-X', media_type: 'image/png' };
+      const y = { name: 'Y.txt', media_type: 'text/plain', text: 'unsent-Y' };
+      const tag = {
+        id: 'file:new',
+        kind: 'file' as const,
+        value: 'new',
+        serialized: '@new',
+        metadata: { managedFile: { text: 'new bytes' } },
+      };
+      await mount({
+        sessionId: 'session-a',
+        onSubmit,
+        persistFileReferences: true,
+      });
+      await flushDraftAttachments();
+      act(() => {
+        latest!.handle.restoreImages([x]);
+        latest!.setText('same text');
+        latest!.submitText();
+      });
+      act(() => root!.unmount());
+      container!.remove();
+      await mount({ sessionId: 'session-a', persistFileReferences: true });
+      await flushDraftAttachments();
+      act(() => {
+        if (edit === 'text') latest!.setText('new unsent text');
+        else if (edit === 'tag') latest!.addTags([tag], { placement: 'top' });
+        else latest!.handle.restoreFiles([y]);
+      });
+      await flushDraftAttachments();
+      expect(localStorage.getItem(SESSION_A_DRAFT_KEY)).toBe('same text');
+      act(() => commit!());
+      await flushDraftAttachments();
+      expect(localStorage.getItem(SESSION_A_DRAFT_KEY)).toBe('same text');
+      if (storageAvailable) {
+        expect(
+          fake.stores.get('attachments')?.get(SESSION_A_DRAFT_KEY),
+        ).toEqual({
+          images: [x],
+          files: edit === 'attachment' ? [y] : [],
+        });
+      }
+      act(() => root!.unmount());
+      container!.remove();
+      await mount({ sessionId: 'session-a', persistFileReferences: true });
+      await flushDraftAttachments();
+      expect(latest!.getText()).toBe(
+        edit === 'text' ? 'new unsent text' : 'same text',
+      );
+      expect(latest!.pastedImages).toEqual(storageAvailable ? [x] : []);
+      expect(latest!.pastedFiles).toEqual(
+        storageAvailable && edit === 'attachment' ? [y] : [],
+      );
+      expect(latest!.composerTags).toEqual(edit === 'tag' ? [tag] : []);
+    },
+  );
+
+  it.each([false, true])(
+    'preserves outgoing and unread destination archives during an atomic capability switch (read pending: %s)',
+    async (deferGets) => {
+      const fake = createFakeIndexedDB({ deferGets });
+      vi.stubGlobal('indexedDB', fake.factory);
+      const image = { data: 'A image', media_type: 'image/png' };
+      const file = { name: 'A.txt', media_type: 'text/plain', text: 'A file' };
+      const bFile = { name: 'B.txt', media_type: 'text/plain', text: 'B file' };
+      seed(fake, 'session-a', { images: [image], files: [file] });
+      seed(fake, 'session-b', { images: [], files: [bFile] });
+      const mounted = await mount({
+        sessionId: 'session-a',
+        attachmentsEnabled: true,
+      });
+      await flushDraftAttachments();
+      mounted.switchSession('session-b', '/work/b', false);
+      fake.releaseLoads();
+      await flushDraftAttachments();
+      expect(latest!.pastedImages).toEqual([]);
+      expect(latest!.pastedFiles).toEqual([]);
+      expect(fake.stores.get('attachments')?.get(SESSION_A_DRAFT_KEY)).toEqual({
+        images: [image],
+        files: [file],
+      });
+      expect(
+        fake.stores.get('attachments')?.get(getSessionDraftKey('session-b')),
+      ).toEqual({ images: [], files: [bFile] });
+      mounted.switchSession('session-a', undefined, true);
+      await flushDraftAttachments();
+      fake.releaseLoads();
+      await flushDraftAttachments();
+      expect(latest!.pastedImages).toEqual([image]);
+      expect(latest!.pastedFiles).toEqual([file]);
+    },
+  );
+
+  it('preserves the departing archive when target context changes before session ID', async () => {
+    const fake = createFakeIndexedDB();
+    vi.stubGlobal('indexedDB', fake.factory);
+    const image = { data: 'A image', media_type: 'image/png' };
+    seed(fake, 'session-a', { images: [image], files: [] });
+    const mounted = await mount({
+      sessionId: 'session-a',
+      atWorkspaceCwd: '/work',
+      composerScopeKey: '/work',
+      attachmentsEnabled: true,
+    });
+    await flushDraftAttachments();
+    mounted.switchSession('session-a', undefined, false, 'live');
+    await flushDraftAttachments();
+    mounted.switchSession('session-b', undefined, false, 'live');
+    await flushDraftAttachments();
+    mounted.switchSession('session-a', '/work', true, '/work');
+    await flushDraftAttachments();
+    expect(latest!.pastedImages).toEqual([image]);
+    expect(fake.stores.get('attachments')?.get(SESSION_A_DRAFT_KEY)).toEqual({
+      images: [image],
+      files: [],
+    });
+  });
+
+  it('restores on re-enabling while same-session workspace metadata resolves', async () => {
+    const fake = createFakeIndexedDB();
+    vi.stubGlobal('indexedDB', fake.factory);
+    const image = { data: 'A image', media_type: 'image/png' };
+    seed(fake, 'session-a', { images: [image], files: [] });
+    const mounted = await mount({
+      sessionId: 'session-a',
+      attachmentsEnabled: false,
+    });
+    mounted.switchSession('session-a', '/work', true);
+    await flushDraftAttachments();
+    expect(latest!.pastedImages).toEqual([image]);
+    mounted.setAttachmentsEnabled(false);
+    await flushDraftAttachments();
+    expect(latest!.pastedImages).toEqual([]);
+    expect(fake.stores.get('attachments')?.has(SESSION_A_DRAFT_KEY)).toBe(
+      false,
+    );
+  });
+
+  it('restores a previously disabled archive when a pending context change is cancelled', async () => {
+    const fake = createFakeIndexedDB();
+    vi.stubGlobal('indexedDB', fake.factory);
+    const image = { data: 'A image', media_type: 'image/png' };
+    seed(fake, 'session-a', { images: [image], files: [] });
+    const mounted = await mount({
+      sessionId: 'session-a',
+      composerScopeKey: '/work',
+      attachmentsEnabled: false,
+    });
+    mounted.switchSession('session-a', undefined, false, 'live');
+    mounted.switchSession('session-a', '/work', true, '/work');
+    await flushDraftAttachments();
+    expect(latest!.pastedImages).toEqual([image]);
+  });
+
+  it.each([false, true])(
+    'keeps same-session attachments when workspace resolves (read pending: %s)',
+    async (deferGets) => {
+      const fake = createFakeIndexedDB({ deferGets });
+      vi.stubGlobal('indexedDB', fake.factory);
+      const image = { data: 'archived', media_type: 'image/png' };
+      seed(fake, 'session-a', { images: [image], files: [] });
+      const mounted = await mount({ sessionId: 'session-a' });
+      await flushDraftAttachments();
+      mounted.switchSession('session-a', '/work');
+      fake.releaseLoads();
+      await flushDraftAttachments();
+      expect(latest!.pastedImages).toEqual([image]);
+      expect(latest!.canSubmit).toBe(true);
+    },
+  );
+
+  it('keeps a waiting host submission when only workspace metadata resolves', async () => {
+    const fake = createFakeIndexedDB({ deferGets: true });
+    vi.stubGlobal('indexedDB', fake.factory);
+    const image = { data: 'archived', media_type: 'image/png' };
+    seed(fake, 'session-a', { images: [image], files: [] });
+    const onSubmit = vi.fn();
+    const mounted = await mount({
+      sessionId: 'session-a',
+      onSubmit,
+      composerInput: { text: 'host prompt', submit: true },
+    });
+    await flushDraftAttachments();
+    mounted.switchSession('session-a', '/work');
+    fake.releaseLoads();
+    await flushDraftAttachments();
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(onSubmit.mock.calls[0].slice(0, 2)).toEqual([
+      'host prompt',
+      [image],
+    ]);
+  });
+
+  it.each([
+    [false, false],
+    [true, false],
+    [true, true],
+  ])(
+    'restores pending attachments when workspace resolves (new attachment: %s, stored text: %s)',
+    async (addAttachment, hasStoredText) => {
+      const fake = createFakeIndexedDB({ deferGets: true });
+      vi.stubGlobal('indexedDB', fake.factory);
+      const image = { data: 'archived', media_type: 'image/png' };
+      const archived = {
+        name: 'old.txt',
+        media_type: 'text/plain',
+        text: 'old',
+      };
+      const added = { name: 'new.txt', media_type: 'text/plain', text: 'new' };
+      fake.db.createObjectStore('attachments');
+      const key = getPendingTaskDraftKey('/work');
+      fake.db.seed('attachments', key, { images: [image], files: [archived] });
+      if (hasStoredText) localStorage.setItem(key, 'older draft');
+      const mounted = await mount();
+      if (addAttachment) act(() => latest!.handle.restoreFiles([added]));
+      mounted.switchSession(undefined, '/work');
+      await flushDraftAttachments();
+      fake.releaseLoads();
+      await flushDraftAttachments();
+      expect(latest!.pastedImages).toEqual([image]);
+      expect(latest!.getText()).toBe(hasStoredText ? 'older draft' : '');
+      expect(latest!.pastedFiles).toEqual(
+        addAttachment ? [added, archived] : [archived],
+      );
+      expect(fake.stores.get('attachments')?.get(key)).toEqual({
+        images: [image],
+        files: addAttachment ? [added, archived] : [archived],
+      });
+    },
+  );
+
+  it('waits for archived attachments before enabling or accepting submission', async () => {
+    const fake = createFakeIndexedDB({ deferGets: true });
+    vi.stubGlobal('indexedDB', fake.factory);
+    const image = { data: 'archived-image', media_type: 'image/png' };
+    seed(fake, 'session-a', { images: [image], files: [] });
+    localStorage.setItem(SESSION_A_DRAFT_KEY, 'please review image');
+    localStorage.setItem(
+      getPromptHistoryStorageKey(),
+      JSON.stringify(['from history']),
+    );
+    const onSubmit = vi.fn();
+    await mount({ sessionId: 'session-a', onSubmit });
+    await flushDraftAttachments();
+    expect(latest!.getText()).toBe('please review image');
+    expect(latest!.pastedImages).toEqual([]);
+    expect(latest!.canSubmit).toBe(false);
+    act(() => latest!.submitText());
+    act(() => latest!.retryLast());
+    act(() => latest!.setShellMode(true));
+    act(() => latest!.searchState.submitSearchMatch('from history'));
+    act(() => latest!.setShellMode(false));
+    expect(onSubmit).not.toHaveBeenCalled();
+    fake.releaseLoads();
+    await flushDraftAttachments();
+    expect(latest!.pastedImages).toEqual([image]);
+    expect(latest!.canSubmit).toBe(true);
+    act(() => latest!.submitText());
+    expect(onSubmit.mock.calls[0][0]).toBe('please review image');
+    expect(onSubmit.mock.calls[0][1]).toEqual([image]);
+    await flushDraftAttachments();
+    expect(fake.stores.get('attachments')?.has(SESSION_A_DRAFT_KEY)).toBe(
+      false,
+    );
+  });
+
+  it('keeps both same-name files added before and during a restore', async () => {
+    const fake = createFakeIndexedDB({ deferGets: true });
+    vi.stubGlobal('indexedDB', fake.factory);
+    const archived = {
+      name: 'notes.txt',
+      media_type: 'text/plain',
+      text: 'old unique content',
+    };
+    const newer = {
+      name: 'notes.txt',
+      media_type: 'text/plain',
+      text: 'new different content',
+    };
+    seed(fake, 'session-a', { images: [], files: [archived] });
+    await mount({ sessionId: 'session-a' });
+    await flushDraftAttachments();
+    act(() => latest!.handle.restoreFiles([newer]));
+    fake.releaseLoads();
+    await flushDraftAttachments();
+    const files = [newer, { ...archived, name: 'notes (1).txt' }];
+    expect(latest!.pastedFiles).toEqual(files);
+    expect(fake.stores.get('attachments')?.get(SESSION_A_DRAFT_KEY)).toEqual({
+      images: [],
+      files,
+    });
+  });
+
+  it.each(['A prompt', ''])(
+    'finishes B restore when A is accepted (text: %s)',
+    async (text) => {
+      const fake = createFakeIndexedDB({ deferGets: true });
+      vi.stubGlobal('indexedDB', fake.factory);
+      const bImage = { data: 'session-b-image', media_type: 'image/png' };
+      seed(fake, 'session-b', { images: [bImage], files: [] });
+      let commit: ComposerSubmitCommit | undefined;
+      const onSubmit = vi.fn<UseComposerCoreOptions['onSubmit']>(
+        (_text, _images, _files, accepted) => {
+          commit = accepted;
+          return false;
+        },
+      );
+      const mounted = await mount({ sessionId: 'session-a', onSubmit });
+      await flushDraftAttachments();
+      fake.releaseLoads();
+      await flushDraftAttachments();
+      act(() => {
+        latest!.handle.restoreImages([
+          { data: 'A image', media_type: 'image/png' },
+        ]);
+        latest!.setText(text);
+        latest!.submitText();
+      });
+      mounted.switchSession('session-b', undefined);
+      await flushDraftAttachments();
+      expect(latest!.pastedImages).toEqual([]);
+      act(() => commit!());
+      fake.releaseLoads();
+      await flushDraftAttachments();
+      expect(latest!.pastedImages).toEqual([bImage]);
+      expect(latest!.canSubmit).toBe(true);
+      expect(fake.stores.get('attachments')?.has(SESSION_A_DRAFT_KEY)).toBe(
+        false,
+      );
+      expect(
+        fake.stores.get('attachments')?.get(getSessionDraftKey('session-b')),
+      ).toEqual({ images: [bImage], files: [] });
+      mounted.switchSession('session-c', undefined);
+      await flushDraftAttachments();
+      fake.releaseLoads();
+      await flushDraftAttachments();
+      mounted.switchSession('session-b', undefined);
+      await flushDraftAttachments();
+      fake.releaseLoads();
+      await flushDraftAttachments();
+      expect(latest!.pastedImages).toEqual([bImage]);
+    },
+  );
+  it.each([false, true])(
+    'keeps newer A attachments after late acceptance (text changed: %s)',
+    async (changeText) => {
+      const fake = createFakeIndexedDB();
+      vi.stubGlobal('indexedDB', fake.factory);
+      let commit: ComposerSubmitCommit | undefined;
+      const onSubmit = vi.fn<UseComposerCoreOptions['onSubmit']>(
+        (_text, _images, _files, accepted) => {
+          commit = accepted;
+          return false;
+        },
+      );
+      const x = { data: 'submitted-X', media_type: 'image/png' };
+      const y = { data: 'new-unsent-Y', media_type: 'image/png' };
+      const mounted = await mount({ sessionId: 'session-a', onSubmit });
+      await flushDraftAttachments();
+      act(() => {
+        latest!.handle.restoreImages([x]);
+        latest!.setText('submitted A');
+        latest!.submitText();
+      });
+      expect(onSubmit.mock.calls[0][1]).toEqual([x]);
+      act(() => {
+        latest!.handle.restoreImages([y]);
+        if (changeText) latest!.setText('new unsent A draft');
+      });
+      await flushDraftAttachments();
+      mounted.switchSession('session-b', undefined);
+      await flushDraftAttachments();
+      expect(fake.stores.get('attachments')?.get(SESSION_A_DRAFT_KEY)).toEqual({
+        images: [x, y],
+        files: [],
+      });
+      act(() => commit!());
+      await flushDraftAttachments();
+      expect(fake.stores.get('attachments')?.get(SESSION_A_DRAFT_KEY)).toEqual({
+        images: [x, y],
+        files: [],
+      });
+      mounted.switchSession('session-a', undefined);
+      await flushDraftAttachments();
+      expect(latest!.getText()).toBe(
+        changeText ? 'new unsent A draft' : 'submitted A',
+      );
+      expect(latest!.pastedImages).toEqual([x, y]);
+    },
+  );
+  it('keeps both archives through A-B-A switches before either read finishes', async () => {
+    const fake = createFakeIndexedDB({ deferGets: true });
+    vi.stubGlobal('indexedDB', fake.factory);
+    const image = { data: 'archived', media_type: 'image/png' };
+    seed(fake, 'session-a', { images: [image], files: [] });
+    const mounted = await mount({ sessionId: 'session-a' });
+    const added = { name: 'new.txt', media_type: 'text/plain', text: 'new' };
+    act(() => latest!.handle.restoreFiles([added]));
+    mounted.switchSession('session-b', undefined);
+    await flushDraftAttachments();
+    mounted.switchSession('session-a', undefined);
+    await flushDraftAttachments();
+    fake.releaseLoads();
+    await flushDraftAttachments();
+    expect(latest!.pastedImages).toEqual([image]);
+    expect(latest!.pastedFiles).toEqual([added]);
+    expect(fake.stores.get('attachments')?.get(SESSION_A_DRAFT_KEY)).toEqual({
+      images: [image],
+      files: [added],
+    });
+  });
+
+  it('does not revive cleared attachments when new ones arrive during the read', async () => {
+    const fake = createFakeIndexedDB({ deferGets: true });
+    vi.stubGlobal('indexedDB', fake.factory);
+    seed(fake, 'session-a', {
+      images: [{ data: 'old', media_type: 'image/png' }],
+      files: [],
+    });
+    await mount({ sessionId: 'session-a' });
+    const image = { data: 'new', media_type: 'image/png' };
+    act(() => {
+      latest!.handle.clear();
+      latest!.handle.restoreImages([image]);
+    });
+    fake.releaseLoads();
+    await flushDraftAttachments();
+    expect(latest!.pastedImages).toEqual([image]);
+    expect(fake.stores.get('attachments')?.get(SESSION_A_DRAFT_KEY)).toEqual({
+      images: [image],
+      files: [],
+    });
+  });
+  it('allows submission after attachment storage fails', async () => {
+    vi.stubGlobal('indexedDB', createFakeIndexedDB({ failOpen: true }).factory);
+    const onSubmit = vi.fn();
+    await mount({ sessionId: 'session-a', onSubmit });
+    await flushDraftAttachments();
+    act(() => latest!.setText('still usable'));
+    expect(latest!.canSubmit).toBe(true);
+    act(() => latest!.submitText());
+    expect(onSubmit).toHaveBeenCalledWith(
+      'still usable',
+      undefined,
+      undefined,
+      expect.any(Function),
+      expect.any(Object),
+    );
+  });
+  it('waits to auto-submit host input until its draft attachments restore', async () => {
+    const fake = createFakeIndexedDB({ deferGets: true });
+    vi.stubGlobal('indexedDB', fake.factory);
+    const image = { data: 'archived-image', media_type: 'image/png' };
+    seed(fake, 'session-a', { images: [image], files: [] });
+    const onSubmit = vi.fn();
+    await mount({
+      sessionId: 'session-a',
+      onSubmit,
+      composerInput: { text: 'host prompt', submit: true },
+    });
+    await flushDraftAttachments();
+    expect(onSubmit).not.toHaveBeenCalled();
+    fake.releaseLoads();
+    await flushDraftAttachments();
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(onSubmit.mock.calls[0].slice(0, 2)).toEqual([
+      'host prompt',
+      [image],
+    ]);
+  });
+  it.each(['switch', 'edit', 'unmount'])(
+    'cancels waiting host submission after %s',
+    async (action) => {
+      const fake = createFakeIndexedDB({ deferGets: true });
+      vi.stubGlobal('indexedDB', fake.factory);
+      const onSubmit = vi.fn();
+      const mounted = await mount({
+        sessionId: 'session-a',
+        onSubmit,
+        composerInput: { text: 'host prompt', submit: true },
+      });
+      await flushDraftAttachments();
+      if (action === 'switch') mounted.switchSession('session-b', undefined);
+      else if (action === 'edit') act(() => latest!.setText('new draft'));
+      else act(() => root?.unmount());
+      await flushDraftAttachments();
+      fake.releaseLoads();
+      await flushDraftAttachments();
+      expect(onSubmit).not.toHaveBeenCalled();
+    },
+  );
+  it('keeps unread archived attachments when a newly added chip is removed', async () => {
+    const fake = createFakeIndexedDB({ deferGets: true });
+    vi.stubGlobal('indexedDB', fake.factory);
+    const image = { data: 'archived', media_type: 'image/png' };
+    seed(fake, 'session-a', { images: [image], files: [] });
+    await mount({ sessionId: 'session-a' });
+    act(() => {
+      latest!.handle.restoreFiles([
+        { name: 'temporary.txt', media_type: 'text/plain', text: 'temporary' },
+      ]);
+      latest!.removeFile(0);
+    });
+    fake.releaseLoads();
+    await flushDraftAttachments();
+    expect(latest!.pastedImages).toEqual([image]);
+    expect(latest!.pastedFiles).toEqual([]);
+    expect(fake.stores.get('attachments')?.get(SESSION_A_DRAFT_KEY)).toEqual({
+      images: [image],
+      files: [],
+    });
   });
 });
