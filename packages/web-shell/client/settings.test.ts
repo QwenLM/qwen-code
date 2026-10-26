@@ -293,6 +293,7 @@ describe('settings presentation aliases', () => {
       'setting:omni-media-delivery': 'omni.enabled',
       'setting:artifacts': 'experimental.artifact',
       'setting:tool-use-summaries': 'experimental.emitToolUseSummaries',
+      'setting:unified-agent-loop': 'experimental.unifiedAgentLoop',
       'setting:voice-model': 'voiceModel',
       'setting:image-model': 'imageModel',
     } satisfies Record<string, string>;

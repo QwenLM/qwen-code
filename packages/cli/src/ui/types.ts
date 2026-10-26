@@ -245,11 +245,15 @@ export type HistoryItemLlmThought = HistoryItemBase & {
   type: 'gemini_thought';
   text: string;
   durationMs?: number;
+  isStreaming?: boolean;
+  thoughtGroupId?: number;
 };
 
 export type HistoryItemLlmThoughtContent = HistoryItemBase & {
   type: 'gemini_thought_content';
   text: string;
+  isStreaming?: boolean;
+  thoughtGroupId?: number;
 };
 
 export type HistoryItemInfo = HistoryItemBase & {

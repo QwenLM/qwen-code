@@ -1600,6 +1600,14 @@ interface CoreToolSchedulerOptions {
    */
   isToolExecutionAllowed?: (toolName: string) => boolean;
   modToolCheck?: ModToolCheck;
+  /**
+   * The owner's own refusal of a call, checked with the input the PreToolUse
+   * hook and the media-policy gate left, before the call is built. A message
+   * fails the call as execution-denied.
+   */
+  refuseToolCall?: (request: ToolCallRequestInfo) => string | undefined;
+  /** The terminal sequence a permission prompt's Notification hook returned. */
+  onPermissionPromptTerminalSequence?: (terminalSequence: string) => void;
 }
 
 // ─── Tool Concurrency Helpers ────────────────────────────────
@@ -3610,6 +3618,26 @@ export class CoreToolScheduler {
             continue;
           }
 
+          const refusal = this.schedulerOptions.refuseToolCall?.({
+            ...reqInfo,
+            args: policyGate.args,
+          });
+          if (refusal !== undefined) {
+            newToolCalls.push({
+              status: 'error',
+              request: reqInfo,
+              tool: toolInstance,
+              response: createErrorResponse(
+                reqInfo,
+                new Error(refusal),
+                ToolErrorType.EXECUTION_DENIED,
+                'not_started',
+              ),
+              durationMs: 0,
+            });
+            continue;
+          }
+
           const invocationOrError = runInRequestGoalContext(reqInfo, () =>
             this.buildInvocation(
               toolInstance,
@@ -4846,11 +4874,19 @@ export class CoreToolScheduler {
                 'Permission needed',
                 undefined,
                 this.hookOwners.get(reqInfo.callId),
-              ).catch((error) => {
-                debugLogger.warn(
-                  `Permission prompt notification hook failed: ${error instanceof Error ? error.message : String(error)}`,
-                );
-              });
+              )
+                .then(({ terminalSequence }) => {
+                  if (terminalSequence) {
+                    this.schedulerOptions.onPermissionPromptTerminalSequence?.(
+                      terminalSequence,
+                    );
+                  }
+                })
+                .catch((error) => {
+                  debugLogger.warn(
+                    `Permission prompt notification hook failed: ${error instanceof Error ? error.message : String(error)}`,
+                  );
+                });
             }
           }
         } catch (error) {
