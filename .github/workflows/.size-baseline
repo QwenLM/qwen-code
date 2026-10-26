@@ -49,7 +49,7 @@
 27648 qwen-triage-finalize.yml
 362377 qwen-triage.yml
 15171 release-chrome-extension.yml
-22974 release-managed-agent-reference.yml
+26801 release-managed-agent-reference.yml
 13464 release-managed-runtime.yml
 11950 release-sdk-java.yml
 22345 release-sdk-python.yml
@@ -60,7 +60,7 @@
 1079 scorecard-monthly.yml
 9751 sdk-java-contract-open-prs.yml
 9555 sdk-java-flyway-open-prs.yml
-136082 sdk-java.yml
+145537 sdk-java.yml
 3886 sdk-python.yml
 5595 security-checks.yml
 6777 serve-ab-publish.yml
