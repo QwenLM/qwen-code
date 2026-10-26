@@ -10320,7 +10320,8 @@ export function registerSessionRoutes(
         const expectedRecordId = body['expectedRecordId'];
         if (
           expectedRecordId !== undefined &&
-          (typeof expectedRecordId !== 'string' || expectedRecordId.length === 0)
+          (typeof expectedRecordId !== 'string' ||
+            expectedRecordId.length === 0)
         ) {
           res.status(400).json({
             error: '`expectedRecordId` must be a non-empty string',
@@ -10343,7 +10344,9 @@ export function registerSessionRoutes(
           {
             promptId,
             rewindFiles: rewindFiles !== false,
-            ...(typeof expectedRecordId === 'string' ? { expectedRecordId } : {}),
+            ...(typeof expectedRecordId === 'string'
+              ? { expectedRecordId }
+              : {}),
           },
           clientId !== undefined ? { clientId } : undefined,
         );

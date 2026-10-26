@@ -14721,7 +14721,10 @@ export function createSessionControlPlane(
           promptId: p.promptId,
           text: p.text,
           ...(includeDraft && p.queueDraft
-            ? { queueDraft: structuredClone(p.queueDraft), restoreComplete: true }
+            ? {
+                queueDraft: structuredClone(p.queueDraft),
+                restoreComplete: true,
+              }
             : {}),
           ...(p.content ? { content: p.content } : {}),
           queuedAt: p.queuedAt,

@@ -43142,14 +43142,18 @@ describe('authoritative pending prompt drafts', () => {
     );
     try {
       await vi.waitFor(() =>
-        expect(bridge.getPendingPrompts(session.sessionId, context)).toHaveLength(
-          2,
-        ),
+        expect(
+          bridge.getPendingPrompts(session.sessionId, context),
+        ).toHaveLength(2),
       );
       expect(
         bridge.getPendingPrompts(session.sessionId, context)[1],
       ).not.toHaveProperty('queueDraft');
-      const draft = bridge.getPendingPrompts(session.sessionId, context, true)[1];
+      const draft = bridge.getPendingPrompts(
+        session.sessionId,
+        context,
+        true,
+      )[1];
       expect(draft).toMatchObject({
         restoreComplete: true,
         queueDraft: {
@@ -43159,11 +43163,15 @@ describe('authoritative pending prompt drafts', () => {
       });
       draft!.queueDraft!.prompt.length = 0;
       expect(
-        bridge.getPendingPrompts(session.sessionId, context, true)[1]!.queueDraft!
-          .prompt,
+        bridge.getPendingPrompts(session.sessionId, context, true)[1]!
+          .queueDraft!.prompt,
       ).toHaveLength(1);
       expect(() =>
-        bridge.getPendingPrompts(session.sessionId, { clientId: 'rogue' }, true),
+        bridge.getPendingPrompts(
+          session.sessionId,
+          { clientId: 'rogue' },
+          true,
+        ),
       ).toThrow();
     } finally {
       release();

@@ -4918,7 +4918,9 @@ export class Session implements SessionContext {
     }
   }
 
-  async resolveRewindTarget(promptId: string): Promise<
+  async resolveRewindTarget(
+    promptId: string,
+  ): Promise<
     | { turnIndex: number; snapshotIndex: number; sourceRecordId: string }
     | undefined
   > {

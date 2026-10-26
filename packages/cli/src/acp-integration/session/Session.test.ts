@@ -8859,7 +8859,9 @@ describe('Session', () => {
         const user: Content = { role: 'user', parts: [{ text: `turn ${i}` }] };
         markApiHistoryPrompt(user, promptId);
         history.push(user, { role: 'model', parts: [{ text: 'answer' }] });
-        records.push(chatRecord({ uuid: `user-${i}`, promptId, message: user }));
+        records.push(
+          chatRecord({ uuid: `user-${i}`, promptId, message: user }),
+        );
       }
       const snapshots = records.slice(24).map((record) => ({
         promptId: record.promptId,
@@ -8874,7 +8876,9 @@ describe('Session', () => {
 
     it('maps a retained snapshot window to the identified global user turn', async () => {
       const { snapshots } = identifiedHistory();
-      const target = await session.resolveRewindTarget('test-session-id########35');
+      const target = await session.resolveRewindTarget(
+        'test-session-id########35',
+      );
       expect(target).toEqual({
         turnIndex: 34,
         snapshotIndex: 10,
@@ -8908,9 +8912,12 @@ describe('Session', () => {
       async (failure) => {
         const { history, records, snapshots } = identifiedHistory();
         if (failure === 'missing') delete records[34]!.promptId;
-        if (failure === 'duplicate') records[33]!.promptId = records[34]!.promptId;
+        if (failure === 'duplicate')
+          records[33]!.promptId = records[34]!.promptId;
         if (failure === 'compacted') {
-          vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history.slice(48));
+          vi.mocked(mockChat.getHistoryShallow).mockReturnValue(
+            history.slice(48),
+          );
         }
         if (failure === 'persisted-mismatch') records.pop();
         if (failure === 'duplicate-api') history.push(history[68]!);
