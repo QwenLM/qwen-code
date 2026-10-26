@@ -7,6 +7,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { LoadedSettings } from '../config/settings.js';
+import {
+  ENGINE_NODE,
+  type ModRenderElement,
+  type ModRenderInput,
+} from '@qwen-code/qwen-code-core/mods/render-tree.js';
 import type { ModTerminalHost } from './mod-session.js';
 import {
   createInteractiveModSession,
@@ -33,6 +38,7 @@ describe('interactive Mod owner', () => {
       loadCommands: vi.fn().mockResolvedValue([]),
       flushLogs: vi.fn(),
       syncSession: vi.fn().mockResolvedValue(undefined),
+      setRenderInput: vi.fn(),
       close: vi.fn().mockResolvedValue(undefined),
     };
     mocks.create.mockReturnValue(runtime);
@@ -180,6 +186,41 @@ describe('interactive Mod owner', () => {
     expect(logs).toHaveBeenLastCalledWith(
       'Mods failed to initialize: Error: bad config',
     );
+  });
+
+  it('offers the sites its first initialize names and keeps the band’s last tree', async () => {
+    const { owner, host, runtime } = setup();
+    expect(host.sites!()).toEqual([]);
+    await owner.initialize(['AbovePrompt']);
+    await owner.initialize([]);
+    expect(host.sites!()).toEqual(['AbovePrompt']);
+    const input = { component: 'AbovePrompt' } as ModRenderInput;
+    owner.setRenderInput(input);
+    expect(runtime.setRenderInput).toHaveBeenCalledExactlyOnceWith(input);
+
+    const listener = vi.fn();
+    const unsubscribe = owner.subscribeBand(listener);
+    const tree: ModRenderElement = { type: 'Text', children: ['☀'] };
+    host.draw!(tree, 'token-weather');
+    host.draw!(tree, 'token-weather');
+    expect(owner.getBand()).toEqual({
+      tree,
+      owner: 'token-weather',
+      revision: 2,
+    });
+    expect(listener).toHaveBeenCalledTimes(2);
+    host.draw!(ENGINE_NODE, 'token-weather');
+    host.draw!(ENGINE_NODE, 'token-weather');
+    expect(owner.getBand()).toBeUndefined();
+    expect(listener).toHaveBeenCalledTimes(3);
+
+    host.draw!(tree, 'token-weather');
+    await owner.close();
+    expect(owner.getBand()).toBeUndefined();
+    expect(listener).toHaveBeenCalledTimes(5);
+    owner.setRenderInput(input);
+    expect(runtime.setRenderInput).toHaveBeenCalledOnce();
+    unsubscribe();
   });
 
   it('closing before startup releases pending command loaders and removes the owner', async () => {
