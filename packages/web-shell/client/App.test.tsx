@@ -48958,6 +48958,28 @@ describe('App view navigation shortcuts (#13175)', () => {
     expect(container.querySelector(SPLIT_VIEW_PAGE)).not.toBeNull();
   });
 
+  it('matches the physical backslash key, not the produced character', async () => {
+    stubLargeScreen(true);
+    const { container } = renderViewApp();
+    await flush();
+    const event = await press({ ...SPLIT_CHORD, key: ';' });
+    expect(event.defaultPrevented).toBe(true);
+    expect(container.querySelector(SPLIT_VIEW_PAGE)).not.toBeNull();
+  });
+
+  it('opens the Session Overview from the split view', async () => {
+    // Unlike the chat-only shortcuts, the view chords are not gated on
+    // interactionBlocked: they navigate away from covering views.
+    stubLargeScreen(true);
+    const { container } = renderViewApp();
+    await flush();
+    await press(SPLIT_CHORD);
+    expect(container.querySelector(SPLIT_VIEW_PAGE)).not.toBeNull();
+    const event = await press(OVERVIEW_CHORD);
+    expect(event.defaultPrevented).toBe(true);
+    expect(container.querySelector(OVERVIEW_PANEL)).not.toBeNull();
+  });
+
   it('opens the split view from the ISO backslash key (IntlBackslash)', async () => {
     stubLargeScreen(true);
     const { container } = renderViewApp();
@@ -49136,12 +49158,13 @@ describe('App view navigation shortcuts (#13175)', () => {
     ).toContain('w-full');
   });
 
-  it('ignores alt-combos, unmodified presses, auto-repeat and IME composition', async () => {
+  it('ignores alt-combos, inexact modifiers, unmodified presses, auto-repeat and IME composition', async () => {
     stubLargeScreen(true);
     const { container } = renderViewApp();
     await flush();
     for (const init of [
       { ...OVERVIEW_CHORD, altKey: true },
+      { ...OVERVIEW_CHORD, key: 'o', shiftKey: false },
       { key: '\\', code: 'Backslash' },
       { ...SPLIT_CHORD, shiftKey: true },
       { ...OVERVIEW_CHORD, repeat: true },
