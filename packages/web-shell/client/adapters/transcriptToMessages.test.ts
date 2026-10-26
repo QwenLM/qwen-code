@@ -137,6 +137,20 @@ describe('Assistant branch anchors', () => {
     });
   });
 
+  it('preserves the background-notification response tag on the assistant message', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('assistant-1', 'assistant', 'Done.', 1, false, {
+        meta: { source: 'background_notification_response' },
+      }),
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      role: 'assistant',
+      content: 'Done.',
+      source: 'background_notification_response',
+    });
+  });
+
   it('does not anchor an insight-only block onto the previous reply', () => {
     const messages = transcriptBlocksToDaemonMessages([
       textBlock('assistant-1', 'assistant', 'first answer', 1),

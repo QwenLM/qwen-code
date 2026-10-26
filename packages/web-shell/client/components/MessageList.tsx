@@ -50,6 +50,11 @@ import {
 } from '../customization';
 import { useI18n } from '../i18n';
 import { formatContextTokens } from '../utils/formatTokenCount';
+import {
+  isShellCompletionAckRow,
+  shellAckRowFromMessage,
+  type ShellAckRow,
+} from '../utils/shellCompletionAck';
 import { useWebShellPortalRoot } from '../portalRoot';
 import { useTranscriptRenderMode } from '../transcriptRenderMode';
 import { useAssistantFeedback } from '../hooks/useAssistantFeedback';
@@ -773,6 +778,61 @@ function isFinalContentCandidate(
   );
 }
 
+function isBackgroundTurnMarker(item: DisplayItem): boolean {
+  return (
+    item.type === 'message' &&
+    item.message.role === 'system' &&
+    item.message.source === 'background_notification_turn_started'
+  );
+}
+
+/**
+ * The ack rule itself lives in utils/shellCompletionAck.ts so the /copy
+ * path applies the same classification. This wrapper projects the turn's
+ * display rows into the rule's row view: message rows keep their fields,
+ * parallel-agent groups count as execution work, and every other
+ * non-message row reduces to an inert placeholder the rule cannot fold.
+ *
+ * A reply is folded away from the turn's final answer only on positive
+ * signals: it is the daemon-tagged reply to a background shell completion
+ * (or the raw result notification itself), the turn already produced a
+ * main answer before that specific marker, only thoughts and daemon
+ * bookkeeping rows sit between the marker and the reply, and nothing but
+ * thoughts and markers follows it. A reply to a failed or cancelled task,
+ * an untagged reply, or one followed by work or user steering stays the
+ * turn's final answer.
+ */
+function isShellCompletionAckItem(
+  items: readonly DisplayItem[],
+  start: number,
+  end: number,
+  index: number,
+  includeBackgroundNotifications: boolean,
+): boolean {
+  const rows: ShellAckRow[] = [];
+  for (let i = start + 1; i <= end; i++) {
+    const item = items[i]!;
+    if (item.type === 'message') {
+      rows.push(shellAckRowFromMessage(item.message));
+    } else {
+      rows.push({
+        role: 'inert',
+        hasContent: false,
+        isWorkStep: item.type === 'parallel_agents',
+        isAgentReply: false,
+        isCompletionRow: false,
+      });
+    }
+  }
+  return isShellCompletionAckRow(
+    rows,
+    index - (start + 1),
+    -1,
+    rows.length - 1,
+    includeBackgroundNotifications,
+  );
+}
+
 function findFinalAnswerIndex(
   items: readonly DisplayItem[],
   start: number,
@@ -782,11 +842,7 @@ function findFinalAnswerIndex(
   let hasLaterWork = false;
   for (let i = end; i > start; i--) {
     const item = items[i]!;
-    if (
-      item.type === 'message' &&
-      item.message.role === 'system' &&
-      item.message.source === 'background_notification_turn_started'
-    ) {
+    if (isBackgroundTurnMarker(item)) {
       hasLaterWork = false;
     } else if (isExecutionWorkStep(item)) {
       hasLaterWork = true;
@@ -794,6 +850,17 @@ function findFinalAnswerIndex(
       !hasLaterWork &&
       isFinalContentCandidate(item, includeBackgroundNotifications)
     ) {
+      if (
+        isShellCompletionAckItem(
+          items,
+          start,
+          end,
+          i,
+          includeBackgroundNotifications,
+        )
+      ) {
+        continue;
+      }
       return i;
     }
   }
