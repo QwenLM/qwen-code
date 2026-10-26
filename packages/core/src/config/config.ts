@@ -113,6 +113,7 @@ import {
   DEFAULT_RECURRING_MAX_AGE_DAYS,
   normalizeRecurringMaxAge,
 } from '../services/cronScheduler.js';
+import { createCronGateRunner } from '../services/cron-gate.js';
 import {
   MemoryPressureMonitor,
   DEFAULT_PRESSURE_CONFIG,
@@ -133,6 +134,7 @@ import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { ToolRegistry, type ToolFactory } from '../tools/tool-registry.js';
 import type { McpBudgetEvent } from '../tools/mcp-client-manager.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { forgetAutofixPrSession } from '../tools/autofix-pr-grants.js';
 import {
   ToolMode,
   type ToolMode as ToolModeValue,
@@ -360,6 +362,10 @@ import {
   ManagedSessionUncommittedTailError,
 } from '../managed-runtime/managed-session-authority.js';
 import { LocalJsonlManagedSessionJournalStore } from '../managed-runtime/local-jsonl-managed-session-journal-store.js';
+import {
+  acquireLocalManagedSessionWriter,
+  prepareLocalManagedSessionWriter,
+} from '../managed-runtime/local-managed-session-writer.js';
 import { LocalManagedSessionResourceStore } from '../managed-runtime/managed-session-resources.js';
 import {
   LocalManagedRuntimeOutcomes,
@@ -1416,6 +1422,8 @@ export interface ConfigParameters {
   /** Opt-in flag for the built-in `todo_write` tool. */
   todoWriteEnabled?: boolean;
   agentTeamEnabled?: boolean;
+  /** Experimental: run migrated surfaces on the shared agent loop. */
+  unifiedAgentLoopEnabled?: boolean;
   /**
    * Opt-in for persistent workspace Agents answering @-mentions in chat
    * sessions. Separate from `agentTeamEnabled`: neither implies the other.
@@ -2430,11 +2438,16 @@ export interface CurrentSessionScheduledTaskCreateRequest {
   prompt: string;
   recurring: boolean;
   promptId: string;
+  /** Shell command run at each fire outside the model; see cron-gate.ts. */
+  gate?: string;
 }
 
 export interface CurrentSessionScheduledTaskCreateResult {
   id: string;
   cron: string;
+  /** The gate the daemon stored, or null for none; absent from a daemon that
+   * predates gated tasks and would have dropped a requested gate. */
+  gate?: string | null;
 }
 
 /** Daemon-only capability used by `cron_create` to bind a durable task to the
@@ -2484,6 +2497,7 @@ export type DerivedConfigOverrides = Partial<
     | 'getWorkspaceContext'
     | 'getFileService'
     | 'getEffectiveInputModalities'
+    | 'isOmniEnabled'
     | 'getFileReadCache'
     | 'getFileHistoryService'
     | 'getToolRegistry'
@@ -3155,6 +3169,7 @@ export class Config {
   private readonly lsToolEnabled: boolean = false;
   private readonly todoWriteEnabled: boolean = false;
   private readonly agentTeamEnabled: boolean = false;
+  private readonly unifiedAgentLoopEnabled: boolean = false;
   private readonly agentCollaborationEnabled: boolean = false;
   private readonly artifactEnabled: boolean = true;
   private artifactSnapshotsEnabled = false;
@@ -3609,6 +3624,7 @@ export class Config {
     this.lsToolEnabled = params.lsToolEnabled ?? false;
     this.todoWriteEnabled = params.todoWriteEnabled ?? false;
     this.agentTeamEnabled = params.agentTeamEnabled ?? false;
+    this.unifiedAgentLoopEnabled = params.unifiedAgentLoopEnabled ?? false;
     this.agentCollaborationEnabled = params.agentCollaborationEnabled ?? false;
     this.artifactEnabled = params.artifactEnabled ?? true;
     this.artifactAutoOpen = params.artifactAutoOpen ?? true;
@@ -4986,10 +5002,14 @@ export class Config {
       ReturnType<typeof LocalJsonlManagedSessionJournalStore.read>
     >;
     try {
-      scan = await LocalJsonlManagedSessionJournalStore.read(
+      scan = await LocalJsonlManagedSessionJournalStore.read({
         transcriptPath,
-        localManagedSessionKey(this.storage.getProjectRoot(), this.sessionId),
-      );
+        runtimeBaseDir: this.sessionRuntimeBaseDir,
+        sessionKey: localManagedSessionKey(
+          this.storage.getProjectRoot(),
+          this.sessionId,
+        ),
+      });
     } catch {
       return;
     }
@@ -5067,7 +5087,10 @@ export class Config {
     if (!recorder) throw new SessionWriterUnavailableError();
     let lease: SessionWriterLease | undefined;
     try {
-      lease = await SessionWriterLease.acquire({
+      const acquire = managed
+        ? acquireLocalManagedSessionWriter
+        : SessionWriterLease.acquire;
+      lease = await acquire({
         runtimeBaseDir: this.sessionRuntimeBaseDir,
         sessionId: this.sessionId,
         transcriptPath: this.getTranscriptPath(),
@@ -5121,6 +5144,23 @@ export class Config {
         projection = await this.sessionRestoreProjectionSource();
         if (managed) {
           // Checked before the log is opened, which writes to it.
+          assertSessionExecutionEngine(
+            projection?.executionEngine,
+            this.sessionId,
+            'managed',
+          );
+        }
+        if (
+          managed &&
+          (await prepareLocalManagedSessionWriter(
+            lease,
+            localManagedSessionKey(
+              this.storage.getProjectRoot(),
+              this.sessionId,
+            ),
+          ))
+        ) {
+          projection = await this.sessionRestoreProjectionSource();
           assertSessionExecutionEngine(
             projection?.executionEngine,
             this.sessionId,
@@ -6339,7 +6379,7 @@ export class Config {
    * and should be displayed to the user during startup.
    */
   getWarnings(): string[] {
-    // Include the request-only catalog as well as the system memory policy.
+    // Include the current catalog as well as the system memory policy.
     const memoryContextWarning = this.buildMemoryContextWarning(
       [
         this.getUserMemory(),
@@ -6430,6 +6470,10 @@ export class Config {
       // Skill grants belong to the session that loaded the skill; a resumed
       // session re-arms its own from history during `initialize()`.
       this.permissionManager?.clearSessionAllowRules();
+      // So do the autofix-pr watches it confirmed and the fixes it let run
+      // without asking; a resumed watch asks again.
+      forgetAutofixPrSession(previousSessionId);
+      forgetAutofixPrSession(nextSessionId);
       // The web search budget belongs to the session, like the grants above.
       this.webSearchSessionUsage.calls = 0;
       // So does the Advisor budget, reset in place for the same reason the
@@ -8042,6 +8086,9 @@ export class Config {
     // installs is owned and cleaned up by that profile.
     if (isDerivedConfig(this)) return;
     this.shutdownRequested = true;
+    // What the session confirmed for autofix-pr ends with it: a daemon that
+    // loads it again under the same id asks again.
+    forgetAutofixPrSession(this.sessionId);
     void this.shutdownExecutionEnvironments().catch(() => undefined);
     this.settingsWatcher?.stopWatching();
     // Only a Config with a Runtime waits for it, so others close their
@@ -9293,7 +9340,7 @@ export class Config {
     return this.autoMemoryPrompt;
   }
 
-  /** Latest legacy catalog, sent only at the request tail, never stored history. */
+  /** Latest legacy catalog; scoped maintenance configs suppress it. */
   getAutoMemoryContext(): string {
     // Scoped maintenance configs override the policy getter to suppress session
     // memory. Respect that override rather than inheriting the parent's catalog.
@@ -10353,6 +10400,9 @@ export class Config {
       this.cronScheduler = new CronScheduler(
         this.getProjectRoot(),
         this.getCronRecurringMaxAgeDays() * 24 * 60 * 60 * 1000,
+        // Gates run with this session's cwd, environment and permission
+        // state — in the daemon that is the ACP child's, not the daemon's.
+        { runGate: createCronGateRunner(this) },
       );
     }
     return this.cronScheduler;
@@ -10403,6 +10453,11 @@ export class Config {
     // Agent team is experimental and opt-in: enabled via settings or env var
     if (process.env['QWEN_CODE_ENABLE_AGENT_TEAM'] === '1') return true;
     return this.agentTeamEnabled;
+  }
+
+  isUnifiedAgentLoopEnabled(): boolean {
+    if (process.env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'] === '1') return true;
+    return this.unifiedAgentLoopEnabled;
   }
 
   /**
@@ -13255,6 +13310,11 @@ export class Config {
         return new LoopWakeupTool(this);
       });
     }
+
+    await registerLazy(ToolNames.AUTOFIX_PR, async () => {
+      const { AutofixPrTool } = await import('../tools/autofix-pr.js');
+      return new AutofixPrTool(this);
+    });
 
     // create_sub_session is daemon-only: it needs the bridge, wired onto the
     // Config as a sub-session spawner by the ACP session. Registering it

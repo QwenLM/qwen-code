@@ -383,6 +383,21 @@ vi.mock('./server/git-branch-ops.js', () => ({
       : Promise.resolve(),
 }));
 
+// Observe the prompt route's binding hand-off without running the real
+// pipeline (which would query the platform). Only this export is replaced;
+// the backfill route registration stays real via importOriginal.
+const bindSessionPrsFromReviewPromptMock = vi.hoisted(() =>
+  vi.fn(async () => {}),
+);
+vi.mock('./routes/session-pr-backfill.js', async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import('./routes/session-pr-backfill.js')>();
+  return {
+    ...original,
+    bindSessionPrsFromReviewPrompt: bindSessionPrsFromReviewPromptMock,
+  };
+});
+
 const baseOpts: ServeOptions = {
   hostname: '127.0.0.1',
   port: 4170,
@@ -654,6 +669,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_acp_status',
   'auth_provider_install',
   'workspace_memory',
+  'memory_import_v1',
   'workspace_memory_remember',
   'workspace_memory_remember_project_scope',
   'workspace_memory_remember_user_scope',
@@ -670,6 +686,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_tasks',
   'session_agents',
   'session_agent_trace',
+  'scheduled_task_gate',
   'session_monitor_tool_correlation',
   'session_stats',
   'session_lsp',
@@ -809,6 +826,8 @@ const EXPECTED_REGISTERED_FEATURES = [
         feature,
         'session_artifacts_persistence',
         'session_artifact_library',
+        'workspace_artifact_library',
+        'workspace_artifact_library_stream',
         'session_sources',
       ];
     }
@@ -927,10 +946,12 @@ const EXPECTED_REGISTERED_FEATURES = [
   'persistent_workspace_registration',
   'workspace_display_name',
   'scratch_workspace_registration',
+  'git_workspace_clone',
   'workspace_runtime_removal',
   'native_directory_picker',
   'workspace_runtime',
   'workspace_runtime_stop',
+  'workspace_directories',
   'workspace_local_open',
   'workspace_local_terminal',
   'workspace_qualified_rest_core',
@@ -3718,6 +3739,8 @@ describe('createServeApp', () => {
         if (
           feature === 'session_artifacts_persistence' ||
           feature === 'session_artifact_library' ||
+          feature === 'workspace_artifact_library' ||
+          feature === 'workspace_artifact_library_stream' ||
           feature === 'session_sources'
         ) {
           expect(
@@ -3953,6 +3976,20 @@ describe('createServeApp', () => {
               scratchWorkspaceRegistrationAvailable: true,
             }),
           ).toContain(feature);
+          continue;
+        }
+        if (feature === 'git_workspace_clone') {
+          expect(predicate({ gitWorkspaceCloneAvailable: true })).toBe(true);
+          expect(predicate({ gitWorkspaceCloneAvailable: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              gitWorkspaceCloneAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
           continue;
         }
         if (feature === 'workspace_runtime_removal') {
@@ -4293,6 +4330,22 @@ describe('createServeApp', () => {
           expect(
             getAdvertisedServeFeatures(undefined, {
               agentCollaborationEnabled: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'workspace_directories') {
+          expect(predicate({ workspaceDirectoriesAvailable: true })).toBe(true);
+          expect(predicate({ workspaceDirectoriesAvailable: false })).toBe(
+            false,
+          );
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              workspaceDirectoriesAvailable: true,
             }),
           ).toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
@@ -5798,6 +5851,7 @@ describe('createServeApp', () => {
       );
       expect(window).toEqual([
         'workspace_memory',
+        'memory_import_v1',
         'workspace_memory_remember',
         'workspace_memory_remember_project_scope',
         'workspace_memory_remember_user_scope',
@@ -6053,6 +6107,10 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(200);
       expect(res.body.features).not.toContain('session_artifacts_persistence');
+      expect(res.body.features).not.toContain('workspace_artifact_library');
+      expect(res.body.features).not.toContain(
+        'workspace_artifact_library_stream',
+      );
     });
 
     it('reflects a dynamically added workspace and persistence support', async () => {
@@ -20189,6 +20247,148 @@ describe('createServeApp', () => {
       expect(bridge.promptCalls).toHaveLength(1);
       expect(bridge.promptCalls[0]?.sessionId).toBe('session-A');
       expect(bridge.promptCalls[0]?.req.sessionId).toBe('session-A');
+    });
+
+    it('hands the first text block of an admitted /review prompt to the binder', async () => {
+      bindSessionPrsFromReviewPromptMock.mockClear();
+      const bridge = fakeBridge({
+        promptImpl: async () => ({ stopReason: 'end_turn' }),
+      });
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        primaryWorkspaceTrusted: true,
+      });
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ prompt: [{ type: 'text', text: '/review 42 --comment' }] });
+      expect(res.status).toBe(202);
+      // Allow the fire-and-forget bind hand-off to run.
+      await new Promise((r) => setTimeout(r, 20));
+      expect(bindSessionPrsFromReviewPromptMock).toHaveBeenCalledWith(
+        expect.objectContaining({ workspaceCwd: expect.any(String) }),
+        'session-A',
+        '/review 42 --comment',
+        expect.objectContaining({
+          archiveCoordinator: expect.anything(),
+        }),
+      );
+    });
+
+    it('does not hand a /review line from a later text block to the binder', async () => {
+      // @-imported file content and other later blocks can quote `/review N`
+      // without requesting one; only the first text block is the user prompt.
+      bindSessionPrsFromReviewPromptMock.mockClear();
+      const bridge = fakeBridge({
+        promptImpl: async () => ({ stopReason: 'end_turn' }),
+      });
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        primaryWorkspaceTrusted: true,
+      });
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [
+            { type: 'text', text: 'please look' },
+            { type: 'text', text: '/review 42' },
+          ],
+        });
+      expect(res.status).toBe(202);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(bindSessionPrsFromReviewPromptMock).toHaveBeenCalledWith(
+        expect.anything(),
+        'session-A',
+        'please look',
+        expect.anything(),
+      );
+      expect(bindSessionPrsFromReviewPromptMock).not.toHaveBeenCalledWith(
+        expect.anything(),
+        'session-A',
+        expect.stringContaining('/review'),
+        expect.anything(),
+      );
+    });
+
+    it('does not hand a /review prompt to the binder in an untrusted workspace', async () => {
+      // Direct app tests default to an untrusted primary workspace; the
+      // route's own gate must keep the bind out even before the helper runs.
+      bindSessionPrsFromReviewPromptMock.mockClear();
+      const bridge = fakeBridge({
+        promptImpl: async () => ({ stopReason: 'end_turn' }),
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ prompt: [{ type: 'text', text: '/review 42' }] });
+      expect(res.status).toBe(202);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(bindSessionPrsFromReviewPromptMock).not.toHaveBeenCalled();
+    });
+
+    it('keeps the 202 response when the binder rejects', async () => {
+      bindSessionPrsFromReviewPromptMock.mockClear();
+      bindSessionPrsFromReviewPromptMock.mockRejectedValueOnce(
+        new Error('draining'),
+      );
+      const bridge = fakeBridge({
+        promptImpl: async () => ({ stopReason: 'end_turn' }),
+      });
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        primaryWorkspaceTrusted: true,
+      });
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ prompt: [{ type: 'text', text: '/review 42' }] });
+      expect(res.status).toBe(202);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(bridge.promptCalls).toHaveLength(1);
+    });
+
+    it('keeps the 202 response when the binder never settles', async () => {
+      bindSessionPrsFromReviewPromptMock.mockClear();
+      bindSessionPrsFromReviewPromptMock.mockImplementationOnce(
+        () => new Promise(() => {}),
+      );
+      const bridge = fakeBridge({
+        promptImpl: async () => ({ stopReason: 'end_turn' }),
+      });
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        primaryWorkspaceTrusted: true,
+      });
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ prompt: [{ type: 'text', text: '/review 42' }] });
+      expect(res.status).toBe(202);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(bridge.promptCalls).toHaveLength(1);
+    });
+
+    it('does not bind a channel-relayed /review prompt', async () => {
+      bindSessionPrsFromReviewPromptMock.mockClear();
+      const bridge = fakeBridge({
+        promptImpl: async () => ({ stopReason: 'end_turn' }),
+      });
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        primaryWorkspaceTrusted: true,
+      });
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [{ type: 'text', text: '/review 42' }],
+          _meta: { [CHANNEL_PROMPT_META_KEY]: true },
+        });
+      expect(res.status).toBe(202);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(bindSessionPrsFromReviewPromptMock).not.toHaveBeenCalled();
     });
 
     it('400 when the prompt carries more than 256 media blocks', async () => {
@@ -41116,6 +41316,10 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
     return {
       workspaceId: 'ws-registry',
       workspaceCwd: '/work/registry-primary',
+      sessionRuntimeBaseDir: path.join(
+        serverTestEnvironmentRoot,
+        'registry-runtime',
+      ),
       primary: true,
       trusted: true,
       env: { mode: 'parent-process', overlayKeys: [] },

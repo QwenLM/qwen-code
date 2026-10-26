@@ -23,6 +23,7 @@ const editorMocks = vi.hoisted(() => ({
     | undefined,
   clear: vi.fn(),
   setText: vi.fn(),
+  getText: vi.fn(() => ''),
 }));
 
 vi.mock('../ChatEditor', async () => {
@@ -40,6 +41,7 @@ vi.mock('../ChatEditor', async () => {
           ({
             clear: editorMocks.clear,
             setText: editorMocks.setText,
+            getText: editorMocks.getText,
           }) as EditorHandle,
       );
       return (
@@ -171,6 +173,7 @@ describe('WorkspaceBindingCreator', () => {
     creationSkills = undefined;
     vi.clearAllMocks();
     editorMocks.props = undefined;
+    editorMocks.getText.mockReturnValue('');
     sessionStorage.clear();
     createEmpty = vi.fn();
     getSession = vi.fn();
@@ -179,10 +182,8 @@ describe('WorkspaceBindingCreator', () => {
     onSelectWorkspace = vi.fn();
     onWorkspaceCreated = vi.fn();
     provider = {
-      kind: 'java',
       storageKey: 'host:scope-a:agent-a:workspace-v1',
       canCancel: false,
-      acceptsWorkspaceCwd: false,
       workspaceBinding: {
         agentId: 'agent-a',
         list: vi.fn().mockResolvedValue({
@@ -199,6 +200,7 @@ describe('WorkspaceBindingCreator', () => {
       createSession: vi.fn(),
       submitPrompt: vi.fn(),
       cancel: vi.fn(),
+      queryCancelOperation: vi.fn(),
       async *subscribeEvents() {
         yield* [];
       },
@@ -219,6 +221,74 @@ describe('WorkspaceBindingCreator', () => {
     workspaceId: 'ws-remote',
     displayName: 'Remote project',
   };
+
+  it.each([
+    { handoffAgent: 'agent-b', presetAgents: ['agent-a', 'agent-b'] },
+    { handoffAgent: 'agent-a', presetAgents: ['agent-b'] },
+  ])(
+    'prepares an editable handoff with the permitted Workspace, cwd and Agent $handoffAgent without creating or sending',
+    async ({ handoffAgent, presetAgents }) => {
+      const createSession = directCreation();
+      provider.workspaceBinding!.modelPresets = presetAgents.map((agentId) => ({
+        agentId,
+        label: agentId,
+      }));
+      await render(true, true, undefined, {
+        handoff: {
+          sourceSessionId: 'original',
+          workspaceId: 'ws-a',
+          cwdRelative: 'project',
+          agentId: handoffAgent,
+          text: 'Historical reference',
+          truncated: true,
+        },
+      });
+      expect(editorMocks.setText).toHaveBeenCalledTimes(1);
+      expect(editorMocks.setText).toHaveBeenCalledWith('Historical reference');
+      expect(editorMocks.props?.composerScopeKey).toContain(
+        ':new:handoff:original',
+      );
+      expect(editorMocks.props?.currentModel).toBe(handoffAgent);
+      expect(provider.workspaceBinding!.get).toHaveBeenCalledWith(
+        'ws-a',
+        expect.anything(),
+      );
+      expect(container.textContent).toContain('Review and edit this handoff');
+      expect(container.textContent).toContain('32 KiB');
+      await expectWorkingDirectory('project');
+      expect(createSession).not.toHaveBeenCalled();
+      expect(createEmpty).not.toHaveBeenCalled();
+      expect(onCreated).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps a lost Workspace grant behind the existing admission controls for handoff drafts', async () => {
+    const createSession = directCreation();
+    vi.mocked(provider.workspaceBinding!.get).mockRejectedValue(
+      new Error('access denied'),
+    );
+    await render(true, false, 'ws-private', {
+      handoff: {
+        sourceSessionId: 'original',
+        workspaceId: 'ws-private',
+        cwdRelative: '.',
+        text: 'Review this',
+        truncated: false,
+      },
+    });
+    expect(container.textContent).toContain('access denied');
+    await act(async () => {
+      editorMocks.props!.onSubmit(
+        'Attempt after lost grant',
+        undefined,
+        undefined,
+        vi.fn(),
+      );
+      await flush();
+    });
+    expect(createSession).not.toHaveBeenCalled();
+    expect(createEmpty).not.toHaveBeenCalled();
+  });
 
   function enableRegistration() {
     const registration = {
@@ -806,10 +876,112 @@ describe('WorkspaceBindingCreator', () => {
       sessionId: 'session-a',
       agentId: 'agent-a',
       approvalMode: 'default',
+      initialApprovalMode: 'default',
       workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
     });
     return { createSession, getSessionOptions };
   }
+
+  it.each(['default', 'auto-edit', 'yolo'] as const)(
+    'selects a catalog model independently of the %s approval policy',
+    async (approvalMode) => {
+      const { createSession, getSessionOptions } = approvalSelection();
+      provider.workspaceBinding = {
+        ...provider.workspaceBinding!,
+        agentId: 'qwen-code',
+        modelPresets: [
+          { agentId: 'qwen-code', modelId: 'model-a', label: 'A' },
+          { agentId: 'qwen-code', modelId: 'model-b', label: 'B' },
+        ],
+      };
+      getSessionOptions.mockResolvedValue({
+        approvalMode: 'default',
+        availableApprovalModes: ['default', 'auto-edit', 'yolo'],
+        modelSelectionSupported: true,
+      });
+      getSession.mockResolvedValue({
+        sessionId: 'session-a',
+        agentId: 'qwen-code',
+        approvalMode,
+        initialApprovalMode: approvalMode,
+        modelSelection: { modelId: 'model-b', revision: 1 },
+        workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+      });
+      await render();
+      expect(editorMocks.props?.availableModes).toEqual([
+        'default',
+        'auto-edit',
+        'yolo',
+      ]);
+      await act(async () => editorMocks.props!.onSelectMode!(approvalMode));
+      await act(async () => editorMocks.props!.onSelectModel!('model-b'));
+      expect(editorMocks.props?.currentMode).toBe(approvalMode);
+      expect(editorMocks.props?.currentModel).toBe('model-b');
+      const commit = await sendInitial('Use chosen model and policy');
+      expect(createSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          agentId: 'qwen-code',
+          modelId: 'model-b',
+          approvalMode,
+        }),
+        expect.any(Object),
+      );
+      expect(commit).toHaveBeenCalledOnce();
+      expect(onCreated).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('freezes the model and permission after an unknown creation across remount', async () => {
+    const { createSession, getSessionOptions } = approvalSelection();
+    provider.workspaceBinding = {
+      ...provider.workspaceBinding!,
+      agentId: 'qwen-code',
+      modelPresets: [{ agentId: 'qwen-code', modelId: 'model-a', label: 'A' }],
+    };
+    getSessionOptions.mockResolvedValue({
+      approvalMode: 'default',
+      availableApprovalModes: ['default', 'yolo'],
+      modelSelectionSupported: true,
+    });
+    createSession.mockRejectedValueOnce(new Error('Unknown delivery'));
+    await render();
+    await act(async () => editorMocks.props!.onSelectMode!('yolo'));
+    await sendInitial('Frozen first prompt');
+    const [request, command] = createSession.mock.calls[0];
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    getSession.mockResolvedValue({
+      sessionId: 'session-a',
+      agentId: 'qwen-code',
+      approvalMode: 'yolo',
+      initialApprovalMode: 'yolo',
+      modelSelection: { modelId: 'model-a', revision: 1 },
+      workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+    });
+    await render();
+    await sendInitial('Changed draft');
+    expect(createSession).toHaveBeenLastCalledWith(
+      request,
+      expect.objectContaining({ idempotencyKey: command.idempotencyKey }),
+    );
+    expect(request).toMatchObject({
+      modelId: 'model-a',
+      approvalMode: 'yolo',
+      text: 'Frozen first prompt',
+    });
+    expect(onCreated).toHaveBeenCalledWith('session-a', 'ws-a');
+  });
+
+  it('refuses catalog creation when the host lacks the initial-model capability', async () => {
+    const { createSession } = approvalSelection();
+    provider.workspaceBinding = {
+      ...provider.workspaceBinding!,
+      modelPresets: [{ agentId: 'agent-a', modelId: 'model-a', label: 'A' }],
+    };
+    await render();
+    await sendInitial('Do not silently use the default model');
+    expect(createSession).not.toHaveBeenCalled();
+  });
 
   it('loads actual policy options and selects a mode without changing model, Workspace or draft', async () => {
     const { createSession, getSessionOptions } = approvalSelection();
@@ -831,6 +1003,7 @@ describe('WorkspaceBindingCreator', () => {
       sessionId: 'session-a',
       agentId: 'agent-a',
       approvalMode: 'auto-edit',
+      initialApprovalMode: 'auto-edit',
       workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
     });
     const commit = await sendInitial('Write a file');
@@ -1209,9 +1382,6 @@ describe('WorkspaceBindingCreator', () => {
       expect(Boolean(editorMocks.props?.onSkillsOpenChange)).toBe(
         Boolean(skillsSupported),
       );
-      expect(
-        container.textContent?.includes('Enabled Skills on the Skills page'),
-      ).toBe(Boolean(skillsSupported));
       await sendInitial('Compatible creation');
       expect(createSession).toHaveBeenCalledOnce();
       expect(load).toHaveBeenCalledTimes(skillsSupported ? 1 : 0);
@@ -1242,9 +1412,6 @@ describe('WorkspaceBindingCreator', () => {
     };
     createSession.mockRejectedValue(new Error('lost response'));
     await render();
-    expect(container.textContent).toContain(
-      'Enabled Skills on the Skills page',
-    );
     expect(container.textContent).not.toContain('Add Skill');
     await act(async () => {
       await editorMocks.props!.onSubmit!('hello');
@@ -1262,7 +1429,6 @@ describe('WorkspaceBindingCreator', () => {
       skillsSupported: false,
     });
     await render();
-    expect(container.textContent).toContain('42 Skills are saved');
     await click('Retry the same request');
     expect(load).toHaveBeenCalledTimes(1);
     expect(createSession.mock.calls[1]![0].skills).toEqual(first[0].skills);
@@ -1338,6 +1504,7 @@ describe('WorkspaceBindingCreator', () => {
       sessionId: 'session-a',
       agentId: 'agent-a',
       approvalMode: 'auto-edit',
+      initialApprovalMode: 'auto-edit',
       workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
     });
     await click('Retry the same request');
@@ -1441,12 +1608,28 @@ describe('WorkspaceBindingCreator', () => {
     expect(commit).toHaveBeenCalledOnce();
   });
 
+  it('does not substitute current policy when creation policy is absent', async () => {
+    approvalSelection();
+    getSession.mockResolvedValue({
+      sessionId: 'session-a',
+      agentId: 'agent-a',
+      approvalMode: 'default',
+      workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+    });
+    await render();
+    const commit = await sendInitial('Confirm the original creation policy');
+    expect(onCreated).not.toHaveBeenCalled();
+    expect(commit).not.toHaveBeenCalled();
+    expect(container.textContent).toContain('could not be confirmed');
+  });
+
   it('keeps explicit policy frozen when Session read-back reports another mode', async () => {
     const { createSession } = approvalSelection();
     getSession.mockResolvedValue({
       sessionId: 'session-a',
       agentId: 'agent-a',
       approvalMode: 'auto-edit',
+      initialApprovalMode: 'auto-edit',
       workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
     });
     await render();
@@ -2727,6 +2910,104 @@ describe('WorkspaceBindingCreator', () => {
       ).toBeNull();
     },
   );
+
+  it.each([32, 33, 256])(
+    'displays a valid %i-package catalog and caps the Session selection at 32',
+    async (count) => {
+      provider = {
+        ...provider,
+        extensions: {
+          list: vi.fn().mockResolvedValue({
+            supported: true,
+            extensions: Array.from({ length: count }, (_, index) => ({
+              pin: {
+                extensionId: `ext_00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
+                packageRevision: 1,
+                packageDigest: 'a'.repeat(64),
+              },
+              manifest: { name: `Review package ${index + 1}`, version: '1' },
+            })),
+          }),
+        } as unknown as ManagedAgentProvider['extensions'],
+      };
+      await render();
+      const choices = [
+        ...container.querySelectorAll<HTMLInputElement>(
+          'input[type="checkbox"]',
+        ),
+      ].filter((input) =>
+        input.closest('label')?.textContent?.includes('Review package'),
+      );
+      expect(choices).toHaveLength(count);
+      for (const choice of choices.slice(0, 32))
+        await act(async () => choice.click());
+      expect(choices.filter((choice) => choice.checked)).toHaveLength(32);
+      if (count > 32) {
+        expect(choices[32]!.disabled).toBe(true);
+        await act(async () => choices[32]!.click());
+        expect(choices[32]!.checked).toBe(false);
+        await act(async () => choices[0]!.click());
+        expect(choices[32]!.disabled).toBe(false);
+        await act(async () => choices[32]!.click());
+        expect(choices.filter((choice) => choice.checked)).toHaveLength(32);
+      }
+    },
+  );
+
+  it('freezes selected package and settings revisions across creation retries', async () => {
+    const pin = {
+      extensionId: 'ext_00000000-0000-4000-8000-000000000001',
+      packageRevision: 2,
+      packageDigest: 'a'.repeat(64),
+    };
+    provider = {
+      ...provider,
+      extensions: {
+        list: vi.fn().mockResolvedValue({
+          supported: true,
+          extensions: [
+            { pin, manifest: { name: 'Frozen package', version: '2' } },
+          ],
+        }),
+      } as unknown as ManagedAgentProvider['extensions'],
+    };
+    createEmpty
+      .mockRejectedValueOnce(new TypeError('response lost'))
+      .mockResolvedValueOnce({ sessionId: 'session-a' });
+    getSession.mockResolvedValue({
+      sessionId: 'session-a',
+      workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+    });
+    await render();
+    const checkbox = [
+      ...container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'),
+    ].find((input) =>
+      input.closest('label')?.textContent?.includes('Frozen package'),
+    )!;
+    expect(checkbox).toBeDefined();
+    await act(async () => checkbox.click());
+    const revision = container.querySelector<HTMLInputElement>(
+      '[aria-label="Settings revision (optional): Frozen package"]',
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(revision, '7');
+      revision.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await click('Create session');
+    expect(createEmpty.mock.calls[0]?.[0].extensionPins).toEqual([
+      { ...pin, settingsRevision: 7 },
+    ]);
+    await click('Retry the same request');
+    expect(createEmpty.mock.calls[1]?.[0]).toEqual(
+      createEmpty.mock.calls[0]?.[0],
+    );
+    expect(createEmpty.mock.calls[1]?.[1].idempotencyKey).toEqual(
+      createEmpty.mock.calls[0]?.[1].idempotencyKey,
+    );
+  });
 
   it('retries the frozen request after a lost response and confirms binding', async () => {
     createEmpty

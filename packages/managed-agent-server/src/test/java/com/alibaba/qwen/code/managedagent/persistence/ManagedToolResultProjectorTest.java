@@ -31,7 +31,6 @@ class ManagedToolResultProjectorTest {
         org.mockito.Mockito.doNothing().when(projector).project(claim);
         properties.getArtifacts().setEnabled(true);
         projector.tick();
-        org.mockito.Mockito.verify(store).backfillOnePage();
         org.mockito.Mockito.verify(store, org.mockito.Mockito.times(8)).claim();
         org.mockito.Mockito.verify(projector, org.mockito.Mockito.times(8)).project(claim);
     }
@@ -59,7 +58,6 @@ class ManagedToolResultProjectorTest {
                         "Tenant guard is held"));
         org.assertj.core.api.Assertions.assertThatCode(projector::tick)
                 .doesNotThrowAnyException();
-        org.mockito.Mockito.verify(store).backfillOnePage();
         org.mockito.Mockito.verify(store).claim();
     }
 

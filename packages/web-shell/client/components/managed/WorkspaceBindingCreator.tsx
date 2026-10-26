@@ -8,6 +8,7 @@ import type { ComposerSubmitMetadata } from '../../hooks/useComposerCore';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import shellStyles from '../../App.module.css';
 import { useI18n } from '../../i18n';
+import { useManagedRecoveryText } from './managed-recovery-messages';
 import { ChatEditor } from '../ChatEditor';
 import type { WorkspaceSelectorOption } from '../WorkspaceSelector';
 import { HostLabel } from '../workspaces/HostLabel';
@@ -52,6 +53,7 @@ import type {
   ManagedAgentWorkspace,
   ManagedApprovalMode,
   ManagedSessionOptions,
+  ManagedModelPreset,
   ManagedInputBlock,
   ManagedSessionSkill,
 } from './managed-agent-provider';
@@ -66,12 +68,18 @@ import {
   readManagedPending,
   saveManagedPending,
 } from './managed-pending-storage';
-import { isManagedApprovalMode } from './managed-agent-provider';
+import { isManagedInitialApprovalMode } from './managed-agent-provider';
 import { managedRequestId } from './managed-session-storage';
 import { RemoteWorkspaceRegistration } from './RemoteWorkspaceRegistration';
+import {
+  isManagedExtensionPins,
+  type ManagedExtensionPin,
+  type ManagedExtensionCatalog,
+} from './managed-extension-types';
 
 interface PendingCreation {
   agentId: string;
+  modelId?: string;
   workspaceId: string;
   cwdRelative: string;
   input: ManagedInputBlock[];
@@ -81,6 +89,7 @@ interface PendingCreation {
   approvalMode?: ManagedApprovalMode;
   planMode?: boolean;
   skills?: ManagedSessionSkill[];
+  extensionPins?: ManagedExtensionPin[];
 }
 
 interface PendingWorkspace {
@@ -146,16 +155,20 @@ function readPending(
     const input = item['input'];
     if (
       typeof item['agentId'] !== 'string' ||
+      (item['modelId'] !== undefined &&
+        (typeof item['modelId'] !== 'string' || !item['modelId'].trim())) ||
       typeof item['workspaceId'] !== 'string' ||
       typeof item['cwdRelative'] !== 'string' ||
       typeof item['clientId'] !== 'string' ||
       typeof item['idempotencyKey'] !== 'string' ||
       (item['approvalMode'] !== undefined &&
-        !isManagedApprovalMode(item['approvalMode'])) ||
+        !isManagedInitialApprovalMode(item['approvalMode'])) ||
       (item['planMode'] !== undefined &&
         typeof item['planMode'] !== 'boolean') ||
       (item['skills'] !== undefined &&
         !isManagedSessionSkills(item['skills'])) ||
+      (item['extensionPins'] !== undefined &&
+        !isManagedExtensionPins(item['extensionPins'])) ||
       !isManagedInput(input) ||
       (item['sessionId'] !== undefined && typeof item['sessionId'] !== 'string')
     )
@@ -188,12 +201,13 @@ export function WorkspaceBindingCreator({
   clientId,
   onCreated,
   onAbandoned,
-  workspaceId,
+  workspaceId: explicitWorkspaceId,
   onSelectWorkspace,
   onWorkspaceCreated,
   interactive = true,
   creationSkills,
-  onManageSkills,
+  handoff,
+  onOpenHandoffSource,
 }: {
   provider: ManagedAgentProvider;
   workspaceCreationOpen?: boolean;
@@ -210,9 +224,12 @@ export function WorkspaceBindingCreator({
   onWorkspaceCreated?: (workspaceId: string) => void;
   interactive?: boolean;
   creationSkills?: ManagedCreationSkillsSource;
-  onManageSkills?: () => void;
+  handoff?: import('./managed-recovery-handoff').ManagedRecoveryHandoff;
+  onOpenHandoffSource?: () => void;
 }) {
   const { t } = useI18n();
+  const recoveryText = useManagedRecoveryText();
+  const workspaceId = explicitWorkspaceId ?? handoff?.workspaceId;
   const binding = provider.workspaceBinding!;
   const pendingKey = `qwen-managed-workspace-create:${provider.storageKey}`;
   const [pending, setPending] = useState(() => readPending(pendingKey));
@@ -261,6 +278,32 @@ export function WorkspaceBindingCreator({
       return '';
     }
   });
+  const [extensionCatalog, setExtensionCatalog] =
+    useState<ManagedExtensionCatalog>();
+  const [extensionPins, setExtensionPins] = useState<ManagedExtensionPin[]>([]);
+  useEffect(() => {
+    const abort = new AbortController();
+    setExtensionCatalog(undefined);
+    setExtensionPins([]);
+    if (selected && provider.extensions) {
+      void provider.extensions
+        .list(selected, { clientId, signal: abort.signal })
+        .then((catalog) => {
+          if (
+            !abort.signal.aborted &&
+            catalog.extensions.length <= 256 &&
+            catalog.extensions.every((item) =>
+              isManagedExtensionPins([item.pin]),
+            ) &&
+            new Set(catalog.extensions.map((item) => item.pin.extensionId))
+              .size === catalog.extensions.length
+          )
+            setExtensionCatalog(catalog);
+        })
+        .catch(() => undefined);
+    }
+    return () => abort.abort();
+  }, [selected, provider.extensions, clientId]);
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
   const requestedWorkspaceRef = useRef(workspaceId);
@@ -270,19 +313,30 @@ export function WorkspaceBindingCreator({
   const workspaceSelectionBlocked =
     selectingWorkspace ||
     Boolean(workspaceId && handledWorkspaceRequest.current !== workspaceId);
-  const [cwdRelative, setCwdRelative] = useState('.');
+  const [cwdRelative, setCwdRelative] = useState(handoff?.cwdRelative ?? '.');
   const [cwdDraft, setCwdDraft] = useState<string>();
-  const cwdEdited = useRef(false);
+  const cwdEdited = useRef(Boolean(handoff?.cwdRelative));
   const modelPresets = binding.modelPresets ?? [];
-  const [agentId, setAgentId] = useState(
-    modelPresets.find((item) => item.agentId === binding.agentId)?.agentId ??
-      modelPresets[0]?.agentId ??
-      binding.agentId,
-  );
-  const availableModels =
+  const availableModels: readonly ManagedModelPreset[] =
     modelPresets.length > 0
       ? modelPresets
       : [{ agentId: binding.agentId, label: t('managed.modelDefault') }];
+  const [selectedModel, setSelectedModel] = useState(() => {
+    const preferred: ManagedModelPreset =
+      availableModels.find((item) => item.agentId === handoff?.agentId) ??
+      (handoff?.agentId === binding.agentId
+        ? { agentId: binding.agentId, label: t('managed.modelDefault') }
+        : undefined) ??
+      availableModels.find((item) => item.agentId === binding.agentId) ??
+      availableModels[0]!;
+    return preferred.modelId ?? preferred.agentId;
+  });
+  const selectedPreset = availableModels.find(
+    (item) => (item.modelId ?? item.agentId) === selectedModel,
+  );
+  const agentId = selectedPreset?.agentId ?? binding.agentId;
+  const modelId = selectedPreset?.modelId;
+
   const [nextCursor, setNextCursor] = useState<string>();
   const [supported, setSupported] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -488,9 +542,9 @@ export function WorkspaceBindingCreator({
         });
         if (abort.signal.aborted) return;
         if (
-          !isManagedApprovalMode(options.approvalMode) ||
+          !isManagedInitialApprovalMode(options.approvalMode) ||
           !Array.isArray(options.availableApprovalModes) ||
-          !options.availableApprovalModes.every(isManagedApprovalMode) ||
+          !options.availableApprovalModes.every(isManagedInitialApprovalMode) ||
           !options.availableApprovalModes.includes(options.approvalMode)
         ) {
           throw new Error(t('managed.approvalOptionsInvalid'));
@@ -543,8 +597,9 @@ export function WorkspaceBindingCreator({
       : undefined,
   );
   const approvalReady =
-    !supportsApprovalModeSelection ||
-    (!optionsLoading && Boolean(currentOptions));
+    (!supportsApprovalModeSelection ||
+      (!optionsLoading && Boolean(currentOptions))) &&
+    (modelId === undefined || currentOptions?.modelSelectionSupported === true);
   const displayedApprovalMode = pending
     ? pending.approvalMode
     : supportsApprovalModeSelection
@@ -605,6 +660,12 @@ export function WorkspaceBindingCreator({
       !supportsApprovalModeSelection
     )
       return;
+    if (
+      attempt?.modelId !== undefined &&
+      !attempt.sessionId &&
+      currentOptions?.modelSelectionSupported !== true
+    )
+      return;
     const firstSubmission = !attempt;
     if (!attempt) {
       if (
@@ -625,7 +686,7 @@ export function WorkspaceBindingCreator({
       if (!approvalReady) return;
       if (
         !supported ||
-        !availableModels.some((item) => item.agentId === agentId) ||
+        !selectedPreset ||
         !items.find(
           (item) => item.workspaceId === selected && item.canCreateSession,
         )
@@ -673,12 +734,16 @@ export function WorkspaceBindingCreator({
       }
       attempt = {
         agentId,
+        ...(modelId === undefined ? {} : { modelId }),
         workspaceId: selected,
         cwdRelative,
         input,
         clientId,
         idempotencyKey: managedRequestId(),
         ...(skills.length ? { skills: structuredClone(skills) } : {}),
+        ...(extensionPins.length
+          ? { extensionPins: structuredClone(extensionPins) }
+          : {}),
         ...(supportsApprovalModeSelection && currentOptions
           ? { approvalMode: currentOptions.approvalMode }
           : {}),
@@ -707,9 +772,15 @@ export function WorkspaceBindingCreator({
       if (!attempt.sessionId) {
         const request = {
           agentId: attempt.agentId,
+          ...(attempt.modelId === undefined
+            ? {}
+            : { modelId: attempt.modelId }),
           workspaceId: attempt.workspaceId,
           cwdRelative: attempt.cwdRelative,
           ...(attempt.skills?.length ? { skills: attempt.skills } : {}),
+          ...(attempt.extensionPins === undefined
+            ? {}
+            : { extensionPins: attempt.extensionPins }),
           ...(attempt.approvalMode === undefined
             ? {}
             : { approvalMode: attempt.approvalMode }),
@@ -757,9 +828,10 @@ export function WorkspaceBindingCreator({
       if (abort.signal.aborted) return;
       if (
         session.sessionId !== createdSessionId ||
+        (attempt.modelId !== undefined &&
+          session.modelSelection?.modelId !== attempt.modelId) ||
         (attempt.approvalMode !== undefined &&
-          (session.initialApprovalMode ?? session.approvalMode) !==
-            attempt.approvalMode) ||
+          session.initialApprovalMode !== attempt.approvalMode) ||
         ((modelPresets.length > 0 || session.agentId !== undefined) &&
           session.agentId !== attempt.agentId) ||
         !session.workspace ||
@@ -1004,6 +1076,20 @@ export function WorkspaceBindingCreator({
   }
 
   const directInput = Boolean(binding.createSession);
+  const handoffApplied = useRef(false);
+  useEffect(() => {
+    if (
+      !handoff ||
+      handoffApplied.current ||
+      !directInput ||
+      busy ||
+      pending ||
+      !editor.current
+    )
+      return;
+    if (!editor.current.getText().trim()) editor.current.setText(handoff.text);
+    handoffApplied.current = true;
+  }, [handoff, directInput, busy, pending]);
   const workspaceCreationSupported = Boolean(
     (canCreateWorkspace || canSelectDirectory || canImportLocalDirectory) &&
       binding.createWorkspace,
@@ -1072,6 +1158,19 @@ export function WorkspaceBindingCreator({
     <div
       className={`${directInput ? shellStyles.appChatEmpty : ''} flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-2`}
     >
+      {handoff && (
+        <div className="space-y-2 rounded-md border p-3 text-sm" role="status">
+          <p>{recoveryText('managed.recovery.handoffNotice')}</p>
+          {handoff.truncated && (
+            <p>{recoveryText('managed.recovery.handoff.truncated')}</p>
+          )}
+          {onOpenHandoffSource && (
+            <Button variant="outline" onClick={onOpenHandoffSource}>
+              {recoveryText('managed.recovery.source')}
+            </Button>
+          )}
+        </div>
+      )}
       {!directInput && (
         <h2 className="text-base font-medium">
           {t('managed.workspaceCreateTitle')}
@@ -1147,25 +1246,89 @@ export function WorkspaceBindingCreator({
           {t('managed.newWorkspaceResume')}
         </Button>
       )}
-      {(supportedSkillsSource || pending?.skills?.length) && (
-        <p className="my-2 text-sm text-muted-foreground">
-          {pending?.skills?.length
-            ? t('managed.creationSkillsPinned', {
-                count: pending.skills.length,
-              })
-            : t('managed.creationSkillsFromSettings')}
-          {onManageSkills && (
-            <Button
-              type="button"
-              variant="link"
-              title={supportedSkillsSource?.workspaceCwd}
-              onClick={onManageSkills}
-            >
-              {t('managed.creationSkillsManage')}
-            </Button>
-          )}
-        </p>
-      )}
+      {extensionCatalog?.supported &&
+        extensionCatalog.extensions.length > 0 && (
+          <fieldset
+            className="my-2 grid gap-2 text-sm"
+            disabled={busy || !!pending}
+          >
+            <legend>{t('managed.extensions.title')}</legend>
+            {extensionCatalog.extensions.map((entry) => (
+              <div key={entry.pin.extensionId} className="grid gap-1">
+                <label className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    disabled={
+                      extensionPins.length >= 32 &&
+                      !extensionPins.some(
+                        (pin) => pin.extensionId === entry.pin.extensionId,
+                      )
+                    }
+                    checked={extensionPins.some(
+                      (pin) => pin.extensionId === entry.pin.extensionId,
+                    )}
+                    onChange={(event) =>
+                      setExtensionPins((old) =>
+                        event.target.checked
+                          ? old.length < 32 &&
+                            !old.some(
+                              (pin) =>
+                                pin.extensionId === entry.pin.extensionId,
+                            )
+                            ? [...old, entry.pin]
+                            : old
+                          : old.filter(
+                              (pin) =>
+                                pin.extensionId !== entry.pin.extensionId,
+                            ),
+                      )
+                    }
+                  />
+                  {entry.manifest.name} {entry.manifest.version}
+                </label>
+                {extensionPins.some(
+                  (pin) => pin.extensionId === entry.pin.extensionId,
+                ) && (
+                  <label className="flex items-center gap-2">
+                    {t('managed.extensions.settingsRevision')}
+                    <Input
+                      type="number"
+                      min={1}
+                      max={Number.MAX_SAFE_INTEGER}
+                      aria-label={`${t('managed.extensions.settingsRevision')}: ${entry.manifest.name}`}
+                      value={
+                        extensionPins.find(
+                          (pin) => pin.extensionId === entry.pin.extensionId,
+                        )?.settingsRevision ?? ''
+                      }
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        if (
+                          value &&
+                          (!/^[1-9][0-9]*$/.test(value) ||
+                            !Number.isSafeInteger(Number(value)))
+                        )
+                          return;
+                        setExtensionPins((old) =>
+                          old.map((pin) =>
+                            pin.extensionId === entry.pin.extensionId
+                              ? {
+                                  ...pin,
+                                  settingsRevision: value
+                                    ? Number(value)
+                                    : undefined,
+                                }
+                              : pin,
+                          ),
+                        );
+                      }}
+                    />
+                  </label>
+                )}
+              </div>
+            ))}
+          </fieldset>
+        )}
       {pending && !busy ? (
         <div className="space-y-2 text-sm">
           <p>{t('managed.workspaceUncertain')}</p>
@@ -1243,7 +1406,7 @@ export function WorkspaceBindingCreator({
                 }
                 onValueChange={(value) => {
                   if (
-                    isManagedApprovalMode(value) &&
+                    isManagedInitialApprovalMode(value) &&
                     currentOptions?.availableApprovalModes.includes(value)
                   )
                     setSessionOptions({
@@ -1271,8 +1434,8 @@ export function WorkspaceBindingCreator({
                 {t('managed.modelPreset')}
               </label>
               <Select
-                value={agentId}
-                onValueChange={setAgentId}
+                value={selectedModel}
+                onValueChange={setSelectedModel}
                 disabled={busy}
               >
                 <SelectTrigger id="managed-model-select" className="w-full">
@@ -1280,7 +1443,10 @@ export function WorkspaceBindingCreator({
                 </SelectTrigger>
                 <SelectContent>
                   {availableModels.map((item) => (
-                    <SelectItem key={item.agentId} value={item.agentId}>
+                    <SelectItem
+                      key={item.modelId ?? item.agentId}
+                      value={item.modelId ?? item.agentId}
+                    >
                       {item.label}
                     </SelectItem>
                   ))}
@@ -1391,7 +1557,7 @@ export function WorkspaceBindingCreator({
               Boolean(switchTo) ||
               !approvalReady ||
               busy ||
-              !availableModels.some((item) => item.agentId === agentId) ||
+              !selectedPreset ||
               !items.some(
                 (item) =>
                   item.workspaceId === selected && item.canCreateSession,
@@ -1417,7 +1583,11 @@ export function WorkspaceBindingCreator({
             <ChatEditor
               ref={editor}
               commands={skills.commands}
-              composerScopeKey={`managed:${provider.storageKey}:new`}
+              composerScopeKey={
+                handoff
+                  ? `managed:${provider.storageKey}:new:handoff:${handoff.sourceSessionId}`
+                  : `managed:${provider.storageKey}:new`
+              }
               disableLegacyHistoryFallback
               shellModeEnabled={false}
               workspaceFeaturesEnabled={false}
@@ -1429,6 +1599,7 @@ export function WorkspaceBindingCreator({
               skillsLoadError={skills.error}
               skillsLoaded={skills.loaded}
               fileReferenceActions={fileReferences.actions}
+              fileUploadTarget={fileReferences.uploadTarget}
               persistFileReferences
               existingFolderWorkspaceSupported={
                 registrationAvailable && Boolean(binding.registration)
@@ -1460,7 +1631,9 @@ export function WorkspaceBindingCreator({
               }
               showChatWidthToggle={false}
               contextChipPlacement="below"
-              currentModel={pending?.agentId ?? agentId}
+              currentModel={
+                pending?.modelId ?? pending?.agentId ?? selectedModel
+              }
               modelControlsDisabled={
                 busy || workspaceCreating || Boolean(pending)
               }
@@ -1504,7 +1677,7 @@ export function WorkspaceBindingCreator({
                   !workspaceCreating &&
                   !pendingRef.current &&
                   !optionsLoading &&
-                  isManagedApprovalMode(value) &&
+                  isManagedInitialApprovalMode(value) &&
                   currentOptions?.availableApprovalModes.includes(value)
                 ) {
                   setSessionOptions({
@@ -1514,12 +1687,12 @@ export function WorkspaceBindingCreator({
                 }
               }}
               availableModels={availableModels.map((item) => ({
-                id: item.agentId,
+                id: item.modelId ?? item.agentId,
                 label: item.label,
               }))}
               onSelectModel={(id) => {
                 if (!busy && !encoding.current && !pendingRef.current)
-                  setAgentId(id);
+                  setSelectedModel(id);
               }}
               workspaces={items.map((item) => ({
                 id: item.workspaceId,

@@ -763,15 +763,16 @@ describe('standalone release packaging', () => {
     expect(allowedBlock).not.toBeNull();
     expect(npmOnlyBlock).not.toBeNull();
     for (const entry of entries) {
-      if (entry.includes('*')) {
+      const topLevelEntry = entry.split('/')[0];
+      if (topLevelEntry.includes('*')) {
         // Glob entries (today: '*.sb') are covered by
         // DIST_ALLOWED_ENTRY_PATTERNS rather than a literal name.
         expect(packageScript).toContain('DIST_ALLOWED_ENTRY_PATTERNS');
         continue;
       }
       const known =
-        allowedBlock[1].includes(`'${entry}'`) ||
-        npmOnlyBlock[1].includes(`'${entry}'`);
+        allowedBlock[1].includes(`'${topLevelEntry}'`) ||
+        npmOnlyBlock[1].includes(`'${topLevelEntry}'`);
       expect(known, `npm files entry '${entry}' unknown to packager`).toBe(
         true,
       );
@@ -2951,13 +2952,30 @@ describe('standalone release packaging', () => {
 
     try {
       const archiveRoot = path.join(tmpDir, 'pkg');
-      mkdirSync(path.join(archiveRoot, 'qwen-code', 'bin'), {
-        recursive: true,
-      });
+      const packageRoot = path.join(archiveRoot, 'qwen-code');
+      for (const directory of ['bin', 'bun/bin', 'node/bin', 'lib']) {
+        mkdirSync(path.join(packageRoot, directory), { recursive: true });
+      }
       writeFileSync(
-        path.join(archiveRoot, 'qwen-code', 'bin', 'qwen'),
-        '#!/usr/bin/env sh\n',
+        path.join(packageRoot, 'manifest.json'),
+        JSON.stringify({
+          name: '@qwen-code/qwen-code',
+          version: '0.0.1',
+          runtime: 'bun',
+          target: `${process.platform}-${process.arch}`,
+        }),
       );
+      writeFileSync(
+        path.join(packageRoot, 'lib/package.json'),
+        '{"type":"module"}',
+      );
+      for (const file of ['lib/cli.js', 'lib/cli-entry.js']) {
+        writeFileSync(path.join(packageRoot, file), 'export {};\n');
+      }
+      for (const file of ['bin/qwen', 'bun/bin/bun', 'node/bin/node']) {
+        writeFileSync(path.join(packageRoot, file), '#!/usr/bin/env sh\n');
+        chmodSync(path.join(packageRoot, file), 0o755);
+      }
       const archive = path.join(
         tmpDir,
         'qwen-code-linux-x64-opentui-preview.tar.gz',

@@ -30,14 +30,14 @@ class BackfillWitnessesTest {
                                             + " table_schema = 'public' AND table_type='BASE"
                                             + " TABLE'",
                                         Integer.class))
-                .isEqualTo(33);
+                .isEqualTo(39);
         assertThat(
                         new JdbcTemplate(source)
                                 .queryForObject(
                                         "SELECT version FROM flyway_schema_history"
                                                 + " WHERE success = TRUE AND type = 'BASELINE'",
                                         String.class))
-                .isEqualTo("15");
+                .isEqualTo("1");
     }
 
     @Test
