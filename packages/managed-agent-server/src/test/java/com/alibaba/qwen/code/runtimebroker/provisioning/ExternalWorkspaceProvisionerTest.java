@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker.provisioning;
 
+import com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeObservation;
@@ -114,13 +115,18 @@ class ExternalWorkspaceProvisionerTest {
     void aScopeWithoutTheWorkspaceDigestKeepsTheScratchShapedRequest() {
         // Delegating keeps the base request shape for non-Workspace scopes; the
         // profile then fails closed instead of inventing a storage binding.
-        RuntimeProvisionRequest plain = provisioner(registration(PROVIDER, 1, MOUNT))
-                .createRequest(new RuntimeScope(TENANT, ALIAS, "1", MOUNT,
-                        "sha256:" + "c".repeat(64), "session"), "isolation-a");
-        assertEquals(ExternalWorkspaceProvisioner.KIND, plain.getProvisionerKind());
-        assertFalse(plain.isManagedContext());
-        assertEquals("external_workspace_storage_required",
-                failure(provisioner.ensureResource(plain, seed("plain-scope"), null)).getCode());
+        ExternalWorkspaceProvisioner subject = provisioner(registration(PROVIDER, 1, MOUNT));
+        for (String capability : List.of("sha256:" + "c".repeat(64),
+                ManagedExtensionExecutionProfile.LINUX_CAPABILITY_DIGEST,
+                ManagedExtensionExecutionProfile.DEVELOPER_CAPABILITY_DIGEST)) {
+            RuntimeProvisionRequest plain = subject.createRequest(scope(capability), "isolation-a");
+            assertEquals(ExternalWorkspaceProvisioner.KIND, plain.getProvisionerKind());
+            assertFalse(plain.isManagedContext(), capability);
+            RuntimeBrokerException refused = failure(
+                    subject.ensureResource(plain, seed("plain-scope"), null));
+            assertEquals("external_workspace_storage_required", refused.getCode());
+            assertFalse(refused.isRetryable());
+        }
         assertTrue(client.provisions.isEmpty());
     }
 

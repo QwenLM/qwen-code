@@ -74,7 +74,7 @@ public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvision
      */
     @Override
     public RuntimeProvisionRequest createRequest(RuntimeScope scope, String isolationKey) {
-        if (!WorkspaceExecutionProfile.admitsCapabilityDigest(scope.getCapabilityDigest())) {
+        if (!WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(scope.getCapabilityDigest())) {
             return super.createRequest(scope, isolationKey);
         }
         return new RuntimeProvisionRequest(scope, isolationKey, KIND, scope.getWorkspaceId());
