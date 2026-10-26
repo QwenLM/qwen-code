@@ -13,6 +13,7 @@ import {
   recordWatchTask,
   resetUnattendedFixGrantsForTests,
 } from '../../tools/autofix-pr-grants.js';
+import { runWithAgentContext } from './agent-context.js';
 import * as os from 'node:os';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -4658,6 +4659,79 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
         {},
         /a background fix agent of \/autofix-pr is working/,
       );
+    } finally {
+      resetUnattendedFixGrantsForTests();
+    }
+  });
+
+  /** A background fix of /autofix-pr at `wt`, its agent `agent-x`. */
+  const fixAt = async (wt: string) => {
+    grantUnattendedFixes('wf-session', {
+      pr: 7,
+      worktree: wt,
+      check: async () => true,
+      open: async () => ({ task: 't' }),
+      close: async () => {},
+    });
+    recordConfirmedWatch('wf-session', {
+      pr: 7,
+      repo: 'o/r',
+      host: null,
+      targetDir: '/fake/repo',
+      preparedAt: null,
+      worktree: wt,
+      authorCanPush: true,
+    });
+    recordWatchTask('wf-session', 7, {
+      task: 't',
+      reply: true,
+      instructions: '',
+    });
+    const fix = await openBackgroundFix(
+      'wf-session',
+      wt,
+      new AbortController().signal,
+    );
+    fix.attach('agent-x', () => {});
+    return fix;
+  };
+
+  it("dispatches what the fix's own agent asks for, in its worktree or the session's directory there", async () => {
+    try {
+      await fixAt('/fake/repo/.qwen/tmp/review-pr-7');
+      await expect(
+        runWithAgentContext(
+          'agent-x',
+          () => dispatchVia({ onCreate: ends('pinned') }, 'hi', PINNED).result,
+        ),
+      ).resolves.toBe('pinned');
+      resetUnattendedFixGrantsForTests();
+      await fixAt('/fake/repo');
+      await expect(
+        runWithAgentContext(
+          'agent-x',
+          () =>
+            dispatchVia({ onCreate: ends('own') }, 'hi', { model: 'qwen3-max' })
+              .result,
+        ),
+      ).resolves.toBe('own');
+    } finally {
+      resetUnattendedFixGrantsForTests();
+    }
+  });
+
+  it("waits for a dropped fix's agent to settle before it pins an agent to that worktree", async () => {
+    try {
+      const fix = await fixAt('/fake/repo/.qwen/tmp/review-pr-7');
+      fix.drop();
+      let returned = false;
+      const pinned = dispatchVia({ onCreate: ends('pinned') }, 'hi', PINNED);
+      void pinned.result.then(() => (returned = true));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(returned).toBe(false);
+      expect(pinned.calls).toHaveLength(0);
+      fix.bodySettled();
+      await expect(pinned.result).resolves.toBe('pinned');
     } finally {
       resetUnattendedFixGrantsForTests();
     }

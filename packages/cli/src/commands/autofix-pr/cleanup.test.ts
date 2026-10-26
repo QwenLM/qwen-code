@@ -329,6 +329,17 @@ describe('runCleanup (real git)', () => {
       expect(readState(paths.statePath)).not.toHaveProperty('ended');
     });
 
+    it('names the running fix before anything else, an unreadable watch too', () => {
+      // Before it reads the watch: a state file it cannot read would
+      // otherwise send the user to --force, which then refuses the same.
+      writeFileSync(paths.statePath, '{');
+      openAttempt();
+      for (const force of [false, true]) {
+        expect(() => runCleanup(7, force)).toThrow(refused);
+      }
+      expect(existsSync(paths.worktreePath)).toBe(true);
+    });
+
     it('keeps the worktree --force would discard', () => {
       run(paths.worktreePath, 'commit', '-q', '--allow-empty', '-m', 'fix');
       hooks.afterRead = () => {

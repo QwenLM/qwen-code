@@ -28,6 +28,10 @@ import {
   realpathSync,
 } from 'node:fs';
 import path from 'node:path';
+import {
+  getCurrentAgentAncestors,
+  getCurrentAgentId,
+} from '../agents/runtime/agent-context.js';
 
 /** A watch as the `prepare` this session ran reported it. */
 export interface ConfirmedWatch {
@@ -210,7 +214,8 @@ export function isUnattendedFixConfig(config: object): boolean {
 /** Drops everything a session confirmed and granted, and its fixes. */
 export function forgetAutofixPrSession(sessionId: string): void {
   for (const fix of [...fixes.values()]) {
-    if (fix.sessionId === sessionId) fix.drop();
+    // No notification: it would reach the session's next conversation.
+    if (fix.sessionId === sessionId) fix.drop({ notify: false });
   }
   confirmed.delete(sessionId);
   grants.delete(sessionId);
@@ -231,7 +236,7 @@ export function resetUnattendedFixGrantsForTests(): void {
 /** How often the session refreshes an attempt's marker. */
 export const FIX_HEARTBEAT_MS = 30_000;
 /** A refresh later than this past its time: the process was suspended. */
-const FIX_HEARTBEAT_LATE_MS = 60_000;
+export const FIX_HEARTBEAT_LATE_MS = 60_000;
 /** The attempt time limit: the agent is stopped then. */
 export const FIX_TIME_LIMIT_MS = 30 * 60_000;
 /** How long an attempt waits for its round's claim, from when it opened:
@@ -267,10 +272,12 @@ export class BackgroundFix {
    * `ended` when a stopped agent's grace ran out first. */
   readonly settled: Promise<void>;
   private settle!: () => void;
-  private cancelAgent: (() => void) | null = null;
+  private cancelAgent: ((notify: boolean) => void) | null = null;
   private descends: ((callerAgentId: string) => boolean) | null = null;
   /** A stop asked for before the agent launched: done as it launches. */
   private stopRequested = false;
+  /** Whether that stop, or the latest, tells the model: not on a reset. */
+  private stopNotifies = true;
   private isSettled = false;
   /** Until when an ended attempt's agent is waited for. */
   settleBy = 0;
@@ -372,31 +379,39 @@ export class BackgroundFix {
    * stops it now. */
   attach(
     agentId: string,
-    cancel: () => void,
+    cancel: (notify: boolean) => void,
     descends?: (callerAgentId: string) => boolean,
   ): void {
     this.agentId = agentId;
     this.cancelAgent = cancel;
     this.descends = descends ?? null;
-    if (this.done || this.stopRequested) cancel();
+    if (this.done || this.stopRequested) cancel(this.stopNotifies);
   }
 
   /**
    * Whether a call is this fix's own: its agent's, or an agent's that one
-   * started (each agent runs its tools in its own frame). Never the
+   * started, at any depth — known by the frames it runs in (`ancestors`),
+   * or, for an agent the registry holds, by its parent links. Never the
    * session's, nor an agent the session started.
    */
-  ownsCaller(callerAgentId: string | null): boolean {
+  ownsCaller(
+    callerAgentId: string | null,
+    ancestors: readonly string[] = [],
+  ): boolean {
     if (callerAgentId === null || this.agentId === null) return false;
     return (
-      callerAgentId === this.agentId || this.descends?.(callerAgentId) === true
+      callerAgentId === this.agentId ||
+      ancestors.includes(this.agentId) ||
+      this.descends?.(callerAgentId) === true
     );
   }
 
-  /** Stops the agent; its attempt stays the round's to claim. */
-  stop(): void {
+  /** Stops the agent; its attempt stays the round's to claim. Its
+   * notification is left out when the session's conversation is reset. */
+  stop({ notify = true }: { notify?: boolean } = {}): void {
     if (this.ended) return;
-    if (this.cancelAgent) this.cancelAgent();
+    this.stopNotifies = notify;
+    if (this.cancelAgent) this.cancelAgent(notify);
     else this.stopRequested = true;
   }
 
@@ -457,9 +472,9 @@ export class BackgroundFix {
    * Nothing more happens to the attempt: the agent is stopped, and its
    * marker, no longer refreshed, is left to the gate and the next round.
    */
-  drop(): void {
+  drop(options: { notify?: boolean } = {}): void {
     if (this.done) return;
-    this.stop();
+    this.stop(options);
     this.finish();
     // Stale as soon as its agent has stopped, not 90 seconds later: the
     // helpers then let the next round in, which the gate wakes for it.
@@ -647,8 +662,16 @@ export function backgroundFixHolding(
   callerAgentId: string | null,
 ): BackgroundFix | undefined {
   if (fixes.size === 0 && settling.size === 0) return undefined;
+  // The frames the caller runs in, when it is the agent running now: a
+  // workflow agent or a teammate the fix's agent started is in no registry
+  // the parent links are read from.
+  const ancestors =
+    callerAgentId !== null && callerAgentId === getCurrentAgentId()
+      ? getCurrentAgentAncestors()
+      : [];
   // Before the agent attaches, it has no id: no caller is it.
-  const notItsAgent = (fix: BackgroundFix) => !fix.ownsCaller(callerAgentId);
+  const notItsAgent = (fix: BackgroundFix) =>
+    !fix.ownsCaller(callerAgentId, ancestors);
   const running = containing(fixes, file, notItsAgent);
   // One found late is dropped here, into `settling`: looked up there next.
   const held = running ? live(running) : undefined;

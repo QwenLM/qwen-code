@@ -42,6 +42,7 @@ import {
   watchTask,
 } from './autofix-pr-grants.js';
 import { ToolConfirmationOutcome } from './tools.js';
+import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 
 // Stands in for the CLI: `prepare` reports FAKE_WORKTREE and
 // FAKE_CAN_PUSH, `status` prints FAKE_STATUS, it refuses or hangs on
@@ -1164,7 +1165,10 @@ describe('background fixes', () => {
   /** The launch's part: open the attempt, then attach the agent. */
   const launched = async (agentId = 'agent-1') => {
     const fix = await openBackgroundFix('session-a', worktree, signal());
-    fix.attach(agentId, () => cancel(agentId));
+    // As the registry is asked: with no options, or told not to notify.
+    fix.attach(agentId, (notify) =>
+      notify ? cancel(agentId) : cancel(agentId, { notify: false }),
+    );
     return fix;
   };
   const run = (params: AutofixPrParams, config = registryConfig()) =>
@@ -1228,6 +1232,19 @@ describe('background fixes', () => {
     await expect(
       openBackgroundFix('session-a', worktree, signal()),
     ).rejects.toThrow(/runs without asking/);
+    // Granted, but no task scheduled: no round could claim it.
+    const config = registryConfig();
+    await prepare(config);
+    const inv = invocation({ command: 'unattended', pr: 12 }, config);
+    await (
+      await inv.getConfirmationDetails(signal())
+    ).onConfirm(ToolConfirmationOutcome.ProceedOnce);
+    expect((await inv.execute(signal())).error).toBeUndefined();
+    await expect(
+      openBackgroundFix('session-a', worktree, signal()),
+    ).rejects.toThrow(/has no task this session scheduled/);
+    expect(backgroundFixOf('session-a', 12)).toBeUndefined();
+    expect(log().filter((line) => line.startsWith('fix-start'))).toEqual([]);
     await granted();
     vi.stubEnv('FAKE_AUTOFIX_MODE', 'refuse');
     await expect(
@@ -1560,6 +1577,24 @@ describe('background fixes', () => {
     expect(held(path.join(worktree, 'src', 'new', 'a.ts'))).toBe(true);
     expect(held(path.join(worktree, '..foo', 'x'))).toBe(true);
     expect(held(path.join(worktree, 'a.ts'), 'agent-1')).toBe(false);
+    // A workflow agent or teammate its agent started, in no registry: known
+    // by the frames it runs in — only when it is the agent running now.
+    const inFrames = (...ids: string[]) =>
+      ids.reduceRight<() => Promise<boolean>>(
+        (inner, id) => () => runWithAgentContext(id, inner),
+        async () => held(path.join(worktree, 'a.ts'), ids.at(-1)!),
+      )();
+    expect(await inFrames('agent-1', 'workflow-1')).toBe(false);
+    expect(await inFrames('agent-1', 'workflow-1', 'nested-1')).toBe(false);
+    expect(await inFrames('session-agent', 'workflow-2')).toBe(true);
+    expect(held(path.join(worktree, 'a.ts'), 'workflow-1')).toBe(true);
+    expect(
+      await runWithAgentContext('agent-1', () =>
+        runWithAgentContext('workflow-1', async () =>
+          held(path.join(worktree, 'a.ts'), 'someone-else'),
+        ),
+      ),
+    ).toBe(true);
     expect(
       held(path.join(path.dirname(worktree), 'autofix-pr-12-plan.json')),
     ).toBe(false);
@@ -1593,6 +1628,15 @@ describe('background fixes', () => {
       ).toBe(true);
       // A backslash is a character of a name outside Windows.
       expect(held(`${worktree}/a\\..\\..\\..\\b/conftest.py`)).toBe(true);
+      // Links that go round, as `node_modules` trees can: the walk ends.
+      fs.symlinkSync('self', path.join(out, 'self'));
+      fs.symlinkSync('ring-b', path.join(out, 'ring-a'));
+      fs.symlinkSync('ring-a', path.join(out, 'ring-b'));
+      fs.symlinkSync(path.join(out, 'ring-a'), path.join(worktree, 'ring'));
+      expect(held(path.join(out, 'self', 'x.ts'))).toBe(false);
+      expect(held(path.join(out, 'ring-a', 'x.ts'))).toBe(false);
+      // Into the ring from the worktree: a write there fails (ELOOP).
+      expect(held(path.join(worktree, 'ring', 'x.ts'))).toBe(false);
     } finally {
       fs.rmSync(out, { recursive: true, force: true });
     }
@@ -1639,32 +1683,51 @@ describe('background fixes', () => {
     });
 
     it('stops the agent and lets go when the marker is another attempt, gone, or a link', async () => {
-      for (const plant of [
-        () => writeMarker('ba9876543210'),
-        () => fs.rmSync(marker()),
-        // Links need privileges on Windows.
-        ...(process.platform === 'win32'
-          ? []
-          : [
-              () => {
-                const target = path.join(dir, 'target');
-                writeMarker(fix.attempt);
-                fs.renameSync(marker(), target);
-                fs.symlinkSync(target, marker());
-              },
-            ]),
-      ]) {
-        resetUnattendedFixGrantsForTests();
-        cancel.mockReset();
-        await granted();
-        fix = await launched();
+      const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'autofix-link-'));
+      /** A link at the marker to a file naming this attempt, dated `old`. */
+      const linkTo = (target: string) => () => {
         writeMarker(fix.attempt);
-        plant();
-        await vi.advanceTimersByTimeAsync(FIX_HEARTBEAT_MS);
-        expect(fix.done).toBe(true);
-        expect(cancel).toHaveBeenCalledWith('agent-1');
-        expect(fix.followUp()).toBeUndefined();
-        fs.rmSync(marker(), { force: true });
+        fs.renameSync(marker(), target);
+        const old = new Date('2026-10-01T00:00:00Z');
+        fs.utimesSync(target, old, old);
+        fs.symlinkSync(target, marker());
+        return target;
+      };
+      try {
+        for (const plant of [
+          () => void writeMarker('ba9876543210'),
+          () => void fs.rmSync(marker()),
+          // Links need privileges on Windows.
+          ...(process.platform === 'win32'
+            ? []
+            : [
+                linkTo(path.join(dir, 'target')),
+                linkTo(path.join(outside, 'target')),
+              ]),
+        ] as Array<() => string | undefined>) {
+          resetUnattendedFixGrantsForTests();
+          cancel.mockReset();
+          await granted();
+          fix = await launched();
+          writeMarker(fix.attempt);
+          const target = plant();
+          await vi.advanceTimersByTimeAsync(FIX_HEARTBEAT_MS);
+          expect(fix.done).toBe(true);
+          expect(cancel).toHaveBeenCalledWith('agent-1');
+          expect(fix.followUp()).toBeUndefined();
+          // Its stopped agent settles, and the marker is expired: never
+          // what a link there names.
+          fix.bodySettled();
+          await vi.advanceTimersByTimeAsync(0);
+          if (target) {
+            expect(fs.statSync(target).mtimeMs).toBe(
+              new Date('2026-10-01T00:00:00Z').getTime(),
+            );
+          }
+          fs.rmSync(marker(), { force: true });
+        }
+      } finally {
+        fs.rmSync(outside, { recursive: true, force: true });
       }
     });
 
@@ -1796,7 +1859,34 @@ describe('background fixes', () => {
       expect(fix.done).toBe(false);
       forgetAutofixPrSession('session-a');
       expect(fix.done).toBe(true);
-      expect(cancel).toHaveBeenCalledWith('agent-1');
+      // Its notification would reach the session's next conversation.
+      expect(cancel).toHaveBeenCalledWith('agent-1', { notify: false });
+      expect(cancel).toHaveBeenCalledTimes(1);
+    });
+
+    it("stops an agent that launches after a stop with the stop's notification", () => {
+      const bare = (task: { reply: boolean; instructions: string }) =>
+        new BackgroundFix(
+          'session-c',
+          12,
+          'o/r',
+          worktree,
+          { task: 'feedc0ffee12', ...task },
+          {
+            pr: 12,
+            worktree,
+            check: async () => true,
+            open: async () => ({ task: 'feedc0ffee12' }),
+            close: async () => {},
+          },
+        );
+      for (const notify of [false, true]) {
+        const early = bare({ reply: true, instructions: '' });
+        early.stop({ notify });
+        const stopped = vi.fn();
+        early.attach('agent-2', stopped);
+        expect(stopped).toHaveBeenCalledWith(notify);
+      }
     });
 
     it('tells the round to go on with the options the session scheduled', () => {
@@ -1808,6 +1898,33 @@ describe('background fixes', () => {
       );
       fix.claim();
       expect(fix.followUp()).toBeUndefined();
+    });
+
+    it('says nothing of replies or instructions a watch was scheduled without', () => {
+      const bare = (task: { reply: boolean; instructions: string }) =>
+        new BackgroundFix(
+          'session-c',
+          12,
+          'o/r',
+          worktree,
+          { task: 'feedc0ffee12', ...task },
+          {
+            pr: 12,
+            worktree,
+            check: async () => true,
+            open: async () => ({ task: 'feedc0ffee12' }),
+            close: async () => {},
+          },
+        );
+      const argsOf = (f: BackgroundFix) => f.followUp()!.split('\n').at(-1);
+      const replying = bare({ reply: true, instructions: '' });
+      expect(argsOf(replying)).toBe(
+        `after-fix o/r#12 --task feedc0ffee12 --attempt ${replying.attempt}`,
+      );
+      const instructed = bare({ reply: true, instructions: 'keep the API' });
+      expect(argsOf(instructed)).toBe(
+        `after-fix o/r#12 --task feedc0ffee12 --attempt ${instructed.attempt} -- keep the API`,
+      );
     });
   });
 });

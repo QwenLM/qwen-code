@@ -2935,6 +2935,44 @@ describe('AgentTool', () => {
         );
 
         itInRepo(
+          "lets the fix's own agent pin its agents to the worktree, and waits for a dropped fix's agent to settle",
+          async (repo) => {
+            const wt = addWorktree(repo);
+            vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+            grant(wt, true);
+            const live = await openBackgroundFix(
+              'test-session-id',
+              canonicalWorktreePath(wt),
+              new AbortController().signal,
+            );
+            live.attach('fix-agent', () => {});
+            const pinned = review(wt, { subagent_type: 'general-purpose' });
+            // The session's agent beside it: refused.
+            expect(textOf(await run(pinned))).toMatch(
+              /a background fix agent of \/autofix-pr is working/,
+            );
+            // One the fix's own agent starts: its own.
+            const own = await runWithAgentContext('fix-agent', () =>
+              invoke(pinned).execute(new AbortController().signal),
+            );
+            expect(textOf(own)).not.toMatch(/background fix agent/);
+            // Dropped while its agent still writes: an agent in the
+            // session's own directory there waits for it first.
+            live.drop();
+            vi.mocked(config.getTargetDir).mockReturnValue(wt);
+            let returned = false;
+            const waiting = run(fg()).then((result) => {
+              returned = true;
+              return result;
+            });
+            await new Promise((resolve) => setTimeout(resolve, 100));
+            expect(returned).toBe(false);
+            live.bodySettled();
+            expect(textOf(await waiting)).not.toMatch(/background fix agent/);
+          },
+        );
+
+        itInRepo(
           'refuses rather than run in the background when the grant no longer holds',
           async (repo) => {
             const wt = addWorktree(repo);

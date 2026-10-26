@@ -40,10 +40,16 @@ export interface AutofixPrFixAttempt {
   startedAt: string;
 }
 
-/** The session refreshes the marker every 30 seconds. */
+/** The session refreshes the marker every 30 seconds and drops the attempt
+ * once a refresh is a minute late (`FIX_HEARTBEAT_MS` and
+ * `FIX_HEARTBEAT_LATE_MS` in core): fresh while the attempt may be live. */
 export const FIX_FRESH_MS = 90_000;
-/** The session stops the agent at 30 minutes and waits 10 for the claim: a
- * marker kept fresh for longer is no attempt of the session's. */
+/** The session stops the agent at 30 minutes, and the round may claim the
+ * attempt until 40 (`FIX_TIME_LIMIT_MS` and `FIX_CLAIM_DEADLINE_MS` in
+ * core). This bound must stay above that deadline: a claimable attempt read
+ * as left behind would be removed by the next `sync`. The five minutes over
+ * it leave room for the clocks. A marker kept fresh for longer is no
+ * attempt of the session's. */
 export const FIX_MAX_AGE_MS = 45 * 60_000;
 /** How far ahead of this clock another's may run. */
 const CLOCK_SKEW_MS = 60_000;

@@ -112,7 +112,6 @@ import { createDebugLogger } from '../../utils/debugLogger.js';
 import { PermissionMode } from '../../hooks/types.js';
 import { approvalModeToPermissionMode } from '../../hooks/permission-mode.js';
 import {
-  backgroundFixAt,
   backgroundFixHolding,
   hasUnattendedFixGrant,
   isUnattendedFixConfig,
@@ -3441,10 +3440,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           return failWorktreeProvisioning(resolved.error);
         }
         // A background fix agent works there now, or its round has yet to go
-        // on: no other agent may work beside it, in either mode. One that is
-        // late is over, once its agent settled.
+        // on: no other agent may work beside it, in either mode — but one
+        // that agent starts is its own. One that is late is over, once its
+        // agent settled.
         await settleBackgroundFix({ worktree: resolved.path });
-        if (backgroundFixAt(resolved.path)) {
+        if (backgroundFixHolding(resolved.path, getCurrentAgentId())) {
           return failWorktreeProvisioning(
             `Error: a background fix agent of /autofix-pr is working in ${resolved.path}; its round goes on when it ends.`,
           );
@@ -3964,7 +3964,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             const fixAgentId = hookOpts.agentId;
             backgroundFix.attach(
               fixAgentId,
-              () => registry.cancel(fixAgentId),
+              (notify) => registry.cancel(fixAgentId, { notify }),
               // An agent it starts records it as parent: its own, too, at
               // any depth the session allows.
               (callerAgentId) => {
@@ -5379,7 +5379,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // Not beside a background fix agent of /autofix-pr, nor before its
         // round went on.
         await settleBackgroundFix({ worktree: resolved.path });
-        if (backgroundFixAt(resolved.path)) {
+        if (backgroundFixHolding(resolved.path, getCurrentAgentId())) {
           return this.buildSpawnBlockedResult(
             `Error: a background fix agent of /autofix-pr is working in ${resolved.path}; its round goes on when it ends.`,
             'Worktree in use by a background fix',

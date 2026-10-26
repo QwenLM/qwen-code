@@ -72,9 +72,10 @@ export interface WatchStatus {
    * `cleanup` judges it without asking the remote, or null. A round that
    * starts on it discards it. */
   worktreeWork: string | null;
-  /** The attempt of a fix agent running in the background, or null: while
-   * `fresh`, its agent works in the worktree and the round's helpers refuse;
-   * otherwise its session left it behind (Section 6.14). */
+  /** The attempt of a fix agent run in the background, or null: while
+   * `fresh` it has not ended — its agent works in the worktree, or was
+   * stopped and the round may still claim it — and the round's helpers
+   * refuse; otherwise its session left it behind (Section 6.14). */
   fix: {
     attempt: string | null;
     startedAt: string | null;

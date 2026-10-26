@@ -65,6 +65,13 @@ interface AgentContext {
    * {@link getCurrentAgentDepth} for telemetry (#3731 Phase 3).
    */
   readonly depth?: number;
+  /**
+   * The agents whose frames this agent's frame was opened in, outermost
+   * first: the ones that started it, through any runtime (the `agent` tool,
+   * a workflow's dispatch, a teammate's spawn). A frame re-entered from
+   * outside them — a resume, an approval's re-entry — starts with none.
+   */
+  readonly ancestors?: readonly string[];
 }
 
 const storage = new AsyncLocalStorage<AgentContext>();
@@ -82,7 +89,16 @@ export function runWithAgentContext<T>(
   // recomputes from a top-level (depth 0) parent and a resumed nested agent
   // would regain spawn capacity it should not have.
   const depth = depthOverride ?? (current.depth ?? -1) + 1;
-  return storage.run({ ...current, agentId, depth }, fn);
+  const ancestors =
+    current.agentId !== undefined && current.agentId !== agentId
+      ? [...(current.ancestors ?? []), current.agentId]
+      : (current.ancestors ?? []);
+  return storage.run({ ...current, agentId, depth, ancestors }, fn);
+}
+
+/** The agents the current agent's frame was opened in, outermost first. */
+export function getCurrentAgentAncestors(): readonly string[] {
+  return storage.getStore()?.ancestors ?? [];
 }
 
 export function runWithRuntimeContentGenerator<T>(

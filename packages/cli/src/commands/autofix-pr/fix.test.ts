@@ -46,6 +46,12 @@ import {
   runFixEnd,
   runFixStart,
 } from './fix.js';
+import {
+  FIX_CLAIM_DEADLINE_MS,
+  FIX_HEARTBEAT_LATE_MS,
+  FIX_HEARTBEAT_MS,
+  FIX_TIME_LIMIT_MS,
+} from '@qwen-code/qwen-code-core/tools/autofix-pr-grants.js';
 import { autofixPrPaths, writeState, type AutofixPrState } from './state.js';
 import { runCiLog } from './ci-log.js';
 import { runCleanup } from './cleanup.js';
@@ -334,6 +340,20 @@ describe('fix-start and fix-end', () => {
       expect(() => runFixStart({ pr: 7, attempt })).toThrow(/--attempt/);
       expect(() => runFixEnd({ pr: 7, attempt })).toThrow(/--attempt/);
     }
+  });
+
+  it('reads a marker as fresh for as long as the session may keep its attempt live', () => {
+    // The two halves of the marker's contract: the session (core) refreshes
+    // and drops it, these helpers read it.
+    expect(FIX_HEARTBEAT_MS).toBe(30_000);
+    expect(FIX_TIME_LIMIT_MS).toBe(30 * 60_000);
+    expect(FIX_CLAIM_DEADLINE_MS).toBe(40 * 60_000);
+    // Not stale before the session would drop it for a late refresh.
+    expect(FIX_FRESH_MS).toBeGreaterThanOrEqual(
+      FIX_HEARTBEAT_MS + FIX_HEARTBEAT_LATE_MS,
+    );
+    // Not too old while its round may still claim it.
+    expect(FIX_MAX_AGE_MS).toBeGreaterThan(FIX_CLAIM_DEADLINE_MS);
   });
 
   it('is fresh only while the session refreshes it and within the time an attempt lives', () => {

@@ -508,6 +508,14 @@ when there are none, so the session is woken only for them:
   always goes, so every run makes progress.
 - The first run reports what is outstanding: failed checks, a conflict, and
   comments no one has handled.
+- An attempt of a background fix its session left behind (a stale marker,
+  Section 6.14) is reported once per attempt id as an `abandoned_fix` event,
+  recorded in the cursor (`reportedAbandonedFix`), and only by the watch's
+  own gate (a run with `--session`): a probe by hand or a Managed
+  automation's gate wakes no round to handle it. It goes after the other
+  events, outside the 12 KiB they are fitted to — it is a few dozen bytes —
+  and makes the action `fix` though nothing else changed. While a marker is
+  fresh the gate prints nothing at all.
 
 The cursor is written before the output, so a probe that prints and then
 dies cannot report the same transitions twice. `ci_pending` and the `wait`
@@ -950,9 +958,10 @@ the reason for a state file that could not be read. Each watch carries:
   A round that starts on it
   discards it, so a take-over or a resume says so before it asks;
 - `fix`: `{ attempt, startedAt, fresh }` for a background fix's attempt
-  marker, or null. While `fresh`, its agent works in the worktree and the
-  round's helpers refuse; otherwise its session left it behind, and the
-  next round's `sync` removes it (Section 6.14).
+  marker, or null. `fresh` is an attempt that has not ended: its agent works
+  in the worktree, or was stopped and the round may still claim the attempt
+  — either way the round's helpers refuse. Otherwise its session left it
+  behind, and the next round's `sync` removes it (Section 6.14).
 
 The gate cursor outlives a watch (Section 6.6), so it is read only when it
 names the watch's repository and is no older than the watch (`preparedAt`,
@@ -1016,10 +1025,12 @@ gate and the prompt are not composed in a prompt.
 
 A core tool runs the helpers, so that a rule can name them. One call runs
 one helper: `command` names it (`prepare`, `snapshot`, `ci-log`, `push`,
-`sync`, `reply`, `rerun`, `schedule`, `status`, `cleanup`), and typed
+`sync`, `reply`, `rerun`, `schedule`, `status`, `cleanup`; `fix-end`,
+Section 6.14; `unattended` and `attended`, Section 6.13 — `fix-start` is
+no command of the tool: the launch of a background fix runs it), and typed
 parameters carry its options (`pr`, `repo`, `host`, `take_over`, `task`,
 `run_id`, `lines`, `plan`, `no_post`, `discard`, `every`, `no_reply`,
-`instructions`, `again`). The tool builds the arguments itself, options as
+`instructions`, `again`, and `attempt`, which `fix-end` requires). The tool builds the arguments itself, options as
 `--name=value`, and starts the CLI without a shell, so nothing in a
 parameter is read as shell syntax or as an option; a parameter the command
 does not take is a refusal before anything runs. `reply`'s plan must be the
@@ -1247,10 +1258,18 @@ grant no longer holds or no round has a fix to start; any other refusal (a
 fix in flight, one left behind, a watch no longer the round's) ends the
 round. So every background agent at a worktree has an attempt tied to the
 round that prepared it, and while one lives no other agent, teammate or
-workflow agent launches there, in the foreground or the background. The session's own `edit`,
-`write_file` and `notebook_edit` into the worktree — any but the fix
-agent's and those of an agent it started, at any depth (the registry's
-parent links) — the path resolved as
+workflow agent launches there, in the foreground or the background — but
+one the fix agent starts, itself or through an agent it started, is its
+own. The fix's own agents are known by the frames their tools run in (an
+agent's frame is opened in the frame of the agent that starts it, through
+the `agent` tool, a workflow's dispatch or a teammate's spawn — for a
+teammate, the turns of its first task and of the messages its spawner sends
+it), and, for an agent in the background registry, by its parent links too.
+A frame opened from outside them — a resume, an approval's re-entry, a
+teammate's turn another agent's message starts — knows none, so its writes
+ask: the frames only ever make fewer of them ask. The session's own `edit`,
+`write_file` and `notebook_edit` into the worktree — any but those of the
+fix's own agents — the path resolved as
 the kernel will, each link followed as written before a `..` after it, and
 also as Windows will, which folds `..` as text first; inside either way is
 inside — ask the user whatever the approval mode,
@@ -1330,7 +1349,9 @@ for the next stop. The session drops the
 attempt, and with it the marker's refreshes, when no claim came within 40
 minutes of the attempt's opening — a notification waits for the session to
 be idle, so the deadline does not run from the agent's end — and when the
-session or its process ends. A dropped attempt's marker is made stale once
+session or its process ends, or its conversation is reset (`/clear`,
+`/resume`), when the agent is stopped with no notification: one would
+reach the next conversation. A dropped attempt's marker is made stale once
 its stopped agent has settled (at most 15 seconds), while it still names
 that attempt, so the helpers let the next round in then rather than 90
 seconds later.

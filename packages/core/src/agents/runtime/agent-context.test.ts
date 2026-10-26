@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import {
   canSpawnNestedAgent,
   childLaunchDepth,
+  getCurrentAgentAncestors,
   getCurrentAgentDepth,
   getCurrentAgentDisallowedTools,
   getCurrentAgentId,
@@ -89,6 +90,27 @@ describe('agent-context (agentId)', () => {
         expect(getCurrentAgentId()).toBe('inner-2');
       });
       expect(getCurrentAgentId()).toBe('outer-1');
+    });
+  });
+
+  it('records the agents a frame was opened in, outermost first', async () => {
+    expect(getCurrentAgentAncestors()).toEqual([]);
+    await runWithAgentContext('fix-1', async () => {
+      expect(getCurrentAgentAncestors()).toEqual([]);
+      await runWithAgentContext('workflow-2', async () => {
+        await runWithAgentContext('nested-3', async () => {
+          expect(getCurrentAgentAncestors()).toEqual(['fix-1', 'workflow-2']);
+        });
+        // Re-entered under its own id (a resumed tool call): no new link.
+        await runWithAgentContext(
+          'workflow-2',
+          async () => {
+            expect(getCurrentAgentAncestors()).toEqual(['fix-1']);
+          },
+          1,
+        );
+      });
+      expect(getCurrentAgentAncestors()).toEqual([]);
     });
   });
 

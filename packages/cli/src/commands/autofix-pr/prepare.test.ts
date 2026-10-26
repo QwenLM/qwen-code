@@ -289,7 +289,16 @@ describe('runPrepare (real git)', () => {
     // a sibling checkout prepares it outside its own directory — where the
     // daemon refuses every command the fix agent would run.
     const elsewhere = join(dir, 'elsewhere');
-    run(clone, 'worktree', 'add', '-q', '-b', 'other', elsewhere, 'main');
+    run(
+      clone,
+      'worktree',
+      'add',
+      '-q',
+      '-b',
+      'other',
+      elsewhere,
+      'origin/main',
+    );
     const savedServe = process.env['QWEN_CODE_SERVE'];
     process.env['QWEN_CODE_SERVE'] = '1';
     process.chdir(elsewhere);
@@ -324,7 +333,16 @@ describe('runPrepare (real git)', () => {
     runPrepare({ pr: 7, repo: 'o/r' });
     const paths = autofixPrPaths(clone, 7);
     const elsewhere = join(dir, 'elsewhere');
-    run(clone, 'worktree', 'add', '-q', '-b', 'other', elsewhere, 'main');
+    run(
+      clone,
+      'worktree',
+      'add',
+      '-q',
+      '-b',
+      'other',
+      elsewhere,
+      'origin/main',
+    );
     const savedServe = process.env['QWEN_CODE_SERVE'];
     process.env['QWEN_CODE_SERVE'] = '1';
     process.chdir(elsewhere);
