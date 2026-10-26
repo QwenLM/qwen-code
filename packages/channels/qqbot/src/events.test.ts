@@ -3886,11 +3886,14 @@ describe('qqbot moderation tools', () => {
     expect(registeredTools()).toEqual([]);
   });
 
-  it('registers the recall tool when moderationTools is true', () => {
+  it('registers the group-management tools when moderationTools is true', () => {
     const names = registeredTools({ moderationTools: true }).map(
       (tool) => tool.name,
     );
-    expect(names).toEqual(['qq_recall_message']);
+    expect(names).toHaveLength(18);
+    expect(names[0]).toBe('qq_recall_message');
+    expect(names).toContain('qq_kick_member');
+    expect(names).toContain('qq_execute_join_approval_strategy');
   });
 
   it('registers nothing when moderationTools is false', () => {
@@ -4260,7 +4263,9 @@ describe('qqbot moderation tool ownership and recovery', () => {
           tools.push(tool),
       },
     );
-    expect(tools.map((tool) => tool.name)).toEqual(['qq_recall_message']);
+    const names = tools.map((tool) => tool.name);
+    expect(names).toHaveLength(18);
+    expect(names[0]).toBe('qq_recall_message');
     expect(tools.every((tool) => tool.owner === 'test-bot')).toBe(true);
   });
 
@@ -4273,13 +4278,15 @@ describe('qqbot moderation tool ownership and recovery', () => {
         registerChannelTool: (tool: { name: string }) => first.push(tool.name),
       },
     );
-    expect(first).toEqual(['qq_recall_message']);
+    expect(first).toHaveLength(18);
+    expect(first[0]).toBe('qq_recall_message');
 
     ch.setBridge({
       registerChannelTool: (tool: { name: string }) => second.push(tool.name),
     } as never);
 
-    expect(second).toEqual(['qq_recall_message']);
+    expect(second).toHaveLength(18);
+    expect(second[0]).toBe('qq_recall_message');
     expect(second).toContain('qq_recall_message');
   });
 
