@@ -6,7 +6,7 @@ import { expect, it } from 'vitest';
 import { Storage, type ChatRecord } from '@qwen-code/qwen-code-core';
 import { spawnDaemon, type SpawnedDaemon } from './_daemon-harness.js';
 
-it('relocates secondary sessions independently and reapplies cd after restart without Git', async () => {
+async function verifySecondarySessionCd(rootKind: 'ordinary' | 'symlinked') {
   const directory = await fs.mkdtemp(
     path.join(os.tmpdir(), 'qwen-session-cd-'),
   );
@@ -26,6 +26,15 @@ it('relocates secondary sessions independently and reapplies cd after restart wi
     neighborDirectory,
   ]) {
     await fs.mkdir(target, { recursive: true });
+  }
+  const registrationPath =
+    rootKind === 'symlinked' ? path.join(root, 'secondary-alias') : secondary;
+  if (rootKind === 'symlinked') {
+    await fs.symlink(
+      secondary,
+      registrationPath,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
   }
   await fs.writeFile(
     path.join(qwenHome, 'settings.json'),
@@ -60,7 +69,7 @@ it('relocates secondary sessions independently and reapplies cd after restart wi
       bootTimeoutMs: 60_000,
       extraArgs: ['--enable-session-shell'],
     });
-    const registered = await post('/workspaces', { cwd: secondary });
+    const registered = await post('/workspaces', { cwd: registrationPath });
     expect(registered.status, await registered.text()).toBe(201);
   };
   const post = (route: string, body: unknown, clientId?: string) =>
@@ -108,7 +117,15 @@ it('relocates secondary sessions independently and reapplies cd after restart wi
     ] as const) {
       const response = await post(
         `/session/${target.sessionId}/cd`,
-        { path: targetDirectory },
+        {
+          path:
+            target === primarySession
+              ? targetDirectory
+              : path.join(
+                  registrationPath,
+                  path.relative(secondary, targetDirectory),
+                ),
+        },
         target.clientId,
       );
       expect(response.status, await response.text()).toBe(200);
@@ -126,7 +143,9 @@ it('relocates secondary sessions independently and reapplies cd after restart wi
         { path: target },
         session.clientId,
       );
-      expect(response.status, await response.text()).toBe(400);
+      const body = await response.json();
+      expect(response.status, JSON.stringify(body)).toBe(400);
+      expect(body.code).toBe('containment_violation');
     }
     expect(await shellCwd(session)).toBe(sessionDirectory);
     expect(await shellCwd(neighbor)).toBe(neighborDirectory);
@@ -198,4 +217,10 @@ it('relocates secondary sessions independently and reapplies cd after restart wi
     await daemon?.dispose();
     await fs.rm(directory, { recursive: true, force: true });
   }
-}, 180_000);
+}
+
+it.each(['ordinary', 'symlinked'] as const)(
+  'relocates secondary sessions independently and reapplies cd after restart without Git (%s root)',
+  verifySecondarySessionCd,
+  180_000,
+);
