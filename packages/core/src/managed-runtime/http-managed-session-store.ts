@@ -4,6 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  parseManagedPermissionRules,
+  nonEmptyManagedPermissionRules,
+  type ManagedPermissionRules,
+} from './managed-permission-rules.js';
+
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { isIPv4 } from 'node:net';
 import { managedToolDigest } from '../tools/managed-tool-protocol.js';
@@ -142,6 +148,12 @@ export interface CsiApplicationRetirementStatus {
   readonly finalizeReceiptSha256: string | null;
 }
 
+export interface ManagedQueuedUserMessage {
+  readonly id: string;
+  readonly revision: number;
+  readonly input: readonly unknown[];
+}
+
 export interface HttpManagedSessionStores {
   readonly journalStore: ManagedSessionJournalStore;
   readonly resourceStore: ManagedSessionResourceStore;
@@ -164,12 +176,19 @@ export interface HttpManagedSessionStores {
   close(): Promise<void>;
   setLifecycleAuthority(authority?: ManagedSessionLifecycleAuthority): void;
   authorizeLifecycle(kind?: 'close' | 'delete'): Promise<void>;
-  authorizeOrdinary(kind?: 'legacy-close'): Promise<void>;
+  authorizeOrdinary(
+    kind?: 'legacy-close' | `configuration:${string}`,
+  ): Promise<void>;
   approvalSelection(): Promise<ManagedSessionApprovalSelection | undefined>;
+  claimUserMessages(
+    promptId: string,
+    initialOnly?: boolean,
+  ): Promise<ManagedQueuedUserMessage[]>;
 }
 
 export interface ManagedSessionApprovalSelection {
-  readonly mode: 'default' | 'auto-edit' | 'yolo';
+  readonly mode: 'default' | 'auto-edit' | 'yolo' | 'auto';
+  readonly permissionRules?: ManagedPermissionRules;
   readonly revision: number;
 }
 
@@ -263,6 +282,8 @@ export function createHttpManagedSessionStores(
     authorizeLifecycle: (kind) => client.authorizeLifecycle(kind),
     authorizeOrdinary: (kind) => client.authorizeOrdinary(kind),
     approvalSelection: () => client.approvalSelection(),
+    claimUserMessages: (promptId, initialOnly) =>
+      client.claimUserMessages(promptId, initialOnly),
   };
 }
 
@@ -789,13 +810,58 @@ class ManagedSessionStoreHttpClient {
     this.lifecycleAuthority = authority;
   }
 
-  async authorizeOrdinary(kind?: 'legacy-close'): Promise<void> {
+  async authorizeOrdinary(
+    kind?: 'legacy-close' | `configuration:${string}`,
+  ): Promise<void> {
     await this.assertWritable();
     await this.json('/execution:authorize', 'POST', {
       ...(kind ? { kind } : {}),
       workspaceId: this.sessionKey.workspaceId,
       writerId: this.writerId,
       writerGeneration: this.grant!.writerGeneration,
+    });
+  }
+
+  async claimUserMessages(
+    promptId: string,
+    initialOnly?: boolean,
+  ): Promise<ManagedQueuedUserMessage[]> {
+    await this.assertWritable();
+    let value: unknown;
+    try {
+      value = await this.json('/user-messages:claim', 'POST', {
+        workspaceId: this.sessionKey.workspaceId,
+        writerId: this.writerId,
+        writerGeneration: this.grant!.writerGeneration,
+        promptId,
+        initialOnly: initialOnly ?? false,
+      });
+    } catch (error) {
+      if (
+        error instanceof ManagedSessionStoreHttpError &&
+        error.status === 404 &&
+        error.remoteCode === 'not_found'
+      )
+        return [];
+      throw error;
+    }
+    if (!Array.isArray(value) || value.length > 32)
+      throw corrupt('invalid user message queue.');
+    return value.map((entry) => {
+      const message = asRecord(entry, 'queued user message');
+      if (
+        typeof message['id'] !== 'string' ||
+        !message['id'].startsWith('umsg_') ||
+        !Number.isSafeInteger(message['revision']) ||
+        Number(message['revision']) < 1 ||
+        !Array.isArray(message['input'])
+      )
+        throw corrupt('invalid queued user message.');
+      return {
+        id: message['id'],
+        revision: Number(message['revision']),
+        input: message['input'],
+      };
     });
   }
 
@@ -811,17 +877,37 @@ class ManagedSessionStoreHttpClient {
     if (value === null) return undefined;
     const selection = asRecord(value, 'approval selection');
     if (
-      Object.keys(selection).length !== 2 ||
-      !['default', 'auto-edit', 'yolo'].includes(String(selection['mode'])) ||
+      Object.keys(selection).length !==
+        (selection['permissionRules'] === undefined ? 2 : 3) ||
+      !['default', 'auto-edit', 'yolo', 'auto'].includes(
+        String(selection['mode']),
+      ) ||
       typeof selection['mode'] !== 'string' ||
       typeof selection['revision'] !== 'number' ||
       !Number.isSafeInteger(selection['revision']) ||
       selection['revision'] < 0
     )
       throw corrupt('approval selection is invalid.');
+    let permissionRules: ManagedPermissionRules | undefined;
+    try {
+      permissionRules =
+        selection['permissionRules'] === undefined
+          ? undefined
+          : nonEmptyManagedPermissionRules(
+              parseManagedPermissionRules(selection['permissionRules']),
+            );
+    } catch {
+      throw corrupt('approval selection rules are invalid.');
+    }
+    if (
+      selection['revision'] === 0 &&
+      (selection['mode'] === 'auto' || permissionRules)
+    )
+      throw corrupt('approval selection revision is invalid.');
     return {
       mode: selection['mode'] as ManagedSessionApprovalSelection['mode'],
       revision: selection['revision'],
+      ...(permissionRules ? { permissionRules } : {}),
     };
   }
 

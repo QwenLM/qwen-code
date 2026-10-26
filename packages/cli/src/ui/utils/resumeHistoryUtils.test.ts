@@ -1074,7 +1074,7 @@ describe('resumeHistoryUtils', () => {
           description: 'Mocked description',
           args: { target: 'a' },
           resultDisplay: undefined,
-          status: ToolCallStatus.Success,
+          status: ToolCallStatus.Error,
           confirmationDetails: undefined,
         },
       ],
@@ -1160,6 +1160,7 @@ describe('resumeHistoryUtils', () => {
         {
           type: 'system',
           subtype: 'slash_command',
+          promptId: 'session########3',
           systemPayload: {
             phase: 'invocation',
             rawCommand: '/filecmd',
@@ -1181,7 +1182,13 @@ describe('resumeHistoryUtils', () => {
     const items = buildResumedHistoryItems(session, makeConfig({}), 20);
 
     expect(items).toEqual([
-      { id: 21, type: 'user', text: '/filecmd', sentToModel: true },
+      {
+        id: 21,
+        type: 'user',
+        text: '/filecmd',
+        sentToModel: true,
+        promptId: 'session########3',
+      },
       {
         id: 22,
         type: 'gemini',
@@ -1520,6 +1527,120 @@ describe('resumeHistoryUtils', () => {
     });
   });
 
+  it('does not render an unpaired sibling as successful when only selected A has a real result', () => {
+    const messages = [
+      {
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'h11a-edit',
+                name: 'edit',
+                args: {
+                  file_path: '/test/workspace/owned-a.txt',
+                  old_string: 'H11A_ORIGINAL_BYTES',
+                  new_string: 'H11A_EDITED_BYTES',
+                },
+              },
+            },
+            {
+              functionCall: {
+                id: 'h11a-edit-b',
+                name: 'edit',
+                args: {
+                  file_path: '/test/workspace/owned-b.txt',
+                  old_string: 'H11A_B_ORIGINAL_BYTES',
+                  new_string: 'H11A_B_EDITED_BYTES',
+                },
+              },
+            },
+          ],
+        },
+      },
+      {
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'h11a-edit',
+                name: 'edit',
+                response: {
+                  output:
+                    'The file: /test/workspace/owned-a.txt has been updated. Showing lines 1-2 of 2 from the edited file:\n\n---\n\nH11A_EDITED_BYTES\n\n\nH11A_REAL_EDIT_A_NEW2',
+                },
+              },
+            },
+          ],
+        },
+        toolCallResult: {
+          callId: 'h11a-edit',
+          status: 'success',
+          resultDisplay: {
+            fileDiff:
+              'Index: owned-a.txt\n===================================================================\n--- owned-a.txt\tCurrent\n+++ owned-a.txt\tProposed\n@@ -1,1 +1,1 @@\n-H11A_ORIGINAL_BYTES\n+H11A_EDITED_BYTES\n',
+            fileName: 'owned-a.txt',
+            filePath: '/test/workspace/owned-a.txt',
+            originalContent: 'H11A_ORIGINAL_BYTES\n',
+            newContent: 'H11A_EDITED_BYTES\n',
+            diffStat: {
+              model_added_lines: 1,
+              model_removed_lines: 1,
+              model_added_chars: 17,
+              model_removed_chars: 19,
+              user_added_lines: 0,
+              user_removed_lines: 0,
+              user_added_chars: 0,
+              user_removed_chars: 0,
+            },
+          },
+          executionStatus: 'success',
+          artifacts: [
+            {
+              title: 'owned-a.txt',
+              kind: 'file',
+              storage: 'workspace',
+              workspacePath: 'owned-a.txt',
+              mimeType: 'text/plain',
+              sizeBytes: 18,
+              updateOnly: true,
+            },
+          ],
+        },
+      },
+    ] as unknown as ConversationRecord['messages'];
+    const items = buildResumedHistoryItems(
+      { conversation: { messages } } as ResumedSessionData,
+      makeConfig({ edit: mockTool }),
+      10,
+    );
+    const groups = items.filter(
+      (item): item is Extract<HistoryItem, { type: 'tool_group' }> =>
+        item.type === 'tool_group',
+    );
+    expect(groups).toHaveLength(1);
+    expect(groups[0].tools).toHaveLength(2);
+    const selected = groups[0].tools.find(
+      (tool) => tool.callId === 'h11a-edit',
+    );
+    const sibling = groups[0].tools.find(
+      (tool) => tool.callId === 'h11a-edit-b',
+    );
+    expect(selected?.status).toBe(ToolCallStatus.Success);
+    expect(selected?.resultDisplay).toEqual(
+      messages[1].toolCallResult?.resultDisplay,
+    );
+    expect(sibling?.status).toBe(ToolCallStatus.Error);
+    expect(sibling?.resultDisplay).toBeUndefined();
+    expect(sibling?.detailedDisplay).toBeUndefined();
+    expect(sibling?.args).toEqual(
+      messages[0].message?.parts?.[1].functionCall?.args,
+    );
+  });
+
   describe('detailedDisplay (§4.9 Ctrl+O full detail on resume)', () => {
     type ToolGroupItem = Extract<HistoryItem, { type: 'tool_group' }>;
     const firstTool = (items: HistoryItem[]) =>
@@ -1618,6 +1739,51 @@ describe('resumeHistoryUtils', () => {
       });
       const tool = firstTool(items);
       expect(tool?.detailedDisplay).toBeUndefined();
+    });
+
+    it('preserves a recorded cancellation and never exposes raw read output as detailed success', () => {
+      const items = buildWithToolResult({
+        toolCallResult: {
+          callId: 'call-1',
+          status: 'cancelled',
+          resultDisplay: 'Cancelled',
+          responseParts: [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'read_file',
+                response: { output: 'RAW_CANCELLED_READ_MUST_NOT_SURFACE' },
+              },
+            },
+          ],
+        },
+      });
+      const tool = firstTool(items);
+      expect(tool?.status).toBe(ToolCallStatus.Canceled);
+      expect(tool?.resultDisplay).toBe('Cancelled');
+      expect(tool?.detailedDisplay).toBeUndefined();
+    });
+
+    it('keeps a legacy recorded result without status successful', () => {
+      const items = buildWithToolResult({
+        toolCallResult: {
+          callId: 'call-1',
+          resultDisplay: 'Legacy read',
+          responseParts: [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'read_file',
+                response: { output: 'LEGACY_RECORDED_READ' },
+              },
+            },
+          ],
+        },
+      });
+      const tool = firstTool(items);
+      expect(tool?.status).toBe(ToolCallStatus.Success);
+      expect(tool?.resultDisplay).toBe('Legacy read');
+      expect(tool?.detailedDisplay).toBe('LEGACY_RECORDED_READ');
     });
 
     it('does NOT populate detailedDisplay for errored tools (matches live path)', () => {
@@ -2193,6 +2359,46 @@ describe('resumed promptId attachment', () => {
       version: '1',
       ...over,
     }) as unknown as ChatRecord;
+
+  it('rewinds a legacy placeholder prompt through its source record', () => {
+    const messages: ChatRecord[] = [
+      'hello',
+      'response hello',
+      '[Old inline media cleared: image/png]',
+      'response colliding',
+      'world',
+      'response world',
+    ].map((text, index) => ({
+      uuid: `legacy-${index}`,
+      parentUuid: index === 0 ? null : `legacy-${index - 1}`,
+      sessionId: 's',
+      timestamp: '2026-10-09T00:00:00.000Z',
+      cwd: '/workspace',
+      version: '0.10.5',
+      type: index % 2 === 0 ? 'user' : 'assistant',
+      message: {
+        role: index % 2 === 0 ? 'user' : 'model',
+        parts: [{ text }],
+      },
+    }));
+    const sessionData = {
+      conversation: { messages },
+    } as unknown as ResumedSessionData;
+    const ui = buildResumedHistoryItems(sessionData, null, 0);
+    const api = buildApiHistoryFromConversation(sessionData.conversation);
+    const target = ui.find((item) => item.type === 'user' && item.id === 3)!;
+
+    expect(target).toMatchObject({
+      text: '[Old inline media cleared: image/png]',
+    });
+    expect('promptId' in target).toBe(false);
+    const cut = computeApiTruncationIndex(ui, target.id, api);
+    expect(cut).toBe(2);
+    expect(api.slice(0, cut).map((entry) => entry.parts?.[0]?.text)).toEqual([
+      'hello',
+      'response hello',
+    ]);
+  });
 
   it('attaches recorded prompt identities to resumed user items', () => {
     const sessionData = {

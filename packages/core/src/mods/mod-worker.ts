@@ -60,6 +60,11 @@ const hostOperations = new Map<
     reject: (error: Error) => void;
   }
 >();
+// $.turn.abort calls waiting for the host, which owns the running turn.
+const turnAborts = new Map<
+  number,
+  { resolve: () => void; reject: (error: Error) => void }
+>();
 let serial = 0;
 let epoch = 0;
 let rootId = 0;
@@ -394,12 +399,14 @@ async function bounded(
 
 // The engine names the plugin behind an ask it made or reworded; an answer
 // passed up as heard keeps the owner it had, and a hook cannot write one.
+// `setting` names a host option's own check, which Qwen Code does not report,
+// so a hook's is dropped too.
 async function ownCheck(
   value: ModToolCheckResult,
   below: Promise<unknown> | undefined,
   plugin: string,
 ): Promise<ModToolCheckResult> {
-  const { plugin: _written, ...answer } = value;
+  const { plugin: _written, setting: _setting, ...answer } = value;
   if (answer.decision !== 'ask') return answer;
   const heard = (await below?.catch(() => undefined)) as
     | ModToolCheckResult
@@ -639,6 +646,10 @@ async function hostCall(
           await sleep(call, Number(e['ms']));
           return { value: undefined };
         }
+        if (method === 'turn.abort') {
+          await abortTurn(String(e['turnId']));
+          return { value: undefined };
+        }
         logChars += String(e['text']).length + 1;
         if (logChars > 100_000) throw new Error('Mod log budget exceeded.');
         send({
@@ -688,6 +699,14 @@ function sleep(call: ModInvocation, ms: number): Promise<void> {
         settle(new Error('Mod sleep ended with its hook.'));
     }, 5);
   });
+}
+
+function abortTurn(turnId: string): Promise<void> {
+  const id = ++serial;
+  return new Promise<void>((resolve, reject) => {
+    turnAborts.set(id, { resolve, reject });
+    send({ type: 'turn-abort', id, turnId });
+  }).finally(() => turnAborts.delete(id));
 }
 
 function cancelAbandonedOperations(): void {
@@ -748,6 +767,13 @@ port.on('message', async (request: ModWorkerRequest) => {
     hostOperations.delete(request.id);
     if (request.error !== undefined) operation.reject(new Error(request.error));
     else operation.resolve(request.result);
+    return;
+  }
+  if (request.type === 'turn-abort-result') {
+    if (!busy || request.root !== rootId) return;
+    const pending = turnAborts.get(request.id);
+    if (request.error !== undefined) pending?.reject(new Error(request.error));
+    else pending?.resolve();
     return;
   }
   if (request.type === 'tool-check') {
@@ -861,15 +887,17 @@ port.on('message', async (request: ModWorkerRequest) => {
         [],
         async (e) => ({ cwd: e['cwd'] }),
       );
+      const hooked = (event: ModEvent) =>
+        realms
+          .filter((realm) =>
+            realm.patterns.some((pattern) => patternMatches(pattern, event)),
+          )
+          .map((realm) => realm.plugin.name);
       result = {
         commands: [...commands.values()],
-        tools: realms.some((realm) =>
-          realm.patterns.some(
-            (pattern) =>
-              patternMatches(pattern, 'tool.call') ||
-              patternMatches(pattern, 'tool.check'),
-          ),
-        ),
+        tools: hooked('tool.call').length + hooked('tool.check').length > 0,
+        turnStart: hooked('turn.start').length > 0,
+        turnComplete: hooked('turn.complete'),
       };
     } else if (request.type === 'command') {
       if (!commands.has(request.command))
@@ -898,6 +926,25 @@ port.on('message', async (request: ModWorkerRequest) => {
         engineOrigin,
         [],
         executeHostTool,
+      );
+    } else if (request.type === 'turn-start') {
+      result = await dispatch(
+        'turn.start',
+        { ...request.input },
+        engineOrigin,
+        [],
+        async (e) => ({ turnId: e['turnId'] }),
+      );
+    } else if (request.type === 'turn-complete') {
+      result = await dispatch(
+        'turn.complete',
+        { ...request.input },
+        engineOrigin,
+        [],
+        async (e) => ({
+          text: e['answer'],
+          ...(e['usage'] === undefined ? {} : { usage: e['usage'] }),
+        }),
       );
     } else {
       result = await dispatch(
@@ -928,10 +975,14 @@ port.on('message', async (request: ModWorkerRequest) => {
     }
     if (hostOperations.size)
       send({ type: 'host-cancel', ids: [...hostOperations.keys()] });
-    for (const operation of hostOperations.values()) {
+    for (const operation of [
+      ...hostOperations.values(),
+      ...turnAborts.values(),
+    ]) {
       operation.reject(new Error('Mod root dispatch has ended.'));
     }
     hostOperations.clear();
+    turnAborts.clear();
     starting = false;
     builtinTool = undefined;
     rootBudget = undefined;

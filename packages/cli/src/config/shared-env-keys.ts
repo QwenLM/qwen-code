@@ -264,6 +264,16 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // operator set in the daemon's launch env still apply.
   'QWEN_CDP_MCP_COMMAND',
   'QWEN_SERVE_CDP_TUNNEL_OVER_WS',
+  // The serve daemon bearer token, resolved from --token, the operator's
+  // exported environment, or — only on a non-loopback bind with neither
+  // source present — a generated ephemeral bearer. A project `.env`,
+  // `.qwen/.env`, or workspace settings.env supplying it would let a cloned
+  // repository preset the daemon credential for the operator who launches
+  // `qwen serve` there; the full loader already rejects the key on the reload
+  // tier, and the fast path must not be a second, weaker entry point. The
+  // operator channels (export/--token) and home-scoped `.env` files are
+  // unaffected; settings.env is rejected at every scope.
+  'QWEN_SERVER_TOKEN',
   // QWEN_SERVE_NEW_FILE_MODE decides the creation mode of every agent-written
   // NEW file (owner-only 0600 vs umask-derived). A project `.env` flipping it
   // to `system` would silently widen file visibility daemon-wide — including
@@ -400,6 +410,7 @@ export const HOME_ENV_BOOTSTRAP_KEYS = [
 // (behind --experimental-lsp) and its keys were chosen independently.
 export const INHERITED_LOADER_ENV_KEYS = [
   'NODE_OPTIONS',
+  'BUN_OPTIONS',
   // npm maps its `node-options` config onto npm_config_node_options in the
   // environment, and `npm run` lifecycle scripts apply it like NODE_OPTIONS —
   // the same hijack through an adjacent key. The config-file keys are the
