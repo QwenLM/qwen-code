@@ -148,6 +148,12 @@ interface PKCEParams {
 
 const HTTP_OK = 200;
 
+// Token reads/refreshes in flight, keyed by server name. Module-level so every
+// provider instance in the process shares it: authorization servers commonly
+// rotate refresh tokens, so a second concurrent refresh would present an
+// already-consumed token, fail with invalid_grant and wipe the credentials.
+const inflightTokenReads = new Map<string, Promise<OAuthToken | null>>();
+
 /**
  * Provider for handling OAuth authentication for MCP servers.
  */
@@ -958,6 +964,37 @@ export class MCPOAuthProvider {
     serverName: string,
     config: MCPOAuthConfig,
   ): Promise<string | null> {
+    return (
+      (await this.getValidOAuthToken(serverName, config))?.accessToken ?? null
+    );
+  }
+
+  /**
+   * Like {@link getValidToken} but returns the full token (including
+   * `expiresAt`) so callers can cache it and decide locally when to ask again.
+   * Concurrent calls for the same server share one read-and-refresh.
+   */
+  getValidOAuthToken(
+    serverName: string,
+    config: MCPOAuthConfig,
+  ): Promise<OAuthToken | null> {
+    const inflight = inflightTokenReads.get(serverName);
+    if (inflight) {
+      return inflight;
+    }
+    const read = this.readOrRefreshToken(serverName, config).finally(() => {
+      if (inflightTokenReads.get(serverName) === read) {
+        inflightTokenReads.delete(serverName);
+      }
+    });
+    inflightTokenReads.set(serverName, read);
+    return read;
+  }
+
+  private async readOrRefreshToken(
+    serverName: string,
+    config: MCPOAuthConfig,
+  ): Promise<OAuthToken | null> {
     debugLogger.debug(`Getting valid token for server: ${serverName}`);
     const credentials = await this.tokenStorage.getCredentials(serverName);
 
@@ -974,7 +1011,7 @@ export class MCPOAuthProvider {
     // Check if token is expired
     if (!this.tokenStorage.isTokenExpired(token)) {
       debugLogger.debug(`Returning valid token for server: ${serverName}`);
-      return token.accessToken;
+      return token;
     }
 
     // Try to refresh if we have a refresh token
@@ -1012,7 +1049,7 @@ export class MCPOAuthProvider {
           credentials.mcpServerUrl,
         );
 
-        return newToken.accessToken;
+        return newToken;
       } catch (error) {
         debugLogger.error(`Failed to refresh token: ${getErrorMessage(error)}`);
         // Remove invalid token
