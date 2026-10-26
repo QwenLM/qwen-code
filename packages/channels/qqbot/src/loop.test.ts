@@ -76,6 +76,7 @@ vi.mock('./login.js', () => ({
 }));
 
 const { QQChannel } = await import('./QQChannel.js');
+import { isChannelProactiveDeliveryError } from '@qwen-code/channel-base';
 import type {
   ChannelAgentBridge,
   ChannelLoop,
@@ -379,10 +380,29 @@ describe('QQ channel proactive loops', () => {
     mockPrompt.mockResolvedValue('Scheduled summary');
 
     await expect(ch.runLoopPrompt(loopJob())).rejects.toMatchObject({
-      name: 'DeliveryError',
-      code: 'ACTIVE_MSG_DISABLED',
+      name: 'ChannelProactiveDeliveryError',
+      disposition: 'permanent',
       message: expect.stringMatching(/Active messages disabled/u),
     });
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+  });
+
+  it('reports a disabled active-message toggle as a permanent proactive failure', async () => {
+    const { ch, raw } = makeChannel();
+    raw.groupActiveMsgEnabled.set(CHAT_ID, false);
+
+    const err: unknown = await ch
+      .deliverProactive(
+        { channelName: 'test-bot', type: 'chat', id: CHAT_ID },
+        'Scheduled summary',
+      )
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+
+    expect(isChannelProactiveDeliveryError(err)).toBe(true);
+    expect(err).toMatchObject({ disposition: 'permanent' });
     expect(mockSendQQMessage).not.toHaveBeenCalled();
   });
 

@@ -1166,37 +1166,54 @@ export class QQChannel extends ChannelBase {
   }
 
   /**
-   * Proactive deliveries (loops, webhook tasks) are unattended: they must
-   * never inherit the chat-level reply anchor a recent inbound message left
-   * behind, or QQ would accept the active message as a passive reply
-   * (msg_id/msg_seq) and the active-message toggle below would not apply.
+   * Proactive deliveries are unattended. Four callers reach this override —
+   * the loop prompt, the webhook-task prompt, background/named-task response
+   * delivery (deliverBackgroundResponseToTarget), and the daemon's
+   * deliverProactive. Background/named-task responses now intentionally take
+   * this unanchored path as active messages instead of the anchored reply
+   * path, because an unattended delivery must not inherit a chat-level reply
+   * anchor: QQ would accept it as a passive reply (msg_id/msg_seq) and the
+   * active-message toggle would not apply.
    */
   protected override async pushProactive(
     target: SessionTarget,
     text: string,
     sourceLabel?: string,
   ): Promise<void> {
-    if (target.threadId) {
-      throw new Error(
-        'Channel does not support proactive loop messages for threaded targets.',
+    try {
+      const blocked = await this.sendMessageWithReplyContext(
+        target.chatId,
+        text,
+        undefined,
+        sourceLabel,
       );
-    }
-    const blocked = await this.sendMessageWithReplyContext(
-      target.chatId,
-      text,
-      undefined,
-      sourceLabel,
-    );
-    // A route-blocked send resolves without throwing and never reaches the
-    // wire (see resolveRoute), while runLoopPrompt has already marked the
-    // delivery started — returning here would record an undelivered loop as
-    // delivered. Keep the block's class so the scheduler can tell a permanent
-    // route failure from a retryable one.
-    if (blocked !== undefined) {
-      throw new ChannelProactiveDeliveryError(
-        blocked,
-        `outgoing route ${blocked} blocked for ${target.chatId}`,
-      );
+      // A route-blocked send resolves without throwing and never reaches the
+      // wire (see resolveRoute), while runLoopPrompt has already marked the
+      // delivery started — returning here would record an undelivered loop as
+      // delivered. Keep the block's class so the scheduler can tell a permanent
+      // route failure from a retryable one.
+      if (blocked !== undefined) {
+        throw new ChannelProactiveDeliveryError(
+          blocked,
+          `outgoing route ${blocked} blocked for ${target.chatId}`,
+        );
+      }
+    } catch (err) {
+      // RETRY_EXHAUSTED, ACTIVE_MSG_DISABLED, and FALLBACK_FAILED are
+      // permanent (see flushAndTrack). Keep that class here too: the base
+      // wrapper would otherwise label them retryable. RATE_LIMITED and any
+      // other error stay untouched, because 'transient' is right for those.
+      if (
+        err instanceof DeliveryError &&
+        (err.code === 'RETRY_EXHAUSTED' ||
+          err.code === 'ACTIVE_MSG_DISABLED' ||
+          err.code === 'FALLBACK_FAILED')
+      ) {
+        throw new ChannelProactiveDeliveryError('permanent', err.message, {
+          cause: err,
+        });
+      }
+      throw err;
     }
   }
 
