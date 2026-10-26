@@ -134,6 +134,7 @@ import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { ToolRegistry, type ToolFactory } from '../tools/tool-registry.js';
 import type { McpBudgetEvent } from '../tools/mcp-client-manager.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { forgetAutofixPrSession } from '../tools/autofix-pr-grants.js';
 import {
   ToolMode,
   type ToolMode as ToolModeValue,
@@ -6441,6 +6442,10 @@ export class Config {
       // Skill grants belong to the session that loaded the skill; a resumed
       // session re-arms its own from history during `initialize()`.
       this.permissionManager?.clearSessionAllowRules();
+      // So do the autofix-pr watches it confirmed and the fixes it let run
+      // without asking; a resumed watch asks again.
+      forgetAutofixPrSession(previousSessionId);
+      forgetAutofixPrSession(nextSessionId);
       // The web search budget belongs to the session, like the grants above.
       this.webSearchSessionUsage.calls = 0;
       // So does the Advisor budget, reset in place for the same reason the
@@ -8053,6 +8058,9 @@ export class Config {
     // installs is owned and cleaned up by that profile.
     if (isDerivedConfig(this)) return;
     this.shutdownRequested = true;
+    // What the session confirmed for autofix-pr ends with it: a daemon that
+    // loads it again under the same id asks again.
+    forgetAutofixPrSession(this.sessionId);
     void this.shutdownExecutionEnvironments().catch(() => undefined);
     this.settingsWatcher?.stopWatching();
     // Only a Config with a Runtime waits for it, so others close their
@@ -13260,6 +13268,11 @@ export class Config {
         return new LoopWakeupTool(this);
       });
     }
+
+    await registerLazy(ToolNames.AUTOFIX_PR, async () => {
+      const { AutofixPrTool } = await import('../tools/autofix-pr.js');
+      return new AutofixPrTool(this);
+    });
 
     // create_sub_session is daemon-only: it needs the bridge, wired onto the
     // Config as a sub-session spawner by the ACP session. Registering it

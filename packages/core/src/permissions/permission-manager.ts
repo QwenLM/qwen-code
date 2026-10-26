@@ -797,6 +797,7 @@ export class PermissionManager {
     'loop_wakeup',
     'create_sub_session',
     'monitor',
+    'autofix_pr',
   ]);
 
   /**

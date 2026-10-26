@@ -67,6 +67,8 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
             "CLOSED", "ARCHIVING", "ARCHIVED", "DELETING", "DELETED");
     private final SshWorkspaceService ssh;
     private final RuntimeProvisioner localProvisioner;
+    private final RuntimeBindingRepository extensionBindings;
+    private final HttpRuntimeTransport extensionTransport;
 
     public EmbeddedRuntimeBroker(AgentStateStore store,
             ManagedAgentProperties properties,
@@ -180,6 +182,8 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
             throw new IllegalStateException("Resident Workspace and SSH nodes require separate Broker configurations");
         }
         HttpRuntimeTransport http = remote ? new HttpRuntimeTransport(ssh.connections()::resolveEndpoint) : new HttpRuntimeTransport();
+        this.extensionBindings = bindingRepository;
+        this.extensionTransport = http;
         this.workspaces = workspaceExecutionStore == null ? null
                 : new WorkspaceRuntimeResolver(store, workspaceExecutionStore, properties, ssh);
         WorkspaceRuntimeResolver workspaces = this.workspaces;
@@ -211,11 +215,17 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
             }
             baseProvisioner = provisioner(broker, remote ? new HttpRuntimeTransport() : http);
         }
+        if (properties.getManagedExtensions().isEnabled() && baseProvisioner instanceof LocalProcessRuntimeProvisioner local) {
+            local.withManagedExtensionCacheDirectory(properties.getManagedExtensions().getCacheDirectory(), properties.getManagedExtensions().getCgroupRoot());
+        }
         this.localProvisioner = baseProvisioner;
         if (remote) {
             RuntimeProvisioner local = baseProvisioner;
             var remoteProvisioner = new com.alibaba.qwen.code.runtimebroker.provisioning.SshRuntimeProvisioner(
                     ssh::node, ssh::runtimeStorage, ssh.connections(), http);
+            if (properties.getManagedExtensions().isEnabled()) {
+                remoteProvisioner.withManagedExtensionCacheDirectory(properties.getManagedExtensions().getCacheDirectory(), properties.getManagedExtensions().getCgroupRoot());
+            }
             baseProvisioner = new com.alibaba.qwen.code.runtimebroker.provisioning.RoutingRuntimeProvisioner(
                     java.util.Map.of(local.kind(), local, com.alibaba.qwen.code.runtimebroker.provisioning.SshRuntimeProvisioner.KIND, remoteProvisioner),
                     scope -> ssh.runtimeStorage(scope) == null ? local.kind() : com.alibaba.qwen.code.runtimebroker.provisioning.SshRuntimeProvisioner.KIND,
@@ -364,6 +374,88 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
     @Override
     public boolean isEnabled() {
         return true;
+    }
+
+    public void configureExtensions(com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionPackageService packages) {
+        extensionTransport.configureExtensionPreparation((binding, sessionId, operation) -> {
+            String tenant = binding.getRequest().getScope().getTenantId();
+            @SuppressWarnings("unchecked")
+            var selected = (List<java.util.Map<String, Object>>) operation.get("extensions");
+            CompletionStage<java.util.Map<String, java.util.Map<String, String>>> delivery =
+                    CompletableFuture.completedFuture(new java.util.LinkedHashMap<>());
+            java.util.Map<String, Object> manifests = new java.util.LinkedHashMap<>();
+            for (var pin : selected) {
+                delivery = delivery.thenCompose(settings -> {
+                    var parsed = new com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionPackages.Pin(
+                            (String) pin.get("extensionId"), ((Number) pin.get("packageRevision")).longValue(),
+                            (String) pin.get("packageDigest"), pin.get("settingsRevision") == null ? null
+                            : ((Number) pin.get("settingsRevision")).longValue());
+                    try {
+                        var resolved = packages.resolvePin(tenant, binding.getRequest().getScope().getWorkspaceId(), parsed);
+                        var manifest = resolved.descriptor().manifest();
+                        java.util.Map<String, Object> metadata = new java.util.LinkedHashMap<>(java.util.Map.of(
+                                "schemaVersion", manifest.schemaVersion(), "compilerVersion", manifest.compilerVersion(),
+                                "name", manifest.name(), "version", manifest.version(),
+                                "target", java.util.Map.of("platform", manifest.target().platform(), "arch", manifest.target().arch()),
+                                "components", manifest.components()));
+                        if (manifest.sourceType() != null) {
+                            metadata.put("sourceType", manifest.sourceType());
+                            metadata.put("sourceRevision", manifest.sourceRevision());
+                        }
+                        manifests.put(parsed.extensionId(), metadata);
+                        return installExtensionPackage(tenant, sessionId, binding, parsed.packageDigest(), resolved.archive())
+                                .thenApply(ignored -> {
+                                    settings.put(parsed.extensionId(), resolved.settings());
+                                    return settings;
+                                });
+                    } catch (IOException error) {
+                        return CompletableFuture.failedFuture(error);
+                    }
+                });
+            }
+            return delivery.thenApply(settings -> {
+                java.util.Map<String, Object> prepared = new java.util.LinkedHashMap<>(operation);
+                prepared.put("settings", settings);
+                prepared.put("packageManifests", manifests);
+                prepared.put("toolProfile", store.requireSession(tenant, sessionId).toolProfile());
+                return prepared;
+            });
+        });
+    }
+
+    private CompletionStage<java.util.Map<String, Object>> installExtensionPackage(String tenantId,
+            String sessionId, com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord expected, String digest, Path archive) {
+        SessionRecord session = store.requireSession(tenantId, sessionId);
+        var binding = extensionBindings.findById(expected.getBindingId());
+        if (binding == null || binding.getGeneration() != expected.getGeneration()
+                || !binding.getRequest().equals(expected.getRequest())
+                || !java.util.Objects.equals(binding.getProvisionSeed(), expected.getProvisionSeed())
+                || !sameExtensionLease(binding.getLease(), expected.getLease())
+                || binding.getState() != com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord.State.READY
+                || binding.isDrainRequested() || binding.getLease() == null || session.workspace() == null
+                || !tenantId.equals(binding.getRequest().getScope().getTenantId())
+                || !session.workspace().getWorkspaceId().equals(binding.getRequest().getScope().getWorkspaceId())
+                || !"session".equals(binding.getRequest().getScope().getIsolationClass())
+                || !sessionId.equals(binding.getRequest().getIsolationKey())) {
+            return CompletableFuture.failedFuture(WorkspaceExecutionStore.unavailable());
+        }
+        return extensionTransport.installExtensionPackage(binding, digest, archive).thenApply(result -> {
+            var current = extensionBindings.findById(expected.getBindingId());
+            if (current == null || current.getGeneration() != binding.getGeneration()
+                    || !current.getRequest().equals(binding.getRequest())
+                    || !java.util.Objects.equals(current.getProvisionSeed(), binding.getProvisionSeed())
+                    || current.getState() != com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord.State.READY
+                    || current.isDrainRequested() || !sameExtensionLease(current.getLease(), binding.getLease())) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            return result;
+        });
+    }
+
+    private static boolean sameExtensionLease(RuntimeLease left, RuntimeLease right) {
+        return left != null && right != null && left.getRuntimeInstanceId().equals(right.getRuntimeInstanceId())
+                && left.getLeaseId().equals(right.getLeaseId()) && left.getEpoch() == right.getEpoch()
+                && left.getEndpoint().equals(right.getEndpoint()) && left.getToken().equals(right.getToken());
     }
 
     @Override

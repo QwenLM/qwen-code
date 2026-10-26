@@ -127,6 +127,10 @@ import {
   getInitialChatHistory,
   wrapSystemReminder,
 } from './environmentContext.js';
+import {
+  createUserPromptSubmitContextPart,
+  hasUserPromptSubmitContext,
+} from '../hooks/user-prompt-submit-context.js';
 import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
 import type { AvailableSkillEntry } from '../tools/skill-utils.js';
 import { ToolNames } from '../tools/tool-names.js';
@@ -139,9 +143,11 @@ import { emptyGoalSnapshot } from '../goals/goal-protocol.js';
 import type { GoalRuntime } from '../goals/goal-runtime.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
 import {
+  buildApiHistoryFromConversation,
   findApiHistoryPromptIndex,
   markApiHistoryPrompt,
 } from '../services/session-api-history.js';
+import type { ChatRecord } from '../services/chatRecordingService.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import {
   clearCacheSafeParams,
@@ -689,6 +695,9 @@ describe('Gemini Client (client.ts)', () => {
       getCompletedToolCallIds: vi.fn().mockReturnValue(undefined),
       getHistory: vi.fn(() => structuredClone(history)),
       getHistoryShallow: vi.fn(() => history.map((c) => ({ ...c }))),
+      findLastHistoryEntry: vi.fn((predicate: (entry: Content) => boolean) =>
+        [...history].reverse().find(predicate),
+      ),
       setHistory: vi.fn(),
     });
   /** Installs a message bus answering hook requests with `request`. */
@@ -739,6 +748,7 @@ describe('Gemini Client (client.ts)', () => {
     const chat = {
       addHistory: vi.fn(),
       getHistory: vi.fn().mockReturnValue([]),
+      findLastHistoryEntry: vi.fn().mockReturnValue(undefined),
       ...overrides,
     };
     client['chat'] = chat as unknown as LlmChat;
@@ -1479,6 +1489,70 @@ describe('Gemini Client (client.ts)', () => {
       expect(mockTurnRunFn).not.toHaveBeenCalled();
       expect(applied).not.toHaveBeenCalled();
       expect(bus.request.mock.calls[0][0].input.prompt).toBe('ultracode raw');
+    });
+  });
+
+  describe('onPromptAdmitted', () => {
+    beforeEach(() => {
+      mockTurnRunFn.mockImplementation(() => textTurn('ok'));
+    });
+
+    it('reports an admitted prompt once, before its model request', async () => {
+      const order: string[] = [];
+      const bus = installMessageBus(
+        vi.fn(async () => {
+          order.push('hook');
+          return { output: {} };
+        }),
+        'UserPromptSubmit',
+      );
+      mockTurnRunFn.mockImplementation(() => {
+        order.push('request');
+        return textTurn('ok');
+      });
+      await run([{ text: 'hello' }], 'admitted', {
+        type: SendMessageType.UserQuery,
+        onPromptAdmitted: () => order.push('admitted'),
+      });
+      expect(bus.request).toHaveBeenCalledOnce();
+      expect(order).toEqual(['hook', 'admitted', 'request']);
+    });
+
+    it('does not report the turn again for a continuation it sends', async () => {
+      const { checkNextSpeaker } = await import(
+        '../utils/nextSpeakerChecker.js'
+      );
+      vi.mocked(checkNextSpeaker)
+        .mockResolvedValueOnce({ reasoning: 'forced', next_speaker: 'model' })
+        .mockResolvedValue(null);
+      const admitted = vi.fn();
+      await run([{ text: 'hello' }], 'continued', {
+        type: SendMessageType.UserQuery,
+        onPromptAdmitted: admitted,
+      });
+      expect(mockTurnRunFn).toHaveBeenCalledTimes(2);
+      expect(admitted).toHaveBeenCalledOnce();
+    });
+
+    it('does not report a prompt a hook blocks', async () => {
+      installMessageBus(
+        vi.fn().mockResolvedValue({
+          output: { decision: 'block', reason: 'blocked by fixture' },
+        }),
+        'UserPromptSubmit',
+      );
+      const admitted = vi.fn();
+      const events = await run([{ text: 'hello' }], 'blocked', {
+        type: SendMessageType.UserQuery,
+        onPromptAdmitted: admitted,
+      });
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: LlmEventType.UserPromptSubmitBlocked,
+        }),
+      );
+      expect(admitted).not.toHaveBeenCalled();
+      expect(mockTurnRunFn).not.toHaveBeenCalled();
     });
   });
 
@@ -2674,6 +2748,42 @@ describe('Gemini Client (client.ts)', () => {
       expect(setTools).toHaveBeenCalledWith(tools);
     });
 
+    it('leaves the todo reminder to a host that runs its own tool-call guards', async () => {
+      // The prompt's first round makes its tool-result rounds the turn's own.
+      await runTurn(
+        SendMessageType.UserQuery,
+        [{ text: 'hello' }],
+        'prompt-tool-result',
+        { toolLoopGuardsByHost: true },
+      );
+      todoReminder('run tests');
+      vi.mocked(mockConfig.takeActiveTodoReminder).mockClear();
+      vi.spyOn(client['loopDetector'], 'takeLoopReminder').mockReturnValue(
+        'LOOP_REMINDER',
+      );
+      vi.spyOn(client, 'consumeManagedAutoMemoryRecall').mockResolvedValue({
+        prompt: 'MEMORY_RECALL',
+      } as never);
+      vi.spyOn(client, 'commitManagedAutoMemoryRecallDelivery').mockReturnValue(
+        undefined,
+      );
+
+      await runTurn(
+        SendMessageType.ToolResult,
+        [fnResponse('read_file', { ok: true })],
+        'prompt-tool-result',
+        { toolLoopGuardsByHost: true },
+      );
+
+      expect(mockConfig.takeActiveTodoReminder).not.toHaveBeenCalled();
+      expect(client.consumeManagedAutoMemoryRecall).toHaveBeenCalledWith(
+        'tool_result',
+      );
+      expect(lastRequest()).toEqual(
+        expect.arrayContaining([{ text: 'LOOP_REMINDER' }, 'MEMORY_RECALL']),
+      );
+    });
+
     it('carries active todos after tool results and clears them for new work', async () => {
       const reminder = todoReminder('run tests');
 
@@ -2726,6 +2836,33 @@ describe('Gemini Client (client.ts)', () => {
       expect(mockConfig.startActiveTodoWorkChain).toHaveBeenCalledWith(
         'prompt-retry',
         'prompt-userQuery',
+      );
+    });
+
+    it('leaves the user message record and work chain to a host that did both', async () => {
+      const recordUserMessage = vi.fn();
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+        recordUserMessage,
+        recordAttributionSnapshot: vi.fn(),
+        recordFileHistorySnapshot: vi.fn(),
+      } as unknown as ReturnType<Config['getChatRecordingService']>);
+
+      await runTurn(
+        SendMessageType.UserQuery,
+        [{ text: 'hello' }],
+        'prompt-host',
+        { userTurnRecordedByHost: true },
+      );
+
+      expect(recordUserMessage).not.toHaveBeenCalled();
+      expect(mockConfig.startActiveTodoWorkChain).not.toHaveBeenCalled();
+
+      await runTurn(SendMessageType.Retry, [{ text: 'hello' }], 'prompt-retry');
+
+      // A retry still continues the chain the host's prompt opened.
+      expect(mockConfig.startActiveTodoWorkChain).toHaveBeenCalledWith(
+        'prompt-retry',
+        'prompt-host',
       );
     });
 
@@ -7190,6 +7327,30 @@ Other open files:
       );
     });
 
+    it('recalls with the memoryRecallQuery a host gives instead of the expanded request', async () => {
+      mockMemoryManager.recall.mockResolvedValue(noRecall());
+      mockTurnRunFn.mockReturnValue(textTurn('Hello'));
+      installChat();
+
+      await run(
+        [
+          { text: 'fix the bug' },
+          { text: '--- src/big.ts ---\nexport const big = 1;' },
+        ],
+        'prompt-id-recall-query',
+        {
+          type: SendMessageType.UserQuery,
+          memoryRecallQuery: 'fix the bug',
+        },
+      );
+
+      expect(mockMemoryManager.recall).toHaveBeenCalledWith(
+        '/test/project/root',
+        'fix the bug',
+        expect.anything(),
+      );
+    });
+
     it('should not exclude memories that were only surfaced as metadata', async () => {
       mockMemoryManager.recall
         .mockResolvedValueOnce({
@@ -7549,6 +7710,27 @@ Other open files:
     const stopped = () => ({
       type: LlmEventType.Finished,
       value: { reason: 'STOP' },
+    });
+
+    it('leaves the interaction span to a host that keeps one open', async () => {
+      const promptId = 'prompt-host-span';
+      ownerFor(promptId);
+      mockTurnRunFn.mockReturnValueOnce(
+        turnStream(toolCallRequest('call-1', 'read_file', {}, promptId)),
+      );
+
+      await run([{ text: 'use a tool' }], promptId, {
+        type: SendMessageType.UserQuery,
+        interactionSpanByHost: true,
+      });
+      mockTurnRunFn.mockReturnValueOnce(textTurn('done'));
+      await run([fnResponse('read_file', { ok: true })], promptId, {
+        type: SendMessageType.ToolResult,
+        interactionSpanByHost: true,
+      });
+
+      expect(tel.startInteractionSpan).not.toHaveBeenCalled();
+      expect(tel.endInteractionSpan).not.toHaveBeenCalled();
     });
 
     it('keeps one interaction open across multiple tool-result continuations', async () => {
@@ -8730,6 +8912,31 @@ Other open files:
           toolCallLimit: 2,
         },
       });
+    });
+
+    it('leaves the tool-call guards to a host that runs its own', async () => {
+      // Past an explicit cap of 2, and an alternating pattern for the
+      // heuristics, which are on here.
+      vi.mocked(mockConfig.getMaxToolCallsPerTurn).mockReturnValue(2);
+      vi.mocked(mockConfig.isMaxToolCallsPerTurnExplicit).mockReturnValue(true);
+      vi.spyOn(client['config'], 'getSkipLoopDetection').mockReturnValue(false);
+      const calls = Array.from({ length: 10 }, (_, i) =>
+        toolCallRequest(`call-${i}`, 'read_file', { path: i % 2 ? 'a' : 'b' }),
+      );
+      mockTurnRunFn.mockReturnValueOnce(turnStream(...calls));
+      installChat();
+
+      const events = await run([{ text: 'read the files' }], 'prompt-cap', {
+        type: SendMessageType.UserQuery,
+        toolLoopGuardsByHost: true,
+      });
+
+      expect(events).not.toContainEqual(
+        expect.objectContaining({ type: LlmEventType.LoopDetected }),
+      );
+      expect(
+        events.filter((event) => event.type === LlmEventType.ToolCallRequest),
+      ).toHaveLength(10);
     });
 
     it('always-on consecutive halt clears all pending calls (uniform with the turn cap)', async () => {
@@ -11975,6 +12182,53 @@ Other open files:
         });
       });
 
+      it('asks for tool call preparations in a blocking Stop hook continuation too', async () => {
+        installMessageBus(blockStopOnce(), 'Stop');
+        notDoneChat();
+        mockTurnRunFn.mockImplementation(() =>
+          (async function* () {
+            yield { type: LlmEventType.Content, value: 'not done' };
+          })(),
+        );
+
+        await run([{ text: 'Hi' }], 'prompt-stop-hook-preparations', {
+          type: SendMessageType.UserQuery,
+          toolCallPreparations: true,
+        });
+
+        expect(mockTurnConstructorFn).toHaveBeenCalledTimes(2);
+        expect(mockTurnConstructorFn.mock.calls.map((args) => args[6])).toEqual(
+          [true, true],
+        );
+      });
+
+      it('leaves the Stop hook and the memory tasks to a host that runs it after the round', async () => {
+        const request = blockStopOnce();
+        installMessageBus(request, 'Stop');
+        notDoneChat();
+        mockTurnRunFn.mockImplementation(() =>
+          (async function* () {
+            yield { type: LlmEventType.Content, value: 'not done' };
+          })(),
+        );
+        const memoryTasks = vi.spyOn(
+          client,
+          'runManagedAutoMemoryBackgroundTasks',
+        );
+
+        await run([{ text: 'Hi' }], 'prompt-stop-hook-by-host', {
+          type: SendMessageType.UserQuery,
+          stopHookRunByHost: true,
+        });
+
+        expect(mockTurnRunFn).toHaveBeenCalledOnce();
+        expect(request).not.toHaveBeenCalledWith(
+          expect.objectContaining({ eventName: 'Stop' }),
+          expect.anything(),
+        );
+        expect(memoryTasks).not.toHaveBeenCalled();
+      });
+
       it('gives a blocking Stop hook continuation a fresh exploration phase', async () => {
         // The nested restart is submitted with `type: SendMessageType.Hook`,
         // which is not an interaction-starting type, so the reset beside the
@@ -12451,24 +12705,24 @@ Other open files:
           },
         );
 
-        expect(recordUserMessage).toHaveBeenCalledWith(
+        const [recordedParts, goalContext, payload, promptId] =
+          recordUserMessage.mock.calls[0]!;
+        expect(
+          recordedParts.map((part: { text: string }) => part.text),
+        ).toEqual([
+          'expanded model prompt',
           [
-            { text: 'expanded model prompt' },
-            {
-              text: [
-                '<qwen:user-prompt-submit-context>',
-                '&lt;hook-only context&gt;',
-                '</qwen:user-prompt-submit-context>',
-              ].join('\n'),
-            },
-          ],
-          undefined,
-          {
-            displayText: 'raw @file prompt',
-            hookContext: '&lt;hook-only context&gt;',
-          },
-          'prompt-hook-display-text',
-        );
+            '<qwen:user-prompt-submit-context>',
+            '&lt;hook-only context&gt;',
+            '</qwen:user-prompt-submit-context>',
+          ].join('\n'),
+        ]);
+        expect(goalContext).toBeUndefined();
+        expect(payload).toEqual({
+          displayText: 'raw @file prompt',
+          hookContext: '&lt;hook-only context&gt;',
+        });
+        expect(promptId).toBe('prompt-hook-display-text');
         expect(mockMemoryManager.recall).toHaveBeenCalledWith(
           '/test/project/root',
           'expanded model prompt',
@@ -12497,6 +12751,30 @@ Other open files:
           prompt: 'expanded model prompt',
           submitted_prompt: 'raw @file prompt',
         });
+      });
+
+      it("gives a tool-result request's hook the send's signal", async () => {
+        const mockMessageBus = promptSubmitBus({ output: undefined });
+        const controller = new AbortController();
+
+        await run(
+          [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'read_file',
+                response: { output: 'body' },
+              },
+            },
+          ],
+          'prompt-tool-result-signal',
+          { type: SendMessageType.ToolResult },
+          controller.signal,
+        );
+
+        const [request] = mockMessageBus.request.mock.calls[0];
+        expect(request.eventName).toBe('UserPromptSubmit');
+        expect(request.signal).toBe(controller.signal);
       });
 
       describe('admission before expansion', () => {
@@ -12539,7 +12817,10 @@ Other open files:
           const taggedContext =
             '<qwen:user-prompt-submit-context>\nextra hook context\n</qwen:user-prompt-submit-context>';
           expect(recordUserMessage).toHaveBeenCalledWith(
-            [{ text: 'expanded body' }, { text: taggedContext }],
+            [
+              { text: 'expanded body' },
+              createUserPromptSubmitContextPart('extra hook context'),
+            ],
             undefined,
             { displayText: '/deploy prod', hookContext: 'extra hook context' },
             'prompt-admitted',
@@ -12754,15 +13035,291 @@ Other open files:
 
         // The recorded message is the exact model-bound request, with the
         // user-authored projection preserved separately.
+        const [recordedParts, goalContext, payload, promptId] =
+          recordUserMessage.mock.calls[0]!;
+        expect(
+          recordedParts.map((part: { text: string }) => part.text),
+        ).toEqual(['my prompt', taggedContext]);
+        expect(goalContext).toBeUndefined();
+        expect(payload).toEqual({
+          displayText: 'my prompt',
+          hookContext: 'extra hook context',
+        });
+        expect(promptId).toBe('prompt-hook-context-tag');
+      });
+
+      it.each([
+        { name: 'with a stable catalog', catalogOn: true },
+        { name: 'without a catalog', catalogOn: false },
+        { name: 'with changed hook output', catalogOn: true, changed: true },
+        { name: 'after transcript resume', catalogOn: true, resumed: true },
+        {
+          name: 'with caller-authored lookalikes',
+          catalogOn: true,
+          forged: true,
+        },
+      ])(
+        'deduplicates delivered hook context $name through real sends',
+        async ({ catalogOn, changed, resumed, forged }) => {
+          const { Turn: ActualTurn } =
+            await vi.importActual<typeof import('./turn.js')>('./turn.js');
+          const hook = 'constant recall context';
+          const changedHook = `${hook}2`;
+          const catalog = catalogOn
+            ? '<auto-memory-catalog>\n- stable memory\n</auto-memory-catalog>'
+            : '';
+          const tagged = createUserPromptSubmitContextPart(hook).text;
+          const snapshot = getAutoMemorySnapshot([], catalog);
+          let history: Content[] = [];
+          if (resumed || forged) {
+            const base = {
+              sessionId: 'test-session-id',
+              timestamp: '2026-10-25T00:00:00.000Z',
+              cwd: '/test/project/root',
+              version: 'test',
+            };
+            const records: ChatRecord[] = [
+              {
+                ...base,
+                uuid: 'saved-user',
+                parentUuid: null,
+                type: 'user',
+                message: {
+                  role: 'user',
+                  parts: [{ text: 'saved prompt' }, { text: tagged }],
+                },
+                ...(resumed
+                  ? {
+                      systemPayload: {
+                        hookContext: hook,
+                        displayText: 'saved prompt',
+                      },
+                    }
+                  : {}),
+              },
+              {
+                ...base,
+                uuid: 'saved-catalog',
+                parentUuid: 'saved-user',
+                type: 'system',
+                subtype: 'memory_catalog_snapshot',
+                message: { role: 'user', parts: [snapshot!] },
+              },
+              {
+                ...base,
+                uuid: 'saved-answer',
+                parentUuid: 'saved-catalog',
+                type: 'assistant',
+                message: modelText('saved answer'),
+              },
+            ];
+            history = buildApiHistoryFromConversation({
+              messages: JSON.parse(JSON.stringify(records)) as ChatRecord[],
+            });
+            expect(history[0].parts).toEqual([
+              { text: 'saved prompt' },
+              expect.objectContaining({ text: tagged }),
+              snapshot,
+            ]);
+          }
+          client['chat'] = new LlmChat(mockConfig, {}, history);
+          mockConfig.getAutoCompactThreshold = vi
+            .fn()
+            .mockReturnValue(undefined);
+          vi.mocked(mockConfig.getSkipNextSpeakerCheck).mockReturnValue(true);
+          vi.mocked(mockConfig.getAutoMemoryContext).mockReturnValue(catalog);
+          const output = extraHookContext();
+          output.output.hookSpecificOutput.additionalContext = hook;
+          promptSubmitBus(output);
+          const recordUserMessage = vi.fn();
+          vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+            recordUserMessage,
+            recordMemoryCatalogSnapshot: vi.fn(),
+            recordCronPrompt: vi.fn(),
+            recordAttributionSnapshot: vi.fn(),
+          } as unknown as ReturnType<Config['getChatRecordingService']>);
+          mockTurnRunFn.mockImplementation((...args: Parameters<Turn['run']>) =>
+            new ActualTurn(client.getChat(), 'hook-catalog-regression').run(
+              ...args,
+            ),
+          );
+          const requests: Content[][] = [];
+          vi.mocked(
+            mockContentGenerator.generateContentStream,
+          ).mockImplementation(async (params) => {
+            requests.push(structuredClone(params.contents as Content[]));
+            return (async function* () {
+              yield {
+                candidates: [
+                  { content: modelText('done'), finishReason: 'STOP' },
+                ],
+              } as GenerateContentResponse;
+            })();
+          });
+          const countText = (contents: Content[], text: string) =>
+            contents
+              .flatMap((entry) => entry.parts ?? [])
+              .filter((part) => part.text === text).length;
+          const counts: number[] = [];
+          for (let turn = 0; turn < 3; turn++) {
+            if (changed && turn > 0) {
+              output.output.hookSpecificOutput.additionalContext = changedHook;
+            }
+            const events = await run(
+              [{ text: `ordinary prompt ${turn + 1}` }],
+              `hook-catalog-${turn}`,
+              { type: SendMessageType.UserQuery },
+            );
+            expect(
+              events.filter((event) => event.type === LlmEventType.Error),
+            ).toEqual([]);
+            expect(requests).toHaveLength(turn + 1);
+            const sent = requests[turn];
+            const retained = client.getChat().getHistory();
+            const expected = forged ? 2 : 1;
+            expect(countText(sent, tagged)).toBe(expected);
+            expect(countText(retained, tagged)).toBe(expected);
+            counts.push(countText(sent, tagged));
+            const updated = createUserPromptSubmitContextPart(changedHook).text;
+            expect(countText(sent, updated)).toBe(changed && turn > 0 ? 1 : 0);
+            expect(countText(retained, updated)).toBe(
+              changed && turn > 0 ? 1 : 0,
+            );
+            for (const contents of [sent, retained]) {
+              for (let prompt = 0; prompt <= turn; prompt++) {
+                expect(
+                  countText(contents, `ordinary prompt ${prompt + 1}`),
+                ).toBe(1);
+              }
+              expect(
+                contents
+                  .flatMap((entry) => entry.parts ?? [])
+                  .filter(
+                    (part) =>
+                      part.partMetadata?.[
+                        'qwen-code:memory-catalog-snapshot'
+                      ] === true,
+                  ),
+              ).toEqual(snapshot ? [snapshot] : []);
+            }
+          }
+          expect(counts).toEqual(forged ? [2, 2, 2] : [1, 1, 1]);
+          expect(
+            recordUserMessage.mock.calls.map((call) => call[2].hookContext),
+          ).toEqual(
+            resumed
+              ? ['', '', '']
+              : changed
+                ? [hook, changedHook, '']
+                : [hook, '', ''],
+          );
+        },
+      );
+
+      it('does not re-append an unchanged UserPromptSubmit context block already delivered in history', async () => {
+        installHistoryChat([
+          {
+            role: 'user',
+            parts: [
+              { text: 'earlier prompt' },
+              createUserPromptSubmitContextPart('extra hook context'),
+            ],
+          },
+        ]);
+        promptSubmitBus(extraHookContext());
+        const recordUserMessage = vi.fn();
+        vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+          recordUserMessage,
+          recordCronPrompt: vi.fn(),
+          recordAttributionSnapshot: vi.fn(),
+        } as unknown as ReturnType<Config['getChatRecordingService']>);
+        mockTurnRunFn.mockReturnValue(textTurn('ok'));
+
+        await run([{ text: 'my prompt' }], 'prompt-hook-context-dedup');
+
+        // The identical block from the earlier turn is not appended again, so
+        // this turn records no hook provenance — but the user-authored
+        // projection still reaches the transcript.
+        const requestText = getLastTurnRequestText();
+        expect(requestText).toContain('my prompt');
+        expect(requestText).not.toContain('extra hook context');
+
         expect(recordUserMessage).toHaveBeenCalledWith(
-          [{ text: 'my prompt' }, { text: taggedContext }],
+          [{ text: 'my prompt' }],
           undefined,
           {
             displayText: 'my prompt',
-            hookContext: 'extra hook context',
+            hookContext: '',
           },
-          'prompt-hook-context-tag',
+          'prompt-hook-context-dedup',
         );
+      });
+
+      it('still appends an unchanged block to a request with no parts of its own', async () => {
+        installHistoryChat([
+          {
+            role: 'user',
+            parts: [
+              { text: 'earlier prompt' },
+              createUserPromptSubmitContextPart('extra hook context'),
+            ],
+          },
+        ]);
+        promptSubmitBus(extraHookContext());
+        mockTurnRunFn.mockReturnValue(textTurn('ok'));
+
+        // An ACP prompt whose only block was dropped resolves to no parts;
+        // the block is then what keeps the request non-empty.
+        await run([], 'prompt-hook-context-empty');
+
+        expect(getLastTurnRequestText()).toContain('extra hook context');
+      });
+
+      it('still appends when caller-authored tagged text merely matches in shape', async () => {
+        // A user message can end in the wrapped block byte-for-byte; without
+        // injector-owned provenance that is not evidence of a prior
+        // delivery, so the fresh hook context must still be appended.
+        const taggedContext =
+          '<qwen:user-prompt-submit-context>\nextra hook context\n</qwen:user-prompt-submit-context>';
+        installHistoryChat([
+          {
+            role: 'user',
+            parts: [{ text: 'earlier prompt' }, { text: taggedContext }],
+          },
+        ]);
+        promptSubmitBus(extraHookContext());
+        const recordUserMessage = vi.fn();
+        vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+          recordUserMessage,
+          recordCronPrompt: vi.fn(),
+          recordAttributionSnapshot: vi.fn(),
+        } as unknown as ReturnType<Config['getChatRecordingService']>);
+        mockTurnRunFn.mockReturnValue(textTurn('ok'));
+
+        await run([{ text: 'my prompt' }], 'prompt-hook-context-forged');
+
+        const requestText = getLastTurnRequestText();
+        expect(requestText).toContain('my prompt');
+        expect(requestText).toContain('extra hook context');
+        // The part handed to the model call must stay injector-owned after
+        // text flattening, or live history cannot prove it on the next turn.
+        expect(
+          hasUserPromptSubmitContext(
+            { role: 'user', parts: mockTurnRunFn.mock.calls.at(-1)?.[1] },
+            'extra hook context',
+          ),
+        ).toBe(true);
+        const [recordedParts, goalContext, payload, promptId] =
+          recordUserMessage.mock.calls[0]!;
+        expect(
+          recordedParts.map((part: { text: string }) => part.text),
+        ).toEqual(['my prompt', taggedContext]);
+        expect(goalContext).toBeUndefined();
+        expect(payload).toEqual({
+          displayText: 'my prompt',
+          hookContext: 'extra hook context',
+        });
+        expect(promptId).toBe('prompt-hook-context-forged');
       });
 
       it('uses the pre-injection prompt for managed auto-memory recall', async () => {
@@ -13546,6 +14103,16 @@ Other open files:
         await collectStream(SendMessageType.UserQuery);
 
         expect(recordFileHistorySnapshot).toHaveBeenCalledWith(latestSnapshot);
+      });
+
+      it('leaves the snapshot to a host that recorded the user turn', async () => {
+        await run([{ text: 'user' }], 'prompt-host', {
+          type: SendMessageType.UserQuery,
+          userTurnRecordedByHost: true,
+        });
+
+        expect(mockFileHistoryService.makeSnapshot).not.toHaveBeenCalled();
+        expect(recordFileHistorySnapshot).not.toHaveBeenCalled();
       });
 
       it('does not call makeSnapshot for ToolResult and Retry turns', async () => {

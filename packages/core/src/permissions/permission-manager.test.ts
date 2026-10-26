@@ -2262,6 +2262,14 @@ describe('PermissionManager', () => {
       expect(await enabled('loop_wakeup')).toBe(true);
     });
 
+    it('coreTools allowlist gates autofix_pr, which pushes and replies', async () => {
+      pm = makePm({ coreTools: ['read_file'] });
+      expect(await enabled('autofix_pr')).toBe(false);
+
+      pm = makePm({ coreTools: ['AutofixPr'] });
+      expect(await enabled('autofix_pr')).toBe(true);
+    });
+
     it('coreTools allowlist gates managed memory tools', async () => {
       pm = new PermissionManager(makeConfig({ coreTools: ['read_file'] }));
       pm.initialize();

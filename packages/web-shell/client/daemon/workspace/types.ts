@@ -66,6 +66,8 @@ import type {
   DaemonWorkspaceFileWriteRequest,
   DaemonWorkspaceFileWriteResult,
   DaemonWorkspaceMcpStatus,
+  DaemonWorkspaceDirectories,
+  DaemonWorkspaceDirectoriesMutation,
   DaemonWorkspaceMcpConfigStatus,
   DaemonMcpConfigMutationResult,
   DaemonMcpConfigScope,
@@ -765,6 +767,17 @@ export interface DaemonWorkspaceActions {
     workspaceSelector: string,
     update: DaemonWorkspaceUpdate,
   ): Promise<DaemonWorkspaceCapability>;
+  listWorkspaceDirectories(
+    workspaceSelector: string,
+  ): Promise<DaemonWorkspaceDirectories>;
+  addWorkspaceDirectory(
+    workspaceSelector: string,
+    path: string,
+  ): Promise<DaemonWorkspaceDirectoriesMutation>;
+  removeWorkspaceDirectory(
+    workspaceSelector: string,
+    path: string,
+  ): Promise<DaemonWorkspaceDirectoriesMutation>;
   removeWorkspace(
     workspaceId: string,
     options?: { force?: boolean; timeoutMs?: number },
