@@ -15,7 +15,10 @@
 # `tail --pid` keeps streaming its log until it exits. The replay also puts
 # the side lane's failures after the main lane's: when both lanes fail,
 # main-failure-signature.mjs, which titles and searches by the first failures
-# in the log, names main-lane tests.
+# in the log, names main-lane tests. The log is SIDE_LANE_LOG when the caller
+# names one, so that a step killed before the replay (a timeout or a cancel)
+# leaves it for a later step to print, else a temp file; either way it is
+# removed once replayed.
 #
 # Each Vitest run applies the worker cap (VITEST_MAX_FORKS / VITEST_MAX_THREADS)
 # on its own, so two lanes would run twice the cap. The side lane's Vitest runs
@@ -65,7 +68,13 @@ if [ -z "$side_args" ]; then
 fi
 mapfile -t side_workspaces <<<"$side_args"
 
-if ! side_log="$(mktemp "${TMPDIR:-/tmp}/side-lane-tests.XXXXXX")"; then
+if [ -n "${SIDE_LANE_LOG:-}" ]; then
+  side_log="$SIDE_LANE_LOG"
+  if ! : > "$side_log"; then
+    echo "::error::Could not create the side lane's log file ${side_log}; running no suites."
+    exit 1
+  fi
+elif ! side_log="$(mktemp "${TMPDIR:-/tmp}/side-lane-tests.XXXXXX")"; then
   echo "::error::Could not create the side lane's log file under ${TMPDIR:-/tmp}; running no suites."
   exit 1
 fi

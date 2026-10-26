@@ -1209,7 +1209,7 @@ describe('package scripts', () => {
       'npm run test:ci:workspaces && npm run test:scripts',
     );
     // test:scripts passes its args on to the scripts/tests Vitest run, which
-    // CI's main lane runs as its own script.
+    // CI's side lane runs as its own script.
     expect(packageJson.scripts['test:scripts']).toBe(
       'npm run test:standalone:runtimes:ci && npm run test:scripts:unit --',
     );
@@ -1240,6 +1240,33 @@ describe('package scripts', () => {
     );
     expect(lanes).toContain('npm run test:ci "${side_workspaces[@]}" -- "$@"');
     expect(lanes).toContain('npm run test:scripts:unit -- "$@"');
+  });
+
+  it('prints the side lane of a test step killed before its replay', () => {
+    // The lane script replays the side lane only after the main lane ends,
+    // so a timeout or a cancel would lose every suite but the CLI and core
+    // ones. The step names the log outside the TMPDIR it removes, and the
+    // next step prints whatever is left of it.
+    const job = getWorkflowJob(
+      readWorkflow('.github/workflows/ci.yml'),
+      'test',
+    );
+    const log = '${{ runner.temp }}/side-lane-tests.log';
+    expect(getWorkflowStep(job, 'Run tests and generate reports')).toContain(
+      `SIDE_LANE_LOG: '${log}'`,
+    );
+    const print = getWorkflowStep(
+      job,
+      'Print the side lane of a killed test step',
+    );
+    expect(print).toContain("if: '${{ failure() || cancelled() }}'");
+    expect(print).toContain('side_log="${RUNNER_TEMP}/side-lane-tests.log"');
+    expect(print).toContain('cat "${side_log}"');
+    expect(
+      job.indexOf("- name: 'Run tests and generate reports'"),
+    ).toBeLessThan(
+      job.indexOf("- name: 'Print the side lane of a killed test step'"),
+    );
   });
 
   it('drops DAC capabilities for root unit tests on every CI command', () => {
@@ -1329,6 +1356,7 @@ describe('package scripts', () => {
             'esac',
             'echo "output of npm $*"',
             'if [ -n "$STUB_FAIL" ] && echo "$*" | grep -qF -- "$STUB_FAIL"; then exit 7; fi',
+            'if [ -n "$STUB_HANG" ] && echo "$*" | grep -qF -- "$STUB_HANG"; then sleep 30; fi',
             '',
           ].join('\n'),
         );
@@ -1341,6 +1369,17 @@ describe('package scripts', () => {
           '@qwen-code/web-templates': {},
           '@qwen-code/sdk': 'vitest run',
         };
+        // Kills the script's process group once the side lane has run its
+        // last suite, while the main lane still hangs: a step timeout or
+        // cancel that lands before the replay.
+        const killBeforeReplay = [
+          'setsid bash "$LANES" --retry=2 &',
+          'pid=$!',
+          'i=0',
+          'until grep -q "output of npm run test:scripts:unit" "$SIDE_LANE_LOG" 2>/dev/null || [ "$i" -ge 100 ]; do sleep 0.1; i=$((i + 1)); done',
+          'kill -KILL -- "-$pid"',
+          'wait "$pid"',
+        ].join('\n');
         const run = (
           name,
           {
@@ -1353,10 +1392,13 @@ describe('package scripts', () => {
             // ci.yml sets both to the same cap; apart, they show which is which.
             forks = '4',
             threads = '6',
+            sideLog = '',
+            killed = false,
           } = {},
         ) => {
           const calls = path.join(dir, `${name}.calls`);
-          const result = spawnSync('bash', [lanes, '--retry=2'], {
+          const args = killed ? ['-c', killBeforeReplay] : [lanes, '--retry=2'];
+          const result = spawnSync('bash', args, {
             cwd: root,
             encoding: 'utf8',
             env: {
@@ -1368,11 +1410,16 @@ describe('package scripts', () => {
               NODE_OPTIONS: '',
               VITEST_MAX_FORKS: forks,
               VITEST_MAX_THREADS: threads,
+              // In CI this suite runs inside the side lane, whose own log
+              // ci.yml names here: never write to it.
+              SIDE_LANE_LOG: sideLog,
+              LANES: lanes,
               STUB_CALLS: calls,
               STUB_WORKSPACES: pkgGet,
               STUB_PKG_GET_RC: String(pkgGetRc),
               STUB_REAL_NPM: realListing ? realNpm : '',
               STUB_FAIL: fail,
+              STUB_HANG: killed ? '--workspace=@qwen-code/qwen-code-core' : '',
             },
           });
           // The replayed side log is removed once printed.
@@ -1409,11 +1456,11 @@ describe('package scripts', () => {
           order(passing.calls, scriptsUnit),
         );
         const replay = passing.stdout.indexOf('Side lane output');
-        expect(
-          passing.stdout.indexOf(
-            'output of npm run test:ci --workspace=@qwen-code/qwen-code ',
-          ),
-        ).toBeLessThan(replay);
+        const mainOutput = passing.stdout.indexOf(
+          'output of npm run test:ci --workspace=@qwen-code/qwen-code ',
+        );
+        expect(mainOutput).toBeGreaterThanOrEqual(0);
+        expect(mainOutput).toBeLessThan(replay);
         for (const side of [
           'output of npm run test:ci --workspace=@qwen-code/acp-bridge',
           'output of npm run test:standalone:runtimes:ci',
@@ -1544,7 +1591,40 @@ describe('package scripts', () => {
         );
         expect(splitName.calls).toEqual([]);
 
+        // A log the caller names is removed once replayed, like a temp one.
+        const namedLog = path.join(dir, 'named.log');
+        const named = run('named-log', { sideLog: namedLog });
+        expect(named.rc).toBe('0');
+        expect([...named.calls].sort()).toEqual([...passing.calls].sort());
+        expect(named.stdout).toContain(
+          'output of npm run test:scripts:unit -- --retry=2',
+        );
+        expect(existsSync(namedLog)).toBe(false);
+
+        // A step killed before the replay leaves the named log behind with
+        // everything the side lane ran, for ci.yml's next step to print.
+        const killedLog = path.join(dir, 'killed.log');
+        const killed = run('killed', { sideLog: killedLog, killed: true });
+        expect(killed.stdout).not.toContain('Side lane output');
+        expect(killed.calls).toContain(mainSuites);
+        const leftover = readFileSync(killedLog, 'utf8');
+        for (const side of [
+          'output of npm run test:ci --workspace=@qwen-code/acp-bridge',
+          'output of npm run test:standalone:runtimes:ci',
+          'output of npm run test:scripts:unit',
+        ]) {
+          expect(leftover).toContain(side);
+        }
+
         // Without a log file for the side lane, nothing runs.
+        const noLog = run('named-log-missing', {
+          sideLog: path.join(dir, 'missing', 'named.log'),
+        });
+        expect(noLog.rc).toBe('1');
+        expect(noLog.stdout).toContain(
+          `::error::Could not create the side lane's log file ${path.join(dir, 'missing', 'named.log')}; running no suites.`,
+        );
+        expect(noLog.calls).toEqual([]);
         const noTmp = run('no-tmpdir', { tmp: path.join(dir, 'missing') });
         expect(noTmp.rc).toBe('1');
         expect(noTmp.stdout).toContain(
