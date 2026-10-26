@@ -3,6 +3,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
+import { McpAppGeneratedUiOwnerContext } from '../mcpAppHostContext';
 
 const primarySessions = [
   { sessionId: 'primary', workspaceCwd: '/primary' },
@@ -90,6 +91,51 @@ afterEach(() => {
 });
 
 describe('useScopedSessions', () => {
+  it.each(['/retained-deletion', '/another-workspace'])(
+    'invalidates only confirmed background deletions in matching scope %s',
+    async (ownerWorkspace) => {
+      listWorkspaceSessionsPage.mockResolvedValue({ sessions: [] });
+      deleteSessionsData.mockResolvedValue({
+        removed: ['secondary'],
+        notFound: ['missing'],
+        errors: [{ sessionId: 'failed', error: 'busy' }],
+      });
+      const invalidate = vi.fn();
+      let sessions: ReturnType<typeof useScopedSessions> | undefined;
+      function Harness() {
+        sessions = useScopedSessions('/retained-deletion');
+        return null;
+      }
+      act(() => {
+        root!.render(
+          <McpAppGeneratedUiOwnerContext.Provider
+            value={{
+              scopeId: 'retained-scope',
+              workspaceCwd: ownerWorkspace,
+              invalidate,
+              subscribeInvalidation: () => () => undefined,
+            }}
+          >
+            <Harness />
+          </McpAppGeneratedUiOwnerContext.Provider>,
+        );
+      });
+      expect(invalidate).not.toHaveBeenCalled();
+      await act(async () => {
+        await sessions!.deleteSessions(['secondary', 'missing', 'failed']);
+      });
+      expect(invalidate.mock.calls.map(([event]) => event)).toEqual(
+        ownerWorkspace === '/retained-deletion'
+          ? ['secondary', 'missing'].map((sessionId) => ({
+              scopeId: 'retained-scope',
+              sessionId,
+              reason: 'deleted',
+            }))
+          : [],
+      );
+    },
+  );
+
   it('loads and mutates sessions through the requested workspace', async () => {
     listWorkspaceSessionsPage.mockResolvedValue({
       sessions: [

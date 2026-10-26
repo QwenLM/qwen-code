@@ -1,5 +1,6 @@
 import {
   useCallback,
+  useContext,
   useEffect,
   useMemo,
   useRef,
@@ -24,6 +25,7 @@ import {
   type SessionCatalogQuery,
   type SessionCatalogSnapshot,
 } from './session-catalog-store';
+import { McpAppGeneratedUiOwnerContext } from '../mcpAppHostContext';
 
 const EMPTY_SNAPSHOTS: readonly SessionCatalogSnapshot[] = [];
 const EMPTY_QUERIES: readonly SessionCatalogQuery[] = [];
@@ -486,6 +488,7 @@ export function useSessionCatalogController(client: DaemonClient) {
 }
 
 export function useWebShellSessions(options: WebShellSessionsOptions = {}) {
+  const generatedUiOwner = useContext(McpAppGeneratedUiOwnerContext);
   const {
     autoLoad = false,
     enabled = true,
@@ -570,22 +573,47 @@ export function useWebShellSessions(options: WebShellSessionsOptions = {}) {
   const deleteSession = useCallback(
     async (sessionId: string) => {
       try {
-        return await workspace.actions.deleteSession(sessionId);
+        const removed = await workspace.actions.deleteSession(sessionId);
+        if (
+          removed &&
+          generatedUiOwner &&
+          generatedUiOwner.workspaceCwd === workspaceCwd
+        ) {
+          generatedUiOwner.invalidate({
+            scopeId: generatedUiOwner.scopeId,
+            sessionId,
+            reason: 'deleted',
+          });
+        }
+        return removed;
       } finally {
         invalidate();
       }
     },
-    [invalidate, workspace.actions],
+    [generatedUiOwner, invalidate, workspace.actions, workspaceCwd],
   );
   const deleteSessions = useCallback(
     async (sessionIds: string[]) => {
       try {
-        return await workspace.actions.deleteSessions(sessionIds);
+        const result = await workspace.actions.deleteSessions(sessionIds);
+        if (
+          generatedUiOwner &&
+          generatedUiOwner.workspaceCwd === workspaceCwd
+        ) {
+          for (const sessionId of [...result.removed, ...result.notFound]) {
+            generatedUiOwner.invalidate({
+              scopeId: generatedUiOwner.scopeId,
+              sessionId,
+              reason: 'deleted',
+            });
+          }
+        }
+        return result;
       } finally {
         invalidate();
       }
     },
-    [invalidate, workspace.actions],
+    [generatedUiOwner, invalidate, workspace.actions, workspaceCwd],
   );
   const archiveSession = useCallback(
     async (sessionId: string) => {

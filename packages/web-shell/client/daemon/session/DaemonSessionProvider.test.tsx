@@ -21,6 +21,8 @@ import {
 import {
   McpAppToolsContext,
   McpAppGeneratedUiContext,
+  McpAppGeneratedUiOwnerContext,
+  type McpAppGeneratedUiInvalidation,
 } from '../../mcpAppHostContext.js';
 import { BrowserTurnNotifications } from '../../browser-turn-notifications';
 import { I18nProvider } from '../../i18n.js';
@@ -18341,6 +18343,356 @@ describe('DaemonSessionProvider', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  describe('Generated UI retained owner lifecycle', () => {
+    it.each(['randomUUID', 'crypto'])(
+      'creates distinct scopes without %s while Generated UI is disabled',
+      async (missing) => {
+        vi.stubGlobal(
+          'crypto',
+          missing === 'crypto'
+            ? undefined
+            : { getRandomValues: webcrypto.getRandomValues.bind(webcrypto) },
+        );
+        let owner: ContextType<typeof McpAppGeneratedUiOwnerContext>;
+        let connection: DaemonConnectionState | undefined;
+        function Harness() {
+          owner = useContext(McpAppGeneratedUiOwnerContext);
+          connection = useDaemonConnection();
+          return null;
+        }
+        await renderWithProvider(<Harness />, {
+          clientId: 'http-client',
+          workspaceCwd: '/workspace-a',
+        });
+        expect(connection?.status).toBe('idle');
+        expect(owner?.source).toBeUndefined();
+        const firstScope = requireActions(owner).scopeId;
+        for (const workspaceCwd of ['/workspace-a', '/workspace-b']) {
+          await act(async () => {
+            root?.render(
+              <DaemonSessionProvider
+                baseUrl="http://127.0.0.1:4170"
+                clientId="http-client"
+                workspaceCwd={workspaceCwd}
+                autoConnect={false}
+              >
+                <Harness />
+              </DaemonSessionProvider>,
+            );
+          });
+          expect(requireActions(owner).scopeId === firstScope).toBe(
+            workspaceCwd === '/workspace-a',
+          );
+        }
+      },
+    );
+
+    it.each(['/workspace-a', '/workspace-b'])(
+      'releases only an owned scope when a nested provider closes: %s',
+      async (workspaceCwd) => {
+        let outer: ContextType<typeof McpAppGeneratedUiOwnerContext>;
+        let inner: ContextType<typeof McpAppGeneratedUiOwnerContext>;
+        let show = true;
+        const invalidations: McpAppGeneratedUiInvalidation[] = [];
+        const makeSession = () =>
+          createMockSession({
+            sessionId: 'nested-session',
+            workspaceCwd,
+            session: { generatedUi: { version: 1, enabled: true } },
+          });
+        sdkMocks.sessions.push(makeSession());
+        function Inner() {
+          inner = useContext(McpAppGeneratedUiOwnerContext);
+          return null;
+        }
+        function Outer() {
+          outer = useContext(McpAppGeneratedUiOwnerContext);
+          const subscribe = outer?.subscribeInvalidation;
+          useLayoutEffect(
+            () => subscribe?.((event) => invalidations.push(event)),
+            [subscribe],
+          );
+          return show ? (
+            <DaemonSessionProvider
+              baseUrl="http://127.0.0.1:4170"
+              workspaceCwd={workspaceCwd}
+              sessionId="nested-session"
+              autoConnect
+            >
+              <Inner />
+            </DaemonSessionProvider>
+          ) : null;
+        }
+        const tree = () => (
+          <DaemonSessionProvider
+            baseUrl="http://127.0.0.1:4170"
+            workspaceCwd="/workspace-a"
+            autoConnect={false}
+          >
+            <Outer />
+          </DaemonSessionProvider>
+        );
+        await renderWithProvider(<Outer />, { workspaceCwd: '/workspace-a' });
+        const first = requireActions(inner?.source);
+        expect(first.captureOwner().isCurrent()).toBe(true);
+        const shared = first.scopeId === requireActions(outer).scopeId;
+        expect(shared).toBe(workspaceCwd === '/workspace-a');
+        invalidations.length = 0;
+        show = false;
+        await act(async () => {
+          root?.render(tree());
+          await flushPromises();
+        });
+        expect(first.captureOwner().isCurrent()).toBe(false);
+        expect(invalidations).toEqual(
+          shared ? [] : [{ scopeId: first.scopeId, reason: 'scope-changed' }],
+        );
+        show = true;
+        sdkMocks.sessions.push(makeSession());
+        await act(async () => {
+          root?.render(tree());
+          await flushPromises();
+        });
+        const reopened = requireActions(inner?.source);
+        expect(reopened.scopeId === first.scopeId).toBe(shared);
+        expect(reopened.captureOwner().isCurrent()).toBe(true);
+      },
+    );
+
+    it('shares a same-workspace nested scope and its invalidation channel', async () => {
+      let outer: ContextType<typeof McpAppGeneratedUiOwnerContext>;
+      let inner: ContextType<typeof McpAppGeneratedUiOwnerContext>;
+      const invalidations: McpAppGeneratedUiInvalidation[] = [];
+      function Inner() {
+        inner = useContext(McpAppGeneratedUiOwnerContext);
+        return null;
+      }
+      function Outer() {
+        outer = useContext(McpAppGeneratedUiOwnerContext);
+        const subscribe = outer?.subscribeInvalidation;
+        useLayoutEffect(
+          () => subscribe?.((event) => invalidations.push(event)),
+          [subscribe],
+        );
+        return (
+          <DaemonSessionProvider
+            baseUrl="http://127.0.0.1:4170"
+            workspaceCwd="/same-workspace"
+            autoConnect={false}
+          >
+            <Inner />
+          </DaemonSessionProvider>
+        );
+      }
+      await renderWithProvider(<Outer />, { workspaceCwd: '/same-workspace' });
+      expect(inner?.scopeId).toBe(outer?.scopeId);
+      const event = {
+        scopeId: requireActions(inner).scopeId,
+        sessionId: 'nested-session',
+        reason: 'deleted' as const,
+      };
+      inner?.invalidate(event);
+      expect(invalidations).toContainEqual(event);
+    });
+
+    it('keeps the scope across session switches and revokes the previous owner', async () => {
+      sdkMocks.sessions.push(
+        createMockSession({
+          session: { generatedUi: { version: 1, enabled: true } },
+        }),
+      );
+      let owner: ContextType<typeof McpAppGeneratedUiOwnerContext>;
+      let actions: DaemonSessionActions | undefined;
+      const invalidations: McpAppGeneratedUiInvalidation[] = [];
+      function Harness() {
+        owner = useContext(McpAppGeneratedUiOwnerContext);
+        actions = useDaemonActions();
+        const subscribe = owner?.subscribeInvalidation;
+        useLayoutEffect(
+          () => subscribe?.((event) => invalidations.push(event)),
+          [subscribe],
+        );
+        return null;
+      }
+      await renderWithProvider(<Harness />, { autoConnect: true });
+      const first = requireActions(owner?.source);
+      const captured = first.captureOwner();
+      expect(first).toMatchObject({
+        sessionId: 'session-1',
+        clientId: 'client-1',
+        workspaceCwd: '/mock-workspace',
+        eventEpoch: 'epoch-1',
+      });
+      expect(captured.isCurrent()).toBe(true);
+      invalidations.length = 0;
+      sdkMocks.sessions.push(
+        createMockSession({
+          sessionId: 'session-2',
+          session: { generatedUi: { version: 1, enabled: true } },
+        }),
+      );
+      let switched!: Promise<void>;
+      act(() => {
+        switched = requireActions(actions).loadSession('session-2');
+      });
+      await act(async () => {
+        await switched;
+        await flushPromises();
+      });
+      expect(owner?.source?.scopeId).toBe(first.scopeId);
+      expect(owner?.source?.sessionId).toBe('session-2');
+      expect(captured.isCurrent()).toBe(false);
+      expect(invalidations).toEqual([]);
+      await act(async () => {
+        await requireActions(actions).clearSession();
+      });
+      expect(owner?.source).toBeUndefined();
+      expect(invalidations).toEqual([
+        { scopeId: first.scopeId, sessionId: 'session-2', reason: 'cleared' },
+      ]);
+    });
+
+    it.each(['client', 'epoch', 'receipt'] as const)(
+      'rejects a captured retained owner immediately after in-place %s changes',
+      async (change) => {
+        const session = createMockSession({
+          session: { generatedUi: { version: 1, enabled: true } },
+        });
+        sdkMocks.sessions.push(session);
+        let owner: ContextType<typeof McpAppGeneratedUiOwnerContext>;
+        function Harness() {
+          owner = useContext(McpAppGeneratedUiOwnerContext);
+          return null;
+        }
+        await renderWithProvider(<Harness />, { autoConnect: true });
+        const captured = requireActions(owner?.source).captureOwner();
+        expect(captured.isCurrent()).toBe(true);
+        if (change === 'client') session.clientId = 'reattached-client';
+        if (change === 'epoch') session.eventEpoch = 'epoch-2';
+        if (change === 'receipt') session.session!['generatedUi'] = undefined;
+        expect(captured.isCurrent()).toBe(false);
+      },
+    );
+
+    it.each([
+      ['policy', { v: 1, type: 'settings_reloaded', data: {} }, false],
+      [
+        'deleted',
+        {
+          v: 1,
+          type: 'session_messages_deleted',
+          originatorClientId: 'client-1',
+          data: {
+            deletedGroupIds: ['group-1'],
+            deletedPromptIds: ['prompt-1'],
+          },
+        },
+        true,
+      ],
+      ['rewound', { v: 1, type: 'session_rewound', data: {} }, true],
+      [
+        'epoch',
+        {
+          v: 1,
+          type: 'state_resync_required',
+          data: { reason: 'epoch_reset' },
+        },
+        false,
+      ],
+      [
+        'deleted',
+        { v: 1, type: 'session_closed', data: { reason: 'client_close' } },
+        true,
+      ],
+      [
+        'runtime-stopped',
+        {
+          v: 1,
+          type: 'session_closed',
+          data: { reason: 'client_close', cause: 'workspace_runtime_stop' },
+        },
+        false,
+      ],
+    ] satisfies Array<
+      [McpAppGeneratedUiInvalidation['reason'], DaemonEvent, boolean]
+    >)(
+      'publishes %s invalidation from the actual session event: %j',
+      async (reason, event, sessionOnly) => {
+        const change = createDeferred<DaemonEvent>();
+        sdkMocks.sessions.push(
+          createMockSession({
+            session: { generatedUi: { version: 1, enabled: true } },
+            async *events(opts) {
+              yield await change.promise;
+              yield* createIdleEvents()(opts);
+            },
+          }),
+        );
+        let owner: ContextType<typeof McpAppGeneratedUiOwnerContext>;
+        const invalidations: McpAppGeneratedUiInvalidation[] = [];
+        function Harness() {
+          owner = useContext(McpAppGeneratedUiOwnerContext);
+          const subscribe = owner?.subscribeInvalidation;
+          useLayoutEffect(
+            () =>
+              subscribe?.((invalidation) => invalidations.push(invalidation)),
+            [subscribe],
+          );
+          return null;
+        }
+        await renderWithProvider(<Harness />, { autoConnect: true });
+        const scopeId = requireActions(owner?.source).scopeId;
+        invalidations.length = 0;
+        await act(async () => {
+          change.resolve(event);
+          await flushPromises();
+        });
+        expect(invalidations).toContainEqual({
+          scopeId,
+          ...(sessionOnly ? { sessionId: 'session-1' } : {}),
+          reason,
+        });
+      },
+    );
+
+    it.each(['baseUrl', 'token', 'workspaceCwd'] as const)(
+      'invalidates the original scope when the confirmed %s changes',
+      async (field) => {
+        let owner: ContextType<typeof McpAppGeneratedUiOwnerContext>;
+        const invalidations: McpAppGeneratedUiInvalidation[] = [];
+        function Harness() {
+          owner = useContext(McpAppGeneratedUiOwnerContext);
+          const subscribe = owner?.subscribeInvalidation;
+          useLayoutEffect(
+            () => subscribe?.((event) => invalidations.push(event)),
+            [subscribe],
+          );
+          return null;
+        }
+        const props = {
+          baseUrl: 'http://127.0.0.1:4170',
+          token: 'first-token',
+          workspaceCwd: '/first-workspace',
+          autoConnect: false,
+        };
+        await renderWithProvider(<Harness />, props);
+        const scopeId = requireActions(owner).scopeId;
+        act(() => {
+          root?.render(
+            <DaemonSessionProvider {...props} {...{ [field]: 'changed' }}>
+              <Harness />
+            </DaemonSessionProvider>,
+          );
+        });
+        expect(owner?.scopeId).not.toBe(scopeId);
+        expect(invalidations).toContainEqual({
+          scopeId,
+          reason: 'scope-changed',
+        });
+      },
+    );
   });
 
   it('exposes Generated UI only from the attached session and clears it with the owner', async () => {

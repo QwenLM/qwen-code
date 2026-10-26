@@ -49,6 +49,44 @@ export const McpAppGeneratedUiContext = createContext<
   McpAppGeneratedUi | undefined
 >(undefined);
 
+export interface McpAppGeneratedUiOwnerSource {
+  scopeId: string;
+  sessionId: string;
+  clientId: string;
+  workspaceCwd: string;
+  eventEpoch?: string;
+  captureOwner(): { isCurrent(): boolean };
+}
+
+export interface McpAppGeneratedUiInvalidation {
+  scopeId: string;
+  sessionId?: string;
+  reason:
+    | 'policy'
+    | 'epoch'
+    | 'runtime-stopped'
+    | 'cleared'
+    | 'deleted'
+    | 'rewound'
+    | 'scope-changed';
+}
+
+export interface McpAppGeneratedUiOwner {
+  scopeId: string;
+  workspaceCwd?: string;
+  source?: McpAppGeneratedUiOwnerSource;
+  subscribeInvalidation(
+    listener: (event: McpAppGeneratedUiInvalidation) => void,
+  ): () => void;
+  invalidate(event: McpAppGeneratedUiInvalidation): void;
+}
+
+export const McpAppGeneratedUiOwnerContext = createContext<
+  McpAppGeneratedUiOwner | undefined
+>(undefined);
+
+export const McpAppVisibilityContext = createContext(true);
+
 export function useMcpAppAdmission(display?: {
   resourceUri: string;
   requiredFeature?: 'generated-ui';

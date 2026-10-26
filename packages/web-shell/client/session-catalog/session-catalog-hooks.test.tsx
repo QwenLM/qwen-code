@@ -9,6 +9,7 @@ import type {
   DaemonSessionListPage,
 } from '@qwen-code/sdk/daemon';
 import type { SessionCatalogQuery } from './session-catalog-store';
+import { McpAppGeneratedUiOwnerContext } from '../mcpAppHostContext';
 import {
   SESSION_CATALOG_ERROR_RETRY_MS,
   SESSION_CATALOG_TRAILING_REFRESH_MS,
@@ -186,6 +187,7 @@ describe('session catalog hooks', () => {
     legacy.mockResolvedValue({ sessions: [{ sessionId: 'primary' }] });
     mocks.workspace.actions.deleteSession.mockResolvedValue(true);
     let facade: ReturnType<typeof useWebShellSessions> | undefined;
+    const invalidate = vi.fn();
 
     function FacadeProbe() {
       facade = useWebShellSessions({ autoLoad: true });
@@ -193,11 +195,23 @@ describe('session catalog hooks', () => {
     }
 
     await act(async () => {
-      root.render(<FacadeProbe />);
+      root.render(
+        <McpAppGeneratedUiOwnerContext.Provider
+          value={{
+            scopeId: 'primary-scope',
+            workspaceCwd: '/primary',
+            invalidate,
+            subscribeInvalidation: () => () => undefined,
+          }}
+        >
+          <FacadeProbe />
+        </McpAppGeneratedUiOwnerContext.Provider>,
+      );
       await Promise.resolve();
       await Promise.resolve();
     });
     expect(legacy).toHaveBeenCalledTimes(1);
+    expect(invalidate).not.toHaveBeenCalled();
 
     await act(async () => {
       await facade!.deleteSession('primary');
@@ -210,6 +224,11 @@ describe('session catalog hooks', () => {
       mocks.useSessions.mock.results.at(-1)?.value.deleteSession,
     ).not.toHaveBeenCalled();
     expect(legacy).toHaveBeenCalledTimes(2);
+    expect(invalidate).toHaveBeenCalledWith({
+      scopeId: 'primary-scope',
+      sessionId: 'primary',
+      reason: 'deleted',
+    });
   });
 
   it('keeps the legacy reload contract when a list request fails', async () => {

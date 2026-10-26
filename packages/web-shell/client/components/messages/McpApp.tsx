@@ -9,10 +9,18 @@ import {
   McpAppMessagesContext,
   McpAppSessionContext,
   McpAppToolsContext,
+  McpAppGeneratedUiOwnerContext,
+  McpAppVisibilityContext,
 } from '../../mcpAppHostContext';
 import { useI18n } from '../../i18n';
 import { useTheme } from '../../themeContext';
 import styles from './McpApp.module.css';
+import {
+  GeneratedUiSlot,
+  useGeneratedUiRetention,
+} from '../../generated-ui/GeneratedUiRuntimeProvider';
+import { Button } from '../ui/button';
+import type { GeneratedUiInstance } from '../../generated-ui/instance-store';
 
 type SandboxResource = Parameters<AppBridge['sendSandboxResourceReady']>[0];
 type AppToolResult = Parameters<AppBridge['sendToolResult']>[0];
@@ -172,8 +180,36 @@ export function GeneratedUiFallback({ display }: { display: McpAppDisplay }) {
   );
 }
 
-export function McpApp({ display }: { display: McpAppDisplay }) {
+export function McpApp({
+  display,
+  toolId,
+  visible = true,
+}: {
+  display: McpAppDisplay;
+  toolId?: string;
+  visible?: boolean;
+}) {
   const allowed = useMcpAppAdmission(display);
+  const retention = useGeneratedUiRetention();
+  const owner = useContext(McpAppGeneratedUiOwnerContext)?.source;
+  const sessionId = useContext(McpAppSessionContext);
+  const surfaceVisible = useContext(McpAppVisibilityContext);
+  const builtIn =
+    display.requiredFeature === 'generated-ui' ||
+    display.resourceUri === 'ui://qwen-code-generated-ui/view-v1.html';
+  if (
+    allowed &&
+    retention &&
+    toolId &&
+    builtIn &&
+    owner?.eventEpoch &&
+    owner.sessionId === sessionId
+  )
+    return surfaceVisible ? (
+      <GeneratedUiSlot display={display} toolId={toolId} visible={visible} />
+    ) : (
+      <GeneratedUiFallback display={display} />
+    );
   return allowed ? (
     <McpAppRuntime display={display} />
   ) : (
@@ -181,7 +217,14 @@ export function McpApp({ display }: { display: McpAppDisplay }) {
   );
 }
 
-function McpAppRuntime({ display }: { display: McpAppDisplay }) {
+export function McpAppRuntime({
+  display,
+  retained,
+}: {
+  display: McpAppDisplay;
+  retained?: GeneratedUiInstance['runtime'];
+}) {
+  const { t } = useI18n();
   const daemonBaseUrl = useContext(McpAppHostContext);
   const sessionId = useContext(McpAppSessionContext);
   const tools = useContext(McpAppToolsContext);
@@ -245,7 +288,11 @@ function McpAppRuntime({ display }: { display: McpAppDisplay }) {
     let messagePending = false;
     if (requestMessage) {
       bridge.onmessage = async (params, extra) => {
-        const signal = AbortSignal.any([extra.signal, appAbort.signal]);
+        const signal = AbortSignal.any([
+          extra.signal,
+          appAbort.signal,
+          ...(retained ? [retained.getSignal()] : []),
+        ]);
         const content = params.content;
         if (
           signal.aborted ||
@@ -276,7 +323,11 @@ function McpAppRuntime({ display }: { display: McpAppDisplay }) {
     }
     if (callTool) {
       bridge.oncalltool = async (params, extra) => {
-        const signal = AbortSignal.any([extra.signal, appAbort.signal]);
+        const signal = AbortSignal.any([
+          extra.signal,
+          appAbort.signal,
+          ...(retained ? [retained.getSignal()] : []),
+        ]);
         let progress = 0;
         const progressToken = params._meta?.progressToken;
         // ext-apps omits the base MCP progress notification from its union.
@@ -368,7 +419,8 @@ function McpAppRuntime({ display }: { display: McpAppDisplay }) {
     bridge.onsizechange = ({ height: requestedHeight }) => {
       if (
         typeof requestedHeight === 'number' &&
-        Number.isFinite(requestedHeight)
+        Number.isFinite(requestedHeight) &&
+        (!retained || (retained.isVisible() && requestedHeight > 0))
       ) {
         setHeight(Math.min(640, Math.max(120, Math.ceil(requestedHeight))));
       }
@@ -423,6 +475,7 @@ function McpAppRuntime({ display }: { display: McpAppDisplay }) {
     cspKey,
     toolArgumentsKey,
     toolResultKey,
+    retained,
   ]);
 
   useEffect(() => {
@@ -438,7 +491,22 @@ function McpAppRuntime({ display }: { display: McpAppDisplay }) {
       <div className={styles.header}>
         <span>MCP App</span>
         <span className={styles.server}>{display.serverName}</span>
+        {retained && (
+          <Button
+            variant="ghost"
+            size="sm"
+            title={t('mcpApp.generatedUi.reopenNotice')}
+            onClick={retained.reset}
+          >
+            {t('mcpApp.generatedUi.reset')}
+          </Button>
+        )}
       </div>
+      {retained?.reopened && (
+        <div className={styles.fallback}>
+          {t('mcpApp.generatedUi.reopenNotice')}
+        </div>
+      )}
       {error ? (
         <div className={styles.fallback}>
           {display.fallbackText || 'MCP App could not initialize.'}

@@ -327,7 +327,12 @@ import { ExtensionsManagerPage } from './components/extensions/ExtensionsManager
 import { PluginManagerPage } from './components/plugins/PluginManagerPage';
 import { ChannelsManagerPage } from './components/channels/ChannelsManagerPage';
 import { ShadowDomBoundary } from './components/ShadowDomBoundary';
-import { McpAppHostContext, McpAppMessagesContext } from './mcpAppHostContext';
+import {
+  McpAppHostContext,
+  McpAppMessagesContext,
+  McpAppVisibilityContext,
+} from './mcpAppHostContext';
+import { GeneratedUiRuntimeProvider } from './generated-ui/GeneratedUiRuntimeProvider';
 import {
   useMcpAppMessages,
   type McpAppPromptSubmission,
@@ -21449,6 +21454,7 @@ export function App({
           data-compact-sidebar={compactShell ? '' : undefined}
           lang={selectedLanguage}
         >
+          <GeneratedUiRuntimeProvider>
           {mcpAppMessages.review}
           {capacityRecovery && <CapacityRecoveryDialog intent={capacityRecovery} onClose={dismissCapacityRecovery} />}
           {!onToast && (
@@ -23194,6 +23200,7 @@ export function App({
                       session chat does (todo contexts stay chat-only — they
                       belong to the outer session, not the panes). */}
                   <WebShellCustomizationProvider value={customization}>
+                    <McpAppVisibilityContext.Provider value={!activePanel && !artifactPanelFullscreen}>
                       <SplitView
                         showResponseTokensPerSecond={showResponseTokensPerSecond}
                         modelManagement={modelManagement}
@@ -23243,6 +23250,7 @@ export function App({
                         }
                         sessionWorkflowEnabled={sessionWorkflowEnabled}
                       />
+                    </McpAppVisibilityContext.Provider>
                   </WebShellCustomizationProvider>
                 </div>
               )}
@@ -23381,6 +23389,7 @@ export function App({
                   }
                 >
                   <WebShellCustomizationProvider value={mainChatCustomization}>
+                    <McpAppVisibilityContext.Provider value={chatActive && !showMissingSessionState}>
                       <TodoContextsProvider
                         timeline={todoTimeline}
                         details={todoDetails}
@@ -24464,6 +24473,7 @@ export function App({
                         </div>
                       )}
                     </div>
+                    </McpAppVisibilityContext.Provider>
                   </WebShellCustomizationProvider>
                 </div>
               </div>
@@ -24739,6 +24749,7 @@ export function App({
                 artifactPanelSlotEl,
               )}
           </div>
+          </GeneratedUiRuntimeProvider>
         </div>
         </CompactModeContext.Provider>
         </WebShellPortalRootContext.Provider>
