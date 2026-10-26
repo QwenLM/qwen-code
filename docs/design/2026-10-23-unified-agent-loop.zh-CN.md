@@ -176,12 +176,12 @@ headless 的主循环以 `maxRounds: 1` 运行。因此它为每一轮做的准�
 
 有些入口在迁移前自己做了交互步骤中的一部分工作，迁到共享路径后还会继续自己做一段时间。这时用一个发送选项告诉 client 跳过这部分，避免执行两次。这类选项只是迁移期的过渡手段，不是长期 API。下表逐项列出，并写明由哪一步把它删除或改成输入。
 
-| 选项                     | 宿主为什么保留这部分                                                                                                                                                                               | 由哪一步移除                                                                                                |
-| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `toolLoopGuardsByHost`   | ACP 的工具步骤运行 daemon 工具循环守卫：每轮工具调用上限、重复调用、探索提醒，以及重复工具失败守卫                                                                                                 | PR 2b，ACP 工具批迁移时：client 已有的守卫直接生效，只有 ACP 才有的守卫（例如重复工具失败守卫）改为入口策略 |
-| `stopHookRunByHost`      | ACP 的 Stop 循环还负责 Todo Stop Guard、当前轮次的后台结果和轮次中途的输入，因此由 ACP 决定轮次何时结束并安排记忆任务                                                                              | PR 2c，这些续发改为 stop 点策略时（见 [stop 点续发](#stop-点续发)）                                         |
-| `interactionSpanByHost`  | ACP 的 span 挂在 daemon 的 trace 下                                                                                                                                                                | 改为输入：client 加入宿主为该 prompt 开启的 span；ACP 修改默认值之前完成                                    |
-| `userTurnRecordedByHost` | ACP 在 slash 命令执行前，按用户输入的原样记录 prompt，连同显示文本、附件、resource link 和 daemon prompt id 一起记录，并在首次发送前为这一轮建立文件历史快照，所以发出前就被取消的 prompt 也有快照 | 改为输入：宿主传入这条记录，由 client 写入；ACP 修改默认值之前完成                                          |
+| 选项                     | 宿主为什么保留这部分                                                                                                                                                                               | 由哪一步移除                                                                                                                                                                                                           |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `toolLoopGuardsByHost`   | ACP 的工具步骤运行 daemon 工具循环守卫：每轮工具调用上限、重复调用、探索提醒，以及重复工具失败守卫                                                                                                 | PR 2b 迁移全新 prompt 的工具批：client 的守卫生效，只有 ACP 才有的守卫，即它的参数错误、半截编辑和重复工具失败停止，作为 ACP 的策略保留。带 live 工具的会话和 Agent Host 会话保留 ACP 的工具步骤和这个选项，直到 PR 2d |
+| `stopHookRunByHost`      | ACP 的 Stop 循环还负责 Todo Stop Guard、当前轮次的后台结果和轮次中途的输入，因此由 ACP 决定轮次何时结束并安排记忆任务                                                                              | PR 2c，这些续发改为 stop 点策略时（见 [stop 点续发](#stop-点续发)）                                                                                                                                                    |
+| `interactionSpanByHost`  | ACP 的 span 挂在 daemon 的 trace 下                                                                                                                                                                | 改为输入：client 加入宿主为该 prompt 开启的 span；ACP 修改默认值之前完成                                                                                                                                               |
+| `userTurnRecordedByHost` | ACP 在 slash 命令执行前，按用户输入的原样记录 prompt，连同显示文本、附件、resource link 和 daemon prompt id 一起记录，并在首次发送前为这一轮建立文件历史快照，所以发出前就被取消的 prompt 也有快照 | 改为输入：宿主传入这条记录，由 client 写入；ACP 修改默认值之前完成                                                                                                                                                     |
 
 `toolCallPreparations` 和 `memoryRecallQuery` 不在表中：前者只是请求一个额外的事件，后者把宿主在发送前展开的 prompt 原文交给召回；两者都不关闭任何行为。
 
@@ -260,6 +260,32 @@ PR 2 分三步迁移 ACP。PR 2a 迁移全新用户 prompt 的模型轮：不是
 - `admitUserPrompt` 接受 hook 的 `submitted_prompt` 和取消信号；
 - 导出 `runModelRound`。
 
+### ACP 工具批迁到共享工具批（PR 2b）
+
+PR 2b 迁移 PR 2a 所迁轮次的工具批。工具批就是共享 loop 自己的 `runToolBatch`，跑在一个 `CoreToolScheduler` 上：重复与 replay 处理、调度、按请求顺序排列的结果、`finalizeToolResponses` 和记录。工具批外面的 loop（工具之后的下一条请求、中途输入、后台结果、Stop 循环）在 PR 2c 之前仍由 ACP 处理。
+
+ACP 这边只负责翻译 scheduler 的状态变化：
+
+| ACP 现在的执行器                                                                                                                                                        | 设置开启后                                                                                                                                                          |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `runToolCalls` / `runTool`：自己做工具查找、校验、半截编辑守卫、PreToolUse、PermissionRequest、权限流程、AUTO 模式、plan 模式的 shell 规则、PostToolUse、图片处理和遥测 | 由 scheduler 处理                                                                                                                                                   |
+| 只有相邻的 Agent 调用并发执行                                                                                                                                           | 按 scheduler 的分批：所有并发安全的调用（Read、Search、Fetch、只读 shell、Agent）并发执行，并发上限不变                                                             |
+| 轮到某个调用时才发权限请求                                                                                                                                              | scheduler 把调用置为 `awaiting_approval` 时，经 ACP 的权限队列为每个调用发 `session/request_permission`，都在这一批的任何调用执行之前；答复交给该调用的 `onConfirm` |
+| 请求被拒绝或失败时，这个调用之后停止轮次，批中后面的调用被跳过                                                                                                          | 同样停止；批中其他调用在执行前被取消                                                                                                                                |
+| `runTool` 内部发出的 `tool_call` 开始、生命周期、shell 心跳、子代理和结果更新                                                                                           | 同样的更新，改由 scheduler 的回调发出：调用启动时发开始，结束时发结果，执行前被拒绝的调用发错误更新                                                                 |
+| 每轮工具调用上限、重复调用和探索提醒                                                                                                                                    | 由 client 处理，模型轮不再带 `toolLoopGuardsByHost`                                                                                                                 |
+| 按轮次计数的参数错误停止和半截编辑停止，以及重复工具失败守卫                                                                                                            | 仍由 ACP 处理，依据这一批的结果                                                                                                                                     |
+| Goal 审批的归属、standalone worktree 限制                                                                                                                               | 仍由 ACP 处理，通过 scheduler 的 `refuseToolCall`                                                                                                                   |
+| PermissionPrompt Notification hook 返回的终端序列                                                                                                                       | hook 由 scheduler 触发；ACP 转发它报告的序列                                                                                                                        |
+| Managed 会话的批次收尾、记忆写入后的记忆刷新                                                                                                                            | 仍由 ACP 处理，在这一批之后                                                                                                                                         |
+
+带 live 工具的会话（ACP 不经权限流程就信任这些工具）和只读的 Agent Host 会话（拒绝一切审批）在 PR 2d 之前保留 ACP 的执行器和 `toolLoopGuardsByHost`。
+
+这一步对 core 的改动都是增量的：
+
+- 导出 `runToolBatch`，并新增 `keepCancelledResults`：被 loop 信号取消的批次仍会收尾、记录并返回结果，因为 ACP 会把被取消轮次的结果保留在历史中；
+- `CoreToolScheduler` 新增选项 `refuseToolCall`（owner 在调用构建之前自行拒绝）和 `onPermissionPromptTerminalSequence`。
+
 ## 迁移计划
 
 | PR  | 内容                                                                                                            |
@@ -321,9 +347,9 @@ PR 3–6 每一项之后，同样各自跟随默认开启和删除旧 loop 两�
 **ACP 场景**（`integration-tests/cli/acp-agent-loop-parity.test.ts`）：
 
 - 纯文本，以及带 thought 的流式文本；
-- 一个工具，以及一次回复中的两个读取；
-- 两次读取之间一次获准的写入，以及一次被拒绝的写入；
-- 超过每轮工具调用上限的读取；
+- 一个工具，以及一次回复中的两个读取；两个读取在共享工具批上并发执行，因此按调用比较它们的更新；
+- 两次读取之间一次获准的写入，以及一次被拒绝的写入，都在默认审批模式下；
+- 超过每轮工具调用上限的读取，不比较被 client 上限停下的那次回复的结尾；
 - 被输出上限截断的编辑；
 - 中途断流后重试的流；
 - 同一会话中的两个 prompt；
@@ -335,7 +361,7 @@ PR 3–6 每一项之后，同样各自跟随默认开启和删除旧 loop 两�
 
 ## 兼容性
 
-- 设置关闭时，任何入口都不变。共享代码的改动都是增量的：scheduler 的可选项 `beforeToolLaunch`，以及从 PR 2a 起上文所列的 `Turn` 事件字段和发送选项，不使用它们的调用方不受影响。
+- 设置关闭时，任何入口都不变。共享代码的改动都是增量的：scheduler 的可选项 `beforeToolLaunch`、从 PR 2a 起上文所列的 `Turn` 事件字段和发送选项，以及从 PR 2b 起导出的 `runToolBatch` 和 scheduler 的 `refuseToolCall`、`onPermissionPromptTerminalSequence`，不使用它们的调用方不受影响。
 - 设置开启时，headless 与现在相比有以下有意的差异。其中大多数源于把一批调用作为一个整体调度，这也是 TUI 现在的做法：
   - 在 stream-json 中，超过 `--max-session-turns` 的消息会在会话轮数上限处结束运行，与 `-p` 相同（错误写到 stderr，退出码 53），而不是返回一个重复上一条回答的成功结果（#15325）；
   - 通知轮次（cron、monitor 等排队条目）的每一轮模型调用都计入 `--max-session-turns`，与主轮次相同，而不是整个条目只计一轮，因此通知轮次中调用工具的运行可能更早到达上限；
@@ -356,8 +382,15 @@ PR 3–6 每一项之后，同样各自跟随默认开启和删除旧 loop 两�
   - client 的会话轮数上限对 ACP prompt 生效；`model.skipLoopDetection` 为 false 时它的内容和 thought 循环启发式检测也生效，启用时 next-speaker 检查也一样（#14114）；
   - 工具结果请求会带上召回结果和排队的循环提醒，并运行 client 只按大小判断的 microcompaction，托管记忆任务（包括 skill review）由 client 执行，prompt 计入提交署名；
   - 每次压缩都会显示压缩提示，发送过程中的压缩也一样；
+  - 从 PR 2b 起，一批工具调用作为一个整体调度，与 TUI 相同：这一批的审批都在它的任何调用执行之前请求，并发安全的调用并发执行，因此它们的更新会交错；
+  - client 的每轮工具调用上限在回复流式输出时就把它停下，因此这次请求以 interrupted 结束，也不报告 usage；超出上限的调用仍显示为已跳过；
+  - 被取消调用的结果是 `[Operation Cancelled] Reason: …`；审批被拒绝时，这一批的其他调用被取消，而不是带着 ACP 的权限取消提示被跳过；
+  - ACP 的参数错误停止和半截编辑停止在这一批结束后才生效，因此批中其他调用仍会执行；provider 调用 id 重复导致轮次结束时，不再记录被跳过的结果；
+  - 工具结果请求中的 todo 提醒和探索提醒改由 client 添加，client 把它们放在工具边界处取得的输入之后；
+  - PostToolBatch hook 每批触发一次，批次输出预算也按整批计算；
+  - PostToolUse hook 产生的 artifacts 随工具的结果更新一起发出，不再单独发 `artifact-event` 通知；
 
-  ACP 对拍测试覆盖了保持不变的常见场景，并对日期提醒、工具结果上的 UserPromptSubmit，以及该 hook 运行时取消做了断言。
+  ACP 对拍测试覆盖了保持不变的常见场景，并对日期提醒、工具结果上的 UserPromptSubmit、该 hook 运行时取消，以及一批的审批先于它的调用执行做了断言。
 
 - 之后迁移的入口会带来各自的修复：#15324（ACP）、#15326（OpenTUI）、#14114 与 #12209（ACP）。
 

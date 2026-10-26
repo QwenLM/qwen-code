@@ -176,12 +176,12 @@ A policy affects only the surface that passes it.
 
 Some surfaces did part of the interaction step themselves before they moved, and keep doing it on the shared path for a while. A send option then tells the client not to do that part, so it does not run twice. Each such option is a transition step, not a lasting API: it is listed here with the step that removes it or turns it into an input.
 
-| Option                   | Why the host keeps the part                                                                                                                                                                                                                                  | Removed by                                                                                                                                                               |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `toolLoopGuardsByHost`   | ACP's tool step runs the daemon tool-loop guards: the per-turn tool-call cap, repeated calls, the exploration reminder and the repeated-tool-failure guard                                                                                                   | PR 2b, when ACP's tool batch moves: the guards the client already has apply, and the ones only ACP has, such as the repeated-tool-failure guard, become a surface policy |
-| `stopHookRunByHost`      | ACP's Stop loop also runs the Todo Stop Guard, the turn's background results and mid-turn input, so ACP decides when the turn ends and runs its memory tasks                                                                                                 | PR 2c, when those continuations become stop-point policies ([Stop-point continuations](#stop-point-continuations))                                                       |
-| `interactionSpanByHost`  | ACP's span is parented to the daemon's trace                                                                                                                                                                                                                 | an input instead: the client joins the span the host started for the prompt; before the default changes for ACP                                                          |
-| `userTurnRecordedByHost` | ACP records the prompt as typed, with its display text, attachments, resource links and daemon prompt id, before slash commands run, and takes the turn's file-history snapshot before its first send, so a prompt cancelled before it is sent still has one | an input instead: the host passes that record and the client writes it; before the default changes for ACP                                                               |
+| Option                   | Why the host keeps the part                                                                                                                                                                                                                                  | Removed by                                                                                                                                                                                                                                                                                     |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `toolLoopGuardsByHost`   | ACP's tool step runs the daemon tool-loop guards: the per-turn tool-call cap, repeated calls, the exploration reminder and the repeated-tool-failure guard                                                                                                   | PR 2b for a fresh prompt's tool batches: the client's guards apply, and ACP keeps the ones only it has, its parameter-error, partial-edit and repeated-tool-failure stops, as its policy. A session with live tools and an Agent Host session keep ACP's tool step and this option until PR 2d |
+| `stopHookRunByHost`      | ACP's Stop loop also runs the Todo Stop Guard, the turn's background results and mid-turn input, so ACP decides when the turn ends and runs its memory tasks                                                                                                 | PR 2c, when those continuations become stop-point policies ([Stop-point continuations](#stop-point-continuations))                                                                                                                                                                             |
+| `interactionSpanByHost`  | ACP's span is parented to the daemon's trace                                                                                                                                                                                                                 | an input instead: the client joins the span the host started for the prompt; before the default changes for ACP                                                                                                                                                                                |
+| `userTurnRecordedByHost` | ACP records the prompt as typed, with its display text, attachments, resource links and daemon prompt id, before slash commands run, and takes the turn's file-history snapshot before its first send, so a prompt cancelled before it is sent still has one | an input instead: the host passes that record and the client writes it; before the default changes for ACP                                                                                                                                                                                     |
 
 `toolCallPreparations` and `memoryRecallQuery` are not in the table: one asks for an extra event, the other gives recall the prompt's text, which the host expanded before the send; neither turns anything off.
 
@@ -260,6 +260,32 @@ The core changes of this step are additive and change nothing for a caller that 
 - `admitUserPrompt` takes the hook's `submitted_prompt` and a signal;
 - `runModelRound` is exported.
 
+### ACP tool batches on the shared batch (PR 2b)
+
+PR 2b moves the tool batch of the turns PR 2a moved. The batch is the loop's own `runToolBatch` on one `CoreToolScheduler`: duplicates and replays, scheduling, results in request order, `finalizeToolResponses` and recording. ACP keeps the loop around it (the next request after tools, mid-turn input, background results, the Stop loop) until PR 2c.
+
+ACP's part is a translation of the scheduler's state changes:
+
+| ACP's executor today                                                                                                                                                                                            | With the setting on                                                                                                                                                                                 |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `runToolCalls` / `runTool`: its own lookup, validation, the partial-edit guard, PreToolUse, PermissionRequest, the permission flow, AUTO mode, plan-mode shell rules, PostToolUse, image handling and telemetry | the scheduler's                                                                                                                                                                                     |
+| only consecutive Agent calls run concurrently                                                                                                                                                                   | the scheduler's partitioning: every concurrency-safe call (Read, Search, Fetch, read-only shell, Agent) runs concurrently, under the same in-flight cap                                             |
+| a permission request when a call reaches its turn                                                                                                                                                               | `session/request_permission` for each call the scheduler holds in `awaiting_approval`, through ACP's permission queue, before any call of the batch runs; the answer goes to the call's `onConfirm` |
+| a declined or failed request stops the turn after the call; the batch's later calls are skipped                                                                                                                 | the same stop; the batch's other calls are cancelled before they run                                                                                                                                |
+| `tool_call` start, lifecycle, shell heartbeat, subagent and result updates from inside `runTool`                                                                                                                | the same updates from the scheduler's callbacks: the start when a call launches, the result when it settles, an error update for a call refused before it ran                                       |
+| the per-turn tool-call cap, repeated calls and the exploration reminder                                                                                                                                         | the client's, which no longer gets `toolLoopGuardsByHost`                                                                                                                                           |
+| the parameter-error and partial-edit stops, counted per turn, and the repeated-tool-failure guard                                                                                                               | ACP's, from the batch's results                                                                                                                                                                     |
+| Goal-approval ownership, the standalone worktree limits                                                                                                                                                         | ACP's, through the scheduler's `refuseToolCall`                                                                                                                                                     |
+| the PermissionPrompt Notification hook's terminal sequence                                                                                                                                                      | the scheduler's hook; ACP forwards the sequence it reports                                                                                                                                          |
+| a Managed session's batch close, the memory refresh after a memory write                                                                                                                                        | ACP's, after the batch                                                                                                                                                                              |
+
+A session with live tools, which ACP trusts without the permission flow, and a read-only Agent Host session, which refuses approvals, keep ACP's executor and `toolLoopGuardsByHost` until PR 2d.
+
+The core changes of this step are additive:
+
+- `runToolBatch` is exported, with `keepCancelledResults`: a batch the loop's signal cancelled is still finished, recorded and returned, since ACP keeps a cancelled turn's results in history;
+- `CoreToolScheduler` options `refuseToolCall`, the owner's own refusal of a call before it is built, and `onPermissionPromptTerminalSequence`.
+
 ## Migration
 
 | PR  | Content                                                                                                                                             |
@@ -321,9 +347,9 @@ A difference fails the scenario unless it is listed with a linked issue.
 **ACP scenarios** (`integration-tests/cli/acp-agent-loop-parity.test.ts`):
 
 - plain text, and streamed text with a thought;
-- one tool, and two reads in one response;
-- an approved write between reads, and a denied write;
-- reads past the per-turn tool-call cap;
+- one tool, and two reads in one response, whose updates are compared per call because the reads run concurrently on the shared batch;
+- an approved write between reads, and a denied write, in the default approval mode;
+- reads past the per-turn tool-call cap, without the end of the response the client's cap stops;
 - an edit cut off by the output limit;
 - a stream that drops and is retried;
 - two prompts in one session;
@@ -335,7 +361,7 @@ The suite runs in the integration job. A scheduled job also runs the whole headl
 
 ## Compatibility
 
-- With the setting off, no surface changes. The shared code that changes is additive: the scheduler's optional `beforeToolLaunch`, and from PR 2a the `Turn` event fields and send options above, which change nothing for a caller that does not use them.
+- With the setting off, no surface changes. The shared code that changes is additive: the scheduler's optional `beforeToolLaunch`, from PR 2a the `Turn` event fields and send options above, and from PR 2b the exported `runToolBatch` and the scheduler's `refuseToolCall` and `onPermissionPromptTerminalSequence`, which change nothing for a caller that does not use them.
 - With the setting on, headless differs from today in these intended ways. Most follow from scheduling a batch as one unit, as the TUI already does:
   - a stream-json message past `--max-session-turns` ends the run at the session turn limit, as `-p` does (the error on stderr, exit code 53), instead of a success that repeats the previous answer (#15325);
   - a notification turn (cron, monitor and other queued items) counts each of its model rounds toward `--max-session-turns`, as the main turn does, instead of one turn for the whole item, so a run whose notification turns call tools can reach the limit sooner;
@@ -356,8 +382,15 @@ The suite runs in the integration job. A scheduled job also runs the whole headl
   - the client's session turn cap applies to ACP prompts, and so do its content and thought loop heuristics when `model.skipLoopDetection` is false and the next-speaker check when it is enabled (#14114);
   - a tool-result request carries the recall and the queued loop reminder and runs the client's size-only microcompaction, the managed memory tasks are the client's, skill review included, and the prompt counts toward commit attribution;
   - every compaction shows the compaction notice, also one inside a send;
+  - from PR 2b, a tool batch is scheduled as one unit, as in the TUI: its approvals are asked for before any of its calls runs, and its concurrency-safe calls run concurrently, so their updates interleave;
+  - the client's per-turn tool-call cap stops the response as it streams, so that request ends interrupted and reports no usage; the call past the cap is still shown as skipped;
+  - a cancelled call's result reads `[Operation Cancelled] Reason: …`, and the other calls of a batch whose approval was declined are cancelled instead of skipped with ACP's permission-cancel message;
+  - ACP's parameter-error and partial-edit stops take effect after the batch, so its other calls still run; a repeated provider call id ends the turn without recording skipped results;
+  - the todo and exploration reminders of a tool-result request are the client's, placed by the client after the input taken at the tool boundary;
+  - a PostToolBatch hook fires once per batch, and the batch output budget applies across the batch;
+  - a PostToolUse hook's artifacts arrive with the tool's result update instead of a separate `artifact-event` notification;
 
-  The ACP parity suite covers the common cases unchanged and asserts the date reminder, UserPromptSubmit on tool results and cancelling while that hook runs.
+  The ACP parity suite covers the common cases unchanged and asserts the date reminder, UserPromptSubmit on tool results, cancelling while that hook runs, and that a batch's approvals come before its calls run.
 
 - Later surfaces bring their own fixes: #15324 (ACP), #15326 (OpenTUI), #14114 and #12209 (ACP).
 
