@@ -653,6 +653,7 @@ starts failing, not at every fire.
 | `standalone_session_options_v1`          | the complete standalone-session runtime is installed (same condition as `standalone_sessions_v1`), so the read-only, sessionless `GET /standalone/session-options` route is registered on the internal Conversations runtime.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `session_artifacts_persistence`          | session artifact persistence is wired for the runtime.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `session_artifact_library`               | Session artifact persistence is wired; supports trusted workspace-owner reads/removal of live, cold, and archived registrations via `/workspaces/:workspace/session/:id/artifact-library`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `workspace_artifact_library`             | Persisted workspace-wide artifact queries, batch session queries and explicit-pair removal via `/workspaces/:workspace/artifact-library`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `session_sources`                        | session source persistence is wired for the runtime. Registers metadata-only workspace files, uploaded attachments, and HTTP(S) links through the live session owner.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `session_generation`                     | session generation helpers are available.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `scheduled_task_session_reuse`           | durable scheduled-task session management is active and every managed daemon runtime has installed the callback that lets a task explicitly bind to its current existing session.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
@@ -3119,6 +3120,45 @@ Return aggregate persisted session counts for the selected workspace without cha
 The TypeScript daemon SDK exposes the plural route through `workspaceById(...)` or `workspaceByCwd(...)`, followed by `getWorkspaceSessionInfo()`.
 
 ### Workspace session artifact library
+
+`workspace_artifact_library` additionally advertises workspace-wide queries and
+batch operations:
+
+| Method | Route                                            | Input                                                                           |
+| ------ | ------------------------------------------------ | ------------------------------------------------------------------------------- |
+| GET    | `/workspaces/:workspace/artifact-library`        | All live, unloaded, and archived sessions in the workspace                      |
+| POST   | `/workspaces/:workspace/artifact-library/query`  | `{ "sessionIds": ["session-id"] }`                                              |
+| POST   | `/workspaces/:workspace/artifact-library/delete` | `{ "artifacts": [{ "sessionId": "session-id", "artifactId": "artifact-id" }] }` |
+
+Both POST bodies are strict objects containing 1–100 entries. Duplicate IDs or
+pairs are processed once. Query responses are
+`{ "v": 1, "sessions": [<session artifact envelope>], "errors": [<member error>] }`.
+Each member error contains `sessionId`, `status`, `code`, and `message`. Full
+discovery omits absent/foreign sessions; an explicit query reports them. Other
+member failures remain explicit while successful sessions are returned.
+
+Batch removal returns `{ "v": 1, "results": [...] }`. Each result contains
+`sessionId` and `artifactId`, plus either the existing mutation envelope
+(`v`, `changes`, optional `warnings`/`warningDetails`) or
+`error: { status, code, message }`. Missing artifacts are idempotent empty
+changes. Clients must inspect every result and persistence warning; a 200 batch
+response does not mean every member succeeded. Removal is grouped by session,
+is not transactional across sessions, preserves actual files, and requires
+the same strict operator authority as single-artifact removal. Invalid input
+returns 400 `invalid_artifact_library_request`; workspace-level errors retain
+ordinary HTTP status codes.
+
+Live queries reuse the bridge. Unloaded metadata, including empty results, is
+cached per runtime with a 32 MiB serialized-size budget. Unchanged files are not
+replayed on repeated queries or after a TTL. Transcript and ownership metadata
+identities are checked on each read; changed entries are rebuilt. Candidate
+discovery is cached by directory identity. Concurrent cold reads share a load.
+Admitted unchanged entries are retained; new results exceeding the budget are
+returned uncached so repeated full scans do not evict the whole cache. Those
+uncached sessions, or a daemon restart, require reconstruction. This avoids
+repeated JSONL parsing for cached entries, but filesystem checks and response
+size still scale with the workspace. Cold file availability retains the existing
+metadata-only semantics.
 
 `session_artifact_library` advertises these persisted-workspace-scoped endpoints:
 

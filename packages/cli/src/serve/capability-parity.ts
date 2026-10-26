@@ -143,6 +143,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     standing: 'managed',
     evidence: 'surface:ARTIFACT_GET',
   },
+  workspace_artifact_library: NO_MANAGED_EQUIVALENT(
+    'no Managed workspace-wide artifact query or explicit-pair batch removal',
+  ),
   session_sources: NO_MANAGED_EQUIVALENT('no Managed session source list'),
   slow_client_warning: LEGACY_ONLY(
     'SSE backpressure is a legacy transport knob',

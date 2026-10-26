@@ -49,6 +49,7 @@ function runtime(workspaceId = 'primary', live = true): WorkspaceRuntime {
         sessionId: id,
         artifacts: [],
       })),
+      listWorkspaceSessions: vi.fn(() => (live ? [{ sessionId: id }] : [])),
       removeSessionArtifactForWorkspaceOwner: vi.fn(async () => ({
         v: 1,
         sessionId: id,
@@ -59,6 +60,7 @@ function runtime(workspaceId = 'primary', live = true): WorkspaceRuntime {
 }
 function setup(runtimes = [runtime()], persistence = true, authorized = true) {
   const app = express();
+  app.use(express.json());
   const registry = createWorkspaceRegistry(runtimes);
   const coordinator = new SessionArchiveCoordinator();
   const activity = new ConversationRuntimeActivityGate();
@@ -81,6 +83,334 @@ function setup(runtimes = [runtime()], persistence = true, authorized = true) {
   return { app, registry, coordinator, activity };
 }
 afterEach(() => vi.restoreAllMocks());
+
+const collectionRoute = '/workspaces/primary/artifact-library';
+const secondId = '550e8400-e29b-41d4-a716-446655440001';
+
+describe('workspace artifact collection routes', () => {
+  it('reads live artifacts repeatedly without a client identity and deduplicates IDs', async () => {
+    const owner = runtime();
+    const { app, coordinator } = setup([owner]);
+    const shared = vi.spyOn(coordinator, 'runSharedMany');
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const response = await request(app)
+        .post(`${collectionRoute}/query`)
+        .send({ sessionIds: [id, id.toUpperCase()] });
+      expect(response.status).toBe(200);
+      expect(response.headers['cache-control']).toBe('no-store');
+      expect(response.body).toEqual({
+        v: 1,
+        sessions: [{ v: 1, sessionId: id, artifacts: [] }],
+        errors: [],
+      });
+    }
+    expect(owner.bridge.getSessionArtifacts).toHaveBeenCalledTimes(2);
+    expect(owner.bridge.getSessionArtifacts).toHaveBeenCalledWith(id);
+    expect(shared).toHaveBeenCalledWith([id], expect.any(Function));
+  });
+
+  it('returns per-pair mutation warnings and does not repeat duplicate removals', async () => {
+    const owner = runtime();
+    vi.mocked(owner.bridge.removeSessionArtifactForWorkspaceOwner)
+      .mockResolvedValueOnce({
+        v: 1,
+        sessionId: id,
+        changes: [],
+        warnings: ['persistence failed; registration kept'],
+      })
+      .mockRejectedValueOnce(new SessionNotFoundError(id));
+    const { app, coordinator } = setup([owner]);
+    const exclusive = vi.spyOn(coordinator, 'runExclusiveMany');
+    const response = await request(app)
+      .post(`${collectionRoute}/delete`)
+      .send({
+        artifacts: [
+          { sessionId: id, artifactId: 'a' },
+          { sessionId: id, artifactId: 'a' },
+          { sessionId: id, artifactId: 'b' },
+        ],
+      });
+    expect(response.status).toBe(200);
+    expect(response.body.results).toEqual([
+      {
+        v: 1,
+        sessionId: id,
+        artifactId: 'a',
+        changes: [],
+        warnings: ['persistence failed; registration kept'],
+      },
+      {
+        sessionId: id,
+        artifactId: 'b',
+        error: expect.objectContaining({
+          status: 404,
+          code: 'session_not_found',
+        }),
+      },
+    ]);
+    expect(
+      owner.bridge.removeSessionArtifactForWorkspaceOwner,
+    ).toHaveBeenCalledTimes(2);
+    expect(exclusive).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ['query', {}],
+    ['query', { sessionIds: [] }],
+    ['query', { sessionIds: [id], extra: true }],
+    ['query', { sessionIds: Array(101).fill(id) }],
+    ['query', { sessionIds: [' '] }],
+    ['delete', { sessionIds: [id] }],
+    ['delete', { artifacts: [] }],
+    ['delete', { artifacts: [{ sessionId: id }] }],
+    ['delete', { artifacts: [{ sessionId: id, artifactId: '' }] }],
+  ])('rejects malformed %s bodies', async (operation, body) => {
+    const owner = runtime();
+    const { app } = setup([owner]);
+    expect(
+      (await request(app).post(`${collectionRoute}/${operation}`).send(body))
+        .status,
+    ).toBe(400);
+    expect(owner.bridge.getSessionArtifacts).not.toHaveBeenCalled();
+    expect(
+      owner.bridge.removeSessionArtifactForWorkspaceOwner,
+    ).not.toHaveBeenCalled();
+  });
+
+  it('requires operator authority for batch removal', async () => {
+    const owner = runtime();
+    const { app } = setup([owner], true, false);
+    const response = await request(app)
+      .post(`${collectionRoute}/delete`)
+      .send({ artifacts: [{ sessionId: id, artifactId: 'a' }] });
+    expect(response.status).toBe(401);
+    expect(
+      owner.bridge.removeSessionArtifactForWorkspaceOwner,
+    ).not.toHaveBeenCalled();
+  });
+
+  it.each(['query', 'delete'])(
+    'rejects a foreign live owner in %s before accessing storage',
+    async (operation) => {
+      const selected = runtime('primary', false);
+      const owner = runtime('other');
+      const { app } = setup([selected, owner]);
+      const location = vi.spyOn(
+        SessionService.prototype,
+        'getMaintainableSessionLocation',
+      );
+      const response = await request(app)
+        .post(`${collectionRoute}/${operation}`)
+        .send(
+          operation === 'query'
+            ? { sessionIds: [id] }
+            : { artifacts: [{ sessionId: id, artifactId: 'a' }] },
+        );
+      expect(response.status).toBe(200);
+      const error =
+        operation === 'query'
+          ? response.body.errors[0]
+          : response.body.results[0].error;
+      expect(error).toMatchObject({
+        status: 409,
+        code: 'session_workspace_conflict',
+      });
+      expect(location).not.toHaveBeenCalled();
+      expect(
+        owner.bridge.removeSessionArtifactForWorkspaceOwner,
+      ).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rejects untrusted and unavailable workspaces before discovery', async () => {
+    const owner = { ...runtime(), trusted: false };
+    const { app } = setup([owner]);
+    expect((await request(app).get(collectionRoute)).status).toBe(403);
+    expect(owner.bridge.listWorkspaceSessions).not.toHaveBeenCalled();
+    expect(
+      (await request(app).get('/workspaces/unknown/artifact-library')).status,
+    ).not.toBe(200);
+  });
+
+  it('rejects all collection operations when persistence is disabled', async () => {
+    const owner = runtime();
+    const { app } = setup([owner], false);
+    const responses = [
+      await request(app).get(collectionRoute),
+      await request(app)
+        .post(`${collectionRoute}/query`)
+        .send({ sessionIds: [id] }),
+      await request(app)
+        .post(`${collectionRoute}/delete`)
+        .send({ artifacts: [{ sessionId: id, artifactId: 'a' }] }),
+    ];
+    for (const response of responses) {
+      expect(response.status).toBe(409);
+      expect(response.body.code).toBe('artifact_library_unavailable');
+    }
+    expect(owner.bridge.listWorkspaceSessions).not.toHaveBeenCalled();
+  });
+
+  it('reuses cold projections across full and batch queries and refreshes after grouped removal', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-library-batch-'));
+    try {
+      const owner = {
+        ...runtime('primary', false),
+        workspaceCwd: dir,
+        sessionRuntimeBaseDir: path.join(dir, 'runtime'),
+      };
+      const storage = new Storage(dir, owner.sessionRuntimeBaseDir);
+      const chats = path.join(storage.getProjectDir(), 'chats');
+      await fs.mkdir(path.join(chats, 'archive'), { recursive: true });
+      const artifact = (sessionId: string, artifactId: string) => ({
+        id: artifactId,
+        title: artifactId,
+        kind: 'link',
+        storage: 'external_url',
+        url: `https://example.com/${artifactId}`,
+        source: 'client',
+        status: 'available',
+        retention: 'restorable',
+        clientRetained: false,
+        createdAt: '2026-10-26T00:00:00Z',
+        updatedAt: '2026-10-26T00:00:00Z',
+      });
+      // Use the same stable identities as real registrations.
+      const { stableSessionArtifactId } = await import(
+        '@qwen-code/qwen-code-core/services/session-artifact-persistence.js'
+      );
+      const ids = ['a', 'b', 'c'].map((name) =>
+        stableSessionArtifactId(id, `url:https://example.com/${name}`),
+      );
+      for (const sessionId of [id, secondId]) {
+        const artifacts =
+          sessionId === id
+            ? ['a', 'b', 'c'].map((name, index) => ({
+                ...artifact(sessionId, name),
+                id: ids[index],
+              }))
+            : [];
+        const record = {
+          uuid: `snapshot-${sessionId}`,
+          parentUuid: null,
+          sessionId,
+          cwd: dir,
+          timestamp: '2026-10-26T00:00:00Z',
+          version: '0.26.1',
+          type: 'system',
+          subtype: 'session_artifact_snapshot',
+          systemPayload: {
+            v: 2,
+            sessionId,
+            sequence: 0,
+            recordedAt: '2026-10-26T00:00:00Z',
+            artifacts,
+            tombstonedIds: [],
+            stickyEphemeralIds: [],
+          },
+        };
+        await fs.writeFile(
+          path.join(
+            chats,
+            sessionId === secondId ? 'archive' : '',
+            `${sessionId}.jsonl`,
+          ),
+          `${JSON.stringify(record)}\n`,
+        );
+      }
+      const { app } = setup([owner]);
+      const read = vi.spyOn(
+        SessionService.prototype,
+        'readSessionArtifactSnapshot',
+      );
+      const bulkRemove = vi.spyOn(
+        SessionService.prototype,
+        'removeSessionArtifactsForLibrary',
+      );
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const response = await request(app).get(collectionRoute);
+        expect(response.status).toBe(200);
+        expect(response.body.errors).toEqual([]);
+        expect(response.body.sessions).toHaveLength(2);
+        expect(
+          response.body.sessions.find(
+            (item: { sessionId: string }) => item.sessionId === id,
+          ).artifacts,
+        ).toHaveLength(3);
+      }
+      const batch = await request(app)
+        .post(`${collectionRoute}/query`)
+        .send({ sessionIds: [id, secondId, 'missing'] });
+      expect(batch.body.sessions).toHaveLength(2);
+      expect(batch.body.errors).toEqual([
+        expect.objectContaining({ sessionId: 'missing', status: 404 }),
+      ]);
+      expect(read).toHaveBeenCalledTimes(2);
+      // Loading can overlap a cold read: only durable records may enter its cache.
+      vi.mocked(owner.bridge.getSessionSummary).mockReturnValue({
+        sessionId: id,
+      } as never);
+      await request(app)
+        .post(`${collectionRoute}/query`)
+        .send({ sessionIds: [id] });
+      vi.mocked(owner.bridge.getSessionSummary)
+        .mockImplementationOnce(() => {
+          throw new SessionNotFoundError(id);
+        })
+        .mockImplementationOnce(() => {
+          throw new SessionNotFoundError(id);
+        })
+        .mockReturnValue({ sessionId: id } as never);
+      const racingRead = await request(app)
+        .post(`${collectionRoute}/query`)
+        .send({ sessionIds: [id] });
+      expect(racingRead.body.sessions[0].artifacts).toHaveLength(3);
+      vi.mocked(owner.bridge.getSessionSummary).mockImplementation(() => {
+        throw new SessionNotFoundError(id);
+      });
+      expect(
+        (
+          await request(app)
+            .post(`${collectionRoute}/query`)
+            .send({ sessionIds: [id] })
+        ).body.sessions[0].artifacts,
+      ).toHaveLength(3);
+      expect(read).toHaveBeenCalledTimes(3);
+      const deletion = await request(app)
+        .post(`${collectionRoute}/delete`)
+        .send({
+          artifacts: ids
+            .slice(0, 2)
+            .map((artifactId) => ({ sessionId: id, artifactId })),
+        });
+      expect(deletion.status).toBe(200);
+      expect(deletion.body.results).toHaveLength(2);
+      expect(
+        deletion.body.results.every(
+          (item: { changes: unknown[] }) => item.changes?.length === 1,
+        ),
+      ).toBe(true);
+      expect(bulkRemove).toHaveBeenCalledOnce();
+      const refreshed = await request(app).get(collectionRoute);
+      expect(refreshed.body.errors).toEqual([]);
+      expect(
+        refreshed.body.sessions
+          .find((item: { sessionId: string }) => item.sessionId === id)
+          .artifacts.map((item: { id: string }) => item.id),
+      ).toEqual([ids[2]]);
+      expect(read).toHaveBeenCalledTimes(4);
+      const single = await request(app).delete(`${route}/${ids[2]}`);
+      expect(single.status).toBe(200);
+      const afterSingle = await request(app)
+        .post(`${collectionRoute}/query`)
+        .send({ sessionIds: [id] });
+      expect(afterSingle.body.sessions[0].artifacts).toEqual([]);
+      expect(read).toHaveBeenCalledTimes(5);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('workspace artifact library routes', () => {
   it('reads live artifacts without a client identity under the shared barrier', async () => {

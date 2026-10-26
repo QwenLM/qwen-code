@@ -12,6 +12,7 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { inspect } from 'node:util';
+import { z } from 'zod';
 import {
   APPROVAL_MODES,
   AGENT_WORKTREE_SLUG_PATTERN,
@@ -165,9 +166,14 @@ import {
   unarchiveDaemonSessions,
 } from '../server/session-archive.js';
 import {
+  ArtifactLibraryRequestError,
+  artifactLibraryMemberError,
   readWorkspaceArtifactLibrary,
   removeWorkspaceLibraryArtifact,
+  removeWorkspaceLibraryArtifacts,
+  type ArtifactLibraryRemovalResult,
 } from '../server/session-artifact-library.js';
+import { WorkspaceArtifactCache } from '../server/workspace-artifact-cache.js';
 import { bindSessionPrsFromReviewPrompt } from './session-pr-backfill.js';
 import { acquireWorktreeOwnershipOp } from '../server/worktree-ownership-op.js';
 import {
@@ -934,6 +940,18 @@ export function registerSessionRoutes(
     return guard ? () => guard.assertOpen() : undefined;
   };
   const LANGUAGE_CODES = deps.languageCodes;
+  const workspaceArtifactCaches = new WeakMap<
+    WorkspaceRuntime,
+    WorkspaceArtifactCache
+  >();
+  const artifactCache = (runtime: WorkspaceRuntime): WorkspaceArtifactCache => {
+    let cache = workspaceArtifactCaches.get(runtime);
+    if (!cache) {
+      cache = new WorkspaceArtifactCache(runtime);
+      workspaceArtifactCaches.set(runtime, cache);
+    }
+    return cache;
+  };
   const transcriptCursorMasterKey = crypto.randomBytes(32);
   const transcriptCursorCodecs = new Map<
     string,
@@ -7306,6 +7324,224 @@ export function registerSessionRoutes(
     ),
   );
 
+  const artifactSessionId = z
+    .string()
+    .min(1)
+    .max(256)
+    .refine((id) => id.trim().length > 0)
+    .transform(normalizeSessionIdForLookup);
+  const artifactQuery = z
+    .object({
+      sessionIds: z.array(artifactSessionId).min(1).max(100),
+    })
+    .strict();
+  const artifactDeletion = z
+    .object({
+      artifacts: z
+        .array(
+          z
+            .object({
+              sessionId: artifactSessionId,
+              artifactId: z
+                .string()
+                .min(1)
+                .max(200)
+                .refine((id) => id.trim().length > 0),
+            })
+            .strict(),
+        )
+        .min(1)
+        .max(100),
+    })
+    .strict();
+
+  for (const operation of ['all', 'query', 'delete'] as const) {
+    const route =
+      '/workspaces/:workspace/artifact-library' +
+      (operation === 'all' ? '' : `/${operation}`);
+    const handler: RequestHandler = async (req, res) => {
+      const selected = new Map<string, Set<string>>();
+      if (operation === 'query') {
+        const parsed = artifactQuery.safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({
+            code: 'invalid_artifact_library_request',
+            error: 'Expected 1–100 sessionIds.',
+          });
+          return;
+        }
+        for (const id of parsed.data.sessionIds) selected.set(id, new Set());
+      } else if (operation === 'delete') {
+        const parsed = artifactDeletion.safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({
+            code: 'invalid_artifact_library_request',
+            error: 'Expected 1–100 artifacts with sessionId and artifactId.',
+          });
+          return;
+        }
+        for (const { sessionId, artifactId } of parsed.data.artifacts) {
+          const ids = selected.get(sessionId) ?? new Set<string>();
+          ids.add(artifactId);
+          selected.set(sessionId, ids);
+        }
+      }
+      if (deps.sessionArtifactsPersistenceAvailable === false) {
+        res.status(409).json({
+          code: 'artifact_library_unavailable',
+          error: 'Artifact persistence is unavailable',
+        });
+        return;
+      }
+      try {
+        const runtime = await resolveQualifiedSessionRuntime(
+          req,
+          res,
+          route,
+          [],
+          'any',
+        );
+        if (!runtime) return;
+        const assertOpen = captureRuntimeGenerationAssertion(runtime);
+        const cache = artifactCache(runtime);
+        const response = await runOwnerRuntimeActivity(runtime, () =>
+          runWithWorkspaceRuntimeStorage(runtime, async () => {
+            assertOpen?.();
+            if (operation === 'all') {
+              for (const id of await cache.sessionIds())
+                selected.set(id, new Set());
+            }
+            const readResults: Array<
+              Awaited<ReturnType<typeof readWorkspaceArtifactLibrary>>
+            > = [];
+            const errors: Array<
+              ReturnType<typeof artifactLibraryMemberError> & {
+                sessionId: string;
+              }
+            > = [];
+            const removed: ArtifactLibraryRemovalResult[] = [];
+            const groups = [...selected];
+            for (let offset = 0; offset < groups.length; offset += 4) {
+              const batch = await Promise.all(
+                groups
+                  .slice(offset, offset + 4)
+                  .map(async ([sessionId, artifactIds]) => {
+                    const run = async () => {
+                      assertOpen?.();
+                      const owner =
+                        workspaceRegistry.resolveLiveSessionOwner(sessionId);
+                      if (owner.kind === 'unavailable')
+                        throw new ArtifactLibraryRequestError(
+                          503,
+                          'workspace_runtime_unavailable',
+                          'Session owner is unavailable.',
+                        );
+                      if (owner.kind === 'ambiguous')
+                        throw new ArtifactLibraryRequestError(
+                          500,
+                          'ambiguous_session_owner',
+                          'Session has multiple live owners.',
+                        );
+                      if (owner.kind === 'found' && owner.runtime !== runtime)
+                        throw new ArtifactLibraryRequestError(
+                          409,
+                          'session_workspace_conflict',
+                          'Session belongs to another workspace.',
+                        );
+                      if (isInternalWorkspaceRuntime(runtime)) {
+                        const service =
+                          createWorkspaceRuntimeSessionService(runtime);
+                        const location =
+                          await service.getSessionLocation(sessionId);
+                        if (location === 'conflict')
+                          throw new SessionConflictError(sessionId);
+                        if (
+                          !location ||
+                          !(await readLoadableLiveConversationMetadata(
+                            sessionId,
+                            service,
+                          ))
+                        )
+                          throw new SessionNotFoundError(sessionId);
+                      }
+                      assertOpen?.();
+                      if (operation !== 'delete')
+                        return { session: await cache.read(sessionId) };
+                      cache.invalidate(sessionId);
+                      try {
+                        return {
+                          removed: await removeWorkspaceLibraryArtifacts(
+                            runtime,
+                            sessionId,
+                            [...artifactIds],
+                            () => assertOpen?.(),
+                          ),
+                        };
+                      } finally {
+                        cache.invalidate(sessionId);
+                      }
+                    };
+                    try {
+                      const result =
+                        operation === 'delete'
+                          ? await archiveCoordinator.runExclusiveMany(
+                              [sessionId],
+                              run,
+                            )
+                          : await archiveCoordinator.runSharedMany(
+                              [sessionId],
+                              run,
+                            );
+                      return { sessionId, artifactIds, result };
+                    } catch (error) {
+                      return {
+                        sessionId,
+                        artifactIds,
+                        error: artifactLibraryMemberError(error),
+                      };
+                    }
+                  }),
+              );
+              assertOpen?.();
+              for (const item of batch) {
+                if (item.error) {
+                  if (operation === 'delete') {
+                    for (const artifactId of item.artifactIds)
+                      removed.push({
+                        sessionId: item.sessionId,
+                        artifactId,
+                        error: item.error,
+                      });
+                  } else if (
+                    operation !== 'all' ||
+                    item.error.code !== 'session_not_found'
+                  ) {
+                    errors.push({ sessionId: item.sessionId, ...item.error });
+                  }
+                } else if (item.result?.session) {
+                  readResults.push(item.result.session);
+                } else if (item.result?.removed) {
+                  removed.push(...item.result.removed);
+                }
+              }
+            }
+            assertOpen?.();
+            return operation === 'delete'
+              ? { v: 1, results: removed }
+              : { v: 1, sessions: readResults, errors };
+          }),
+        );
+        res.status(200).set('Cache-Control', 'no-store').json(response);
+      } catch (error) {
+        sendBridgeError(res, error, { route });
+      }
+    };
+    if (operation === 'all') app.get(route, handler);
+    else if (operation === 'delete')
+      app.post(route, mutate({ strict: true }), handler);
+    else app.post(route, handler);
+  }
+
   // Persisted workspace management neither borrows a session client identity
   // nor loads cold sessions.
   for (const operation of ['read', 'remove'] as const) {
@@ -7359,6 +7595,8 @@ export function registerSessionRoutes(
             );
             return undefined;
           }
+          if (operation === 'remove')
+            workspaceArtifactCaches.get(runtime)?.invalidate(sessionId);
           const result = await runWithWorkspaceRuntimeStorage(runtime, () =>
             operation === 'read'
               ? readWorkspaceArtifactLibrary(runtime, sessionId)
