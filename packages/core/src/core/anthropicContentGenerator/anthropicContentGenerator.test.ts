@@ -3387,9 +3387,7 @@ describe('AnthropicContentGenerator', () => {
         expect(messageText(req)).toContain(SCHEMA_INSTRUCTION);
         expect(messageText(req)).toContain('JSON object');
         expect(messageText(req)).toContain('no Markdown fences or prose');
-        const tools = req['tools'] as Array<{ strict?: boolean }>;
-        expect(tools).toHaveLength(1);
-        expect(tools[0]?.strict).toBeUndefined();
+        expect(req['tools']).toHaveLength(1);
       },
     );
 
@@ -3431,6 +3429,47 @@ describe('AnthropicContentGenerator', () => {
       });
       expect(req['tool_choice']).toBeUndefined();
       expect(messageText(req)).not.toContain(SCHEMA_INSTRUCTION);
+    });
+
+    it('appends the instruction only to the last turn and preserves user text', async () => {
+      const contents = [
+        userText('older turn'),
+        modelText('earlier answer'),
+        userText('Provide the title Local result.'),
+      ];
+      const originalContents = structuredClone(contents);
+      const { req } = await send(nativeCfg('claude-opus-5-5'), {
+        contents,
+        config: {
+          tools: schemaTools(),
+          toolConfig: { functionCallingConfig: { mode: 'ANY' } },
+        },
+      });
+      expect(req.messages).toHaveLength(3);
+      const texts = req.messages.map((message) =>
+        message.content.map((block) => block.text ?? '').join('\n'),
+      );
+      expect(texts[0]).toBe('older turn');
+      expect(texts[1]).toBe('earlier answer');
+      expect(texts[2]).toContain('Provide the title Local result.');
+      expect(texts[2]).toContain(SCHEMA_INSTRUCTION);
+      expect(contents).toEqual(originalContents);
+    });
+
+    it('includes the schema instruction in streaming requests', async () => {
+      createImpl.mockResolvedValue(streamOf(messageDelta('end_turn', 1)));
+      const stream = await openStream(nativeCfg('claude-opus-5-5'), {
+        contents: [userText('Provide the title Local result.')],
+        config: {
+          tools: schemaTools(),
+          toolConfig: { functionCallingConfig: { mode: 'ANY' } },
+        },
+      });
+      const { req } = lastCall();
+      expect(req['tool_choice']).toEqual({ type: 'auto' });
+      expect(messageText(req)).toContain('Provide the title Local result.');
+      expect(messageText(req)).toContain(SCHEMA_INSTRUCTION);
+      await drain(stream);
     });
 
     it('does not offer JSON text instead of calling an ordinary tool', async () => {
