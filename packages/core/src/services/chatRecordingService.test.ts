@@ -61,6 +61,7 @@ import type { ToolResultBoundaryObservation } from '../tools/tool-result-boundar
 import { fnResponse, userText } from '../test-utils/model-fixtures.js';
 import { CompressionStatus } from '../core/turn.js';
 import { markApiHistoryPrompt } from './session-api-history.js';
+import { createUserPromptSubmitContextPart } from '../hooks/user-prompt-submit-context.js';
 
 function branchTestRecord(
   uuid: string,
@@ -537,7 +538,7 @@ describe('ChatRecordingService', () => {
       expect(record.systemPayload).toMatchObject({ promptIds: ['prompt-1'] });
     });
 
-    it('freezes the compression snapshot array against later live-history mutation', async () => {
+    it('freezes compression snapshot containers against later live-history mutation', async () => {
       // Deferred serialization must keep entries aligned with promptIds.
       const first: Content = { role: 'user', parts: [{ text: 'A' }] };
       const second: Content = { role: 'user', parts: [{ text: 'B' }] };
@@ -555,6 +556,13 @@ describe('ChatRecordingService', () => {
       });
 
       // Mutations the same turn performs before the queued write drains.
+      first.parts = [
+        ...(first.parts ?? []),
+        createUserPromptSubmitContextPart('rescued hook context'),
+      ];
+      second.parts?.push(
+        createUserPromptSubmitContextPart('rescued hook context'),
+      );
       liveHistory.splice(1, 0, {
         role: 'user',
         parts: [
