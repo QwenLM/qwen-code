@@ -103,8 +103,8 @@ for (const language of ['en', 'zh-CN'] as const) {
         { steps: 6 },
       );
       await expect(tooltipBubble).toHaveCount(0);
-      await expect(olderMarkdown.locator('..')).toHaveCSS('opacity', '0');
       await page.mouse.move(0, 0, { steps: 12 });
+      await expect(olderMarkdown.locator('..')).toHaveCSS('opacity', '0');
       expect(
         await copy.evaluate((button) =>
           button.nextElementSibling?.getAttribute('aria-label'),
