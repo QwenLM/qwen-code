@@ -6,6 +6,7 @@
 
 import {
   attachToolOutputRecovery,
+  getToolOutputRecovery,
   type ToolOutputRecovery,
 } from '../tools/tool-output-recovery.js';
 
@@ -7896,9 +7897,16 @@ export class CoreToolScheduler {
                 ...call,
                 response: {
                   ...call.response,
-                  responseParts: attachToolOutputProvenance(
-                    call.response.responseParts,
-                    provenance,
+                  // The provenance stamp spreads each part, which drops the
+                  // non-enumerable recovery handle, so re-attach it last.
+                  responseParts: attachToolOutputRecovery(
+                    attachToolOutputProvenance(
+                      call.response.responseParts,
+                      provenance,
+                    ),
+                    call.response.responseParts
+                      .map(getToolOutputRecovery)
+                      .find(Boolean) ?? {},
                   ),
                 },
               }
@@ -7932,15 +7940,23 @@ export class CoreToolScheduler {
             call.response.responseParts
               .map(getToolOutputProvenance)
               .find(Boolean) ?? provenanceByCall.get(call.request.callId);
-          call.response.responseParts = attachToolOutputProvenance(
-            call.response.responseParts,
-            provenance ?? {
-              callId: call.request.callId,
-              toolName: getModelFacingToolName(call.request),
-              promptId: call.request.prompt_id,
-              toolType:
-                call.tool instanceof DiscoveredMCPTool ? 'mcp' : 'native',
-            },
+          // Read the recovery handle before the provenance spread drops it.
+          const recovery =
+            call.response.responseParts
+              .map(getToolOutputRecovery)
+              .find(Boolean) ?? {};
+          call.response.responseParts = attachToolOutputRecovery(
+            attachToolOutputProvenance(
+              call.response.responseParts,
+              provenance ?? {
+                callId: call.request.callId,
+                toolName: getModelFacingToolName(call.request),
+                promptId: call.request.prompt_id,
+                toolType:
+                  call.tool instanceof DiscoveredMCPTool ? 'mcp' : 'native',
+              },
+            ),
+            recovery,
           );
           this.runtimeContentGeneratorViews.delete(call.request.callId);
           // A call its owner refused to launch never ran.

@@ -8,6 +8,8 @@ import {
   getToolOutputProvenance,
   measureToolOutput,
 } from '../tools/tool-output-size.js';
+import { enforceFunctionResponseBudget } from '../tools/tool-response-finalizer.js';
+import { buildTranscriptMarker } from '../tools/agent/transcript-marker.js';
 import * as outputTruncation from '../tools/truncation.js';
 import * as sizeLoggers from '../telemetry/loggers.js';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -4089,6 +4091,64 @@ describe('CoreToolScheduler', () => {
 
       expectSpilled(responseText(call), BODY);
     });
+
+    // A producer-sized body never earns `persistedOutputFiles`, so the part's
+    // non-enumerable recovery handle is the only carrier of its remediation
+    // text. Finalizing re-stamps provenance over those parts by spreading them;
+    // without re-attaching the handle the send boundary — which builds its
+    // entries from parts alone — re-cuts the composition and drops the reason
+    // line and the transcript pointer, so the parent model retries the same
+    // call verbatim and times out again (#13597).
+    it.each([660, 1000])(
+      'delivers the producer recovery text to a %i-char send-boundary slot',
+      async (budget) => {
+        // Wording mirrors `subagentTerminalReason(TIMEOUT)`: this is the line
+        // the parent model has to read to avoid re-issuing the same call.
+        const reason =
+          "Subagent did not complete (terminate mode: TIMEOUT). It ran out of time, so re-running the same call will time out again; raise the agent's `runConfig.max_time_minutes` instead.";
+        const marker = buildTranscriptMarker('/tmp/subagent-transcript.jsonl');
+        const recoveryText = `${reason}\n\n${marker}`;
+        const { calls } = await runLoneTool(
+          toolReturning(
+            'agentTool',
+            {
+              returnDisplay: 'x',
+              llmContent: `${recoveryText}\n\n${'a'.repeat(4_000)}`,
+              recoveryText,
+              outputBudgetApplied: true,
+            },
+            { maxOutputChars: 30_000 },
+          ),
+          'c-recovery',
+          'p-recovery',
+          { waitForCompletion: true, truncateToolOutputThreshold: 25_000 },
+        );
+
+        // `llm-chat.ts`'s own send-boundary shape: one part per entry, no
+        // `persistedOutputFiles`, so nothing downstream can rebuild the handle.
+        const entries = (calls[0]?.response.responseParts ?? []).map(
+          (part) => ({
+            callId: 'send-boundary-test',
+            toolName: 'tool-response-batch',
+            responseParts: [part],
+          }),
+        );
+        const sent = enforceFunctionResponseBudget(
+          entries,
+          budget,
+          true,
+          false,
+        );
+        const output = sent[0]?.responseParts[0]?.functionResponse?.response?.[
+          'output'
+        ] as string;
+
+        expect(output).toContain(reason);
+        expect(output).toContain(
+          'The full output is in /tmp/subagent-transcript.jsonl.',
+        );
+      },
+    );
 
     it('skips the error gate while error.message is still the sized body', async () => {
       const call = await runBudgetedTool(BODY, true, { message: BODY });
