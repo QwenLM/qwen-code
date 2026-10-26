@@ -81,6 +81,12 @@ function makeChannel(
     bridge as unknown as ChannelAgentBridge,
     { loopController: controller, registerBridgeEvents: false, router },
   );
+  // The inbound group message that created this session records the chat type
+  // too; the proactive gate requires a learned type for a group target.
+  const raw = ch as unknown as {
+    chatTypeMap: Map<string, 'c2c' | 'group'>;
+  };
+  raw.chatTypeMap.set(CHAT_ID, 'group');
   return { ch, router, getLoopHandler: () => loopHandler };
 }
 

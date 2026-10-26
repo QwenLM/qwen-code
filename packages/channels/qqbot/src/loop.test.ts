@@ -75,7 +75,8 @@ vi.mock('./login.js', () => ({
   qrCodeLogin: vi.fn(),
 }));
 
-const { QQChannel } = await import('./QQChannel.js');
+const { QQChannel, DeliveryError } = await import('./QQChannel.js');
+import { OpCode } from './types.js';
 import { isChannelProactiveDeliveryError } from '@qwen-code/channel-base';
 import type {
   ChannelAgentBridge,
@@ -96,6 +97,11 @@ interface RawChannel {
   tokenExpiresAt: number;
   chatTypeMap: Map<string, 'c2c' | 'group'>;
   replyMsgId: Map<string, { msgId: string; timestamp: number }>;
+  replyContextByMessageId: Map<
+    string,
+    { chatId: string; msgId: string; timestamp: number }
+  >;
+  activePrompts: Map<string, { messageId?: string }>;
   groupActiveMsgEnabled: Map<string, boolean>;
   router: SessionRouter;
 }
@@ -168,7 +174,7 @@ function makeLoopController(): {
   return { controller, jobs };
 }
 
-function makeChannel(): {
+function makeChannel(configOverrides: Record<string, unknown> = {}): {
   ch: InstanceType<typeof QQChannel>;
   raw: RawChannel;
   controller: ChannelLoopController;
@@ -192,6 +198,7 @@ function makeChannel(): {
       dmPolicy: 'open' as const,
       appID: 'test-app-id',
       appSecret: 'test-secret',
+      ...configOverrides,
     },
     bridge,
     { loopController: controller, registerBridgeEvents: false },
@@ -259,6 +266,32 @@ async function bindSession(raw: RawChannel): Promise<string> {
     '/tmp',
     true,
   );
+}
+
+function groupTarget(): SessionTarget {
+  return {
+    channelName: 'test-bot',
+    senderId: SENDER_ID,
+    chatId: CHAT_ID,
+    isGroup: true,
+  };
+}
+
+/**
+ * A fresh inbound anchor for a live turn: the per-session message id plus its
+ * reply context, exactly what resolveResponseReplyContext reads.
+ */
+function primeFreshAnchor(
+  raw: RawChannel,
+  sessionId: string,
+  msgId: string,
+): void {
+  raw.replyContextByMessageId.set(msgId, {
+    chatId: CHAT_ID,
+    msgId,
+    timestamp: Date.now(),
+  });
+  raw.activePrompts.set(sessionId, { messageId: msgId });
 }
 
 beforeEach(() => {
@@ -452,6 +485,47 @@ describe('QQ channel proactive loops', () => {
     ).toBe(true);
   });
 
+  it('gates a group declared only in qqConfig.chatTypes on the toggle', async () => {
+    // The chat type is learned from the channel config, not chatTypeMap, so
+    // the gate must resolve it through chatTypeFor — the same accessor
+    // resolveRoute routes on. The target omits isGroup (the webhook and
+    // persisted-loop shape).
+    const { ch, raw } = makeChannel({
+      chatTypes: { [CHAT_ID]: 'group' },
+    });
+    // Declared only in the channel config: chatTypeMap has never learned it.
+    raw.chatTypeMap.delete(CHAT_ID);
+    raw.groupActiveMsgEnabled.set(CHAT_ID, false);
+    const target: SessionTarget = {
+      channelName: 'test-bot',
+      senderId: SENDER_ID,
+      chatId: CHAT_ID,
+    };
+
+    expect(isProactiveTargetSupported(ch, target)).toBe(false);
+    await expect(ch.runLoopPrompt({ ...loopJob(), target })).rejects.toThrow(
+      'Channel does not support proactive loop messages for this chat target.',
+    );
+    // The gate runs before the turn starts, so no unattended agent turn is
+    // burned on a target that cannot receive the result.
+    expect(mockPrompt).not.toHaveBeenCalled();
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+  });
+
+  it('rejects a group target whose chat type was never learned', () => {
+    const { ch } = makeChannel();
+    const target: SessionTarget = {
+      channelName: 'test-bot',
+      senderId: SENDER_ID,
+      chatId: 'group-openid-unseen',
+      isGroup: true,
+    };
+
+    // resolveRoute would refuse this after the turn ran (no chat type), so the
+    // gate must reject it up front to avoid burning the unattended turn.
+    expect(isProactiveTargetSupported(ch, target)).toBe(false);
+  });
+
   it('disables the group loops when the bot is removed from the group', async () => {
     const { ch, raw, controller, jobs, getLoopHandler } = makeChannel();
     const sessionId = await bindSession(raw);
@@ -472,28 +546,85 @@ describe('QQ channel proactive loops', () => {
     expect(jobs.get('job-1')?.enabled).toBe(false);
   });
 
-  it('disables the group loops when active messages are toggled off', async () => {
+  it('keeps the group loops when active messages are toggled off and on', async () => {
     const { ch, raw, controller, jobs, getLoopHandler } = makeChannel();
     const sessionId = await bindSession(raw);
     await getLoopHandler()!.create(sessionId, {
       cron: '*/5 * * * *',
       prompt: 'drink water',
     });
+    expect(jobs.get('job-1')?.enabled).toBe(true);
 
+    const toggle = { group_openid: CHAT_ID, timestamp: Date.now() };
     await invokeGroupLifecycleHandler(
       ch,
       'handleGroupMsgToggle',
-      {
-        group_openid: CHAT_ID,
-        op_member_openid: 'admin-1',
-        timestamp: Date.now(),
-      },
+      { ...toggle, op_member_openid: 'admin-1' },
       false,
     );
+    await invokeGroupLifecycleHandler(
+      ch,
+      'handleGroupMsgToggle',
+      { ...toggle, op_member_openid: 'admin-1' },
+      true,
+    );
 
-    expect(controller.listForChat).toHaveBeenCalledWith('test-bot', CHAT_ID);
-    expect(controller.disable).toHaveBeenCalledWith('job-1');
-    expect(jobs.get('job-1')?.enabled).toBe(false);
+    // A toggle is reversible, so the handler must not retire loops: the
+    // pre-flight target gate already refuses the next fire (no turn burned)
+    // while the toggle is off, and a loop left failing is retired by the
+    // scheduler's 5-consecutive-failure limit. Only handleGroupDelRobot
+    // disables eagerly, because the gate cannot see a removal.
+    expect(controller.disable).not.toHaveBeenCalled();
+    expect(jobs.get('job-1')?.enabled).toBe(true);
+    expect(raw.groupActiveMsgEnabled.get(CHAT_ID)).toBe(true);
+  });
+
+  it('delivers a background response unanchored despite a fresh anchor', async () => {
+    const { ch, raw } = makeChannel();
+    const sessionId = await bindSession(raw);
+    // A live turn leaves a chat-level reply anchor behind. An unattended
+    // background/named-task result is not that turn's reply and must not be
+    // re-parented onto it as a passive reply.
+    primeFreshAnchor(raw, sessionId, 'inbound-bg-anchor-1');
+    mockSendQQMessage.mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => '',
+    });
+
+    await ch.dispatchBackgroundResponse(sessionId, 'background result');
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    const [base, path, , body] = mockSendQQMessage.mock.calls[0]!;
+    expect(base).toBe('https://api.sgroup.qq.com');
+    expect(path).toBe(`/v2/groups/${CHAT_ID}/messages`);
+    expect(body).toEqual({
+      msg_type: 2,
+      markdown: { content: 'background result' },
+    });
+    expect(body).not.toHaveProperty('msg_id');
+    expect(body).not.toHaveProperty('msg_seq');
+  });
+
+  it('fails a background response for a toggle-off group instead of anchoring it', async () => {
+    const { ch, raw } = makeChannel();
+    const sessionId = await bindSession(raw);
+    primeFreshAnchor(raw, sessionId, 'inbound-bg-anchor-2');
+    raw.groupActiveMsgEnabled.set(CHAT_ID, false);
+
+    const err: unknown = await ch
+      .dispatchBackgroundResponse(sessionId, 'background result')
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+
+    // The anchored fallback (base's deliverBackgroundReply) would bypass the
+    // active-message toggle through msg_id/msg_seq, so the delivery must fail
+    // permanently instead of quietly receiving it as a passive reply.
+    expect(isChannelProactiveDeliveryError(err)).toBe(true);
+    expect(err).toMatchObject({ disposition: 'permanent' });
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
   });
 
   it('reports a disabled active-message toggle as a permanent proactive failure', async () => {
@@ -543,17 +674,75 @@ describe('QQ channel proactive loops', () => {
     expect(mockSendQQMessage).not.toHaveBeenCalled();
   });
 
+  it('classifies an exhausted fallback as a permanent proactive failure', async () => {
+    const { ch } = makeChannel();
+    // Both the markdown attempt and the plain-text fallback fail.
+    mockSendQQMessage.mockResolvedValue({
+      ok: false,
+      status: 500,
+      text: async () => '',
+    });
+
+    const err: unknown = await (
+      ch as unknown as {
+        pushProactive(target: SessionTarget, text: string): Promise<void>;
+      }
+    )
+      .pushProactive(groupTarget(), 'Scheduled summary')
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+
+    expect(isChannelProactiveDeliveryError(err)).toBe(true);
+    expect(err).toMatchObject({ disposition: 'permanent' });
+    expect((err as { cause?: unknown }).cause).toMatchObject({
+      name: 'DeliveryError',
+      code: 'FALLBACK_FAILED',
+    });
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it('leaves a rate-limited proactive failure unwrapped for retry', async () => {
+    const { ch } = makeChannel();
+    mockSendQQMessage.mockResolvedValue({
+      ok: false,
+      status: 429,
+      text: async () => '',
+    });
+
+    const err: unknown = await (
+      ch as unknown as {
+        pushProactive(target: SessionTarget, text: string): Promise<void>;
+      }
+    )
+      .pushProactive(groupTarget(), 'Scheduled summary')
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+
+    // A throttle is transient: it must reach base's delivery wrapper as the
+    // raw DeliveryError, not as a permanent proactive-error wrapper.
+    expect(err).toBeInstanceOf(DeliveryError);
+    expect((err as DeliveryError).code).toBe('RATE_LIMITED');
+    expect(isChannelProactiveDeliveryError(err)).toBe(false);
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+  });
+
   it('fails the loop when the route block is permanent', async () => {
     const { ch, raw } = makeChannel();
     await bindSession(raw);
-    // The chat type was lost (e.g. the bot left the group), so the delivery is
-    // dropped before the wire and must not be recorded as delivered.
-    raw.chatTypeMap.delete(CHAT_ID);
+    // The channel is disposed after the gate ran, so the send resolves to a
+    // permanent route block: the delivery is dropped before the wire and must
+    // not be recorded as delivered.
+    (ch as unknown as Record<string, unknown>)['disposed'] = true;
     mockPrompt.mockResolvedValue('Scheduled summary');
 
     await expect(ch.runLoopPrompt(loopJob())).rejects.toMatchObject({
       name: 'ChannelProactiveDeliveryError',
       disposition: 'permanent',
+      message: `outgoing route unresolved (permanent) for ${CHAT_ID}`,
     });
     expect(mockSendQQMessage).not.toHaveBeenCalled();
   });
@@ -568,6 +757,9 @@ describe('QQ channel proactive loops', () => {
     await expect(ch.runLoopPrompt(loopJob())).rejects.toMatchObject({
       name: 'ChannelProactiveDeliveryError',
       disposition: 'transient',
+      // The retry class is part of the operator-visible message so a route
+      // block is distinguishable in /loop inspect's lastError.
+      message: `outgoing route unresolved (transient) for ${CHAT_ID}`,
     });
     expect(mockSendQQMessage).not.toHaveBeenCalled();
   });
@@ -603,5 +795,60 @@ describe('QQ channel proactive loops', () => {
       msg_type: 2,
       markdown: { content: response },
     });
+  });
+
+  it('logs a rejecting loop store from the GROUP_DEL_ROBOT dispatch with the group id', async () => {
+    const { ch, raw, controller } = makeChannel();
+    await bindSession(raw);
+    // The realistic store failure: readJobs() throws on a corrupt file, and
+    // the dispatch arm's .catch guard is what keeps it from becoming an
+    // unhandled rejection in the daemon worker.
+    const storeError = new Error(
+      'Malformed JSON in /tmp/qwen/loops.json; fix or delete the file.',
+    );
+    vi.mocked(controller.listForChat).mockRejectedValue(storeError);
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    let logged = '';
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      (
+        ch as unknown as {
+          handleGatewayMessage(
+            msg: Record<string, unknown>,
+            onReady: () => void,
+          ): void;
+        }
+      ).handleGatewayMessage(
+        {
+          op: OpCode.DISPATCH,
+          t: 'GROUP_DEL_ROBOT',
+          d: {
+            group_openid: CHAT_ID,
+            op_member_openid: 'admin-1',
+            timestamp: Date.now(),
+          },
+        },
+        () => {},
+      );
+      // Two macrotask turns: the rejection propagates through the handler's
+      // awaits and, if unguarded, Node emits unhandledRejection.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      logged = stderrSpy.mock.calls.map((call) => String(call[0])).join('');
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+      stderrSpy.mockRestore();
+    }
+
+    expect(unhandled).toEqual([]);
+    // The failure line carries the group so a daemon serving several groups
+    // can tell whose cleanup was discarded.
+    expect(logged).toContain(`handleGroupDelRobot failed for group ${CHAT_ID}`);
+    expect(logged).toContain(storeError.message);
   });
 });
