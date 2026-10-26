@@ -22784,6 +22784,11 @@ export function App({
                         skillsWorkspaceCwd={skillsSourceCwd}
                         onSkillsWorkspaceChange={selectSkillsWorkspace}
                         managedSkills={managedAgentProvider !== undefined}
+                        managedExtensions={managedMode && managedAgentProvider ? {
+                          provider: managedAgentProvider,
+                          sessionId: managedSessionId,
+                          workspaceId: managedWorkspaceId ?? undefined,
+                        } : undefined}
                         managedMcp={managedMode && managedAgentProvider ? {
                           provider: managedAgentProvider,
                           sessionId: managedSessionId,
@@ -23307,11 +23312,6 @@ export function App({
                       }}
                       managedAgentProvider={managedAgentProvider}
                       creationSkills={managedCreationSkills}
-                      onManageSkills={() => {
-                        setPluginInitialTab('skills');
-                        closeMobileDrawer();
-                        openPanel('plugins');
-                      }}
                       interactive={managedChatVisible}
                       navigationTarget={
                         sidebarOptions.enabled

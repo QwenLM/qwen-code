@@ -3,6 +3,7 @@ import { ArrowLeftIcon } from 'lucide-react';
 import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
 import { AgentsManagerPage } from '../agents/AgentsManagerPage';
 import { ExtensionsManagerPage } from '../extensions/ExtensionsManagerPage';
+import type { ManagedExtensionsManagerPageProps } from '../managed/ManagedExtensionsManagerPage';
 import { McpManagerPage } from '../mcp/McpManagerPage';
 import {
   ManagedMcpManagerPage,
@@ -33,6 +34,7 @@ interface PluginManagerPageProps {
   skillsWorkspaceCwd?: string;
   onSkillsWorkspaceChange?: (cwd: string) => void;
   managedSkills?: boolean;
+  managedExtensions?: Omit<ManagedExtensionsManagerPageProps, 'onClose'>;
   managedMcp?: ManagedMcpManagerPageProps;
 }
 
@@ -45,6 +47,7 @@ export function PluginManagerPage({
   skillsWorkspaceCwd,
   onSkillsWorkspaceChange,
   managedSkills = false,
+  managedExtensions,
   managedMcp,
 }: PluginManagerPageProps) {
   const { t } = useI18n();
@@ -206,6 +209,7 @@ export function PluginManagerPage({
         {activeTab === 'extensions' ? (
           <ExtensionsManagerPage
             key={`extensions-${pageRevision}`}
+            managed={managedExtensions}
             onClose={onClose}
             embedded={embedded}
           />
