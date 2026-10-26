@@ -2025,13 +2025,22 @@ jobs:
       - name: 'Install libfaketime'
         # The clock-skew row moves one node's whole wall clock. A pool host
         # keeps the package between jobs, so install only when it is missing;
-        # sudo -n fails fast instead of prompting.
+        # sudo -n fails fast instead of prompting. The multiarch directory is
+        # resolved rather than assumed: the aarch64 pool hosts run this lane
+        # too, and libfaketime lands under aarch64-linux-gnu there.
         run: |-
-          if ! test -f /usr/lib/x86_64-linux-gnu/faketime/libfaketimeMT.so.1; then
+          set -uo pipefail
+          lib="$(find /usr/lib -maxdepth 3 -name libfaketimeMT.so.1 -print -quit 2>/dev/null || true)"
+          if [[ -z "${lib}" ]]; then
             sudo -n apt-get -o DPkg::Lock::Timeout=300 update -q
             sudo -n apt-get -o DPkg::Lock::Timeout=300 install -y -q faketime
+            lib="$(find /usr/lib -maxdepth 3 -name libfaketimeMT.so.1 -print -quit 2>/dev/null || true)"
           fi
-          test -f /usr/lib/x86_64-linux-gnu/faketime/libfaketimeMT.so.1
+          if [[ -z "${lib}" ]]; then
+            echo "::error::libfaketime is not installed for this architecture"
+            exit 1
+          fi
+          echo "FAKETIME_LIB=${lib}" >> "${GITHUB_ENV}"
       # Pool hosts share one host-wide fs.aio-nr budget across concurrent
       # jobs, and a mysqld that reserves native AIO contexts can exhaust it
       # and fail to boot with `io_setup() failed with EAGAIN` (#14416).
@@ -2099,7 +2108,7 @@ jobs:
             -Dqwen.gate.rocketmq.endpoints=127.0.0.1:${RMQ_PROXY_GRPC_PORT} \
             -Dqwen.gate.rocketmq.topic=qwen-managed-events \
             -Dqwen.gate.rocketmq.work-dir="${RUNNER_TEMP}/rocketmq" \
-            -Dqwen.gate.faketime.library=/usr/lib/x86_64-linux-gnu/faketime/libfaketimeMT.so.1 \
+            -Dqwen.gate.faketime.library="${FAKETIME_LIB}" \
             clean verify && \
             node scripts/check-failsafe-reports.js event-transport-multi-node packages/managed-agent-server
       - name: 'Upload multi-node gate reports'
