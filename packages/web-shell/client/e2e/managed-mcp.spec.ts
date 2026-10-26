@@ -24,6 +24,8 @@ for (const width of [1280, 390]) {
       const body = route.request().postDataJSON();
       if (path.endsWith('/user-messages/query'))
         return route.fulfill({ json: { paused: false, messages: [] } });
+      if (path.endsWith('/workspace-extensions/query'))
+        return route.fulfill({ json: { supported: false, extensions: [] } });
       if (path.endsWith('/runtime-nodes/query'))
         return route.fulfill({ json: { supported: false, data: [] } });
       if (path.endsWith('/sessions/query'))

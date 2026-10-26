@@ -108,6 +108,10 @@ public class SignatureAuthFilter extends OncePerRequestFilter
                     "The signature timestamp is outside the allowed drift.");
             return;
         }
+        if (extensionArchiveUpload(request)) {
+            authenticateArchive(request, response, chain, tenantId, actorId, signature, timestamp.trim());
+            return;
+        }
         // The body is signed, so it is buffered here and re-exposed to the
         // chain; without it a captured signature would authorize any
         // substitute body on the same method and path inside the window. The
@@ -271,9 +275,15 @@ public class SignatureAuthFilter extends OncePerRequestFilter
     private String sign(String method, String uri, String query,
             String tenantId, String actorId, String timestamp, byte[] body,
             String idempotencyKey) {
+        return signDigest(method, uri, query, tenantId, actorId, timestamp, sha256Hex(body), idempotencyKey);
+    }
+
+    private String signDigest(String method, String uri, String query,
+            String tenantId, String actorId, String timestamp, String digest,
+            String idempotencyKey) {
         String canonical = "qwen-broker-auth-v1\n" + method + "\n" + uri
                 + "\n" + (query == null ? "" : query) + "\n" + tenantId
-                + "\n" + actorId + "\n" + timestamp + "\n" + sha256Hex(body)
+                + "\n" + actorId + "\n" + timestamp + "\n" + digest
                 + "\n" + (idempotencyKey == null ? "" : idempotencyKey);
         try {
             return new HmacUtils(HmacAlgorithms.HMAC_SHA_256,
@@ -282,6 +292,84 @@ public class SignatureAuthFilter extends OncePerRequestFilter
         } catch (Exception error) {
             throw new IllegalStateException("HmacSHA256 is unavailable",
                     error);
+        }
+    }
+
+    private static boolean extensionArchiveUpload(HttpServletRequest request) {
+        String path = PublicSurface.pathWithinApplication(request);
+        String content = request.getContentType();
+        return content != null && content.equalsIgnoreCase(MediaType.APPLICATION_OCTET_STREAM_VALUE)
+                && ("POST".equals(request.getMethod())
+                && (path.matches("/v1/agents/workspaces/[^/]+/extensions")
+                || path.equals("/api/agent/web-shell/v1/workspace-extensions/publish"))
+                || "PUT".equals(request.getMethod())
+                && path.matches("/v1/agents/workspaces/[^/]+/extensions/ext_[a-f0-9-]{36}/packages/[a-f0-9]{64}"));
+    }
+
+    private void authenticateArchive(HttpServletRequest request, HttpServletResponse response, FilterChain chain,
+            String tenantId, String actorId, String signature, String timestamp) throws IOException, ServletException {
+        long maximum = com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionPackages.MAX_ARCHIVE_BYTES;
+        if (request.getContentLengthLong() > maximum) {
+            reject(request, response, HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE,
+                    "payload_too_large", "Extension archive exceeds 100 MiB.");
+            return;
+        }
+        java.nio.file.Path temporary = java.nio.file.Files.createTempFile("qwen-extension-auth-", ".part");
+        try {
+            var digest = DigestUtils.getSha256Digest();
+            long total = 0;
+            try (var output = java.nio.file.Files.newOutputStream(temporary)) {
+                byte[] buffer = new byte[64 * 1024];
+                int count;
+                while ((count = request.getInputStream().read(buffer)) != -1) {
+                    total += count;
+                    if (total > maximum) {
+                        reject(request, response, HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE,
+                                "payload_too_large", "Extension archive exceeds 100 MiB.");
+                        return;
+                    }
+                    digest.update(buffer, 0, count);
+                    output.write(buffer, 0, count);
+                }
+            }
+            String expected = PREFIX + signDigest(request.getMethod(), request.getRequestURI(), request.getQueryString(),
+                    tenantId, actorId, timestamp, org.apache.commons.codec.binary.Hex.encodeHexString(digest.digest()),
+                    request.getHeader(IDEMPOTENCY_HEADER));
+            if (!MessageDigest.isEqual(expected.getBytes(StandardCharsets.US_ASCII),
+                    signature.trim().getBytes(StandardCharsets.US_ASCII))) {
+                reject(request, response, HttpServletResponse.SC_UNAUTHORIZED, "invalid_signature", "The request signature is invalid.");
+                return;
+            }
+            try (var input = java.nio.file.Files.newInputStream(temporary)) {
+                var stream = new jakarta.servlet.ServletInputStream() {
+                    private boolean finished;
+                    @Override public boolean isFinished() { return finished; }
+                    @Override public boolean isReady() { return true; }
+                    @Override public void setReadListener(jakarta.servlet.ReadListener listener) { }
+                    @Override public int read() throws IOException {
+                        int value = input.read();
+                        finished = value == -1;
+                        return value;
+                    }
+                    @Override public int read(byte[] bytes, int offset, int length) throws IOException {
+                        int count = input.read(bytes, offset, length);
+                        finished = count == -1;
+                        return count;
+                    }
+                };
+                chain.doFilter(new HttpServletRequestWrapper(request) {
+                    @Override public jakarta.servlet.ServletInputStream getInputStream() { return stream; }
+                    @Override public Principal getUserPrincipal() {
+                        return new AuthenticatedTenantActor() {
+                            @Override public String tenantId() { return tenantId; }
+                            @Override public String actorId() { return actorId; }
+                            @Override public String getName() { return actorId; }
+                        };
+                    }
+                }, response);
+            }
+        } finally {
+            java.nio.file.Files.deleteIfExists(temporary);
         }
     }
 
