@@ -8,7 +8,8 @@
 // acceptance criterion 7): a disposable standalone installation is updated
 // from a local HTTPS release root while the npm registry is unreachable.
 // The run must install exactly the requested version and must not touch the
-// registry — the sink server fails the test if any request reaches it.
+// registry — the sink records every request and answers 503; the
+// expect(registryRequests).toEqual([]) assertions are what fail the run.
 //
 // The scratch root stays in os.tmpdir(), outside the repository checkout.
 // getInstallationInfo only reports "local git clone" — which disables
@@ -338,7 +339,8 @@ describe.skipIf(process.platform === 'win32')(
         releaseServer.listen(0, '127.0.0.1', resolve),
       );
 
-      // Any npm registry discovery lands here and fails the run.
+      // Any npm registry discovery lands here and is recorded; the per-test
+      // assertions on registryRequests are what fail the run.
       registryRequests = [];
       registrySink = http.createServer((req, res) => {
         registryRequests.push(req.url ?? '');
