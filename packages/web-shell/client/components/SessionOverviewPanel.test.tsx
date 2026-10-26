@@ -3659,6 +3659,29 @@ describe('SessionOverviewPanel standalone sessions', () => {
     );
   });
 
+  it('opens a standalone row from its title with the standalone context', async () => {
+    useStandaloneCapabilities();
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('st1', {
+            displayName: 'Solo',
+            updatedAt: '2026-07-06T11:00:00.000Z',
+          }),
+        ],
+      },
+    ];
+    render();
+    await flushAsync();
+    const row = rows().find((tr) => tr.textContent?.includes('Solo'))!;
+    act(() => click(titleTrigger(row)));
+    expect(onOpenSession).toHaveBeenCalledExactlyOnceWith(
+      'st1',
+      '/standalone',
+      { kind: 'standalone' },
+    );
+  });
+
   it('opens a workspace row without a standalone context', async () => {
     useStandaloneCapabilities();
     sessionsState.sessions = [session('s1', { displayName: 'One' })];
