@@ -50,6 +50,7 @@ import {
 import type { PartListUnion } from '@google/genai';
 import { MessageSenderType } from '@qwen-code/qwen-code-core/core/logger.js';
 import type { LoadedSettings } from '../../config/settings.js';
+import type { MicrophonePermission } from '../hooks/use-voice-input.js';
 import type { VimMode } from '../contexts/VimModeContext.js';
 import type { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
 import type { SlashCommand } from '../commands/types.js';
@@ -673,6 +674,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   rewindIdleRef.current = !streaming;
   const rewindInjectionRef = useRef<(() => void) | null>(null);
   useEffect(() => () => rewindInjectionRef.current?.(), []);
+  const voiceMicWarnedStatusRef = useRef<MicrophonePermission | null>(null);
   const host = useMemo(
     () =>
       new OpenTuiAppHost({
@@ -1519,6 +1521,11 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
               <OpenTuiInputPrompt
                 onSubmit={onSubmit}
                 onNotice={notify}
+                voice={{
+                  settings,
+                  voiceMicWarnedStatusRef,
+                  addItem: (item, at) => host.addItem(item, at),
+                }}
                 preferredEditor={settings.merged.general?.preferredEditor}
                 topRightLabel={host.sessionName ?? undefined}
                 userMessages={userMessages}

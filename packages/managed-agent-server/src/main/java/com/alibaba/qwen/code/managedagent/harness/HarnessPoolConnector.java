@@ -383,6 +383,21 @@ public class HarnessPoolConnector implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsSessionExtensions() {
+        return feature("session-extension-packages/1");
+    }
+
+    @Override
+    public Map<String, Object> applyExtensions(String tenant, String session, Map<String, Object> command) {
+        return call(tenant, session, leaf -> leaf.applyExtensions(tenant, session, command));
+    }
+
+    @Override
+    public Map<String, Object> continueExtensionOperation(String tenant, String session, String operationId, boolean recoverPrevious) {
+        return call(tenant, session, leaf -> leaf.continueExtensionOperation(tenant, session, operationId, recoverPrevious));
+    }
+
+    @Override
     public boolean isWorkspaceFilesAvailable() {
         return properties.getHarness().isWorkspaceFilesEnabled();
     }

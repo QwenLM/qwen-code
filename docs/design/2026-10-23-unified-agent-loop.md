@@ -2,7 +2,7 @@
 
 [English](2026-10-23-unified-agent-loop.md) | [简体中文](2026-10-23-unified-agent-loop.zh-CN.md)
 
-- **Status**: accepted in #15343. PR 1 (headless) is #15369.
+- **Status**: accepted in #15343. PR 1 (headless) merged in #15369. PR 2a (the model round of ACP prompt turns) is in review in #15509.
 - **Date**: 2026-10-23, against upstream `779a4d5d0d`.
 - **Related**:
   - tracking issue #15327;
@@ -84,7 +84,7 @@ Out of scope for this round:
 - `LlmChat` and the provider layer;
 - `CoreToolScheduler` internals beyond the hooks the loop needs;
 - UI rendering and wire protocols;
-- changing any default during this round.
+- changing a surface's default before it meets the conditions in [Migration](#migration).
 
 ## Design
 
@@ -172,6 +172,27 @@ Behavior that only some surfaces have is passed in as a policy instead of copyin
 
 A policy affects only the surface that passes it.
 
+### Send options a host owns
+
+Some surfaces did part of the interaction step themselves before they moved, and keep doing it on the shared path for a while. A send option then tells the client not to do that part, so it does not run twice. Each such option is a transition step, not a lasting API: it is listed here with the step that removes it or turns it into an input.
+
+| Option                   | Why the host keeps the part                                                                                                                                                                                                                                  | Removed by                                                                                                                                                               |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `toolLoopGuardsByHost`   | ACP's tool step runs the daemon tool-loop guards: the per-turn tool-call cap, repeated calls, the exploration reminder and the repeated-tool-failure guard                                                                                                   | PR 2b, when ACP's tool batch moves: the guards the client already has apply, and the ones only ACP has, such as the repeated-tool-failure guard, become a surface policy |
+| `stopHookRunByHost`      | ACP's Stop loop also runs the Todo Stop Guard, the turn's background results and mid-turn input, so ACP decides when the turn ends and runs its memory tasks                                                                                                 | PR 2c, when those continuations become stop-point policies ([Stop-point continuations](#stop-point-continuations))                                                       |
+| `interactionSpanByHost`  | ACP's span is parented to the daemon's trace                                                                                                                                                                                                                 | an input instead: the client joins the span the host started for the prompt; before the default changes for ACP                                                          |
+| `userTurnRecordedByHost` | ACP records the prompt as typed, with its display text, attachments, resource links and daemon prompt id, before slash commands run, and takes the turn's file-history snapshot before its first send, so a prompt cancelled before it is sent still has one | an input instead: the host passes that record and the client writes it; before the default changes for ACP                                                               |
+
+`toolCallPreparations` and `memoryRecallQuery` are not in the table: one asks for an extra event, the other gives recall the prompt's text, which the host expanded before the send; neither turns anything off.
+
+A new option that turns off part of the client's work for one host needs a row here, and a surface's default does not change while it has an open row.
+
+### Stop-point continuations
+
+When a response ends without tool calls, `LlmClient` decides whether the turn continues: the Stop hook, steering and the next-speaker check. Ink, OpenTUI and headless rely on that chain as it is. ACP continues at the same point for more reasons: the Todo Stop Guard, the background results of the current turn and input that arrived mid-turn. Today its Stop loop runs all of them, the Stop hook included.
+
+Before ACP's other turns move (PR 2c), these continuations need one owner. The proposal is that the client's chain takes ordered surface stop policies. Each policy can return the parts to continue with, and the chain sends them as it sends a Stop-hook continuation. ACP then passes its three continuations as policies and drops its Stop loop and `stopHookRunByHost`. The other surfaces pass none and do not change.
+
 ### The setting
 
 `experimental.unifiedAgentLoop` is a boolean, `false` by default, and takes effect after a restart. `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=1` overrides it, which lets CI and scripts run the suites with the shared loop. Both follow the pattern of `experimental.agentTeam` / `QWEN_CODE_ENABLE_AGENT_TEAM`.
@@ -185,7 +206,9 @@ if (config.isUnifiedAgentLoopEnabled()) {
 // current loop, unchanged
 ```
 
-The current loop stays as the `else` branch and is not refactored while the setting exists. A surface that has not moved yet ignores the setting, and the setting's description names the surfaces it covers. ACP children started by `qwen serve` read the same settings, so the daemon and Web Shell follow the setting once ACP moves. Until then the Web Shell settings panel leaves the setting out, since there it would be a toggle with no effect.
+The current loop stays as the `else` branch and is not refactored while the setting exists. A surface that has not moved yet ignores the setting, and the setting's description names the surfaces it covers. ACP children started by `qwen serve` read the same settings, so the daemon and Web Shell follow the setting for the ACP turns that have moved. The Web Shell settings panel lists the setting from PR 2a on.
+
+Once surfaces change their defaults one at a time, the setting has no schema default. `Config.isUnifiedAgentLoopEnabled(surface)` returns the setting when it is set, and otherwise the surface's own default. The environment variable still overrides both.
 
 ### Headless on the shared loop (PR 1)
 
@@ -209,22 +232,62 @@ The current loop stays as the `else` branch and is not refactored while the sett
 | abort → `routeAbort` (55 / 130)                                                    | stop reason `cancelled`; the surface still routes the abort                                                 |
 | idle phase: next Goal, teammates, cron, background holdback, memory, final result  | unchanged, outside the loop                                                                                 |
 
+### ACP prompt turns on the shared round (PR 2a)
+
+PR 2 moves ACP in three steps. PR 2a moves the model round of a fresh user prompt: one that is not a retry, a continue or a restore, and not a Goal, channel or goal-proposal approval turn. The round is the loop's own `runModelRound`: one `LlmClient.sendMessageStream` call whose events go to ACP and whose terminal events become stop reasons. ACP keeps its tool step (`runToolCalls`, the next message after tools, the daemon tool-loop guards) and everything around the turn. PR 2b moves the tool batch of these turns onto the scheduler. PR 2c then moves the other turns onto the whole loop, so each of ACP's loop bodies changes once.
+
+| ACP today                                                                                         | With the setting on                                                                                                                                                                                             |
+| ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `chat.sendMessageStream` behind `#sendMessageStreamWithAutoCompression`                           | `LlmClient.sendMessageStream` through `runModelRound`: the first round is `UserQuery`, a round after tools is `ToolResult`, and input taken while a response streamed is `Steer`                                |
+| raw chunks: text, thought, usage, function calls, tool-call preparations                          | the client's events: `Content`, `Thought` with its raw `text`, the usage on `Finished`, `ToolCallRequest` with the `functionCall` it came from, `ToolCallPreparation`                                           |
+| UserPromptSubmit through the message bus                                                          | `admitUserPrompt`, with the same input at the same point; the first round applies the verdict, and a blocked prompt is reported by that round without a request                                                 |
+| the user message record, the todo work chain and the file-history snapshot                        | ACP's, as today; the first round says so with `userTurnRecordedByHost`                                                                                                                                          |
+| memory recall, plan, arena and output-style reminders, workflow intent, MessageDisplay            | the client                                                                                                                                                                                                      |
+| compaction before the send and its notice; the session token gate                                 | the client's compaction inside the send, with the same notice on `ChatCompressed`; the client's gate, reported as today (`max_tokens`)                                                                          |
+| the external Stop hook, its cap and its continuation                                              | ACP's Stop loop, as today, which also runs the Todo Stop Guard and the current turn's background results; the round tells the client with `stopHookRunByHost`. The hook moves with those continuations in PR 2c |
+| the StopFailure hook and the 429 mapping when a request fails                                     | ACP, as today, also for a stream `Error` event, with the error the provider threw                                                                                                                               |
+| the managed memory tasks after the turn                                                           | ACP, when the turn ends as today, through the client's `runManagedAutoMemoryBackgroundTasks`; the client skips them under `stopHookRunByHost`, since ACP's Stop loop can still continue the turn                |
+| the interaction span                                                                              | ACP's, as today; the round tells the client with `interactionSpanByHost`                                                                                                                                        |
+| the daemon tool-loop guards: the per-turn tool-call cap, repeated calls, the exploration reminder | ACP's, as today; the round tells the client with `toolLoopGuardsByHost`, so the client checks no tool-call patterns and adds neither the exploration reminder nor the todo reminder ACP's message carries       |
+| no content or thought loop heuristics, no session turn cap                                        | the client's content and thought heuristics when `model.skipLoopDetection` is false, whose `LoopDetected` rejects the prompt as a loop (`LOOP_DETECTED`); `MaxSessionTurns` ends it with `max_turn_requests`    |
+
+The core changes of this step are additive and change nothing for a caller that does not use them:
+
+- `Turn` gives `Thought` the chunk's raw `text` and `ToolCallRequest` the `functionCall` it was built from, and yields `ToolCallPreparation` for a call the model started streaming when the send asks for it with `toolCallPreparations`;
+- `SendMessageOptions.userTurnRecordedByHost`, `stopHookRunByHost`, `interactionSpanByHost` and `toolLoopGuardsByHost`, and the loop detector's `toolCallPatterns` check option;
+- `SendMessageOptions.memoryRecallQuery`, what a `UserQuery`'s memory recall searches for in place of the request;
+- `getStructuredErrorCause` returns the error a `Turn` `Error` event was built from;
+- `admitUserPrompt` takes the hook's `submitted_prompt` and a signal;
+- `runModelRound` is exported.
+
 ## Migration
 
-| PR  | Content                                                                                                                                                |
-| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 0   | this design                                                                                                                                            |
-| 1   | the shared loop, `beforeToolLaunch`, the setting, headless (`-p` and stream-json), the parity suite                                                    |
-| 2   | ACP sessions; the model round moves to `LlmClient` and ACP's re-implementations stay out of the shared path; may split into model round and tool batch |
-| 3   | Ink TUI                                                                                                                                                |
-| 4   | OpenTUI                                                                                                                                                |
-| 5   | AgentCore on a `Turn` round (subagents, background and forked agents, workflows)                                                                       |
-| 6   | speculation                                                                                                                                            |
-| —   | Hosted Harness: separate evaluation                                                                                                                    |
-| 7   | default on                                                                                                                                             |
-| 8   | remove the current loops                                                                                                                               |
+| PR  | Content                                                                                                                                             |
+| --- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0   | this design                                                                                                                                         |
+| 1   | the shared loop, `beforeToolLaunch`, the setting, headless (`-p` and stream-json), the parity suite                                                 |
+| 1d  | headless: default on                                                                                                                                |
+| 1r  | headless: remove its current loop                                                                                                                   |
+| 2a  | ACP: the model round of a fresh user prompt moves to `LlmClient`; ACP's re-implementations stay out of the shared path, and ACP keeps its tool step |
+| 2b  | ACP: the tool batch of those turns on the scheduler; the daemon tool-loop guards become the client's guards plus a surface policy                   |
+| 2c  | ACP: the other turns (retry, continue, restore, Goal turns, cron, notifications) on the whole loop; ACP's own continuations as stop-point policies  |
+| 2d  | ACP: default on, then remove its current loop                                                                                                       |
+| 3   | Ink TUI                                                                                                                                             |
+| 4   | OpenTUI                                                                                                                                             |
+| 5   | AgentCore on a `Turn` round (subagents, background and forked agents, workflows)                                                                    |
+| 6   | speculation                                                                                                                                         |
+| —   | Hosted Harness: separate evaluation                                                                                                                 |
 
-A surface counts as moved when it passes its parity suite with the setting on and its known differences are listed. The default changes after every surface in scope has moved and the setting has been used in CI and by opt-in users for at least one release. The current loops are removed after the default has shipped for at least one release.
+Each of PRs 3–6 is followed by its own default-on and removal steps.
+
+A surface counts as moved when it passes its parity suite with the setting on and its known differences are listed. Each surface then changes its default on its own, without waiting for the others. Its default changes when:
+
+- the setting has been available for that surface for at least one release;
+- the scheduled job that runs the surface's integration suite with the setting on has passed on main for two weeks;
+- the surface has no open row in [Send options a host owns](#send-options-a-host-owns);
+- the release notes list its intended differences from [Compatibility](#compatibility).
+
+Its current loop is removed one release after its default changed. Until then, setting `experimental.unifiedAgentLoop` to `false` brings the current loop back for that surface.
 
 ## Parity suite
 
@@ -233,7 +296,7 @@ A surface counts as moved when it passes its parity suite with the setting on an
 **How it runs.** The suite runs each scripted scenario on a surface twice, once with `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` unset and once with it set to `1`. It compares:
 
 - the request sequence the model saw, normalized by removing timestamps, the date reminder, ids and durations;
-- the surface's output: the stream-json frames for headless, and later the ACP `session/update` notifications.
+- the surface's output: the stream-json frames for headless; for ACP the `session/update` notifications and each prompt's stop reason, without `available_commands_update`, which arrives on its own schedule.
 
 A difference fails the scenario unless it is listed with a linked issue.
 
@@ -255,11 +318,24 @@ A difference fails the scenario unless it is listed with a linked issue.
 - structured output with a sibling call;
 - a teammate message merged into a tool-result turn.
 
+**ACP scenarios** (`integration-tests/cli/acp-agent-loop-parity.test.ts`):
+
+- plain text, and streamed text with a thought;
+- one tool, and two reads in one response;
+- an approved write between reads, and a denied write;
+- reads past the per-turn tool-call cap;
+- an edit cut off by the output limit;
+- a stream that drops and is retried;
+- two prompts in one session;
+- a model error;
+- a UserPromptSubmit hook that blocks;
+- a Stop hook that blocks once, and one that blocks up to the cap.
+
 The suite runs in the integration job. A scheduled job also runs the whole headless integration suite with the setting on.
 
 ## Compatibility
 
-- With the setting off, no surface changes. The only shared code that changes is the scheduler's new optional `beforeToolLaunch`, which does nothing when it is not passed.
+- With the setting off, no surface changes. The shared code that changes is additive: the scheduler's optional `beforeToolLaunch`, and from PR 2a the `Turn` event fields and send options above, which change nothing for a caller that does not use them.
 - With the setting on, headless differs from today in these intended ways. Most follow from scheduling a batch as one unit, as the TUI already does:
   - a stream-json message past `--max-session-turns` ends the run at the session turn limit, as `-p` does (the error on stderr, exit code 53), instead of a success that repeats the previous answer (#15325);
   - a notification turn (cron, monitor and other queued items) counts each of its model rounds toward `--max-session-turns`, as the main turn does, instead of one turn for the whole item, so a run whose notification turns call tools can reach the limit sooner;
@@ -273,19 +349,29 @@ The suite runs in the integration job. A scheduled job also runs the whole headl
 
   The parity suite covers the common cases unchanged and asserts the #15325 stop and the approved call under `--max-tool-calls`. The headless unit tests run the notification-turn count and the resubmitted `structured_output` on both loops.
 
+- With the setting on, an ACP prompt turn differs from today in these intended ways. Most follow from the client doing for ACP what it does for the other surfaces:
+  - a prompt carries the client's date reminder when the date changed since the last one, and its system reminders are the client's, the advisor and paused-Goal reminders included; they come before ACP's one-shot notices instead of after them;
+  - UserPromptSubmit also runs for the turn's tool-result requests, with their text (empty when the request carries only tool results), as on the other surfaces (#9511); cancelling the turn stops a hook still running there; a block there ends the turn with the block notice and closes the round's tool calls with a result saying the hook blocked it, keeping the input taken with the results in history;
+  - the session token limit is checked before the client compacts the history instead of after;
+  - the client's session turn cap applies to ACP prompts, and so do its content and thought loop heuristics when `model.skipLoopDetection` is false and the next-speaker check when it is enabled (#14114);
+  - a tool-result request carries the recall and the queued loop reminder and runs the client's size-only microcompaction, the managed memory tasks are the client's, skill review included, and the prompt counts toward commit attribution;
+  - every compaction shows the compaction notice, also one inside a send;
+
+  The ACP parity suite covers the common cases unchanged and asserts the date reminder, UserPromptSubmit on tool results and cancelling while that hook runs.
+
 - Later surfaces bring their own fixes: #15324 (ACP), #15326 (OpenTUI), #14114 and #12209 (ACP).
 
 - No setting, protocol field or file format is removed.
 
 ## Risks
 
-| Risk                                                                                              | Mitigation                                                                                                |
-| ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| Whole-batch scheduling changes headless frame order or the exact `--max-tool-calls` count         | ordered result streaming; `beforeToolLaunch`; parity scenarios at the budget edge                         |
-| Moving ACP onto `LlmClient` adds behavior (caps, heuristics, reminders) and could run hooks twice | ACP's own copies stay off the shared path; parity lists every added behavior; separate PR                 |
-| AgentCore's deferred approvals must restore four async-local frames                               | move the existing contract tests with the code; a real deferred-approval run in the TUI agent view (PR 5) |
-| Two implementations coexist while the setting exists                                              | the current loops are not refactored; parity runs in CI; removal is scheduled in the plan                 |
-| Large PRs touch core                                                                              | each PR moves one surface; PR 1 is a feature PR behind an off-by-default setting                          |
+| Risk                                                                                                        | Mitigation                                                                                                                                                                                       |
+| ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Whole-batch scheduling changes headless frame order or the exact `--max-tool-calls` count                   | ordered result streaming; `beforeToolLaunch`; parity scenarios at the budget edge                                                                                                                |
+| Moving ACP onto `LlmClient` adds behavior (caps, heuristics, reminders) and could run hooks twice           | ACP's own copies stay off the shared path; parity lists every added behavior; separate PR                                                                                                        |
+| AgentCore's deferred approvals must restore four async-local frames                                         | move the existing contract tests with the code; a real deferred-approval run in the TUI agent view (PR 5)                                                                                        |
+| Two implementations coexist while the setting exists, and new loop-level behavior has to be wired into both | each surface switches its default and drops its current loop as soon as it is ready, instead of after every surface has moved; the current loops are not refactored meanwhile; parity runs in CI |
+| Large PRs touch core                                                                                        | each PR moves one surface; PR 1 is a feature PR behind an off-by-default setting                                                                                                                 |
 
 ## Acceptance criteria
 
@@ -310,6 +396,7 @@ End state:
 - Should `model.maxSessionTurns: 0` mean "no turns" or be rejected? Today the loops disagree (#15325).
 - The parity suite compares frames in order, and no scenario yet runs concurrent calls with live output, whose progress frames have no fixed order in either loop. Should such scenarios compare progress frames per call?
 - A call `beforeToolLaunch` refuses is still a member of its batch for PostToolBatch, so a stop or added context the hook attaches to it does not reach the model. Headless refuses a call only when the run ends, so this does not show there. Before another surface uses `beforeToolLaunch`, should refused calls leave the batch the hook sees, or should the hook's output move to the last call that ran?
+- Stop-point continuations: do surface stop policies in the client's chain cover ACP's Todo Stop Guard, background results and mid-turn input in the order its Stop loop runs them today, including which of them a user can interrupt? This has to be settled before PR 2c.
 
 ## Follow-up
 

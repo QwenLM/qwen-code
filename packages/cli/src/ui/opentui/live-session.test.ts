@@ -831,6 +831,33 @@ describe('livePromptEvents', () => {
     expect(options).toEqual({ type: SendMessageType.UserQuery });
   });
 
+  it('hands the turn hooks the admission and every event of its streams', async () => {
+    const events = [
+      { type: 'content', value: 'hi' },
+      {
+        type: 'finished',
+        value: { reason: undefined, usageMetadata: undefined },
+      },
+    ];
+    const sendMessageStream = vi.fn(function* (...args: unknown[]) {
+      (args[3] as { onPromptAdmitted?: () => void }).onPromptAdmitted?.();
+      yield* events;
+    });
+    const config = createFakeConfig(sendMessageStream);
+    const onPromptAdmitted = vi.fn();
+    const onStreamEvent = vi.fn();
+
+    await drain(
+      livePromptEvents(config, 'hello', new AbortController().signal, {
+        onPromptAdmitted,
+        onStreamEvent,
+      }),
+    );
+
+    expect(onPromptAdmitted).toHaveBeenCalledOnce();
+    expect(onStreamEvent.mock.calls.map(([event]) => event)).toEqual(events);
+  });
+
   it('shares one initialization promise across callers', async () => {
     const initialize = vi.fn(async () => {});
     const config = { initialize } as unknown as Config;
@@ -3292,6 +3319,38 @@ describe('livePromptEvents', () => {
       { type: 'tool-queued', id: 'q1', queued: true },
       { type: 'tool-queued', id: 'q1', queued: false },
     ]);
+  });
+
+  it('tells the turn when every tool of a round was declined', async () => {
+    const sendMessageStream = vi.fn(function* (): Generator<{
+      type: string;
+      value?: unknown;
+    }> {
+      yield {
+        type: 'tool_call_request',
+        value: {
+          callId: 'c9',
+          name: 'run_shell_command',
+          args: { __cancelApproval: true },
+        },
+      };
+      yield { type: 'finished', value: {} };
+    });
+    const config = {
+      ...createFakeConfig(sendMessageStream),
+      getGeminiClient: () => ({
+        sendMessageStream,
+        addHistory: vi.fn(),
+        isInitialized: () => true,
+        getChat: () => ({ getGenerationConfig: () => ({ tools: [] }) }),
+      }),
+    } as unknown as Config;
+    const onToolsCancelled = vi.fn();
+
+    await drain(livePromptEvents(config, 'q', undefined, { onToolsCancelled }));
+
+    expect(onToolsCancelled).toHaveBeenCalledOnce();
+    expect(sendMessageStream).toHaveBeenCalledOnce();
   });
 
   it('records the No/Esc cancellation as a rejected resolution (R1-18)', async () => {
