@@ -100,6 +100,10 @@ scanner-threads`，它仍是正确的后续方向。
   同一套分发与 join 的串行形态。`aTickJoinsEveryRowBeforeItReportsOneFailure`
   在真实的单线程池上运行，第一个认领抛出时第二个行的认领仍在飞行中：直接执行器
   钉不住 join，因为它的任务在提交阶段就已跑完（#15442 验证 lane 发现 2）。
+- `commonClaimFailuresProduceOneBoundedSummary` 钉住统一的认领故障：五行已提交
+  任务产生四个额外的已观测任务异常，一条 WARN 只带前三条 tenant/schedule 身份，
+  不带 throwable 负载，并原样抛回第一个异常。计数覆盖已观测的行任务异常，不统计
+  已在行内处理的 fire/decide 错误；即使中断提前停止 join，`submitted` 仍是已提交行总数。
 - MySQL（`AutomationScannerConcurrencyMySqlIT`，`mysql-integration` profile）：
   InnoDB 行锁下竞争认领只有一个 fence 赢家；接管后旧所有者无法移动账本；两个
   扫描器跨线程池对每个 occurrence 只结算一次。

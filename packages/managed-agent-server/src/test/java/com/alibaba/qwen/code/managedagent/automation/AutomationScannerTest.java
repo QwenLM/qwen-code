@@ -2569,7 +2569,7 @@ class AutomationScannerTest {
             ILoggingEvent summary = logged.list.getFirst();
             assertThat(summary.getThrowableProxy()).isNull();
             assertThat(summary.getFormattedMessage())
-                    .contains("additionalFailures=4");
+                    .contains("additionalObservedTaskFailures=4", "submitted=5");
             for (ScheduleRow row : candidates.subList(0, 3)) {
                 assertThat(summary.getFormattedMessage())
                         .contains("tenant=" + row.tenantId(),

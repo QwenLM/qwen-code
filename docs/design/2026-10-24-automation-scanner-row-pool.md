@@ -118,6 +118,12 @@ follow-up if probe durations keep saturating
   runs on a real one-thread pool with the second row's claim in flight when
   the first one throws: a direct executor cannot pin the join, because its
   tasks finish during submission (#15442 verify lane, finding 2).
+- `commonClaimFailuresProduceOneBoundedSummary` pins the common claim outage:
+  one WARN with four additional observed task exceptions out of five submitted
+  rows, the first three tenant/schedule identities, no throwable payload, and
+  the original first exception rethrown. The count covers observed row-task
+  exceptions, not fire/decide errors handled inside a row; `submitted` remains
+  the submitted-row total even if an interrupt stops joining early.
 - MySQL (`AutomationScannerConcurrencyMySqlIT`, `mysql-integration` profile):
   racing claims reach exactly one fence winner under InnoDB row locks, a stale
   owner cannot move the ledger after a takeover, and two scanners settle one
