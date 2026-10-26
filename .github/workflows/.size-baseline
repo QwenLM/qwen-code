@@ -58,7 +58,7 @@
 35955 release.yml
 44285 repo-hygiene.yml
 1079 scorecard-monthly.yml
-3298 sdk-java-arm64.yml
+3316 sdk-java-arm64.yml
 9751 sdk-java-contract-open-prs.yml
 9555 sdk-java-flyway-open-prs.yml
 139803 sdk-java.yml

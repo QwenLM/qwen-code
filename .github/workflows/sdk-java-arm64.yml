@@ -1,4 +1,4 @@
-name: SDK Java ARM64 (experimental)
+name: 'SDK Java ARM64 (experimental)'
 
 # An arm64 lane for the self-hosted Hangzhou hosts, dispatched by hand on
 # purpose. It exists to prove the arm64 toolchain end to end — tool-cache JDK,
@@ -9,7 +9,7 @@ on:
     inputs:
       run_tests:
         description: 'Also run the managed-agent-server suite after the build'
-        type: boolean
+        type: 'boolean'
         default: false
 
 concurrency:
@@ -17,7 +17,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  contents: 'read'
 
 env:
   MAVEN_VERSION: '3.9.11'
@@ -26,10 +26,10 @@ jobs:
   arm64:
     name: 'SDK Java (arm64)'
     runs-on:
-      - self-hosted
-      - linux
-      - arm64
-      - ecs-qwen
+      - 'self-hosted'
+      - 'linux'
+      - 'arm64'
+      - 'ecs-qwen'
     timeout-minutes: 90
     steps:
       - name: 'Checkout'
@@ -72,14 +72,14 @@ jobs:
             -Dmaven.javadoc.skip=true -f packages/managed-agent-server/pom.xml install
 
       - name: 'Run the suite'
-        if: ${{ inputs.run_tests }}
+        if: '${{ inputs.run_tests }}'
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml -Dmaven.repo.local=${{ runner.temp }}/m2-repo'
         run: |-
           mvn --batch-mode --no-transfer-progress -f packages/managed-agent-server/pom.xml test
 
       - name: 'Report the platform'
-        if: ${{ always() }}
+        if: '${{ always() }}'
         run: |-
           uname -m
           java -version || true
