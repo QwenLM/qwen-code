@@ -205,7 +205,10 @@ import { escapeSystemReminderTags } from '../utils/xml.js';
 import { ApiRetryEvent } from '../telemetry/types.js';
 import { logApiRetry } from '../telemetry/loggers.js';
 import { shouldUsePlanOnlyReminderInSubagentContext } from '../agents/runtime/subagent-plan-tool-policy.js';
-import { wrapUserPromptSubmitContext } from '../utils/transcript-records.js';
+import {
+  createUserPromptSubmitContextPart,
+  hasUserPromptSubmitContext,
+} from '../hooks/user-prompt-submit-context.js';
 import {
   TrustedUserAnswers,
   type TrustedUserAnswerQuestion,
@@ -271,6 +274,11 @@ export interface SendMessageOptions {
   submittedPrompt?: string;
   humanInput?: HumanPromptInput;
   onWorkflowIntentApplied?: (trigger: WorkflowIntentTrigger) => void;
+  /**
+   * Called once when UserPromptSubmit lets the prompt through, before any
+   * model request; a blocked or failed admission never calls it.
+   */
+  onPromptAdmitted?: () => void;
   /**
    * {@link LlmClient.admitUserPrompt}'s verdict on this prompt, applied in
    * place of running UserPromptSubmit again. It is spent by the UserQuery with
@@ -3683,11 +3691,16 @@ export class LlmClient {
         ? { text: options.humanInput.text }
         : undefined;
     const onWorkflowIntentApplied = options?.onWorkflowIntentApplied;
-    if (options && (options.humanInput || onWorkflowIntentApplied)) {
+    const onPromptAdmitted = options?.onPromptAdmitted;
+    if (
+      options &&
+      (options.humanInput || onWorkflowIntentApplied || onPromptAdmitted)
+    ) {
       options = {
         ...options,
         humanInput: undefined,
         onWorkflowIntentApplied: undefined,
+        onPromptAdmitted: undefined,
       };
     }
     const startsInteraction =
@@ -4066,6 +4079,10 @@ export class LlmClient {
       managedMemoryType = interactionStartType;
     }
     let userPromptRecordPayload: UserPromptRecordPayload | undefined;
+    /** Hook context appended to this turn's request, if any. */
+    let appendedHookContext: string | undefined;
+    /** Hook context suppressed as already delivered; compression may need it back. */
+    let suppressedHookContext: string | undefined;
     let hooksEnabled: boolean;
     let messageBus: ReturnType<Config['getMessageBus']>;
     let userPromptSubmitFailureMessage = 'UserPromptSubmit hook failed';
@@ -4173,17 +4190,35 @@ export class LlmClient {
         // distinguishable from user-authored text in model history, resume,
         // and offline transcript analysis. `getAdditionalContext()` escapes
         // `<`/`>`, so hook output cannot forge the closing tag.
+        // An unchanged payload is already in history from an earlier turn, so
+        // re-appending it would duplicate it once per turn for the rest of the
+        // session; the earlier copy still carries the same text. History is
+        // scanned newest-first over the raw entries, so the check stays off
+        // the deep-cloning accessor on this per-turn path.
         const additionalContext = verdict.additionalContext;
         if (additionalContext) {
-          const requestArray = Array.isArray(request) ? request : [request];
-          request = [
-            ...requestArray,
-            { text: wrapUserPromptSubmitContext(additionalContext) },
-          ];
+          const alreadyDelivered = Boolean(
+            this.getChat().findLastHistoryEntry((entry) =>
+              hasUserPromptSubmitContext(entry, additionalContext),
+            ),
+          );
+          if (!alreadyDelivered) {
+            const requestArray = Array.isArray(request) ? request : [request];
+            request = [
+              ...requestArray,
+              createUserPromptSubmitContextPart(additionalContext),
+            ];
+            appendedHookContext = additionalContext;
+          } else {
+            suppressedHookContext = additionalContext;
+          }
           if (messageType === SendMessageType.UserQuery) {
+            // A suppressed turn appends nothing, so it records no
+            // hookContext, but the user-authored projection still belongs in
+            // the transcript.
             userPromptRecordPayload = {
               displayText: submittedPrompt ?? verdict.prompt,
-              hookContext: additionalContext,
+              hookContext: alreadyDelivered ? '' : additionalContext,
             };
           }
         }
@@ -4213,6 +4248,7 @@ export class LlmClient {
       settleSteerInput(attachedSteerInput);
       throw error;
     }
+    onPromptAdmitted?.();
 
     try {
       goalRuntime = await loadGoalRuntime(
@@ -4734,6 +4770,7 @@ export class LlmClient {
         messageType === SendMessageType.UserQuery ? prompt_id : undefined,
         options?.retractDeliveredOutputOnRetry,
         options?.onPreparedRequest,
+        suppressedHookContext,
       );
 
       // Assemble the outgoing request. IDE context is merged into the
@@ -4742,6 +4779,13 @@ export class LlmClient {
       // so the final shape is: [systemReminders..., ideContext + user prompt].
       // Replay Parts carry snapshot metadata needed by history deduplication.
       let requestToSend = Array.isArray(request) ? [...request] : [request];
+      if (appendedHookContext) {
+        // The UserPromptSubmit receipt has to survive on the live request, so
+        // that history carries the same provenance resume restores from the
+        // recorded payload.
+        requestToSend[requestToSend.length - 1] =
+          createUserPromptSubmitContextPart(appendedHookContext);
+      }
       if (ideContextText) {
         const firstText = requestToSend.find(
           (part) => typeof part === 'string' || 'text' in part,

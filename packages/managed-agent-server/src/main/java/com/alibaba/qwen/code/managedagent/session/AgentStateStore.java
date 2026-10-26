@@ -35,6 +35,7 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
 import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
+import com.fasterxml.jackson.databind.JsonNode;
 
 import java.time.Duration;
 import java.util.List;
@@ -233,6 +234,22 @@ public interface AgentStateStore {
         return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest,
                 agentId, requestedRevision, title, input, payloadDigest, selection, approvalMode,
                 approvalSelectionSupported, planMode, planModeSupported, skills, publicChildrenSupported);
+    }
+
+    @org.springframework.transaction.annotation.Transactional
+    default Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
+            String idempotencyKey, String requestDigest, String agentId, String requestedRevision,
+            String title, List<Map<String, Object>> input, String payloadDigest, WorkspaceSelection selection,
+            String approvalMode, boolean approvalSelectionSupported, Boolean planMode, boolean planModeSupported,
+            List<Map<String, Object>> skills, boolean publicChildrenSupported, String modelId,
+            List<com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionPackages.Pin> extensionPins,
+            Set<String> extensionLifecycleProfiles) {
+        if (extensionPins != null) {
+            throw new UnsupportedOperationException("Initial extension selection is unavailable");
+        }
+        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest,
+                agentId, requestedRevision, title, input, payloadDigest, selection, approvalMode,
+                approvalSelectionSupported, planMode, planModeSupported, skills, publicChildrenSupported, modelId);
     }
 
     Admission replayWorkspaceSessionCommand(String tenantId, String actorId,
@@ -726,6 +743,14 @@ public interface AgentStateStore {
 
     default void requireMcpSettingsCommit(String tenantId, String workspaceId, String sessionId) {
         throw new UnsupportedOperationException("MCP management is unavailable");
+    }
+
+    default SessionRecord requireExtensionManagement(String tenantId, String actorId, String sessionId, String operationId, boolean mutation) {
+        throw new UnsupportedOperationException("Extension management is unavailable");
+    }
+
+    default void requireConfigurationCommit(String tenantId, String workspaceId, String sessionId, JsonNode body) {
+        throw new UnsupportedOperationException("Extension management is unavailable");
     }
 
     default Set<String> findApprovalOwners(String tenantId, String actorId,
