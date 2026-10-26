@@ -93,11 +93,16 @@ public class RuntimeBrokerConfiguration {
             org.springframework.beans.factory.ObjectProvider<ToolPublicationDataStore> publicationData,
             org.springframework.jdbc.core.JdbcTemplate jdbc,
             org.springframework.transaction.PlatformTransactionManager manager,
-            com.alibaba.qwen.code.managedagent.workspace.SshWorkspaceService ssh) {
-        return new EmbeddedRuntimeBroker(store, properties,
+            com.alibaba.qwen.code.managedagent.workspace.SshWorkspaceService ssh,
+            com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionPackageService extensions,
+            com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionCommandVerifier extensionCommands) {
+        var broker = new EmbeddedRuntimeBroker(store, properties,
                 bindingRepository, sessionRepository, executionRepository,
                 workspaceExecutionStore, publications.getIfAvailable(),
                 publicationData.getIfAvailable(), jdbc, manager, ssh);
+        broker.configureExtensions(extensions);
+        broker.service().configureExtensionCommandVerifier(extensionCommands);
+        return broker;
     }
 
     // The child result relay and the close cascade probe bindings across

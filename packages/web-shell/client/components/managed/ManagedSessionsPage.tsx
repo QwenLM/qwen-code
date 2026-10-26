@@ -1067,7 +1067,7 @@ function ManagedSessionsContent({
         sessionId,
         ...(input.some(
           (block) =>
-            block.type === 'input_file' || block.type === 'input_image',
+            block.type !== 'input_text' || block.text !== submittedText,
         )
           ? { input }
           : {}),
@@ -2236,6 +2236,7 @@ function ManagedSessionsContent({
                 skillsLoaded={skills.loaded}
                 workspaceFeaturesEnabled={false}
                 fileReferenceActions={referenceActions}
+                fileUploadTarget={fileReferences.uploadTarget}
                 persistFileReferences
                 attachmentsEnabled={
                   attachmentCapability.current.enabled && !active
