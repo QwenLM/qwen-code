@@ -7,8 +7,18 @@
   border-bottom: 1px solid var(--border);
   overflow: hidden;
 }
-.toggle {
+.header {
   flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.toggle {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   text-align: left;
   padding: 6px;
   font-size: 12px;
@@ -16,13 +26,6 @@
   background: transparent;
   border: 0;
   cursor: pointer;
-}
-.notice {
-  flex: none;
-  padding: 2px 6px;
-  margin: 0;
-  font-size: 10px;
-  color: var(--muted-foreground);
 }
 .axis {
   display: flex;
@@ -34,6 +37,7 @@
 }
 .scroll {
   overflow: auto;
+  overflow-anchor: none;
   min-height: 34px;
   height: 136px;
   flex: 1 1 auto;
@@ -101,10 +105,6 @@
   }
   .track {
     display: none;
-  }
-  .notice {
-    max-height: 28px;
-    overflow: auto;
   }
 }
 

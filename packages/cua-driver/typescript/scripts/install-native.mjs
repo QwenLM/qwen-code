@@ -156,27 +156,66 @@ async function requireValidAuthenticodeSignature(source) {
     `$signature = Get-AuthenticodeSignature -LiteralPath ${quotePowerShell(source)}; ` +
     `if ($signature.Status -ne 'Valid') { ` +
     `throw \"UIAccess worker Authenticode status is $($signature.Status)\" }`
-  await run(
-    "powershell",
-    ["-NoProfile", "-NonInteractive", "-Command", command],
-    {
-      timeout: 30_000,
-    },
-  )
+  const args = ["-NoProfile", "-NonInteractive", "-Command", command]
+  try {
+    await run("powershell", args, { timeout: 30_000 })
+  } catch (error) {
+    // Windows PowerShell 5.1 can fail to autoload the Security module, which
+    // reports the error id below instead of running Get-AuthenticodeSignature.
+    // Observed on the windows-2025 runner during a CUA release dry run. The id
+    // is not localized, unlike the message text, and ordinary failures of the
+    // signature check do not carry it, so the retry cannot mask a real result.
+    if (!String(error?.stderr).includes("CouldNotAutoloadMatchingModule")) {
+      throw error
+    }
+    try {
+      await run("pwsh", args, { timeout: 30_000 })
+    } catch (retryError) {
+      // The population that hits the 5.1 autoload failure is largely the
+      // population without pwsh — chain the original diagnostic or the user
+      // is sent chasing a missing pwsh instead of the autoload failure. The
+      // entry renderer prints only error.message, so interpolate it.
+      throw new Error(
+        `Get-AuthenticodeSignature failed under Windows PowerShell (${error.message}) and the pwsh retry failed: ${retryError.message}`,
+        { cause: error },
+      )
+    }
+  }
 }
 
-async function installUiAccessWorker(source, version, env) {
-  await requireValidAuthenticodeSignature(source)
+// `verifySignature`/`mkdirImpl` are injectable (same pattern as
+// ensureNativePayload's fetchImpl) so the deploy path is testable off
+// Windows.
+export async function installUiAccessWorker(
+  source,
+  version,
+  env,
+  verifySignature = requireValidAuthenticodeSignature,
+  mkdirImpl = mkdir,
+  copyFileImpl = copyFile,
+) {
+  await verifySignature(source)
   const destination = uiAccessWorkerPath(version, env)
   const installed = await stat(destination).catch(() => undefined)
   if (installed?.isFile()) {
-    await requireValidAuthenticodeSignature(destination)
+    await verifySignature(destination)
     return destination
   }
-  await mkdir(dirname(destination), { recursive: true })
   const temporary = `${destination}.${process.pid}.tmp`
-  await copyFile(source, temporary)
-  await rename(temporary, destination)
+  try {
+    await mkdirImpl(dirname(destination), { recursive: true })
+    await copyFileImpl(source, temporary)
+    await rename(temporary, destination)
+  } catch (error) {
+    await rm(temporary, { force: true }).catch(() => {})
+    if (error?.code === "EPERM" || error?.code === "EACCES") {
+      throw new Error(
+        `Installing the UIAccess worker requires an elevated terminal: the worker must be deployed to ${destination} (${error.message}). Rerun the SDK installation from an elevated terminal with CUA_DRIVER_USE_UIACCESS=1.`,
+        { cause: error },
+      )
+    }
+    throw error
+  }
   return destination
 }
 
@@ -196,9 +235,11 @@ export async function ensureNativePayload({
   } = await import(NATIVE_ASSETS_MODULE.href)
   version ??= cuaSdkVersion()
   const target = nativeTarget(platform, arch, version)
+  const uiAccess = platform === "win32" && env.CUA_DRIVER_USE_UIACCESS === "1"
+  if (uiAccess) target.companions = ["qwen-cua-driver-uia.exe"]
   if (env[CUA_SDK_NATIVE_DIR_ENV]) {
     const directory = resolveNativeDirectory(env, platform, arch, version)
-    if (platform === "win32") {
+    if (uiAccess) {
       await installUiAccessWorker(
         join(directory, "qwen-cua-driver-uia.exe"),
         version,
@@ -210,7 +251,7 @@ export async function ensureNativePayload({
 
   const destination = cachedNativeDirectory(target, version, env, platform)
   if (hasCompletedNativePayload(destination, target)) {
-    if (platform === "win32") {
+    if (uiAccess) {
       await installUiAccessWorker(
         join(destination, "qwen-cua-driver-uia.exe"),
         version,
@@ -265,7 +306,7 @@ export async function ensureNativePayload({
       source: archiveResult.url,
       version,
     })
-    if (platform === "win32") {
+    if (uiAccess) {
       await installUiAccessWorker(
         join(destination, "qwen-cua-driver-uia.exe"),
         version,

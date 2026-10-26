@@ -28,7 +28,8 @@ machine hours per day.
 - A PR that does not touch those paths pays nothing beyond a few seconds of
   path matching.
 - A regression that still reaches main files an issue through the existing
-  `main-ci-failure-issue.yml` route.
+  `main-ci-failure-issue.yml` route, except when main has already advanced
+  past the failing head and a newer run owns the result.
 
 ## Non-goals
 
@@ -48,13 +49,13 @@ machine hours per day.
 
 ### Tiers
 
-| Trigger                    | Condition                                                        | Tier | Lanes                                        |
-| -------------------------- | ---------------------------------------------------------------- | ---- | -------------------------------------------- |
-| `pull_request` push        | touches Managed Agent paths                                      | fast | flyway guard, real-daemon E2E, Linux Java 21 |
-| `pull_request_review`      | first maintainer approval of the current head, touches the paths | full | all 11 lanes                                 |
-| `push` to main             | touches the paths                                                | fast | as above                                     |
-| `merge_group`              | touches the paths                                                | fast | as above                                     |
-| nightly, dispatch, release | unchanged (`sdk-java.yml` called directly)                       | full | all 11 lanes                                 |
+| Trigger                    | Condition                                                                      | Tier | Lanes                                        |
+| -------------------------- | ------------------------------------------------------------------------------ | ---- | -------------------------------------------- |
+| `pull_request` push        | touches Managed Agent paths                                                    | fast | flyway guard, real-daemon E2E, Linux Java 21 |
+| `pull_request_review`      | first maintainer approval of the current head on an open PR, touches the paths | full | all 11 lanes                                 |
+| `push` to main             | touches the paths                                                              | fast | as above                                     |
+| `merge_group`              | touches the paths                                                              | fast | as above                                     |
+| nightly, dispatch, release | unchanged (`sdk-java.yml` called directly)                                     | full | all 11 lanes                                 |
 
 `managed-agent-gate.yml` selects the tier and calls `sdk-java.yml` through
 `workflow_call` with a new `tier` input. `tier: fast` narrows the `test` matrix
@@ -84,16 +85,27 @@ matches. Changes outside the scope still reach the nightly run.
 
 ### Required check
 
-The `gate` job always runs and reports the tier result. Its name is computed:
+The `gate` job reports the tier result for every run the workflow starts. Its
+name is computed:
 
-| Event                 | Scope                 | Name                                 |
-| --------------------- | --------------------- | ------------------------------------ |
-| any                   | untouched             | `Managed Agent gate` (pass)          |
-| `pull_request`        | touched               | `Managed Agent fast tier`            |
-| `pull_request_review` | touched, full run     | `Managed Agent gate`                 |
-| `pull_request_review` | touched, no full run  | `Managed Agent review (no full run)` |
-| `push`, `merge_group` | touched               | `Managed Agent gate`                 |
-| any                   | tier selection failed | `Managed Agent gate` (fail)          |
+| Event                 | Scope                           | Name                                 |
+| --------------------- | ------------------------------- | ------------------------------------ |
+| any                   | untouched                       | `Managed Agent gate` (pass)          |
+| `pull_request`        | touched                         | `Managed Agent fast tier`            |
+| `pull_request_review` | touched, full run               | `Managed Agent gate`                 |
+| `pull_request_review` | touched, no full run            | `Managed Agent review (no full run)` |
+| `pull_request_review` | not an approval, or a closed PR | all jobs skip; no gate check         |
+| `push`, `merge_group` | touched                         | `Managed Agent gate`                 |
+| any                   | tier selection failed           | `Managed Agent gate` (fail)          |
+
+A review that is not an approval, or one submitted after its pull request
+closed, starts no job: GitHub still creates the run, but it can never select a
+tier above `none` — or the check it would report no longer gates anything —
+so both `scope` and `gate` skip and it finishes in seconds without taking a
+runner. The run still lists one skipped check per job, and `gate`'s name is
+reported as its unevaluated expression, so no check named `Managed Agent gate`
+or `Managed Agent review (no full run)` appears. It used to report
+`Managed Agent review (no full run)` — a green check no rule reads.
 
 Branch protection reads the most recently updated check of a name. A touched
 PR therefore shows `Managed Agent gate` as expected until the full run on its
@@ -162,9 +174,29 @@ pre-checkout hygiene steps; fork runs stay hosted.
 ### Failure reporting
 
 `main-ci-failure-issue.yml` also watches `Managed Agent gate`, so a red
-post-merge fast tier files the same deduplicated autofix issue as other main
-failures. `qwen-triage-finalize.yml` now lists `Managed Agent gate` in place
-of `SDK Java`, which has had no `pull_request` trigger since #14205.
+post-merge fast tier is recorded there: a run that names failing tests reuses
+or files a per-signature issue deduped by the test markers in its body, and a
+run without one comments on the workflow's shared aggregate issue, reopening a
+matching closed issue when found. New aggregates receive `scope/ci-cd` and
+`status/needs-triage` for human triage, with no automatic autofix assignment.
+`qwen-triage-finalize.yml` now lists `Managed Agent gate` in place of `SDK Java`,
+which has had no `pull_request` trigger since #14205.
+
+A post-merge push failure whose head is no longer main's tip is recorded only
+on the analyze run's step summary, not on the workflow issue, when a newer push
+run of the same workflow exists at the new tip and has already settled: a
+`success` there means the tree is green, and a `failure` reports itself through
+its own completion event. A successor that ended `cancelled`, `timed_out`,
+`skipped`, or `startup_failure` is never analyzed, so the original failure is
+reported instead.
+
+A successor that has not completed settles nothing, and this job cannot wait
+for it — the pool the reporter runs on queued it for 20-100
+minutes, so the tip's run is usually still young when the report is prepared.
+The failure is reported anyway, marked provisional at the top of the body. That
+is affordable because the per-signature route hands new issues to a human
+rather than to autofix: a stale provisional report costs a close, while a
+dropped one costs the regression (#15470).
 
 ## Cost
 

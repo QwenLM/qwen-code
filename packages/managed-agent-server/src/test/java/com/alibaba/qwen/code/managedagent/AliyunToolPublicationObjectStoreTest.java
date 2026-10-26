@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.store.AliyunToolPublicationObjectStore;
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationStorageException;
+import com.alibaba.qwen.code.managedagent.artifact.AliyunToolPublicationObjectStore;
+import com.alibaba.qwen.code.managedagent.artifact.ToolPublicationStorageException;
 import com.aliyun.oss.ClientException;
 import com.aliyun.oss.OSS;
 import com.aliyun.oss.OSSException;

@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent.api;
 
+import com.alibaba.qwen.code.managedagent.model.TenantContext;
+import com.alibaba.qwen.code.managedagent.security.PublicSurface;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceActor;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.FilterChain;
@@ -25,6 +27,8 @@ public class TenantContextFilter extends OncePerRequestFilter {
             "/internal/managed-tool-publications/v1/";
     private static final String MANAGED_CHANNELS_PREFIX =
             "/internal/managed-channels/v1/";
+    private static final String MANAGED_WORKSPACES_PREFIX =
+            "/internal/managed-workspaces/v1/";
     private static final Pattern TENANT_PATTERN = Pattern.compile(
             "^[A-Za-z0-9._:-]{1,128}$");
     private final ObjectMapper objectMapper;
@@ -39,7 +43,8 @@ public class TenantContextFilter extends OncePerRequestFilter {
         return !PublicSurface.covers(path)
                 && !path.startsWith(MANAGED_SESSION_STORE_PREFIX)
                 && !path.startsWith(TOOL_PUBLICATION_PREFIX)
-                && !path.startsWith(MANAGED_CHANNELS_PREFIX);
+                && !path.startsWith(MANAGED_CHANNELS_PREFIX)
+                && !path.startsWith(MANAGED_WORKSPACES_PREFIX);
     }
 
     @Override
@@ -50,6 +55,7 @@ public class TenantContextFilter extends OncePerRequestFilter {
         if (path.startsWith(MANAGED_SESSION_STORE_PREFIX)
                 || path.startsWith(TOOL_PUBLICATION_PREFIX)
                 || path.startsWith(MANAGED_CHANNELS_PREFIX)
+                || path.startsWith(MANAGED_WORKSPACES_PREFIX)
                 || path.startsWith("/v1/agents/workspaces")
                 || path.startsWith("/api/agent/web-shell/v1/workspaces/")) {
             response.setHeader(HttpHeaders.CACHE_CONTROL, "no-store");

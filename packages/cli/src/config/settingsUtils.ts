@@ -286,6 +286,8 @@ export const WORKSPACE_RESTRICTED_SETTINGS = [
   { section: 'goals', key: 'modelProposed' },
   { section: 'outboundCorrelation', key: 'allowDynamicHeaderValues' },
   { section: 'serve', key: 'tokenQr' },
+  { section: 'serve', key: 'maxSessions' },
+  { section: 'ui', key: 'allowedApprovalModes' },
   // Disabling the built-in Qwen OAuth (personal Qwen login) models is an
   // operator decision; a trusted workspace must not make it (issue #12805).
   // The merge-time strip and the generic "ignored" warning follow from this.
@@ -305,6 +307,9 @@ export const WORKSPACE_RESTRICTED_ROOT_SETTINGS = [
   'advisorModel',
   'advisorMaxUses',
   'pluginConfigs',
+  // Where verification evidence gets published is the operator's call: a
+  // cloned repository must not redirect it to another fork.
+  'verifyPr',
 ] as const;
 
 /**
