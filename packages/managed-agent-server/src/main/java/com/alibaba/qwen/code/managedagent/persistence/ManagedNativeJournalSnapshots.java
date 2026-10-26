@@ -183,6 +183,7 @@ public class ManagedNativeJournalSnapshots {
                 + ManagedSchemaTime.SQL_NOW + " FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind = 'JOURNAL'"
                 + " AND owner_key = ? AND owner_revision = journal_revision AND journal_revision <= ?"
                 + " GROUP BY resource_key, resource_id";
+        // This setter bypasses schema coercion; binary identities are bound explicitly.
         var arguments = new org.springframework.jdbc.core.ArgumentPreparedStatementSetter(new Object[] {
                 scope, owner, revision, ManagedSchemaKeys.identity(tenant), ManagedSchemaKeys.identity(request.workspaceId()),
                 ManagedSchemaKeys.identity(session), scope, scope, revision
