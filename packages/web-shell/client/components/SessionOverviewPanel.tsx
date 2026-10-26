@@ -916,8 +916,18 @@ function SessionOverviewPanelInner({
           }
         }
       }
-      if (standaloneCards.length > 0) {
-        const ids = standaloneCards.map((card) => card.sessionId);
+      // The standalone batch routes reject more than 100 ids per request,
+      // the same cap the workspace archive batches above honour.
+      for (
+        let offset = 0;
+        offset < standaloneCards.length;
+        offset += SESSION_ARCHIVE_BATCH_SIZE
+      ) {
+        const batch = standaloneCards.slice(
+          offset,
+          offset + SESSION_ARCHIVE_BATCH_SIZE,
+        );
+        const ids = batch.map((card) => card.sessionId);
         try {
           if (mutation === 'archive') {
             const result =
@@ -927,9 +937,7 @@ function SessionOverviewPanelInner({
               ...result.alreadyArchived,
               ...result.notFound,
             ]) {
-              const card = standaloneCards.find(
-                (entry) => entry.sessionId === id,
-              );
+              const card = batch.find((entry) => entry.sessionId === id);
               if (card) succeededIdentities.add(getSessionIdentity(card));
             }
             firstError ??= result.errors[0]
@@ -938,9 +946,7 @@ function SessionOverviewPanelInner({
           } else {
             const result = await workspace.client.deleteStandaloneSessions(ids);
             for (const id of [...result.removed, ...result.notFound]) {
-              const card = standaloneCards.find(
-                (entry) => entry.sessionId === id,
-              );
+              const card = batch.find((entry) => entry.sessionId === id);
               if (card) succeededIdentities.add(getSessionIdentity(card));
             }
             for (const id of result.fileCleanupPending) {

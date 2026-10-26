@@ -3950,6 +3950,41 @@ describe('SessionOverviewPanel standalone sessions', () => {
     expect(workspaceActions.renameSession).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['Archive', 'archiveStandaloneSessions'],
+    ['Delete', 'deleteStandaloneSessions'],
+  ] as const)(
+    'splits standalone %s batches at the route limit of 100 ids',
+    async (label, method) => {
+      useConversationsRuntimeCapabilities();
+      const many = Array.from({ length: 101 }, (_, index) =>
+        standaloneSession(`st-${index}`, {
+          workspaceCwd: '/conv',
+          displayName: `Solo ${index}`,
+        }),
+      );
+      standalonePages = [{ sessions: many }, { sessions: [] }];
+      render();
+      await flushAsync();
+      act(() => click(selectAllCheckbox()));
+      act(() => click(footerButton(label)!));
+      const confirm = document.querySelector(
+        '[data-slot="alert-dialog-action"]',
+      ) as HTMLElement;
+      act(() => click(confirm));
+      await flushAsync();
+      expect(workspaceClient[method]).toHaveBeenCalledTimes(2);
+      expect(workspaceClient[method]).toHaveBeenNthCalledWith(
+        1,
+        many.slice(0, 100).map((item) => item.sessionId),
+      );
+      expect(workspaceClient[method]).toHaveBeenNthCalledWith(
+        2,
+        many.slice(100).map((item) => item.sessionId),
+      );
+    },
+  );
+
   it('marks the open standalone session as current and clears it on delete', async () => {
     useConversationsRuntimeCapabilities();
     connectionState.sessionId = 'st1';
