@@ -98,7 +98,7 @@ class HostedChannelProcessCrashIT {
             assertThat(cases).contains(selected);
             cases = List.of(selected);
         }
-        jdbc = new com.alibaba.qwen.code.managedagent.store.ManagedSchemaJdbcTemplate(new DriverManagerDataSource(
+        jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(new DriverManagerDataSource(
                 required("mysql.url"), required("mysql.user"),
                 System.getProperty("mysql.password", "")));
         jdbc.setQueryTimeout(10);
@@ -655,9 +655,9 @@ class HostedChannelProcessCrashIT {
                 if (!match.find()) {
                     return null;
                 }
-                // qwen serve falls back attemptPort+1 on EADDRINUSE; a
-                // harness on a fallback port invalidates the pre-baked
-                // harness.base-url, so the bound port must be the reserved one.
+                // --profile hosted-harness exits on EADDRINUSE instead of
+                // moving, so a collision surfaces as a harness exit; this check
+                // keeps the pre-baked harness.base-url honest should it move.
                 if (Integer.parseInt(match.group(1)) != harnessPort) {
                     return new IllegalStateException("harness bound port "
                             + match.group(1) + " instead of the reserved "

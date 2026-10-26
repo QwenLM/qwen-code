@@ -1,29 +1,15 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.daemon.HarnessEventStream;
-import com.alibaba.qwen.code.daemon.HarnessSessionRef;
-import com.alibaba.qwen.code.daemon.HostedHarnessClient;
-import com.alibaba.qwen.code.daemon.StreamHarnessEvents;
-import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
-import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.SourceEvent;
-import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
-import com.alibaba.qwen.code.managedagent.service.HarnessEventProjector;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.session.HarnessEventProjector;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.EmbeddedRuntimeBroker;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
-import jakarta.servlet.DispatcherType;
-import jakarta.servlet.Filter;
-import jakarta.servlet.http.HttpServletRequest;
-import jakarta.servlet.http.HttpServletRequestWrapper;
-import org.springframework.boot.web.servlet.FilterRegistrationBean;
-import org.springframework.core.Ordered;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.test.util.ReflectionTestUtils;
 
-import java.net.URI;
 import java.nio.charset.StandardCharsets;
-import java.security.Principal;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -52,38 +38,6 @@ final class HostedMonitorRunProbe implements AutoCloseable {
     private final AtomicReference<HarnessEventStream> activeStream =
             new AtomicReference<>();
     private CompletableFuture<Void> relay;
-
-    static FilterRegistrationBean<Filter> authentication(String tenant) {
-        AuthenticatedTenantActor actor = new AuthenticatedTenantActor() {
-            public String tenantId() {
-                return tenant;
-            }
-
-            public String actorId() {
-                return "actor";
-            }
-
-            public String getName() {
-                return "fg8-fixture";
-            }
-        };
-        FilterRegistrationBean<Filter> registration =
-                new FilterRegistrationBean<>((request, response, chain) ->
-                        chain.doFilter(new HttpServletRequestWrapper(
-                                (HttpServletRequest) request) {
-                            @Override
-                            public Principal getUserPrincipal() {
-                                return actor;
-                            }
-                        }, response));
-        registration.setOrder(Ordered.HIGHEST_PRECEDENCE);
-        registration.setAsyncSupported(true);
-        registration.setDispatcherTypes(DispatcherType.REQUEST,
-                DispatcherType.ASYNC);
-        registration.addUrlPatterns("/v1/agents/*",
-                "/api/agent/web-shell/v1/*");
-        return registration;
-    }
 
     HostedMonitorRunProbe(JdbcTemplate jdbc, String tenant,
             EmbeddedRuntimeBroker broker, ManagedAgentStore store,
@@ -128,6 +82,8 @@ final class HostedMonitorRunProbe implements AutoCloseable {
                     }
                     case "state" -> state(sessionId);
                     case "ledger" -> ledger(sessionId);
+                    case "workers" -> workers();
+                    case "runtime" -> runtime(sessionId);
                     default -> throw new IllegalArgumentException(route[3]);
                 };
                 byte[] bytes = JSON.writeValueAsBytes(response);
@@ -150,47 +106,30 @@ final class HostedMonitorRunProbe implements AutoCloseable {
     // the turn it belongs to. relay-stop closes the stream; the blocked
     // read then ends the loop.
     private void relay(String sessionId, JsonNode request) {
-        try (var client = HostedHarnessClient.builder()
-                .baseUri(URI.create(request.path("baseUrl").asText()))
-                .bearerToken("hosted-process-fixture-token")
-                .capabilityDigest("sha256:" + "a".repeat(64)).build()) {
-            assertThat(client.capabilities().getBootId())
-                    .isEqualTo(request.path("bootId").asText());
-            HarnessSessionRef ref = ReflectionTestUtils.invokeMethod(client,
-                    "parseSession", request.path("created").toString(),
-                    sessionId, "FG8 actual POST /session response");
-            try (var stream = client.streamEvents(StreamHarnessEvents
-                    .builder().session(ref)
-                    .lastEventId(ref.getHarnessLastEventId())
-                    .eventEpoch(ref.getHarnessEventEpoch()).build())) {
-                activeStream.set(stream);
-                while (true) {
-                    com.alibaba.qwen.code.daemon.DaemonEvent event;
-                    try {
-                        event = stream.next();
-                    } catch (IllegalStateException closed) {
-                        if (stopRelay.getCount() == 0) {
-                            return;
-                        }
-                        throw closed;
-                    }
-                    if (event == null) {
+        try (var relayStream = HostedGateTestSupport.openRelayStream(request,
+                sessionId, "FG8 actual POST /session response")) {
+            activeStream.set(relayStream.stream());
+            while (true) {
+                com.alibaba.qwen.code.daemon.DaemonEvent event;
+                try {
+                    event = relayStream.stream().next();
+                } catch (IllegalStateException closed) {
+                    if (stopRelay.getCount() == 0) {
                         return;
                     }
-                    String turnId = event.getPromptId();
-                    var projected = projector.project(
-                            new SourceEvent(event.getId(), event.getType(),
-                                    event.getData(), event.getPromptId(),
-                                    event.getMetadata()), turnId);
-                    if (projected == null) {
-                        continue;
-                    }
-                    String key = ref.getHarnessBootId() + ":"
-                            + stream.getEventEpoch() + ":" + event.getId();
-                    store.appendPublicEventIfAbsent(tenant, sessionId, turnId,
-                            projected.type(), projected.data(),
-                            projected.terminal(), key);
+                    throw closed;
                 }
+                if (event == null) {
+                    return;
+                }
+                String turnId = event.getPromptId();
+                var projected = HostedGateTestSupport.projectEvent(projector,
+                        event, turnId);
+                if (projected == null) {
+                    continue;
+                }
+                HostedGateTestSupport.appendProjected(store, tenant,
+                        sessionId, relayStream, event, projected, turnId);
             }
         } catch (Throwable error) {
             if (stopRelay.getCount() != 0) {
@@ -208,47 +147,90 @@ final class HostedMonitorRunProbe implements AutoCloseable {
                         + " = ? ORDER BY execution_call_id", sessionId);
         var relayFailure = failure.get();
         return Map.of("executions", executions,
-                "monitors", extensionRecords(sessionId, "monitor_run"),
-                "childRuns", extensionRecords(sessionId, "child_run"),
+                "monitors", HostedGateTestSupport.extensionRecords(jdbc,
+                        tenant, sessionId, "monitor_run"),
+                "childRuns", HostedGateTestSupport.extensionRecords(jdbc,
+                        tenant, sessionId, "child_run"),
                 // FG8f sequences on the committed tool-result resources:
                 // the driver watches full segments land before it kills or
                 // arms the store-proxy faults.
                 "resources", jdbc.queryForList(
                         "SELECT resource_id, kind, byte_length, sha256 FROM"
-                                + " ma_resource WHERE"
-                                + " tenant_id = ? AND session_id = ? AND kind"
-                                + " LIKE 'managed-tool-result-%' ORDER BY"
-                                + " gmt_create, resource_id", tenant,
-                        sessionId),
+                                + " ma_resource WHERE session_scope_key = ?"
+                                + " AND tenant_id = ? AND session_id = ? AND"
+                                + " kind LIKE 'managed-tool-result-%' ORDER"
+                                + " BY gmt_create, resource_id",
+                        scopeKey(sessionId), tenant, sessionId),
                 "relayAlive", relay != null && !relay.isDone(),
                 "relayFailure", relayFailure == null ? ""
                         : relayFailure.toString());
     }
 
-    private List<JsonNode> extensionRecords(String sessionId, String domain) {
-        try {
-            var rows = jdbc.queryForList(
-                    "SELECT record_id, record_resource_id FROM"
-                            + " ma_session_record WHERE"
-                            + " tenant_id = ? AND session_id = ? AND domain"
-                            + " = ? ORDER BY gmt_create, record_id", tenant,
-                    sessionId, domain);
-            var records = new java.util.ArrayList<JsonNode>();
-            for (var row : rows) {
-                var resources = jdbc.queryForList(
-                        "SELECT CONVERT(inline_bytes USING utf8mb4) AS body"
-                                + " FROM ma_resource WHERE"
-                                + " tenant_id = ? AND session_id = ? AND"
-                                + " resource_id = ?", tenant, sessionId,
-                        row.get("record_resource_id"));
-                assertThat(resources).as(domain + " record body").hasSize(1);
-                records.add(JSON.readTree(
-                        resources.getFirst().get("body").toString()));
-            }
-            return records;
-        } catch (java.io.IOException failure) {
-            throw new IllegalStateException(failure);
+    // ma_resource keys on the Session's scope key and holds the inline
+    // capture bytes, and the drivers poll these reads: filtered by the
+    // unindexed tenant and session columns alone, each poll scans all the
+    // bytes the lane has written so far (FG8f alone inlines tens of MiB a
+    // case), so each later letter polls slower. The record read leads with
+    // the same key.
+    private String scopeKey(String sessionId) {
+        return com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore
+                .sessionScopeKey(tenant, sessionId);
+    }
+
+    // FG8c: the in-JVM embedded broker spawns each binding's managed worker
+    // as a direct child of this JVM, so the live worker set is exactly the
+    // JVM's children carrying the worker argument. The driver diffs it
+    // around a case's first dispatch to name the one worker it signals.
+    private List<Long> workers() {
+        return ProcessHandle.current().children()
+                .filter(ProcessHandle::isAlive)
+                .filter(process -> List.of(process.info().arguments()
+                        .orElse(new String[0]))
+                        .contains("managed-runtime-worker"))
+                .map(ProcessHandle::pid).sorted().toList();
+    }
+
+    // FG8c's generation ground truth: the Session's bindings (isolation is
+    // per Harness Session), their slots and Runtime Sessions, and the full
+    // loss fields of its execution rows.
+    private Map<String, Object> runtime(String sessionId) {
+        var bindings = jdbc.queryForList(
+                "SELECT CAST(binding_id AS CHAR) AS binding_id, request_key,"
+                        + " binding_state, runtime_generation,"
+                        + " loss_evidence_json IS NOT NULL AS loss_evidence,"
+                        + " stop_evidence_json IS NOT NULL AS stop_evidence,"
+                        + " drain_requested FROM ma_runtime_binding WHERE"
+                        + " tenant_id = ? AND isolation_key = ? ORDER BY"
+                        + " runtime_generation", tenant, sessionId);
+        var slots = new java.util.ArrayList<Map<String, Object>>();
+        for (var key : bindings.stream().map(row -> row.get("request_key"))
+                .distinct().toList()) {
+            slots.addAll(jdbc.queryForList(
+                    "SELECT request_key, last_generation,"
+                            + " CAST(active_binding_id AS CHAR) AS"
+                            + " active_binding_id FROM ma_runtime_slot"
+                            + " WHERE request_key = ?", key));
         }
+        return Map.of("bindings", bindings, "slots", slots,
+                "runtimeSessions", jdbc.queryForList(
+                        "SELECT CAST(runtime_session_id AS CHAR) AS"
+                                + " runtime_session_id, session_state,"
+                                + " runtime_generation FROM"
+                                + " ma_runtime_session WHERE tenant_id = ?"
+                                + " AND harness_session_id = ? ORDER BY"
+                                + " last_active_at", tenant, sessionId),
+                "executions", jdbc.queryForList(
+                        "SELECT CAST(execution_call_id AS CHAR) AS"
+                                + " execution_call_id, execution_state,"
+                                + " execution_status, runtime_generation,"
+                                + " CAST(runtime_session_id AS CHAR) AS"
+                                + " runtime_session_id, CAST(loss_evidence_id"
+                                + " AS CHAR) AS loss_evidence_id,"
+                                + " abandoned_at IS NOT NULL AS abandoned,"
+                                + " CAST(result_json AS CHAR) AS result_json"
+                                + " FROM ma_tool_execution WHERE"
+                                + " harness_session_id = ? ORDER BY"
+                                + " execution_call_id", sessionId));
     }
 
     private List<Map<String, Object>> ledger(String sessionId) {

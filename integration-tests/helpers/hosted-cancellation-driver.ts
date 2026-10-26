@@ -12,6 +12,7 @@ import { createServer } from 'node:http';
 import path from 'node:path';
 import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
 import { HostedHarnessProcess, waitUntil } from './hosted-harness-process.js';
+import { isLegitimateMountRelease } from './hosted-mount-release.js';
 
 const configPath = process.argv[2];
 const config = JSON.parse(await readFile(configPath, 'utf8')) as {
@@ -94,10 +95,35 @@ const proxy = createServer(async (req, res) => {
       : Object.fromEntries(url.searchParams);
     const operation =
       req.method === 'GET' ? 'status' : url.pathname.split(':').at(-1)!;
+    if (
+      operation === 'release-mount' &&
+      fields.harnessSessionId !== sessionId
+    ) {
+      // An earlier case's owed handback (#13800) keeps retrying on its own
+      // clock: forward it outside this case's ledger.
+      const upstream = await fetch(url, {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer hosted-tools-broker-token',
+          'Content-Type': 'application/json',
+        },
+        body,
+        signal: AbortSignal.timeout(30_000),
+      });
+      const text = await upstream.text();
+      assert(
+        isLegitimateMountRelease(upstream.status, JSON.parse(text).code),
+        `${upstream.status}: ${text}`,
+      );
+      res.writeHead(upstream.status, { 'Content-Type': 'application/json' });
+      res.end(text);
+      return;
+    }
     const harnessScoped =
       req.method === 'POST' &&
       [
         '/internal/runtime-broker/v1/runtimes:warm',
+        '/internal/runtime-broker/v1/runtimes:capabilities',
         '/internal/runtime-broker/v1/tool-sessions:active-holds',
       ].includes(url.pathname);
     assert.equal(fields.harnessSessionId, sessionId);
@@ -132,7 +158,15 @@ const proxy = createServer(async (req, res) => {
       signal: AbortSignal.timeout(30_000),
     });
     const text = await upstream.text();
-    assert.equal(upstream.status, 200, text);
+    if (url.pathname.endsWith(':release-mount')) {
+      const replyBody = JSON.parse(text) as { code?: unknown };
+      assert(
+        isLegitimateMountRelease(upstream.status, replyBody.code),
+        `${upstream.status}: ${text}`,
+      );
+    } else {
+      assert.equal(upstream.status, 200, text);
+    }
     const reply = JSON.parse(text);
     if (id) assert.equal(reply.executionCallId, executionCallId);
     if (operation === 'prepare') {
@@ -179,7 +213,10 @@ const proxy = createServer(async (req, res) => {
         statusHeld = true;
       });
     }
-    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.writeHead(
+      url.pathname.endsWith(':release-mount') ? upstream.status : 200,
+      { 'Content-Type': 'application/json' },
+    );
     res.end(text);
   } catch (cause) {
     proxyFailure = cause;

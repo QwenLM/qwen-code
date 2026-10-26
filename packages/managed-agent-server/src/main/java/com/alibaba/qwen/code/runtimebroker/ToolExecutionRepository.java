@@ -88,10 +88,12 @@ public interface ToolExecutionRepository {
      * the release-state filter — a row stops mattering only when that
      * Session's release is durably recorded. Ownership is found by harness
      * session instead of by one Runtime Session, because the held obligation
-     * outlives the process that named the turn. At most 100 rows per page,
-     * and a short page means the scan is exhausted; the exclusive cursor is
-     * an execution ID, including one already settled. */
-    List<ToolExecutionRecord> findHoldRowsByHarnessSession(String harnessSessionId,
+     * outlives the process that named the turn. The answer is narrowed to
+     * the identity and Runtime Session the caller reads, so a store need not
+     * materialize non-hold rows it scans past (#13986 review R1-7). At most
+     * 100 rows per page, and a short page means the scan is exhausted; the
+     * exclusive cursor is an execution ID, including one already settled. */
+    List<ToolHoldRow> findHoldRowsByHarnessSession(String harnessSessionId,
             String afterExecutionCallId, int limit);
 
     /**
@@ -120,6 +122,26 @@ public interface ToolExecutionRepository {
     boolean hasActiveByRuntimeSession(String bindingId, long runtimeGeneration,
             String runtimeSessionId,
             java.util.Set<String> excludingExecutionCallIds);
+
+    /** Any SETTLED execution of this Runtime Session whose captured output
+     * never proved its producer stopped: a capture other than `complete`
+     * (both streams sealed by EOF) or `detached` (the live process is its
+     * own `:process` row). A `partial` or `unavailable` capture may leave an
+     * escaped writer in the Workspace, which the operator-recovery family
+     * fences on the mount. Settled rows never change, so this stays true
+     * until that recovery runs. The default fails closed like
+     * findByBinding's. */
+    default boolean hasUnprovenCaptureByRuntimeSession(String bindingId,
+            long runtimeGeneration, String runtimeSessionId) {
+        throw new UnsupportedOperationException(
+                "Unproven-capture probe is unavailable");
+    }
+
+    static boolean captureStopUnproven(Map<?, ?> result) {
+        return result != null && result.get("capture") instanceof Map<?, ?> capture
+                && !"complete".equals(capture.get("captureStatus"))
+                && !"detached".equals(capture.get("captureStatus"));
+    }
 
     /** Any nonterminal execution still points at this binding generation.
      * UNKNOWN counts as active; terminal uncertainty is not physical stop proof. */

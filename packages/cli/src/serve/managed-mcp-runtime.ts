@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { managedExtensionEnvironment } from './managed-extension-environment.js';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -33,6 +34,9 @@ import {
   type ManagedMcpOperationView,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
 import type { ManagedSessionKey } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import { launchManagedStdio } from './managed-stdio-supervisor.js';
+import type { ManagedExtensionProcessOwners } from './managed-extension-process.js';
+import { ManagedExtensionStdioTransport } from './managed-extension-stdio.js';
 
 export interface ManagedMcpDefinition {
   readonly tenantId: string;
@@ -332,14 +336,17 @@ function parseManifest(value: unknown): ManagedMcpManifest {
 
 export class ManagedMcpRuntime {
   private readonly definitions: ManagedMcpManifest;
+  private readonly sessionDefinitions = new Map<string, ManagedMcpManifest>();
   private readonly connections = new Map<string, Connection>();
   private readonly operations = new Map<string, Operation>();
   private readonly gates = new ManagedOperationGrantGate();
+  private readonly fileHistorySessions = new Set<string>();
   private generation = 0;
   private closing = false;
   private admissionSealed = false;
   private grantInstalled = false;
-  private pendingStarts = 0;
+  private readonly pendingStarts = new Map<string, number>();
+  private readonly extensionPendingStarts = new Map<string, number>();
 
   constructor(
     private readonly workspace: {
@@ -351,12 +358,202 @@ export class ManagedMcpRuntime {
       runtimeSessionId: string,
     ) => Promise<string | undefined>,
     manifest: ManagedMcpManifest,
+    private readonly extensionProcesses?: ManagedExtensionProcessOwners,
   ) {
     this.definitions = parseManifest(manifest);
   }
 
+  resolvePinnedDefinitions(
+    pins: ReadonlyArray<{
+      serverId: string;
+      serverRevision: number;
+      definitionDigest: string;
+    }>,
+  ): readonly ManagedMcpDefinition[] {
+    const available = [
+      ...this.definitions.servers,
+      ...[...this.sessionDefinitions.values()].flatMap(
+        (manifest) => manifest.servers,
+      ),
+    ];
+    return pins.map((pin) => {
+      const found = available.find(
+        (entry) =>
+          entry.serverId === pin.serverId &&
+          entry.serverRevision === pin.serverRevision &&
+          entry.definitionDigest === pin.definitionDigest,
+      );
+      if (!found)
+        throw new ManagedMcpError('managed_mcp_definition_unavailable');
+      return structuredClone(found);
+    });
+  }
+
+  installSessionDefinitions(
+    runtimeSessionId: string,
+    manifest: ManagedMcpManifest,
+  ): void {
+    const parsed = parseManifest(manifest);
+    if (
+      [...this.connections.values()].some(
+        (entry) =>
+          entry.sessionKey.sessionId === runtimeSessionId &&
+          (entry.pending.size > 0 ||
+            (!entry.closed && !this.matchesDefinition(entry, parsed))),
+      ) ||
+      this.hasExtensionPendingOperations(runtimeSessionId)
+    )
+      throw new ManagedMcpError('managed_mcp_session_busy');
+    if (
+      parsed.servers.some(
+        (entry) =>
+          entry.tenantId !== this.workspace.tenantId ||
+          entry.workspaceId !== this.workspace.workspaceId,
+      )
+    )
+      throw new ManagedMcpError('managed_mcp_scope_conflict');
+    this.sessionDefinitions.set(runtimeSessionId, parsed);
+  }
+
+  hasExtensionPendingOperations(sessionId: string): boolean {
+    return (
+      this.extensionPendingStarts.has(sessionId) ||
+      [...this.operations.values()].some(
+        (entry) =>
+          entry.control.sessionKey.sessionId === sessionId &&
+          entry.view.state !== 'settled',
+      )
+    );
+  }
+
+  hasUnsettledExtensionOperations(): boolean {
+    return (
+      this.pendingStarts.size > 0 ||
+      [...this.operations.values()].some(
+        (entry) => entry.view.state !== 'settled',
+      )
+    );
+  }
+
+  matchingSessionDefinition(
+    sessionId: string,
+    serverId: string,
+    digest: string,
+  ): ManagedMcpDefinition | undefined {
+    return this.sessionDefinitions
+      .get(sessionId)
+      ?.servers.find(
+        (entry) =>
+          entry.serverId === serverId && entry.definitionDigest === digest,
+      );
+  }
+
+  private matchesDefinition(
+    connection: Connection,
+    manifest: ManagedMcpManifest,
+  ): boolean {
+    return (
+      !connection.retiring &&
+      manifest.servers.some(
+        (entry) =>
+          entry.serverId === connection.definition.serverId &&
+          entry.serverRevision === connection.definition.serverRevision &&
+          entry.definitionDigest === connection.definition.definitionDigest,
+      )
+    );
+  }
+
+  retainedExtensionOwnerIds(
+    sessionId: string,
+    manifest: ManagedMcpManifest,
+  ): ReadonlySet<string> {
+    return new Set(
+      [...this.connections.values()]
+        .filter(
+          (entry) =>
+            entry.sessionKey.sessionId === sessionId &&
+            !entry.closed &&
+            this.matchesDefinition(entry, manifest),
+        )
+        .flatMap((entry) =>
+          entry.transport instanceof ManagedExtensionStdioTransport &&
+          entry.transport.processOwnerId
+            ? [entry.transport.processOwnerId]
+            : [],
+        ),
+    );
+  }
+
+  async drainExtensionSession(
+    sessionId: string,
+    next?: ManagedMcpManifest,
+  ): Promise<void> {
+    if (this.hasExtensionPendingOperations(sessionId))
+      throw new ManagedMcpError('managed_mcp_drain_unknown');
+    await Promise.all(
+      [...this.connections.values()]
+        .filter(
+          (entry) =>
+            entry.sessionKey.sessionId === sessionId &&
+            (!next || !this.matchesDefinition(entry, next)),
+        )
+        .map((entry) => this.closeConnection(entry)),
+    );
+    if (
+      [...this.connections.values()].some(
+        (entry) =>
+          entry.sessionKey.sessionId === sessionId &&
+          (!next || !this.matchesDefinition(entry, next)) &&
+          (!entry.closed || entry.pending.size),
+      )
+    )
+      throw new ManagedMcpError('managed_mcp_drain_unknown');
+  }
+
+  async drainSession(runtimeSessionId: string): Promise<void> {
+    if (this.hasPendingWork(runtimeSessionId))
+      throw new ManagedMcpError('managed_mcp_drain_unknown');
+    await Promise.all(
+      [...this.connections.values()]
+        .filter((entry) => entry.runtimeSessionId === runtimeSessionId)
+        .map((entry) => this.closeConnection(entry)),
+    );
+    if (this.hasHolds(runtimeSessionId))
+      throw new ManagedMcpError('managed_mcp_drain_unknown');
+  }
+
   sealAdmission(): void {
     this.admissionSealed = true;
+  }
+
+  publishedDefinitions(
+    tenantId: string,
+    workspaceId: string,
+  ): ReadonlyArray<{
+    serverId: string;
+    serverRevision: number;
+    definitionDigest: string;
+    transport: ManagedMcpDefinition['transport'];
+  }> {
+    if (
+      tenantId !== this.workspace.tenantId ||
+      workspaceId !== this.workspace.workspaceId
+    )
+      throw new ManagedMcpError('managed_mcp_scope_conflict');
+    if (this.closing || this.admissionSealed)
+      throw new ManagedMcpError('managed_mcp_closed');
+    return this.definitions.servers
+      .filter(
+        (server) =>
+          server.tenantId === this.workspace.tenantId &&
+          server.workspaceId === this.workspace.workspaceId,
+      )
+      .map(({ serverId, serverRevision, definitionDigest, transport }) => ({
+        serverId,
+        serverRevision,
+        definitionDigest,
+        transport,
+      }));
   }
 
   getDrainInspection(): {
@@ -365,7 +562,10 @@ export class ManagedMcpRuntime {
     hasActivity: boolean;
   } {
     return {
-      pendingStarts: this.pendingStarts,
+      pendingStarts: [...this.pendingStarts.values()].reduce(
+        (total, count) => total + count,
+        0,
+      ),
       pendingInvocations: [...this.operations.values()].filter(
         (operation) =>
           operation.view.state === 'running' ||
@@ -422,6 +622,8 @@ export class ManagedMcpRuntime {
         throw new ManagedMcpError('managed_mcp_operation_conflict');
       return structuredClone(existing.view);
     }
+    if (this.fileHistorySessions.has(runtimeSessionId))
+      throw new ManagedMcpError('managed_mcp_file_history_active');
     if (this.closing) throw new ManagedMcpError('managed_mcp_closed');
     this.assertAdmission(control);
     const phase = control.kind.slice(4);
@@ -456,11 +658,29 @@ export class ManagedMcpRuntime {
       throw new ManagedMcpError('managed_mcp_grant_invalid');
     let directory: string | undefined;
     if (control.kind !== 'mcp-release') {
-      this.pendingStarts++;
+      this.extensionPendingStarts.set(
+        control.sessionKey.sessionId,
+        (this.extensionPendingStarts.get(control.sessionKey.sessionId) ?? 0) +
+          1,
+      );
+      this.pendingStarts.set(
+        runtimeSessionId,
+        (this.pendingStarts.get(runtimeSessionId) ?? 0) + 1,
+      );
       try {
         directory = await this.sessionDirectory(runtimeSessionId);
       } finally {
-        this.pendingStarts--;
+        const scopeRemaining =
+          this.extensionPendingStarts.get(control.sessionKey.sessionId)! - 1;
+        if (scopeRemaining)
+          this.extensionPendingStarts.set(
+            control.sessionKey.sessionId,
+            scopeRemaining,
+          );
+        else this.extensionPendingStarts.delete(control.sessionKey.sessionId);
+        const remaining = this.pendingStarts.get(runtimeSessionId)! - 1;
+        if (remaining) this.pendingStarts.set(runtimeSessionId, remaining);
+        else this.pendingStarts.delete(runtimeSessionId);
       }
     }
     if (!directory && control.kind !== 'mcp-release')
@@ -532,6 +752,27 @@ export class ManagedMcpRuntime {
         entry.runtimeSessionId === runtimeSessionId &&
         (!entry.closed || entry.pending.size > 0),
     );
+  }
+
+  hasPendingWork(runtimeSessionId: string): boolean {
+    return (
+      this.pendingStarts.has(runtimeSessionId) ||
+      [...this.operations.values()].some(
+        (operation) =>
+          operation.runtimeSessionId === runtimeSessionId &&
+          operation.view.state !== 'settled',
+      ) ||
+      [...this.connections.values()].some(
+        (connection) =>
+          connection.runtimeSessionId === runtimeSessionId &&
+          connection.pending.size > 0,
+      )
+    );
+  }
+
+  setFileHistoryActive(runtimeSessionId: string, active: boolean): void {
+    if (active) this.fileHistorySessions.add(runtimeSessionId);
+    else this.fileHistorySessions.delete(runtimeSessionId);
   }
 
   toolStatus(
@@ -611,7 +852,10 @@ export class ManagedMcpRuntime {
   ): Promise<void> {
     const control = operation.control;
     if (control.kind === 'mcp-configure') {
-      const definition = this.definitions.servers.find(
+      const definition = (
+        this.sessionDefinitions.get(control.sessionKey.sessionId) ??
+        this.definitions
+      ).servers.find(
         (item) =>
           item.tenantId === control.sessionKey.tenantId &&
           item.workspaceId === control.sessionKey.workspaceId &&
@@ -643,24 +887,56 @@ export class ManagedMcpRuntime {
         throw new ManagedMcpError('managed_mcp_connection_quota');
       const transport =
         definition.transport === 'stdio'
-          ? new StdioClientTransport({
-              command: definition.command!,
-              args: definition.args,
-              cwd: directory!,
-              stderr: 'pipe',
-              env: {
-                ...Object.fromEntries(
-                  DEFAULT_INHERITED_ENV_VARS.map((key) => [key, '']),
+          ? this.extensionProcesses
+            ? new ManagedExtensionStdioTransport(this.extensionProcesses, {
+                sessionId: control.sessionKey.sessionId,
+                configRevision: control.configRevision,
+                executable: definition.command!,
+                args: definition.args ?? [],
+                env: managedExtensionEnvironment(
+                  process.env,
+                  directory!,
+                  definition.env,
                 ),
-                PATH: process.env['PATH'] ?? '',
-                HOME: directory!,
-                USERPROFILE: directory!,
-                ...(process.env['SystemRoot']
-                  ? { SYSTEMROOT: process.env['SystemRoot'] }
-                  : {}),
-                ...definition.env,
-              },
-            })
+                cwd: directory!,
+              })
+            : (() => {
+                const env = {
+                  ...Object.fromEntries(
+                    DEFAULT_INHERITED_ENV_VARS.map((key) => [key, '']),
+                  ),
+                  PATH: process.env['PATH'] ?? '',
+                  HOME: directory!,
+                  USERPROFILE: directory!,
+                  ...(process.env['SystemRoot']
+                    ? { SYSTEMROOT: process.env['SystemRoot'] }
+                    : {}),
+                  ...definition.env,
+                };
+                // Windows keeps the SDK transport: its cross-spawn launch still
+                // resolves .cmd/.bat command shims, which the native launcher
+                // does not. Containment on Windows is unchanged.
+                if (process.platform === 'win32')
+                  return new StdioClientTransport({
+                    command: definition.command!,
+                    args: definition.args,
+                    cwd: directory!,
+                    stderr: 'pipe',
+                    env,
+                  });
+                const launch = launchManagedStdio(
+                  definition.command!,
+                  definition.args ?? [],
+                  env,
+                );
+                return new StdioClientTransport({
+                  command: launch.executable,
+                  args: launch.args,
+                  cwd: directory!,
+                  stderr: 'pipe',
+                  env: launch.env,
+                });
+              })()
           : definition.transport === 'streamable-http'
             ? new StreamableHTTPClientTransport(new URL(definition.url!), {
                 requestInit: { headers: definition.headers, redirect: 'error' },
@@ -725,7 +1001,9 @@ export class ManagedMcpRuntime {
       try {
         await client.connect(transport, { timeout: TIMEOUT_MS });
         const onmessage = transport.onmessage!;
-        transport.onmessage = (message) => {
+        transport.onmessage = (
+          message: import('@modelcontextprotocol/sdk/types.js').JSONRPCMessage,
+        ) => {
           if ('method' in message) {
             const changed = {
               'notifications/tools/list_changed': 'tools',

@@ -33,6 +33,13 @@ import {
   type ManagedShellCapturePublisher,
 } from './managed-runtime-tool-executor.js';
 import { managedRuntimeLedgerFromEnvironment } from './managed-runtime-ledger.js';
+import type { ManagedSshRuntime } from './managed-runtime-ssh-worker.js';
+import {
+  MANAGED_EXTENSION_RETIRE_ROUTE,
+  MANAGED_EXTENSION_RUNTIME_ROUTE,
+  MANAGED_EXTENSION_UPLOAD_ROUTE,
+} from './managed-extension-runtime.js';
+import { MANAGED_EXTENSION_COMMAND_ROUTE } from './managed-extension-command-runtime.js';
 import { PUBLICATION_INSTALL_ROUTE } from './remote-shell-result-publication.js';
 import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 import {
@@ -194,12 +201,14 @@ export function startManagedRuntimeAttestationWorker(
   capturePublisher?: ManagedShellCapturePublisher,
   remotePublishers?: ManagedShellPublisherRegistry,
   containerMode?: boolean,
+  sshRuntime?: ManagedSshRuntime,
 ): Promise<ManagedCsiFileWorkerHandle>;
 export function startManagedRuntimeAttestationWorker(
   bootDocument: ManagedRuntimeWorkerBoot | ManagedContextBoot | ManagedCsiBoot,
   capturePublisher?: ManagedShellCapturePublisher,
   remotePublishers?: ManagedShellPublisherRegistry,
   containerMode?: boolean,
+  sshRuntime?: ManagedSshRuntime,
 ): Promise<ManagedRuntimeAttestationWorkerHandle>;
 export function startManagedRuntimeAttestationWorker(
   bootDocument:
@@ -210,6 +219,7 @@ export function startManagedRuntimeAttestationWorker(
   capturePublisher?: ManagedShellCapturePublisher,
   remotePublishers?: ManagedShellPublisherRegistry,
   containerMode?: boolean,
+  sshRuntime?: ManagedSshRuntime,
 ): Promise<ManagedRuntimeAttestationWorkerHandle | ManagedCsiFileWorkerHandle>;
 export async function startManagedRuntimeAttestationWorker(
   bootDocument:
@@ -220,9 +230,14 @@ export async function startManagedRuntimeAttestationWorker(
   capturePublisher?: ManagedShellCapturePublisher,
   remotePublishers?: ManagedShellPublisherRegistry,
   containerMode = false,
+  sshRuntime?: ManagedSshRuntime,
 ): Promise<ManagedRuntimeAttestationWorkerHandle | ManagedCsiFileWorkerHandle> {
-  if (bootDocument.version === 4 || bootDocument.version === 5) {
-    if (!containerMode || capturePublisher || remotePublishers)
+  if (
+    bootDocument.version === 4 ||
+    bootDocument.version === 5 ||
+    bootDocument.version === 6
+  ) {
+    if (!containerMode || capturePublisher || remotePublishers || sshRuntime)
       throw new Error(INVALID_BOOT_MESSAGE);
     return startManagedCsiFileWorker(bootDocument);
   }
@@ -253,13 +268,24 @@ export async function startManagedRuntimeAttestationWorker(
       registerManagedCsiAttestationRoute(app, csiBoot, csiMount);
     }
     if (boot.version === 2) {
+      const ledger =
+        sshRuntime?.ledger ??
+        managedRuntimeLedgerFromEnvironment(boot.runtimeIncarnation);
+      ledger?.watch();
       executor = registerManagedContextRoutes(
         app,
         boot,
         capturePublisher,
         remotePublishers,
-        csiMount,
+        sshRuntime
+          ? new ManagedContextMount(boot.mountRoot, () =>
+              sshRuntime.verifyStorage(),
+            )
+          : csiMount,
+        ledger,
+        sshRuntime !== undefined,
       );
+      sshRuntime?.register(app, boot, executor);
     } else {
       registerManagedRuntimeAttestationRoute(app, boot);
       // A Managed session's host names one ledger per worker incarnation and
@@ -296,9 +322,18 @@ export async function startManagedRuntimeAttestationWorker(
       boot.version === 2
         ? capturePublisher ||
           remotePublishers ||
-          boot.capabilityDigest === WORKSPACE_CAPABILITY_DIGEST
+          boot.capabilityDigest === WORKSPACE_CAPABILITY_DIGEST ||
+          boot.managedExtensions !== undefined
           ? [
               ...MANAGED_CONTEXT_WORKER_ROUTES,
+              ...(boot.managedExtensions
+                ? [
+                    MANAGED_EXTENSION_RUNTIME_ROUTE,
+                    MANAGED_EXTENSION_UPLOAD_ROUTE,
+                    MANAGED_EXTENSION_RETIRE_ROUTE,
+                    MANAGED_EXTENSION_COMMAND_ROUTE,
+                  ]
+                : []),
               ...(csiBoot
                 ? [
                     MANAGED_CSI_ATTEST_ROUTE,
@@ -307,14 +342,24 @@ export async function startManagedRuntimeAttestationWorker(
                   ]
                 : []),
               ...MANAGED_TOOL_RESULT_ROUTES,
+              ...(sshRuntime ? [sshRuntime.route] : []),
               ...(remotePublishers ? [MANAGED_SHELL_PUBLISHER_ROUTE] : []),
               ...(!capturePublisher &&
-              boot.capabilityDigest === WORKSPACE_CAPABILITY_DIGEST
+              (boot.capabilityDigest === WORKSPACE_CAPABILITY_DIGEST ||
+                boot.managedExtensions !== undefined)
                 ? [PUBLICATION_INSTALL_ROUTE]
                 : []),
             ]
           : [
               ...MANAGED_CONTEXT_WORKER_ROUTES,
+              ...(boot.managedExtensions
+                ? [
+                    MANAGED_EXTENSION_RUNTIME_ROUTE,
+                    MANAGED_EXTENSION_UPLOAD_ROUTE,
+                    MANAGED_EXTENSION_RETIRE_ROUTE,
+                    MANAGED_EXTENSION_COMMAND_ROUTE,
+                  ]
+                : []),
               ...(csiBoot
                 ? [
                     MANAGED_CSI_ATTEST_ROUTE,
@@ -443,7 +488,7 @@ export async function readManagedRuntimeContainerBoot(
       parsed &&
       typeof parsed === 'object' &&
       'version' in parsed &&
-      (parsed.version === 4 || parsed.version === 5)
+      (parsed.version === 4 || parsed.version === 5 || parsed.version === 6)
     ) {
       return parseManagedCsiFileBoot(
         parseManagedCsiFileJson(
@@ -507,7 +552,10 @@ export async function runManagedRuntimeAttestationWorker(
     return;
   }
   const contextBoot =
-    boot.version === 3 || boot.version === 4 || boot.version === 5
+    boot.version === 3 ||
+    boot.version === 4 ||
+    boot.version === 5 ||
+    boot.version === 6
       ? boot.context
       : boot;
   const worker = await startManagedRuntimeAttestationWorker(

@@ -1,10 +1,12 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.SourceEvent;
-import com.alibaba.qwen.code.managedagent.service.HarnessEventProjector;
-import com.alibaba.qwen.code.managedagent.store.EventIdentity;
-import com.alibaba.qwen.code.managedagent.store.StoreModels.ProjectedEvent;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.ProjectedEvent;
+import com.alibaba.qwen.code.managedagent.persistence.EventIdentity;
+import com.alibaba.qwen.code.managedagent.session.HarnessEventProjector;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.Map;
 
@@ -13,6 +15,35 @@ import static org.assertj.core.api.Assertions.assertThat;
 class HarnessEventProjectorTest {
     private final HarnessEventProjector projector =
             new HarnessEventProjector();
+
+    @Test
+    void forwardsOnlyBoundedCommittedTodoSnapshots() {
+        String snapshot = "[{\"id\":\"a\",\"content\":\"first\",\"status\":\"pending\"}]";
+        Map<String, Object> update = Map.of("sessionUpdate", "tool_call_update",
+                "toolCallId", "call-1", "name", "todo_write", "status", "completed",
+                "todoSnapshot", snapshot, "rawOutput", "must-not-leak");
+        ProjectedEvent committed = projector.project(new SourceEvent(1L,
+                "managed_journal_event", Map.of("update", update), "prompt", Map.of()), "turn-1");
+        assertThat(committed.data()).containsEntry("todoSnapshot", snapshot)
+                .doesNotContainKey("rawOutput");
+        ProjectedEvent uncommitted = projector.project(new SourceEvent(2L,
+                "session_update", Map.of("update", update), "prompt", Map.of()), "turn-1");
+        assertThat(uncommitted.data()).doesNotContainKey("todoSnapshot");
+        for (Map<String, Object> refused : java.util.List.of(
+                Map.<String, Object>of("name", "read_file", "status", "completed",
+                        "todoSnapshot", snapshot),
+                Map.<String, Object>of("name", "todo_write", "status", "failed",
+                        "todoSnapshot", snapshot),
+                Map.<String, Object>of("name", "todo_write", "status", "completed",
+                        "todoSnapshot", "x".repeat(16 * 1024 + 1)))) {
+            Map<String, Object> candidate = new java.util.LinkedHashMap<>(refused);
+            candidate.put("sessionUpdate", "tool_call_update");
+            candidate.put("toolCallId", "call-1");
+            ProjectedEvent event = projector.project(new SourceEvent(3L,
+                    "managed_journal_event", Map.of("update", candidate), "prompt", Map.of()), "turn-1");
+            assertThat(event.data()).doesNotContainKey("todoSnapshot");
+        }
+    }
 
     @Test
     void projectsTextWithoutLeakingOtherUpdateFields() {
@@ -55,6 +86,32 @@ class HarnessEventProjectorTest {
                 "prompt", Map.of()), "turn-1");
 
         assertThat(event.errorCode()).isEqualTo("model_failed");
+        assertThat(event.data().toString()).doesNotContain("secret")
+                .doesNotContain("/private/workspace");
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "model_payment_required, HTTP 402, billing",
+        "model_authentication_failed, HTTP 401, credentials",
+        "model_access_denied, HTTP 403, permissions",
+        "model_rate_limited, HTTP 429, later",
+        "model_request_timeout, timed out, later",
+        "model_request_rejected, rejected, configuration",
+        "model_service_unavailable, unavailable, later",
+        "model_request_failed, Model API request failed, logs"
+    })
+    void projectsSafeActionableModelApiFailures(String code,
+            String cause, String action) {
+        ProjectedEvent event = projector.project(new SourceEvent(3L,
+                "turn_error", Map.of("code", code, "message",
+                        "token=secret path=/private/workspace"),
+                "prompt", Map.of()), "turn-1");
+
+        assertThat(event.errorCode()).isEqualTo(code);
+        assertThat(event.errorMessage()).contains(cause).contains(action);
+        assertThat(event.terminalStatus()).isEqualTo("FAILED");
+        assertThat(event.data()).containsEntry("message", event.errorMessage());
         assertThat(event.data().toString()).doesNotContain("secret")
                 .doesNotContain("/private/workspace");
     }
@@ -110,6 +167,7 @@ class HarnessEventProjectorTest {
         assertThat(event.type()).isEqualTo("item.tool_call.updated");
         assertThat(event.data()).containsEntry("toolCallId", "tool-1")
                 .containsEntry("name", "read_file")
+                .containsEntry("sourceSequence", 7L)
                 .containsEntry("title", "Read file")
                 .containsEntry("status", "completed");
         // The same allowlist guards the tool path: the raw update map must
@@ -143,6 +201,37 @@ class HarnessEventProjectorTest {
         assertThat(oversize.errorCode()).isEqualTo("hosted_harness_error");
         assertThat(oversize.type()).isEqualTo("turn.failed");
         assertThat(atBound.errorCode()).isEqualTo("b".repeat(128));
+    }
+
+    @Test
+    void projectsToolResultLifecycleWithoutPublishingThePrivateRecord() {
+        ProjectedEvent event = projector.project(new SourceEvent(6L,
+                "managed_journal_event", Map.of(
+                        "record", Map.of("text", "private output"),
+                        "update", Map.of("sessionUpdate", "tool_call_update",
+                                "toolCallId", "model-call", "name", "read_file",
+                                "status", "completed")),
+                "prompt", Map.of()), "turn-1");
+
+        assertThat(event.type()).isEqualTo("item.tool_call.updated");
+        assertThat(event.data()).containsEntry("toolCallId", "model-call")
+                .containsEntry("status", "completed");
+        assertThat(event.data().toString()).doesNotContain("private output")
+                .doesNotContain("record");
+    }
+
+    @Test
+    void projectsConfiguredRoundLimitWithASafeActionableMessage() {
+        ProjectedEvent event = projector.project(new SourceEvent(4L,
+                "turn_error", Map.of("code", "hosted_turn_limit_exceeded",
+                        "message", "token=secret path=/private/workspace"),
+                "prompt", Map.of()), "turn-1");
+
+        assertThat(event.errorCode()).isEqualTo("hosted_turn_limit_exceeded");
+        assertThat(event.errorMessage()).isEqualTo(
+                "The Hosted Harness Turn reached its configured model round limit.");
+        assertThat(event.data().toString()).doesNotContain("secret")
+                .doesNotContain("/private/workspace");
     }
 
     @Test

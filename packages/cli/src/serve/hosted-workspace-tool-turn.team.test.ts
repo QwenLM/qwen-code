@@ -102,6 +102,7 @@ const broker = vi.hoisted(() => ({
 vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./hosted-workspace-broker.js')>()),
   HostedWorkspaceBroker: class {
+    resolveCapabilities = async () => {};
     readonly runtimeSessionId = 'prompt';
     warm = broker.warm;
     acquire = broker.acquire;
@@ -529,7 +530,8 @@ it('refuses a snapshot member and admits a plain snapshot child', async () => {
   );
   expect(children.record('prompt:call-bob')).toBeUndefined();
   expect(roster()).toEqual([]);
-  // The remedies name only the isolation the host serves.
+  // The remedies name only the isolation the host serves, and a refusal on
+  // either host commits nothing, exactly like the capable host's refusal.
   const worktreeOnly = await execute(createTurn({ childWorkspaces: true }), [
     member('bob', 'call-bob-worktree', { isolation: 'snapshot' }),
   ]);
@@ -537,11 +539,15 @@ it('refuses a snapshot member and admits a plain snapshot child', async () => {
     'Launch the member with isolation \\"worktree\\" or without isolation.',
   );
   expect(worktreeOnly).not.toContain('snapshot without name');
+  expect(children.record('prompt:call-bob-worktree')).toBeUndefined();
+  expect(roster()).toEqual([]);
   expect(
     await execute(createTurn(), [
       member('bob', 'call-bob-shared', { isolation: 'snapshot' }),
     ]),
   ).toContain('Launch the member without isolation.');
+  expect(children.record('prompt:call-bob-shared')).toBeUndefined();
+  expect(roster()).toEqual([]);
 
   await execute(capable, [
     call(

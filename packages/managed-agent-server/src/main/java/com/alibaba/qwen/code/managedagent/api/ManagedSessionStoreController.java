@@ -1,21 +1,24 @@
 package com.alibaba.qwen.code.managedagent.api;
 
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AcquireWriterRequest;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.BlockRecoveryRequest;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitReceipt;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitTransactionRequest;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.PublishToolResultRequest;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.RecoveryStateReceipt;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.RenewWriterRequest;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.RestoreHead;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.SealReceipt;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.SealWriterRequest;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.StoredResource;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.ToolResultResourceRef;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.TransactionPage;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.WriterGrant;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.model.TenantContext;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.AcquireWriterRequest;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.BlockRecoveryRequest;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.CommitReceipt;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.PublishToolResultRequest;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.RecoveryStateReceipt;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.RenewWriterRequest;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.RestoreHead;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.SealReceipt;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.SealWriterRequest;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.StoredResource;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.ToolResultResourceRef;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.TransactionPage;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.WriterGrant;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedUserMessageStore;
 import jakarta.validation.Valid;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpHeaders;
@@ -36,9 +39,31 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/internal/managed-session-store/v1/sessions/{sessionId}")
 public class ManagedSessionStoreController {
     private final ManagedSessionStore store;
+    private final ManagedUserMessageStore userMessages;
 
-    public ManagedSessionStoreController(ManagedSessionStore store) {
+    public ManagedSessionStoreController(ManagedSessionStore store, ManagedUserMessageStore userMessages) {
         this.store = store;
+        this.userMessages = userMessages;
+    }
+
+    public record QueueClaim(String workspaceId, String writerId, long writerGeneration, String promptId, boolean initialOnly) { }
+
+    @PostMapping("/user-messages:claim")
+    @org.springframework.transaction.annotation.Transactional
+    public Object claimUserMessages(TenantContext tenant, @PathVariable String sessionId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            @RequestBody QueueClaim request) {
+        store.authorizeOrdinary(tenant.tenantId(), sessionId, writerToken,
+                new ManagedSessionStoreModels.AuthorizeLifecycleRequest(request.workspaceId(), request.writerId(), request.writerGeneration(), null));
+        return userMessages.claim(tenant.tenantId(), sessionId, request.promptId(), request.initialOnly());
+    }
+
+    @PostMapping("/approval:query")
+    public Object approvalSelection(TenantContext tenant, @PathVariable String sessionId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            @Valid @RequestBody ManagedSessionStoreModels.AuthorizeLifecycleRequest request) {
+        var selected = store.approvalSelection(tenant.tenantId(), sessionId, writerToken, request);
+        return selected == null ? com.fasterxml.jackson.databind.node.NullNode.getInstance() : selected;
     }
 
     static com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority lifecycleAuthority(HttpHeaders headers) {
@@ -50,7 +75,7 @@ public class ManagedSessionStoreController {
         try {
             return new com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority(operation, Long.parseLong(generation));
         } catch (RuntimeException error) {
-            throw new ApiException(org.springframework.http.HttpStatus.BAD_REQUEST, "invalid_lifecycle_authority", "Invalid lifecycle authority.");
+            throw new ManagedAgentException(org.springframework.http.HttpStatus.BAD_REQUEST, "invalid_lifecycle_authority", "Invalid lifecycle authority.");
         }
     }
 
@@ -102,6 +127,23 @@ public class ManagedSessionStoreController {
             @RequestHeader HttpHeaders headers) {
         return store.sealWriter(tenant.tenantId(), sessionId,
                 writerToken, request, lifecycleAuthority(headers));
+    }
+
+    @PostMapping("/writers:release-ownership")
+    public com.fasterxml.jackson.databind.JsonNode releaseOwnership(TenantContext tenant,
+            @PathVariable String sessionId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            @Valid @RequestBody ManagedSessionStoreModels.ReleaseOwnershipRequest request) {
+        return store.releaseOwnership(tenant.tenantId(), sessionId, writerToken, request);
+    }
+
+    @PostMapping("/writers:quiesce-ownership")
+    public java.util.Map<String, String> quiesceOwnership(TenantContext tenant,
+            @PathVariable String sessionId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            @Valid @RequestBody ManagedSessionStoreModels.QuiesceOwnershipRequest request) {
+        store.quiesceOwnership(tenant.tenantId(), sessionId, writerToken, request);
+        return java.util.Map.of("state", "QUIESCING");
     }
 
     @PostMapping("/recovery:block")

@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -17,6 +18,17 @@ import java.util.concurrent.CompletionStage;
  * completion only with {@code true}.
  */
 public interface RuntimeTransport {
+    default CompletionStage<Map<String, Object>> extensionControl(RuntimeBindingRecord runtime,
+            String harnessSessionId, Map<String, Object> operation) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "managed_extension_unavailable", "Extension metadata controls are unavailable.", false));
+    }
+
+    default CompletionStage<List<Map<String, Object>>> mcpDefinitions(RuntimeBindingRecord runtime) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "managed_mcp_management_unavailable", "Runtime MCP definitions are unavailable.", false));
+    }
+
     /**
      * Re-proves the identity behind a restored lease. The default fails
      * closed: a transport that cannot attest can never adopt a binding.
@@ -58,6 +70,12 @@ public interface RuntimeTransport {
             ContextBinding binding, String executionId) {
         return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
                 "csi_native_execution_unavailable", "Original CSI execution is unavailable.", false));
+    }
+
+    default CompletionStage<byte[]> csiFileFinalize(RuntimeBindingRecord runtime, ContextBinding binding,
+            Map<String, Object> operation) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "csi_file_finalization_unavailable", "Original CSI file finalization is unavailable.", false));
     }
 
     /** Explicit comparison inputs are component expectations, not trusted CSI placement provenance. */
@@ -106,6 +124,12 @@ public interface RuntimeTransport {
 
     CompletionStage<Map<String, Object>> execute(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> reference);
+
+    /** Releases the worker journal payload only after the original v2 result is durable. */
+    default CompletionStage<Void> acknowledgeV2(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> reference) {
+        return CompletableFuture.completedFuture(null);
+    }
 
     default CompletionStage<Void> installPublication(RuntimeLease lease,
             RuntimeSession session, RuntimePublicationGrant grant) {
@@ -185,4 +209,44 @@ public interface RuntimeTransport {
 
     CompletionStage<Boolean> release(RuntimeLease lease,
             RuntimeSession session);
+
+    /**
+     * Frees only the Workspace execution mount the Session holds, leaving
+     * the Session itself — its READY identity, its renewals and every later
+     * full {@link #release} — untouched. The recovery-blocked turn of a
+     * managed Workspace Session parks alive forever by contract; its mount
+     * lease is what must not park with it, or every later tool turn on the
+     * same storage wedges behind it (#13800). Only a Workspace-owning
+     * transport vouches for that distinction, so the default fails closed.
+     */
+    default CompletionStage<Boolean> releaseMount(RuntimeLease lease,
+            RuntimeSession session) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "workspace_mount_release_unsupported",
+                "Runtime transport does not support Workspace mount release.",
+                false));
+    }
+
+    /**
+     * Finishes durable ownership for a Session the Broker has already retired.
+     * The caller must hold durable proof that the Runtime stopped holding the
+     * Session — a persisted drain receipt matching the binding and no active
+     * executions — and must never call this on a mere transport failure. A
+     * transport without durable ownership has nothing to clear.
+     */
+    default CompletionStage<Boolean> releaseRetired(RuntimeLease lease,
+            RuntimeSession session) {
+        return CompletableFuture.completedFuture(true);
+    }
+
+    /**
+     * Claims the Workspace execution mount again for an acquired Session
+     * whose mount was handed back by {@link #releaseMount}; a mount the
+     * Session still holds is left as it is. A transport without Workspace
+     * ownership has no mount to claim.
+     */
+    default CompletionStage<Void> reclaimMount(RuntimeLease lease,
+            RuntimeSession session) {
+        return CompletableFuture.completedFuture(null);
+    }
 }

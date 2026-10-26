@@ -592,7 +592,11 @@ describe('AssistantMessage markdown tables', () => {
       </WebShellCustomizationProvider>,
     );
 
-    expect(container.textContent).toContain('Copy table');
+    expect(
+      container.querySelector(
+        '[data-selection-copy-table] button[aria-label="Copy"]',
+      ),
+    ).not.toBeNull();
     expect(
       container.querySelector('button[aria-label="View details for row 1"]'),
     ).not.toBeNull();
@@ -604,7 +608,11 @@ describe('AssistantMessage markdown tables', () => {
     );
 
     expect(container.querySelector('table')).not.toBeNull();
-    expect(container.textContent).not.toContain('Copy table');
+    expect(
+      container.querySelector(
+        '[data-selection-copy-table] button[aria-label="Copy"]',
+      ),
+    ).toBeNull();
   });
 });
 

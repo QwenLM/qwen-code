@@ -4,10 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-session-journal-store.js';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { SessionWriterLease } from '../services/session-writer-lease.js';
 import { LocalManagedSessionAuthority } from './managed-session-authority.js';
 import { managedExtensionRecordKey } from './managed-extension-projection.js';
@@ -15,30 +16,12 @@ import { LocalManagedSessionResourceStore } from './managed-session-resources.js
 import { type ManagedSessionDurableRef } from './managed-session-records.js';
 
 // child_run's shell kind is enabled by the H3 enablement slice (#13856),
-// so this suite commits through the real gate. A test that needs the gate
-// shut closes it per test — never the other way around.
-const enablement = vi.hoisted(() => ({ childRun: true }));
-
-vi.mock('./managed-session-records.js', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('./managed-session-records.js')>();
-  return {
-    ...actual,
-    assertManagedSessionChildRunKindEnabled: (kind: string) => {
-      if (kind === 'shell' && !enablement.childRun) {
-        throw new actual.ManagedSessionRecordError(
-          'domain child_run kind shell is registered but not enabled for submission.',
-        );
-      }
-      actual.assertManagedSessionChildRunKindEnabled(kind);
-    },
-  };
-});
+// so this suite commits through the real gate with no per-test switch —
+// there is no closed child_run kind left to refuse (#13930 R1-65).
 
 const temporaryDirectories = new Set<string>();
 
 afterEach(async () => {
-  enablement.childRun = true;
   for (const directory of temporaryDirectories) {
     await fs.rm(directory, { recursive: true, force: true });
   }
@@ -103,7 +86,10 @@ async function withAuthority<T>(
             createdBy: 'daemon',
           };
     const authority = await LocalManagedSessionAuthority.open({
-      lease,
+      journal: LocalJsonlManagedSessionJournalStore.fromLease(
+        lease,
+        sessionKey,
+      ),
       sessionKey,
       cwd: '/workspace',
       version: 'test',
@@ -516,23 +502,6 @@ describe('managed session authority child_run records', () => {
       ).rejects.toThrow(
         /never-published|managed-tool-args|resource|reference/im,
       );
-      expect(await publishedBodies(harness)).toBe(0);
-    });
-  });
-
-  it('refuses the domain while it stays disabled', async () => {
-    enablement.childRun = false;
-    const harness = await createHarness();
-    const refs = await publishRefs(harness);
-    const chain = life(refs);
-    await withAuthority(harness, async (authority) => {
-      await expect(
-        authority.commitExtensionRecord(
-          command('shell-1:1'),
-          { domain: 'child_run', record: chain[0] },
-          TRUSTED,
-        ),
-      ).rejects.toThrow('domain child_run kind shell is registered but not');
       expect(await publishedBodies(harness)).toBe(0);
     });
   });
