@@ -92,7 +92,7 @@ public class WakeRecoveryStore {
                             + " AND retired_at IS NULL AND csi_guard = FALSE"
                             + " AND (workspace_id IS NULL OR workspace_id = ?) FOR UPDATE",
                     String.class, candidate.tenantId(), candidate.sessionId(), candidate.workspaceId());
-            if (session.isEmpty()) {
+            if (session.isEmpty() || ManagedConfigInstall.blocked(jdbc, candidate.tenantId(), candidate.sessionId())) {
                 return false;
             }
             return jdbc.update("UPDATE ma_session_head h SET wake_retry_at = " + ManagedSchemaTime.SQL_NOW + " + " + RETRY_MS + " WHERE"
