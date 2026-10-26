@@ -50,8 +50,14 @@ describe('email configuration and bounds', () => {
       { pollInterval: 0 },
       { privatePolicy: 'pairing' },
       { dispatchMode: 'collect' },
+      { dispatchMode: 'inject' },
     ])
       expect(() => emailSettings({ ...settings, ...override })).toThrow();
+    // The two modes email can honour keep their durable per-delivery claim.
+    expect(
+      emailSettings({ ...settings, dispatchMode: 'followup' }),
+    ).toBeTruthy();
+    expect(emailSettings({ ...settings, dispatchMode: 'steer' })).toBeTruthy();
     expect(() =>
       emailSettings({ ...settings, smtpPassword: '\r\nsecret' }),
     ).toThrow('Email smtpPassword must be a non-empty single-line string.');

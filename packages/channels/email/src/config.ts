@@ -54,9 +54,18 @@ export function emailSettings(raw: Readonly<Record<string, unknown>>) {
       'Email supports privatePolicy allowlist, open or disabled; configure allowedUsers instead of pairing.',
     );
   }
-  if (raw['dispatchMode'] === 'collect') {
+  // Whitelist rather than exclude: a new dispatch mode must opt in explicitly,
+  // because email's per-delivery durable claim only survives if every message
+  // becomes its own (or a collected) turn — `inject` hands the text to a
+  // running turn and would release the claim as soon as it is queued.
+  const dispatchMode = raw['dispatchMode'];
+  if (
+    dispatchMode !== undefined &&
+    dispatchMode !== 'followup' &&
+    dispatchMode !== 'steer'
+  ) {
     throw new Error(
-      'Email does not support collect dispatch mode; use followup or steer so each delivery retains its durable claim.',
+      'Email does not support collect or inject dispatch mode; use followup or steer so each delivery retains its durable claim.',
     );
   }
   addressList(raw['allowedUsers'], 'allowedUsers');
