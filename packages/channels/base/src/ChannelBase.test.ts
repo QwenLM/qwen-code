@@ -24054,7 +24054,7 @@ describe('ChannelBase', () => {
 
   describe('mid-turn message injection (inject dispatch mode)', () => {
     function enableInjection() {
-      const queueMidTurnMessage = vi.fn();
+      const queueMidTurnMessage = vi.fn().mockReturnValue({ accepted: true });
       (
         bridge as unknown as {
           queueMidTurnMessage: typeof queueMidTurnMessage;
@@ -24083,31 +24083,234 @@ describe('ChannelBase', () => {
       const queueMidTurnMessage = enableInjection();
       const resolvers = resolvablePrompts();
       const ch = createChannel({ dispatchMode: 'inject' });
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        const running = ch.handleInbound(
+          envelope({ text: 'start', messageId: 'm-inject-1' }),
+        );
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+        const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+          .calls[0]![0] as string;
 
-      const running = ch.handleInbound(
-        envelope({ text: 'start', messageId: 'm-inject-1' }),
-      );
-      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
-      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
-        .calls[0]![0] as string;
+        await ch.handleInbound(
+          envelope({ text: 'insert this', messageId: 'm-inject-2' }),
+        );
 
-      await ch.handleInbound(
-        envelope({ text: 'insert this', messageId: 'm-inject-2' }),
-      );
+        expect(queueMidTurnMessage).toHaveBeenCalledWith(
+          sessionId,
+          'insert this',
+        );
+        const logged = stderr.mock.calls.map(([line]) => String(line)).join('');
+        expect(logged).toContain(
+          `inject: delivered mid-turn message from user1 into session ${sessionId}`,
+        );
+        expect(bridge.cancelSession).not.toHaveBeenCalled();
+        // The injection must not start a second turn or buffer a first one.
+        expect(resolvers).toHaveLength(1);
+        expect(collectBuffers(ch).size).toBe(0);
+        expect(ch.promptBuffers).toEqual([]);
 
-      expect(queueMidTurnMessage).toHaveBeenCalledWith(
-        sessionId,
-        'insert this',
-      );
-      expect(bridge.cancelSession).not.toHaveBeenCalled();
-      // The injection must not start a second turn or buffer a first one.
-      expect(resolvers).toHaveLength(1);
-      expect(collectBuffers(ch).size).toBe(0);
-      expect(ch.promptBuffers).toEqual([]);
+        resolvers[0]!('done');
+        await running;
+        expect(bridge.prompt).toHaveBeenCalledTimes(1);
+      } finally {
+        stderr.mockRestore();
+      }
+    });
 
-      resolvers[0]!('done');
-      await running;
-      expect(bridge.prompt).toHaveBeenCalledTimes(1);
+    it('retains the 21st message when the mid-turn queue is full', async () => {
+      const queueMidTurnMessage = enableInjection();
+      for (let index = 0; index < 20; index += 1) {
+        queueMidTurnMessage.mockReturnValueOnce({ accepted: true });
+      }
+      queueMidTurnMessage.mockReturnValue({
+        accepted: false,
+        reason: 'capacity',
+      });
+      const resolvers = resolvablePrompts();
+      const ch = createChannel({ dispatchMode: 'inject' });
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        const running = ch.handleInbound(
+          envelope({ text: 'start', messageId: 'm-cap-0' }),
+        );
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+        const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+          .calls[0]![0] as string;
+
+        for (let index = 0; index < 20; index += 1) {
+          await ch.handleInbound(
+            envelope({
+              text: `injected ${index}`,
+              messageId: `m-cap-${index + 1}`,
+            }),
+          );
+        }
+        expect(collectBuffers(ch).size).toBe(0);
+
+        await ch.handleInbound(
+          envelope({ text: 'overflow', messageId: 'm-cap-21' }),
+        );
+
+        const logged = stderr.mock.calls.map(([line]) => String(line)).join('');
+        expect(logged.match(/inject: delivered mid-turn/g) ?? []).toHaveLength(
+          20,
+        );
+        expect(logged).toContain('inject: NOT delivered mid-turn (capacity)');
+        expect(
+          collectBuffers(ch)
+            .get(sessionId)
+            ?.map((entry) => (entry as { text: string }).text),
+        ).toEqual(['overflow']);
+
+        resolvers[0]!('done');
+        await running;
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+        expect(bridge.prompt.mock.calls[1]?.[1]).toContain('overflow');
+        resolvers[1]?.('second done');
+        await vi.waitFor(() => expect(ch.promptEnds).toHaveLength(2));
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it('buffers a rejected injection for the next turn and never reports delivery', async () => {
+      const queueMidTurnMessage = enableInjection();
+      queueMidTurnMessage.mockReturnValue({
+        accepted: false,
+        reason: 'capacity',
+      });
+      const resolvers = resolvablePrompts();
+      const ch = createChannel({ dispatchMode: 'inject' });
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        const running = ch.handleInbound(
+          envelope({ text: 'start', messageId: 'm-reject-1' }),
+        );
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+        const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+          .calls[0]![0] as string;
+
+        await ch.handleInbound(
+          envelope({ text: 'keep me', messageId: 'm-reject-2' }),
+        );
+
+        const logged = stderr.mock.calls.map(([line]) => String(line)).join('');
+        expect(logged).not.toContain('inject: delivered');
+        expect(logged).toContain('inject: NOT delivered mid-turn (capacity)');
+        expect(
+          collectBuffers(ch)
+            .get(sessionId)
+            ?.map((entry) => (entry as { text: string }).text),
+        ).toEqual(['keep me']);
+        expect(ch.promptBuffers).toEqual([
+          expect.objectContaining({ sessionId, messageId: 'm-reject-2' }),
+        ]);
+
+        resolvers[0]!('done');
+        await running;
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+        expect(bridge.prompt.mock.calls[1]?.[1]).toContain('keep me');
+        resolvers[1]?.('second done');
+        await vi.waitFor(() => expect(ch.promptEnds).toHaveLength(2));
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it('never reports delivery for a stale session and buffers instead', async () => {
+      const queueMidTurnMessage = enableInjection();
+      queueMidTurnMessage.mockReturnValue({
+        accepted: false,
+        reason: 'unknown-session',
+      });
+      const resolvers = resolvablePrompts();
+      const ch = createChannel({ dispatchMode: 'inject' });
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        const running = ch.handleInbound(
+          envelope({ text: 'start', messageId: 'm-stale-1' }),
+        );
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+        const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+          .calls[0]![0] as string;
+
+        await ch.handleInbound(
+          envelope({ text: 'stale text', messageId: 'm-stale-2' }),
+        );
+
+        const logged = stderr.mock.calls.map(([line]) => String(line)).join('');
+        expect(logged).not.toContain('inject: delivered');
+        expect(logged).toContain(
+          'inject: NOT delivered mid-turn (unknown-session)',
+        );
+        expect(
+          collectBuffers(ch)
+            .get(sessionId)
+            ?.map((entry) => (entry as { text: string }).text),
+        ).toEqual(['stale text']);
+
+        resolvers[0]!('done');
+        await running;
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+        expect(bridge.prompt.mock.calls[1]?.[1]).toContain('stale text');
+        resolvers[1]?.('second done');
+        await vi.waitFor(() => expect(ch.promptEnds).toHaveLength(2));
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it('refuses a message when the bounded inject fallback is full', async () => {
+      const queueMidTurnMessage = enableInjection();
+      queueMidTurnMessage.mockReturnValue({
+        accepted: false,
+        reason: 'capacity',
+      });
+      const resolvers = resolvablePrompts();
+      const ch = createChannel({ dispatchMode: 'inject' });
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        const running = ch.handleInbound(
+          envelope({ text: 'start', messageId: 'm-full-0' }),
+        );
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+        const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+          .calls[0]![0] as string;
+
+        for (let index = 0; index < 20; index += 1) {
+          await ch.handleInbound(
+            envelope({
+              text: `fallback ${index}`,
+              messageId: `m-full-${index + 1}`,
+            }),
+          );
+        }
+        expect(collectBuffers(ch).get(sessionId)).toHaveLength(20);
+
+        await ch.handleInbound(
+          envelope({ text: 'one too many', messageId: 'm-full-21' }),
+        );
+
+        expect(collectBuffers(ch).get(sessionId)).toHaveLength(20);
+        expect(ch.promptBuffers).toHaveLength(20);
+        const logged = stderr.mock.calls.map(([line]) => String(line)).join('');
+        expect(logged).not.toContain('inject: delivered');
+        expect(logged).toContain(
+          'inject: could not queue mid-turn message (capacity)',
+        );
+        expect(logged).toContain('refusing message');
+
+        resolvers[0]!('done');
+        await running;
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+        expect(bridge.prompt.mock.calls[1]?.[1]).toContain('fallback 0');
+        expect(bridge.prompt.mock.calls[1]?.[1]).not.toContain('one too many');
+        resolvers[1]?.('second done');
+        await vi.waitFor(() => expect(ch.promptEnds).toHaveLength(2));
+      } finally {
+        stderr.mockRestore();
+      }
     });
 
     it('falls back to collect buffering when the bridge cannot inject', async () => {

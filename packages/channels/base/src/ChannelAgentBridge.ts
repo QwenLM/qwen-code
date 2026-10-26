@@ -246,6 +246,18 @@ export function resolvePromptImages(
     });
 }
 
+/**
+ * Outcome of handing a message to the bridge's mid-turn queue. When
+ * `accepted` is false the bridge did NOT queue the text, so the caller owns
+ * fallback delivery (or an explicit refusal); it must not report delivery.
+ */
+export type MidTurnQueueReceipt =
+  | { accepted: true }
+  | {
+      accepted: false;
+      reason: 'blank' | 'unknown-session' | 'capacity';
+    };
+
 export interface ChannelAgentBridge {
   readonly availableCommands: AvailableCommand[];
   getAvailableCommands?(sessionId: string): AvailableCommand[];
@@ -292,10 +304,13 @@ export interface ChannelAgentBridge {
   /**
    * Hand a user message to the session's RUNNING turn: the agent sees it at its
    * next drain boundary (between tool batches), not pre-emptively, and the text
-   * is not carried as an attachment. Bridges that omit it make channels fall
-   * back to buffering (`collect`) so the message is never lost.
+   * is not carried as an attachment. The receipt says whether the text was
+   * actually queued; a rejection is final for this call, so callers must fall
+   * back to buffering (`collect`) or refuse visibly instead of reporting
+   * delivery. Bridges that omit it make channels fall back to `collect`
+   * directly.
    */
-  queueMidTurnMessage?(sessionId: string, text: string): void;
+  queueMidTurnMessage?(sessionId: string, text: string): MidTurnQueueReceipt;
   cancelSession(sessionId: string): Promise<void>;
   /** Release a bridge-owned session that will not be routed to a caller. */
   discardSession?(

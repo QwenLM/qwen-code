@@ -34,6 +34,7 @@ import {
   type ChannelAgentBridgePromptOptions,
   type ChannelAgentBridgeSessionOptions,
   type ChannelLoopToolHandler,
+  type MidTurnQueueReceipt,
   type ToolCallEvent,
 } from './ChannelAgentBridge.js';
 import {
@@ -426,10 +427,13 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     }
   }
 
-  queueMidTurnMessage(sessionId: string, text: string): void {
+  queueMidTurnMessage(sessionId: string, text: string): MidTurnQueueReceipt {
     // A blank entry would make the child treat the whole drain as malformed
     // (it rejects whitespace-only messages), so it never enters the queue.
-    if (!text.trim() || !this.knownSessionIds.has(sessionId)) return;
+    if (!text.trim()) return { accepted: false, reason: 'blank' };
+    if (!this.knownSessionIds.has(sessionId)) {
+      return { accepted: false, reason: 'unknown-session' };
+    }
     const queue = this.midTurnMessageQueues.get(sessionId) ?? [];
     const queuedChars = queue.reduce((total, item) => total + item.length, 0);
     if (
@@ -437,14 +441,16 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       queuedChars + text.length > MID_TURN_QUEUE_MAX_CHARS
     ) {
       // Drop rather than truncate: a half instruction can steer the running
-      // turn wrong, while a dropped one is visible to the operator here.
+      // turn wrong, while a dropped one is visible to the operator here and to
+      // the caller through the returned receipt.
       process.stderr.write(
-        `[AcpBridge] Dropped mid-turn message for session ${sanitizeLogText(sessionId, 128)} (queue=${queue.length}/${MID_TURN_QUEUE_MAX_MESSAGES} messages, ${queuedChars}/${MID_TURN_QUEUE_MAX_CHARS} chars): ${sanitizeLogText(text, 256)}\n`,
+        `[AcpBridge] Dropped mid-turn message for session ${sanitizeLogText(sessionId, 128)} (reason=capacity, queue=${queue.length}/${MID_TURN_QUEUE_MAX_MESSAGES} messages, ${queuedChars}/${MID_TURN_QUEUE_MAX_CHARS} chars): ${sanitizeLogText(text, 256)}\n`,
       );
-      return;
+      return { accepted: false, reason: 'capacity' };
     }
     queue.push(text);
     this.midTurnMessageQueues.set(sessionId, queue);
+    return { accepted: true };
   }
 
   async discardSession(

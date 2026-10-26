@@ -120,6 +120,11 @@ const CURRENT_MESSAGE_MARKER = '[Current message - respond to this]';
 const GROUP_HISTORY_ENTRY_TEXT_LIMIT = 1000;
 const GROUP_HISTORY_ENTRY_METADATA_LIMIT = 256;
 const LOOP_CANCEL_GRACE_MS = 5000;
+// Mirrors the mid-turn queue bounds in AcpBridge. Applied only to messages the
+// inject→collect fallback retains, so plain collect-mode buffering is
+// unchanged.
+const INJECT_FALLBACK_MAX_MESSAGES = 20;
+const INJECT_FALLBACK_MAX_CHARS = 20_000;
 const CHANNEL_MEMORY_PROMPT_CODE_POINT_LIMIT = 12_000;
 const CHANNEL_MEMORY_PAGE_SIZE = 20;
 const CHANNEL_MEMORY_PREVIEW_CODE_POINT_LIMIT = 160;
@@ -356,6 +361,8 @@ type PendingPermissionLookup =
 type CollectBufferEntry = {
   text: string;
   envelope: Envelope;
+  /** Admitted by the bounded inject-rejection fallback, not plain `collect`. */
+  injectFallback?: boolean;
 };
 type NamedTurnBinding = {
   sessionId: string | null;
@@ -7098,13 +7105,41 @@ export abstract class ChannelBase {
             // agent reads it inside the RUNNING turn, at its next drain
             // boundary. A bridge without that capability falls through to the
             // collect buffering below (drained as a new turn once this one
-            // ends), so the message is never lost.
+            // ends), so the message is never lost. The same fallback keeps a
+            // REJECTED injection from being reported as delivered; it is
+            // bounded so it cannot pin unbounded text in memory.
+            let injectFallback = false;
             if (mode === 'inject' && this.bridge.queueMidTurnMessage) {
-              this.bridge.queueMidTurnMessage(sessionId, promptText);
-              process.stderr.write(
-                `[${this.name}] inject: delivered mid-turn message from ${envelope.senderId} into session ${sessionId}\n`,
+              const receipt = this.bridge.queueMidTurnMessage(
+                sessionId,
+                promptText,
               );
-              return;
+              if (receipt.accepted) {
+                process.stderr.write(
+                  `[${this.name}] inject: delivered mid-turn message from ${envelope.senderId} into session ${sessionId}\n`,
+                );
+                return;
+              }
+              const fallbackEntries = (
+                this.collectBuffers.get(sessionId) ?? []
+              ).filter((entry) => entry.injectFallback);
+              const fallbackChars = fallbackEntries.reduce(
+                (total, entry) => total + entry.text.length,
+                0,
+              );
+              if (
+                fallbackEntries.length >= INJECT_FALLBACK_MAX_MESSAGES ||
+                fallbackChars + promptText.length > INJECT_FALLBACK_MAX_CHARS
+              ) {
+                process.stderr.write(
+                  `[${this.name}] inject: could not queue mid-turn message (${receipt.reason}) and the fallback buffer is full; refusing message from ${envelope.senderId} for session ${sessionId}\n`,
+                );
+                return;
+              }
+              injectFallback = true;
+              process.stderr.write(
+                `[${this.name}] inject: NOT delivered mid-turn (${receipt.reason}); buffered for the next turn from ${envelope.senderId} into session ${sessionId}\n`,
+              );
             }
             // Buffer the message; it will be coalesced when the active prompt finishes
             let buffer = this.collectBuffers.get(sessionId);
@@ -7112,7 +7147,9 @@ export abstract class ChannelBase {
               buffer = [];
               this.collectBuffers.set(sessionId, buffer);
             }
-            buffer.push({ text: promptText, envelope });
+            const entry: CollectBufferEntry = { text: promptText, envelope };
+            if (injectFallback) entry.injectFallback = true;
+            buffer.push(entry);
             try {
               this.onPromptBuffered(
                 envelope.chatId,

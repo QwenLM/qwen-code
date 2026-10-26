@@ -361,7 +361,9 @@ describe('AcpBridge', () => {
     }) as unknown as TestableAcpBridge;
     bridge.knownSessionIds.add('s-1');
     bridge.knownSessionIds.add('s-2');
-    bridge.queueMidTurnMessage('s-1', 'first');
+    expect(bridge.queueMidTurnMessage('s-1', 'first')).toStrictEqual({
+      accepted: true,
+    });
     bridge.queueMidTurnMessage('s-1', 'second');
     bridge.queueMidTurnMessage('s-2', 'other');
 
@@ -388,7 +390,10 @@ describe('AcpBridge', () => {
       cwd: '/tmp',
     }) as unknown as TestableAcpBridge;
 
-    bridge.queueMidTurnMessage('s-unknown', 'lost');
+    expect(bridge.queueMidTurnMessage('s-unknown', 'lost')).toStrictEqual({
+      accepted: false,
+      reason: 'unknown-session',
+    });
 
     expect(bridge.midTurnMessageQueues.size).toBe(0);
     await expect(
@@ -396,6 +401,20 @@ describe('AcpBridge', () => {
         sessionId: 's-unknown',
       }),
     ).resolves.toStrictEqual({ messages: [], hasQueuedPrompt: false });
+  });
+
+  it('rejects blank mid-turn messages', () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.knownSessionIds.add('s-1');
+
+    expect(bridge.queueMidTurnMessage('s-1', '  \n\t')).toStrictEqual({
+      accepted: false,
+      reason: 'blank',
+    });
+    expect(bridge.midTurnMessageQueues.size).toBe(0);
   });
 
   it('bounds the mid-turn queue by message count', async () => {
@@ -406,9 +425,16 @@ describe('AcpBridge', () => {
     bridge.knownSessionIds.add('s-1');
     const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
     try {
-      for (let index = 0; index < 25; index += 1) {
-        bridge.queueMidTurnMessage('s-1', `m${index}`);
-      }
+      const receipts = Array.from({ length: 25 }, (_value, index) =>
+        bridge.queueMidTurnMessage('s-1', `m${index}`),
+      );
+      expect(receipts.slice(0, 20)).toStrictEqual(
+        Array.from({ length: 20 }, () => ({ accepted: true })),
+      );
+      expect(receipts[20]).toStrictEqual({
+        accepted: false,
+        reason: 'capacity',
+      });
 
       await expect(
         bridge.handleExtMethod('craft/drainMidTurnQueue', { sessionId: 's-1' }),
@@ -417,8 +443,42 @@ describe('AcpBridge', () => {
         hasQueuedPrompt: false,
       });
       expect(
+        stderr.mock.calls.some(
+          ([line]) =>
+            String(line).includes('Dropped mid-turn message') &&
+            String(line).includes('reason=capacity'),
+        ),
+      ).toBe(true);
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('bounds the mid-turn queue by characters', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.knownSessionIds.add('s-1');
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      expect(
+        bridge.queueMidTurnMessage('s-1', 'x'.repeat(20_000)),
+      ).toStrictEqual({ accepted: true });
+      expect(bridge.queueMidTurnMessage('s-1', 'y')).toStrictEqual({
+        accepted: false,
+        reason: 'capacity',
+      });
+
+      await expect(
+        bridge.handleExtMethod('craft/drainMidTurnQueue', { sessionId: 's-1' }),
+      ).resolves.toStrictEqual({
+        messages: ['x'.repeat(20_000)],
+        hasQueuedPrompt: false,
+      });
+      expect(
         stderr.mock.calls.some(([line]) =>
-          String(line).includes('Dropped mid-turn message'),
+          String(line).includes('reason=capacity'),
         ),
       ).toBe(true);
     } finally {
