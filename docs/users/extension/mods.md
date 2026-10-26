@@ -160,7 +160,7 @@ Patterns select among the engine events `session.start`, `session.end`,
 `*`, or a single negation such as `!session.*`. The patterns `!*` and `!!...` are
 rejected.
 
-Claude Code 2.1.308 also defines events that Qwen Code does not run yet, such as
+Claude Code 2.1.310 also defines events that Qwen Code does not run yet, such as
 `prompt.submit`, `ui.render` or `classic.Stop`. A registration for one of them,
 or for a prefix such as `prompt.*` that matches none of the events above, loads
 but never runs, so the rest of the Mod keeps working. At startup each plugin
@@ -264,8 +264,10 @@ call does not approve it; and a headless run without a permission host denies
 it, giving the model the Mod's reason. A PermissionRequest hook can deny it but
 cannot answer for the user. Qwen's own ask passed up unchanged keeps the current
 approval mode's decision flow. If a native PermissionRequest hook rebuilds the
-arguments, they are checked again. A Mod-authored `rule`, `hook`, `ceiling` or
-`plugin` cannot create host permissions; the host sets `plugin`.
+arguments, they are checked again. A Mod-authored `rule`, `hook`, `setting`,
+`ceiling` or `plugin` cannot create host permissions. The host sets `plugin`.
+It drops a `setting` a hook writes: in Claude Code that field names a Claude
+Code option's own check, and Qwen Code reports none.
 
 Return `{deny: reason}` to block, or `{result: value}` to supply a JSON result
 without executing. Native next returns `{ref, result, text, isError?}`.
@@ -409,7 +411,7 @@ supports:
 {
   "version": "0.26.0",
   "qwen": {
-    "claudeCode": "2.1.308",
+    "claudeCode": "2.1.310",
     "events": [
       "clock.now",
       "clock.sleep",
@@ -502,7 +504,7 @@ Mod discovery. Mod manifests must be relative paths inside the extension.
 directory, the one that holds `qwen-extension.json` or
 `.claude-plugin/plugin.json`. They are plain properties.
 
-The other methods are API events that resolve to the shapes Claude Code 2.1.308
+The other methods are API events that resolve to the shapes Claude Code 2.1.310
 declares:
 
 | Method                                | Resolves to                                                                             |
@@ -736,6 +738,6 @@ Own `__proto__` keys in tool inputs and results are ordinary data on both sides.
 A hook answer whose getter throws while Qwen Code reads it fails as a whole;
 Claude Code 2.1.299 drops only that key.
 
-The author API is based on Claude Code 2.1.296 declarations, with event names
-recognized from Claude Code 2.1.308, and the
+The author API follows the Claude Code 2.1.310 declarations, event names
+included, and the
 [official Mod documentation](https://code.claude.com/docs/en/plugins/mods/create).
