@@ -68,15 +68,31 @@ class HarnessBrokerUrlTest {
     @Test
     void allowsOnlyTheDeclaredApproximations() {
         // An https xn-- host stays unclassified only against an accepting
-        // verdict, and an http one must name the refusal the fixture records.
+        // verdict, and a scheme read before the host may name the refusal
+        // the fixture records for an invalid URL.
         assertTrue(declaredApproximation("accepted",
                 HarnessBrokerUrl.Verdict.UNCLASSIFIED, "https://xn--a:8443"));
         assertFalse(declaredApproximation("invalid",
                 HarnessBrokerUrl.Verdict.UNCLASSIFIED, "https://xn--a:8443"));
         assertFalse(declaredApproximation("invalid",
-                HarnessBrokerUrl.Verdict.PLAIN_OUTSIDE_LOOPBACK, "http://xn--a:4182"));
+                HarnessBrokerUrl.Verdict.PLAIN_OUTSIDE_LOOPBACK,
+                "http://xn--a:4182"));
         assertTrue(declaredApproximation("invalid",
+                HarnessBrokerUrl.Verdict.NOT_ORIGIN, "ftp://"));
+        assertFalse(declaredApproximation("not-origin",
                 HarnessBrokerUrl.Verdict.NOT_ORIGIN, "ftp://127.0.0.1:4182"));
+        // One negative per remaining decision point, so that loosening any
+        // arm fails here rather than in readsEveryUrlTheWayTheHarnessDoes.
+        assertFalse(declaredApproximation("accepted",
+                HarnessBrokerUrl.Verdict.UNCLASSIFIED, "https://broker.example:8443"));
+        assertFalse(declaredApproximation("accepted",
+                HarnessBrokerUrl.Verdict.UNCLASSIFIED, "http://xn--a:4182"));
+        assertFalse(declaredApproximation("accepted",
+                HarnessBrokerUrl.Verdict.NOT_ORIGIN, "http://127.0.0.1:4182"));
+        assertFalse(declaredApproximation("invalid",
+                HarnessBrokerUrl.Verdict.ACCEPTED, "https://127.0.0.1:4182"));
+        assertFalse(declaredApproximation("accepted",
+                HarnessBrokerUrl.Verdict.INVALID, "https://xn--bcher-kva.1:8443"));
     }
 
     // The two exceptions HarnessBrokerUrl documents, and only those: a
