@@ -677,6 +677,33 @@ export function reportRejectedLoaderKeys(
   return rejectedKeys;
 }
 
+// A home .env could set these before they decided where the global dir is,
+// so say why one is now ignored instead of dropping it silently. A key the
+// environment already holds (QWEN_HOME from the home .env pre-read, say) was
+// not dropped.
+export function reportRejectedGlobalDirKeys(
+  source: string,
+  parsedEnv: Readonly<Record<string, string>>,
+): void {
+  const warnedKeys =
+    reportedLoaderKeyRejections.get(source) ?? new Set<string>();
+  const freshKeys = Object.keys(parsedEnv).filter(
+    (key) =>
+      isGlobalDirEnvKey(key) &&
+      parsedEnv[key] &&
+      !process.env[key] &&
+      !warnedKeys.has(key),
+  );
+  if (freshKeys.length === 0) return;
+  for (const key of freshKeys) warnedKeys.add(key);
+  reportedLoaderKeyRejections.set(source, warnedKeys);
+  writeStderrLineSafe(
+    `qwen: ${source} cannot set the env vars that locate the global ` +
+      `directory; ignored: ${freshKeys.join(', ')}. Export them in the ` +
+      'launch environment instead.',
+  );
+}
+
 /** Test-only: forget already-reported loader-key rejections. */
 export function resetLoaderKeyRejectionReportingForTesting(): void {
   reportedLoaderKeyRejections.clear();

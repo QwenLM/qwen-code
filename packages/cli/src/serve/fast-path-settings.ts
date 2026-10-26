@@ -21,6 +21,7 @@ import {
   isHardcodedProjectEnvExclusion,
   isLoaderEnvKey,
   isPrivateProvenanceEnvKey,
+  reportRejectedGlobalDirKeys,
   reportRejectedLoaderKeys,
 } from '../config/shared-env-keys.js';
 import {
@@ -335,6 +336,9 @@ export function loadServeFastPathEnvironment(
           Object.keys(parsedEnv),
         ),
       );
+      if (isHomeScopedEnvFile) {
+        reportRejectedGlobalDirKeys(`.env file ${envFilePath}`, parsedEnv);
+      }
     } catch {
       // Errors are ignored to match dotenv quiet-mode behavior.
     }

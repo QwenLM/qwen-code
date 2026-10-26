@@ -19,6 +19,7 @@ import {
   isPrivateProvenanceEnvKey,
   PRIVATE_RELAUNCH_ENV_PROVENANCE,
   PROJECT_ENV_HARDCODED_EXCLUSIONS,
+  reportRejectedGlobalDirKeys,
   reportRejectedLoaderKeys,
   resetLoaderKeyRejectionReportingForTesting,
 } from './shared-env-keys.js';
@@ -782,6 +783,12 @@ export function loadEnvironment(
       `.env file ${envFile.path}`,
       Object.keys(envFile.parsedEnv),
     );
+    if (envFile.isHomeScopedEnvFile) {
+      reportRejectedGlobalDirKeys(
+        `.env file ${envFile.path}`,
+        envFile.parsedEnv,
+      );
+    }
   }
 
   // Step 2: settings.env fallback (lowest priority, no-override).

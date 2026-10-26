@@ -1719,6 +1719,7 @@ describe('serve fast path environment bootstrap', () => {
         join(home, '.qwen', '.env'),
         `QWEN_HOME=${join(home, 'legacy')}\nFASTPATH_LEGACY_ALLOWED=allowed\n`,
       );
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
       try {
         preResolveServeFastPathHomeEnvOverrides();
         loadServeFastPathEnvironment({}, tempWorkspace);
@@ -1726,7 +1727,13 @@ describe('serve fast path environment bootstrap', () => {
         expect(process.env['FASTPATH_LEGACY_ALLOWED']).toBe('allowed');
         expect(process.env['QWEN_HOME']).toBeUndefined();
         expect(getGlobalQwenDirLite()).toBe(xdgDir);
+        expect(stderr).toHaveBeenCalledWith(
+          expect.stringContaining(
+            `.env file ${join(home, '.qwen', '.env')} cannot set the env vars that locate the global directory; ignored: QWEN_HOME.`,
+          ),
+        );
       } finally {
+        stderr.mockRestore();
         delete process.env['FASTPATH_LEGACY_ALLOWED'];
       }
     });

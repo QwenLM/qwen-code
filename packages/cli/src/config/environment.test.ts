@@ -2245,12 +2245,42 @@ describe('home .env with the global dir in the XDG config directory', () => {
       `QWEN_HOME=${path.join(os.homedir(), 'legacy')}\nDEMO_VAR=legacy\n`,
     );
 
-    preResolveHomeEnvOverrides();
-    loadEnvironment(testSettings({}), makeWorkspace());
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      preResolveHomeEnvOverrides();
+      loadEnvironment(testSettings({}), makeWorkspace());
 
-    expect(process.env['DEMO_VAR']).toBe('legacy');
-    expect(process.env['QWEN_HOME']).toBeUndefined();
-    expect(Storage.getGlobalQwenDir()).toBe(xdgDir());
+      expect(process.env['DEMO_VAR']).toBe('legacy');
+      expect(process.env['QWEN_HOME']).toBeUndefined();
+      expect(Storage.getGlobalQwenDir()).toBe(xdgDir());
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining(
+          `.env file ${path.join(legacyDir, '.env')} cannot set the env vars that locate the global directory; ignored: QWEN_HOME.`,
+        ),
+      );
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('does not report the QWEN_HOME the home .env pre-read applied', () => {
+    const qwenHome = makeWorkspace();
+    fs.writeFileSync(
+      path.join(os.homedir(), '.env'),
+      `QWEN_HOME=${qwenHome}\n`,
+    );
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      preResolveHomeEnvOverrides();
+      loadEnvironment(testSettings({}), makeWorkspace());
+
+      expect(process.env['QWEN_HOME']).toBe(qwenHome);
+      expect(stderr).not.toHaveBeenCalledWith(
+        expect.stringContaining('locate the global directory'),
+      );
+    } finally {
+      stderr.mockRestore();
+    }
   });
 
   // On Windows os.homedir() reads USERPROFILE, so unsetting it would leave
