@@ -3969,7 +3969,7 @@ export class HostedWorkspaceToolTurn {
               'Hosted Shell timeout must be an integer from 1 to 600000 ms.';
           }
           if (
-            !backgroundAdmitted &&
+            !this.backgroundShellAdmitted() &&
             this.publication &&
             args['is_background'] !== undefined
           ) {
