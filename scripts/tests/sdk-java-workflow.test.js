@@ -275,6 +275,14 @@ describe('SDK Java self-hosted workflow guards', () => {
     const parsed = parse(workflow);
     const drops = [];
     const prunes = [];
+    // Maven's resolver tracking markers are spelled twice too: the seed
+    // deletes them, and a write-back that forgets them publishes a failed
+    // resolution into the host cache every consumer reads. Compare both
+    // spellings instead of pinning one.
+    const markersOf = (text) =>
+      [...text.matchAll(/-name '([^']+)'/g)].map((match) => match[1]).sort();
+    const seedMarkers = [];
+    const pruneMarkers = [];
     for (const [jobName, job] of Object.entries(parsed.jobs)) {
       for (const candidate of job.steps ?? []) {
         const run = candidate.run;
@@ -283,18 +291,18 @@ describe('SDK Java self-hosted workflow guards', () => {
         if (seedAt !== -1) {
           const seedEnd = run.indexOf('\nmvn --batch-mode', seedAt);
           expect(seedEnd, jobName).toBeGreaterThan(seedAt);
+          const seed = run.slice(seedAt, seedEnd);
           drops.push([
             jobName,
             [
-              ...run
-                .slice(seedAt, seedEnd)
-                .matchAll(
-                  /"\$\{RUNNER_TEMP\}\/m2-repo\/com\/alibaba\/([^"]+)"/g,
-                ),
+              ...seed.matchAll(
+                /"\$\{RUNNER_TEMP\}\/m2-repo\/com\/alibaba\/([^"]+)"/g,
+              ),
             ]
               .map((match) => match[1])
               .sort(),
           ]);
+          seedMarkers.push([jobName, markersOf(seed)]);
         }
         const pruneAt = run.indexOf('timeout 300 find .');
         if (pruneAt === -1) continue;
@@ -305,6 +313,7 @@ describe('SDK Java self-hosted workflow guards', () => {
             .map((match) => match[1])
             .sort(),
         ]);
+        pruneMarkers.push([jobName, markersOf(prune)]);
       }
     }
     const expected = ['qwen-managed-agent-server', 'qwencode-sdk'];
@@ -312,6 +321,16 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(prunes.length).toBeGreaterThan(0);
     for (const [jobName, set] of [...drops, ...prunes]) {
       expect(set, jobName).toEqual(expected);
+    }
+    const expectedMarkers = [
+      '*.lastUpdated',
+      '_remote.repositories',
+      'resolver-status.properties',
+    ];
+    expect(seedMarkers.length).toBe(drops.length);
+    expect(pruneMarkers.length).toBe(prunes.length);
+    for (const [jobName, set] of [...seedMarkers, ...pruneMarkers]) {
+      expect(set, jobName).toEqual(expectedMarkers);
     }
   });
 
@@ -519,7 +538,13 @@ describe('SDK Java self-hosted workflow guards', () => {
         ).run;
         const start = run.indexOf('mkdir -p "${HOME}/.m2/repository"');
         expect(start, name).toBeGreaterThan(-1);
-        const writeBack = run.slice(start);
+        // The test job defers its Maven status to the end of the step, so its
+        // slice ends with `exit "${mvn_status}"` while the slice starts below
+        // that assignment. The MariaDB lane ends at its own `fi`.
+        const slice = run.slice(start);
+        const writeBack = slice.includes('exit "${mvn_status}"')
+          ? `mvn_status=0\n${slice}`
+          : slice;
         const dir = mkdtempSync(join(tmpdir(), 'sdk-java-write-back-'));
         const shims = join(dir, 'bin');
         const home = join(dir, 'home');
@@ -628,14 +653,14 @@ describe('SDK Java self-hosted workflow guards', () => {
         ).run;
         const start = run.indexOf('lock_setup_fault() {');
         expect(start, name).toBeGreaterThan(-1);
-        // The test job defers its Maven status to the end of the step, so its
-        // skip arms read `mvn_status`; the slice starts below that
-        // assignment. The MariaDB lane's arms stay independent of any status.
         const slice = run.slice(start);
-        const acquisitionAndWriteBack = slice.includes('exit "${mvn_status}"')
-          ? `mvn_status=0\n${slice}`
-          : slice;
-        for (const arm of [
+        // The test job defers its Maven status to the end of the step, so its
+        // skip arms read `mvn_status` while the slice starts below that
+        // assignment. Run those arms green and red: a tolerated skip must
+        // report the suite's status instead of turning a red suite green.
+        // The MariaDB lane's suites fail inline, so its arms are always green.
+        const deferred = slice.includes('exit "${mvn_status}"');
+        const arms = [
           'helper',
           'helper-capitalised',
           'helper-no-flock',
@@ -646,7 +671,13 @@ describe('SDK Java self-hosted workflow guards', () => {
           'lock-fault',
           'fallback-setup-fault',
           'fallback-fault',
-        ]) {
+        ];
+        for (const [status, arm] of (deferred ? [0, 7] : [0]).flatMap((value) =>
+          arms.map((candidate) => [value, candidate]),
+        )) {
+          const acquisitionAndWriteBack = deferred
+            ? `mvn_status=${status}\n${slice}`
+            : slice;
           const noFlock =
             arm === 'helper-no-flock' || arm === 'fallback-no-flock';
           const dir = mkdtempSync(join(tmpdir(), 'sdk-java-lock-skip-'));
@@ -767,25 +798,27 @@ describe('SDK Java self-hosted workflow guards', () => {
                 },
               },
             );
-            expect(result.error, `${name}/${arm}`).toBeUndefined();
+            expect(result.error, `${name}/${arm}/${status}`).toBeUndefined();
             // A genuine timeout and a known host fault warn and skip; an
             // unexpected flock status is not a fault this call site knows,
-            // so it stays fatal.
+            // so it stays fatal. A skip reports the suite's own status: a
+            // red suite must not turn green because the copy was skipped.
+            const label = `${name}/${arm}/${status}`;
             if (arm === 'fallback-fault') {
-              expect(result.status, `${name}/${arm}${result.stderr}`).toBe(1);
-              expect(result.stdout, `${name}/${arm}`).toContain(
+              expect(result.status, `${label}${result.stderr}`).toBe(1);
+              expect(result.stdout, label).toContain(
                 'Maven cache write-back setup failed',
               );
             } else {
-              expect(result.status, `${name}/${arm}${result.stderr}`).toBe(0);
-              expect(result.stdout, `${name}/${arm}`).toContain(
+              expect(result.status, `${label}${result.stderr}`).toBe(status);
+              expect(result.stdout, label).toContain(
                 '::warning::Maven cache write-back skipped',
               );
             }
             // Neither the call-site warning nor the helper's timeout line
             // (rewritten at the call site) may carry a rerun-classifier
             // signature onto this now-green step.
-            expect(result.stdout, `${name}/${arm}`).not.toMatch(signatures);
+            expect(result.stdout, label).not.toMatch(signatures);
             const reasons = {
               'setup-fault':
                 '::warning::Maven cache write-back skipped: the write-back queue directory cannot be created',
@@ -821,15 +854,19 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(block).toContain("TIER: '${{ inputs.tier }}'");
     expect(block).toContain(
       'mvn_status=0\n' +
+        "          mvn_stage='sdk-java test'\n" +
         '          mvn --batch-mode --no-transfer-progress clean test || mvn_status=$?\n' +
         '          if [ "${mvn_status}" -eq 0 ] && [ "${MATRIX_JAVA}" = "21" ]; then\n' +
+        "            mvn_stage='sdk-java install'\n" +
         '            mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install || mvn_status=$?\n' +
         '            if [ "${mvn_status}" -eq 0 ]; then\n' +
         '              cd ../../managed-agent-server\n' +
         '              # The fast tier skips mysql-integration, which owns the full H2 unit suite.\n' +
         '              if [ "${TIER}" = "fast" ]; then\n' +
+        "                mvn_stage='runtime-broker H2 suite'\n" +
         '                mvn --batch-mode --no-transfer-progress clean test || mvn_status=$?\n' +
         '              else\n' +
+        "                mvn_stage='runtime-broker suite'\n" +
         `                mvn --batch-mode --no-transfer-progress '-Dtest=${brokerTestPattern}' clean test || mvn_status=$?\n` +
         '              fi\n' +
         '            fi\n' +
@@ -855,6 +892,13 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(block).not.toMatch(/^\s+exit 0$/m);
     expect(block.match(/exit "\$\{mvn_status\}"/g)).toHaveLength(4);
     expect(block.trimEnd().endsWith('exit "${mvn_status}"')).toBe(true);
+    // Each Maven run names its stage, and the deferred exit announces the one
+    // that failed: the write-back output is the log tail, so the tail alone
+    // cannot tell three suites apart.
+    expect(block.match(/mvn_stage='[^']+'/g)).toHaveLength(4);
+    expect(block).toContain(
+      "echo \"::error::Maven suite '${mvn_stage}' failed with status ${mvn_status}",
+    );
   });
 
   it.skipIf(process.platform !== 'linux')(
@@ -870,6 +914,10 @@ describe('SDK Java self-hosted workflow guards', () => {
       mkdirSync(join(home, '.m2', 'repository'), { recursive: true });
       mkdirSync(cwd, { recursive: true });
       mkdirSync(shims);
+      // Create the directory itself, not `m2-repo`: with the copy target
+      // already present the seed would copy *into* it and bypass the path
+      // the write-back publishes from.
+      mkdirSync(runnerTemp, { recursive: true });
       writeFileSync(
         join(workspace, '.github', 'scripts', 'sdk-java-lock.sh'),
         'sdk_java_lock_acquire() { return 0; }\n',
@@ -910,6 +958,12 @@ describe('SDK Java self-hosted workflow guards', () => {
         );
         expect(result.error).toBeUndefined();
         expect(result.status, result.stderr).toBe(7);
+        // The write-back output is the log tail now, so the deferred exit
+        // names the stage that failed instead of leaving only the runner's
+        // bare "process completed with exit code".
+        expect(result.stdout).toContain(
+          "::error::Maven suite 'sdk-java test' failed with status 7",
+        );
         expect(
           existsSync(
             join(
@@ -1986,7 +2040,7 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     // artifact in the shared cache the next seed hardlinks from.
     expect(step.run).toContain('cd "${RUNNER_TEMP}/m2-repo"');
     expect(step.run).toContain(
-      'timeout 300 find . \\( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-server \\) -prune -o -type f -links 1 -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?',
+      "timeout 300 find . \\( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-server -o -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' \\) -prune -o -type f -links 1 -exec cp -ln --parents -t \"${HOME}/.m2/repository\" {} + 9>&- || write_back=$?",
     );
     expect(step.run).not.toMatch(/tar [^\n]*-xf/);
     expect(step.run).toContain(

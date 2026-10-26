@@ -308,15 +308,19 @@ jobs:
           # them. Only the exit is deferred — a failure still stops the
           # remaining suites, and the step ends with Maven's status.
           mvn_status=0
+          mvn_stage='sdk-java test'
           mvn --batch-mode --no-transfer-progress clean test || mvn_status=$?
           if [ "${mvn_status}" -eq 0 ] && [ "${MATRIX_JAVA}" = "21" ]; then
+            mvn_stage='sdk-java install'
             mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install || mvn_status=$?
             if [ "${mvn_status}" -eq 0 ]; then
               cd ../../managed-agent-server
               # The fast tier skips mysql-integration, which owns the full H2 unit suite.
               if [ "${TIER}" = "fast" ]; then
+                mvn_stage='runtime-broker H2 suite'
                 mvn --batch-mode --no-transfer-progress clean test || mvn_status=$?
               else
+                mvn_stage='runtime-broker suite'
                 mvn --batch-mode --no-transfer-progress '-Dtest=com/alibaba/qwen/code/runtimebroker/**/Test*.java,com/alibaba/qwen/code/runtimebroker/**/*Test.java,com/alibaba/qwen/code/runtimebroker/**/*Tests.java,com/alibaba/qwen/code/runtimebroker/**/*TestCase.java' clean test || mvn_status=$?
               fi
             fi
@@ -394,17 +398,27 @@ jobs:
           # artifact missing for the next job to re-resolve, never truncated.
           # No write-back child inherits fd 9, or a cancelled job's survivor
           # would hold the host lock until it exits.
+          # The seed drops Maven's resolver tracking markers because they
+          # record a resolution outcome; a red suite can leave them behind,
+          # and publishing them would make that failure stick for every
+          # reader of the host cache, so skip the same three names here.
           mkdir -p "${HOME}/.m2/repository" 9>&-
           cd "${RUNNER_TEMP}/m2-repo"
           write_back=0
-          timeout 300 find . \( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-server \) -prune -o -type f -links 1 -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
+          timeout 300 find . \( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-server -o -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' \) -prune -o -type f -links 1 -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
           if [ "${write_back}" -eq 124 ]; then
             echo "::warning::Maven cache write-back stopped after 300 s; the gate result above is unaffected"
           elif [ "${write_back}" -ne 0 ]; then
             echo "::warning::Maven cache write-back failed; the gate result above is unaffected"
           fi
           # Deferred so a failed suite still reaches the write-back; the
-          # step's status is the suite's, not the copy's.
+          # step's status is the suite's, not the copy's. The write-back
+          # output is now the log tail, so name the stage that failed before
+          # the bare exit: every Maven failure exits 1, and the tail alone
+          # cannot tell the three suites apart.
+          if [ "${mvn_status}" -ne 0 ]; then
+            echo "::error::Maven suite '${mvn_stage}' failed with status ${mvn_status}; the cache write-back above ran after it"
+          fi
           exit "${mvn_status}"
 
       - name: 'Run Java SDK tests (hosted)'
@@ -1036,10 +1050,14 @@ jobs:
           # artifact missing for the next job to re-resolve, never truncated.
           # No write-back child inherits fd 9, or a cancelled job's survivor
           # would hold the host lock until it exits.
+          # The seed drops Maven's resolver tracking markers because they
+          # record a resolution outcome; a red suite can leave them behind,
+          # and publishing them would make that failure stick for every
+          # reader of the host cache, so skip the same three names here.
           mkdir -p "${HOME}/.m2/repository" 9>&-
           cd "${RUNNER_TEMP}/m2-repo"
           write_back=0
-          timeout 300 find . \( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-server \) -prune -o -type f -links 1 -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
+          timeout 300 find . \( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-server -o -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' \) -prune -o -type f -links 1 -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
           if [ "${write_back}" -eq 124 ]; then
             echo "::warning::Maven cache write-back stopped after 300 s; the gate result above is unaffected"
           elif [ "${write_back}" -ne 0 ]; then

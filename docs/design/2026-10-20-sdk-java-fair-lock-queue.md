@@ -156,7 +156,10 @@ failure in `mvn_status` instead of aborting under errexit, the failure stops
 the remaining suites, and that deferred status fails the step after the copy.
 The downloads the failed run made are therefore published instead of
 re-fetched by the next leg, and a tolerated skip of the copy reports the same
-status rather than turning the step green.
+status rather than turning the step green. Because the write-back output now
+sits between the failure and the log tail, the deferred exit also emits an
+annotation naming the stage that failed; Maven exits 1 for nearly every
+failure mode, so the bare exit code cannot tell the three suites apart.
 
 The 9600 s test-lane and 5400 s write-back budgets are unchanged by this PR.
 They bound the queue, not the hold; the test lane's 9600 s is carried from
@@ -293,15 +296,22 @@ order this section exists to prevent.
 - The workflow pins move with the mechanism:
   `scripts/tests/sdk-java-workflow.test.js` pins the sourced helper, the
   test lane's 9600 s budget and 200-minute ceiling, the MariaDB write-back's
-  5400 s budget and 310-minute ceiling, the identical prelude and write-back
-  tail at both sites (modulo the intentional budget difference), both jobs'
-  Maven runs above their acquisition, their write-back children's fd 9
-  close, the two in-house coordinates' and the tracking markers' absence
-  from every seeded job-local repository, and the seed-drop/prune sets
-  agreeing at every site. The fault arms cover a missing `flock`, a broken
-  `mkdir`, a stray queue file, a lock path that is a directory, a timed-out
-  `flock`, and an unexpected `flock` status. The `.size-baseline` entry is
-  re-measured to the workflow's size after the last edit.
+  5400 s budget and 310-minute ceiling, the prelude and write-back tail at
+  both sites — byte-identical apart from two deliberate differences: the
+  wait budget, and the test job's deferred `mvn_status` exits, which the
+  comparison normalizes to `exit 0` in the prelude and cuts off after the
+  write-back in the tail; the MariaDB site's arms keep `exit 0` because its
+  suites fail inline — both jobs' Maven runs above their acquisition, every
+  test-lane `mvn` line ending in `|| mvn_status=$?` with a named stage, the
+  deferred exit that follows the copy and names the failing stage, the
+  tolerated-skip arms exercised with both a green and a red status, their
+  write-back children's fd 9 close, the two in-house coordinates' and the
+  tracking markers' absence from every seeded job-local repository and from
+  both write-back prunes, and the seed-drop/prune sets agreeing at every
+  site. The fault arms cover a missing `flock`, a broken `mkdir`, a stray
+  queue file, a lock path that is a directory, a timed-out `flock`, and an
+  unexpected `flock` status. The `.size-baseline` entry is re-measured to
+  the workflow's size after the last edit.
 - Real-host soak is CI itself: the first pool runs after merge either
   acquire in ticket order or time out with an attributable ticket number.
 
