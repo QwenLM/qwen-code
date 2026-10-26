@@ -24,12 +24,11 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.AbstractExecutorService;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executor;
 import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.FutureTask;
 import java.util.function.Supplier;
 
 /**
@@ -79,7 +78,7 @@ public class AutomationScanner {
     private final ManagedAgentProperties.Automation settings;
     private final Supplier<Long> clock;
     private final String owner;
-    private final ExecutorService pool;
+    private final Executor executor;
 
     @Autowired
     public AutomationScanner(AutomationLedgerStore store,
@@ -94,56 +93,19 @@ public class AutomationScanner {
     AutomationScanner(AutomationLedgerStore store, HarnessConnector harness,
             ManagedAgentProperties.Automation settings,
             Supplier<Long> clock, String owner) {
-        this(store, harness, settings, clock, owner, DIRECT);
+        this(store, harness, settings, clock, owner, Runnable::run);
     }
 
     AutomationScanner(AutomationLedgerStore store, HarnessConnector harness,
             ManagedAgentProperties.Automation settings,
-            Supplier<Long> clock, String owner, ExecutorService pool) {
+            Supplier<Long> clock, String owner, Executor executor) {
         this.store = store;
         this.harness = harness;
         this.settings = settings;
         this.clock = clock;
         this.owner = owner;
-        this.pool = pool;
+        this.executor = executor;
     }
-
-    /**
-     * Runs every submitted task on the submitting thread, in submit order.
-     * Unit tests pin the serial shape of the tick through the same fan-out
-     * and join the production pool takes. It owns no threads, so its
-     * lifecycle surface is inert and never stopped.
-     */
-    private static final ExecutorService DIRECT = new AbstractExecutorService() {
-        @Override
-        public void shutdown() {
-        }
-
-        @Override
-        public List<Runnable> shutdownNow() {
-            return List.of();
-        }
-
-        @Override
-        public boolean isShutdown() {
-            return false;
-        }
-
-        @Override
-        public boolean isTerminated() {
-            return false;
-        }
-
-        @Override
-        public boolean awaitTermination(long timeout, TimeUnit unit) {
-            return true;
-        }
-
-        @Override
-        public void execute(Runnable task) {
-            task.run();
-        }
-    };
 
     @Scheduled(scheduler = "managedAutomationScheduler", fixedDelayString =
             "${qwen.managed-agent.automation.scan-delay:10s}")
@@ -188,7 +150,9 @@ public class AutomationScanner {
         }
         List<Future<Integer>> pending = new ArrayList<>();
         for (Callable<Integer> task : tasks) {
-            pending.add(pool.submit(task));
+            FutureTask<Integer> next = new FutureTask<>(task);
+            executor.execute(next);
+            pending.add(next);
         }
         int fired = 0;
         Throwable failure = null;
@@ -210,6 +174,13 @@ public class AutomationScanner {
                 // still owed to the caller's lease accounting.
                 if (failure == null) {
                     failure = error.getCause();
+                } else {
+                    // Keep the later ones visible: the tick reports the
+                    // first, and a silent drop would hide a second row
+                    // that failed the same way.
+                    LOG.warn("automation row failed alongside an earlier one"
+                            + " failure={}", error.getCause().getMessage(),
+                            error.getCause());
                 }
             }
         }
