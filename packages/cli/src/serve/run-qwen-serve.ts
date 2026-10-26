@@ -111,6 +111,7 @@ import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 // closure check doesn't trace create-sub-session's transitive deps through
 // the run-qwen-serve chunk. The launcher is only needed after listen().
 import { PathMutexRegistry } from './fs/path-mutex-registry.js';
+import { SkillCatalogUnavailableError } from './workspace-service/types.js';
 import { isDeepHealthQuery } from './health-query.js';
 import {
   hostAssignsIpv6Loopback,
@@ -5920,6 +5921,7 @@ async function runQwenServeImpl(
       skillNames: readonly string[],
     ) => {
       let skills: ServeWorkspaceSkillStatus[] | undefined;
+      let catalogAvailable = false;
       try {
         const workspaceRuntime =
           workspaceRegistryForPersistence.current?.getByWorkspaceCwd(workspace);
@@ -5928,7 +5930,12 @@ async function runQwenServeImpl(
             route: 'skill settings persistence',
             workspaceCwd: workspace,
           });
-        if (status?.initialized) skills = status.skills;
+        if (status?.initialized) {
+          skills = status.skills;
+          // An untrusted workspace's catalog omits Extension Skills, so an
+          // unresolved name there is not evidence that the name is invalid.
+          catalogAvailable = isWorkspaceTrustedForPersistence(workspace);
+        }
       } catch {
         // Preserve the legacy name heuristic when the catalog is unavailable.
       }
@@ -5954,7 +5961,7 @@ async function runQwenServeImpl(
           skillsByAuthoredName.has(authored) ? undefined : skill,
         );
       }
-      return skillNames.map((skillName) => {
+      const identities = skillNames.map((skillName) => {
         const normalized = skillName.trim().toLowerCase();
         const exact = skillsByName.get(normalized);
         if (exact) {
@@ -5992,6 +5999,7 @@ async function runQwenServeImpl(
           resolved: false,
         };
       });
+      return { identities, catalogAvailable };
     };
     // Which standing entries can block is a catalog question (both
     // spellings), while which entry the write removes is a spelling
@@ -6058,10 +6066,9 @@ async function runQwenServeImpl(
         // locks such rows, and a route that persists anyway reports an
         // enable the merged config still denies.
         if (enabled) {
-          const [skillIdentity] = await resolveSkillToggleIdentities(
-            workspace,
-            [skillName],
-          );
+          const {
+            identities: [skillIdentity],
+          } = await resolveSkillToggleIdentities(workspace, [skillName]);
           const block = skillToggleBlockForName(
             fresh,
             blockSkillIdentity(skillIdentity, skillName),
@@ -6137,7 +6144,8 @@ async function runQwenServeImpl(
           'enabled',
         );
         const skillIdentities = enabled
-          ? await resolveSkillToggleIdentities(workspace, skillNames)
+          ? (await resolveSkillToggleIdentities(workspace, skillNames))
+              .identities
           : skillNames.map((name) => ({ name }));
         let next = { disabled: initialDisabled, enabled: initialEnabled };
         const outcomes: PersistDisabledSkillsBatchResult['outcomes'] =
@@ -6239,10 +6247,8 @@ async function runQwenServeImpl(
           ),
           enabled: skillSettingStrings(fresh, USER_SETTING_SCOPE, 'enabled'),
         };
-        const skillIdentities = await resolveSkillToggleIdentities(
-          workspace,
-          skillNames,
-        );
+        const { identities: skillIdentities, catalogAvailable } =
+          await resolveSkillToggleIdentities(workspace, skillNames);
         const writtenName = (index: number) =>
           skillIdentities[index]!.registryName ?? skillIdentities[index]!.name;
         let next = initial;
@@ -6275,6 +6281,9 @@ async function runQwenServeImpl(
           for (const index of pending) {
             const skillName = writtenName(index);
             if (enabled && !skillIdentities[index]!.resolved) {
+              if (!catalogAvailable) {
+                throw new SkillCatalogUnavailableError();
+              }
               outcomes[index] = {
                 skillName,
                 changed: false,

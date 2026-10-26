@@ -1366,6 +1366,7 @@ describe('workspace skill settings persistence', () => {
 
   const captureSkillPersistence = async (
     skills: ServeWorkspaceSkillStatus[],
+    options: { initialized?: boolean; trustedWorkspace?: boolean } = {},
   ) => {
     const originalCreateServeApp = serverModule.createServeApp;
     let deps: Parameters<typeof serverModule.createServeApp>[2];
@@ -1378,7 +1379,7 @@ describe('workspace skill settings persistence', () => {
       queryWorkspaceStatus: vi.fn().mockResolvedValue({
         v: 1,
         workspaceCwd: workspace,
-        initialized: true,
+        initialized: options.initialized ?? true,
         skills,
       }),
     } as unknown as HttpAcpBridge;
@@ -1390,7 +1391,12 @@ describe('workspace skill settings persistence', () => {
         workspace,
         serveWebShell: false,
       },
-      { bridge },
+      {
+        bridge,
+        ...(options.trustedWorkspace !== undefined
+          ? { trustedWorkspace: options.trustedWorkspace }
+          : {}),
+      },
     );
     await handle.runtimeReady;
     expect(deps?.persistDisabledSkills).toBeDefined();
@@ -1731,6 +1737,37 @@ describe('workspace skill settings persistence', () => {
       ],
       settingsChanges: [],
     });
+  });
+
+  it('reports a retryable failure when the catalog is unavailable', async () => {
+    writeSkillSettings([], []);
+    // Block the daemon-local fallback too: it would otherwise answer with a
+    // complete catalog and mask the child's unavailable status.
+    fs.writeFileSync(path.join(workspace, '.qwen', 'skills'), '');
+    const { persistUserSkillActivation } = await captureSkillPersistence(
+      [skillStatus('rust:pdf', 'extension', 'rust')],
+      { initialized: false },
+    );
+
+    await expect(
+      persistUserSkillActivation!(workspace, ['pdf'], true, 'hard'),
+    ).rejects.toMatchObject({ name: 'SkillCatalogUnavailableError' });
+    expect(
+      JSON.parse(fs.readFileSync(path.join(qwenHome, 'settings.json'), 'utf8'))
+        .skills,
+    ).toEqual({ disabled: [] });
+  });
+
+  it('reports a retryable failure for an unresolved name on an untrusted workspace', async () => {
+    writeSkillSettings([], []);
+    const { persistUserSkillActivation } = await captureSkillPersistence(
+      [skillStatus('review', 'bundled')],
+      { trustedWorkspace: false },
+    );
+
+    await expect(
+      persistUserSkillActivation!(workspace, ['pdf'], true, 'hard'),
+    ).rejects.toMatchObject({ name: 'SkillCatalogUnavailableError' });
   });
 
   it('writes the registry spelling on a disable so the enable can remove it', async () => {

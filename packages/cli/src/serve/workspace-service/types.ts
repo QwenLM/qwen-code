@@ -486,6 +486,18 @@ export interface PersistUserSkillActivationResult {
   }>;
 }
 
+/**
+ * The workspace Skill catalog could not be read, or omits Extension Skills
+ * because the workspace is untrusted. Enable requests that cannot resolve a
+ * name in that state are retryable rather than a permanent name defect.
+ */
+export class SkillCatalogUnavailableError extends Error {
+  constructor() {
+    super('The workspace Skill catalog is unavailable. Retry the request.');
+    this.name = 'SkillCatalogUnavailableError';
+  }
+}
+
 export class WorkspaceSkillNotFoundError extends Error {
   constructor(readonly skillName: string) {
     super(`Skill not found: ${skillName}`);

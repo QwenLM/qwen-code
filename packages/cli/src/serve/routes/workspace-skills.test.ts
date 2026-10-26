@@ -16,6 +16,7 @@ import {
 import { getWorkspaceRuntimeCoordinator } from '../workspace-runtime-coordinator.js';
 import { WorkspaceSkillManagementError } from '../workspace-skill-management.js';
 import {
+  SkillCatalogUnavailableError,
   WorkspaceSkillNotFoundError,
   type PersistUserSkillActivationResult,
   type WorkspaceSkillBatchToggleResult,
@@ -1099,6 +1100,26 @@ describe('user Skill activation routes', () => {
       .send({ skillNames: ['  '], state: 'enabled' });
     expect(blankName.body.code).toBe('invalid_skill_name');
     expect(persist).not.toHaveBeenCalled();
+  });
+
+  it('answers 503 when the catalog cannot resolve an enable', async () => {
+    const persist = vi
+      .fn()
+      .mockRejectedValue(new SkillCatalogUnavailableError());
+    const h = createHarness(true, false, {
+      persistUserSkillActivation: persist,
+    });
+
+    const response = await request(h.app)
+      .put('/skills/pdf/activation')
+      .send({ state: 'enabled' });
+
+    expect(response.status).toBe(503);
+    expect(response.body).toMatchObject({
+      code: 'skill_catalog_unavailable',
+      retryable: true,
+    });
+    expect(response.headers['retry-after']).toBe('5');
   });
 
   it('writes a hard disable by default and reconciles every runtime', async () => {

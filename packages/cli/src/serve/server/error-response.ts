@@ -71,7 +71,10 @@ import {
 } from '../acp-session-bridge.js';
 import type { DaemonLogger } from '../daemon-logger.js';
 import { workflowRequestErrorStatus } from '../workflow-errors.js';
-import { mapWorkspaceSkillToggleError } from '../workspace-service/types.js';
+import {
+  mapWorkspaceSkillToggleError,
+  SkillCatalogUnavailableError,
+} from '../workspace-service/types.js';
 import { sendGenerationClosedError } from '../workspace-route-runtime.js';
 import {
   WorkspaceRuntimeInitializationError,
@@ -544,6 +547,15 @@ export function sendBridgeError(
         'This session cannot be resumed with the current execution engine.',
       code: err.errorKind,
       errorKind: err.errorKind,
+    });
+    return;
+  }
+  if (err instanceof SkillCatalogUnavailableError) {
+    res.set('Retry-After', '5');
+    res.status(503).json({
+      error: err.message,
+      code: 'skill_catalog_unavailable',
+      retryable: true,
     });
     return;
   }
