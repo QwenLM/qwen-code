@@ -906,6 +906,60 @@ describe('MCPOAuthProvider', () => {
 
       expect(await getValidToken()).toBeNull();
     });
+
+    it('should return the full token from getValidOAuthToken', async () => {
+      vi.spyOn(Date, 'now').mockReturnValue(1_700_000_000_000);
+      mockStoredToken(expiredToken(), true);
+      mockFetch.mockResolvedValueOnce(jsonResponse(mockRefreshResponse));
+
+      const token = await new MCPOAuthProvider().getValidOAuthToken(
+        'test-server',
+        mockConfig,
+      );
+
+      expect(token).toMatchObject({
+        accessToken: 'new_access_token',
+        expiresAt: 1_700_000_000_000 + mockRefreshResponse.expires_in! * 1000,
+      });
+    });
+
+    it('should share one refresh between concurrent callers', async () => {
+      const tokenStorage = mockStoredToken(expiredToken(), true);
+      // Hold the token endpoint open so every caller overlaps the refresh.
+      let respond!: () => void;
+      mockFetch.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            respond = () => resolve(jsonResponse(mockRefreshResponse));
+          }),
+      );
+
+      // Separate provider instances: the dedupe is process-wide.
+      const calls = Array.from({ length: 5 }, () =>
+        new MCPOAuthProvider().getValidToken('test-server', mockConfig),
+      );
+      await vi.waitFor(() => expect(mockFetch).toHaveBeenCalledOnce());
+      respond();
+
+      expect(await Promise.all(calls)).toEqual(
+        Array(5).fill('new_access_token'),
+      );
+      expect(mockFetch).toHaveBeenCalledOnce();
+      expect(tokenStorage.saveToken).toHaveBeenCalledOnce();
+      expect(tokenStorage.deleteCredentials).not.toHaveBeenCalled();
+    });
+
+    it('should refresh again once the previous refresh has finished', async () => {
+      mockStoredToken(expiredToken(), true);
+      mockFetch
+        .mockResolvedValueOnce(jsonResponse(mockRefreshResponse))
+        .mockResolvedValueOnce(jsonResponse(mockRefreshResponse));
+
+      await getValidToken();
+      await getValidToken();
+
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
   });
 
   describe('PKCE parameter generation', () => {
