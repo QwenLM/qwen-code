@@ -39258,13 +39258,19 @@ describe('Hosted Harness stored definitions', () => {
         payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
       })
       .expect(202);
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', created.body.clientId);
-      expect(status.body.hasActivePrompt).toBe(false);
-      expect(status.body.recoveryBlocked).toBe(true);
-    });
+    // The slow-host settle budget, not vitest's 1 s default: this poll flipped
+    // in CI on a loaded ecs host (#15579, run 40182849995) before the
+    // recovery-blocked state landed.
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', created.body.clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(true);
+      },
+      { timeout: SETTLE_TIMEOUT_MS },
+    );
     write.mockRestore();
     await headers(supertest(server).post(`/session/${SESSION_ID}/detach`)).set(
       'X-Qwen-Client-Id',
@@ -39285,18 +39291,23 @@ describe('Hosted Harness stored definitions', () => {
         driveRuntimeRecovery: true,
       })
       .expect(200);
-    await vi.waitFor(() =>
-      expect(JSON.stringify(recovered)).toContain('RECOVERED_ORIGINAL_SKILL'),
+    await vi.waitFor(
+      () =>
+        expect(JSON.stringify(recovered)).toContain('RECOVERED_ORIGINAL_SKILL'),
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     expect(JSON.stringify(recovered)).not.toContain('never ran');
     expect(JSON.stringify(recovered)).toContain('Tool output truncated.');
     expect(JSON.stringify(recovered).length).toBeLessThan(201000);
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(replacement).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', loaded.body.clientId);
-      expect(status.body.hasActivePrompt).toBe(false);
-      expect(status.body.recoveryBlocked).toBe(false);
-    });
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(replacement).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', loaded.body.clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(false);
+      },
+      { timeout: SETTLE_TIMEOUT_MS },
+    );
   });
 });
