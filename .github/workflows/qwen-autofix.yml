@@ -4381,7 +4381,7 @@ jobs:
           LIVE_MAX_ROUND="$(jq -r --arg key "${LIVE_REARM_KEY}" --argjson start "${LIVE_ROUND_START}" 'map(select(.win == $key)) | map(.round) | max // $start' <<< "${LIVE_MARKS}")"
           LIVE_BUDGET_FLOOR="$(jq -r --arg ab "${AUTOFIX_BOT}" '[ .[] | select((.user.login // "") == $ab) | select((.body // "") as $b | ($b | contains("<!-- takeover-ack engaged -->")) or (($b | contains("<!-- autofix-rearm -->")) and (($b | contains("<!-- autofix-eval ")) | not))) | .created_at ] | max // ""' "${WORKDIR}/ic.json" 2> /dev/null || echo '')"
           LIVE_ROUND_BUDGET="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg f "${LIVE_BUDGET_FLOOR}" '[ .[] | select((.user.login // "") == $ab) | select((.created_at // "") >= $f) | ((.body // "") | [ scan("<!-- autofix-round-budget ([1-9][0-9]?) -->") ] | .[] | .[0]) ] | last // "0"' "${WORKDIR}/ic.json" 2> /dev/null || echo '0')"
-          [[ "${LIVE_ROUND_BUDGET}" =~ ^[0-9]{1,2}$ ]] || LIVE_ROUND_BUDGET=0
+          [[ "${LIVE_ROUND_BUDGET}" =~ ^[0-9]{1,2}$ && "${LIVE_TAKEOVER}" == 'true' ]] || LIVE_ROUND_BUDGET=0
           LIVE_ATTEMPTS="$(jq -r --arg f "${LIVE_BUDGET_FLOOR}" '[.[] | select(.win != "none" and .win >= $f) | "\(.ts)|\(.round)"] | unique | length' <<< "${LIVE_MARKS}" 2> /dev/null || echo 0)"
           [[ "${LIVE_ATTEMPTS}" =~ ^[0-9]+$ ]] || LIVE_ATTEMPTS=0
           # The head a sibling last judged, mirrored from the scan's RED_HEAD
