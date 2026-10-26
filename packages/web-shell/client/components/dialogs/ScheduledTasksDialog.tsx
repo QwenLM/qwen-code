@@ -25,6 +25,7 @@ import {
 } from 'lucide-react';
 import {
   useWorkspaceActions,
+  type DaemonAutofixPrWatch,
   type DaemonScheduledTask,
   type DaemonScheduledTaskRun,
 } from '@qwen-code/web-shell/daemon-react-sdk';
@@ -57,6 +58,16 @@ import {
   type TranslateFn,
 } from './scheduledTasksSchedule';
 import styles from './ScheduledTasksDialog.module.css';
+import { AutofixPrWatchSummary } from '../autofixPr/AutofixPrWatchSummary';
+import {
+  autofixPrWatchesKey,
+  useAutofixPrWatches,
+} from '../../hooks/useAutofixPrWatches';
+import {
+  parseAutofixPrTick,
+  stopCommand,
+  watchOfTask,
+} from '../../utils/autofixPrWatches';
 
 /** Localized absolute timestamp, resilient to a bad epoch value. */
 function safeLocaleString(ms: number): string {
@@ -174,6 +185,9 @@ interface ScheduledTasksDialogProps {
    * command and the request carries it. An older daemon would drop the field
    * silently, so it is never sent without the capability. */
   gateAvailable?: boolean;
+  /** The daemon advertises `autofix_pr_watches`: the card of an
+   * `/autofix-pr` watch's task shows the watch's state, and can stop it. */
+  autofixPrWatchesAvailable?: boolean;
   onError: (error: unknown, fallback: string) => void;
 }
 
@@ -622,6 +636,7 @@ export function ScheduledTasksDialog({
   currentSession,
   currentSessionSchedulingAvailable,
   gateAvailable,
+  autofixPrWatchesAvailable = false,
   onError,
 }: ScheduledTasksDialogProps) {
   const { t } = useI18n();
@@ -659,6 +674,31 @@ export function ScheduledTasksDialog({
     : undefined;
 
   const [tasks, setTasks] = useState<DaemonScheduledTask[] | null>(null);
+  // The watches of the workspaces whose tasks are listed, read only while a
+  // task of an `/autofix-pr` watch is among them.
+  const watchWorkspaceIds = useMemo(
+    () =>
+      lockedWorkspace
+        ? [lockedWorkspaceId]
+        : isMultiWorkspace
+          ? operableWorkspaces.map(workspaceActionId)
+          : [undefined],
+    [
+      isMultiWorkspace,
+      lockedWorkspace,
+      lockedWorkspaceId,
+      operableWorkspaces,
+      workspaceActionId,
+    ],
+  );
+  const hasWatchTask = !!tasks?.some(
+    (task) => parseAutofixPrTick(task.prompt) !== null,
+  );
+  const autofixPrWatches = useAutofixPrWatches(
+    autofixPrWatchesAvailable && hasWatchTask,
+    watchWorkspaceIds,
+  );
+  const [stoppingWatch, setStoppingWatch] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   // The task whose manual "run now" is mid-flight (switching to its session +
@@ -1356,6 +1396,28 @@ export function ScheduledTasksDialog({
       }
     },
     [actions, onError, reload, t],
+  );
+
+  // Stopping a watch is the skill's: `/autofix-pr stop <n>` runs in the
+  // session that owns the watch, as the user would type it there, and asks
+  // what it asks there.
+  const handleStopWatch = useCallback(
+    async (
+      task: DaemonScheduledTask,
+      watch: DaemonAutofixPrWatch,
+      sessionId: string,
+    ) => {
+      if (stoppingWatch !== null || runningTaskId !== null) return;
+      setStoppingWatch(taskKey(task));
+      try {
+        await onRunPrompt(stopCommand(watch), sessionId);
+      } catch (err) {
+        onError(err, t('autofixPrWatches.stopFailed'));
+      } finally {
+        if (mountedRef.current) setStoppingWatch(null);
+      }
+    },
+    [onError, onRunPrompt, runningTaskId, stoppingWatch, t],
   );
 
   const handleRunNow = useCallback(
@@ -2076,6 +2138,35 @@ export function ScheduledTasksDialog({
                   {t('scheduledTasks.gate.cardPrefix')} {task.gate}
                 </div>
               )}
+              {(() => {
+                const match = watchOfTask(
+                  task.prompt,
+                  autofixPrWatches.lists.get(
+                    autofixPrWatchesKey(task.workspaceId),
+                  )?.watches,
+                );
+                if (!match) return null;
+                // Stopped in the session that owns the watch, which a task
+                // left behind by a take-over is not.
+                const owner =
+                  !match.stale && task.sessionId === match.watch.session
+                    ? task.sessionId
+                    : null;
+                return (
+                  <AutofixPrWatchSummary
+                    watch={match.watch}
+                    stale={match.stale}
+                    showPr
+                    stopping={stoppingWatch === taskKey(task)}
+                    {...(owner
+                      ? {
+                          onStop: () =>
+                            void handleStopWatch(task, match.watch, owner),
+                        }
+                      : {})}
+                  />
+                );
+              })()}
 
               <div className={styles.cardFooter}>
                 {isMultiWorkspace && task.workspaceCwd && (
