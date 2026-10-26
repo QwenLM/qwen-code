@@ -960,6 +960,50 @@ describe('MCPOAuthProvider', () => {
 
       expect(mockFetch).toHaveBeenCalledTimes(2);
     });
+
+    it('should refresh with the stored client id when the config has none', async () => {
+      const tokenStorage = mockStoredToken(expiredToken(), true);
+      mockFetch.mockResolvedValueOnce(jsonResponse(mockRefreshResponse));
+
+      const result = await new MCPOAuthProvider().getValidToken('test-server', {
+        enabled: true,
+      });
+
+      expect(result).toBe('new_access_token');
+      const body = new URLSearchParams(mockFetch.mock.calls[0][1].body);
+      expect(body.get('client_id')).toBe('test-client-id');
+      expect(tokenStorage.saveToken).toHaveBeenCalledWith(
+        'test-server',
+        expect.objectContaining({ accessToken: 'new_access_token' }),
+        'test-client-id',
+        'https://auth.example.com/token',
+        undefined,
+      );
+    });
+
+    it('should resolve every waiter to null when a shared refresh fails', async () => {
+      const tokenStorage = mockStoredToken(expiredToken(), true);
+      vi.mocked(tokenStorage.deleteCredentials).mockResolvedValue(undefined);
+      let respond!: () => void;
+      mockFetch.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            respond = () => resolve(formResponse('error=invalid_grant', 400));
+          }),
+      );
+
+      const calls = Array.from({ length: 3 }, () => getValidToken());
+      await vi.waitFor(() => expect(mockFetch).toHaveBeenCalledOnce());
+      respond();
+
+      expect(await Promise.all(calls)).toEqual([null, null, null]);
+      expect(tokenStorage.deleteCredentials).toHaveBeenCalledOnce();
+
+      // The failed flight is gone: the next caller starts a fresh one.
+      mockFetch.mockResolvedValueOnce(jsonResponse(mockRefreshResponse));
+      expect(await getValidToken()).toBe('new_access_token');
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
   });
 
   describe('PKCE parameter generation', () => {

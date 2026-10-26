@@ -208,9 +208,21 @@ function mockTokenStorage(getCredentials: Mock) {
 const noStoredCredentials = () =>
   mockTokenStorage(vi.fn().mockResolvedValue(null));
 
+/**
+ * Connect-time token lookups go through `getValidOAuthToken`; a provider that
+ * only stubs `getValidToken` gets one that wraps its result in a token.
+ */
 function mockOAuthProvider<T extends Obj>(provider: T): T {
+  const getValidToken = provider['getValidToken'] as Mock | undefined;
+  const impl: Obj = { ...provider };
+  if (getValidToken && !impl['getValidOAuthToken']) {
+    impl['getValidOAuthToken'] = async (...args: unknown[]) => {
+      const accessToken = await getValidToken(...args);
+      return accessToken ? { accessToken, tokenType: 'Bearer' } : null;
+    };
+  }
   vi.mocked(MCPOAuthProvider).mockImplementation(
-    () => ({ ...provider }) as unknown as MCPOAuthProvider,
+    () => ({ ...impl }) as unknown as MCPOAuthProvider,
   );
   return provider;
 }

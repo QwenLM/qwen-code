@@ -1014,15 +1014,19 @@ export class MCPOAuthProvider {
       return token;
     }
 
+    // A dynamically registered client has no clientId in the user's config;
+    // only the stored credentials know it.
+    const clientId = config.clientId ?? credentials.clientId;
+
     // Try to refresh if we have a refresh token
-    if (token.refreshToken && config.clientId && credentials.tokenUrl) {
+    if (token.refreshToken && clientId && credentials.tokenUrl) {
       try {
         debugLogger.info(
           `Refreshing expired token for MCP server: ${serverName}`,
         );
 
         const newTokenResponse = await this.refreshAccessToken(
-          config,
+          { ...config, clientId },
           token.refreshToken,
           credentials.tokenUrl,
           credentials.mcpServerUrl,
@@ -1044,7 +1048,7 @@ export class MCPOAuthProvider {
         await this.tokenStorage.saveToken(
           serverName,
           newToken,
-          config.clientId,
+          clientId,
           credentials.tokenUrl,
           credentials.mcpServerUrl,
         );
