@@ -215,6 +215,7 @@ describe('no-AK integration CI wiring', () => {
       './qwen-live-m2-steering.test.ts',
       './cli/_prompt-latency-policy.test.ts',
       './cli/agent-loop-parity.test.ts',
+      './cli/acp-agent-loop-parity.test.ts',
       './cli/hosted-harness-process.test.ts',
       './cli/daemon-invocation-context.test.ts',
       './cli/headless-workflow-skill.test.ts',

@@ -27,6 +27,7 @@ final class WorkspaceRuntimeResolver {
     private final com.alibaba.qwen.code.managedagent.persistence.ResidentWorkspaces residents;
     private final Map<Storage, Mount> mounts = new LinkedHashMap<>();
     private final String boundSessionIsolationClass;
+    private final ManagedAgentProperties.ManagedExtensions managedExtensions;
 
     WorkspaceRuntimeResolver(AgentStateStore sessions, WorkspaceExecutionStore authority,
             ManagedAgentProperties properties) {
@@ -36,6 +37,10 @@ final class WorkspaceRuntimeResolver {
     WorkspaceRuntimeResolver(AgentStateStore sessions, WorkspaceExecutionStore authority,
             ManagedAgentProperties properties, SshWorkspaceService ssh) {
         this.ssh = ssh;
+        this.managedExtensions = properties.getManagedExtensions();
+        if (managedExtensions.isEnabled() && !properties.getExtensions().isEnabled()) {
+            throw new IllegalStateException("Managed extension execution requires extensions to be enabled");
+        }
         this.sessions = sessions;
         this.authority = authority;
         var broker = properties.getRuntimeBroker();
@@ -102,13 +107,13 @@ final class WorkspaceRuntimeResolver {
         }
         ContextBinding binding = session.workspace();
         if (ssh != null && ssh.runtimeStorage(binding) != null) {
-            if (hook) {
+            if (hook && !managedExtensions.isEnabled()) {
                 throw WorkspaceExecutionStore.unavailable();
             }
             ssh.verifyBinding(binding);
             return new Resolved(binding, new RuntimeScope(session.tenantId(), binding.getWorkspaceId(),
                     Long.toString(binding.getWorkspaceGeneration()), ssh.runtimeStorage(binding).mountRoot(),
-                    WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session").withLifecycleAuthority(lifecycle));
+                    extensionDigest(String.valueOf(ssh.runtimeStorage(binding).registration().get("platform"))), "session").withLifecycleAuthority(lifecycle));
         }
         var resident = residents.find(binding);
         if (resident != null) {
@@ -122,7 +127,20 @@ final class WorkspaceRuntimeResolver {
         verifyMountIntact(mount);
         return new Resolved(binding, new RuntimeScope(session.tenantId(), binding.getWorkspaceId(),
                 Long.toString(binding.getWorkspaceGeneration()), mount.root().toString(),
-                WorkspaceExecutionProfile.CAPABILITY_DIGEST, boundSessionIsolationClass).withLifecycleAuthority(lifecycle));
+                extensionDigest(System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).contains("mac") ? "darwin" : System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT)), boundSessionIsolationClass).withLifecycleAuthority(lifecycle));
+    }
+
+    private String extensionDigest(String platform) {
+        if (!managedExtensions.isEnabled()) {
+            return WorkspaceExecutionProfile.CAPABILITY_DIGEST;
+        }
+        if ("linux".equals(platform)) {
+            return com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.LINUX_CAPABILITY_DIGEST;
+        }
+        if ("darwin".equals(platform) && "developer-process-group".equals(managedExtensions.getMode())) {
+            return com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.DEVELOPER_CAPABILITY_DIGEST;
+        }
+        throw new IllegalStateException("Native extension execution requires an explicit supported platform mode");
     }
 
     /**

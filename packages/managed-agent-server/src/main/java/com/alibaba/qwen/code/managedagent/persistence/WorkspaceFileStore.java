@@ -46,7 +46,9 @@ public class WorkspaceFileStore {
     public record Entry(String path, String name, String kind) {
     }
 
-    public record QueryResult(String scopeRevision, String directory, List<Entry> entries, boolean truncated) {
+    public record QueryResult(String scopeRevision, String directory, List<Entry> entries, boolean truncated,
+            @com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL)
+            Integer maxUploadBytes) {
     }
 
     public record FileResult(String scopeRevision, String path, String name, String mimeType,
@@ -64,8 +66,10 @@ public class WorkspaceFileStore {
                     || entry.path() == null || entry.name() == null || entry.kind() == null || !List.of("file", "directory").contains(entry.kind()))) {
                 throw unavailable();
             }
+            Integer maximum = mapper.convertValue(result.files().get("maxUploadBytes"), Integer.class);
             return new QueryResult(result.revision(), directory, List.of(entries),
-                    Boolean.TRUE.equals(result.files().get("truncated")));
+                    Boolean.TRUE.equals(result.files().get("truncated")),
+                    Integer.valueOf(WorkspaceFileProcess.MAX_UPLOAD_BYTES).equals(maximum) ? maximum : null);
         } catch (IllegalArgumentException error) {
             throw unavailable();
         }
@@ -89,7 +93,7 @@ public class WorkspaceFileStore {
         }
     }
 
-    private record Scope(ContextBinding binding, String kind, String revision) {
+    record Scope(ContextBinding binding, String kind, String revision) {
     }
 
     private record Exchange(String revision, Map<String, Object> files) {
@@ -143,7 +147,7 @@ public class WorkspaceFileStore {
         }
     }
 
-    private Scope scope(String tenant, String actor, String workspace, String cwd) {
+    Scope scope(String tenant, String actor, String workspace, String cwd) {
         return Objects.requireNonNull(transaction.execute(status -> {
             var binding = registry.resolveForCreation(tenant, actor, new WorkspaceSelection(workspace, cwd)).binding();
             if (!properties.getHarness().isWorkspaceFilesEnabled()) {

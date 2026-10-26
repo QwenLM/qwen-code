@@ -1222,17 +1222,26 @@ jobs:
         env:
           LINT_HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
         run: |-
-          # Blobless, and not optional: `Report test growth` may already have
-          # fetched the merge base with --filter=blob:none, leaving commits and
-          # trees without blobs. A later plain fetch then dies resolving
-          # thin-pack deltas against blobs this checkout does not have
-          # (`fatal: missing blob object`), and continue-on-error turns that
-          # into a silent full scan. lint-scope reads only commits and trees.
-          # The unset is load-bearing: the filter is recorded on the remote and
-          # later fetches in this checkout must stay ordinary.
-          git -c extensions.partialClone=origin -c remote.origin.promisor=true \
-            fetch --no-tags --depth=100 --filter=blob:none \
+          # Blobless: `Report test growth` may already have fetched the merge
+          # base with --filter=blob:none, and a plain fetch then dies resolving
+          # thin-pack deltas against blobs this checkout lacks. lint-scope
+          # reads only commits and trees.
+          partial=(-c extensions.partialClone=origin -c remote.origin.promisor=true)
+          git "${partial[@]}" fetch --no-tags --depth=100 --filter=blob:none \
             origin "${LINT_BASE_SHA}" "${LINT_HEAD_SHA}"
+          # Deepen until Git can prove the merge base. A fixed 100-commit
+          # window expires in about a day at this merge rate, after which every
+          # longer-lived PR silently paid for a full scan; each deepen is
+          # blobless, so the extra transfer is trees, not the whole pack.
+          for _attempt in 1 2 3; do
+            if git merge-base --all "${LINT_BASE_SHA}" HEAD >/dev/null 2>&1; then
+              break
+            fi
+            git "${partial[@]}" fetch --no-tags --deepen=300 --filter=blob:none \
+              origin "${LINT_BASE_SHA}" "${LINT_HEAD_SHA}" || break
+          done
+          # Recorded on the remote by the filtered fetch; later fetches in this
+          # checkout must stay ordinary.
           git config --unset remote.origin.partialclonefilter || true
 
       # Avoid setup-node downloads on ECS, where nodejs.org may be unreachable
