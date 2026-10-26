@@ -10,7 +10,23 @@
 set -uo pipefail
 
 settings="${RUNNER_TEMP:?}/setup-java-m2/settings.xml"
-mirror="${MAVEN_MIRROR_URL:-https://maven.aliyun.com/repository/public}"
+
+# The pool hosts sit in Alibaba Cloud, where the internal mirror answers from
+# inside the VPC and does not consume the instance's public bandwidth — the
+# 100 Mbps egress cap that made concurrent dependency fetches drop packets.
+# Hosted runners and the Hong Kong hosts cannot reach it, so probe first and
+# keep the public mirror as the answer when the probe fails.
+mirror="${MAVEN_MIRROR_URL:-}"
+if [[ -z "${mirror}" ]]; then
+  # Probe a real artifact: the mirror answers 404 for its directory root, so
+  # the root is not evidence that the tree is served.
+  if curl -fsS --max-time 5 -o /dev/null \
+    http://mirrors.cloud.aliyuncs.com/maven/repository/public/junit/junit/4.13.2/junit-4.13.2.pom; then
+    mirror='http://mirrors.cloud.aliyuncs.com/maven/repository/public'
+  else
+    mirror='https://maven.aliyun.com/repository/public'
+  fi
+fi
 
 mkdir -p -- "$(dirname -- "${settings}")" || {
   echo "::error::cannot create $(dirname -- "${settings}")"

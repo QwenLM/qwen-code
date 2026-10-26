@@ -996,16 +996,12 @@ describe('managed session header', () => {
   it('refuses a newer format or reader requirement', () => {
     headerError({ formatVersion: 2 }, /is not supported by this reader/);
     headerError(
-      { minimumReader: 'managed-session/2' },
-      /is not supported by this reader/,
-    );
-    headerError(
       { minimumReader: 'managed-session/3' },
       /is not supported by this reader/,
     );
   });
 
-  it('accepts an older minimum-reader requirement and returns its token', () => {
+  it('accepts supported minimum-reader requirements and returns their tokens', () => {
     expect(
       parseManagedSessionHeader(header({ minimumReader: 'managed-session/0' }))
         .minimumReader,
@@ -1014,6 +1010,10 @@ describe('managed session header', () => {
       parseManagedSessionHeader(header({ minimumReader: 'managed-session/1' }))
         .minimumReader,
     ).toBe('managed-session/1');
+    expect(
+      parseManagedSessionHeader(header({ minimumReader: 'managed-session/2' }))
+        .minimumReader,
+    ).toBe('managed-session/2');
   });
 
   it('refuses a malformed minimum-reader token', () => {

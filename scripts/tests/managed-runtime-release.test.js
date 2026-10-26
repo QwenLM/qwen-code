@@ -486,6 +486,19 @@ describe('Managed runtime publication gates', () => {
     );
   });
 
+  it('isolates server test classes without filtering or bypassing release verification', () => {
+    const verification = step(
+      'Verify the executable JAR and publication profile',
+    ).run;
+    expect(verification).toContain('-DforkCount=1');
+    expect(verification).toContain('-DreuseForks=false');
+    expect(verification).toContain('clean verify -Pcentral-release');
+    expect(verification).not.toMatch(
+      /-D(?:test=|groups=|excludedGroups=|skipTests|maven\.test\.(?:skip|failure\.ignore)|surefire\.(?:includes|excludes|rerunFailingTestsCount))/,
+    );
+    expect(verification).not.toContain('-DargLine=');
+  });
+
   it('keeps auxiliary executable JARs out of Central without changing their ordinary build attachment', () => {
     const pom = fs.readFileSync(
       path.join(root, 'packages/managed-agent-server/pom.xml'),
