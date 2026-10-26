@@ -605,7 +605,9 @@ export function backgroundFixHolding(
   const notItsAgent = (fix: BackgroundFix) =>
     fix.agentId === null || fix.agentId !== callerAgentId;
   const running = containing(fixes, file, notItsAgent);
-  if (running) return live(running);
+  // One found late is dropped here, into `settling`: looked up there next.
+  const held = running ? live(running) : undefined;
+  if (held) return held;
   // One whose stopped agent may still be writing there.
   return containing(settling, file, notItsAgent);
 }

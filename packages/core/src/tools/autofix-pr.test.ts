@@ -1465,6 +1465,18 @@ describe('background fixes', () => {
     expect(backgroundFixHolding(inside, null)).toBeUndefined();
   });
 
+  it('holds the worktree on the very lookup that finds a fix late, its stopped agent not settled', async () => {
+    await granted();
+    const fix = await launched();
+    // Suspended past its refresh: no timer has run yet.
+    vi.setSystemTime(Date.now() + 3 * 60_000);
+    const inside = path.join(worktree, 'src', 'a.ts');
+    expect(backgroundFixHolding(inside, null)).toBe(fix);
+    expect(fix.done).toBe(true);
+    expect(cancel).toHaveBeenCalledWith('agent-1');
+    fix.bodySettled();
+  });
+
   it('is never late before its heartbeat starts: its helper may wait its turn', async () => {
     await granted();
     const fix = new BackgroundFix(
