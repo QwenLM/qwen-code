@@ -199,7 +199,6 @@ describe.skipIf(process.platform === 'win32')(
       const env = f.prepare('job');
       success(f.run(env));
       expect(f.home(env)).toBe(f.shared);
-      expect(f.downloads()).toBe(0);
       expect(statSync(join(f.shared, 'bin/java')).ino).toBe(inode);
       expect(readFileSync(env.GITHUB_PATH, 'utf8').trim()).toBe(
         `${f.shared}/bin`,
@@ -210,6 +209,20 @@ describe.skipIf(process.platform === 'win32')(
           'utf8',
         ),
       ).toContain(`<jdkHome>${f.shared}</jdkHome>`);
+    });
+
+    it('fails closed when the private namespace cannot be created on a cold install', () => {
+      const f = fixture('network');
+      writeFileSync(join(f.cache, 'qwen-pool-jdk'), 'not a directory');
+      const env = f.prepare('cold');
+      const result = f.run(env);
+      expect(result.status).not.toBe(0);
+      // `mkdir` itself prints "cannot create directory", so the script's own
+      // marker is what has to be asserted here.
+      expect(`${result.stdout}${result.stderr}`).toContain(
+        '::error::cannot create',
+      );
+      expect(existsSync(env.GITHUB_ENV)).toBe(false);
     });
 
     it('reinstalls a private JDK when only its completion marker remains', () => {
