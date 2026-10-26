@@ -84,6 +84,7 @@ import type {
   ChannelLoopInput,
   ChannelLoopToolHandler,
   SessionRouter,
+  SessionTarget,
 } from '@qwen-code/channel-base';
 
 const CHAT_ID = 'group-openid-1';
@@ -150,6 +151,12 @@ function makeLoopController(): {
       },
     ),
     listForTarget: vi.fn(async () => [...jobs.values()]),
+    listForChat: vi.fn(async (channelName: string, chatId: string) =>
+      [...jobs.values()].filter(
+        (job) =>
+          job.channelName === channelName && job.target.chatId === chatId,
+      ),
+    ),
     disable: vi.fn(async (id: string) => {
       const job = jobs.get(id);
       if (!job) return false;
@@ -165,10 +172,11 @@ function makeChannel(): {
   ch: InstanceType<typeof QQChannel>;
   raw: RawChannel;
   controller: ChannelLoopController;
+  jobs: Map<string, ChannelLoop>;
   getLoopHandler: () => ChannelLoopToolHandler | undefined;
   getChunkListener: () => ChunkListener | undefined;
 } {
-  const { controller } = makeLoopController();
+  const { controller, jobs } = makeLoopController();
   const { bridge, getLoopHandler, getChunkListener } = makeBridge();
   const ch = new QQChannel(
     'test-bot',
@@ -192,7 +200,31 @@ function makeChannel(): {
   raw.accessToken = 'test-token';
   raw.tokenExpiresAt = Date.now() + 3_600_000;
   raw.chatTypeMap.set(CHAT_ID, 'group');
-  return { ch, raw, controller, getLoopHandler, getChunkListener };
+  return { ch, raw, controller, jobs, getLoopHandler, getChunkListener };
+}
+
+type GroupLifecycleHandler = 'handleGroupDelRobot' | 'handleGroupMsgToggle';
+
+async function invokeGroupLifecycleHandler(
+  ch: InstanceType<typeof QQChannel>,
+  handler: GroupLifecycleHandler,
+  ...args: unknown[]
+): Promise<void> {
+  const pvt = ch as unknown as Record<
+    string,
+    (...params: unknown[]) => unknown
+  >;
+  await pvt[handler]!(...args);
+}
+
+function isProactiveTargetSupported(
+  ch: InstanceType<typeof QQChannel>,
+  target: SessionTarget,
+): boolean {
+  const pvt = ch as unknown as {
+    supportsProactiveTarget(target: SessionTarget): boolean;
+  };
+  return pvt.supportsProactiveTarget(target);
 }
 
 function loopJob(): ChannelLoop {
@@ -367,7 +399,7 @@ describe('QQ channel proactive loops', () => {
     expect(fallbackBody).not.toHaveProperty('msg_seq');
   });
 
-  it('surfaces active messages being disabled instead of dropping the result', async () => {
+  it('refuses to start a loop when the group active-message toggle is off', async () => {
     const { ch, raw } = makeChannel();
     await bindSession(raw);
     // The anchor must not turn the loop delivery into a passive reply that
@@ -377,14 +409,91 @@ describe('QQ channel proactive loops', () => {
       timestamp: Date.now(),
     });
     raw.groupActiveMsgEnabled.set(CHAT_ID, false);
-    mockPrompt.mockResolvedValue('Scheduled summary');
 
-    await expect(ch.runLoopPrompt(loopJob())).rejects.toMatchObject({
-      name: 'ChannelProactiveDeliveryError',
-      disposition: 'permanent',
-      message: expect.stringMatching(/Active messages disabled/u),
-    });
+    await expect(ch.runLoopPrompt(loopJob())).rejects.toThrow(
+      'Channel does not support proactive loop messages for this chat target.',
+    );
+    // The gate runs before the turn starts, so no unattended agent turn is
+    // burned on a target that cannot receive the result.
+    expect(mockPrompt).not.toHaveBeenCalled();
     expect(mockSendQQMessage).not.toHaveBeenCalled();
+  });
+
+  it('refuses to create a loop when the group active-message toggle is off', async () => {
+    const { raw, controller, getLoopHandler } = makeChannel();
+    const sessionId = await bindSession(raw);
+    raw.groupActiveMsgEnabled.set(CHAT_ID, false);
+
+    const result = await getLoopHandler()!.create(sessionId, {
+      cron: '*/5 * * * *',
+      prompt: 'drink water',
+    });
+
+    expect(result).toEqual({
+      text: 'This channel does not support proactive loop messages for this chat target.',
+      isError: true,
+    });
+    expect(controller.createForTarget).not.toHaveBeenCalled();
+  });
+
+  it('does not apply the group active-message toggle to direct messages', () => {
+    const { ch, raw } = makeChannel();
+    // A stale/foreign group toggle entry must never block a C2C target.
+    raw.groupActiveMsgEnabled.set('dm-chat-1', false);
+    raw.chatTypeMap.set('dm-chat-1', 'c2c');
+
+    expect(
+      isProactiveTargetSupported(ch, {
+        channelName: 'test-bot',
+        senderId: SENDER_ID,
+        chatId: 'dm-chat-1',
+        isGroup: false,
+      }),
+    ).toBe(true);
+  });
+
+  it('disables the group loops when the bot is removed from the group', async () => {
+    const { ch, raw, controller, jobs, getLoopHandler } = makeChannel();
+    const sessionId = await bindSession(raw);
+    await getLoopHandler()!.create(sessionId, {
+      cron: '*/5 * * * *',
+      prompt: 'drink water',
+    });
+    expect(jobs.get('job-1')?.enabled).toBe(true);
+
+    await invokeGroupLifecycleHandler(ch, 'handleGroupDelRobot', {
+      group_openid: CHAT_ID,
+      op_member_openid: 'admin-1',
+      timestamp: Date.now(),
+    });
+
+    expect(controller.listForChat).toHaveBeenCalledWith('test-bot', CHAT_ID);
+    expect(controller.disable).toHaveBeenCalledWith('job-1');
+    expect(jobs.get('job-1')?.enabled).toBe(false);
+  });
+
+  it('disables the group loops when active messages are toggled off', async () => {
+    const { ch, raw, controller, jobs, getLoopHandler } = makeChannel();
+    const sessionId = await bindSession(raw);
+    await getLoopHandler()!.create(sessionId, {
+      cron: '*/5 * * * *',
+      prompt: 'drink water',
+    });
+
+    await invokeGroupLifecycleHandler(
+      ch,
+      'handleGroupMsgToggle',
+      {
+        group_openid: CHAT_ID,
+        op_member_openid: 'admin-1',
+        timestamp: Date.now(),
+      },
+      false,
+    );
+
+    expect(controller.listForChat).toHaveBeenCalledWith('test-bot', CHAT_ID);
+    expect(controller.disable).toHaveBeenCalledWith('job-1');
+    expect(jobs.get('job-1')?.enabled).toBe(false);
   });
 
   it('reports a disabled active-message toggle as a permanent proactive failure', async () => {
@@ -396,6 +505,34 @@ describe('QQ channel proactive loops', () => {
         { channelName: 'test-bot', type: 'chat', id: CHAT_ID },
         'Scheduled summary',
       )
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+
+    expect(isChannelProactiveDeliveryError(err)).toBe(true);
+    expect(err).toMatchObject({ disposition: 'permanent' });
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+  });
+
+  it('keeps a mid-flight disabled toggle permanent on the delivery arm', async () => {
+    const { ch, raw } = makeChannel();
+    raw.groupActiveMsgEnabled.set(CHAT_ID, false);
+    const target: SessionTarget = {
+      channelName: 'test-bot',
+      senderId: SENDER_ID,
+      chatId: CHAT_ID,
+      isGroup: true,
+    };
+
+    // The target gate can pass before the toggle flips; the delivery arm must
+    // still classify the resulting ACTIVE_MSG_DISABLED as permanent.
+    const err: unknown = await (
+      ch as unknown as {
+        pushProactive(target: SessionTarget, text: string): Promise<void>;
+      }
+    )
+      .pushProactive(target, 'Scheduled summary')
       .then(
         () => undefined,
         (error: unknown) => error,

@@ -323,6 +323,13 @@ export interface ChannelLoopController {
     channelName: string,
     target: SessionTarget,
   ): Promise<ChannelLoop[]>;
+  /**
+   * List every loop in a chat regardless of sender, thread or route. Optional:
+   * `listForTarget` needs the creator's exact target, which chat-wide state
+   * changes (the bot was removed from a group, a group's active messages were
+   * disabled) cannot supply.
+   */
+  listForChat?(channelName: string, chatId: string): Promise<ChannelLoop[]>;
   disable(id: string): Promise<boolean>;
   validateCron(cron: string): void;
   nextFireTime?(job: ChannelLoop): Date;
@@ -4824,6 +4831,25 @@ export abstract class ChannelBase {
     }
 
     return `Loop ${job.id}: ${job.cron}`;
+  }
+
+  /**
+   * Disable every enabled loop in a chat. Adapters call this when the chat can
+   * no longer receive proactive messages (the bot was removed from a group, or
+   * a group's active messages were disabled), so orphaned loops stop burning
+   * unattended turns. Needs the chat-scoped controller lookup; returns how many
+   * jobs were disabled.
+   */
+  protected async disableLoopJobsForChat(chatId: string): Promise<number> {
+    if (!this.loopController?.listForChat) return 0;
+    const jobs = await this.loopController.listForChat(this.name, chatId);
+    let disabled = 0;
+    for (const job of jobs) {
+      if (job.enabled && (await this.loopController.disable(job.id))) {
+        disabled++;
+      }
+    }
+    return disabled;
   }
 
   private async listLoopsFromTool(

@@ -230,6 +230,10 @@ class TestChannel extends ChannelBase {
     return this.stateDir;
   }
 
+  disableLoopJobsForChatForTest(chatId: string): Promise<number> {
+    return this.disableLoopJobsForChat(chatId);
+  }
+
   formatMarkdownForTest(text: string, sourceLabel?: string): string {
     return this.formatMarkdownAttributedText(text, sourceLabel);
   }
@@ -24049,6 +24053,87 @@ describe('ChannelBase', () => {
         expect(bridge.prompt).toHaveBeenCalledTimes(2);
       });
       expect(ch.preflightTexts).toEqual(['while loop runs']);
+    });
+
+    describe('disableLoopJobsForChat', () => {
+      const target: SessionTarget = {
+        channelName: 'test-chan',
+        chatId: 'chat1',
+        isGroup: true,
+      };
+      const job = (overrides: Partial<ChannelLoop>): ChannelLoop => ({
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: { ...target, senderId: 'user1' },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'User 1',
+        createdAt: '2026-06-30T01:02:03.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+        ...overrides,
+      });
+
+      it('disables every enabled loop in the chat regardless of sender', async () => {
+        const disable = vi.fn(async () => true);
+        const listForChat = vi.fn(async () => [
+          job({ id: 'job-1' }),
+          job({ id: 'job-2', enabled: false }),
+          job({ id: 'job-3', target: { ...target, senderId: 'user2' } }),
+        ]);
+        const ch = createChannel(
+          {},
+          {
+            loopController: {
+              create: vi.fn(),
+              listForTarget: vi.fn(),
+              listForChat,
+              disable,
+              validateCron: vi.fn(),
+            },
+          },
+        );
+
+        await expect(ch.disableLoopJobsForChatForTest('chat1')).resolves.toBe(
+          2,
+        );
+        expect(listForChat).toHaveBeenCalledWith('test-chan', 'chat1');
+        expect(disable.mock.calls.map(([id]) => id)).toEqual([
+          'job-1',
+          'job-3',
+        ]);
+      });
+
+      it('does nothing when the controller has no chat-scoped lookup', async () => {
+        const listForTarget = vi.fn(async () => [job({})]);
+        const disable = vi.fn(async () => true);
+        const ch = createChannel(
+          {},
+          {
+            loopController: {
+              create: vi.fn(),
+              listForTarget,
+              disable,
+              validateCron: vi.fn(),
+            },
+          },
+        );
+
+        await expect(ch.disableLoopJobsForChatForTest('chat1')).resolves.toBe(
+          0,
+        );
+        expect(listForTarget).not.toHaveBeenCalled();
+        expect(disable).not.toHaveBeenCalled();
+      });
+
+      it('returns 0 when no loop controller is configured', async () => {
+        await expect(
+          createChannel({}).disableLoopJobsForChatForTest('chat1'),
+        ).resolves.toBe(0);
+      });
     });
   });
 });

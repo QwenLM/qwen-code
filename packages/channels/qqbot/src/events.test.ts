@@ -112,6 +112,9 @@ vi.mock('@qwen-code/channel-base', () => ({
     protected isProactivePromptTurn(_sessionId: string): boolean {
       return false;
     }
+    protected disableLoopJobsForChat(_chatId: string): Promise<number> {
+      return Promise.resolve(0);
+    }
     protected prepareThenHandleInbound(
       env: unknown,
       prepare: () => Promise<boolean | void>,

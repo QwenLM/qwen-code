@@ -1131,6 +1131,19 @@ export class QQChannel extends ChannelBase {
     return true;
   }
 
+  /**
+   * A group whose active-message toggle is known to be off rejects every
+   * proactive send, so loops/webhooks/background results must not target it.
+   * Direct messages never consult the group toggle map.
+   */
+  protected override supportsProactiveTarget(target: SessionTarget): boolean {
+    if (!super.supportsProactiveTarget(target)) return false;
+    const isGroup =
+      target.isGroup === true ||
+      this.chatTypeMap.get(target.chatId) === 'group';
+    return !isGroup || this.groupActiveMsgEnabled.get(target.chatId) !== false;
+  }
+
   async sendMessage(chatId: string, text: string): Promise<void> {
     const inboundContext = this.inboundReplyContext.getStore();
     const latest = this.replyMsgId.get(chatId);
@@ -5391,16 +5404,24 @@ export class QQChannel extends ChannelBase {
         } else if (t === 'GROUP_ADD_ROBOT') {
           this.handleGroupAddRobot(msg['d'] as unknown as GroupAddRobotEvent);
         } else if (t === 'GROUP_DEL_ROBOT') {
-          this.handleGroupDelRobot(msg['d'] as unknown as GroupDelRobotEvent);
+          void this.handleGroupDelRobot(
+            msg['d'] as unknown as GroupDelRobotEvent,
+          ).catch((error: unknown) =>
+            this.logGroupEventError('handleGroupDelRobot', error),
+          );
         } else if (t === 'GROUP_MSG_REJECT') {
-          this.handleGroupMsgToggle(
+          void this.handleGroupMsgToggle(
             msg['d'] as unknown as GroupMsgToggleEvent,
             false,
+          ).catch((error: unknown) =>
+            this.logGroupEventError('handleGroupMsgToggle', error),
           );
         } else if (t === 'GROUP_MSG_RECEIVE') {
-          this.handleGroupMsgToggle(
+          void this.handleGroupMsgToggle(
             msg['d'] as unknown as GroupMsgToggleEvent,
             true,
+          ).catch((error: unknown) =>
+            this.logGroupEventError('handleGroupMsgToggle', error),
           );
         } else if (t === 'RESUMED') {
           // RESUME success — the process did NOT restart, all in-memory
@@ -6253,6 +6274,12 @@ export class QQChannel extends ChannelBase {
 
   // ── Group management events ────────────────────────────────────
 
+  private logGroupEventError(handler: string, error: unknown): void {
+    process.stderr.write(
+      `[QQ:${this.name}] ${handler} failed: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 200)}\n`,
+    );
+  }
+
   private handleGroupAddRobot(event: GroupAddRobotEvent): void {
     const groupId = event.group_openid;
     if (!groupId) {
@@ -6274,7 +6301,7 @@ export class QQChannel extends ChannelBase {
     );
   }
 
-  private handleGroupDelRobot(event: GroupDelRobotEvent): void {
+  private async handleGroupDelRobot(event: GroupDelRobotEvent): Promise<void> {
     const groupId = event.group_openid;
     if (!groupId) {
       process.stderr.write(
@@ -6357,16 +6384,17 @@ export class QQChannel extends ChannelBase {
         cleanedStreams++;
       }
     }
+    const disabledLoops = await this.disableLoopJobsForChat(groupId);
     this.saveQQState();
     process.stderr.write(
-      `[QQ:${this.name}] Removed from group ${sanitizeLogText(groupId, 64)} by ${sanitizeLogText(event.op_member_openid, 64)}, cleaned ${cleanedStreams} stream(s) and ${cleanedCron} cron buffer(s)\n`,
+      `[QQ:${this.name}] Removed from group ${sanitizeLogText(groupId, 64)} by ${sanitizeLogText(event.op_member_openid, 64)}, cleaned ${cleanedStreams} stream(s), ${cleanedCron} cron buffer(s), and disabled ${disabledLoops} loop(s)\n`,
     );
   }
 
-  private handleGroupMsgToggle(
+  private async handleGroupMsgToggle(
     event: GroupMsgToggleEvent,
     enabled: boolean,
-  ): void {
+  ): Promise<void> {
     if (!event.group_openid) {
       process.stderr.write(
         `[QQ:${this.name}] Group msg toggle dropped: missing group_openid\n`,
@@ -6384,5 +6412,15 @@ export class QQChannel extends ChannelBase {
     process.stderr.write(
       `[QQ:${this.name}] Active msg ${enabled ? 'enabled' : 'disabled'} for group ${sanitizeLogText(event.group_openid, 64)}\n`,
     );
+    if (!enabled) {
+      // A disabled group rejects every active send, so its loops can never
+      // deliver. Retire them instead of letting each fire burn an agent turn.
+      const disabledLoops = await this.disableLoopJobsForChat(
+        event.group_openid,
+      );
+      process.stderr.write(
+        `[QQ:${this.name}] Disabled ${disabledLoops} loop(s) for group ${sanitizeLogText(event.group_openid, 64)} after active messages were disabled\n`,
+      );
+    }
   }
 }
