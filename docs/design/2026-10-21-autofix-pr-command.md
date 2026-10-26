@@ -1239,7 +1239,9 @@ round. So every background agent at a worktree has an attempt tied to the
 round that prepared it, and while one lives no other agent, teammate or
 workflow agent launches there, in the foreground or the background. The session's own `edit`,
 `write_file` and `notebook_edit` into the worktree — the path resolved as
-the kernel will, links and all — ask the user whatever the approval mode,
+the kernel will, each link followed as written before a `..` after it, and
+also as Windows will, which folds `..` as text first; inside either way is
+inside — ask the user whatever the approval mode,
 as the fix agent builds and runs what is there without asking; an agent,
 teammate or workflow agent the session starts in its own directory after a
 `/cd` into the worktree is refused. Only this process

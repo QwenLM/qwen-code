@@ -1539,6 +1539,22 @@ describe('background fixes', () => {
       fs.symlinkSync(path.join(worktree, 'new.sh'), path.join(out, 'dangling'));
       expect(held(path.join(out, 'dangling'))).toBe(true);
       expect(held(path.join(out, 'other.ts'))).toBe(false);
+      // A link whose own target goes through a link and `..`, followed as
+      // written, not folded as text.
+      fs.mkdirSync(path.join(worktree, 'a', 'b'), { recursive: true });
+      fs.symlinkSync('a/b', path.join(worktree, 'S'));
+      fs.symlinkSync('S/../../src', path.join(worktree, 'LD'));
+      fs.symlinkSync(path.join(worktree, 'LD'), path.join(out, 'via'));
+      expect(held(path.join(out, 'via', 'index.ts'))).toBe(true);
+      // Inside as Windows reads it, which folds `escape\..` as text.
+      fs.symlinkSync(out, path.join(worktree, 'escape'));
+      expect(
+        held(`${path.join(worktree, 'escape')}${path.sep}..${path.sep}x.json`),
+      ).toBe(true);
+      // A backslash is a character of a name outside Windows.
+      if (process.platform !== 'win32') {
+        expect(held(`${worktree}/a\\..\\..\\..\\b/conftest.py`)).toBe(true);
+      }
     } finally {
       fs.rmSync(out, { recursive: true, force: true });
     }

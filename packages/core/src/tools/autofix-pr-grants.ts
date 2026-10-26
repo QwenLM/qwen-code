@@ -534,10 +534,7 @@ function canonicalPathOf(file: string): string {
     ? file
     : `${process.cwd()}${path.sep}${file}`;
   const { root } = path.parse(absolute);
-  const pending = absolute
-    .slice(root.length)
-    .split(/[\\/]+/)
-    .filter(Boolean);
+  const pending = segmentsOf(absolute.slice(root.length));
   let current = root;
   for (let hops = 0; pending.length > 0; ) {
     const segment = pending.shift()!;
@@ -559,16 +556,15 @@ function canonicalPathOf(file: string): string {
       current = next;
       continue;
     }
-    // The link's target, then what came after it.
-    const resolved = path.resolve(current, target);
-    const { root: linkRoot } = path.parse(resolved);
-    pending.unshift(
-      ...resolved
-        .slice(linkRoot.length)
-        .split(/[\\/]+/)
-        .filter(Boolean),
-    );
-    current = linkRoot;
+    // The link's target as written, then what came after it: from its own
+    // root when absolute, else from the directory holding the link.
+    if (path.isAbsolute(target)) {
+      const { root: linkRoot } = path.parse(target);
+      current = linkRoot;
+      pending.unshift(...segmentsOf(target.slice(linkRoot.length)));
+    } else {
+      pending.unshift(...segmentsOf(target));
+    }
   }
   // In the file system's own case, through the deepest part that exists.
   const rest: string[] = [];
@@ -582,6 +578,14 @@ function canonicalPathOf(file: string): string {
   }
 }
 
+/** A path's names, split where this platform separates them: a backslash
+ * is a character of a name outside Windows. */
+function segmentsOf(p: string): string[] {
+  return p
+    .split(process.platform === 'win32' ? /[\\/]+/ : /\/+/)
+    .filter(Boolean);
+}
+
 /**
  * The attempt whose worktree holds `file` (the worktree itself, or a path
  * in it), for a caller other than its own agent: what such a caller writes
@@ -591,15 +595,21 @@ export function backgroundFixHolding(
   file: string,
   callerAgentId: string | null,
 ): BackgroundFix | undefined {
-  const target = canonicalPathOf(file);
+  if (fixes.size === 0) return undefined;
+  // As the kernel resolves it, and as Windows does, which drops `x\\..` as
+  // text before it opens the file: inside either way is inside.
+  const targets = [canonicalPathOf(file), canonicalPathOf(path.resolve(file))];
   for (const fix of fixes.values()) {
-    const rel = path.relative(fix.worktree, target);
-    // `..foo` is a name inside it, not its parent.
-    const inside =
-      rel === '' ||
-      (rel !== '..' &&
-        !rel.startsWith(`..${path.sep}`) &&
-        !path.isAbsolute(rel));
+    const inside = targets.some((target) => {
+      const rel = path.relative(fix.worktree, target);
+      // `..foo` is a name inside it, not its parent.
+      return (
+        rel === '' ||
+        (rel !== '..' &&
+          !rel.startsWith(`..${path.sep}`) &&
+          !path.isAbsolute(rel))
+      );
+    });
     // Before the agent attaches, it has no id: no caller is it.
     const caller = fix.agentId === null || fix.agentId !== callerAgentId;
     if (inside && caller) return live(fix);
