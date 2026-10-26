@@ -910,6 +910,10 @@ export class LlmClient {
     return true;
   }
 
+  isTelemetrySwapInProgress(): boolean {
+    return this.telemetrySwap !== undefined;
+  }
+
   /**
    * The swap committed: drop the armed undo without restoring. The replayed
    * history legitimately belongs to the session the user is now on, and a

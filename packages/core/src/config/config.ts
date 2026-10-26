@@ -10805,6 +10805,11 @@ export class Config {
     if (!this.workflowModeReady) {
       throw new Error('Workflow mode is not initialized');
     }
+    if (this.getLlmClient().isTelemetrySwapInProgress()) {
+      throw new Error(
+        'A session switch is in progress. Try again in a moment.',
+      );
+    }
     const epoch = this.workflowModeEpoch;
     const recorder = this.chatRecordingService;
     const write = this.workflowModeWriteTail.then(async () => {
@@ -10885,7 +10890,9 @@ export class Config {
     );
   }
 
-  captureWorkflowModeState(): WorkflowModeSnapshot {
+  async captureWorkflowModeState(): Promise<WorkflowModeSnapshot> {
+    // The swap latch blocks new writes; include any write already in flight.
+    await this.workflowModeWriteTail;
     return this.isWorkflowModeSupported()
       ? this.workflowModeContext.snapshot()
       : new WorkflowModeContext().snapshot();

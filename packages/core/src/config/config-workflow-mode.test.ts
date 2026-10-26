@@ -344,7 +344,7 @@ describe('Config durable workflow mode', () => {
     await config.setWorkflowMode(true);
     config.prepareWorkflowMode(null).onModelRequestDispatched?.();
     const oldId = config.getSessionId();
-    const snapshot = config.captureWorkflowModeState();
+    const snapshot = await config.captureWorkflowModeState();
     const oldToken = config.prepareWorkflowMode(null);
     const recorder = config.getChatRecordingService()!;
     let finish!: () => void;
@@ -371,10 +371,106 @@ describe('Config durable workflow mode', () => {
     config.startNewSession(oldId);
     config.restoreWorkflowModeState(snapshot);
     expect(config.getWorkflowMode().effective).toBe(true);
-    expect(config.captureWorkflowModeState()).toEqual(snapshot);
+    expect(await config.captureWorkflowModeState()).toEqual(snapshot);
     expect(config.getChatRecordingService()?.getSessionWorkflowMode()).toBe(
       true,
     );
+  });
+
+  it.each(['commitTelemetrySwap', 'abortTelemetrySwap'] as const)(
+    'rejects mode writes until a session switch ends with %s',
+    async (settle) => {
+      const config = createConfig();
+      await config.initialize();
+      await config.setWorkflowMode(false);
+      const client = config.getLlmClient();
+      const listener = vi.fn();
+      config.onWorkflowModeChange(listener);
+
+      expect(client.beginTelemetrySwap()).toBe(true);
+      for (const enabled of [true, false]) {
+        await expect(config.setWorkflowMode(enabled)).rejects.toThrow(
+          'A session switch is in progress',
+        );
+      }
+      expect(config.getWorkflowMode().requested).toBe(false);
+      expect(listener).not.toHaveBeenCalled();
+      expect((await modeRecords(config)).map((r) => r.systemPayload)).toEqual([
+        { enabled: false },
+      ]);
+
+      client[settle]();
+      await expect(config.setWorkflowMode(true)).resolves.toMatchObject({
+        requested: true,
+        effective: true,
+      });
+      expect((await modeRecords(config)).map((r) => r.systemPayload)).toEqual([
+        { enabled: false },
+        { enabled: true },
+      ]);
+    },
+  );
+
+  it('includes in-flight and queued mode writes in the rollback snapshot', async () => {
+    const config = createConfig();
+    await config.initialize();
+    await config.setWorkflowMode(false);
+    const oldId = config.getSessionId();
+    const recorder = config.getChatRecordingService()!;
+    const record = recorder.recordSessionWorkflowMode.bind(recorder);
+    let finish!: () => void;
+    const held = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const write = vi
+      .spyOn(recorder, 'recordSessionWorkflowMode')
+      .mockImplementationOnce(async (enabled) => {
+        await held;
+        return record(enabled);
+      });
+    const pending = config.setWorkflowMode(true);
+    await vi.waitFor(() => expect(write).toHaveBeenCalledOnce());
+    const queuedOff = config.setWorkflowMode(false);
+    const queuedOn = config.setWorkflowMode(true);
+    const client = config.getLlmClient();
+    expect(client.beginTelemetrySwap()).toBe(true);
+    let captured = false;
+    const snapshotPromise = Promise.resolve(
+      config.captureWorkflowModeState(),
+    ).then((snapshot) => {
+      captured = true;
+      return snapshot;
+    });
+    await Promise.resolve();
+    const capturedBeforeWriteFinished = captured;
+    finish();
+    const acknowledgments = await Promise.all([pending, queuedOff, queuedOn]);
+    expect(capturedBeforeWriteFinished).toBe(false);
+    expect(acknowledgments.map((state) => state.requested)).toEqual([
+      true,
+      false,
+      true,
+    ]);
+    const snapshot = await snapshotPromise;
+    expect(snapshot.requested).toBe(true);
+    const data = await config.getSessionService().loadSession(oldId);
+    config.startNewSession();
+    config.startNewSession(oldId, data);
+    config.restoreWorkflowModeState(snapshot);
+    client.abortTelemetrySwap();
+    const live = config.getWorkflowMode();
+    expect(live.effective).toBe(true);
+    expect((await modeRecords(config)).map((r) => r.systemPayload)).toEqual([
+      { enabled: false },
+      { enabled: true },
+      { enabled: false },
+      { enabled: true },
+    ]);
+
+    await config.closeSessionWriter();
+    const cold = createConfig({ sessionId: oldId, sessionData: data });
+    await cold.initialize();
+    expect(cold.getWorkflowMode()).toEqual(live);
   });
 
   it('does not share mode authority with derived, managed, remote or unrecorded owners', async () => {
