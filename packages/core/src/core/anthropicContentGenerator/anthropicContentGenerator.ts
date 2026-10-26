@@ -1325,9 +1325,8 @@ export class AnthropicContentGenerator implements ContentGenerator {
   }
 
   /**
-   * Names the caller required. `allowedFunctionNames` wins when it names a
-   * declared tool; otherwise every declared tool is in scope, which is what
-   * mode ANY means when the caller did not narrow the set.
+   * Names declared tools permitted by the caller. Without an allowlist, every
+   * declared tool is in scope.
    */
   private schemaToolNames(
     request: GenerateContentParameters,
@@ -1340,8 +1339,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
       request.config?.toolConfig?.functionCallingConfig?.allowedFunctionNames;
     if (!allowed || allowed.length === 0) return declared;
     const allowedSet = new Set(allowed);
-    const named = declared.filter((name) => allowedSet.has(name));
-    return named.length > 0 ? named : allowed.filter((name) => name.length > 0);
+    return declared.filter((name) => allowedSet.has(name));
   }
 
   private appendSchemaToolInstruction(
@@ -1355,7 +1353,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
         ', ',
       )}.` +
       (names.length === 1 && names[0] === 'respond_in_schema'
-        ? ' If you do not call a tool, reply with only a JSON object of that same shape and no other text.'
+        ? ' If you do not call a tool, reply with only a raw JSON object of that same shape, with no Markdown fences or prose.'
         : '');
     const last = messages.at(-1);
     if (!last || last.role !== 'user') {

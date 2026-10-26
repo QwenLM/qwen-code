@@ -3386,6 +3386,7 @@ describe('AnthropicContentGenerator', () => {
         expect(messageText(req)).toContain('respond_in_schema');
         expect(messageText(req)).toContain(SCHEMA_INSTRUCTION);
         expect(messageText(req)).toContain('JSON object');
+        expect(messageText(req)).toContain('no Markdown fences or prose');
         const tools = req['tools'] as Array<{ strict?: boolean }>;
         expect(tools).toHaveLength(1);
         expect(tools[0]?.strict).toBeUndefined();
@@ -3398,6 +3399,9 @@ describe('AnthropicContentGenerator', () => {
       'claude-opus-5',
       'claude-sonnet-5',
       'claude-opus-4-6',
+      'claude-sonnet-4-5',
+      'claude-opus-4-5',
+      'vertex_ai/claude-sonnet-4.5',
       'claude-fable-5',
       'claude-mythos-5',
       'claude-opus-5-6',
@@ -3436,6 +3440,15 @@ describe('AnthropicContentGenerator', () => {
       expect(req['tool_choice']).toEqual({ type: 'auto' });
       expect(messageText(req)).toContain('run_action');
       expect(messageText(req)).not.toContain('If you do not call a tool');
+    });
+
+    it('does not instruct the model to call an undeclared allowed tool', async () => {
+      const req = await sendToolMode('claude-opus-5-5', 'ANY', {
+        tools: schemaTools(['respond_in_schema']),
+        allowedFunctionNames: ['missing_tool'],
+      });
+      expect(req['tool_choice']).toEqual({ type: 'auto' });
+      expect(messageText(req)).toBe('Provide the title Local result.');
     });
 
     it('names only allowedFunctionNames in the fallback instruction', async () => {

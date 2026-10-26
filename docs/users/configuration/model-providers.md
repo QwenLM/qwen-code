@@ -393,7 +393,8 @@ Claude Opus 5.5, Sonnet 5.5, Fable 5.1, and Mythos 5.1 reject forced
 tool selection. For structured side queries, Qwen Code uses automatic tool
 selection with an explicit schema-response instruction on these models. Models
 that support forced selection retain it. Automatic selection does not guarantee
-a tool call; JSON side queries can also read a JSON object from the response text.
+a tool call; JSON side queries can also read a raw JSON object from the response text,
+without Markdown fences or surrounding prose.
 See [Anthropic's tool-choice restrictions](https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools#forcing-tool-use).
 
 ```json
