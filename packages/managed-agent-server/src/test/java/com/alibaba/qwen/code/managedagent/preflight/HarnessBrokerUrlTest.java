@@ -90,13 +90,15 @@ class HarnessBrokerUrlTest {
         assertFalse(declaredApproximation("accepted",
                 HarnessBrokerUrl.Verdict.NOT_ORIGIN, "http://127.0.0.1:4182"));
         assertFalse(declaredApproximation("invalid",
+                HarnessBrokerUrl.Verdict.NOT_ORIGIN, "http://"));
+        assertFalse(declaredApproximation("invalid",
                 HarnessBrokerUrl.Verdict.ACCEPTED, "https://127.0.0.1:4182"));
         assertFalse(declaredApproximation("accepted",
                 HarnessBrokerUrl.Verdict.INVALID, "https://xn--bcher-kva.1:8443"));
     }
 
     // The two exceptions HarnessBrokerUrl documents, and only those: a
-    // scheme or path read before the host may name another refusal for a
+    // non-http(s) scheme read before the host may name another refusal for a
     // URL the Harness finds invalid, and an https xn-- host stays
     // unclassified, since IDNA alone decides whether the Harness takes it.
     // For an xn-- host the fixture records the verdict where the URL parser
@@ -105,7 +107,8 @@ class HarnessBrokerUrlTest {
             HarnessBrokerUrl.Verdict verdict, String url) {
         boolean idna = url.toLowerCase(Locale.ROOT).contains("xn--");
         return switch (verdict) {
-            case NOT_ORIGIN -> expected.equals("invalid");
+            case NOT_ORIGIN -> expected.equals("invalid")
+                    && !url.regionMatches(true, 0, "http", 0, 4);
             case UNCLASSIFIED -> idna && url.regionMatches(true, 0, "https:", 0, 6)
                     && expected.equals("accepted");
             case ACCEPTED, INVALID, PLAIN_OUTSIDE_LOOPBACK -> false;
