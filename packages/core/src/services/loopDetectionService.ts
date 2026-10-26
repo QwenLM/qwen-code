@@ -218,14 +218,9 @@ const ADAPTIVE_CAP_HARD_MULTIPLIER = 10;
  * feed set (`modelRequestAccepted`/`hasToolCalls`/`loopGuardFedCallIds`) — so
  * a new restart-style event lands in both of them or in neither.
  *
- * It is deliberately not consumed by the loop detector, which has no call
- * site here: that module's own per-turn cap rollback stays `Retry`-only, and
- * `checkAlwaysOnSafeties` already treats a fallback as a no-op through its
- * non-`ToolCallRequest` early return (a fallback cannot have streamed calls,
- * and clearing the detector's streak evidence per round-trip would silence
- * the consecutive-identical and stagnation guards). A restart-style event
- * added here does NOT propagate to the detector; add it there separately and
- * justify it.
+ * The loop detector handles Retry and ModelFallback explicitly: a fallback
+ * rolls back only uncommitted calls, preserving completed round-trips. A new
+ * restart event needs separate handling and verification there.
  */
 export function isAttemptRestartEvent(event: ServerLlmStreamEvent): boolean {
   return (
@@ -1053,15 +1048,20 @@ export class LoopDetectionService {
       return false;
     }
 
-    // A retry re-streams the failed attempt's tool calls, which would
-    // double-count against both always-on guards. Roll the per-turn cap back
+    // A fallback before any new tool calls must preserve the prior completed
+    // round-trips' guard evidence. Otherwise, retry/fallback discards pending
+    // calls that must not be counted again. Roll the per-turn cap back
     // to the last committed round-trip (never below it — prior round-trips
     // stay) and drop the consecutive-identical streak so the replayed attempt
     // cannot push it over the threshold. The adaptive cap's repeat tracker is
     // cleared (consistent with how the heuristic path clears
-    // globalToolCallCounts on retry): the replayed calls re-populate it, and a
+    // globalToolCallCounts on reset): the replayed calls re-populate it, and a
     // stuck pattern simply re-accumulates toward the threshold.
-    if (event.type === LlmEventType.Retry) {
+    if (
+      event.type === LlmEventType.Retry ||
+      (event.type === LlmEventType.ModelFallback &&
+        this.turnToolCallTotal > this.turnToolCallTotalCommitted)
+    ) {
       this.dropPendingReminders();
       this.turnToolCallTotal = this.turnToolCallTotalCommitted;
       this.resetToolCallCount();

@@ -50,6 +50,7 @@ import type {
   GoalTurnPermit,
 } from '../goals/goal-protocol.js';
 import { getProviderToolCallId } from './toolCallIdUtils.js';
+import { ModelStreamAttemptState } from './model-stream-attempt-state.js';
 import { toolCallArgumentsWereIncomplete } from './incomplete-tool-call-args.js';
 
 const ERROR_REPORT_HISTORY_TAIL_COUNT = 8;
@@ -779,6 +780,7 @@ export class Turn {
             this.goalContext,
             sendOptions,
           );
+      const attemptState = new ModelStreamAttemptState();
 
       for await (const streamEvent of responseStream) {
         if (signal?.aborted) {
@@ -786,36 +788,38 @@ export class Turn {
           return;
         }
 
-        // Handle the new RETRY event: clear accumulated state from the
-        // previous attempt to avoid duplicate tool calls and stale metadata.
-        if (streamEvent.type === 'retry') {
+        const transition = attemptState.accept(streamEvent);
+        if (
+          transition.type === 'attempt_reset' &&
+          transition.reason === 'retry'
+        ) {
           this.pendingToolCalls.length = 0;
           this.pendingCitations.clear();
           this.finishReason = undefined;
+          this.currentResponseId = undefined;
           yield {
             type: LlmEventType.Retry,
-            retryInfo: streamEvent.retryInfo,
-            retryDiagnostics: streamEvent.retryDiagnostics,
-            isContinuation: streamEvent.isContinuation,
+            retryInfo: transition.retryInfo.retryInfo,
+            retryDiagnostics: transition.retryInfo.retryDiagnostics,
+            isContinuation: transition.retryInfo.isContinuation,
           };
-          continue; // Skip to the next event in the stream
+          continue;
         }
 
-        // Surface model fallback transitions from the chat stream as the
-        // top-level ModelFallback event. The UI uses this to notify the user
-        // that the system switched to a different model due to capacity issues.
-        if (streamEvent.type === 'model_fallback') {
-          // Clear accumulated state from the failed model's partial response
+        if (
+          transition.type === 'attempt_reset' &&
+          transition.reason === 'model_fallback'
+        ) {
           this.pendingToolCalls.length = 0;
           this.pendingCitations.clear();
           this.finishReason = undefined;
           this.currentResponseId = undefined;
           yield {
             type: LlmEventType.ModelFallback,
-            fromModel: streamEvent.info.fromModel,
-            toModel: streamEvent.info.toModel,
-            statusCode: streamEvent.info.statusCode,
-            fallbackIndex: streamEvent.info.fallbackIndex,
+            fromModel: transition.info.fromModel,
+            toModel: transition.info.toModel,
+            statusCode: transition.info.statusCode,
+            fallbackIndex: transition.info.fallbackIndex,
           };
           continue;
         }
@@ -825,19 +829,16 @@ export class Turn {
         // connected. This bridge is the primary path for auto-compaction
         // events; manual /compress emits its own ChatCompressed in
         // LlmClient.tryCompressChat.
-        if (streamEvent.type === 'compressed') {
+        if (transition.type === 'compressed') {
           yield {
             type: LlmEventType.ChatCompressed,
-            value: streamEvent.info,
+            value: transition.info,
           };
           continue;
         }
 
-        // Assuming other events are chunks with a `value` property
-        const resp = streamEvent.value as GenerateContentResponse;
-        if (!resp) continue; // Skip if there's no response body
+        const resp = transition.response;
 
-        // Track the current response ID for tool call correlation
         if (resp.responseId) {
           this.currentResponseId = resp.responseId;
         }
@@ -861,9 +862,7 @@ export class Turn {
           };
         }
 
-        // Handle function calls (requesting tool execution)
-        const functionCalls = resp.functionCalls ?? [];
-        for (const fnCall of functionCalls) {
+        for (const fnCall of transition.functionCalls) {
           const event = this.handlePendingFunctionCall(fnCall);
           if (event) {
             yield event;
@@ -874,8 +873,7 @@ export class Turn {
           this.pendingCitations.add(citation);
         }
 
-        // Check if response was truncated or stopped for various reasons
-        const finishReason = resp.candidates?.[0]?.finishReason;
+        const finishReason = transition.finishReason;
 
         // This is the key change: Only yield 'Finished' if there is a finishReason.
         if (finishReason) {
