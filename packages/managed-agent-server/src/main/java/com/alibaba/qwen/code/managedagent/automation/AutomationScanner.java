@@ -183,7 +183,10 @@ public class AutomationScanner {
             }
         }
         if (additionalFailures > 0) {
-            LOG.warn("automation scan had additionalFailures={} sample={}",
+            LOG.warn("automation scan had additionalFailures={} sample={}"
+                    + " (observed, not submitted-row totals: an interrupted"
+                    + " join stops early; the count excludes the rethrown"
+                    + " first failure, the sample includes it)",
                     additionalFailures, failureSample);
         }
         if (failure instanceof Error error) {

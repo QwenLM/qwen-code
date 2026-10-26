@@ -91,7 +91,7 @@ scanner-threads`，它仍是正确的后续方向。
   `aBacklogDeeperThanThePoolStillCompletesWithinTheTick`、
   `aTickJoinsEveryRowBeforeItReportsOneFailure`、
   `theScannerWorksRowsOnItsOwnBoundedPool`、
-  `theScannerRowPoolFinishesInFlightWorkInsteadOfInterruptingIt`、
+  `theScannerRowPoolNeverInterruptsRowTasksAndClosesWithoutWaiting`、
   `theScannerRowPoolStillBootsWithAnUnvalidatedSizeWhileAutomationIsOff`、
   `twoDefinitionsSharingOneSessionBothFireWhenDueTogether`、
   `aRowBothQueriesReturnIsSubmittedOnce`、

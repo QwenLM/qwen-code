@@ -107,7 +107,7 @@ follow-up if probe durations keep saturating
   `aBacklogDeeperThanThePoolStillCompletesWithinTheTick`,
   `aTickJoinsEveryRowBeforeItReportsOneFailure`,
   `theScannerWorksRowsOnItsOwnBoundedPool`,
-  `theScannerRowPoolFinishesInFlightWorkInsteadOfInterruptingIt`,
+  `theScannerRowPoolNeverInterruptsRowTasksAndClosesWithoutWaiting`,
   `theScannerRowPoolStillBootsWithAnUnvalidatedSizeWhileAutomationIsOff`,
   `twoDefinitionsSharingOneSessionBothFireWhenDueTogether`,
   `aRowBothQueriesReturnIsSubmittedOnce`,
