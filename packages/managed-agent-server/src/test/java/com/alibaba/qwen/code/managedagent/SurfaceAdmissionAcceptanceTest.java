@@ -1541,7 +1541,7 @@ class SurfaceAdmissionAcceptanceTest {
             query.add("workspaceId=workspace");
             query.add("cwdRelative=.");
             query.add("path=file.txt");
-            query.add("expectedScopeRevision=" + "a".repeat(64));
+            query.add("expectedScopeRevision=" + digest());
             query.add("uploadId=11111111-1111-4111-8111-111111111111");
         }
         if (entry.capabilities().contains(Capability.EXTENSION_PUBLISH)) {
