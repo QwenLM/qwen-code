@@ -22,6 +22,14 @@ import {
   CONTRACT_DOCUMENT_PREDECESSOR,
 } from '../contract-version-utils.js';
 
+// Actions exports GITHUB_STEP_SUMMARY and RUNNER_NAME for every step. The
+// workflow bodies spawned below append host-health postmortems to any
+// non-empty summary path, so an inherited value would publish fabricated
+// records into the live job's summary. Blank, not unset: the guards read
+// [ -n "${GITHUB_STEP_SUMMARY:-}" ], and every spawn spreads this env.
+process.env.GITHUB_STEP_SUMMARY = '';
+process.env.RUNNER_NAME = 'ecs-runner-7';
+
 const brokerTestPattern = ['Test*', '*Test', '*Tests', '*TestCase']
   .map((pattern) => `com/alibaba/qwen/code/runtimebroker/**/${pattern}.java`)
   .join(',');
@@ -52,6 +60,14 @@ const seedSites = () =>
   );
 
 describe('SDK Java self-hosted workflow guards', () => {
+  it('keeps the live step summary path out of the spawned bodies', () => {
+    // Every spawn below spreads process.env. Actions exports this path for
+    // every step, so without the blank above each green run would append
+    // fabricated host-health records to the live job's summary.
+    expect(process.env.GITHUB_STEP_SUMMARY).toBe('');
+    expect(process.env.RUNNER_NAME).toBe('ecs-runner-7');
+  });
+
   it('builds native producer prerequisites before either Server test lane', () => {
     const jobs = parse(workflow).jobs;
     for (const name of ['mysql-integration', 'hosted-harness-mysql']) {
@@ -389,6 +405,14 @@ describe('SDK Java self-hosted workflow guards', () => {
       }
     },
   );
+
+  it('discovers a seed site written with or without the trailing /.', () => {
+    for (const site of [
+      'cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo"',
+      'cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo/"',
+    ])
+      expect(site).toContain(SEED_COPY);
+  });
 
   it.skipIf(process.platform !== 'linux')(
     'drops seeded in-house coordinates so Maven writes fresh inodes',
@@ -1569,30 +1593,33 @@ describe('SDK Java self-hosted workflow guards', () => {
         mode: 0o755,
       });
       try {
-        const result = spawnSync(
-          'bash',
-          [
-            '--noprofile',
-            '--norc',
-            '-e',
-            '-c',
-            `result_status=0\n${locked.slice(start)}`,
-          ],
-          {
-            encoding: 'utf8',
-            timeout: 5000,
-            env: {
-              ...process.env,
-              PATH: `${shims}:${process.env.PATH}`,
-              HOME: home,
-              RUNNER_TEMP: runnerTemp,
-              GITHUB_STEP_SUMMARY: summary,
-              RUNNER_NAME: 'ecs-runner-7',
-              SDK_JAVA_M2_SEED_EXISTED: '0',
-              SDK_JAVA_M2_SEED_STATUS: '0',
+        const run = (env) =>
+          spawnSync(
+            'bash',
+            [
+              '--noprofile',
+              '--norc',
+              '-e',
+              '-c',
+              `result_status=0\n${locked.slice(start)}`,
+            ],
+            {
+              encoding: 'utf8',
+              timeout: 5000,
+              env: {
+                ...process.env,
+                PATH: `${shims}:${process.env.PATH}`,
+                HOME: home,
+                RUNNER_TEMP: runnerTemp,
+                GITHUB_STEP_SUMMARY: summary,
+                RUNNER_NAME: 'ecs-runner-7',
+                SDK_JAVA_M2_SEED_EXISTED: '0',
+                SDK_JAVA_M2_SEED_STATUS: '0',
+                ...env,
+              },
             },
-          },
-        );
+          );
+        const result = run({});
         expect(result.error).toBeUndefined();
         expect(result.status, result.stderr).toBe(0);
         expect(result.stdout).toContain(
@@ -1600,6 +1627,13 @@ describe('SDK Java self-hosted workflow guards', () => {
         );
         expect(readFileSync(summary, 'utf8')).toContain(
           'sdk-java cache write-back failed on ecs-runner-7: status 124; host cache present at seed: 0; seed status: 0',
+        );
+        // A replay or local run may not set the summary path at all; the
+        // warning sits outside the guard and the step must stay green.
+        const unset = run({ GITHUB_STEP_SUMMARY: '' });
+        expect(unset.status, unset.stderr).toBe(0);
+        expect(unset.stdout).toContain(
+          '::warning::Maven cache write-back stopped after 300 s',
         );
       } finally {
         rmSync(dir, { recursive: true, force: true });
@@ -1779,27 +1813,30 @@ describe('SDK Java self-hosted workflow guards', () => {
         });
       }
       try {
-        const result = spawnSync(
-          '/bin/bash',
-          ['-e', '-c', `result_status=${resultStatus}\n${run.slice(start)}`],
-          {
-            encoding: 'utf8',
-            timeout: 5000,
-            env: {
-              ...process.env,
-              ...(arm === 'fallback'
-                ? { PATH: `${shims}:${process.env.PATH}` }
-                : {}),
-              HOME: home,
-              RUNNER_TEMP: runnerTemp,
-              GITHUB_WORKSPACE: workspace,
-              GITHUB_STEP_SUMMARY: summary,
-              RUNNER_NAME: 'ecs-runner-7',
-              SDK_JAVA_M2_SEED_EXISTED: '1',
-              SDK_JAVA_M2_SEED_STATUS: '0',
+        const runStep = (env) =>
+          spawnSync(
+            '/bin/bash',
+            ['-e', '-c', `result_status=${resultStatus}\n${run.slice(start)}`],
+            {
+              encoding: 'utf8',
+              timeout: 5000,
+              env: {
+                ...process.env,
+                ...(arm === 'fallback'
+                  ? { PATH: `${shims}:${process.env.PATH}` }
+                  : {}),
+                HOME: home,
+                RUNNER_TEMP: runnerTemp,
+                GITHUB_WORKSPACE: workspace,
+                GITHUB_STEP_SUMMARY: summary,
+                RUNNER_NAME: 'ecs-runner-7',
+                SDK_JAVA_M2_SEED_EXISTED: '1',
+                SDK_JAVA_M2_SEED_STATUS: '0',
+                ...env,
+              },
             },
-          },
-        );
+          );
+        const result = runStep({});
         expect(result.error).toBeUndefined();
         expect(result.status, result.stderr).toBe(expectedStatus);
         expect(result.stdout).toContain(
@@ -1809,6 +1846,14 @@ describe('SDK Java self-hosted workflow guards', () => {
           arm === 'helper'
             ? 'sdk-java cache write-back skipped on ecs-runner-7: host lock wait exhausted; host cache present at seed: 1; seed status: 0'
             : 'sdk-java cache write-back skipped on ecs-runner-7: host lock wait exhausted in the bare-flock fallback; host cache present at seed: 1; seed status: 0',
+        );
+        // A replay or local run may not set the summary path at all; the
+        // warning sits outside the guard and the exit status must not move.
+        const unset = runStep({ GITHUB_STEP_SUMMARY: '' });
+        expect(unset.error).toBeUndefined();
+        expect(unset.status, unset.stderr).toBe(expectedStatus);
+        expect(unset.stdout).toContain(
+          '::warning::Maven cache write-back skipped',
         );
       } finally {
         rmSync(dir, { recursive: true, force: true });
