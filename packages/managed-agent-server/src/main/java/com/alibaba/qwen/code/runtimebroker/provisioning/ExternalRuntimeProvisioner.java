@@ -72,11 +72,6 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
 
     @Override
     public String kind() {
-        return kindName();
-    }
-
-    /** The provisioner kind this instance claims in durable requests and handles. */
-    protected String kindName() {
         return KIND;
     }
 
@@ -109,7 +104,7 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
             Placement retained = admitPlacement(request, seed, knownHandle, true);
             RuntimeResourceHandle original = knownHandle != null ? knownHandle : retained.handle();
             RuntimeResourceHandle handle = original != null ? original
-                    : new RuntimeResourceHandle(kindName(), HANDLE_VERSION, Map.of(
+                    : new RuntimeResourceHandle(kind(), HANDLE_VERSION, Map.of(
                             "providerId", providerId,
                             "provisionRequestId", seed.getProvisionRequestId(),
                             "identity", identity(request, seed),
@@ -121,7 +116,7 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
 
     @Override
     public boolean supportsStartupRecovery(RuntimeResourceHandle handle) {
-        return handle != null && kindName().equals(handle.getKind()) && handle.getVersion() == HANDLE_VERSION;
+        return handle != null && kind().equals(handle.getKind()) && handle.getVersion() == HANDLE_VERSION;
     }
 
     @Override
@@ -390,7 +385,7 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
     }
 
     private void validate(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
-        if (request == null || seed == null || !kindName().equals(request.getProvisionerKind())
+        if (request == null || seed == null || !kind().equals(request.getProvisionerKind())
                 || !"session".equals(request.getScope().getIsolationClass())) {
             throw conflict();
         }
@@ -482,7 +477,7 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
 
     /** Canonical-JSON SHA-256, the digest discipline every external identity uses. */
     protected static String canonicalDigest(Object value) {
-        return digest(canonical(value));
+        return digest(value);
     }
 
     private static String digest(Object value) {

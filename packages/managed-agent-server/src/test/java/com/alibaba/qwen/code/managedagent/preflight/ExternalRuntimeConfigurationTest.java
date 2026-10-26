@@ -217,25 +217,6 @@ class ExternalRuntimeConfigurationTest {
     }
 
     private static ManagedAgentProperties scratchProperties() {
-        var environment = new MockEnvironment()
-                .withProperty("QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED", "true")
-                .withProperty("QWEN_MANAGED_AGENT_RUNTIME_PROVISIONER", "external-scratch")
-                .withProperty("QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN", "broker-token-for-tests")
-                .withProperty("QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID", "key-1")
-                .withProperty("QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY",
-                        java.util.Base64.getEncoder().encodeToString(new byte[32]))
-                .withProperty("QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY", "false")
-                .withProperty("QWEN_MANAGED_AGENT_WORKSPACE_ID", "scratch")
-                .withProperty("QWEN_MANAGED_AGENT_WORKSPACE_CWD", "/worker/scratch")
-                .withProperty("QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_PROVIDER_URL", "http://provider.invalid/api")
-                .withProperty("QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_PROVIDER_TOKEN", "provider-token-for-tests")
-                .withProperty("QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_PROVIDER_ID", "placement-service")
-                .withProperty("QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_REQUEST_TIMEOUT", "7")
-                .withProperty("QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_STARTUP_TIMEOUT", "90");
-        var checks = new ArrayList<ManagedAgentPreflight.Check>();
-        ManagedAgentPreflight.loadConfiguration(environment, List.of(), checks);
-        var properties = ManagedAgentPreflight.bind(environment, checks);
-        assertTrue(checks.isEmpty(), checks.toString());
-        return properties;
+        return properties(ExternalRuntimeProvisioner.KIND);
     }
 }

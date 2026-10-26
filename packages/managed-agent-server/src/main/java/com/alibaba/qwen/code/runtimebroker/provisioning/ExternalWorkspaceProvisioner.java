@@ -58,7 +58,7 @@ public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvision
     }
 
     @Override
-    protected String kindName() {
+    public String kind() {
         return KIND;
     }
 
@@ -86,7 +86,6 @@ public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvision
             throw refuse("external_workspace_storage_required",
                     "External Workspace provisioning requires a registered storage binding.");
         }
-        binding(request);
     }
 
     /**
@@ -117,7 +116,8 @@ public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvision
             RuntimeResourceHandle handle, Map<String, Object> response) {
         Object reported = response.get("storage");
         if (reported != null) {
-            if (!(reported instanceof Map<?, ?> evidence)) {
+            if (!"RUNNING".equals(response.get("state"))
+                    || !(reported instanceof Map<?, ?> evidence)) {
                 throw refuse("external_storage_registration_mismatch",
                         "External storage evidence does not match the registration.");
             }

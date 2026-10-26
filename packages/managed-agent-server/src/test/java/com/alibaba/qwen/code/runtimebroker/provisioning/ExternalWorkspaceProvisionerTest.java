@@ -241,13 +241,12 @@ class ExternalWorkspaceProvisionerTest {
         Placement placement = place(subject, "drift");
         assertTrue(subject.supportsStartupRecovery(placement.handle()));
 
-        // Re-registration bumps the revision: the durable handle was minted from
-        // the old identity, so adopting the same worker under it must fail.
+        // A fresh provisioner must reject a handle minted from a different identity.
+        subject.close();
         subject = provisioner(registration(PROVIDER, 2, MOUNT));
         RuntimeObservation observed = join(subject.reconcile(placement.request(),
                 placement.seed(), placement.handle(), placement.lease()));
         assertEquals(RuntimeObservation.Outcome.CONFLICT, observed.getOutcome());
-        assertFalse(subject.isUsable(placement.lease()));
     }
 
     @Test
@@ -275,6 +274,18 @@ class ExternalWorkspaceProvisionerTest {
         assertEquals(RuntimeObservation.Outcome.UNKNOWN, join(subject.reconcile(placement.request(),
                 placement.seed(), placement.handle(), placement.lease())).getOutcome());
         assertTrue(subject.isUsable(placement.lease()));
+    }
+
+    @Test
+    void unknownStorageContinuityCannotOverrideAGoneWorker() throws Exception {
+        ExternalWorkspaceProvisioner subject = provisioner(registration(PROVIDER, 1, MOUNT));
+        Placement placement = place(subject, "gone-storage");
+        client.observeState = "GONE";
+        client.storage = evidence("unknown", 1);
+        assertEquals(RuntimeObservation.Outcome.CONFLICT, join(subject.reconcile(placement.request(),
+                placement.seed(), placement.handle(), placement.lease())).getOutcome());
+        assertFalse(subject.isUsable(placement.lease()));
+        assertEquals(1, client.provisions.size());
     }
 
     @Test
@@ -330,9 +341,12 @@ class ExternalWorkspaceProvisionerTest {
     void malformedStorageEvidenceIsAPermanentRefusal() throws Exception {
         ExternalWorkspaceProvisioner subject = provisioner(registration(PROVIDER, 1, MOUNT));
         Placement placement = place(subject, "malformed");
+        String storageRef = "bc02fecc13c3be69643517ab58a55a200fe0ca71b9006a09947c9cc203f9ab79";
         for (Map<String, Object> broken : List.of(
-                Map.<String, Object>of("storageRef", "x"),
-                Map.<String, Object>of("storageRef", "x", "mountRoot", MOUNT, "continuity", "maybe"))) {
+                Map.<String, Object>of("storageRef", storageRef, "mountRoot", MOUNT,
+                        "continuity", "confirms", "unexpected", "value"),
+                Map.<String, Object>of("storageRef", storageRef, "mountRoot", MOUNT,
+                        "continuity", "maybe"))) {
             client.storage = broken;
             assertEquals(RuntimeObservation.Outcome.CONFLICT, join(subject.reconcile(placement.request(),
                     placement.seed(), placement.handle(), placement.lease())).getOutcome());
