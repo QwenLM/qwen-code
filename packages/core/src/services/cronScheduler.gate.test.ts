@@ -509,10 +509,10 @@ describe('CronScheduler gate', () => {
       scheduler.tick(at(10, 30, 59));
       await script.release(quiet);
       scheduler.tick(at(10, 31, 59));
-      await vi.waitFor(async () => {
-        [task] = await readCronTasks(tmpDir);
-        expect(task?.lastFiredAt).toBe(at(10, 31).getTime());
-      });
+      await (scheduler as unknown as { pendingPersist: Promise<unknown> })
+        .pendingPersist;
+      [task] = await readCronTasks(tmpDir);
+      expect(task?.lastFiredAt).toBe(at(10, 31).getTime());
       expect(task?.runs ?? []).toHaveLength(0);
       expect(task?.gateStatus).toMatchObject({
         lastOutcome: 'quiet',
@@ -521,10 +521,10 @@ describe('CronScheduler gate', () => {
 
       await script.release(output('event: comment\n'));
       expect(fired).toHaveLength(1);
-      await vi.waitFor(async () => {
-        [task] = await readCronTasks(tmpDir);
-        expect(task?.runs).toHaveLength(1);
-      });
+      await (scheduler as unknown as { pendingPersist: Promise<unknown> })
+        .pendingPersist;
+      [task] = await readCronTasks(tmpDir);
+      expect(task?.runs).toHaveLength(1);
       expect(task?.runs?.[0]).toMatchObject({
         at: at(10, 31).getTime(),
         kind: 'scheduled',
