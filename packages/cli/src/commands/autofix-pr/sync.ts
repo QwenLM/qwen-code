@@ -80,9 +80,8 @@ export function runSync(
   const paths = autofixPrPaths(root, prNumber);
   return withWatchLock(paths, prNumber, () => {
     // Before anything moves: the attempt's agent may be working in the
-    // worktree, and only the session that owns the watch removes a marker
-    // its session left behind (Section 6.14).
-    assertWatching(requireState(paths.statePath, prNumber), task);
+    // worktree. Only the session that owns the watch removes a marker its
+    // session left behind (Section 6.14): `syncLocked` checks it first.
     assertNoFixInFlight(paths, prNumber);
     // Removed once the sync answered: one that fails keeps it for the
     // next, which then reports it.

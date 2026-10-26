@@ -2854,6 +2854,31 @@ describe('AgentTool', () => {
             const live = backgroundFixAt(wt)!;
             expect(live.attempt).toBe(open.mock.calls[0]![0]);
             expect(live.agentId).toBe(entry.agentId);
+            // Its own agents: one it started, by the registry's parent
+            // link, at any depth the session allows (up to 100).
+            const own = config.getBackgroundTaskRegistry().get(entry.agentId);
+            const parents: Record<string, string> = {
+              'depth-1': entry.agentId!,
+              'loop-a': 'loop-b',
+              'loop-b': 'loop-a',
+            };
+            for (let depth = 2; depth <= 100; depth++) {
+              parents[`depth-${depth}`] = `depth-${depth - 1}`;
+            }
+            vi.mocked(
+              config.getBackgroundTaskRegistry().get,
+            ).mockImplementation(((id: string) =>
+              id === entry.agentId
+                ? own
+                : id in parents
+                  ? { parentAgentId: parents[id] }
+                  : undefined) as never);
+            expect(live.ownsCaller(entry.agentId!)).toBe(true);
+            expect(live.ownsCaller('depth-1')).toBe(true);
+            expect(live.ownsCaller('depth-100')).toBe(true);
+            expect(live.ownsCaller('stranger')).toBe(false);
+            expect(live.ownsCaller('loop-a')).toBe(false);
+            expect(live.ownsCaller(null)).toBe(false);
             expect(
               config.getBackgroundTaskRegistry().registerResidentAgent,
             ).not.toHaveBeenCalled();

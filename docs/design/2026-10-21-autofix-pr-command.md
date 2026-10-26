@@ -399,9 +399,12 @@ Event rules:
 
 Action precedence: `stop` (merged or closed) → `resync` (head moved
 externally) → `fix` (a conflict, a failed check or a trusted comment) →
-`wait`. The loop adds two more inputs: an exhausted budget means `stop`, and a
+`wait`. The loop adds three more inputs: an exhausted budget means `stop`; a
 background fix in flight (its attempt marker, Section 6.14) keeps the gate
-quiet and the prepared snapshot refused until the attempt ends.
+quiet and the prepared snapshot refused until the attempt ends; and an
+attempt its session left behind (a stale marker) is a source of `fix` too —
+the watch's own gate reports it once as an `abandoned_fix` event, so a round
+discards the attempt's work and redoes the fix though nothing else changed.
 
 #### Gate mode (`--gate`)
 
@@ -612,7 +615,9 @@ The helper decides what may be posted, against one fresh read of the PR
   trusted author, and `handled` names comments of that thread. Untrusted
   comments cannot be marked handled; a check key must be one a `ci_failed`
   event reports on the head (prepared mode prints its `key`) — now, or in
-  the round's prepared snapshot file: the head can move on from a failure
+  the round's prepared snapshot file (or, once a background fix's claim
+  moved that file, the claimed `autofix-pr-<n>-fix-snapshot.json`, read
+  until a round prepares another; Section 6.14): the head can move on from a failure
   while the round runs (a re-run, a run a review starts), and the round's
   answer still stands, under the key the next failure of a review-started
   workflow on that head carries. A failure a deferral holds while its run
@@ -922,7 +927,8 @@ the reason for a state file that could not be read. Each watch carries:
 - `preparedAt`, when `prepare` made the watch (null for one from before it
   recorded that), which `prepare` reports too;
 - `lastCheck`, the last run of the watch's own gate (one with a
-  `--session`) that read the PR — it touches
+  `--session`), whether it read the PR or, with a background fix in
+  flight, skipped reading it (Section 6.14) — it touches
   `.qwen/tmp/autofix-pr-<n>-gate.checked` on every such run, which
   `cleanup` removes with the watch, while a gate with no session, which
   shares the cursor, leaves it — and `lastRound`, the time of the last
@@ -942,7 +948,11 @@ the reason for a state file that could not be read. Each watch carries:
   worktree or its branch holds that the PR does not, judged as `cleanup`
   judges it without asking the remote or taking the index lock, or null.
   A round that starts on it
-  discards it, so a take-over or a resume says so before it asks.
+  discards it, so a take-over or a resume says so before it asks;
+- `fix`: `{ attempt, startedAt, fresh }` for a background fix's attempt
+  marker, or null. While `fresh`, its agent works in the worktree and the
+  round's helpers refuse; otherwise its session left it behind, and the
+  next round's `sync` removes it (Section 6.14).
 
 The gate cursor outlives a watch (Section 6.6), so it is read only when it
 names the watch's repository and is no older than the watch (`preparedAt`,
@@ -1238,7 +1248,9 @@ fix in flight, one left behind, a watch no longer the round's) ends the
 round. So every background agent at a worktree has an attempt tied to the
 round that prepared it, and while one lives no other agent, teammate or
 workflow agent launches there, in the foreground or the background. The session's own `edit`,
-`write_file` and `notebook_edit` into the worktree — the path resolved as
+`write_file` and `notebook_edit` into the worktree — any but the fix
+agent's and those of an agent it started, at any depth (the registry's
+parent links) — the path resolved as
 the kernel will, each link followed as written before a `..` after it, and
 also as Windows will, which folds `..` as text first; inside either way is
 inside — ask the user whatever the approval mode,
@@ -1264,7 +1276,8 @@ approval mode it would have had without the grant.
 with the watch's `--no-reply` and instructions as the session's own
 `schedule` printed them. That record decides for this session: while the
 agent runs, the `autofix_pr` tool refuses every helper of the PR but
-`status`, and `fix-end` until the agent has ended — its registry entry
+`status` and `cleanup` (which stops the agent, below), and `fix-end` until
+the agent has ended — its registry entry
 reached a terminal state, which a stopped agent does once its tools settle
 or its cancellation's grace runs out; a claim then waits up to 15 seconds
 more for the agent's body to settle. A stop asked for while the agent
@@ -1317,7 +1330,10 @@ for the next stop. The session drops the
 attempt, and with it the marker's refreshes, when no claim came within 40
 minutes of the attempt's opening — a notification waits for the session to
 be idle, so the deadline does not run from the agent's end — and when the
-session or its process ends.
+session or its process ends. A dropped attempt's marker is made stale once
+its stopped agent has settled (at most 15 seconds), while it still names
+that attempt, so the helpers let the next round in then rather than 90
+seconds later.
 Another session cannot stop the agent: its `cleanup`, `prepare --take-over`
 and `resume` refuse while the marker is fresh, saying that a fix of the
 session that owns the watch is running there. A marker no longer fresh is
@@ -1403,11 +1419,13 @@ snapshot --gate (in the gate)
 The fix runs in an `agent` with `working_dir` set to the worktree.
 Its brief is a file listing the events, log paths, the trust rules, the user's
 extra instructions and the verification requirement. The agent runs in the
-foreground — the `agent` tool runs a `working_dir` agent only so, since the
-caller owns the worktree — and the main session runs `push` and `reply` when
-it returns, except on a watch whose fixes run unattended: there it runs in
-the background and the round goes on from its completion notification
-(Section 6.14). If verification fails, nothing is pushed and the failure is
+foreground — the `agent` tool refuses `working_dir` with
+`run_in_background`, since the caller owns the worktree — and the main
+session runs `push` and `reply` when it returns. The one exception is a
+watch whose fixes run unattended: there the tool allows the pair for the
+built-in `general-purpose` agent at that watch's worktree, outside plan mode
+in a trusted folder, the agent runs in the background and the round goes on
+from its completion notification (Section 6.14). If verification fails, nothing is pushed and the failure is
 reported.
 
 A background fix's attempt marker (Section 6.14) keeps the gate quiet and
@@ -1666,8 +1684,8 @@ Delivery plan:
    `allowedTools` name a round's helpers and those run without asking;
    `unattended` (Section 6.13) lets the fix agent of a confirmed watch run
    its commands without asking too, and such a watch's fix agent runs in the
-   background (Section 6.14). Still to come: the budgets of Section 10 not
-   enforced yet.
+   background (Section 6.14), stopped at the 30-minute limit of Section 10.
+   Still to come: the fix-attempts-per-failing-check budget of Section 10.
 5. Follow-ups: a configurable bot allowlist.
 
 Open questions:

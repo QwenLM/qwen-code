@@ -1966,7 +1966,9 @@ function runGate(args: SnapshotArgs): void {
     if (session !== '') markChecked(paths.checkedPath);
     return;
   }
-  const reported = withAbandonedFix(result, marker, {
+  // Only the watch's own gate spends the one report of an abandoned
+  // attempt: a probe run by hand, or a Managed automation's, wakes no round.
+  const reported = withAbandonedFix(result, session !== '' ? marker : null, {
     headSha: pr.headRefOid,
     isDraft: pr.isDraft,
     url: pr.url,

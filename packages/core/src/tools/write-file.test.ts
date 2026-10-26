@@ -397,6 +397,21 @@ describe('WriteFileTool', () => {
               .requiresUserInteraction?.(),
           ),
         ).toBe(false);
+        // An agent the fix agent started is its own; another agent is not.
+        expect(
+          await runWithAgentContext('fix-agent-child', async () =>
+            tool
+              .build({ file_path: file, content: 'x' })
+              .requiresUserInteraction?.(),
+          ),
+        ).toBe(false);
+        expect(
+          await runWithAgentContext('session-agent', async () =>
+            tool
+              .build({ file_path: file, content: 'x' })
+              .requiresUserInteraction?.(),
+          ),
+        ).toBe(true);
         const outside = path.join(path.dirname(worktree), 'elsewhere.ts');
         expect(
           tool
@@ -1447,6 +1462,11 @@ async function openFixAt(worktree: string, agentId: string) {
     worktree,
     new AbortController().signal,
   );
-  fix.attach(agentId, () => {});
+  // The fix agent started `${agentId}-child`.
+  fix.attach(
+    agentId,
+    () => {},
+    (id) => id === `${agentId}-child`,
+  );
   return fix;
 }

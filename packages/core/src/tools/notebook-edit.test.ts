@@ -773,7 +773,11 @@ describe('NotebookEditTool', () => {
         worktree,
         new AbortController().signal,
       );
-      fix.attach('fix-agent', () => {});
+      fix.attach(
+        'fix-agent',
+        () => {},
+        (id) => id === 'fix-agent-child',
+      );
       const inside = writeNotebook(path.join('wt', 'a.ipynb'), nb45([CODE_A]));
       const outside = writeNotebook('b.ipynb', nb45([CODE_A]));
       const build = (notebook_path: string) =>
@@ -784,6 +788,17 @@ describe('NotebookEditTool', () => {
           build(inside).requiresUserInteraction?.(),
         ),
       ).toBe(false);
+      // An agent the fix agent started is its own; another agent is not.
+      expect(
+        await runWithAgentContext('fix-agent-child', async () =>
+          build(inside).requiresUserInteraction?.(),
+        ),
+      ).toBe(false);
+      expect(
+        await runWithAgentContext('session-agent', async () =>
+          build(inside).requiresUserInteraction?.(),
+        ),
+      ).toBe(true);
       expect(build(outside).requiresUserInteraction?.()).toBe(false);
     } finally {
       resetUnattendedFixGrantsForTests();

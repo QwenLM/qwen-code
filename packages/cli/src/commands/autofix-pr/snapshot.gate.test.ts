@@ -2045,6 +2045,12 @@ describe('runSnapshot --gate', () => {
     );
     runSnapshot({ pr: 7, gate: true });
     expect(mocks.stdout).toHaveBeenCalledTimes(1);
+    const cursor = JSON.parse(readFileSync(gatePath(), 'utf8')) as {
+      latestChecks?: string[];
+    };
+    expect(cursor.latestChecks).toEqual([
+      expect.stringMatching(/^run::::Test@.*~5$/),
+    ]);
     expect(reportedAt()).toBe(first);
   });
 
@@ -2190,6 +2196,132 @@ describe('runSnapshot --gate', () => {
         expect.objectContaining({ id: 'I2' }),
         { type: 'abandoned_fix', startedAt },
       ],
+    });
+  });
+
+  describe("a fix attempt's marker", () => {
+    const paths = () => autofixPrPaths(mocks.root, 7);
+    const watchOf = (owner: string, repo: string) => {
+      mkdirSync(dirname(paths().statePath), { recursive: true });
+      writeState(paths().statePath, {
+        version: 1,
+        sessionId: 'session-a',
+        host: 'github.com',
+        owner,
+        repo,
+        prNumber: 7,
+        remote: 'origin',
+        pushTarget: 'origin',
+        headRefName: 'feat',
+        baseRefName: 'main',
+        branch: 'qwen-autofix/pr-7',
+        worktreePath: join(dirname(paths().statePath), 'autofix-pr-7'),
+        viewer: 'me',
+        prAuthor: 'me',
+        lastKnownHeadSha: HEAD,
+        pushedShas: [],
+        handledCommentIds: [],
+        postedCommentIds: [],
+        watch: {
+          every: 2,
+          reply: true,
+          instructions: '',
+          task: 'aaaaaaaaaaaa',
+        },
+      });
+    };
+    const plantMarker = (ageMs = 0) => {
+      mkdirSync(dirname(paths().fixPath), { recursive: true });
+      writeFileSync(
+        paths().fixPath,
+        JSON.stringify({
+          version: 1,
+          attempt: '0123456789ab',
+          task: 'aaaaaaaaaaaa',
+          head: HEAD,
+          startedAt: new Date(Date.now() - ageMs).toISOString(),
+        }),
+      );
+      const at = new Date(Date.now() - ageMs);
+      utimesSync(paths().fixPath, at, at);
+    };
+    const own = () =>
+      runSnapshot({
+        pr: 7,
+        gate: true,
+        session: 'session-a',
+        task: 'aaaaaaaaaaaa',
+      });
+
+    it("is another clone's when no watch here names this repository: the gate reads and prints", () => {
+      // The marker's path names the PR number alone.
+      plantMarker();
+      respond(withComments('I1'));
+      runSnapshot({ pr: 7, repo: 'o/r', gate: true });
+      expect(printedIds()).toEqual([['I1']]);
+
+      watchOf('x', 'y');
+      respond(withComments('I1', 'I2'));
+      runSnapshot({ pr: 7, repo: 'o/r', gate: true });
+      expect(printedIds()).toEqual([['I1'], ['I2']]);
+      expect(existsSync(paths().checkedPath)).toBe(false);
+    });
+
+    it('keeps a gate of no session quiet, marking no check of the watch', () => {
+      watchOf('o', 'r');
+      plantMarker();
+      runSnapshot({ pr: 7, repo: 'o/r', gate: true });
+      expect(mockGh).not.toHaveBeenCalled();
+      expect(mocks.stdout).not.toHaveBeenCalled();
+      expect(existsSync(paths().checkedPath)).toBe(false);
+    });
+
+    it('keeps the gate quiet when the attempt opened while GitHub was asked', () => {
+      watchOf('o', 'r');
+      respond(withComments('I1'));
+      own();
+      const written = readFileSync(gatePath(), 'utf8');
+      const old = new Date('2026-10-01T00:00:00.000Z');
+      utimesSync(paths().checkedPath, old, old);
+      mockGh.mockClear();
+      const answer = JSON.stringify({
+        data: {
+          viewer: { login: 'me' },
+          repository: { pullRequest: withComments('I1', 'I2') },
+        },
+      });
+      mockGh.mockImplementationOnce(() => {
+        plantMarker();
+        return answer;
+      });
+      own();
+      expect(mockGh).toHaveBeenCalledTimes(1);
+      expect(mocks.stdout).toHaveBeenCalledTimes(1);
+      // What changed meanwhile is the next round's.
+      expect(readFileSync(gatePath(), 'utf8')).toBe(written);
+      expect(statSync(paths().checkedPath).mtimeMs).toBeGreaterThan(
+        old.getTime(),
+      );
+    });
+
+    it("leaves the one report of an abandoned attempt to the watch's own gate", () => {
+      watchOf('o', 'r');
+      respond(withComments('I1'));
+      own();
+      plantMarker(5 * 60_000);
+      // A probe run by hand: it wakes no round.
+      respond(withComments('I1'));
+      runSnapshot({ pr: 7, gate: true });
+      expect(mocks.stdout).toHaveBeenCalledTimes(1);
+      expect(
+        JSON.parse(readFileSync(gatePath(), 'utf8')) as object,
+      ).not.toHaveProperty('reportedAbandonedFix');
+      respond(withComments('I1'));
+      own();
+      expect(JSON.parse(mocks.stdout.mock.calls.at(-1)![0])).toMatchObject({
+        action: 'fix',
+        events: [{ type: 'abandoned_fix' }],
+      });
     });
   });
 
@@ -2424,17 +2556,27 @@ describe('runSnapshot --gate', () => {
       ...state,
       watch: { every: 2, reply: true, instructions: '', task: 'aaaaaaaaaaaa' },
     });
-    respond(data);
+    // GitHub answers ten seconds after it was asked.
+    const answer = JSON.stringify({
+      data: { viewer: { login: 'me' }, repository: { pullRequest: data } },
+    });
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-26T10:00:00.000Z'));
+    mockGh.mockImplementationOnce(() => {
+      vi.setSystemTime(new Date('2026-10-26T10:00:10.000Z'));
+      return answer;
+    });
     delete process.env['QWEN_CODE_SESSION_ID'];
     try {
       runSnapshot({ pr: 7, task: 'aaaaaaaaaaaa' });
     } finally {
+      vi.useRealTimers();
       if (saved !== undefined) process.env['QWEN_CODE_SESSION_ID'] = saved;
     }
     expect(JSON.parse(readFileSync(paths.snapshotPath, 'utf8'))).toMatchObject({
       task: 'aaaaaaaaaaaa',
-      // When it began to read the PR: before it wrote the file.
-      readAt: expect.stringMatching(/^\d{4}-\d\d-\d\dT/),
+      // When it began to read the PR, not when GitHub answered.
+      readAt: '2026-10-26T10:00:00.000Z',
     });
   });
 

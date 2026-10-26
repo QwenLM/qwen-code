@@ -268,6 +268,7 @@ export class BackgroundFix {
   readonly settled: Promise<void>;
   private settle!: () => void;
   private cancelAgent: (() => void) | null = null;
+  private descends: ((callerAgentId: string) => boolean) | null = null;
   /** A stop asked for before the agent launched: done as it launches. */
   private stopRequested = false;
   private isSettled = false;
@@ -369,10 +370,27 @@ export class BackgroundFix {
 
   /** The agent launched. A stop or a drop asked for while it launched
    * stops it now. */
-  attach(agentId: string, cancel: () => void): void {
+  attach(
+    agentId: string,
+    cancel: () => void,
+    descends?: (callerAgentId: string) => boolean,
+  ): void {
     this.agentId = agentId;
     this.cancelAgent = cancel;
+    this.descends = descends ?? null;
     if (this.done || this.stopRequested) cancel();
+  }
+
+  /**
+   * Whether a call is this fix's own: its agent's, or an agent's that one
+   * started (each agent runs its tools in its own frame). Never the
+   * session's, nor an agent the session started.
+   */
+  ownsCaller(callerAgentId: string | null): boolean {
+    if (callerAgentId === null || this.agentId === null) return false;
+    return (
+      callerAgentId === this.agentId || this.descends?.(callerAgentId) === true
+    );
   }
 
   /** Stops the agent; its attempt stays the round's to claim. */
@@ -443,6 +461,34 @@ export class BackgroundFix {
     if (this.done) return;
     this.stop();
     this.finish();
+    // Stale as soon as its agent has stopped, not 90 seconds later: the
+    // helpers then let the next round in, which the gate wakes for it.
+    const expire = () => this.expireMarker();
+    if (this.agentId === null || this.isSettled) expire();
+    else void this.waitSettled(FIX_SETTLE_WAIT_MS).then(expire);
+  }
+
+  /** Sets the marker's time far back while it still names this attempt. */
+  private expireMarker(): void {
+    let fd: number | undefined;
+    try {
+      fd = openSync(
+        this.marker,
+        constants.O_RDWR |
+          (constants.O_NOFOLLOW ?? 0) |
+          (constants.O_NONBLOCK ?? 0),
+      );
+      const stat = fstatSync(fd);
+      if (!stat.isFile() || stat.size > FIX_MARKER_MAX_BYTES) return;
+      const marker = JSON.parse(readFileSync(fd, 'utf8')) as {
+        attempt?: unknown;
+      } | null;
+      if (marker?.attempt === this.attempt) futimesSync(fd, 0, 0);
+    } catch {
+      // Gone, or not this attempt's: nothing to expire.
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
   }
 
   /** A launch that failed after the attempt opened, or while it opened:
@@ -602,8 +648,7 @@ export function backgroundFixHolding(
 ): BackgroundFix | undefined {
   if (fixes.size === 0 && settling.size === 0) return undefined;
   // Before the agent attaches, it has no id: no caller is it.
-  const notItsAgent = (fix: BackgroundFix) =>
-    fix.agentId === null || fix.agentId !== callerAgentId;
+  const notItsAgent = (fix: BackgroundFix) => !fix.ownsCaller(callerAgentId);
   const running = containing(fixes, file, notItsAgent);
   // One found late is dropped here, into `settling`: looked up there next.
   const held = running ? live(running) : undefined;

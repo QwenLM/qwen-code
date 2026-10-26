@@ -1708,6 +1708,25 @@ describe('background fixes', () => {
       waited.drop();
     });
 
+    it('expires its marker once its stopped agent settles when the fixes ask again', async () => {
+      writeMarker(fix.attempt);
+      await run({ command: 'attended', pr: 12 });
+      // Still fresh while the agent may write.
+      expect(mtime()).not.toBe(0);
+      fix.bodySettled();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(mtime()).toBe(0);
+    });
+
+    it("leaves another attempt's marker alone when it drops", async () => {
+      writeMarker('ba9876543210');
+      const before = mtime();
+      fix.bodySettled();
+      fix.drop();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(mtime()).toBe(before);
+    });
+
     it('lets go when a refresh comes late: the process was suspended', () => {
       vi.setSystemTime(Date.now() + FIX_HEARTBEAT_MS + 61_000);
       fix.beat();

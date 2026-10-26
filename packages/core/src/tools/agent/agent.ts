@@ -3606,7 +3606,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // cannot ask, and the round runs a fix that asks in the foreground.
         if (!unattendedFixes) {
           return failWorktreeProvisioning(
-            'Error: this fix no longer runs without asking (the watch changed, or the session is in plan mode or an untrusted folder): run it in the foreground, without "run_in_background".',
+            'Error: this fix no longer runs without asking (the watch changed, the session is in plan mode or an untrusted folder, or the general-purpose agent here is not the built-in one): run it in the foreground, without "run_in_background".',
           );
         }
         try {
@@ -3962,7 +3962,22 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           backgroundSlotReservation = undefined;
           if (backgroundFix) {
             const fixAgentId = hookOpts.agentId;
-            backgroundFix.attach(fixAgentId, () => registry.cancel(fixAgentId));
+            backgroundFix.attach(
+              fixAgentId,
+              () => registry.cancel(fixAgentId),
+              // An agent it starts records it as parent: its own, too, at
+              // any depth the session allows.
+              (callerAgentId) => {
+                const seen = new Set<string>();
+                let id = registry.get(callerAgentId)?.parentAgentId;
+                while (id && !seen.has(id)) {
+                  if (id === fixAgentId) return true;
+                  seen.add(id);
+                  id = registry.get(id)?.parentAgentId;
+                }
+                return false;
+              },
+            );
             backgroundFixAttached = true;
           }
         } catch (error) {

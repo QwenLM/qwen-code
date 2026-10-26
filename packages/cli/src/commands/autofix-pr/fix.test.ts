@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import {
   existsSync,
@@ -18,6 +18,23 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+
+// A move that fails: the round's snapshot onto the claimed one's path.
+const failedMove = vi.hoisted(() => ({ to: null as string | null }));
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    renameSync: (...args: Parameters<typeof actual.renameSync>) => {
+      if (failedMove.to !== null && String(args[1]) === failedMove.to) {
+        throw Object.assign(new Error('EACCES: permission denied'), {
+          code: 'EACCES',
+        });
+      }
+      actual.renameSync(...args);
+    },
+  };
+});
 import {
   assertNoFixInFlight,
   clearAbandonedFix,
@@ -108,6 +125,7 @@ describe('fix-start and fix-end', () => {
   });
 
   afterEach(() => {
+    failedMove.to = null;
     process.chdir(savedCwd);
     if (savedSession === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
     else process.env['QWEN_CODE_SESSION_ID'] = savedSession;
@@ -218,6 +236,14 @@ describe('fix-start and fix-end', () => {
     expect(runFixEnd({ pr: 7, attempt: ATTEMPT, abandon: true }).attempt).toBe(
       ATTEMPT,
     );
+  });
+
+  it("keeps the attempt when the round's snapshot cannot be moved, for the next round's sync", () => {
+    runFixStart({ pr: 7, attempt: ATTEMPT });
+    failedMove.to = fixSnapshotPath(paths, 7);
+    expect(() => runFixEnd({ pr: 7, attempt: ATTEMPT })).toThrow(/EACCES/);
+    expect(fixInFlight(paths)?.attempt).toBe(ATTEMPT);
+    expect(JSON.parse(readFileSync(paths.snapshotPath, 'utf8'))).toEqual(ROUND);
   });
 
   it("moves the round's snapshot over whatever is in its place", () => {

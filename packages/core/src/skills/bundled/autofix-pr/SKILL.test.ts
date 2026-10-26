@@ -299,6 +299,24 @@ describe('bundled autofix-pr skill', () => {
     expect(body).toContain('whose `## Never` it is told to follow too');
   });
 
+  it("lists every item step 3 sets aside under the brief's own items, which the after-fix turn answers from", () => {
+    const { body } = loadSkill();
+    const ciLogs = /3\. \*\*CI logs\.\*\*([^\n]*)/.exec(body)?.[1] ?? '';
+    // A workflow that could not start, a run with no log, a log unavailable.
+    expect(
+      ciLogs.match(
+        /out of the brief's events, list (?:it|them) under `## The round's own items`/g,
+      ),
+    ).toHaveLength(2);
+    expect(ciLogs).toContain(
+      "never goes into the brief's events — only under `## The round's own items`",
+    );
+    expect(ciLogs).not.toMatch(/out of the brief[ ,.]|into the brief[;.]/);
+    expect(body).toContain(
+      "and `## The round's own items`, when there, the ones step 3",
+    );
+  });
+
   it('names a built-in subagent type for the fix agent, as working_dir requires', () => {
     const { body } = loadSkill();
     expect(body).toContain('`subagent_type` = `general-purpose`');
