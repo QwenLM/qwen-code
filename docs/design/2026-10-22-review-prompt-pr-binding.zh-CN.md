@@ -37,7 +37,9 @@ daemon 接纳 `/review` 或 `/verify-pr` 提示词时，立即绑定 PR。
 - **`--repo` 作用域。** `/verify-pr` 接受 `--repo <owner>/<repo>`（gh 的
   `[HOST/]OWNER/REPO` 形态）。号码被限定到既非本 workspace 自身、也非 gh 页
   已确认 fork 父仓库时，它是另一个仓库的 PR，不产生绑定；本 workspace 的同号
-  PR 是另一个 PR。
+  PR 是另一个 PR。该限定从任何提示词命令上读取，因此既有 `/review <N>` 提示词里
+  误写的 `--repo a/b` 也会 fail closed，而不是绑定本 workspace 的 N；且匹配需要
+  workspace 仓库 key——`origin` 无法解析时，即使限定本身正确，也不产生绑定。
 - **来源。** 只有本地用户键入的提示词会绑定。渠道转发的轮次按原始渠道标记跳过，
   外部发送者不能把 PR 绑定写进本地会话。
 - **输入上限。** 语法最多扫描 16 KiB。惰性 URL 分支呈二次方回溯，而 live 钩子

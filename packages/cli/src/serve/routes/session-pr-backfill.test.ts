@@ -2730,6 +2730,30 @@ describe('backfillWorkspaceSessionPrs', () => {
     expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
   });
 
+  it('declines a /review that carries a stray --repo', async () => {
+    // `/review` has no `--repo` flag, but the shared grammar reads the
+    // qualifier off the prompt, so a stray one fails closed instead of
+    // binding a number the reviewer scoped elsewhere. The badge is missing,
+    // never wrong.
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'fix/77')],
+    });
+
+    const result = await bindSessionPrsFromPromptCommand(
+      runtime,
+      SESSION_A,
+      '/review 77 --repo other/x',
+    );
+
+    expect(result).toMatchObject({ scanned: 1, bound: 0, written: 0 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+  });
+
   it('binds a /verify-pr command recorded in the transcript', async () => {
     // A TUI turn records the typed command in the slash_command system
     // record; the sweep must read /verify-pr from it, not just /review.

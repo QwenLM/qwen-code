@@ -42,7 +42,11 @@ Bind the PR when the daemon admits a `/review` or `/verify-pr` prompt.
   `[HOST/]OWNER/REPO` form). A number qualified with a repository that is not
   this workspace's own — or the page's confirmed fork parent — is another
   repository's PR and binds nothing; the workspace's same-numbered PR is a
-  different PR.
+  different PR. The qualifier is read off any prompt command, so a stray
+  `--repo a/b` on a pre-existing `/review <N>` also fails closed instead of
+  binding this workspace's N, and matching needs the workspace repository key:
+  a workspace whose `origin` cannot be resolved declines a qualified number
+  even when the qualifier is correct.
 - **Source.** Only the local user's typed prompt binds. A channel-relayed turn
   is skipped on its raw channel marker, so an external sender cannot write a
   PR binding into the local session.
