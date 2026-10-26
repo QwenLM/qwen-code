@@ -22,7 +22,7 @@ describe.each([false, true])(
   (shared) => {
     it('isolates session owners, publishes committed state, and injects ordinary prompts', async () => {
       const rig = new TestRig();
-      await rig.setup('dw04-acp');
+      await rig.setup(`dw04-acp-${shared ? 'shared' : 'legacy'}`);
       rig.mkdir('home');
       rig.createFile(
         'home/settings.json',
@@ -31,6 +31,7 @@ describe.each([false, true])(
           tools: { workflowsEnabled: true },
           experimental: { unifiedAgentLoop: shared },
           general: { enableAutoUpdate: false },
+          ui: { enableFollowupSuggestions: false },
           telemetry: { enabled: false },
           memory: {
             enableManagedAutoMemory: false,
@@ -190,6 +191,11 @@ describe.each([false, true])(
           ),
         ).toBe(true);
       } finally {
+        rig.createFile(
+          'provider-requests.json',
+          JSON.stringify(server.requests, null, 2),
+        );
+        rig.createFile('stderr.txt', stderr);
         if (child.exitCode === null && child.signalCode === null) {
           await new Promise<void>((resolve) => {
             const timeout = setTimeout(() => child.kill('SIGKILL'), 5_000);
