@@ -44,6 +44,7 @@ import {
   networkGitEnv,
   requireWorktree,
 } from './worktree.js';
+import { assertNoFixInFlight, clearAbandonedFix } from './fix.js';
 
 export interface SyncOutcome {
   synced: boolean;
@@ -61,6 +62,9 @@ export interface SyncOutcome {
   /** Commits the worktree holds that the PR does not: a round's work not
    * pushed yet — or left behind by a round that never ended. */
   unpushed?: number;
+  /** A background fix whose session ended before its round went on: its
+   * marker is gone, and the round discards what the worktree holds. */
+  abandonedFix?: { startedAt: string | null };
 }
 
 /**
@@ -74,9 +78,17 @@ export function runSync(
 ): SyncOutcome {
   const root = repoRoot();
   const paths = autofixPrPaths(root, prNumber);
-  return withWatchLock(paths, prNumber, () =>
-    syncLocked(paths, prNumber, discard, root, task),
-  );
+  return withWatchLock(paths, prNumber, () => {
+    // Before anything moves: the attempt's agent may be working in the
+    // worktree. Only the session that owns the watch removes a marker its
+    // session left behind (Section 6.14): `syncLocked` checks it first.
+    assertNoFixInFlight(paths, prNumber);
+    // Removed once the sync answered: one that fails keeps it for the
+    // next, which then reports it.
+    const outcome = syncLocked(paths, prNumber, discard, root, task);
+    const abandonedFix = clearAbandonedFix(paths);
+    return abandonedFix ? { ...outcome, abandonedFix } : outcome;
+  });
 }
 
 function syncLocked(
