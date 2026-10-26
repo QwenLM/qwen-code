@@ -60,6 +60,13 @@ Abort/release 不得删除格式 2 barrier；经过验证的失败打开可以�
 锁 claim/primary 转换必须在移除保护 claim 之前同步目录。进程崩溃测试不证明掉电耐久性，
 也不代表未测试文件系统获得资格。
 
+此完整性门禁同样适用于被选择转换的既有 sealed v1 Session。声明依赖缺失、截断或摘要
+不一致时，即使旧读取器曾容忍这些损坏，也必须在 activation 前阻断恢复。原 transcript
+保持不变，格式 2 barrier 保持 sealed；不提供兼容绕过或自动裁剪。恢复引用所指向的原始
+资源字节后，下次恢复可以重试同一份历史。未转换 v1 transcript 的静态查看保留原读取语义，
+且不触发升级。Journal handle 首次 read 可以准备转换，是因为该 handle 已持有 writer，
+属于恢复操作；abort 会封存其证明，而不是删除已升级的 barrier。
+
 ## 读取与兼容性
 
 逻辑 scan 包含完整事件、事务和恢复事实。快照读取同时校验 manifest 资源清单和已提交尾部

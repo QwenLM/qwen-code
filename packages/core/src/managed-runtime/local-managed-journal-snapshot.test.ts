@@ -341,6 +341,121 @@ describe('local native journal snapshots', () => {
     },
   );
 
+  it.each(
+    (['definition', 'root', 'input', 'nested'] as const).flatMap((dependency) =>
+      (['missing', 'corrupt'] as const).map((damage) => ({
+        dependency,
+        damage,
+      })),
+    ),
+  )(
+    'blocks an existing sealed v1 Session with a $damage $dependency before activation',
+    async ({ dependency, damage }) => {
+      const f = await fixture();
+      let nestedRef = f.input.contentRef;
+      if (dependency === 'nested') {
+        const attachment = await f.resources.publish(
+          'managed-channel-attachment',
+          Buffer.from('nested attachment'),
+        );
+        nestedRef = attachment;
+        const contentRef = await f.resources.publish(
+          'managed-input',
+          encodeChannelInputEnvelope({
+            channelInstanceId: 'channel',
+            accountId: 'account',
+            accountGeneration: 1,
+            platformEventId: 'event',
+            semanticRevision: 1,
+            routeId: 'route',
+            routeRevision: 1,
+            senderId: 'sender',
+            chatId: null,
+            threadId: null,
+            subject: null,
+            text: 'hello',
+            attachments: [
+              {
+                fileName: 'input.txt',
+                mimeType: 'text/plain',
+                byteLength: attachment.byteLength,
+                digest: attachment.digest,
+                ref: attachment,
+              },
+            ],
+            replyContext: {},
+          }),
+        );
+        await f.first.authority.submitInput(f.command('channel'), {
+          ...f.input,
+          inputId: 'channel',
+          turnId: 'channel',
+          source: 'channel',
+          contentRef,
+        });
+      }
+      const ref =
+        dependency === 'definition'
+          ? f.first.authority.sessionHeader.definitionRef
+          : dependency === 'root'
+            ? f.first.authority.sessionHeader.rootSnapshotRef
+            : dependency === 'nested'
+              ? nestedRef
+              : f.input.contentRef;
+      await f.first.authority.close();
+      const before = await fs.readFile(f.transcriptPath);
+      expect(before.includes('managed-session/1')).toBe(true);
+      expect(before.includes(LOCAL_MANAGED_SNAPSHOT_BASE)).toBe(false);
+      const resourcePath = path.join(
+        f.resources.sessionRoot,
+        ref.kind,
+        ref.resourceId,
+      );
+      const original = await fs.readFile(resourcePath);
+      if (damage === 'missing') await fs.unlink(resourcePath);
+      else await fs.writeFile(resourcePath, Buffer.alloc(0));
+      await LocalJsonlManagedSessionJournalStore.read(f);
+      expect(await fs.readFile(f.transcriptPath)).toEqual(before);
+      const options = {
+        ...f,
+        cwd: f.project,
+        version: 'test',
+        workerId: 'test',
+        activationLeaseDurationMs: 60_000,
+      };
+      await expect(openManagedSession(options)).rejects.toThrow(/resource/);
+      expect(await fs.readFile(f.transcriptPath)).toEqual(before);
+      expect(
+        (await LocalJsonlManagedSessionJournalStore.read(f)).events.some(
+          (event) => event.kind === 'activation.changed',
+        ),
+      ).toBe(false);
+      expect(
+        JSON.parse(
+          await fs.readFile(
+            getSessionWriterLockPath(f.runtimeBaseDir, f.sessionId),
+            'utf8',
+          ),
+        ),
+      ).toMatchObject({ state: 'sealed', format_version: 2 });
+      for (const kind of [
+        LOCAL_MANAGED_SNAPSHOT_KIND,
+        LOCAL_MANAGED_SNAPSHOT_PAGE_KIND,
+      ]) {
+        await expect(
+          fs.access(path.join(f.resources.sessionRoot, kind)),
+        ).rejects.toMatchObject({ code: 'ENOENT' });
+      }
+      await fs.writeFile(resourcePath, original);
+      const resumed = await openManagedSession(options);
+      expect(
+        (await resumed.authority.submitInput(f.command('input'), f.input))
+          .transactionId,
+      ).toBe(f.receipt.transactionId);
+      await resumed.close();
+    },
+  );
+
   it('refuses cross-scope reads and a symlinked page', async () => {
     const f = await fixture();
     await f.first.authority.close();

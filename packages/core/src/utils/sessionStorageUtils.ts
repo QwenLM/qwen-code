@@ -1176,9 +1176,18 @@ function readManagedDomainBodySync(
     const headLength = Math.min(fileSize, LITE_READ_BUF_SIZE);
     const headBytes = fs.readSync(fd, buffer, 0, headLength, 0);
     const headText = buffer.toString('utf-8', 0, headBytes);
-    if (
-      readLocalJournalHeader(filePath)?.minimumReader === 'managed-session/2'
-    ) {
+    // Classify the way the header gates do: a parsed header record, not raw
+    // marker text a glued legacy line may carry.
+    const header = findManagedHeaderRecord(headText, filePath) as
+      | { managedSession?: { sessionKey?: { sessionId?: unknown } } }
+      | undefined;
+    let localHeader;
+    try {
+      localHeader = readLocalJournalHeader(filePath);
+    } catch {
+      if (header === undefined) return undefined;
+    }
+    if (localHeader?.minimumReader === 'managed-session/2') {
       const snapshotBody = readLocalSnapshotDomainBody(
         readLocalJournalBytes(filePath),
         runtimeBaseDir,
@@ -1188,11 +1197,6 @@ function readManagedDomainBodySync(
       );
       if (snapshotBody !== undefined) return snapshotBody;
     }
-    // Classify the way the header gates do: a parsed header record, not raw
-    // marker text a glued legacy line may carry.
-    const header = findManagedHeaderRecord(headText, filePath) as
-      | { managedSession?: { sessionKey?: { sessionId?: unknown } } }
-      | undefined;
     if (header === undefined) return undefined;
 
     /* The recorded identity, not the file name, decides where the resources

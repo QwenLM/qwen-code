@@ -90,6 +90,7 @@ export class LocalJsonlManagedSessionJournalHandle
     } = {},
   ): Promise<ManagedSessionJournalScan> {
     if (this.prepareOnRead) {
+      // This handle already owns the writer; static inspection never prepares.
       this.preparation ??= prepareLocalManagedSessionWriter(
         this.lease,
         this.sessionKey,
@@ -133,6 +134,7 @@ export class LocalJsonlManagedSessionJournalHandle
   async abort(): Promise<void> {
     if (!this.ownsLease) return;
     if ((this.lease.managedJournalFormatVersion ?? 0) >= 2) {
+      // Retain the format barrier so an older writer cannot acquire the Session.
       const proof = this.lease.takeoverCommitProof;
       if (proof) await this.lease.sealForHandoff(proof);
       return;

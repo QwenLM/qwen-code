@@ -80,6 +80,17 @@ another head. Lock claim/primary transitions for format 2 are directory-synced
 before claims protecting them are removed. Process-crash testing does not prove
 power-loss durability or qualify an untested filesystem.
 
+This integrity gate also applies to pre-existing sealed v1 Sessions selected for
+conversion. Missing, truncated or digest-mismatched declared dependencies stop
+resume before activation, even if an older reader tolerated that damage. The
+original transcript remains unchanged and the format-2 barrier remains sealed;
+there is no compatibility bypass or automatic pruning. Restoring the originally
+referenced resource bytes allows a subsequent resume to retry the same history.
+Static inspection of an unconverted v1 transcript keeps its previous read
+semantics and never upgrades it. A journal handle's first read can prepare only
+because that handle already owns the writer; it is a resume operation. Aborting
+that writer seals its proof instead of deleting the upgraded barrier.
+
 ## Readers and compatibility
 
 The logical scan includes all events, transactions and recovery facts.
