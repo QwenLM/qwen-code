@@ -21,6 +21,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   artifactDirName,
+  detectCredentialSignals,
   detectIsolation,
   parseArgs,
   parseRepo,
@@ -175,6 +176,29 @@ describe('detectIsolation', () => {
   });
 });
 
+describe('detectCredentialSignals', () => {
+  it('names environment variables and well-known paths', () => {
+    expect(detectCredentialSignals({}, () => false, '/home/t')).toEqual([]);
+    expect(
+      detectCredentialSignals(
+        { OPENAI_API_KEY: 'x', GH_TOKEN: 'y' },
+        () => false,
+        '/home/t',
+      ),
+    ).toEqual(['OPENAI_API_KEY', 'GH_TOKEN']);
+    expect(
+      detectCredentialSignals({}, (path) => path === '/home/t/.ssh', '/home/t'),
+    ).toEqual(['~/.ssh']);
+    expect(
+      detectCredentialSignals(
+        { SANDBOX_MOUNTS: '/x:/y' },
+        () => false,
+        '/home/t',
+      ),
+    ).toEqual(['SANDBOX_MOUNTS']);
+  });
+});
+
 describe('validateContext', () => {
   it('requires a numeric PR and two full OIDs', () => {
     const ok = {
@@ -275,13 +299,55 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     const boundary = runPrepare(dir, ['--require-isolation'], env);
     expect(boundary.status).toBe(4);
     expect(boundary.stderr).toContain('default profile still reads host files');
+  });
 
-    const container = runPrepare(dir, ['--require-isolation'], {
-      ...env,
+  // A marker says a container exists; it cannot say what the container mounts.
+  // The CLI's own launcher attaches gcloud config, the ADC file and model
+  // keys, so the gate also needs the attestation and a clean signal set.
+  it('does not pass the gate on a container marker alone', () => {
+    const { dir } = makeRepo();
+    const env = {
+      PATH: process.env.PATH ?? '',
+      HOME: makeTmpDir(),
       SANDBOX: 'docker',
+    };
+
+    const markerOnly = runPrepare(dir, ['--require-isolation'], env);
+    expect(markerOnly.status).toBe(4);
+    expect(markerOnly.stderr).toContain(
+      'QWEN_VERIFY_CREDENTIAL_FREE=1 is not set',
+    );
+
+    const attested = runPrepare(dir, ['--require-isolation'], {
+      ...env,
+      QWEN_VERIFY_CREDENTIAL_FREE: '1',
     });
-    expect(container.status).toBe(0);
-    expect(container.stdout).toContain('verify-pr boundary: SANDBOX=docker');
+    expect(attested.status).toBe(0);
+    expect(attested.stdout).toContain('credential-free per attestation');
+  });
+
+  it('refuses an attested boundary that still shows credentials', () => {
+    const { dir } = makeRepo();
+    const home = makeTmpDir();
+    const env = {
+      PATH: process.env.PATH ?? '',
+      HOME: home,
+      SANDBOX: 'docker',
+      QWEN_VERIFY_CREDENTIAL_FREE: '1',
+    };
+    mkdirSync(join(home, '.ssh'));
+
+    const mounted = runPrepare(dir, ['--require-isolation'], env);
+    expect(mounted.status).toBe(4);
+    expect(mounted.stderr).toContain('~/.ssh');
+
+    const keyed = runPrepare(dir, ['--require-isolation'], {
+      ...env,
+      HOME: makeTmpDir(),
+      OPENAI_API_KEY: 'sk-test',
+    });
+    expect(keyed.status).toBe(4);
+    expect(keyed.stderr).toContain('OPENAI_API_KEY');
   });
 
   it('strips control characters from an untrusted title', () => {

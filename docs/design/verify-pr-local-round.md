@@ -75,7 +75,10 @@ them rather than at the end of the document.
 
 - The isolation detector counts only container-backed signals. The built-in
   macOS sandbox sets `SANDBOX=sandbox-exec` while its default profile still
-  reads host files, so it is reported as a caveat rather than a boundary.
+  reads host files, so it is reported as a caveat rather than a boundary. A
+  marker is not credential-free readiness either: the CLI's own Docker/Podman
+  launcher mounts the gcloud config and ADC file and copies model keys, so the
+  gate also requires an explicit attestation and refuses on a visible signal.
 - Two implementations of the publish rules can drift. A workflow meta-test pins
   the checker verdict vocabulary to the publisher case labels, so a fifth word
   on one side fails the suite. The CI publisher remains authoritative.
@@ -99,8 +102,9 @@ them rather than at the end of the document.
 
 - `prepare` on a clone holding both OIDs writes a snapshot whose
   `baseRefOid`/`headRefOid` match the PR, creates the glob-matching directory,
-  and exits 0 on the host; `--require-isolation` exits 4 outside a container and
-  0 inside one.
+  and exits 0 on the host. `--require-isolation` passes only when a container
+  marker is present, `QWEN_VERIFY_CREDENTIAL_FREE=1` attests to a clean
+  boundary, and no known credential signal is visible; otherwise it exits 4.
 - A missing OID fails with a fetch naming the `--repo` repository, not `origin`.
 - `check` rejects `merge-ready` with a failed assertion, an inconsistent
   triple, and an unknown verdict word; it accepts `findings` with the same

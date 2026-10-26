@@ -145,9 +145,13 @@ isolation signals it can see. It does not gate on them — resolving metadata
 needs `gh`, which the boundary excludes, so this path always runs on the host.
 The boundary check belongs inside: run
 `node scripts/verify-pr-prepare.mjs --require-isolation` as the round's first
-command there, and treat exit 4 as "this is not a boundary". The built-in macOS
-sandbox (`SANDBOX=sandbox-exec`) does not count, because its default profile
-still reads host files.
+command there, and treat exit 4 as "this is not a boundary". A container
+marker alone does not pass: the CLI's own Docker/Podman launcher mounts
+`~/.config/gcloud`, the ADC file and every model API key it can see, so the
+check also requires `QWEN_VERIFY_CREDENTIAL_FREE=1` — set it only after
+confirming the boundary mounts nothing — and refuses when a known credential
+signal is visible. The built-in macOS sandbox (`SANDBOX=sandbox-exec`) never
+counts, because its default profile still reads host files.
 
 ⚠️ That isolation and `gh` are mutually exclusive: `gh` refuses even
 public-repository queries without authentication, so the metadata **cannot

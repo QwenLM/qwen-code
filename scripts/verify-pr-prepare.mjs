@@ -44,6 +44,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { isEntryPoint } from './lib/entry-point.js';
 
@@ -74,8 +75,11 @@ metadata snapshot the round reads as $QWEN_VERIFY_CONTEXT:
 The coordinate path runs on the host by construction: it needs gh, and gh and
 the boundary are mutually exclusive. Run --require-isolation inside the
 boundary, as the round's first command; exit 4 means this process is not
-isolated and must not execute PR code. The built-in macOS sandbox
-(SANDBOX=sandbox-exec) does not count — its default profile reads host files.
+isolated and must not execute PR code. A container marker alone does not pass:
+the CLI's own Docker/Podman launcher mounts ~/.config/gcloud and the ADC file
+and copies model API keys, so the check also requires the credential-free
+attestation and refuses when a known credential signal is visible. The
+built-in macOS sandbox (SANDBOX=sandbox-exec) never counts.
 `;
 
 /** Returns `{owner, name}` for a GitHub repository slug, or null. */
@@ -110,6 +114,62 @@ export function artifactDirName(pr, now = new Date()) {
  * it is not the credential-free boundary the round needs.
  */
 export const SEATBELT = 'sandbox-exec';
+
+/**
+ * Set this only after confirming the boundary mounts no host credentials. A
+ * marker says a container exists; it cannot say the container is clean, and
+ * the CLI's own Docker/Podman launcher mounts `~/.config/gcloud`, the ADC file
+ * and every model API key it can see, so the two questions are separate.
+ */
+export const CREDENTIAL_FREE_ATTESTATION = 'QWEN_VERIFY_CREDENTIAL_FREE';
+
+const CREDENTIAL_ENV = [
+  'GOOGLE_APPLICATION_CREDENTIALS',
+  'GEMINI_API_KEY',
+  'GOOGLE_API_KEY',
+  'OPENAI_API_KEY',
+  'AWS_ACCESS_KEY_ID',
+  'AWS_SECRET_ACCESS_KEY',
+  'AWS_SESSION_TOKEN',
+  'AZURE_CLIENT_SECRET',
+  'SSH_AUTH_SOCK',
+  'GH_TOKEN',
+  'GITHUB_TOKEN',
+  'KUBECONFIG',
+  // An arbitrary mount list can carry anything, so it cannot be attested to.
+  'SANDBOX_MOUNTS',
+];
+
+const CREDENTIAL_PATHS = [
+  ['.config/gcloud', '~/.config/gcloud'],
+  ['.aws', '~/.aws'],
+  ['.azure', '~/.azure'],
+  ['.ssh', '~/.ssh'],
+  ['.kube/config', '~/.kube/config'],
+  ['.git-credentials', '~/.git-credentials'],
+  ['.netrc', '~/.netrc'],
+  ['.docker/config.json', '~/.docker/config.json'],
+];
+
+/**
+ * Known credential signals. An empty list is not proof of a clean boundary —
+ * it is what the process can see — which is why the gate also needs the
+ * attestation below rather than treating the absence as a pass.
+ */
+export function detectCredentialSignals(
+  env = process.env,
+  exists = existsSync,
+  home = homedir(),
+) {
+  const signals = [];
+  for (const name of CREDENTIAL_ENV) {
+    if (env[name]) signals.push(name);
+  }
+  for (const [relative, label] of CREDENTIAL_PATHS) {
+    if (exists(join(home, relative))) signals.push(label);
+  }
+  return signals;
+}
 
 /**
  * Reports the isolation signals this process can observe. Only a
@@ -326,17 +386,40 @@ function main(argv) {
  */
 function requireBoundary() {
   const isolation = detectIsolation();
-  if (isolation.isolated) {
-    report([`verify-pr boundary: ${isolation.signals.join(', ')}`]);
-    return 0;
+  const credentials = detectCredentialSignals();
+  const attested = process.env[CREDENTIAL_FREE_ATTESTATION] === '1';
+
+  if (!isolation.isolated) {
+    const detail = isolation.seatbelt
+      ? 'SANDBOX=sandbox-exec is the built-in macOS sandbox, whose default profile still reads host files'
+      : 'no container marker was found';
+    process.stderr.write(
+      `verify-pr boundary: ${detail} — do not execute PR code in this process\n`,
+    );
+    return 4;
   }
-  const detail = isolation.seatbelt
-    ? 'SANDBOX=sandbox-exec is the built-in macOS sandbox, whose default profile still reads host files'
-    : 'no container marker was found';
-  process.stderr.write(
-    `verify-pr boundary: ${detail} — do not execute PR code in this process\n`,
-  );
-  return 4;
+
+  const refusals = [];
+  if (!attested) {
+    refusals.push(
+      `${CREDENTIAL_FREE_ATTESTATION}=1 is not set: a marker says a container exists, not that it carries no host credentials`,
+    );
+  }
+  if (credentials.length > 0) {
+    refusals.push(
+      `credential signals contradict a credential-free boundary: ${credentials.join(', ')}`,
+    );
+  }
+  if (refusals.length > 0) {
+    process.stderr.write(
+      `verify-pr boundary: ${isolation.signals.join(', ')} but ${refusals.join('; ')} — do not execute PR code here\n`,
+    );
+    return 4;
+  }
+  report([
+    `verify-pr boundary: ${isolation.signals.join(', ')}; credential-free per attestation, no known credential signal`,
+  ]);
+  return 0;
 }
 
 if (isEntryPoint(import.meta.url, process.argv[1])) {

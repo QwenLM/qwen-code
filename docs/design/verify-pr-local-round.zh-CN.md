@@ -30,7 +30,7 @@
 
 ## 约束与风险
 
-- 隔离检测只把容器类信号计为边界。内置 macOS 沙箱设置 `SANDBOX=sandbox-exec`，但其默认 profile 仍能读取宿主文件，因此只作为注意事项报告，不算边界。
+- 隔离检测只把容器类信号计为边界。内置 macOS 沙箱设置 `SANDBOX=sandbox-exec`，但其默认 profile 仍能读取宿主文件，因此只作为注意事项报告，不算边界。仅有标记也不等于无凭据就绪：CLI 自带的 Docker/Podman 启动器会挂载 gcloud 配置与 ADC 文件并复制模型 key，因此闸门还要求显式声明，并在看到已知信号时拒绝。
 - 发布规则存在两份实现，可能漂移。一条 workflow 元测试把检查器的判定词表钉到发布侧的 case 标签上，任一侧新增第五个词都会让套件失败。CI 发布侧仍是权威。
 - PR 标题是不可信输入且会到达维护者终端，因此在打印前剥离控制字符。
 - 这两个是本地辅助脚本：lane 从基线分支钉住 `.qwen`，因此引用它们的 skill 文本要在本改动合入后才生效。
@@ -43,7 +43,7 @@
 
 ## 验收标准
 
-- 在同时含有两个 OID 的克隆上，`prepare` 写出的快照其 `baseRefOid`/`headRefOid` 与 PR 一致，创建符合 glob 的目录，且在宿主上退出 0；`--require-isolation` 在容器外退出 4，在容器内退出 0。
+- 在同时含有两个 OID 的克隆上，`prepare` 写出的快照其 `baseRefOid`/`headRefOid` 与 PR 一致，创建符合 glob 的目录，且在宿主上退出 0。`--require-isolation` 只有在容器标记存在、`QWEN_VERIFY_CREDENTIAL_FREE=1` 声明边界干净、且看不到已知凭据信号时才通过；否则退出 4。
 - OID 缺失时失败，并给出用 `--repo` 指定仓库（而非 `origin`）的 fetch 命令。
 - `check` 拒绝带失败断言的 `merge-ready`、不一致的三元组、未知判定词；对相同计数下的 `findings` 予以通过。
 - 两个脚本都不执行 PR 代码。
