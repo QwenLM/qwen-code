@@ -137,6 +137,35 @@ function success(result) {
 describe.skipIf(process.platform === 'win32')(
   'pool JDK cache publication',
   () => {
+    it.each([
+      ['x86_64', 'x64', 'x64'],
+      ['aarch64', 'aarch64', 'arm64'],
+    ])(
+      'uses mirror and cache coordinates for %s',
+      (machine, mirrorArch, cacheArch) => {
+        const f = fixture('network');
+        writeFileSync(
+          join(f.root, 'bin/uname'),
+          `#!/usr/bin/env python3\nprint('${machine}')\n`,
+          { mode: 0o755 },
+        );
+        const cold = f.run(f.prepare('cold'));
+        expect(cold.status).not.toBe(0);
+        expect(cold.stdout).toContain(
+          `::error::could not download https://mirrors.tuna.tsinghua.edu.cn/Adoptium/11/jdk/${mirrorArch}/linux/OpenJDK11U-jdk_${mirrorArch}_linux_hotspot_11.0.32.1_1.tar.gz`,
+        );
+        const shared = join(
+          f.cache,
+          'Java_Temurin-Hotspot_jdk/11.0.32-101',
+          cacheArch,
+        );
+        seed(shared);
+        const warm = f.prepare('warm');
+        success(f.run(warm));
+        expect(f.home(warm)).toBe(shared);
+      },
+    );
+
     it('reuses setup-java sibling completion markers without downloading or replacing the JDK', () => {
       const f = fixture('network');
       const inode = seed(f.shared);

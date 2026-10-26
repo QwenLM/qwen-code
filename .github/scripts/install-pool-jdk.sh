@@ -41,7 +41,7 @@ case "${spec}/${arch}" in
     ;;
 esac
 
-url="https://mirrors.tuna.tsinghua.edu.cn/Adoptium/${spec}/jdk/${arch}/linux/${file}"
+url="https://mirrors.tuna.tsinghua.edu.cn/Adoptium/${spec}/jdk/${arch/arm64/aarch64}/linux/${file}"
 # Read setup-java entries, but never publish into its namespace: setup-java
 # does not take our lock and can still be installing when this fallback runs.
 shared_tool="${RUNNER_TOOL_CACHE:?}/Java_Temurin-Hotspot_jdk/${dir}/${arch}"
