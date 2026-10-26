@@ -19,6 +19,7 @@ import type {
 import type { EditorHandle } from '../../hooks/useComposerCore';
 import { getComposerDraftStorageKey } from '../../hooks/useComposerCore';
 import { getSlashCommandCompletionResult } from '../../completions/slashCompletion';
+import { createInputAnnotationsFromComposerTags } from '../../utils/composerTag';
 import type { ComponentProps } from 'react';
 import {
   ToolDetailsContext,
@@ -924,6 +925,67 @@ describe('ManagedSessionsPage', () => {
     );
   });
 
+  it('keeps prepared upload path context in the durable Turn input without a text attachment', async () => {
+    provider = {
+      ...provider,
+      workspaceFiles: {
+        query: vi.fn(async () => ({
+          scopeRevision: 'registered',
+          directory: '.',
+          entries: [],
+          truncated: false,
+          maxUploadBytes: 8 * 1024 * 1024,
+        })),
+        read: vi.fn(),
+        upload: vi.fn(async (request, data) => ({
+          scopeRevision: 'registered',
+          uploadId: request.uploadId,
+          path: request.path,
+          sizeBytes: data.size,
+          sha256: 'a'.repeat(64),
+        })),
+      },
+    };
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: {
+          canSend: true,
+          canCancel: false,
+          inputAttachments: true,
+          workspaceTurns: true,
+        },
+        workspace: { workspaceId: 'ws', cwdRelative: '.' },
+      }),
+    );
+    await render('s1');
+    const target = mocks.editorProps!.fileUploadTarget!;
+    const result = await target.client!.uploadWorkspaceFile({
+      path: '报告.bin',
+      data: new Blob(['binary']),
+    });
+    const tag = target.createReference(result.path);
+    const text = tag.serialized!;
+    await act(async () => {
+      mocks.editorProps!.onSubmit(text, undefined, undefined, vi.fn(), {
+        inputAnnotations: createInputAnnotationsFromComposerTags(text, [tag]),
+      });
+      await flush();
+    });
+    expect(mocks.client.submitPrompt).toHaveBeenCalledOnce();
+    expect(mocks.client.submitPrompt.mock.calls[0][1]).toMatchObject({
+      text,
+      input: [
+        {
+          type: 'input_text',
+          text: expect.stringContaining(
+            'Uploaded Workspace files (paths relative to the working directory):',
+          ),
+        },
+      ],
+    });
+    expect(provider.workspaceFiles!.read).not.toHaveBeenCalled();
+  });
+
   it.each(['default', 'auto-edit', 'yolo'] as const)(
     'shows persisted policy as fixed even on an unbound Session (%s)',
     async (approvalMode) => {
@@ -1242,6 +1304,48 @@ describe('ManagedSessionsPage', () => {
     });
     expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
     expect(provider.contextCompression.submit).not.toHaveBeenCalled();
+  });
+
+  it('keeps one composer and its draft when permission rules rerender', async () => {
+    mocks.client.getSession.mockImplementation(async (id: string) =>
+      summary(id, {
+        approvalMode: 'default',
+        approvalRevision: 0,
+        capabilities: {
+          canSend: true,
+          canCancel: false,
+          approvalModeChange: true,
+        },
+      }),
+    );
+    provider.approvalChange = {
+      queryOptions: vi.fn(async () => ({
+        supported: true,
+        approvalMode: 'default',
+        approvalRevision: 0,
+        availableApprovalModes: ['default'],
+        permissionRulesSupported: true,
+        permissionRules: { allow: ['Read'], ask: [], deny: [] },
+      })),
+      submit: vi.fn(),
+    };
+
+    await render('s1');
+    const composer = container.querySelector('textarea');
+    await input('Keep the permission draft');
+    for (let i = 0; i < 3; i++) await render('s1');
+
+    expect(
+      container.querySelectorAll('[data-managed-composer-scope]'),
+    ).toHaveLength(1);
+    expect(container.querySelector('textarea')).toBe(composer);
+    expect(composer?.value).toBe('Keep the permission draft');
+
+    await render('s2');
+    expect(
+      container.querySelectorAll('[data-managed-composer-scope]'),
+    ).toHaveLength(1);
+    expect(container.querySelector('textarea')).not.toBe(composer);
   });
 
   it.each(['qwen-code', `agent_${'a'.repeat(32)}`])(

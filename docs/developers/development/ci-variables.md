@@ -41,8 +41,9 @@ this page in the same change.
 ### Retry counts
 
 `QWEN_CI_VITEST_RETRY` and `QWEN_RELEASE_VITEST_RETRY` are passed to Vitest as
-`--retry=<n>` in the main CI test step (`npm run test:ci:workspaces` and
-`npm run test:scripts`) and on the release lane
+`--retry=<n>` in the main CI test step (every workspace's `test:ci`, which
+that step runs in two concurrent lanes, and `npm run test:scripts:unit`) and on
+the release lane
 (`npm run test:release:workspaces`) respectively. The two lanes have separate
 variables so they can be tuned independently.
 
@@ -75,6 +76,12 @@ and release workflows do not consume it; they use their own Vitest limits.
 The web-shell E2E smoke is pinned to `ubuntu-latest`, so the cap cannot apply
 to it. On GitHub-hosted runners
 the variable is ignored and Vitest uses its own defaults.
+
+Each Vitest run applies the cap on its own. The main CI workspace-test step
+runs two lanes at once (`.github/scripts/ci/run-unit-test-lanes.sh`): the cap
+bounds each Vitest run in the main lane, and web-shell's suite in the side lane
+runs at half the cap, at least 1, so at its peak the step runs the cap plus that
+half. On GitHub-hosted runners that side-lane suite runs at 2 workers.
 
 ### Related variables outside test execution
 

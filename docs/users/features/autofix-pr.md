@@ -4,7 +4,8 @@
 
 ```text
 /autofix-pr [<pr-number>|<pr-url>] [--once] [--every <minutes>] [--no-reply] [--yes] [instructions...]
-/autofix-pr status
+/autofix-pr status [<pr-number>]
+/autofix-pr resume [<pr-number>]
 /autofix-pr stop [<pr-number>]
 ```
 
@@ -18,11 +19,12 @@
 ## Before you start
 
 - `gh` is signed in, with push access to the PR branch: write access to a same-repository PR, or your own fork, or a fork that allows edits from maintainers.
-- You run it from a clone of the PR's repository with one git remote for it.
-- In the default [approval mode](./approval-mode.md), every shell command asks first: the helper calls (the push included), `gh pr view`, and every command a fix runs. That suits a watch you keep an eye on. To let it run unattended, choose a mode that lets commands run, such as [Auto Mode](./auto-mode.md), and keep in mind that the fix runs the repository's own build and test commands. The skill itself grants only reading its own files under `.qwen/tmp/`, writing its fix brief and reply plan there, and listing scheduled tasks. Those files live in the clone's main worktree; from a session started in a linked worktree, reading and writing them asks as well.
+- You run it from a clone of the PR's repository with one git remote for it. In a daemon session (`qwen serve`, the Web Shell), that clone has to sit inside the session's working directory: the daemon runs a fix agent's commands only there, so `prepare` refuses a PR whose clone is not. A watch there is a durable scheduled task bound to its session: the daemon keeps that session resident instead of reclaiming it once idle and the task appears on the Scheduled tasks page, so closing the browser tab does not end the watch — `/autofix-pr stop` does. The task is rehydrated after a daemon restart; a restart drops the gate's in-process approval, so the gate then needs an approval mode or a saved rule that lets it run unattended, and the first blocked fire names the rule to add. One daemon conversation carries one scheduled task, so a second watch there needs a conversation of its own. A restart also drops what the session confirmed for the watch: until `/autofix-pr resume <n>` confirms it again, its helpers and its fixes follow the approval mode as shell commands do.
+- The skill runs its helpers through the `autofix_pr` tool. On a watch you started or resumed in this session, a round's helpers — the push and the replies included — run without asking. Starting or resuming a watch, scheduling it, and taking one over from another session — which `/autofix-pr stop <n>` naming the PR does — still ask, each time (in [Auto Mode](./auto-mode.md) its classifier decides, except that a start is always yours to confirm), and so do `gh pr view` and creating the scheduled task. A rule that denies the shell command, such as `Bash` or `Bash(qwen autofix-pr *)`, denies the tool's call too, an ask rule for it keeps the call asking, and `AutofixPr(command:push)` in your deny rules stops every push. A PreToolUse hook you set on the shell tool does not see these calls; set it on `autofix_pr`. In a clone with a git hook that a push or sync runs (`pre-push`, `post-checkout`, `post-merge`, `reference-transaction`) — a hooks path inside the worktree, such as husky's, or a hook manager such as pre-commit or lefthook that runs what a file in the PR says — `sync` and `push` ask too unless the fixes run without asking (below). So does every helper of a worktree with a submodule whose git directory sits inside it rather than in the clone's own, and an ask rule for the shell command asks here too. The skill also grants reading its own files under `.qwen/tmp/`, writing its fix brief, reply plan and your instructions there, and listing scheduled tasks. Those files live in the clone's main worktree; from a session started in a linked worktree, reading and writing them asks as well.
+- The start question also offers **Start, fixes run without asking**: the fix agent's commands — builds, tests, commits in the PR worktree — then run without asking for this watch, after one more dialog that confirms it (declining that dialog cancels the start; run `/autofix-pr <n>` again). Its agent runs as one of a [YOLO](./approval-mode.md) session would: with your `git` and `gh` credentials, able to reach files outside the worktree, past your ask rules; your deny rules still apply. That lasts until the watch is stopped, started again with plain **Start** (or `--yes`), or the session exits or is cleared; `/autofix-pr resume` asks again. Choose plain **Start**, and in the default [approval mode](./approval-mode.md) each of its commands asks first, which suits a watch you keep an eye on. Taking a watch over and `/autofix-pr resume` offer the same choice. Only you answer that dialog: no saved rule, [Auto Mode](./auto-mode.md)'s classifier or `--yes` does, and the choice is refused in an untrusted folder and to a program driving Qwen Code through stream-json. Where the `autofix_pr` tool is not available (a tool allowlist in your settings can leave it out), the helpers run through the shell and each asks first.
 - A PR whose author cannot push to the repository runs someone else's code, with your `gh` and `git` credentials in reach, when a fix is verified. Such a PR is never watched: only `--once` is offered, after a confirmation that says so and that `--yes` does not skip.
 
-When it starts, it asks once to confirm where it will push and that it will reply on the PR.
+When it starts, it asks once to confirm where it will push and that it will reply on the PR, and whether the fixes may run their commands without asking.
 
 ## What a check does
 
@@ -34,7 +36,13 @@ A watch is a [scheduled task](./scheduled-tasks.md) whose gate runs `qwen autofi
 4. The commits are pushed as a fast-forward of the PR head, never forced. If someone pushed meanwhile, their work is merged first.
 5. Each review thread it handled gets a reply — `Fixed in <sha>: …`, `Not changed: …` or `Needs a human decision: …` — and each push gets one summary comment.
 
-A round never asks you anything. What needs a person is answered on the PR as "Needs a human decision" and reported in the session.
+A round never asks you anything. What needs a person is answered on the PR as "Needs a human decision", reported in the session and listed by `/autofix-pr status`.
+
+## Status and resuming
+
+`/autofix-pr status` lists every watch of the clone, whichever session runs it: the PR and its branch, the head, the pushes used, when its gate last checked and its last round ran, whether this session runs it, and what is waiting for a person. It reads the watches' files only and asks GitHub nothing.
+
+A watch ends when the session that ran it exits — in a daemon session its task is durable and bound to that session, so the daemon keeps it resident and the watch survives a daemon restart — and its scheduled task expires after 7 days by default (the `experimental.cronRecurringMaxAgeDays` setting, or `QWEN_CODE_CRON_MAX_AGE_DAYS`). Its state file stays. `/autofix-pr resume` starts again, in the current session, every watch that this session does not run — or the one you name — with the interval, `--no-reply` and instructions it was started with, and its pushes, history and budgets kept. It asks once for all of them, then runs one round of each and schedules it again. In a daemon session one conversation carries one scheduled task, so resume the others one conversation at a time. If another session is still running one of them, that session's task stops at its next fire; without a PR named, `resume` leaves out a watch another session checked recently, and says so. A watch whose PR was merged or closed while no session ran it is removed by its round. A watch started with `--once`, or one `stop` ended while keeping its worktree, is started again with `/autofix-pr <n>`.
 
 ## Whose feedback counts
 
@@ -58,18 +66,20 @@ Comments are acted on when their author is an owner, member or collaborator of t
 
 ## Stopping and files
 
-`/autofix-pr stop <n>` deletes the scheduled task and removes the worktree, its branch and the state file; the gate cursor and the PR's history stay, so a later watch does not answer the same comments again. A worktree that still holds unpushed work is kept, and the report says why; `qwen autofix-pr cleanup <n> --force` discards it. A scheduled task expires after 7 days by default (the `experimental.cronRecurringMaxAgeDays` setting, or `QWEN_CODE_CRON_MAX_AGE_DAYS`), and the watch then ends without a report; start it again to go on. The watch also ends when the session exits; its state file stays, owned by that session. Starting `/autofix-pr <n>` in a new session — or after `/clear` or `/resume` — offers to take the watch over, its pushes and budgets kept.
+`/autofix-pr stop <n>` deletes the scheduled task and removes the worktree, its branch and the state file; the gate cursor and the PR's history stay, so a later watch does not answer the same comments again. A worktree that still holds unpushed work is kept, and the report says why; the watch has ended all the same, and `qwen autofix-pr cleanup <n> --force` discards the work. `/autofix-pr stop <n>` also stops a watch another session left behind; a bare `/autofix-pr stop` leaves a watch another session is still running alone, and naming its PR ends it. A watch whose task expired, or whose terminal session exited, ends without a report; `/autofix-pr resume` starts it again (above). Starting `/autofix-pr <n>` in a new session — or after `/clear` or `/resume` — also offers to take the watch over, its pushes and budgets kept.
 
 Files live under `.qwen/tmp/` of the clone's main worktree:
 
 | File                                     | Contents                                                          |
 | ---------------------------------------- | ----------------------------------------------------------------- |
 | `autofix-pr-<n>/`                        | the PR worktree                                                   |
-| `autofix-pr-<n>-state.json`              | the watch: known head, pushes, handled ids                        |
+| `autofix-pr-<n>-state.json`              | the watch: known head, pushes, handled ids, its scheduled task    |
 | `autofix-pr-<n>-gate.json`               | the gate probe's cursor                                           |
+| `autofix-pr-<n>-gate.checked`            | when the watch's own gate last checked the PR                     |
 | `autofix-pr-<n>-snapshot.json`           | the latest round's snapshot of the PR, read by the round          |
 | `autofix-pr-<n>-replies.json`            | which bot comments answer another, as GitHub said                 |
 | `autofix-pr-<n>-history-*.json`          | what earlier watches of the PR posted and handled, kept by `stop` |
+| `autofix-pr-<n>-instructions.txt`        | your instructions for every round                                 |
 | `autofix-pr-<n>-*.log`, `*.md`, `*.json` | CI logs, fix briefs and reply plans                               |
 
 The design is in [`docs/design/2026-10-21-autofix-pr-command.md`](../../design/2026-10-21-autofix-pr-command.md).

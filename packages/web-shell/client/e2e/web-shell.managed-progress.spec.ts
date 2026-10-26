@@ -84,6 +84,8 @@ async function installManagedScenario(page: Page, testInfo: TestInfo) {
       '',
     );
     const body = request.postDataJSON();
+    if (path.endsWith('/user-messages/query'))
+      return route.fulfill({ json: { paused: false, messages: [] } });
     const respond = (json: unknown, status = 200) =>
       route.fulfill({ status, json });
     if (path === '/sessions/query')
@@ -257,7 +259,7 @@ test('Managed progress stays visible through a long transcript and live thought/
     'Thinking / responding',
   );
   await expect(page.locator('[data-managed-progress]')).toBeInViewport();
-  await expect(composer).toHaveAttribute('contenteditable', 'false');
+  await expect(composer).toHaveAttribute('contenteditable', 'true');
   await expect(
     page
       .getByRole('region', { name: 'Managed conversation' })
@@ -600,7 +602,7 @@ test('Managed cancellation waits for settlement before continuing the same sessi
   await expect(page.locator('[data-managed-progress]')).toContainText(
     'Cancelling',
   );
-  await expect(composer).toHaveAttribute('contenteditable', 'false');
+  await expect(composer).toHaveAttribute('contenteditable', 'true');
   await expect(
     page
       .getByRole('region', { name: 'Managed conversation' })
