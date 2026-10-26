@@ -1940,6 +1940,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         const skipMetadataRefreshThisIteration = skipMetadataRefresh;
         skipMetadataRefresh = false;
         let loadingRequestedSession = false;
+        let generatedUiRestoreTarget:
+          | { scopeId: string; sessionId: string }
+          | undefined;
         let eventStream:
           | {
               sessionId: string;
@@ -2382,6 +2385,24 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 : {}),
             };
             let nextSession: DaemonSessionClient;
+            if (targetSessionId && effectSessionContext?.kind === 'workspace') {
+              const scope = [
+                inheritedGeneratedUiScopeRef.current,
+                generatedUiScopeRef.current,
+              ].find(
+                (candidate) =>
+                  candidate &&
+                  candidate.baseUrl === resolvedBaseUrl &&
+                  candidate.token === resolvedToken &&
+                  candidate.workspaceCwd === effectWorkspaceCwd,
+              );
+              if (scope) {
+                generatedUiRestoreTarget = {
+                  scopeId: scope.id,
+                  sessionId: targetSessionId,
+                };
+              }
+            }
             if (restoreSessionId) {
               if (effectSessionContext?.kind === 'standalone') {
                 nextSession = shouldResumeRequestedSession
@@ -4651,6 +4672,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 isAuthFailure ? 'scope-changed' : 'deleted',
                 isAuthFailure ? null : session.sessionId,
               );
+            } else if (generatedUiRestoreTarget) {
+              generatedUiLifecycle.invalidate({
+                scopeId: generatedUiRestoreTarget.scopeId,
+                ...(isAuthFailure
+                  ? {}
+                  : { sessionId: generatedUiRestoreTarget.sessionId }),
+                reason: isAuthFailure ? 'scope-changed' : 'deleted',
+              });
             }
             // Auth failures (401/403) and terminal session errors (404/410)
             // must clear the session — the server-side state is gone or
@@ -4899,6 +4928,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   }, [
     autoConnect,
     autoReconnect,
+    generatedUiLifecycle,
     invalidateGeneratedUi,
     prefetchGitBranch,
     prefetchSkills,

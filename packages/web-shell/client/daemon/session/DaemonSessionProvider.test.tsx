@@ -18353,6 +18353,372 @@ describe('DaemonSessionProvider', () => {
   });
 
   describe('Generated UI retained owner lifecycle', () => {
+    describe('restore failures', () => {
+      const providerProps = {
+        baseUrl: 'http://127.0.0.1:4170',
+        token: 'token-a',
+        workspaceCwd: '/mock-workspace',
+        sessionId: 'session-a',
+        autoConnect: true,
+        autoReconnect: false,
+      };
+      const display: McpAppDisplay = {
+        type: 'mcp_app',
+        requiredFeature: 'generated-ui',
+        serverName: 'qwen-code-generated-ui',
+        resourceUri: 'ui://qwen-code-generated-ui/view-v1.html',
+        html: '<main>Retained parameters</main>',
+        toolResult: { content: [{ type: 'text', text: 'Ready' }] },
+        fallbackText: 'Retained parameters',
+      };
+      let retained: GeneratedUiInstanceStore;
+      let parking: HTMLDivElement;
+      let slotElement: HTMLDivElement;
+      let probes: Record<
+        string,
+        {
+          owner: ContextType<typeof McpAppGeneratedUiOwnerContext>;
+          actions: DaemonSessionActions;
+          connection: DaemonConnectionState;
+        }
+      >;
+
+      beforeEach(() => {
+        vi.stubGlobal(
+          'fetch',
+          vi.fn(async () => new Response(null, { status: 204 })),
+        );
+        retained = new GeneratedUiInstanceStore();
+        parking = document.createElement('div');
+        parking.hidden = true;
+        slotElement = document.createElement('div');
+        document.body.append(parking, slotElement);
+        retained.parking = parking;
+        probes = {};
+        const load = async (
+          client: unknown,
+          sessionId: string,
+          request?: unknown,
+        ) => {
+          const session = createMockSession({
+            sessionId,
+            workspaceCwd: (request as { workspaceCwd?: string } | undefined)
+              ?.workspaceCwd,
+            session: { generatedUi: { version: 1, enabled: true } },
+          });
+          session.client = client as MockClient;
+          return session;
+        };
+        sdkMocks.MockDaemonSessionClient.load.mockImplementation(load);
+        sdkMocks.MockDaemonSessionClient.resume.mockImplementation(load);
+      });
+
+      afterEach(() => {
+        retained.clear();
+        parking.remove();
+        slotElement.remove();
+      });
+
+      function Probe({
+        name,
+        children,
+      }: {
+        name: string;
+        children?: ReactNode;
+      }) {
+        const owner = useContext(McpAppGeneratedUiOwnerContext);
+        probes[name] = {
+          owner,
+          actions: useDaemonActions(),
+          connection: useDaemonConnection(),
+        };
+        const subscribe = owner?.subscribeInvalidation;
+        useLayoutEffect(
+          () =>
+            name === 'main' ? subscribe?.(retained.invalidate) : undefined,
+          [name, subscribe],
+        );
+        return children ?? null;
+      }
+
+      function park(name: string) {
+        const source = requireActions(probes[name]?.owner?.source);
+        const slot: InstanceSlot = {
+          key: instanceKey(source, 'call-a', display),
+          resourceKey: resourceKey(display, source.eventEpoch),
+          display,
+          source,
+          receipt: {
+            sessionId: source.sessionId,
+            status: { version: 1, enabled: true },
+          },
+          baseUrl: providerProps.baseUrl,
+          token: {},
+          element: slotElement,
+          visible: true,
+          reset: vi.fn(),
+        };
+        const entry = requireActions(retained.attach(slot));
+        entry.container.dataset.dirtyInput = '9';
+        retained.release(slot.key, slot.token);
+        expect(entry.container.parentElement).toBe(parking);
+        return entry;
+      }
+
+      async function switchSession(
+        name: string,
+        sessionId: string,
+        mode: 'load' | 'resume' = 'load',
+        options?: Parameters<DaemonSessionActions['loadSession']>[1],
+      ) {
+        let pending!: Promise<unknown>;
+        act(() => {
+          const actions = requireActions(probes[name]).actions;
+          pending = (
+            mode === 'resume'
+              ? actions.resumeSession(sessionId, options)
+              : actions.loadSession(sessionId, options)
+          ).catch((error: unknown) => error);
+        });
+        let result: unknown;
+        await act(async () => {
+          result = await pending;
+          await flushPromises();
+        });
+        return result;
+      }
+
+      it.each([
+        { mode: 'load', status: 404 },
+        { mode: 'load', status: 410 },
+        { mode: 'load', status: 401 },
+        { mode: 'load', status: 403 },
+        { mode: 'load', status: 503 },
+        { mode: 'resume', status: 404 },
+        { mode: 'resume', status: 401 },
+      ] as const)(
+        'releases the correct retained instances after $mode returns $status',
+        async ({ mode, status }) => {
+          await renderWithProvider(
+            <Probe name="main">
+              <DaemonSessionProvider {...providerProps} workspaceCwd="/foreign">
+                <Probe name="foreign" />
+              </DaemonSessionProvider>
+            </Probe>,
+            providerProps,
+          );
+          const target = park('main');
+          const foreign = park('foreign');
+          expect(target.sessionId).toBe(foreign.sessionId);
+          expect(target.scopeId).not.toBe(foreign.scopeId);
+          expect(await switchSession('main', 'session-c')).toBeUndefined();
+          const sibling = park('main');
+          expect(sibling.scopeId).toBe(target.scopeId);
+          expect(await switchSession('main', 'session-b')).toBeUndefined();
+          expect(retained.getEntries()).toHaveLength(3);
+
+          const error = new DaemonHttpError(
+            status,
+            undefined,
+            'Restore failed',
+          );
+          sdkMocks.MockDaemonSessionClient[mode].mockRejectedValueOnce(error);
+          expect(await switchSession('main', 'session-a', mode)).toBe(error);
+          expect(probes.main?.connection.errorStatus).toBe(status);
+          expect(probes.main?.owner?.scopeId).toBe(target.scopeId);
+          const authFailure = status === 401 || status === 403;
+          const temporaryFailure = status === 503;
+          expect(retained.getEntries().includes(target)).toBe(temporaryFailure);
+          expect(target.container.isConnected).toBe(temporaryFailure);
+          expect(retained.getEntries().includes(sibling)).toBe(!authFailure);
+          expect(sibling.container.isConnected).toBe(!authFailure);
+          expect(retained.getEntries()).toContain(foreign);
+          expect(foreign.container.isConnected).toBe(true);
+          expect(foreign.container.dataset.dirtyInput).toBe('9');
+        },
+      );
+
+      it.each([
+        {
+          boundary: 'matching ancestor',
+          baseUrl: providerProps.baseUrl,
+          token: 'token-a',
+          workspaceCwd: '/ancestor',
+          releases: true,
+        },
+        {
+          boundary: 'different workspace',
+          baseUrl: providerProps.baseUrl,
+          token: 'token-a',
+          workspaceCwd: '/other',
+          releases: false,
+        },
+        {
+          boundary: 'different daemon',
+          baseUrl: 'http://127.0.0.1:4171',
+          token: 'token-a',
+          workspaceCwd: '/ancestor',
+          releases: false,
+        },
+        {
+          boundary: 'different credentials',
+          baseUrl: providerProps.baseUrl,
+          token: 'token-b',
+          workspaceCwd: '/ancestor',
+          releases: false,
+        },
+      ])(
+        'isolates retained ancestor instances on failed restore: $boundary',
+        async ({ baseUrl, token, workspaceCwd, releases }) => {
+          await renderWithProvider(
+            <Probe name="main">
+              <DaemonSessionProvider
+                {...providerProps}
+                baseUrl={baseUrl}
+                token={token}
+                workspaceCwd="/child"
+                sessionId="child-a"
+              >
+                <Probe name="child" />
+              </DaemonSessionProvider>
+            </Probe>,
+            { ...providerProps, workspaceCwd: '/ancestor' },
+          );
+          const ancestor = park('main');
+          const child = park('child');
+          expect(child.scopeId).not.toBe(ancestor.scopeId);
+          const error = new DaemonHttpError(401, undefined, 'Unauthorized');
+          sdkMocks.MockDaemonSessionClient.load.mockRejectedValueOnce(error);
+          expect(
+            await switchSession('child', 'session-a', 'load', { workspaceCwd }),
+          ).toBe(error);
+          expect(probes.child?.connection.errorStatus).toBe(401);
+          expect(retained.getEntries().includes(ancestor)).toBe(!releases);
+          expect(ancestor.container.isConnected).toBe(!releases);
+          expect(retained.getEntries()).toContain(child);
+          expect(child.container.isConnected).toBe(true);
+        },
+      );
+
+      it.each(['standalone', 'live'] as const)(
+        'keeps workspace instances when a %s restore fails authentication',
+        async (kind) => {
+          sdkMocks.capabilities.mockResolvedValue({
+            workspaceCwd: '/primary',
+            features: ['standalone_sessions_v1', 'multi_workspace_sessions'],
+            workspaces: [
+              {
+                id: 'primary',
+                cwd: '/primary',
+                primary: true,
+                trusted: true,
+              },
+              {
+                id: 'live',
+                cwd: '/mock-workspace',
+                kind: 'live',
+                primary: false,
+                trusted: true,
+              },
+            ],
+          });
+          sdkMocks.MockDaemonSessionClient.loadStandalone.mockImplementation(
+            async (client, sessionId) => {
+              const session = createMockSession({
+                sessionId,
+                session: {
+                  generatedUi: { version: 1, enabled: true },
+                  sourceType: 'standalone',
+                  context: { kind: 'standalone' },
+                  projectlessOutputDirectory: '/output/non-workspace',
+                  workingDirectory: { state: 'ready' },
+                },
+              });
+              session.client = client as MockClient;
+              return session;
+            },
+          );
+          await renderWithProvider(
+            <Probe name="main">
+              <DaemonSessionProvider
+                baseUrl={providerProps.baseUrl}
+                token={providerProps.token}
+                sessionId="non-workspace"
+                sessionContext={{ kind }}
+                autoConnect
+                autoReconnect={false}
+              >
+                <Probe name="child" />
+              </DaemonSessionProvider>
+            </Probe>,
+            providerProps,
+          );
+          const workspace = park('main');
+          expect(probes.child?.connection).toMatchObject({
+            status: 'connected',
+            sessionContext: { kind },
+            workspaceCwd: undefined,
+          });
+          expect(probes.child?.owner?.source).toBeUndefined();
+          const error = new DaemonHttpError(401, undefined, 'Unauthorized');
+          (kind === 'standalone'
+            ? sdkMocks.MockDaemonSessionClient.loadStandalone
+            : sdkMocks.MockDaemonSessionClient.load
+          ).mockRejectedValueOnce(error);
+          expect(
+            await switchSession('child', 'non-workspace-next', 'load', {
+              sessionContext: { kind },
+            }),
+          ).toBe(error);
+          expect(probes.child?.connection.errorStatus).toBe(401);
+          expect(retained.getEntries()).toContain(workspace);
+          expect(workspace.container.isConnected).toBe(true);
+        },
+      );
+
+      it('ignores a late auth failure after another restore owns the effect', async () => {
+        await renderWithProvider(<Probe name="main" />, providerProps);
+        const old = park('main');
+        expect(await switchSession('main', 'session-b')).toBeUndefined();
+        const delayed = createDeferred<MockSession>();
+        sdkMocks.MockDaemonSessionClient.load.mockImplementationOnce(
+          () => delayed.promise,
+        );
+        let replaced!: Promise<unknown>;
+        await act(async () => {
+          replaced = requireActions(probes.main)
+            .actions.loadSession('session-a')
+            .catch((error: unknown) => error);
+          await flushPromises();
+        });
+        expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenLastCalledWith(
+          expect.anything(),
+          'session-a',
+          expect.anything(),
+          expect.any(String),
+        );
+        expect(await switchSession('main', 'session-c')).toBeUndefined();
+        expect(await replaced).toMatchObject({ name: 'AbortError' });
+        const current = park('main');
+        expect(current.scopeId).toBe(old.scopeId);
+        await act(async () => {
+          delayed.reject(
+            new DaemonHttpError(401, undefined, 'Late auth failure'),
+          );
+          await flushPromises();
+        });
+        expect(probes.main?.connection).toMatchObject({
+          status: 'connected',
+          sessionId: 'session-c',
+        });
+        expect(retained.getEntries()).toEqual(
+          expect.arrayContaining([old, current]),
+        );
+        expect(old.container.isConnected).toBe(true);
+        expect(current.container.isConnected).toBe(true);
+      });
+    });
+
     it.each(['immediate', 'after-render'] as const)(
       'disposes a parked activation when the next session receives a policy event %s',
       async (timing) => {

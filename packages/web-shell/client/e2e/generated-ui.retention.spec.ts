@@ -625,6 +625,91 @@ test('retains the actual App and Worker across virtual row unmounts @smoke', asy
   expect(daemon.promptRequests()).toHaveLength(0);
 });
 
+for (const status of [404, 401, 503]) {
+  test(`handles retained App and Worker lifetime after load returns ${status} @smoke`, async ({
+    page,
+  }, testInfo) => {
+    const { app, cards, probe, daemon, scenario } = await openCards(
+      page,
+      testInfo,
+    );
+    await page.route('**/workspace/models', (route) =>
+      route.fulfill({ json: { models: [] } }),
+    );
+    const view = app().frameLocator('#view');
+    await view.locator('#rate').fill('7');
+    await view.getByRole('button', { name: 'Apply', exact: true }).click();
+    await expect(view.locator('#answer')).toHaveText('1:7');
+    await view.locator('#rate').fill('9');
+    await expect(app().locator('#status')).toHaveAttribute(
+      'data-state',
+      'dirty',
+    );
+    const before = await probe.snapshot(app());
+    const mainRealm = await page.evaluate(
+      () => (window as ProbeWindow).__pr03Realm.id,
+    );
+
+    await page.route('**/session/previous-session/load', (route) =>
+      route.fulfill({
+        json: {
+          sessionId: 'previous-session',
+          clientId: scenario.clientId,
+          workspaceCwd: scenario.workspaceCwd,
+          eventEpoch: 'generated-ui-retention-epoch-1',
+          attached: true,
+          hasActivePrompt: false,
+          state: scenario.state,
+          generatedUi: scenario.state._meta?.['generatedUi'],
+          compactedReplay: [],
+          liveJournal: [],
+          lastEventId: 0,
+        },
+      }),
+    );
+    const sidebar = page.locator('[data-sidebar-shell]');
+    await sidebar.getByText('Previous Session', { exact: true }).click();
+    await daemon.sse.waitForConnection('previous-session');
+    await daemon.sendEvent(
+      replayCompleteEvent({ sessionId: 'previous-session' }),
+    );
+    await expect(page).toHaveURL(/\/session\/previous-session/);
+    await expect(cards).toHaveCount(1);
+    await expect(cards).toBeHidden();
+    expect(await probe.snapshot(app())).toEqual(before);
+
+    const failurePath = `/session/${scenario.sessionId}/load`;
+    const errorMessage = `Retention load failure ${status}`;
+    await page.route(`**${failurePath}`, (route) =>
+      route.fulfill({ status, json: { error: errorMessage } }),
+    );
+    const failedLoad = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === failurePath &&
+        response.request().method() === 'POST',
+    );
+    await sidebar.getByText(scenario.displayName, { exact: true }).click();
+    expect((await failedLoad).status()).toBe(status);
+    await expect(page.getByText(errorMessage).first()).toBeVisible();
+    if (status === 503) {
+      await expect(cards).toHaveCount(1);
+      await expect(cards).toBeHidden();
+      expect(await probe.snapshot(app())).toEqual(before);
+      await expect(view.locator('#rate')).toHaveValue('9');
+      await expect(view.locator('#answer')).toHaveText('1:7');
+    } else {
+      await expect(cards).toHaveCount(0);
+      await expect
+        .poll(() => probe.workers.every(({ closed }) => closed))
+        .toBe(true);
+    }
+    expect(
+      await page.evaluate(() => (window as ProbeWindow).__pr03Realm.id),
+    ).toBe(mainRealm);
+    expect(daemon.promptRequests()).toHaveLength(0);
+  });
+}
+
 test('folding preserves state and returns keyboard focus at narrow width @smoke', async ({
   page,
 }, testInfo) => {
