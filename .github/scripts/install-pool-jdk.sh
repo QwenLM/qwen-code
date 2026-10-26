@@ -58,7 +58,7 @@ if ! flock --wait 900 9; then
 fi
 if [[ -d "${shared_tool}" && -f "${shared_tool}.complete" ]]; then
   tool="${shared_tool}"
-elif [[ ! -f "${tool}.complete" ]]; then
+elif [[ ! -d "${tool}" || ! -f "${tool}.complete" ]]; then
   mkdir -p -- "${tool_dir}" || { echo "::error::cannot create ${tool_dir}"; exit 1; }
   work="$(mktemp -d "${tool_dir}/install.XXXXXX")" || { echo "::error::cannot stage the download"; exit 1; }
   echo "downloading Temurin ${spec} (${arch}) from the mirror"

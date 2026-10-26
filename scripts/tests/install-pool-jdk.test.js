@@ -212,6 +212,17 @@ describe.skipIf(process.platform === 'win32')(
       ).toContain(`<jdkHome>${f.shared}</jdkHome>`);
     });
 
+    it('reinstalls a private JDK when only its completion marker remains', () => {
+      const f = fixture();
+      const toolDir = join(f.cache, 'qwen-pool-jdk/11.0.32-101');
+      mkdirSync(toolDir, { recursive: true });
+      writeFileSync(join(toolDir, 'x64.complete'), '');
+      const env = f.prepare('job');
+      success(f.run(env));
+      expect(f.downloads()).toBe(1);
+      expect(existsSync(join(f.home(env), 'bin/java'))).toBe(true);
+    });
+
     it('keeps legacy internal-marker entries intact and reuses its own completed installation', () => {
       const f = fixture();
       const inode = seed(f.shared, join(f.shared, '.complete'));
