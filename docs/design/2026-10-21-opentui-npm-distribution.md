@@ -2,6 +2,12 @@
 
 [English](2026-10-21-opentui-npm-distribution.md) | [简体中文](2026-10-21-opentui-npm-distribution.zh-CN.md)
 
+**Runtime follow-up after merged [#14959](https://github.com/QwenLM/qwen-code/pull/14959).** This batch makes OpenTUI Bun-only and updates the shipped private npm and standalone-preview Bun pin to **1.4.4**, keeping OpenTUI **0.5.10**. It addresses the upstream Brotli decoder error-propagation fix without changing the direct-runtime compatibility floor or the default renderer. The current proposal integrates main `949a71e2` from the original `249ab50d` baseline; its own installed-artifact and platform acceptance is pending.
+
+Historical evidence belongs to its original artifact: main `32b4234b` plus the earlier runtime changes passed normal build/typecheck/bundle, 87 CLI and 46 packaging/workflow tests. Actual Node 26.4.0/npm 11.17.0 pack and owned `--ignore-scripts` installation verified 1,355 published files and executable modes (152,316,775 unpacked bytes, below 160 MiB). One macOS arm64 strict installed smoke observed the Node launcher, same-installation private Bun 1.4.4, native library, one model HTTP request, syntax colors and natural `/quit` exit 0. Six refusal controls for disabled relaunch, missing private Bun and an inherited FFI flag subsequently passed fallback/strict behavior. These are not acceptance of this newly integrated artifact, other installation layouts, npm subprocess identity or other platforms.
+
+The earlier normal standalone updater matrix passed 152 synthetic scenario rows on real Node 24.19 and Bun 1.4.4 hosts (76 each), using verified loopback HTTPS and unsigned CLI/version archives. Node registry dispatch used an injected npm executor; Bun probe observability was unavailable. The later local `a28ba265` integration passed fresh build/typecheck/bundle and the 133 affected unit tests. These source and synthetic results do not close released standalone upgrades, final installed-product checks or supported-platform execution. Earlier 1.3.14 evidence below retains its historical provenance.
+
 ## Status and problem
 
 The source checkpoint `0d353777bb054b9d5c9925f134dd63db7c316614` normally merges main `19d3289f4818617efdf31ca46d4db0522da36f95`, including the accepted input/output batch #15067 and Bun PTY #14046. It preserves all 49 distribution changes and the existing dependency inputs. Fresh macOS arm64 build and typecheck passed at this checkpoint. Affected consumer, native, bundle and installed-product gates are recorded separately in [#14959](https://github.com/QwenLM/qwen-code/pull/14959); a successful source build is not installed-artifact acceptance.
@@ -10,10 +16,10 @@ Earlier evidence remains bound to its source and artifact. Candidate `e8192c18` 
 
 The original strict interactive `--json-file` defect is covered by the accepted output changes, but the final installed combination still requires its own output regression. The historical serve shutdown failure requires current-candidate characterization. Native Linux cgroup/bwrap/landlock, other supported platforms and released-version upgrades remain separate open gates. Windows ConPTY diagnostics are not installed-Qwen acceptance and do not change the pinned Bun runtime. This remains an opt-in POSIX npm delivery; completion of all TUI migration and a default-renderer change require the overall migration gates.
 
-The published npm manifest excludes `opentui-assets` and has no private Bun
-runtime. On Node below 26.4, an explicit OpenTUI request falls back to Ink; on
-newer Node, a bundled installation still lacks the native/parser assets needed
-to boot OpenTUI. The separate Bun standalone preview already ships its runtime
+The original npm distribution baseline excluded `opentui-assets` and had no private Bun
+runtime. In that baseline, Node below 26.4 fell back to Ink for an explicit OpenTUI
+request; newer Node installations lacked the native/parser assets needed to boot
+OpenTUI. The separate Bun standalone preview already shipped its runtime
 and assets. npm/npx must gain the same explicit renderer choice without requiring
 a global Bun installation or changing the default renderer.
 
@@ -28,15 +34,18 @@ Related work:
 ## Goals and boundaries
 
 Support explicit OpenTUI sessions installed by npm or npx on darwin-arm64,
-darwin-x64, linux-arm64, and linux-x64 (glibc). Keep Node as the npm launcher and
-package-manager interpreter, and use the existing supervised CLI relaunch when
-the selected interactive renderer needs private Bun.
+darwin-x64, linux-arm64, and linux-x64 (glibc). Eligible published npm installations
+use their private pinned Bun for OpenTUI from every supported invoking Node version.
+Keep Node as the npm launcher and package-manager interpreter, reusing the existing
+supervised CLI relaunch.
 
 Do not add `QWEN_TUI_RUNTIME`, a new package publishing family, a runtime cache,
 startup downloads, a search for Bun on `PATH`, a compiled application, or changes
-to the package manager. Do not switch the default renderer or runtime. Windows,
-musl, whole-CLI sandbox images, and Node-only external hosts remain outside the
-new handoff. Existing standalone runtime selection and updates remain intact.
+to the package manager. Do not switch the default renderer or default Ink runtime.
+Windows, musl, whole-CLI sandbox images, and Node-only external hosts remain outside
+the new handoff. Node classic standalone and source invocations retain Node/Ink;
+Bun standalone preview and source invocations on supported Bun may select OpenTUI.
+Standalone runtime packaging and update interpreter boundaries remain intact.
 
 The direct `process.execPath` audit also identifies a bounded remainder from
 [#14134 at c807de17](https://github.com/QwenLM/qwen-code/pull/14134) and
@@ -66,20 +75,27 @@ or prompt is non-interactive, and an empty prompt requires terminal stdin.
 The private Bun handoff also requires terminal stdout, so redirected output
 retains its invoking runtime.
 
-| Invocation                                                           | Runtime behavior                                                     |
-| -------------------------------------------------------------------- | -------------------------------------------------------------------- |
-| Renderer unset, `ink`, or unknown                                    | Existing runtime and renderer behavior                               |
-| Explicit OpenTUI, interactive Node below 26.4, supported npm install | Private pinned Bun through the existing supervisor                   |
-| Explicit OpenTUI, Node 26.4 or newer                                 | Existing Node/OpenTUI path; existing FFI requirements still apply    |
-| Already running under Bun                                            | Existing runtime; no recursive handoff                               |
-| Screen reader, including settings and CLI overrides                  | Existing Ink capability fallback; strict request fails               |
-| Prompt/headless, pipe, help, version                                 | Remain on the invoking runtime                                       |
-| `serve`, `mcp`, managed bootstrap, ACP, SDK, IDE protocol hosts      | Remain on their existing runtime/protocol path                       |
-| Dual-output protocol input/file or JSON descriptor                   | No new runtime handoff                                               |
-| Whole-CLI sandbox or already inside one                              | No host-private Bun handoff; preserve existing sandbox behavior      |
-| Windows, unsupported CPU, or Linux musl                              | No private Bun handoff                                               |
-| Missing optional runtime or non-executable binary                    | Node/Ink fallback; strict explicit request fails with a useful cause |
-| Unsupported inherited Node runtime flags                             | Keep the original Node path; strict explicit request fails           |
+OpenTUI selection requires a supported Bun runtime. This retires the earlier
+Node 26.4+ native-OpenTUI exception to satisfy the TUI migration-to-Bun goal. When
+Node cannot hand off, the existing shared gate selects Ink for an ordinary request
+and rejects a strict request; native Node FFI is no alternative OpenTUI route.
+No new fallback state, helper, dependency family or runtime-selection mechanism is introduced. The existing private Bun version pin is updated separately within this batch.
+
+| Invocation                                                          | Runtime behavior                                                         |
+| ------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| Renderer unset, `ink`, or unknown                                   | Existing runtime and renderer behavior                                   |
+| Explicit OpenTUI, interactive supported Node, supported npm install | Private pinned Bun through the existing supervisor, including Node 26.4+ |
+| Source or classic standalone running on Node                        | Node/Ink; strict OpenTUI request fails, with no native Node exception    |
+| Source or standalone preview running on supported Bun               | Explicit OpenTUI uses Bun; no npm handoff                                |
+| Already running under Bun                                           | Existing runtime; no recursive handoff                                   |
+| Screen reader, including settings and CLI overrides                 | Existing Ink capability fallback; strict request fails                   |
+| Prompt/headless, pipe, help, version                                | Remain on the invoking runtime                                           |
+| `serve`, `mcp`, managed bootstrap, ACP, SDK, IDE protocol hosts     | Remain on their existing runtime/protocol path                           |
+| Dual-output protocol input/file or JSON descriptor                  | No new runtime handoff                                                   |
+| Whole-CLI sandbox or already inside one                             | No host-private Bun handoff; preserve existing sandbox behavior          |
+| npm Node on Windows, unsupported CPU, or Linux musl                 | No private Bun handoff; Node/Ink, or strict failure                      |
+| Missing optional runtime or non-executable binary                   | Node/Ink fallback; strict explicit request fails with a useful cause     |
+| Unsupported inherited Node runtime flags or disabled relaunch       | Node/Ink fallback; strict explicit request fails                         |
 
 Only flags that are valid for this known Bun launch are passed to Bun. Node
 memory tuning and Node loaders are not forwarded as Bun arguments. Preserve
@@ -143,7 +159,7 @@ response after the first foreground-group signal, before testing double exit.
 ## Package construction
 
 The generated npm manifest adds four exact optional dependencies from the
-official `@oven` platform packages at Bun 1.3.14. Use the direct platform packages,
+official `@oven` platform packages at Bun 1.4.4. Use the direct platform packages,
 whose executable already exists in the tarball, rather than the `bun` wrapper
 with its install script. This supports `--ignore-scripts`; `--omit=optional`
 deliberately leaves the private Bun path unavailable.
@@ -200,9 +216,12 @@ real-process and artifact gates remain open. Windows Bun PTY remains unsupported
 
 Four platform archive contents can be checked on one host; native behavior cannot.
 Record macOS arm64 execution separately from Linux/x64 or Windows checks.
-Node 26.4 preserving Node/OpenTUI is an intentional compatibility choice here:
-the later all-TUI-to-Bun milestone must still address these Node versions,
-screen-reader behavior, sandboxing, Windows/musl, and the PTY dependency.
+The former Node 26.4+ native path is a retired compatibility exception, not a
+remaining policy choice. The official Node 26.4.0 runtime was acquired and verified. One real npm-installed
+strict OpenTUI case passed with that launcher and the same installation’s private
+Bun 1.4.4; injected-version unit tests alone are not product evidence.
+Screen-reader behavior, sandboxing, Windows/musl, and the PTY dependency remain
+separate overall migration gates.
 
 Runtime flags, managed npm updates, symlinked/npm-prefix installs, and optional
 dependency omission are the highest-risk boundaries. Missing parser workers or
@@ -235,8 +254,12 @@ temporary HOME, QWEN_HOME, npm prefix/cache, and shell configuration paths.
    update staging and the 44 relaunch chain, IPC update-on-exit, SIGINT/SIGTERM,
    and shutdown without leaked children. Synthetic fixtures must be labeled.
 7. Verify headless/protocol/help/version remain on Node and keep output framing.
-   Node 26.4+, screen reader, standalone, Windows, and musl exclusions have
-   explicit regression coverage and honest platform execution limits.
+   For Node 26.4+, verify eligible npm handoff and every refusal ending in Ink or
+   strict failure, including inherited FFI flags; no case may select native Node/OpenTUI.
+   Verify Node source/classic standalone stays Ink and supported Bun source/preview
+   can select OpenTUI. Keep screen-reader, Windows/musl and sandbox controls and
+   record platform limits. The first actual Node 26 strict installed smoke passed;
+   the six refusal controls passed on that historical artifact, while this integrated artifact and other installation layouts still require execution.
 8. Preserve npm publication executable bits and record tarball hash, unpacked
    size, installed optional-runtime size, Node/Bun versions, and exact commit.
 9. Validate the consolidated interpreter sites with a distinct private path,
@@ -247,3 +270,15 @@ temporary HOME, QWEN_HOME, npm prefix/cache, and shell configuration paths.
 No result is marked passed before execution. Platform content checks do not
 substitute for native platform tests, and this delivery does not close the
 overall runtime-migration or Ink parity umbrella.
+
+## Permanent installed npm regression
+
+One dedicated installed suite shares a fresh current `prepare:package`, an actual Node26.4/npm pack, and one owned `install --ignore-scripts` with ordinary optional dependencies. It verifies the same tarball's complete published bytes and modes, the 160 MiB unpacked limit, and the separately installed private Bun and native library. It never substitutes the checkout bundle, global Bun, preload instrumentation or a simulated package-manager result.
+
+Nine sequential cases cover strict installed native/parser startup with one closed model request and natural quit; disabled relaunch, missing owned Bun and inherited FFI flag, each in ordinary fallback and strict refusal mode; and real npm registry-child execution under the original Node. The identity observer delegates to unchanged real npm against a synthetic loopback registry. Its start and exit records must identify the same original Node/no-Bun process, with the required queries actually exiting zero before the foreground Bun/native and normal UI are checked. This does not prove registry authentication or update installation. One added case uses real Node to independently seed the legacy AES-GCM extension file and selector, then directly executes the installed private Bun public settings reader with correct, missing and wrong USER. Every environment requires exit zero, the stored-sensitive marker without plaintext, unchanged ciphertext/modes and an unchanged installation. The fixed keychain label is not OS keychain proof. This permanent regression still requires execution.
+
+The dedicated configuration selects only this suite, one worker, no retry, fatal unhandled errors and 120 seconds per case. Its shared setup budget is 1560 seconds: prepare 600, pack 300, install 600 and bounded verification; cleanup retains the first failure. The independent installed job in the existing TUI workflow has a 60-minute limit and leaves the existing 45-minute source parity job unchanged. Default integration collection excludes the installed directory so generic tests do not silently install packages.
+
+Required CI initially uses hosted Ubuntu Linux x64 GNU and Node26.4; Darwin arm64 is a separate local result. Linux process identity and native mappings use `/proc`, while Darwin uses `ps` and `lsof`; neither platform inherits the other's observed result. Other supported POSIX hosts remain NOT_RUN until actual execution. Windows and musl are not strict npm OpenTUI success targets. Missing required toolchains, assets, observation permissions or network fail setup; they are not skipped passes. Evidence records the actual checkout, archive, installation, raw PTY/HTTP, natural exits and owned process cleanup under a unique run/attempt directory.
+
+These cases remain part of runtime follow-up PR #15387. Historical ignored manual results calibrate the contract, but do not mark the new permanent suite or Linux adapter passed. Standalone release upgrades/rollback, global/npx/symlink/read-only layouts, other target platforms and real registry authentication remain separate obligations.

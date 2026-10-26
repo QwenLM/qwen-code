@@ -30,3 +30,23 @@
 #       credential-key: '${QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY:<base64-encoded-32-byte-v2-key>}'
 #       previous-credential-keys:
 #         '[reference-v1]': <base64-encoded-32-byte-v1-key>
+
+# Extension execution is separately disabled by default. Enable package publishing
+# (qwen.managed-agent.extensions.enabled) as well before enabling execution.
+# Linux LOCAL/SSH requires a writable delegated cgroup-v2 subtree on the Runtime
+# host; cache-directory is an absolute private path outside every Workspace.
+# qwen:
+#   managed-agent:
+#     extensions:
+#       enabled: true
+#       artifact-directory: /var/lib/qwen-managed-agent/extension-packages
+#       allowed-actors: [your-operator-actor]
+#     managed-extensions:
+#       enabled: true
+#       mode: linux-cgroup
+#       cache-directory: /var/lib/qwen-managed-agent/extension-cache
+#       cgroup-root: /sys/fs/cgroup/qwen-managed-agent/extensions
+# Native macOS LOCAL is explicitly weaker developer mode:
+#       mode: developer-process-group
+#       cache-directory: /Users/developer/.qwen-managed-extension-cache
+#       cgroup-root: ''
