@@ -14291,7 +14291,7 @@ vi.mock('./server/session-pr-refresh.js', () => {
   );
 });
 
-describe('session-pr-refresh degraded load on the serve fast path', () => {
+describe('session-pr-refresh isolation on the serve fast path', () => {
   let tmpDir: string;
 
   afterEach(() => {
@@ -14301,37 +14301,55 @@ describe('session-pr-refresh degraded load on the serve fast path', () => {
     }
   });
 
-  it('degrades to no PR-state sweep instead of leaking an unhandled rejection', async () => {
-    tmpDir = fs.realpathSync(
-      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-pr-refresh-degrade-')),
-    );
-    // The serve fast path installs no process-level unhandledRejection
-    // handler before the runtime builds, so record them here: without the
-    // import's .catch the rejection escapes and Node's default is to exit.
-    const rejections: unknown[] = [];
-    const recordRejection = (reason: unknown): void => {
-      rejections.push(reason);
-    };
-    process.on('unhandledRejection', recordRejection);
-    let handle: RunHandle | undefined;
-    try {
-      ({ handle } = await startDeferredDaemon(tmpDir));
-      const health = await fetch(`${handle.url}/health`);
-      expect(health.status).toBe(200);
-      // The first health schedules the runtime build; the refresh module
-      // import fires inside it and rejects on the next turns.
-      await expect(handle.runtimeReady).resolves.toBeUndefined();
-      await new Promise((resolve) => setTimeout(resolve, 150));
-      expect(rejections).toEqual([]);
-      // The intended degradation is "no PR-state sweep" — the daemon keeps
-      // serving everything else.
-      const healthAfter = await fetch(`${handle.url}/health`);
-      expect(healthAfter.status).toBe(200);
-    } finally {
-      process.off('unhandledRejection', recordRejection);
-      await handle?.close();
-    }
-  });
+  it.each([false, true])(
+    'keeps serving when the refresh chunk is unavailable (Hosted: %s)',
+    async (hosted) => {
+      tmpDir = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qws-pr-refresh-degrade-')),
+      );
+      // The serve fast path installs no process-level unhandledRejection
+      // handler before the runtime builds, so record them here: without the
+      // import's .catch the rejection escapes and Node's default is to exit.
+      const stderr = vi.spyOn(process.stderr, 'write');
+      const rejections: unknown[] = [];
+      const recordRejection = (reason: unknown): void => {
+        rejections.push(reason);
+      };
+      process.on('unhandledRejection', recordRejection);
+      let handle: RunHandle | undefined;
+      try {
+        ({ handle } = await startDeferredDaemon(tmpDir, {
+          serveOptions: hosted
+            ? {
+                profile: 'hosted-harness',
+                serveWebShell: false,
+                hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+              }
+            : {},
+        }));
+        const headers = { authorization: 'Bearer secret-token' };
+        const health = await fetch(`${handle.url}/health`, { headers });
+        expect(health.status).toBe(200);
+        // The first health schedules the runtime build; the refresh module
+        // import fires inside it and rejects on the next turns.
+        await expect(handle.runtimeReady).resolves.toBeUndefined();
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        expect(rejections).toEqual([]);
+        expect(
+          stderr.mock.calls.some(([chunk]) =>
+            String(chunk).includes('session-pr-refresh load failed:'),
+          ),
+        ).toBe(!hosted);
+        // The intended degradation is "no PR-state sweep" — the daemon keeps
+        // serving everything else.
+        const healthAfter = await fetch(`${handle.url}/health`, { headers });
+        expect(healthAfter.status).toBe(200);
+      } finally {
+        process.off('unhandledRejection', recordRejection);
+        await handle?.close();
+      }
+    },
+  );
 });
 
 describe('runQwenServe Web Shell signals on RunHandle', () => {
