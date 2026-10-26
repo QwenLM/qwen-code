@@ -508,6 +508,15 @@ export class QQChannel extends ChannelBase {
   private sessionReplyMsgId: Map<string, { msgId: string; timestamp: number }> =
     new Map();
   /**
+   * Chat the turn in progress is about, per session, recorded by
+   * onPromptStart. Under a shared `sessionScope` a session serves many chats,
+   * so the router target frozen at session creation is whichever chat created
+   * it — not the chat a tool call belongs to. The moderation tools resolve
+   * their chat from here instead. Cleared on prompt end and session teardown.
+   */
+  private sessionTurnChat: Map<string, { chatId: string; isGroup: boolean }> =
+    new Map();
+  /**
    * Monotonic turn counter per session, bumped on every onPromptStart.
    * streamState entries carry the turn they were created in; when a new
    * prompt starts on a session whose previous turn left a streamState entry
@@ -1669,6 +1678,7 @@ export class QQChannel extends ChannelBase {
     }
     this.streamState.clear();
     this.sessionReplyMsgId.clear();
+    this.sessionTurnChat.clear();
     this.turnCounter.clear();
     this.flushingSessions.clear();
     this.pendingStreamDelete.clear();
@@ -1713,10 +1723,16 @@ export class QQChannel extends ChannelBase {
    * replies must go out as active messages, so clear any stale anchor.
    */
   protected override onPromptStart(
-    _chatId: string,
+    chatId: string,
     sessionId: string,
     messageId?: string,
   ): void {
+    // A shared sessionScope maps many chats onto one session, so the chat a
+    // tool call belongs to is this turn's, not the session's routed target.
+    this.sessionTurnChat.set(sessionId, {
+      chatId,
+      isGroup: this.chatTypeFor(chatId) === 'group',
+    });
     this.activePromptSessions.add(sessionId);
     // Bump the turn generation: streamState entries created by a previous
     // turn on this session (e.g. one left behind by a deferred send) are now
@@ -1775,6 +1791,7 @@ export class QQChannel extends ChannelBase {
     sessionId: string,
     _messageId?: string,
   ): void {
+    this.sessionTurnChat.delete(sessionId);
     // Always clear the prompt-in-flight marker first: the PR #8241 teardown
     // below has early returns (deferred flush chains) that must not leave
     // this session marked as an active prompt for the cron discriminator.
@@ -3930,6 +3947,7 @@ export class QQChannel extends ChannelBase {
   }
 
   override onSessionDied(sessionId: string): void {
+    this.sessionTurnChat.delete(sessionId);
     const state = this.streamState.get(sessionId);
     if (state?.timer) {
       clearTimeout(state.timer);
@@ -5027,6 +5045,30 @@ export class QQChannel extends ChannelBase {
   }
 
   /**
+   * The chat a moderation call may touch, resolved from the turn in progress.
+   * Under a shared `sessionScope` one session serves every group and DM, and
+   * the router target frozen at session creation is whichever chat happened to
+   * create it — using it would recall a message in a chat nobody asked about.
+   * ChannelBase calls `onPromptStart` for every turn with that turn's envelope
+   * chat, which is the only chat the turn is about.
+   */
+  private resolveModerationChat(
+    sessionId: string,
+  ): { chatId: string; isGroup: boolean } | undefined {
+    const turn = this.sessionTurnChat.get(sessionId);
+    if (turn) return turn;
+    // No turn in progress. A per-chat scope still maps the session to one
+    // chat, so its routed target is that chat — keep the channel-name guard so
+    // this instance's token cannot act on another channel's chat when several
+    // channels share one router. 'single' maps every chat onto one session, so
+    // its frozen target cannot say which chat this is: fail closed.
+    if (this.config.sessionScope === 'single') return undefined;
+    const target = this.router.getTarget(sessionId);
+    if (!target || target.channelName !== this.name) return undefined;
+    return { chatId: target.chatId, isGroup: target.isGroup === true };
+  }
+
+  /**
    * Expose the QQ group-management surface to the agent as client MCP tools.
    * Opt-in: a no-op unless the channel sets moderationTools: true, and also a
    * no-op when the bridge has no client MCP tool support. Tools are owned by
@@ -5038,18 +5080,9 @@ export class QQChannel extends ChannelBase {
     const register = this.bridge.registerChannelTool?.bind(this.bridge);
     if (!register) return;
     for (const tool of buildModerationTools({
-      resolveChat: (sessionId) => {
-        const target = this.router.getTarget(sessionId);
-        // A router shared by several channels resolves every channel's
-        // sessions, so the channel name is the guard that keeps this
-        // instance's token off another channel's chat.
-        if (!target || target.channelName !== this.name) return undefined;
-        return {
-          chatId: target.chatId,
-          isGroup: target.isGroup === true,
-        };
-      },
+      resolveChat: (sessionId) => this.resolveModerationChat(sessionId),
       memberRecallDisabled: this.moderationRecallWindowMs === 0,
+      currentSenderId: (sessionId) => this.getResponseSenderId(sessionId),
       recentMemberMessage: (chatId, senderId) =>
         this.recentMemberMessage(chatId, senderId),
       dropRecentMessage: (chatId, messageId) =>
@@ -6127,7 +6160,9 @@ export class QQChannel extends ChannelBase {
     }
     this.chatTypeMap.set(chatId, 'c2c');
     this.setReplyMsgId(chatId, event.id);
-    this.recordRecentInbound(chatId, chatId, event.id);
+    // Not recorded in the recent-inbound ring: it is read only by the
+    // group-only member-targeted recall, so a DM entry could never be
+    // resolved and would consume the ring's shared 256-chat budget.
     const senderName = event.author.username || event.author.id || 'QQ User';
     const safeName = sanitizeSenderName(senderName);
     const cleanText = rawContent.trim();
