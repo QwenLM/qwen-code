@@ -98,12 +98,13 @@ const MAX_EMBEDDED_RESOURCE_BYTES = 256 * 1024;
  * the estimator bills a flat 16 units per number/boolean regardless of JSON
  * width, so a payload that passes the byte ceiling can still hold the
  * newest block — which trimming never evicts — at several times its charged
- * bytes in live objects. Sized above the largest writer-parity witness (a
- * scalar-heavy `_meta` the writer journaled at ~80 KB of real JSON charges
- * ~641k units) so replay keeps it, and far below the empty-object flood
- * (~5.1M units) that exists only to pin the store.
+ * bytes in live objects. Sized at the same 8 estimate units per writer byte
+ * as the aggregate bound: a number-dense payload the writer journaled at
+ * the 256 KiB ceiling charges ~2.1M units, so replay keeps it, while the
+ * empty-object flood (~5.1M units) that exists only to pin the store still
+ * fails closed.
  */
-const MAX_EMBEDDED_RESOURCE_EXTRA_ESTIMATE = 1024 * 1024;
+const MAX_EMBEDDED_RESOURCE_EXTRA_ESTIMATE = 8 * MAX_EMBEDDED_RESOURCE_BYTES;
 /**
  * Estimate-unit bound on the *sum* of one block's `embeddedResources`. The
  * writer bounds a prompt's resources only in real JSON bytes (256 KiB summed,
@@ -2618,6 +2619,20 @@ function truncateTextToJsonByteBudget(
   return `${detachString(text.slice(0, end))}${TEXT_TRUNCATED_SUFFIX}`;
 }
 
+// Never collapse a field to the bare suffix: keep at least one code unit,
+// whose worst-case escaped width is 6 bytes.
+const MINIMUM_TRIMMED_JSON_BYTES = 2 + TRUNCATED_SUFFIX_ESCAPED_BYTES + 6;
+
+/** JSON bytes a string field can give back when cut to its minimum form. */
+function absorbableJsonBytes(value: unknown): number {
+  if (typeof value !== 'string' || value === '') return 0;
+  return Math.max(
+    0,
+    jsonByteEncoder.encode(JSON.stringify(value)).length -
+      MINIMUM_TRIMMED_JSON_BYTES,
+  );
+}
+
 /**
  * Byte-driven last resort of the skeleton cascade: shrink one retained
  * string field so the skeleton's real JSON bytes fit the ceiling. The cut
@@ -2634,12 +2649,21 @@ function cutSkeletonFieldToByteBudget(
   const excess = realJsonBytesOf(skeleton) - MAX_EMBEDDED_RESOURCE_BYTES;
   if (excess <= 0) return false;
   const contribution = jsonByteEncoder.encode(JSON.stringify(value)).length;
-  // Never collapse a field to the bare suffix: keep at least one code unit,
-  // whose worst-case escaped width is 6 bytes. The caller rotates fields and
-  // empties the text only as the final fallback.
-  const minimumTrimmedBytes = 2 + TRUNCATED_SUFFIX_ESCAPED_BYTES + 6;
-  const absorbable = contribution - minimumTrimmedBytes;
+  const absorbable = contribution - MINIMUM_TRIMMED_JSON_BYTES;
   if (absorbable <= 0) return false;
+  // The text arm must not shred a legitimate text when the uri or mimeType
+  // owns the byte-ceiling breach: cutting the text frees bytes the siblings
+  // still have to absorb, and reports a text truncation that never happened.
+  // Fire only when the excess exceeds their combined absorbable share; the
+  // field rotation below then cuts the field that owns the overflow.
+  if (
+    field === 'text' &&
+    excess <=
+      absorbableJsonBytes(skeleton.resource.uri) +
+        absorbableJsonBytes(skeleton.resource.mimeType)
+  ) {
+    return false;
+  }
   // Absorb only the share this field can give. Refusing unless one field owns
   // the whole excess leaves the skeleton over the ceiling when two fields
   // each own part of it; the caller re-checks and walks the rest down

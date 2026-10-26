@@ -3452,6 +3452,9 @@ export class ChatRecordingService {
       this.turnParentUuids = [];
       this.turnPromptIds = [];
       this.userDisplayTextsForTitle.length = 0;
+      this.turnTitleStates.length = 0;
+      this.displayProjectionForTitle = false;
+      this.lastProjectionTextForTitle = undefined;
       for (const record of records) {
         if (
           record.type === 'user' &&
@@ -3466,13 +3469,11 @@ export class ChatRecordingService {
           ].includes(record.subtype ?? '')
         ) {
           this.turnParentUuids.push(record.parentUuid ?? null);
+          this.trackUserDisplayTextForTitlePayload(
+            record.systemPayload as UserPromptRecordPayload | undefined,
+          );
           this.turnPromptIds.push(getRecordRewindId(record));
         }
-        if (record.type === 'user' && record.subtype === undefined)
-          this.trackUserDisplayTextForTitle(
-            (record.systemPayload as UserPromptRecordPayload | undefined)
-              ?.displayText,
-          );
       }
     };
     let committed = false;

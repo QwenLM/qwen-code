@@ -3407,6 +3407,27 @@ describe('SessionTranscriptReader', () => {
       expect(navigationKindForRecord(record)).toBe('prompt');
     });
 
+    it('keeps a truncation-only resource prompt visible in navigation', () => {
+      const record: ChatRecord = {
+        uuid: 'u-resource-truncated',
+        parentUuid: null,
+        sessionId,
+        timestamp: new Date(RECORD_BASE_MS).toISOString(),
+        type: 'user',
+        cwd: workspaceDir,
+        version: '1.0.0',
+        message: { role: 'user', parts: [] },
+        systemPayload: {
+          displayText: '',
+          displayProjection: false,
+          hookContext: '',
+          embeddedResourcesTruncated: true,
+        },
+      };
+
+      expect(navigationKindForRecord(record)).toBe('prompt');
+    });
+
     const turnResult = (uuid: string, parentUuid: string, promptId: string) =>
       sys(uuid, parentUuid, 'turn_result', {
         promptId,

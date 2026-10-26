@@ -620,6 +620,45 @@ describe('daemon embedded text resources', () => {
     expect(retainedJsonBytes).toBeLessThanOrEqual(256 * 1024);
   });
 
+  it('keeps a legitimate text when a multi-byte uri owns the byte-ceiling breach', () => {
+    // R20-3: the byte cut is authorized per field. A 90k CJK uri owns the
+    // real-byte overflow, so the cascade must cut the uri and leave the
+    // 40-char text intact — cutting the text would remove bytes the uri
+    // still owns and report a text truncation that never happened.
+    const maxRetainedBytes = 1024 * 1024;
+    const onTruncation = vi.fn();
+    const store = createDaemonTranscriptStore({
+      now: 1,
+      maxRetainedBytes,
+      onTruncation,
+    });
+    const text = 'abcdefghijklmnopqrstuvwxyz0123456789ABCD';
+    store.dispatch(
+      normalizeDaemonEvent(
+        frame({
+          type: 'resource',
+          resource: {
+            uri: `context://example/${'\u754c'.repeat(90_000)}`,
+            text,
+          },
+        }),
+      )[0]!,
+    );
+    const snapshot = store.getSnapshot();
+    expect(snapshot.retainedBytes).toBeLessThanOrEqual(maxRetainedBytes);
+    expect(onTruncation).toHaveBeenCalled();
+    const block = snapshot.blocks.find((b) => b.kind === 'user');
+    if (!block || block.kind !== 'user') {
+      throw new Error('expected one retained user block');
+    }
+    expect(block.embeddedResources).toHaveLength(1);
+    const retained = block.embeddedResources![0]!;
+    expect(retained.resource.text).toBe(text);
+    expect(
+      new TextEncoder().encode(JSON.stringify(retained)).length,
+    ).toBeLessThanOrEqual(256 * 1024);
+  });
+
   it('does not skeletonize a writer-journaled payload on replay', () => {
     // The writer journals a resource whose real JSON fits 256 KiB
     // (`MAX_RECORDED_EMBEDDED_RESOURCES_BYTES`), and the offline projection
@@ -824,6 +863,28 @@ describe('daemon embedded text resources', () => {
     expect(onTruncation).not.toHaveBeenCalled();
   });
 
+  it('keeps a writer-journaled scalar payload inside the writer byte ceiling', () => {
+    // 130,000 one-digit numbers are ~260 KB of real JSON — inside the
+    // writer's 256 KiB journal bound — but charge ~2.08M estimate units.
+    // The per-resource estimate ceiling must cover the writer-admitted
+    // window at the same ~8 units per writer byte as the aggregate bound,
+    // or a payload the writer journaled whole is skeletonized on replay.
+    const onTruncation = vi.fn();
+    const store = createDaemonTranscriptStore({ now: 1, onTruncation });
+    const scalarPayload = {
+      type: 'resource',
+      resource: { uri: 'context://example/parity', text: '' },
+      _meta: { nums: Array.from({ length: 130_000 }, () => 1) },
+    };
+    store.dispatch(normalizeDaemonEvent(frame(scalarPayload))[0]!);
+    const block = store.getSnapshot().blocks.find((b) => b.kind === 'user');
+    if (!block || block.kind !== 'user') {
+      throw new Error('expected one retained user block');
+    }
+    expect(block.embeddedResources![0]).toHaveProperty('_meta');
+    expect(onTruncation).not.toHaveBeenCalled();
+  });
+
   it('bounds the per-block aggregate when many in-bounds resources fold into one turn', () => {
     // R2-2 count leg: the live echo folds every resource of one prompt into
     // a single user block, and trimming never evicts the newest block. Each
@@ -860,11 +921,11 @@ describe('daemon embedded text resources', () => {
     // The documented store ceiling is "budget + one worst-case block":
     // trimming never evicts the newest block, and the one admitted flood
     // resource charges max(real JSON bytes, non-text estimate) — up to
-    // MAX_EMBEDDED_RESOURCE_EXTRA_ESTIMATE (1 MiB) plus the block's own
+    // MAX_EMBEDDED_RESOURCE_EXTRA_ESTIMATE (2 MiB) plus the block's own
     // structural overhead — past this 512 KiB budget on its own, with
     // nothing evictable.
     expect(snapshot.retainedBytes).toBeLessThanOrEqual(
-      maxRetainedBytes + 1024 * 1024 + 4096,
+      maxRetainedBytes + 2 * 1024 * 1024 + 4096,
     );
     expect(onTruncation).toHaveBeenCalled();
     const block = snapshot.blocks.find((b) => b.kind === 'user');

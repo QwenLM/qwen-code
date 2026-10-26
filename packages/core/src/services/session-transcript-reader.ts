@@ -1332,7 +1332,9 @@ export function navigationKindForRecord(
           resource['type'] === 'resource' &&
           isObjectRecord(resource['resource']) &&
           typeof resource['resource']['uri'] === 'string',
-      ));
+      )) ||
+    (isObjectRecord(record.systemPayload) &&
+      record.systemPayload['embeddedResourcesTruncated'] === true);
   if (!hasVisibleText && !hasVisibleAttachment) return undefined;
   return record.subtype === 'realtime_message' ? 'realtime' : 'prompt';
 }
