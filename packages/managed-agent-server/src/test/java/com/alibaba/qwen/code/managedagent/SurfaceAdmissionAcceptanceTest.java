@@ -528,7 +528,9 @@ class SurfaceAdmissionAcceptanceTest {
             }
             case WORKSPACE_FILES -> {
                 expect(entry, null, 401, "actor_required");
-                expect(entry, STRANGER, 404, "workspace_not_found");
+                expect(entry, STRANGER, 404, entry.capabilities().contains(
+                        Capability.WORKSPACE_FILES_UPLOAD_QUERY)
+                        ? "workspace_upload_not_found" : "workspace_not_found");
             }
             case WORKSPACE_ALLOCATION -> {
                 expect(entry, null, 401, "actor_required");
@@ -1535,6 +1537,13 @@ class SurfaceAdmissionAcceptanceTest {
             }
         }
         List<String> query = new ArrayList<>();
+        if (entry.capabilities().contains(Capability.WORKSPACE_FILES_UPLOAD)) {
+            query.add("workspaceId=workspace");
+            query.add("cwdRelative=.");
+            query.add("path=file.txt");
+            query.add("expectedScopeRevision=" + "a".repeat(64));
+            query.add("uploadId=11111111-1111-4111-8111-111111111111");
+        }
         if (entry.capabilities().contains(Capability.EXTENSION_PUBLISH)) {
             String manifest = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
                     ("{\"schemaVersion\":1,\"compilerVersion\":1,\"name\":\"example\",\"version\":\"1\","
@@ -1574,7 +1583,8 @@ class SurfaceAdmissionAcceptanceTest {
         if ("POST".equals(entry.method()) || "PATCH".equals(entry.method()) || "PUT".equals(entry.method())) {
             boolean octets = entry.capabilities().contains(
                     Capability.PUB_SEGMENT) || entry.capabilities().contains(
-                    Capability.PUB_RESOURCE) || entry.capabilities().contains(Capability.EXTENSION_PUBLISH);
+                    Capability.PUB_RESOURCE) || entry.capabilities().contains(Capability.EXTENSION_PUBLISH)
+                    || entry.capabilities().contains(Capability.WORKSPACE_FILES_UPLOAD);
             request.contentType(octets ? MediaType.APPLICATION_OCTET_STREAM
                     : MediaType.APPLICATION_JSON);
             request.content(bodyFor(entry, headerTenant, session));
@@ -1717,6 +1727,7 @@ class SurfaceAdmissionAcceptanceTest {
             case WORKSPACE_CREATE -> "{\"displayName\":\"New workspace\",\"idempotencyKey\":\"create-key\"}";
             case WORKSPACE_FILES_QUERY -> "{\"workspaceId\":\"workspace\",\"cwdRelative\":\".\",\"directory\":\".\"}";
             case WORKSPACE_FILES_READ -> "{\"workspaceId\":\"workspace\",\"cwdRelative\":\".\",\"path\":\"file.txt\",\"expectedScopeRevision\":\"revision\"}";
+            case WORKSPACE_FILES_UPLOAD_QUERY -> "{\"uploadId\":\"11111111-1111-4111-8111-111111111111\"}";
             case WORKSPACE_DIRECTORIES -> "{\"workspaceId\":\"workspace\",\"cwdRelative\":\".\"}";
             case SESSION_OPTIONS -> "{\"agentId\":\"qwen-code\"}";
             case SESSION_APPROVAL, SESSION_MODELS, SESSION_SKILLS, SESSION_MCP -> "{\"sessionId\":\"" + session + "\"}";
