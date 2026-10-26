@@ -84,21 +84,12 @@ export function useScopedSessions(
     async (sessionIds: string[]) => {
       if (!workspaceCwd) return primaryDeleteSessions(sessionIds);
       try {
+        const invalidateDeleted =
+          generatedUiOwner?.captureSessionDeletion(workspaceCwd);
         const result = await workspace.client
           .workspaceByCwd(workspaceCwd)
           .deleteSessionsData(sessionIds);
-        if (
-          generatedUiOwner &&
-          generatedUiOwner.workspaceCwd === workspaceCwd
-        ) {
-          for (const sessionId of [...result.removed, ...result.notFound]) {
-            generatedUiOwner.invalidate({
-              scopeId: generatedUiOwner.scopeId,
-              sessionId,
-              reason: 'deleted',
-            });
-          }
-        }
+        invalidateDeleted?.([...result.removed, ...result.notFound]);
         return result;
       } finally {
         controller.invalidateWorkspace(workspaceCwd);

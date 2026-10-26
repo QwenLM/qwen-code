@@ -92,7 +92,7 @@ afterEach(() => {
 
 describe('useScopedSessions', () => {
   it.each(['/retained-deletion', '/another-workspace'])(
-    'invalidates only confirmed background deletions in matching scope %s',
+    'captures confirmed deletions in the requested workspace from owner %s',
     async (ownerWorkspace) => {
       listWorkspaceSessionsPage.mockResolvedValue({ sessions: [] });
       deleteSessionsData.mockResolvedValue({
@@ -100,7 +100,8 @@ describe('useScopedSessions', () => {
         notFound: ['missing'],
         errors: [{ sessionId: 'failed', error: 'busy' }],
       });
-      const invalidate = vi.fn();
+      const invalidateDeleted = vi.fn();
+      const captureSessionDeletion = vi.fn(() => invalidateDeleted);
       let sessions: ReturnType<typeof useScopedSessions> | undefined;
       function Harness() {
         sessions = useScopedSessions('/retained-deletion');
@@ -112,7 +113,8 @@ describe('useScopedSessions', () => {
             value={{
               scopeId: 'retained-scope',
               workspaceCwd: ownerWorkspace,
-              invalidate,
+              invalidate: vi.fn(),
+              captureSessionDeletion,
               subscribeInvalidation: () => () => undefined,
             }}
           >
@@ -120,19 +122,18 @@ describe('useScopedSessions', () => {
           </McpAppGeneratedUiOwnerContext.Provider>,
         );
       });
-      expect(invalidate).not.toHaveBeenCalled();
+      expect(invalidateDeleted).not.toHaveBeenCalled();
       await act(async () => {
         await sessions!.deleteSessions(['secondary', 'missing', 'failed']);
       });
-      expect(invalidate.mock.calls.map(([event]) => event)).toEqual(
-        ownerWorkspace === '/retained-deletion'
-          ? ['secondary', 'missing'].map((sessionId) => ({
-              scopeId: 'retained-scope',
-              sessionId,
-              reason: 'deleted',
-            }))
-          : [],
+      expect(captureSessionDeletion).toHaveBeenCalledWith('/retained-deletion');
+      expect(captureSessionDeletion.mock.invocationCallOrder[0]).toBeLessThan(
+        deleteSessionsData.mock.invocationCallOrder[0]!,
       );
+      expect(invalidateDeleted).toHaveBeenCalledExactlyOnceWith([
+        'secondary',
+        'missing',
+      ]);
     },
   );
 

@@ -18346,6 +18346,120 @@ describe('DaemonSessionProvider', () => {
   });
 
   describe('Generated UI retained owner lifecycle', () => {
+    it('captures deletion scopes by workspace, daemon and credentials before the response', async () => {
+      const owners: Record<
+        string,
+        ContextType<typeof McpAppGeneratedUiOwnerContext>
+      > = {};
+      const invalidations: McpAppGeneratedUiInvalidation[] = [];
+      let targetKey = 'initial';
+      let showInherited = true;
+      function Probe({ name }: { name: string }) {
+        owners[name] = useContext(McpAppGeneratedUiOwnerContext);
+        return null;
+      }
+      function Outer() {
+        owners.outer = useContext(McpAppGeneratedUiOwnerContext);
+        const subscribe = owners.outer?.subscribeInvalidation;
+        useLayoutEffect(
+          () => subscribe?.((event) => invalidations.push(event)),
+          [subscribe],
+        );
+        return [
+          ['target', '/target', 'http://127.0.0.1:4170', 'token-a'],
+          ['same-primary', '/primary', 'http://127.0.0.1:4170', 'token-a'],
+          ['other-workspace', '/other', 'http://127.0.0.1:4170', 'token-a'],
+          ['other-daemon', '/target', 'http://127.0.0.1:4171', 'token-a'],
+          ['other-credentials', '/target', 'http://127.0.0.1:4170', 'token-b'],
+        ]
+          .filter(([name]) => showInherited || name !== 'same-primary')
+          .map(([name, workspaceCwd, baseUrl, token]) => (
+            <DaemonSessionProvider
+              key={name === 'target' ? targetKey : name}
+              baseUrl={baseUrl}
+              token={token}
+              workspaceCwd={workspaceCwd}
+              autoConnect={false}
+            >
+              <Probe name={name!} />
+            </DaemonSessionProvider>
+          ));
+      }
+      await renderWithProvider(<Outer />, {
+        workspaceCwd: '/primary',
+        token: 'token-a',
+      });
+      const rerender = async () => {
+        await act(async () => {
+          root?.render(
+            <DaemonSessionProvider
+              baseUrl="http://127.0.0.1:4170"
+              token="token-a"
+              workspaceCwd="/primary"
+              autoConnect={false}
+            >
+              <Outer />
+            </DaemonSessionProvider>,
+          );
+          await flushPromises();
+        });
+      };
+      const outer = requireActions(owners.outer);
+      const originalTarget = requireActions(owners.target).scopeId;
+      expect(owners['same-primary']?.scopeId).toBe(outer.scopeId);
+      const deleted = outer.captureSessionDeletion('/target');
+      deleted(['removed', 'not-found']);
+      expect(invalidations).toEqual(
+        ['removed', 'not-found'].map((sessionId) => ({
+          scopeId: originalTarget,
+          sessionId,
+          reason: 'deleted',
+        })),
+      );
+      invalidations.length = 0;
+      outer.captureSessionDeletion('/primary')(['same-session-id']);
+      expect(invalidations).toEqual([
+        {
+          scopeId: outer.scopeId,
+          sessionId: 'same-session-id',
+          reason: 'deleted',
+        },
+      ]);
+      invalidations.length = 0;
+      outer.captureSessionDeletion(undefined)(['same-session-id']);
+      outer.captureSessionDeletion('/unknown')(['same-session-id']);
+      expect(invalidations).toEqual([]);
+
+      targetKey = 'replacement';
+      showInherited = false;
+      await rerender();
+      const replacement = requireActions(owners.target).scopeId;
+      expect(replacement).not.toBe(originalTarget);
+      invalidations.length = 0;
+      deleted(['late-result']);
+      expect(invalidations).toEqual([
+        {
+          scopeId: originalTarget,
+          sessionId: 'late-result',
+          reason: 'deleted',
+        },
+      ]);
+      invalidations.length = 0;
+      requireActions(owners.outer).captureSessionDeletion('/target')(['fresh']);
+      expect(invalidations).toEqual([
+        { scopeId: replacement, sessionId: 'fresh', reason: 'deleted' },
+      ]);
+      invalidations.length = 0;
+      outer.captureSessionDeletion('/primary')(['after-inherited-unmount']);
+      expect(invalidations).toEqual([
+        {
+          scopeId: outer.scopeId,
+          sessionId: 'after-inherited-unmount',
+          reason: 'deleted',
+        },
+      ]);
+    });
+
     it.each(['randomUUID', 'crypto'])(
       'creates distinct scopes without %s while Generated UI is disabled',
       async (missing) => {

@@ -573,18 +573,10 @@ export function useWebShellSessions(options: WebShellSessionsOptions = {}) {
   const deleteSession = useCallback(
     async (sessionId: string) => {
       try {
+        const invalidateDeleted =
+          generatedUiOwner?.captureSessionDeletion(workspaceCwd);
         const removed = await workspace.actions.deleteSession(sessionId);
-        if (
-          removed &&
-          generatedUiOwner &&
-          generatedUiOwner.workspaceCwd === workspaceCwd
-        ) {
-          generatedUiOwner.invalidate({
-            scopeId: generatedUiOwner.scopeId,
-            sessionId,
-            reason: 'deleted',
-          });
-        }
+        if (removed) invalidateDeleted?.([sessionId]);
         return removed;
       } finally {
         invalidate();
@@ -595,19 +587,10 @@ export function useWebShellSessions(options: WebShellSessionsOptions = {}) {
   const deleteSessions = useCallback(
     async (sessionIds: string[]) => {
       try {
+        const invalidateDeleted =
+          generatedUiOwner?.captureSessionDeletion(workspaceCwd);
         const result = await workspace.actions.deleteSessions(sessionIds);
-        if (
-          generatedUiOwner &&
-          generatedUiOwner.workspaceCwd === workspaceCwd
-        ) {
-          for (const sessionId of [...result.removed, ...result.notFound]) {
-            generatedUiOwner.invalidate({
-              scopeId: generatedUiOwner.scopeId,
-              sessionId,
-              reason: 'deleted',
-            });
-          }
-        }
+        invalidateDeleted?.([...result.removed, ...result.notFound]);
         return result;
       } finally {
         invalidate();

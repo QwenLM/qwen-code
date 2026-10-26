@@ -153,6 +153,7 @@ function setup(strict = false) {
     scopeId: source.scopeId,
     workspaceCwd: source.workspaceCwd,
     source,
+    captureSessionDeletion: () => () => undefined,
     subscribeInvalidation: (listener) => {
       listeners.add(listener);
       return () => listeners.delete(listener);

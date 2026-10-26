@@ -784,7 +784,13 @@ const DaemonSessionOwnerGuardContext = createContext<
 type GeneratedUiLifecycle = Pick<
   McpAppGeneratedUiOwner,
   'subscribeInvalidation' | 'invalidate'
->;
+> & {
+  registerScope(scope: GeneratedUiScope): () => void;
+  captureSessionDeletion(
+    owner: GeneratedUiScope,
+    workspaceCwd: string | undefined,
+  ): (sessionIds: readonly string[]) => void;
+};
 
 interface GeneratedUiScope {
   id: string;
@@ -1355,6 +1361,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const inheritedGeneratedUi = useContext(GeneratedUiScopeContext);
   const ownGeneratedUiLifecycle = useMemo<GeneratedUiLifecycle>(() => {
     const listeners = new Set<(event: McpAppGeneratedUiInvalidation) => void>();
+    const scopes = new Set<GeneratedUiScope>();
+    const invalidate = (event: McpAppGeneratedUiInvalidation) => {
+      for (const listener of listeners) listener(event);
+    };
     return {
       subscribeInvalidation(listener) {
         listeners.add(listener);
@@ -1362,8 +1372,30 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           listeners.delete(listener);
         };
       },
-      invalidate(event) {
-        for (const listener of listeners) listener(event);
+      invalidate,
+      registerScope(scope) {
+        scopes.add(scope);
+        return () => {
+          scopes.delete(scope);
+        };
+      },
+      captureSessionDeletion(owner, workspaceCwd) {
+        const scopeIds = [...scopes]
+          .filter(
+            (scope) =>
+              workspaceCwd !== undefined &&
+              scope.workspaceCwd === workspaceCwd &&
+              scope.baseUrl === owner.baseUrl &&
+              scope.token === owner.token,
+          )
+          .map((scope) => scope.id);
+        return (sessionIds) => {
+          for (const scopeId of scopeIds) {
+            for (const sessionId of sessionIds) {
+              invalidate({ scopeId, sessionId, reason: 'deleted' });
+            }
+          }
+        };
       },
     };
   }, []);
@@ -1399,7 +1431,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   );
   useLayoutEffect(() => {
     if (generatedUiScope !== ownGeneratedUiScope) return;
+    const unregister = generatedUiLifecycle.registerScope(generatedUiScope);
     return () => {
+      unregister();
       generatedUiLifecycle.invalidate({
         scopeId: generatedUiScope.id,
         reason: 'scope-changed',
@@ -5694,7 +5728,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       scopeId: generatedUiScope.id,
       workspaceCwd: generatedUiScope.workspaceCwd,
       source: generatedUiOwnerSource,
-      ...generatedUiLifecycle,
+      subscribeInvalidation: generatedUiLifecycle.subscribeInvalidation,
+      invalidate: generatedUiLifecycle.invalidate,
+      captureSessionDeletion: (workspaceCwd) =>
+        generatedUiLifecycle.captureSessionDeletion(
+          generatedUiScope,
+          workspaceCwd,
+        ),
     }),
     [generatedUiLifecycle, generatedUiOwnerSource, generatedUiScope],
   );

@@ -97,6 +97,7 @@ describe('Generated UI message deletion invalidation', () => {
               scopeId: 'original-scope',
               workspaceCwd: '/workspace',
               subscribeInvalidation: () => () => undefined,
+              captureSessionDeletion: () => () => undefined,
               invalidate,
             }}
           >

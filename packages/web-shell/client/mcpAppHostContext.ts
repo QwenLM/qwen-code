@@ -79,6 +79,9 @@ export interface McpAppGeneratedUiOwner {
     listener: (event: McpAppGeneratedUiInvalidation) => void,
   ): () => void;
   invalidate(event: McpAppGeneratedUiInvalidation): void;
+  captureSessionDeletion(
+    workspaceCwd: string | undefined,
+  ): (sessionIds: readonly string[]) => void;
 }
 
 export const McpAppGeneratedUiOwnerContext = createContext<

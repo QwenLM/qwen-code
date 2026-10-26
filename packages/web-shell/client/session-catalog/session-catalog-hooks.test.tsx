@@ -187,7 +187,8 @@ describe('session catalog hooks', () => {
     legacy.mockResolvedValue({ sessions: [{ sessionId: 'primary' }] });
     mocks.workspace.actions.deleteSession.mockResolvedValue(true);
     let facade: ReturnType<typeof useWebShellSessions> | undefined;
-    const invalidate = vi.fn();
+    const invalidateDeleted = vi.fn();
+    const captureSessionDeletion = vi.fn(() => invalidateDeleted);
 
     function FacadeProbe() {
       facade = useWebShellSessions({ autoLoad: true });
@@ -199,8 +200,9 @@ describe('session catalog hooks', () => {
         <McpAppGeneratedUiOwnerContext.Provider
           value={{
             scopeId: 'primary-scope',
-            workspaceCwd: '/primary',
-            invalidate,
+            workspaceCwd: '/another-workspace',
+            invalidate: vi.fn(),
+            captureSessionDeletion,
             subscribeInvalidation: () => () => undefined,
           }}
         >
@@ -211,7 +213,7 @@ describe('session catalog hooks', () => {
       await Promise.resolve();
     });
     expect(legacy).toHaveBeenCalledTimes(1);
-    expect(invalidate).not.toHaveBeenCalled();
+    expect(invalidateDeleted).not.toHaveBeenCalled();
 
     await act(async () => {
       await facade!.deleteSession('primary');
@@ -224,11 +226,42 @@ describe('session catalog hooks', () => {
       mocks.useSessions.mock.results.at(-1)?.value.deleteSession,
     ).not.toHaveBeenCalled();
     expect(legacy).toHaveBeenCalledTimes(2);
-    expect(invalidate).toHaveBeenCalledWith({
-      scopeId: 'primary-scope',
-      sessionId: 'primary',
-      reason: 'deleted',
+    expect(captureSessionDeletion).toHaveBeenCalledWith('/primary');
+    expect(captureSessionDeletion.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.workspace.actions.deleteSession.mock.invocationCallOrder[0]!,
+    );
+    expect(invalidateDeleted).toHaveBeenCalledExactlyOnceWith(['primary']);
+
+    invalidateDeleted.mockClear();
+    mocks.workspace.actions.deleteSession.mockResolvedValue(false);
+    await act(async () => {
+      await facade!.deleteSession('failed');
     });
+    expect(invalidateDeleted).not.toHaveBeenCalled();
+
+    mocks.workspace.actions.deleteSessions.mockResolvedValue({
+      removed: ['removed'],
+      notFound: ['missing'],
+      errors: [{ sessionId: 'failed', error: 'busy' }],
+    });
+    await act(async () => {
+      await facade!.deleteSessions(['removed', 'missing', 'failed']);
+    });
+    expect(invalidateDeleted).toHaveBeenCalledExactlyOnceWith([
+      'removed',
+      'missing',
+    ]);
+
+    invalidateDeleted.mockClear();
+    mocks.workspace.actions.deleteSessions.mockRejectedValue(
+      new Error('offline'),
+    );
+    await act(async () => {
+      await expect(facade!.deleteSessions(['failed'])).rejects.toThrow(
+        'offline',
+      );
+    });
+    expect(invalidateDeleted).not.toHaveBeenCalled();
   });
 
   it('keeps the legacy reload contract when a list request fails', async () => {
