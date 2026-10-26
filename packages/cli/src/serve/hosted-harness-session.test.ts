@@ -46,7 +46,10 @@ import {
   type ManagedSession,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
-import { SessionTranscriptChangedError } from '@qwen-code/qwen-code-core/services/session-writer-lease.js';
+import {
+  SessionTranscriptChangedError,
+  SessionWriterLease,
+} from '@qwen-code/qwen-code-core/services/session-writer-lease.js';
 import { WorkflowStartCancelledError } from '@qwen-code/qwen-code-core/agents/runtime/workflow-runner.js';
 import { channelInputId } from '@qwen-code/qwen-code-core/managed-runtime/managed-channel-operations.js';
 import { HostedChannelSession } from './hosted-channel-session.js';
@@ -293,6 +296,25 @@ const state = vi.hoisted(() => ({
     }),
   ),
 }));
+
+// HTTP-store fixtures retain their original container; native local snapshot
+// preparation is verified by the Core snapshot and process-recovery suites.
+vi.mock(
+  '@qwen-code/qwen-code-core/managed-runtime/local-managed-session-writer.js',
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import('@qwen-code/qwen-code-core/managed-runtime/local-managed-session-writer.js')
+    >()),
+    acquireLocalManagedSessionWriter: (
+      options: Parameters<typeof SessionWriterLease.acquire>[0],
+    ) =>
+      SessionWriterLease.acquire({
+        ...options,
+        takeoverPolicy: 'certified',
+        lockSchema: { schemaVersion: 3, formatVersion: 1 },
+      }),
+  }),
+);
 
 vi.mock(
   '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js',
@@ -3177,10 +3199,15 @@ describe('Hosted Harness no-tool session', () => {
       );
       expect(state.model).toHaveBeenCalledTimes(1);
       expect(state.ownershipReleases).toHaveLength(1);
-      const journal = await LocalJsonlManagedSessionJournalStore.read(
-        path.join(state.root, `${SESSION_ID}.jsonl`),
-        { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
-      );
+      const journal = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+      });
       expect(
         journal.events.filter(
           (event) =>
@@ -3392,10 +3419,15 @@ describe('Hosted Harness no-tool session', () => {
       (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
         .status,
     ).toBe(204);
-    const journal = await LocalJsonlManagedSessionJournalStore.read(
-      path.join(state.root, `${SESSION_ID}.jsonl`),
-      { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
-    );
+    const journal = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      runtimeBaseDir: state.root,
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+    });
     // Claim, dispatch, settle: three run revisions, and the automation
     // input's turn settled by the pump, not by the close path.
     expect(
@@ -4294,10 +4326,11 @@ describe('Hosted Harness no-tool session', () => {
         .find((each) => each.occurrenceKey === AUTOMATION_SLOT);
       expect(run?.run.state).toBe('failed');
       expect(run?.run.execution).toBe('outcome_unknown');
-      const journal = await LocalJsonlManagedSessionJournalStore.read(
-        path.join(state.root, `${SESSION_ID}.jsonl`),
-        key,
-      );
+      const journal = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: key,
+      });
       expect(
         journal.events.some(
           (event) =>
@@ -4558,10 +4591,11 @@ describe('Hosted Harness no-tool session', () => {
             ),
         ),
       ).toHaveLength(1);
-      const journal = await LocalJsonlManagedSessionJournalStore.read(
-        path.join(state.root, `${SESSION_ID}.jsonl`),
-        key,
-      );
+      const journal = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: key,
+      });
       expect(
         journal.events.some(
           (event) =>
@@ -4634,10 +4668,11 @@ describe('Hosted Harness no-tool session', () => {
       expect(aftermath).toBe('pending');
       // Nothing consumed, nothing settled: every retry channel still
       // sees the park.
-      const journal = await LocalJsonlManagedSessionJournalStore.read(
-        path.join(state.root, `${SESSION_ID}.jsonl`),
-        key,
-      );
+      const journal = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: key,
+      });
       expect(
         journal.events.some(
           (event) =>
@@ -4827,10 +4862,11 @@ describe('Hosted Harness no-tool session', () => {
       expect(aftermath).toBe('pending');
       // No terminal record over a park the settle could not verify, and
       // the lease stays for the retry that can.
-      const journal = await LocalJsonlManagedSessionJournalStore.read(
-        path.join(state.root, `${SESSION_ID}.jsonl`),
-        key,
-      );
+      const journal = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: key,
+      });
       expect(
         journal.events.some(
           (event) =>
@@ -5094,10 +5130,15 @@ describe('Hosted Harness no-tool session', () => {
     });
     expect(refused.status).toBe(409);
     expect(refused.body.code).toBe('hosted_turn_recovery_in_progress');
-    const journal = await LocalJsonlManagedSessionJournalStore.read(
-      path.join(state.root, `${SESSION_ID}.jsonl`),
-      { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
-    );
+    const journal = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      runtimeBaseDir: state.root,
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+    });
     expect(
       journal.events.some(
         (event) =>
@@ -5115,14 +5156,15 @@ describe('Hosted Harness no-tool session', () => {
     capturedWakeSession().monitorWake!.kick();
     await vi.waitFor(
       async () => {
-        const journal = await LocalJsonlManagedSessionJournalStore.read(
-          path.join(state.root, `${SESSION_ID}.jsonl`),
-          {
+        const journal = await LocalJsonlManagedSessionJournalStore.read({
+          transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+          runtimeBaseDir: state.root,
+          sessionKey: {
             tenantId: 'tenant',
             workspaceId: 'workspace',
             sessionId: SESSION_ID,
           },
-        );
+        });
         expect(
           journal.events.some(
             (event) =>
@@ -5219,10 +5261,11 @@ describe('Hosted Harness no-tool session', () => {
       workspaceId: 'workspace',
       sessionId: SESSION_ID,
     };
-    const journal = await LocalJsonlManagedSessionJournalStore.read(
-      path.join(state.root, `${SESSION_ID}.jsonl`),
-      key,
-    );
+    const journal = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      runtimeBaseDir: state.root,
+      sessionKey: key,
+    });
     expect(
       journal.events.some(
         (event) =>
@@ -5383,10 +5426,11 @@ describe('Hosted Harness no-tool session', () => {
         workspaceId: 'workspace',
         sessionId: SESSION_ID,
       };
-      const journal = await LocalJsonlManagedSessionJournalStore.read(
-        path.join(state.root, `${SESSION_ID}.jsonl`),
-        key,
-      );
+      const journal = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: key,
+      });
       expect(
         journal.events.some(
           (event) =>
@@ -5486,10 +5530,11 @@ describe('Hosted Harness no-tool session', () => {
       workspaceId: 'workspace',
       sessionId: SESSION_ID,
     };
-    const journal = await LocalJsonlManagedSessionJournalStore.read(
-      path.join(state.root, `${SESSION_ID}.jsonl`),
-      key,
-    );
+    const journal = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      runtimeBaseDir: state.root,
+      sessionKey: key,
+    });
     expect(
       journal.events.some(
         (event) =>
@@ -5687,14 +5732,15 @@ describe('Hosted Harness no-tool session', () => {
         .body as { recoveryBlocked: boolean; hasActivePrompt: boolean };
     const settledTurns = async () =>
       (
-        await LocalJsonlManagedSessionJournalStore.read(
-          path.join(state.root, `${SESSION_ID}.jsonl`),
-          {
+        await LocalJsonlManagedSessionJournalStore.read({
+          transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+          runtimeBaseDir: state.root,
+          sessionKey: {
             tenantId: 'tenant',
             workspaceId: 'workspace',
             sessionId: SESSION_ID,
           },
-        )
+        })
       ).events.filter(
         (event) =>
           event.kind === 'turn.settled' && event.payload['turnId'] === inputId,
@@ -5870,14 +5916,15 @@ describe('Hosted Harness no-tool session', () => {
         ).body as { recoveryBlocked: boolean; hasActivePrompt: boolean },
       settledTurns: async () =>
         (
-          await LocalJsonlManagedSessionJournalStore.read(
-            path.join(state.root, `${SESSION_ID}.jsonl`),
-            {
+          await LocalJsonlManagedSessionJournalStore.read({
+            transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+            runtimeBaseDir: state.root,
+            sessionKey: {
               tenantId: 'tenant',
               workspaceId: 'workspace',
               sessionId: SESSION_ID,
             },
-          )
+          })
         ).events.filter(
           (event) =>
             event.kind === 'turn.settled' &&
@@ -6146,10 +6193,15 @@ describe('Hosted Harness no-tool session', () => {
     expect(replay.body.repaired).toBe(false);
     expect(replay.body.run.state).toBe('failed');
     expect(replay.body.run.execution).toBe('settled');
-    const journal = await LocalJsonlManagedSessionJournalStore.read(
-      path.join(state.root, `${SESSION_ID}.jsonl`),
-      { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
-    );
+    const journal = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      runtimeBaseDir: state.root,
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+    });
     const crashed = automationRunId(AUTOMATION_ID, AUTOMATION_SLOT);
     expect(
       journal.events
@@ -6273,10 +6325,15 @@ describe('Hosted Harness no-tool session', () => {
       (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
         .status,
     ).toBe(204);
-    const journal = await LocalJsonlManagedSessionJournalStore.read(
-      path.join(state.root, `${SESSION_ID}.jsonl`),
-      { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
-    );
+    const journal = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      runtimeBaseDir: state.root,
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+    });
     const settled = journal.events.filter(
       (event) =>
         event.kind === 'turn.settled' && event.payload['turnId'] === inputId,
@@ -6331,10 +6388,15 @@ describe('Hosted Harness no-tool session', () => {
     expect(refused.body.code).toBe('hosted_turn_recovery_in_progress');
     // Nothing was admitted: the checkpoint probe, not the admission path,
     // held the line.
-    const journal = await LocalJsonlManagedSessionJournalStore.read(
-      path.join(state.root, `${SESSION_ID}.jsonl`),
-      { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
-    );
+    const journal = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      runtimeBaseDir: state.root,
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+    });
     expect(
       journal.events.some(
         (event) =>
@@ -6351,14 +6413,15 @@ describe('Hosted Harness no-tool session', () => {
     // hung classification ever latches the block.
     await vi.waitFor(
       async () => {
-        const journal = await LocalJsonlManagedSessionJournalStore.read(
-          path.join(state.root, `${SESSION_ID}.jsonl`),
-          {
+        const journal = await LocalJsonlManagedSessionJournalStore.read({
+          transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+          runtimeBaseDir: state.root,
+          sessionKey: {
             tenantId: 'tenant',
             workspaceId: 'workspace',
             sessionId: SESSION_ID,
           },
-        );
+        });
         expect(
           journal.events.some(
             (event) =>
@@ -6485,10 +6548,15 @@ describe('Hosted Harness no-tool session', () => {
       expect(refused.body.code).toBe('hosted_turn_recovery_required');
       expect(refused.body.reason).toBe('turn_blocked');
       // Nothing was admitted.
-      const journal = await LocalJsonlManagedSessionJournalStore.read(
-        path.join(state.root, `${SESSION_ID}.jsonl`),
-        { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
-      );
+      const journal = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+      });
       expect(
         journal.events.some(
           (event) =>
@@ -6843,14 +6911,15 @@ describe('Hosted Harness no-tool session', () => {
         { timeout: SETTLE_TIMEOUT_MS, interval: 50 },
       );
       await vi.waitFor(async () => {
-        const journal = await LocalJsonlManagedSessionJournalStore.read(
-          path.join(state.root, `${SESSION_ID}.jsonl`),
-          {
+        const journal = await LocalJsonlManagedSessionJournalStore.read({
+          transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+          runtimeBaseDir: state.root,
+          sessionKey: {
             tenantId: 'tenant',
             workspaceId: 'workspace',
             sessionId: SESSION_ID,
           },
-        );
+        });
         const settled = journal.events.filter(
           (event) =>
             event.kind === 'turn.settled' &&
@@ -6909,10 +6978,11 @@ describe('Hosted Harness no-tool session', () => {
       workspaceId: 'workspace',
       sessionId: SESSION_ID,
     };
-    let journal = await LocalJsonlManagedSessionJournalStore.read(
-      path.join(state.root, `${SESSION_ID}.jsonl`),
-      key,
-    );
+    let journal = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      runtimeBaseDir: state.root,
+      sessionKey: key,
+    });
     expect(
       journal.events.some(
         (event) =>
@@ -6944,10 +7014,11 @@ describe('Hosted Harness no-tool session', () => {
     ).send({ operationId: randomUUID(), ...fireBody(1, slot) });
     expect(fired.status).toBe(202);
     expect(fired.body.replayed).toBe(true);
-    journal = await LocalJsonlManagedSessionJournalStore.read(
-      path.join(state.root, `${SESSION_ID}.jsonl`),
-      key,
-    );
+    journal = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      runtimeBaseDir: state.root,
+      sessionKey: key,
+    });
     expect(
       journal.events
         .filter(
@@ -6986,10 +7057,11 @@ describe('Hosted Harness no-tool session', () => {
     const zombieRun = automationRunId(AUTOMATION_ID, slot);
     expect(
       (
-        await LocalJsonlManagedSessionJournalStore.read(
-          path.join(state.root, `${SESSION_ID}.jsonl`),
-          key,
-        )
+        await LocalJsonlManagedSessionJournalStore.read({
+          transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+          runtimeBaseDir: state.root,
+          sessionKey: key,
+        })
       ).events.some(
         (event) =>
           event.kind === 'domain.committed' &&
@@ -7020,10 +7092,11 @@ describe('Hosted Harness no-tool session', () => {
     expect(refusedAgain.body.code).toBe('hosted_session_blocked');
     expect(
       (
-        await LocalJsonlManagedSessionJournalStore.read(
-          path.join(state.root, `${SESSION_ID}.jsonl`),
-          key,
-        )
+        await LocalJsonlManagedSessionJournalStore.read({
+          transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+          runtimeBaseDir: state.root,
+          sessionKey: key,
+        })
       ).events.some(
         (event) =>
           event.kind === 'domain.committed' &&
@@ -7050,10 +7123,15 @@ describe('Hosted Harness no-tool session', () => {
     // parked prompt kept the wake pump blocked, and the close path settled
     // it model-free, cancelling the run with its execution proven never to
     // have started.
-    const journal = await LocalJsonlManagedSessionJournalStore.read(
-      path.join(state.root, `${SESSION_ID}.jsonl`),
-      { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
-    );
+    const journal = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      runtimeBaseDir: state.root,
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+    });
     const settled = journal.events.filter(
       (event) =>
         event.kind === 'turn.settled' && event.payload['turnId'] === turnId,
@@ -7183,10 +7261,15 @@ describe('Hosted Harness no-tool session', () => {
     expect(recovered.status).toBe(202);
     expect(recovered.body.replayed).toBe(true);
     const runId = recovered.body.run.automationRunId as string;
-    const journal = await LocalJsonlManagedSessionJournalStore.read(
-      path.join(state.root, `${SESSION_ID}.jsonl`),
-      { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
-    );
+    const journal = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      runtimeBaseDir: state.root,
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+    });
     expect(
       journal.events
         .filter(
@@ -8023,10 +8106,15 @@ describe('Hosted Harness no-tool session', () => {
       (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
         .status,
     ).toBe(204);
-    const journal = await LocalJsonlManagedSessionJournalStore.read(
-      path.join(state.root, `${SESSION_ID}.jsonl`),
-      { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
-    );
+    const journal = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      runtimeBaseDir: state.root,
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+    });
     const settled = journal.events.filter(
       (event) =>
         event.kind === 'turn.settled' &&
@@ -8066,10 +8154,15 @@ describe('Hosted Harness no-tool session', () => {
       (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
         .status,
     ).toBe(204);
-    const journal = await LocalJsonlManagedSessionJournalStore.read(
-      path.join(state.root, `${SESSION_ID}.jsonl`),
-      { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
-    );
+    const journal = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      runtimeBaseDir: state.root,
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+    });
     const settled = journal.events.filter(
       (event) =>
         event.kind === 'turn.settled' &&
@@ -8625,14 +8718,15 @@ describe('Hosted Harness no-tool session', () => {
     // through the Broker rather than assumed.
     await vi.waitFor(
       async () => {
-        const journal = await LocalJsonlManagedSessionJournalStore.read(
-          path.join(state.root, `${SESSION_ID}.jsonl`),
-          {
+        const journal = await LocalJsonlManagedSessionJournalStore.read({
+          transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+          runtimeBaseDir: state.root,
+          sessionKey: {
             tenantId: 'tenant',
             workspaceId: 'workspace',
             sessionId: SESSION_ID,
           },
-        );
+        });
         const settled = journal.events.filter(
           (event) =>
             event.kind === 'turn.settled' &&
@@ -8700,14 +8794,15 @@ describe('Hosted Harness no-tool session', () => {
     const clientId = loaded.body.clientId as string;
     await vi.waitFor(
       async () => {
-        const journal = await LocalJsonlManagedSessionJournalStore.read(
-          path.join(state.root, `${SESSION_ID}.jsonl`),
-          {
+        const journal = await LocalJsonlManagedSessionJournalStore.read({
+          transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+          runtimeBaseDir: state.root,
+          sessionKey: {
             tenantId: 'tenant',
             workspaceId: 'workspace',
             sessionId: SESSION_ID,
           },
-        );
+        });
         const settled = journal.events.filter(
           (event) =>
             event.kind === 'turn.settled' &&
@@ -8768,14 +8863,15 @@ describe('Hosted Harness no-tool session', () => {
     const clientId = loaded.body.clientId as string;
     await vi.waitFor(
       async () => {
-        const journal = await LocalJsonlManagedSessionJournalStore.read(
-          path.join(state.root, `${SESSION_ID}.jsonl`),
-          {
+        const journal = await LocalJsonlManagedSessionJournalStore.read({
+          transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+          runtimeBaseDir: state.root,
+          sessionKey: {
             tenantId: 'tenant',
             workspaceId: 'workspace',
             sessionId: SESSION_ID,
           },
-        );
+        });
         expect(
           journal.events.filter(
             (event) =>
@@ -8850,10 +8946,15 @@ describe('Hosted Harness no-tool session', () => {
       // default 1s waitFor window flaked on a loaded ubuntu-latest runner.
       { timeout: SETTLE_TIMEOUT_MS },
     );
-    const journal = await LocalJsonlManagedSessionJournalStore.read(
-      path.join(state.root, `${SESSION_ID}.jsonl`),
-      { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
-    );
+    const journal = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      runtimeBaseDir: state.root,
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+    });
     expect(
       journal.events.filter((event) => event.kind === 'input.accepted'),
     ).toHaveLength(1);
@@ -8939,14 +9040,15 @@ describe('Hosted Harness no-tool session', () => {
     );
     const readSettled = async () =>
       (
-        await LocalJsonlManagedSessionJournalStore.read(
-          path.join(state.root, `${SESSION_ID}.jsonl`),
-          {
+        await LocalJsonlManagedSessionJournalStore.read({
+          transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+          runtimeBaseDir: state.root,
+          sessionKey: {
             tenantId: 'tenant',
             workspaceId: 'workspace',
             sessionId: SESSION_ID,
           },
-        )
+        })
       ).events.filter(
         (event) =>
           event.kind === 'turn.settled' &&
@@ -8992,10 +9094,15 @@ describe('Hosted Harness no-tool session', () => {
     const authorize = (request: supertest.Test) =>
       headers(request).set('X-Qwen-Client-Id', loaded.body.clientId as string);
     const readJournal = () =>
-      LocalJsonlManagedSessionJournalStore.read(
-        path.join(state.root, `${SESSION_ID}.jsonl`),
-        { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
-      );
+      LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+      });
     await vi.waitFor(
       async () => {
         expect(release).toHaveBeenCalledTimes(1);
@@ -9151,14 +9258,15 @@ describe('Hosted Harness no-tool session', () => {
     // a delete that lands mid-turn answers 409 (hosted_session_busy).
     await vi.waitFor(
       async () => {
-        const journal = await LocalJsonlManagedSessionJournalStore.read(
-          path.join(state.root, `${SESSION_ID}.jsonl`),
-          {
+        const journal = await LocalJsonlManagedSessionJournalStore.read({
+          transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+          runtimeBaseDir: state.root,
+          sessionKey: {
             tenantId: 'tenant',
             workspaceId: 'workspace',
             sessionId: SESSION_ID,
           },
-        );
+        });
         expect(
           journal.events.some(
             (event) =>
@@ -9353,14 +9461,15 @@ describe('Hosted Harness no-tool session', () => {
     // writes.
     await vi.waitFor(
       async () => {
-        const journal = await LocalJsonlManagedSessionJournalStore.read(
-          path.join(state.root, `${SESSION_ID}.jsonl`),
-          {
+        const journal = await LocalJsonlManagedSessionJournalStore.read({
+          transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+          runtimeBaseDir: state.root,
+          sessionKey: {
             tenantId: 'tenant',
             workspaceId: 'workspace',
             sessionId: SESSION_ID,
           },
-        );
+        });
         expect(
           journal.events.some(
             (event) =>
@@ -9402,14 +9511,15 @@ describe('Hosted Harness no-tool session', () => {
     expect(JSON.stringify(log.mock.calls)).not.toContain('unsettled_input');
     await vi.waitFor(
       async () => {
-        const journal = await LocalJsonlManagedSessionJournalStore.read(
-          path.join(state.root, `${SESSION_ID}.jsonl`),
-          {
+        const journal = await LocalJsonlManagedSessionJournalStore.read({
+          transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+          runtimeBaseDir: state.root,
+          sessionKey: {
             tenantId: 'tenant',
             workspaceId: 'workspace',
             sessionId: SESSION_ID,
           },
-        );
+        });
         expect(
           journal.events.some(
             (event) =>
@@ -9444,10 +9554,15 @@ describe('Hosted Harness no-tool session', () => {
       supertest(server).post(`/session/${SESSION_ID}/load`),
     ).send({ managedSessionStore: store() });
     expect(loaded.status).toBe(200);
-    const journal = await LocalJsonlManagedSessionJournalStore.read(
-      path.join(state.root, `${SESSION_ID}.jsonl`),
-      { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
-    );
+    const journal = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      runtimeBaseDir: state.root,
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+    });
     expect(
       journal.events.some(
         (event) =>
@@ -9459,14 +9574,15 @@ describe('Hosted Harness no-tool session', () => {
     // before the close route executes, exactly like the R1-5 lifecycle.
     await vi.waitFor(
       async () => {
-        const settled = await LocalJsonlManagedSessionJournalStore.read(
-          path.join(state.root, `${SESSION_ID}.jsonl`),
-          {
+        const settled = await LocalJsonlManagedSessionJournalStore.read({
+          transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+          runtimeBaseDir: state.root,
+          sessionKey: {
             tenantId: 'tenant',
             workspaceId: 'workspace',
             sessionId: SESSION_ID,
           },
-        );
+        });
         expect(
           settled.events.some(
             (event) =>
@@ -9594,10 +9710,15 @@ describe('Hosted Harness no-tool session', () => {
 
   async function journalEvents() {
     return (
-      await LocalJsonlManagedSessionJournalStore.read(
-        path.join(state.root, `${SESSION_ID}.jsonl`),
-        { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
-      )
+      await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+      })
     ).events;
   }
 
@@ -10506,10 +10627,15 @@ describe('Hosted Harness no-tool session', () => {
         supertest(server).post(`/session/${SESSION_ID}/load`),
       ).send({ managedSessionStore: store() });
       expect(loaded.status).toBe(200);
-      const journal = await LocalJsonlManagedSessionJournalStore.read(
-        path.join(state.root, `${SESSION_ID}.jsonl`),
-        { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
-      );
+      const journal = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+      });
       expect(
         journal.events
           .filter((event) => event.kind === 'domain.committed')
@@ -10637,14 +10763,15 @@ describe('Hosted Harness no-tool session', () => {
         }))();
     await vi.waitFor(
       async () => {
-        const journal = await LocalJsonlManagedSessionJournalStore.read(
-          path.join(state.root, `${SESSION_ID}.jsonl`),
-          {
+        const journal = await LocalJsonlManagedSessionJournalStore.read({
+          transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+          runtimeBaseDir: state.root,
+          sessionKey: {
             tenantId: 'tenant',
             workspaceId: 'workspace',
             sessionId: SESSION_ID,
           },
-        );
+        });
         expect(
           journal.events.some(
             (event) =>
@@ -10683,10 +10810,15 @@ describe('Hosted Harness no-tool session', () => {
       },
       { timeout: 15_000, interval: 100 },
     );
-    const journal = await LocalJsonlManagedSessionJournalStore.read(
-      path.join(state.root, `${SESSION_ID}.jsonl`),
-      { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
-    );
+    const journal = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      runtimeBaseDir: state.root,
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+    });
     expect(
       journal.events.some(
         (event) =>
@@ -10766,14 +10898,15 @@ describe('Hosted Harness no-tool session', () => {
         }))();
     await vi.waitFor(
       async () => {
-        const journal = await LocalJsonlManagedSessionJournalStore.read(
-          path.join(state.root, `${SESSION_ID}.jsonl`),
-          {
+        const journal = await LocalJsonlManagedSessionJournalStore.read({
+          transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+          runtimeBaseDir: state.root,
+          sessionKey: {
             tenantId: 'tenant',
             workspaceId: 'workspace',
             sessionId: SESSION_ID,
           },
-        );
+        });
         expect(
           journal.events.some(
             (event) =>
@@ -10878,14 +11011,15 @@ describe('Hosted Harness no-tool session', () => {
         }))();
     await vi.waitFor(
       async () => {
-        const journal = await LocalJsonlManagedSessionJournalStore.read(
-          path.join(state.root, `${SESSION_ID}.jsonl`),
-          {
+        const journal = await LocalJsonlManagedSessionJournalStore.read({
+          transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+          runtimeBaseDir: state.root,
+          sessionKey: {
             tenantId: 'tenant',
             workspaceId: 'workspace',
             sessionId: SESSION_ID,
           },
-        );
+        });
         expect(
           journal.events.some(
             (event) =>
@@ -10993,14 +11127,15 @@ describe('Hosted Harness no-tool session', () => {
         }))();
     await vi.waitFor(
       async () => {
-        const journal = await LocalJsonlManagedSessionJournalStore.read(
-          path.join(state.root, `${SESSION_ID}.jsonl`),
-          {
+        const journal = await LocalJsonlManagedSessionJournalStore.read({
+          transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+          runtimeBaseDir: state.root,
+          sessionKey: {
             tenantId: 'tenant',
             workspaceId: 'workspace',
             sessionId: SESSION_ID,
           },
-        );
+        });
         expect(
           journal.events.some(
             (event) =>
@@ -11112,14 +11247,15 @@ describe('Hosted Harness no-tool session', () => {
           supertest(server).get(`/session/${SESSION_ID}/status`),
         ).set('X-Qwen-Client-Id', clientId);
         expect(status.body.hasActivePrompt).toBe(false);
-        const journal = await LocalJsonlManagedSessionJournalStore.read(
-          path.join(state.root, `${SESSION_ID}.jsonl`),
-          {
+        const journal = await LocalJsonlManagedSessionJournalStore.read({
+          transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+          runtimeBaseDir: state.root,
+          sessionKey: {
             tenantId: 'tenant',
             workspaceId: 'workspace',
             sessionId: SESSION_ID,
           },
-        );
+        });
         expect(
           journal.events.some(
             (event) =>
@@ -11291,14 +11427,15 @@ describe('Hosted Harness no-tool session', () => {
         }))();
     await vi.waitFor(
       async () => {
-        const journal = await LocalJsonlManagedSessionJournalStore.read(
-          path.join(state.root, `${SESSION_ID}.jsonl`),
-          {
+        const journal = await LocalJsonlManagedSessionJournalStore.read({
+          transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+          runtimeBaseDir: state.root,
+          sessionKey: {
             tenantId: 'tenant',
             workspaceId: 'workspace',
             sessionId: SESSION_ID,
           },
-        );
+        });
         expect(
           journal.events.some(
             (event) =>
@@ -11455,10 +11592,11 @@ describe('Hosted Harness no-tool session', () => {
       sessionId: SESSION_ID,
     };
     const readMonitorRun = async () => {
-      const journal = await LocalJsonlManagedSessionJournalStore.read(
-        path.join(state.root, `${SESSION_ID}.jsonl`),
-        key,
-      );
+      const journal = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: key,
+      });
       const commits = journal.events.filter(
         (event) =>
           event.kind === 'domain.committed' &&
@@ -11613,10 +11751,11 @@ describe('Hosted Harness no-tool session', () => {
       sessionId: SESSION_ID,
     };
     const readMonitorRun = async () => {
-      const journal = await LocalJsonlManagedSessionJournalStore.read(
-        path.join(state.root, `${SESSION_ID}.jsonl`),
-        key,
-      );
+      const journal = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: key,
+      });
       const commits = journal.events.filter(
         (event) =>
           event.kind === 'domain.committed' &&
@@ -14145,10 +14284,11 @@ describe('Hosted Harness no-tool session', () => {
       workspaceId: 'workspace',
       sessionId: SESSION_ID,
     };
-    const saved = await LocalJsonlManagedSessionJournalStore.read(
-      path.join(state.root, `${SESSION_ID}.jsonl`),
-      key,
-    );
+    const saved = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      runtimeBaseDir: state.root,
+      sessionKey: key,
+    });
     const checkpoint = saved.events.findLast(
       (event) => event.kind === 'checkpoint.committed',
     )!;
@@ -16757,14 +16897,15 @@ describe('Hosted Harness no-tool session', () => {
           },
           { timeout: 30_000 },
         );
-        const journal = await LocalJsonlManagedSessionJournalStore.read(
-          path.join(state.root, `${SESSION_ID}.jsonl`),
-          {
+        const journal = await LocalJsonlManagedSessionJournalStore.read({
+          transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+          runtimeBaseDir: state.root,
+          sessionKey: {
             tenantId: 'tenant',
             workspaceId: 'workspace',
             sessionId: SESSION_ID,
           },
-        );
+        });
         const settlement = journal.events.filter(
           (event) =>
             event.kind === 'turn.settled' &&
@@ -18455,10 +18596,15 @@ describe('Hosted Harness no-tool session', () => {
       },
       { timeout: SETTLE_TIMEOUT_MS },
     );
-    const before = await LocalJsonlManagedSessionJournalStore.read(
-      path.join(state.root, `${SESSION_ID}.jsonl`),
-      { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
-    );
+    const before = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      runtimeBaseDir: state.root,
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+    });
     expect(
       before.events.filter((event) => event.kind === 'tool.intent'),
     ).toHaveLength(1);
@@ -18480,10 +18626,15 @@ describe('Hosted Harness no-tool session', () => {
         recoveryBlocked: false,
       });
     });
-    const after = await LocalJsonlManagedSessionJournalStore.read(
-      path.join(state.root, `${SESSION_ID}.jsonl`),
-      { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
-    );
+    const after = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      runtimeBaseDir: state.root,
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+    });
     const terminals = after.events.filter(
       (event) => event.kind === 'turn.settled',
     );
@@ -18513,10 +18664,15 @@ describe('Hosted Harness no-tool session', () => {
       })
       .expect(202);
     await vi.waitFor(async () => {
-      const journal = await LocalJsonlManagedSessionJournalStore.read(
-        path.join(state.root, `${SESSION_ID}.jsonl`),
-        { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
-      );
+      const journal = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+      });
       expect(
         journal.events.filter(
           (event) =>
@@ -18646,10 +18802,15 @@ describe('Hosted Harness no-tool session', () => {
           recoveryBlocked: false,
         });
       });
-      const journal = await LocalJsonlManagedSessionJournalStore.read(
-        path.join(state.root, `${SESSION_ID}.jsonl`),
-        { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
-      );
+      const journal = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+      });
       expect(
         journal.events.filter((event) => event.kind === 'cancel.requested'),
       ).toHaveLength(1);
@@ -18790,14 +18951,15 @@ describe('Hosted Harness no-tool session', () => {
       expect(loaded.status).toBe(200);
       await vi.waitFor(
         async () => {
-          const journal = await LocalJsonlManagedSessionJournalStore.read(
-            path.join(state.root, `${SESSION_ID}.jsonl`),
-            {
+          const journal = await LocalJsonlManagedSessionJournalStore.read({
+            transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+            runtimeBaseDir: state.root,
+            sessionKey: {
               tenantId: 'tenant',
               workspaceId: 'workspace',
               sessionId: SESSION_ID,
             },
-          );
+          });
           const terminals = journal.events.filter(
             (event) => event.kind === 'turn.settled',
           );
@@ -18910,14 +19072,15 @@ describe('Hosted Harness no-tool session', () => {
       }
       await vi.waitFor(
         async () => {
-          const journal = await LocalJsonlManagedSessionJournalStore.read(
-            path.join(state.root, `${SESSION_ID}.jsonl`),
-            {
+          const journal = await LocalJsonlManagedSessionJournalStore.read({
+            transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+            runtimeBaseDir: state.root,
+            sessionKey: {
               tenantId: 'tenant',
               workspaceId: 'workspace',
               sessionId: SESSION_ID,
             },
-          );
+          });
           expect(
             journal.events.filter((event) => event.kind === 'turn.settled'),
           ).toHaveLength(1);
@@ -19003,10 +19166,15 @@ describe('Hosted Harness no-tool session', () => {
   it('marks the publication flag not-applicable on a profile-less cold refusal', async () => {
     const server = await app(true);
     await parkUnsettledPlainTurn(server);
-    const parked = await LocalJsonlManagedSessionJournalStore.read(
-      path.join(state.root, `${SESSION_ID}.jsonl`),
-      { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
-    );
+    const parked = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      runtimeBaseDir: state.root,
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+    });
     const log = vi
       .spyOn(stdio, 'writeStderrLineSafe')
       .mockImplementation(() => {});
@@ -20126,10 +20294,11 @@ describe('Hosted Harness no-tool session', () => {
       const releases = vi.mocked(HostedWorkspaceBroker.prototype.release);
       const releasedBefore = releases.mock.calls.length;
       const second = await app(true);
-      const checkpointBefore = await LocalJsonlManagedSessionJournalStore.read(
-        path.join(state.root, `${SESSION_ID}.jsonl`),
-        key,
-      );
+      const checkpointBefore = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: key,
+      });
       const prepare = vi.mocked(HostedWorkspaceBroker.prototype.prepareV3);
       const execute = vi.mocked(HostedWorkspaceBroker.prototype.executeV3);
       const acquireCount = acquire.mock.calls.length;
@@ -20151,10 +20320,11 @@ describe('Hosted Harness no-tool session', () => {
         expect(execute).toHaveBeenCalledOnce();
         expect(acquire).toHaveBeenCalledTimes(acquireCount);
         expect(acknowledge).not.toHaveBeenCalled();
-        const unchanged = await LocalJsonlManagedSessionJournalStore.read(
-          path.join(state.root, `${SESSION_ID}.jsonl`),
-          key,
-        );
+        const unchanged = await LocalJsonlManagedSessionJournalStore.read({
+          transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+          runtimeBaseDir: state.root,
+          sessionKey: key,
+        });
         const recoverable = (events: ManagedSessionEvent[]) =>
           events.filter((event) =>
             [
@@ -20193,10 +20363,11 @@ describe('Hosted Harness no-tool session', () => {
           expect(execute).toHaveBeenCalledOnce();
           expect(acquire).toHaveBeenCalledTimes(acquireCount);
         }
-        const repaired = await LocalJsonlManagedSessionJournalStore.read(
-          path.join(state.root, `${SESSION_ID}.jsonl`),
-          key,
-        );
+        const repaired = await LocalJsonlManagedSessionJournalStore.read({
+          transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+          runtimeBaseDir: state.root,
+          sessionKey: key,
+        });
         expect(
           repaired.events.filter((event) => event.kind === 'tool.receipt'),
         ).toHaveLength(1);
@@ -20238,10 +20409,11 @@ describe('Hosted Harness no-tool session', () => {
           .runtimeSessionId,
       ).toBe(originalOwner);
       if (hooks) expect(originalOwner).not.toBe(PROMPT_ID);
-      const checkpointAfter = await LocalJsonlManagedSessionJournalStore.read(
-        path.join(state.root, `${SESSION_ID}.jsonl`),
-        key,
-      );
+      const checkpointAfter = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: key,
+      });
       expect(
         checkpointAfter.events.filter((event) => event.kind === 'tool.receipt'),
       ).toEqual(
@@ -21409,14 +21581,15 @@ describe('Hosted Harness no-tool session', () => {
       },
       { timeout: SETTLE_TIMEOUT_MS },
     );
-    const saved = await LocalJsonlManagedSessionJournalStore.read(
-      path.join(state.root, `${SESSION_ID}.jsonl`),
-      {
+    const saved = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      runtimeBaseDir: state.root,
+      sessionKey: {
         tenantId: 'tenant',
         workspaceId: 'workspace',
         sessionId: SESSION_ID,
       },
-    );
+    });
     const settled = saved.events.find(
       (event) => event.kind === 'turn.settled',
     )!;
@@ -21507,14 +21680,15 @@ describe('Hosted Harness no-tool session', () => {
       },
       { timeout: SETTLE_TIMEOUT_MS },
     );
-    const saved = await LocalJsonlManagedSessionJournalStore.read(
-      path.join(state.root, `${SESSION_ID}.jsonl`),
-      {
+    const saved = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      runtimeBaseDir: state.root,
+      sessionKey: {
         tenantId: 'tenant',
         workspaceId: 'workspace',
         sessionId: SESSION_ID,
       },
-    );
+    });
     const settled = saved.events.find(
       (event) => event.kind === 'turn.settled',
     )!;
@@ -21617,14 +21791,15 @@ describe('Hosted Harness no-tool session', () => {
       },
       { timeout: SETTLE_TIMEOUT_MS },
     );
-    const saved = await LocalJsonlManagedSessionJournalStore.read(
-      path.join(state.root, `${SESSION_ID}.jsonl`),
-      {
+    const saved = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      runtimeBaseDir: state.root,
+      sessionKey: {
         tenantId: 'tenant',
         workspaceId: 'workspace',
         sessionId: SESSION_ID,
       },
-    );
+    });
     const settled = saved.events.find(
       (event) => event.kind === 'turn.settled',
     )!;
@@ -21796,14 +21971,15 @@ describe('Hosted Harness no-tool session', () => {
       await idle();
       await cancel(PROMPT_ID).expect(204);
       await cancel(later).expect(204);
-      const saved = await LocalJsonlManagedSessionJournalStore.read(
-        path.join(state.root, `${SESSION_ID}.jsonl`),
-        {
+      const saved = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: {
           tenantId: 'tenant',
           workspaceId: 'workspace',
           sessionId: SESSION_ID,
         },
-      );
+      });
       expect(
         saved.events
           .filter((event) => event.kind === 'cancel.requested')
@@ -21888,10 +22064,15 @@ describe('Hosted Harness no-tool session', () => {
       expect(HostedWorkspaceBroker.prototype.acquire).not.toHaveBeenCalled();
       expect(HostedWorkspaceBroker.prototype.warm).not.toHaveBeenCalled();
       expect(state.model).toHaveBeenCalledTimes(2);
-      const saved = await LocalJsonlManagedSessionJournalStore.read(
-        path.join(state.root, `${SESSION_ID}.jsonl`),
-        { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
-      );
+      const saved = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+      });
       expect(
         saved.events.some(
           (event) =>
@@ -22608,10 +22789,15 @@ describe('Hosted Harness no-tool session', () => {
     const authorize = (request: supertest.Test) =>
       headers(request).set('X-Qwen-Client-Id', loaded.body.clientId);
     const journal = () =>
-      LocalJsonlManagedSessionJournalStore.read(
-        path.join(state.root, `${SESSION_ID}.jsonl`),
-        { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
-      );
+      LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+      });
     const before = await journal();
     const acquire = vi.mocked(HostedWorkspaceBroker.prototype.acquire);
     acquire.mockClear();
@@ -23599,10 +23785,15 @@ describe('Hosted Harness tool approvals', () => {
           recoveryBlocked: true,
         });
       });
-      const journal = await LocalJsonlManagedSessionJournalStore.read(
-        path.join(state.root, `${SESSION_ID}.jsonl`),
-        { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
-      );
+      const journal = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+      });
       const action = journal.events.findLast(
         (event) =>
           event.kind === 'action.changed' &&
@@ -23650,10 +23841,15 @@ describe('Hosted Harness tool approvals', () => {
       expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledTimes(
         toolName === 'write_file' ? 1 : 0,
       );
-      const restored = await LocalJsonlManagedSessionJournalStore.read(
-        path.join(state.root, `${SESSION_ID}.jsonl`),
-        { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
-      );
+      const restored = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+      });
       expect(
         restored.events.filter(
           (event) =>
@@ -23956,10 +24152,15 @@ describe('Hosted Harness tool approvals', () => {
             }),
       };
       expect(await definitions()).toEqual([saved]);
-      const initialJournal = await LocalJsonlManagedSessionJournalStore.read(
-        path.join(state.root, `${SESSION_ID}.jsonl`),
-        { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
-      );
+      const initialJournal = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+      });
       const send = async (mode: 'default' | 'yolo', revision: number) => {
         const prompt = [
           { type: 'text', text: 'write using the admitted policy' },
@@ -23985,14 +24186,15 @@ describe('Hosted Harness tool approvals', () => {
               sessionId: SESSION_ID,
             },
           });
-          const journal = await LocalJsonlManagedSessionJournalStore.read(
-            path.join(state.root, `${SESSION_ID}.jsonl`),
-            {
+          const journal = await LocalJsonlManagedSessionJournalStore.read({
+            transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+            runtimeBaseDir: state.root,
+            sessionKey: {
               tenantId: 'tenant',
               workspaceId: 'workspace',
               sessionId: SESSION_ID,
             },
-          );
+          });
           const requested = journal.events.findLast(
             (event) =>
               event.kind === 'action.changed' &&
@@ -24062,10 +24264,15 @@ describe('Hosted Harness tool approvals', () => {
       expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledTimes(3);
       for (const definition of await definitions())
         expect(definition).toEqual(saved);
-      const finalJournal = await LocalJsonlManagedSessionJournalStore.read(
-        path.join(state.root, `${SESSION_ID}.jsonl`),
-        { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
-      );
+      const finalJournal = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+      });
       expect(finalJournal.header!.definitionRef).toEqual(
         initialJournal.header!.definitionRef,
       );
@@ -27010,10 +27217,11 @@ describe('Hosted Harness Runtime turn takeover', () => {
       sessionKey: key,
     });
     const latestCheckpointState = async () => {
-      const journal = await LocalJsonlManagedSessionJournalStore.read(
-        path.join(state.root, `${SESSION_ID}.jsonl`),
-        key,
-      );
+      const journal = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: key,
+      });
       const checkpoint = journal.events.findLast(
         (event) => event.kind === 'checkpoint.committed',
       );
@@ -27692,10 +27900,15 @@ describe('Hosted Harness Runtime turn takeover', () => {
     ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
     expect(status.body.recoveryBlocked).toBe(false);
     expect(status.body.recoveryReason).toBeUndefined();
-    const saved = await LocalJsonlManagedSessionJournalStore.read(
-      path.join(state.root, `${SESSION_ID}.jsonl`),
-      { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
-    );
+    const saved = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      runtimeBaseDir: state.root,
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+    });
     const settled = saved.events.filter(
       (event) =>
         event.kind === 'turn.settled' && event.payload['turnId'] === PROMPT_ID,
@@ -28354,10 +28567,11 @@ describe('Hosted Harness Runtime turn takeover', () => {
       // The transcript also carries the crashed first Harness's events, so
       // the scan keys on the turn rather than on the kind alone (#13800
       // R2-13).
-      const saved = await LocalJsonlManagedSessionJournalStore.read(
-        path.join(state.root, `${SESSION_ID}.jsonl`),
-        key,
-      );
+      const saved = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: key,
+      });
       expect(
         saved.events.filter(
           (event) =>
@@ -28404,10 +28618,11 @@ describe('Hosted Harness Runtime turn takeover', () => {
       workspaceId: 'workspace',
       sessionId: SESSION_ID,
     };
-    const journal = await LocalJsonlManagedSessionJournalStore.read(
-      path.join(state.root, `${SESSION_ID}.jsonl`),
-      key,
-    );
+    const journal = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      runtimeBaseDir: state.root,
+      sessionKey: key,
+    });
     expect(
       journal.events.filter(
         (event) =>
@@ -28541,10 +28756,11 @@ describe('Hosted Harness Runtime turn takeover', () => {
       sessionKey: key,
     });
     const latestCheckpointState = async () => {
-      const journal = await LocalJsonlManagedSessionJournalStore.read(
-        path.join(state.root, `${SESSION_ID}.jsonl`),
-        key,
-      );
+      const journal = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: key,
+      });
       const checkpoint = journal.events.findLast(
         (event) => event.kind === 'checkpoint.committed',
       );
@@ -28567,10 +28783,11 @@ describe('Hosted Harness Runtime turn takeover', () => {
         expect((await latestCheckpointState())?.continuation.phase).toBe(
           'await_command',
         );
-        const journal = await LocalJsonlManagedSessionJournalStore.read(
-          path.join(state.root, `${SESSION_ID}.jsonl`),
-          key,
-        );
+        const journal = await LocalJsonlManagedSessionJournalStore.read({
+          transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+          runtimeBaseDir: state.root,
+          sessionKey: key,
+        });
         expect(
           journal.events.some(
             (event) =>
@@ -31788,14 +32005,15 @@ describe('Hosted Harness Runtime turn takeover', () => {
       expect(deps?.busy?.()).toBe(true);
       // The park has something to park: the notification's input is
       // journaled where the pump reads it.
-      const journal = await LocalJsonlManagedSessionJournalStore.read(
-        path.join(state.root, `${SESSION_ID}.jsonl`),
-        {
+      const journal = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: {
           tenantId: 'tenant',
           workspaceId: 'workspace',
           sessionId: SESSION_ID,
         },
-      );
+      });
       expect(
         journal.events.some(
           (event) =>
@@ -31810,14 +32028,15 @@ describe('Hosted Harness Runtime turn takeover', () => {
         { timeout: SETTLE_TIMEOUT_MS },
       );
       expect(state.model).not.toHaveBeenCalled();
-      const parkedJournal = await LocalJsonlManagedSessionJournalStore.read(
-        path.join(state.root, `${SESSION_ID}.jsonl`),
-        {
+      const parkedJournal = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: {
           tenantId: 'tenant',
           workspaceId: 'workspace',
           sessionId: SESSION_ID,
         },
-      );
+      });
       expect(
         parkedJournal.events.some(
           (event) =>
@@ -31859,14 +32078,15 @@ describe('Hosted Harness Runtime turn takeover', () => {
       });
       await vi.waitFor(
         async () => {
-          const delivered = await LocalJsonlManagedSessionJournalStore.read(
-            path.join(state.root, `${SESSION_ID}.jsonl`),
-            {
+          const delivered = await LocalJsonlManagedSessionJournalStore.read({
+            transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+            runtimeBaseDir: state.root,
+            sessionKey: {
               tenantId: 'tenant',
               workspaceId: 'workspace',
               sessionId: SESSION_ID,
             },
-          );
+          });
           expect(
             delivered.events.some(
               (event) =>
@@ -31935,14 +32155,15 @@ describe('Hosted Harness Runtime turn takeover', () => {
       expect(kick.mock.calls.length).toBeGreaterThan(0);
       await new Promise((resolve) => setTimeout(resolve, 1_200));
       expect(state.model).not.toHaveBeenCalled();
-      const journal = await LocalJsonlManagedSessionJournalStore.read(
-        path.join(state.root, `${SESSION_ID}.jsonl`),
-        {
+      const journal = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: {
           tenantId: 'tenant',
           workspaceId: 'workspace',
           sessionId: SESSION_ID,
         },
-      );
+      });
       expect(
         journal.events.some(
           (event) =>
@@ -38620,14 +38841,15 @@ describe('Hosted Harness Runtime turn takeover', () => {
           },
           { timeout: SETTLE_TIMEOUT_MS },
         );
-        const journal = await LocalJsonlManagedSessionJournalStore.read(
-          path.join(state.root, `${SESSION_ID}.jsonl`),
-          {
+        const journal = await LocalJsonlManagedSessionJournalStore.read({
+          transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+          runtimeBaseDir: state.root,
+          sessionKey: {
             tenantId: 'tenant',
             workspaceId: 'workspace',
             sessionId: SESSION_ID,
           },
-        );
+        });
         const domainCommits = (domain: string) =>
           journal.events.filter(
             (e) =>
@@ -39239,13 +39461,19 @@ describe('Hosted Harness stored definitions', () => {
         payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
       })
       .expect(202);
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(server).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', created.body.clientId);
-      expect(status.body.hasActivePrompt).toBe(false);
-      expect(status.body.recoveryBlocked).toBe(true);
-    });
+    // The slow-host settle budget, not vitest's 1 s default: this poll flipped
+    // in CI on a loaded ecs host (#15579, run 40182849995) before the
+    // recovery-blocked state landed.
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', created.body.clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(true);
+      },
+      { timeout: SETTLE_TIMEOUT_MS },
+    );
     write.mockRestore();
     await headers(supertest(server).post(`/session/${SESSION_ID}/detach`)).set(
       'X-Qwen-Client-Id',
@@ -39266,18 +39494,23 @@ describe('Hosted Harness stored definitions', () => {
         driveRuntimeRecovery: true,
       })
       .expect(200);
-    await vi.waitFor(() =>
-      expect(JSON.stringify(recovered)).toContain('RECOVERED_ORIGINAL_SKILL'),
+    await vi.waitFor(
+      () =>
+        expect(JSON.stringify(recovered)).toContain('RECOVERED_ORIGINAL_SKILL'),
+      { timeout: SETTLE_TIMEOUT_MS },
     );
     expect(JSON.stringify(recovered)).not.toContain('never ran');
     expect(JSON.stringify(recovered)).toContain('Tool output truncated.');
     expect(JSON.stringify(recovered).length).toBeLessThan(201000);
-    await vi.waitFor(async () => {
-      const status = await headers(
-        supertest(replacement).get(`/session/${SESSION_ID}/status`),
-      ).set('X-Qwen-Client-Id', loaded.body.clientId);
-      expect(status.body.hasActivePrompt).toBe(false);
-      expect(status.body.recoveryBlocked).toBe(false);
-    });
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(replacement).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', loaded.body.clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(false);
+      },
+      { timeout: SETTLE_TIMEOUT_MS },
+    );
   });
 });

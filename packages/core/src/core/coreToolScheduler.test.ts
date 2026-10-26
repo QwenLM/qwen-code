@@ -1324,6 +1324,7 @@ describe('CoreToolScheduler', () => {
 
   function createSchedulerForLegacyToolTests(options: {
     toolsByName: Map<string, MockTool>;
+    onPermissionPromptTerminalSequence?: (terminalSequence: string) => void;
     approvalMode?: ApprovalMode;
     getPermissionsDeny?: () => string[] | undefined;
     messageBus?: { request: ReturnType<typeof vi.fn> };
@@ -1469,6 +1470,8 @@ describe('CoreToolScheduler', () => {
         chatRecordingService: options.chatRecordingService,
         onToolResultFullTurnModel: options.onToolResultFullTurnModel,
         isToolExecutionAllowed: options.isToolExecutionAllowed,
+        onPermissionPromptTerminalSequence:
+          options.onPermissionPromptTerminalSequence,
       },
     );
 
@@ -4851,6 +4854,41 @@ describe('CoreToolScheduler', () => {
     });
     expect(runSideQueryMock).not.toHaveBeenCalled();
     expect(hookSystem.firePermissionDeniedEvent).not.toHaveBeenCalled();
+  });
+
+  it('hands its owner the terminal sequence of the permission prompt hook', async () => {
+    const onConfirm = vi.fn().mockResolvedValue(undefined);
+    const tool = new MockTool({
+      name: 'needs-approval',
+      kind: Kind.Edit,
+      getDefaultPermission: MOCK_TOOL_GET_DEFAULT_PERMISSION,
+      getConfirmationDetails: async () =>
+        execDetails('Confirm', 'needs-approval', 'needs-approval', onConfirm),
+    });
+    const onPermissionPromptTerminalSequence = vi.fn();
+    const { scheduler } = createSchedulerForLegacyToolTests({
+      toolsByName: toolMap(tool),
+      approvalMode: ApprovalMode.DEFAULT,
+      messageBus: hookBus(async (request) =>
+        hookResponse(
+          `${request.eventName}-hook`,
+          request.eventName === 'Notification'
+            ? { terminalSequence: '\u0007' }
+            : {},
+        ),
+      ),
+      disableHooks: false,
+      onPermissionPromptTerminalSequence,
+    });
+
+    await scheduleBatch(
+      scheduler,
+      toolRequest('prompted', tool.name, {}, 'prompt-prompted'),
+    );
+
+    await vi.waitFor(() =>
+      expect(onPermissionPromptTerminalSequence).toHaveBeenCalledWith('\u0007'),
+    );
   });
 
   it('marks invalid PermissionRequest rewrites as pre-execution span failures', async () => {
@@ -13844,6 +13882,36 @@ describe('Fire hook functions integration', () => {
           ? refused.response.executionStatus
           : undefined,
       ).toBe('not_started');
+      expect(
+        completed
+          .filter((c) => c.request.callId !== '2')
+          .every((c) => c.status === 'success'),
+      ).toBe(true);
+    });
+
+    it('fails a call its owner refuses as execution-denied, without running it', async () => {
+      const log: string[] = [];
+      const { scheduler, onAllToolCallsComplete } = createScheduler(
+        toolMap(loggingTool(log, 'Agent', 'agent', undefined, { prefix: '' })),
+        {
+          refuseToolCall: (request) =>
+            request.callId === '2' ? 'Not in this session.' : undefined,
+        },
+      );
+
+      await scheduleBatch(scheduler, ...agentCalls());
+
+      expect(log).not.toContain('start:B');
+      const completed = firstBatch(onAllToolCallsComplete);
+      const refused = completed.find((c) => c.request.callId === '2');
+      expect(refused?.status).toBe('error');
+      expect(
+        refused && 'response' in refused ? refused.response : {},
+      ).toMatchObject({
+        errorType: ToolErrorType.EXECUTION_DENIED,
+        executionStatus: 'not_started',
+        error: new Error('Not in this session.'),
+      });
       expect(
         completed
           .filter((c) => c.request.callId !== '2')

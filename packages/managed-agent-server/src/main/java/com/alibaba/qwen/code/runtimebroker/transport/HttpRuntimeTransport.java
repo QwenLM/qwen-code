@@ -24,6 +24,7 @@ import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.provisioning.ManagedContextProtocol;
 import com.alibaba.qwen.code.runtimebroker.provisioning.ProviderRuntimeProtocol;
 
+import java.io.EOFException;
 import java.math.BigDecimal;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -362,9 +363,21 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
             }
             Map<String, Object> boot = contextBoot(request, seed);
             Map<String, Object> body = ManagedContextProtocol.attestationRequest(boot);
-            return post(lease, files ? ManagedCsiFilesProtocol.CONTEXT_ATTEST_PATH : ManagedContextProtocol.ATTEST_PATH,
-                    encodeToolRequest(files ? ManagedCsiFilesProtocol.wrapContext(request, body) : body,
-                            BODY_LIMIT_BYTES), BODY_LIMIT_BYTES, files ? seed.getGatewayIncarnation() : null)
+            String path = files ? ManagedCsiFilesProtocol.CONTEXT_ATTEST_PATH : ManagedContextProtocol.ATTEST_PATH;
+            byte[] encoded = encodeToolRequest(files ? ManagedCsiFilesProtocol.wrapContext(request, body) : body,
+                    BODY_LIMIT_BYTES);
+            String incarnation = files ? seed.getGatewayIncarnation() : null;
+            long started = System.nanoTime();
+            return post(lease, path, encoded, BODY_LIMIT_BYTES, incarnation)
+                    .exceptionallyCompose(error -> {
+                        long remaining = requestTimeout.toNanos() - (System.nanoTime() - started);
+                        // Read-only confirmation can race an idle SSH connection closing.
+                        if (remaining > 0 && causedByEof(error)) {
+                            return post(lease, path, encoded, BODY_LIMIT_BYTES, incarnation,
+                                    Duration.ofNanos(remaining));
+                        }
+                        return CompletableFuture.failedFuture(unwrap(error));
+                    })
                     .thenApply(bytes -> {
                         var actual = files ? ManagedCsiFilesProtocol.unwrapContext(request, ManagedCsiFilesProtocol.parse(bytes))
                                 : ManagedContextProtocol.parse(bytes);
@@ -1363,9 +1376,23 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
 
     private CompletionStage<byte[]> post(RuntimeLease lease, String path,
             byte[] encoded, int responseLimit, String expectedIncarnation) {
+        return post(lease, path, encoded, responseLimit, expectedIncarnation, requestTimeout);
+    }
+
+    private static boolean causedByEof(Throwable error) {
+        for (Throwable cause = error; cause != null; cause = cause.getCause()) {
+            if (cause instanceof EOFException) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private CompletionStage<byte[]> post(RuntimeLease lease, String path,
+            byte[] encoded, int responseLimit, String expectedIncarnation, Duration timeout) {
         HttpRequest httpRequest = HttpRequest.newBuilder(
                 endpoint(lease).resolve(path))
-                .timeout(requestTimeout)
+                .timeout(timeout)
                 .header("Authorization", "Bearer " + lease.getToken())
                 .header("Cache-Control", "no-store")
                 .header("Content-Type", "application/json")
@@ -1427,7 +1454,7 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
             result.complete(responseBody.bytes());
         });
         CompletableFuture<byte[]> returned = result
-                .orTimeout(requestTimeout.toMillis(), TimeUnit.MILLISECONDS)
+                .orTimeout(timeout.toMillis(), TimeUnit.MILLISECONDS)
                 .handle((value, error) -> {
                     if (error == null) {
                         return value;
