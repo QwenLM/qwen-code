@@ -706,6 +706,7 @@ export function buildRuntimeEnvironment(
       settings?.advanced?.excludedEnvVars || DEFAULT_EXCLUDED_ENV_VARS;
     for (const [key, value] of Object.entries(settings.env)) {
       if (isLoaderEnvKey(key)) continue;
+      if (isGlobalDirEnvKey(key)) continue;
       if (isReloadExcludedKey(key)) continue;
       if (isHardcodedProjectEnvExclusion(key)) continue;
       if (excludedVars.includes(key)) continue;
@@ -789,6 +790,9 @@ export function loadEnvironment(
   if (settings.env) {
     for (const [key, value] of Object.entries(settings.env)) {
       if (isLoaderEnvKey(key)) {
+        continue;
+      }
+      if (isGlobalDirEnvKey(key)) {
         continue;
       }
       if (isReloadExcludedKey(key)) {
@@ -890,6 +894,7 @@ export function reloadEnvironment(
   if (settings.env) {
     for (const [key, value] of Object.entries(settings.env)) {
       if (isLoaderEnvKey(key)) continue;
+      if (isGlobalDirEnvKey(key)) continue;
       if (isReloadExcludedKey(key)) continue;
       if (isHardcodedProjectEnvExclusion(key)) continue;
       if (typeof value !== 'string') continue;

@@ -28,7 +28,7 @@ Qwen Code 在所有平台上都把设置、凭据和其他全局状态保存在 
   - channels 基础包；
   - SDK 的 peer 注册表；
   - 内置 `/stuck` skill 的 shell 前置脚本。
-- `XDG_CONFIG_HOME`、`HOME` 和 `USERPROFILE` 只从 Qwen Code 启动时的环境读取。`QWEN_HOME` 还可以来自全局目录的 `.env` 和 `~/.env`，它们在解析全局目录之前读取。之后加载的任何 `.env` 文件都不能设置这四个变量，包括 XDG 安装上遗留的 `~/.qwen/.env`，因为之后再出现的值会把设置和凭据拆分到两个目录。
+- `XDG_CONFIG_HOME`、`HOME` 和 `USERPROFILE` 只从 Qwen Code 启动时的环境读取。`QWEN_HOME` 还可以来自全局目录的 `.env` 和 `~/.env`，它们在解析全局目录之前读取。之后加载的任何 `.env` 文件以及 `settings.json` 中的 `env` 部分都不能设置这四个变量，包括 XDG 安装上遗留的 `~/.qwen/.env`，因为之后再出现的值会把设置和凭据拆分到两个目录。
 - 原本把全局目录的父目录当作主目录的代码，现在直接使用主目录，因此 `~/.env` 仍然是主目录级的 `.env`。
 - Auto 模式的自我修改保护覆盖解析后的全局目录，因此 `~/.config/qwen/settings.json` 及其 `hooks/`、`skills/` 与 `~/.qwen/...` 一样受到路径模式的保护。写成 `~/...` 形式的 `QWEN_HOME` 也同样适用。在 Linux 上，即使正在使用 `~/.qwen`，它也会保护 XDG 目录及其标记，因为在那里写入标记会让 XDG 目录在下一次启动时成为全局目录。
 - 需手动开启的诊断功能（启动与 CPU profile、堆快照）写入全局目录，因此在 XDG 安装上不会再创建 `~/.qwen`。

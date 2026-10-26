@@ -896,8 +896,9 @@ when `QWEN_HOME` is unset) is loaded before `~/.env`, and existing environment
 values are not overwritten. `QWEN_HOME` is read from those two files before
 anything else loads, and from no other `.env` file, including a `~/.qwen/.env`
 left behind when the global directory is elsewhere. `XDG_CONFIG_HOME`, `HOME`
-and `USERPROFILE` are never read from a `.env` file. All four decide where the
-global directory is.
+and `USERPROFILE` are never read from a `.env` file, and none of the four is
+read from the `settings.json` `env` section. All four decide where the global
+directory is.
 
 ### Standalone update download source
 

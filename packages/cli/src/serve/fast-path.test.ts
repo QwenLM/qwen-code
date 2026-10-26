@@ -1748,6 +1748,33 @@ describe('serve fast path environment bootstrap', () => {
         expect(process.env['USERPROFILE']).toBeUndefined();
       },
     );
+
+    it.skipIf(platform.value === 'win32')(
+      'does not let settings.env set USERPROFILE',
+      () => {
+        useXdgHome();
+        tempWorkspace = realpathSync(
+          mkdtempSync(join(os.tmpdir(), 'qws-fast-path-xdg-workspace-')),
+        );
+        delete process.env['USERPROFILE'];
+        try {
+          loadServeFastPathEnvironment(
+            {
+              env: {
+                USERPROFILE: '/elsewhere',
+                FASTPATH_SETTINGS_ALLOWED: 'allowed',
+              },
+            },
+            tempWorkspace,
+          );
+
+          expect(process.env['FASTPATH_SETTINGS_ALLOWED']).toBe('allowed');
+          expect(process.env['USERPROFILE']).toBeUndefined();
+        } finally {
+          delete process.env['FASTPATH_SETTINGS_ALLOWED'];
+        }
+      },
+    );
   });
 
   it('applies legacy settings keys consumed by the serve fast path', () => {

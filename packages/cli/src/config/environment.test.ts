@@ -2269,4 +2269,31 @@ describe('home .env with the global dir in the XDG config directory', () => {
       expect(process.env['USERPROFILE']).toBeUndefined();
     },
   );
+
+  it.skipIf(platform.value === 'win32').each(['load', 'reload', 'snapshot'])(
+    'does not let settings.env set USERPROFILE during %s',
+    (operation) => {
+      delete process.env['USERPROFILE'];
+      const workspace = makeWorkspace();
+      const settings = testSettings({
+        env: { USERPROFILE: '/elsewhere', DEMO_VAR: 'loaded' },
+      });
+
+      if (operation === 'snapshot') {
+        const { effectiveEnv } = buildRuntimeEnvironment(
+          settings,
+          workspace,
+          {},
+          true,
+        );
+        expect(effectiveEnv['USERPROFILE']).toBeUndefined();
+        expect(effectiveEnv['DEMO_VAR']).toBe('loaded');
+      } else {
+        if (operation === 'load') loadEnvironment(settings, workspace);
+        else reloadEnvironment(settings, workspace, true);
+        expect(process.env['USERPROFILE']).toBeUndefined();
+        expect(process.env['DEMO_VAR']).toBe('loaded');
+      }
+    },
+  );
 });

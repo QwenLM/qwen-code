@@ -344,6 +344,7 @@ export function loadServeFastPathEnvironment(
     for (const [key, value] of Object.entries(settings.env)) {
       if (isHardcodedProjectEnvExclusion(key)) continue;
       if (isLoaderEnvKey(key)) continue;
+      if (isGlobalDirEnvKey(key)) continue;
       if (!Object.hasOwn(process.env, key) && typeof value === 'string') {
         process.env[key] = value;
       }
