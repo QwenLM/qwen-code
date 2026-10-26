@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2025 Qwen Team
+ * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -32,6 +32,7 @@ const SCRIPT = fileURLToPath(
 );
 const OID = (char) => char.repeat(40);
 const REPO = 'QwenLM/qwen-code';
+const ESC = String.fromCharCode(27);
 
 const gitEnv = {
   ...process.env,
@@ -139,22 +140,37 @@ describe('artifactDirName', () => {
 });
 
 describe('detectIsolation', () => {
-  it('reports the signals it can observe', () => {
+  it('reports a container marker as a boundary', () => {
     expect(detectIsolation({}, () => false)).toEqual({
       isolated: false,
       signals: [],
-    });
-    expect(detectIsolation({ SANDBOX: 'sandbox-exec' }, () => false)).toEqual({
-      isolated: true,
-      signals: ['SANDBOX=sandbox-exec'],
+      seatbelt: false,
     });
     expect(detectIsolation({ container: 'podman' }, () => false)).toEqual({
       isolated: true,
       signals: ['container=podman'],
+      seatbelt: false,
+    });
+    expect(detectIsolation({ SANDBOX: 'docker' }, () => false)).toEqual({
+      isolated: true,
+      signals: ['SANDBOX=docker'],
+      seatbelt: false,
     });
     expect(detectIsolation({}, (path) => path === '/.dockerenv')).toEqual({
       isolated: true,
       signals: ['/.dockerenv'],
+      seatbelt: false,
+    });
+  });
+
+  // The built-in macOS sandbox sets this value and runs a profile that still
+  // reads host files, so counting it as a boundary would send untrusted PR code
+  // down the local path the gate exists to prevent.
+  it('does not count the built-in macOS sandbox as a boundary', () => {
+    expect(detectIsolation({ SANDBOX: 'sandbox-exec' }, () => false)).toEqual({
+      isolated: false,
+      signals: [],
+      seatbelt: true,
     });
   });
 });
@@ -184,16 +200,19 @@ describe('validateContext', () => {
 });
 
 describe('parseArgs', () => {
-  it('takes the PR number, --repo in both spellings, and --allow-host', () => {
+  it('takes the PR number, --repo in both spellings, and --require-isolation', () => {
     expect(parseArgs(['42', '--repo', REPO])).toMatchObject({
       pr: 42,
       repo: REPO,
-      allowHost: false,
+      requireIsolation: false,
     });
-    expect(parseArgs(['42', `--repo=${REPO}`, '--allow-host'])).toMatchObject({
+    expect(parseArgs(['42', `--repo=${REPO}`])).toMatchObject({
       pr: 42,
       repo: REPO,
-      allowHost: true,
+    });
+    // The boundary check needs no coordinates: it is meant to run inside.
+    expect(parseArgs(['--require-isolation'])).toMatchObject({
+      requireIsolation: true,
     });
     expect(parseArgs(['--help'])).toMatchObject({ help: true });
   });
@@ -205,16 +224,20 @@ describe('parseArgs', () => {
     expect(parseArgs(['42', '--repo', REPO, 'extra']).error).toMatch(
       /unexpected argument/,
     );
+    // The removed escape hatch must not fall through as a PR.
+    expect(parseArgs(['42', '--repo', REPO, '--allow-host']).error).toMatch(
+      /unexpected argument/,
+    );
   });
 });
 
 // These cases drive the real CLI through a POSIX `gh` stand-in; a Windows
 // runner cannot express it, and the Linux lane owns that coverage.
 describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
-  it('resolves the coordinates and reports a detectable boundary', () => {
+  it('resolves the coordinates and reports a container boundary', () => {
     const { dir, base, head } = makeRepo();
     const env = installFakeGh(dir, snapshotFor({ base, head }));
-    env.SANDBOX = 'sandbox-exec';
+    env.SANDBOX = 'docker';
 
     const result = runPrepare(dir, ['42', '--repo', REPO], env);
     expect(result.stderr).toBe('');
@@ -222,7 +245,8 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     expect(result.stdout).toContain(`repo       ${REPO}`);
     expect(result.stdout).toContain(`base       ${base}`);
     expect(result.stdout).toContain(`head       ${head}`);
-    expect(result.stdout).toContain('isolation  SANDBOX=sandbox-exec');
+    expect(result.stdout).toContain('isolation  SANDBOX=docker');
+    expect(result.stdout).toContain('--require-isolation');
 
     const root = realpathSync(dir);
     const contextPath = join(root, 'tmp', 'verify-context', 'pr42.json');
@@ -234,39 +258,59 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     expect(existsSync(join(artifacts, 'evidence'))).toBe(true);
   });
 
-  it('does not claim isolation it cannot observe', () => {
+  // The coordinate path always runs on the host, because resolving metadata
+  // needs `gh`. Gating there would fire every round; the gate is the separate
+  // mode, run where PR code actually executes.
+  it('reports a seatbelt process without claiming it is a boundary', () => {
     const { dir, base, head } = makeRepo();
     const env = installFakeGh(dir, snapshotFor({ base, head }));
-    delete env.SANDBOX;
-    delete env.container;
-    // A GitHub-hosted runner is not itself a container; if this host really is
-    // one, the detector is right and the case cannot observe its negative.
+    env.SANDBOX = 'sandbox-exec';
     if (detectIsolation().isolated) return;
 
-    const result = runPrepare(dir, ['42', '--repo', REPO], env);
-    expect(result.status).toBe(4);
-    expect(result.stdout).toContain('No isolation boundary detected');
-    expect(result.stdout).toContain(
-      `gh pr comment 42 --repo ${REPO} --body '@qwen-code /verify'`,
-    );
+    const prepared = runPrepare(dir, ['42', '--repo', REPO], env);
+    expect(prepared.status).toBe(0);
+    expect(prepared.stdout).toContain('isolation  none detected');
+    expect(prepared.stdout).toContain('not a boundary');
 
-    const allowed = runPrepare(
+    const boundary = runPrepare(dir, ['--require-isolation'], env);
+    expect(boundary.status).toBe(4);
+    expect(boundary.stderr).toContain('default profile still reads host files');
+
+    const container = runPrepare(dir, ['--require-isolation'], {
+      ...env,
+      SANDBOX: 'docker',
+    });
+    expect(container.status).toBe(0);
+    expect(container.stdout).toContain('verify-pr boundary: SANDBOX=docker');
+  });
+
+  it('strips control characters from an untrusted title', () => {
+    const { dir, base, head } = makeRepo();
+    const env = installFakeGh(
       dir,
-      ['42', '--repo', REPO, '--allow-host'],
-      env,
+      snapshotFor({ base, head, title: `evil${ESC}[2Jtitle` }),
     );
-    expect(allowed.status).toBe(0);
+    env.SANDBOX = 'docker';
+
+    const result = runPrepare(dir, ['42', '--repo', REPO], env);
+    expect(result.status).toBe(0);
+    expect(result.stdout).not.toContain(ESC);
+    expect(result.stdout).toContain('evil[2Jtitle');
   });
 
   it('names the fetch that brings a missing OID into the clone', () => {
     const { dir, base } = makeRepo();
     const env = installFakeGh(dir, snapshotFor({ base, head: OID('f') }));
-    env.SANDBOX = 'sandbox-exec';
+    env.SANDBOX = 'docker';
 
     const result = runPrepare(dir, ['42', '--repo', REPO], env);
     expect(result.status).toBe(3);
     expect(result.stderr).toContain(`head ${OID('f')} is not in this clone`);
-    expect(result.stderr).toContain('git fetch origin pull/42/head');
+    // Named explicitly: `origin` may be the contributor's fork, which resolves
+    // the same PR number to an unrelated PR.
+    expect(result.stderr).toContain(
+      `git fetch https://github.com/${REPO}.git pull/42/head`,
+    );
   });
 
   it('refuses to run without a repository', () => {

@@ -38,9 +38,11 @@ them rather than at the end of the document.
 - `scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo>` resolves the
   coordinates: fetch the snapshot with the field list the lane uses, verify both
   OIDs exist in this clone, create the artifact directory with its `evidence/`
-  subdirectory, and report the isolation signals the process can observe. Exit
-  4 means the coordinates are ready but no boundary was detected; `--allow-host`
-  is the explicit override for a host the detector cannot see.
+  subdirectory, and report the isolation signals the process can observe. It
+  does not gate on them: resolving metadata needs `gh`, and `gh` and the
+  boundary are mutually exclusive, so this path always runs on the host. The
+  gate is `--require-isolation`, meant to run inside the boundary before the
+  round executes anything.
 - `scripts/verify-pr-check.mjs <dir>` applies the publisher's rules to a local
   artifact directory: required files, the four verdict words, a positive and
   self-consistent assertion triple, and no `merge-ready` carrying a failed
@@ -54,10 +56,13 @@ them rather than at the end of the document.
    from a contributor's fork, and there `origin` resolves the same PR number to
    an unrelated PR. Failing closed costs one flag and removes exactly the
    failure the skill already warns about.
-2. **The scripts never touch the round.** Prepare fetches metadata and creates
-   directories; it does not checkout a worktree, build, or execute PR code. The
-   isolation report is an input to the decision, not a gate the script can
-   enforce on itself.
+2. **The scripts never touch the round, and the coordinate path does not gate on
+   isolation.** Prepare fetches metadata and creates directories; it does not
+   checkout a worktree, build, or execute PR code. It also cannot decide whether
+   this process may run that code: it must reach `gh`, which the boundary
+   excludes by design, so it always runs on the host. A gate there would fire on
+   every round and turn the override into the normal path, so the check is a
+   separate mode intended to run inside the boundary.
 3. **The local checker mirrors the publisher instead of replacing it.**
    Extracting the publish job's assertions into shared code would touch the
    workflow and its meta-tests; the rule set is four checks, stable, and stated
@@ -68,12 +73,14 @@ them rather than at the end of the document.
 
 ## Constraints and risks
 
-- The isolation detector reads two environment variables and two container
-  marker files. A VM shows none of them, which is why the override exists. A
-  false positive would need one of those to be set for another reason.
-- Two implementations of the publish rules can drift. The CI publisher remains
-  authoritative; folding the checker into it would be a separate change with
-  its own blast radius.
+- The isolation detector counts only container-backed signals. The built-in
+  macOS sandbox sets `SANDBOX=sandbox-exec` while its default profile still
+  reads host files, so it is reported as a caveat rather than a boundary.
+- Two implementations of the publish rules can drift. A workflow meta-test pins
+  the checker verdict vocabulary to the publisher case labels, so a fifth word
+  on one side fails the suite. The CI publisher remains authoritative.
+- The PR title is untrusted input reaching a maintainer terminal, so control
+  characters are dropped before it is printed.
 - These are local helpers: the lane pins `.qwen` from the base branch, so the
   skill text that references them takes effect only after this change merges.
 
@@ -92,8 +99,9 @@ them rather than at the end of the document.
 
 - `prepare` on a clone holding both OIDs writes a snapshot whose
   `baseRefOid`/`headRefOid` match the PR, creates the glob-matching directory,
-  and exits 0 only when a boundary is detected or `--allow-host` is passed.
-- A missing OID fails with the exact fetch that brings it into the clone.
+  and exits 0 on the host; `--require-isolation` exits 4 outside a container and
+  0 inside one.
+- A missing OID fails with a fetch naming the `--repo` repository, not `origin`.
 - `check` rejects `merge-ready` with a failed assertion, an inconsistent
   triple, and an unknown verdict word; it accepts `findings` with the same
   counts.

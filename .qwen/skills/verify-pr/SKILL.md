@@ -138,12 +138,16 @@ profiles, or `gh` token. Do not run it in an ordinary working copy on a
 maintainer's machine; if that isolation is unavailable, ask the maintainer to
 trigger the sandboxed `@qwen-code /verify` lane instead.
 
-Run `node scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo>` before
-anything else: it fetches the metadata snapshot, resolves and verifies both
-OIDs against this clone, creates `tmp/pr<n>-verify-<ts>/`, and reports whether
-an isolation boundary was detected. Exit 4 means none was — stop there and
-trigger the lane above, or pass `--allow-host` when the boundary exists
-somewhere the detector cannot see it (a VM).
+Run `node scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo>` on the host
+before anything else: it fetches the metadata snapshot, resolves and verifies
+both OIDs against this clone, creates `tmp/pr<n>-verify-<ts>/`, and reports the
+isolation signals it can see. It does not gate on them — resolving metadata
+needs `gh`, which the boundary excludes, so this path always runs on the host.
+The boundary check belongs inside: run
+`node scripts/verify-pr-prepare.mjs --require-isolation` as the round's first
+command there, and treat exit 4 as "this is not a boundary". The built-in macOS
+sandbox (`SANDBOX=sandbox-exec`) does not count, because its default profile
+still reads host files.
 
 ⚠️ That isolation and `gh` are mutually exclusive: `gh` refuses even
 public-repository queries without authentication, so the metadata **cannot

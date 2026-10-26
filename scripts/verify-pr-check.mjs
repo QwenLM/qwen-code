@@ -2,7 +2,7 @@
 
 /**
  * @license
- * Copyright 2025 Qwen Team
+ * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -22,9 +22,9 @@
  * error, 2 on a usage error.
  */
 
-import { existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
-import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { isEntryPoint } from './lib/entry-point.js';
 
 export const VERDICTS = ['merge-ready', 'findings', 'blocked', 'inconclusive'];
 
@@ -84,13 +84,25 @@ export function checkArtifacts({ files, evidence = [] }) {
 
   let counts = null;
   if (files.assertions && files.assertions.trim() !== '') {
-    let parsed = null;
+    let parsed;
+    let parsedOk = true;
     try {
       parsed = JSON.parse(files.assertions);
     } catch {
+      parsedOk = false;
       errors.push('assertions.json is not valid JSON');
     }
-    if (parsed !== null) {
+    // JSON.parse('null') succeeds, and the publisher's jq requires
+    // type == "object": without this branch a null or array artifact skips
+    // every count check and still reads as evidence.
+    if (
+      parsedOk &&
+      (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed))
+    ) {
+      errors.push(
+        'assertions.json must be an object with pass, fail and total',
+      );
+    } else if (parsedOk) {
       const fields = ['pass', 'fail', 'total'];
       const valid = fields.every(
         (field) => Number.isInteger(parsed?.[field]) && parsed[field] >= 0,
@@ -193,22 +205,6 @@ function main(argv) {
   );
   process.stdout.write(`${lines.join('\n')}\n`);
   return result.errors.length === 0 ? 0 : 1;
-}
-
-/**
- * Whether this module is the executed entry point; `import.meta.url` is a
- * percent-encoded file URL and Node resolves the entry module's symlinks while
- * `argv[1]` keeps the path the shell was given.
- */
-function isEntryPoint(metaUrl, argv1) {
-  if (!argv1) return false;
-  try {
-    return (
-      realpathSync(resolve(argv1)) === realpathSync(fileURLToPath(metaUrl))
-    );
-  } catch {
-    return false;
-  }
 }
 
 if (isEntryPoint(import.meta.url, process.argv[1])) {

@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2025 Qwen Team
+ * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -104,6 +104,11 @@ describe('checkArtifacts', () => {
       ['{"pass":4,"fail":0,"total":0}', /total is 0/],
       ['{"pass":2,"fail":1,"total":4}', /inconsistent/],
       ['not json', /not valid JSON/],
+      // JSON.parse accepts all three; the publisher's jq requires an object,
+      // and a null artifact used to skip every count check and read as clean.
+      ['null', /must be an object/],
+      ['[]', /must be an object/],
+      ['0', /must be an object/],
     ];
     for (const [assertions, message] of cases) {
       expect(check({ assertions }).errors.join('\n')).toMatch(message);

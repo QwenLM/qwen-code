@@ -2,7 +2,7 @@
 
 /**
  * @license
- * Copyright 2025 Qwen Team
+ * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -18,31 +18,34 @@
  * report is about another PR or is discarded outright.
  *
  * This script resolves those coordinates and nothing else. It does not checkout
- * a worktree, build, or execute PR code; deciding whether this host may run
- * that code is the round's business, and the isolation report below is the
- * input to that decision.
+ * a worktree, build, or execute PR code. It also cannot gate on isolation:
+ * resolving the coordinates needs `gh`, and `gh` and the boundary are mutually
+ * exclusive, so this path always runs on the host. The gate is the separate
+ * `--require-isolation` mode, meant to run inside the boundary before the round
+ * executes anything.
  *
  * Usage:
- *   node scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo> [--allow-host]
+ *   node scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo>
+ *   node scripts/verify-pr-prepare.mjs --require-isolation
  *
  * Options:
- *   --repo <owner>/<repo>  required: never inferred from `origin`, because a
- *                          fork's `origin` resolves the same PR number to an
- *                          unrelated PR
- *   --allow-host           exit 0 even when no isolation boundary is detected,
- *                          for a host the detector cannot see (a VM)
+ *   --repo <owner>/<repo>  required for the coordinate path: never inferred
+ *                          from `origin`, because a fork's `origin` resolves the
+ *                          same PR number to an unrelated PR
+ *   --require-isolation    check the process this runs in and exit 4 when no
+ *                          boundary is detected; run it inside the boundary
  *
  * Exit codes:
- *   0  prepared, an isolation boundary was detected (or --allow-host)
+ *   0  coordinates resolved, or the boundary check passed
  *   2  usage error
  *   3  metadata, OID, or filesystem failure
- *   4  prepared, but no isolation boundary was detected — do not run PR code
+ *   4  --require-isolation found no boundary — do not run PR code here
  */
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { isEntryPoint } from './lib/entry-point.js';
 
 const OID = /^[0-9a-f]{40}$/;
 const REPO = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/;
@@ -57,7 +60,8 @@ const FIELDS = [
   'commits',
 ].join(',');
 
-const HELP = `Usage: node scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo> [--allow-host]
+const HELP = `Usage: node scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo>
+       node scripts/verify-pr-prepare.mjs --require-isolation
 
 Resolves the coordinates a local /verify-pr round needs and writes the
 metadata snapshot the round reads as $QWEN_VERIFY_CONTEXT:
@@ -65,15 +69,13 @@ metadata snapshot the round reads as $QWEN_VERIFY_CONTEXT:
   - fetches the PR snapshot with gh, from the repository you name
   - verifies the base and head OIDs exist in this clone
   - creates tmp/pr<n>-verify-<YYYYMMDD-HHMMSS>/ with an evidence/ subdirectory
-  - reports whether an isolation boundary was detected
+  - reports the isolation signals this process can observe
 
-Exit 4 means the coordinates are ready but this process does not look isolated:
-do not execute PR code here. Trigger the sandboxed lane instead:
-
-  gh pr comment <pr> --repo <owner>/<repo> --body '@qwen-code /verify'
-
-Pass --allow-host only when the boundary exists somewhere the detector cannot
-see it, such as a VM.
+The coordinate path runs on the host by construction: it needs gh, and gh and
+the boundary are mutually exclusive. Run --require-isolation inside the
+boundary, as the round's first command; exit 4 means this process is not
+isolated and must not execute PR code. The built-in macOS sandbox
+(SANDBOX=sandbox-exec) does not count — its default profile reads host files.
 `;
 
 /** Returns `{owner, name}` for a GitHub repository slug, or null. */
@@ -103,18 +105,31 @@ export function artifactDirName(pr, now = new Date()) {
 }
 
 /**
- * Reports the isolation signals this process can observe. A false negative is
- * possible (a VM carries none of them), which is why the caller may override
- * with --allow-host; a false positive would need one of these variables or
- * files to exist on the host for another reason.
+ * The built-in macOS sandbox announces itself with this value while its
+ * default `permissive-open` profile still lets the process read host files, so
+ * it is not the credential-free boundary the round needs.
+ */
+export const SEATBELT = 'sandbox-exec';
+
+/**
+ * Reports the isolation signals this process can observe. Only a
+ * container-backed signal counts: a VM carries none of them, which is why the
+ * caller decides what a missing signal means, and why the seatbelt flag is
+ * reported separately rather than folded into `isolated`.
  */
 export function detectIsolation(env = process.env, exists = existsSync) {
   const signals = [];
-  if (env.SANDBOX) signals.push(`SANDBOX=${env.SANDBOX}`);
   if (env.container) signals.push(`container=${env.container}`);
   if (exists('/.dockerenv')) signals.push('/.dockerenv');
   if (exists('/run/.containerenv')) signals.push('/run/.containerenv');
-  return { isolated: signals.length > 0, signals };
+  if (env.SANDBOX && env.SANDBOX !== SEATBELT) {
+    signals.push(`SANDBOX=${env.SANDBOX}`);
+  }
+  return {
+    isolated: signals.length > 0,
+    signals,
+    seatbelt: env.SANDBOX === SEATBELT,
+  };
 }
 
 /** Returns the normalized snapshot fields, or null when the shape is wrong. */
@@ -135,15 +150,30 @@ export function validateContext(json) {
   };
 }
 
+/** Drops C0/C1 control characters, which a terminal would interpret. */
+export function printable(text) {
+  return [...String(text ?? '')]
+    .filter((char) => {
+      const code = char.codePointAt(0);
+      return code > 0x1f && (code < 0x7f || code > 0x9f);
+    })
+    .join('');
+}
+
 /** Parses argv into options, or `{error}` for a usage failure. */
 export function parseArgs(argv) {
-  const options = { pr: null, repo: null, allowHost: false, help: false };
+  const options = {
+    pr: null,
+    repo: null,
+    requireIsolation: false,
+    help: false,
+  };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === '--help' || arg === '-h') {
       options.help = true;
-    } else if (arg === '--allow-host') {
-      options.allowHost = true;
+    } else if (arg === '--require-isolation') {
+      options.requireIsolation = true;
     } else if (arg === '--repo') {
       options.repo = argv[(index += 1)] ?? null;
       if (!options.repo) return { error: '--repo needs <owner>/<repo>' };
@@ -155,7 +185,7 @@ export function parseArgs(argv) {
       return { error: `unexpected argument: ${arg}` };
     }
   }
-  if (options.help) return options;
+  if (options.help || options.requireIsolation) return options;
   if (!Number.isInteger(options.pr) || options.pr <= 0) {
     return { error: 'a PR number is required' };
   }
@@ -188,6 +218,7 @@ function main(argv) {
     process.stdout.write(HELP);
     return 0;
   }
+  if (options.requireIsolation) return requireBoundary();
 
   const { owner, name } = parseRepo(options.repo);
   const slug = `${owner}/${name}`;
@@ -238,7 +269,7 @@ function main(argv) {
     ) {
       return fail(
         3,
-        `${label} ${oid} is not in this clone — run: git fetch origin ${ref}`,
+        `${label} ${oid} is not in this clone — run: git fetch https://github.com/${slug}.git ${ref}`,
       );
     }
   }
@@ -248,8 +279,8 @@ function main(argv) {
   const artifacts = join(root, 'tmp', artifactDirName(context.pr));
   try {
     mkdirSync(contextDir, { recursive: true });
-    // Recursive, so a retry in the same second — exit 4, then --allow-host —
-    // lands in the directory this script just made instead of failing on it.
+    // Recursive, so a retry within the same second lands in the directory this
+    // script just made instead of failing on it.
     mkdirSync(artifacts, { recursive: true });
     mkdirSync(join(artifacts, 'evidence'), { recursive: true });
   } catch (error) {
@@ -258,7 +289,9 @@ function main(argv) {
   writeFileSync(contextPath, `${JSON.stringify(snapshot, null, 2)}\n`);
 
   const isolation = detectIsolation();
-  const title = context.title.replace(/\s+/g, ' ').trim();
+  // The title comes from an untrusted fork, and a control character would reach
+  // the maintainer's terminal from a tool whose job is to protect it.
+  const title = printable(context.title).replace(/\s+/g, ' ').trim();
   report([
     'verify-pr prepare',
     `  repo       ${slug}`,
@@ -269,45 +302,41 @@ function main(argv) {
     `  artifacts  ${artifacts}`,
     `  isolation  ${isolation.isolated ? isolation.signals.join(', ') : 'none detected'}`,
   ]);
-
-  if (isolation.isolated || options.allowHost) {
+  if (isolation.seatbelt) {
     report([
-      '',
-      `Next: build the round in ${artifacts}; the snapshot above is the whole`,
-      'world for metadata (no network calls from inside the boundary).',
+      '  seatbelt   SANDBOX=sandbox-exec (default profile allows host reads —',
+      '             not a boundary)',
     ]);
-    return 0;
   }
-
   report([
     '',
-    'No isolation boundary detected. Do not execute PR code in this working',
-    'copy. Run the round in a credential-free container or VM, or trigger the',
-    'sandboxed lane:',
+    `Next: build the round in ${artifacts}. This preflight ran on the host,`,
+    'because resolving the coordinates needs `gh` and `gh` is mutually',
+    'exclusive with the boundary. Before executing PR code, run inside it:',
     '',
-    `  gh pr comment ${context.pr} --repo ${slug} --body '@qwen-code /verify'`,
-    '',
-    'Pass --allow-host only when the boundary exists somewhere the detector',
-    'cannot see it (a VM).',
+    '  node scripts/verify-pr-prepare.mjs --require-isolation',
   ]);
-  return 4;
+  return 0;
 }
 
 /**
- * Whether this module is the executed entry point. `import.meta.url` is a
- * percent-encoded file URL, so comparing it to a plain `file://` + path breaks
- * on spaces or non-ASCII characters, and Node resolves the entry module's
- * symlinks while `argv[1]` keeps the path the shell was given.
+ * The in-boundary check, and the only place its answer means anything: the
+ * coordinate path necessarily runs on the host, so a gate there would fire
+ * every round and teach the maintainer to ignore it.
  */
-function isEntryPoint(metaUrl, argv1) {
-  if (!argv1) return false;
-  try {
-    return (
-      realpathSync(resolve(argv1)) === realpathSync(fileURLToPath(metaUrl))
-    );
-  } catch {
-    return false;
+function requireBoundary() {
+  const isolation = detectIsolation();
+  if (isolation.isolated) {
+    report([`verify-pr boundary: ${isolation.signals.join(', ')}`]);
+    return 0;
   }
+  const detail = isolation.seatbelt
+    ? 'SANDBOX=sandbox-exec is the built-in macOS sandbox, whose default profile still reads host files'
+    : 'no container marker was found';
+  process.stderr.write(
+    `verify-pr boundary: ${detail} — do not execute PR code in this process\n`,
+  );
+  return 4;
 }
 
 if (isEntryPoint(import.meta.url, process.argv[1])) {
