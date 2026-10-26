@@ -9,7 +9,7 @@ import { MOD_MAX_DEPTH } from './types.js';
 
 // Executed only inside QuickJS. The factory's handles stay private to the host.
 export const MOD_GUEST_FACTORY = String.raw`
-((bridge, status) => {
+((bridge, status, identity) => {
   const parse = JSON.parse.bind(JSON);
   const stringify = JSON.stringify.bind(JSON);
   const Depths = Map;
@@ -31,6 +31,7 @@ export const MOD_GUEST_FACTORY = String.raw`
   const keys = Object.keys;
   const freeze = Object.freeze;
   const hasOwn = Object.hasOwn;
+  const plugin = freeze(parse(identity));
   const hooks = [];
   const runs = new Map();
   const known = new Set(${JSON.stringify(CLAUDE_CODE_EVENTS)});
@@ -108,7 +109,35 @@ export const MOD_GUEST_FACTORY = String.raw`
     const invoke = (name, value) => call(id, frames, name, value);
     const namespaces = {
       command: { register: spec => invoke('command.register', spec) },
-      session: { version: () => invoke('session.version', {}) },
+      session: {
+        cwd: () => invoke('session.cwd', {}),
+        id: () => invoke('session.id', {}),
+        model: () => invoke('session.model', {}),
+        root: () => invoke('session.root', {}),
+        surface: () => invoke('session.surface', {}),
+        surfaces: () => invoke('session.surfaces', {}),
+        turns: () => invoke('session.turns', {}),
+        usage: (args = {}) => invoke('session.usage', args),
+        version: () => invoke('session.version', {})
+      },
+      clock: {
+        now: () => invoke('clock.now', {}),
+        // The signal stays here: aborting it rejects the wait at once.
+        sleep: (ms, options = {}) => {
+          if (!object(options) || keys(options).some(k => k !== 'signal')) return Promise.reject(new Error('Invalid Mod sleep options'));
+          const { signal } = options;
+          if (signal !== undefined && (!object(signal) || typeof signal.addEventListener !== 'function')) return Promise.reject(new Error('Invalid Mod sleep signal'));
+          if (signal?.aborted) return Promise.reject(signal.reason ?? new Error('Mod sleep aborted'));
+          const waiting = invoke('clock.sleep', { ms });
+          if (!signal) return waiting;
+          return new Promise((resolve, reject) => {
+            const abort = () => reject(signal.reason ?? new Error('Mod sleep aborted'));
+            signal.addEventListener('abort', abort);
+            waiting.then(resolve, reject).finally(() => signal.removeEventListener?.('abort', abort));
+          });
+        }
+      },
+      turn: { abort: input => invoke('turn.abort', input) },
       ui: { log: (text, options = {}) => {
         if (!object(options) || keys(options).some(k => k !== 'to')) throw new Error('Invalid Mod log');
         void invoke('ui.log', { text: String(text), to: options.to ?? 'transcript' }).catch(() => {});
@@ -121,6 +150,8 @@ export const MOD_GUEST_FACTORY = String.raw`
         return target[name];
       }
     });
+    // Data, not methods: it stays the frozen plain object JSON and await expect.
+    namespaces.plugin = plugin;
     return new Proxy(namespaces, { get: (target, key) => hasOwn(target, key) ? target[key] : unsupported('$.' + String(key)) });
   };
   const signalFor = run => ({

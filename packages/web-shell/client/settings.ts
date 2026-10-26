@@ -1,4 +1,6 @@
 /** Stable presentation aliases; schema paths are private implementation details. */
+export const OUTPUT_LANGUAGE_SETTING_KEY = 'general.outputLanguage';
+
 const SETTING_KEYS = {
   'setting:auto-update': 'general.enableAutoUpdate',
   'setting:session-recap': 'general.showSessionRecap',
@@ -8,6 +10,7 @@ const SETTING_KEYS = {
   'setting:git-commit-co-author': 'general.gitCoAuthor.commit',
   'setting:git-pr-co-author': 'general.gitCoAuthor.pr',
   'setting:language': 'general.language',
+  'setting:output-language': 'general.outputLanguage',
   'setting:prevent-system-sleep': 'general.preventSystemSleep',
   'setting:review-attribution': 'review.attribution',
   'setting:review-sandbox': 'review.sandbox',
@@ -49,6 +52,7 @@ const SETTING_KEYS = {
   'setting:workflow-size': 'tools.workflowSizeGuideline',
   'setting:workflow-name-only': 'tools.workflowNameOnly',
   'setting:permission-strategy': 'policy.permissionStrategy',
+  'setting:max-sessions': 'serve.maxSessions',
   'setting:model-proposed-goals': 'goals.modelProposed',
   'setting:arena-artifacts': 'agents.arena.preserveArtifacts',
   'setting:session-workflow': 'experimental.sessionWorkflow',
@@ -70,6 +74,7 @@ const BUILTIN_IDS = [
   'builtin:live-setup',
   'builtin:local-control',
   'builtin:connections',
+  'builtin:workspace-directories',
   'builtin:model-management',
 ] as const;
 

@@ -32,6 +32,9 @@ import {
   type ModLog,
   type ModReply,
   type ModRequest,
+  type ModSessionFacts,
+  type ModTurnComplete,
+  type ModTurnStart,
   type ModWorkerReply,
   type ModSource,
   type ModOptions,
@@ -62,6 +65,10 @@ export class ModRuntime {
   private pending?: (reply: ModReply) => void;
   private commands: Array<ModCommand & { plugin: string }> = [];
   private tools = false;
+  private turns: { start: boolean; complete: string[] } = {
+    start: false,
+    complete: [],
+  };
   private sequence = 0;
   private root?: {
     id: number;
@@ -88,8 +95,10 @@ export class ModRuntime {
 
   private constructor(
     private readonly log: (entry: ModLog, plugin: string) => void,
+    private readonly facts: () => ModSessionFacts,
     private readonly resolveTool?: ModToolResolver,
     private readonly surface: 'terminal' | null = null,
+    private readonly abortTurn?: (turnId: string) => void,
   ) {
     this.worker = new Worker(workerEntry(), {
       stdout: true,
@@ -107,6 +116,8 @@ export class ModRuntime {
           this.tool?.operations.get(id)?.controller.abort();
       } else if (reply.type === 'check-result')
         this.tool?.checks.get(reply.id)?.(reply);
+      else if (reply.type === 'turn-abort')
+        this.answerTurnAbort(reply, root.id);
       else if (reply.type === 'activity') {
         if (
           reply.phase !== root.phase ||
@@ -156,18 +167,35 @@ export class ModRuntime {
     resolveTool?: ModToolResolver,
     surface: 'terminal' | null = null,
     version = 'unknown',
+    facts?: () => ModSessionFacts,
+    abortTurn?: (turnId: string) => void,
   ): Promise<ModRuntime> {
     if (
       plugins.length > 32 ||
       new Set(plugins.map((p) => p.id)).size !== plugins.length
     )
       throw new Error('Invalid Mod plugin group.');
+    const startedAt = Date.now();
     const runtime = new ModRuntime(
       log,
+      facts ??
+        (() => ({
+          id: '',
+          cwd,
+          root: cwd,
+          model: '',
+          turns: 0,
+          usage: {
+            startedAt,
+            context: { tokens: 0, window: 0 },
+            rateLimits: [],
+          },
+        })),
       plugins.some((plugin) => plugin.toolDialect === 'claude')
         ? resolveTool
         : undefined,
       surface,
+      abortTurn,
     );
     try {
       const result = await runtime.request(
@@ -175,7 +203,16 @@ export class ModRuntime {
         signal,
         60_000,
       );
-      if (!record(result) || typeof result['tools'] !== 'boolean')
+      const turnComplete = record(result) ? result['turnComplete'] : undefined;
+      if (
+        !record(result) ||
+        typeof result['tools'] !== 'boolean' ||
+        typeof result['turnStart'] !== 'boolean' ||
+        !Array.isArray(turnComplete) ||
+        turnComplete.some(
+          (name) => !plugins.some((plugin) => plugin.name === name),
+        )
+      )
         throw new Error('Invalid Mod declarations.');
       const commands = result['commands'];
       if (
@@ -195,6 +232,10 @@ export class ModRuntime {
         throw new Error('Invalid Mod command declarations.');
       runtime.commands = commands as Array<ModCommand & { plugin: string }>;
       runtime.tools = result['tools'];
+      runtime.turns = {
+        start: result['turnStart'],
+        complete: turnComplete as string[],
+      };
       return runtime;
     } catch (error) {
       await runtime.dispose();
@@ -210,6 +251,14 @@ export class ModRuntime {
 
   get hasToolHooks(): boolean {
     return this.tools;
+  }
+
+  /** Whether `turn.start` has hooks, and the plugins `turn.complete` reaches. */
+  get turnHooks(): {
+    readonly start: boolean;
+    readonly complete: readonly string[];
+  } {
+    return this.turns;
   }
 
   private async builtinTool(name: string): Promise<string | undefined> {
@@ -414,6 +463,43 @@ export class ModRuntime {
     return 'text' in result ? (result.text as string) : '';
   }
 
+  async startTurn(input: ModTurnStart, signal: AbortSignal): Promise<void> {
+    validateResult(
+      'turn.start',
+      await this.request({ type: 'turn-start', input }, signal),
+    );
+  }
+
+  async completeTurn(
+    input: ModTurnComplete,
+    signal: AbortSignal,
+  ): Promise<string> {
+    const result = await this.request({ type: 'turn-complete', input }, signal);
+    validateResult('turn.complete', result);
+    return (result as { text: string }).text;
+  }
+
+  // The host owns the running turn, so it judges the id and ends the turn.
+  private answerTurnAbort(
+    reply: Extract<ModReply, { type: 'turn-abort' }>,
+    root: number,
+  ): void {
+    let error: string | undefined;
+    try {
+      if (!this.abortTurn)
+        throw new Error(
+          `$.turn.abort: no turn is running (asked for ${reply.turnId})`,
+        );
+      this.abortTurn(reply.turnId);
+    } catch (caught) {
+      error = (caught instanceof Error ? caught.message : String(caught)).slice(
+        0,
+        4000,
+      );
+    }
+    this.post({ type: 'turn-abort-result', id: reply.id, error }, root);
+  }
+
   async end(
     sessionId: string,
     reason: 'clear' | 'resume' | 'other',
@@ -450,7 +536,8 @@ export class ModRuntime {
     signal.throwIfAborted();
     if (this.failure) throw this.failure;
     if (this.pending) throw new Error('A Mod dispatch is already running.');
-    const json = JSON.stringify(request);
+    const message = { ...request, facts: this.facts() };
+    const json = JSON.stringify(message);
     if (
       Buffer.byteLength(json) >
       (request.type === 'load' ? 32 : 1) * MOD_MAX_BYTES + 8192
@@ -517,7 +604,7 @@ export class ModRuntime {
         signal.addEventListener('abort', onAbort, { once: true });
         root.refresh();
         this.worker.postMessage({
-          ...request,
+          ...message,
           root: root.id,
           phase: root.phase,
         });

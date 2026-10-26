@@ -41,6 +41,7 @@ import {
   runQwenServe,
   type RunHandle,
   type RunQwenServeDeps,
+  maxSessionsFromSettings,
   subSessionConcurrencyCapsFromSettings,
   validatePolicyConfig,
   verifyWorkerTlsTrust,
@@ -121,6 +122,7 @@ import type { WorkspaceFileSystemFactory } from './fs/workspace-file-system.js';
 import { ConversationWorkspace } from './conversations/conversation-workspace.js';
 import type { WorkspaceRuntimeProvenance } from './managed-scratch-workspace.js';
 import * as scheduledTaskKeepalive from './scheduled-task-keepalive.js';
+import { createDaemonUpdateRestarter } from './daemon-update-restart.js';
 
 const originalTestRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
 const isolatedTestRuntimeDir = fs.realpathSync(
@@ -1277,6 +1279,15 @@ vi.mock('@qwen-code/acp-bridge/spawnChannel', async (importOriginal) => {
   };
 });
 
+vi.mock('./daemon-update-restart.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./daemon-update-restart.js')>();
+  return {
+    ...actual,
+    createDaemonUpdateRestarter: vi.fn(actual.createDaemonUpdateRestarter),
+  };
+});
+
 vi.mock('./channel-worker-manager.js', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('./channel-worker-manager.js')>();
@@ -2092,6 +2103,34 @@ describe('subSessionConcurrencyCapsFromSettings', () => {
     const onWarning = vi.fn();
     subSessionConcurrencyCapsFromSettings({}, onWarning);
     expect(onWarning).not.toHaveBeenCalled();
+  });
+});
+
+describe('maxSessionsFromSettings', () => {
+  it('honors non-negative integers and Infinity', () => {
+    expect(maxSessionsFromSettings({ maxSessions: 0 })).toBe(0);
+    expect(maxSessionsFromSettings({ maxSessions: 64 })).toBe(64);
+    expect(
+      maxSessionsFromSettings({ maxSessions: Number.POSITIVE_INFINITY }),
+    ).toBe(Number.POSITIVE_INFINITY);
+  });
+
+  it('omits an absent key so the built-in default applies', () => {
+    const onWarning = vi.fn();
+    expect(maxSessionsFromSettings({}, onWarning)).toBeUndefined();
+    expect(maxSessionsFromSettings(undefined, onWarning)).toBeUndefined();
+    expect(onWarning).not.toHaveBeenCalled();
+  });
+
+  it('rejects values the bridge would refuse and warns', () => {
+    const onWarning = vi.fn();
+    for (const value of [-1, 2.5, Number.NaN, '32', true, null]) {
+      expect(maxSessionsFromSettings({ maxSessions: value }, onWarning)) //
+        .toBeUndefined();
+    }
+    expect(onWarning).toHaveBeenCalledTimes(6);
+    expect(onWarning.mock.calls[0][0]).toContain('serve.maxSessions');
+    expect(onWarning.mock.calls[0][0]).toContain('-1');
   });
 });
 
@@ -4774,6 +4813,61 @@ describe('runQwenServe daemon logger wiring', () => {
   }, 10_000);
 });
 
+describe('serve.maxSessions boot resolution', () => {
+  let tmpDir: string;
+
+  afterEach(() => {
+    if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  async function bootAndAdvertise(
+    optionMaxSessions: number | undefined,
+    settingsMaxSessions: unknown,
+  ): Promise<number | null> {
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ms-')));
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        ...(optionMaxSessions !== undefined
+          ? { maxSessions: optionMaxSessions }
+          : {}),
+      },
+      {
+        bridge: makeRuntimeBridge(),
+        preheatBridge: false,
+        bootSettings: { serve: { maxSessions: settingsMaxSessions } },
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+      },
+    );
+    try {
+      const res = await fetch(`${handle.url}/capabilities`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        limits: { maxSessionsPerWorkspace: number | null };
+      };
+      return body.limits.maxSessionsPerWorkspace;
+    } finally {
+      await handle.close();
+    }
+  }
+
+  it('applies serve.maxSessions when the flag is omitted', async () => {
+    await expect(bootAndAdvertise(undefined, 7)).resolves.toBe(7);
+  });
+
+  it('lets the flag win over serve.maxSessions', async () => {
+    await expect(bootAndAdvertise(5, 7)).resolves.toBe(5);
+  });
+
+  it('keeps the built-in default for an invalid setting', async () => {
+    await expect(bootAndAdvertise(undefined, -1)).resolves.toBe(32);
+  });
+});
+
 describe('runQwenServe telemetry validation', () => {
   let tmpDir: string;
   const originalSensitiveSpanAttributeMaxLengthEnv =
@@ -4964,6 +5058,57 @@ describe('runQwenServe telemetry validation', () => {
         reason: 'daemon_shutdown',
       });
     }
+  });
+
+  it('derives the multi-workspace total cap from serve.maxSessions', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ms-total-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    const secondary = path.join(tmpDir, 'secondary');
+    fs.mkdirSync(primary);
+    fs.mkdirSync(secondary);
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockImplementation(() => makeRuntimeBridge());
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: [primary, secondary],
+        maxRegisteredWorkspaces: 2,
+        serveWebShell: false,
+      },
+      {
+        preheatBridge: false,
+        bootSettings: { serve: { maxSessions: 3 } },
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+      },
+    );
+    try {
+      const res = await fetch(`${handle.url}/capabilities`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        limits: {
+          maxSessionsPerWorkspace: number | null;
+          maxTotalSessions: number | null;
+        };
+      };
+      expect(body.limits.maxSessionsPerWorkspace).toBe(3);
+      // maxRegisteredWorkspaces: 2 keeps the capacity at or below the 25
+      // threshold, so the total is derived from the resolved per-workspace
+      // cap instead of the flat 800.
+      expect(body.limits.maxTotalSessions).toBe(6);
+    } finally {
+      await handle.close();
+    }
+    expect(createBridge).toHaveBeenCalledTimes(2);
   });
 
   it('drains every lifecycle runtime before close yields', async () => {
@@ -6560,6 +6705,8 @@ describe('runQwenServe deployment profiles', () => {
           token: 'hosted-secret',
           serveWebShell: false,
           hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+          managedRuntimeBrokerUrl: 'https://broker.internal',
+          managedRuntimeBrokerToken: 'file-fed-broker-secret',
         },
         {
           bridge: makeRuntimeBridge(),
@@ -6567,12 +6714,58 @@ describe('runQwenServe deployment profiles', () => {
         },
       );
       expect(createApp.mock.calls[0]?.[0].channelSelection).toBeUndefined();
+      expect(createApp.mock.calls[0]?.[0].managedRuntimeBrokerUrl).toBe(
+        'https://broker.internal',
+      );
+      expect(createApp.mock.calls[0]?.[0].managedRuntimeBrokerToken).toBe(
+        'file-fed-broker-secret',
+      );
       expect(createApp.mock.calls[0]?.[2]?.manageScheduledTaskSessions).toBe(
         false,
       );
     } finally {
       await handle?.close();
       createApp.mockRestore();
+      fs.rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('hands the update restarter the Broker pair the Hosted Harness resolved', async () => {
+    const workspace = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-hosted-restart-')),
+    );
+    vi.mocked(createDaemonUpdateRestarter).mockClear();
+    let handle: RunHandle | undefined;
+    try {
+      handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace,
+          profile: 'hosted-harness',
+          token: 'hosted-secret',
+          serveWebShell: false,
+          hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+          managedRuntimeBrokerUrl: 'https://broker.internal',
+          managedRuntimeBrokerToken: 'broker-secret',
+        },
+        {
+          bridge: makeRuntimeBridge(),
+          daemonLogBaseDir: path.join(workspace, 'debug'),
+          updateRestartArgv: ['serve', '--profile', 'hosted-harness'],
+        },
+      );
+      // `qwen serve` has already removed the pair from its environment, so
+      // the replacement gets it only through these options.
+      expect(createDaemonUpdateRestarter).toHaveBeenCalledWith(
+        expect.objectContaining({
+          managedRuntimeBrokerUrl: 'https://broker.internal',
+          managedRuntimeBrokerToken: 'broker-secret',
+        }),
+      );
+    } finally {
+      await handle?.close();
       fs.rmSync(workspace, { recursive: true, force: true });
     }
   });
@@ -21004,6 +21197,9 @@ describe('runQwenServe channel worker supervisor', () => {
   });
 
   it('keeps serve running when worker pidfile metadata cannot be written', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-pidfile-')),
     );
@@ -21038,8 +21234,14 @@ describe('runQwenServe channel worker supervisor', () => {
       await handle.runtimeReady;
       expect(worker.start).toHaveBeenCalled();
       expect(pidfile.writeServeServiceInfo).toHaveBeenCalled();
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'failed to write channel worker pidfile metadata: disk full',
+        ),
+      );
     } finally {
       await handle.close();
+      stderr.mockRestore();
     }
   });
 
@@ -21758,6 +21960,63 @@ describe('runQwenServe channel worker supervisor', () => {
     } finally {
       await handle.close();
     }
+  });
+
+  it('keeps the Hosted Harness on its requested port', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-hosted-port-')),
+    );
+    const portsAttempted: number[] = [];
+    const stderrWrites: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+    vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
+      locals: {},
+    } as unknown as express.Application);
+    const testServer = createServer();
+    testServer.listen = vi.fn((port: number) => {
+      portsAttempted.push(port);
+      const err = new Error('address in use') as NodeJS.ErrnoException;
+      err.code = 'EADDRINUSE';
+      setImmediate(() => testServer.emit('error', err));
+      return testServer;
+    }) as unknown as typeof testServer.listen;
+
+    try {
+      await expect(
+        runQwenServe(
+          {
+            port: 4170,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace: tmpDir,
+            profile: 'hosted-harness',
+            token: 'hosted-secret',
+            serveWebShell: false,
+            hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+          },
+          {
+            bridge: makeFakeBridge(),
+            httpServerFactory: () => testServer,
+            resolveOnListen: true,
+          },
+        ),
+      ).rejects.toMatchObject({ code: 'EADDRINUSE' });
+    } finally {
+      stderrSpy.mockRestore();
+    }
+    expect(portsAttempted).toEqual([4170]);
+    expect(
+      stderrWrites.some((w) =>
+        w.includes(
+          'port 4170 is in use; --profile hosted-harness does not move to another port',
+        ),
+      ),
+    ).toBe(true);
   });
 
   it('does not retry on non-EADDRINUSE listen errors', async () => {

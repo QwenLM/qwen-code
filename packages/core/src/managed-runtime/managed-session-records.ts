@@ -116,6 +116,7 @@ export const MANAGED_SESSION_DOMAINS = [
   'session_metadata',
   'file_history',
   'session_source',
+  'hosted_harness_release',
 ] as const;
 
 export type ManagedSessionDomain = (typeof MANAGED_SESSION_DOMAINS)[number];
@@ -127,8 +128,10 @@ export type ManagedSessionDomain = (typeof MANAGED_SESSION_DOMAINS)[number];
  */
 export const MANAGED_SESSION_ENABLED_DOMAINS: readonly ManagedSessionDomain[] =
   [
+    'tool_stage',
     'config_install',
     'goal_state',
+    'todo_state',
     'session_metadata',
     'file_history',
     'session_source',
@@ -298,6 +301,7 @@ export const MANAGED_SESSION_ENVELOPE_DOMAINS: readonly ManagedSessionDomain[] =
   [
     'config_install',
     'goal_state',
+    'todo_state',
     'session_metadata',
     'file_history',
     'session_source',

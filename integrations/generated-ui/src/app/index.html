@@ -21,6 +21,26 @@
       </p>
       <p id="notice" role="status" aria-live="polite" hidden></p>
       <iframe id="view" title="Generated interactive content" hidden></iframe>
+      <footer>
+        <button
+          id="continue-analysis"
+          type="button"
+          aria-describedby="continuation-help"
+          disabled
+        >
+          Continue analysis with current parameters
+        </button>
+        <p id="continuation-help">
+          Connect to a Qwen Code host to review parameters before sending.
+        </p>
+        <p
+          id="continuation-status"
+          role="status"
+          aria-live="polite"
+          data-state="idle"
+          hidden
+        ></p>
+      </footer>
     </main>
     <!-- APP_SCRIPT -->
   </body>

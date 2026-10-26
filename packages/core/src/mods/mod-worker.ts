@@ -22,6 +22,7 @@ import {
   type ModCommand,
   type ModPlugin,
   type ModReply,
+  type ModSessionFacts,
   type ModWorkerRequest,
 } from './types.js';
 import {
@@ -31,6 +32,7 @@ import {
   ModTimeoutError,
   assertModDepth,
   engineOrigin,
+  isModMethod,
   record,
   validateInput,
   validateResult,
@@ -58,6 +60,11 @@ const hostOperations = new Map<
     reject: (error: Error) => void;
   }
 >();
+// $.turn.abort calls waiting for the host, which owns the running turn.
+const turnAborts = new Map<
+  number,
+  { resolve: () => void; reject: (error: Error) => void }
+>();
 let serial = 0;
 let epoch = 0;
 let rootId = 0;
@@ -79,6 +86,7 @@ let pumping = false;
 let builtinTool: string | undefined;
 let surface: 'terminal' | null = null;
 let version = 'unknown';
+let facts: ModSessionFacts | undefined;
 const send = (reply: ModReply, root = rootId) =>
   port.postMessage({ ...reply, root, phase });
 const abandoned = () =>
@@ -208,12 +216,22 @@ class Realm {
     const factory = this.vm.unwrapResult(
       this.vm.evalCode(MOD_GUEST_FACTORY, 'mod-host.js'),
     );
+    const identity = this.vm.newString(
+      JSON.stringify({ name: plugin.name, root: plugin.source.root }),
+    );
     this.guest = this.vm.unwrapResult(
-      this.vm.callFunction(factory, this.vm.undefined, bridge, status),
+      this.vm.callFunction(
+        factory,
+        this.vm.undefined,
+        bridge,
+        status,
+        identity,
+      ),
     );
     factory.dispose();
     bridge.dispose();
     status.dispose();
+    identity.dispose();
   }
   execute<T>(action: () => T): T {
     executing++;
@@ -381,12 +399,14 @@ async function bounded(
 
 // The engine names the plugin behind an ask it made or reworded; an answer
 // passed up as heard keeps the owner it had, and a hook cannot write one.
+// `setting` names a host option's own check, which Qwen Code does not report,
+// so a hook's is dropped too.
 async function ownCheck(
   value: ModToolCheckResult,
   below: Promise<unknown> | undefined,
   plugin: string,
 ): Promise<ModToolCheckResult> {
-  const { plugin: _written, ...answer } = value;
+  const { plugin: _written, setting: _setting, ...answer } = value;
   if (answer.decision !== 'ask') return answer;
   const heard = (await below?.catch(() => undefined)) as
     | ModToolCheckResult
@@ -577,12 +597,7 @@ async function hostCall(
       updateActivity();
     }
   }
-  if (
-    method !== 'command.register' &&
-    method !== 'session.version' &&
-    method !== 'ui.log'
-  )
-    throw new Error('Mod API not supported: ' + method);
+  if (!isModMethod(method)) throw new Error('Mod API not supported: ' + method);
   validateInput(method, value, {});
   const plugin = realms[call.plugin].plugin;
   const invoke = async () => {
@@ -618,6 +633,23 @@ async function hostCall(
               },
             },
           };
+        const fact = SESSION_FACTS[method];
+        if (fact) {
+          if (!facts) throw new Error('Mod session facts are unavailable.');
+          return { value: facts[fact] };
+        }
+        if (method === 'session.surfaces')
+          return { value: surface ? [surface] : [] };
+        if (method === 'session.surface') return { value: surface };
+        if (method === 'clock.now') return { value: Date.now() };
+        if (method === 'clock.sleep') {
+          await sleep(call, Number(e['ms']));
+          return { value: undefined };
+        }
+        if (method === 'turn.abort') {
+          await abortTurn(String(e['turnId']));
+          return { value: undefined };
+        }
         logChars += String(e['text']).length + 1;
         if (logChars > 100_000) throw new Error('Mod log budget exceeded.');
         send({
@@ -635,8 +667,46 @@ async function hostCall(
     if ('deny' in result) throw new Error(String(result['deny']));
     return result['value'];
   };
-  // Void log notifications do not suspend their caller's execution.
-  return method === 'ui.log' ? invoke() : call.budget.lend(invoke);
+  // Void log notifications do not suspend their caller's execution, and a
+  // sleep is the caller's own time; other calls lend the caller's budget.
+  return method === 'ui.log' || method === 'clock.sleep'
+    ? invoke()
+    : call.budget.lend(invoke);
+}
+
+const SESSION_FACTS: Partial<Record<ModEvent, keyof ModSessionFacts>> = {
+  'session.cwd': 'cwd',
+  'session.id': 'id',
+  'session.model': 'model',
+  'session.root': 'root',
+  'session.turns': 'turns',
+  'session.usage': 'usage',
+};
+
+// Work cannot outlive its dispatch yet, so a sleep ends with its hook.
+function sleep(call: ModInvocation, ms: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const settle = (error?: Error) => {
+      clearTimeout(timer);
+      clearInterval(watch);
+      if (error) reject(error);
+      else resolve();
+    };
+    const timer = setTimeout(() => settle(), Math.min(ms, 2 ** 31 - 1));
+    const watch = setInterval(() => {
+      // A hook that timed out is no longer live while its catch recovers.
+      if (!call.live || callAbandoned(call))
+        settle(new Error('Mod sleep ended with its hook.'));
+    }, 5);
+  });
+}
+
+function abortTurn(turnId: string): Promise<void> {
+  const id = ++serial;
+  return new Promise<void>((resolve, reject) => {
+    turnAborts.set(id, { resolve, reject });
+    send({ type: 'turn-abort', id, turnId });
+  }).finally(() => turnAborts.delete(id));
 }
 
 function cancelAbandonedOperations(): void {
@@ -699,6 +769,13 @@ port.on('message', async (request: ModWorkerRequest) => {
     else operation.resolve(request.result);
     return;
   }
+  if (request.type === 'turn-abort-result') {
+    if (!busy || request.root !== rootId) return;
+    const pending = turnAborts.get(request.id);
+    if (request.error !== undefined) pending?.reject(new Error(request.error));
+    else pending?.resolve();
+    return;
+  }
   if (request.type === 'tool-check') {
     if (request.id <= lastCheck) return;
     lastCheck = request.id;
@@ -756,6 +833,7 @@ port.on('message', async (request: ModWorkerRequest) => {
   checks = 0;
   lastCheck = 0;
   builtinTool = request.type === 'tool' ? request.builtinTool : undefined;
+  facts = request.facts;
   epoch++;
   logChars = 0;
   operations = 0;
@@ -809,15 +887,17 @@ port.on('message', async (request: ModWorkerRequest) => {
         [],
         async (e) => ({ cwd: e['cwd'] }),
       );
+      const hooked = (event: ModEvent) =>
+        realms
+          .filter((realm) =>
+            realm.patterns.some((pattern) => patternMatches(pattern, event)),
+          )
+          .map((realm) => realm.plugin.name);
       result = {
         commands: [...commands.values()],
-        tools: realms.some((realm) =>
-          realm.patterns.some(
-            (pattern) =>
-              patternMatches(pattern, 'tool.call') ||
-              patternMatches(pattern, 'tool.check'),
-          ),
-        ),
+        tools: hooked('tool.call').length + hooked('tool.check').length > 0,
+        turnStart: hooked('turn.start').length > 0,
+        turnComplete: hooked('turn.complete'),
       };
     } else if (request.type === 'command') {
       if (!commands.has(request.command))
@@ -846,6 +926,25 @@ port.on('message', async (request: ModWorkerRequest) => {
         engineOrigin,
         [],
         executeHostTool,
+      );
+    } else if (request.type === 'turn-start') {
+      result = await dispatch(
+        'turn.start',
+        { ...request.input },
+        engineOrigin,
+        [],
+        async (e) => ({ turnId: e['turnId'] }),
+      );
+    } else if (request.type === 'turn-complete') {
+      result = await dispatch(
+        'turn.complete',
+        { ...request.input },
+        engineOrigin,
+        [],
+        async (e) => ({
+          text: e['answer'],
+          ...(e['usage'] === undefined ? {} : { usage: e['usage'] }),
+        }),
       );
     } else {
       result = await dispatch(
@@ -876,10 +975,14 @@ port.on('message', async (request: ModWorkerRequest) => {
     }
     if (hostOperations.size)
       send({ type: 'host-cancel', ids: [...hostOperations.keys()] });
-    for (const operation of hostOperations.values()) {
+    for (const operation of [
+      ...hostOperations.values(),
+      ...turnAborts.values(),
+    ]) {
       operation.reject(new Error('Mod root dispatch has ended.'));
     }
     hostOperations.clear();
+    turnAborts.clear();
     starting = false;
     builtinTool = undefined;
     rootBudget = undefined;
