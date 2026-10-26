@@ -27,6 +27,13 @@ import {
 import { BrowserTurnNotifications } from '../../browser-turn-notifications';
 import { I18nProvider } from '../../i18n.js';
 import { SessionRecoveryBanner } from '../../components/SessionRecoveryBanner.js';
+import type { McpAppDisplay } from '../../components/messages/McpApp.js';
+import {
+  GeneratedUiInstanceStore,
+  instanceKey,
+  resourceKey,
+  type InstanceSlot,
+} from '../../generated-ui/instance-store.js';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
@@ -18346,6 +18353,369 @@ describe('DaemonSessionProvider', () => {
   });
 
   describe('Generated UI retained owner lifecycle', () => {
+    it.each(['immediate', 'after-render'] as const)(
+      'disposes a parked activation when the next session receives a policy event %s',
+      async (timing) => {
+        vi.stubGlobal(
+          'fetch',
+          vi.fn(async () => new Response(null, { status: 204 })),
+        );
+        const retained = new GeneratedUiInstanceStore();
+        const parking = document.createElement('div');
+        parking.hidden = true;
+        document.body.appendChild(parking);
+        retained.parking = parking;
+        const slotElement = document.createElement('div');
+        document.body.appendChild(slotElement);
+        const delayedPolicy = createDeferred<DaemonEvent>();
+        const invalidations: McpAppGeneratedUiInvalidation[] = [];
+        let owner: ContextType<typeof McpAppGeneratedUiOwnerContext>;
+        let actions: DaemonSessionActions | undefined;
+        function Harness() {
+          owner = useContext(McpAppGeneratedUiOwnerContext);
+          actions = useDaemonActions();
+          const subscribe = owner?.subscribeInvalidation;
+          useLayoutEffect(
+            () =>
+              subscribe?.((event) => {
+                invalidations.push(event);
+                retained.invalidate(event);
+              }),
+            [subscribe],
+          );
+          return null;
+        }
+        try {
+          sdkMocks.sessions.push(
+            createMockSession({
+              sessionId: 'session-a',
+              session: { generatedUi: { version: 1, enabled: true } },
+            }),
+          );
+          await renderWithProvider(<Harness />, {
+            autoConnect: true,
+            workspaceCwd: '/mock-workspace',
+          });
+          const initialOwner = requireActions(owner?.source);
+          const display: McpAppDisplay = {
+            type: 'mcp_app',
+            requiredFeature: 'generated-ui',
+            serverName: 'qwen-code-generated-ui',
+            resourceUri: 'ui://qwen-code-generated-ui/view-v1.html',
+            html: '<main>retained parameters</main>',
+            toolResult: { content: [{ type: 'text', text: 'Ready' }] },
+            toolArguments: { rate: 7 },
+            fallbackText: 'Retained parameters',
+          };
+          const initialSlot: InstanceSlot = {
+            key: instanceKey(initialOwner, 'call-a', display),
+            resourceKey: resourceKey(display, initialOwner.eventEpoch),
+            display,
+            source: initialOwner,
+            receipt: {
+              sessionId: 'session-a',
+              status: { version: 1, enabled: true },
+            },
+            baseUrl: 'http://127.0.0.1:4170',
+            token: {},
+            element: slotElement,
+            visible: true,
+            reset: vi.fn(),
+          };
+          const activation = requireActions(retained.attach(initialSlot));
+          activation.container.dataset.dirtyInput = '9';
+          retained.release(initialSlot.key, initialSlot.token);
+          expect(activation.container.parentElement).toBe(parking);
+          invalidations.length = 0;
+
+          const policy: DaemonEvent = {
+            v: 1,
+            type: 'settings_reloaded',
+            data: {},
+          };
+          sdkMocks.sessions.push(
+            createMockSession({
+              sessionId: 'session-b',
+              session: { generatedUi: { version: 1, enabled: true } },
+              async *events(opts) {
+                yield timing === 'immediate'
+                  ? policy
+                  : await delayedPolicy.promise;
+                yield* createIdleEvents()(opts);
+              },
+            }),
+          );
+          let switchToB!: Promise<void>;
+          act(() => {
+            switchToB = requireActions(actions).loadSession('session-b');
+          });
+          await act(async () => {
+            await switchToB;
+            await flushPromises();
+          });
+          if (timing === 'after-render') {
+            expect(retained.getEntries()).toContain(activation);
+            await act(async () => {
+              delayedPolicy.resolve(policy);
+              await flushPromises();
+            });
+          }
+          expect(invalidations).toContainEqual({
+            scopeId: initialOwner.scopeId,
+            reason: 'policy',
+          });
+          expect(retained.getEntries()).not.toContain(activation);
+          expect(activation.container.isConnected).toBe(false);
+
+          sdkMocks.sessions.push(
+            createMockSession({
+              sessionId: 'session-a',
+              session: { generatedUi: { version: 1, enabled: true } },
+            }),
+          );
+          let switchToA!: Promise<void>;
+          act(() => {
+            switchToA = requireActions(actions).loadSession('session-a');
+          });
+          await act(async () => {
+            await switchToA;
+            await flushPromises();
+          });
+          const returnedOwner = requireActions(owner?.source);
+          expect(returnedOwner.scopeId).toBe(initialOwner.scopeId);
+          const returnedSlot: InstanceSlot = {
+            ...initialSlot,
+            source: returnedOwner,
+            token: {},
+            key: instanceKey(returnedOwner, 'call-a', display),
+            resourceKey: resourceKey(display, returnedOwner.eventEpoch),
+          };
+          expect(retained.attach(returnedSlot)).toBeUndefined();
+          const reopened = requireActions(retained.attach(returnedSlot, true));
+          expect(reopened).not.toBe(activation);
+          expect(reopened.runtime.reopened).toBe(true);
+          expect(reopened.container.dataset.dirtyInput).toBeUndefined();
+        } finally {
+          retained.clear();
+          parking.remove();
+          slotElement.remove();
+        }
+      },
+    );
+
+    it.each([
+      {
+        boundary: 'matching ancestor',
+        baseUrl: 'http://127.0.0.1:4170',
+        token: 'token-a',
+        workspaceCwd: '/ancestor',
+        inherits: true,
+      },
+      {
+        boundary: 'different workspace',
+        baseUrl: 'http://127.0.0.1:4170',
+        token: 'token-a',
+        workspaceCwd: '/other',
+        inherits: false,
+      },
+      {
+        boundary: 'different daemon',
+        baseUrl: 'http://127.0.0.1:4171',
+        token: 'token-a',
+        workspaceCwd: '/ancestor',
+        inherits: false,
+      },
+      {
+        boundary: 'different credentials',
+        baseUrl: 'http://127.0.0.1:4170',
+        token: 'token-b',
+        workspaceCwd: '/ancestor',
+        inherits: false,
+      },
+    ])(
+      'binds the first policy event across a nested workspace switch: $boundary',
+      async ({ baseUrl, token, workspaceCwd, inherits }) => {
+        vi.stubGlobal(
+          'fetch',
+          vi.fn(async () => new Response(null, { status: 204 })),
+        );
+        let outer: ContextType<typeof McpAppGeneratedUiOwnerContext>;
+        let inner: ContextType<typeof McpAppGeneratedUiOwnerContext>;
+        let actions: DaemonSessionActions | undefined;
+        let connection: DaemonConnectionState | undefined;
+        const invalidations: McpAppGeneratedUiInvalidation[] = [];
+        function Inner() {
+          inner = useContext(McpAppGeneratedUiOwnerContext);
+          actions = useDaemonActions();
+          connection = useDaemonConnection();
+          return null;
+        }
+        function Outer() {
+          outer = useContext(McpAppGeneratedUiOwnerContext);
+          const subscribe = outer?.subscribeInvalidation;
+          useLayoutEffect(
+            () => subscribe?.((event) => invalidations.push(event)),
+            [subscribe],
+          );
+          return (
+            <DaemonSessionProvider
+              baseUrl={baseUrl}
+              token={token}
+              workspaceCwd="/child"
+              sessionId="child-a"
+              autoConnect={true}
+            >
+              <Inner />
+            </DaemonSessionProvider>
+          );
+        }
+        sdkMocks.sessions.push(
+          createMockSession({
+            sessionId: 'child-a',
+            workspaceCwd: '/child',
+            session: { generatedUi: { version: 1, enabled: true } },
+          }),
+        );
+        await renderWithProvider(<Outer />, {
+          workspaceCwd: '/ancestor',
+          token: 'token-a',
+        });
+        const ancestorScopeId = requireActions(outer).scopeId;
+        const childScopeId = requireActions(inner?.source).scopeId;
+        expect(childScopeId).not.toBe(ancestorScopeId);
+        invalidations.length = 0;
+        let receivedPolicy = false;
+        sdkMocks.sessions.push(
+          createMockSession({
+            sessionId: 'child-b',
+            workspaceCwd,
+            session: { generatedUi: { version: 1, enabled: true } },
+            async *events(opts) {
+              receivedPolicy = true;
+              yield { v: 1, type: 'settings_reloaded', data: {} };
+              yield* createIdleEvents()(opts);
+            },
+          }),
+        );
+        let switched!: Promise<void>;
+        act(() => {
+          switched = requireActions(actions).loadSession('child-b', {
+            workspaceCwd,
+          });
+        });
+        await act(async () => {
+          await switched;
+          await flushPromises();
+        });
+        expect(receivedPolicy).toBe(true);
+        expect(connection).toMatchObject({
+          status: 'connected',
+          sessionId: 'child-b',
+          workspaceCwd,
+        });
+        const connectedSource = requireActions(inner?.source);
+        expect(connectedSource.scopeId === ancestorScopeId).toBe(inherits);
+        expect(connectedSource.scopeId).not.toBe(childScopeId);
+        expect(
+          invalidations.filter(
+            (event) =>
+              event.reason === 'policy' && event.scopeId === ancestorScopeId,
+          ),
+        ).toEqual(
+          inherits ? [{ scopeId: ancestorScopeId, reason: 'policy' }] : [],
+        );
+      },
+    );
+
+    it.each(['standalone', 'live'] as const)(
+      'does not bind a first policy event in %s to an ancestor with the same SDK cwd',
+      async (kind) => {
+        vi.stubGlobal(
+          'fetch',
+          vi.fn(async () => new Response(null, { status: 204 })),
+        );
+        sdkMocks.capabilities.mockResolvedValue({
+          workspaceCwd: '/primary',
+          features: ['standalone_sessions_v1', 'multi_workspace_sessions'],
+          workspaces: [
+            { id: 'primary', cwd: '/primary', primary: true, trusted: true },
+            {
+              id: 'live',
+              cwd: '/ancestor',
+              kind: 'live',
+              primary: false,
+              trusted: true,
+            },
+          ],
+        });
+        let inner: ContextType<typeof McpAppGeneratedUiOwnerContext>;
+        let connection: DaemonConnectionState | undefined;
+        let receivedPolicy = false;
+        const invalidations: McpAppGeneratedUiInvalidation[] = [];
+        function Inner() {
+          inner = useContext(McpAppGeneratedUiOwnerContext);
+          connection = useDaemonConnection();
+          return null;
+        }
+        function Outer() {
+          const owner = useContext(McpAppGeneratedUiOwnerContext);
+          const subscribe = owner?.subscribeInvalidation;
+          useLayoutEffect(
+            () => subscribe?.((event) => invalidations.push(event)),
+            [subscribe],
+          );
+          return (
+            <DaemonSessionProvider
+              baseUrl="http://127.0.0.1:4170"
+              token="token-a"
+              sessionContext={{ kind }}
+              sessionId="non-workspace"
+              autoConnect={true}
+            >
+              <Inner />
+            </DaemonSessionProvider>
+          );
+        }
+        sdkMocks.sessions.push(
+          createMockSession({
+            sessionId: 'non-workspace',
+            workspaceCwd: '/ancestor',
+            session: {
+              generatedUi: { version: 1, enabled: true },
+              ...(kind === 'standalone'
+                ? {
+                    sourceType: 'standalone',
+                    context: { kind: 'standalone' },
+                    projectlessOutputDirectory: '/output/non-workspace',
+                    workingDirectory: { state: 'ready' },
+                  }
+                : {}),
+            },
+            async *events(opts) {
+              receivedPolicy = true;
+              yield { v: 1, type: 'settings_reloaded', data: {} };
+              yield* createIdleEvents()(opts);
+            },
+          }),
+        );
+        await renderWithProvider(<Outer />, {
+          workspaceCwd: '/ancestor',
+          token: 'token-a',
+        });
+        expect(receivedPolicy).toBe(true);
+        expect(connection).toMatchObject({
+          status: 'connected',
+          sessionId: 'non-workspace',
+          sessionContext: { kind },
+          workspaceCwd: undefined,
+        });
+        expect(inner?.source).toBeUndefined();
+        expect(
+          invalidations.filter((event) => event.reason === 'policy'),
+        ).toEqual([]);
+      },
+    );
+
     it('captures deletion scopes by workspace, daemon and credentials before the response', async () => {
       const owners: Record<
         string,

@@ -1417,6 +1417,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     [generatedUiWorkspaceCwd, resolvedBaseUrl, resolvedToken],
   );
   const inheritedScope = inheritedGeneratedUi?.scope;
+  const inheritedGeneratedUiScopeRef = useRef(inheritedScope);
+  inheritedGeneratedUiScopeRef.current = inheritedScope;
   const generatedUiScope =
     inheritedScope &&
     inheritedScope.baseUrl === resolvedBaseUrl &&
@@ -2666,6 +2668,26 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           turnNotifications.activate(activeSession);
           const activeWorkspaceScoped =
             activeProductSessionContext.kind === 'workspace';
+          // Buffered SSE events can arrive before the connected render binds
+          // this session. Never assign a different workspace's current scope.
+          if (
+            activeWorkspaceScoped &&
+            !generatedUiSessionScopes.current.has(activeSession)
+          ) {
+            const scope = [
+              inheritedGeneratedUiScopeRef.current,
+              generatedUiScopeRef.current,
+            ].find(
+              (candidate) =>
+                candidate &&
+                candidate.baseUrl === resolvedBaseUrl &&
+                candidate.token === resolvedToken &&
+                candidate.workspaceCwd === activeSession.workspaceCwd,
+            );
+            if (scope) {
+              generatedUiSessionScopes.current.set(activeSession, scope.id);
+            }
+          }
           if (runnerSession !== activeSession) {
             setConnectionSynchronous((current) => ({
               ...current,
