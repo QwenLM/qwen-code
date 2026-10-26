@@ -90,10 +90,12 @@ follow-up if probe durations keep saturating
   queries, so one tick submits at most 2 × `SCAN_LIMIT` (200) tasks; a row
   both queries return is submitted once.
 - At context close the pool also runs its **queued** rows, not only the
-  in-flight one, on its non-daemon threads: `destroy()` still returns
-  immediately, but process exit waits for queued work. Every queued row
-  claims and fires under the same fence, and a lost answer is re-driven by
-  a later tick (#15442 verify lane, finding 3).
+  in-flight one, on its non-daemon threads: `destroy()` returns immediately
+  and the JVM does not wait for that backlog once the shutdown hook
+  returns, so a queued row may neither run nor be waited for. Every row
+  that does run claims and fires under the same fence, and a lost answer is
+  re-driven by a later tick (#15442 verify lane, finding 3; corrected after
+  the #15527 review).
 
 ## Validation
 

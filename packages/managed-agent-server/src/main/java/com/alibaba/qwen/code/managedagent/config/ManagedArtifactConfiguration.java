@@ -46,7 +46,9 @@ public class ManagedArtifactConfiguration {
      * would deadlock the tick on the pool's only thread, and a bigger
      * scheduler pool would park a thread per pending join. Shutdown lets an
      * in-flight row finish (its claim is durable and later ticks re-drive a
-     * lost answer) and never interrupts it or parks the context close.
+     * lost answer) and never interrupts it; the pool adds no close wait of
+     * its own, and a tick caught mid-join is still bounded by the
+     * application's shutdown phase.
      */
     @Bean
     public ThreadPoolTaskExecutor automationScannerExecutor(
