@@ -208,6 +208,9 @@ export class Query implements AsyncIterable<SDKMessage> {
           error instanceof Error ? error : new Error(errorMessage),
         );
       }
+      this.close().catch((cleanupError) => {
+        logger.error('Error during initialization cleanup:', cleanupError);
+      });
     });
 
     this.startMessageRouter();

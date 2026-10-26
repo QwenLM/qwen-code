@@ -340,27 +340,35 @@ describe('Query', () => {
       },
     );
 
-    it('rejects an ignored initial choice before sending the first user message', async () => {
-      const query = new Query(transport, { workflowMode: true });
-      const input = query.streamInput(
-        (async function* () {
-          yield createUserMessage('ordinary prompt');
-        })(),
-      );
-      const result = input.catch((error: unknown) => error);
-      await vi.waitFor(() => expect(transport.writtenMessages).toHaveLength(1));
-      const request = transport.getLastWrittenMessage() as CLIControlRequest;
-      transport.simulateMessage(
-        createControlResponse(request.request_id, true, {}),
-      );
-      expect(await result).toEqual(
-        expect.objectContaining({
-          message: expect.stringContaining('does not support'),
-        }),
-      );
-      expect(transport.getAllWrittenMessages()).toHaveLength(1);
-      await query.close();
-    });
+    it.each([true, false])(
+      'closes after rejecting an ignored initial choice (%s)',
+      async (workflowMode) => {
+        const query = new Query(transport, { workflowMode });
+        const output = query.next().catch((error: unknown) => error);
+        const input = query.streamInput(
+          (async function* () {
+            yield createUserMessage('ordinary prompt');
+          })(),
+        );
+        const result = input.catch((error: unknown) => error);
+        await vi.waitFor(() =>
+          expect(transport.writtenMessages).toHaveLength(1),
+        );
+        const request = transport.getLastWrittenMessage() as CLIControlRequest;
+        transport.simulateMessage(
+          createControlResponse(request.request_id, true, {}),
+        );
+        expect(await result).toEqual(
+          expect.objectContaining({
+            message: expect.stringContaining('does not support'),
+          }),
+        );
+        expect(transport.getAllWrittenMessages()).toHaveLength(1);
+        expect(await output).toEqual(await result);
+        expect(query.isClosed()).toBe(true);
+        expect(transport.closed).toBe(true);
+      },
+    );
 
     it('sends strict Boolean setters and rejects malformed status instead of assuming off', async () => {
       const query = new Query(transport, { workflowMode: false });
@@ -678,8 +686,26 @@ describe('Query', () => {
       );
 
       await expect(query.initialized).rejects.toThrow();
+      expect(query.isClosed()).toBe(true);
+      expect(transport.closed).toBe(true);
+    });
 
-      await query.close();
+    it('preserves the initialization error when cleanup rejects', async () => {
+      vi.spyOn(transport, 'close').mockRejectedValueOnce(
+        new Error('cleanup failed'),
+      );
+      const query = new Query(transport, {});
+      const output = query.next().catch((error: unknown) => error);
+      await vi.waitFor(() => expect(transport.writtenMessages).toHaveLength(1));
+      const request = transport.getLastWrittenMessage() as CLIControlRequest;
+      transport.simulateMessage(
+        createControlResponse(request.request_id, false),
+      );
+
+      const error = await query.initialized.catch((error: unknown) => error);
+      expect(await output).toBe(error);
+      expect(transport.close).toHaveBeenCalledOnce();
+      expect(query.isClosed()).toBe(true);
     });
   });
 

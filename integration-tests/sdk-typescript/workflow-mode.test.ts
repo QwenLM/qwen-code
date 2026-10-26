@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import { join } from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { query, isSDKResultMessage, type SDKUserMessage } from '@qwen-code/sdk';
 import {
@@ -222,4 +224,91 @@ describe.each([
       await session.close();
     }
   }, 45_000);
+});
+
+describe('DW04: SDK initialization process cleanup', () => {
+  let helper: SDKTestHelper;
+  let cwd: string;
+  beforeEach(async () => {
+    helper = new SDKTestHelper();
+    cwd = await helper.setup('dw04-sdk-init-cleanup');
+  });
+  afterEach(async () => {
+    await helper?.cleanup();
+  });
+
+  it.each([undefined, true, false])(
+    'exits without caller cleanup when an older CLI omits the capability (workflowMode=%s)',
+    async (workflowMode) => {
+      const requestsPath = await helper.createFile('requests.jsonl', '');
+      const cliPath = await helper.createFile(
+        'older-cli.mjs',
+        `import { createInterface } from 'node:readline';
+import { appendFileSync } from 'node:fs';
+const input = createInterface({ input: process.stdin });
+input.on('line', (line) => {
+  const message = JSON.parse(line);
+  appendFileSync(${JSON.stringify(requestsPath)}, line + '\\n');
+  if (message.type === 'control_request') {
+    process.stdout.write(JSON.stringify({
+      type: 'control_response',
+      response: { subtype: 'success', request_id: message.request_id,
+        response: { capabilities: {} } },
+    }) + '\\n');
+  } else if (message.type === 'user') {
+    process.stdout.write(JSON.stringify({
+      type: 'result', subtype: 'success', session_id: message.session_id,
+      uuid: 'fixture-result', result: 'OK', is_error: false,
+      duration_ms: 0, duration_api_ms: 0, num_turns: 1,
+      usage: { input_tokens: 0, output_tokens: 0 }, permission_denials: [],
+    }) + '\\n');
+  }
+});
+`,
+      );
+      const sdkUrl = new URL(
+        '../../packages/sdk-typescript/dist/index.mjs',
+        import.meta.url,
+      ).href;
+      const hostPath = await helper.createFile(
+        'sdk-host.mjs',
+        `import { query } from ${JSON.stringify(sdkUrl)};
+const session = query({
+  prompt: 'ordinary prompt',
+  options: ${JSON.stringify({ pathToQwenExecutable: cliPath, cwd, workflowMode })},
+});
+try {
+  for await (const message of session) {
+    if (message.type === 'result') console.log(JSON.stringify({ result: message.result }));
+  }
+} catch (error) {
+  console.log(JSON.stringify({ error: error.message }));
+}
+`,
+      );
+      // A leaked CLI keeps this host alive after its iterator has settled.
+      const { stdout } = await promisify(execFile)(
+        process.execPath,
+        [hostPath],
+        {
+          cwd,
+          timeout: 10_000,
+        },
+      );
+      expect(JSON.parse(stdout.trim())).toEqual(
+        workflowMode === undefined
+          ? { result: 'OK' }
+          : { error: 'The CLI does not support session Workflow mode' },
+      );
+      const requests = (await helper.readFile('requests.jsonl'))
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line) as { type: string });
+      expect(requests.map(({ type }) => type)).toEqual(
+        workflowMode === undefined
+          ? ['control_request', 'user']
+          : ['control_request'],
+      );
+    },
+  );
 });
