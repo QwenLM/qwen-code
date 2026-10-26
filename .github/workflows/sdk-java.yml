@@ -1904,17 +1904,6 @@ jobs:
           set -uo pipefail
           lib="$(find /usr/lib -maxdepth 3 -name libfaketimeMT.so.1 -print -quit 2>/dev/null || true)"
           if [[ -z "${lib}" ]]; then
-            # Pool hosts sit in Alibaba Cloud, where the internal Ubuntu mirror
-            # answers from inside the VPC; the public archive is slow and
-            # occasionally unreachable from that egress. faketime lives in
-            # universe, so name both components. Hosted runners cannot reach
-            # the internal mirror, so probe it first and keep their sources.
-            mirror_list=/etc/apt/sources.list.d/pool-mirror.list
-            if curl -fsS --max-time 5 -o /dev/null http://mirrors.cloud.aliyuncs.com/ && [[ ! -f "${mirror_list}" ]]; then
-              codename="$(. /etc/os-release && echo "${VERSION_CODENAME}")"
-              printf 'deb http://mirrors.cloud.aliyuncs.com/ubuntu/ %s main universe\ndeb http://mirrors.cloud.aliyuncs.com/ubuntu/ %s-updates main universe\n' \
-                "${codename}" "${codename}" | sudo -n tee "${mirror_list}" >/dev/null
-            fi
             sudo -n apt-get -o DPkg::Lock::Timeout=300 update -q
             sudo -n apt-get -o DPkg::Lock::Timeout=300 install -y -q faketime
             lib="$(find /usr/lib -maxdepth 3 -name libfaketimeMT.so.1 -print -quit 2>/dev/null || true)"
