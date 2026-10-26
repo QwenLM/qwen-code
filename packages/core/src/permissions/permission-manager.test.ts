@@ -3336,6 +3336,24 @@ describe('PermissionManager — compound shell write attribution', () => {
     expect(await pm.evaluate(ctx)).toBe('deny');
   });
 
+  // #15600: `>&file` writes `file`, so it must hit that file's deny rule, while
+  // fd duplication (`2>&1`, `>&2`) writes nothing and must not be denied.
+  it.each<[command: string, expected: 'allow' | 'deny']>([
+    ['printf TXT > protected.txt', 'deny'],
+    ['printf TXT &>protected.txt', 'deny'],
+    ['printf TXT >&protected.txt', 'deny'],
+    ['printf TXT 1>&protected.txt', 'deny'],
+    ['df -hT / 2>&1', 'allow'],
+    ['df -hT / >&2', 'allow'],
+    ['printf TXT > other.txt', 'allow'],
+  ])('Bash(*) allow + file deny: %s → %s', async (command, expected) => {
+    const pm = repoPm({
+      permissionsAllow: ['Bash(*)'],
+      permissionsDeny: ['WriteFileTool(protected.txt)'],
+    });
+    expect(await pm.evaluate(sh(command, '/repo'))).toBe(expected);
+  });
+
   // #11865: a redirect target of non-separator characters (one NBSP here) is a
   // real filename to bash and must survive into the virtual op; deleting it
   // with `String.prototype.trim` dropped the write from a `deny` verdict.

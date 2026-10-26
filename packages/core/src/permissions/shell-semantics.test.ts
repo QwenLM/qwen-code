@@ -430,6 +430,29 @@ describe('extractShellOperations', () => {
     ]);
   });
 
+  // `N>&M`, `>&M`, `N<&M` and `N>&-` duplicate or close a descriptor; bash
+  // opens no file. They used to come back as a write to `<cwd>/&1`, which a
+  // bare Edit/Write deny (the headless -p default) turned into a denial.
+  it.each<[command: string, expected: ShellOperation[]]>([
+    ['df -hT / 2>&1', []],
+    ['df -hT / 1>&2', []],
+    ['df -hT / >&2', []],
+    ['df -hT / 2>&-', []],
+    ['df -hT / >&-', []],
+    ['cat <&0', []],
+    ['df -hT / 2>&1 | head -5', []],
+    ['cat /etc/hosts 2>&1', [read('/etc/hosts')]],
+    ['echo hi > out.txt 2>&1', [write(`${CWD}/out.txt`)]],
+    ['echo hi 2>&1 >out.txt', [write(`${CWD}/out.txt`)]],
+  ])('fd duplication is not a file operation: %s', (command, expected) => {
+    expectSorted(command, expected);
+  });
+
+  it('>&file and 1>&file write the named file, not "&file"', () => {
+    expect(ops('echo hi >&.qwen/settings.json')).toEqual([write(SETTINGS)]);
+    expect(ops('echo hi 1>&.qwen/settings.json')).toEqual([write(SETTINGS)]);
+  });
+
   it('regression: ordinary file redirects still tracked', () => {
     expect(ops('echo hi > out.txt')).toContainEqual(write(`${CWD}/out.txt`));
     expect(ops('sort < in.txt')).toContainEqual(read(`${CWD}/in.txt`));

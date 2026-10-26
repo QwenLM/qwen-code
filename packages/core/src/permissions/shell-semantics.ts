@@ -302,10 +302,27 @@ function extractRedirects(tokens: string[], cwd: string): RedirectResult {
       const m = tok.match(/^(<<-?|1>>|1>|>>|>|2>>|2>|&>>|&>|<)([\s\S]+)$/);
       if (m) {
         const op = m[1]!;
-        const target = m[2]!;
+        let target = m[2]!;
         if (op.startsWith('<<')) {
           toRemove.add(i);
           continue;
+        }
+        // `>&`, `N>&` and `<&` take a file descriptor, not a file name.
+        if (
+          target.startsWith('&') &&
+          (op === '>' || op === '1>' || op === '2>' || op === '<')
+        ) {
+          const word = target.slice(1);
+          // `2>&1`, `>&2`, `<&0`, `2>&-`: duplicate or close a descriptor.
+          // Bash opens no file, so there is no file operation to check.
+          if (/^(\d+|-)$/.test(word)) {
+            toRemove.add(i);
+            continue;
+          }
+          // `>&file` and `1>&file` write `file` (stdout and stderr). Check
+          // that path, not `&file`. (`2>&file` and `<&file` are errors in
+          // bash; treating them as file operations keeps the check strict.)
+          target = word;
         }
         if (
           target !== '/dev/null' &&
