@@ -1126,6 +1126,10 @@ export class QQChannel extends ChannelBase {
     );
   }
 
+  override supportsProactiveSend(): boolean {
+    return true;
+  }
+
   async sendMessage(chatId: string, text: string): Promise<void> {
     const inboundContext = this.inboundReplyContext.getStore();
     const latest = this.replyMsgId.get(chatId);
@@ -1156,6 +1160,30 @@ export class QQChannel extends ChannelBase {
       chatId,
       text,
       replyContext,
+      sourceLabel,
+    );
+  }
+
+  /**
+   * Proactive deliveries (loops, webhook tasks) are unattended: they must
+   * never inherit the chat-level reply anchor a recent inbound message left
+   * behind, or QQ would accept the active message as a passive reply
+   * (msg_id/msg_seq) and the active-message toggle below would not apply.
+   */
+  protected override async pushProactive(
+    target: SessionTarget,
+    text: string,
+    sourceLabel?: string,
+  ): Promise<void> {
+    if (target.threadId) {
+      throw new Error(
+        'Channel does not support proactive loop messages for threaded targets.',
+      );
+    }
+    await this.sendMessageWithReplyContext(
+      target.chatId,
+      text,
+      undefined,
       sourceLabel,
     );
   }
