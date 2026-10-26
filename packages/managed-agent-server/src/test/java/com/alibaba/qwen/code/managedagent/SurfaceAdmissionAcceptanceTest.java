@@ -1377,7 +1377,8 @@ class SurfaceAdmissionAcceptanceTest {
             case STORE_USER_MESSAGE_CLAIM, STORE_WRITER_ACQUIRE, STORE_WRITER_RENEW, STORE_WRITER_SEAL,
                     STORE_RECOVERY_BLOCK, STORE_TRANSACTION_COMMIT,
                     STORE_RESTORE, STORE_TOOL_RESULT_PUBLISH,
-                    STORE_TRANSACTION_LIST, STORE_RESOURCE_GET, PUB_FINISHED,
+                    STORE_TRANSACTION_LIST, STORE_RESOURCE_GET, STORE_SNAPSHOT_PUBLISH,
+                    STORE_SNAPSHOT_GET, STORE_SNAPSHOT_PAGES, PUB_FINISHED,
                     PUB_ADMISSION_PREPARE, PUB_RECEIPT_VERIFY,
                     PUB_RANGE -> 403;
             case PUB_OPERATION_GET -> 404;
@@ -1524,6 +1525,7 @@ class SurfaceAdmissionAcceptanceTest {
         variables.put("itemId", artifactItemId);
         variables.put("artifactId", artifactId);
         variables.put("resourceId", "resource-0000000000000000");
+        variables.put("snapshotId", "snapshot-probe");
         variables.put("publicationId", "publication-0000000000000000");
         variables.put("streamId", "stdout");
         variables.put("kind", "stdout.raw");
@@ -1628,6 +1630,9 @@ class SurfaceAdmissionAcceptanceTest {
         Capability capability = entry.capabilities().iterator().next();
         boolean publicSurface = entry.surface() == Surface.PUBLIC;
         return switch (capability) {
+            case STORE_SNAPSHOT_PUBLISH -> "{\"workspaceId\":\"ws\",\"writerId\":\"writer-probe\","
+                    + "\"writerGeneration\":1,\"snapshotId\":\"snapshot-probe\",\"expectedJournalRevision\":1,"
+                    + "\"expectedCommittedSequence\":0}";
             case STORE_USER_MESSAGE_CLAIM -> "{\"workspaceId\":\"ws\",\"writerId\":\"writer-probe\",\"writerGeneration\":1,\"promptId\":\"prompt-probe\",\"initialOnly\":false}";
             case EXTENSION_CONFIG_GET -> "{\"sessionId\":\"" + session + "\"}";
             case EXTENSION_CONFIG_APPLY -> {
