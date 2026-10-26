@@ -1,6 +1,8 @@
 package com.alibaba.qwen.code.runtimebroker.provisioning;
 
+import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.RuntimeDrainReceipt;
 import com.alibaba.qwen.code.runtimebroker.RuntimeObservation;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
@@ -9,12 +11,15 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 
 /**
  * Session-exclusive workers whose Workspace is a registered EXTERNAL storage
@@ -25,9 +30,10 @@ import java.util.Set;
  * product feature: it mints the shipped {@code managed-context/1} boot plus the
  * already-admitted {@code storage} member, so a provider can place a worker on a
  * registered tree and report continuity evidence. Hosted files, foreground shell,
- * approval, capture and close/drain stay unimplemented, and
- * {@link #supportsDrainedStop()} therefore stays {@code false}: a Session placed
- * here cannot be closed, which is why no configuration admits one yet.
+ * approval, capture and native close orchestration stay unimplemented.
+ * The guarded drain primitive is not blanket close support:
+ * {@link #supportsDrainedStop()} stays {@code false}, and no configuration admits
+ * a Hosted Session yet.
  *
  * <p>Trust boundary: the request only names a tenant-bound alias. Provider
  * identity, physical key, registration revision, alias path and mount root come
@@ -60,6 +66,41 @@ public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvision
     @Override
     public String kind() {
         return KIND;
+    }
+
+    @Override
+    public boolean supportsDrainedStop(RuntimeBindingRecord binding) {
+        try {
+            validatedSavedBoot(binding);
+            return true;
+        } catch (RuntimeException invalid) {
+            return false;
+        }
+    }
+
+    @Override
+    public CompletionStage<RuntimeDrainReceipt> stopDrained(RuntimeBindingRecord binding) {
+        try {
+            if (binding == null || !binding.isDrainRequested()) {
+                throw refuse("workspace_close_identity_unverified", "External Workspace drain is not authorized.");
+            }
+            Map<String, Object> boot = validatedSavedBoot(binding);
+            Map<?, ?> storage = (Map<?, ?>) boot.get("storage");
+            long revision = ((Number) storage.get("registrationRevision")).longValue();
+            var stop = transport.stopExternalWorkspaceDrained(binding.getLease(), binding.getRequest(),
+                    binding.getProvisionSeed(), revision).toCompletableFuture();
+            var receipt = stop.thenApply(ignored -> new RuntimeDrainReceipt(binding.getBindingId(),
+                    binding.getGeneration(), binding.getProvisionSeed().getProvisionRequestId(),
+                    binding.getResourceHandle(), Instant.now()));
+            receipt.whenComplete((ignored, error) -> {
+                if (receipt.isCancelled()) {
+                    stop.cancel(true);
+                }
+            });
+            return receipt;
+        } catch (RuntimeException invalid) {
+            return CompletableFuture.failedFuture(invalid);
+        }
     }
 
     /**

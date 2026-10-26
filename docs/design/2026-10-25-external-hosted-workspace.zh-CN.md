@@ -2,7 +2,7 @@
 
 [English](2026-10-25-external-hosted-workspace.md) | [简体中文](2026-10-25-external-hosted-workspace.zh-CN.md)
 
-状态：**step 3a（供给前置层）已实现，产品能力仍未实现**。接续阶段一 `docs/design/2026-10-23-external-runtime-provider.md`（external-scratch，已认可的契约）和已实测完成的 Aone 适配器链路。本阶段不削弱阶段一的任何性质：在首次远程调用前持久化确定的逻辑 handle、丢响应后禁止替换、不提供 release‑to‑kill、Broker 独立 attest、provider 按 `provisionRequestId` 幂等。
+状态：**step 3a 与惰性 B0 原生 drain 前置层（§13）已实现，产品能力仍未实现**。接续阶段一 `docs/design/2026-10-23-external-runtime-provider.md`（external-scratch，已认可的契约）和已实测完成的 Aone 适配器链路。本阶段不削弱阶段一的任何性质：在首次远程调用前持久化确定的逻辑 handle、丢响应后禁止替换、不提供 release‑to‑kill、Broker 独立 attest、provider 按 `provisionRequestId` 幂等。
 
 ## 1. 本阶段存在的原因
 
@@ -201,3 +201,15 @@ profile 不可用于 Hosted 工具。
 相对 §6 的已知偏离（留给后续片）：不新建 `managed-runtime-boot/2` 文档、不反转
 mount root 归属、不返回 `rootDevice`/`rootInode` receipt。这些属于 worker 契约变更，
 而 `storage` 契约已经是公开的 adapter 面；仓库内没有生产者并不等于外部没有消费者。
+
+## 13. B0 修订：惰性的同源原生 drain
+
+本次提供 drain 原语，不提供 Hosted 准入或完整的关闭编排。对 B0 而言，以下决定取代 §§3、6、8 中关于独立 ingress 和 drain 证明的提议；§12 保留此前 step 3a 的范围记录。
+
+- **同一个已保存 origin，既有路由。** external boot 将既有 publication 对象和 executor 注册到 worker 主应用，并将其路由加入 owned-route 门禁。原独立 publication listener 和 ready 通告保持兼容；两个 listener 共享退役与 channel 状态。Express 注册时转义 `publication:*` 路径中的字面量冒号，避免将其视为参数而匹配另一种操作；线上路径不变。Broker 使用持久化的 `RuntimeLease.endpoint` 独立 attest context，随后向 `/internal/managed-runtime/v2/publication:stop-drained` 发起 POST，请求体严格为 `{"protocolVersion":2,"channel":"all"}`。不引入第二个 endpoint，也不推算端口。
+- **I/O 前校验原始身份。** provisioner 复用基类校验，检查已保存 request、seed、凭据和 canonical storage-bound handle，核对当前注册元组与已保留 endpoint，并要求 `external-workspace`、managed context、session 隔离和精确的 Workspace capability digest。原始信息缺失或冲突不产生 receipt；adapter 重启后使用完整的已保存身份，不分配资源，也不调用 provider observe。传输层在 attest 前拒绝重定向和被替换的解析 origin。stop 发送 Bearer、lease ID/epoch、`X-Qwen-Managed-Storage-Revision`、`X-Qwen-Managed-Runtime-Incarnation`、JSON 和 `Cache-Control: no-store`；boot 头的值在 attest 前固定。publication 不返回 response-incarnation 头，stop 也不要求该头。stop 信封限 64 KiB，超时或取消会关闭活动 HTTP 请求。
+- **有限证据，不读取证明内容。** 仅接受 HTTP 200、JSON/no-store 和精确的 `{protocolVersion:2,state:'drained',proof,receipts:[]}`。严格解析拒绝重复键、尾随 token、畸形 UTF-8 和非整数数值 token。proof 恰有 `resourceId/kind/schemaVersion/byteLength/digest`：符合生产者形状的 UUID、`external-publication`、整数 `1`、不超过 64 MiB 的正整数长度，以及原始小写 64 位十六进制 SHA-256。unknown、undrained、非空 channel/receipt 或畸形回包不产生 receipt。Broker 在 attest 后信任经过认证的 worker 声明；它**不**读取或计算私有 proof 字节的哈希，不声称 attest 与 stop 原子执行，也不抵抗被攻陷的可信 ingress 后方的恶意克隆。同源路由必须到达原 worker。
+- **退役不等于进程退出。** 成功 drain 会封闭 managed writer 准入并退役执行资源；HTTP 进程可以继续存活。原生 receipt 使用既有 binding/generation/provision-request/handle/time 五字段构造器，`stoppedAt` 为 Broker 观察时间，不携带 extension mode 或 scope。binding state 与 operation claim 的授权由 Broker 调用链负责，provisioner 不重复建立这些判据；原语要求 drain 请求和经过校验的原始身份。
+- **仍未激活。** 按 binding 的 `supportsDrainedStop(binding)` 可以识别有效原始绑定，但无参 `supportsDrainedStop()` 仍为 false。SQL 支撑的 `WorkspaceExecutionStore.canStopDrained` 门禁仍拒绝 EXTERNAL。ACK 重放、先持久化 receipt 再释放 owner 的编排，以及 EXTERNAL 执行归属仍属后续工作。没有启用任何公开工具、Hosted profile 或准入开关，`release` 仍为空操作。#15512 尚未完成。
+
+聚焦机制检查覆盖：listener 共享状态与字面量路由；原始请求头以及没有 response-incarnation 回显时的成功；身份/注册拒绝；严格畸形解析与回包上限；重定向 sink 不收到请求；活动连接的取消/超时；以及从已保存身份重启且不分配资源。它们不证明公开 Hosted 执行、SQL owner 释放或真实 provider 的端到端关闭；激活前仍须完成这些验证。
