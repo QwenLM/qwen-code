@@ -192,8 +192,9 @@ describe.skipIf(process.platform === 'win32')(
       },
     );
 
-    it('reuses setup-java sibling completion markers without downloading or replacing the JDK', () => {
+    it('reuses setup-java sibling completion markers when the private namespace cannot be created', () => {
       const f = fixture('network');
+      writeFileSync(join(f.cache, 'qwen-pool-jdk'), 'not a directory');
       const inode = seed(f.shared);
       const env = f.prepare('job');
       success(f.run(env));

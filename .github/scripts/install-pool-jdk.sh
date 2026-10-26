@@ -48,7 +48,6 @@ url="https://mirrors.tuna.tsinghua.edu.cn/Adoptium/${spec}/jdk/${arch/arm64/aarc
 shared_tool="${RUNNER_TOOL_CACHE:?}/Java_Temurin-Hotspot_jdk/${dir}/${arch}"
 tool="${RUNNER_TOOL_CACHE:?}/qwen-pool-jdk/${dir}/${arch}"
 tool_dir="$(dirname -- "${tool}")"
-mkdir -p -- "${tool_dir}" || { echo "::error::cannot create ${tool_dir}"; exit 1; }
 
 # Pool fallbacks share this lock. A completed entry is immutable; only an
 # incomplete entry in our own namespace can be replaced.
@@ -60,6 +59,7 @@ fi
 if [[ -d "${shared_tool}" && -f "${shared_tool}.complete" ]]; then
   tool="${shared_tool}"
 elif [[ ! -f "${tool}.complete" ]]; then
+  mkdir -p -- "${tool_dir}" || { echo "::error::cannot create ${tool_dir}"; exit 1; }
   work="$(mktemp -d "${tool_dir}/install.XXXXXX")" || { echo "::error::cannot stage the download"; exit 1; }
   echo "downloading Temurin ${spec} (${arch}) from the mirror"
   if ! curl -fsSL --retry 3 --retry-delay 5 --retry-max-time 300 --max-time 600 "${url}" -o "${work}/jdk.tgz"; then
