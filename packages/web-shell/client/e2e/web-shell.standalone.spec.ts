@@ -228,7 +228,20 @@ test('standalone Recents keeps lifecycle actions on exact standalone routes @smo
 
   await openSessionAction(page, 'Other conversation', 'Rename');
   const renameDialog = page.getByRole('dialog', { name: 'Rename' });
-  await renameDialog.getByRole('textbox').fill('Renamed conversation');
+  const renameField = renameDialog.getByRole('textbox');
+  await expect(renameField).toBeFocused();
+  expect(
+    await renameField.evaluate((element) => ({
+      value: element.value,
+      start: element.selectionStart,
+      end: element.selectionEnd,
+    })),
+  ).toEqual({
+    value: 'Other conversation',
+    start: 0,
+    end: 'Other conversation'.length,
+  });
+  await renameField.fill('Renamed conversation');
   await renameDialog.getByRole('button', { name: 'Save' }).click();
   await expect(
     page.getByText('Renamed conversation', { exact: true }),

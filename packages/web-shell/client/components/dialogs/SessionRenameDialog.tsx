@@ -1,3 +1,4 @@
+import { useRef } from 'react';
 import { useI18n } from '../../i18n';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
@@ -21,6 +22,12 @@ export function SessionRenameDialog({
   onClose,
 }: SessionRenameDialogProps) {
   const { t } = useI18n();
+  // The first focus selects the current name and later ones do not, so a
+  // caret the user placed survives the focus the dialog hands back on Tab.
+  // Keyed on focus rather than mount because the dialog moves focus onto this
+  // field itself, after mount, and that later focus would drop a selection
+  // made earlier.
+  const selectedRef = useRef(false);
   return (
     <DialogShell title={t('sidebar.rename')} size="sm" onClose={onClose}>
       <form
@@ -40,7 +47,11 @@ export function SessionRenameDialog({
           value={value}
           disabled={busy}
           onChange={(event) => onChange(event.target.value)}
-          onFocus={(event) => event.currentTarget.select()}
+          onFocus={(event) => {
+            if (selectedRef.current) return;
+            selectedRef.current = true;
+            event.currentTarget.select();
+          }}
           onKeyDown={(event) => {
             if (
               event.key === 'Enter' &&

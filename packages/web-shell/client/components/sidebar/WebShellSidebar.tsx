@@ -1814,6 +1814,17 @@ export function WebShellSidebar({
   const sessionMenuPointerDismissRef = useRef(false);
   const sessionMenuOpenRef = useRef(false);
   const renameFocusSuppressRef = useRef(false);
+  // The first focus after an editor opens selects the current name and later
+  // ones do not, so the caret the user placed survives the focus the menu
+  // hands back (`renameFocusSuppressRef`) and any focus that returns to the
+  // field. Keyed on focus rather than mount because the menu-close sequence
+  // moves focus after the editor mounts.
+  const renameSelectedRef = useRef(false);
+  const selectRenameOnFirstFocus = useCallback((element: HTMLInputElement) => {
+    if (renameSelectedRef.current) return;
+    renameSelectedRef.current = true;
+    element.select();
+  }, []);
   const handleSessionMenuOpenChange = useCallback((open: boolean) => {
     sessionMenuOpenRef.current = open;
     if (open) renameFocusSuppressRef.current = false;
@@ -3297,6 +3308,7 @@ export function WebShellSidebar({
       if (!canRenameSession(session)) return;
       const identity = getIdentityForSession(session);
       if (busySessionIdsRef.current.has(identity)) return;
+      renameSelectedRef.current = false;
       setEditingSession(session);
       setEditingSessionIdentity(identity);
       editingSessionIdentityRef.current = identity;
@@ -4880,7 +4892,9 @@ export function WebShellSidebar({
                   maxLength={256}
                   value={editingName}
                   onChange={(event) => setEditingName(event.target.value)}
-                  onFocus={(event) => event.currentTarget.select()}
+                  onFocus={(event) =>
+                    selectRenameOnFirstFocus(event.currentTarget)
+                  }
                   onBlur={cancelRename}
                   onKeyDown={(event) => {
                     if (event.key === 'Escape') cancelRename();
@@ -5199,7 +5213,9 @@ export function WebShellSidebar({
                 maxLength={256}
                 value={editingName}
                 onChange={(event) => setEditingName(event.target.value)}
-                onFocus={(event) => event.currentTarget.select()}
+                onFocus={(event) =>
+                  selectRenameOnFirstFocus(event.currentTarget)
+                }
                 onBlur={cancelRename}
                 onKeyDown={(event) => {
                   if (event.key === 'Escape') {
@@ -5516,6 +5532,7 @@ export function WebShellSidebar({
       openGroupMenuFromAnchor,
       currentSessionActive,
       saveRename,
+      selectRenameOnFirstFocus,
       searchQuery,
       sessionActionItems,
       inlineActionItems,
