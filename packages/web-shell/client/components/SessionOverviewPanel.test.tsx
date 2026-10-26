@@ -3668,6 +3668,17 @@ describe('SessionOverviewPanel standalone sessions', () => {
     expect(onOpenSession).toHaveBeenCalledWith('s1', '/w', undefined);
   });
 
+  it('classifies standalone rows by catalog, not by an empty cwd', async () => {
+    useStandaloneCapabilities();
+    sessionsState.sessions = [
+      session('e1', { displayName: 'Empty', workspaceCwd: '' }),
+    ];
+    render();
+    await flushAsync();
+    act(() => click(rows()[0]!.querySelectorAll('td')[2] as HTMLElement));
+    expect(onOpenSession).toHaveBeenCalledExactlyOnceWith('e1', '', undefined);
+  });
+
   it('keeps the split and tab buttons disabled for a standalone selection', async () => {
     useStandaloneCapabilities();
     standalonePages = [

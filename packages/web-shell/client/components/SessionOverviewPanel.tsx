@@ -180,15 +180,16 @@ function getSessionIdentity(session: SessionIdentity): string {
 
 /**
  * Standalone conversations live outside every workspace catalog, so opening
- * one through the workspace route would fail: rows without a workspace of
- * their own carry the standalone context to the open handler.
+ * one through the workspace route would fail: rows from the standalone
+ * catalog carry the standalone context to the open handler. The catalog
+ * discriminator decides, never the cwd — an empty cwd means the primary
+ * workspace everywhere else in this panel, and a standalone row's cwd is the
+ * daemon's internal Conversations root.
  */
 function openSessionContext(
-  card: Pick<SessionCard, 'workspaceCwd' | 'sourceType'>,
+  card: Pick<SessionCard, 'sourceType'>,
 ): DaemonProductSessionContext | undefined {
-  return card.sourceType === 'standalone' || !card.workspaceCwd
-    ? { kind: 'standalone' }
-    : undefined;
+  return card.sourceType === 'standalone' ? { kind: 'standalone' } : undefined;
 }
 
 function isCurrentSession(
