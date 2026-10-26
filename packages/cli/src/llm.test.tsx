@@ -2275,7 +2275,6 @@ describe('llm.tsx main function', () => {
         getSystemHooks: () => undefined,
         getUserHooks: () => undefined,
         getProjectHooks: () => hooks,
-        isTrusted: true,
         user: { originalSettings: {} },
         workspace: {
           path: join(root, '.qwen', 'settings.json'),

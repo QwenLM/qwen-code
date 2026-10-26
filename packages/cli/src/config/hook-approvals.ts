@@ -58,12 +58,16 @@ export function getProjectHooksRoot(settings: {
  * environments, so only the unresolved text hashes the same on both.
  */
 export function getProjectHooksForApproval(settings: {
-  isTrusted: boolean;
+  getProjectHooks(): Record<string, unknown> | undefined;
   workspace: { originalSettings: { hooks?: unknown } };
 }): Record<string, unknown> | undefined {
-  const hooks = settings.isTrusted
-    ? settings.workspace.originalSettings.hooks
-    : undefined;
+  // Resolution keeps the structure, so the resolved block (already withheld
+  // in an untrusted folder) decides whether there is anything to gate.
+  const resolved = settings.getProjectHooks();
+  if (!isRecord(resolved) || summarizeProjectHooks(resolved).length === 0) {
+    return undefined;
+  }
+  const hooks = settings.workspace.originalSettings.hooks;
   return isRecord(hooks) ? hooks : undefined;
 }
 
@@ -72,7 +76,6 @@ export function getSeparatedHookSettings(settings: {
   getSystemHooks(): Record<string, unknown> | undefined;
   getUserHooks(): Record<string, unknown> | undefined;
   getProjectHooks(): Record<string, unknown> | undefined;
-  isTrusted: boolean;
   workspace: { path: string; originalSettings: { hooks?: unknown } };
 }) {
   // A copy: the hook registry tags loaded definitions in place, and an ACP
@@ -83,8 +86,7 @@ export function getSeparatedHookSettings(settings: {
     systemHooks: settings.getSystemHooks(),
     userHooks: settings.getUserHooks(),
     projectHooks,
-    // Only a block with something runnable is gated.
-    ...(gated && summarizeProjectHooks(gated).length > 0
+    ...(gated
       ? {
           projectHooksApproval: {
             root: getProjectHooksRoot(settings),

@@ -212,7 +212,6 @@ describe('hooksCommand', () => {
             getUserHooks: () => userHooks,
             getProjectHooks: () =>
               opts.resolvedProjectHooks ?? opts.projectHooks ?? projectHooks,
-            isTrusted: true,
             workspace: {
               path: '/work/repo/.qwen/settings.json',
               originalSettings: {

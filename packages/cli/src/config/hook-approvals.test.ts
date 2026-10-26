@@ -180,7 +180,6 @@ describe('hook-approvals (hash-bound approval store)', () => {
       getSystemHooks: () => system,
       getUserHooks: () => user,
       getProjectHooks: () => resolved,
-      isTrusted: true,
       workspace: {
         path: path.join('/work', 'repo', '.qwen', 'settings.json'),
         originalSettings: { hooks: raw },
@@ -205,7 +204,7 @@ describe('hook-approvals (hash-bound approval store)', () => {
   it('withholds the unresolved block from the gate in an untrusted folder', () => {
     expect(
       getProjectHooksForApproval({
-        isTrusted: false,
+        getProjectHooks: () => undefined,
         workspace: { originalSettings: { hooks } },
       }),
     ).toBeUndefined();
