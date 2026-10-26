@@ -4095,16 +4095,17 @@ describe('CoreToolScheduler', () => {
       expectSpilled(responseText(call), BODY);
     });
 
-    // A producer-sized body never earns `persistedOutputFiles`, so the part's
-    // non-enumerable recovery handle is the only carrier of its remediation
-    // text. Finalizing re-stamps provenance over those parts by spreading them;
-    // without re-attaching the handle the send boundary — which builds its
-    // entries from parts alone — re-cuts the composition and drops the reason
-    // line and the transcript pointer, so the parent model retries the same
-    // call verbatim and times out again (#13597).
-    it.each([660, 1000])(
-      'delivers the producer recovery text to a %i-char send-boundary slot',
-      async (budget) => {
+    // With no saved output file, the part's non-enumerable recovery handle
+    // is the only carrier of its remediation text. Provenance re-stamps and
+    // hook context append both copy parts before the send-boundary budget.
+    it.each([
+      { budget: 660, hookEvent: undefined },
+      { budget: 1000, hookEvent: undefined },
+      { budget: 660, hookEvent: 'PreToolUse' },
+      { budget: 660, hookEvent: 'PostToolUse' },
+    ])(
+      'delivers the producer recovery text to a $budget-char send-boundary slot ($hookEvent)',
+      async ({ budget, hookEvent }) => {
         // Wording mirrors `subagentTerminalReason(TIMEOUT)`: this is the line
         // the parent model has to read to avoid re-issuing the same call.
         const reason =
@@ -4118,14 +4119,33 @@ describe('CoreToolScheduler', () => {
               returnDisplay: 'x',
               llmContent: `${recoveryText}\n\n${'a'.repeat(4_000)}`,
               recoveryText,
+              ...(hookEvent ? { persistedOutputFiles: [] } : {}),
               outputBudgetApplied: true,
             },
             { maxOutputChars: 30_000 },
           ),
           'c-recovery',
           'p-recovery',
-          { waitForCompletion: true, truncateToolOutputThreshold: 25_000 },
+          {
+            waitForCompletion: true,
+            truncateToolOutputThreshold: 25_000,
+            ...(hookEvent
+              ? {
+                  disableHooks: false,
+                  messageBus: hookBusAdding(hookEvent, {
+                    hookEventName: hookEvent,
+                    additionalContext: 'hook recovery context',
+                  }),
+                  toolOutputBatchBudget: 660,
+                }
+              : {}),
+          },
         );
+        if (hookEvent) {
+          expect(responseText(calls[0])).toContain(reason);
+          expect(responseText(calls[0])).toContain(marker);
+          expect(responseText(calls[0])).toContain('hook recovery context');
+        }
 
         // `llm-chat.ts`'s own send-boundary shape: one part per entry, no
         // `persistedOutputFiles`, so nothing downstream can rebuild the handle.
