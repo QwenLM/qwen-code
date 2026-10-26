@@ -24,6 +24,7 @@ import {
   normalizeRemoteToWebUrl,
   parseGhPrList,
   repoKeyFromWebUrl,
+  resolveGhBinary,
   GITHUB_PR_LIST_LIMIT,
 } from './github-prs.js';
 
@@ -243,7 +244,7 @@ describe('fetchGitHubPullRequests', () => {
       pullRequests: [expect.objectContaining({ number: 1, state: 'open' })],
     });
     expect(mockExecFile).toHaveBeenCalledWith(
-      'gh',
+      expect.stringMatching(/(?:^|[/\\])gh$/),
       [
         'pr',
         'list',
@@ -262,6 +263,47 @@ describe('fetchGitHubPullRequests', () => {
     );
   });
 
+  it('spawns the fallback gh when PATH cannot resolve it', async () => {
+    const dir = tmp.repo();
+    const home = path.join(tmp.dir, 'home');
+    const binary = fakeGh(path.join(home, '.local', 'bin'));
+    mockGhSuccess([ghPrEntry()]);
+
+    await fetchGitHubPullRequests(dir, { PATH: '/nonexistent', HOME: home });
+
+    expect(mockExecFile.mock.calls[0]?.[0]).toBe(binary);
+  });
+
+  it('forwards the spawn directory when resolving gh', async () => {
+    const dir = tmp.repo();
+    fakeGh(path.join(dir, 'bin'));
+    const home = path.join(tmp.dir, 'home');
+    fakeGh(path.join(home, '.local', 'bin'));
+    mockGhSuccess([ghPrEntry()]);
+
+    await fetchGitHubPullRequests(dir, { PATH: 'bin', HOME: home });
+
+    // Literal, not the widened matcher: the fallback would satisfy that too,
+    // and this case exists to tell "child PATH resolved" from "fallback won".
+    expect(mockExecFile.mock.calls[0]?.[0]).toBe('gh');
+  });
+
+  it('reports the fallback binary on a spawn failure', async () => {
+    const dir = tmp.repo();
+    const home = path.join(tmp.dir, 'home');
+    const binary = fakeGh(path.join(home, '.local', 'bin'));
+    mockExecError('spawn EACCES', { code: 'EACCES' });
+
+    const result = await fetchGitHubPullRequests(dir, {
+      PATH: '/nonexistent',
+      HOME: home,
+    });
+
+    // The route redacts this exact value: it names the host's HOME and may
+    // contain spaces, which a token sweep cannot own.
+    expect(result).toMatchObject({ kind: 'failed', binary });
+  });
+
   it('uses slim fields and the requested state/limit when asked', async () => {
     const dir = tmp.repo();
     mockGhSuccess([ghPrEntry({ state: 'MERGED' })]);
@@ -277,7 +319,7 @@ describe('fetchGitHubPullRequests', () => {
       pullRequests: [expect.objectContaining({ number: 1, state: 'merged' })],
     });
     expect(mockExecFile).toHaveBeenCalledWith(
-      'gh',
+      expect.stringMatching(/(?:^|[/\\])gh$/),
       [
         'pr',
         'list',
@@ -305,7 +347,7 @@ describe('fetchGitHubPullRequests', () => {
       stderr: '',
     });
     const result = await fetchGitHubPullRequests(tmp.repo());
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       kind: 'failed',
       message: 'gh pr list timed out after 10s',
       gitRoot: tmp.dir,
@@ -315,7 +357,7 @@ describe('fetchGitHubPullRequests', () => {
   it('returns failed with a single-line stderr message when gh exits non-zero', async () => {
     mockExecError('exit 1', { stderr: 'gh: not logged in\nRun gh auth login' });
     const result = await fetchGitHubPullRequests(tmp.repo());
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       kind: 'failed',
       message: 'gh: not logged in Run gh auth login',
       gitRoot: tmp.dir,
@@ -376,6 +418,26 @@ describe('createGitHubPullRequest', () => {
     expect(seen.env).toBeDefined();
     expect(seen.env).not.toHaveProperty('GIT_DIR');
     expect(seen.env).not.toHaveProperty('GIT_WORK_TREE');
+  });
+
+  it('spawns the fallback gh when PATH cannot resolve it', async () => {
+    const dir = tmp.repo();
+    const home = path.join(tmp.dir, 'home');
+    const binary = fakeGh(path.join(home, '.local', 'bin'));
+    answerWithUrl('https://github.com/o/r/pull/7');
+
+    await createGitHubPullRequest(
+      dir,
+      { title: 'My PR' },
+      { PATH: '/nonexistent', HOME: home },
+    );
+
+    expect(mockExecFile).toHaveBeenCalledWith(
+      binary,
+      expect.any(Array),
+      expect.anything(),
+      expect.any(Function),
+    );
   });
 
   it('forwards a workspace env while still stripping repository selectors', async () => {
@@ -576,8 +638,100 @@ describe('fetchRemoteWebUrl', () => {
   });
 });
 
+/** Creates `<dir>/gh` and returns its path. */
+function fakeGh(dir: string): string {
+  fs.mkdirSync(dir, { recursive: true });
+  const binary = path.join(dir, 'gh');
+  fs.writeFileSync(binary, '');
+  return binary;
+}
+
+describe('resolveGhBinary', () => {
+  const tmp = useTmpDir('github-prs-gh-binary-');
+
+  it('executes the gh that PATH resolves even when a fallback is installed', () => {
+    const binDir = path.join(tmp.dir, 'bin');
+    fakeGh(binDir);
+    // A fallback that exists on the host must not outrank PATH. Creating one
+    // makes "PATH wins" observable regardless of this machine's installs.
+    fakeGh(path.join(tmp.dir, 'home', '.local', 'bin'));
+    expect(
+      resolveGhBinary(
+        {
+          PATH: binDir,
+          HOME: path.join(tmp.dir, 'home'),
+        },
+        tmp.dir,
+      ),
+    ).toBe('gh');
+  });
+
+  it('resolves a relative PATH entry against the child directory', () => {
+    const cwd = path.join(tmp.dir, 'repo');
+    fs.mkdirSync(cwd, { recursive: true });
+    fakeGh(path.join(cwd, 'bin'));
+    // The fallback is the discriminator: reaching it means the relative entry
+    // was probed under this process's cwd instead of the spawn directory.
+    fakeGh(path.join(tmp.dir, 'home', '.local', 'bin'));
+    expect(
+      resolveGhBinary({ PATH: 'bin', HOME: path.join(tmp.dir, 'home') }, cwd),
+    ).toBe('gh');
+  });
+
+  it('resolves an empty PATH component against the child directory', () => {
+    const cwd = path.join(tmp.dir, 'repo2');
+    fs.mkdirSync(cwd, { recursive: true });
+    fakeGh(cwd);
+    fakeGh(path.join(tmp.dir, 'home', '.local', 'bin'));
+    expect(
+      resolveGhBinary(
+        {
+          PATH: `${path.delimiter}${path.join(tmp.dir, 'missing')}`,
+          HOME: path.join(tmp.dir, 'home'),
+        },
+        cwd,
+      ),
+    ).toBe('gh');
+  });
+
+  it('falls back to the per-user install when PATH cannot resolve gh', () => {
+    // A daemon launched by launchd inherits `/usr/bin:/bin:…` — no
+    // package-manager bin dir — so a bare name would fail with ENOENT and
+    // every gh consumer would silently degrade.
+    const binary = fakeGh(path.join(tmp.dir, 'home', '.local', 'bin'));
+    expect(
+      resolveGhBinary(
+        {
+          PATH: '/nonexistent',
+          HOME: path.join(tmp.dir, 'home'),
+        },
+        tmp.dir,
+      ),
+    ).toBe(binary);
+  });
+});
+
 describe('fetchCurrentBranchPullRequest', () => {
   const tmp = useTmpDir('github-prs-branch-pr-');
+
+  it('spawns the fallback gh when PATH cannot resolve it', async () => {
+    const dir = tmp.repo();
+    const home = path.join(tmp.dir, 'home');
+    const binary = fakeGh(path.join(home, '.local', 'bin'));
+    mockGhSuccess({
+      number: 77,
+      url: 'https://github.com/o/r/pull/77',
+      state: 'OPEN',
+      headRefName: 'feat/x',
+    });
+
+    await fetchCurrentBranchPullRequest(dir, {
+      PATH: '/nonexistent',
+      HOME: home,
+    });
+
+    expect(mockExecFile.mock.calls[0]?.[0]).toBe(binary);
+  });
 
   it('resolves number, url, state, and head branch from gh', async () => {
     mockGhSuccess(
@@ -690,6 +844,17 @@ describe('fetchAttributionRepoKeys', () => {
       resolved: 'github.com/fork/r',
       parent: 'github.com/parent/r',
     });
+  });
+
+  it('spawns the fallback gh when PATH cannot resolve it', async () => {
+    const dir = tmp.repo();
+    const home = path.join(tmp.dir, 'home');
+    const binary = fakeGh(path.join(home, '.local', 'bin'));
+    mockGhSuccess({ url: 'https://github.com/o/r' });
+
+    await fetchAttributionRepoKeys(dir, { PATH: '/nonexistent', HOME: home });
+
+    expect(mockExecFile.mock.calls[0]?.[0]).toBe(binary);
   });
 
   it('omits the parent key for a non-fork repo', async () => {

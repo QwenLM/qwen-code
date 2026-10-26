@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   ChatCompressionService,
+  firePostCompact,
   COMPACT_MAX_OUTPUT_TOKENS,
   COMPACTION_BUDGET_SAFETY_MARGIN,
   computeCompactionOutputBudget,
@@ -37,6 +38,8 @@ import * as postCompactModule from './postCompactAttachments.js';
 import * as slimmingModule from './compactionInputSlimming.js';
 import { logChatCompression } from '../telemetry/loggers.js';
 import { estimateContentTokens } from './tokenEstimation.js';
+import { getAutoMemorySnapshot } from '../memory/request-context.js';
+import { detectTurnInterruption } from '../core/turn-interruption.js';
 import {
   content,
   fnCall,
@@ -1011,6 +1014,70 @@ describe('ChatCompressionService', () => {
   describe('PreCompact hook', () => {
     beforeEach(installHookSystem);
 
+    it('awaits a durable candidate before PostCompact and resumes the saved candidate without generating again', async () => {
+      arrangeForced();
+      let saved:
+        | import('./chatCompressionService.js').ChatCompressionCandidate
+        | undefined;
+      let release: () => void = () => {};
+      let prepared: () => void = () => {};
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const ready = new Promise<void>((resolve) => {
+        prepared = resolve;
+      });
+      const pending = run({
+        force: true,
+        onPreparedCompaction: async (candidate) => {
+          saved = structuredClone(candidate);
+          prepared();
+          await blocked;
+        },
+      });
+      await ready;
+      expect(saved?.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(saved?.newHistory.length).toBeGreaterThanOrEqual(2);
+      expect(mockFirePostCompactEvent).not.toHaveBeenCalled();
+      release();
+      expectCompressed(await pending);
+      expect(mockFirePostCompactEvent).toHaveBeenCalledWith(
+        PostCompactTrigger.Manual,
+        saved!.summary,
+        undefined,
+      );
+      const calls = vi.mocked(mockConfig.getBaseLlmClient().generateText).mock
+        .calls.length;
+      await firePostCompact(mockConfig, saved!);
+      expect(
+        vi.mocked(mockConfig.getBaseLlmClient().generateText).mock.calls,
+      ).toHaveLength(calls);
+    });
+
+    it('does not run PostCompact after candidate persistence fails', async () => {
+      arrangeForced();
+      await expect(
+        run({
+          force: true,
+          onPreparedCompaction: async () => {
+            throw new Error('writer fenced');
+          },
+        }),
+      ).rejects.toThrow('writer fenced');
+      expect(mockFirePostCompactEvent).not.toHaveBeenCalled();
+    });
+
+    it('disables local file restoration for a Hosted compression', async () => {
+      arrangeForced();
+      const compose = vi.spyOn(postCompactModule, 'composePostCompactHistory');
+      expectCompressed(await run({ force: true, restoreRecentFiles: false }));
+      expect(compose).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        expect.objectContaining({ maxFiles: 0 }),
+      );
+    });
+
     it('should fire PreCompact hook with Manual trigger when force=true', async () => {
       arrangeForced();
       await run({ force: true }); // force = true -> Manual trigger
@@ -1532,6 +1599,75 @@ describe('ChatCompressionService.compress cache sharing', () => {
       });
       const request = generateText.mock.calls[0]![0] as GenerateTextOptions;
       expect(request.promptCacheSharing).toBe(true);
+    },
+  );
+
+  it.each([
+    { cacheSharing: false, visible: false },
+    { cacheSharing: true, visible: false },
+    { cacheSharing: false, visible: true },
+    { cacheSharing: true, visible: true },
+  ])(
+    'projects replayed tool-result catalogs for compression: $cacheSharing / $visible',
+    async ({ cacheSharing, visible }) => {
+      const history = [
+        userText('read the file ' + 'earlier conversation '.repeat(2_000)),
+        content('model', fnCall('read_file', { path: 'README.md' }, 'call-1')),
+      ];
+      const snapshot = getAutoMemorySnapshot(
+        [],
+        'retained catalog '.repeat(100),
+      )!;
+      const response = fnResponse(
+        'read_file',
+        { output: 'contents' },
+        'call-1',
+      );
+      const quoted = { text: snapshot.text! };
+      const raw = content('user', response, quoted, snapshot);
+      const interruption = detectTurnInterruption([...history, raw]);
+      if (interruption.kind !== 'interrupted_prompt')
+        throw new Error('missing replay parts');
+      const pendingUserMessage = content('user', ...interruption.parts);
+      const before = structuredClone(pendingUserMessage);
+      const { config, generateText, run } = makeFixture({
+        history,
+        enableCacheControl: cacheSharing,
+      });
+      config.getAutoMemoryContext = () => (visible ? 'current catalog' : '');
+      const coldSpy = cacheSharing
+        ? vi.spyOn(sideQueryModule, 'runSideQuery')
+        : spyCold();
+      const result = await run({ trigger: 'auto', pendingUserMessage });
+      expectCompressed(result);
+      expectCacheLog(config, cacheSharing, cacheSharing);
+      expect(generateText).toHaveBeenCalledTimes(cacheSharing ? 1 : 0);
+      expect(coldSpy).toHaveBeenCalledTimes(cacheSharing ? 0 : 1);
+      const request = (
+        cacheSharing
+          ? generateText.mock.calls[0]![0]
+          : coldSpy.mock.calls[0]![1]
+      ) as { contents: Content[] };
+      const expectedPending = content(
+        'user',
+        response,
+        quoted,
+        ...(visible ? [snapshot] : []),
+      );
+      expect(request.contents.slice(0, -1)).toEqual([
+        ...history,
+        expectedPending,
+      ]);
+      expect(pendingUserMessage).toEqual(before);
+      expect(raw.parts).toEqual([response, quoted, snapshot]);
+      expect(result.newHistory?.at(-1)?.parts).toContainEqual(
+        history[1].parts![0],
+      );
+      if (!cacheSharing) {
+        expect(result.info.newTokenCount).toBe(
+          11_500 + estimateContentTokens([expectedPending]),
+        );
+      }
     },
   );
 
@@ -2608,6 +2744,60 @@ describe('ChatCompressionService.compress — single-turn Node REPL image regres
       screenshot(data),
     ]),
   ];
+
+  it.each([false, true])(
+    'counts restored images once with positive usage (pending call: %s)',
+    async (pendingCall) => {
+      const history = screenshotSession('Analyze screenshots.', [
+        's1',
+        's2',
+        's3',
+      ]);
+      if (pendingCall) {
+        history.push(content('model', fnCall('read_file', {}, 'pending')));
+      }
+      spySideQuery('S'.repeat(2000), usage(170_000, 500));
+      const result = await compressWith(fakeChat(history), fakeConfig(), {
+        trigger: 'auto',
+      });
+      expectCompressed(result);
+      expect(result.info.newTokenCount).toBeGreaterThanOrEqual(
+        11_500 + 3 * 1600,
+      );
+      expect(result.info.newTokenCount).toBeLessThan(16_600);
+      expect(result.newHistory).toHaveLength(pendingCall ? 4 : 3);
+    },
+  );
+
+  it('rejects inflation when a restored file grows beyond the original context', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-restore-cost-'));
+    const file = join(dir, 'context.txt');
+    writeFileSync(file, 'x'.repeat(17_600));
+    try {
+      const history = [
+        userText('Read the file.'),
+        content('model', fnCall('read_file', { file_path: file }, 'read')),
+        content(
+          'user',
+          fnResponse('read_file', { output: 'Earlier content.' }, 'read'),
+        ),
+        modelText('Done.'),
+      ];
+      spySideQuery('Summary.', usage(3000, 100));
+      const result = await compressWith(
+        fakeChat(history),
+        fakeConfig({ extra: { getTargetDir: () => dir } }),
+        { originalTokenCount: 2000 },
+      );
+      expectNoNewHistory(
+        result,
+        CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT,
+      );
+      expect(result.info.newTokenCount).toBeGreaterThan(4400);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
   it('preserves the user prompt verbatim in summary and restores 3 most recent screenshots', async () => {
     // Reproduces the "single-turn long task" scenario the rewrite targets:

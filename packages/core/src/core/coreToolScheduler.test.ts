@@ -903,9 +903,10 @@ function autoApprovePendingTools(
       autoApproveCompatiblePendingTools: (
         signal: AbortSignal,
         triggeringCallId: string,
+        isActive: () => boolean,
       ) => Promise<void>;
     }
-  ).autoApproveCompatiblePendingTools(signal, triggeringCallId);
+  ).autoApproveCompatiblePendingTools(signal, triggeringCallId, () => true);
 }
 
 describe('CoreToolScheduler', () => {
@@ -1323,6 +1324,7 @@ describe('CoreToolScheduler', () => {
 
   function createSchedulerForLegacyToolTests(options: {
     toolsByName: Map<string, MockTool>;
+    onPermissionPromptTerminalSequence?: (terminalSequence: string) => void;
     approvalMode?: ApprovalMode;
     getPermissionsDeny?: () => string[] | undefined;
     messageBus?: { request: ReturnType<typeof vi.fn> };
@@ -1468,6 +1470,8 @@ describe('CoreToolScheduler', () => {
         chatRecordingService: options.chatRecordingService,
         onToolResultFullTurnModel: options.onToolResultFullTurnModel,
         isToolExecutionAllowed: options.isToolExecutionAllowed,
+        onPermissionPromptTerminalSequence:
+          options.onPermissionPromptTerminalSequence,
       },
     );
 
@@ -4850,6 +4854,41 @@ describe('CoreToolScheduler', () => {
     });
     expect(runSideQueryMock).not.toHaveBeenCalled();
     expect(hookSystem.firePermissionDeniedEvent).not.toHaveBeenCalled();
+  });
+
+  it('hands its owner the terminal sequence of the permission prompt hook', async () => {
+    const onConfirm = vi.fn().mockResolvedValue(undefined);
+    const tool = new MockTool({
+      name: 'needs-approval',
+      kind: Kind.Edit,
+      getDefaultPermission: MOCK_TOOL_GET_DEFAULT_PERMISSION,
+      getConfirmationDetails: async () =>
+        execDetails('Confirm', 'needs-approval', 'needs-approval', onConfirm),
+    });
+    const onPermissionPromptTerminalSequence = vi.fn();
+    const { scheduler } = createSchedulerForLegacyToolTests({
+      toolsByName: toolMap(tool),
+      approvalMode: ApprovalMode.DEFAULT,
+      messageBus: hookBus(async (request) =>
+        hookResponse(
+          `${request.eventName}-hook`,
+          request.eventName === 'Notification'
+            ? { terminalSequence: '\u0007' }
+            : {},
+        ),
+      ),
+      disableHooks: false,
+      onPermissionPromptTerminalSequence,
+    });
+
+    await scheduleBatch(
+      scheduler,
+      toolRequest('prompted', tool.name, {}, 'prompt-prompted'),
+    );
+
+    await vi.waitFor(() =>
+      expect(onPermissionPromptTerminalSequence).toHaveBeenCalledWith('\u0007'),
+    );
   });
 
   it('marks invalid PermissionRequest rewrites as pre-execution span failures', async () => {
@@ -12620,6 +12659,119 @@ describe('CoreToolScheduler telemetry spans', () => {
     return onAllToolCallsComplete;
   }
 
+  it.each([
+    ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault,
+    ToolConfirmationOutcome.ProceedAlwaysProject,
+    ToolConfirmationOutcome.ProceedAlwaysUser,
+  ])(
+    'does not apply approval side effects after abort during onConfirm: %s',
+    async (outcome) => {
+      let release!: () => void;
+      const barrier = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const originalOnConfirm = vi.fn(() => barrier);
+      const execute = vi.fn(async () => textResult('executed'));
+      const persist = vi.fn();
+      const setApprovalMode = vi.fn();
+      const tool = new MockTool({
+        name: 'confirmation_barrier',
+        getDefaultPermission: async () => 'ask',
+        getConfirmationDetails: async () => ({
+          type: 'exec',
+          title: 'Confirm command',
+          command: 'echo barrier',
+          rootCommand: 'echo',
+          permissionRules: ['Bash(echo barrier)'],
+          onConfirm: originalOnConfirm,
+        }),
+        execute,
+      });
+      const { scheduler, onToolCallsUpdate, onAllToolCallsComplete } =
+        schedulerWithCallbacks(
+          makeSchedulerConfig(makeToolRegistry(tool), {
+            ...INTERACTIVE_CLI,
+            setApprovalMode,
+            getOnPersistPermissionRule: () => persist,
+          }),
+        );
+      const controller = new AbortController();
+      await scheduler.schedule(
+        [
+          toolRequest('barrier-first', tool.name, {}, 'barrier'),
+          toolRequest('barrier-sister', tool.name, {}, 'barrier'),
+        ],
+        controller.signal,
+      );
+      const waiting = await waitForApproval(onToolCallsUpdate);
+      const responding = waiting.confirmationDetails.onConfirm(outcome);
+      await vi.waitFor(() => expect(originalOnConfirm).toHaveBeenCalledOnce());
+      controller.abort();
+      release();
+      await responding;
+      await vi.waitFor(() =>
+        expect(onAllToolCallsComplete).toHaveBeenCalledOnce(),
+      );
+      expect(persist).not.toHaveBeenCalled();
+      expect(setApprovalMode).not.toHaveBeenCalled();
+      expect(execute).not.toHaveBeenCalled();
+      expect(
+        firstBatch<CompletedToolCall>(onAllToolCallsComplete).every(
+          (call) => call.status === 'cancelled',
+        ),
+      ).toBe(true);
+    },
+  );
+
+  it('does not apply a pending confirmation to a replacement with the same call id', async () => {
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const originalOnConfirm = vi.fn(() => barrier);
+    const persist = vi.fn();
+    const execute = vi.fn(async () => textResult('executed'));
+    const tool = new MockTool({
+      name: 'replacement_confirmation',
+      getDefaultPermission: async () => 'ask',
+      getConfirmationDetails: async () => ({
+        type: 'exec',
+        title: 'Confirm command',
+        command: 'echo replacement',
+        rootCommand: 'echo',
+        permissionRules: ['Bash(echo replacement)'],
+        onConfirm: originalOnConfirm,
+      }),
+      execute,
+    });
+    const { scheduler, onToolCallsUpdate } = schedulerWithCallbacks(
+      makeSchedulerConfig(makeToolRegistry(tool), {
+        ...INTERACTIVE_CLI,
+        getOnPersistPermissionRule: () => persist,
+      }),
+    );
+    const controller = new AbortController();
+    await scheduler.schedule(
+      toolRequest('same-call', tool.name, {}, 'replacement'),
+      controller.signal,
+    );
+    const waiting = await waitForApproval(onToolCallsUpdate);
+    const responding = waiting.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedAlwaysProject,
+    );
+    await vi.waitFor(() => expect(originalOnConfirm).toHaveBeenCalledOnce());
+    const internals = scheduler as unknown as { toolCalls: ToolCall[] };
+    const replacement = { ...internals.toolCalls[0] };
+    internals.toolCalls = [replacement];
+    release();
+    await responding;
+    expect(persist).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+    expect(internals.toolCalls[0]).toBe(replacement);
+    expect(replacement.status).toBe('awaiting_approval');
+    controller.abort();
+  });
+
   it('keeps the exact runtime through manual approval', async () => {
     let runtimeDuringExecute: RuntimeContentGeneratorView | undefined;
     const tool = new MockEditTool(async () => {
@@ -13103,9 +13255,9 @@ describe('CoreToolScheduler telemetry spans', () => {
       'prompt-rethrow-aborted',
     );
 
-    abortController.abort();
     const boom = new Error('originalOnConfirm boom while aborted');
     const throwingOnConfirm = async () => {
+      abortController.abort();
       throw boom;
     };
     await expect(
@@ -13526,7 +13678,10 @@ describe('Fire hook functions integration', () => {
       vi.unstubAllEnvs();
     });
 
-    function createScheduler(tools: Map<string, MockTool>) {
+    function createScheduler(
+      tools: Map<string, MockTool>,
+      options: Partial<ConstructorParameters<typeof CoreToolScheduler>[0]> = {},
+    ) {
       return schedulerWithCallbacks(
         makeSchedulerConfig(
           makeToolRegistry(undefined, {
@@ -13548,6 +13703,7 @@ describe('Fire hook functions integration', () => {
             trackToolResultBytes: vi.fn(),
           },
         ),
+        options,
       );
     }
 
@@ -13681,6 +13837,107 @@ describe('Fire hook functions integration', () => {
         .map((e) => executionLog.indexOf(e));
       const firstEnd = executionLog.findIndex((e) => e.startsWith('end:'));
       expect(startIndices.every((i) => i < firstEnd)).toBe(true);
+    });
+
+    it('asks beforeToolLaunch serially, in request order, inside a concurrent batch', async () => {
+      const log: string[] = [];
+      const asked: string[] = [];
+      const { scheduler, onAllToolCallsComplete } = createScheduler(
+        toolMap(loggingTool(log, 'Agent', 'agent', undefined, { prefix: '' })),
+        {
+          beforeToolLaunch: async (call) => {
+            asked.push(call.request.callId);
+            await new Promise((resolve) => setTimeout(resolve, 5));
+            return true;
+          },
+        },
+      );
+
+      await scheduleBatch(scheduler, ...agentCalls());
+
+      expect(asked).toEqual(['1', '2', '3']);
+      expectAllSucceeded(onAllToolCallsComplete, 3);
+    });
+
+    it('cancels a call that beforeToolLaunch refuses, without running or logging it', async () => {
+      const log: string[] = [];
+      const logged = vi.spyOn(sizeLoggers, 'logToolCall');
+      const { scheduler, onAllToolCallsComplete } = createScheduler(
+        toolMap(loggingTool(log, 'Agent', 'agent', undefined, { prefix: '' })),
+        { beforeToolLaunch: (call) => call.request.callId !== '2' },
+      );
+
+      await scheduleBatch(scheduler, ...agentCalls());
+
+      expect(log).not.toContain('start:B');
+      expect(logged.mock.calls.map(([, event]) => event.call_id)).toEqual([
+        '1',
+        '3',
+      ]);
+      const completed = firstBatch(onAllToolCallsComplete);
+      const refused = completed.find((c) => c.request.callId === '2');
+      expect(refused?.status).toBe('cancelled');
+      expect(
+        refused && 'response' in refused
+          ? refused.response.executionStatus
+          : undefined,
+      ).toBe('not_started');
+      expect(
+        completed
+          .filter((c) => c.request.callId !== '2')
+          .every((c) => c.status === 'success'),
+      ).toBe(true);
+    });
+
+    it('fails a call its owner refuses as execution-denied, without running it', async () => {
+      const log: string[] = [];
+      const { scheduler, onAllToolCallsComplete } = createScheduler(
+        toolMap(loggingTool(log, 'Agent', 'agent', undefined, { prefix: '' })),
+        {
+          refuseToolCall: (request) =>
+            request.callId === '2' ? 'Not in this session.' : undefined,
+        },
+      );
+
+      await scheduleBatch(scheduler, ...agentCalls());
+
+      expect(log).not.toContain('start:B');
+      const completed = firstBatch(onAllToolCallsComplete);
+      const refused = completed.find((c) => c.request.callId === '2');
+      expect(refused?.status).toBe('error');
+      expect(
+        refused && 'response' in refused ? refused.response : {},
+      ).toMatchObject({
+        errorType: ToolErrorType.EXECUTION_DENIED,
+        executionStatus: 'not_started',
+        error: new Error('Not in this session.'),
+      });
+      expect(
+        completed
+          .filter((c) => c.request.callId !== '2')
+          .every((c) => c.status === 'success'),
+      ).toBe(true);
+    });
+
+    it('asks beforeToolLaunch for every call that fits in flight before launching them', async () => {
+      vi.stubEnv('QWEN_CODE_MAX_TOOL_CONCURRENCY', '2');
+      const log: string[] = [];
+      const { scheduler } = createScheduler(
+        toolMap(loggingTool(log, 'Agent', 'agent', undefined, { prefix: '' })),
+        {
+          beforeToolLaunch: (call) => {
+            log.push(`ask:${call.request.callId}`);
+            return true;
+          },
+        },
+      );
+
+      await scheduleBatch(scheduler, ...agentCalls());
+
+      expect(log.slice(0, 4)).toEqual(['ask:1', 'ask:2', 'start:A', 'start:B']);
+      expect(log.indexOf('ask:3')).toBeGreaterThan(
+        log.findIndex((entry) => entry.startsWith('end:')),
+      );
     });
 
     it('ignores malformed QWEN_CODE_MAX_TOOL_CONCURRENCY values', async () => {
@@ -15392,7 +15649,7 @@ describe('CoreToolScheduler prompt_id propagation', () => {
 });
 
 describe('persistence size attribution', () => {
-  it('counts retained media with the configured estimate', async () => {
+  it('counts retained media with the configured estimate and bounds nested web_fetch envelopes', async () => {
     const cfg = {
       getTruncateToolOutputThreshold: () => 25000,
       getChatCompression: () => ({ imageTokenEstimate: 800 }),
@@ -15439,13 +15696,22 @@ describe('persistence size attribution', () => {
       expect(event.injected_estimated_tokens).toBeGreaterThanOrEqual(800);
       expect(event.prompt_id).toBe('p');
       await owner.maybePersistLargeToolResult(
+        'page',
+        'web_fetch',
+        'header\n... [CONTENT TRUNCATED] ...\n' + 'x'.repeat(98000),
+        false,
+        'page-prompt',
+      );
+      expect(persist).toHaveBeenCalledTimes(2);
+      expect(log.mock.calls[1][1].prompt_id).toBe('page-prompt');
+      await owner.maybePersistLargeToolResult(
         'already',
         'shell',
         '<persisted-output>' + 'x'.repeat(60000),
         false,
         'p',
       );
-      expect(persist).toHaveBeenCalledTimes(1);
+      expect(persist).toHaveBeenCalledTimes(2);
     } finally {
       persist.mockRestore();
       log.mockRestore();

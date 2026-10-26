@@ -1,16 +1,17 @@
 #!/usr/bin/env node
 /**
- * Turn the logs of a failed main-branch CI run into a stable failure signature.
+ * Analyze failed CI logs and render failure details.
  *
- * `main-ci-failure-issue.yml` used to dedupe on the commit SHA, so a standing
- * red opened one fresh issue per merged commit (six duplicates for a single
- * broken E2E test on 2026-07-26). Deduping on *what broke* collapses those into
- * one issue that records each recurrence instead.
+ * main-ci-failure-issue.yml consumes only `analyze` and `comment`: extracted
+ * tests populate the failure summary, and the workflow routes on them — a run
+ * that names failing tests files or reuses a per-signature issue (matched by
+ * the `title` and `searchMarkers` emitted here), while a run without any test
+ * identity shares the workflow's aggregate issue.
  *
- * Every failing test gets its own `qwen-main-ci-failure-test:<key>` marker in
- * the issue body, so an issue is matched when the current failure set overlaps
- * the recorded one at all — `[A]` then `[A, B]` updates the issue that already
- * tracks A rather than opening a second one.
+ * The legacy `plan`/title/body-renderer pipeline has no shipped caller and is
+ * retained for revertability. It places a `qwen-main-ci-failure-test:<key>`
+ * marker for each test in the body, allowing overlapping failure sets such as
+ * `[A]` then `[A, B]` to share an issue; unknown tests fall back to a commit key.
  */
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';

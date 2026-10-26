@@ -19,13 +19,12 @@ import type {
   GoalStateCause,
   HistoryGap,
 } from '@qwen-code/qwen-code-core';
-import {
-  getToolResponseDisplayText,
-  isGoalCheckpointBookkeepingRecord,
-  parseGoalStateRecordPayloadV2,
-  projectUserTranscriptForDisplay,
-  computeInitialTurnFromHistory,
-} from '@qwen-code/qwen-code-core';
+import { getToolResponseDisplayText } from '@qwen-code/qwen-code-core/utils/generateContentResponseUtilities.js';
+import { isGoalCheckpointBookkeepingRecord } from '@qwen-code/qwen-code-core/goals/goal-card.js';
+import { parseGoalStateRecordPayloadV2 } from '@qwen-code/qwen-code-core/goals/goal-reducer.js';
+import { projectUserTranscriptForDisplay } from '@qwen-code/qwen-code-core/utils/transcript-records.js';
+import { computeInitialTurnFromHistory } from '@qwen-code/qwen-code-core/services/session-turn-state.js';
+import { getRecordRewindId } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import { CROSS_SESSION_TAG } from '@qwen-code/qwen-code-core/ipc/peer-envelope.js';
 import type {
   HistoryItem,
@@ -36,7 +35,7 @@ import type {
 } from '../types.js';
 import { ToolCallStatus, MessageType } from '../types.js';
 import { t } from '../../i18n/index.js';
-import { isCollapsibleTool } from '../components/messages/CompactToolGroupDisplay.js';
+import { isCollapsibleTool } from './tool-group-summary.js';
 import {
   formatHistoryGapNotice,
   indexGapsByChild,
@@ -273,6 +272,7 @@ function convertToHistoryItems(
       typeof record.promptId === 'string' && record.promptId.length > 0
         ? record.promptId
         : undefined;
+    const rewindId = promptId ? undefined : getRecordRewindId(record);
     // A detected history gap begins at this record — surface a visible divider
     // so the surviving turns below are not read as contiguous across the lost
     // segment. Flush any pending tool group first so the divider is not
@@ -349,6 +349,7 @@ function convertToHistoryItems(
           items.push({
             type: 'user',
             text: payload.rawCommand,
+            ...(promptId ? { promptId } : {}),
             ...(sentToModel === undefined ? {} : { sentToModel }),
           });
         }
@@ -469,6 +470,7 @@ function convertToHistoryItems(
               type: 'user',
               text,
               ...(promptId ? { promptId } : {}),
+              ...(rewindId ? { rewindId } : {}),
             });
           }
 
@@ -507,6 +509,7 @@ function convertToHistoryItems(
             type: 'user',
             text,
             ...(promptId ? { promptId } : {}),
+            ...(rewindId ? { rewindId } : {}),
           });
         }
         break;
@@ -589,7 +592,8 @@ function convertToHistoryItems(
             // resumed session shows the same args row as a live one.
             args: fc.args,
             resultDisplay: undefined,
-            status: ToolCallStatus.Success, // Will be updated by tool_result
+            // Without a recorded result, completion cannot be established.
+            status: ToolCallStatus.Error,
             confirmationDetails: undefined,
           });
         }
@@ -619,7 +623,9 @@ function convertToHistoryItems(
             toolCall.status =
               rawStatus === 'error'
                 ? ToolCallStatus.Error
-                : ToolCallStatus.Success;
+                : rawStatus === 'cancelled'
+                  ? ToolCallStatus.Canceled
+                  : ToolCallStatus.Success;
             const { images, omittedImageCount } =
               collectInlineImages(responseParts);
             if (images.length > 0) {
@@ -711,7 +717,7 @@ function convertToHistoryItems(
  * @returns Array of HistoryItem with proper IDs
  */
 export function buildResumedHistoryItems(
-  sessionData: ResumedSessionData,
+  sessionData: Pick<ResumedSessionData, 'conversation' | 'historyGaps'>,
   config: Config | null,
   baseTimestamp: number = Date.now(),
 ): HistoryItem[] {
@@ -770,7 +776,9 @@ function createHistoryCollapseSummaryItem(
  * Strips the suppressOnRestore flag from a history item's display property.
  * Used when rewinding into collapsed history to ensure rewound items remain visible.
  */
-export function stripSuppressOnRestore(item: HistoryItem): HistoryItem {
+export function stripSuppressOnRestore<T extends Pick<HistoryItem, 'display'>>(
+  item: T,
+): T {
   if (!item.display?.suppressOnRestore) return item;
   const { suppressOnRestore: _, ...rest } = item.display;
   return {

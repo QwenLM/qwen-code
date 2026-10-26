@@ -36,6 +36,7 @@ import type {
   DaemonSessionResourcesStatus,
   DaemonSessionOrganizationResult,
   DaemonSessionSupportedCommandsStatus,
+  DaemonSessionTaskRuntimeStatus,
   DaemonSessionTasksStatus,
   DaemonWorkspaceEnvStatus,
   DaemonWorkspaceMcpStatus,
@@ -2714,6 +2715,18 @@ describe('DaemonClient', () => {
         now: 1_700_000_000_000,
         tasks: [],
       };
+      const runtime: DaemonSessionTaskRuntimeStatus = {
+        v: 1,
+        sessionId: 'with/slash',
+        taskId: 'bg_1',
+        runtime: {
+          memoryBytes: 2048,
+          outputBytes: 4096,
+          outputModifiedAt: 1_700_000_000_000,
+          outputTail: 'ready',
+          outputTailTruncated: false,
+        },
+      };
       const lsp: DaemonSessionLspStatus = {
         v: 1,
         sessionId: 'with/slash',
@@ -2766,6 +2779,9 @@ describe('DaemonClient', () => {
         ) {
           return jsonResponse(200, tasks);
         }
+        if (req.url.endsWith('/session/with%2Fslash/tasks/bg_1/runtime')) {
+          return jsonResponse(200, runtime);
+        }
         if (req.url.endsWith('/session/with%2Fslash/lsp')) {
           return jsonResponse(200, lsp);
         }
@@ -2786,6 +2802,9 @@ describe('DaemonClient', () => {
         client.sessionTasks('with/slash', 'client-1'),
       ).resolves.toEqual(tasks);
       await expect(
+        client.sessionTaskRuntime('with/slash', 'bg_1', 'client-1'),
+      ).resolves.toEqual(runtime);
+      await expect(
         client.sessionWorkflowTasks('with/slash', 'client-1'),
       ).resolves.toEqual(tasks);
       await expect(
@@ -2798,6 +2817,7 @@ describe('DaemonClient', () => {
         ['GET', 'http://daemon/session/with%2Fslash/context'],
         ['GET', 'http://daemon/session/with%2Fslash/supported-commands'],
         ['GET', 'http://daemon/session/with%2Fslash/tasks'],
+        ['GET', 'http://daemon/session/with%2Fslash/tasks/bg_1/runtime'],
         [
           'GET',
           'http://daemon/session/with%2Fslash/tasks?includeWorkflows=true',
@@ -2806,6 +2826,7 @@ describe('DaemonClient', () => {
         ['GET', 'http://daemon/session/with%2Fslash/resources'],
       ]);
       expect(calls.map((c) => c.headers['x-qwen-client-id'])).toEqual([
+        'client-1',
         'client-1',
         'client-1',
         'client-1',
@@ -10998,6 +11019,23 @@ describe('DaemonClient', () => {
       expect(calls[0]?.signal?.aborted).toBe(false);
       controller.abort();
       expect(calls[0]?.signal?.aborted).toBe(true);
+    });
+
+    it('reloads model providers through an encoded workspace-qualified mutation', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { status: 'applied' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client
+          .workspaceByCwd('/tmp/work space')
+          .reloadModelProviders({ clientId: 'client-1' }),
+      ).resolves.toEqual({ status: 'applied' });
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspaces/%2Ftmp%2Fwork%20space/models/reload',
+      );
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
     });
 
     it('workspaceById and workspaceByCwd call workspace-qualified agents routes', async () => {

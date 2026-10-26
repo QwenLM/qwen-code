@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.AutomationDefinitionRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicAutomation;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicAutomationGateStatus;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicAutomationRun;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicList;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
@@ -21,7 +22,9 @@ import com.alibaba.qwen.code.managedagent.persistence.AutomationLedgerStore.Sche
 import com.alibaba.qwen.code.managedagent.persistence.AutomationLedgerStore.SchedulePage;
 import com.alibaba.qwen.code.managedagent.persistence.AutomationLedgerStore.ScheduleRow;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.session.HarnessConflictCodes;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -349,12 +352,22 @@ public class ManagedAutomationService {
                             "The automation is being scanned; retry."));
             if (AutomationLedgerStore.OUTCOME_FIRING.equals(
                     occurrence.outcome())) {
+                if (occurrence.nextRetryAt() > now
+                        && occurrence.attempts() > 1) {
+                    // The first same-key retry after a failure re-drives,
+                    // so a lost answer still recovers. Once that attempt
+                    // is spent, a retry inside the window must not spend
+                    // another one or move the scanner's schedule; the
+                    // scanner owns the next fire when the delay lapses.
+                    throw deferred(occurrence);
+                }
                 try {
                     scanner.fire(held, occurrence, owner, fence, now);
                 } catch (RuntimeException error) {
                     // The claim is durable and re-driven by the scanner
                     // with backoff; the same key answers it once known.
-                    scanner.defer(held, occurrence, owner, fence, error, now);
+                    scanner.defer(held, occurrence, owner, fence, error,
+                            clock.get());
                     throw unobtained(error);
                 }
                 // A definitive route refusal settles the decision as
@@ -457,7 +470,8 @@ public class ManagedAutomationService {
      * binding its successful sibling owns.
      */
     private static final Set<String> PRE_COMMIT_REFUSALS = Set.of(
-            "automation_mode_disabled");
+            "automation_mode_disabled", "automation_gate_unsupported",
+            "automation_gate_invalid");
 
     /**
      * The relay of a claimed mutation. Only a refusal in
@@ -573,7 +587,10 @@ public class ManagedAutomationService {
                     schedule.required("catchUpLimit").isNull() ? null
                             : schedule.required("catchUpLimit").asLong(),
                     schedule.required("enabled").asBoolean(), row.state(),
-                    row.createdAt(), row.updatedAt());
+                    row.createdAt(), row.updatedAt(),
+                    schedule.required("gate").isTextual()
+                            ? schedule.required("gate").textValue() : null,
+                    null);
         }
         return publicAutomation(row);
     }
@@ -595,6 +612,35 @@ public class ManagedAutomationService {
         }
         if (request.enabled() != null) {
             definition.put("enabled", request.enabled());
+        }
+        // An explicit null clears a committed gate; a command is checked here
+        // for the shape the mirror column and the record contract bound, and
+        // by the Harness for the scheduled-task gate's rule on backgrounding.
+        if (request.gate() != null) {
+            if (request.gate().isNull()) {
+                definition.put("gate", null);
+            } else if (request.gate().isTextual()
+                    && !request.gate().textValue().isBlank()) {
+                String gate = request.gate().textValue();
+                if (gate.getBytes(StandardCharsets.UTF_8).length
+                        > ManagedExtensionRecords.SCHEDULE_GATE_MAX_BYTES) {
+                    throw new ManagedAgentException(HttpStatus.BAD_REQUEST,
+                            "invalid_automation", "gate exceeds "
+                            + ManagedExtensionRecords.SCHEDULE_GATE_MAX_BYTES
+                            + " bytes.");
+                }
+                if (gate.chars().anyMatch(character -> character <= 0x1f
+                        || (character >= 0x7f && character <= 0x9f))) {
+                    throw new ManagedAgentException(HttpStatus.BAD_REQUEST,
+                            "invalid_automation",
+                            "gate must not contain control characters.");
+                }
+                definition.put("gate", gate);
+            } else {
+                throw new ManagedAgentException(HttpStatus.BAD_REQUEST,
+                        "invalid_automation",
+                        "gate must be a non-empty shell command or null.");
+            }
         }
         if (create) {
             for (String field : List.of("goal", "cron", "timezone", "prompt")) {
@@ -808,11 +854,44 @@ public class ManagedAutomationService {
                 .toString();
     }
 
+    private static String deferredCode(OccurrenceRow occurrence) {
+        String error = occurrence.lastError();
+        if (error != null) {
+            int at = error.indexOf("\"code\":\"");
+            if (at >= 0) {
+                int end = error.indexOf('"', at + 8);
+                if (end > at) {
+                    return error.substring(at + 8, end);
+                }
+            }
+        }
+        return "automation_operation_unknown";
+    }
+
+    private static ManagedAgentException deferred(OccurrenceRow occurrence) {
+        String code = deferredCode(occurrence);
+        boolean retryable = "automation_operation_unknown".equals(code)
+                || HarnessConflictCodes.isTransient(code);
+        return new ManagedAgentException(
+                retryable ? HttpStatus.SERVICE_UNAVAILABLE : HttpStatus.CONFLICT,
+                code,
+                retryable
+                        ? "The Hosted Harness answer is pending; retry"
+                                + " the same key."
+                        : "The Hosted Harness refused the automation operation.");
+    }
+
     static ManagedAgentException translate(DaemonHttpException error) {
         String code = AutomationScanner.errorCode(error);
+        // A self-healing Harness conflict (a dead predecessor's writer
+        // lease, a busy or briefly unavailable Workspace, a closing
+        // Session) answers the retryable 503 every other unobtained
+        // outcome takes: the same request under the same key succeeds
+        // once it lapses, so a 409 would tell the caller to stop.
         HttpStatus status = switch (error.getStatusCode()) {
             case 404 -> HttpStatus.NOT_FOUND;
-            case 409 -> HttpStatus.CONFLICT;
+            case 409 -> HarnessConflictCodes.isTransient(code)
+                    ? HttpStatus.SERVICE_UNAVAILABLE : HttpStatus.CONFLICT;
             case 400 -> HttpStatus.BAD_REQUEST;
             default -> HttpStatus.SERVICE_UNAVAILABLE;
         };
@@ -827,7 +906,11 @@ public class ManagedAutomationService {
                 row.definitionDigest(), row.goal(), row.cron(), row.timezone(),
                 row.sessionMode(), row.overlap(), row.catchUp(),
                 row.catchUpLimit(), row.enabled() && AutomationLedgerStore.STATE_LIVE.equals(row.state()), row.state(),
-                row.createdAt(), row.updatedAt());
+                row.createdAt(), row.updatedAt(), row.gate(),
+                row.gateLastOutcome() == null || row.gateLastAt() == null ? null
+                        : new PublicAutomationGateStatus(row.gateLastOutcome(),
+                                row.gateLastAt(), row.gateQuietSinceDelivery(),
+                                row.gateFailures(), row.gateLastError()));
     }
 
     static PublicAutomationRun publicRun(OccurrenceView view) {

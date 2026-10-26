@@ -277,6 +277,27 @@ function sessionWriterRpcError(err: unknown):
   };
 }
 
+function withGeneratedUiReceipt(
+  generatedUi: BridgeRestoredSession['generatedUi'],
+  state: Record<string, unknown> = {},
+): Record<string, unknown> {
+  const { generatedUi: _stateGeneratedUi, ...response } = state;
+  const meta = isObject(response['_meta']) ? response['_meta'] : undefined;
+  const { generatedUi: _stateGeneratedUiMeta, ...publicMeta } = meta ?? {};
+  return {
+    ...response,
+    ...(generatedUi ? { generatedUi } : {}),
+    ...(meta || generatedUi
+      ? {
+          _meta: {
+            ...publicMeta,
+            ...(generatedUi ? { generatedUi } : {}),
+          },
+        }
+      : {}),
+  };
+}
+
 const debugLogger = createDebugLogger('ACP_HTTP_DISPATCH');
 
 type PermissionResponse = Parameters<
@@ -310,6 +331,7 @@ const SSH_METHODS = new Set([
     'session/detach',
     'session/context_usage',
     'session/tasks',
+    'session/task_runtime',
     'session/agents',
     'session/agent_trace',
     'session/attachments',
@@ -379,6 +401,7 @@ const ALL_QWEN_VENDOR_METHODS: readonly string[] = [
   `${QWEN_METHOD_NS}session/detach`,
   `${QWEN_METHOD_NS}session/context_usage`,
   `${QWEN_METHOD_NS}session/tasks`,
+  `${QWEN_METHOD_NS}session/task_runtime`,
   `${QWEN_METHOD_NS}session/agents`,
   `${QWEN_METHOD_NS}session/agent_trace`,
   `${QWEN_METHOD_NS}session/attachments`,
@@ -2174,6 +2197,7 @@ export class AcpDispatcher {
                 id,
                 {
                   sessionId: session.sessionId,
+                  ...withGeneratedUiReceipt(session.generatedUi),
                   ...(session.startupConfigApplied
                     ? {
                         modelApplied: true,
@@ -2525,18 +2549,20 @@ export class AcpDispatcher {
                 conn,
                 id,
                 {
-                  ...loadState,
-                  ...(replayStatus
-                    ? {
-                        _meta: {
-                          ...(loadMeta ?? {}),
-                          [QWEN_META_KEY]: {
-                            ...(loadQwenMeta ?? {}),
-                            sessionLoadReplay: replayStatus,
+                  ...withGeneratedUiReceipt(restored.generatedUi, {
+                    ...loadState,
+                    ...(replayStatus
+                      ? {
+                          _meta: {
+                            ...(loadMeta ?? {}),
+                            [QWEN_META_KEY]: {
+                              ...(loadQwenMeta ?? {}),
+                              sessionLoadReplay: replayStatus,
+                            },
                           },
-                        },
-                      }
-                    : {}),
+                        }
+                      : {}),
+                  }),
                   ...(loadConfigOptions
                     ? { configOptions: loadConfigOptions }
                     : {}),
@@ -2827,6 +2853,7 @@ export class AcpDispatcher {
                 id,
                 {
                   sessionId: result.sessionId,
+                  ...withGeneratedUiReceipt(result.generatedUi),
                   ...(configOptions ? { configOptions } : {}),
                   ...(models ? { models } : {}),
                   ...(modes ? { modes } : {}),
@@ -4123,6 +4150,26 @@ export class AcpDispatcher {
             includeWorkflows:
               this.isWorkspaceTrusted() && params['includeWorkflows'] === true,
           });
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}session/task_runtime`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          if (!this.requireOwned(conn, sessionId, id)) return;
+          const taskId = params['taskId'];
+          if (typeof taskId !== 'string' || taskId.length === 0) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, '`taskId` is required'),
+              );
+            }
+            return;
+          }
+          const result = await this.bridge.getSessionTaskRuntime(
+            sessionId,
+            taskId,
+          );
           this.replyConn(conn, id, result as unknown);
           return;
         }

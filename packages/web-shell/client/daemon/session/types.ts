@@ -35,6 +35,7 @@ import type {
   DaemonSession,
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
+  DaemonSessionTaskRuntimeStatus,
   DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionTasksStatus,
   DaemonSessionWorkflowTaskStatus,
@@ -531,6 +532,13 @@ export interface DaemonSessionActions {
   ): Promise<SubmitPromptResult>;
   cancel(): Promise<void>;
   setModel(modelId: string): Promise<SetModelResult>;
+  refreshModels(
+    beforeRefresh?: (target: {
+      workspaceCwd: string;
+      sessionId?: string;
+    }) => void | Promise<void>,
+  ): Promise<void>;
+
   setReasoningEffort(
     value: ReasoningSelection,
     opts?: { persist?: boolean },
@@ -702,6 +710,7 @@ export interface DaemonSessionActions {
   ): Promise<DaemonRemovePendingPromptResult>;
   sendShellCommand(command: string): Promise<DaemonShellCommandResult>;
   getTasks(opts?: GetTasksActionOptions): Promise<DaemonSessionTasksStatus>;
+  getTaskRuntime(taskId: string): Promise<DaemonSessionTaskRuntimeStatus>;
   getWorkflowTasks(
     opts?: GetTasksActionOptions,
   ): Promise<DaemonSessionWorkflowTasksStatus>;

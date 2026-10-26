@@ -181,6 +181,10 @@ const TRANSCRIPT_STUBS = new Map(
       './client/components/artifacts/files-messages.transcript-stub.ts',
     ],
     [
+      './client/components/artifacts/token-usage-messages.ts',
+      './client/components/artifacts/token-usage-messages.transcript-stub.ts',
+    ],
+    [
       './client/voice/messages.ts',
       './client/voice/messages.transcript-stub.ts',
     ],
@@ -205,8 +209,16 @@ const TRANSCRIPT_STUBS = new Map(
       './client/components/messages/SelectionCopyMenu.transcript-stub.tsx',
     ],
     [
+      './client/utils/selectionClipboard.ts',
+      './client/utils/selectionClipboard.transcript-stub.ts',
+    ],
+    [
       './client/components/messages/workflow-agent-details.ts',
       './client/components/messages/workflow-agent-details.transcript-stub.ts',
+    ],
+    [
+      './client/components/managed/managed-lifecycle-messages.ts',
+      './client/components/managed/managed-lifecycle-messages.transcript-stub.ts',
     ],
     [
       './client/components/managed/managed-task-messages.ts',
@@ -215,6 +227,10 @@ const TRANSCRIPT_STUBS = new Map(
     [
       './client/components/managed/managed-workspace-messages.ts',
       './client/components/managed/managed-workspace-messages.transcript-stub.ts',
+    ],
+    [
+      './client/components/managed/managed-mcp-messages.ts',
+      './client/components/managed/managed-mcp-messages.transcript-stub.ts',
     ],
   ].map(([module, stub]) => [
     normalizePath(resolve(__dirname, module)),
@@ -291,6 +307,7 @@ export default defineConfig(({ mode }) => ({
           'react/jsx-dev-runtime',
           'react-dom',
           'react-dom/client',
+          'react-dom/server',
           'radix-ui',
           'lucide-react',
           'class-variance-authority',

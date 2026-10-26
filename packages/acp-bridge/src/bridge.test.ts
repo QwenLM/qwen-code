@@ -2648,6 +2648,43 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('starts a workspace-owned channel for import consolidation without a chat session', async () => {
+    const proposal = {
+      decision: 'skip',
+      reason: 'No durable knowledge.',
+      documents: [],
+    };
+    const input = {
+      scope: 'project',
+      source: 'Synthetic historical context',
+      existing: [],
+    };
+    const handle = makeChannel({
+      extMethodImpl: async (method) =>
+        method === SERVE_CONTROL_EXT_METHODS.workspaceMemoryImportPlan
+          ? proposal
+          : {},
+    });
+    const channelFactory = vi.fn().mockResolvedValue(handle.channel);
+    const bridge = makeBridge({ channelFactory });
+    try {
+      await expect(
+        bridge.invokeWorkspaceCommand(
+          SERVE_CONTROL_EXT_METHODS.workspaceMemoryImportPlan,
+          input,
+        ),
+      ).resolves.toEqual(proposal);
+      expect(channelFactory).toHaveBeenCalledTimes(1);
+      expect(handle.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.workspaceMemoryImportPlan,
+        params: input,
+      });
+      expect(handle.killed).toBe(true);
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
   it('starts a workspace channel when reconnecting an MCP server', async () => {
     const handle = makeChannel({
       extMethodImpl: async (method, params) =>
@@ -4008,6 +4045,43 @@ describe('createAcpSessionBridge', () => {
     }
   });
 
+  it('lets the workspace owner remove a client artifact without impersonating its client', async () => {
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    try {
+      const created = await bridge.addSessionArtifact(
+        session.sessionId,
+        { title: 'Client output', url: 'https://example.com/output' },
+        { clientId: session.clientId },
+      );
+      const artifactId = created.changes[0]!.artifactId;
+      await expect(
+        bridge.removeSessionArtifact(session.sessionId, artifactId),
+      ).rejects.toBeInstanceOf(SessionArtifactAuthorizationError);
+      await expect(
+        bridge.removeSessionArtifactForWorkspaceOwner(
+          session.sessionId,
+          artifactId,
+        ),
+      ).resolves.toMatchObject({
+        changes: [{ action: 'removed', artifactId }],
+      });
+      await expect(
+        bridge.getSessionArtifacts(session.sessionId),
+      ).resolves.toMatchObject({ artifacts: [] });
+      await expect(
+        bridge.removeSessionArtifactForWorkspaceOwner(
+          session.sessionId,
+          artifactId,
+        ),
+      ).resolves.toMatchObject({ changes: [] });
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
   it('rejects invalid client artifact records instead of dropping them', async () => {
     const bridge = makeBridge({
       channelFactory: async () => makeChannel().channel,
@@ -4557,6 +4631,14 @@ describe('createAcpSessionBridge', () => {
                 tasks: [],
               };
             }
+            if (method === 'qwen/status/session/task_runtime') {
+              return {
+                v: 1,
+                sessionId: params['sessionId'],
+                taskId: params['taskId'],
+                runtime: { outputTail: 'ready' },
+              };
+            }
             if (method === 'qwen/status/session/agent_trace') {
               return {
                 v: 1,
@@ -4644,6 +4726,13 @@ describe('createAcpSessionBridge', () => {
       tasks: [],
     });
     await expect(
+      bridge.getSessionTaskRuntime(session.sessionId, 'bg_1'),
+    ).resolves.toMatchObject({
+      sessionId: session.sessionId,
+      taskId: 'bg_1',
+      runtime: { outputTail: 'ready' },
+    });
+    await expect(
       bridge.getSessionAgentsStatus(session.sessionId),
     ).resolves.toMatchObject({
       sessionId: session.sessionId,
@@ -4681,6 +4770,7 @@ describe('createAcpSessionBridge', () => {
       'qwen/status/session/context',
       'qwen/status/session/supported_commands',
       'qwen/status/session/tasks',
+      'qwen/status/session/task_runtime',
       'qwen/status/session/agents',
       'qwen/status/session/agent_trace',
       'qwen/status/session/lsp',
@@ -6939,24 +7029,36 @@ describe('createAcpSessionBridge', () => {
       }
       return undefined;
     })();
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
 
-    await expect(
-      bridge.rewindSession(
-        session.sessionId,
-        { promptId: 'prompt-1' },
-        { clientId: session.clientId },
-      ),
-    ).resolves.toMatchObject({
-      targetTurnIndex: 0,
-      warnings: ['artifact snapshot not persisted'],
-    });
-    await expect(rewoundEvent).resolves.toMatchObject({
-      type: 'session_rewound',
-      data: { warnings: ['artifact snapshot not persisted'] },
-    });
-    abort.abort();
-
-    await bridge.shutdown();
+    try {
+      await expect(
+        bridge.rewindSession(
+          session.sessionId,
+          { promptId: 'prompt-1' },
+          { clientId: session.clientId },
+        ),
+      ).resolves.toMatchObject({
+        targetTurnIndex: 0,
+        warnings: ['artifact snapshot not persisted'],
+      });
+      await expect(rewoundEvent).resolves.toMatchObject({
+        type: 'session_rewound',
+        data: { warnings: ['artifact snapshot not persisted'] },
+      });
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining('action=snapshot_failed'),
+      );
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining('action=rewind_snapshot_warning'),
+      );
+    } finally {
+      abort.abort();
+      await bridge.shutdown();
+      stderr.mockRestore();
+    }
   });
 
   it('loads history replay from response metadata when requested', async () => {
@@ -7742,6 +7844,9 @@ describe('createAcpSessionBridge', () => {
           code: 'LOOP_DETECTED',
           errorKind: 'loop_detected',
           loopType: 'turn_tool_call_cap',
+          loopReason: 'explicit_cap',
+          toolCallCount: 4,
+          toolCallLimit: 3,
         });
       },
       extMethodImpl: (method, params) => {
@@ -7800,6 +7905,8 @@ describe('createAcpSessionBridge', () => {
         content: { type: 'text', text: 'persisted turn content' },
       }),
     });
+    // The loop reason and tool-call numbers survive the refresh too, so Web
+    // Shell can keep showing the cause-specific text after a reload.
     expect(compactedReplay[compactedReplay.length - 1]).toMatchObject({
       type: 'turn_error',
       promptId: 'prompt-loop',
@@ -7807,6 +7914,9 @@ describe('createAcpSessionBridge', () => {
         code: 'LOOP_DETECTED',
         errorKind: 'loop_detected',
         loopType: 'turn_tool_call_cap',
+        loopReason: 'explicit_cap',
+        toolCallCount: 4,
+        toolCallLimit: 3,
       }),
     });
 

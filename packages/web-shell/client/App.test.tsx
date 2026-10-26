@@ -87,7 +87,9 @@ import { createStatsMessageData } from './components/messages/StatsMessage';
 import { serializeStatusMessage } from './components/messages/StatusMessage';
 import { loadSplitSessions, saveSplitSessions } from './utils/splitUrl';
 import { StandaloneContext } from './config/standalone';
+import { WebShellNavigationBoundary } from './navigation';
 import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
+import type { WorkspaceSelectorOption } from './components/WorkspaceSelector';
 
 vi.mock('./components/managed/ManagedSessionsPage', async () => {
   const React = await import('react');
@@ -95,9 +97,30 @@ vi.mock('./components/managed/ManagedSessionsPage', async () => {
   return {
     ManagedSessionsPage: (props: {
       sessionId?: string;
-      onSelectSession: (id: string | undefined) => void;
+      onSelectSession: (id: string | undefined, workspaceId?: string) => void;
+      onOpenSession?: (id: string, workspaceId?: string) => void;
+      workspaceId?: string;
+      onSelectWorkspace?: (workspaceId: string) => void;
+      daemonWorkspaces?: WorkspaceSelectorOption[];
+      onSelectDaemonWorkspace?: (workspace: WorkspaceSelectorOption) => void;
+      onWorkspacesChange?: (
+        workspaces: {
+          workspaceId: string;
+          displayName: string;
+          state: string;
+          canCreateSession: boolean;
+        }[],
+      ) => void;
+      onSessionWorkspaceChange?: (workspaceId: string | null) => void;
+      navigationActive?: boolean;
+      navigationSearch?: string;
       navigationTarget?: HTMLElement | null;
       interactive?: boolean;
+      creationSkills?: { workspaceCwd: string };
+      workspaceCreationOpen?: boolean;
+      onWorkspaceCreationOpenChange?: (open: boolean) => void;
+      onOpenLocalWorkspace?: () => void;
+      onWorkspaceCreated?: (workspaceId: string) => void;
     }) => {
       const [draft, setDraft] = React.useState('');
       return (
@@ -105,19 +128,108 @@ vi.mock('./components/managed/ManagedSessionsPage', async () => {
           data-testid="managed-conversation"
           data-session={props.sessionId ?? 'new'}
           data-interactive={props.interactive}
+          data-skills-workspace={props.creationSkills?.workspaceCwd}
+          data-workspace={props.workspaceId}
+          data-search={props.navigationSearch}
+          data-workspace-creation-open={Boolean(props.workspaceCreationOpen)}
         >
           <input
             aria-label="Managed draft"
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
           />
+          {props.daemonWorkspaces?.map((workspace) => (
+            <button
+              key={workspace.id}
+              onClick={() => props.onSelectDaemonWorkspace?.(workspace)}
+            >
+              Choose daemon {workspace.label}
+            </button>
+          ))}
+          <button
+            onClick={() =>
+              props.onWorkspacesChange?.([
+                {
+                  workspaceId: 'managed-target',
+                  displayName: 'Managed Project',
+                  state: 'active',
+                  canCreateSession: true,
+                },
+                {
+                  workspaceId: 'blocked-target',
+                  displayName: 'Blocked Project',
+                  state: 'active',
+                  canCreateSession: false,
+                },
+              ])
+            }
+          >
+            Discover Managed workspaces
+          </button>
+          <button onClick={() => props.onWorkspaceCreationOpenChange?.(false)}>
+            Close workspace creation
+          </button>
+          <button
+            onClick={() => {
+              props.onWorkspaceCreationOpenChange?.(false);
+              props.onOpenLocalWorkspace?.();
+            }}
+          >
+            Select Local workspace creation
+          </button>
+          <button
+            onClick={() => {
+              props.onWorkspaceCreated?.('created-workspace');
+              props.onWorkspaceCreationOpenChange?.(false);
+            }}
+          >
+            Complete Managed workspace creation
+          </button>
+          <button
+            onClick={() =>
+              props.onSessionWorkspaceChange?.('resolved-workspace')
+            }
+          >
+            Resolve Managed workspace
+          </button>
+          <button onClick={() => props.onSessionWorkspaceChange?.(null)}>
+            Resolve unbound Managed workspace
+          </button>
+          <button onClick={() => props.onSelectSession(props.sessionId)}>
+            Complete Managed submission
+          </button>
+          <button
+            onClick={() =>
+              props.sessionId && props.onOpenSession?.(props.sessionId)
+            }
+          >
+            Reopen selected Managed session
+          </button>
+          <button
+            data-testid="complete-managed-creation"
+            onClick={() =>
+              props.onSelectSession('managed-created', 'created-workspace')
+            }
+          >
+            Complete Managed creation
+          </button>
           {props.navigationTarget &&
             createPortal(
               <nav aria-label="Managed sessions">
                 <button
-                  onClick={() => props.onSelectSession('managed-history')}
+                  onClick={() =>
+                    (props.onOpenSession ?? props.onSelectSession)(
+                      'managed-history',
+                      'managed-workspace',
+                    )
+                  }
                 >
                   Managed history
+                </button>
+                <button
+                  onClick={() => props.onSelectWorkspace?.('managed-workspace')}
+                >
+                  New Managed workspace task
                 </button>
               </nav>,
               props.navigationTarget,
@@ -285,6 +397,7 @@ type ChatEditorTestProps = {
   workspaceFeaturesEnabled?: boolean;
   attachmentsEnabled?: boolean;
   selectedWorkspaceCwd?: string;
+  workspaceMenuItems?: React.ReactNode;
   onSelectWorkspace?: (cwd: string | undefined) => void;
   standaloneTargetSupported?: boolean;
   selectedStandaloneTarget?: boolean;
@@ -312,6 +425,8 @@ type ChatEditorTestProps = {
 };
 
 type AddWorkspaceDialogTestProps = {
+  executionMode?: 'daemon' | 'managed';
+  onExecutionModeChange?: (mode: 'daemon' | 'managed') => void;
   onClose: () => void;
   onAdd: (cwd: string, persist: boolean, displayName?: string) => Promise<void>;
   onSuggest?: (prefix: string) => Promise<unknown>;
@@ -498,6 +613,12 @@ const {
       hasMore: false,
     }),
     getWorkspaceSessionLiveState: vi.fn(),
+    sessionTaskRuntime: vi.fn().mockResolvedValue({
+      v: 1,
+      sessionId: 'nested-session',
+      taskId: 'shell-1',
+      runtime: { outputTail: 'restored output' },
+    }),
     sessionTasks: vi.fn().mockResolvedValue({
       v: 1,
       sessionId: 'session-1',
@@ -621,6 +742,7 @@ const {
     listSources: vi
       .fn<() => Promise<SessionSourcesResult>>()
       .mockResolvedValue({ revision: 0, sources: [] }),
+    getTaskRuntime: vi.fn(),
     getTasks: vi.fn().mockResolvedValue({
       v: 1,
       sessionId: 'session-1',
@@ -1254,6 +1376,7 @@ vi.mock('./daemon/session/DaemonSessionProvider', async (importOriginal) => {
 vi.mock('./components/ChatEditor', async () => {
   const React = await import('react');
   const { useWebShellCustomization } = await import('./customization');
+  const { WorkspaceSelector } = await import('./components/WorkspaceSelector');
   return {
     ChatEditor: React.memo(
       React.forwardRef(function ChatEditor(
@@ -1350,6 +1473,19 @@ vi.mock('./components/ChatEditor', async () => {
             ),
             'data-file-drop-action': customization.fileDropAction,
           },
+          props.workspaceMenuItems
+            ? React.createElement(WorkspaceSelector, {
+                workspaces: props.workspaces ?? [],
+                selectedWorkspaceCwd: props.selectedWorkspaceCwd,
+                alwaysVisible: true,
+                scratchSupported: false,
+                existingFolderSupported: false,
+                onSelectWorkspace: props.onSelectWorkspace ?? (() => {}),
+                onCreateScratch: () => {},
+                onOpenExistingFolder: () => {},
+                menuItems: props.workspaceMenuItems,
+              })
+            : null,
           React.createElement(
             'button',
             {
@@ -1506,6 +1642,7 @@ vi.mock('./components/messages/SettingsMessage', async () => {
         language: string,
         scope: 'user' | 'workspace',
       ) => void;
+      onOutputLanguageChange?: (language: string) => void;
       presentation?: WebShellSettingsOptions;
       modelManagementSectionProps?: {
         busy?: boolean;
@@ -1593,6 +1730,24 @@ vi.mock('./components/messages/SettingsMessage', async () => {
             onClick: () => props.onLanguageChange?.('en', 'workspace'),
           },
           'language (workspace)',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'change-output-language',
+            type: 'button',
+            onClick: () => props.onOutputLanguageChange?.('English'),
+          },
+          'output language',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'change-output-language-auto',
+            type: 'button',
+            onClick: () => props.onOutputLanguageChange?.(''),
+          },
+          'output language (auto)',
         ),
       );
     },
@@ -1729,7 +1884,10 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
       onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
       onOpenWorkspacesOverview?: () => void;
       onLoadSession?: (sessionId: string) => Promise<void> | void;
-      onLoadStandaloneSession?: (sessionId: string) => Promise<void> | void;
+      onLoadStandaloneSession?: (
+        sessionId: string,
+        displayName?: string,
+      ) => Promise<void> | void;
       onSelectCurrentSession?: () => void;
       onSessionsDeleted?: (
         sessionIds: string[],
@@ -1746,6 +1904,9 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
       canOpenSplitView?: boolean;
       sessionContent?: ReactNode;
       sessionHeader?: ReactNode;
+      managedWorkspaces?: ReactNode;
+      onSearchQueryChange?: (query: string) => void;
+      currentSessionActive?: boolean;
     }) => {
       // Expose the Daemon Status / Session Overview openers so tests can
       // exercise those activePanel branches (neither has a slash command).
@@ -1763,6 +1924,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
           'data-has-open-agents': String(Boolean(props.onOpenAgents)),
           'data-has-git-diff': String(Boolean(props.onOpenGitDiff)),
           'data-has-commit': String(Boolean(props.onOpenCommit)),
+          'data-current-session-active': String(props.currentSessionActive),
           'data-can-open-sessions-overview': String(
             Boolean(props.canOpenSessionsOverview),
           ),
@@ -1770,6 +1932,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
         },
         props.sessionHeader,
         props.sessionContent,
+        props.managedWorkspaces,
         React.createElement(
           'button',
           {
@@ -1886,7 +2049,10 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
             type: 'button',
             onClick: () => {
               void Promise.resolve(
-                props.onLoadStandaloneSession?.('standalone-session-2'),
+                props.onLoadStandaloneSession?.(
+                  'standalone-session-2',
+                  'Standalone sidebar title',
+                ),
               ).catch(() => undefined);
             },
           },
@@ -2122,14 +2288,17 @@ vi.doMock('./components/StreamingStatus', async () => {
     StreamingStatus: ({
       startedAt,
       hasActivePrompt,
+      showPhrase,
     }: {
       startedAt?: number;
       hasActivePrompt?: boolean;
+      showPhrase?: boolean;
     }) =>
       React.createElement('div', {
         'data-testid': 'streaming-status',
         'data-started-at': startedAt,
         'data-has-active-prompt': String(hasActivePrompt === true),
+        'data-show-phrase': String(showPhrase !== false),
       }),
   };
 });
@@ -2593,10 +2762,20 @@ vi.doMock('./components/extensions/ExtensionsManagerPage', async () => {
       onClose: () => void;
       initialFocusRef?: React.Ref<HTMLHeadingElement>;
       embedded?: unknown;
+      managed?: {
+        provider: ManagedAgentProvider;
+        sessionId?: string;
+        workspaceId?: string;
+      };
     }) =>
       React.createElement(
         'div',
-        { 'data-testid': 'extensions-manager-page' },
+        {
+          'data-testid': 'extensions-manager-page',
+          'data-managed-provider': props.managed?.provider.storageKey,
+          'data-managed-session': props.managed?.sessionId,
+          'data-managed-workspace': props.managed?.workspaceId,
+        },
         React.createElement(
           'h1',
           {
@@ -2672,7 +2851,11 @@ vi.doMock('./components/messages/AskUserQuestion', async () => {
 });
 vi.doMock('./components/messages/TasksStatusMessage', async () => {
   const React = await import('react');
+  const actual = await vi.importActual<
+    typeof import('./components/messages/TasksStatusMessage')
+  >('./components/messages/TasksStatusMessage');
   return {
+    shellTaskPanelTitle: actual.shellTaskPanelTitle,
     TasksStatusMessage: (props: {
       planTodos?: Array<{ id: string }>;
       agentTools?: Array<{ callId: string }>;
@@ -6099,7 +6282,10 @@ describe('task activity key', () => {
         .click(),
     );
     await flush();
-    expect(container.textContent).toContain('Historical window');
+    expect(
+      container.querySelector('[data-testid="trajectory-follow-status"]')
+        ?.textContent,
+    ).toBe('Earlier window');
     const input = container.querySelector<HTMLInputElement>(
       'input[type="search"]',
     )!;
@@ -6116,9 +6302,9 @@ describe('task activity key', () => {
         .querySelector<HTMLElement>('[data-testid="trajectory-row-request"]')!
         .click(),
     );
-    const selected = container.querySelector(
-      '[data-testid="trajectory-selected"]',
-    )!.textContent;
+    const selected = container
+      .querySelector('[data-testid="trajectory-row-request"]')!
+      .getAttribute('data-row-key');
     const rows = container.querySelector<HTMLElement>(
       '[data-testid="trajectory-rows"]',
     )!;
@@ -6155,22 +6341,32 @@ describe('task activity key', () => {
     expect(mockWorkspace.client.getSessionTranscriptPage).toHaveBeenCalledTimes(
       8,
     );
-    expect(container.textContent).toContain('Historical window');
+    expect(
+      container.querySelector('[data-testid="trajectory-follow-status"]')
+        ?.textContent,
+    ).toBe('Earlier window');
     expect(
       container.querySelector<HTMLInputElement>('input[type="search"]')!.value,
     ).toBe('qwen-test');
     expect(
-      container.querySelector('[data-testid="trajectory-selected"]')!
-        .textContent,
+      container
+        .querySelector('[data-selected="true"]')
+        ?.getAttribute('data-row-key'),
     ).toBe(selected);
     expect(container.querySelector('[data-testid="trajectory-rows"]')).toBe(
       rows,
     );
     expect(rows.scrollTop).toBe(118);
-    expect(
-      container.querySelector('[data-testid="trajectory-context-notice"]')!
-        .textContent,
-    ).toContain('History may have changed while disconnected');
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="trajectory-warnings"]',
+        )!
+        .click(),
+    );
+    expect(document.body.textContent).toContain(
+      'History may have changed while disconnected',
+    );
     expect(
       Array.from(
         container.querySelectorAll('[role="tablist"] [role="tab"]'),
@@ -6180,15 +6376,14 @@ describe('task activity key', () => {
     await act(async () =>
       container
         .querySelector<HTMLButtonElement>(
-          '[data-testid="trajectory-window-latest"]',
+          '[data-testid="trajectory-follow-status"]',
         )!
         .click(),
     );
     await flush();
     expect(
-      container.querySelector('[data-testid="trajectory-context-notice"]')!
-        .textContent,
-    ).not.toContain('History may have changed while disconnected');
+      container.querySelector('[data-testid="trajectory-warnings"]'),
+    ).toBeNull();
   });
 
   it('drops a restored trajectory tab when the host stopped listing it', async () => {
@@ -7497,6 +7692,19 @@ describe('task activity key', () => {
     expect(mockWorkspace.client.sessionTasks).toHaveBeenLastCalledWith(
       'nested-session',
     );
+    const restored = testState.latestArtifactPanelProps?.tabs.find(
+      (tab) => tab.kind === 'shell',
+    );
+    expect(restored?.kind).toBe('shell');
+    if (restored?.kind !== 'shell')
+      throw new Error('Shell tab was not restored');
+    expect(restored.title).toBe('npm');
+    await restored.sessionActions!.getTaskRuntime('shell-1');
+    expect(mockWorkspace.client.sessionTaskRuntime).toHaveBeenCalledWith(
+      'nested-session',
+      'shell-1',
+    );
+    expect(mockSessionActions.getTaskRuntime).not.toHaveBeenCalled();
   });
 
   it('does not restart current-session task restoration on transcript updates', async () => {
@@ -11656,6 +11864,7 @@ function renderApp(
   props: React.ComponentProps<typeof App> = {},
   notificationTarget?: EventTarget,
   standalone = false,
+  urlNavigation = false,
 ): {
   container: HTMLElement;
   rerender: (nextProps?: React.ComponentProps<typeof App>) => void;
@@ -11671,7 +11880,21 @@ function renderApp(
           <TurnNotificationNavigationContext.Provider
             value={notificationTarget}
           >
-            <App sidebar={{ enabled: true }} header={{}} {...nextProps} />
+            {urlNavigation ? (
+              <WebShellNavigationBoundary options={{}} externalTarget={{}}>
+                {(target, onChange) => (
+                  <App
+                    sidebar={{ enabled: true }}
+                    header={{}}
+                    {...nextProps}
+                    {...target}
+                    onSessionIdChange={onChange}
+                  />
+                )}
+              </WebShellNavigationBoundary>
+            ) : (
+              <App sidebar={{ enabled: true }} header={{}} {...nextProps} />
+            )}
           </TurnNotificationNavigationContext.Provider>
         </StandaloneContext.Provider>,
       );
@@ -13732,6 +13955,51 @@ describe('App conversation indicator keep-alive (#9487)', () => {
       },
     );
   });
+
+  it.each([false, true, undefined])(
+    'applies loading phrase visibility (%s) before host customization',
+    async (enabled) => {
+      testState.sessionHasActivePrompt = true;
+      testState.settings =
+        enabled === undefined
+          ? []
+          : [
+              {
+                key: 'ui.accessibility.enableLoadingPhrases',
+                type: 'boolean',
+                label: 'Enable Loading Phrases',
+                category: 'UI',
+                requiresRestart: true,
+                default: true,
+                values: { effective: enabled },
+              },
+            ];
+      const loadingPhrases = () => ['Custom loading phrase'];
+      const { container, rerender } = renderApp({ loadingPhrases });
+      await flush();
+      const status = () =>
+        container.querySelector('[data-testid="streaming-status"]');
+      expect(status()?.getAttribute('data-show-phrase')).toBe(
+        String(enabled !== false),
+      );
+      testState.settings = [
+        {
+          key: 'ui.accessibility.enableLoadingPhrases',
+          type: 'boolean',
+          label: 'Enable Loading Phrases',
+          category: 'UI',
+          requiresRestart: true,
+          default: true,
+          values: { effective: enabled === false },
+        },
+      ];
+      rerender({ loadingPhrases });
+      await flush();
+      expect(status()?.getAttribute('data-show-phrase')).toBe(
+        String(enabled === false),
+      );
+    },
+  );
 
   it('keeps the indicator mounted and composer running through a silent gap', async () => {
     const composerFooterProps: WebShellComposerToolbarRenderInfo[] = [];
@@ -16437,6 +16705,57 @@ describe('App session callbacks', () => {
     });
   });
 
+  it('refreshes a new standalone title after its first turn completes', async () => {
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.workspaceCwd = undefined;
+    mockConnection.displayName = undefined;
+    const { container, rerender } = renderApp();
+    await flush();
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender();
+    });
+    mockWorkspace.client.getStandaloneSession.mockResolvedValue({
+      sessionId: 'session-1',
+      sourceType: 'standalone',
+      context: { kind: 'standalone' },
+      isArchived: false,
+      displayName: 'First standalone prompt',
+    });
+    act(() => {
+      testState.streamingState = 'idle';
+      rerender();
+    });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="chat-context-header"]')
+        ?.textContent,
+    ).toContain('First standalone prompt');
+  });
+
+  it('seeds a standalone sidebar title while the transcript is loading', async () => {
+    const { container, rerender } = renderApp();
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="load-standalone-session"]',
+        )!
+        .click();
+    });
+    mockConnection.sessionId = 'standalone-session-2';
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.workspaceCwd = undefined;
+    mockConnection.displayName = undefined;
+    mockConnection.loadingTranscript = true;
+    rerender();
+    const header = container.querySelector(
+      '[data-testid="chat-context-header"]',
+    )?.textContent;
+    expect(header).toContain('Standalone sidebar title');
+    expect(header).not.toContain('New session');
+  });
+
   it('seeds the catalog title before the session finishes loading', async () => {
     mockPeekSessionCatalogDisplayName.mockImplementation(
       (_client: unknown, sessionId: string) =>
@@ -18775,12 +19094,12 @@ describe('App session callbacks', () => {
       status: 'running',
       startTime: 1_000,
       runtimeMs: 5_000,
-      command: 'npm run dev',
+      command: '/opt/bin/node server.js',
       cwd: '/tmp/project',
       pid: 42,
     };
     testState.backgroundTasks = [shell];
-    const { container } = renderApp();
+    const { container, rerender } = renderApp();
 
     act(() => {
       testState.latestChatEditorProps?.onChatWidthModeChange?.('wide');
@@ -18796,7 +19115,7 @@ describe('App session callbacks', () => {
       container.querySelectorAll<HTMLButtonElement>(
         '[data-testid="environment-panel"] ul button',
       ),
-    ).find((button) => button.textContent?.includes('npm run dev'));
+    ).find((button) => button.textContent?.includes('/opt/bin/node server.js'));
 
     act(() => shellButton?.click());
 
@@ -18805,11 +19124,14 @@ describe('App session callbacks', () => {
         '[data-testid="environment-panel"]:not([hidden])',
       ),
     ).not.toBeNull();
-    expect(
-      container.querySelector('button[title="npm run dev"]'),
-    ).not.toBeNull();
+    expect(container.querySelector('button[title="node"]')).not.toBeNull();
+    testState.backgroundTasks = [{ ...shell, runtimeMs: 8000 }];
+    rerender();
+    expect(container.querySelector('button[title="node"]')).not.toBeNull();
+    act(() => shellButton?.click());
+    expect(container.querySelector('button[title="node"]')).not.toBeNull();
     expect(container.textContent).toContain('/tmp/project');
-    expect(testState.latestBackgroundTasksRefreshTrigger).toBe(2);
+    expect(testState.latestBackgroundTasksRefreshTrigger).toBe(3);
   });
 
   it('restores the environment panel open state per session', () => {
@@ -26798,6 +27120,9 @@ describe('App session callbacks', () => {
           source: 'mcp-app',
         }),
       );
+      const options = mockSessionActions.sendPrompt.mock.calls[0][1];
+      expect(options).not.toHaveProperty('submittedPrompt');
+      expect(options).not.toHaveProperty('humanInput');
       expect(testState.prompt).toBe('hello');
       expect(editorClear).not.toHaveBeenCalled();
       expect(editorCommit).not.toHaveBeenCalled();
@@ -26816,6 +27141,7 @@ describe('App session callbacks', () => {
       'recovery',
       'client',
       'session',
+      'workspace',
       'write-block',
     ] as const)(
       'does not dispatch after %s invalidates an asynchronous preparation',
@@ -26841,6 +27167,8 @@ describe('App session callbacks', () => {
           if (change === 'recovery') testState.recoveryVersion += 1;
           if (change === 'client') mockConnection.clientId = 'client-2';
           if (change === 'session') mockConnection.sessionId = 'session-2';
+          if (change === 'workspace')
+            mockConnection.workspaceCwd = '/tmp/other';
           if (change === 'write-block') mockConnection.loadingTranscript = true;
           rerender({ prepareSubmit, onSubmitBefore });
         });
@@ -27019,12 +27347,14 @@ describe('App session callbacks', () => {
       });
     });
 
-    it.each(['streaming', 'active', 'goal'] as const)(
+    it.each(['streaming', 'active', 'goal', 'queued'] as const)(
       'refuses a known %s session without enqueuing the App text',
       async (busy) => {
         if (busy === 'streaming') testState.streamingState = 'responding';
         if (busy === 'active') testState.sessionHasActivePrompt = true;
         if (busy === 'goal') mockConnection.goalState = activeGoalSnapshot();
+        if (busy === 'queued')
+          testState.queuedPrompts = [{ id: 1, text: 'follow up' }];
         const prepareSubmit = vi.fn();
         renderApp({ prepareSubmit });
         await flush();
@@ -27037,6 +27367,40 @@ describe('App session callbacks', () => {
         expect(testState.prompt).toBe('hello');
       },
     );
+
+    it('refuses App text while shell commands are draining', async () => {
+      const running = deferred<void>();
+      mockSessionActions.sendShellCommand.mockReturnValueOnce(running.promise);
+      const { rerender } = renderApp();
+      await flush();
+      act(() => {
+        testState.streamingState = 'responding';
+        rerender();
+      });
+      await act(async () => {
+        testState.latestChatEditorProps!.onSubmit('!first');
+        testState.latestChatEditorProps!.onSubmit('!second');
+      });
+      act(() => {
+        testState.streamingState = 'idle';
+        rerender();
+      });
+      await flush();
+      expect(mockSessionActions.sendShellCommand).toHaveBeenCalledOnce();
+      await expect(
+        mcpAppMessageHost.current!.submit('App parameters', submission()),
+      ).rejects.toThrow();
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+      expect(rawEnqueuePrompt).not.toHaveBeenCalled();
+      await act(async () => {
+        running.resolve();
+      });
+      await flush();
+      expect(mockSessionActions.sendShellCommand).toHaveBeenNthCalledWith(
+        2,
+        'second',
+      );
+    });
 
     it('leaves dispatch without a receipt distinguishable from admission', async () => {
       mockSessionActions.sendPrompt.mockImplementationOnce(
@@ -42281,6 +42645,54 @@ describe('App session callbacks', () => {
     expect(onLanguageChange).not.toHaveBeenCalled();
   });
 
+  it('sends /language output for a model output language change from Settings', async () => {
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="change-output-language"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(
+      mockSessionActions.sendPrompt.mock.calls.some(
+        (c) => c[0] === '/language output English',
+      ),
+    ).toBe(true);
+  });
+
+  it('sends auto when the model output language is cleared in Settings', async () => {
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="change-output-language-auto"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(
+      mockSessionActions.sendPrompt.mock.calls.some(
+        (c) => c[0] === '/language output auto',
+      ),
+    ).toBe(true);
+  });
+
   it('resynchronizes the catalog when a settings prompt admission is ambiguous', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const lostResponse = deferred<void>();
@@ -48616,6 +49028,449 @@ describe('approval mode allowlist', () => {
 });
 
 describe('Managed home integration', () => {
+  it.each([undefined, 'managed-target'])(
+    'passes the Managed Extensions target through Plugins (Session: %s)',
+    async (sessionId) => {
+      window.history.replaceState(
+        null,
+        '',
+        '/?managed=1' + (sessionId ? `&managedSession=${sessionId}` : ''),
+      );
+      const provider = managedProvider();
+      const { container } = renderApp({
+        managedAgentProvider: provider,
+        language: 'en',
+      });
+      await flush();
+      if (sessionId) {
+        const resolve = [
+          ...container.querySelectorAll<HTMLButtonElement>('button'),
+        ].find((button) => button.textContent === 'Resolve Managed workspace');
+        await act(async () => resolve!.click());
+        await flush();
+      }
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="open-plugins"]')!
+          .click(),
+      );
+      await flush();
+      const page = container.querySelector(
+        '[data-testid="inline-panel"] [data-testid="extensions-manager-page"]',
+      );
+      expect(page?.getAttribute('data-managed-provider')).toBe(
+        provider.storageKey,
+      );
+      expect(page?.getAttribute('data-managed-session')).toBe(
+        sessionId ?? null,
+      );
+      expect(page?.getAttribute('data-managed-workspace')).toBe(
+        sessionId ? 'resolved-workspace' : null,
+      );
+    },
+  );
+
+  it('opens the Managed MCP manager from Plugins without falling back to daemon management', async () => {
+    window.history.replaceState(null, '', '/?managed=1');
+    const { container } = renderApp({
+      managedAgentProvider: managedProvider(),
+      language: 'en',
+    });
+    await flush();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-plugins"]')!
+        .click(),
+    );
+    await flush();
+    const panel = container.querySelector('[data-testid="inline-panel"]')!;
+    const tab = [
+      ...panel.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+    ].find((entry) => entry.textContent === 'MCP');
+    expect(tab).toBeDefined();
+    await act(async () => {
+      tab!.focus();
+      tab!.click();
+    });
+    await flush();
+    expect(panel.querySelector('[data-managed-mcp-manager]')).not.toBeNull();
+    expect(panel.textContent).toContain('Select a Managed Session');
+    expect(
+      panel.querySelector('[data-testid="mcp-server-actions"]'),
+    ).toBeNull();
+  });
+
+  it.each([
+    ['primary', '/workspace'],
+    ['other', '/other-project'],
+  ])(
+    'selects the %s daemon workspace as a new task and retains the Managed draft',
+    async (_id, cwd) => {
+      window.history.replaceState(null, '', '/?managed=1');
+      mockConnection.sessionId = 'old-local-session';
+      mockConnection.workspaceCwd = '/workspace';
+      mockWorkspace.capabilities = {
+        workspaces: [
+          {
+            id: 'primary',
+            displayName: 'qwen-code',
+            cwd: '/workspace',
+            primary: true,
+            trusted: true,
+          },
+          {
+            id: 'other',
+            displayName: 'Other',
+            cwd: '/other-project',
+            primary: false,
+            trusted: true,
+          },
+        ],
+      } as typeof mockWorkspace.capabilities;
+      mockSessionActions.clearSession.mockImplementationOnce(async () => {
+        mockConnection.sessionId = undefined;
+      });
+      const { container } = renderApp({
+        managedAgentProvider: managedProvider(),
+        language: 'en',
+      });
+      await flush();
+      const draft = container.querySelector<HTMLInputElement>(
+        '[aria-label="Managed draft"]',
+      )!;
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          'value',
+        )!.set!.call(draft, 'Unsent Managed draft');
+        draft.dispatchEvent(new Event('input', { bubbles: true }));
+        draft.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+      const label = cwd === '/workspace' ? 'qwen-code' : 'Other';
+      await act(async () =>
+        [...container.querySelectorAll<HTMLButtonElement>('button')]
+          .find(
+            (item) => item.textContent === `Choose daemon ${label} · Local`,
+          )!
+          .click(),
+      );
+      await flush();
+      expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+      expect(testState.latestChatEditorProps?.selectedWorkspaceCwd).toBe(cwd);
+      expect(
+        container
+          .querySelector('[data-testid="managed-conversation"]')!
+          .getAttribute('data-interactive'),
+      ).toBe('false');
+      await chooseBackend(container, 'Managed');
+      expect(draft.value).toBe('Unsent Managed draft');
+      expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+      expect(mockWorkspaceActions.addWorkspace).not.toHaveBeenCalled();
+    },
+  );
+
+  it('offers the shared Managed catalog from a Local draft, respects availability and scopes it to its provider', async () => {
+    window.history.replaceState(null, '', '/?managed=0');
+    mockConnection.sessionId = undefined;
+    const provider = managedProvider();
+    const { container, rerender } = renderApp({
+      managedAgentProvider: provider,
+      language: 'en',
+    });
+    await flush();
+    testState.prompt = 'Unsent Local draft';
+    await act(async () =>
+      [...container.querySelectorAll<HTMLButtonElement>('button')]
+        .find((item) => item.textContent === 'Discover Managed workspaces')!
+        .click(),
+    );
+    await flush();
+    await act(async () =>
+      container
+        .querySelector<HTMLElement>('button[aria-label="Workspace"]')!
+        .dispatchEvent(
+          new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+        ),
+    );
+    const options = [
+      ...document.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ];
+    const blocked = options.find(
+      (item) => item.textContent === 'Blocked Project · Managed',
+    )!;
+    expect(blocked.getAttribute('data-disabled')).not.toBeNull();
+    await act(async () => blocked.click());
+    expect(
+      container
+        .querySelector('[data-testid="managed-conversation"]')!
+        .getAttribute('data-interactive'),
+    ).toBe('false');
+    await act(async () =>
+      options
+        .find((item) => item.textContent === 'Managed Project · Managed')!
+        .click(),
+    );
+    await flush();
+    const managed = container.querySelector(
+      '[data-testid="managed-conversation"]',
+    )!;
+    expect(managed.getAttribute('data-workspace')).toBe('managed-target');
+    expect(managed.getAttribute('data-session')).toBe('new');
+    expect(managed.getAttribute('data-interactive')).toBe('true');
+    expect(testState.prompt).toBe('Unsent Local draft');
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+    expect(mockWorkspaceActions.addWorkspace).not.toHaveBeenCalled();
+    rerender({
+      managedAgentProvider: { ...provider, storageKey: 'different-provider' },
+      language: 'en',
+    });
+    await flush();
+    expect(testState.latestChatEditorProps?.workspaceMenuItems).toBe(false);
+  });
+
+  function providerWithWorkspaceCreation(): ManagedAgentProvider {
+    return {
+      ...managedProvider(),
+      workspaceBinding: {
+        agentId: 'agent',
+        list: vi.fn(),
+        get: vi.fn(),
+        createEmpty: vi.fn(),
+        createWorkspace: vi.fn(),
+      },
+    };
+  }
+
+  it('switches Local workspace creation to Managed without changing the current conversation until success', async () => {
+    window.history.replaceState(null, '', '/?managed=0');
+    const { container } = renderApp({
+      managedAgentProvider: providerWithWorkspaceCreation(),
+      language: 'en',
+    });
+    await flush();
+    const sidebar = container.querySelector('[data-testid="sidebar"]')!;
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-add-workspace"]')!
+        .click(),
+    );
+    expect(testState.latestAddWorkspaceDialogProps?.executionMode).toBe(
+      'daemon',
+    );
+    await act(async () =>
+      testState.latestAddWorkspaceDialogProps?.onExecutionModeChange?.(
+        'managed',
+      ),
+    );
+    await flush();
+    const managed = container.querySelector(
+      '[data-testid="managed-conversation"]',
+    )!;
+    expect(managed.getAttribute('data-workspace-creation-open')).toBe('true');
+    expect(sidebar.getAttribute('data-current-session-active')).toBe('true');
+    expect(
+      container.querySelector('[data-testid="add-workspace-dialog"]'),
+    ).toBeNull();
+    await act(async () =>
+      [...container.querySelectorAll<HTMLButtonElement>('button')]
+        .find(
+          (node) => node.textContent === 'Complete Managed workspace creation',
+        )!
+        .click(),
+    );
+    await flush();
+    expect(sidebar.getAttribute('data-current-session-active')).toBe('false');
+    expect(managed.getAttribute('data-workspace')).toBe('created-workspace');
+    expect(managed.getAttribute('data-session')).toBe('new');
+    expect(mockWorkspaceActions.addWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('defaults creation to Managed and preserves its history session when canceled or switched to Local', async () => {
+    window.history.replaceState(null, '', '/?managed=1&managedSession=history');
+    mockWorkspace.capabilities = {
+      features: ['dynamic_workspace_registration'],
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const { container } = renderApp({
+      managedAgentProvider: providerWithWorkspaceCreation(),
+      language: 'en',
+    });
+    await flush();
+    const managed = container.querySelector(
+      '[data-testid="managed-conversation"]',
+    )!;
+    const open = container.querySelector<HTMLButtonElement>(
+      '[data-testid="open-add-workspace"]',
+    )!;
+    await act(async () => open.click());
+    await flush();
+    expect(managed.getAttribute('data-workspace-creation-open')).toBe('true');
+    expect(managed.getAttribute('data-session')).toBe('history');
+    await act(async () =>
+      [...container.querySelectorAll<HTMLButtonElement>('button')]
+        .find((node) => node.textContent === 'Close workspace creation')!
+        .click(),
+    );
+    await flush();
+    expect(managed.getAttribute('data-session')).toBe('history');
+    await act(async () => open.click());
+    await act(async () =>
+      [...container.querySelectorAll<HTMLButtonElement>('button')]
+        .find((node) => node.textContent === 'Select Local workspace creation')!
+        .click(),
+    );
+    await flush();
+    expect(testState.latestAddWorkspaceDialogProps?.executionMode).toBe(
+      'daemon',
+    );
+    expect(managed.getAttribute('data-session')).toBe('history');
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+  });
+
+  it('does not activate a late workspace completion after its dialog has been dismissed', async () => {
+    window.history.replaceState(null, '', '/?managed=0');
+    const { container } = renderApp({
+      managedAgentProvider: providerWithWorkspaceCreation(),
+      language: 'en',
+    });
+    await flush();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-add-workspace"]')!
+        .click(),
+    );
+    await act(async () =>
+      testState.latestAddWorkspaceDialogProps?.onExecutionModeChange?.(
+        'managed',
+      ),
+    );
+    await act(async () =>
+      [...container.querySelectorAll<HTMLButtonElement>('button')]
+        .find((node) => node.textContent === 'Close workspace creation')!
+        .click(),
+    );
+    await flush();
+    await act(async () =>
+      [...container.querySelectorAll<HTMLButtonElement>('button')]
+        .find(
+          (node) => node.textContent === 'Complete Managed workspace creation',
+        )!
+        .click(),
+    );
+    await flush();
+    expect(
+      container
+        .querySelector('[data-testid="sidebar"]')!
+        .getAttribute('data-current-session-active'),
+    ).toBe('true');
+  });
+  it('waits for a different history session workspace and retains a confirmed workspace on same-session history replay', async () => {
+    window.history.replaceState(null, '', '/?managed=1&managedSession=first');
+    const { container } = renderApp(
+      {
+        managedAgentProvider: {
+          ...managedProvider(),
+          workspaceBinding: {
+            agentId: 'agent',
+            list: vi.fn(),
+            get: vi.fn(),
+            createEmpty: vi.fn(),
+          },
+        },
+        language: 'en',
+      },
+      undefined,
+      false,
+      true,
+    );
+    await flush();
+    const managed = container.querySelector(
+      '[data-testid="managed-conversation"]',
+    )!;
+    const newTask = container.querySelector<HTMLButtonElement>(
+      '[data-testid="new-session"]',
+    )!;
+    const resolveWorkspace = [...container.querySelectorAll('button')].find(
+      (node) => node.textContent === 'Resolve Managed workspace',
+    )!;
+    await act(async () => resolveWorkspace.click());
+    await flush();
+    expect(managed.getAttribute('data-workspace')).toBe('resolved-workspace');
+
+    window.history.pushState(
+      null,
+      '',
+      '/?managed=1&managedSession=second-in-another-workspace',
+    );
+    await act(async () => window.dispatchEvent(new PopStateEvent('popstate')));
+    await flush();
+    await act(async () => newTask.click());
+    await flush();
+    expect(managed.getAttribute('data-session')).toBe(
+      'second-in-another-workspace',
+    );
+    expect(managed.getAttribute('data-workspace')).toBeNull();
+
+    await act(async () => resolveWorkspace.click());
+    await flush();
+    window.history.pushState(
+      null,
+      '',
+      '/?managed=1&managedSession=second-in-another-workspace',
+    );
+    await act(async () => window.dispatchEvent(new PopStateEvent('popstate')));
+    await flush();
+    await act(async () => newTask.click());
+    await flush();
+    expect(managed.getAttribute('data-session')).toBe('new');
+    expect(managed.getAttribute('data-workspace')).toBe('resolved-workspace');
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+  });
+
+  it('allows New task after resolving and reopening an unbound session and completing another prompt', async () => {
+    window.history.replaceState(null, '', '/?managed=1&managedSession=legacy');
+    const { container } = renderApp({
+      managedAgentProvider: {
+        ...managedProvider(),
+        workspaceBinding: {
+          agentId: 'agent',
+          list: vi.fn(),
+          get: vi.fn(),
+          createEmpty: vi.fn(),
+        },
+      },
+      language: 'en',
+    });
+    await flush();
+    for (const label of [
+      'Resolve unbound Managed workspace',
+      'Reopen selected Managed session',
+      'Complete Managed submission',
+    ]) {
+      await act(async () =>
+        [...container.querySelectorAll('button')]
+          .find((node) => node.textContent === label)!
+          .click(),
+      );
+      await flush();
+    }
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="new-session"]')!
+        .click(),
+    );
+    await flush();
+    const managed = container.querySelector(
+      '[data-testid="managed-conversation"]',
+    )!;
+    expect(managed.getAttribute('data-session')).toBe('new');
+    expect(managed.getAttribute('data-workspace')).toBeNull();
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+  });
+
   function autoApprovableLocalPermission() {
     return makePendingPermissionBlock({
       options: [
@@ -48631,16 +49486,15 @@ describe('Managed home integration', () => {
 
   function managedProvider(): ManagedAgentProvider {
     return {
-      kind: 'java',
       storageKey: 'managed-test',
       canCancel: true,
-      acceptsWorkspaceCwd: false,
       listSessions: vi.fn(),
       getSession: vi.fn(),
       getTranscript: vi.fn(),
       createSession: vi.fn(),
       submitPrompt: vi.fn(),
       cancel: vi.fn(),
+      queryCancelOperation: vi.fn(),
       async *subscribeEvents() {
         yield* [];
       },
@@ -48648,17 +49502,179 @@ describe('Managed home integration', () => {
   }
 
   async function chooseBackend(container: HTMLElement, label: string) {
-    const tab = [
-      ...container.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
-    ].find((node) => node.textContent === label);
-    expect(tab).toBeTruthy();
-    await act(async () =>
-      tab!.dispatchEvent(
-        new MouseEvent('mousedown', { bubbles: true, button: 0 }),
-      ),
-    );
+    const target =
+      label === 'Local'
+        ? container.querySelector<HTMLButtonElement>(
+            '[data-testid="select-current-session"]',
+          )
+        : [...container.querySelectorAll<HTMLButtonElement>('button')].find(
+            (node) => node.textContent === 'Managed history',
+          );
+    expect(target).toBeTruthy();
+    await act(async () => target!.click());
     await flush();
   }
+
+  it('keeps Managed workspace navigation available beside Local sessions without execution tabs', async () => {
+    window.history.replaceState(null, '', '/?managed=0');
+    const { container } = renderApp({
+      managedAgentProvider: managedProvider(),
+      language: 'en',
+    });
+    await flush();
+    const sidebar = container.querySelector('[data-testid="sidebar"]')!;
+    expect(sidebar.querySelector('[role="tablist"]')).toBeNull();
+    expect(
+      sidebar.querySelector('nav[aria-label="Managed sessions"]'),
+    ).not.toBeNull();
+    expect(
+      sidebar.querySelector('[data-testid="load-session"]'),
+    ).not.toBeNull();
+    expect(sidebar.getAttribute('data-current-session-active')).toBe('true');
+
+    await chooseBackend(container, 'Managed');
+    expect(sidebar.getAttribute('data-current-session-active')).toBe('false');
+    expect(
+      sidebar.querySelector('[data-testid="load-session"]'),
+    ).not.toBeNull();
+    expect(mockSessionActions.loadSession).not.toHaveBeenCalled();
+
+    await chooseBackend(container, 'Local');
+    expect(sidebar.getAttribute('data-current-session-active')).toBe('true');
+    expect(mockSessionActions.loadSession).not.toHaveBeenCalled();
+  });
+
+  it('inherits the selected Managed history workspace for New task', async () => {
+    window.history.replaceState(null, '', '/?managed=0');
+    const { container } = renderApp({
+      managedAgentProvider: managedProvider(),
+      language: 'en',
+    });
+    await flush();
+    await chooseBackend(container, 'Managed');
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="new-session"]')!
+        .click(),
+    );
+    await flush();
+    const managed = container.querySelector(
+      '[data-testid="managed-conversation"]',
+    )!;
+    expect(managed.getAttribute('data-session')).toBe('new');
+    expect(managed.getAttribute('data-workspace')).toBe('managed-workspace');
+    expect(managed.getAttribute('data-interactive')).toBe('true');
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+  });
+
+  it('waits for a deep-linked Managed session workspace before opening a new task', async () => {
+    window.history.replaceState(
+      null,
+      '',
+      '/?managed=1&managedSession=deep-link',
+    );
+    const { container } = renderApp({
+      managedAgentProvider: {
+        ...managedProvider(),
+        workspaceBinding: {
+          agentId: 'agent',
+          list: vi.fn(),
+          get: vi.fn(),
+          createEmpty: vi.fn(),
+        },
+      },
+      language: 'en',
+    });
+    await flush();
+    const newTask = container.querySelector<HTMLButtonElement>(
+      '[data-testid="new-session"]',
+    )!;
+    const managed = container.querySelector(
+      '[data-testid="managed-conversation"]',
+    )!;
+    await act(async () => newTask.click());
+    await flush();
+    expect(managed.getAttribute('data-session')).toBe('deep-link');
+    await act(async () =>
+      [...container.querySelectorAll<HTMLButtonElement>('button')]
+        .find((node) => node.textContent === 'Resolve Managed workspace')!
+        .click(),
+    );
+    await act(async () => newTask.click());
+    await flush();
+    expect(managed.getAttribute('data-session')).toBe('new');
+    expect(managed.getAttribute('data-workspace')).toBe('resolved-workspace');
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+  });
+
+  it('records a background Managed creation without leaving the selected Local conversation', async () => {
+    window.history.replaceState(null, '', '/?managed=0');
+    const { container } = renderApp({
+      managedAgentProvider: managedProvider(),
+      language: 'en',
+    });
+    await flush();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="complete-managed-creation"]',
+        )!
+        .click(),
+    );
+    await flush();
+    expect(
+      container
+        .querySelector('[data-testid="managed-home"]')
+        ?.getAttribute('aria-hidden'),
+    ).toBe('true');
+    expect(
+      container
+        .querySelector('[data-testid="managed-conversation"]')
+        ?.getAttribute('data-session'),
+    ).toBe('managed-created');
+    expect(mockSessionActions.loadSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+  });
+
+  it('opens a Managed workspace draft from Local and a Local workspace draft from Managed', async () => {
+    window.history.replaceState(null, '', '/?managed=0');
+    const { container } = renderApp({
+      managedAgentProvider: managedProvider(),
+      language: 'en',
+    });
+    await flush();
+    await act(async () =>
+      [...container.querySelectorAll<HTMLButtonElement>('button')]
+        .find((node) => node.textContent === 'New Managed workspace task')!
+        .click(),
+    );
+    await flush();
+    expect(
+      container
+        .querySelector('[data-testid="managed-conversation"]')
+        ?.getAttribute('data-workspace'),
+    ).toBe('managed-workspace');
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="new-session-primary-workspace"]',
+        )!
+        .click(),
+    );
+    await flush();
+    expect(
+      container
+        .querySelector('[data-testid="managed-home"]')
+        ?.getAttribute('aria-hidden'),
+    ).toBe('true');
+    expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+    expect(new URLSearchParams(window.location.search).get('managed')).toBe(
+      '0',
+    );
+  });
 
   it('keeps the Local approval-mode dialog usable in Local', async () => {
     window.history.replaceState(null, '', '/?managed=0');
@@ -48884,15 +49900,11 @@ describe('Managed home integration', () => {
       if (toolName) expect(hiddenApprovalKeyboardActive).toBe(false);
 
       await chooseBackend(container, 'Local');
+      expect(
+        container.querySelector('[data-testid="inline-panel"]'),
+      ).toBeNull();
       if (toolName) {
-        expect(
-          container.querySelector('[data-testid="inline-panel"]'),
-        ).toBeNull();
         expect(keyboardActive()).toBe(true);
-      } else {
-        expect(
-          container.querySelector('[data-testid="inline-panel"]'),
-        ).not.toBeNull();
       }
       expect(mockSessionActions.submitPermission).not.toHaveBeenCalled();
       expect(mockSessionActions.respondToPermission).not.toHaveBeenCalled();
@@ -48949,7 +49961,7 @@ describe('Managed home integration', () => {
     ).not.toBeNull();
     expect(
       container.querySelector('[data-testid="sidebar"] [role="tablist"]'),
-    ).not.toBeNull();
+    ).toBeNull();
     expect(
       container.querySelector(
         '[data-testid="chat-pane-container"] [role="tablist"]',
@@ -49041,7 +50053,9 @@ describe('Managed home integration', () => {
         .querySelector('[data-testid="managed-conversation"]')
         ?.getAttribute('data-interactive'),
     ).toBe('false');
-    expect(container.querySelector('[data-testid="sidebar"] nav')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="sidebar"] nav'),
+    ).not.toBeNull();
     await act(async () =>
       container
         .querySelector<HTMLButtonElement>('[data-testid="new-session"]')!
@@ -49138,4 +50152,103 @@ describe('Managed home integration', () => {
     ).toBeNull();
     expect(window.location.search).toBe('?host=ordinary');
   });
+
+  it.each([undefined, ''])(
+    'waits for a Skills source workspace (%s)',
+    async (cwd) => {
+      window.history.replaceState(null, '', '/?managed=1');
+      mockWorkspace.workspaceCwd = cwd;
+      mockWorkspace.capabilities = undefined;
+      const props = {
+        managedAgentProvider: managedProvider(),
+        language: 'en' as const,
+      };
+      const { container, rerender } = renderApp(props);
+      await flush();
+      const sourceCwd = () =>
+        container
+          .querySelector('[data-testid="managed-conversation"]')
+          ?.getAttribute('data-skills-workspace');
+      expect(sourceCwd()).toBeNull();
+      mockWorkspace.workspaceCwd = '/work/ready';
+      rerender(props);
+      await flush();
+      expect(sourceCwd()).toBe('/work/ready');
+    },
+  );
+
+  it.each([false, true])(
+    'keeps plugin entry tabs and focus independent (shadow DOM: %s)',
+    async (shadowDom) => {
+      window.history.replaceState(null, '', '/?managed=1');
+      const { container } = renderApp({
+        managedAgentProvider: managedProvider(),
+        language: 'en',
+        shadowDom: { plugins: shadowDom, portals: false },
+      });
+      await flush();
+
+      const tabRoot = () => {
+        const panel = container.querySelector('[data-testid="inline-panel"]');
+        expect(panel).not.toBeNull();
+        const shadowRoot = panel!.querySelector(
+          '[data-web-shell-shadow-host="plugins"]',
+        )?.shadowRoot;
+        expect(Boolean(shadowRoot)).toBe(shadowDom);
+        return shadowRoot ?? panel!;
+      };
+      const expectSelectedTab = (label: string) => {
+        const content = tabRoot();
+        const selected = content.querySelector(
+          '[role="tab"][aria-selected="true"]',
+        );
+        expect(selected?.textContent).toBe(label);
+        expect(
+          content instanceof ShadowRoot
+            ? content.activeElement
+            : document.activeElement,
+        ).toBe(selected);
+      };
+      const click = async (button: HTMLButtonElement | null) => {
+        expect(button).not.toBeNull();
+        await act(async () => {
+          button!.focus();
+          button!.click();
+        });
+        await flush();
+      };
+
+      await click(container.querySelector('[data-testid="open-plugins"]'));
+      expectSelectedTab('Extensions');
+      await click(
+        Array.from(
+          tabRoot().querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+        ).find((tab) => tab.textContent === 'Skills') ?? null,
+      );
+      expectSelectedTab('Skills');
+      await click(
+        Array.from(
+          tabRoot().querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+        ).find((tab) => tab.textContent === 'Extensions') ?? null,
+      );
+      expectSelectedTab('Extensions');
+
+      await act(async () => {
+        container.querySelector('[data-testid="inline-panel"]')!.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            bubbles: true,
+            cancelable: true,
+            key: 'Escape',
+          }),
+        );
+      });
+      await flush();
+      expect(
+        container.querySelector('[data-testid="inline-panel"]'),
+      ).toBeNull();
+
+      await click(container.querySelector('[data-testid="open-plugins"]'));
+      expectSelectedTab('Extensions');
+    },
+  );
 });
