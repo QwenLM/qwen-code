@@ -6619,6 +6619,22 @@ export class Session implements SessionContext {
               void recordDaemonSessionApprovalModeFromConfig(this.config);
             }
 
+            let previousTurnWasUserCancelled = false;
+            if (
+              !continuesCurrentWorkChain &&
+              !channelTurn &&
+              !isSlashInput &&
+              goalTurn?.origin !== 'runtime' &&
+              this.config.getChatRecordingService()
+            ) {
+              try {
+                previousTurnWasUserCancelled =
+                  (await this.#getTurnCancellation())?.reason === 'user';
+              } catch {
+                debugLogger.warn('Unable to read previous turn cancellation');
+              }
+            }
+
             if (goalTurn?.origin === 'runtime') {
               // The automatic Goal turn was recorded above with its runtime
               // provenance and must not also appear as real user input.
@@ -6898,7 +6914,8 @@ export class Session implements SessionContext {
             // very turn that may be asking about it (#10953).
             const continuesTodoWorkChain =
               continuesCurrentWorkChain ||
-              (this.activeTodoWorkChainPromptId !== undefined &&
+              (!previousTurnWasUserCancelled &&
+                this.activeTodoWorkChainPromptId !== undefined &&
                 this.config.getActiveTodoReminder(
                   this.activeTodoWorkChainPromptId,
                 ) !== undefined &&
@@ -6950,6 +6967,13 @@ export class Session implements SessionContext {
             // plan mode in ACP has no effect because the model never learns it
             // should avoid edits.
             const systemReminders = await this.#buildInitialSystemReminders();
+            if (previousTurnWasUserCancelled) {
+              systemReminders.push({
+                text: wrapSystemReminder(
+                  'The user intentionally cancelled the preceding turn. Its unfinished actions are no longer pending and must not be retried or continued automatically. Keep that turn as historical context. Respond to the current user message; resume the cancelled work only if the current message explicitly requests it.',
+                ),
+              });
+            }
             if (systemReminders.length > 0 && !isRestoreAskUserQuestion) {
               // On an `interrupted_prompt` continuation the replayed orphaned
               // user run can already carry the reminders that were prepended on

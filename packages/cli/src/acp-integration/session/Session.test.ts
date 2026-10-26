@@ -53,7 +53,11 @@ import {
   SYSTEM_REMINDER_CLOSE,
 } from '@qwen-code/qwen-code-core';
 import * as core from '@qwen-code/qwen-code-core';
-import { markApiHistoryPrompt } from '@qwen-code/qwen-code-core/services/session-api-history.js';
+import {
+  buildApiHistoryFromConversation,
+  getApiHistoryPromptId,
+  markApiHistoryPrompt,
+} from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
 import { ExitPlanModeTool } from '@qwen-code/qwen-code-core/tools/exitPlanMode.js';
 import {
@@ -6631,6 +6635,299 @@ describe('Session', () => {
     ).pendingPromptCompletion = null;
     await vi.waitFor(() => {
       expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe('new prompt after cancellation', () => {
+    function cancelledHistory(
+      reason: 'user' | 'unknown' | 'interrupted' | 'completed',
+      withTool = false,
+    ) {
+      const input: Content = {
+        role: 'user',
+        parts: [{ text: 'old unfinished task' }],
+      };
+      markApiHistoryPrompt(input, 'cancelled-native-turn');
+      const history: Content[] = [input];
+      if (withTool) {
+        history.push(
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'old-call',
+                  name: 'run_shell_command',
+                  args: { command: 'sleep 45' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'old-call',
+                  name: 'run_shell_command',
+                  response: { error: 'User intentionally cancelled' },
+                },
+              },
+            ],
+          },
+        );
+      }
+      const records = [
+        chatRecord({
+          uuid: 'cancelled-input',
+          promptId: 'cancelled-native-turn',
+          daemonPromptId: 'cancelled-daemon-turn',
+          message: input,
+        }),
+        chatRecord({
+          uuid: 'cancelled-result',
+          parentUuid: 'cancelled-input',
+          type: 'system',
+          subtype: 'turn_result',
+          promptId: 'cancelled-native-turn',
+          systemPayload: {
+            promptId: 'cancelled-daemon-turn',
+            state: reason === 'completed' ? 'completed' : 'cancelled',
+            startedAt: 1000,
+            endedAt: 2000,
+            ...(reason !== 'interrupted' ? { cancelledAt: 1900 } : {}),
+            ...(reason === 'user' ? { cancelReason: 'user' } : {}),
+          },
+        }),
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      mockChatRecordingService.readActiveTranscriptChain.mockResolvedValue(
+        records,
+      );
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      return { history, records };
+    }
+
+    it.each([false, true])(
+      'informs the next request while preserving cancelled history (tool=%s)',
+      async (withTool) => {
+        const { history, records } = cancelledHistory('user', withTool);
+        const originalHistory = JSON.stringify(history);
+        const originalRecords = JSON.stringify(records);
+        await session.prompt({
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'Only answer AFTER-CANCEL' }],
+        });
+        const request = vi.mocked(mockChat.sendMessageStream).mock.calls[0][1];
+        const reminders = (request.message as Part[]).filter((part) =>
+          part.text?.includes('intentionally cancelled the preceding turn'),
+        );
+        expect(reminders).toHaveLength(1);
+        expect(reminders[0].text).toContain(
+          'resume the cancelled work only if the current message explicitly requests it',
+        );
+        expect(request.message).toContainEqual({
+          text: 'Only answer AFTER-CANCEL',
+        });
+        expect(JSON.stringify(history)).toEqual(originalHistory);
+        expect(getApiHistoryPromptId(history[0])).toBe('cancelled-native-turn');
+        expect(JSON.stringify(records)).toEqual(originalRecords);
+        expect(
+          mockChatRecordingService.readActiveTranscriptChain.mock
+            .invocationCallOrder[0],
+        ).toBeLessThan(
+          mockChatRecordingService.recordUserMessage.mock
+            .invocationCallOrder[0],
+        );
+        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+          'Only answer AFTER-CANCEL',
+          undefined,
+          undefined,
+          expect.any(String),
+          undefined,
+        );
+      },
+    );
+
+    it.each(['unknown', 'interrupted', 'completed'] as const)(
+      'does not invent user cancellation for %s',
+      async (reason) => {
+        cancelledHistory(reason);
+        await session.prompt({
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'new task' }],
+        });
+        expect(
+          JSON.stringify(
+            vi.mocked(mockChat.sendMessageStream).mock.calls[0][1].message,
+          ),
+        ).not.toContain('intentionally cancelled the preceding turn');
+      },
+    );
+
+    it('starts a new todo chain and does not re-inject the cancelled plan after a tool response', async () => {
+      cancelledHistory('user');
+      (
+        session as unknown as { activeTodoWorkChainPromptId: string }
+      ).activeTodoWorkChainPromptId = 'cancelled-native-turn';
+      const reminder =
+        '<system-reminder>unfinished cancelled task</system-reminder>';
+      const reminders = new Map([['cancelled-native-turn', reminder]]);
+      vi.mocked(mockConfig.getActiveTodoReminder).mockImplementation((id) =>
+        reminders.get(id),
+      );
+      vi.mocked(mockConfig.getActiveTodoPlanWriterOwner).mockReturnValue(
+        'cancelled-native-turn',
+      );
+      vi.mocked(mockConfig.takeActiveTodoReminder).mockImplementation((id) =>
+        reminders.get(id),
+      );
+      vi.mocked(mockConfig.startActiveTodoWorkChain).mockImplementation(
+        (id, continuedFrom) => {
+          const inherited = continuedFrom && reminders.get(continuedFrom);
+          reminders.clear();
+          if (inherited) reminders.set(id, inherited);
+        },
+      );
+      mockToolRegistry.getTool.mockReturnValue({
+        name: 'read_file',
+        kind: core.Kind.Read,
+        build: vi.fn().mockReturnValue({
+          params: { path: '/tmp/new-task.txt' },
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Read file'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute: vi.fn().mockResolvedValue({
+            llmContent: 'new task contents',
+            returnDisplay: 'new task contents',
+          }),
+        }),
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  {
+                    id: 'new-call',
+                    name: 'read_file',
+                    args: { path: '/tmp/new-task.txt' },
+                  },
+                ],
+              },
+            },
+          ]),
+        )
+        .mockResolvedValueOnce(createEmptyStream());
+      await session.prompt({
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'Read only the new task file' }],
+      });
+      expect(mockConfig.startActiveTodoWorkChain).toHaveBeenLastCalledWith(
+        expect.any(String),
+        undefined,
+      );
+      expect(mockConfig.takeActiveTodoReminder).toHaveBeenCalled();
+      const toolFollowUp = vi.mocked(mockChat.sendMessageStream).mock
+        .calls[1][1].message as Part[];
+      expect(
+        toolFollowUp.some((part) => part.functionResponse?.id === 'new-call'),
+      ).toBe(true);
+      expect(JSON.stringify(toolFollowUp)).not.toContain(
+        'unfinished cancelled task',
+      );
+      expect(JSON.stringify(toolFollowUp)).not.toContain(
+        'intentionally cancelled the preceding turn',
+      );
+    });
+
+    it('does not read or inject user cancellation context for channel turns', async () => {
+      cancelledHistory('user');
+      await session.prompt({
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'automated channel event' }],
+        _meta: { [CHANNEL_PROMPT_META_KEY]: true },
+      });
+      expect(
+        mockChatRecordingService.readActiveTranscriptChain,
+      ).not.toHaveBeenCalled();
+      expect(
+        JSON.stringify(
+          vi.mocked(mockChat.sendMessageStream).mock.calls[0][1].message,
+        ),
+      ).not.toContain('intentionally cancelled the preceding turn');
+    });
+
+    it('keeps new requests usable without claiming cancellation when transcript reading fails', async () => {
+      cancelledHistory('user');
+      mockChatRecordingService.readActiveTranscriptChain.mockRejectedValue(
+        new Error('unavailable transcript'),
+      );
+      await session.prompt({
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'new request' }],
+      });
+      expect(
+        JSON.stringify(
+          vi.mocked(mockChat.sendMessageStream).mock.calls[0][1].message,
+        ),
+      ).not.toContain('intentionally cancelled the preceding turn');
+    });
+
+    it('uses restored identity once and leaves explicit resume requests intact', async () => {
+      const { records } = cancelledHistory('user');
+      const restoredHistory = buildApiHistoryFromConversation({
+        messages: JSON.parse(JSON.stringify(records)) as ChatRecord[],
+      });
+      vi.mocked(mockChat.getHistory).mockReturnValue(restoredHistory);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(restoredHistory);
+      const resumeText = 'Explicitly resume the task I cancelled';
+      await session.prompt({
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: resumeText }],
+      });
+      const firstRequest = vi.mocked(mockChat.sendMessageStream).mock
+        .calls[0][1];
+      expect(firstRequest.message).toContainEqual({ text: resumeText });
+      expect(JSON.stringify(firstRequest.message)).toContain(
+        'intentionally cancelled the preceding turn',
+      );
+      const nextInput: Content = {
+        role: 'user',
+        parts: firstRequest.message as Part[],
+      };
+      markApiHistoryPrompt(nextInput, 'new-native-turn');
+      records.push(
+        chatRecord({
+          uuid: 'new-input',
+          promptId: 'new-native-turn',
+          daemonPromptId: 'new-daemon-turn',
+          message: nextInput,
+        }),
+      );
+      const restoredAfterNewTurn = buildApiHistoryFromConversation({
+        messages: JSON.parse(JSON.stringify(records)) as ChatRecord[],
+      });
+      vi.mocked(mockChat.getHistory).mockReturnValue(restoredAfterNewTurn);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(
+        restoredAfterNewTurn,
+      );
+      await session.prompt({
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'another new request' }],
+      });
+      expect(
+        JSON.stringify(
+          vi.mocked(mockChat.sendMessageStream).mock.calls[1][1].message,
+        ),
+      ).not.toContain('intentionally cancelled the preceding turn');
     });
   });
 
