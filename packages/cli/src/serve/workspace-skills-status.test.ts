@@ -1169,4 +1169,53 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     const status = await provider(workspace);
     expect(status.skills.some((skill) => skill.name === 'alpha')).toBe(false);
   });
+
+  it('starts a post-invalidation read instead of joining the pre-invalidation enumeration', async () => {
+    const workspace = path.join(qwenHome, 'workspace');
+    const alphaDir = path.join(workspace, '.qwen', 'skills', 'alpha');
+    await fsp.mkdir(alphaDir, { recursive: true });
+    await fsp.writeFile(
+      path.join(alphaDir, 'SKILL.md'),
+      '---\nname: alpha\ndescription: Alpha\n---\nInstructions',
+    );
+
+    let enter!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const original = SkillManager.prototype.listSkills;
+    const listSpy = vi
+      .spyOn(SkillManager.prototype, 'listSkills')
+      .mockImplementation(async function (this: SkillManager) {
+        const skills = await original.call(this);
+        if (listSpy.mock.calls.length === 1) {
+          enter();
+          await gate;
+        }
+        return skills;
+      });
+
+    const provider = createWorkspaceSkillsStatusProvider();
+    const first = provider(workspace);
+    await entered;
+    const betaDir = path.join(workspace, '.qwen', 'skills', 'beta');
+    await fsp.mkdir(betaDir, { recursive: true });
+    await fsp.writeFile(
+      path.join(betaDir, 'SKILL.md'),
+      '---\nname: beta\ndescription: Beta\n---\nInstructions',
+    );
+    provider.invalidate?.(workspace);
+    const second = provider(workspace);
+    expect(second).not.toBe(first);
+    release();
+
+    const [firstStatus, secondStatus] = await Promise.all([first, second]);
+    expect(listSpy).toHaveBeenCalledTimes(2);
+    expect(secondStatus.skills.map((skill) => skill.name)).toContain('beta');
+    expect(firstStatus.skills.map((skill) => skill.name)).not.toContain('beta');
+  });
 });

@@ -141,6 +141,9 @@ export function createWorkspaceSkillsStatusProvider(
   provider.invalidate = (workspaceCwd) => {
     epochs.set(workspaceCwd, (epochs.get(workspaceCwd) ?? 0) + 1);
     managers.delete(workspaceCwd);
+    // An enumeration that started before this invalidation must not answer a
+    // read issued after it; the caller needs its own observation.
+    inFlight.delete(workspaceCwd);
   };
   provider.snapshot = async (workspaceCwd) => {
     if (options.workspaceTrusted === false)
