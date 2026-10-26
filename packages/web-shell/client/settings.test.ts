@@ -254,7 +254,6 @@ describe('settings presentation aliases', () => {
       'setting:workflow-keyword-trigger': 'ui.disableWorkflowKeywordTrigger',
       'setting:status-in-title': 'ui.showStatusInTitle',
       'setting:response-speed': 'ui.showResponseTokensPerSecond',
-      'setting:loading-phrases': 'ui.accessibility.enableLoadingPhrases',
       'setting:followup-suggestions': 'ui.enableFollowupSuggestions',
       'setting:tool-call-details': 'ui.showToolCallDetails',
       'setting:shell-output-limit': 'ui.shellOutputMaxLines',

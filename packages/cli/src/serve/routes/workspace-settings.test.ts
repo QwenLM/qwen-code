@@ -980,6 +980,7 @@ describe('POST /workspace/settings', () => {
     expect(write.status).toBe(400);
     expect(write.body).toMatchObject({ code: 'disallowed_key' });
     expect(persistSetting).not.toHaveBeenCalled();
+  });
 
   it('includes enableLoadingPhrases and customWittyPhrases in allowed keys for web shell clients', () => {
     const keys = getAllowedKeys();

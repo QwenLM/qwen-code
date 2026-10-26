@@ -13385,13 +13385,6 @@ export function App({
     activePanel === 'live' ||
       (activePanel === 'settings' && !liveSidebarEnabled),
   );
-  const enableLoadingPhrases = useMemo(() => {
-    const setting = workspaceSettings.find(
-      (s) => s.key === 'ui.accessibility.enableLoadingPhrases',
-    );
-    return setting?.values.effective !== false;
-  }, [workspaceSettings]);
-
   const configuredCustomWittyPhrases = useMemo(() => {
     const setting = workspaceSettings.find(
       (s) => s.key === 'ui.customWittyPhrases',
@@ -23878,7 +23871,6 @@ export function App({
                                 failedPromptRetry?.startedAt ??
                                 activeTurnStartedAt
                               }
-                              showPhrase={enableLoadingPhrases}
                               hasActivePrompt={sessionHasActivePrompt}
                               backgroundLabel={
                                 connection.backgroundTurn?.label ??
