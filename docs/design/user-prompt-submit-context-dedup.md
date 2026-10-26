@@ -203,6 +203,7 @@ accepted and documented as a limitation rather than solved here.
    (surrounding whitespace, no newline delimiters) are covered against
    `isUserPromptSubmitContextPartText`, which recognizes any tagged block; the
    predicate compares one exact payload and deliberately does not trim.
+
 2. A regression test at each injection site: with the tagged block already in
    history, the appended part and the recorded hook-context provenance are both
    absent on the interactive path, and only the prompt text is sent on the
