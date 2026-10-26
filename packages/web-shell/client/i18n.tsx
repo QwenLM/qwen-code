@@ -1,4 +1,8 @@
 import {
+  MANAGED_EXTENSION_MESSAGES_EN,
+  MANAGED_EXTENSION_MESSAGES_ZH,
+} from './components/managed/managed-extension-messages.js';
+import {
   MANAGED_LIFECYCLE_MESSAGES_EN,
   MANAGED_LIFECYCLE_MESSAGES_ZH,
 } from './components/managed/managed-lifecycle-messages.js';
@@ -4584,6 +4588,7 @@ const EN: Messages = {
   ...MANAGED_LIFECYCLE_MESSAGES_EN,
   ...WORKSPACE_REGISTRATION_MESSAGES_EN,
   ...MANAGED_MCP_MESSAGES_EN,
+  ...MANAGED_EXTENSION_MESSAGES_EN,
   ...TRAJECTORY_EXECUTION_MESSAGES_EN,
   ...TRAJECTORY_FILTER_MESSAGES_EN,
   ...TRAJECTORY_WINDOW_MESSAGES_EN,
@@ -5160,6 +5165,7 @@ const ZH: Messages = {
   'toolName.cron_create': '创建定时任务',
   'toolName.cron_list': '定时任务列表',
   'toolName.cron_delete': '删除定时任务',
+  'toolName.autofix_pr': 'PR 自动修复',
   'toolName.task_create': '创建任务',
   'toolName.task_update': '更新任务',
   'toolName.task_list': '任务列表',
@@ -8816,6 +8822,7 @@ const ZH: Messages = {
   ...MANAGED_LIFECYCLE_MESSAGES_ZH,
   ...WORKSPACE_REGISTRATION_MESSAGES_ZH,
   ...MANAGED_MCP_MESSAGES_ZH,
+  ...MANAGED_EXTENSION_MESSAGES_ZH,
   ...TRAJECTORY_EXECUTION_MESSAGES_ZH,
   ...TRAJECTORY_FILTER_MESSAGES_ZH,
   ...TRAJECTORY_WINDOW_MESSAGES_ZH,

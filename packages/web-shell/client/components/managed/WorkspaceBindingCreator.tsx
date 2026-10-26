@@ -71,6 +71,11 @@ import {
 import { isManagedInitialApprovalMode } from './managed-agent-provider';
 import { managedRequestId } from './managed-session-storage';
 import { RemoteWorkspaceRegistration } from './RemoteWorkspaceRegistration';
+import {
+  isManagedExtensionPins,
+  type ManagedExtensionPin,
+  type ManagedExtensionCatalog,
+} from './managed-extension-types';
 
 interface PendingCreation {
   agentId: string;
@@ -84,6 +89,7 @@ interface PendingCreation {
   approvalMode?: ManagedApprovalMode;
   planMode?: boolean;
   skills?: ManagedSessionSkill[];
+  extensionPins?: ManagedExtensionPin[];
 }
 
 interface PendingWorkspace {
@@ -161,6 +167,8 @@ function readPending(
         typeof item['planMode'] !== 'boolean') ||
       (item['skills'] !== undefined &&
         !isManagedSessionSkills(item['skills'])) ||
+      (item['extensionPins'] !== undefined &&
+        !isManagedExtensionPins(item['extensionPins'])) ||
       !isManagedInput(input) ||
       (item['sessionId'] !== undefined && typeof item['sessionId'] !== 'string')
     )
@@ -272,6 +280,32 @@ export function WorkspaceBindingCreator({
       return '';
     }
   });
+  const [extensionCatalog, setExtensionCatalog] =
+    useState<ManagedExtensionCatalog>();
+  const [extensionPins, setExtensionPins] = useState<ManagedExtensionPin[]>([]);
+  useEffect(() => {
+    const abort = new AbortController();
+    setExtensionCatalog(undefined);
+    setExtensionPins([]);
+    if (selected && provider.extensions) {
+      void provider.extensions
+        .list(selected, { clientId, signal: abort.signal })
+        .then((catalog) => {
+          if (
+            !abort.signal.aborted &&
+            catalog.extensions.length <= 256 &&
+            catalog.extensions.every((item) =>
+              isManagedExtensionPins([item.pin]),
+            ) &&
+            new Set(catalog.extensions.map((item) => item.pin.extensionId))
+              .size === catalog.extensions.length
+          )
+            setExtensionCatalog(catalog);
+        })
+        .catch(() => undefined);
+    }
+    return () => abort.abort();
+  }, [selected, provider.extensions, clientId]);
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
   const requestedWorkspaceRef = useRef(workspaceId);
@@ -709,6 +743,9 @@ export function WorkspaceBindingCreator({
         clientId,
         idempotencyKey: managedRequestId(),
         ...(skills.length ? { skills: structuredClone(skills) } : {}),
+        ...(extensionPins.length
+          ? { extensionPins: structuredClone(extensionPins) }
+          : {}),
         ...(supportsApprovalModeSelection && currentOptions
           ? { approvalMode: currentOptions.approvalMode }
           : {}),
@@ -743,6 +780,9 @@ export function WorkspaceBindingCreator({
           workspaceId: attempt.workspaceId,
           cwdRelative: attempt.cwdRelative,
           ...(attempt.skills?.length ? { skills: attempt.skills } : {}),
+          ...(attempt.extensionPins === undefined
+            ? {}
+            : { extensionPins: attempt.extensionPins }),
           ...(attempt.approvalMode === undefined
             ? {}
             : { approvalMode: attempt.approvalMode }),
@@ -1208,6 +1248,89 @@ export function WorkspaceBindingCreator({
           {t('managed.newWorkspaceResume')}
         </Button>
       )}
+      {extensionCatalog?.supported &&
+        extensionCatalog.extensions.length > 0 && (
+          <fieldset
+            className="my-2 grid gap-2 text-sm"
+            disabled={busy || !!pending}
+          >
+            <legend>{t('managed.extensions.title')}</legend>
+            {extensionCatalog.extensions.map((entry) => (
+              <div key={entry.pin.extensionId} className="grid gap-1">
+                <label className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    disabled={
+                      extensionPins.length >= 32 &&
+                      !extensionPins.some(
+                        (pin) => pin.extensionId === entry.pin.extensionId,
+                      )
+                    }
+                    checked={extensionPins.some(
+                      (pin) => pin.extensionId === entry.pin.extensionId,
+                    )}
+                    onChange={(event) =>
+                      setExtensionPins((old) =>
+                        event.target.checked
+                          ? old.length < 32 &&
+                            !old.some(
+                              (pin) =>
+                                pin.extensionId === entry.pin.extensionId,
+                            )
+                            ? [...old, entry.pin]
+                            : old
+                          : old.filter(
+                              (pin) =>
+                                pin.extensionId !== entry.pin.extensionId,
+                            ),
+                      )
+                    }
+                  />
+                  {entry.manifest.name} {entry.manifest.version}
+                </label>
+                {extensionPins.some(
+                  (pin) => pin.extensionId === entry.pin.extensionId,
+                ) && (
+                  <label className="flex items-center gap-2">
+                    {t('managed.extensions.settingsRevision')}
+                    <Input
+                      type="number"
+                      min={1}
+                      max={Number.MAX_SAFE_INTEGER}
+                      aria-label={`${t('managed.extensions.settingsRevision')}: ${entry.manifest.name}`}
+                      value={
+                        extensionPins.find(
+                          (pin) => pin.extensionId === entry.pin.extensionId,
+                        )?.settingsRevision ?? ''
+                      }
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        if (
+                          value &&
+                          (!/^[1-9][0-9]*$/.test(value) ||
+                            !Number.isSafeInteger(Number(value)))
+                        )
+                          return;
+                        setExtensionPins((old) =>
+                          old.map((pin) =>
+                            pin.extensionId === entry.pin.extensionId
+                              ? {
+                                  ...pin,
+                                  settingsRevision: value
+                                    ? Number(value)
+                                    : undefined,
+                                }
+                              : pin,
+                          ),
+                        );
+                      }}
+                    />
+                  </label>
+                )}
+              </div>
+            ))}
+          </fieldset>
+        )}
       {(supportedSkillsSource || pending?.skills?.length) && (
         <p className="my-2 text-sm text-muted-foreground">
           {pending?.skills?.length
@@ -1497,6 +1620,7 @@ export function WorkspaceBindingCreator({
               skillsLoadError={skills.error}
               skillsLoaded={skills.loaded}
               fileReferenceActions={fileReferences.actions}
+              fileUploadTarget={fileReferences.uploadTarget}
               persistFileReferences
               existingFolderWorkspaceSupported={
                 registrationAvailable && Boolean(binding.registration)

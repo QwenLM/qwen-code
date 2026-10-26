@@ -1895,8 +1895,7 @@ class HostedPublicWorkspaceIT {
                 assertThat(tools).contains("read_file", "write_file", "edit", "run_shell_command");
                 assertThat(tools).doesNotContain("team_create", "workflow", "send_message");
             } else if (shell) {
-                List<String> expectedTools = new ArrayList<>(List.of(
-                        "read_file", "write_file", "edit", "web_fetch", "run_shell_command", "glob"));
+                var expectedTools = new ArrayList<>(List.of("read_file", "write_file", "edit", "web_fetch", "run_shell_command", "glob"));
                 if (shellLifecycleV2) {
                     expectedTools.add("monitor");
                 }
