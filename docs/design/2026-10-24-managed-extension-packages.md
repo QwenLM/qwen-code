@@ -155,6 +155,9 @@ requires Workspace OPERATOR and deployment source/actor/execution policy. Comman
 use stable idempotency keys and expected configuration revisions. Status is read-only:
 it never creates Sessions, cold-loads Harnesses or resubmits work. Reuse the manager
 UI with a distinct Managed provider and abort stale target requests.
+The unified Plugins → Extensions tab receives the current Managed provider,
+Workspace and Session, including before a Session is selected, so it never
+falls back to the daemon extension catalog in Managed mode.
 Catalogs contain at most 256 packages; a Session may select at most 32.
 Only the explicit pre-admission `extension_config_revision_conflict` response
 clears a pending apply and refreshes its configuration revision. Generic conflicts

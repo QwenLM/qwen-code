@@ -1139,6 +1139,14 @@ function resolveWebSearchSettings(
   );
   const maxPerSession =
     envMaxPerSession > 0 ? envMaxPerSession : webSearch?.maxPerSession;
+  // Comma-separated, like the other list-valued env overrides. Entries are
+  // normalized in core (trim, lower-case, drop dotless) at classification time.
+  const envAllowedHosts = (process.env['WEB_SEARCH_ALLOWED_HOSTS'] ?? '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  const allowedHosts =
+    envAllowedHosts.length > 0 ? envAllowedHosts : webSearch?.allowedHosts;
   const baseUrl = process.env['WEB_SEARCH_BASE_URL']?.trim() || undefined;
   const apiKeyEnv = baseUrl
     ? process.env['WEB_SEARCH_API_KEY']?.trim()
@@ -1151,7 +1159,8 @@ function resolveWebSearchSettings(
     webExtractor === undefined &&
     baseUrl === undefined &&
     timeoutMs === undefined &&
-    maxPerSession === undefined
+    maxPerSession === undefined &&
+    allowedHosts === undefined
   ) {
     return undefined;
   }
@@ -1160,6 +1169,7 @@ function resolveWebSearchSettings(
     model,
     webExtractor,
     baseUrl,
+    allowedHosts,
     apiKeyEnv,
     timeoutMs,
     maxPerSession,
