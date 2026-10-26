@@ -1262,6 +1262,9 @@ describe('package scripts', () => {
     expect(print).toContain("if: '${{ failure() || cancelled() }}'");
     expect(print).toContain('side_log="${RUNNER_TEMP}/side-lane-tests.log"');
     expect(print).toContain('cat "${side_log}"');
+    // The script removes the log after every replay it reaches, so on an
+    // ordinary red test job the guard is what keeps this step quiet.
+    expect(print).toContain('if [ -f "${side_log}" ]; then');
     expect(
       job.indexOf("- name: 'Run tests and generate reports'"),
     ).toBeLessThan(
@@ -1357,6 +1360,13 @@ describe('package scripts', () => {
             'echo "output of npm $*"',
             'if [ -n "$STUB_FAIL" ] && echo "$*" | grep -qF -- "$STUB_FAIL"; then exit 7; fi',
             'if [ -n "$STUB_HANG" ] && echo "$*" | grep -qF -- "$STUB_HANG"; then sleep 30; fi',
+            // scripts/tests runs `npm run test:scripts:unit`, the lane script
+            // again, one level deep. Its args mark its output, so a test can
+            // tell the nested lane's lines from the outer one's.
+            'if [ -n "$STUB_NESTED" ] && [ -z "${STUB_NESTED_DONE:-}" ] && echo "$*" | grep -qF "test:scripts:unit"; then',
+            '  printf "%s" "${SIDE_LANE_LOG-<unset>}" > "$STUB_NESTED_SAW"',
+            '  STUB_NESTED_DONE=1 bash "$LANES" --nested',
+            'fi',
             '',
           ].join('\n'),
         );
@@ -1394,6 +1404,7 @@ describe('package scripts', () => {
             threads = '6',
             sideLog = '',
             killed = false,
+            nested = false,
           } = {},
         ) => {
           const calls = path.join(dir, `${name}.calls`);
@@ -1420,6 +1431,8 @@ describe('package scripts', () => {
               STUB_REAL_NPM: realListing ? realNpm : '',
               STUB_FAIL: fail,
               STUB_HANG: killed ? '--workspace=@qwen-code/qwen-code-core' : '',
+              STUB_NESTED: nested ? '1' : '',
+              STUB_NESTED_SAW: path.join(dir, `${name}.nested-saw`),
             },
           });
           // The replayed side log is removed once printed.
@@ -1600,6 +1613,36 @@ describe('package scripts', () => {
           'output of npm run test:scripts:unit -- --retry=2',
         );
         expect(existsSync(namedLog)).toBe(false);
+
+        // scripts/tests runs `npm run test:scripts:unit`, which runs this
+        // script again. A nested run must not inherit the caller's log: it
+        // would truncate the outer side lane's log, replay it and remove it,
+        // leaving the outer replay nothing to print.
+        const nestedLog = path.join(dir, 'nested.log');
+        const nested = run('nested-log', { sideLog: nestedLog, nested: true });
+        expect(nested.rc).toBe('0');
+        expect(
+          nested.calls.filter((call) =>
+            call.startsWith('npm run test:scripts:unit'),
+          ),
+        ).toHaveLength(2);
+        // The nested run does not see the caller's log, so it cannot truncate,
+        // replay or remove it.
+        expect(
+          readFileSync(path.join(dir, 'nested-log.nested-saw'), 'utf8'),
+        ).toBe('<unset>');
+        // The outer side lane's own lines still reached its replay. The
+        // nested run's carry `--nested`, so its identical-looking output
+        // cannot satisfy these.
+        const nestedReplay = nested.stdout.indexOf('Side lane output');
+        expect(nestedReplay).toBeGreaterThanOrEqual(0);
+        for (const side of [
+          'output of npm run test:ci --workspace=@qwen-code/acp-bridge --workspace=@qwen-code/web-shell --workspace=@qwen-code/sdk -- --retry=2',
+          'output of npm run test:scripts:unit -- --retry=2',
+        ]) {
+          expect(nestedReplay).toBeLessThan(nested.stdout.indexOf(side));
+        }
+        expect(existsSync(nestedLog)).toBe(false);
 
         // A step killed before the replay leaves the named log behind with
         // everything the side lane ran, for ci.yml's next step to print.

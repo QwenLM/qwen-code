@@ -78,6 +78,10 @@ elif ! side_log="$(mktemp "${TMPDIR:-/tmp}/side-lane-tests.XXXXXX")"; then
   echo "::error::Could not create the side lane's log file under ${TMPDIR:-/tmp}; running no suites."
   exit 1
 fi
+# scripts/tests runs `npm run test:scripts:unit`, this script again: a nested
+# run that inherited the caller's log would truncate the outer side lane's,
+# replay it and remove it.
+unset SIDE_LANE_LOG
 
 # Half a Vitest worker cap, at least 1; 2 where the cap is unset or not a count.
 half_cap() {
