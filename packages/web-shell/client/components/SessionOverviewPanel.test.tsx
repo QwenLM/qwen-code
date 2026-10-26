@@ -3854,6 +3854,62 @@ describe('SessionOverviewPanel standalone sessions', () => {
     }
   });
 
+  it('labels a standalone row "No workspace" instead of the internal root', async () => {
+    useConversationsRuntimeCapabilities();
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('st1', {
+            workspaceCwd: '/conv',
+            displayName: 'Solo',
+            updatedAt: '2026-07-06T11:00:00.000Z',
+          }),
+        ],
+      },
+    ];
+    render();
+    await flushAsync();
+    const row = rows().find((tr) => tr.textContent?.includes('Solo'))!;
+    const workspaceCell = row.querySelector(
+      '[data-web-shell-session-workspace]',
+    )!;
+    expect(workspaceCell.textContent).toBe('No workspace');
+    expect(workspaceCell.getAttribute('title')).toBe('No workspace');
+    await act(async () => click(rowActionButton(row, 'Details for Solo')));
+    const details = document.querySelector(
+      '[role="dialog"][aria-label="Solo"]',
+    ) as HTMLElement;
+    expect(details).not.toBeNull();
+    expect(details.textContent).toContain('No workspace');
+    expect(details.innerHTML).not.toContain('/conv');
+  });
+
+  it('labels the Conversations runtime facet "No workspace" in the workspace filter', async () => {
+    useConversationsRuntimeCapabilities();
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('st1', {
+            workspaceCwd: '/conv',
+            displayName: 'Solo',
+            updatedAt: '2026-07-06T11:00:00.000Z',
+          }),
+        ],
+      },
+    ];
+    render();
+    await flushAsync();
+    const trigger = container!.querySelector(
+      'button[aria-label^="Filter by workspace:"]',
+    ) as HTMLElement;
+    act(() => click(trigger));
+    const filterPanel = document.querySelector(
+      '[role="dialog"][aria-label="Filter by workspace"]',
+    ) as HTMLElement;
+    expect(filterPanel.textContent).toContain('No workspace');
+    expect(filterPanel.textContent).not.toContain('Conversations');
+  });
+
   it('renames the open standalone session through the standalone route', async () => {
     useConversationsRuntimeCapabilities();
     connectionState.sessionId = 'st1';

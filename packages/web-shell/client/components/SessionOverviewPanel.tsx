@@ -627,11 +627,15 @@ function SessionOverviewPanelInner({
     if (workspaceCwd || !multiWorkspace) return [];
     const workspaces = registeredWorkspaces ?? [];
     const listed = workspaces.filter((entry) => entry.primary || entry.trusted);
+    // The live entry is the daemon's internal Conversations runtime that
+    // standalone rows carry as their cwd; it is not a project, so its facet
+    // reads the same "No workspace" the rows do.
     return listed.map((entry) => ({
       cwd: entry.cwd,
-      label: workspaceLabel(entry),
+      label:
+        entry.kind === 'live' ? t('sidebar.noWorkspace') : workspaceLabel(entry),
     }));
-  }, [multiWorkspace, registeredWorkspaces, workspaceCwd]);
+  }, [multiWorkspace, registeredWorkspaces, t, workspaceCwd]);
 
   // Exclusions are only manageable through the filter popover. When the
   // option set shrinks — most sharply when the host locks the panel to one
@@ -702,6 +706,12 @@ function SessionOverviewPanelInner({
           isWaitingForPermission: card.status === 'needsApproval',
           isWaitingForUserQuestion: card.status === 'askUserQuestion',
         },
+        // A standalone row's cwd is the daemon's internal Conversations root,
+        // a routing detail that must not be shown as a project — the sidebar
+        // labels the same session "No workspace".
+        workspaceLabel: openSessionContext(card)
+          ? t('sidebar.noWorkspace')
+          : undefined,
         label: card.label,
         time: card.updatedAt ? formatRelativeTime(card.updatedAt, t) : '',
         completedUnread: false,
@@ -1402,12 +1412,18 @@ function SessionOverviewPanelInner({
                 <span
                   className="max-w-[40%] truncate"
                   data-web-shell-session-workspace
-                  title={card.workspaceCwd}
+                  title={
+                    openSessionContext(card)
+                      ? t('sidebar.noWorkspace')
+                      : card.workspaceCwd
+                  }
                 >
-                  {workspaceLabelForCwd(
-                    card.workspaceCwd,
-                    registeredWorkspaces,
-                  )}
+                  {openSessionContext(card)
+                    ? t('sidebar.noWorkspace')
+                    : workspaceLabelForCwd(
+                        card.workspaceCwd,
+                        registeredWorkspaces,
+                      )}
                 </span>
                 {card.gitBranch && (
                   <>
