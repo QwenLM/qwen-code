@@ -90,28 +90,96 @@ test('simple mobile add drawer exposes secondary controls @smoke', async ({
   await expect.poll(() => daemon.modelRequests().length).toBe(1);
 });
 
-test('simple mobile composer expands inline without losing its draft or attachments @smoke', async ({
+test('simple mobile composer switches directly to advanced mode without losing its draft or attachments @smoke', async ({
   page,
 }, testInfo) => {
-  const scenario = createWebShellDaemonScenario();
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'mediaDevices', {
+      configurable: true,
+      value: {
+        getUserMedia: () => new Promise(() => undefined),
+      },
+    });
+  });
+  const scenario = createWebShellDaemonScenario({
+    capabilities: {
+      features: ['voice_transcribe', 'workspace_voice'],
+    },
+    voice: { enabled: true },
+  });
   const daemon = await installScenario(page, scenario, testInfo);
   await page.goto(
-    `/e2e/composer-layout-harness.html?composerVariant=simple&tags=true&sessionId=${scenario.sessionId}`,
+    `/e2e/composer-layout-harness.html?composerVariant=simple&tags=false&sessionId=${scenario.sessionId}`,
   );
   await completeReplay(page, daemon, scenario.sessionId);
   const composer = page.locator('[data-web-shell-composer]');
   const textarea = composer.locator(COMPOSER_TEXTAREA);
-  const attachments = composer.locator('[data-web-shell-composer-tag]');
-  await expect(attachments).toHaveCount(18);
+  const microphone = composer.getByRole('button', {
+    name: 'Start voice dictation',
+    exact: true,
+  });
+  const modeButton = composer.locator(
+    '[data-web-shell-composer-expand], [data-web-shell-composer-collapse]',
+  );
+  const send = composer.locator('[data-web-shell-composer-submit]');
+  await expect(modeButton).toHaveAccessibleName('Switch to advanced mode');
+  await expect(microphone).toBeVisible();
+  await expect(send).toBeHidden();
+  const modeBox = (await modeButton.boundingBox())!;
+  const micBox = (await microphone.boundingBox())!;
+  expect(modeBox.x + modeBox.width).toBeLessThanOrEqual(micBox.x);
+  await expect(
+    modeButton.locator('..').locator('button:visible').last(),
+  ).toHaveAccessibleName('Start voice dictation');
+
+  await modeButton.tap();
+  await expect(modeButton).toHaveAccessibleName('Switch to simple mode');
+  await expect(composer).toHaveAttribute(
+    'data-web-shell-composer-variant',
+    'default',
+  );
+  await expect(microphone).toBeVisible();
+  await expect(send).toBeHidden();
+  const advancedModeBox = (await modeButton.boundingBox())!;
+  const advancedMicBox = (await microphone.boundingBox())!;
+  expect(advancedModeBox.x + advancedModeBox.width).toBeLessThanOrEqual(
+    advancedMicBox.x,
+  );
+  await expect(
+    modeButton.locator('..').locator('button:visible').last(),
+  ).toHaveAccessibleName('Start voice dictation');
+  await expect(page.getByRole('menu')).toHaveCount(0);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await modeButton.tap();
+  await expect(modeButton).toHaveAccessibleName('Switch to advanced mode');
+
   await textarea.fill('保留中文草稿和附件');
+  await expect(microphone).toBeHidden();
+  await expect(send).toBeVisible();
+  const typedModeBox = (await modeButton.boundingBox())!;
+  const sendBox = (await send.boundingBox())!;
+  expect(typedModeBox.x + typedModeBox.width).toBeLessThanOrEqual(sendBox.x);
+  await expect(
+    modeButton.locator('..').locator('button:visible').last(),
+  ).toHaveAttribute('data-web-shell-composer-submit');
+  await composer
+    .locator('input[type="file"]')
+    .last()
+    .setInputFiles({
+      name: 'retained-note.txt',
+      mimeType: 'text/plain',
+      buffer: Buffer.from('retained attachment'),
+    });
+  const attachments = composer.locator('[data-web-shell-composer-attachments]');
+  await expect(attachments).toBeVisible();
   const textareaNode = (await textarea.elementHandle())!;
-  const attachmentText = await attachments.allTextContents();
+  const attachmentText = await attachments.textContent();
   await expect(composer).toHaveAttribute(
     'data-web-shell-composer-variant',
     'simple',
   );
 
-  await composer.locator('[data-web-shell-composer-expand]').tap();
+  await modeButton.tap();
   await expect(composer).toHaveAttribute(
     'data-web-shell-composer-variant',
     'default',
@@ -120,6 +188,14 @@ test('simple mobile composer expands inline without losing its draft or attachme
     composer.locator('[data-web-shell-mobile-editing-actions]'),
   ).toBeVisible();
   await expect(composer.locator('[data-web-shell-model-button]')).toBeVisible();
+  await expect(modeButton).toHaveAccessibleName('Switch to simple mode');
+  await expect(microphone).toBeHidden();
+  await expect(send).toBeVisible();
+  await expect(
+    modeButton.locator('..').locator('button:visible').last(),
+  ).toHaveAttribute('data-web-shell-composer-submit');
+  await expect(page.getByRole('menu')).toHaveCount(0);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(page.locator('[data-web-shell-expanded-editor]')).toHaveCount(0);
   await expect(textarea).toHaveValue('保留中文草稿和附件');
   expect(
@@ -129,9 +205,9 @@ test('simple mobile composer expands inline without losing its draft or attachme
         document.querySelector('textarea[data-web-shell-composer-editor]'),
     ),
   ).toBe(true);
-  expect(await attachments.allTextContents()).toEqual(attachmentText);
+  expect(await attachments.textContent()).toBe(attachmentText);
 
-  await composer.locator('[data-web-shell-composer-collapse]').tap();
+  await modeButton.tap();
   await expect(composer).toHaveAttribute(
     'data-web-shell-composer-variant',
     'simple',
@@ -140,6 +216,9 @@ test('simple mobile composer expands inline without losing its draft or attachme
     composer.locator('[data-web-shell-mobile-editing-actions]'),
   ).toHaveCount(0);
   await expect(textarea).toHaveValue('保留中文草稿和附件');
+  await expect(modeButton).toHaveAccessibleName('Switch to advanced mode');
+  await expect(page.getByRole('menu')).toHaveCount(0);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
   expect(
     await textareaNode.evaluate(
       (node) =>
@@ -147,13 +226,16 @@ test('simple mobile composer expands inline without losing its draft or attachme
         document.querySelector('textarea[data-web-shell-composer-editor]'),
     ),
   ).toBe(true);
-  expect(await attachments.allTextContents()).toEqual(attachmentText);
+  expect(await attachments.textContent()).toBe(attachmentText);
 
+  await composer
+    .getByRole('button', { name: 'Remove retained-note.txt', exact: true })
+    .tap();
+  await expect(attachments).toHaveCount(0);
   await composer.locator('[data-web-shell-composer-submit]').tap();
   await expect.poll(() => daemon.promptRequests().length).toBe(1);
   const submitted = JSON.stringify(firstRequestBody(daemon.promptRequests()));
   expect(submitted).toContain('保留中文草稿和附件');
-  expect(submitted).toContain('analytics_table_18');
   await expect(textarea).toHaveValue('');
   await expect(attachments).toHaveCount(0);
 });

@@ -126,14 +126,13 @@
   border-radius: 50%;
 }
 
-.editorShell[data-web-shell-composer-variant='simple']
-  [data-web-shell-simple-voice]:not([hidden]) {
+.editorShell [data-web-shell-simple-voice]:not([hidden]) {
   display: flex;
   align-items: center;
   min-height: 44px;
 }
 
-.editorShell[data-web-shell-composer-variant='simple']
+.editorShell
   [data-web-shell-simple-idle]:has([data-web-shell-simple-voice] button)
   [data-web-shell-composer-submit] {
   display: none;

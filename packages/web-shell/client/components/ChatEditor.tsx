@@ -91,7 +91,8 @@ import {
   ArrowUpIcon,
   ChevronDownIcon,
   ChevronRightIcon,
-  ChevronUpIcon,
+  PanelBottomCloseIcon,
+  Settings2Icon,
   FolderClosedIcon,
   HistoryIcon,
   KeyboardIcon,
@@ -1488,8 +1489,9 @@ export const ChatEditor = memo(
       fileDropAction,
       composerVariant = 'default',
     } = useWebShellCustomization();
-    const [simpleExpanded, setSimpleExpanded] = useState(false);
-    const isSimple = composerVariant === 'simple' && !simpleExpanded;
+    const [advancedMode, setAdvancedMode] = useState(false);
+    const simpleVariantEnabled = composerVariant === 'simple';
+    const isSimple = simpleVariantEnabled && !advancedMode;
     // At-mention provider props win when set (main composer). Split-view
     // ChatPane omits them and falls back to the App-level customization
     // context. (Unlike the providers, file upload control comes ONLY from
@@ -3066,27 +3068,39 @@ export const ChatEditor = memo(
             ref={toolbarRightRef}
             className={styles.toolbarRight}
             data-web-shell-simple-idle={
-              isSimple && !core.hasContent && !isRunning && !composerPreparing
+              simpleVariantEnabled &&
+              !core.hasContent &&
+              !isRunning &&
+              !composerPreparing
                 ? ''
                 : undefined
             }
           >
             {!isSimple && toolbarSecondary}
-            {isMobile && isSimple && (
+            {isMobile && simpleVariantEnabled && (
               <button
                 type="button"
                 className={styles.toolBtn}
-                data-web-shell-composer-expand
-                aria-label={t('common.expand')}
-                title={t('common.expand')}
+                data-web-shell-composer-expand={isSimple ? '' : undefined}
+                data-web-shell-composer-collapse={!isSimple ? '' : undefined}
+                aria-label={t(
+                  isSimple
+                    ? 'composerMobile.advancedMode'
+                    : 'composerMobile.simpleMode',
+                )}
+                title={t(
+                  isSimple
+                    ? 'composerMobile.advancedMode'
+                    : 'composerMobile.simpleMode',
+                )}
                 onMouseDown={(event) => event.preventDefault()}
                 onClick={(event) => {
                   event.stopPropagation();
-                  setSimpleExpanded(true);
+                  setAdvancedMode((current) => !current);
                   core.focus();
                 }}
               >
-                <ChevronUpIcon />
+                {isSimple ? <Settings2Icon /> : <PanelBottomCloseIcon />}
               </button>
             )}
             {showToolbarAction('voice') && (
@@ -3107,11 +3121,17 @@ export const ChatEditor = memo(
                   }}
                 />
                 <span
-                  data-web-shell-simple-voice={isSimple ? '' : undefined}
-                  hidden={
-                    isSimple && (core.hasContent || isRunning) && !voiceActive
+                  data-web-shell-simple-voice={
+                    simpleVariantEnabled ? '' : undefined
                   }
-                  style={{ display: !isSimple ? 'contents' : undefined }}
+                  hidden={
+                    simpleVariantEnabled &&
+                    (core.hasContent || isRunning) &&
+                    !voiceActive
+                  }
+                  style={{
+                    display: !simpleVariantEnabled ? 'contents' : undefined,
+                  }}
                 >
                   <VoiceButton
                     disabled={disabled}
@@ -3772,23 +3792,6 @@ export const ChatEditor = memo(
                   </button>
                 )}
                 <span className={styles.mobileEditingSpacer} />
-                {composerVariant === 'simple' && simpleExpanded && (
-                  <button
-                    type="button"
-                    className={styles.toolBtn}
-                    data-web-shell-composer-collapse
-                    aria-label={t('common.collapse')}
-                    title={t('common.collapse')}
-                    onMouseDown={(event) => event.preventDefault()}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      setSimpleExpanded(false);
-                      core.focus();
-                    }}
-                  >
-                    <ChevronDownIcon />
-                  </button>
-                )}
                 {mobileFocused && (
                   <button
                     type="button"
