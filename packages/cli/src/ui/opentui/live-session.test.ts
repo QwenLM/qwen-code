@@ -128,7 +128,26 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
       async schedule(
         calls: Array<{ callId: string; name?: string; args?: unknown }>,
       ): Promise<void> {
-        if (checkpointControl.held) {
+        if (
+          calls.some(
+            (call) => (call.args as { __foreground?: boolean })?.__foreground,
+          )
+        ) {
+          await this.opts.onToolCallsUpdate?.(
+            calls.map((request) => ({ status: 'scheduled', request })),
+          );
+          await this.opts.onToolCallsUpdate?.(
+            calls.map((request, index) => ({
+              status: 'executing',
+              request,
+              pid: 4300 + index,
+              promoteAbortController: new AbortController(),
+            })),
+          );
+          await this.opts.onToolCallsUpdate?.(
+            calls.map((request) => ({ status: 'success', request })),
+          );
+        } else if (checkpointControl.held) {
           const waiting = () =>
             calls.map((request) => ({
               status: 'awaiting_approval',
@@ -376,6 +395,19 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
             };
           }),
         );
+        if (
+          calls.some(
+            (call) => (call.args as { __foreground?: boolean })?.__foreground,
+          )
+        ) {
+          await this.opts.onToolCallsUpdate?.(
+            calls.map((request) => ({
+              status: 'executing',
+              request,
+              pid: 9999,
+            })),
+          );
+        }
       }
     },
   };
@@ -3167,6 +3199,49 @@ describe('livePromptEvents', () => {
     expect(firstEcho).toBeGreaterThan(-1);
     expect(warn).toBeGreaterThan(firstEcho);
     expect(secondEcho).toBeGreaterThan(warn);
+  });
+
+  it('publishes actual executing shell PID/controllers, excluding queued and non-shell calls, then clears the owner', async () => {
+    let requests = 0;
+    const send = vi.fn(function* (): Generator<{
+      type: string;
+      value?: unknown;
+    }> {
+      if (++requests === 1) {
+        yield {
+          type: 'tool_call_request',
+          value: {
+            callId: 'shell-owner',
+            name: 'run_shell_command',
+            args: { __foreground: true },
+          },
+        };
+        yield {
+          type: 'tool_call_request',
+          value: { callId: 'not-shell', name: 'read_file', args: {} },
+        };
+      } else yield { type: 'finished', value: {} };
+    });
+    const onExecutingShells = vi.fn();
+    await drain(
+      livePromptEvents(createFakeConfig(send), 'q', undefined, {
+        onExecutingShells,
+      }),
+    );
+    const snapshots = onExecutingShells.mock.calls.map(([calls]) => calls);
+    expect(snapshots[0]).toEqual([]);
+    expect(snapshots).toContainEqual([
+      {
+        callId: 'shell-owner',
+        pid: 4300,
+        promoteAbortController: expect.any(AbortController),
+      },
+    ]);
+    expect(snapshots.at(-1)).toEqual([]);
+    expect(snapshots.flat().some((call) => call.pid === 9999)).toBe(false);
+    expect(snapshots.flat().some((call) => call.callId === 'not-shell')).toBe(
+      false,
+    );
   });
 
   it('forwards awaiting_approval calls to onWaitingCall exactly once per callId', async () => {

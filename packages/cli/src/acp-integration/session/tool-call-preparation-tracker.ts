@@ -80,6 +80,17 @@ export class ToolCallPreparationTracker {
     }
   }
 
+  /** Takes every call still shown as preparing, for its owner to settle. */
+  takePending(): Array<{ callId: string; toolName: string }> {
+    const pending = [...this.pending].map(([callId, toolName]) => ({
+      callId,
+      toolName,
+    }));
+    this.pending.clear();
+    this.resolved.clear();
+    return pending;
+  }
+
   /**
    * Terminates unresolved preparations. The map is cleared first so repeated
    * cleanup, including re-entry after an emission failure, cannot emit twice.
