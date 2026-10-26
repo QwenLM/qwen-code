@@ -633,7 +633,9 @@ function SessionOverviewPanelInner({
     return listed.map((entry) => ({
       cwd: entry.cwd,
       label:
-        entry.kind === 'live' ? t('sidebar.noWorkspace') : workspaceLabel(entry),
+        entry.kind === 'live'
+          ? t('sidebar.noWorkspace')
+          : workspaceLabel(entry),
     }));
   }, [multiWorkspace, registeredWorkspaces, t, workspaceCwd]);
 
