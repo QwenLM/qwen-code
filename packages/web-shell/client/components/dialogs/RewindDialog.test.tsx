@@ -30,7 +30,7 @@ const snapshots: DaemonRewindSnapshotInfo[] = [
   {
     promptId: 'p1',
     daemonPromptId: 'daemon-B',
-    turnIndex: 2,
+    turnIndex: 1,
     timestamp: '2026-01-01T00:01:00.000Z',
   },
 ] as unknown as DaemonRewindSnapshotInfo[];
@@ -127,9 +127,22 @@ describe('RewindDialog keyboard', () => {
     expect(rewind).toHaveBeenCalledWith('p1');
   });
 
+  it('keeps session turn numbers after earlier transcript blocks are evicted', async () => {
+    const rewind = vi.fn().mockResolvedValue(undefined);
+    await mount(rewind, [{ ...snapshots[1]!, turnIndex: 40 }], [blocks[1]!]);
+    expect(container!.querySelector('[role="option"]')?.textContent).toContain(
+      '#41 second turn',
+    );
+    press('Enter');
+    await act(async () => {
+      rewindButton().click();
+    });
+    expect(rewind).toHaveBeenCalledWith('p1');
+  });
+
   it('numbers the checkpoint the way the chat numbers it past an injected row', async () => {
-    // The chat renders `mid_turn_message_injected` as a system row, so it never
-    // numbers it; the dialog ordinal has to skip it too.
+    // The injected row shares the daemon prompt identity; the preview must
+    // still come from the ordinary user block.
     const withInjected = [
       blocks[0]!,
       {
@@ -170,15 +183,15 @@ describe('RewindDialog keyboard', () => {
   it('keeps a turn outside the loaded window rewindable by its identity', async () => {
     // The loaded transcript is a window, not the session: a truncated replay
     // leaves snapshots whose blocks were never paged in. The rewind itself
-    // carries only the prompt identity, so those rows stay targetable and just
-    // lose the preview text and the ordinal badge.
+    // carries only the prompt identity, so those rows stay targetable and keep
+    // their snapshot number even without preview text.
     const entry = { ...snapshots[0]!, daemonPromptId: 'not-paged-in' };
     const rewind = vi.fn().mockResolvedValue(undefined);
     await mount(rewind, [entry]);
-    // No block means no prompt text and no ordinal badge, so the row falls
-    // back to the identity-derived label instead of pretending it has one.
+    // The snapshot still supplies its number; only the preview falls back to
+    // the identity-derived label.
     expect(container!.textContent).toContain('Prompt');
-    expect(container!.textContent).not.toContain('#1');
+    expect(container!.textContent).toContain('#1');
     press('Enter');
     expect(rewindButton().disabled).toBe(false);
     await act(async () => {

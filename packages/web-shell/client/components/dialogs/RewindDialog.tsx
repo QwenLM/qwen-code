@@ -3,10 +3,7 @@ import type {
   DaemonRewindSnapshotInfo,
   DaemonTranscriptBlock,
 } from '@qwen-code/sdk/daemon';
-import {
-  findDaemonRewindUserBlock,
-  isDaemonRewindUserBlock,
-} from '@qwen-code/sdk/daemon';
+import { findDaemonRewindUserBlock } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../../i18n';
 import { useListboxKeyboard } from '../../hooks/useListboxKeyboard';
 import { dp } from './dialogStyles';
@@ -71,13 +68,8 @@ export function RewindDialog({
   }, [loadSnapshots, onError]);
 
   const items = useMemo(() => {
-    // One pass each: the ordinal map is shared by every row (a per-snapshot
-    // rescan is quadratic in a long transcript), and the identity census makes
-    // duplicate detection a lookup instead of a nested filter.
-    const ordinals = new Map<DaemonTranscriptBlock, number>();
-    for (const block of blocks) {
-      if (isDaemonRewindUserBlock(block)) ordinals.set(block, ordinals.size);
-    }
+    // Count identities once so duplicate detection is a lookup instead of a
+    // nested filter.
     const identityCounts = new Map<string, number>();
     for (const snapshot of snapshots) {
       const identity = snapshot.daemonPromptId;
@@ -98,12 +90,10 @@ export function RewindDialog({
         return {
           snapshot,
           promptText: block?.text.trim() ?? '',
-          turnIndex: block ? ordinals.get(block) : undefined,
           // The rewind itself carries only the prompt identity, so a turn
           // outside the loaded transcript window stays targetable: the block
-          // lookup above supplies the preview text and the ordinal badge, not
-          // the permission. Only a snapshot with no usable identity is
-          // unavailable, and it says why.
+          // lookup above supplies the preview text, not the permission. Only a
+          // snapshot with no usable identity is unavailable, and it says why.
           available: usable,
         };
       })
@@ -201,7 +191,7 @@ export function RewindDialog({
           items.length > 0 ? optionId(cursorIdx) : undefined
         }
       >
-        {items.map(({ snapshot, promptText, turnIndex, available }, index) => {
+        {items.map(({ snapshot, promptText, available }, index) => {
           const isCursor = index === cursorIdx;
           const isSelected = selectedPromptId === snapshot.promptId;
           const label =
@@ -227,9 +217,7 @@ export function RewindDialog({
               onMouseMove={() => setCursorIdx(index)}
             >
               <div className={styles.prompt} title={label}>
-                {turnIndex !== undefined && (
-                  <span className={styles.turn}>#{turnIndex + 1}</span>
-                )}{' '}
+                <span className={styles.turn}>#{snapshot.turnIndex + 1}</span>{' '}
                 {label}
               </div>
               <div className={styles.time}>
