@@ -83,6 +83,12 @@ test('click opens Home and functional pages while collapse retains the draft @sm
     'Plugins',
   );
   await expect(
+    page.getByTestId('inline-panel').getByRole('button', {
+      name: 'back',
+      exact: true,
+    }),
+  ).toHaveCount(0);
+  await expect(
     rail.getByRole('button', { name: 'Plugins', exact: true }),
   ).toHaveAttribute('aria-current', 'page');
   await page.screenshot({ path: info.outputPath('plugins-dark.png') });
@@ -384,6 +390,28 @@ test('split view keeps the home column and a working collapse control', async ({
   await expect(page.locator(homeColumn)).toBeHidden();
   await rail.getByRole('button', { name: 'Expand', exact: true }).click();
   await expect(page.locator(homeColumn)).toBeVisible();
+});
+
+test('narrow Plugins page keeps a visible back control to the conversation', async ({
+  page,
+  baseURL,
+}) => {
+  await page.setViewportSize({ width: 1400, height: 900 });
+  await installMockDaemon(page, createWebShellDaemonScenario(), { baseURL });
+  await page.goto('/e2e/navigation-rail-harness.html?narrow');
+  await expect(page.locator(homeColumn)).toBeHidden();
+  await page.getByRole('button', { name: 'Toggle menu' }).click();
+  await page
+    .getByRole('dialog', { name: 'Workspace sidebar' })
+    .getByRole('button', { name: 'Plugins', exact: true })
+    .click();
+
+  const panel = page.getByTestId('inline-panel');
+  await expect(panel).toHaveAttribute('aria-label', 'Plugins');
+  const back = panel.getByRole('button', { name: 'back', exact: true });
+  await expect(back).toBeVisible();
+  await back.click();
+  await expect(panel).toHaveCount(0);
 });
 
 test('a very narrow host still contains the compact drawer', async ({

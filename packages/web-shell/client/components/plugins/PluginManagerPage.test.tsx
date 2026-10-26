@@ -241,6 +241,73 @@ describe('PluginManagerPage Skills workspace selector', () => {
   });
 });
 
+describe('PluginManagerPage back control', () => {
+  const backButton = () =>
+    container.querySelector<HTMLButtonElement>('button[aria-label="back"]');
+
+  it('renders a back control wired to onClose', async () => {
+    const onClose = vi.fn();
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <PluginManagerPage
+            onClose={onClose}
+            onUseSkill={vi.fn()}
+            showBackButton
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(backButton()).not.toBeNull();
+    await act(async () => backButton()!.click());
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the back control after switching tabs', async () => {
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <PluginManagerPage
+            onClose={vi.fn()}
+            onUseSkill={vi.fn()}
+            showBackButton
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const mcpTab = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'MCP',
+    );
+    await act(async () => {
+      mcpTab?.dispatchEvent(
+        new MouseEvent('mousedown', { bubbles: true, button: 0 }),
+      );
+      mcpTab?.click();
+    });
+
+    await vi.waitFor(() => {
+      expect(
+        container.querySelector('[data-testid="mcp-page"]'),
+      ).not.toBeNull();
+    });
+    expect(backButton()).not.toBeNull();
+  });
+
+  it('omits the back control by default', async () => {
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <PluginManagerPage onClose={vi.fn()} onUseSkill={vi.fn()} />
+        </I18nProvider>,
+      );
+    });
+
+    expect(backButton()).toBeNull();
+  });
+});
+
 describe('PluginManagerPage MCP workspace selection', () => {
   beforeEach(() => {
     const mcpFixture: TestWorkspace[] = [

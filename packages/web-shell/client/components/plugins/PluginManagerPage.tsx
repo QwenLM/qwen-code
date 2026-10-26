@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type Ref } from 'react';
+import { ArrowLeftIcon } from 'lucide-react';
 import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
 import { AgentsManagerPage } from '../agents/AgentsManagerPage';
 import { ExtensionsManagerPage } from '../extensions/ExtensionsManagerPage';
@@ -8,6 +9,7 @@ import {
   type ManagedMcpManagerPageProps,
 } from '../managed/ManagedMcpManagerPage';
 import { SkillsManagerPage } from '../skills/SkillsManagerPage';
+import { Button } from '../ui/button';
 import {
   Select,
   SelectContent,
@@ -25,6 +27,7 @@ type PluginTab = 'extensions' | 'mcp' | 'skills' | 'agents';
 interface PluginManagerPageProps {
   onClose: () => void;
   onUseSkill: (name: string) => void;
+  showBackButton?: boolean;
   initialFocusRef?: Ref<HTMLButtonElement>;
   initialTab?: PluginTab;
   skillsWorkspaceCwd?: string;
@@ -36,6 +39,7 @@ interface PluginManagerPageProps {
 export function PluginManagerPage({
   onClose,
   onUseSkill,
+  showBackButton = false,
   initialFocusRef,
   initialTab = 'extensions',
   skillsWorkspaceCwd,
@@ -151,32 +155,44 @@ export function PluginManagerPage({
     <Tabs value={activeTab} onValueChange={handleTabChange} className="w-full">
       {!detailOpen ? (
         <div className="sticky -top-4 z-10 -mx-5 -mt-4 flex items-center justify-between gap-3 border-b bg-background px-5 py-3">
-          <TabsList className="h-8" aria-label={t('plugins.sections')}>
-            <TabsTrigger
-              ref={activeTab === 'extensions' ? initialFocusRef : undefined}
-              value="extensions"
-            >
-              {t('plugins.extensions')}
-            </TabsTrigger>
-            <TabsTrigger
-              ref={activeTab === 'mcp' ? initialFocusRef : undefined}
-              value="mcp"
-            >
-              {t('plugins.mcp')}
-            </TabsTrigger>
-            <TabsTrigger
-              ref={activeTab === 'skills' ? initialFocusRef : undefined}
-              value="skills"
-            >
-              {t('plugins.skills')}
-            </TabsTrigger>
-            <TabsTrigger
-              ref={activeTab === 'agents' ? initialFocusRef : undefined}
-              value="agents"
-            >
-              {t('plugins.agents')}
-            </TabsTrigger>
-          </TabsList>
+          <div className="flex min-w-0 items-center gap-2">
+            {showBackButton ? (
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={onClose}
+                aria-label={t('common.back')}
+              >
+                <ArrowLeftIcon />
+              </Button>
+            ) : null}
+            <TabsList className="h-8" aria-label={t('plugins.sections')}>
+              <TabsTrigger
+                ref={activeTab === 'extensions' ? initialFocusRef : undefined}
+                value="extensions"
+              >
+                {t('plugins.extensions')}
+              </TabsTrigger>
+              <TabsTrigger
+                ref={activeTab === 'mcp' ? initialFocusRef : undefined}
+                value="mcp"
+              >
+                {t('plugins.mcp')}
+              </TabsTrigger>
+              <TabsTrigger
+                ref={activeTab === 'skills' ? initialFocusRef : undefined}
+                value="skills"
+              >
+                {t('plugins.skills')}
+              </TabsTrigger>
+              <TabsTrigger
+                ref={activeTab === 'agents' ? initialFocusRef : undefined}
+                value="agents"
+              >
+                {t('plugins.agents')}
+              </TabsTrigger>
+            </TabsList>
+          </div>
           {workspaceSelect(false)}
         </div>
       ) : null}
