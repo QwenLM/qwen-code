@@ -57,6 +57,19 @@ describe('TUI product evidence', () => {
     return result;
   }
 
+  it('runs the foreground shell wholefile in all three product legs without retries', () => {
+    const step = steps.find(
+      (entry) =>
+        entry.name ===
+        'Three-leg product acceptance (Node+Ink, Bun+Ink, Bun+OpenTUI)',
+    );
+    expect(step.run).toContain('node:ink bun:ink bun:opentui');
+    expect(step.run).toContain('interactive/tui-foreground-shell.test.ts');
+    expect(step.run).toContain('--retry=0');
+    expect(step.run).toContain('--dangerouslyIgnoreUnhandledErrors=false');
+    expect(step.run).not.toContain(' -t ');
+  });
+
   it('cancels superseded PRs while keeping dispatches independent', () => {
     expect(workflow.concurrency).toEqual({
       group:
