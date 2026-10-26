@@ -61,7 +61,7 @@ Qwen Code 在所有平台上都把设置、凭据和其他全局状态保存在 
 
 - 要在新机器上保留 `~/.qwen`，设置 `QWEN_HOME=~/.qwen`，或在首次运行前创建 `~/.qwen`。带 `--source` 参数的独立安装脚本会写入 `~/.qwen/source.json`，因此也会产生后一种效果。
 - 自定义的 `XDG_CONFIG_HOME` 只在设置了它的地方生效。没有设置它的启动环境（例如桌面启动器、systemd 用户服务或 cron）会解析到 `~/.config/qwen`，在没有 `~/.qwen` 时把它当作另一个独立的安装。标记规则只保护 `~/.qwen`。
-- 指向不存在目标的 `~/.qwen` 符号链接会被视为不存在，与 `existsSync` 的结果一致。
+- 指向不存在目标的 `~/.qwen` 符号链接会被视为不存在，与 `existsSync` 的结果一致。它存在期间不会写入标记，因此一旦目标恢复（例如此前尚未挂载的卷），`~/.qwen` 会重新被使用。
 - 在 Linux 上，未设置 `QWEN_HOME` 时，每次解析默认目录都需要一到两次 `existsSync` 调用，在 macOS 上两次约 3 µs。结果不做缓存，因为主目录 `.env` 可能在第一次解析之后才设置 `QWEN_HOME`，而 VS Code 插件也是有意每次重新探测。
 - 伪造主目录或在 mock `node:fs` 时未提供 `existsSync` 的测试，现在会固定 `QWEN_HOME`，因为 Linux CI 使用空的 `HOME` 运行。
 

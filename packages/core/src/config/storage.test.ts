@@ -594,6 +594,21 @@ describe('Storage – default global dir (XDG Base Directory)', () => {
     expect(Storage.getGlobalQwenDir()).toBe(legacyDir());
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'writes no marker while ~/.qwen is a symlink it cannot follow',
+    () => {
+      const volume = path.join(home, 'volume');
+      actualFs.symlinkSync(volume, legacyDir());
+      expect(Storage.getGlobalQwenDir()).toBe(xdgDir());
+      Storage.markDefaultGlobalQwenDir();
+      expect(actualFs.existsSync(path.join(xdgDir(), '.qwen-global-dir'))).toBe(
+        false,
+      );
+      create(volume);
+      expect(Storage.getGlobalQwenDir()).toBe(legacyDir());
+    },
+  );
+
   it('writes no marker while ~/.qwen is in use', () => {
     create(legacyDir());
     Storage.markDefaultGlobalQwenDir();

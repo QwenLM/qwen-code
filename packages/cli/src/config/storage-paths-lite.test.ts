@@ -349,6 +349,17 @@ describe('settings locations in a given environment', () => {
       expect(getGlobalQwenDirLite()).toBe(xdgDir);
     });
 
+    it.skipIf(process.platform === 'win32')(
+      'writes no marker while ~/.qwen is a symlink it cannot follow',
+      () => {
+        const volume = path.join(userHome, 'volume');
+        fs.symlinkSync(volume, path.join(userHome, '.qwen'));
+        markDefaultGlobalQwenDirLite();
+        fs.mkdirSync(volume);
+        expect(getGlobalQwenDirLite()).toBe(path.join(userHome, '.qwen'));
+      },
+    );
+
     it('writes no marker under QWEN_HOME or when ~/.qwen is in use', () => {
       const xdgDir = path.join(userHome, '.config', 'qwen');
       vi.stubEnv('QWEN_HOME', xdgDir);

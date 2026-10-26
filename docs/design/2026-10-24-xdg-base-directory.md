@@ -61,7 +61,7 @@ This change moves only the default location of the global directory. `QWEN_HOME`
 
 - To keep `~/.qwen` on a new machine, set `QWEN_HOME=~/.qwen` or create `~/.qwen` before the first run. The standalone installer does the latter when given `--source`, because it writes `~/.qwen/source.json`.
 - A custom `XDG_CONFIG_HOME` applies only where it is set. A launch context without it, such as a desktop launcher, a systemd user service or cron, resolves `~/.config/qwen` and, when there is no `~/.qwen`, uses it as a separate install. The marker rule only protects `~/.qwen`.
-- A `~/.qwen` that is a dangling symlink counts as missing, as `existsSync` reports it.
+- A `~/.qwen` that is a dangling symlink counts as missing, as `existsSync` reports it. No marker is written while it is there, so once its target is back, such as a volume that was not mounted yet, `~/.qwen` is used again.
 - On Linux, resolving the default costs one or two `existsSync` calls when `QWEN_HOME` is unset, on every call, about 3 µs for two on macOS. The result is not cached, because the home `.env` can set `QWEN_HOME` after the first resolution and the VS Code companion re-probes on purpose.
 - Tests that faked the home directory, or mocked `node:fs` without `existsSync`, now pin `QWEN_HOME`, because Linux CI runs with an empty `HOME`.
 

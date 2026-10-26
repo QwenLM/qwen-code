@@ -256,10 +256,15 @@ export class Storage {
     }
     const dir = Storage.getGlobalQwenDir();
     const marker = path.join(dir, GLOBAL_DIR_MARKER);
-    if (dir === path.join(homeDir, QWEN_DIR) || fs.existsSync(marker)) {
+    const legacyDir = path.join(homeDir, QWEN_DIR);
+    if (dir === legacyDir || fs.existsSync(marker)) {
       return;
     }
     try {
+      // existsSync reports a ~/.qwen it cannot follow, such as a symlink into
+      // a volume that is not mounted yet, as missing. Marking the XDG dir now
+      // would keep that install out for good once its target is back.
+      if (fs.lstatSync(legacyDir, { throwIfNoEntry: false })) return;
       fs.mkdirSync(dir, { recursive: true });
       fs.writeFileSync(
         marker,

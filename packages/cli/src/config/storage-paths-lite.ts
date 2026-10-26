@@ -208,13 +208,13 @@ export function markDefaultGlobalQwenDirLite(): void {
   }
   const dir = getDefaultQwenDirLite(process.env['XDG_CONFIG_HOME']);
   const marker = path.join(dir, GLOBAL_DIR_MARKER);
-  if (
-    dir === path.join(homeDir, SETTINGS_DIRECTORY_NAME) ||
-    fs.existsSync(marker)
-  ) {
+  const legacyDir = path.join(homeDir, SETTINGS_DIRECTORY_NAME);
+  if (dir === legacyDir || fs.existsSync(marker)) {
     return;
   }
   try {
+    // A ~/.qwen that existsSync cannot follow; see core.
+    if (fs.lstatSync(legacyDir, { throwIfNoEntry: false })) return;
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(
       marker,
