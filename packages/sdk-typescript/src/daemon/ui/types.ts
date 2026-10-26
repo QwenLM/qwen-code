@@ -487,6 +487,7 @@ export interface DaemonUiStatusEvent extends DaemonUiEventBase {
   text: string;
   source?: string;
   data?: unknown;
+  agent?: DaemonAgentIdentity;
   /**
    * Set only on normalizer-produced `debug` events. Absent on `status` events
    * and on debug events dispatched by clients themselves.
@@ -1238,6 +1239,7 @@ export interface DaemonStatusTranscriptBlock extends DaemonTranscriptBlockBase {
   loop?: DaemonLoopStop;
   source?: string;
   data?: unknown;
+  agent?: DaemonAgentIdentity;
   /** Mirrors `DaemonUiStatusEvent.debugReason`; only set on `debug` blocks. */
   debugReason?: DaemonUiDebugReason;
 }

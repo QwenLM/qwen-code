@@ -1324,7 +1324,7 @@ describe('BridgeClient — mode promotion fallback', () => {
       const client = new BridgeClient(
         (() => entry) as never,
         vi.fn(),
-        { request: vi.fn(), cancelForPrompt: vi.fn() },
+        { request: vi.fn(), cancelForPrompt: vi.fn(), vote: vi.fn() },
         0,
         Infinity,
       );
@@ -5446,7 +5446,7 @@ describe('background execution ownership', () => {
       const client = new BridgeClient(
         (() => entry) as never,
         vi.fn(),
-        { request: vi.fn(), cancelForPrompt: vi.fn() },
+        { request: vi.fn(), cancelForPrompt: vi.fn(), vote: vi.fn() },
         0,
         Infinity,
       );
@@ -5612,22 +5612,207 @@ describe('background execution ownership', () => {
       toolCall: { toolCallId: 'call-fg', title: 'run', kind: 'execute' },
       options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
     });
-    expect(entry.pendingPermissionIds.size).toBe(2);
+    entry.promptActive = false;
+    const teammateApproval = client.requestPermission({
+      sessionId: 'session',
+      _meta: { permissionScope: 'session', backgroundTurn },
+      toolCall: {
+        toolCallId: 'teammate-write',
+        title: 'Write report',
+        kind: 'edit',
+      },
+      options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+    });
+    entry.promptActive = true;
+    const teammateFrame = publish.mock.calls.at(-1)![0];
+    expect(teammateFrame.promptId).toBeUndefined();
+    expect(teammateFrame.originatorClientId).toBeUndefined();
+    expect(teammateFrame.data.backgroundTurn).toBeUndefined();
+    expect(entry.pendingPermissionIds.size).toBe(3);
 
     client.finishBackgroundTurn('session', 'notification-1', 'end_turn');
 
     await expect(turnApproval).resolves.toMatchObject({
       outcome: { outcome: 'cancelled' },
     });
-    expect(entry.pendingPermissionIds.size).toBe(1);
-    expect(entry.pendingInteractions.size).toBe(1);
-    // The live prompt's approval stays pending for its own lifecycle.
+    expect(entry.pendingPermissionIds.size).toBe(2);
+    expect(entry.pendingInteractions.size).toBe(2);
+    // The live prompt and teammate approvals survive the background turn.
     mediator.forgetSession('session');
     await expect(promptApproval).resolves.toMatchObject({
       outcome: { outcome: 'cancelled' },
     });
+    await expect(teammateApproval).resolves.toMatchObject({
+      outcome: { outcome: 'cancelled' },
+    });
     expect(entry.pendingPermissionIds.size).toBe(0);
   });
+
+  function teammatePermissionClient(cap: number) {
+    const publish = vi.fn().mockReturnValue(true);
+    const entry = {
+      sessionId: 'session',
+      promptActive: true,
+      activePromptId: 'leader-turn',
+      events: { publish },
+      pendingPermissionIds: new Set<string>(),
+      pendingInteractions: new Map<string, unknown>(),
+    };
+    const ownsSession = vi.fn((sessionId: string) => sessionId === 'session');
+    const mediator = new MultiClientPermissionMediator('first-responder', {
+      emit: (_sessionId, event) => publish(event),
+      audit: {
+        recordRequested: () => {},
+        recordVoted: () => {},
+        recordForbidden: () => {},
+        recordResolved: () => {},
+        recordTimeout: () => {},
+      },
+      now: Date.now,
+      votersForSession: () => new Set<string>(),
+    });
+    const client = new BridgeClient(
+      (() => entry) as never,
+      () => undefined,
+      mediator,
+      0,
+      cap,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      ownsSession,
+    );
+    const request = (bindingId?: number, teammateName?: string) =>
+      client.requestPermission({
+        sessionId: 'session',
+        ...(bindingId !== undefined
+          ? {
+              _meta: {
+                permissionScope: 'session',
+                teammateBindingId: bindingId,
+              },
+            }
+          : {}),
+        toolCall: {
+          toolCallId: `call-${bindingId ?? 'leader'}-${teammateName ?? 'leader'}`,
+          title: 'Write',
+          ...(teammateName ? { _meta: { teammateName } } : {}),
+        },
+        options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+      });
+    const retire = (bindingId: number, sessionId = 'session') =>
+      client.extNotification('qwen/notify/session/teammate-binding-ended', {
+        v: 1,
+        sessionId,
+        bindingId,
+      });
+    return { client, entry, mediator, ownsSession, publish, request, retire };
+  }
+
+  it('retracts a retired team approval and releases capacity for the new team', async () => {
+    const { entry, mediator, publish, request, retire } =
+      teammatePermissionClient(1);
+    const old = request(1);
+    await retire(1);
+    await expect(old).resolves.toMatchObject({
+      outcome: { outcome: 'cancelled' },
+    });
+    expect(entry.pendingPermissionIds.size).toBe(0);
+    expect(entry.pendingInteractions.size).toBe(0);
+    expect(publish).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'permission_resolved' }),
+    );
+    const current = request(2);
+    const requestId = [...entry.pendingPermissionIds][0]!;
+    expect(requestId).toBeDefined();
+    mediator.vote({
+      sessionId: 'session',
+      requestId,
+      optionId: 'allow',
+      clientId: undefined,
+      receivedAtMs: Date.now(),
+      fromLoopback: true,
+    });
+    await expect(current).resolves.toEqual({
+      outcome: { outcome: 'selected', optionId: 'allow' },
+    });
+    expect(entry.pendingPermissionIds.size).toBe(0);
+  });
+
+  it("retires the exited teammate's approval and leaves its neighbour pending", async () => {
+    const { client, entry, mediator, request } = teammatePermissionClient(4);
+    const security = request(1, 'security');
+    const tests = request(1, 'tests');
+    expect(entry.pendingPermissionIds.size).toBe(2);
+
+    await client.extNotification('qwen/notify/session/teammate-exited', {
+      v: 1,
+      sessionId: 'session',
+      teammateName: 'security',
+    });
+
+    await expect(security).resolves.toMatchObject({
+      outcome: { outcome: 'cancelled' },
+    });
+    // The session must stop advertising the dead teammate's prompt — and only
+    // that one: its neighbour is still running and still answerable.
+    expect(entry.pendingPermissionIds.size).toBe(1);
+    expect(entry.pendingInteractions.size).toBe(1);
+
+    mediator.forgetSession('session');
+    await expect(tests).resolves.toMatchObject({
+      outcome: { outcome: 'cancelled' },
+    });
+    expect(entry.pendingPermissionIds.size).toBe(0);
+  });
+
+  it('retires only the owned old binding, leaving leader and replacement approvals pending', async () => {
+    const { entry, mediator, ownsSession, request, retire } =
+      teammatePermissionClient(3);
+    const old = request(1);
+    const leader = request();
+    const current = request(2);
+    ownsSession.mockReturnValueOnce(false);
+    await retire(1);
+    await retire(1, 'other-session');
+    expect(entry.pendingPermissionIds.size).toBe(3);
+    await retire(1);
+    await expect(old).resolves.toMatchObject({
+      outcome: { outcome: 'cancelled' },
+    });
+    expect(entry.pendingPermissionIds.size).toBe(2);
+    mediator.forgetSession('session');
+    await Promise.all([leader, current]);
+    expect(entry.pendingPermissionIds.size).toBe(0);
+  });
+
+  it.each(['before request', 'during publication'])(
+    'fences a retired binding %s so a late request cannot remain pending',
+    async (boundary) => {
+      const { entry, publish, request, retire } = teammatePermissionClient(1);
+      if (boundary === 'before request') {
+        await retire(1);
+      } else {
+        publish.mockImplementation((event) => {
+          if (event.type === 'permission_request') void retire(1);
+          return true;
+        });
+      }
+      await expect(request(1)).resolves.toMatchObject({
+        outcome: { outcome: 'cancelled' },
+      });
+      expect(entry.pendingPermissionIds.size).toBe(0);
+      expect(entry.pendingInteractions.size).toBe(0);
+      if (boundary === 'before request') expect(publish).not.toHaveBeenCalled();
+      else
+        expect(
+          publish.mock.calls.filter(
+            ([event]) => event.type === 'permission_resolved',
+          ),
+        ).toHaveLength(1);
+    },
+  );
 });
 
 describe('MCP reload capability invalidation', () => {
