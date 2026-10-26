@@ -40,6 +40,7 @@ export function SessionRenameDialog({
           value={value}
           disabled={busy}
           onChange={(event) => onChange(event.target.value)}
+          onFocus={(event) => event.currentTarget.select()}
           onKeyDown={(event) => {
             if (
               event.key === 'Enter' &&

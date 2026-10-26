@@ -4880,6 +4880,7 @@ export function WebShellSidebar({
                   maxLength={256}
                   value={editingName}
                   onChange={(event) => setEditingName(event.target.value)}
+                  onFocus={(event) => event.currentTarget.select()}
                   onBlur={cancelRename}
                   onKeyDown={(event) => {
                     if (event.key === 'Escape') cancelRename();
@@ -5198,6 +5199,7 @@ export function WebShellSidebar({
                 maxLength={256}
                 value={editingName}
                 onChange={(event) => setEditingName(event.target.value)}
+                onFocus={(event) => event.currentTarget.select()}
                 onBlur={cancelRename}
                 onKeyDown={(event) => {
                   if (event.key === 'Escape') {

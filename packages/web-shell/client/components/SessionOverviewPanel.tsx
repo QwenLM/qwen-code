@@ -1126,6 +1126,7 @@ function SessionOverviewPanelInner({
                       autoFocus
                       value={editingNameRef.current}
                       onChange={(event) => setEditingName(event.target.value)}
+                      onFocus={(event) => event.currentTarget.select()}
                       onBlur={cancelRename}
                       onKeyDown={(event) => {
                         if (event.key === 'Escape') {
