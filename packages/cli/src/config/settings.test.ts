@@ -105,14 +105,15 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 // mock, so it drops the pin before the module-load path constants below are
 // captured. Tests that exercise `QWEN_HOME` itself set it in-body.
 //
-// The pin is dropped for the duration of this file only. An un-restored delete
-// leaves `process.env` un-pinned for every later file in the worker — under
-// `--no-isolate` the module registry shares that side effect, so a neighbour
-// resolving `getUserSettingsPath()` against the real filesystem saved a merged
-// object over the operator's real `~/.qwen/settings.json` (#15267). Re-pinning
-// to the mocked home is not equivalent: the `~/.env` bootstrap branches on
-// `QWEN_HOME` being set (config/environment.ts), so it would silently change
-// what the `.env` tests below cover.
+// The drop is scoped to this file: `clearQwenHomePin()` hands back a restore
+// function and `afterAll` runs it, so the un-pinned state does not outlive this
+// file even when the module registry is shared (`vitest --no-isolate`). That is
+// the leak half of #15267 only. The issue's reporter traced the destructive
+// write to this file's own un-pinned window, which this change leaves intact,
+// so the issue is referenced rather than closed. Re-pinning to the mocked home
+// is not equivalent either: the `~/.env` bootstrap branches on `QWEN_HOME`
+// being set (config/environment.ts), so it would silently change what the
+// `.env` tests below cover.
 const restoreQwenHomePin = clearQwenHomePin();
 
 // Resolve the (mocked) user-settings path once at module load. Tests mock

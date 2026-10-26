@@ -12,14 +12,14 @@
  * resolves its fixtures against a mocked `os.homedir()` instead has to drop
  * that pin, and deleting the variable outright leaves the un-pinned state
  * behind: `process.env` is process-global, so the deletion outlives the file
- * whenever the module registry is shared (`vitest --no-isolate`). A later file
- * in that worker then resolves `Storage.getGlobalQwenDir()` against the real
- * home, and the next settings save rewrites the operator's actual
- * `~/.qwen/settings.json` (#15267).
+ * whenever the module registry is shared (`vitest --no-isolate`).
  *
- * Register the returned function in `afterAll` so the pin is back before the
- * next file runs. Idempotent, and restoring a variable that was absent leaves
- * it absent rather than defined as an empty string.
+ * Register the returned function in `afterAll` so the pin is back when the file
+ * finishes. That stops the state from outliving the file, which is one half of
+ * #15267; it does not close the issue, because the reporter traced the
+ * destructive write to the un-pinned window inside that same file. Idempotent,
+ * and restoring a variable that was absent leaves it absent rather than defined
+ * as an empty string.
  */
 export function clearQwenHomePin(): () => void {
   const previous = process.env['QWEN_HOME'];
