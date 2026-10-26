@@ -61,11 +61,30 @@ function isError(result: unknown): boolean {
 }
 
 describe('buildModerationTools', () => {
-  it('exposes the recall tool once', () => {
+  it('exposes the full group-management surface once each', () => {
     const { tools } = harness();
     const names = tools.map((tool) => tool.name);
     expect(new Set(names).size).toBe(names.length);
-    expect(names).toEqual(['qq_recall_message']);
+    expect(names).toEqual([
+      'qq_recall_message',
+      'qq_get_group_info',
+      'qq_get_bot_state',
+      'qq_list_join_requests',
+      'qq_review_join_request',
+      'qq_get_mute_status',
+      'qq_set_mute',
+      'qq_list_join_approval_strategies',
+      'qq_create_join_approval_strategy',
+      'qq_update_join_approval_strategy',
+      'qq_delete_join_approval_strategy',
+      'qq_execute_join_approval_strategy',
+      'qq_set_join_approval_whitelist',
+      'qq_list_group_members',
+      'qq_get_group_member',
+      'qq_kick_member',
+      'qq_list_member_blacklist',
+      'qq_update_member_blacklist',
+    ]);
   });
 
   it('every tool declares a JSON-schema object input', () => {
@@ -339,5 +358,360 @@ describe('request shapes', () => {
     await call('qq_recall_message', { message_id: 'M1' });
     expect(logs.join('\n')).toContain('qq_recall_message ok');
     expect(logs.join('\n')).toContain('target=G123/M1 via=message_id');
+  });
+});
+
+describe('group-scoped guards', () => {
+  it('rejects group tools in a direct-message session', async () => {
+    const { call, calls } = harness({
+      resolveChat: () => ({ chatId: 'U9', isGroup: false }),
+    });
+    const result = await call('qq_kick_member', { member_openid: 'M1' });
+    expect(isError(result)).toBe(true);
+    expect(textOf(result)).toContain('only applies to a group chat');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('rejects group tools before the session has a chat binding', async () => {
+    const { call, calls } = harness({ resolveChat: () => undefined });
+    const result = await call('qq_get_bot_state');
+    expect(isError(result)).toBe(true);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('lets bot-scoped strategy tools run without a chat binding', async () => {
+    const { call, calls } = harness({ resolveChat: () => undefined });
+    await call('qq_list_join_approval_strategies');
+    expect(calls[0]).toEqual({
+      method: 'GET',
+      path: '/v2/groups/join_approval_strategy',
+    });
+  });
+
+  it('binds each call to the chat of the calling session', async () => {
+    const resolveChat = vi.fn(() => ({ chatId: 'G123', isGroup: true }));
+    const { call } = harness({ resolveChat });
+    await call('qq_get_group_info');
+    expect(resolveChat).toHaveBeenCalledWith('S1');
+  });
+});
+
+describe('platform failure mapping for the group tools', () => {
+  it('maps 11253 to the allowlist explanation', async () => {
+    const { call } = harness(
+      {},
+      {
+        ok: false,
+        status: 403,
+        code: 11253,
+        message: '应用无接口访问权限',
+      },
+    );
+    const result = await call('qq_kick_member', { member_openid: 'M1' });
+    expect(isError(result)).toBe(true);
+    expect(textOf(result)).toContain('allowlist-only');
+    expect(textOf(result)).toContain('11253');
+  });
+
+  it('maps 40062003 to the admin and ordinary-member explanation', async () => {
+    const { call } = harness(
+      {},
+      {
+        ok: false,
+        status: 403,
+        code: 40062003,
+        message: '无操作权限',
+      },
+    );
+    const result = textOf(await call('qq_set_mute', { member_openid: 'M1' }));
+    expect(result).toContain('group admin');
+    expect(result).toContain('ordinary member');
+  });
+});
+
+describe('group-management request shapes', () => {
+  it('get group info and bot state use the group path', async () => {
+    const { call, calls } = harness();
+    await call('qq_get_group_info');
+    await call('qq_get_bot_state');
+    expect(calls.map((entry) => entry.path)).toEqual([
+      '/v2/groups/G123/info',
+      '/v2/groups/G123/bot_state',
+    ]);
+  });
+
+  it('passes pagination as query parameters', async () => {
+    const { call, calls } = harness();
+    await call('qq_list_join_requests', { cursor: 'C1', limit: 10 });
+    expect(calls[0]).toEqual({
+      method: 'GET',
+      path: '/v2/groups/G123/join_request_list?cursor=C1&limit=10',
+    });
+  });
+
+  it('reviews a join request with op and optional fields', async () => {
+    const { call, calls } = harness();
+    await call('qq_review_join_request', {
+      member_openid: 'M1',
+      op: 'decline',
+      join_request_id: 'JR1',
+      reject_reason: 'spam',
+      add_to_member_blacklist: true,
+    });
+    expect(calls[0]).toEqual({
+      method: 'POST',
+      path: '/v2/groups/G123/approval_join_request/M1',
+      body: {
+        op: 'decline',
+        join_request_id: 'JR1',
+        reject_reason: 'spam',
+        add_to_member_blacklist: true,
+      },
+    });
+  });
+
+  it('requires an approval op', async () => {
+    const { call, calls } = harness();
+    const result = await call('qq_review_join_request', {
+      member_openid: 'M1',
+      op: 'maybe',
+    });
+    expect(isError(result)).toBe(true);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('sets a single member mute with an expiry', async () => {
+    const { call, calls } = harness();
+    await call('qq_set_mute', {
+      member_openid: 'M1',
+      op: 'add',
+      mute_expire_at: '2026-08-05T11:23:05+08:00',
+    });
+    expect(calls[0]).toEqual({
+      method: 'POST',
+      path: '/v2/groups/G123/restrict_chat_setting',
+      body: {
+        members: [
+          {
+            op: 'add',
+            member_openid: 'M1',
+            mute_expire_at: '2026-08-05T11:23:05+08:00',
+          },
+        ],
+      },
+    });
+  });
+
+  it('forwards a single-member mute without an expiry, like the bulk form', async () => {
+    const { call, calls } = harness();
+    await call('qq_set_mute', { member_openid: 'M1', op: 'add' });
+    expect(calls[0]?.body).toEqual({
+      members: [{ op: 'add', member_openid: 'M1' }],
+    });
+  });
+
+  it('accepts the bulk mute form and rejects more than 20 members', async () => {
+    const { call, calls } = harness();
+    await call('qq_set_mute', {
+      members: [{ op: 'del', member_openid: 'M1' }],
+    });
+    expect(calls[0]?.body).toEqual({
+      members: [{ op: 'del', member_openid: 'M1' }],
+    });
+    const tooMany = await call('qq_set_mute', {
+      members: Array.from({ length: 21 }, (_, index) => ({
+        op: 'del',
+        member_openid: `M${index}`,
+      })),
+    });
+    expect(textOf(tooMany)).toContain('At most 20');
+  });
+
+  it('creates a strategy with group_ids as numbers', async () => {
+    const { call, calls } = harness();
+    await call('qq_create_join_approval_strategy', {
+      group_ids: ['123456'],
+      is_enable: 'off',
+      remark: 'class group',
+    });
+    expect(calls[0]).toEqual({
+      method: 'POST',
+      path: '/v2/groups/join_approval_strategy',
+      body: {
+        group_ids: [123456],
+        is_enable: 'off',
+        remark: 'class group',
+      },
+    });
+  });
+
+  it('rejects a strategy with both or neither group selector', async () => {
+    const { call, calls } = harness();
+    expect(
+      textOf(await call('qq_create_join_approval_strategy', {})),
+    ).toContain('exactly one of');
+    expect(
+      textOf(
+        await call('qq_create_join_approval_strategy', {
+          group_ids: ['1'],
+          group_openids: ['A'.repeat(32)],
+        }),
+      ),
+    ).toContain('exactly one of');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('caps the client-side limits the platform documents', async () => {
+    const { call, calls } = harness();
+    expect(
+      textOf(await call('qq_list_join_requests', { limit: 51 })),
+    ).toContain('between 1 and 50');
+    expect(
+      textOf(await call('qq_list_member_blacklist', { limit: 101 })),
+    ).toContain('between 1 and 100');
+    expect(
+      textOf(
+        await call('qq_create_join_approval_strategy', {
+          group_ids: Array.from({ length: 101 }, (_, i) => String(i + 1)),
+        }),
+      ),
+    ).toContain('at most 100 entries');
+    expect(
+      textOf(
+        await call('qq_create_join_approval_strategy', {
+          group_ids: ['1'],
+          remark: 'x'.repeat(256),
+        }),
+      ),
+    ).toContain('at most 255 characters');
+    expect(
+      textOf(
+        await call('qq_update_join_approval_strategy', {
+          strategy_id: 'st_1',
+          remark: 'x'.repeat(256),
+        }),
+      ),
+    ).toContain('at most 255 characters');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('rejects a group number too long to survive a JSON number', async () => {
+    const { call, calls } = harness();
+    const result = await call('qq_create_join_approval_strategy', {
+      group_ids: ['9999999999999999'],
+    });
+    expect(textOf(result)).toContain('is not a QQ group number');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('updates a strategy through PATCH with a group action', async () => {
+    const { call, calls } = harness();
+    await call('qq_update_join_approval_strategy', {
+      strategy_id: 'st_1',
+      group_action: { op: 'add', group_openids: ['A'.repeat(32)] },
+    });
+    expect(calls[0]).toEqual({
+      method: 'PATCH',
+      path: '/v2/groups/join_approval_strategy/st_1',
+      body: { group_action: { op: 'add', group_openids: ['A'.repeat(32)] } },
+    });
+  });
+
+  it('rejects an update with no fields', async () => {
+    const { call, calls } = harness();
+    expect(
+      textOf(
+        await call('qq_update_join_approval_strategy', {
+          strategy_id: 'st_1',
+        }),
+      ),
+    ).toContain('Provide at least one of');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('deletes and executes strategies on their own paths', async () => {
+    const { call, calls } = harness();
+    await call('qq_delete_join_approval_strategy', { strategy_id: 'st_1' });
+    await call('qq_execute_join_approval_strategy', { strategy_id: 'st_1' });
+    expect(calls).toEqual([
+      { method: 'DELETE', path: '/v2/groups/join_approval_strategy/st_1' },
+      {
+        method: 'POST',
+        path: '/v2/groups/join_approval_strategy/st_1/execute',
+      },
+    ]);
+  });
+
+  it('keeps whitelist numbers as strings and caps the batch', async () => {
+    const { call, calls } = harness();
+    await call('qq_set_join_approval_whitelist', {
+      strategy_id: 'st_1',
+      op: 'add',
+      whitelist_users: ['12345678901234567890'],
+    });
+    expect(calls[0]).toEqual({
+      method: 'POST',
+      path: '/v2/groups/join_approval_strategy/st_1/whitelist_users',
+      body: { op: 'add', whitelist_users: ['12345678901234567890'] },
+    });
+    const tooMany = await call('qq_set_join_approval_whitelist', {
+      strategy_id: 'st_1',
+      op: 'add',
+      whitelist_users: Array.from({ length: 10001 }, (_, i) => String(i)),
+    });
+    expect(textOf(tooMany)).toContain('At most 10000');
+  });
+
+  it('lists members and member details on the reserved endpoints', async () => {
+    const { call, calls } = harness();
+    await call('qq_list_group_members', { cursor: 'C2' });
+    await call('qq_get_group_member', { member_openid: 'M1' });
+    expect(calls).toEqual([
+      { method: 'GET', path: '/v2/groups/G123/members?cursor=C2' },
+      { method: 'GET', path: '/v2/groups/G123/members/M1' },
+    ]);
+  });
+
+  it('kicks members with the blacklist flag', async () => {
+    const { call, calls } = harness();
+    await call('qq_kick_member', {
+      member_openids: ['M1', 'M2'],
+      add_to_blacklist: true,
+    });
+    expect(calls[0]).toEqual({
+      method: 'POST',
+      path: '/v2/groups/G123/batch_remove_members',
+      body: { member_openids: ['M1', 'M2'], add_to_member_blacklist: true },
+    });
+  });
+
+  it('updates the blacklist with an op', async () => {
+    const { call, calls } = harness();
+    await call('qq_update_member_blacklist', {
+      op: 'add',
+      member_openids: ['M1'],
+    });
+    expect(calls[0]).toEqual({
+      method: 'POST',
+      path: '/v2/groups/G123/member_blacklist',
+      body: { op: 'add', member_openids: ['M1'] },
+    });
+    const badOp = await call('qq_update_member_blacklist', {
+      op: 'remove',
+      member_openids: ['M1'],
+    });
+    expect(textOf(badOp)).toContain('must be one of');
+  });
+
+  it('encodes ids so a crafted value cannot escape its path segment', async () => {
+    const { call, calls } = harness();
+    await call('qq_get_group_member', { member_openid: 'a/../b' });
+    expect(calls[0]?.path).toBe('/v2/groups/G123/members/a%2F..%2Fb');
+  });
+
+  it('logs each call outcome with the tool name', async () => {
+    const { call, logs } = harness();
+    await call('qq_get_group_info');
+    expect(logs.join('\n')).toContain('qq_get_group_info ok');
   });
 });
