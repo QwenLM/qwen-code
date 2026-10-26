@@ -130,6 +130,8 @@ class SurfaceAdmissionAcceptanceTest {
     private static final String WRONG_TOKEN =
             "qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq";
     private static final String WRITER_TOKEN = "X-Qwen-Managed-Writer-Token";
+    private static final String PROBE_UPLOAD_ID =
+            "11111111-1111-4111-8111-111111111111";
     private static final String ARTIFACT_TENANT = "tenant-1";
     private static final String ARTIFACT_WORKSPACE = "workspace-1";
     private static final String ARTIFACT_SESSION = "session-1";
@@ -528,7 +530,10 @@ class SurfaceAdmissionAcceptanceTest {
             }
             case WORKSPACE_FILES -> {
                 expect(entry, null, 401, "actor_required");
-                expect(entry, STRANGER, 404, "workspace_not_found");
+                expect(entry, STRANGER, 404,
+                        entry == SurfaceRegistry.WEBSHELL_WORKSPACE_FILES_UPLOAD_QUERY
+                                ? "workspace_upload_not_found"
+                                : "workspace_not_found");
             }
             case WORKSPACE_ALLOCATION -> {
                 expect(entry, null, 401, "actor_required");
@@ -1560,6 +1565,13 @@ class SurfaceAdmissionAcceptanceTest {
                 && "GET".equals(entry.method())) {
             query.add("workspaceId=ws");
         }
+        if (entry == SurfaceRegistry.WEBSHELL_WORKSPACE_FILES_UPLOAD) {
+            query.add("workspaceId=ws");
+            query.add("cwdRelative=.");
+            query.add("path=file.txt");
+            query.add("expectedScopeRevision=" + "0".repeat(64));
+            query.add("uploadId=" + PROBE_UPLOAD_ID);
+        }
         if (!query.isEmpty()) {
             path += "?" + String.join("&", query);
         }
@@ -1574,7 +1586,9 @@ class SurfaceAdmissionAcceptanceTest {
         if ("POST".equals(entry.method()) || "PATCH".equals(entry.method()) || "PUT".equals(entry.method())) {
             boolean octets = entry.capabilities().contains(
                     Capability.PUB_SEGMENT) || entry.capabilities().contains(
-                    Capability.PUB_RESOURCE) || entry.capabilities().contains(Capability.EXTENSION_PUBLISH);
+                    Capability.PUB_RESOURCE) || entry.capabilities().contains(Capability.EXTENSION_PUBLISH)
+                    || entry.capabilities().contains(
+                            Capability.WORKSPACE_FILES_UPLOAD);
             request.contentType(octets ? MediaType.APPLICATION_OCTET_STREAM
                     : MediaType.APPLICATION_JSON);
             request.content(bodyFor(entry, headerTenant, session));
@@ -1717,6 +1731,8 @@ class SurfaceAdmissionAcceptanceTest {
             case WORKSPACE_CREATE -> "{\"displayName\":\"New workspace\",\"idempotencyKey\":\"create-key\"}";
             case WORKSPACE_FILES_QUERY -> "{\"workspaceId\":\"workspace\",\"cwdRelative\":\".\",\"directory\":\".\"}";
             case WORKSPACE_FILES_READ -> "{\"workspaceId\":\"workspace\",\"cwdRelative\":\".\",\"path\":\"file.txt\",\"expectedScopeRevision\":\"revision\"}";
+            case WORKSPACE_FILES_UPLOAD_QUERY -> "{\"uploadId\":\""
+                    + PROBE_UPLOAD_ID + "\"}";
             case WORKSPACE_DIRECTORIES -> "{\"workspaceId\":\"workspace\",\"cwdRelative\":\".\"}";
             case SESSION_OPTIONS -> "{\"agentId\":\"qwen-code\"}";
             case SESSION_APPROVAL, SESSION_MODELS, SESSION_SKILLS, SESSION_MCP -> "{\"sessionId\":\"" + session + "\"}";
