@@ -44,6 +44,7 @@ import {
   type AutofixPrHistory,
   type AutofixPrState,
 } from './state.js';
+import { assertNoFixInFlight, clearAbandonedFix } from './fix.js';
 import { networkGit } from './worktree.js';
 
 export interface PrView {
@@ -326,6 +327,8 @@ export function runPrepare(args: PrepareArgs): void {
     args.takeOver === true && state.sessionId !== currentSessionId();
   if (existing) {
     sameWatch(existing);
+    // A fix agent works in the worktree now, for whichever session.
+    assertNoFixInFlight(paths, args.pr);
     // The recorded path goes stale when the clone moves; this one does not.
     if (existsSync(paths.worktreePath)) {
       // A /clear or /resume gives the session a new id while its scheduled
@@ -373,6 +376,9 @@ export function runPrepare(args: PrepareArgs): void {
         const current = requireState(paths.statePath, args.pr);
         if (takesOver(current)) tookOver = true;
         else assertOwnedBySession(current);
+        assertNoFixInFlight(paths, args.pr);
+        // An attempt whose session left it behind is no longer anyone's.
+        if (tookOver) clearAbandonedFix(paths);
         // A start resumes a watch `cleanup` ended keeping its worktree: the
         // user asked for it, and the start's confirmation said what the
         // worktree holds. Read here, under the lock that also clears it.
@@ -448,6 +454,8 @@ export function runPrepare(args: PrepareArgs): void {
       // The state written below names this session.
       if (takesOver(existing)) tookOver = true;
       else assertOwnedBySession(existing);
+      assertNoFixInFlight(paths, args.pr);
+      if (tookOver) clearAbandonedFix(paths);
       recreated = true;
       // A watch `stop` ended keeping its worktree, the worktree removed
       // since: the start resumes it all the same, and says so.

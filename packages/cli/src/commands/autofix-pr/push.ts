@@ -30,6 +30,7 @@ import {
   type AutofixPrPaths,
   type AutofixPrState,
 } from './state.js';
+import { assertNoFixInFlight } from './fix.js';
 import {
   hasUncommittedChanges,
   isAncestor,
@@ -227,6 +228,7 @@ function pushLocked(
 ): PushOutcome {
   const state = requireState(paths.statePath, prNumber);
   assertWatching(state, task);
+  assertNoFixInFlight(paths, prNumber);
   const worktree = paths.worktreePath;
   requireWorktree(paths, prNumber, root);
   if (hasUncommittedChanges(worktree)) {
