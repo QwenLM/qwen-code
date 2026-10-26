@@ -729,7 +729,8 @@ These differ from Claude Code:
   Code Mods have no timers.
 - A render can wait behind a tool call and its approval, and the band keeps its
   last tree meanwhile. A tool call, command or turn event queued behind a
-  running render waits for it, up to the hook's 10-second budget.
+  running render waits for it, up to 10 seconds for each `ui.render` hook in
+  the chain.
 - Refusal lines go only to the debug log, since Qwen Code has no hot reload.
 - JSX is not compiled yet, although `h` and `Fragment` exist.
 

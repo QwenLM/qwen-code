@@ -142,7 +142,7 @@ These go into the user guide:
 - Only the `AbovePrompt` site is raised, and only in Ink. Elements other than `Box` and `Text` fail the tree.
 - The band has no collapse mark, focus, scrolling or `n more` row. A tree taller than `maxRows` is clipped. `maxRows` is a third of the terminal's rows, where Claude Code gives the bottom slot's remaining rows in fullscreen and the terminal's height otherwise. `bodyColumns` keeps Claude Code's five-column reservation.
 - `$.ui.invalidate` takes effect after the dispatch that called it, since Qwen Code Mods have no timers.
-- A render can wait behind a tool call and its approval, and the band keeps its last tree meanwhile. A tool call, command or turn event queued behind a running render waits for it, up to the hook's 10-second budget.
+- A render can wait behind a tool call and its approval, and the band keeps its last tree meanwhile. A tool call, command or turn event queued behind a running render waits for it, up to 10 seconds for each `ui.render` hook in the chain.
 - `ui.resolve` hooks are skipped as unsupported. `hover` is checked but not drawn.
 - Refusal lines go only to the debug log, since Qwen Code has no hot reload.
 - JSX is not compiled yet, although `h` and `Fragment` exist.
@@ -193,5 +193,5 @@ Acceptance: Token Weather's line shows in Ink with the icon, word, percentage, t
 
 - The band takes rows from the transcript. The cap of a third of the terminal keeps it small. Whether to match Claude Code's fullscreen slot more closely is open.
 - A render that waits behind a long tool call leaves the band stale. That is acceptable for a band that changes per turn. Concurrent roots in the worker would lift it.
-- A slow render hook delays the tool middleware queued behind it by up to the hook's 10-second budget.
+- A slow render hook delays the tool middleware queued behind it by up to 10 seconds for each `ui.render` hook in the chain.
 - Whether refusal lines should also reach the transcript under `--debug`, since there is no hot reload to show them, is open.
