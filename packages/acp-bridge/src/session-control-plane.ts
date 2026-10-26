@@ -16133,15 +16133,90 @@ export function createSessionControlPlane(
           !snapshot ||
           snapshot.degraded ||
           entry.restoreReplayPartial ||
-          entry.restoreReplayError ||
-          entry.restoreHistoryHasMore
+          entry.restoreReplayError
         ) {
           throw new InvalidRewindTargetError(
             sessionId,
             'Cannot prove the surviving transcript; reload the session before retrying rewind',
           );
         }
-        const replay = [...snapshot.compactedTurns, ...snapshot.liveJournal];
+        let replay = [...snapshot.compactedTurns, ...snapshot.liveJournal];
+        if (entry.restoreHistoryHasMore) {
+          const lastEventId = entry.events.lastEventId;
+          const eventEpoch = entry.events.epoch;
+          const seenCursors = new Set<string>();
+          let cursor: string | undefined;
+          let replayBytes = 0;
+          let emptyPages = 0;
+          replay = [];
+          do {
+            const page = await requestSessionTranscriptPage({
+              sessionId,
+              ...(cursor !== undefined ? { cursor } : {}),
+              limit: SESSION_TRANSCRIPT_MAX_LIMIT,
+            });
+            if (
+              page.v !== 1 ||
+              page.sessionId !== sessionId ||
+              !Array.isArray(page.events) ||
+              typeof page.hasMore !== 'boolean' ||
+              page.partial ||
+              page.replayError !== undefined ||
+              (page.hasMore &&
+                (!page.nextCursor || seenCursors.has(page.nextCursor)))
+            ) {
+              throw new InvalidRewindTargetError(
+                sessionId,
+                'Cannot prove a complete persisted transcript for rewind',
+              );
+            }
+            const pageReplay = page.events.map((event) => {
+              if (
+                event.type !== 'session_update' ||
+                !isRecord(event.data) ||
+                isRecord(event.data['update'])
+              )
+                return event;
+              return { ...event, data: { sessionId, update: event.data } };
+            });
+            // Reserve the IDs and timestamps assigned when replay is reseeded.
+            replayBytes += Buffer.byteLength(
+              JSON.stringify(
+                pageReplay.map((event) => ({
+                  ...event,
+                  id: Number.MAX_SAFE_INTEGER,
+                  _meta: {
+                    ...event._meta,
+                    serverTimestamp: Number.MAX_SAFE_INTEGER,
+                  },
+                })),
+              ),
+              'utf8',
+            );
+            if (
+              replayBytes > compactedReplayMaxBytes ||
+              (page.events.length === 0 &&
+                ++emptyPages >= MAX_EMPTY_TRANSCRIPT_PAGES)
+            ) {
+              throw new InvalidRewindTargetError(
+                sessionId,
+                'Persisted rewind replay exceeds the bounded replay budget',
+              );
+            }
+            replay.push(...pageReplay);
+            cursor = page.hasMore ? page.nextCursor : undefined;
+            if (cursor !== undefined) seenCursors.add(cursor);
+          } while (cursor !== undefined);
+          if (
+            entry.events.lastEventId !== lastEventId ||
+            entry.events.epoch !== eventEpoch
+          ) {
+            throw new InvalidRewindTargetError(
+              sessionId,
+              'Session changed while recovering the rewind transcript; retry rewind',
+            );
+          }
+        }
         const boundaries: number[] = [];
         let previousTargetChunk = false;
         for (const [index, event] of replay.entries()) {

@@ -209,6 +209,113 @@ async function seedRewindTarget(
 }
 
 describe('authoritative rewind replay', () => {
+  it.each(['complete', 'partial', 'repeated cursor', 'oversized'] as const)(
+    'recovers a paged restore before rewind only with a complete bounded prefix: %s',
+    async (failure) => {
+      const nativeRewind = vi.fn(() => ({
+        targetTurnIndex: 1,
+        filesChanged: [],
+        filesFailed: [],
+      }));
+      const frame = (name: string, id: number): BridgeEvent => ({
+        v: 1,
+        id,
+        type: 'session_update',
+        data: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: name },
+          _meta: { promptId: `daemon-${name}` },
+        },
+      });
+      const handle = makeChannel({
+        loadSessionImpl: () => ({
+          _meta: {
+            'qwen.session.loadReplay': {
+              v: 1,
+              hasMore: true,
+              anchorRecordId: 'record-A',
+              updates: [
+                {
+                  sessionUpdate: 'user_message_chunk',
+                  content: { type: 'text', text: 'A' },
+                  _meta: { promptId: 'daemon-A' },
+                },
+              ],
+            },
+          },
+        }),
+        extMethodImpl: (method, params) => {
+          if (method === SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots)
+            return {
+              snapshots: [
+                {
+                  promptId: 'native-A',
+                  daemonPromptId: 'daemon-A',
+                  turnIndex: 1,
+                },
+              ],
+            };
+          if (method === SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+            if (!params['cursor'])
+              return {
+                v: 1,
+                sessionId: SESS_A,
+                events: [
+                  frame(
+                    failure === 'oversized' ? 'x'.repeat(10_000) : 'ROOT',
+                    1,
+                  ),
+                ],
+                nextCursor: 'next',
+                hasMore: true,
+              };
+            return {
+              v: 1,
+              sessionId: SESS_A,
+              events: [frame('A', 2)],
+              hasMore: failure === 'repeated cursor',
+              nextCursor: 'next',
+              ...(failure === 'partial' ? { partial: true } : {}),
+            };
+          }
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionRewind)
+            return nativeRewind();
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        compactedReplayMaxBytes: 4096,
+      });
+      try {
+        const session = await bridge.loadSession({
+          sessionId: SESS_A,
+          workspaceCwd: WS_A,
+          historyPageSize: 1,
+          historyReplay: 'response',
+        });
+        const before = bridge.getSessionReplaySnapshot(session.sessionId);
+        const result = bridge.rewindSession(session.sessionId, {
+          promptId: 'native-A',
+        });
+        if (failure === 'complete') {
+          await result;
+          expect(nativeRewind).toHaveBeenCalledOnce();
+          const replay = bridge.getSessionReplaySnapshot(session.sessionId);
+          expect(JSON.stringify(replay)).toContain('ROOT');
+          expect(JSON.stringify(replay)).not.toContain('daemon-A');
+        } else {
+          await expect(result).rejects.toBeInstanceOf(InvalidRewindTargetError);
+          expect(nativeRewind).not.toHaveBeenCalled();
+          expect(bridge.getSessionReplaySnapshot(session.sessionId)).toEqual(
+            before,
+          );
+        }
+      } finally {
+        await bridge.shutdown();
+      }
+    },
+  );
   it.each([
     { partial: true },
     { replayError: 'persisted replay read failed' },
@@ -255,6 +362,7 @@ describe('authoritative rewind replay', () => {
         const session = await bridge.loadSession({
           sessionId: SESS_A,
           workspaceCwd: WS_A,
+          historyReplay: 'response',
         });
         const before = bridge.getSessionReplaySnapshot(session.sessionId);
         await expect(

@@ -559,6 +559,9 @@ function applyDaemonTranscriptEvent(
     case 'session.rewound':
       if (event.replay !== undefined) {
         const previousLength = next.blocks.length;
+        const previousOldestRecordId = next.blocks.find(
+          (block) => (block.sourceRecordIds?.length ?? 0) > 0,
+        )?.sourceRecordIds?.[0];
         next.awaitingResync = false;
         next.lastResyncRequired = undefined;
         truncateTranscriptBeforeBlock(next, 0, false);
@@ -570,13 +573,14 @@ function applyDaemonTranscriptEvent(
         // Retention and rewind notifications must observe the installed prefix.
         trimTranscriptState(next);
         if (previousLength > 0) {
+          const oldestRetainedRecordId = next.blocks.find(
+            (block) => (block.sourceRecordIds?.length ?? 0) > 0,
+          )?.sourceRecordIds?.[0];
           callback?.({
             kind: 'blocks',
-            oldestRetainedRecordId: next.blocks.find(
-              (block) => (block.sourceRecordIds?.length ?? 0) > 0,
-            )?.sourceRecordIds?.[0],
-            // Replacement can restore a prefix older than the previous window.
-            evictedOldest: true,
+            oldestRetainedRecordId,
+            evictedOldest: oldestRetainedRecordId !== previousOldestRecordId,
+            replacedReplay: true,
             blockCount: next.blocks.length,
             retainedBytes: next.retainedBytes,
             maxBlocks: next.maxBlocks,

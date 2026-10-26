@@ -13,6 +13,16 @@ describe('daemon transcript rewind', () => {
   it.each([
     { v: 1, type: 'session_rewound', data: {} },
     { v: 1, type: 'session_update', data: { sessionId: 'other-session' } },
+    {
+      v: 1,
+      type: 'approval_mode_changed',
+      data: {
+        sessionId: 'other-session',
+        previous: 'default',
+        next: 'plan',
+        persisted: false,
+      },
+    },
   ])('rejects a nested or cross-session authoritative prefix: %j', (frame) => {
     const events = normalizeDaemonEvent({
       v: 1,
@@ -29,6 +39,70 @@ describe('daemon transcript rewind', () => {
     });
     expect(events.some((event) => event.type === 'session.rewound')).toBe(
       false,
+    );
+  });
+
+  it('accepts a persisted workspace approval broadcast in another session prefix', () => {
+    const events = normalizeDaemonEvent({
+      v: 1,
+      type: 'session_rewound',
+      data: {
+        sessionId: 'session',
+        promptId: 'native-A',
+        targetTurnIndex: 0,
+        filesChanged: [],
+        filesFailed: [],
+        replay: [
+          {
+            v: 1,
+            type: 'approval_mode_changed',
+            data: {
+              sessionId: 'other-session',
+              previous: 'default',
+              next: 'plan',
+              persisted: true,
+            },
+          },
+        ],
+      },
+    });
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState(),
+      events,
+    );
+    expect(events.some((event) => event.type === 'session.rewound')).toBe(true);
+    expect(state.approvalMode).toBe('plan');
+  });
+
+  it('reports a tail-only replay replacement without evicting its oldest anchor', () => {
+    const onTruncation = vi.fn();
+    const before = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ onTruncation }),
+      [
+        { type: 'user.text.delta', text: 'ROOT', sourceRecordIds: ['root'] },
+        { type: 'assistant.done' },
+        { type: 'user.text.delta', text: 'A', promptId: 'a' },
+      ],
+    );
+    onTruncation.mockClear();
+    const after = reduceDaemonTranscriptEvents(before, [
+      {
+        type: 'session.rewound',
+        promptId: 'a',
+        targetTurnIndex: 1,
+        replay: [
+          { type: 'user.text.delta', text: 'ROOT', sourceRecordIds: ['root'] },
+        ],
+      },
+    ]);
+    expect(after.blocks.map((block) => 'text' in block && block.text)).toEqual([
+      'ROOT',
+    ]);
+    expect(onTruncation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        evictedOldest: false,
+        oldestRetainedRecordId: 'root',
+      }),
     );
   });
 

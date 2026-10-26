@@ -1926,7 +1926,9 @@ function isSessionRewoundData(
             'data' in event &&
             (!isRecord(event['data']) ||
               event['data']['sessionId'] === undefined ||
-              event['data']['sessionId'] === value['sessionId']),
+              event['data']['sessionId'] === value['sessionId'] ||
+              (event['type'] === 'approval_mode_changed' &&
+                event['data']['persisted'] === true)),
         ))) &&
     Array.isArray(value['filesChanged']) &&
     Array.isArray(value['filesFailed'])

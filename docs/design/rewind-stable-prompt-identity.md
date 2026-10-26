@@ -117,9 +117,12 @@ native rewind, the owning prompt queue resolves a unique checkpoint-to-daemon
 identity and freezes the existing complete bounded UI replay. Its ordinary user
 chunk group determines the surviving prefix; multipart text and attachments
 belong to one group, while background and injected rows are excluded. Missing,
-ambiguous, degraded, truncated, partial or unfinished paginated history refuses
-recoverably before conversation, files or recording change. Server proof loss
-therefore differs from eviction in a client's smaller retained window.
+ambiguous, degraded, truncated or partial history refuses recoverably before
+conversation, files or recording change. A paged restore first recovers native
+transcript pages from the oldest record within the existing replay byte budget;
+partial/error pages, non-advancing cursors or concurrent events refuse before
+native mutation. Server proof loss therefore differs from eviction in a client's
+smaller retained window.
 
 After native conversation rewind, the daemon resets replay even for an empty
 prefix, reseeds surviving events with new monotonic IDs, clears obsolete restore
@@ -132,9 +135,13 @@ use the same bounded authority without a new Session journal.
 The SDK normalizes the prefix through its existing event normalizer, including
 formerly optimistic own-user rows, and installs it atomically with its existing
 block and byte budgets. Indexes, accounting and active references follow the
-replacement; truncation callbacks observe the final window and re-anchor to its
-oldest source record, while the outer rewind cursor remains latest. Older producers without `replay` retain the identity or
-legacy-index behavior. Acceptance requires ROOT+A+B+C with A evicted only in the
+replacement; truncation callbacks observe the final window and report oldest
+anchor eviction only when that source record changes. Web Shell re-anchors an
+older restored prefix without adding the discarded tail to a rejected page's
+footprint, so available history capacity reopens. Persisted workspace approval
+broadcasts retain their origin session in replay; foreign session-local events
+remain invalid. The outer rewind cursor remains latest. Older producers without
+`replay` retain the identity or legacy-index behavior. Acceptance requires ROOT+A+B+C with A evicted only in the
 client to rewind A and restore ROOT in the original client, server cache and
 unbounded observer. Reconnect, fresh/paged loads, a second rewind after reseeding
 and the next actual model request must not resurrect A/B/C. Both recording modes,
