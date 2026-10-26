@@ -43103,3 +43103,80 @@ describe('background handoff cancellation', () => {
     }
   });
 });
+
+describe('authoritative pending prompt drafts', () => {
+  it('returns isolated complete drafts only on an owner-scoped opt-in read', async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const bridge = makeBridge({
+      channelFactory: async () =>
+        makeChannel({
+          promptImpl: async () => {
+            await blocked;
+            return { stopReason: 'end_turn' };
+          },
+        }).channel,
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const context = { clientId: session.clientId };
+    const first = bridge.sendPrompt(
+      session.sessionId,
+      {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'first' }],
+      },
+      undefined,
+      context,
+    );
+    const second = bridge.sendPrompt(
+      session.sessionId,
+      {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'queued' }],
+        _meta: { context: { selection: [] } },
+      },
+      undefined,
+      context,
+    );
+    try {
+      await vi.waitFor(() =>
+        expect(
+          bridge.getPendingPrompts(session.sessionId, context),
+        ).toHaveLength(2),
+      );
+      expect(
+        bridge.getPendingPrompts(session.sessionId, context)[1],
+      ).not.toHaveProperty('queueDraft');
+      const draft = bridge.getPendingPrompts(
+        session.sessionId,
+        context,
+        true,
+      )[1];
+      expect(draft).toMatchObject({
+        restoreComplete: true,
+        queueDraft: {
+          prompt: [{ type: 'text', text: 'queued' }],
+          _meta: { context: { selection: [] } },
+        },
+      });
+      draft!.queueDraft!.prompt.length = 0;
+      expect(
+        bridge.getPendingPrompts(session.sessionId, context, true)[1]!
+          .queueDraft!.prompt,
+      ).toHaveLength(1);
+      expect(() =>
+        bridge.getPendingPrompts(
+          session.sessionId,
+          { clientId: 'rogue' },
+          true,
+        ),
+      ).toThrow();
+    } finally {
+      release();
+      await Promise.all([first, second]);
+      await bridge.shutdown();
+    }
+  });
+});
