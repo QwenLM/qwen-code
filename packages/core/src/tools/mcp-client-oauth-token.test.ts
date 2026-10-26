@@ -236,10 +236,8 @@ describe('createTransport OAuth bearer token per request', () => {
       oauth: { enabled: true, clientId: 'client-id', scopes: ['read'] },
     });
 
-    expect(transport._requestInit?.headers).toMatchObject({
-      'X-Tenant': 'acme',
-      Authorization: 'Bearer access-0',
-    });
+    // Only the fetch wrapper writes the OAuth header.
+    expect(transport._requestInit?.headers).toEqual({ 'X-Tenant': 'acme' });
 
     vi.setSystemTime(Date.now() + 56 * 60 * 1000);
     await send(transport);
@@ -264,19 +262,82 @@ describe('createTransport OAuth bearer token per request', () => {
     expect(refreshBodies[0].has('scope')).toBe(false);
   });
 
-  it('leaves the request untouched when no token can be obtained', async () => {
+  it('sends no stale bearer once no token can be obtained', async () => {
     stubAuthorizationServer();
     const sent = stubMcpNetwork();
     const transport = await transportFor({
       httpUrl: 'https://mcp.example/mcp',
+      headers: { 'X-Tenant': 'acme' },
     });
 
     storage.creds = null;
     vi.setSystemTime(Date.now() + 2 * HOUR_MS);
     await send(transport);
 
-    // The connect-time header stays; the wrapper does not override it.
+    const last = sent.at(-1)!;
+    expect(last.authorization).toBeNull();
+    expect(last.headers.get('x-tenant')).toBe('acme');
+  });
+
+  it('keeps a due token that cannot be refreshed until it actually expires', async () => {
+    const { handler } = stubAuthorizationServer();
+    const sent = stubMcpNetwork();
+    seedCredentials();
+    storage.creds!.token.refreshToken = undefined;
+    const transport = await transportFor({
+      httpUrl: 'https://mcp.example/mcp',
+    });
+
+    // Inside the buffer with nothing to refresh with: still accepted.
+    vi.setSystemTime(Date.now() + 56 * 60 * 1000);
+    await send(transport);
     expect(sent.at(-1)?.authorization).toBe('Bearer access-0');
+
+    // Past expiry nothing usable is left.
+    vi.setSystemTime(Date.now() + 5 * 60 * 1000);
+    await send(transport);
+    expect(sent.at(-1)?.authorization).toBeNull();
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('sends no stale bearer on SSE once no token can be obtained', async () => {
+    stubAuthorizationServer();
+    const transport = await transportFor({ url: 'https://mcp.example/sse' });
+    const sent: Array<string | null> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        sent.push(new Headers(init?.headers).get('authorization'));
+        return new Response(null, { status: 202 });
+      }),
+    );
+
+    storage.creds = null;
+    vi.setSystemTime(Date.now() + 2 * HOUR_MS);
+    await sendRaw(transport);
+
+    // Neither the connect-time headers nor the fetch wrapper carry it.
+    expect(transport._requestInit?.headers).toBeUndefined();
+    expect(sent).toEqual([null]);
+  });
+
+  it('keeps a user-configured Authorization header apart from the OAuth one', async () => {
+    stubAuthorizationServer();
+    const sent = stubMcpNetwork();
+    const transport = await transportFor({
+      httpUrl: 'https://mcp.example/mcp',
+      headers: { Authorization: 'Basic user-configured' },
+    });
+
+    // A usable OAuth token takes precedence.
+    await send(transport);
+    expect(sent.at(-1)?.authorization).toBe('Bearer access-0');
+
+    // With none left, the configured header goes out, not the stale token.
+    storage.creds = null;
+    vi.setSystemTime(Date.now() + 2 * HOUR_MS);
+    await send(transport);
+    expect(sent.at(-1)?.authorization).toBe('Basic user-configured');
   });
 
   it('sends the refreshed token on SSE transports too', async () => {
