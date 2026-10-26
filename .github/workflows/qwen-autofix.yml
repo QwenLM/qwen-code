@@ -324,8 +324,8 @@ jobs:
                 CMD=''
                 [[ "${BODY_TRIMMED}" == "${TAKEOVER_COMMAND}" ]] && CMD='add'
                 [[ "${BODY_TRIMMED}" == "${TAKEOVER_COMMAND} stop" ]] && CMD='remove'
-                # '<cmd> from N' — the ONE parameterized form, and the only
-                # place this workflow reads a value out of a comment body.
+                # '<cmd> from N' / 'for N' — the two parameterized forms,
+                # the only places this reads a value out of a comment body.
                 # Full rationale → qwen-autofix.md#af-007
                 # Operator guide → qwen-autofix-round-seed.md
                 if [[ "${BODY_TRIMMED}" =~ ^(.*)\ from\ ([0-9]{1,2})$ ]]; then
@@ -2913,8 +2913,8 @@ jobs:
 
             if [[ "${ROUND}" -ge "${EFF_MAX_ROUNDS}" || "${BUDGET_SPENT}" == 'true' ]]; then
               IS_BOT_AUTHOR="$(jq -r --arg ab "${AUTOFIX_BOT}" '((.author.login // "") == $ab)' <<< "${PR_META}")"
-              # '<cmd> for N' spent its BUDGET: a human PR is RELEASED, a bot PR keeps the paused path. → qwen-autofix.md#af-159
-              if [[ "${BUDGET_SPENT}" == 'true' && "${IS_BOT_AUTHOR}" != 'true' && "${BUDGET_STREAK}" -lt "${TIMEOUT_WINDOW_CAP}" && -z "${FORCED_PR}" ]]; then
+              # Budget spent: human PR released, bot PR paused. → qwen-autofix.md#af-159
+              if [[ "${BUDGET_SPENT}" == 'true' && "${IS_BOT_AUTHOR}" != 'true' && "${BUDGET_STREAK}" -lt "${TIMEOUT_WINDOW_CAP}" && ( -z "${FORCED_PR}" || "${EVENT_NAME}" != 'workflow_dispatch' ) ]]; then
                 fleet_row "${PR}" 'budget-spent' "budget ${BUDGET_USED}/${ROUND_BUDGET} spent - releasing takeover"
                 BUDGET_RT="${REARM_KEY}"
                 [[ "${BUDGET_RT}" == "none" ]] && BUDGET_RT=''
@@ -2940,7 +2940,7 @@ jobs:
                 else
                   if [[ "${BUDGET_NOTICED}" == "0" ]]; then
                     gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🏁 Takeover budget spent: %s round(s), %s attempt(s) used — the loop is releasing the PR now (removing the `%s` label); nothing here is waiting on a human. No-ops, errors, timeouts and crashes all count.\n\n<details>\n<summary>中文说明</summary>\n\n🏁 托管预算已用完：%s 轮预算、已用 %s 次尝试 —— 循环正在释放本 PR（移除 `%s` 标签），这里没有任何事情在等人处理。无改动、报错、超时或崩溃同样计数。\n\n</details>\n\n<!-- autofix-budget-reached -->' "${ROUND_BUDGET}" "${BUDGET_USED}" "${TAKEOVER_LABEL}" "${ROUND_BUDGET}" "${BUDGET_USED}" "${TAKEOVER_LABEL}")" \
-                      || echo "::warning::budget-spent notice failed for #${PR}; will retry next scan"
+                      || { echo "::warning::budget-spent notice failed for #${PR}; will retry next scan"; continue; }
                   fi
                   # REST, URI-encoded segment, 404-tolerant — every release site.
                   if ! BUDGET_DEL_ERR="$(gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${TAKEOVER_LABEL}" '$l|@uri')" 2>&1)"; then
@@ -4512,8 +4512,7 @@ jobs:
           # Full rationale → qwen-autofix.md#af-118
           MEASURED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           [[ "${NET_MEASURED}" == 'true' ]] && echo "measured_at=${MEASURED_AT}" >> "${GITHUB_OUTPUT}"
-          # NOTE (#9114 R2-8/R6-3): re-anchoring on an EXTERNAL head move (an
-          # author push) is deliberately NOT done here.
+          # NOTE (#9114 R2-8/R6-3): an EXTERNAL head move is NOT re-anchored.
           # Full rationale → qwen-autofix.md#af-119
           GROWTH_NOW_CUTOFF="${BASE_UPD_AT}"
           # KNOWN RESIDUAL (#9114): this sibling read still filters on the
