@@ -24,9 +24,10 @@ case "${machine}" in
     ;;
 esac
 
-# Pinned archive and build-specific fallback cache coordinates.
-# setup-java strips build metadata from its cache versions; our own namespace
-# retains it so different pinned builds cannot reuse the same fallback entry.
+# Pinned archive and cache coordinates. `dir` is exactly the version setup-java
+# keys its own tool-cache entry by: getToolcacheVersionName() rewrites the first
+# '+' of Adoptium's semver to '-' before tc.cacheDir() runs semver.clean(), and
+# clean() keeps a prerelease, so the build suffix stays in the directory name.
 case "${spec}/${arch}" in
   11/arm64) dir='11.0.32-101'; file='OpenJDK11U-jdk_aarch64_linux_hotspot_11.0.32.1_1.tar.gz'; sha='f27033e6f7523c1b0b2565a78e9c0e0abe5596a854ce00ca04ec1b06ece7a935' ;;
   11/x64)   dir='11.0.32-101'; file='OpenJDK11U-jdk_x64_linux_hotspot_11.0.32.1_1.tar.gz';     sha='5c3f68887c325d36d852ba534303e1f5f1f5cae7d6cc1e951d73e0d8e98a058d' ;;
@@ -44,7 +45,7 @@ esac
 url="https://mirrors.tuna.tsinghua.edu.cn/Adoptium/${spec}/jdk/${arch/arm64/aarch64}/linux/${file}"
 # Read setup-java entries, but never publish into its namespace: setup-java
 # does not take our lock and can still be installing when this fallback runs.
-shared_tool="${RUNNER_TOOL_CACHE:?}/Java_Temurin-Hotspot_jdk/${dir%%-*}/${arch}"
+shared_tool="${RUNNER_TOOL_CACHE:?}/Java_Temurin-Hotspot_jdk/${dir}/${arch}"
 tool="${RUNNER_TOOL_CACHE:?}/qwen-pool-jdk/${dir}/${arch}"
 tool_dir="$(dirname -- "${tool}")"
 mkdir -p -- "${tool_dir}" || { echo "::error::cannot create ${tool_dir}"; exit 1; }

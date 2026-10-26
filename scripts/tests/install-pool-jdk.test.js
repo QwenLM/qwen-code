@@ -22,6 +22,14 @@ afterEach(() => {
   for (const root of fixtures.splice(0)) rmSync(root, { recursive: true });
 });
 
+// The directory actions/setup-java actually keys its tool-cache entry by:
+// getToolcacheVersionName() rewrites the first '+' of Adoptium's semver to '-'
+// BEFORE tc.cacheDir() applies semver.clean(), and clean() keeps a prerelease.
+// semver.clean(semver) alone would drop the build suffix and never match.
+function toolcacheVersionName(version) {
+  return semver.clean(version.replace('+', '-')) || version;
+}
+
 function fixture(mode = 'ok') {
   const root = mkdtempSync(join(tmpdir(), 'pool-jdk-test-'));
   fixtures.push(root);
@@ -88,7 +96,7 @@ fcntl.flock(int(sys.argv[-1]), fcntl.LOCK_UN if '-u' in sys.argv else fcntl.LOCK
   const shared = join(
     cache,
     'Java_Temurin-Hotspot_jdk',
-    semver.clean('11.0.32+101'),
+    toolcacheVersionName('11.0.32+101'),
     'x64',
   );
   const prepare = (name) => {
@@ -110,14 +118,17 @@ fcntl.flock(int(sys.argv[-1]), fcntl.LOCK_UN if '-u' in sys.argv else fcntl.LOCK
     spawnSync('bash', [script], { env, encoding: 'utf8', timeout: 10_000 });
   const start = (env) => {
     const child = spawn('bash', [script], { env, timeout: 10_000 });
+    let stdout = '';
     let stderr = '';
+    child.stdout.on('data', (data) => {
+      stdout += data;
+    });
     child.stderr.on('data', (data) => {
       stderr += data;
     });
-    child.stdout.resume();
     return new Promise((resolve, reject) => {
       child.on('error', reject);
-      child.on('close', (status) => resolve({ status, stderr }));
+      child.on('close', (status) => resolve({ status, stdout, stderr }));
     });
   };
   const home = (env) =>
@@ -137,7 +148,7 @@ function seed(shared, marker = `${shared}.complete`) {
 }
 
 function success(result) {
-  expect(result.status, result.stderr).toBe(0);
+  expect(result.status, `${result.stdout}${result.stderr}`).toBe(0);
 }
 
 describe.skipIf(process.platform === 'win32')(
@@ -170,7 +181,7 @@ describe.skipIf(process.platform === 'win32')(
         const shared = join(
           f.cache,
           'Java_Temurin-Hotspot_jdk',
-          semver.clean(setupVersion),
+          toolcacheVersionName(setupVersion),
           cacheArch,
         );
         const inode = seed(shared);
@@ -189,6 +200,15 @@ describe.skipIf(process.platform === 'win32')(
       expect(f.home(env)).toBe(f.shared);
       expect(f.downloads()).toBe(0);
       expect(statSync(join(f.shared, 'bin/java')).ino).toBe(inode);
+      expect(readFileSync(env.GITHUB_PATH, 'utf8').trim()).toBe(
+        `${f.shared}/bin`,
+      );
+      expect(
+        readFileSync(
+          join(env.RUNNER_TEMP, 'setup-java-m2', 'toolchains.xml'),
+          'utf8',
+        ),
+      ).toContain(`<jdkHome>${f.shared}</jdkHome>`);
     });
 
     it('keeps legacy internal-marker entries intact and reuses its own completed installation', () => {
