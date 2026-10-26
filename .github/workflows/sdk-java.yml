@@ -2165,7 +2165,15 @@ jobs:
             echo "::warning::Expected Node 22.x but found $(node -v); daemon E2E will run against the runner's Node."
           fi
 
+      # setup-java resolves the requested version through api.adoptium.net on
+      # every run, even when the tool cache already holds that JDK, and the
+      # lookup has no timeout: on the Hangzhou hosts it stalled and held this
+      # step for close to two hours (run 40262799523). Bound the attempt and
+      # fall back to the pool's own cache or mirror when it does not finish.
       - name: 'Set up Java'
+        id: 'setup_java'
+        timeout-minutes: 3
+        continue-on-error: true
         uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
         with:
           distribution: 'temurin'
@@ -2173,6 +2181,12 @@ jobs:
           cache: "${{ runner.environment == 'github-hosted' && 'maven' || '' }}"
           cache-dependency-path: 'packages/sdk-java/qwencode/pom.xml'
           settings-path: '${{ runner.temp }}/setup-java-m2'
+
+      - name: 'Set up Java (pool fallback)'
+        if: "${{ steps.setup_java.outcome != 'success' }}"
+        env:
+          JAVA_SPEC: '11'
+        run: 'bash .github/scripts/install-pool-jdk.sh'
 
       - name: 'Set up Maven (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
