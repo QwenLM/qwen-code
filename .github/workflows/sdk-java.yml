@@ -246,7 +246,7 @@ jobs:
             for base in \
               'https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven' \
               'https://maven.aliyun.com/repository/public/org/apache/maven/apache-maven'; do
-              if curl -fsSL --retry 2 --retry-delay 5 --retry-max-time 30 --max-time 300 \
+              if curl -fsSL --retry 2 --retry-delay 5 --retry-connrefused --retry-max-time 30 --max-time 300 \
                 "${base}/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "${archive}"; then
                 break
               fi
@@ -260,6 +260,7 @@ jobs:
             if ! { mkdir -p -- "$(dirname -- "${cached}")" &&
               cp -- "${archive}" "${cached}.$$" &&
               mv -- "${cached}.$$" "${cached}"; }; then
+              rm -f -- "${cached}.$$"
               echo "::warning::Maven cache write-back skipped: the shared cache is not writable; the verified job-local archive is used instead"
             fi
           fi
@@ -772,7 +773,7 @@ jobs:
             for base in \
               'https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven' \
               'https://maven.aliyun.com/repository/public/org/apache/maven/apache-maven'; do
-              if curl -fsSL --retry 2 --retry-delay 5 --retry-max-time 30 --max-time 300 \
+              if curl -fsSL --retry 2 --retry-delay 5 --retry-connrefused --retry-max-time 30 --max-time 300 \
                 "${base}/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "${archive}"; then
                 break
               fi
@@ -786,6 +787,7 @@ jobs:
             if ! { mkdir -p -- "$(dirname -- "${cached}")" &&
               cp -- "${archive}" "${cached}.$$" &&
               mv -- "${cached}.$$" "${cached}"; }; then
+              rm -f -- "${cached}.$$"
               echo "::warning::Maven cache write-back skipped: the shared cache is not writable; the verified job-local archive is used instead"
             fi
           fi
@@ -1683,7 +1685,7 @@ jobs:
             for base in \
               'https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven' \
               'https://maven.aliyun.com/repository/public/org/apache/maven/apache-maven'; do
-              if curl -fsSL --retry 2 --retry-delay 5 --retry-max-time 30 --max-time 300 \
+              if curl -fsSL --retry 2 --retry-delay 5 --retry-connrefused --retry-max-time 30 --max-time 300 \
                 "${base}/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "${archive}"; then
                 break
               fi
@@ -1697,6 +1699,7 @@ jobs:
             if ! { mkdir -p -- "$(dirname -- "${cached}")" &&
               cp -- "${archive}" "${cached}.$$" &&
               mv -- "${cached}.$$" "${cached}"; }; then
+              rm -f -- "${cached}.$$"
               echo "::warning::Maven cache write-back skipped: the shared cache is not writable; the verified job-local archive is used instead"
             fi
           fi
@@ -1938,7 +1941,7 @@ jobs:
             for base in \
               'https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven' \
               'https://maven.aliyun.com/repository/public/org/apache/maven/apache-maven'; do
-              if curl -fsSL --retry 2 --retry-delay 5 --retry-max-time 30 --max-time 300 \
+              if curl -fsSL --retry 2 --retry-delay 5 --retry-connrefused --retry-max-time 30 --max-time 300 \
                 "${base}/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "${archive}"; then
                 break
               fi
@@ -1952,6 +1955,7 @@ jobs:
             if ! { mkdir -p -- "$(dirname -- "${cached}")" &&
               cp -- "${archive}" "${cached}.$$" &&
               mv -- "${cached}.$$" "${cached}"; }; then
+              rm -f -- "${cached}.$$"
               echo "::warning::Maven cache write-back skipped: the shared cache is not writable; the verified job-local archive is used instead"
             fi
           fi
@@ -2298,7 +2302,7 @@ jobs:
             for base in \
               'https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven' \
               'https://maven.aliyun.com/repository/public/org/apache/maven/apache-maven'; do
-              if curl -fsSL --retry 2 --retry-delay 5 --retry-max-time 30 --max-time 300 \
+              if curl -fsSL --retry 2 --retry-delay 5 --retry-connrefused --retry-max-time 30 --max-time 300 \
                 "${base}/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "${archive}"; then
                 break
               fi
@@ -2312,6 +2316,7 @@ jobs:
             if ! { mkdir -p -- "$(dirname -- "${cached}")" &&
               cp -- "${archive}" "${cached}.$$" &&
               mv -- "${cached}.$$" "${cached}"; }; then
+              rm -f -- "${cached}.$$"
               echo "::warning::Maven cache write-back skipped: the shared cache is not writable; the verified job-local archive is used instead"
             fi
           fi
