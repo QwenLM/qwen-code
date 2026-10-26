@@ -143,6 +143,34 @@ describe('checkArtifacts', () => {
     expect(result.warnings.join('\n')).toMatch(/does not state "merge-ready"/);
     expect(result.warnings.join('\n')).toMatch(/40-character head OID/);
   });
+
+  // Presence is not identity: a base OID is also 40 hex characters. With the
+  // round snapshot at hand, the cited OID has to be the head it verified.
+  it('warns when the report cites an OID other than the verified head', () => {
+    const head = 'c'.repeat(40);
+    const base = 'd'.repeat(40);
+    const cites = (oid) =>
+      `merge-ready · 1 passed · 0 failed · 1 total · ${oid}\n`;
+
+    const correct = checkArtifacts({
+      files: validFiles({ report: cites(head) }),
+      evidence: [],
+      expectedHead: head,
+    });
+    expect(correct.warnings.join('\n')).not.toContain(
+      'does not name the verified head',
+    );
+
+    const other = checkArtifacts({
+      files: validFiles({ report: cites(base) }),
+      evidence: [],
+      expectedHead: head,
+    });
+    expect(other.warnings.join('\n')).toContain(
+      `does not name the verified head ${head}`,
+    );
+    expect(other.warnings.join('\n')).toContain('cites 1 other OID');
+  });
 });
 
 // The CLI is the path a maintainer runs, so the exit codes are the contract.
@@ -167,6 +195,35 @@ describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
     expect(bad.status).toBe(1);
     expect(bad.stdout).toContain('error merge-ready with 1 failed assertion');
     expect(bad.stdout).toContain('failed: verdict=merge-ready');
+  });
+
+  it('reads the verified head from the round snapshot', () => {
+    const root = mkdtempSync(join(tmpdir(), 'verify-pr-check-snapshot-'));
+    tmpDirs.push(root);
+    const artifacts = join(root, 'tmp', 'pr7-verify-20261026-120000');
+    mkdirSync(join(artifacts, 'evidence'), { recursive: true });
+    mkdirSync(join(root, 'tmp', 'verify-context'), { recursive: true });
+    const head = 'e'.repeat(40);
+    const base = 'f'.repeat(40);
+    writeFileSync(
+      join(root, 'tmp', 'verify-context', 'pr7.json'),
+      JSON.stringify({ number: 7, headRefOid: head }),
+    );
+    writeFileSync(join(artifacts, 'verdict.txt'), 'merge-ready\n');
+    writeFileSync(
+      join(artifacts, 'assertions.json'),
+      JSON.stringify({ pass: 1, fail: 0, total: 1 }),
+    );
+    writeFileSync(
+      join(artifacts, 'report.md'),
+      `merge-ready · 1 passed · 0 failed · 1 total · ${base}\n`,
+    );
+
+    const result = spawnSync(process.execPath, [SCRIPT, artifacts], {
+      encoding: 'utf8',
+    });
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain(`does not name the verified head ${head}`);
   });
 
   it('exits 2 without a directory and 1 on a missing one', () => {

@@ -23,13 +23,12 @@
  */
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { isEntryPoint } from './lib/entry-point.js';
 
 export const VERDICTS = ['merge-ready', 'findings', 'blocked', 'inconclusive'];
 
 const KEBAB_PNG = /^[a-z0-9]+(?:-[a-z0-9]+)*\.png$/;
-const OID = /\b[0-9a-f]{40}\b/;
 
 const HELP = `Usage: node scripts/verify-pr-check.mjs <artifact-dir>
 
@@ -55,7 +54,7 @@ function readIfExists(path) {
  * Pure check over already-read artifacts. `files` carries raw text or null;
  * `evidence` is the PNG file names under evidence/.
  */
-export function checkArtifacts({ files, evidence = [] }) {
+export function checkArtifacts({ files, evidence = [], expectedHead = null }) {
   const errors = [];
   const warnings = [];
 
@@ -141,7 +140,14 @@ export function checkArtifacts({ files, evidence = [] }) {
         `report.md does not state "${verdict}" in its first 10 non-empty lines`,
       );
     }
-    if (!lead.some((line) => OID.test(line))) {
+    const cited = lead.join('\n').match(/\b[0-9a-f]{40}\b/g) ?? [];
+    if (expectedHead) {
+      if (!cited.includes(expectedHead)) {
+        warnings.push(
+          `report.md does not name the verified head ${expectedHead} in its first 10 non-empty lines${cited.length > 0 ? ` (it cites ${cited.length} other OID${cited.length === 1 ? '' : 's'})` : ''}`,
+        );
+      }
+    } else if (cited.length === 0) {
       warnings.push(
         'report.md does not name a 40-character head OID in its first 10 non-empty lines',
       );
@@ -193,7 +199,34 @@ function main(argv) {
       )
     : [];
 
-  const result = checkArtifacts({ files, evidence });
+  // When the round's own snapshot is beside the artifact directory, the report
+  // has to cite the head it verified — not merely some 40-hex token, which a
+  // base OID satisfies. A snapshot that exists but cannot be read is reported
+  // rather than silently downgrading the check.
+  let expectedHead = null;
+  let snapshotWarning = null;
+  const prNumber = /^pr(\d+)-verify-/.exec(basename(resolve(dir)))?.[1];
+  if (prNumber) {
+    const snapshotPath = join(
+      dirname(resolve(dir)),
+      'verify-context',
+      `pr${prNumber}.json`,
+    );
+    if (existsSync(snapshotPath)) {
+      try {
+        const snapshot = JSON.parse(readFileSync(snapshotPath, 'utf8'));
+        if (/^[0-9a-f]{40}$/.test(snapshot?.headRefOid ?? '')) {
+          expectedHead = snapshot.headRefOid;
+        }
+      } catch {
+        snapshotWarning =
+          'the verify-context snapshot is unreadable; the head-OID check fell back to presence-only';
+      }
+    }
+  }
+
+  const result = checkArtifacts({ files, evidence, expectedHead });
+  if (snapshotWarning) result.warnings.unshift(snapshotWarning);
   const lines = [`verify-pr check: ${dir}`];
   for (const warning of result.warnings) lines.push(`  warn  ${warning}`);
   for (const error of result.errors) lines.push(`  error ${error}`);

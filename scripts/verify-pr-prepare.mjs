@@ -149,6 +149,9 @@ const CREDENTIAL_PATHS = [
   ['.git-credentials', '~/.git-credentials'],
   ['.netrc', '~/.netrc'],
   ['.docker/config.json', '~/.docker/config.json'],
+  // The persistent form of GH_TOKEN/GITHUB_TOKEN and a registry token.
+  ['.config/gh', '~/.config/gh'],
+  ['.npmrc', '~/.npmrc'],
 ];
 
 /**
@@ -182,13 +185,16 @@ export function detectIsolation(env = process.env, exists = existsSync) {
   if (env.container) signals.push(`container=${env.container}`);
   if (exists('/.dockerenv')) signals.push('/.dockerenv');
   if (exists('/run/.containerenv')) signals.push('/run/.containerenv');
-  if (env.SANDBOX && env.SANDBOX !== SEATBELT) {
-    signals.push(`SANDBOX=${env.SANDBOX}`);
+  // A boolean-looking value reads as "sandbox disabled"; the CLI's transport
+  // writes a container name or `sandbox-exec`, neither of which is a marker.
+  const sandbox = (env.SANDBOX ?? '').trim();
+  if (sandbox && !['false', 'true', '0', '1'].includes(sandbox)) {
+    if (sandbox !== SEATBELT) signals.push(`SANDBOX=${sandbox}`);
   }
   return {
     isolated: signals.length > 0,
     signals,
-    seatbelt: env.SANDBOX === SEATBELT,
+    seatbelt: sandbox === SEATBELT,
   };
 }
 

@@ -173,6 +173,12 @@ describe('detectIsolation', () => {
       signals: [],
       seatbelt: true,
     });
+    // A boolean-looking value reads as "disabled", not as a container name.
+    expect(detectIsolation({ SANDBOX: 'false' }, () => false)).toEqual({
+      isolated: false,
+      signals: [],
+      seatbelt: false,
+    });
   });
 });
 
@@ -340,6 +346,18 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     const mounted = runPrepare(dir, ['--require-isolation'], env);
     expect(mounted.status).toBe(4);
     expect(mounted.stderr).toContain('~/.ssh');
+
+    // Persistent forms of the same credentials: `gh auth login` and `npm login`.
+    for (const relative of ['.config/gh', '.npmrc']) {
+      const home = makeTmpDir();
+      mkdirSync(join(home, relative), { recursive: true });
+      const result = runPrepare(dir, ['--require-isolation'], {
+        ...env,
+        HOME: home,
+      });
+      expect(result.status).toBe(4);
+      expect(result.stderr).toContain(`~/${relative}`);
+    }
 
     const keyed = runPrepare(dir, ['--require-isolation'], {
       ...env,
