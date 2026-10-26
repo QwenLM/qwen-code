@@ -23,20 +23,31 @@
 //   module that names a changed file's basename joins the list, so the tests
 //   that import it run.
 // - A change that reaches every test without being imported by any — the
-//   vitest/vite config, a setup file, a manifest, the lockfile, a tsconfig,
-//   a dependency patch — or a file the diff deletes or renames away, which
-//   takes the old edges with it. Each of these runs every suite whole.
+//   vitest/vite config and the setup files it names, a workspace manifest,
+//   the lockfile, a tsconfig, a dependency patch, a `__mocks__` module — or a
+//   file the diff deletes or renames away, which takes the old edges with it.
+//   Each of these runs every suite whole. The list is the conventions this
+//   module knows, not every way a file can reach a test.
+// - A snapshot: vitest binds `__snapshots__/<test>.snap` to `<test>` by name,
+//   so the test joins the list.
 // - A path the graph spells differently from the diff: vitest resolves the
-//   list against its configured `root`, and a dependency imported by package
-//   name is its build output (`dist/…`), not the source the diff changed.
-//   A suite whose config moves its root, or that imports a changed
-//   dependency without aliasing it to source, runs whole.
+//   list against its configured `root`, so a suite whose config moves it
+//   runs whole; and a package imported by name is its build output in the
+//   graph, so a changed file of a package whose entry is not its source
+//   brings that build output with it (`buildOutputOf`).
 // - A suite whose npm `pretest`/`posttest` must run: `npm exec` runs neither.
-//   It runs whole.
-// - A test that lists a directory without naming the file in it. Nothing
-//   here finds that one; the report says so (`relatedTestsSentence`).
+//   It runs whole, as does one whose `vitest` npm exec would not find.
+// - A test that lists a directory, or builds the file's name at run time,
+//   without naming the file. Nothing here finds that one; the report says so
+//   (`relatedTestsSentence`).
 
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import {
+  existsSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+} from 'node:fs';
 import { join, posix } from 'node:path';
 
 /**
@@ -45,30 +56,44 @@ import { join, posix } from 'node:path';
  * env prefix, a filter or a flag — keeps its whole suite, as written.
  */
 const VITEST_RUN_RE =
-  /^vitest(?: run| --run)?(?: --config(?:=| )((?!-)[\w@./-]+))?$/;
+  /^vitest(?: run| --run)?(?: --config(?:=| )((?![-/])[\w@./-]+))?$/;
 
 /**
  * A path the command can carry: nothing a shell expands inside double
- * quotes, and nothing vitest would read as a flag.
+ * quotes, nothing vitest would read as a flag, and nothing absolute.
  */
-const PATH_TOKEN_RE = /^(?!-)[\w@./-]+$/;
+const PATH_TOKEN_RE = /^(?![-/])[\w@./-]+$/;
 
 /**
- * Changes that reach every test without being imported by one. The setup
- * clause spares test files: `globalSetup.test.ts` tests a setup, and is in
- * the graph like any other test.
+ * Changes that reach every test without being imported by one, by name.
+ * A workspace manifest is matched apart (`isManifest`): a `package.json`
+ * under a fixture or an example is no workspace's.
  */
 const WHOLE_SUITE_TRIGGER_RE = new RegExp(
   [
-    String.raw`(?:^|/)package\.json$`,
-    String.raw`(?:^|/)(?:pnpm-lock\.yaml|package-lock\.json|npm-shrinkwrap\.json|pnpm-workspace\.yaml|\.npmrc)$`,
+    String.raw`(?:^|/)(?:pnpm-lock\.yaml|package-lock\.json|npm-shrinkwrap\.json|pnpm-workspace\.yaml|\.npmrc|\.pnpmfile\.[cm]?js)$`,
     String.raw`(?:^|/)tsconfig[^/]*\.json$`,
     String.raw`(?:^|/)vite(?:st)?(?:\.[\w-]+)*\.(?:config|workspace|projects)\.[cm]?[jt]s$`,
-    String.raw`(?:^|/)(?![^/]*\.(?:test|spec)\.)[^/]*setup[^/]*\.[cm]?[jt]sx?$`,
-    String.raw`(?:^|/)patches/`,
+    String.raw`^patches/`,
+    String.raw`(?:^|/)__mocks__/`,
   ].join('|'),
   'i',
 );
+
+/**
+ * A setup file by the convention of its name — the whole stem a setup word
+ * (`test-setup.ts`, `setupTests.ts`, `globalSetup.ts`,
+ * `vitest-global-setup.js`, `client/test/setup.ts`), never a module that
+ * merely contains one (`setupGithubCommand.ts`, `useLiveVoiceSetup.ts`), nor
+ * a test of a setup (`globalSetup.test.ts`). Not under `src/`, where a
+ * `setup.ts` is as likely ordinary code: a setup file there is caught by its
+ * config naming it (`setupNamesOf`).
+ */
+const SETUP_FILE_RE =
+  /(?:^|\/)(?:test[-_.]?setup|setup[-_.]?tests?|(?:vitest[-_.]?)?(?:global[-_.]?)?setup)\.[cm]?[jt]sx?$/i;
+
+/** Snapshot files vitest binds to their test by name. */
+const SNAPSHOT_RE = /^(.*\/)?__snapshots__\/([^/]+)\.snap$/;
 
 /** A JavaScript or TypeScript module, by extension. */
 const SCRIPT_RE = /\.[cm]?[jt]sx?$/;
@@ -96,6 +121,13 @@ const PROJECTS_FILE_RE = /^vitest\.(?:workspace|projects)\.[\w.]+$/;
 /** More changed files than this, and the related tests are the suite. */
 const MAX_CHANGED_FILES = 200;
 
+/**
+ * More distinct basenames than this, and the name scan is not run: it reads
+ * the whole tree once per name (about 40 ms each on this repo), and a diff
+ * this wide relates most of a suite anyway.
+ */
+const MAX_LOOKUPS = 64;
+
 /** More paths than this on one command, and the suite runs whole instead. */
 const MAX_COMMAND_PATHS = 400;
 
@@ -113,20 +145,34 @@ export function wholeSuiteReason(
   root: string,
   changed: readonly string[],
   renamedFrom: readonly string[],
+  ownerOf: (file: string) => string | null,
 ): string | undefined {
   if (changed.length > MAX_CHANGED_FILES) {
     return `it changes ${changed.length} files`;
   }
   if (renamedFrom.length > 0) return `it renames ${renamedFrom[0]}`;
   for (const file of changed) {
-    if (!PATH_TOKEN_RE.test(file)) {
-      return `${JSON.stringify(file)} cannot be passed to vitest as written`;
+    if (
+      WHOLE_SUITE_TRIGGER_RE.test(file) ||
+      isManifest(file, ownerOf) ||
+      (SETUP_FILE_RE.test(file) && !/(?:^|\/)src\//.test(file))
+    ) {
+      return `it changes ${file}`;
     }
-    if (WHOLE_SUITE_TRIGGER_RE.test(file)) return `it changes ${file}`;
     // The plan names a deleted file by its old path.
     if (!existsSync(join(root, file))) return `it deletes ${file}`;
   }
   return undefined;
+}
+
+/** The root manifest, or a workspace's own: one at the dir it owns. */
+function isManifest(
+  file: string,
+  ownerOf: (file: string) => string | null,
+): boolean {
+  if (posix.basename(file) !== 'package.json') return false;
+  const dir = posix.dirname(file);
+  return dir === '.' || ownerOf(file) === dir;
 }
 
 /**
@@ -190,19 +236,122 @@ function configTextOf(
  * Then a test importing it by package name is in the graph of its source.
  */
 function entryIsSource(manifest: Manifest | undefined): boolean {
+  const paths = entryPathsOf(manifest);
+  return (
+    paths.length > 0 &&
+    paths.every((p) => /\.[cm]?tsx?$/.test(p) || /^src\//.test(p))
+  );
+}
+
+/** Every path a manifest's `main`/`module`/`exports` name, normalised. */
+function entryPathsOf(manifest: Manifest | undefined): string[] {
   const paths: string[] = [];
   const collect = (v: unknown): void => {
-    if (typeof v === 'string') paths.push(v);
+    if (typeof v === 'string') paths.push(posix.normalize(v));
     else if (Array.isArray(v)) v.forEach(collect);
     else if (typeof v === 'object' && v !== null) {
       Object.values(v).forEach(collect);
     }
   };
   collect([manifest?.main, manifest?.module, manifest?.exports]);
-  return (
-    paths.length > 0 &&
-    paths.every((p) => /\.[cm]?tsx?$/.test(p) || /^(?:\.\/)?src\//.test(p))
+  return [...new Set(paths)];
+}
+
+/** A module whose build output a package's entry can carry. */
+const BUILT_RE = /\.(?:[cm]?[jt]sx?|json)$/;
+
+/**
+ * Where a package's build put a changed file, repo-relative: its compiled
+ * counterpart under the directory the entry points into (`src/x.ts` →
+ * `dist/src/x.js` or `dist/x.js`), or — when none exists, as for a bundle —
+ * every JavaScript entry the manifest names. `[]` for a package whose entry
+ * is its source, or for a file no build carries; undefined when the build
+ * output cannot be found, and then the suite runs whole. A test importing
+ * the package by name has this output in its graph, not the source.
+ */
+function buildOutputOf(
+  root: string,
+  pkg: string,
+  file: string,
+): string[] | undefined {
+  const manifest = manifestOf(root, pkg);
+  // No entry, nothing to import it by; a source entry is in the graph as is.
+  if (
+    entryPathsOf(manifest).length === 0 ||
+    entryIsSource(manifest) ||
+    !BUILT_RE.test(file)
+  ) {
+    return [];
+  }
+  const exists = (p: string): boolean => existsSync(join(root, pkg, p));
+  const entries = entryPathsOf(manifest).filter(
+    (p) => /\.[cm]?js$/.test(p) && !p.startsWith('../') && exists(p),
   );
+  const rel = pkg === '.' ? file : posix.relative(pkg, file);
+  const js = rel
+    .replace(/\.mts$/, '.mjs')
+    .replace(/\.cts$/, '.cjs')
+    .replace(/\.tsx?$/, '.js');
+  const outDirs = [...new Set(entries.map((p) => p.split('/')[0]))].filter(
+    (d) => d !== '.' && !d.endsWith('.js'),
+  );
+  const counterparts = outDirs
+    .flatMap((d) => [`${d}/${js}`, `${d}/${js.replace(/^src\//, '')}`])
+    .filter(exists);
+  const found = counterparts.length > 0 ? counterparts : entries;
+  if (found.length === 0) return undefined;
+  return [...new Set(found)].map((p) => (pkg === '.' ? p : `${pkg}/${p}`));
+}
+
+/**
+ * The basenames a config's `setupFiles`/`globalSetup` name: what runs before
+ * every test of the suite, imported by none. Read off the text after each
+ * key — wider than the value at worst, which only keeps more suites whole.
+ */
+function setupNamesOf(configText: string): Set<string> {
+  const names = new Set<string>();
+  for (const m of configText.matchAll(/\b(?:setupFiles|globalSetup)\s*:/g)) {
+    const after = configText.slice(m.index + m[0].length, m.index + 400);
+    for (const q of after.matchAll(/['"\x60]([^'"\x60\n]+)['"\x60]/g)) {
+      if (SCRIPT_RE.test(q[1])) names.add(posix.basename(q[1]));
+    }
+  }
+  return names;
+}
+
+/**
+ * Whether `npm exec` in `dir` runs the `vitest` its `npm test` would. npm
+ * exec looks in the root's `node_modules/.bin` only — never the workspace's
+ * own (measured, npm 10.9) — and with none there it wants the registry. So
+ * the root must have one, and no `.bin` between the workspace and the root
+ * may hold a different one.
+ */
+function sameVitest(root: string, dir: string): boolean {
+  const binOf = (at: string): string | undefined => {
+    for (const name of ['vitest', 'vitest.cmd']) {
+      const file = join(root, at, 'node_modules', '.bin', name);
+      if (existsSync(file)) return file;
+    }
+    return undefined;
+  };
+  const rootBin = binOf('.');
+  if (!rootBin) return false;
+  let rootTarget: string;
+  try {
+    rootTarget = realpathSync(rootBin);
+  } catch {
+    return false;
+  }
+  for (let at = dir; at !== '.' && at !== ''; at = posix.dirname(at)) {
+    const own = binOf(at);
+    if (!own) continue;
+    try {
+      if (realpathSync(own) !== rootTarget) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
 }
 
 const escapeRe = (s: string): string =>
@@ -221,13 +370,16 @@ export function filesNaming(
 ): Map<string, string[]> | undefined {
   const found = new Map(basenames.map((b) => [b, [] as string[]]));
   if (basenames.length === 0) return found;
-  const patterns = basenames.map(
-    (b) =>
-      [
-        b,
-        new RegExp(String.raw`(?:^|[\\/'"\x60\s(,=])${escapeRe(b)}(?![\w.-])`),
-      ] as const,
-  );
+  if (basenames.length > MAX_LOOKUPS) return undefined;
+  // The name as written, and as a regex spells it (`guide\.md`).
+  const patterns = basenames.map((b) => {
+    const escaped = b.replace(/\./g, '\\.');
+    const forms = escaped === b ? [b] : [b, escaped];
+    const re = new RegExp(
+      String.raw`(?:^|[\\/'"\x60\s(,=^])(?:${forms.map(escapeRe).join('|')})(?![\w.-])`,
+    );
+    return [b, forms, re] as const;
+  });
   let seen = 0;
   const walk = (dir: string): boolean => {
     let entries;
@@ -259,8 +411,10 @@ export function filesNaming(
       } catch {
         continue;
       }
-      for (const [b, re] of patterns) {
-        if (text.includes(b) && re.test(text)) found.get(b)!.push(rel);
+      for (const [b, forms, re] of patterns) {
+        if (forms.some((f) => text.includes(f)) && re.test(text)) {
+          found.get(b)!.push(rel);
+        }
       }
     }
     return true;
@@ -291,6 +445,8 @@ export interface RelatedTestsInput {
 export interface RelatedTests {
   /** Why every suite runs whole, when one must. */
   reason: string | undefined;
+  /** Whether `dir`'s test script is one a related run could stand in for. */
+  narrowable(dir: string): boolean;
   /** `dir`'s related run, or undefined when its whole suite runs. */
   select(dir: string): RelatedSelection | undefined;
 }
@@ -300,8 +456,8 @@ export interface RelatedTests {
  * a `--resume` that rebuilds it picks the same tests the first call did.
  */
 export function relatedTests(input: RelatedTestsInput): RelatedTests {
-  const { root, changed } = input;
-  const reason = wholeSuiteReason(root, changed, input.renamedFrom);
+  const { root, changed, ownerOf } = input;
+  const reason = wholeSuiteReason(root, changed, input.renamedFrom, ownerOf);
   // Every changed file, source too: a test can assert a source file's text
   // (`build-budget.test.ts` reads `agent-prompt.ts`) without importing it.
   const lookups = [...new Set(changed.map((f) => posix.basename(f)))];
@@ -310,18 +466,22 @@ export function relatedTests(input: RelatedTestsInput): RelatedTests {
     if (naming === null) naming = filesNaming(root, lookups);
     return naming;
   };
+  const scriptOf = (manifest: Manifest | undefined): string | undefined => {
+    const script = manifest?.scripts?.['test'];
+    return typeof script === 'string' ? script : undefined;
+  };
+  const narrowable = (dir: string): boolean =>
+    vitestRunConfig(scriptOf(manifestOf(root, dir))) !== undefined;
   const select = (dir: string): RelatedSelection | undefined => {
     if (reason !== undefined) return undefined;
     const manifest = manifestOf(root, dir);
-    const script = manifest?.scripts?.['test'];
-    const config = vitestRunConfig(
-      typeof script === 'string' ? script : undefined,
-    );
+    const config = vitestRunConfig(scriptOf(manifest));
     if (config === undefined) return undefined;
     // `npm test` runs these around the script; `npm exec` does not.
     if (manifest?.scripts?.['pretest'] || manifest?.scripts?.['posttest']) {
       return undefined;
     }
+    if (!sameVitest(root, dir)) return undefined;
     // A config named outside vitest's own names is no trigger by name.
     if (config && changed.includes(posix.join(dir, config))) return undefined;
     const configText = configTextOf(root, dir, config);
@@ -339,57 +499,65 @@ export function relatedTests(input: RelatedTestsInput): RelatedTests {
     } catch {
       return undefined;
     }
+    const setupNames = setupNamesOf(configText);
+    if (changed.some((f) => setupNames.has(posix.basename(f)))) {
+      return undefined;
+    }
+    const reach = new Set(input.reachOf(dir));
+    const reachable = (file: string): boolean => {
+      const owner = ownerOf(file);
+      return owner === null || owner === dir || reach.has(owner);
+    };
+    // A path no command can carry runs the suite whole where the suite can
+    // import it; outside every workspace it is only left off the list.
+    const carried = changed.filter((f) => PATH_TOKEN_RE.test(f));
+    if (
+      changed.some(
+        (f) => !PATH_TOKEN_RE.test(f) && ownerOf(f) !== null && reachable(f),
+      )
+    ) {
+      return undefined;
+    }
+    if (carried.length > MAX_COMMAND_PATHS) return undefined;
     const byName = named();
     if (byName === undefined) return undefined;
-    const reach = new Set(input.reachOf(dir));
-    /** A dependency this suite's tests import as source, not build output. */
-    const asSource = new Map<string, boolean>();
-    const importsSource = (dep: string): boolean => {
-      let known = asSource.get(dep);
-      if (known === undefined) {
-        const rel = dir === '.' ? dep : posix.relative(dir, dep);
-        known =
-          configText.includes(`${rel}/src`) ||
-          entryIsSource(manifestOf(root, dep));
-        asSource.set(dep, known);
-      }
-      return known;
-    };
     const inDir = (file: string): boolean => {
-      const owner = input.ownerOf(file);
+      const owner = ownerOf(file);
       return dir === '.' ? owner === null : owner === dir;
     };
+    const snapshotTests = changed.flatMap((f) => {
+      const m = SNAPSHOT_RE.exec(f);
+      const test = m ? `${m[1] ?? ''}${m[2]}` : undefined;
+      return test && existsSync(join(root, test)) ? [test] : [];
+    });
     // A test file runs only in its own suite; a module joins wherever the
     // suite can import it from. Outside every workspace counts as
     // importable: a root-level helper has no manifest to say who uses it.
-    const namers = [...byName.values()].flat().filter((file) => {
-      if (TEST_FILE_RE.test(file)) return inDir(file);
-      const owner = input.ownerOf(file);
-      return owner === null || reach.has(owner);
-    });
-    // A changed file in a dependency the suite imports by package name is,
-    // in the graph, that package's build output: the path the diff names
-    // matches nothing there, and the tests that import it would not run.
-    // Another package's test is no module anything imports.
-    const unseen = [...changed, ...namers].some((file) => {
-      if (TEST_FILE_RE.test(file)) return false;
-      const owner = input.ownerOf(file);
-      return (
-        owner !== null &&
-        owner !== dir &&
-        reach.has(owner) &&
-        !importsSource(owner)
-      );
-    });
-    if (unseen) return undefined;
+    const namers = [...[...byName.values()].flat(), ...snapshotTests].filter(
+      (file) => (TEST_FILE_RE.test(file) ? inDir(file) : reachable(file)),
+    );
+    // What a test importing a package by name has in its graph: the
+    // package's build output, beside the source the diff names.
+    const built: string[] = [];
+    for (const file of [...carried, ...namers]) {
+      const owner = ownerOf(file);
+      if (owner === null || TEST_FILE_RE.test(file) || !reachable(file)) {
+        continue;
+      }
+      const output = buildOutputOf(root, owner, file);
+      if (output === undefined) return undefined;
+      built.push(...output);
+    }
     const relative = (file: string): string =>
       dir === '.' ? file : posix.relative(dir, file);
-    const paths = [...new Set([...changed, ...namers].map(relative))].sort();
+    const paths = [
+      ...new Set([...carried, ...namers, ...built].map(relative)),
+    ].sort();
     if (paths.length === 0 || paths.length > MAX_COMMAND_PATHS) {
       return undefined;
     }
     if (!paths.every((p) => PATH_TOKEN_RE.test(p))) return undefined;
     return { config, paths };
   };
-  return { reason, select };
+  return { reason, narrowable, select };
 }

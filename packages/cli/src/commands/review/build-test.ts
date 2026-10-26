@@ -226,6 +226,12 @@ export interface BuildTestReport {
    */
   relatedTests?: string[];
   /**
+   * Why every suite ran whole where a related run could have stood in — the
+   * diff changes what no import graph sees through (`wholeSuiteReason`).
+   * Absent when a suite ran related, or when none could have.
+   */
+  wholeSuiteReason?: string;
+  /**
    * True when every build and test command exited 0. An install that exits non-zero
    * but leaves a usable tree (a failed `prepare` hook) does NOT set this false — the
    * build below is the authoritative signal, and the `note` explains the install.

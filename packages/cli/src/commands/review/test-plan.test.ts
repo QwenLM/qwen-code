@@ -1050,18 +1050,22 @@ describe('runTestPlan', () => {
       expect(claim?.observed).toBe('exit 1');
     });
 
-    it('settles a bare test claim by a related run, and says it was narrowed', () => {
-      const related = (exitCode: number) =>
+    it('settles a test claim by a related run, read as the suite it stands in for', () => {
+      const report = (exitCode: number, whole?: number) =>
         ({
           build: [],
           test: [
-            {
-              command: 'npm test --workspace="packages/core"',
-              exitCode: 0,
-              seconds: 3,
-              timedOut: false,
-              output: '',
-            },
+            ...(whole === undefined
+              ? []
+              : [
+                  {
+                    command: 'npm test --workspace="packages/core"',
+                    exitCode: whole,
+                    seconds: 3,
+                    timedOut: false,
+                    output: '',
+                  },
+                ]),
             {
               command:
                 'npm exec --workspace="packages/cli" --yes=false -- vitest related --run "src/a.ts"',
@@ -1072,33 +1076,37 @@ describe('runTestPlan', () => {
             },
           ],
         }) as unknown as BuildTestReport;
-      const pass = run(
-        '## Test Plan\n\nRan `npm test`',
-        [],
-        related(0),
-      ).claims.find((c) => c.text === 'npm test');
-      expect(pass?.verdict).toBe('reproduces');
-      expect(pass?.observed).toBe('exit 0');
-      expect(pass?.note).toBe(
+      const claim = (text: string, bt: BuildTestReport) =>
+        run(`## Test Plan\n\nRan \`${text}\``, [], bt).claims.find(
+          (c) => c.text === text,
+        );
+      // A failed related run contradicts, alone or beside a green whole one.
+      for (const bt of [report(1), report(1, 0)]) {
+        expect(claim('npm test', bt)).toMatchObject({
+          verdict: 'contradicted',
+          observed: 'exit 1',
+          note: 'this review ran the tests related to the diff (vitest related) and they failed',
+        });
+      }
+      expect(
+        claim('npm test --workspace="packages/cli"', report(1)),
+      ).toMatchObject({ verdict: 'contradicted', observed: 'exit 1' });
+      // A green one says it ran a part, never that it ran the suite.
+      expect(claim('npm test', report(0))).toMatchObject({
+        verdict: 'reproduces',
+        observed: 'exit 0',
+        note: 'this review ran only its tests related to the diff (vitest related), in packages/cli, and they passed',
+      });
+      expect(claim('npm test', report(0, 0))?.note).toBe(
         'this review ran it — in packages/cli, only the tests related to the diff (vitest related)',
       );
-      const fail = run(
-        '## Test Plan\n\nRan `npm test`',
-        [],
-        related(1),
-      ).claims.find((c) => c.text === 'npm test');
-      expect(fail?.verdict).toBe('contradicted');
-      expect(fail?.observed).toBe('exit 1');
-      expect(fail?.note).toBe(
-        'this review ran the tests related to the diff (vitest related) and they failed',
+      // A claim no suite command settles is not one a related run settles.
+      expect(claim('npm run test:e2e', report(1))?.note).not.toContain(
+        'this review ran',
       );
-      // A claim that is not the bare script is not one a related run settles.
-      const other = run(
-        '## Test Plan\n\nRan `npm run test:e2e`',
-        [],
-        related(1),
-      ).claims.find((c) => c.text === 'npm run test:e2e');
-      expect(other?.note).not.toContain('this review ran');
+      expect(
+        claim('npm test --workspace="packages/other"', report(1))?.note,
+      ).not.toContain('this review ran');
     });
 
     it('does not rule on a command killed by the deadline', () => {
@@ -1186,6 +1194,38 @@ describe('runTestPlan', () => {
           output: `Tests  ${n} passed (${n})`,
         })),
       }) as unknown as BuildTestReport;
+
+    it('says a differing count may come from a suite the review narrowed', () => {
+      const bt = {
+        build: [],
+        test: [
+          {
+            command:
+              'npm exec --workspace="packages/cli" --yes=false -- vitest related --run "src/a.ts"',
+            exitCode: 0,
+            seconds: 3,
+            timedOut: false,
+            output: '      Tests  312 passed (312)',
+          },
+        ],
+        relatedTests: ['packages/cli'],
+      } as unknown as BuildTestReport;
+      const claim = run(
+        '## Test Plan\n\n1351 tests passed',
+        [],
+        bt,
+      ).claims.find((c) => c.kind === 'count');
+      expect(claim?.verdict).toBe('differs');
+      expect(claim?.note).toContain(
+        'in packages/cli, this review ran only the tests related to the diff',
+      );
+      // A report that is not a list says nothing.
+      const odd = run('## Test Plan\n\n1351 tests passed', [], {
+        ...bt,
+        relatedTests: 'packages/cli',
+      } as unknown as BuildTestReport).claims.find((c) => c.kind === 'count');
+      expect(odd?.note).not.toContain('related to the diff');
+    });
 
     it('reproduces a count a suite in this review reported', () => {
       const r = run('## Test Plan\n\n471 tests passed', [], withCounts(471));

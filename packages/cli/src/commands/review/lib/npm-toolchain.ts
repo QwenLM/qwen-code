@@ -71,10 +71,11 @@ function testCommand(dir: string): string {
 }
 /**
  * The command that runs only `dir`'s tests related to the diff. `npm exec`
- * runs it in the workspace with the workspace's own `vitest`, as `npm test`
- * does; `--yes=false` keeps npm from fetching one when there is none (the
- * run env sets `npm_config_yes`). The paths are `PATH_TOKEN_RE`-clean, so
- * quoting them is enough.
+ * runs it in the workspace, with the root's `vitest` — selection admits a
+ * suite only where that is the one its `npm test` runs (`sameVitest`).
+ * `--yes=false` overrides the run env's `npm_config_yes`, so a missing
+ * `vitest` is an error rather than a silent install. The paths are
+ * `PATH_TOKEN_RE`-clean, so quoting them is enough.
  */
 function relatedCommand(dir: string, selection: RelatedSelection): string {
   const workspace = dir === '.' ? '' : ` --workspace=${shellArg(dir)}`;
@@ -86,12 +87,21 @@ function relatedCommand(dir: string, selection: RelatedSelection): string {
 }
 /** `relatedCommand`'s grammar; the dir is its first group. */
 const RELATED_COMMAND_RE =
-  /^npm exec(?: --workspace="([\w@./-]+)")? --yes=false -- vitest related --run(?: --config "(?!-)[\w@./-]+")?(?: "(?!-)[\w@./-]+")+$/;
+  /^npm exec(?: --workspace="([\w@./-]+)")? --yes=false -- vitest related --run(?: --config "(?![-/])[\w@./-]+")?(?: "(?![-/])[\w@./-]+")+$/;
 
 /** The dir a related run ran in (`.` for the root), or undefined for a whole suite. */
 export function relatedTestDir(command: string): string | undefined {
   const m = RELATED_COMMAND_RE.exec(command);
   return m ? (m[1] ?? '.') : undefined;
+}
+
+/**
+ * The whole-suite command a related run stands in for (`npm test
+ * --workspace="<dir>"`), or undefined for a command that is not one.
+ */
+export function suiteCommandOf(command: string): string | undefined {
+  const dir = relatedTestDir(command);
+  return dir === undefined ? undefined : testCommand(dir);
 }
 
 /**
@@ -104,7 +114,11 @@ function testCommands(
   root: string,
   args: Pick<ToolchainRunArgs, 'changedFiles' | 'renamedFrom'>,
   scope: { globs: string[]; singleRoot: boolean; graph: WorkspacePackage[] },
-): (dir: string) => string {
+): {
+  commandFor: (dir: string) => string;
+  /** Why the suites in `dirs` that could have run related ran whole. */
+  wholeReason: (dirs: string[]) => string | undefined;
+} {
   const related = relatedTests({
     root,
     changed: args.changedFiles,
@@ -113,10 +127,40 @@ function testCommands(
       scope.singleRoot ? null : workspaceDirFor(file, scope.globs),
     reachOf: (dir) => dependencyClosure([dir], scope.graph),
   });
-  return (dir) => {
-    const selection = related.select(dir);
-    return selection ? relatedCommand(dir, selection) : testCommand(dir);
+  return {
+    commandFor: (dir) => {
+      const selection = related.select(dir);
+      if (!selection) return testCommand(dir);
+      // Only a command the grammar reads back: a dir outside it would run
+      // narrowed with nothing in `relatedTests` to say so.
+      const command = relatedCommand(dir, selection);
+      return RELATED_COMMAND_RE.test(command) ? command : testCommand(dir);
+    },
+    wholeReason: (dirs) =>
+      related.reason !== undefined && dirs.some((d) => related.narrowable(d))
+        ? related.reason
+        : undefined,
   };
+}
+
+/** A test command as prose names it: a related run by its dir. */
+const commandName = (command: string): string => {
+  const dir = relatedTestDir(command);
+  return dir === undefined ? command : `${dirName(dir)} (related tests)`;
+};
+
+/** A dir as prose names it: the root is not a workspace. */
+const dirName = (dir: string): string =>
+  dir === '.' ? 'the root package' : dir;
+
+/**
+ * Why every suite ran whole, for the note — when one could have run related.
+ * Structural too (`wholeSuiteReason`), since a continuation rewrites the note.
+ */
+function wholeSuiteSentence(reason: string | undefined): string {
+  return reason
+    ? ` Every suite ran whole, not only the tests related to the diff, because ${reason}.`
+    : '';
 }
 
 /** The dirs whose suite ran only its related tests, sorted. */
@@ -133,21 +177,32 @@ function relatedDirs(test: CommandResult[]): string[] {
  * passed" beside it must not read as a suite that ran.
  */
 function relatedTestsSentence(test: CommandResult[]): string {
-  const dirs = relatedDirs(test);
-  if (dirs.length === 0) return '';
+  // A run killed at its deadline returned no verdict, one that failed
+  // without naming a failing test file crashed before any, and one that found
+  // nothing ran nothing: none is coverage. The timeout and the failure have
+  // their own sentences; the empty run gets the second one below.
   const none = relatedDirs(
     test.filter(
       (t) => t.exitCode === 0 && /No test files found/.test(t.output),
     ),
   );
+  const ran = relatedDirs(
+    test.filter(
+      (t) =>
+        !t.timedOut && (t.exitCode === 0 || (t.failingFiles?.length ?? 0) > 0),
+    ),
+  ).filter((d) => !none.includes(d));
+  const names = (dirs: string[]): string => dirs.map(dirName).join(', ');
   return (
-    ` In ${dirs.join(', ')}, only the tests related to the diff ran ` +
-    '(`vitest related`: the tests that import a changed file, name one, or ' +
-    'import a module that names one) — not the whole suite. A test that reads a ' +
-    'changed file without naming it, or lists a directory, is not among ' +
-    'them.' +
+    (ran.length > 0
+      ? ` In ${names(ran)}, only the tests related to the diff ran ` +
+        '(`vitest related`: the tests that import a changed file, name one, ' +
+        'or import a module that names one) — not the whole suite. A test ' +
+        'that reads a changed file without naming it, lists a directory, or ' +
+        'builds the name at run time is not among them.'
+      : '') +
     (none.length > 0
-      ? ` In ${none.join(', ')}, no test is related to the diff, so none ran.`
+      ? ` In ${names(none)}, no test is related to the diff, so none ran.`
       : '')
   );
 }
@@ -406,10 +461,13 @@ function resumeNpmToolchain(
     ...pendingDirs.filter((d) => affectedSet.has(d)),
     ...pendingDirs.filter((d) => !affectedSet.has(d)),
   ];
-  const commandFor = testCommands(root, args, scopeOf(root));
+  const commands = testCommands(root, args, scopeOf(root));
   const work: Array<{ command: string; dir: string | null }> = [
     ...retryCommands.map((command) => ({ command, dir: null })),
-    ...orderedPending.map((dir) => ({ command: commandFor(dir), dir })),
+    ...orderedPending.map((dir) => ({
+      command: commands.commandFor(dir),
+      dir,
+    })),
   ];
   if (work.length === 0) {
     // "Every suite ran" and "no suite ever ran" both reach here with nothing
@@ -547,7 +605,7 @@ function resumeNpmToolchain(
       liveSegments.push(
         `a --resume call ran ${ranDirs.length + replaced.size} more ` +
           `command(s), ${outstanding.length} still to run: ` +
-          outstanding.join(', '),
+          outstanding.map(commandName).join(', '),
       );
     }
     // NOT an else: a resume can leave BOTH unattempted work and suites
@@ -566,7 +624,7 @@ function resumeNpmToolchain(
       liveSegments.push(
         `a --resume call left ${provisionalOnly.length} command(s) ` +
           `provisional (killed on a budget-shortened deadline): ` +
-          `${provisionalOnly.join(', ')}`,
+          `${provisionalOnly.map(commandName).join(', ')}`,
       );
     }
     const caveat = liveSegments.join('; ');
@@ -585,6 +643,11 @@ function resumeNpmToolchain(
     ...previous.timedOut.filter((c) => !replaced.has(c)),
     ...fresh.filter((r) => r.timedOut).map((r) => r.command),
   ];
+  // Recomputed like `relatedTests`: the same diff gives the same reason.
+  const whole = commands.wholeReason([
+    ...(prevScope?.workspaces ?? previous.affected),
+    ...pendingDirs,
+  ]);
   const merged: BuildTestReport = {
     ...previous,
     test: mergedTest,
@@ -616,6 +679,7 @@ function resumeNpmToolchain(
         stillClamped,
       ) +
       relatedTestsSentence(mergedTest) +
+      wholeSuiteSentence(whole) +
       (testScope?.caveat ? ` Caveat: ${testScope.caveat}.` : ''),
     ...(testScope ? { testScope } : {}),
   };
@@ -624,6 +688,8 @@ function resumeNpmToolchain(
   const related = relatedDirs(mergedTest);
   if (related.length > 0) merged.relatedTests = related;
   else delete merged.relatedTests;
+  if (whole) merged.wholeSuiteReason = whole;
+  else delete merged.wholeSuiteReason;
   return merged;
 }
 
@@ -696,7 +762,8 @@ function resumedNote(
   if (stillPending.length > 0) {
     parts.push(
       `The budget was spent with ${stillPending.length} command(s) still to ` +
-        `run — not run: ${stillPending.join(', ')}. Resume again to reach them.`,
+        `run — not run: ${stillPending.map(commandName).join(', ')}. Resume ` +
+        'again to reach them.',
     );
   }
   // An unattempted retry rides BOTH lists — its command is still-to-run, and
@@ -712,7 +779,8 @@ function resumedNote(
     parts.push(
       `${provisionalOnly.length} command(s) are still provisional — killed ` +
         `on a deadline the budget shortened, not on their own: ` +
-        `${provisionalOnly.join(', ')}. Resume again to give them a full one.`,
+        `${provisionalOnly.map(commandName).join(', ')}. Resume again to ` +
+        'give them a full one.',
     );
   }
   if (stillPending.length === 0 && stillClamped.length === 0) {
@@ -1352,7 +1420,7 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
       ? new Set(reverseDependencyClosure(notBuilt, scopeGraph))
       : new Set<string>();
   const notRun: string[] = [];
-  const commandFor = testCommands(root, args, {
+  const commands = testCommands(root, args, {
     globs,
     singleRoot,
     graph: scopeGraph,
@@ -1363,6 +1431,9 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
       notRun.push(dir);
       continue;
     }
+    // Selected before the clock is read: the name scan it may run is spent
+    // from the budget, and the deadline must be what is left after it.
+    const command = commands.commandFor(dir);
     const remaining = remainingMs();
     if (remaining < BUDGET_MIN_ATTEMPT_MS) {
       // Below the floor an "attempt" cannot even boot npm — it would
@@ -1382,7 +1453,7 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
     // 401s) was admitted with 286s of its 300s deadline and killed, and
     // nothing downstream could tell that from a suite that genuinely hangs.
     const deadline = Math.min(perCommandMs, remaining);
-    const r = exec(commandFor(dir), root, deadline);
+    const r = exec(command, root, deadline);
     const clamped = r.timedOut && deadline < perCommandMs;
     results.test.push(clamped ? { ...r, clamped: true } : r);
     if (r.timedOut) results.timedOut.push(r.command);
@@ -1390,6 +1461,8 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
   }
   const related = relatedDirs(results.test);
   if (related.length > 0) results.relatedTests = related;
+  const whole = commands.wholeReason(runnableDirs);
+  if (whole) results.wholeSuiteReason = whole;
 
   // The test phase ran NOTHING and left work behind: stamp it. A single-root
   // run in this state writes no testScope and keeps ok: true (the build
@@ -1483,7 +1556,9 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
           'the changed workspaces and every workspace declared to depend on ' +
           'them that defines a test script. Everything passed.';
       }
-      testsClause += relatedTestsSentence(results.test);
+      testsClause +=
+        relatedTestsSentence(results.test) +
+        wholeSuiteSentence(results.wholeSuiteReason);
       if (testScope?.caveat) testsClause += ` Caveat: ${testScope.caveat}.`;
       // The root is not a workspace: count it separately, or a 22-member repo
       // reports "of 23" — a number in a report whose thesis is honest numbers.
@@ -1519,7 +1594,11 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
         .join(' ');
     }
     // The ok branch says it inside its tests clause, ahead of the caveat.
-    if (!results.ok) results.note += relatedTestsSentence(results.test);
+    if (!results.ok) {
+      results.note +=
+        relatedTestsSentence(results.test) +
+        wholeSuiteSentence(results.wholeSuiteReason);
+    }
   }
 
   // A failure note must carry the caveat too — the note is what the brief

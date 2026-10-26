@@ -21,6 +21,10 @@ import {
   wholeSuiteReason,
 } from './related-tests.js';
 
+/** `packages/<name>` owns what lies under it. */
+const packageOf = (file: string): string | null =>
+  /^packages\/[^/]+/.exec(file)?.[0] ?? null;
+
 describe('vitestRunConfig', () => {
   it('reads a plain vitest run, and the config it names', () => {
     expect(vitestRunConfig('vitest run')).toBe('');
@@ -31,6 +35,9 @@ describe('vitestRunConfig', () => {
     );
     expect(vitestRunConfig('vitest run --config=cfg/unit.mts')).toBe(
       'cfg/unit.mts',
+    );
+    expect(vitestRunConfig('vitest run --config ../shared/v.config.ts')).toBe(
+      '../shared/v.config.ts',
     );
   });
 
@@ -44,6 +51,7 @@ describe('vitestRunConfig', () => {
       'cross-env NODE_OPTIONS=--x vitest run',
       'vitest run && node check.js',
       'vitest run --config -x',
+      'vitest run --config /tmp/x.mjs',
       'vitest run --config "a b.ts"',
       'tsx --test src/*.test.ts',
     ];
@@ -63,21 +71,27 @@ describe('wholeSuiteReason', () => {
       writeFileSync(join(root, f), '');
     }
   };
+  const reasonOf = (files: string[], renamedFrom: string[] = []) =>
+    wholeSuiteReason(root, files, renamedFrom, packageOf);
 
-  it('leaves a diff of present source files to the graph', () => {
-    touch('packages/a/src/x.ts', 'docs/guide.md', 'packages/a/src/x.test.ts');
-    expect(
-      wholeSuiteReason(
-        root,
-        ['packages/a/src/x.ts', 'docs/guide.md', 'packages/a/src/x.test.ts'],
-        [],
-      ),
-    ).toBeUndefined();
-    // A test OF a setup is in the graph like any other test.
-    touch('packages/a/src/globalSetup.test.ts');
-    expect(
-      wholeSuiteReason(root, ['packages/a/src/globalSetup.test.ts'], []),
-    ).toBeUndefined();
+  it('leaves a diff of present files to the graph', () => {
+    const files = [
+      'packages/a/src/x.ts',
+      'docs/guide.md',
+      'packages/a/src/x.test.ts',
+      // A test OF a setup is in the graph like any other test.
+      'packages/a/src/globalSetup.test.ts',
+      // Ordinary modules whose names hold a setup word.
+      'packages/a/src/setupGithubCommand.ts',
+      'packages/a/client/live/useLiveVoiceSetup.ts',
+      'packages/a/src/commands/setup.ts',
+      'packages/a/src/patches/is-in-ci.ts',
+      // A manifest no workspace owns as its own: a fixture's, an example's.
+      'packages/a/examples/mcp-server/package.json',
+      'packages/a/src/ui/__snapshots__/Footer.test.tsx.snap',
+    ];
+    touch(...files);
+    expect(files.map((f) => reasonOf([f]))).toEqual(files.map(() => undefined));
   });
 
   it('runs every suite whole for what reaches tests without an import', () => {
@@ -88,41 +102,36 @@ describe('wholeSuiteReason', () => {
       'package-lock.json',
       'pnpm-workspace.yaml',
       '.npmrc',
+      '.pnpmfile.cjs',
       'packages/a/tsconfig.build.json',
       'packages/a/vitest.config.ts',
       'packages/a/vite.lib.config.ts',
       'vitest.workspace.ts',
       'packages/a/test-setup.ts',
+      'packages/a/client/test/setup.ts',
+      'integration-tests/globalSetup.ts',
       'scripts/vitest-global-setup.js',
       'patches/dep@1.0.0.patch',
+      'patches/ink+7.0.3.patch',
+      'packages/a/src/__mocks__/dep.ts',
     ];
     touch(...files);
-    expect(files.map((f) => wholeSuiteReason(root, [f], []))).toEqual(
+    expect(files.map((f) => reasonOf([f]))).toEqual(
       files.map((f) => `it changes ${f}`),
     );
   });
 
-  it('runs every suite whole for a deletion, a rename, or a name no command can carry', () => {
-    expect(wholeSuiteReason(root, ['packages/a/src/gone.ts'], [])).toBe(
+  it('runs every suite whole for a deletion, a rename, or a diff too wide', () => {
+    expect(reasonOf(['packages/a/src/gone.ts'])).toBe(
       'it deletes packages/a/src/gone.ts',
     );
     touch('packages/a/src/new.ts');
-    expect(
-      wholeSuiteReason(
-        root,
-        ['packages/a/src/new.ts'],
-        ['packages/a/src/old.ts'],
-      ),
-    ).toBe('it renames packages/a/src/old.ts');
-    const unsafe = ['a b.ts', 'x$(id).ts', '-flag.ts', 'q"uote.ts'];
-    expect(unsafe.map((f) => wholeSuiteReason(root, [f], []))).toEqual(
-      unsafe.map(
-        (f) => `${JSON.stringify(f)} cannot be passed to vitest as written`,
-      ),
+    expect(reasonOf(['packages/a/src/new.ts'], ['packages/a/src/old.ts'])).toBe(
+      'it renames packages/a/src/old.ts',
     );
     const many = Array.from({ length: 201 }, (_, i) => `f${i}.ts`);
     touch(...many);
-    expect(wholeSuiteReason(root, many, [])).toBe('it changes 201 files');
+    expect(reasonOf(many)).toBe('it changes 201 files');
   });
 });
 
@@ -141,9 +150,15 @@ describe('filesNaming', () => {
     write('a/quoted.ts', "const f = 'guide.md';");
     write('a/path.test.ts', 'read(join(ROOT, "docs/guide.md"))');
     write('a/template.ts', 'x = `${dir}/guide.md`;');
+    // As a regex spells it, too.
+    write('a/escaped.ts', 'const RE = /^docs\\/guide\\.md$/;');
+    write('a/anchored.ts', 'const RE = /^guide\\.md$/;');
     write('a/longer.ts', "'my-guide.md' + 'guide.mdx' + 'guide.md.bak'");
+    write('a/longer-escaped.ts', 'const RE = /guide\\.mdx$/;');
     write('a/prose.md', 'guide.md');
     expect(filesNaming(root, ['guide.md'])?.get('guide.md')?.sort()).toEqual([
+      'a/anchored.ts',
+      'a/escaped.ts',
       'a/path.test.ts',
       'a/quoted.ts',
       'a/template.ts',
@@ -165,6 +180,15 @@ describe('filesNaming', () => {
       rmSync(outside, { recursive: true, force: true });
     }
   });
+
+  it('gives up on more names than one scan of the tree should pay for', () => {
+    write('a/x.ts', "'n0.md'");
+    const names = Array.from({ length: 65 }, (_, i) => `n${i}.md`);
+    expect(filesNaming(root, names)).toBeUndefined();
+    expect(filesNaming(root, names.slice(0, 64))?.get('n0.md')).toEqual([
+      'a/x.ts',
+    ]);
+  });
 });
 
 describe('relatedTests', () => {
@@ -177,11 +201,8 @@ describe('relatedTests', () => {
     mkdirSync(dirname(join(root, file)), { recursive: true });
     writeFileSync(join(root, file), text);
   };
-  const owners = ['packages/cli', 'packages/core', 'packages/web'];
-  const ownerOf = (file: string): string | null =>
-    owners.find((d) => file.startsWith(`${d}/`)) ?? null;
   const reach: Record<string, string[]> = {
-    'packages/cli': ['packages/core', 'packages/cli'],
+    'packages/cli': ['packages/cli', 'packages/core'],
     'packages/core': ['packages/core'],
     'packages/web': ['packages/web'],
   };
@@ -190,23 +211,21 @@ describe('relatedTests', () => {
       root,
       changed,
       renamedFrom,
-      ownerOf,
+      ownerOf: packageOf,
       reachOf: (d) => reach[d] ?? [d],
     }).select(dir);
+  const manifest = (dir: string, body: object): void =>
+    write(`${dir}/package.json`, JSON.stringify(body));
 
   beforeEach(() => {
-    for (const d of owners) {
-      write(
-        `${d}/package.json`,
-        JSON.stringify({ scripts: { test: 'vitest run' } }),
-      );
+    // The vitest `npm exec` runs: the root's.
+    write('node_modules/vitest/vitest.mjs');
+    mkdirSync(join(root, 'node_modules/.bin'), { recursive: true });
+    symlinkSync('../vitest/vitest.mjs', join(root, 'node_modules/.bin/vitest'));
+    for (const d of ['packages/cli', 'packages/core', 'packages/web']) {
+      manifest(d, { scripts: { test: 'vitest run' } });
     }
     write('packages/core/src/a.ts');
-    // cli's tests import core's source, as this repo's cli config arranges.
-    write(
-      'packages/cli/vitest.config.ts',
-      "resolve: { alias: [{ find: /^@x\\/core$/, replacement: path.resolve(__dirname, '../core/src') }] }",
-    );
     write('docs/guide.md');
     // What names the doc: a test in the suite, a module it can import, and
     // the same two in a workspace it cannot reach.
@@ -232,7 +251,8 @@ describe('relatedTests', () => {
       ],
     });
     // A test runs only in its own suite: core's is cli's to import from,
-    // but not to run.
+    // but not to run; and core cannot reach cli, its consumer.
+    write('packages/cli/src/names.ts', "'guide.md'");
     expect(
       select(['packages/core/src/a.ts', 'docs/guide.md'], 'packages/core')
         ?.paths,
@@ -257,18 +277,121 @@ describe('relatedTests', () => {
     ]);
   });
 
+  it('looks up a script outside src by name: a test may spawn it', () => {
+    write('packages/cli/src/spawn.test.ts', "exec('scripts/lib/docs.ts')");
+    expect(select(['scripts/lib/docs.ts'], 'packages/cli')?.paths).toEqual([
+      '../../scripts/lib/docs.ts',
+      'src/spawn.test.ts',
+    ]);
+  });
+
+  it("runs a snapshot's test, which vitest binds to it by name", () => {
+    write('packages/core/src/ui/Footer.test.tsx');
+    write('packages/core/src/ui/__snapshots__/Footer.test.tsx.snap');
+    expect(
+      select(
+        ['packages/core/src/ui/__snapshots__/Footer.test.tsx.snap'],
+        'packages/core',
+      )?.paths,
+    ).toEqual([
+      'src/ui/Footer.test.tsx',
+      'src/ui/__snapshots__/Footer.test.tsx.snap',
+    ]);
+  });
+
+  it('hands a suite the build output of a package it imports by name', () => {
+    // cli imports core by package name: its graph holds core's `dist`.
+    manifest('packages/core', {
+      scripts: { test: 'vitest run' },
+      main: 'dist/index.js',
+      exports: { '.': './dist/index.js', './x': './dist/x.js' },
+    });
+    write('packages/core/dist/index.js');
+    write('packages/core/dist/x.js');
+    write('packages/core/dist/src/a.js');
+    expect(select(['packages/core/src/a.ts'], 'packages/cli')?.paths).toEqual([
+      '../core/dist/src/a.js',
+      '../core/src/a.ts',
+    ]);
+    // A module that names a changed doc counts the same way.
+    write('packages/core/dist/src/loader.js');
+    expect(select(['docs/guide.md'], 'packages/cli')?.paths).toContain(
+      '../core/dist/src/loader.js',
+    );
+    // A bundle has no counterpart: every entry stands in for it.
+    rmSync(join(root, 'packages/core/dist/src'), { recursive: true });
+    expect(select(['packages/core/src/a.ts'], 'packages/cli')?.paths).toEqual([
+      '../core/dist/index.js',
+      '../core/dist/x.js',
+      '../core/src/a.ts',
+    ]);
+    // ...and a suite importing itself by name gets its own.
+    expect(
+      select(['packages/core/src/a.ts'], 'packages/core')?.paths,
+    ).toContain('dist/index.js');
+    // A dependency's own test is no module anything imports.
+    write('packages/core/src/a.test.ts');
+    expect(
+      select(['packages/core/src/a.test.ts'], 'packages/cli')?.paths,
+    ).toEqual(['../core/src/a.test.ts']);
+    // An entry the build never produced: no path can name the graph's file.
+    rmSync(join(root, 'packages/core/dist'), { recursive: true });
+    expect(select(['packages/core/src/a.ts'], 'packages/cli')).toBeUndefined();
+    // A source entry is in the graph as it is.
+    manifest('packages/core', {
+      scripts: { test: 'vitest run' },
+      exports: { '.': { import: './src/index.ts' } },
+    });
+    expect(select(['packages/core/src/a.ts'], 'packages/cli')?.paths).toEqual([
+      '../core/src/a.ts',
+    ]);
+    // What the suite cannot reach is not its concern.
+    write('packages/web/src/w.ts');
+    manifest('packages/web', {
+      scripts: { test: 'vitest run' },
+      main: 'dist/w.js',
+    });
+    expect(select(['packages/web/src/w.ts'], 'packages/cli')?.paths).toEqual([
+      '../web/src/w.ts',
+    ]);
+  });
+
   it('runs the suite whole around an npm pretest or posttest', () => {
-    for (const hook of ['pretest', 'posttest']) {
-      write(
-        'packages/core/package.json',
-        JSON.stringify({
-          scripts: { test: 'vitest run', [hook]: 'node f.js' },
-        }),
-      );
-      expect(
-        select(['packages/core/src/a.ts'], 'packages/core'),
-      ).toBeUndefined();
-    }
+    const ruled = ['pretest', 'posttest'].map((hook) => {
+      manifest('packages/core', {
+        scripts: { test: 'vitest run', [hook]: 'node f.js' },
+      });
+      return select(['packages/core/src/a.ts'], 'packages/core');
+    });
+    expect(ruled).toEqual([undefined, undefined]);
+    expect(select(['packages/core/src/a.ts'], 'packages/cli')).toBeDefined();
+  });
+
+  it('runs the suite whole when npm exec would not run the vitest npm test does', () => {
+    // A workspace's own vitest: npm exec never looks there.
+    write('packages/core/node_modules/vitest/vitest.mjs');
+    mkdirSync(join(root, 'packages/core/node_modules/.bin'), {
+      recursive: true,
+    });
+    symlinkSync(
+      '../vitest/vitest.mjs',
+      join(root, 'packages/core/node_modules/.bin/vitest'),
+    );
+    expect(select(['packages/core/src/a.ts'], 'packages/core')).toBeUndefined();
+    expect(select(['packages/core/src/a.ts'], 'packages/cli')).toBeDefined();
+    // One that is the root's, linked: the same vitest.
+    rmSync(join(root, 'packages/core/node_modules'), { recursive: true });
+    mkdirSync(join(root, 'packages/core/node_modules/.bin'), {
+      recursive: true,
+    });
+    symlinkSync(
+      '../../../../node_modules/vitest/vitest.mjs',
+      join(root, 'packages/core/node_modules/.bin/vitest'),
+    );
+    expect(select(['packages/core/src/a.ts'], 'packages/core')).toBeDefined();
+    // None at the root: npm exec would go to the registry.
+    rmSync(join(root, 'node_modules/.bin'), { recursive: true });
+    expect(select(['packages/core/src/a.ts'], 'packages/cli')).toBeUndefined();
   });
 
   it('runs the suite whole when its config moves the root, or hides what it sets', () => {
@@ -293,93 +416,64 @@ describe('relatedTests', () => {
     expect(select(['packages/core/src/a.ts'], 'packages/core')).toBeDefined();
   });
 
+  it('runs the suite whole when the diff changes a setup file its config names', () => {
+    write(
+      'packages/core/vitest.config.ts',
+      "export default { test: { setupFiles: ['./src/setupTests.ts'], globalSetup: path.resolve(\n  __dirname,\n  '../../scripts/globals.js',\n) } }",
+    );
+    write('packages/core/src/setupTests.ts');
+    write('scripts/globals.js');
+    expect(
+      select(['packages/core/src/setupTests.ts'], 'packages/core'),
+    ).toBeUndefined();
+    expect(select(['scripts/globals.js'], 'packages/core')).toBeUndefined();
+    // A sibling module is still the graph's to relate.
+    expect(select(['packages/core/src/a.ts'], 'packages/core')).toBeDefined();
+  });
+
   it('runs the suite whole beside a vitest workspace or projects file', () => {
     write('packages/core/vitest.workspace.ts', 'export default []');
     expect(select(['packages/core/src/a.ts'], 'packages/core')).toBeUndefined();
   });
 
   it('reads the config the script names, and runs whole when it changes or is missing', () => {
-    write(
-      'packages/core/package.json',
-      JSON.stringify({
-        scripts: { test: 'vitest run --config test.config.ts' },
-      }),
-    );
+    manifest('packages/core', {
+      scripts: { test: 'vitest run --config cfg/unit.mts' },
+    });
     expect(select(['packages/core/src/a.ts'], 'packages/core')).toBeUndefined();
-    write('packages/core/test.config.ts', "export default { root: 'x' }");
+    write('packages/core/cfg/unit.mts', "export default { root: 'x' }");
     expect(select(['packages/core/src/a.ts'], 'packages/core')).toBeUndefined();
-    write('packages/core/test.config.ts', 'export default {}');
-    expect(select(['packages/core/src/a.ts'], 'packages/core')).toBeDefined();
+    write('packages/core/cfg/unit.mts', 'export default {}');
+    expect(select(['packages/core/src/a.ts'], 'packages/core')).toEqual({
+      config: 'cfg/unit.mts',
+      paths: ['src/a.ts'],
+    });
     expect(
       select(
-        ['packages/core/src/a.ts', 'packages/core/test.config.ts'],
+        ['packages/core/src/a.ts', 'packages/core/cfg/unit.mts'],
         'packages/core',
       ),
     ).toBeUndefined();
   });
 
-  it('runs a dependent whole when it imports a changed dependency as build output', () => {
-    // No source alias: cli's tests import core's `dist`, which the diff's
-    // `src` path does not name.
-    write('packages/cli/vitest.config.ts', 'export default {}');
-    expect(select(['packages/core/src/a.ts'], 'packages/cli')).toBeUndefined();
-    // ...and a module that names a changed doc counts the same way.
-    expect(select(['docs/guide.md'], 'packages/cli')).toBeUndefined();
-    // A dependency whose entry is its source is in the graph as source.
-    write(
-      'packages/core/package.json',
-      JSON.stringify({
-        scripts: { test: 'vitest run' },
-        exports: { '.': { import: './src/index.ts' } },
-      }),
-    );
-    expect(select(['packages/core/src/a.ts'], 'packages/cli')).toBeDefined();
-    // A dependency's own test is no module anything imports.
-    write(
-      'packages/core/package.json',
-      JSON.stringify({
-        scripts: { test: 'vitest run' },
-        main: 'dist/index.js',
-      }),
-    );
-    write('packages/core/src/a.test.ts');
-    expect(
-      select(['packages/core/src/a.test.ts'], 'packages/cli'),
-    ).toBeDefined();
-    // A change outside what the suite can reach is not its concern.
-    write('packages/web/src/w.ts');
-    write(
-      'packages/core/package.json',
-      JSON.stringify({
-        scripts: { test: 'vitest run' },
-        main: 'dist/index.js',
-      }),
-    );
-    expect(select(['packages/web/src/w.ts'], 'packages/cli')?.paths).toEqual([
-      '../web/src/w.ts',
-    ]);
-  });
-
   it('runs the suite whole when its script is not a plain vitest run', () => {
-    write(
-      'packages/cli/package.json',
-      JSON.stringify({ scripts: { test: 'vitest run --coverage' } }),
-    );
+    manifest('packages/cli', { scripts: { test: 'vitest run --coverage' } });
     expect(select(['packages/core/src/a.ts'], 'packages/cli')).toBeUndefined();
     expect(select(['packages/core/src/a.ts'], 'packages/core')).toBeDefined();
   });
 
   it('runs every suite whole once the diff gives a reason', () => {
-    write('packages/core/package.json', '{}');
-    expect(
-      relatedTests({
-        root,
-        changed: ['packages/core/src/a.ts', 'packages/core/package.json'],
-        renamedFrom: [],
-        ownerOf,
-        reachOf: (d) => reach[d],
-      }).reason,
-    ).toBe('it changes packages/core/package.json');
+    const related = relatedTests({
+      root,
+      changed: ['packages/core/src/a.ts', 'packages/core/package.json'],
+      renamedFrom: [],
+      ownerOf: packageOf,
+      reachOf: (d) => reach[d],
+    });
+    expect(related.reason).toBe('it changes packages/core/package.json');
+    expect(related.select('packages/core')).toBeUndefined();
+    // ...while the same suite is narrowable in its own right.
+    expect(related.narrowable('packages/core')).toBe(true);
     expect(
       select(['packages/core/src/a.ts'], 'packages/core', [
         'packages/core/src/b.ts',
@@ -388,12 +482,9 @@ describe('relatedTests', () => {
   });
 
   it('carries a config the script names, and serves the root suite', () => {
-    write(
-      'packages/web/package.json',
-      JSON.stringify({
-        scripts: { test: 'vitest run --config vitest.unit.config.ts' },
-      }),
-    );
+    manifest('packages/web', {
+      scripts: { test: 'vitest run --config vitest.unit.config.ts' },
+    });
     write('packages/web/vitest.unit.config.ts', 'export default {}');
     expect(select(['docs/guide.md'], 'packages/web')).toEqual({
       config: 'vitest.unit.config.ts',
@@ -410,6 +501,29 @@ describe('relatedTests', () => {
       'docs/guide.md',
       'scripts/lib/docs.ts',
     ]);
+  });
+
+  it('leaves off a path no command can carry outside the suite, and runs whole for one inside it', () => {
+    write('docs-site/src/app/[[...mdxPath]]/page.jsx');
+    expect(
+      select(
+        ['docs-site/src/app/[[...mdxPath]]/page.jsx', 'packages/core/src/a.ts'],
+        'packages/core',
+      )?.paths,
+    ).toEqual(['src/a.ts']);
+    write('packages/core/src/odd name.ts');
+    // Beside a file the suite would relate: the uncarried one decides.
+    const both = ['packages/core/src/odd name.ts', 'packages/core/src/a.ts'];
+    expect(select(both, 'packages/core')).toBeUndefined();
+    expect(select(both, 'packages/cli')).toBeUndefined();
+    // ...but it is nothing to a suite that cannot reach it.
+    write('packages/web/src/w.ts');
+    expect(
+      select(
+        ['packages/core/src/odd name.ts', 'packages/web/src/w.ts'],
+        'packages/web',
+      )?.paths,
+    ).toEqual(['src/w.ts']);
   });
 
   it('runs the suite whole when what names a file cannot ride the command', () => {

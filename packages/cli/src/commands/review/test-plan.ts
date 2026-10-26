@@ -54,7 +54,7 @@ import { getPlatformReader } from './lib/platform/registry.js';
 import { isGitIgnored } from '@qwen-code/qwen-code-core';
 import { GIT_TIMEOUT_MS } from './lib/git.js';
 import { diffHashOf } from './script-lint.js';
-import { relatedTestDir } from './lib/npm-toolchain.js';
+import { relatedTestDir, suiteCommandOf } from './lib/npm-toolchain.js';
 import {
   hasUnmodeledWorkspaceGlob,
   readWorkspaceGlobs,
@@ -596,29 +596,25 @@ function ruleCommand(
 ): TestPlanClaim {
   // A command this review actually ran is settled by its exit code — the
   // strongest evidence available, and it needs no manifest lookup.
+  const claimed = text.trim();
+  // A workspace-scoped run (`npm run build --workspace=...`) still settles
+  // the plan's bare command, so match it plus any extra flags — not only an
+  // exact string. The space guard keeps `build` from matching `build:all`.
+  const settles = (command: string): boolean =>
+    command === claimed ||
+    (command.startsWith(claimed) && command[claimed.length] === ' ');
   const matches = [
     ...(buildTest?.build ?? []),
     ...(buildTest?.test ?? []),
-  ].filter((c) => {
-    const command = c.command.trim();
-    const claimed = text.trim();
-    // A workspace-scoped run (`npm run build --workspace=...`) still settles
-    // the plan's bare command, so match it plus any extra flags — not only an
-    // exact string. The space guard keeps `build` from matching `build:all`.
-    return (
-      command === claimed ||
-      (command.startsWith(claimed) && command[claimed.length] === ' ')
-    );
-  });
+  ].filter((c) => settles(c.command.trim()));
   // A related run (`vitest related`) is this review's run of a suite's `test`
-  // script narrowed to the diff. It settles a bare test claim by its exit
-  // code too, and the note says it was narrowed: a pass is not the whole
-  // suite passing.
-  const related = /^(?:npm|pnpm|yarn)\s+(?:run\s+)?test$/.test(text.trim())
-    ? (buildTest?.test ?? []).filter(
-        (c) => relatedTestDir(c.command) !== undefined,
-      )
-    : [];
+  // script narrowed to the diff, read as the whole-suite command it stands
+  // in for. It settles a claim by its exit code too, and the note says it
+  // was narrowed: a pass is not the whole suite passing.
+  const related = (buildTest?.test ?? []).filter((c) => {
+    const suite = suiteCommandOf(c.command);
+    return suite !== undefined && settles(suite);
+  });
   const runs = [...matches, ...related];
   // build-test records one scoped command per package and does not stop on
   // failure, so a bare claim can match several runs. Prefer a failure: if ANY
@@ -642,10 +638,13 @@ function ruleCommand(
           text,
           verdict: 'reproduces',
           observed: 'exit 0',
-          note: narrowed
-            ? `this review ran it — in ${narrowed}, only the tests related ` +
-              'to the diff (vitest related)'
-            : 'this review ran it',
+          note: !narrowed
+            ? 'this review ran it'
+            : matches.some((c) => !c.timedOut)
+              ? `this review ran it — in ${narrowed}, only the tests ` +
+                'related to the diff (vitest related)'
+              : `this review ran only its tests related to the diff ` +
+                `(vitest related), in ${narrowed}, and they passed`,
         }
       : {
           kind: 'command',
@@ -756,7 +755,11 @@ function ruleCommand(
   };
 }
 
-function ruleCount(text: string, observed: number[]): TestPlanClaim {
+function ruleCount(
+  text: string,
+  observed: number[],
+  related: readonly string[] = [],
+): TestPlanClaim {
   const claimed = Number(
     /(\d{1,3}(?:,\d{3})+|\d+)/.exec(text)?.[1]?.replace(/,/g, ''),
   );
@@ -784,7 +787,11 @@ function ruleCount(text: string, observed: number[]): TestPlanClaim {
     observed: `${observed.join(', ')} passed`,
     // The header's reason, restated where the reader meets the verdict: this is
     // not a contradiction, because the two numbers may be about different suites.
-    note: 'the suites this review ran reported a different count — they may not be the suite the Test Plan means',
+    note:
+      'the suites this review ran reported a different count — they may not be the suite the Test Plan means' +
+      (related.length
+        ? ` (in ${related.join(', ')}, this review ran only the tests related to the diff, so its count covers part of the suite)`
+        : ''),
   };
 }
 
@@ -911,11 +918,15 @@ export function runTestPlan(
     }
   }
   const counts = observedTestCounts(buildTest);
+  // Shape-checked: the report is a file anything may have edited.
+  const relatedSuites = Array.isArray(buildTest?.relatedTests)
+    ? buildTest.relatedTests.filter((d): d is string => typeof d === 'string')
+    : [];
 
   const claims = extractClaims(section.content).map((c) => {
     if (c.kind === 'path') return rulePath(c.text, worktree, changed);
     if (c.kind === 'command') return ruleCommand(c.text, worktree, buildTest);
-    return ruleCount(c.text, counts);
+    return ruleCount(c.text, counts, relatedSuites);
   });
 
   const contradicted = claims.filter(
