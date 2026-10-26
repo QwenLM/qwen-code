@@ -896,6 +896,10 @@ describe.skipIf(!POSIX)('bounded pause hold and resource limits', () => {
     });
     try {
       expect(await waitForChildGone(pty)).toBe(true);
+      // The wrapper must observe the native exit before the limit trips: a
+      // callback still queued when the failure wins the race is recorded for
+      // diagnostics only, so the real exit would be lost.
+      expect(await waitFor(() => pty.stats.pendingExit)).toBe(true);
       killSpy.mockClear();
 
       pty.write(Buffer.alloc(8192));
