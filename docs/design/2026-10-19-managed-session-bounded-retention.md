@@ -126,7 +126,14 @@ continues to apply only after a complete snapshot or legacy event prefix.
 
 ## Remaining native-journal and authority design
 
-These are required serial follow-ups, not implemented by slice 1:
+These are required follow-ups, not implemented by slice 1. Identity storage
+and the native snapshot contract can be developed in parallel. HTTP and local
+replay can proceed in parallel once the snapshot contract is stable; the
+authority window depends on identity storage and both verified replay paths.
+See the [PR2 protocol design](2026-10-26-managed-native-journal-snapshots.md)
+for its implementation boundary and the lossless first payload format.
+
+PR3 [#15599](https://github.com/QwenLM/qwen-code/pull/15599) is merged into the PR2 branch; [#15569](https://github.com/QwenLM/qwen-code/pull/15569) delivers native snapshot storage and [HTTP recovery](2026-10-26-managed-http-snapshot-recovery.md) together to main. These remain separate design and acceptance slices within that PR. Local lease-aware recovery, complete historical-reader migration, compact state and the authority window remain follow-ups; the combined delivery does not enable journal deletion or memory eviction.
 
 1. **Identity storage:** move terminal bodies and deduplication evidence to a
    durable lookup/archival structure before removing them from resident maps.
@@ -153,6 +160,11 @@ These are required serial follow-ups, not implemented by slice 1:
    uniqueness evidence as well as `events`. Approval/model/Plan selection,
    wake/cancel recovery, tool results, tasks, hooks, automations, channels,
    transcript projection, and SSE must preserve their historical answers.
+
+The [local terminal-identity lookup slice](2026-10-26-managed-terminal-identity-lookup.md)
+adds a derived per-key query used by terminal duplicate admission. It keeps the
+journal authoritative and retains resident maps; an independently authoritative
+archive and its completeness boundary remain prerequisites for eviction.
 
 ## Validation plan
 
