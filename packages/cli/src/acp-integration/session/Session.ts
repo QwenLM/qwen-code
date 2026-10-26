@@ -937,6 +937,15 @@ type ModelResponseFacts = {
   refusedPartialEdits: Set<string>;
 };
 
+/** The facts of a response that has not streamed yet. */
+const newModelResponseFacts = (): ModelResponseFacts => ({
+  outputTruncated: false,
+  refusedPartialEdits: new Set(),
+});
+
+const userPromptBlockedNotice = (reason: string | undefined) =>
+  `✗ **UserPromptSubmit blocked**: ${reason || 'No reason provided'}`;
+
 const DAEMON_INVALID_TOOL_PARAMS_THRESHOLD = 3;
 
 const PERMISSION_CANCEL_SKIP_MESSAGE =
@@ -7278,7 +7287,7 @@ export class Session implements SessionContext {
                     onModelEvent: async (event) => {
                       if (event.type === LlmEventType.UserPromptSubmitBlocked) {
                         await this.messageEmitter.emitAgentMessage(
-                          `✗ **UserPromptSubmit blocked**: ${event.value.reason || 'No reason provided'}`,
+                          userPromptBlockedNotice(event.value.reason),
                         );
                       }
                     },
@@ -7322,10 +7331,8 @@ export class Session implements SessionContext {
                 hookOutput?.shouldStopExecution()
               ) {
                 // Hook blocked the prompt - send notification to UI and return
-                const blockReason =
-                  hookOutput?.getEffectiveReason() || 'No reason provided';
                 await this.messageEmitter.emitAgentMessage(
-                  `✗ **UserPromptSubmit blocked**: ${blockReason}`,
+                  userPromptBlockedNotice(hookOutput?.getEffectiveReason()),
                 );
                 return { stopReason: 'end_turn' };
               }
@@ -7782,10 +7789,7 @@ export class Session implements SessionContext {
                       pushCount !== undefined && pushCount <= pushCountBefore
                     );
                   };
-                  let attempt: ModelResponseFacts = {
-                    outputTruncated: false,
-                    refusedPartialEdits: new Set(),
-                  };
+                  let attempt: ModelResponseFacts = newModelResponseFacts();
                   // The user-content push a response answers. A next-speaker
                   // continuation sends another request within the round, and
                   // its response starts its own facts and usage, as a new send
@@ -7853,10 +7857,7 @@ export class Session implements SessionContext {
                             this.#getCurrentChat().getUserContentPushCount?.();
                           if (pushCount !== responsePushCount) {
                             if (responsePushCount !== undefined) {
-                              attempt = {
-                                outputTruncated: false,
-                                refusedPartialEdits: new Set(),
-                              };
+                              attempt = newModelResponseFacts();
                               if (usageMetadata) {
                                 this.#recordPromptTokenCount(
                                   usageMetadata,
@@ -7956,10 +7957,7 @@ export class Session implements SessionContext {
                                 `main prompt ${event.type}`,
                               );
                               functionCalls.length = 0;
-                              attempt = {
-                                outputTruncated: false,
-                                refusedPartialEdits: new Set(),
-                              };
+                              attempt = newModelResponseFacts();
                               break;
                             }
                             case LlmEventType.ChatCompressed:
@@ -7990,7 +7988,7 @@ export class Session implements SessionContext {
                             case LlmEventType.UserPromptSubmitBlocked:
                               // A tool-result round runs UserPromptSubmit too.
                               await this.messageEmitter.emitAgentMessage(
-                                `✗ **UserPromptSubmit blocked**: ${event.value.reason || 'No reason provided'}`,
+                                userPromptBlockedNotice(event.value.reason),
                               );
                               break;
                             case LlmEventType.Error:
@@ -10318,10 +10316,7 @@ export class Session implements SessionContext {
       let memoryDeliveryStateInvalidated = false;
       // As in `turn.ts`: a max-tokens finish marks the calls of the current
       // attempt, and a retry or fallback starts a new attempt.
-      let attempt: ModelResponseFacts = {
-        outputTruncated: false,
-        refusedPartialEdits: new Set(),
-      };
+      let attempt: ModelResponseFacts = newModelResponseFacts();
       const commitMemoryDelivery = () => {
         llmClient.commitManagedAutoMemoryRecallDelivery(memoryDelivery);
         if (memoryDeliveryStateInvalidated) {
@@ -10350,10 +10345,7 @@ export class Session implements SessionContext {
             event.type === StreamEventType.MODEL_FALLBACK
           ) {
             receivedChunk = false;
-            attempt = {
-              outputTruncated: false,
-              refusedPartialEdits: new Set(),
-            };
+            attempt = newModelResponseFacts();
           }
           yield event;
         }

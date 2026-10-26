@@ -121,10 +121,11 @@ export function getThoughtText(response: GenerateContentResponse): string {
     .join('');
 }
 
+/** `thoughtText` is the response's `getThoughtText`, when already read. */
 export function getThoughtSummary(
   response: GenerateContentResponse,
+  thoughtText = getThoughtText(response),
 ): ThoughtSummary | null {
-  const thoughtText = getThoughtText(response);
   if (!thoughtText) {
     return null;
   }

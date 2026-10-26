@@ -870,12 +870,13 @@ export class Turn {
           this.currentResponseId = resp.responseId;
         }
 
-        const thoughtSummary = getThoughtSummary(resp);
+        const thoughtText = getThoughtText(resp);
+        const thoughtSummary = getThoughtSummary(resp, thoughtText);
         if (thoughtSummary) {
           yield {
             type: LlmEventType.Thought,
             value: thoughtSummary,
-            text: getThoughtText(resp),
+            text: thoughtText,
           };
         }
 
