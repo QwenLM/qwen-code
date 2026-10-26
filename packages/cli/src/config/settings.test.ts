@@ -4535,6 +4535,56 @@ describe('Settings Loading and Merging', () => {
     });
   });
 
+  describe('serve.subSessionCompletionTtlHours scope handling', () => {
+    it('is listed as workspace-restricted', () => {
+      expect(WORKSPACE_RESTRICTED_SETTING_KEYS).toContain(
+        'serve.subSessionCompletionTtlHours',
+      );
+    });
+
+    it('honors serve.subSessionCompletionTtlHours from user scope', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              serve: { subSessionCompletionTtlHours: 24 },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.serve?.subSessionCompletionTtlHours).toBe(24);
+    });
+
+    it('strips serve.subSessionCompletionTtlHours from workspace scope and warns', () => {
+      // The TTL deletes completed sub-session transcripts: a repository must
+      // not be able to switch that on (or shorten an operator TTL).
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              serve: { subSessionCompletionTtlHours: 24 },
+            });
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              serve: { subSessionCompletionTtlHours: 1 },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.serve?.subSessionCompletionTtlHours).toBe(24);
+      const warnings = getSettingsWarnings(settings);
+      expect(
+        warnings.some((w) => w.includes('serve.subSessionCompletionTtlHours')),
+      ).toBe(true);
+    });
+  });
+
   describe('named-workflows-only lock scope handling', () => {
     it('honors a workspace that turns the lock on', () => {
       (mockFsExistsSync as Mock).mockReturnValue(true);
