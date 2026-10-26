@@ -88,6 +88,7 @@ import { serializeStatusMessage } from './components/messages/StatusMessage';
 import { loadSplitSessions, saveSplitSessions } from './utils/splitUrl';
 import { StandaloneContext } from './config/standalone';
 import { WebShellNavigationBoundary } from './navigation';
+import { HotkeySetter } from './live/HotkeySetter';
 import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
 import type { WorkspaceSelectorOption } from './components/WorkspaceSelector';
 
@@ -48859,171 +48860,249 @@ describe('App view navigation shortcuts (#13175)', () => {
   // render in jsdom).
   const OVERVIEW_PANEL =
     '[data-testid="inline-panel"][aria-label="Session Overview"]';
+  const SPLIT_VIEW_PAGE = '[data-testid="split-view-page"]';
+  // The hotkeys are live only while the sidebar offers their buttons, and
+  // App normalizes an omitted footer to ['collapse'], so list both items the
+  // way the standalone shell does.
+  const VIEW_SIDEBAR: React.ComponentProps<typeof App>['sidebar'] = {
+    enabled: true,
+    footer: { items: ['sessionsOverview', 'splitView'] },
+  };
+  const OVERVIEW_CHORD: KeyboardEventInit = {
+    key: 'O',
+    code: 'KeyO',
+    metaKey: true,
+    shiftKey: true,
+  };
+  const SPLIT_CHORD: KeyboardEventInit = {
+    key: '\\',
+    code: 'Backslash',
+    ctrlKey: true,
+  };
 
-  function pressViewShortcut(init: KeyboardEventInit): void {
-    window.dispatchEvent(new KeyboardEvent('keydown', init));
+  function renderViewApp(props: React.ComponentProps<typeof App> = {}) {
+    return renderApp({ sidebar: VIEW_SIDEBAR, ...props });
   }
 
-  it('opens the Session Overview panel with Cmd+Shift+O', async () => {
-    const { container } = renderApp();
-    await flush();
-    expect(container.querySelector(OVERVIEW_PANEL)).toBeNull();
+  function pressViewShortcut(
+    init: KeyboardEventInit,
+    target: EventTarget = window,
+  ): KeyboardEvent {
+    const event = new KeyboardEvent('keydown', {
+      bubbles: true,
+      cancelable: true,
+      ...init,
+    });
+    target.dispatchEvent(event);
+    return event;
+  }
+
+  async function press(
+    init: KeyboardEventInit,
+    target: EventTarget = window,
+  ): Promise<KeyboardEvent> {
+    let event!: KeyboardEvent;
     await act(async () => {
-      pressViewShortcut({
-        key: 'O',
-        code: 'KeyO',
-        metaKey: true,
-        shiftKey: true,
-        bubbles: true,
-        cancelable: true,
-      });
+      event = pressViewShortcut(init, target);
       await Promise.resolve();
     });
+    return event;
+  }
+
+  // Split view needs desktop-scale room: the hotkey mirrors the sidebar's
+  // isLargeScreen gate, so match (or miss) the large-screen queries.
+  function stubLargeScreen(large: boolean): void {
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: large && query.includes('min-width'),
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    });
+  }
+
+  it('opens the Session Overview panel with Cmd+Shift+O, also while it is open', async () => {
+    const { container } = renderViewApp();
+    await flush();
+    expect(container.querySelector(OVERVIEW_PANEL)).toBeNull();
+    const first = await press(OVERVIEW_CHORD);
+    expect(first.defaultPrevented).toBe(true);
+    expect(container.querySelector(OVERVIEW_PANEL)).not.toBeNull();
+    // The open overview is an activePanel; it must not gate its own chord.
+    const second = await press(OVERVIEW_CHORD);
+    expect(second.defaultPrevented).toBe(true);
+    expect(container.querySelector(OVERVIEW_PANEL)).not.toBeNull();
+  });
+
+  it('opens the Session Overview panel with Ctrl+Shift+O', async () => {
+    const { container } = renderViewApp();
+    await flush();
+    const event = await press({
+      key: 'O',
+      code: 'KeyO',
+      ctrlKey: true,
+      shiftKey: true,
+    });
+    expect(event.defaultPrevented).toBe(true);
     expect(container.querySelector(OVERVIEW_PANEL)).not.toBeNull();
   });
 
   it('opens the split view with Ctrl+Backslash', async () => {
-    // Split view needs desktop-scale room: the hotkey mirrors the
-    // sidebar's isLargeScreen gate, so match the large-screen queries.
-    Object.defineProperty(window, 'matchMedia', {
-      configurable: true,
-      value: vi.fn().mockImplementation((query: string) => ({
-        matches: query.includes('min-width'),
-        media: query,
-        addEventListener: vi.fn(),
-        removeEventListener: vi.fn(),
-      })),
-    });
-    const { container } = renderApp();
+    stubLargeScreen(true);
+    const { container } = renderViewApp();
     await flush();
-    await act(async () => {
-      pressViewShortcut({
-        key: '\\',
-        code: 'Backslash',
-        ctrlKey: true,
-        bubbles: true,
-        cancelable: true,
-      });
-      await Promise.resolve();
-    });
-    expect(
-      container.querySelector('[data-testid="split-view-page"]'),
-    ).not.toBeNull();
+    const event = await press(SPLIT_CHORD);
+    expect(event.defaultPrevented).toBe(true);
+    expect(container.querySelector(SPLIT_VIEW_PAGE)).not.toBeNull();
   });
 
-  it('does not open the split view on a narrow viewport', async () => {
-    // No min-width query matches: the sidebar withholds its split
-    // button, and the hotkey must honor the same gate.
-    Object.defineProperty(window, 'matchMedia', {
-      configurable: true,
-      value: vi.fn().mockImplementation((query: string) => ({
-        matches: false,
-        media: query,
-        addEventListener: vi.fn(),
-        removeEventListener: vi.fn(),
-      })),
-    });
-    const { container } = renderApp();
+  it('opens the split view from the ISO backslash key (IntlBackslash)', async () => {
+    stubLargeScreen(true);
+    const { container } = renderViewApp();
     await flush();
-    await act(async () => {
-      pressViewShortcut({
-        key: '\\',
-        code: 'Backslash',
-        ctrlKey: true,
-        bubbles: true,
-        cancelable: true,
-      });
-      await Promise.resolve();
-    });
-    // Narrow viewports deliberately do not offer the split layout, so
-    // the shortcut must not open it either.
-    expect(
-      container.querySelector('[data-testid="split-view-page"]'),
-    ).toBeNull();
+    const event = await press({ ...SPLIT_CHORD, code: 'IntlBackslash' });
+    expect(event.defaultPrevented).toBe(true);
+    expect(container.querySelector(SPLIT_VIEW_PAGE)).not.toBeNull();
+  });
+
+  it('runs the sidebar button path for a host that controls the split view', async () => {
+    // The sidebar button opens the split view locally even when the host
+    // passes splitSessionIds; the chord must do the same, not a no-op.
+    stubLargeScreen(true);
+    const { container } = renderViewApp({ splitSessionIds: [] });
+    await flush();
+    const event = await press(SPLIT_CHORD);
+    expect(event.defaultPrevented).toBe(true);
+    expect(container.querySelector(SPLIT_VIEW_PAGE)).not.toBeNull();
+  });
+
+  it('leaves the split chord to the browser on a narrow viewport', async () => {
+    // The sidebar withholds its split button below the large-screen
+    // breakpoint, so the chord is inert and must not consume the key.
+    stubLargeScreen(false);
+    const { container } = renderViewApp();
+    await flush();
+    const event = await press(SPLIT_CHORD);
+    expect(event.defaultPrevented).toBe(false);
+    expect(container.querySelector(SPLIT_VIEW_PAGE)).toBeNull();
+  });
+
+  it('leaves both chords to the browser when the sidebar does not offer the buttons', async () => {
+    stubLargeScreen(true);
+    for (const sidebar of [
+      false,
+      { enabled: false, footer: { items: ['sessionsOverview', 'splitView'] } },
+      { enabled: true, footer: { items: [] } },
+      { enabled: true, footer: { items: ['settings'] } },
+    ] satisfies Array<React.ComponentProps<typeof App>['sidebar']>) {
+      const { container, unmount } = renderApp({ sidebar });
+      await flush();
+      const overview = await press(OVERVIEW_CHORD);
+      const split = await press(SPLIT_CHORD);
+      expect(overview.defaultPrevented).toBe(false);
+      expect(split.defaultPrevented).toBe(false);
+      expect(container.querySelector(OVERVIEW_PANEL)).toBeNull();
+      expect(container.querySelector(SPLIT_VIEW_PAGE)).toBeNull();
+      unmount();
+    }
   });
 
   it('matches the physical key, not the produced character (RU layout)', async () => {
-    const { container } = renderApp();
+    const { container } = renderViewApp();
     await flush();
-    await act(async () => {
-      // On the Russian layout the physical O key produces "л".
-      pressViewShortcut({
-        key: 'л',
-        code: 'KeyO',
-        metaKey: true,
-        shiftKey: true,
-        bubbles: true,
-        cancelable: true,
-      });
-      await Promise.resolve();
-    });
+    // On the Russian layout the physical O key produces "л".
+    await press({ ...OVERVIEW_CHORD, key: 'л' });
     expect(container.querySelector(OVERVIEW_PANEL)).not.toBeNull();
   });
 
   it('does not fire from the character alone (KeyL typing "o")', async () => {
-    const { container } = renderApp();
+    const { container } = renderViewApp();
     await flush();
-    await act(async () => {
-      pressViewShortcut({
-        key: 'o',
-        code: 'KeyL',
-        metaKey: true,
-        shiftKey: true,
-        bubbles: true,
-        cancelable: true,
-      });
-      await Promise.resolve();
-    });
+    const event = await press({ ...OVERVIEW_CHORD, key: 'o', code: 'KeyL' });
+    expect(event.defaultPrevented).toBe(false);
     expect(container.querySelector(OVERVIEW_PANEL)).toBeNull();
   });
 
-  it('skips both shortcuts while a dialog is open (Esc keeps priority)', async () => {
-    const { container } = renderApp();
+  it('skips both chords while an external modal is registered', async () => {
+    stubLargeScreen(true);
+    const { container } = renderViewApp();
     await flush();
-    const dialog = document.createElement('div');
-    dialog.setAttribute('role', 'dialog');
-    document.body.appendChild(dialog);
+    const blocker = container.querySelector<HTMLButtonElement>(
+      '[data-testid="interaction-blocker"]',
+    );
+    expect(blocker).not.toBeNull();
+    await act(async () => {
+      blocker?.click();
+      await Promise.resolve();
+    });
+    const overview = await press(OVERVIEW_CHORD);
+    const split = await press(SPLIT_CHORD);
+    expect(overview.defaultPrevented).toBe(false);
+    expect(split.defaultPrevented).toBe(false);
+    expect(container.querySelector(OVERVIEW_PANEL)).toBeNull();
+    expect(container.querySelector(SPLIT_VIEW_PAGE)).toBeNull();
+    // Releasing the block re-arms the chord (the gate is the block itself).
+    await act(async () => {
+      blocker?.click();
+      await Promise.resolve();
+    });
+    const released = await press(OVERVIEW_CHORD);
+    expect(released.defaultPrevented).toBe(true);
+    expect(container.querySelector(OVERVIEW_PANEL)).not.toBeNull();
+  });
+
+  it('skips both chords while a modal alert dialog is open (Esc keeps priority)', async () => {
+    stubLargeScreen(true);
+    const { container } = renderViewApp();
+    await flush();
+    // The shape ui/alert-dialog renders for a component-owned confirm such
+    // as the Session Overview archive/delete dialog.
+    const confirm = document.createElement('div');
+    confirm.setAttribute('role', 'alertdialog');
+    confirm.setAttribute('data-slot', 'alert-dialog-content');
+    confirm.setAttribute('data-state', 'open');
+    document.body.appendChild(confirm);
     try {
-      await act(async () => {
-        pressViewShortcut({
-          key: 'O',
-          code: 'KeyO',
-          metaKey: true,
-          shiftKey: true,
-          bubbles: true,
-          cancelable: true,
-        });
-        pressViewShortcut({
-          key: '\\',
-          code: 'Backslash',
-          metaKey: true,
-          bubbles: true,
-          cancelable: true,
-        });
-        await Promise.resolve();
-      });
+      const overview = await press(OVERVIEW_CHORD);
+      const split = await press(SPLIT_CHORD);
+      expect(overview.defaultPrevented).toBe(false);
+      expect(split.defaultPrevented).toBe(false);
       expect(container.querySelector(OVERVIEW_PANEL)).toBeNull();
-      expect(
-        container.querySelector('[data-testid="split-view-page"]'),
-      ).toBeNull();
+      expect(container.querySelector(SPLIT_VIEW_PAGE)).toBeNull();
     } finally {
-      dialog.remove();
+      confirm.remove();
+    }
+  });
+
+  it('still fires over non-modal dialog roles (details popover, approval card)', async () => {
+    const { container } = renderViewApp();
+    await flush();
+    // Session details tooltips are popovers with role="dialog"; the inline
+    // tool-approval card carries role="alertdialog". Neither is modal.
+    const popover = document.createElement('div');
+    popover.setAttribute('role', 'dialog');
+    popover.setAttribute('data-slot', 'popover-content');
+    const approval = document.createElement('div');
+    approval.setAttribute('role', 'alertdialog');
+    approval.setAttribute('data-web-shell-permission-panel', '');
+    document.body.append(popover, approval);
+    try {
+      const event = await press(OVERVIEW_CHORD);
+      expect(event.defaultPrevented).toBe(true);
+      expect(container.querySelector(OVERVIEW_PANEL)).not.toBeNull();
+    } finally {
+      popover.remove();
+      approval.remove();
     }
   });
 
   it('does not open views while the artifact panel is fullscreen', async () => {
     // Floating variant: below the dock breakpoint the panel opens in
     // a drawer that covers the chat while fullscreen.
-    Object.defineProperty(window, 'matchMedia', {
-      configurable: true,
-      value: vi.fn().mockImplementation((query: string) => ({
-        matches: false,
-        media: query,
-        addEventListener: vi.fn(),
-        removeEventListener: vi.fn(),
-      })),
-    });
-    const { container } = renderApp();
+    stubLargeScreen(false);
+    const { container } = renderViewApp();
     await flush();
     await act(async () => {
       container
@@ -49044,77 +49123,116 @@ describe('App view navigation shortcuts (#13175)', () => {
       await Promise.resolve();
     });
     await flush();
-    await act(async () => {
-      pressViewShortcut({
-        key: 'O',
-        code: 'KeyO',
-        metaKey: true,
-        shiftKey: true,
-        bubbles: true,
-        cancelable: true,
-      });
-      pressViewShortcut({
-        key: '\\',
-        code: 'Backslash',
-        ctrlKey: true,
-        bubbles: true,
-        cancelable: true,
-      });
-      await Promise.resolve();
-    });
-    // A panel rendered under the covering surface is not open.
+    const overview = await press(OVERVIEW_CHORD);
+    // The overview chord is otherwise live here, so this pins the
+    // fullscreen gate itself.
+    expect(overview.defaultPrevented).toBe(false);
     expect(container.querySelector(OVERVIEW_PANEL)).toBeNull();
+    // The ignored keystroke leaves the fullscreen state untouched.
     expect(
-      container.querySelector('[data-testid="split-view-page"]'),
-    ).toBeNull();
-    // The swallowed keystrokes leave the fullscreen state untouched.
-    expect(
-      document
-        .querySelector(
-          '[data-web-shell-portal-root] [data-slot="drawer-content"]',
-        )
-        ?.className,
+      document.querySelector(
+        '[data-web-shell-portal-root] [data-slot="drawer-content"]',
+      )?.className,
     ).toContain('w-full');
   });
 
-  it('ignores alt-combos, unmodified presses, and key auto-repeat', async () => {
-    const { container } = renderApp();
+  it('ignores alt-combos, unmodified presses, auto-repeat and IME composition', async () => {
+    stubLargeScreen(true);
+    const { container } = renderViewApp();
     await flush();
-    await act(async () => {
-      pressViewShortcut({
-        key: 'O',
-        code: 'KeyO',
-        metaKey: true,
-        shiftKey: true,
-        altKey: true,
-        bubbles: true,
-        cancelable: true,
-      });
-      pressViewShortcut({
-        key: '\\',
-        code: 'Backslash',
-        bubbles: true,
-        cancelable: true,
-      });
-      pressViewShortcut({
-        key: 'O',
-        code: 'KeyO',
-        metaKey: true,
-        shiftKey: true,
-        repeat: true,
-        bubbles: true,
-        cancelable: true,
-      });
-      await Promise.resolve();
-    });
+    for (const init of [
+      { ...OVERVIEW_CHORD, altKey: true },
+      { key: '\\', code: 'Backslash' },
+      { ...SPLIT_CHORD, shiftKey: true },
+      { ...OVERVIEW_CHORD, repeat: true },
+      { ...OVERVIEW_CHORD, isComposing: true },
+    ]) {
+      const event = await press(init);
+      expect(event.defaultPrevented).toBe(false);
+    }
     expect(container.querySelector(OVERVIEW_PANEL)).toBeNull();
-    expect(
-      container.querySelector('[data-testid="split-view-page"]'),
-    ).toBeNull();
+    expect(container.querySelector(SPLIT_VIEW_PAGE)).toBeNull();
+  });
+
+  it('does not scan the DOM for modals on unrelated Cmd/Ctrl chords', async () => {
+    renderViewApp();
+    await flush();
+    const querySpy = vi.spyOn(document, 'querySelector');
+    try {
+      await press({ key: 'c', code: 'KeyC', metaKey: true });
+      await press({ key: 'Enter', code: 'Enter', metaKey: true });
+      expect(
+        querySpy.mock.calls.filter(([selector]) =>
+          String(selector).includes('alert-dialog-content'),
+        ),
+      ).toEqual([]);
+    } finally {
+      querySpy.mockRestore();
+    }
+  });
+
+  it('registers in the capture phase, ahead of handlers on the target', async () => {
+    const { container } = renderViewApp();
+    await flush();
+    // A target that stops the keydown in its own bubble phase: a bubble-phase
+    // window listener would never see it.
+    const field = document.createElement('div');
+    field.tabIndex = 0;
+    field.addEventListener('keydown', (event) => event.stopPropagation());
+    document.body.appendChild(field);
+    try {
+      const event = await press(OVERVIEW_CHORD, field);
+      expect(event.defaultPrevented).toBe(true);
+      expect(container.querySelector(OVERVIEW_PANEL)).not.toBeNull();
+    } finally {
+      field.remove();
+    }
+  });
+
+  it('leaves the chord to an armed shortcut recorder', async () => {
+    stubLargeScreen(true);
+    const { container } = renderViewApp();
+    await flush();
+    const recorderContainer = document.createElement('div');
+    document.body.appendChild(recorderContainer);
+    const recorderRoot = createRoot(recorderContainer);
+    const onChange = vi.fn(async (_accelerator: string) => {});
+    try {
+      act(() => {
+        recorderRoot.render(
+          <HotkeySetter
+            accelerator=""
+            disabled={false}
+            captureLabel="Press shortcut"
+            clearLabel="Clear"
+            offLabel="Off"
+            onChange={onChange}
+          />,
+        );
+      });
+      await act(async () => {
+        recorderContainer
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Press shortcut"]',
+          )
+          ?.click();
+        await Promise.resolve();
+      });
+      const input = recorderContainer.querySelector<HTMLInputElement>(
+        'input[data-web-shell-hotkey-capture]',
+      );
+      expect(input).not.toBeNull();
+      await press(SPLIT_CHORD, input!);
+      expect(onChange).toHaveBeenCalledWith('Control+\\');
+      expect(container.querySelector(SPLIT_VIEW_PAGE)).toBeNull();
+    } finally {
+      act(() => recorderRoot.unmount());
+      recorderContainer.remove();
+    }
   });
 
   it('does not hijack keys targeted at the web terminal', async () => {
-    const { container } = renderApp();
+    const { container } = renderViewApp();
     await flush();
     const terminal = document.createElement('div');
     terminal.setAttribute('data-web-terminal', '');
@@ -49122,19 +49240,8 @@ describe('App view navigation shortcuts (#13175)', () => {
     terminal.appendChild(input);
     document.body.appendChild(terminal);
     try {
-      await act(async () => {
-        input.dispatchEvent(
-          new KeyboardEvent('keydown', {
-            key: 'O',
-            code: 'KeyO',
-            metaKey: true,
-            shiftKey: true,
-            bubbles: true,
-            cancelable: true,
-          }),
-        );
-        await Promise.resolve();
-      });
+      const event = await press(OVERVIEW_CHORD, input);
+      expect(event.defaultPrevented).toBe(false);
       expect(container.querySelector(OVERVIEW_PANEL)).toBeNull();
     } finally {
       terminal.remove();
