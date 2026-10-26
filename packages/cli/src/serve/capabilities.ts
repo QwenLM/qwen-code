@@ -91,6 +91,8 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_artifacts: { since: 'v1' },
   session_artifacts_persistence: { since: 'v1' },
   session_artifact_library: { since: 'v1' },
+  workspace_artifact_library: { since: 'v1' },
+  workspace_artifact_library_stream: { since: 'v1' },
   session_sources: { since: 'v1' },
   // Daemon emits `slow_client_warning` synthetic frames at 75% queue
   // fill and honors `?maxQueued=N` (range [16, 2048]) on
@@ -482,6 +484,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // runtimes. Workspace ids and canonical paths remain the routing identities.
   workspace_display_name: { since: 'v1' },
   scratch_workspace_registration: { since: 'v1' },
+  // Clone a workspace from a Git URL into a new directory
+  // (`POST /workspaces { kind: "git" }` plus the clone job routes).
+  // Advertised only when dynamic registration and the daemon host's `git`
+  // binary are both available.
+  git_workspace_clone: { since: 'v1' },
   workspace_runtime_removal: { since: 'v1' },
   // A native OS directory picker can be opened on the daemon host
   // (osascript on macOS, PowerShell on Windows, zenity on a Linux host
@@ -491,6 +498,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Workspace-owned runtime lifecycle status and explicit on-demand startup.
   workspace_runtime: { since: 'v1' },
   workspace_runtime_stop: { since: 'v1' },
+  // List, add, and remove the extra directories persisted at workspace scope
+  // (`context.includeDirectories`). Advertised with `workspace_settings`: a
+  // daemon without settings persistence cannot make the change durable.
+  workspace_directories: { since: 'v1' },
   // The daemon host can open a workspace directory in the host's OS file
   // manager (Finder via `open` on macOS, Explorer via `explorer.exe` on
   // Windows, xdg-open on a Linux host with a display). Headless hosts omit
@@ -672,7 +683,9 @@ export interface AdvertiseFeatureToggles {
   dynamicWorkspaceRegistrationAvailable?: boolean;
   persistentWorkspaceRegistrationAvailable?: boolean;
   scratchWorkspaceRegistrationAvailable?: boolean;
+  gitWorkspaceCloneAvailable?: boolean;
   workspaceRuntimeRemovalAvailable?: boolean;
+  workspaceDirectoriesAvailable?: boolean;
   nativeDirectoryPickerAvailable?: boolean;
   workspaceRuntimeAvailable?: boolean;
   workspaceRuntimeStopAvailable?: boolean;
@@ -779,6 +792,14 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     (toggles) => toggles.sessionArtifactsPersistenceAvailable === true,
   ],
   [
+    'workspace_artifact_library',
+    (toggles) => toggles.sessionArtifactsPersistenceAvailable === true,
+  ],
+  [
+    'workspace_artifact_library_stream',
+    (toggles) => toggles.sessionArtifactsPersistenceAvailable === true,
+  ],
+  [
     'session_artifacts_persistence',
     (toggles) => toggles.sessionArtifactsPersistenceAvailable === true,
   ],
@@ -845,8 +866,16 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     (toggles) => toggles.scratchWorkspaceRegistrationAvailable === true,
   ],
   [
+    'git_workspace_clone',
+    (toggles) => toggles.gitWorkspaceCloneAvailable === true,
+  ],
+  [
     'workspace_runtime_removal',
     (toggles) => toggles.workspaceRuntimeRemovalAvailable === true,
+  ],
+  [
+    'workspace_directories',
+    (toggles) => toggles.workspaceDirectoriesAvailable === true,
   ],
   [
     'native_directory_picker',

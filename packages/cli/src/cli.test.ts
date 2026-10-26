@@ -57,10 +57,15 @@ const mocks = vi.hoisted(() => ({
   runSessionSendMcp: vi.fn(),
   runManagedRuntimeAttestationWorker: vi.fn(),
   preResolveHomeEnvOverrides: vi.fn(),
+  runManagedRuntimeBootstrap: vi.fn(),
 }));
 
 vi.mock('./config/environment.js', () => ({
   preResolveHomeEnvOverrides: mocks.preResolveHomeEnvOverrides,
+}));
+
+vi.mock('./serve/managed-runtime-bootstrap.js', () => ({
+  runManagedRuntimeBootstrap: mocks.runManagedRuntimeBootstrap,
 }));
 
 vi.mock('./commands/agents/session-send-mcp-server.js', () => ({
@@ -816,6 +821,25 @@ describe('runCliEntry', () => {
     expect(mocks.main).not.toHaveBeenCalled();
     expect(mocks.tryRunServeFastPath).not.toHaveBeenCalled();
   });
+
+  it.each([
+    { args: [], help: false, upload: false },
+    { args: ['--help'], help: true, upload: false },
+    { args: ['--workspace-file-upload'], help: false, upload: true },
+  ])(
+    'dispatches the private bootstrap entry $args before normal startup',
+    async ({ args, help, upload }) => {
+      process.env['QWEN_CODE_MANAGED_NPM_UPDATE_VERSION'] = '2.0.0';
+      await runCliEntry(['managed-runtime-bootstrap', ...args]);
+      expect(mocks.runManagedRuntimeBootstrap).toHaveBeenCalledWith(
+        help,
+        upload,
+      );
+      expect(mocks.installManagedNpmUpdate).not.toHaveBeenCalled();
+      expect(mocks.tryRunServeFastPath).not.toHaveBeenCalled();
+      expect(mocks.main).not.toHaveBeenCalled();
+    },
+  );
 
   it('serves session_send without normal startup or any stdout output', async () => {
     await runCliEntry([

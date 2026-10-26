@@ -633,7 +633,7 @@ class ManagedApprovalChangeTest {
             jdbc.update("UPDATE ma_turn SET status='RECOVERY_BLOCKED' WHERE tenant_id=?", tenant);
         }
         if (shape.equals("cwd")) {
-            transaction().execute(status -> store.beginCwdChangeOperation(tenant, session, "actor", "actor-digest",
+            transaction().execute(status -> LegacyCwdOperations.seed(jdbc, store, tenant, session, "actor", "actor-digest",
                     "cwd", "digest-cwd", "sub", 1));
         }
         if (shape.equals("closed")) {

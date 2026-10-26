@@ -1,4 +1,8 @@
 import {
+  MANAGED_EXTENSION_MESSAGES_EN,
+  MANAGED_EXTENSION_MESSAGES_ZH,
+} from './components/managed/managed-extension-messages.js';
+import {
   MANAGED_LIFECYCLE_MESSAGES_EN,
   MANAGED_LIFECYCLE_MESSAGES_ZH,
 } from './components/managed/managed-lifecycle-messages.js';
@@ -162,6 +166,7 @@ const EN: Messages = {
   'managed.refresh': 'Refresh',
   'managed.empty': 'No managed tasks yet.',
   'managed.loading': 'Loading…',
+  'managed.todo.loadedWindow': 'From the loaded session transcript.',
   'managed.more': 'Load more',
   'managed.titleSearch': 'Search session titles',
   'managed.titleSearchPlaceholder': 'Filter by title…',
@@ -251,9 +256,6 @@ const EN: Messages = {
   'managed.phase.created': 'Created',
   'managed.creationSkillsFromSettings':
     'Enabled Skills on the Skills page are added to new Managed sessions. Existing sessions keep their original Skills.',
-  'managed.creationSkillsManage': 'Manage Skills',
-  'managed.creationSkillsPinned': (v) =>
-    `${v?.count ?? 0} Skills are saved with this creation request.`,
   'managed.creationSkillsSourceChanged':
     'The Skills source changed. Retry with the selected source.',
   'managed.creationSkillsUnavailable':
@@ -269,33 +271,7 @@ const EN: Messages = {
   'managed.workspaceWorkingDirectory': 'Working directory',
   'managed.workspaceWorkingDirectoryDescription':
     'Choose where this session starts within the Workspace. Use . for the Workspace root.',
-  'managed.cwd.change': 'Change directory',
   'managed.cwd.path': 'Directory relative to Workspace root',
-  'managed.cwd.description':
-    'Enter a path relative to the Workspace root. Use . for the root. Future tasks run in the new directory; conversation history is kept.',
-  'managed.cwd.close': 'Close',
-  'managed.cwd.changing': 'Changing directory…',
-  'managed.cwd.confirm': 'Continue confirming',
-  'managed.cwd.unconfirmed':
-    'The directory change is not confirmed yet. Continue confirming the original request.',
-  'managed.cwd.unconfirmedForbidden':
-    'Your account cannot confirm this change. Its result remains unconfirmed, and sending stays blocked until the server settles it or you open a new tab.',
-  'managed.cwd.busy':
-    'Finish the active task, approval or unconfirmed request before changing directory.',
-  'managed.cwd.invalid': 'The directory is invalid or cannot be accessed.',
-  'managed.cwd.conflict':
-    'The current directory has changed. Review it before submitting again.',
-  'managed.cwd.unavailable':
-    'The Workspace is currently unavailable for a directory change.',
-  'managed.cwd.forbidden':
-    'Your account does not have permission to change this directory.',
-  'managed.cwd.storage':
-    'Browser session storage is unavailable. The directory change cannot start safely.',
-  'managed.cwd.failed':
-    'The directory change failed. Review the current directory before trying again.',
-  'managed.cwd.updated': (v) =>
-    `The current directory changed to ${v?.cwd ?? ''}. Confirm this context before submitting.`,
-  'managed.cwd.useCurrent': 'Use the current directory context',
   'managed.workspaceCreate': 'Create session',
   'managed.workspaceBound': 'Bound Workspace',
   'managed.workspaceExecutionUnavailable':
@@ -1007,11 +983,12 @@ const EN: Messages = {
   'approval.option.allowAlwaysUser': 'Always allow for this user',
   'approval.option.allowAlwaysServer': 'Always allow for this server',
   'approval.option.allowAlwaysTool': 'Always allow for this tool',
-  'assistant.branch': 'Branch',
-  'assistant.copy': 'Copy',
+  'assistant.branch': 'New chat from here',
+  'assistant.copyContent': 'Copy content',
   'assistant.selectionCopy': 'Copy selection',
   'assistant.copyPlainText': 'Copy plain text',
   'assistant.copyMarkdown': 'Copy Markdown',
+  'assistant.copyMarkdownSource': 'Copy Markdown source',
   'assistant.dissatisfied': 'Not satisfied',
   'assistant.satisfied': 'Satisfied',
   // A workspace agent's reply in a chat session. These render in exported
@@ -2143,6 +2120,36 @@ const EN: Messages = {
   'sidebar.addWorkspacePersistHint':
     'Persist this workspace registration in the daemon configuration.',
   'sidebar.addWorkspaceAdding': 'Adding…',
+  'sidebar.addWorkspaceSource': 'Source',
+  'sidebar.addWorkspaceSourceDirectory': 'Existing directory',
+  'sidebar.addWorkspaceSourceGit': 'Git repository',
+  'sidebar.gitCloneUrl': 'Repository URL',
+  'sidebar.gitCloneUrlPlaceholder': 'https://github.com/org/repo.git',
+  'sidebar.gitCloneUrlHint':
+    'Public URLs, SSH-agent addresses, and URLs that carry their own token work. The daemon passes the token to Git and never writes it into the cloned repository; Git credentials configured on the host are not used.',
+  'sidebar.gitCloneTarget': 'Clone into',
+  'sidebar.gitCloneTargetPlaceholder': '/absolute/path/for/new/repo',
+  'sidebar.gitCloneTargetHint':
+    'An absolute path that does not exist yet. Its parent directory must already exist.',
+  'sidebar.gitCloneTargetSuggestHint':
+    'Type a parent path to pick from its subfolders.',
+  'sidebar.gitCloneSubmit': 'Clone and add',
+  'sidebar.gitCloneProgress': (vars) => `Cloning… ${vars?.percent}%`,
+  'sidebar.gitCloneProgressLabel': 'Clone progress',
+  'sidebar.gitCloneCancel': 'Cancel clone',
+  'sidebar.gitCloneCancelled': 'Clone cancelled.',
+  'sidebar.gitCloneFailed': 'Clone failed',
+  'sidebar.gitCloneInvalidInput':
+    'Enter a Git URL and an absolute target path.',
+  'sidebar.gitCloneInvalidTarget': 'Enter an absolute target path.',
+  'sidebar.gitCloneUnknown':
+    'Could not confirm the clone result. Check the workspace list before cloning again.',
+  'sidebar.gitCloneJobGone':
+    'This clone job is no longer available, so its result cannot be confirmed. Check the workspace list or whether the target exists before cloning again.',
+  'sidebar.gitCloneRecheck': 'Check again',
+  'sidebar.gitCloneBack': 'Back',
+  'sidebar.gitCloneRegisterRetry': (vars) =>
+    `Cloned to ${vars?.path}. Submit to register it.`,
   'workspaceHost.source': 'Folder source',
   'workspaceHost.thisComputer': 'This computer',
   'workspaceHost.folderOn': (vars) => `Folder on ${vars?.address}`,
@@ -2161,6 +2168,23 @@ const EN: Messages = {
   'workspaceHost.loadingFolders': 'Loading folders from this computer…',
   'workspaceHost.connectionError':
     'Could not load workspace capabilities from this computer.',
+  'workspaceDirectories.title': 'Workspace directories',
+  'workspaceDirectories.description':
+    'Tools can read and edit these directories in addition to the workspace root. New sessions inherit this list.',
+  'workspaceDirectories.warning':
+    'Adding a directory widens file access beyond the workspace root. Only add directories you trust.',
+  'workspaceDirectories.primary': 'Primary',
+  'workspaceDirectories.empty': 'No extra directories.',
+  'workspaceDirectories.add': 'Add directory',
+  'workspaceDirectories.addTitle': 'Add directory to workspace',
+  'workspaceDirectories.addSubmit': 'Add directory',
+  'workspaceDirectories.pathHint':
+    'Enter an absolute path on the machine running this workspace.',
+  'workspaceDirectories.remove': 'Remove directory',
+  'workspaceDirectories.loading': 'Loading directories…',
+  'workspaceDirectories.loadFailed':
+    'Could not load the workspace directories.',
+  'workspaceDirectories.removeFailed': 'Could not remove the directory',
   'sidebar.removeWorkspace': 'Remove workspace',
   'sidebar.workspaceActions': 'Workspace actions',
   'sidebar.renameWorkspace': 'Rename…',
@@ -3862,10 +3886,8 @@ const EN: Messages = {
     return `${n} thought${n === 1 ? '' : 's'}`;
   },
   'turn.stopped': 'You cancelled this request',
-  'turn.stoppedAfter': (v) => {
-    const seconds = v?.seconds ?? 0;
-    return `You cancelled this request after ${seconds} second${seconds === 1 ? '' : 's'}`;
-  },
+  'turn.stoppedAfter': (v) =>
+    `You cancelled this request after ${v?.duration ?? '0s'}`,
   'message.renderError': 'This message could not be displayed.',
   'tasks.title': 'Background tasks',
   'tasks.empty': 'No tasks currently running',
@@ -4568,6 +4590,7 @@ const EN: Messages = {
   ...MANAGED_LIFECYCLE_MESSAGES_EN,
   ...WORKSPACE_REGISTRATION_MESSAGES_EN,
   ...MANAGED_MCP_MESSAGES_EN,
+  ...MANAGED_EXTENSION_MESSAGES_EN,
   ...TRAJECTORY_EXECUTION_MESSAGES_EN,
   ...TRAJECTORY_FILTER_MESSAGES_EN,
   ...TRAJECTORY_WINDOW_MESSAGES_EN,
@@ -4649,6 +4672,7 @@ const ZH: Messages = {
   'managed.refresh': '刷新',
   'managed.empty': '暂无托管任务。',
   'managed.loading': '加载中…',
+  'managed.todo.loadedWindow': '来自当前已加载的会话记录。',
   'managed.more': '加载更多',
   'managed.titleSearch': '搜索会话标题',
   'managed.titleSearchPlaceholder': '按标题筛选…',
@@ -4730,9 +4754,6 @@ const ZH: Messages = {
   'managed.phase.created': '已创建',
   'managed.creationSkillsFromSettings':
     '技能页面中已启用的 Skills 会用于新建 Managed 会话。已有会话保留创建时的 Skills。',
-  'managed.creationSkillsManage': '管理 Skills',
-  'managed.creationSkillsPinned': (v) =>
-    `本次创建请求已保存 ${v?.count ?? 0} 个 Skills。`,
   'managed.creationSkillsSourceChanged':
     'Skills 来源已变化，请按当前选择重试。',
   'managed.creationSkillsUnavailable':
@@ -4748,26 +4769,7 @@ const ZH: Messages = {
   'managed.workspaceWorkingDirectory': '工作目录',
   'managed.workspaceWorkingDirectoryDescription':
     '选择此会话在工作区内的起始目录，使用 . 表示工作区根目录。',
-  'managed.cwd.change': '切换目录',
   'managed.cwd.path': '相对于 Workspace 根目录的路径',
-  'managed.cwd.description':
-    '输入相对于 Workspace 根目录的路径，. 表示根目录。后续任务在新目录执行，对话历史保留。',
-  'managed.cwd.close': '关闭',
-  'managed.cwd.changing': '正在切换目录…',
-  'managed.cwd.confirm': '继续确认',
-  'managed.cwd.unconfirmed': '目录切换结果尚未确认，请继续确认原请求。',
-  'managed.cwd.unconfirmedForbidden':
-    '当前账号无权确认此操作，切换结果仍待确认；在服务器给出最终结果或新开标签页之前，发送将保持禁用。',
-  'managed.cwd.busy': '请先完成正在执行的任务、审批或未确认请求，再切换目录。',
-  'managed.cwd.invalid': '目录无效或无法访问。',
-  'managed.cwd.conflict': '当前目录已变化，请检查后重新提交。',
-  'managed.cwd.unavailable': 'Workspace 当前无法切换目录。',
-  'managed.cwd.forbidden': '当前账号没有切换此目录的权限。',
-  'managed.cwd.storage': '浏览器会话存储不可用，无法安全发起目录切换。',
-  'managed.cwd.failed': '目录切换失败，请检查当前目录后重试。',
-  'managed.cwd.updated': (v) =>
-    `当前目录已变为 ${v?.cwd ?? ''}，请先确认此上下文再提交。`,
-  'managed.cwd.useCurrent': '使用当前目录上下文',
   'managed.workspaceCreate': '创建会话',
   'managed.workspaceBound': '已绑定工作区',
   'managed.workspaceExecutionUnavailable':
@@ -5143,6 +5145,7 @@ const ZH: Messages = {
   'toolName.cron_create': '创建定时任务',
   'toolName.cron_list': '定时任务列表',
   'toolName.cron_delete': '删除定时任务',
+  'toolName.autofix_pr': 'PR 自动修复',
   'toolName.task_create': '创建任务',
   'toolName.task_update': '更新任务',
   'toolName.task_list': '任务列表',
@@ -5516,11 +5519,12 @@ const ZH: Messages = {
   'approval.option.allowAlwaysUser': '对此用户始终允许',
   'approval.option.allowAlwaysServer': '对此服务始终允许',
   'approval.option.allowAlwaysTool': '对此工具始终允许',
-  'assistant.branch': '分叉',
-  'assistant.copy': '复制',
+  'assistant.branch': '从此处新建对话',
+  'assistant.copyContent': '复制内容',
   'assistant.selectionCopy': '复制所选内容',
   'assistant.copyPlainText': '复制纯文本',
   'assistant.copyMarkdown': '复制 Markdown',
+  'assistant.copyMarkdownSource': '复制 Markdown 源文',
   'assistant.dissatisfied': '不满意',
   'assistant.satisfied': '满意',
   'agentMessage.status.failed': '失败',
@@ -6559,6 +6563,32 @@ const ZH: Messages = {
   'sidebar.addWorkspacePersist': '服务重启后保留',
   'sidebar.addWorkspacePersistHint': '将此工作区注册持久化到守护进程配置中。',
   'sidebar.addWorkspaceAdding': '添加中…',
+  'sidebar.addWorkspaceSource': '来源',
+  'sidebar.addWorkspaceSourceDirectory': '已有目录',
+  'sidebar.addWorkspaceSourceGit': 'Git 仓库',
+  'sidebar.gitCloneUrl': '仓库地址',
+  'sidebar.gitCloneUrlPlaceholder': 'https://github.com/org/repo.git',
+  'sidebar.gitCloneUrlHint':
+    '支持公开地址、SSH agent 地址，以及自带 token 的地址：守护进程把 token 交给 Git，不会写入克隆仓库的配置；宿主上已配置的 Git 凭据不会被使用。',
+  'sidebar.gitCloneTarget': '克隆到',
+  'sidebar.gitCloneTargetPlaceholder': '/绝对路径/新目录',
+  'sidebar.gitCloneTargetHint':
+    '必须是尚不存在的绝对路径，其父目录需要已经存在。',
+  'sidebar.gitCloneTargetSuggestHint': '输入父目录可从中选择子目录。',
+  'sidebar.gitCloneSubmit': '克隆并添加',
+  'sidebar.gitCloneProgress': (vars) => `正在克隆… ${vars?.percent}%`,
+  'sidebar.gitCloneProgressLabel': '克隆进度',
+  'sidebar.gitCloneCancel': '取消克隆',
+  'sidebar.gitCloneCancelled': '克隆已取消。',
+  'sidebar.gitCloneFailed': '克隆失败',
+  'sidebar.gitCloneInvalidInput': '请输入 Git 地址和绝对目标路径。',
+  'sidebar.gitCloneInvalidTarget': '请输入绝对目标路径。',
+  'sidebar.gitCloneUnknown':
+    '无法确认克隆结果。请先检查工作区列表，再决定是否重新克隆。',
+  'sidebar.gitCloneRecheck': '重新检查',
+  'sidebar.gitCloneBack': '返回',
+  'sidebar.gitCloneRegisterRetry': (vars) =>
+    `已克隆到 ${vars?.path}，点击提交完成注册。`,
   'workspaceHost.source': '目录来源',
   'workspaceHost.thisComputer': '这台计算机',
   'workspaceHost.folderOn': (vars) => `${vars?.address} 上的目录`,
@@ -6574,6 +6604,21 @@ const ZH: Messages = {
   'workspaceHost.unsupported': '这台计算机不支持添加工作区。',
   'workspaceHost.loadingFolders': '正在从这台计算机加载目录…',
   'workspaceHost.connectionError': '无法从这台计算机加载工作区能力。',
+  'workspaceDirectories.title': '工作区目录',
+  'workspaceDirectories.description':
+    '除工作区根目录外，工具还可以读写这些目录。新建会话会继承该列表。',
+  'workspaceDirectories.warning':
+    '添加目录会扩大工具在工作区根目录之外的文件访问范围，请只添加你信任的目录。',
+  'workspaceDirectories.primary': '主目录',
+  'workspaceDirectories.empty': '暂无额外目录。',
+  'workspaceDirectories.add': '添加目录',
+  'workspaceDirectories.addTitle': '向工作区添加目录',
+  'workspaceDirectories.addSubmit': '添加目录',
+  'workspaceDirectories.pathHint': '请输入运行此工作区的机器上的绝对路径。',
+  'workspaceDirectories.remove': '移除目录',
+  'workspaceDirectories.loading': '正在加载目录…',
+  'workspaceDirectories.loadFailed': '无法加载工作区目录。',
+  'workspaceDirectories.removeFailed': '无法移除该目录',
   'sidebar.removeWorkspace': '移除工作区',
   'sidebar.workspaceActions': '工作区操作',
   'sidebar.renameWorkspace': '重命名…',
@@ -8130,7 +8175,7 @@ const ZH: Messages = {
   'turn.toolCalls': (v) => `工具 ${v?.count ?? 0} 次`,
   'turn.thinkingCount': (v) => `思考 ${v?.count ?? 0} 次`,
   'turn.stopped': '你已取消请求',
-  'turn.stoppedAfter': (v) => `你在 ${v?.seconds ?? 0} 秒后取消了请求`,
+  'turn.stoppedAfter': (v) => `你在 ${v?.duration ?? '0s'} 后取消了请求`,
   'message.renderError': '此消息无法显示。',
   'tasks.title': '后台任务',
   'tasks.empty': '当前没有运行中的任务',
@@ -8787,6 +8832,7 @@ const ZH: Messages = {
   ...MANAGED_LIFECYCLE_MESSAGES_ZH,
   ...WORKSPACE_REGISTRATION_MESSAGES_ZH,
   ...MANAGED_MCP_MESSAGES_ZH,
+  ...MANAGED_EXTENSION_MESSAGES_ZH,
   ...TRAJECTORY_EXECUTION_MESSAGES_ZH,
   ...TRAJECTORY_FILTER_MESSAGES_ZH,
   ...TRAJECTORY_WINDOW_MESSAGES_ZH,

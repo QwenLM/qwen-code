@@ -205,6 +205,15 @@ describe('issue #13328: a second concurrent Session on the same Workspace mount'
       let announceBusy!: () => void;
       const busy = new Promise<void>((resolve) => (announceBusy = resolve));
       const busyRejections: unknown[] = [];
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'resolveCapabilities',
+      ).mockResolvedValue();
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'capabilityDigest',
+        'get',
+      ).mockReturnValue(WORKSPACE_CAPABILITY_DIGEST);
       vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
       vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockImplementation(
         async function (this: HostedWorkspaceBroker) {
