@@ -43,6 +43,9 @@ class ExternalWorkspaceFactoryTest {
             assertTrue(provisioner.supportsKind(ExternalWorkspaceProvisioner.KIND));
             assertFalse(provisioner.supportsKind(ExternalRuntimeProvisioner.KIND));
             assertFalse(provisioner.supportsDrainedStop());
+            assertTrue(provisioner.supportsDrainedStopKind("external-workspace"));
+            assertFalse(provisioner.supportsDrainedStopKind("external-scratch"));
+            assertFalse(provisioner.supportsDrainedStop((com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord) null));
         }
     }
 

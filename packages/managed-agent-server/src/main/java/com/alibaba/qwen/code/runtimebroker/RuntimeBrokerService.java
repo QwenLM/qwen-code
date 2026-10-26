@@ -308,6 +308,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
         return provisioner.supportsDrainedStop();
     }
 
+    public boolean supportsDrainedStopKind(String kind) {
+        return provisioner.supportsDrainedStopKind(kind);
+    }
+
     public boolean supportsDrainedStop(RuntimeBindingRecord binding) {
         return provisioner.supportsDrainedStop(binding);
     }

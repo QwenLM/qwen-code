@@ -114,6 +114,11 @@ final class WorkspaceRuntimeProvisioner implements RuntimeProvisioner {
     }
 
     @Override
+    public boolean supportsDrainedStopKind(String kind) {
+        return delegate.supportsDrainedStopKind(kind);
+    }
+
+    @Override
     public boolean supportsDrainedStop(RuntimeBindingRecord binding) {
         return delegate.supportsDrainedStop(binding);
     }

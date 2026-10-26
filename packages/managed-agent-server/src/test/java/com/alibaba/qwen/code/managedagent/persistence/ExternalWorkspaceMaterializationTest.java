@@ -171,7 +171,7 @@ class ExternalWorkspaceMaterializationTest {
             assertThatThrownBy(() -> new TransactionTemplate(manager).execute(status -> service.createWorkspaceSession(
                     "tenant", "owner", "session-" + input.size(), "qwen-code", null, null, null,
                     input, new WorkspaceSelection("workspace", "."))))
-                    .isInstanceOfSatisfying(RuntimeBrokerException.class,
+                    .isInstanceOfSatisfying(com.alibaba.qwen.code.managedagent.exception.ManagedAgentException.class,
                             error -> assertThat(error.getCode()).isEqualTo("workspace_unavailable"));
         }
         verifyNoInteractions(coordinator);
@@ -180,6 +180,107 @@ class ExternalWorkspaceMaterializationTest {
         assertThatThrownBy(() -> WorkspaceStorageKindGuard.requireExecutionAlias(jdbc, "tenant", "workspace"))
                 .isInstanceOf(RuntimeBrokerException.class);
         assertNoExecution();
+    }
+
+    @Test
+    void productionWiringNegotiatesBeforeRegisteredRootCreationAndPersistsExactProfile() {
+        store.materialize("tenant", "workspace", "Name", "owner", "key");
+        properties.getHarness().setEnabled(true);
+        properties.getSessionStore().setEnabled(true);
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        properties.getRuntimeBroker().setEnabled(true);
+        properties.getRuntimeBroker().setProvisioner("external-workspace");
+        properties.getRuntimeBroker().setTrustedLocalRebootRecovery(false);
+        properties.getRuntimeBroker().setExternalProviderUrl("http://provider.invalid");
+        properties.getRuntimeBroker().setExternalProviderToken("provider-token-for-tests");
+        properties.getRuntimeBroker().setExternalProviderId("provider");
+        properties.getRuntimeBroker().setWorkspaceCwd("/worker/workspace");
+        properties.getRuntimeBroker().setWorkspaceId("workspace");
+        var harness = mock(HarnessConnector.class);
+        var warmer = mock(com.alibaba.qwen.code.managedagent.workspace.runtime.RuntimeWarmer.class);
+        String profile = "hosted-workspace-external-files/1";
+        when(warmer.supportsWorkspaceClose(profile)).thenReturn(true);
+        try (var context = new org.springframework.context.annotation.AnnotationConfigApplicationContext()) {
+            context.registerBean(ManagedAgentProperties.class, () -> properties);
+            context.registerBean(ExternalStorageRegistrationStore.class, () -> registrations);
+            context.registerBean(HarnessConnector.class, () -> harness);
+            context.registerBean(com.alibaba.qwen.code.managedagent.workspace.runtime.RuntimeWarmer.class, () -> warmer);
+            context.registerBean(ManagedWorkspaceRegistry.class, () -> registry);
+            context.registerBean(WorkspaceExecutionStore.class, () -> new WorkspaceExecutionStore(jdbc, manager));
+            context.refresh();
+            var execution = context.getBean(WorkspaceExecutionStore.class);
+            assertThat(registry.findReadable("tenant", "owner", "workspace").canCreateSession()).isFalse();
+            when(harness.supportsLifecycle(profile)).thenReturn(true);
+            assertThat(registry.findReadable("tenant", "owner", "workspace").canCreateSession()).isTrue();
+            assertThat(registry.listReadable("tenant", "owner", null, 10)).singleElement()
+                    .satisfies(row -> {
+                        assertThat(row.canCreateSession()).isTrue();
+                        assertThat(row.canSelectDirectory()).isFalse();
+                    });
+            assertThat(registry.findReadable("tenant", "owner", List.of("workspace")).get("workspace").canCreateSession()).isTrue();
+            var sessions = new ManagedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {}, registry, properties);
+            var transaction = new TransactionTemplate(manager);
+            transaction.executeWithoutResult(status -> WorkspaceMigrationAdmission.requireOpen(jdbc, "tenant", "workspace"));
+            jdbc.update("UPDATE ma_storage SET fence_operation_id='migration-fence'");
+            assertThatThrownBy(() -> transaction.executeWithoutResult(status -> WorkspaceMigrationAdmission.requireOpen(jdbc, "tenant", "workspace")))
+                    .isInstanceOf(RuntimeBrokerException.class);
+            jdbc.update("UPDATE ma_storage SET fence_operation_id=NULL");
+            jdbc.update("UPDATE ma_storage_owner SET maintenance_id='maintenance', maintenance_generation=1");
+            assertThatThrownBy(() -> transaction.executeWithoutResult(status -> WorkspaceMigrationAdmission.requireOpen(jdbc, "tenant", "workspace")))
+                    .isInstanceOf(RuntimeBrokerException.class);
+            jdbc.update("UPDATE ma_storage_owner SET maintenance_id=NULL, maintenance_generation=NULL");
+            for (var input : List.of(List.<java.util.Map<String, Object>>of(),
+                    List.of(java.util.Map.<String, Object>of("type", "input_text", "text", "Read README")))) {
+                var admitted = transaction.execute(status -> sessions.insertWorkspaceSessionCommand("tenant", "owner",
+                        "create-" + input.size(), "digest-" + input.size(), "qwen-code", null, "Files", input,
+                        input.isEmpty() ? null : "input-digest", new WorkspaceSelection("workspace", ".")));
+                var saved = sessions.requireSession("tenant", admitted.sessionId());
+                assertThat(saved.toolProfile()).isEqualTo(profile);
+                var privateStore = new ManagedSessionStore(jdbc);
+                String writerToken = "external-approval-writer-token-0123456789";
+                var writer = transaction.execute(status -> privateStore.acquireWriter("tenant", admitted.sessionId(), writerToken,
+                        new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "writer", 60_000L)));
+                var query = new ManagedSessionStoreModels.AuthorizeLifecycleRequest("workspace", "writer", writer.writerGeneration());
+                var liveApproval = transaction.execute(status -> privateStore.approvalSelection("tenant", admitted.sessionId(), writerToken, query));
+                assertThat(liveApproval).containsExactlyInAnyOrderEntriesOf(java.util.Map.of("mode", "yolo", "revision", 0L));
+                assertThatThrownBy(() -> transaction.execute(status -> privateStore.approvalSelection("tenant", admitted.sessionId(), writerToken,
+                        new ManagedSessionStoreModels.AuthorizeLifecycleRequest("workspace", "writer", writer.writerGeneration() + 1))))
+                        .isInstanceOf(com.alibaba.qwen.code.managedagent.exception.ManagedAgentException.class);
+                assertThatThrownBy(() -> transaction.execute(status -> privateStore.approvalSelection("tenant", admitted.sessionId(), writerToken,
+                        new ManagedSessionStoreModels.AuthorizeLifecycleRequest("foreign", "writer", writer.writerGeneration()))))
+                        .isInstanceOf(com.alibaba.qwen.code.managedagent.exception.ManagedAgentException.class);
+                execution.authorize(saved);
+                when(harness.supportsLifecycle(profile)).thenReturn(false);
+                assertThatThrownBy(() -> execution.authorize(saved)).isInstanceOf(RuntimeBrokerException.class);
+                when(harness.supportsLifecycle(profile)).thenReturn(true);
+                if (!input.isEmpty()) {
+                    var turn = sessions.findTurn("tenant", admitted.sessionId(), admitted.turnId()).orElseThrow();
+                    assertThat(sessions.findTurnApprovalSelection("tenant", admitted.sessionId(), turn.promptId()))
+                            .isEqualTo(new com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellApprovalSelection("yolo", 0));
+                    assertThat(jdbc.queryForObject("SELECT approval_mode FROM ma_turn WHERE session_id=?", String.class, admitted.sessionId()))
+                            .isEqualTo("yolo");
+                    assertThat(jdbc.queryForObject("SELECT plan_enabled FROM ma_turn WHERE session_id=?", Boolean.class, admitted.sessionId())).isFalse();
+                }
+            }
+            when(harness.supportsLifecycle(profile)).thenReturn(false);
+            assertThatThrownBy(() -> transaction.execute(status -> sessions.insertWorkspaceSessionCommand("tenant", "owner",
+                    "old-harness", "digest", "qwen-code", null, "Files", List.of(), null, new WorkspaceSelection("workspace", "."))))
+                    .isInstanceOf(com.alibaba.qwen.code.managedagent.exception.ManagedAgentException.class);
+            when(harness.supportsLifecycle(profile)).thenReturn(true);
+            when(warmer.supportsWorkspaceClose(profile)).thenReturn(false);
+            assertThat(registry.findReadable("tenant", "owner", "workspace").canCreateSession()).isFalse();
+            when(warmer.supportsWorkspaceClose(profile)).thenReturn(true);
+            properties.getHarness().setWorkspaceFilesEnabled(false);
+            assertThatThrownBy(() -> transaction.execute(status -> sessions.insertWorkspaceSessionCommand("tenant", "owner",
+                    "disabled", "digest", "qwen-code", null, "Files", List.of(), null, new WorkspaceSelection("workspace", "."))))
+                    .isInstanceOf(com.alibaba.qwen.code.managedagent.exception.ManagedAgentException.class);
+            properties.getHarness().setWorkspaceFilesEnabled(true);
+            jdbc.update("UPDATE ma_workspace_access SET role='READER'");
+            assertThat(registry.findReadable("tenant", "owner", "workspace").canCreateSession()).isFalse();
+            jdbc.update("UPDATE ma_workspace_access SET role='OWNER'");
+            jdbc.update("UPDATE ma_storage SET registration_state='RETIRED'");
+            assertThat(registry.findReadable("tenant", "owner", "workspace").canCreateSession()).isFalse();
+        }
     }
 
     @Test

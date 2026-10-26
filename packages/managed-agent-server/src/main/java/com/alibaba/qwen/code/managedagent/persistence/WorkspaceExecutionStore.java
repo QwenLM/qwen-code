@@ -96,9 +96,21 @@ public class WorkspaceExecutionStore {
         }
     }
 
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private ManagedWorkspaceRegistry externalAdmission;
+
+    public void requireExternalExecution(ContextBinding binding) {
+        if (isExternal(binding) && (externalAdmission == null
+                || !externalAdmission.externalFilesAllowed(binding))) {
+            throw unavailable();
+        }
+    }
+
     public void authorize(SessionRecord session) {
+        requireExternalExecution(session.workspace());
         authorizePassiveAttachment(session);
-        if (storageGuard != null && residents.find(session.workspace()) == null) {
+        if (storageGuard != null && residents.find(session.workspace()) == null
+                && !(WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile()) && isExternal(session.workspace()))) {
             storageGuard.verify(session.workspace());
         }
     }
@@ -110,7 +122,8 @@ public class WorkspaceExecutionStore {
             throw new RuntimeBrokerException(error.getStatus().value(), error.getCode(), error.getMessage(), false, error);
         }
         authorizePassiveAttachment(session, authority);
-        if (storageGuard != null && residents.find(session.workspace()) == null) {
+        if (storageGuard != null && residents.find(session.workspace()) == null
+                && !(WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile()) && isExternal(session.workspace()))) {
             storageGuard.verify(session.workspace());
         }
     }
@@ -120,7 +133,8 @@ public class WorkspaceExecutionStore {
             throw unavailable();
         }
         authorizePassiveAttachment(session, null, true);
-        if (storageGuard != null && residents.find(session.workspace()) == null) {
+        if (storageGuard != null && residents.find(session.workspace()) == null
+                && !(WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile()) && isExternal(session.workspace()))) {
             storageGuard.verify(session.workspace());
         }
     }
@@ -196,7 +210,11 @@ public class WorkspaceExecutionStore {
     private void authorizeAttachment(SessionRecord session, boolean cancellation,
             boolean actionResponse, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority,
             boolean legacyClose, boolean committedStop) {
-        authorizeAttachment(session, cancellation, actionResponse, authority, legacyClose, committedStop, false);
+        boolean external = WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile()) && isExternal(session.workspace());
+        if (external && (!"qwen-code".equals(session.agentId()) || session.agentDefinitionDigest() != null)) {
+            throw unavailable();
+        }
+        authorizeAttachment(session, cancellation, actionResponse, authority, legacyClose, committedStop, external);
     }
 
     private void authorizeAttachment(SessionRecord session, boolean cancellation,

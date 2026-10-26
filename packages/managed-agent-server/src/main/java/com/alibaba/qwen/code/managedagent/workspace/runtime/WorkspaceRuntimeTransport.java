@@ -141,6 +141,7 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
         }
         Context context = context(lease, session, true);
         if (external(context)) {
+            ownership.requireExternalExecution(context.binding());
             return verifyExternalAcquisition.apply(context.runtime()).thenCompose(ignored -> {
                 ownership.claim(context.binding(), context.session(), context.runtime(), bindings);
                 try {
@@ -210,6 +211,7 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
             try {
                 Context context = context(lease, session, true);
                 requireExternalFile(context, reference);
+                ownership.requireExternalExecution(context.binding());
                 if (external(context) && context.session().getState() != RuntimeSessionRecord.State.READY) {
                     throw WorkspaceExecutionStore.unavailable();
                 }
@@ -451,8 +453,18 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
         if (managed(session)) {
             Context selected = context(lease, session, false);
             if (external(selected)) {
-                throw new RuntimeBrokerException(501, "external_runtime_control_unsupported",
-                        "External Workspace controls are not qualified.", false);
+                requireExternalControl(operation, session);
+                // Snapshot settles capture debt on the original holder even after public admission is disabled.
+                Context original = "snapshot".equals(operation.get("action")) ? selected : context(lease, session, true);
+                if ("snapshot".equals(operation.get("action"))) {
+                    if (!isHeld(original)) {
+                        throw WorkspaceExecutionStore.unavailable();
+                    }
+                } else {
+                    ownership.requireExternalExecution(original.binding());
+                    assertHeld(original);
+                }
+                return delegate.control(lease, session, operation);
             }
             boolean extensionControl = ManagedExtensionExecutionProfile.admits(session.getScope().getCapabilityDigest())
                     && (ManagedMcpProtocol.isOperation(operation) || ManagedHookProtocol.isOperation(operation)
@@ -659,6 +671,34 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
     private static void requireExternalFile(Context context, Map<String, Object> reference) {
         if (external(context) && (reference.containsKey("runtimeProtocol")
                 || !java.util.Set.of("read_file", "write_file", "edit", "glob").contains(reference.get("toolName")))) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+    }
+
+    private static void requireExternalControl(Map<String, Object> operation, RuntimeSession session) {
+        if (!("workspace-context".equals(operation.get("kind"))
+                || "raw-file-history".equals(operation.get("kind"))
+                        && java.util.Set.of("bind", "prepare", "snapshot").contains(String.valueOf(operation.get("action"))))) {
+            throw new RuntimeBrokerException(501, "external_runtime_control_unsupported",
+                    "External Workspace control is not qualified.", false);
+        }
+        com.alibaba.qwen.code.runtimebroker.provisioning.ProviderRuntimeProtocol.control(
+                operation, session.getHarnessSessionId(), session.getRuntimeSessionId());
+        if ("prepare".equals(operation.get("action"))) {
+            String prompt = (String) operation.get("promptId");
+            if (prompt.indexOf('\0') >= 0) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            for (Object value : (List<?>) operation.get("paths")) {
+                String path = (String) value;
+                if (".".equals(path) || !path.equals(com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceRelativePath.normalize(path))) {
+                    throw WorkspaceExecutionStore.unavailable();
+                }
+            }
+        }
+        if ("bind".equals(operation.get("action")) && operation.get("state") != null
+                && (!(operation.get("state") instanceof Map<?, ?> state)
+                        || !state.keySet().equals(java.util.Set.of("ownerSessionId", "snapshots", "files")))) {
             throw WorkspaceExecutionStore.unavailable();
         }
     }

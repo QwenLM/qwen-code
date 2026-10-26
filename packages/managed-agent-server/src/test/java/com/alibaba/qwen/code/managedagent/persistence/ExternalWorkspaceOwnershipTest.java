@@ -197,8 +197,10 @@ class ExternalWorkspaceOwnershipTest {
     void lateCleanupCannotClearAfterClaimChangesAndRevokedGrantCannotAcquire() {
         ownership.claim(context, session, binding, bindings);
         jdbc.update("DELETE FROM ma_workspace_access");
+        assertThat(ownership.isHeld(context, session, binding, bindings)).isTrue();
         assertThatThrownBy(() -> ownership.assertHeld(context, session, binding, bindings)).isInstanceOf(RuntimeBrokerException.class);
         ownership.release(context, session, binding, bindings);
+        assertThat(ownership.isHeld(context, session, binding, bindings)).isFalse();
         assertThatThrownBy(() -> ownership.claim(context, session, binding, bindings)).isInstanceOf(RuntimeBrokerException.class);
         binding = bindings.claimOperation(binding.getBindingId(), "drainer", Duration.ofMinutes(1));
         binding = bindings.compareAndSet(binding, binding.withDrainRequested(true, Instant.now())

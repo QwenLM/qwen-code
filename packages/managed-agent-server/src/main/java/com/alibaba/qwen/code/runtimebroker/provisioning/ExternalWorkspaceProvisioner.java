@@ -32,10 +32,9 @@ import java.util.concurrent.CompletionStage;
  * a public Hosted profile. It mints the shipped {@code managed-context/1} boot
  * plus the admitted {@code storage} member. Acquisition additionally requires
  * positive current storage continuity and independent original-worker attestation.
- * Foreground shell, approval, capture and public profile activation remain outside
- * this contract. The guarded drain primitive is not blanket close support:
- * {@link #supportsDrainedStop()} stays {@code false}, and no configuration admits
- * a Hosted Session yet.
+ * Public profile activation is separately gated by the control plane. The guarded
+ * drain primitive is not blanket close support: {@link #supportsDrainedStop()}
+ * stays {@code false}; kind eligibility never substitutes for saved-binding proof.
  *
  * <p>Trust boundary: the request only names a tenant-bound alias. Provider
  * identity, physical key, registration revision, alias path and mount root come
@@ -142,6 +141,11 @@ public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvision
                 || !lease.getLeaseId().equals(observed.getLeaseId()) || lease.getEpoch() != observed.getEpoch()) {
             throw refuse("external_workspace_acquisition_unverified", "Original Workspace identity differs.");
         }
+    }
+
+    @Override
+    public boolean supportsDrainedStopKind(String kind) {
+        return KIND.equals(kind) && registry != null && client != null && transport != null;
     }
 
     @Override
