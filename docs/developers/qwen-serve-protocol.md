@@ -654,6 +654,7 @@ starts failing, not at every fire.
 | `session_artifacts_persistence`          | session artifact persistence is wired for the runtime.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `session_artifact_library`               | Session artifact persistence is wired; supports trusted workspace-owner reads/removal of live, cold, and archived registrations via `/workspaces/:workspace/session/:id/artifact-library`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `workspace_artifact_library`             | Persisted workspace-wide artifact queries, batch session queries and explicit-pair removal via `/workspaces/:workspace/artifact-library`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `workspace_artifact_library_stream`      | Session metadata on all artifact-library reads and opt-in finite SSE for full and selected-session queries; requires artifact persistence.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `session_sources`                        | session source persistence is wired for the runtime. Registers metadata-only workspace files, uploaded attachments, and HTTP(S) links through the live session owner.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `session_generation`                     | session generation helpers are available.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `scheduled_task_session_reuse`           | durable scheduled-task session management is active and every managed daemon runtime has installed the callback that lets a task explicitly bind to its current existing session.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
@@ -3137,6 +3138,55 @@ Each member error contains `sessionId`, `status`, `code`, and `message`. Full
 discovery omits absent/foreign sessions; an explicit query reports them. Other
 member failures remain explicit while successful sessions are returned.
 
+With `workspace_artifact_library_stream`, every artifact-library session
+envelope (including the existing single-session GET) additionally contains:
+
+```json
+{
+  "session": {
+    "displayName": "Task title",
+    "createdAt": "2026-10-26T00:00:00.000Z",
+    "archiveState": "archived",
+    "sourceType": "scheduled_task",
+    "sourceId": "task-id"
+  }
+}
+```
+
+`displayName` and `sourceId` are optional. `createdAt` is the original session
+creation time, including after resume; it is not an artifact timestamp.
+`archiveState` is `active` or `archived`. Source types are open strings and
+missing attribution becomes `default`. Sources such as `resource_inspection`
+are preserved so clients can explicitly exclude them. A source ID is paired
+with its original source type. Names follow the current live title or persisted
+custom title/first prompt. The generic `/session/:id/artifacts` response is
+unchanged.
+
+The full GET and selected-session POST also accept `Accept: text/event-stream`.
+Without that negotiation they return the JSON response above. Use fetch-based
+streaming for POST; check the capability and response content type on older
+daemons. The finite SSE sequence is:
+
+| Event           | Data                                                                             |
+| --------------- | -------------------------------------------------------------------------------- |
+| `start`         | `{ "v": 1, "total": <candidate sessions> }`                                      |
+| `session`       | One complete artifact-library envelope including `session`                       |
+| `session_error` | `{ "v": 1, "sessionId": "...", "status": 404, "code": "...", "message": "..." }` |
+| `complete`      | `{ "v": 1, "total": 10, "succeeded": 8, "failed": 1, "skipped": 1 }`             |
+| `error`         | Fatal `{ "v": 1, "status": 503, "code": "...", "message": "..." }`               |
+
+Results arrive in completion order with up to four concurrent session reads;
+a slow session does not block other workers. JSON retains selection order.
+Full-query absent/foreign sessions count as `skipped`; explicit-query failures
+emit `session_error`. `total` counts candidates, not artifacts. Only `complete`
+marks a finished scan. Fatal `error` or disconnection without `complete` means
+partial results; there is no replay cursor, automatic reconnect, or subscription.
+Heartbeat comments may occur while waiting. Initial failures use ordinary HTTP
+status codes; after SSE headers, fatal errors are stream events. A disconnected
+request stops dispatching new reads; already running shared cache loads may
+finish. Backpressure bounds pending result frames and does not hold archive
+barriers while waiting for the client.
+
 Batch removal returns `{ "v": 1, "results": [...] }`. Each result contains
 `sessionId` and `artifactId`, plus either the existing mutation envelope
 (`v`, `changes`, optional `warnings`/`warningDetails`) or
@@ -3148,7 +3198,9 @@ the same strict operator authority as single-artifact removal. Invalid input
 returns 400 `invalid_artifact_library_request`; workspace-level errors retain
 ordinary HTTP status codes.
 
-Live queries reuse the bridge. Unloaded metadata, including empty results, is
+Live artifacts and titles come from the bridge; bounded persisted identity
+metadata preserves original creation time and source attribution. Unloaded
+metadata, including empty results, is
 cached per runtime with a 32 MiB serialized-size budget. Unchanged files are not
 replayed on repeated queries or after a TTL. Transcript and ownership metadata
 identities are checked on each read; changed entries are rebuilt. Candidate
@@ -3165,9 +3217,14 @@ size still scale with the workspace. Cold file availability retains the existing
 metadata-only semantics.
 
 The existing single-session artifact-library GET shares this same cache with
-full and batch queries, retaining its response and error shapes. Warming one
+full and batch queries, adding only the `session` summary to its response and
+retaining existing error shapes. Warming one
 route benefits the others; single and batch removal invalidate the shared
-entry. A cached envelope's `generatedAt` is its projection creation time.
+entry. Title-only transcript appends and archive moves also refresh metadata;
+live titles are read on each request without waiting for disk persistence. Live
+persisted metadata and cold envelopes share the same 32 MiB budget, and live/cold
+transitions rebuild the entry. A cached envelope's `generatedAt` is its projection
+creation time.
 
 `session_artifact_library` advertises these persisted-workspace-scoped endpoints:
 

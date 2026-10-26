@@ -6,6 +6,7 @@
 import {
   SessionArtifactStore,
   type SessionArtifactMutationResult,
+  type SessionArtifactsEnvelope,
 } from '@qwen-code/acp-bridge/sessionArtifacts';
 import {
   SessionNotFoundError,
@@ -15,11 +16,25 @@ import {
 import {
   SessionArtifactLibraryError,
   SessionStorageEntryError,
+  type SessionListItem,
 } from '@qwen-code/qwen-code-core/services/sessionService.js';
 import { SessionWriterError } from '@qwen-code/qwen-code-core/services/session-writer-lease.js';
 import { SessionTranscriptTooLargeError } from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
 import type { WorkspaceRuntime } from '../workspace-registry.js';
 import { createWorkspaceRuntimeSessionService } from '../workspace-runtime-storage.js';
+
+export interface ArtifactLibrarySessionMetadata {
+  displayName?: string;
+  createdAt: string;
+  archiveState: 'active' | 'archived';
+  sourceType: string;
+  sourceId?: string;
+}
+
+export interface WorkspaceSessionArtifactsEnvelope
+  extends SessionArtifactsEnvelope {
+  session: ArtifactLibrarySessionMetadata;
+}
 
 export class ArtifactLibraryRequestError extends Error {
   constructor(
@@ -166,18 +181,43 @@ function isLive(runtime: WorkspaceRuntime, sessionId: string) {
 export async function readPersistedWorkspaceArtifactLibrary(
   runtime: WorkspaceRuntime,
   sessionId: string,
-) {
+): Promise<WorkspaceSessionArtifactsEnvelope> {
   const service = createWorkspaceRuntimeSessionService(runtime);
   const location = await service.getMaintainableSessionLocation(sessionId);
   if (!location) throw new SessionNotFoundError(sessionId);
   if (location === 'conflict') throw new SessionConflictError(sessionId);
   const snapshot = await service.readSessionArtifactSnapshot(sessionId);
   if (!snapshot) throw new SessionNotFoundError(sessionId);
-  return new SessionArtifactStore({
+  const metadata = await service.getSessionListItem(sessionId, location);
+  if (!metadata) throw new SessionNotFoundError(sessionId);
+  const envelope = await new SessionArtifactStore({
     sessionId,
     workspaceCwd: runtime.workspaceCwd,
     runtimeBaseDir: runtime.sessionRuntimeBaseDir,
   }).readPersistedLibrary(snapshot);
+  const displayName = metadata.customTitle || metadata.prompt;
+  return {
+    ...envelope,
+    session: {
+      ...(displayName ? { displayName } : {}),
+      createdAt: metadata.startTime,
+      archiveState: location,
+      sourceType: metadata.sourceType ?? 'default',
+      ...(metadata.sourceId !== undefined
+        ? { sourceId: metadata.sourceId }
+        : {}),
+    },
+  };
+}
+
+export async function readPersistedWorkspaceSessionMetadata(
+  runtime: WorkspaceRuntime,
+  sessionId: string,
+): Promise<SessionListItem | undefined> {
+  const service = createWorkspaceRuntimeSessionService(runtime);
+  const location = await service.getMaintainableSessionLocation(sessionId);
+  if (location === 'conflict') throw new SessionConflictError(sessionId);
+  return location ? service.getSessionListItem(sessionId, location) : undefined;
 }
 
 export async function removeWorkspaceLibraryArtifact(

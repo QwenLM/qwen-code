@@ -33,14 +33,63 @@ daemon 鉴权。仅在产物持久化可用时发布 `workspace_artifact_library
 归档屏障，分组删除持有排他屏障，runtime 活动与 generation 保护覆盖完整操作。
 禁止回退到 primary runtime，不加载会话、不取消归档。
 
+## 会话摘要与渐进查询
+
+DAC 需要在产物快照旁获得会话身份，以显示任务名称、恢复归档会话，以及按来源
+跳转和过滤任务。为单会话、全量和指定会话查询的 artifact-library envelope 增加
+必填 `session` 对象：可选 `displayName`、原始 `createdAt`、`archiveState`
+（`active` 或 `archived`）、`sourceType` 和可选 `sourceId`。通用 live
+`/session/:id/artifacts` 合同保持不变。
+
+原始创建时间和创建来源复用已有持久化会话列表元数据。live 标题来自当前 bridge，
+持久化创建时间和来源存在时优先使用；无 transcript 的 live 会话使用 bridge 元数据。
+持久化显示名称依次使用自定义标题、首条提示，与既有目录一致；无名称时省略。
+缺失来源类型使用 `default`，开放字符串来源及其配对 ID 原样保留，包括
+`resource_inspection`。DAC 可明确过滤该来源，无需枚举任务目录；全量接口不隐式
+排除某种来源。
+
+冷会话的摘要与产物 envelope 一起缓存。live 会话仅缓存有界读取的持久化元数据，
+不缓存实时产物响应或标题。使用同一个 runtime 条目 Map 和已有内存预算，以不同
+条目类型区分 live 元数据和 cold envelope；两者均检查 transcript 和归属指纹。
+live/cold 切换会重建条目。仅追加标题记录或移动归档文件也会触发失效，不依赖产物
+事件。live 标题与产物每次重新从 bridge 读取，因此恢复旧会话不会改变原始创建时间，
+live 改名也不必等待异步持久化完成。
+
+全量 GET 与指定会话 POST 接受 `Accept: text/event-stream`，默认继续返回 JSON。
+仅在产物持久化可用时发布 `workspace_artifact_library_stream`，该能力也保证所有
+artifact-library 查询包含会话摘要。兼容旧 daemon 的客户端应检查 capability 和
+响应 content type，不能假定必然返回 SSE。
+
+| SSE 事件        | 数据及含义                                          |
+| --------------- | --------------------------------------------------- |
+| `start`         | `v: 1`、候选会话数 `total`                          |
+| `session`       | 含摘要的完整单会话产物 envelope                     |
+| `session_error` | `v: 1`、`sessionId`、`status`、`code`、`message`    |
+| `complete`      | `v: 1`、`total`、`succeeded`、`failed`、`skipped`   |
+| `error`         | `v: 1`、`status`、`code`、`message`，请求级致命错误 |
+
+每个请求只发现一次会话，最多四个持续取任务的读取 worker。按完成顺序独立发送每个
+结果；慢会话只占自己的槽位，不阻挡其他 worker。JSON 保留选择顺序。全量查询继续
+跳过不存在或属于其他项目的持久化会话，指定查询显式报告错误。只有 `complete`
+表示扫描完成；终止 `error` 或未收到 `complete` 就断连，均表示部分结果。这是有限
+查询，不提供重放、自动重连或实时订阅。POST 通过 fetch 消费 SSE。
+
+读取完成后先释放会话归档屏障，再等待网络背压。写入串行，每个 worker 等待当前结果
+写出后再领取下一项，使待发送结果数量受并发数限制。没有待完成写入时才发送心跳。
+断连后停止派发和写入，已开始的共享缓存读取仍在屏障内完成，不取消其他请求共用的
+加载。整个请求保留 runtime activity/generation 检查。发送 headers 前保留普通
+HTTP 错误；发送后用终止 `error` 报告失败，不追加 JSON 错误响应。删除协议及执行
+路径保持不变。
+
 ## 缓存设计
 
 按 runtime 对象保存有界缓存，避免不同 generation 或存储根共享结果。
-已加载会话始终读取 bridge，并移除对应冷缓存。只缓存成功的冷会话产物响应，
+已加载会话始终从 bridge 读取产物，并将对应冷缓存替换为有界的持久化身份元数据。
+缓存成功的冷会话产物响应，
 包括空结果；不保存 transcript 或文件内容。同一个未变化会话的并发加载共享。
 
 既有单会话 artifact-library GET 与全量和批量查询共享此缓存。任意接口预热后，
-其他接口均可复用；单项或批量删除都会使共享条目失效。单会话响应和错误结构
+其他接口均可复用；单项或批量删除都会使共享条目失效。单会话响应仅新增 `session` 摘要，既有字段和错误结构
 保持不变。缓存响应的 `generatedAt` 表示该投影的构建时间。
 
 通过两个 transcript 位置及 runtime 归属元数据的 `lstat` 身份验证冷缓存：
@@ -79,6 +128,10 @@ daemon 鉴权。仅在产物持久化可用时发布 `workspace_artifact_library
 持久性/幂等性/警告和工作区文件不变。执行 build、typecheck、bundle 和针对性
 测试，在隔离临时 runtime 中验证全局 CLI 基线与本地 bundle。
 E2E 计划位于 `.qwen/e2e-tests/workspace-artifact-library.md`。
+
+验收还包括：恢复会话的原始创建时间、live/cold 改名即时可见、归档移动、来源保留和
+过滤、跨接口元数据缓存复用、首个会话阻塞时后续快会话先返回、断连清理、背压、
+部分失败与唯一完成事件。补充 E2E 计划见 `.qwen/e2e-tests/artifact-library-dac.md`。
 
 ## 决策与限制
 

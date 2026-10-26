@@ -827,6 +827,7 @@ const EXPECTED_REGISTERED_FEATURES = [
         'session_artifacts_persistence',
         'session_artifact_library',
         'workspace_artifact_library',
+        'workspace_artifact_library_stream',
         'session_sources',
       ];
     }
@@ -3739,6 +3740,7 @@ describe('createServeApp', () => {
           feature === 'session_artifacts_persistence' ||
           feature === 'session_artifact_library' ||
           feature === 'workspace_artifact_library' ||
+          feature === 'workspace_artifact_library_stream' ||
           feature === 'session_sources'
         ) {
           expect(
@@ -6106,6 +6108,9 @@ describe('createServeApp', () => {
       expect(res.status).toBe(200);
       expect(res.body.features).not.toContain('session_artifacts_persistence');
       expect(res.body.features).not.toContain('workspace_artifact_library');
+      expect(res.body.features).not.toContain(
+        'workspace_artifact_library_stream',
+      );
     });
 
     it('reflects a dynamically added workspace and persistence support', async () => {

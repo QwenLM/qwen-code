@@ -57,10 +57,7 @@ import {
   parseGoalControlRequest,
   readArtifactSnapshot,
 } from '@qwen-code/qwen-code-core';
-import type {
-  SessionArtifactInput,
-  SessionArtifactsEnvelope,
-} from '@qwen-code/acp-bridge/sessionArtifacts';
+import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifacts';
 import {
   SESSION_ATTACHMENT_CHUNK_BYTES,
   SessionAttachmentUploadError,
@@ -174,8 +171,10 @@ import {
   removeWorkspaceLibraryArtifact,
   removeWorkspaceLibraryArtifacts,
   type ArtifactLibraryRemovalResult,
+  type WorkspaceSessionArtifactsEnvelope,
 } from '../server/session-artifact-library.js';
 import { WorkspaceArtifactCache } from '../server/workspace-artifact-cache.js';
+import { ArtifactLibraryStream } from '../server/artifact-library-stream.js';
 import { bindSessionPrsFromReviewPrompt } from './session-pr-backfill.js';
 import { acquireWorktreeOwnershipOp } from '../server/worktree-ownership-op.js';
 import {
@@ -7396,6 +7395,7 @@ export function registerSessionRoutes(
         });
         return;
       }
+      let stream: ArtifactLibraryStream | undefined;
       try {
         const runtime = await resolveQualifiedSessionRuntime(
           req,
@@ -7414,7 +7414,7 @@ export function registerSessionRoutes(
               for (const id of await cache.sessionIds())
                 selected.set(id, new Set());
             }
-            const readResults: SessionArtifactsEnvelope[] = [];
+            const readResults: WorkspaceSessionArtifactsEnvelope[] = [];
             const errors: Array<
               ReturnType<typeof artifactLibraryMemberError> & {
                 sessionId: string;
@@ -7422,113 +7422,188 @@ export function registerSessionRoutes(
             > = [];
             const removed: ArtifactLibraryRemovalResult[] = [];
             const groups = [...selected];
-            for (
-              let offset = 0;
-              offset < groups.length;
-              offset += ARTIFACT_LIBRARY_CONCURRENCY
-            ) {
-              const batch = await Promise.all(
-                groups
-                  .slice(offset, offset + ARTIFACT_LIBRARY_CONCURRENCY)
-                  .map(async ([sessionId, artifactIds]) => {
-                    const run = async () => {
-                      assertOpen?.();
-                      const owner =
-                        workspaceRegistry.resolveLiveSessionOwner(sessionId);
-                      if (owner.kind === 'unavailable')
-                        throw new ArtifactLibraryRequestError(
-                          503,
-                          'workspace_runtime_unavailable',
-                          'Session owner is unavailable.',
-                        );
-                      if (owner.kind === 'ambiguous')
-                        throw new ArtifactLibraryRequestError(
-                          500,
-                          'ambiguous_session_owner',
-                          'Session has multiple live owners.',
-                        );
-                      if (owner.kind === 'found' && owner.runtime !== runtime)
-                        throw new ArtifactLibraryRequestError(
-                          409,
-                          'session_workspace_conflict',
-                          'Session belongs to another workspace.',
-                        );
-                      if (isInternalWorkspaceRuntime(runtime)) {
-                        const service =
-                          createWorkspaceRuntimeSessionService(runtime);
-                        const location =
-                          await service.getSessionLocation(sessionId);
-                        if (location === 'conflict')
-                          throw new SessionConflictError(sessionId);
-                        if (
-                          !location ||
-                          !(await readLoadableLiveConversationMetadata(
-                            sessionId,
-                            service,
-                          ))
-                        )
-                          throw new SessionNotFoundError(sessionId);
-                      }
-                      assertOpen?.();
-                      if (operation !== 'delete')
-                        return { session: await cache.read(sessionId) };
-                      cache.invalidate(sessionId);
-                      try {
-                        return {
-                          removed: await removeWorkspaceLibraryArtifacts(
-                            runtime,
-                            sessionId,
-                            [...artifactIds],
-                            () => assertOpen?.(),
-                          ),
-                        };
-                      } finally {
-                        cache.invalidate(sessionId);
-                      }
-                    };
-                    try {
-                      const result =
-                        operation === 'delete'
-                          ? await archiveCoordinator.runExclusiveMany(
-                              [sessionId],
-                              run,
-                            )
-                          : await archiveCoordinator.runSharedMany(
-                              [sessionId],
-                              run,
-                            );
-                      return { sessionId, artifactIds, result };
-                    } catch (error) {
-                      return {
-                        sessionId,
-                        artifactIds,
-                        error: artifactLibraryMemberError(error),
-                      };
-                    }
-                  }),
-              );
-              assertOpen?.();
-              for (const item of batch) {
-                if (item.error) {
-                  if (operation === 'delete') {
-                    for (const artifactId of item.artifactIds)
-                      removed.push({
-                        sessionId: item.sessionId,
-                        artifactId,
-                        error: item.error,
-                      });
-                  } else if (
-                    operation !== 'all' ||
-                    item.error.code !== 'session_not_found'
-                  ) {
-                    errors.push({ sessionId: item.sessionId, ...item.error });
-                  }
-                } else if (item.result?.session) {
-                  readResults.push(item.result.session);
-                } else if (item.result?.removed) {
-                  removed.push(...item.result.removed);
+            const processGroup = async ([sessionId, artifactIds]: [
+              string,
+              Set<string>,
+            ]) => {
+              const run = async () => {
+                assertOpen?.();
+                const owner =
+                  workspaceRegistry.resolveLiveSessionOwner(sessionId);
+                if (owner.kind === 'unavailable')
+                  throw new ArtifactLibraryRequestError(
+                    503,
+                    'workspace_runtime_unavailable',
+                    'Session owner is unavailable.',
+                  );
+                if (owner.kind === 'ambiguous')
+                  throw new ArtifactLibraryRequestError(
+                    500,
+                    'ambiguous_session_owner',
+                    'Session has multiple live owners.',
+                  );
+                if (owner.kind === 'found' && owner.runtime !== runtime)
+                  throw new ArtifactLibraryRequestError(
+                    409,
+                    'session_workspace_conflict',
+                    'Session belongs to another workspace.',
+                  );
+                if (isInternalWorkspaceRuntime(runtime)) {
+                  const service = createWorkspaceRuntimeSessionService(runtime);
+                  const location = await service.getSessionLocation(sessionId);
+                  if (location === 'conflict')
+                    throw new SessionConflictError(sessionId);
+                  if (
+                    !location ||
+                    !(await readLoadableLiveConversationMetadata(
+                      sessionId,
+                      service,
+                    ))
+                  )
+                    throw new SessionNotFoundError(sessionId);
                 }
+                assertOpen?.();
+                if (operation !== 'delete')
+                  return { session: await cache.read(sessionId) };
+                cache.invalidate(sessionId);
+                try {
+                  return {
+                    removed: await removeWorkspaceLibraryArtifacts(
+                      runtime,
+                      sessionId,
+                      [...artifactIds],
+                      () => assertOpen?.(),
+                    ),
+                  };
+                } finally {
+                  cache.invalidate(sessionId);
+                }
+              };
+              try {
+                const result =
+                  operation === 'delete'
+                    ? await archiveCoordinator.runExclusiveMany(
+                        [sessionId],
+                        run,
+                      )
+                    : await archiveCoordinator.runSharedMany([sessionId], run);
+                return { sessionId, artifactIds, result };
+              } catch (error) {
+                return {
+                  sessionId,
+                  artifactIds,
+                  error: artifactLibraryMemberError(error),
+                };
               }
+            };
+            let succeeded = 0;
+            let failed = 0;
+            let skipped = 0;
+            const consume = async (
+              item: Awaited<ReturnType<typeof processGroup>>,
+            ) => {
+              if (item.error) {
+                if (operation === 'delete') {
+                  for (const artifactId of item.artifactIds)
+                    removed.push({
+                      sessionId: item.sessionId,
+                      artifactId,
+                      error: item.error,
+                    });
+                } else if (
+                  operation !== 'all' ||
+                  item.error.code !== 'session_not_found'
+                ) {
+                  failed++;
+                  const error = { sessionId: item.sessionId, ...item.error };
+                  if (stream) await stream.send('session_error', error);
+                  else errors.push(error);
+                } else skipped++;
+              } else if (item.result?.session) {
+                succeeded++;
+                if (stream)
+                  await stream.send('session', { ...item.result.session });
+                else readResults.push(item.result.session);
+              } else if (item.result?.removed) {
+                removed.push(...item.result.removed);
+              }
+            };
+            if (operation === 'delete') {
+              for (
+                let offset = 0;
+                offset < groups.length;
+                offset += ARTIFACT_LIBRARY_CONCURRENCY
+              ) {
+                const batch = await Promise.all(
+                  groups
+                    .slice(offset, offset + ARTIFACT_LIBRARY_CONCURRENCY)
+                    .map(processGroup),
+                );
+                assertOpen?.();
+                for (const item of batch) await consume(item);
+              }
+            } else {
+              if (res.destroyed) return;
+              res.vary('Accept');
+              if (
+                req.accepts(['application/json', 'text/event-stream']) ===
+                'text/event-stream'
+              ) {
+                stream = new ArtifactLibraryStream(res);
+                await stream.send('start', { total: groups.length });
+              }
+              const results: Array<Awaited<ReturnType<typeof processGroup>>> =
+                [];
+              let next = 0;
+              let stopped = false;
+              const worker = async () => {
+                try {
+                  while (
+                    !stopped &&
+                    !res.destroyed &&
+                    !stream?.closed &&
+                    next < groups.length
+                  ) {
+                    assertOpen?.();
+                    const index = next++;
+                    const item = await processGroup(groups[index]!);
+                    assertOpen?.();
+                    if (res.destroyed || stream?.closed) return;
+                    if (stream) await consume(item);
+                    else results[index] = item;
+                  }
+                } catch (error) {
+                  stopped = true;
+                  throw error;
+                }
+              };
+              const workers = await Promise.allSettled(
+                Array.from(
+                  {
+                    length: Math.min(
+                      ARTIFACT_LIBRARY_CONCURRENCY,
+                      groups.length,
+                    ),
+                  },
+                  worker,
+                ),
+              );
+              const rejected = workers.find(
+                (result) => result.status === 'rejected',
+              );
+              if (rejected?.status === 'rejected') throw rejected.reason;
+              if (res.destroyed || stream?.closed) return;
+              assertOpen?.();
+              if (stream) {
+                await stream.send('complete', {
+                  total: groups.length,
+                  succeeded,
+                  failed,
+                  skipped,
+                });
+                return;
+              }
+              for (const item of results) await consume(item);
             }
             assertOpen?.();
             return operation === 'delete'
@@ -7536,9 +7611,26 @@ export function registerSessionRoutes(
               : { v: 1, sessions: readResults, errors };
           }),
         );
-        res.status(200).set('Cache-Control', 'no-store').json(response);
+        if (!stream && !res.destroyed)
+          res.status(200).set('Cache-Control', 'no-store').json(response);
       } catch (error) {
-        sendBridgeError(res, error, { route });
+        if (stream) {
+          if (!stream.closed)
+            await stream
+              .send(
+                'error',
+                error instanceof WorkspaceGenerationClosedError
+                  ? {
+                      status: 503,
+                      code: 'workspace_runtime_unavailable',
+                      message: 'Workspace runtime is not active.',
+                    }
+                  : { ...artifactLibraryMemberError(error) },
+              )
+              .catch(() => undefined);
+        } else if (!res.destroyed) sendBridgeError(res, error, { route });
+      } finally {
+        stream?.end();
       }
     };
     if (operation === 'all') app.get(route, handler);

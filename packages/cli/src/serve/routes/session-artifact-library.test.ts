@@ -6,6 +6,7 @@
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
+import type { Server } from 'node:http';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import express from 'express';
 import request from 'supertest';
@@ -18,12 +19,16 @@ import {
 import { createMutationGate } from '../auth.js';
 import {
   createWorkspaceRegistry,
+  createWorkspaceGenerationGuard,
   type WorkspaceRuntime,
 } from '../workspace-registry.js';
 import { SessionArchiveCoordinator } from '../server/session-archive.js';
 import { sendBridgeError } from '../server/error-response.js';
 import { ConversationRuntimeActivityGate } from '../conversations/conversation-runtime-activity.js';
 import { registerSessionRoutes } from './session.js';
+import { WorkspaceArtifactCache } from '../server/workspace-artifact-cache.js';
+import { ArtifactLibraryStream } from '../server/artifact-library-stream.js';
+import type { WorkspaceSessionArtifactsEnvelope } from '../server/session-artifact-library.js';
 
 vi.mock('../../runtime/live-session-source.js', async (original) => ({
   ...(await original<typeof import('../../runtime/live-session-source.js')>()),
@@ -40,9 +45,13 @@ function runtime(workspaceId = 'primary', live = true): WorkspaceRuntime {
     primary: workspaceId === 'primary',
     trusted: true,
     bridge: {
-      getSessionSummary: vi.fn(() => {
-        if (!live) throw new SessionNotFoundError(id);
-        return { sessionId: id };
+      getSessionSummary: vi.fn((sessionId: string) => {
+        if (!live) throw new SessionNotFoundError(sessionId);
+        return {
+          sessionId,
+          createdAt: '2026-10-26T00:00:00Z',
+          displayName: 'Live task',
+        };
       }),
       getSessionArtifacts: vi.fn(async () => ({
         v: 1,
@@ -100,7 +109,19 @@ describe('workspace artifact collection routes', () => {
       expect(response.headers['cache-control']).toBe('no-store');
       expect(response.body).toEqual({
         v: 1,
-        sessions: [{ v: 1, sessionId: id, artifacts: [] }],
+        sessions: [
+          {
+            v: 1,
+            sessionId: id,
+            artifacts: [],
+            session: {
+              createdAt: '2026-10-26T00:00:00Z',
+              displayName: 'Live task',
+              archiveState: 'active',
+              sourceType: 'default',
+            },
+          },
+        ],
         errors: [],
       });
     }
@@ -459,10 +480,28 @@ describe('workspace artifact library routes', () => {
       stickyEphemeralIds: [],
       warnings: [],
     });
+    vi.spyOn(SessionService.prototype, 'getSessionListItem').mockResolvedValue({
+      sessionId: id,
+      cwd: owner.workspaceCwd,
+      startTime: '2020-01-01T00:00:00Z',
+      mtime: 0,
+      prompt: 'Archived task',
+      filePath: 'archived.jsonl',
+      sourceType: 'resource_inspection',
+      sourceId: 'inspection-1',
+      isArchived: true,
+    });
     const res = await request(app).get(route);
     expect(res.status).toBe(200);
     expect(res.body.artifacts).toEqual([]);
     expect(res.body.limits.maxArtifacts).toBe(200);
+    expect(res.body.session).toEqual({
+      displayName: 'Archived task',
+      createdAt: '2020-01-01T00:00:00Z',
+      archiveState: 'archived',
+      sourceType: 'resource_inspection',
+      sourceId: 'inspection-1',
+    });
     expect(owner.bridge.getSessionArtifacts).not.toHaveBeenCalled();
   });
 
@@ -778,4 +817,330 @@ describe('workspace artifact library routes', () => {
       }
     },
   );
+});
+
+function streamEnvelope(sessionId: string): WorkspaceSessionArtifactsEnvelope {
+  return {
+    v: 1,
+    sessionId,
+    artifacts: [],
+    generatedAt: '2026-10-26T00:00:00Z',
+    limits: { maxArtifacts: 200 },
+    session: {
+      createdAt: '2026-10-25T00:00:00Z',
+      archiveState: 'active',
+      sourceType: 'default',
+    },
+  };
+}
+
+function parseLibraryEvents(text: string) {
+  return text.split('\n\n').flatMap((frame) => {
+    const lines = frame.split('\n');
+    if (!lines[0]?.startsWith('event: ')) return [];
+    return [
+      {
+        event: lines[0].slice(7),
+        data: JSON.parse(lines[1]!.slice(6)) as Record<string, unknown>,
+      },
+    ];
+  });
+}
+
+async function listen(app: express.Express): Promise<Server> {
+  return new Promise((resolve) => {
+    const server = app.listen(0, '127.0.0.1', () => resolve(server));
+  });
+}
+
+function serverUrl(server: Server) {
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('No address');
+  return `http://127.0.0.1:${address.port}${collectionRoute}/query`;
+}
+
+async function closeServer(server: Server) {
+  server.closeAllConnections();
+  await new Promise<void>((resolve, reject) =>
+    server.close((error) => (error ? reject(error) : resolve())),
+  );
+}
+
+describe('artifact library progressive queries', () => {
+  it.each(['all', 'query'] as const)(
+    'streams %s results and preserves partial failure semantics',
+    async (operation) => {
+      const { app } = setup();
+      vi.spyOn(
+        WorkspaceArtifactCache.prototype,
+        'sessionIds',
+      ).mockResolvedValue([id, secondId, 'missing']);
+      vi.spyOn(WorkspaceArtifactCache.prototype, 'read').mockImplementation(
+        async (sessionId) => {
+          if (sessionId === secondId)
+            throw new Error('private filesystem details');
+          if (sessionId === 'missing')
+            throw new SessionNotFoundError(sessionId);
+          return streamEnvelope(sessionId);
+        },
+      );
+      const query =
+        operation === 'all'
+          ? request(app).get(collectionRoute)
+          : request(app)
+              .post(`${collectionRoute}/query`)
+              .send({ sessionIds: [id, secondId, 'missing'] });
+      const response = await query.set('Accept', 'text/event-stream');
+      expect(response.status).toBe(200);
+      expect(response.headers['content-type']).toContain('text/event-stream');
+      const events = parseLibraryEvents(response.text);
+      expect(events[0]).toEqual({ event: 'start', data: { v: 1, total: 3 } });
+      expect(events.find((event) => event.event === 'session')?.data).toEqual(
+        streamEnvelope(id),
+      );
+      expect(events.at(-1)).toEqual({
+        event: 'complete',
+        data: {
+          v: 1,
+          total: 3,
+          succeeded: 1,
+          failed: operation === 'all' ? 1 : 2,
+          skipped: operation === 'all' ? 1 : 0,
+        },
+      });
+      expect(events.filter((event) => event.event === 'complete')).toHaveLength(
+        1,
+      );
+      expect(response.text).not.toContain('private filesystem details');
+      expect(
+        events.find((event) => event.data['sessionId'] === secondId)?.data,
+      ).toMatchObject({ status: 500, code: 'artifact_library_failed' });
+    },
+  );
+
+  it('replenishes read slots and emits later sessions before a blocked first session', async () => {
+    const { app } = setup();
+    const ids = Array.from(
+      { length: 6 },
+      (_, index) => `${id.slice(0, -1)}${index}`,
+    );
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let active = 0;
+    let peak = 0;
+    vi.spyOn(WorkspaceArtifactCache.prototype, 'read').mockImplementation(
+      async (sessionId) => {
+        active++;
+        peak = Math.max(peak, active);
+        if (sessionId === id) await blocked;
+        else await new Promise<void>((resolve) => setImmediate(resolve));
+        active--;
+        return streamEnvelope(sessionId);
+      },
+    );
+    const server = await listen(app);
+    let reading: Promise<void> | undefined;
+    let received = '';
+    try {
+      const response = await fetch(serverUrl(server), {
+        method: 'POST',
+        headers: {
+          Accept: 'text/event-stream',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ sessionIds: ids }),
+      });
+      const reader = response.body!.getReader();
+      reading = (async () => {
+        const decoder = new TextDecoder();
+        while (true) {
+          const next = await reader.read();
+          if (next.done) return;
+          received += decoder.decode(next.value, { stream: true });
+        }
+      })();
+      await vi.waitFor(() =>
+        expect(received).toContain(`"sessionId":"${ids[5]}"`),
+      );
+      expect(received).not.toContain(`"sessionId":"${id}"`);
+      expect(received).not.toContain('event: complete');
+      expect(peak).toBe(4);
+      release();
+      await reading;
+      expect(parseLibraryEvents(received).at(-1)?.data).toEqual({
+        v: 1,
+        total: 6,
+        succeeded: 6,
+        failed: 0,
+        skipped: 0,
+      });
+    } finally {
+      release();
+      await reading;
+      await closeServer(server);
+    }
+  });
+
+  it('retains JSON selection order when reads finish out of order', async () => {
+    const { app } = setup();
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(WorkspaceArtifactCache.prototype, 'read').mockImplementation(
+      async (sessionId) => {
+        if (sessionId === id) await blocked;
+        else release();
+        return streamEnvelope(sessionId);
+      },
+    );
+    const response = await request(app)
+      .post(`${collectionRoute}/query`)
+      .send({ sessionIds: [id, secondId] });
+    expect(response.body.sessions).toEqual([
+      streamEnvelope(id),
+      streamEnvelope(secondId),
+    ]);
+    expect(response.headers['content-type']).toContain('application/json');
+  });
+
+  it('releases archive barriers before waiting for result writes', async () => {
+    const { app, coordinator } = setup();
+    vi.spyOn(WorkspaceArtifactCache.prototype, 'read').mockResolvedValue(
+      streamEnvelope(id),
+    );
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const original = ArtifactLibraryStream.prototype.send;
+    const send = vi
+      .spyOn(ArtifactLibraryStream.prototype, 'send')
+      .mockImplementation(async function (
+        this: ArtifactLibraryStream,
+        event,
+        data,
+      ) {
+        if (event === 'session') await blocked;
+        return original.call(this, event, data);
+      });
+    const response = request(app)
+      .post(`${collectionRoute}/query`)
+      .set('Accept', 'text/event-stream')
+      .send({ sessionIds: [id] })
+      .then((value) => value);
+    try {
+      await vi.waitFor(() =>
+        expect(send).toHaveBeenCalledWith('session', expect.any(Object)),
+      );
+      let acquired = false;
+      const exclusive = coordinator.runExclusiveMany([id], async () => {
+        acquired = true;
+      });
+      await vi.waitFor(() => expect(acquired).toBe(true));
+      await exclusive;
+    } finally {
+      release();
+      await response;
+    }
+  });
+
+  it('stops dispatching on disconnect while keeping in-flight reads under their barriers', async () => {
+    const { app, coordinator } = setup();
+    const ids = Array.from(
+      { length: 6 },
+      (_, index) => `${id.slice(0, -1)}${index}`,
+    );
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const read = vi
+      .spyOn(WorkspaceArtifactCache.prototype, 'read')
+      .mockImplementation(async (sessionId) => {
+        await blocked;
+        return streamEnvelope(sessionId);
+      });
+    let isClosed = () => false;
+    const send = ArtifactLibraryStream.prototype.send;
+    vi.spyOn(ArtifactLibraryStream.prototype, 'send').mockImplementation(
+      function (this: ArtifactLibraryStream, event, data) {
+        isClosed = () => this.closed;
+        return send.call(this, event, data);
+      },
+    );
+    const server = await listen(app);
+    const abort = new AbortController();
+    try {
+      const response = await fetch(serverUrl(server), {
+        method: 'POST',
+        signal: abort.signal,
+        headers: {
+          Accept: 'text/event-stream',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ sessionIds: ids }),
+      });
+      await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(4));
+      await response.body!.cancel();
+      abort.abort();
+      await vi.waitFor(() => expect(isClosed()).toBe(true));
+      await expect(
+        coordinator.runExclusiveMany(ids.slice(0, 4), async () => undefined),
+      ).rejects.toThrow('being archived');
+      release();
+      await vi.waitFor(async () => {
+        await coordinator.runExclusiveMany(
+          ids.slice(0, 4),
+          async () => undefined,
+        );
+      });
+      expect(read).toHaveBeenCalledTimes(4);
+    } finally {
+      release();
+      abort.abort();
+      await closeServer(server);
+    }
+  });
+
+  it('terminates with an SSE error when the runtime closes during a read', async () => {
+    const owner = {
+      ...runtime(),
+      generationGuard: createWorkspaceGenerationGuard(),
+    };
+    const { app } = setup([owner]);
+    vi.spyOn(WorkspaceArtifactCache.prototype, 'read').mockImplementation(
+      async () => {
+        owner.generationGuard!.close();
+        return streamEnvelope(id);
+      },
+    );
+    const response = await request(app)
+      .post(`${collectionRoute}/query`)
+      .set('Accept', 'text/event-stream')
+      .send({ sessionIds: [id] });
+    const events = parseLibraryEvents(response.text);
+    expect(events.map((event) => event.event)).toEqual(['start', 'error']);
+    expect(events[1]!.data).toMatchObject({
+      status: 503,
+      code: 'workspace_runtime_unavailable',
+    });
+  });
+
+  it('keeps validation and persistence failures as HTTP JSON before streaming', async () => {
+    const { app } = setup();
+    const invalid = await request(app)
+      .post(`${collectionRoute}/query`)
+      .set('Accept', 'text/event-stream')
+      .send({ sessionIds: [] });
+    expect(invalid.status).toBe(400);
+    expect(invalid.headers['content-type']).toContain('application/json');
+    const disabled = await request(setup([runtime()], false).app)
+      .get(collectionRoute)
+      .set('Accept', 'text/event-stream');
+    expect(disabled.status).toBe(409);
+    expect(disabled.headers['content-type']).toContain('application/json');
+  });
 });

@@ -38,17 +38,80 @@ archive barriers protect reads, exclusive barriers protect grouped removals,
 and runtime activity/generation guards protect the entire operation. There is
 no primary-runtime fallback and no session load or unarchive.
 
+## Session metadata and progressive reads
+
+DAC needs session identity alongside artifact snapshots to label tasks, restore
+archived sessions, and navigate or filter source-specific tasks. Extend each
+artifact-library envelope (single, full, and selected-session queries) with a
+required `session` object: optional `displayName`, original `createdAt`,
+`archiveState` (`active` or `archived`), `sourceType`, and optional `sourceId`.
+Keep the general live `/session/:id/artifacts` contract unchanged.
+
+Use existing persisted session-list metadata for original creation time and
+creator attribution. Live titles come from the current bridge summary, while
+persisted creation time and attribution take precedence when available. A live
+session without a transcript uses bridge metadata. Persisted display names use
+custom title, then first prompt, matching the existing directory; absent names
+remain absent. Missing source types become `default`; preserve open source
+strings and their paired IDs, including `resource_inspection`. DAC can exclude
+that source explicitly without enumerating task directories. Do not silently
+exclude a source from a full-workspace API.
+
+Cache cold envelopes with their metadata. For live sessions, cache only the
+bounded persisted metadata read, never the live artifact response or title.
+Use one per-runtime entry map and the existing byte budget, with distinct
+live-metadata/cold-envelope entry kinds. Validate both against transcript and
+ownership fingerprints. Switching live/cold kinds rebuilds the entry; title-only
+transcript appends and archive moves invalidate it even without artifact events.
+Read live titles and artifacts anew on every request. Thus a resumed session's
+creation time does not become its latest load time, and live renames do not wait
+for asynchronous transcript persistence.
+
+Full GET and selected-session POST accept `Accept: text/event-stream`; default
+responses remain JSON. Advertise `workspace_artifact_library_stream` only when
+artifact persistence is available. This capability includes session metadata on
+all artifact-library reads. Clients using older daemons must inspect the
+capability/response content type rather than assuming an SSE response.
+
+| SSE event       | Data and meaning                                           |
+| --------------- | ---------------------------------------------------------- |
+| `start`         | `v: 1`, candidate `total`                                  |
+| `session`       | Complete enriched per-session artifact envelope            |
+| `session_error` | `v: 1`, `sessionId`, `status`, `code`, `message`           |
+| `complete`      | `v: 1`, `total`, `succeeded`, `failed`, `skipped`          |
+| `error`         | `v: 1`, `status`, `code`, `message`; fatal request failure |
+
+Discover once per request and run at most four continuously replenished read
+workers. Emit each completed session independently, in completion order; a slow
+session occupies one slot without holding up the other workers. JSON results
+retain selection order. Full reads continue to skip absent/foreign persisted
+sessions; explicit queries report them. Only `complete` means the scan finished.
+A terminal `error` or disconnection without `complete` means a partial result.
+This is a finite query, with no replay, automatic reconnect, or live subscription.
+Use fetch-based SSE consumption for POST.
+
+Release each archive read barrier before waiting for network backpressure.
+Serialize writes and let each worker wait for its result to drain before taking
+another session, bounding pending output by worker count. Send heartbeats only
+when no write is pending. On disconnect stop dispatching and writing; let already
+started shared cache reads settle under their barriers, without cancelling a
+load shared by another request. Keep runtime activity/generation checks for the
+whole request. Before headers, preserve ordinary HTTP errors; after headers,
+report fatal failures through `error` and never append a JSON error response.
+Deletion retains its existing protocol and execution path.
+
 ## Cache design
 
 Keep a bounded cache per runtime object, so generations and storage roots cannot
-share results. Live sessions always read the bridge and discard any cold cache
-entry. Cache only successful cold artifact envelopes, including empty results;
+share results. Live sessions always read artifacts from the bridge and replace any cold
+entry with bounded persisted identity metadata. Cache successful cold artifact
+envelopes, including empty results;
 never retain transcripts or file contents. Share concurrent loads of the same
 unchanged session.
 
 The existing single-session artifact-library GET shares this cache with full
 and batch queries. Warming any of these routes benefits the others; either
-single or batch removal invalidates the shared entry. Single-session response
+single or batch removal invalidates the shared entry. Single-session responses gain only the `session` summary; existing fields
 and error shapes remain unchanged. A cached envelope's `generatedAt` records
 when that projection was built.
 
@@ -98,7 +161,12 @@ replacement and runtime-metadata invalidation; empty-cache hits; archive and
 load/unload transitions; grouped deletion durability, idempotence, warnings,
 and unchanged workspace files. Build, typecheck, bundle, run focused tests, and
 exercise the global CLI baseline and local bundle in isolated temporary runtimes.
-The E2E plan is `.qwen/e2e-tests/workspace-artifact-library.md`.
+Also verify original creation times after resume, live and cold rename visibility,
+archive moves, source attribution/filtering, cross-route metadata cache reuse,
+fast-session delivery past a blocked first session, disconnect cleanup,
+backpressure, partial failures and exactly one stream completion.
+The E2E plans are `.qwen/e2e-tests/workspace-artifact-library.md` and
+`.qwen/e2e-tests/artifact-library-dac.md`.
 
 ## Decisions and limitations
 

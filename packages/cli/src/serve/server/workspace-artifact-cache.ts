@@ -7,20 +7,29 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
-import type { SessionArtifactsEnvelope } from '@qwen-code/acp-bridge/sessionArtifacts';
-import { SessionNotFoundError } from '../acp-session-bridge.js';
+import type { SessionListItem } from '@qwen-code/qwen-code-core/services/sessionService.js';
+import {
+  SessionNotFoundError,
+  type BridgeSessionSummary,
+} from '../acp-session-bridge.js';
 import type { WorkspaceRuntime } from '../workspace-registry.js';
-import { readPersistedWorkspaceArtifactLibrary } from './session-artifact-library.js';
+import {
+  readPersistedWorkspaceArtifactLibrary,
+  readPersistedWorkspaceSessionMetadata,
+  type WorkspaceSessionArtifactsEnvelope,
+} from './session-artifact-library.js';
 
 const SESSION_FILE = /^[0-9a-fA-F-]{32,36}\.jsonl$/;
 const MAX_CACHE_BYTES = 32 * 1024 * 1024;
 const DISCOVERY_REFRESH_INTERVAL_MS = 2_000;
 
-interface CachedArtifacts {
+type CachedArtifacts = {
   fingerprint: string;
-  promise: Promise<SessionArtifactsEnvelope>;
   bytes: number;
-}
+} & (
+  | { kind: 'cold'; promise: Promise<WorkspaceSessionArtifactsEnvelope> }
+  | { kind: 'live'; promise: Promise<SessionListItem | undefined> }
+);
 
 async function fingerprint(
   paths: string[],
@@ -127,26 +136,27 @@ export class WorkspaceArtifactCache {
       );
     }
     const persisted = await this.discovery!.promise;
-    const persistedIds = new Set(persisted);
-    for (const id of this.entries.keys()) {
-      if (!persistedIds.has(id)) this.invalidate(id);
-    }
     const live = this.runtime.bridge.listWorkspaceSessions(
       this.runtime.workspaceCwd,
     );
-    return [...new Set([...persisted, ...live.map((item) => item.sessionId)])];
+    const ids = new Set([...persisted, ...live.map((item) => item.sessionId)]);
+    for (const id of this.entries.keys()) {
+      if (!ids.has(id)) this.invalidate(id);
+    }
+    return [...ids];
   }
 
-  async read(sessionId: string): Promise<SessionArtifactsEnvelope> {
+  async read(sessionId: string): Promise<WorkspaceSessionArtifactsEnvelope> {
+    let live: BridgeSessionSummary | undefined;
     try {
-      this.runtime.bridge.getSessionSummary(sessionId);
-      this.invalidate(sessionId);
-      return this.runtime.bridge.getSessionArtifacts(sessionId);
+      live = this.runtime.bridge.getSessionSummary(sessionId);
     } catch (error) {
       if (!(error instanceof SessionNotFoundError)) throw error;
     }
-    if (!SESSION_FILE.test(`${sessionId}.jsonl`))
+    if (!SESSION_FILE.test(`${sessionId}.jsonl`)) {
+      if (live) return this.readLive(live);
       throw new SessionNotFoundError(sessionId);
+    }
     const files = this.directories.map((directory) =>
       path.join(directory, `${sessionId}.jsonl`),
     );
@@ -158,38 +168,96 @@ export class WorkspaceArtifactCache {
         ]),
       );
     const version = await readFingerprint();
-    const cached = this.entries.get(sessionId);
-    if (cached?.fingerprint === version) {
-      return cached.promise;
-    }
-    this.invalidate(sessionId);
-    const entry: CachedArtifacts = {
-      fingerprint: version,
-      bytes: 0,
-      promise: Promise.resolve().then(async () => {
-        try {
-          const result = await readPersistedWorkspaceArtifactLibrary(
-            this.runtime,
-            sessionId,
-          );
-          const unchanged = version === (await readFingerprint());
-          if (this.entries.get(sessionId) === entry) {
-            const bytes = Buffer.byteLength(JSON.stringify(result));
-            if (!unchanged || this.bytes + bytes > MAX_CACHE_BYTES) {
-              this.invalidate(sessionId);
-            } else {
-              entry.bytes = bytes;
-              this.bytes += bytes;
-            }
+    let cached = this.entries.get(sessionId);
+    if (
+      cached?.fingerprint !== version ||
+      cached.kind !== (live ? 'live' : 'cold')
+    ) {
+      this.invalidate(sessionId);
+      const entry: CachedArtifacts = live
+        ? {
+            kind: 'live',
+            fingerprint: version,
+            bytes: 0,
+            promise: Promise.resolve().then(() =>
+              this.load(
+                sessionId,
+                entry,
+                () =>
+                  readPersistedWorkspaceSessionMetadata(
+                    this.runtime,
+                    sessionId,
+                  ),
+                readFingerprint,
+              ),
+            ),
           }
-          return result;
-        } catch (error) {
-          if (this.entries.get(sessionId) === entry) this.invalidate(sessionId);
-          throw error;
-        }
-      }),
+        : {
+            kind: 'cold',
+            fingerprint: version,
+            bytes: 0,
+            promise: Promise.resolve().then(() =>
+              this.load(
+                sessionId,
+                entry,
+                () =>
+                  readPersistedWorkspaceArtifactLibrary(
+                    this.runtime,
+                    sessionId,
+                  ),
+                readFingerprint,
+              ),
+            ),
+          };
+      this.entries.set(sessionId, entry);
+      cached = entry;
+    }
+    return cached.kind === 'cold'
+      ? cached.promise
+      : this.readLive(live!, await cached.promise);
+  }
+
+  private async readLive(
+    live: BridgeSessionSummary,
+    persisted?: SessionListItem,
+  ): Promise<WorkspaceSessionArtifactsEnvelope> {
+    const source = persisted?.sourceType !== undefined ? persisted : live;
+    const displayName =
+      live.displayName ?? (persisted?.customTitle || persisted?.prompt);
+    return {
+      ...(await this.runtime.bridge.getSessionArtifacts(live.sessionId)),
+      session: {
+        ...(displayName ? { displayName } : {}),
+        createdAt: persisted?.startTime ?? live.createdAt,
+        archiveState: 'active',
+        sourceType: source.sourceType ?? 'default',
+        ...(source.sourceId !== undefined ? { sourceId: source.sourceId } : {}),
+      },
     };
-    this.entries.set(sessionId, entry);
-    return entry.promise;
+  }
+
+  private async load<T>(
+    sessionId: string,
+    entry: CachedArtifacts,
+    read: () => Promise<T>,
+    readFingerprint: () => Promise<string>,
+  ): Promise<T> {
+    try {
+      const result = await read();
+      const unchanged = entry.fingerprint === (await readFingerprint());
+      if (this.entries.get(sessionId) === entry) {
+        const bytes = Buffer.byteLength(JSON.stringify(result ?? null));
+        if (!unchanged || this.bytes + bytes > MAX_CACHE_BYTES) {
+          this.invalidate(sessionId);
+        } else {
+          entry.bytes = bytes;
+          this.bytes += bytes;
+        }
+      }
+      return result;
+    } catch (error) {
+      if (this.entries.get(sessionId) === entry) this.invalidate(sessionId);
+      throw error;
+    }
   }
 }
