@@ -1221,16 +1221,13 @@ export class MemoryManager {
           historyLength: params.history.length,
         },
       });
-      // The main agent saved memory itself; do not keep skipping on the
-      // strength of an older no-op. Drop the snapshot with it: a close-time
-      // flush would otherwise fork over the live tail (this turn's own memory
-      // write included) while its gate inspected the skipped turn.
+      // The main agent's write disarms cadence but does not cover earlier
+      // skipped turns. Keep that debt for the next extraction or close flush.
       this.cadenceDiscardEpoch += 1;
       const cadence = this.extractCadence.get(params.sessionId);
       if (cadence) {
         cadence.armed = false;
         cadence.skips = 0;
-        delete cadence.pending;
       }
       if (wroteUserMemory && params.config) {
         await this.recordUserMutation(

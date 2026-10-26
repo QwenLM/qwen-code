@@ -3405,33 +3405,90 @@ describe('MemoryManager', () => {
       ).toEqual([2, 6]);
     });
 
-    it('drops the pending snapshot when the turn wrote to a memory file', async () => {
-      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
-      const mgr = new MemoryManager();
-      await turn(mgr, 2);
-      expect((await turn(mgr, 4)).skippedReason).toBe('cadence');
+    it.each(['next long turn', 'close'] as const)(
+      'retains earlier skipped turns after an unrelated memory write for %s',
+      async (boundary) => {
+        vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+        const mgr = new MemoryManager();
+        await turn(mgr, 2);
+        const owed = [
+          userText('My preferred accent color is CERULEAN-72.'),
+          content('model', { text: 'Understood.' }),
+        ];
+        const skipped = [...turns(2), ...owed];
+        const skippedResult = await mgr.scheduleExtract({
+          ...extractParams(tmp.projectRoot, 'sess', skipped),
+          belowCompactionWarn: true,
+        });
+        expect(skippedResult.skippedReason).toBe('cadence');
 
-      // The main agent saved memory itself, so the cadence disarms and the
-      // skipped snapshot goes with it: replaying it at the close boundary would
-      // fork over this turn's live tail, memory write included.
-      const wrote = await mgr.scheduleExtract({
-        ...extractParams(tmp.projectRoot, 'sess', [
-          ...turns(4),
+        const wroteHistory = [
+          ...skipped,
+          userText('Remember that the build system is LANTERN.'),
           content(
             'model',
             fnCall('write_file', {
               file_path: path.join(
                 tmp.projectRoot,
-                '.qwen/memory/user/test.md',
+                '.qwen/memory/project/unrelated.md',
               ),
+              content: 'The build system is LANTERN.',
+            }),
+          ),
+        ];
+        const wrote = await mgr.scheduleExtract({
+          ...extractParams(tmp.projectRoot, 'sess', wroteHistory),
+          belowCompactionWarn: true,
+        });
+        expect(wrote.skippedReason).toBe('memory_tool');
+        expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
+
+        if (boundary === 'next long turn') {
+          await mgr.scheduleExtract({
+            ...extractParams(tmp.projectRoot, 'sess', [
+              ...wroteHistory,
+              ...turns(50),
+            ]),
+            belowCompactionWarn: true,
+          });
+        } else {
+          await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(
+            true,
+          );
+        }
+        expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+        expect(
+          vi.mocked(runAutoMemoryExtract).mock.calls[1][0].skippedHistory,
+        ).toEqual(owed);
+        await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(
+          true,
+        );
+        expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+      },
+    );
+
+    it('does not flush after a foreground memory write without earlier skipped turns', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+      const wrote = await mgr.scheduleExtract({
+        ...extractParams(tmp.projectRoot, 'sess', [
+          ...turns(2),
+          userText('Remember that the build system is LANTERN.'),
+          content(
+            'model',
+            fnCall('write_file', {
+              file_path: path.join(
+                tmp.projectRoot,
+                '.qwen/memory/project/unrelated.md',
+              ),
+              content: 'The build system is LANTERN.',
             }),
           ),
         ]),
         belowCompactionWarn: true,
       });
       expect(wrote.skippedReason).toBe('memory_tool');
-      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
-
       await expect(mgr.flushPendingExtract('sess', 1_000)).resolves.toBe(true);
       expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
     });
