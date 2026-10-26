@@ -9,6 +9,8 @@
  * retention limits cannot drift between the main and split views.
  */
 export const SESSION_LIST_PAGE_SIZE = 1000;
+// Keep within parseSessionIdsBody's bound in packages/cli/src/serve/routes/session.ts,
+// shared by the primary and workspace-qualified delete/archive routes.
 export const SESSION_ARCHIVE_BATCH_SIZE = 100;
 export const SIDEBAR_SESSION_PREVIEW_LIMIT = 5;
 export const SESSION_ORGANIZATION_FEATURE = 'session_organization';

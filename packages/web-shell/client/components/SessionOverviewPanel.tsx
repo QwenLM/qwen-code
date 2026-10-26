@@ -712,6 +712,7 @@ function SessionOverviewPanelInner({
         byCwd.set(key, [...(byCwd.get(key) ?? []), card]);
       }
       const succeededIdentities = new Set<string>();
+      const deleteFailures: string[] = [];
       let firstError: Error | undefined;
       for (const [cwd, group] of byCwd) {
         const ids = group.map((card) => card.sessionId);
@@ -757,18 +758,14 @@ function SessionOverviewPanelInner({
                 const card = cardsById.get(id);
                 if (card) succeededIdentities.add(getSessionIdentity(card));
               }
-              firstError ??= result.errors[0]
-                ? new Error(result.errors[0].error)
-                : undefined;
+              deleteFailures.push(...result.errors.map(({ error }) => error));
             }
           }
         } catch (error) {
           const requestError =
             error instanceof Error ? error : new Error(String(error));
-          if (mutation === 'delete' && firstError) {
-            firstError = new Error(
-              `${firstError.message}; ${requestError.message}`,
-            );
+          if (mutation === 'delete') {
+            deleteFailures.push(requestError.message);
           } else {
             firstError ??= requestError;
           }
@@ -778,7 +775,12 @@ function SessionOverviewPanelInner({
           }
         }
       }
-      return { succeededIdentities, error: firstError };
+      return {
+        succeededIdentities,
+        error: deleteFailures.length
+          ? new Error(deleteFailures.join('; '))
+          : firstError,
+      };
     },
     [
       canArchiveCard,

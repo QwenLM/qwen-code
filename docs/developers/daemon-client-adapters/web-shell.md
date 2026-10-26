@@ -71,7 +71,9 @@ session, while the failure is shown in the overview.
 
 The batch size follows the daemon's shared 100-ID request validation for
 session deletion and archiving, including workspace-qualified routes. During
-deletion, an earlier per-session error does not hide a later request failure.
+deletion, per-session and request failures are retained across batches and
+workspaces, regardless of their order. A rejected request stops the remaining
+batches in its workspace; other workspace groups are still processed.
 
 ### Removing composer attachments
 
