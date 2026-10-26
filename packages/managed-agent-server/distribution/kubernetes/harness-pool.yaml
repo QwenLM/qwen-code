@@ -86,7 +86,7 @@ spec:
                 configMapKeyRef:
                   name: 'qwen-harness-settings'
                   key: 'capability-digest'
-            - name: 'QWEN_HOSTED_HARNESS_BROKER_URL'
+            - name: 'QWEN_MANAGED_RUNTIME_BROKER_URL'
               valueFrom:
                 configMapKeyRef:
                   name: 'qwen-harness-settings'

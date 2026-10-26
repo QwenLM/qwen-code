@@ -81,8 +81,10 @@ client can submit two text blocks that persist as exactly the injection
 shape). The injector therefore stamps the part it appends with a
 module-private symbol receipt (`createUserPromptSubmitContextPart`), and the
 predicate requires that receipt in addition to the exact trailing text in a
-user entry with at least one part of the user's own ahead of it. The symbol
-cannot cross a JSON transcript, an ACP prompt block, or model output, so only
+user entry, including an entry whose sole part is the authentic hook block.
+A sole tagged part without provenance remains user-authored and visible in the
+transcript. The symbol cannot cross a JSON transcript, an ACP prompt block, or
+model output, so only
 a part the injector built — or one re-stamped by resume from the recorded
 per-turn `hookContext` provenance — counts as delivered. Tagged text that
 merely appears, in any entry shape, does not suppress a fresh delivery; when
@@ -108,6 +110,15 @@ block conservatively re-injects rather than suppressing on unprovable origin.
 A prepared-request replay installs history with `structuredClone`
 (`llm-chat.ts`), so it drops the receipts too and re-injects once, then
 re-arms.
+
+Recording a compression checkpoint copies each `Content` container and its
+parts array at capture time. Spread copies preserve
+symbol metadata used to derive prompt identities and context markers; they do
+not recursively freeze part data. A later rescue cannot add its block to that
+checkpoint. Resume from a checkpoint without the block may therefore inject one
+fresh copy. If a checkpoint already contains the block but lacks restorable
+provenance, resume may still conservatively re-inject; snapshot ownership does
+not make private receipts survive serialization.
 
 When a match is found the turn proceeds without the appended part and without
 recording hook-context provenance for that turn, which keeps the displayed
@@ -154,8 +165,8 @@ accepted and documented as a limitation rather than solved here.
   dialect copies a similarity score, the payload differs whenever the score
   does, so suppression only fires when the score repeats as well. Dialects that
   omit the score see the full benefit.
-- **Compaction is rescued inside the send; other history rebuilds re-inject
-  once, then re-arm.** Suppression is receipt-gated, and the receipt is
+- **Compaction is rescued inside the send; other history rebuilds may re-inject.**
+  Suppression is receipt-gated, and the receipt is
   re-stamped only where per-turn `hookContext` provenance exists — the
   interactive resume path. A rebuild that drops the receipt would otherwise
   lose the block on the very turn that lost the most context, so compaction
@@ -165,22 +176,22 @@ accepted and documented as a limitation rather than solved here.
   fires. The token travels on `LlmChatSendOptions.suppressedHookContext` and a
   matching `Turn` constructor parameter, and `LlmChat`'s hard-tier rescue skips
   a block the request already carries, so forwarding after a helper-side append
-  cannot duplicate it. The three rescues are not equivalent for
-  re-arming: the helper and hard-tier sites append into an entry that already
-  holds the user's own part, so suppression re-arms from the fresh trailing
-  part, while the reactive site's fallback arm pushes a sole-part entry, which
-  the predicate treats as user-authored and so never re-arms. A rebuild with no
-  rescue — a client-driven ACP rollback, a `structuredClone` history install
-  such as the prepared-request replay, the resume of an ACP/IDE turn (which
-  records no provenance), or any restore that crosses serialization — re-injects
-  one duplicate and then re-arms from the fresh part.
+  cannot duplicate it. Each rescue re-arms suppression immediately from the
+  fresh trailing receipt, including the reactive fallback's sole-part user
+  entry. A rebuild with no rescue — a client-driven ACP rollback, a
+  `structuredClone` history install such as the prepared-request replay, or the
+  resume of an ACP/IDE turn (which records no provenance) — may conservatively
+  re-inject when the receipt cannot be restored. The fresh trailing part
+  re-arms suppression in live history; it does not guarantee receipt
+  persistence across later rebuilds.
 
 ## Validation plan
 
 1. Unit coverage for the predicate over absent, present, and malformed entries,
-   plus the provenance cases: the tagged block in a model entry, as a sole
-   user-authored part, ahead of the trailing part, and a receipt-stamped part
-   that is not last all inject rather than suppress. The shape-only variants
+   plus the provenance cases: an authentic sole part in a user entry suppresses;
+   a sole tagged part without provenance remains user-authored and visible.
+   Tagged blocks in model entries and receipt-stamped parts that are not last
+   inject rather than suppress. The shape-only variants
    (surrounding whitespace, no newline delimiters) are covered against
    `isUserPromptSubmitContextPartText`, which recognizes any tagged block; the
    predicate compares one exact payload and deliberately does not trim.
@@ -194,7 +205,16 @@ accepted and documented as a limitation rather than solved here.
    records only, because unrelated records in the same transcript (telemetry,
    the auto-memory extractor) can quote the payload back and make a raw
    substring count meaningless.
-4. `npm run build && npm run typecheck` plus the core unit suites that assert
+4. A real-recorder regression: capture a compression checkpoint, then reassign
+   the live entry's parts before the queued write drains. The serialized
+   checkpoint retains the captured parts and prompt identities while live
+   history contains the rescued block. Removing the recorder's container copy
+   must fail this assertion; copying a mocked payload at call time is not a
+   substitute. Resume from that checkpoint contains no rescued block, so the
+   next identical hook injects exactly one fresh copy. After reactive rescue
+   creates an authentic sole part, the next identical hook suppresses a second
+   copy in live history.
+5. `npm run build && npm run typecheck` plus the core unit suites that assert
    on the reserved tag.
 
 The ACP/IDE site reuses the same predicate and carries a matching regression
@@ -204,16 +224,24 @@ is sent to the model.
 ## Acceptance criteria
 
 - A byte-identical hook context block reaches the model at most once while it
-  stays the trailing part of its user entry, from either injection site, as
-  observed in the model-bound request and in the session transcript. A later
+  stays the trailing receipt-stamped part of its user entry, including a sole
+  authentic part, from either injection site, as observed in the model-bound
+  request and in the session transcript. A sole tagged part without provenance
+  does not suppress and remains visible. A later
   append into that entry (the manual plan-exit notice, a mid-turn merge) pushes
   the stamped part off the trailing position, and a history rebuild without
   per-turn `hookContext` provenance drops the receipt.
 - A compaction inside a send re-appends the suppressed block exactly once — one
   owner per send, the ACP send helper when its own compaction consumed the
   copy, otherwise `LlmChat` — and never twice when the helper already appended
-  it. A rebuild with no rescue (the resume of an ACP/IDE turn, which records no
-  provenance) re-injects one duplicate and then re-arms.
+  it. The fresh trailing receipt immediately re-arms suppression, including in
+  the reactive fallback's sole-part entry. A rebuild without restorable
+  provenance may conservatively re-inject.
+- A compression checkpoint owns its captured `Content` containers and parts
+  arrays, preserving metadata while excluding any subsequent rescue. Resume
+  from a checkpoint without the block allows one fresh injection; a checkpoint
+  already containing the block without provenance may still cause conservative
+  reinjection.
 - A changed payload is always appended.
 - No new configuration, schema, or public API surface beyond the one exported
   predicate.
