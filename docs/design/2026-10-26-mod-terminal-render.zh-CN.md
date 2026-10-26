@@ -60,7 +60,7 @@ hook 收到 Claude Code 为横带定义的输入：
 
 - **输入键**由视口的 `columns` 和 `isFullscreen` 以及 props 组成，按稳定的 JSON 比较。只改高度不会触发渲染，除非它改变了 `maxRows`。宽度或 `maxRows` 变化后要稳定 150 毫秒才运行，所以拖动调整窗口大小只跑一次渲染。
 - **第一次渲染**在 `session.start` 之后运行；切换会话（`/clear`、`/resume`、`/branch`）之后也会再跑一次，因为横带依据的信息可能变了。
-- **`$.ui.invalidate("ui.render")`** 请求重画调用方插件的 `ui.render` 注册可能选中的每个位置，并立即返回。Qwen Code 的 Mod 还没有定时器，所以这个调用总是来自其他某次调度，例如 `turn.complete`，渲染在那次调度结束后运行。多次调用会合并：一连串调用只跑一次渲染。渲染最多每 34 毫秒一次，即 Claude Code 对展开横带的频率。Claude Code 也允许对 `prompt.section` 等缓存事件调用 `$.ui.invalidate`；Qwen Code 里没有可丢弃的缓存，这类调用什么也不做。
+- **`$.ui.invalidate("ui.render")`** 请求重画调用方插件的 `ui.render` 注册可能选中的每个位置，并立即返回。Qwen Code 的 Mod 还没有定时器，所以这个调用总是来自其他某次调度，例如 `turn.complete`，渲染在那次调度结束后运行。多次调用会合并：一连串调用只跑一次渲染。渲染最多每 34 毫秒一次，即 Claude Code 对展开横带的频率。与 Claude Code 相同，某个插件的一次渲染超过这个时长时，它在随后一秒内降为常规频率，即每 100 毫秒最多一次，所以每次渲染都请求重画自己的 hook 不会一直占住调度队列。Claude Code 也允许对 `prompt.section` 等缓存事件调用 `$.ui.invalidate`；Qwen Code 里没有可丢弃的缓存，这类调用什么也不做。
 
 渲染与命令、工具中间件和回合事件共用会话的调度队列，因为 Mod worker 一次只跑一个根调度：
 
@@ -80,7 +80,7 @@ hook 收到 Claude Code 为横带定义的输入：
 - `key` 只保留在 `Box` 上，转为字符串；
 - `hover` 移到 props 旁边；会做校验，但本阶段不绘制。
 
-`h(tag, props, ...children)` 和 `Fragment` 是每个插件环境里的全局量，与 Claude Code 相同。`h` 遇到函数形式的 tag 时，用 props 和 children 调用它。未知的字符串 tag 抛出 Claude Code 的报错 `JSX element <X> is not an element: a render hook draws with the table $.ui.resolve(e) returns`。`Fragment` 返回一个包住子节点的纵向 `Box`。
+`h(tag, props, ...children)` 和 `Fragment` 是每个插件环境里的全局量，与 Claude Code 相同。`h` 遇到函数形式的 tag 时，用 props 和压平后的 children 调用它，children 总是数组，与 Claude Code 的 `h` 相同。未知的字符串 tag 抛出 Claude Code 的报错 `JSX element <X> is not an element: a render hook draws with the table $.ui.resolve(e) returns`。`Fragment` 返回一个包住子节点的纵向 `Box`。
 
 ### 4. 判定一棵树
 
@@ -96,9 +96,9 @@ hook 收到 Claude Code 为横带定义的输入：
 
 - `Box` 的 `key` 若不是 1 到 10,000 个字符的字符串，就去掉；
 - 终端没有的 `borderStyle` 画成无边框；
-- 文本总量超过 100,000 个字符时截断，结尾写 `… <n> more characters, not drawn`。
+- 文本总量超过 100,000 个字符时截断，结尾写 `… <n> more characters, not drawn`；截断不会拆开代理对。
 
-调试日志用 Claude Code 的原话记录每次拒绝和调整，例如 `<plugin>: ui.render hook skipped: returned the wrong shape (a tree AbovePrompt refuses: <reason>)` 和 `<plugin>: ui.render (AbovePrompt) refused: <reason>; nothing was drawn`，每次加载、每个位置记一次。Claude Code 也会把这些行显示在对话记录里，但只在热重载插件目录时。Qwen Code 还没有热重载，所以这些行只进调试日志。
+调试日志用 Claude Code 的原话记录每次拒绝和调整，例如 `<plugin>: ui.render hook skipped: returned the wrong shape (a tree AbovePrompt refuses: <reason>)` 和 `<plugin>: ui.render (AbovePrompt) refused: <reason>; nothing was drawn`。拒绝按原因每次加载记一次，调整按位置和类别每次加载记一次，所以每次渲染长度都在变的文本截断只记一次。Claude Code 也会把这些行显示在对话记录里，但只在热重载插件目录时。Qwen Code 还没有热重载，所以这些行只进调试日志。
 
 ### 5. 在 Ink 中绘制
 

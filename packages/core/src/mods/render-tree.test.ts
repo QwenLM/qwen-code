@@ -176,9 +176,23 @@ describe('adjustRenderTree', () => {
         { type: 'Box' },
       ]),
     );
+    // The first border the terminal lacks stands for the kind.
     expect(notes).toEqual([
-      'ui.render (AbovePrompt): Box borderStyle "wavy" is not a border style (the styles are single, double, round, bold, singleDouble, doubleSingle, classic, arrow, dashed, quote); the Box is drawn with no border',
-      'ui.render (AbovePrompt): Box borderStyle is number, not a style name (the styles are single, double, round, bold, singleDouble, doubleSingle, classic, arrow, dashed, quote); the Box is drawn with no border',
+      {
+        key: 'borderStyle',
+        text: 'ui.render (AbovePrompt): Box borderStyle "wavy" is not a border style (the styles are single, double, round, bold, singleDouble, doubleSingle, classic, arrow, dashed, quote); the Box is drawn with no border',
+      },
+    ]);
+    expect(
+      adjustRenderTree(
+        { type: 'Box', hover: { borderStyle: 3 } } as ModRenderElement,
+        'AbovePrompt',
+      ).notes,
+    ).toEqual([
+      {
+        key: 'borderStyle',
+        text: 'ui.render (AbovePrompt): Box borderStyle is number, not a style name (the styles are single, double, round, bold, singleDouble, doubleSingle, classic, arrow, dashed, quote); the Box is drawn with no border',
+      },
     ]);
   });
 
@@ -200,7 +214,30 @@ describe('adjustRenderTree', () => {
       ]),
     );
     expect(notes).toEqual([
-      `ui.render (AbovePrompt): ${MOD_RENDER_TEXT_CAP + 25} characters of text are drawn up to the first ${MOD_RENDER_TEXT_CAP}`,
+      {
+        key: 'text cut',
+        text: `ui.render (AbovePrompt): ${MOD_RENDER_TEXT_CAP + 25} characters of text are drawn up to the first ${MOD_RENDER_TEXT_CAP}`,
+      },
+    ]);
+  });
+
+  it('never cuts between the halves of a surrogate pair', () => {
+    const { tree, notes } = adjustRenderTree(
+      text(['a'.repeat(MOD_RENDER_TEXT_CAP - 1) + '😀😀']) as ModRenderElement,
+      'AbovePrompt',
+    );
+    expect(tree).toEqual(
+      text([
+        'a'.repeat(MOD_RENDER_TEXT_CAP - 1) +
+          '\n… 4 more characters, not drawn',
+      ]),
+    );
+    expect(() => validateRenderTree(tree)).not.toThrow();
+    expect(notes).toEqual([
+      {
+        key: 'text cut',
+        text: `ui.render (AbovePrompt): ${MOD_RENDER_TEXT_CAP + 3} characters of text are drawn up to the first ${MOD_RENDER_TEXT_CAP - 1}`,
+      },
     ]);
   });
 
@@ -210,5 +247,6 @@ describe('adjustRenderTree', () => {
       ENGINE_NODE,
     ]) as ModRenderElement;
     expect(adjustRenderTree(tree, 'AbovePrompt')).toEqual({ tree, notes: [] });
+    expect(Object.isFrozen(ENGINE_NODE)).toBe(true);
   });
 });

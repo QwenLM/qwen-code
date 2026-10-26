@@ -60,7 +60,7 @@ A render runs when the site's input changes, when the Mods load, and when a plug
 
 - **The input key** is the viewport's `columns` and `isFullscreen` and the props, compared as stable JSON. A change of height alone runs nothing, unless it changes `maxRows`. A change of width or of `maxRows` runs once it has settled for 150 milliseconds, so a drag-resize runs one render.
 - **The first render** runs after `session.start`, and again after a session switch (`/clear`, `/resume`, `/branch`), since the band's facts may differ.
-- **`$.ui.invalidate("ui.render")`** asks for a redraw of every site the calling plugin's `ui.render` registrations may select. It returns at once. Qwen Code Mods have no timers yet, so the call comes from some other dispatch, such as `turn.complete`, and the render runs after that dispatch. Calls fold: a burst runs one render. Renders run at most every 34 milliseconds, Claude Code's rate for an expanded band. `$.ui.invalidate` for the cached events Claude Code also names, such as `prompt.section`, has nothing to drop in Qwen Code and does nothing.
+- **`$.ui.invalidate("ui.render")`** asks for a redraw of every site the calling plugin's `ui.render` registrations may select. It returns at once. Qwen Code Mods have no timers yet, so the call comes from some other dispatch, such as `turn.complete`, and the render runs after that dispatch. Calls fold: a burst runs one render. Renders run at most every 34 milliseconds, Claude Code's rate for an expanded band. As in Claude Code, a plugin whose render takes longer than that drops to the steady rate, one render every 100 milliseconds, for the next second, so a hook that asks for its own redraw on every render cannot keep the dispatch queue busy. `$.ui.invalidate` for the cached events Claude Code also names, such as `prompt.section`, has nothing to drop in Qwen Code and does nothing.
 
 Renders share the session's dispatch queue with commands, tool middleware and turn events, because the Mod worker runs one root at a time:
 
@@ -80,7 +80,7 @@ A constructor takes the props, with `children` among them, and returns a deep-fr
 - `key` kept only on a `Box`, as a string;
 - `hover` moved beside the props; it is checked, but this stage does not draw it.
 
-`h(tag, props, ...children)` and `Fragment` are globals in each plugin's environment, as in Claude Code. `h` calls a function tag with its props and children. An unknown string tag throws Claude Code's message, `JSX element <X> is not an element: a render hook draws with the table $.ui.resolve(e) returns`. `Fragment` returns a column `Box` around its children.
+`h(tag, props, ...children)` and `Fragment` are globals in each plugin's environment, as in Claude Code. `h` calls a function tag with its props and its children flattened, always an array, as Claude Code's `h` does. An unknown string tag throws Claude Code's message, `JSX element <X> is not an element: a render hook draws with the table $.ui.resolve(e) returns`. `Fragment` returns a column `Box` around its children.
 
 ### 4. Judging a tree
 
@@ -96,9 +96,9 @@ A hook whose answer fails is skipped alone: its `.catch` runs, what it had from 
 
 - a `Box` `key` that is not a string of 1 to 10,000 characters is dropped;
 - a `borderStyle` the terminal lacks draws no border;
-- texts past 100,000 characters in all are cut, ending `… <n> more characters, not drawn`.
+- texts past 100,000 characters in all are cut, ending `… <n> more characters, not drawn`; the cut never splits a surrogate pair.
 
-The debug log records each refusal and adjustment in Claude Code's words, such as `<plugin>: ui.render hook skipped: returned the wrong shape (a tree AbovePrompt refuses: <reason>)` and `<plugin>: ui.render (AbovePrompt) refused: <reason>; nothing was drawn`, once per load and site. Claude Code also shows these lines in the transcript, but only while it hot-reloads a plugin folder. Qwen Code has no hot reload yet, so they stay in the debug log.
+The debug log records each refusal and adjustment in Claude Code's words, such as `<plugin>: ui.render hook skipped: returned the wrong shape (a tree AbovePrompt refuses: <reason>)` and `<plugin>: ui.render (AbovePrompt) refused: <reason>; nothing was drawn`. A refusal is recorded once per load and reason, and an adjustment once per load, site and kind, so a text cut whose length changes on each render is told once. Claude Code also shows these lines in the transcript, but only while it hot-reloads a plugin folder. Qwen Code has no hot reload yet, so they stay in the debug log.
 
 ### 5. Drawing in Ink
 

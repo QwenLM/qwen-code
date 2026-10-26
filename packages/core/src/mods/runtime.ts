@@ -88,7 +88,8 @@ export class ModRuntime {
   private renders: string[] = [];
   // Asked for during the load, before the host knows which plugins draw.
   private early?: Set<string> = new Set();
-  // Refusal and adjustment lines are said once per load and site.
+  // Refusal lines are said once per load and reason, adjustment lines once
+  // per load, site and kind.
   private readonly noted = new Set<string>();
   private sequence = 0;
   private root?: {
@@ -312,7 +313,8 @@ export class ModRuntime {
   /**
    * Raises `ui.render` for a site and judges the tree the chain settles on.
    * A tree that fails draws the engine's own, nothing at the band; `notes`
-   * holds what the debug log is told, each line once per load and site.
+   * holds what the debug log is told, each refusal and kind of adjustment
+   * once per load.
    */
   async render(
     input: ModRenderInput,
@@ -321,9 +323,9 @@ export class ModRuntime {
     const settled = await this.request({ type: 'render', input }, signal);
     const owner = this.renders.length === 1 ? this.renders[0] : 'hooks';
     const notes: string[] = [];
-    const note = (line: string) => {
-      if (this.noted.has(line)) return;
-      this.noted.add(line);
+    const note = (line: string, key = line) => {
+      if (this.noted.has(key)) return;
+      this.noted.add(key);
       notes.push(`${owner}: ${line}`);
     };
     try {
@@ -338,7 +340,8 @@ export class ModRuntime {
       settled as ModRenderElement,
       input.component,
     );
-    adjusted.notes.forEach(note);
+    for (const { key, text } of adjusted.notes)
+      note(text, `${input.component}\0${key}`);
     return { tree: adjusted.tree, notes };
   }
 

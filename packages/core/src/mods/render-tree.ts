@@ -50,7 +50,10 @@ export type ModRenderElement =
   | { type: 'engine'; ref: number };
 
 /** What `next(e)` resolves to: the engine's own drawing, nothing at the band. */
-export const ENGINE_NODE: ModRenderElement = { type: 'engine', ref: 0 };
+export const ENGINE_NODE: ModRenderElement = Object.freeze({
+  type: 'engine',
+  ref: 0,
+});
 
 export interface ModAbovePromptProps {
   hasSurvey: boolean;
@@ -324,28 +327,43 @@ export function validateRenderTree(tree: unknown): void {
   visit(tree, 1, false, undefined);
 }
 
+/** An adjustment note; `key` names its kind, said once per load and site. */
+export interface ModRenderNote {
+  key: 'borderStyle' | 'text cut';
+  text: string;
+}
+
 /**
  * The changes Claude Code makes to a tree it accepts: a Box key it cannot
  * address by, a border the terminal lacks, and text past the cap. Each note
- * names what changed, in Claude Code's words after `<owner>: `.
+ * names what changed, in Claude Code's words after `<owner>: `; the first of
+ * each kind in the tree stands for it.
  */
 export function adjustRenderTree(
   tree: ModRenderElement,
   site: ModRenderSite,
-): { tree: ModRenderElement; notes: string[] } {
-  const notes = new Set<string>();
+): { tree: ModRenderElement; notes: ModRenderNote[] } {
+  const notes = new Map<ModRenderNote['key'], string>();
   let budget = MOD_RENDER_TEXT_CAP;
   let total = 0;
+  let drawn = 0;
   let cut = false;
   const text = (value: string): string => {
     total += value.length;
     if (cut) return '';
     if (value.length <= budget) {
       budget -= value.length;
+      drawn += value.length;
       return value;
     }
     cut = true;
-    const kept = value.slice(0, budget);
+    // A cut between the halves of a surrogate pair keeps neither.
+    const last = value.charCodeAt(budget - 1);
+    const kept = value.slice(
+      0,
+      last >= 0xd800 && last <= 0xdbff ? budget - 1 : budget,
+    );
+    drawn += kept.length;
     return `${kept}\n… ${value.length - kept.length} more characters, not drawn`;
   };
   const border = (props: ModRenderProps): ModRenderProps => {
@@ -353,11 +371,13 @@ export function adjustRenderTree(
     if (style === undefined || BORDER_STYLES.includes(style as string))
       return props;
     const { borderStyle: _style, ...rest } = props;
-    notes.add(
-      typeof style === 'string'
-        ? `ui.render (${site}): Box borderStyle "${style}" is not a border style (the styles are ${BORDER_STYLES.join(', ')}); the Box is drawn with no border`
-        : `ui.render (${site}): Box borderStyle is ${kind(style)}, not a style name (the styles are ${BORDER_STYLES.join(', ')}); the Box is drawn with no border`,
-    );
+    if (!notes.has('borderStyle'))
+      notes.set(
+        'borderStyle',
+        typeof style === 'string'
+          ? `ui.render (${site}): Box borderStyle "${style}" is not a border style (the styles are ${BORDER_STYLES.join(', ')}); the Box is drawn with no border`
+          : `ui.render (${site}): Box borderStyle is ${kind(style)}, not a style name (the styles are ${BORDER_STYLES.join(', ')}); the Box is drawn with no border`,
+      );
     return rest;
   };
   const walk = (node: ModRenderNode): ModRenderNode => {
@@ -389,8 +409,12 @@ export function adjustRenderTree(
   };
   const adjusted = walk(tree) as ModRenderElement;
   if (cut)
-    notes.add(
-      `ui.render (${site}): ${total} characters of text are drawn up to the first ${MOD_RENDER_TEXT_CAP}`,
+    notes.set(
+      'text cut',
+      `ui.render (${site}): ${total} characters of text are drawn up to the first ${drawn}`,
     );
-  return { tree: adjusted, notes: [...notes] };
+  return {
+    tree: adjusted,
+    notes: [...notes].map(([key, text]) => ({ key, text })),
+  };
 }

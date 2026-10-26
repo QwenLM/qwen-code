@@ -106,7 +106,8 @@ export const MOD_GUEST_FACTORY = String.raw`
   };
   const elementTags = ${JSON.stringify(TERMINAL_ELEMENTS)};
   const h = (tag, props, ...children) => {
-    if (typeof tag === 'function') return tag({ ...(object(props) ? props : {}), children: children.length === 1 ? children[0] : children });
+    // A component, as in Claude Code, gets its children flattened, always an array.
+    if (typeof tag === 'function') return tag({ ...(object(props) ? props : {}), children: flatten(children) });
     if (tag === 'Box' || tag === 'Text') return build(tag, props, children);
     throw new TypeError('JSX element <' + String(tag) + '> is not an element: a render hook draws with the table $.ui.resolve(e) returns, not by tag name');
   };

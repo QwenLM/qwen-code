@@ -634,7 +634,7 @@ flattened: `null`, `undefined` and booleans are dropped, arrays are spread and
 numbers become strings. `key` is kept only on a `Box`. The `h(tag, props,
 ...children)` and `Fragment` globals build the same elements, as Claude Code's
 JSX factory does; `Fragment` is a column `Box`. `h` calls a function tag with
-its props and throws for a string tag other than `Box` or `Text`.
+its props and its children flattened into an array, and throws for a string tag other than `Box` or `Text`.
 
 No host draws `ui.render` yet, so its hooks are skipped and listed at startup,
 and `$.session.version()` leaves it out. A tree a hook returns is judged with

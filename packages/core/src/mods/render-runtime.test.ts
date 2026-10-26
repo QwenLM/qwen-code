@@ -165,7 +165,12 @@ describe('ui.render through the real QuickJS worker', () => {
         const Row = ({ label, children }) => h(Box, { flexDirection: 'row' }, h(Text, { bold: true }, label), children);
         let unknown = '';
         try { h('Spinner', null); } catch (error) { unknown = String(error); }
-        return h(Fragment, null, h(Row, { label: 'a' }, 'b', [1, [2]]), h(Text, null, unknown));
+        const seen = [];
+        const Probe = ({ children }) => { seen.push(children); return null; };
+        h(Probe, null);
+        h(Probe, null, 'one');
+        h(Probe, null, ['a', [null, 2]], false);
+        return h(Fragment, null, h(Row, { label: 'a' }, 'b', [1, [2]]), h(Text, null, unknown), h(Text, null, JSON.stringify(seen)));
       });`),
     ]);
     const { tree } = await runtime.render(band(), signal());
@@ -189,6 +194,8 @@ describe('ui.render through the real QuickJS worker', () => {
             'TypeError: JSX element <Spinner> is not an element: a render hook draws with the table $.ui.resolve(e) returns, not by tag name',
           ],
         },
+        // A component gets its children flattened, always an array.
+        { type: 'Text', children: ['[[],["one"],["a","2"]]'] },
       ],
     });
   });
@@ -280,9 +287,10 @@ describe('ui.render through the real QuickJS worker', () => {
 
   it('adjusts an accepted tree and says so once per load', async () => {
     const runtime = await create([
-      mod(`on('ui.render', ($, e) => {
+      mod(`let extra = 5;
+      on('ui.render', ($, e) => {
         const { Box, Text } = $.ui.resolve(e);
-        return Box({ borderStyle: 'wavy', children: Text({ children: 'x'.repeat(100005) }) });
+        return Box({ borderStyle: extra === 5 ? 'wavy' : 'dotty', children: Text({ children: 'x'.repeat(100000 + extra++) }) });
       });`),
     ]);
     const first = await runtime.render(band(), signal());
@@ -299,6 +307,7 @@ describe('ui.render through the real QuickJS worker', () => {
       'mod-0: ui.render (AbovePrompt): Box borderStyle "wavy" is not a border style (the styles are single, double, round, bold, singleDouble, doubleSingle, classic, arrow, dashed, quote); the Box is drawn with no border',
       'mod-0: ui.render (AbovePrompt): 100005 characters of text are drawn up to the first 100000',
     ]);
+    // Another border and a longer text are the same kinds, told already.
     expect((await runtime.render(band(), signal())).notes).toEqual([]);
   });
 
