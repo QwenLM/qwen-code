@@ -1222,27 +1222,42 @@ jobs:
         env:
           LINT_HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
         run: |-
-          # Blobless: `Report test growth` may already have fetched the merge
-          # base with --filter=blob:none, and a plain fetch then dies resolving
-          # thin-pack deltas against blobs this checkout lacks. lint-scope
-          # reads only commits and trees.
+          # Blobless: an earlier blobless merge-base fetch leaves this
+          # checkout without those blobs, and lint-scope reads only commits and
+          # trees anyway.
           partial=(-c extensions.partialClone=origin -c remote.origin.promisor=true)
           git "${partial[@]}" fetch --no-tags --depth=100 --filter=blob:none \
             origin "${LINT_BASE_SHA}" "${LINT_HEAD_SHA}"
-          # Deepen until Git can prove the merge base. A fixed 100-commit
-          # window expires in about a day at this merge rate, after which every
-          # longer-lived PR silently paid for a full scan; each deepen is
-          # blobless, so the extra transfer is trees, not the whole pack.
+          # Deepen until the scope's OWN acceptance holds, not just until
+          # `merge-base` exits 0: lint-scope also rejects a shallow boundary
+          # above the merge base, which a branch that merged the base tip has.
+          # Ambiguity cannot be fixed by deepening, so it stops the loop.
+          history_usable() {
+            local merge_base above shallow
+            merge_base="$(git merge-base --all "${LINT_BASE_SHA}" HEAD 2>/dev/null)" || return 1
+            case "${merge_base}" in
+              '') return 1 ;;
+              *$'\n'*) return 0 ;;
+            esac
+            [ "$(git rev-parse --is-shallow-repository)" = 'true' ] || return 0
+            shallow="$(git rev-parse --git-path shallow)"
+            above="$(git rev-list "${merge_base}..HEAD" "${merge_base}..${LINT_BASE_SHA}")" || return 1
+            ! grep -qxF -f "${shallow}" <<< "${above}"
+          }
           for _attempt in 1 2 3; do
-            if git merge-base --all "${LINT_BASE_SHA}" HEAD >/dev/null 2>&1; then
-              break
-            fi
+            if history_usable; then break; fi
             git "${partial[@]}" fetch --no-tags --deepen=300 --filter=blob:none \
               origin "${LINT_BASE_SHA}" "${LINT_HEAD_SHA}" || break
           done
           # Recorded on the remote by the filtered fetch; later fetches in this
           # checkout must stay ordinary.
           git config --unset remote.origin.partialclonefilter || true
+          # The two give-up paths (cap, aborted deepen) otherwise look identical
+          # downstream, where the remedy for one is wrong for the other.
+          if ! history_usable; then
+            echo "::warning::incremental lint history: ${_attempt} deepen(s), base depth $(git rev-list --count "${LINT_BASE_SHA}") — history still unusable"
+            echo "- Incremental lint history: ${_attempt} deepen(s), base depth $(git rev-list --count "${LINT_BASE_SHA}") — history still unusable" >>"${GITHUB_STEP_SUMMARY}"
+          fi
 
       # Avoid setup-node downloads on ECS, where nodejs.org may be unreachable
       # through the egress proxy; reuse the machine's Node instead.

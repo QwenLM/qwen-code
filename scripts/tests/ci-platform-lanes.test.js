@@ -678,6 +678,16 @@ describe('post-merge push lane', () => {
     // 100-commit depth expires in about a day and every longer-lived PR paid
     // for a full scan. The deepen retry is what keeps them incremental.
     expect(fetchCode).toContain('--deepen=');
+    // Pin the mechanism, not the flag: each of these can be deleted while a
+    // bare `--deepen=` substring survives.
+    expect(fetchCode).toContain(
+      'fetch --no-tags --deepen=300 --filter=blob:none',
+    );
+    expect(fetchCode).toContain('git merge-base --all "${LINT_BASE_SHA}" HEAD');
+    expect(fetchCode).toContain('if history_usable; then break; fi');
+    expect(fetchCode).toContain('|| break');
+    expect(fetchCode).toMatch(/for _attempt in 1 2 3/);
+    expect(fetchCode).toContain('Incremental lint history:');
   });
 
   it("pins the disk-pressure collector's upload-artifact revision", () => {
