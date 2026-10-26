@@ -147,6 +147,9 @@ These are required serial follow-ups, not implemented by slice 1:
    commit proof. Renaming a transcript directly from its journal adapter violates
    the current lease's identity proof. Publish the native snapshot durably before
    advancing a new native replay floor, separate from context-summary coverage.
+   [PR4's local design](2026-10-26-managed-local-journal-snapshots.md) implements
+   a one-time sealed-resume conversion with the complete prefix retained; it
+   does not implement rotation, GC, compact state or bounded memory/storage.
 5. **Authority window:** add durable historical lookup/read-through and migrate
    synchronous sequence-1 readers before eviction. Bound `transactions`, event
    IDs, receipt/checkpoint/domain/extension indexes, Actions, and extension
