@@ -183,14 +183,14 @@ public class ManagedNativeJournalSnapshots {
                 + ManagedSchemaTime.SQL_NOW + " FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind = 'JOURNAL'"
                 + " AND owner_key = ? AND owner_revision = journal_revision AND journal_revision <= ?"
                 + " GROUP BY resource_key, resource_id";
-        int copied = jdbc.update(connection -> {
-            var statement = connection.prepareStatement(copy);
-            statement.setQueryTimeout(2);
-            return statement;
-        }, new org.springframework.jdbc.core.ArgumentPreparedStatementSetter(new Object[] {
+        var arguments = new org.springframework.jdbc.core.ArgumentPreparedStatementSetter(new Object[] {
             scope, owner, revision, ManagedSchemaKeys.identity(tenant), ManagedSchemaKeys.identity(request.workspaceId()),
             ManagedSchemaKeys.identity(session), scope, scope, revision
-        }));
+        });
+        int copied = jdbc.update(copy, statement -> {
+            statement.setQueryTimeout(2);
+            arguments.setValues(statement);
+        });
         require(copied == resourceCount, "managed_session_snapshot_corrupt");
         pin(scope, owner, revision, stored, null, tenant, request.workspaceId(), session);
         sessions.lockSnapshotWriter(tenant, session, token, request);
