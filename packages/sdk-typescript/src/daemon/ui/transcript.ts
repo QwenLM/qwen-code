@@ -909,6 +909,11 @@ function appendTextDelta(
   if (parentId != null) {
     (block as DaemonTextTranscriptBlock).parentToolCallId = parentId;
   }
+  const eventAgent =
+    'agent' in event ? (event as DaemonUiTextEvent).agent : undefined;
+  if (eventAgent) {
+    (block as DaemonTextTranscriptBlock).agent = eventAgent;
+  }
   appendBlock(state, block);
 
   if (parentMap && parentId != null) {
@@ -1162,6 +1167,12 @@ function upsertToolBlock(
     if (event.subagentType && !existing.subagentType) {
       existing.subagentType = event.subagentType;
     }
+    // Same first-wins adoption as subagentType: a replayed result frame
+    // carries the identity its start frame never had — persistence keeps
+    // it only on the closing task_execution display.
+    if (event.agent && !existing.agent) {
+      existing.agent = event.agent;
+    }
     state.retainedBytes += estimateBlockBytes(existing) - bytesBefore;
     updateCurrentToolPointer(state, event.toolCallId, event.status);
     return;
@@ -1231,6 +1242,7 @@ function upsertToolBlock(
       ? { parentToolCallId: event.parentToolCallId }
       : {}),
     ...(event.subagentType ? { subagentType: event.subagentType } : {}),
+    ...(event.agent ? { agent: event.agent } : {}),
     ...(parentBlockId ? { parentBlockId } : {}),
   };
   appendBlock(state, block);
