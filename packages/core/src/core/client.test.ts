@@ -2746,6 +2746,42 @@ describe('Gemini Client (client.ts)', () => {
       expect(setTools).toHaveBeenCalledWith(tools);
     });
 
+    it('leaves the todo reminder to a host that runs its own tool-call guards', async () => {
+      // The prompt's first round makes its tool-result rounds the turn's own.
+      await runTurn(
+        SendMessageType.UserQuery,
+        [{ text: 'hello' }],
+        'prompt-tool-result',
+        { toolLoopGuardsByHost: true },
+      );
+      todoReminder('run tests');
+      vi.mocked(mockConfig.takeActiveTodoReminder).mockClear();
+      vi.spyOn(client['loopDetector'], 'takeLoopReminder').mockReturnValue(
+        'LOOP_REMINDER',
+      );
+      vi.spyOn(client, 'consumeManagedAutoMemoryRecall').mockResolvedValue({
+        prompt: 'MEMORY_RECALL',
+      } as never);
+      vi.spyOn(client, 'commitManagedAutoMemoryRecallDelivery').mockReturnValue(
+        undefined,
+      );
+
+      await runTurn(
+        SendMessageType.ToolResult,
+        [fnResponse('read_file', { ok: true })],
+        'prompt-tool-result',
+        { toolLoopGuardsByHost: true },
+      );
+
+      expect(mockConfig.takeActiveTodoReminder).not.toHaveBeenCalled();
+      expect(client.consumeManagedAutoMemoryRecall).toHaveBeenCalledWith(
+        'tool_result',
+      );
+      expect(lastRequest()).toEqual(
+        expect.arrayContaining([{ text: 'LOOP_REMINDER' }, 'MEMORY_RECALL']),
+      );
+    });
+
     it('carries active todos after tool results and clears them for new work', async () => {
       const reminder = todoReminder('run tests');
 
@@ -2798,6 +2834,33 @@ describe('Gemini Client (client.ts)', () => {
       expect(mockConfig.startActiveTodoWorkChain).toHaveBeenCalledWith(
         'prompt-retry',
         'prompt-userQuery',
+      );
+    });
+
+    it('leaves the user message record and work chain to a host that did both', async () => {
+      const recordUserMessage = vi.fn();
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+        recordUserMessage,
+        recordAttributionSnapshot: vi.fn(),
+        recordFileHistorySnapshot: vi.fn(),
+      } as unknown as ReturnType<Config['getChatRecordingService']>);
+
+      await runTurn(
+        SendMessageType.UserQuery,
+        [{ text: 'hello' }],
+        'prompt-host',
+        { userTurnRecordedByHost: true },
+      );
+
+      expect(recordUserMessage).not.toHaveBeenCalled();
+      expect(mockConfig.startActiveTodoWorkChain).not.toHaveBeenCalled();
+
+      await runTurn(SendMessageType.Retry, [{ text: 'hello' }], 'prompt-retry');
+
+      // A retry still continues the chain the host's prompt opened.
+      expect(mockConfig.startActiveTodoWorkChain).toHaveBeenCalledWith(
+        'prompt-retry',
+        'prompt-host',
       );
     });
 
@@ -7262,6 +7325,30 @@ Other open files:
       );
     });
 
+    it('recalls with the memoryRecallQuery a host gives instead of the expanded request', async () => {
+      mockMemoryManager.recall.mockResolvedValue(noRecall());
+      mockTurnRunFn.mockReturnValue(textTurn('Hello'));
+      installChat();
+
+      await run(
+        [
+          { text: 'fix the bug' },
+          { text: '--- src/big.ts ---\nexport const big = 1;' },
+        ],
+        'prompt-id-recall-query',
+        {
+          type: SendMessageType.UserQuery,
+          memoryRecallQuery: 'fix the bug',
+        },
+      );
+
+      expect(mockMemoryManager.recall).toHaveBeenCalledWith(
+        '/test/project/root',
+        'fix the bug',
+        expect.anything(),
+      );
+    });
+
     it('should not exclude memories that were only surfaced as metadata', async () => {
       mockMemoryManager.recall
         .mockResolvedValueOnce({
@@ -7621,6 +7708,27 @@ Other open files:
     const stopped = () => ({
       type: LlmEventType.Finished,
       value: { reason: 'STOP' },
+    });
+
+    it('leaves the interaction span to a host that keeps one open', async () => {
+      const promptId = 'prompt-host-span';
+      ownerFor(promptId);
+      mockTurnRunFn.mockReturnValueOnce(
+        turnStream(toolCallRequest('call-1', 'read_file', {}, promptId)),
+      );
+
+      await run([{ text: 'use a tool' }], promptId, {
+        type: SendMessageType.UserQuery,
+        interactionSpanByHost: true,
+      });
+      mockTurnRunFn.mockReturnValueOnce(textTurn('done'));
+      await run([fnResponse('read_file', { ok: true })], promptId, {
+        type: SendMessageType.ToolResult,
+        interactionSpanByHost: true,
+      });
+
+      expect(tel.startInteractionSpan).not.toHaveBeenCalled();
+      expect(tel.endInteractionSpan).not.toHaveBeenCalled();
     });
 
     it('keeps one interaction open across multiple tool-result continuations', async () => {
@@ -8802,6 +8910,31 @@ Other open files:
           toolCallLimit: 2,
         },
       });
+    });
+
+    it('leaves the tool-call guards to a host that runs its own', async () => {
+      // Past an explicit cap of 2, and an alternating pattern for the
+      // heuristics, which are on here.
+      vi.mocked(mockConfig.getMaxToolCallsPerTurn).mockReturnValue(2);
+      vi.mocked(mockConfig.isMaxToolCallsPerTurnExplicit).mockReturnValue(true);
+      vi.spyOn(client['config'], 'getSkipLoopDetection').mockReturnValue(false);
+      const calls = Array.from({ length: 10 }, (_, i) =>
+        toolCallRequest(`call-${i}`, 'read_file', { path: i % 2 ? 'a' : 'b' }),
+      );
+      mockTurnRunFn.mockReturnValueOnce(turnStream(...calls));
+      installChat();
+
+      const events = await run([{ text: 'read the files' }], 'prompt-cap', {
+        type: SendMessageType.UserQuery,
+        toolLoopGuardsByHost: true,
+      });
+
+      expect(events).not.toContainEqual(
+        expect.objectContaining({ type: LlmEventType.LoopDetected }),
+      );
+      expect(
+        events.filter((event) => event.type === LlmEventType.ToolCallRequest),
+      ).toHaveLength(10);
     });
 
     it('always-on consecutive halt clears all pending calls (uniform with the turn cap)', async () => {
@@ -12047,6 +12180,53 @@ Other open files:
         });
       });
 
+      it('asks for tool call preparations in a blocking Stop hook continuation too', async () => {
+        installMessageBus(blockStopOnce(), 'Stop');
+        notDoneChat();
+        mockTurnRunFn.mockImplementation(() =>
+          (async function* () {
+            yield { type: LlmEventType.Content, value: 'not done' };
+          })(),
+        );
+
+        await run([{ text: 'Hi' }], 'prompt-stop-hook-preparations', {
+          type: SendMessageType.UserQuery,
+          toolCallPreparations: true,
+        });
+
+        expect(mockTurnConstructorFn).toHaveBeenCalledTimes(2);
+        expect(mockTurnConstructorFn.mock.calls.map((args) => args[6])).toEqual(
+          [true, true],
+        );
+      });
+
+      it('leaves the Stop hook and the memory tasks to a host that runs it after the round', async () => {
+        const request = blockStopOnce();
+        installMessageBus(request, 'Stop');
+        notDoneChat();
+        mockTurnRunFn.mockImplementation(() =>
+          (async function* () {
+            yield { type: LlmEventType.Content, value: 'not done' };
+          })(),
+        );
+        const memoryTasks = vi.spyOn(
+          client,
+          'runManagedAutoMemoryBackgroundTasks',
+        );
+
+        await run([{ text: 'Hi' }], 'prompt-stop-hook-by-host', {
+          type: SendMessageType.UserQuery,
+          stopHookRunByHost: true,
+        });
+
+        expect(mockTurnRunFn).toHaveBeenCalledOnce();
+        expect(request).not.toHaveBeenCalledWith(
+          expect.objectContaining({ eventName: 'Stop' }),
+          expect.anything(),
+        );
+        expect(memoryTasks).not.toHaveBeenCalled();
+      });
+
       it('gives a blocking Stop hook continuation a fresh exploration phase', async () => {
         // The nested restart is submitted with `type: SendMessageType.Hook`,
         // which is not an interaction-starting type, so the reset beside the
@@ -12571,6 +12751,30 @@ Other open files:
         });
       });
 
+      it("gives a tool-result request's hook the send's signal", async () => {
+        const mockMessageBus = promptSubmitBus({ output: undefined });
+        const controller = new AbortController();
+
+        await run(
+          [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'read_file',
+                response: { output: 'body' },
+              },
+            },
+          ],
+          'prompt-tool-result-signal',
+          { type: SendMessageType.ToolResult },
+          controller.signal,
+        );
+
+        const [request] = mockMessageBus.request.mock.calls[0];
+        expect(request.eventName).toBe('UserPromptSubmit');
+        expect(request.signal).toBe(controller.signal);
+      });
+
       describe('admission before expansion', () => {
         const submitCalls = (bus: { request: Mock }) =>
           bus.request.mock.calls.filter(
@@ -12879,6 +13083,26 @@ Other open files:
           },
           'prompt-hook-context-dedup',
         );
+      });
+
+      it('still appends an unchanged block to a request with no parts of its own', async () => {
+        installHistoryChat([
+          {
+            role: 'user',
+            parts: [
+              { text: 'earlier prompt' },
+              createUserPromptSubmitContextPart('extra hook context'),
+            ],
+          },
+        ]);
+        promptSubmitBus(extraHookContext());
+        mockTurnRunFn.mockReturnValue(textTurn('ok'));
+
+        // An ACP prompt whose only block was dropped resolves to no parts;
+        // the block is then what keeps the request non-empty.
+        await run([], 'prompt-hook-context-empty');
+
+        expect(getLastTurnRequestText()).toContain('extra hook context');
       });
 
       it('still appends when caller-authored tagged text merely matches in shape', async () => {
@@ -13709,6 +13933,16 @@ Other open files:
         await collectStream(SendMessageType.UserQuery);
 
         expect(recordFileHistorySnapshot).toHaveBeenCalledWith(latestSnapshot);
+      });
+
+      it('leaves the snapshot to a host that recorded the user turn', async () => {
+        await run([{ text: 'user' }], 'prompt-host', {
+          type: SendMessageType.UserQuery,
+          userTurnRecordedByHost: true,
+        });
+
+        expect(mockFileHistoryService.makeSnapshot).not.toHaveBeenCalled();
+        expect(recordFileHistorySnapshot).not.toHaveBeenCalled();
       });
 
       it('does not call makeSnapshot for ToolResult and Retry turns', async () => {
