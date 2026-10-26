@@ -1264,6 +1264,8 @@ export interface WebShellProps {
    * needs them. Plan must be explicitly included.
    */
   composerToolbarActions?: readonly ComposerToolbarAction[];
+  /** Composer presentation shared by the main chat, split panes, and side tasks. */
+  composerVariant?: 'default' | 'simple';
   /** Optionally filter main-model entries without changing shared defaults. */
   mainModelFilter?: (model: ModelDialogModel) => boolean;
   /** Stack completion details vertically for narrow embedded hosts. */
@@ -3125,6 +3127,7 @@ export function App({
   messageTurnOutputs,
   shellRef,
   composerToolbarActions,
+  composerVariant = 'default',
   mainModelFilter,
   compactComposerOverlays = false,
   autoSubmitSlashCommands = false,
@@ -3360,6 +3363,7 @@ export function App({
       artifact,
       askUserFreeTextLabel,
       composerTagIcons,
+      composerVariant,
       builtinAtProviders,
       atProviders,
       renderToolHeaderExtra,
@@ -3393,6 +3397,7 @@ export function App({
       artifact,
       askUserFreeTextLabel,
       composerTagIcons,
+      composerVariant,
       builtinAtProviders,
       atProviders,
       renderToolHeaderExtra,

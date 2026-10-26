@@ -415,6 +415,7 @@ daemon 参数的完整含义和配置方式见
 | `onSessionArtifactsChange` | `(change: WebShellSessionArtifactsChange) => void`                                                                                    | Session Artifact 初始恢复或变化后返回当前完整快照与 turn 投影                                                                                  |
 | `onAssistantTurnSettled`   | `(event: WebShellAssistantTurnSettledEvent) => void`                                                                                  | daemon 权威终态提交后触发；多个 provider 可能重复上报，宿主按 `(sessionId, promptId)` 去重                                                     |
 | `settings`                 | `WebShellSettingsOptions`                                                                                                             | 可选。控制原生 `/settings` 页面的呈现；见 [原生设置呈现](#原生设置呈现)。                                                                      |
+| `composerVariant`          | `'default' \| 'simple'`                                                                                                               | 输入框展示模式；默认 `default`，`simple` 使用胶囊形简洁输入框，适用于主聊天、分屏和侧任务。                                                    |
 
 宿主可以通过 `onContextUsageOpen?: (sessionId: string) => void` 接管上下文
 详情的打开操作：
@@ -482,6 +483,28 @@ load/catch-up 结束；同 Session 短暂断线保留去重基线并主动对账
 
 隐藏后，Sidebar 的会话目录固定查询 `sourceType: "default"`；独立 WebShell 和未配置
 该选项的宿主仍默认展示来源切换。
+
+### 简洁输入框
+
+通过 `composerVariant="simple"` 启用胶囊形输入框，适用于 `WebShell` 和
+`WebShellWithProviders`：
+
+```tsx
+<WebShellWithProviders composerVariant="simple" />
+<WebShell composerVariant="simple" />
+```
+
+`WebShell` 仍需放在现有 daemon providers 中。省略该属性或传入 `"default"`
+时使用原有输入框；该选项不增加 daemon 配置或持久化设置。
+
+简洁模式在左侧保留 ＋ 菜单，中间为编辑区，右侧显示当前主要操作：有内容时发送，
+语音可用且输入为空时显示已有语音入口，运行中保留停止操作。语音不可用时不显示
+无效麦克风。长文本和附件可展开，继续使用已有文本编辑、输入法、附件和提交行为。
+触屏设备可通过右侧向上按钮原地展开为现有完整移动端输入框，并在完整态收起，切换
+保留文字、附件和编辑器节点，不打开全屏对话框；默认模式及桌面端不新增此按钮。
+工作区、权限模式、模型、上下文及宿主工具栏控件放入 ＋ 菜单的次要操作区域；桌面
+使用下拉菜单，触屏使用抽屉。已有 `composerToolbarActions` 等配置继续决定可选
+操作是否可用，`composerPlaceholders` 占位文字覆盖继续生效。
 
 ### 品牌（白标）
 

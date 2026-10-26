@@ -91,6 +91,7 @@ import {
   ArrowUpIcon,
   ChevronDownIcon,
   ChevronRightIcon,
+  ChevronUpIcon,
   FolderClosedIcon,
   HistoryIcon,
   KeyboardIcon,
@@ -1485,7 +1486,10 @@ export const ChatEditor = memo(
       fileUploadEnabled,
       fileUploadDirectory,
       fileDropAction,
+      composerVariant = 'default',
     } = useWebShellCustomization();
+    const [simpleExpanded, setSimpleExpanded] = useState(false);
+    const isSimple = composerVariant === 'simple' && !simpleExpanded;
     // At-mention provider props win when set (main composer). Split-view
     // ChatPane omits them and falls back to the App-level customization
     // context. (Unlike the providers, file upload control comes ONLY from
@@ -1830,7 +1834,8 @@ export const ChatEditor = memo(
       uploadFiles,
     ]);
     // -- Composer add menu (`+`) ---------------------------------------------
-    const showAddMenuAction = visibleToolbarActions?.includes('addMenu');
+    const showAddMenuAction =
+      isSimple || visibleToolbarActions?.includes('addMenu');
     const getAddMenuWorkspaceActions = useCallback(
       () => core.workspaceActionsRef.current,
       [core.workspaceActionsRef],
@@ -2280,9 +2285,10 @@ export const ChatEditor = memo(
     // Both chips say where the prompt goes rather than how it runs, so a caller
     // can move them out of the toolbar without touching their availability.
     const workspaceChipInToolbar =
-      workspaceSelectVisible && contextChipPlacement === 'toolbar';
+      workspaceSelectVisible &&
+      (isSimple || contextChipPlacement === 'toolbar');
     const gitChipInToolbar =
-      gitBranchVisible && contextChipPlacement !== 'below';
+      gitBranchVisible && (isSimple || contextChipPlacement !== 'below');
     const contextRowVisible =
       contextChipPlacement === 'below' &&
       (workspaceSelectVisible || gitBranchVisible);
@@ -2294,12 +2300,14 @@ export const ChatEditor = memo(
     }, [currentModelLabel, lastConfirmedModelLabel]);
 
     const showWorkspaceSelectLabel =
-      isMobile || toolbarLabelVisibility.workspaceSelect;
-    const showWorkspaceLabel = isMobile || toolbarLabelVisibility.workspace;
-    const showGitBranchLabel = isMobile || toolbarLabelVisibility.gitBranch;
-    const showModeLabel = toolbarLabelVisibility.mode;
-    const showPlanLabel = toolbarLabelVisibility.plan;
-    const showModelLabel = toolbarLabelVisibility.model;
+      isSimple || isMobile || toolbarLabelVisibility.workspaceSelect;
+    const showWorkspaceLabel =
+      isSimple || isMobile || toolbarLabelVisibility.workspace;
+    const showGitBranchLabel =
+      isSimple || isMobile || toolbarLabelVisibility.gitBranch;
+    const showModeLabel = isSimple || toolbarLabelVisibility.mode;
+    const showPlanLabel = isSimple || toolbarLabelVisibility.plan;
+    const showModelLabel = isSimple || toolbarLabelVisibility.model;
     // One renderer per chip so the toolbar, the row under the composer, and the
     // mobile row share them: the toolbar drops a label when its width budget is
     // tight, while the rows have a budget of their own and always keep it.
@@ -2361,6 +2369,7 @@ export const ChatEditor = memo(
     const mobileVoiceActive = isMobile && voiceActive;
 
     useLayoutEffect(() => {
+      if (isSimple) return undefined;
       const toolbar = toolbarRef.current;
       const toolbarLeading = toolbarLeadingRef.current;
       const toolbarRight = toolbarRightRef.current;
@@ -2522,6 +2531,7 @@ export const ChatEditor = memo(
       gitChipInToolbar,
       isRunning,
       modelLabelReady,
+      isSimple,
       isMobile,
       modeLabel,
       planLabel,
@@ -2561,6 +2571,644 @@ export const ChatEditor = memo(
       </>
     );
 
+    const renderAddMenu = (toolbar?: ReactNode) =>
+      (showAddMenuAction ||
+        (isMobile && showCommandAction && !core.shellMode)) && (
+        <AddMenu
+          toolbar={toolbar}
+          onLiveVoice={
+            isSimple && liveVoiceSupported && showToolbarAction('voice')
+              ? () => setLiveVoiceOpen(true)
+              : undefined
+          }
+          key={JSON.stringify([sessionId, atWorkspaceCwd, Boolean(disabled)])}
+          disabled={disabled}
+          commandsOnly={!showAddMenuAction}
+          mobileActions={
+            isMobile
+              ? {
+                  commands,
+                  categoryOrder: slashCommandCategoryOrder,
+                  onHistory: core.searchState.openHistorySearch,
+                  onToggleShell: () => {
+                    core.toggleShellMode();
+                    core.focus();
+                  },
+                  shellMode: core.shellMode,
+                  onLiveVoice:
+                    liveVoiceSupported && showToolbarAction('voice')
+                      ? () => setLiveVoiceOpen(true)
+                      : undefined,
+                }
+              : undefined
+          }
+          availabilityKey={JSON.stringify([
+            fileUploadEnabled === false,
+            attachmentsEnabled,
+            uploadEnabled,
+            Boolean(
+              core.workspaceActionsRef.current?.globWorkspace ??
+                core.workspaceActionsRef.current?.listDirectory,
+            ),
+            Boolean(core.workspaceActionsRef.current?.loadExtensionsStatus),
+            Boolean(core.workspaceActionsRef.current?.loadMcpStatus),
+            Boolean(onSkillsOpenChange) || Boolean(skills?.length),
+          ])}
+          addFileAvailable={attachmentsEnabled}
+          uploadAvailable={uploadEnabled}
+          onAddFiles={handleAddMenuFiles}
+          onFilePickerCancel={focusComposer}
+          onInsertReference={handleAddMenuInsertReference}
+          onPrependSkill={handleAddMenuPrependSkill}
+          getWorkspaceActions={getAddMenuWorkspaceActions}
+          skills={skills ?? []}
+          onSkillsOpenChange={
+            onSkillsOpenChange ? setSkillSubmenuOpen : undefined
+          }
+          skillsLoading={skillsLoading}
+          skillsLoadError={skillsLoadError}
+          skillsLoaded={skillsLoaded}
+          plan={
+            showPlanInAddMenu
+              ? {
+                  checked: planMode,
+                  disabled: modeControlsDisabled,
+                  onToggle: handlePlanMenuToggle,
+                }
+              : undefined
+          }
+        />
+      );
+
+    const toolbarLeading = (
+      <div
+        ref={toolbarLeadingRef}
+        className={styles.toolbarLeading}
+        data-web-shell-toolbar-leading
+      >
+        {ToolbarStart && (
+          <div ref={toolbarStartRef} className={styles.toolbarStart}>
+            <ToolbarStart
+              disabled={disabled}
+              isRunning={isRunning}
+              currentMode={currentMode}
+              currentModel={currentModel}
+              sessionName={sessionName}
+            />
+          </div>
+        )}
+        <div className={styles.toolbarLeft}>
+          {!isSimple && renderAddMenu()}
+          {(isSimple || !isMobile) && workspaceControls(true)}
+          {showModeAction && (
+            <div
+              className={`${styles.dropdownWrapper} ${
+                showModeLabel ? '' : styles.dropdownWrapperCompact
+              }`}
+            >
+              <ToolbarPopover
+                compact={compactOverlays}
+                open={modeDropdownOpen}
+                items={modeItems}
+                activeId={currentMode}
+                onOpenChange={(open) => {
+                  setModeDropdownOpen(open);
+                  if (open) setModelDropdownOpen(false);
+                }}
+                onSelect={handleModeSelect}
+                tooltip={modeLabel}
+                trigger={
+                  <button
+                    className={`${styles.toolBtn} ${styles.modeToolBtn} ${
+                      showModeLabel ? '' : styles.toolBtnCompact
+                    }`}
+                    data-web-shell-mode-button
+                    disabled={modeControlsDisabled}
+                    data-web-shell-toolbar-popover-trigger
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      core.closeSlashMenu();
+                      core.closeAtMenu();
+                    }}
+                    aria-label={t('status.mode')}
+                  >
+                    <span className={styles.toolBtnModeIcon}>
+                      <ModeIcon mode={currentMode} />
+                    </span>
+                    {showModeLabel && (
+                      <span className={styles.toolBtnText}>{modeLabel}</span>
+                    )}
+                    <span className={styles.toolBtnArrow}>
+                      <ChevronDownIcon />
+                    </span>
+                  </button>
+                }
+              />
+            </div>
+          )}
+          {showPlanChip && (
+            <TooltipProvider delayDuration={300}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    className={`${styles.toolBtn} ${styles.planChip}`}
+                    data-web-shell-plan-control
+                    data-web-shell-plan-button
+                    data-web-shell-plan-chip
+                    data-labelled={showPlanLabel ? '' : undefined}
+                    // Always true, since the chip renders only while
+                    // Plan is on; it is what tells a host reading
+                    // these hooks that the control is pressed.
+                    aria-pressed={planMode}
+                    aria-label={planLabel}
+                    aria-describedby={planDescriptionId}
+                    // Not the native attribute: both hosts go busy
+                    // inside the chip's own click, and a focused button
+                    // that becomes disabled loses focus to the body
+                    // there and then.
+                    aria-disabled={modeControlsDisabled || undefined}
+                    onFocus={() => {
+                      planChipHadFocusRef.current = true;
+                    }}
+                    onBlur={() => {
+                      planChipHadFocusRef.current = false;
+                    }}
+                    onClick={() => {
+                      // Inert while busy; the click still reaches the
+                      // composer surface, as one on a bare part of the
+                      // toolbar would.
+                      if (modeControlsDisabled) return;
+                      onTogglePlan?.();
+                      // The chip unmounts once Plan is off, so it
+                      // hands focus on rather than dropping it to the
+                      // body. The composer surface this click also
+                      // reaches would focus too; asking here does not
+                      // leave the handoff to that. Propagation is left
+                      // alone so the surface still closes the
+                      // permission and model menus and the touch
+                      // quick actions, as it did for the switch this
+                      // replaces.
+                      core.focus();
+                    }}
+                  >
+                    {/* The close mark shares the icon slot and takes
+                                it over on hover or keyboard focus, so a
+                                mouse user sees no × at rest and the chip
+                                keeps its width when the mark appears. */}
+                    <span
+                      className={`${styles.toolBtnModeIcon} ${styles.planChipIcon}`}
+                    >
+                      <ModeIcon mode="plan" />
+                      <span className={styles.planChipClose} aria-hidden="true">
+                        <XIcon size={12} strokeWidth={2} />
+                      </span>
+                    </span>
+                    {showPlanLabel && (
+                      <span className={styles.toolBtnText}>{planLabel}</span>
+                    )}
+                  </button>
+                </TooltipTrigger>
+                <span id={planDescriptionId} className="sr-only">
+                  {planTooltip}
+                </span>
+                <TooltipContent side="top">{planTooltip}</TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          )}
+          {showPlanSwitch && (
+            <TooltipProvider delayDuration={300}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <label
+                    className={`${styles.toolBtn} ${styles.planControl}`}
+                    data-web-shell-plan-control
+                    data-disabled={modeControlsDisabled ? '' : undefined}
+                  >
+                    {showPlanLabel ? (
+                      <span className={styles.toolBtnText}>{planLabel}</span>
+                    ) : (
+                      <span className={styles.toolBtnModeIcon}>
+                        <ModeIcon mode="plan" />
+                      </span>
+                    )}
+                    <Switch
+                      size="sm"
+                      className="after:inset-x-0"
+                      data-web-shell-plan-button
+                      aria-label={planLabel}
+                      aria-describedby={planDescriptionId}
+                      checked={planMode}
+                      disabled={modeControlsDisabled}
+                      onCheckedChange={onTogglePlan}
+                    />
+                  </label>
+                </TooltipTrigger>
+                <span id={planDescriptionId} className="sr-only">
+                  {planTooltip}
+                </span>
+                <TooltipContent side="top">{planTooltip}</TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          )}
+          {showModelAction && (
+            <div
+              className={`${styles.dropdownWrapper} ${
+                showModelLabel ? '' : styles.dropdownWrapperCompact
+              }`}
+            >
+              <ToolbarPopover
+                compact={compactOverlays}
+                open={modelDropdownOpen}
+                items={modelItems}
+                activeId={currentModel}
+                onOpenChange={(open) => {
+                  setModelDropdownOpen(open);
+                  if (open) setModeDropdownOpen(false);
+                }}
+                onSelect={handleModelSelect}
+                tooltip={modelLabel}
+                showCheck
+                searchable
+                searchLabel={t('common.search')}
+                noResultsLabel={(query) => t('model.noMatch', { query })}
+                submenu={
+                  showReasoningOptions
+                    ? {
+                        triggerLabel: modelLabel,
+                        triggerAriaLabel: `${t('model.select')}: ${modelLabel}`,
+                        sectionLabel: t('model.section'),
+                      }
+                    : undefined
+                }
+                header={
+                  showReasoningOptions && reasoning ? (
+                    <ModelReasoningControls
+                      reasoning={reasoning}
+                      onSelect={onSelectReasoningEffort}
+                    />
+                  ) : undefined
+                }
+                trigger={
+                  <button
+                    className={`${styles.toolBtn} ${styles.modelToolBtn} ${
+                      showModelLabel ? '' : styles.toolBtnCompact
+                    }`}
+                    data-web-shell-model-button
+                    data-web-shell-toolbar-popover-trigger
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      core.closeSlashMenu();
+                      core.closeAtMenu();
+                    }}
+                    aria-label={`${t('model.select')}: ${normalizedModelChipLabel}`}
+                    title={normalizedModelChipLabel}
+                  >
+                    <span className={styles.toolBtnModelIcon}>
+                      <ModelIcon />
+                    </span>
+                    {showModelLabel && (
+                      <span className={styles.toolBtnText}>
+                        {normalizedModelChipLabel}
+                      </span>
+                    )}
+                    <span className={styles.toolBtnArrow}>
+                      <ChevronDownIcon />
+                    </span>
+                  </button>
+                }
+              />
+            </div>
+          )}
+          {ToolbarEnd && (
+            <div ref={toolbarEndRef} className={styles.toolbarEnd}>
+              <ToolbarEnd
+                disabled={disabled}
+                isRunning={isRunning}
+                currentMode={currentMode}
+                currentModel={currentModel}
+                sessionName={sessionName}
+              />
+            </div>
+          )}
+        </div>
+      </div>
+    );
+
+    const toolbarSecondary = (
+      <>
+        {ToolbarRight && (
+          <div
+            ref={toolbarRightCustomRef}
+            className={styles.toolbarRightCustom}
+            data-hide-during-mobile-voice
+          >
+            <ToolbarRight
+              disabled={disabled}
+              isRunning={isRunning}
+              currentMode={currentMode}
+              currentModel={currentModel}
+              sessionName={sessionName}
+            />
+          </div>
+        )}
+        {!isMobile &&
+          showChatWidthToggle &&
+          (isSimple || widthToggleFits) &&
+          showToolbarAction('widthMode') && (
+            <button
+              className={`${styles.toolBtn} ${styles.widthModeBtn}`}
+              data-hide-during-mobile-voice
+              onClick={(e) => {
+                e.stopPropagation();
+                onChatWidthModeChange?.(
+                  chatWidthMode === 'wide' ? '1000' : 'wide',
+                );
+              }}
+              disabled={!onChatWidthModeChange}
+              aria-label={
+                chatWidthMode === 'wide'
+                  ? t('settings.option.ui.chatWidth.1000')
+                  : t('settings.option.ui.chatWidth.wide')
+              }
+              title={
+                chatWidthMode === 'wide'
+                  ? t('settings.option.ui.chatWidth.1000')
+                  : t('settings.option.ui.chatWidth.wide')
+              }
+              data-tooltip={
+                chatWidthMode === 'wide'
+                  ? t('settings.option.ui.chatWidth.1000')
+                  : t('settings.option.ui.chatWidth.wide')
+              }
+            >
+              <span className={styles.toolBtnIcon}>
+                <WidthModeIcon mode={chatWidthMode} />
+              </span>
+            </button>
+          )}
+        {showToolbarAction('contextUsage') &&
+          (contextUsageAlwaysVisible ||
+            (contextWindow > 0 && tokenCount > 0)) && (
+            <ContextUsagePopover
+              key={sessionId}
+              tokenCount={tokenCount}
+              contextWindow={contextWindow}
+              controls={contextUsageControls}
+              onOpenDetails={onOpenContextUsage}
+              showSnapshotHint={Boolean(onShowContextUsage)}
+            >
+              <button
+                className={`${styles.toolBtn} ${styles.contextUsageBtn}`}
+                data-hide-during-mobile-voice
+                data-web-shell-context-usage
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onShowContextUsage?.();
+                }}
+                disabled={!onShowContextUsage}
+                aria-label={
+                  contextWindow > 0 && tokenCount > 0
+                    ? t('status.contextUsed', {
+                        pct: ((tokenCount / contextWindow) * 100).toFixed(1),
+                      })
+                    : t('contextUsage.title')
+                }
+              >
+                <span className={styles.toolBtnIcon}>
+                  <ContextUsageRing
+                    pct={
+                      contextWindow > 0 ? (tokenCount / contextWindow) * 100 : 0
+                    }
+                  />
+                </span>
+                {contextWindow > 0 && tokenCount > 0 && (
+                  <span
+                    className={styles.contextUsagePercentage}
+                    data-level={getContextUsageLevel(
+                      (tokenCount / contextWindow) * 100,
+                    )}
+                    aria-hidden="true"
+                  >
+                    {((tokenCount / contextWindow) * 100).toFixed(1)}%
+                  </span>
+                )}
+              </button>
+            </ContextUsagePopover>
+          )}
+        {!isMobile && showCommandAction && (
+          <button
+            type="button"
+            className={`${styles.toolBtn} ${styles.toolBtnCompact}`}
+            data-web-shell-command-button
+            aria-label={t('help.shortcut.commandMenu')}
+            title={t('help.shortcut.commandMenu')}
+            disabled={disabled}
+            onClick={(event) => {
+              event.stopPropagation();
+              if (!core.openSlashMenu()) {
+                core.insertText('/');
+                core.focus();
+              }
+            }}
+          >
+            <span className={styles.toolBtnIcon}>
+              <SlashIcon />
+            </span>
+          </button>
+        )}
+      </>
+    );
+
+    const primaryInput = (
+      <>
+        <div className={styles.editorArea}>
+          {core.shellMode && (
+            <span className={styles.shellPrefix} aria-hidden="true">
+              !
+            </span>
+          )}
+          {core.mobileComposer ? (
+            // Touch devices get a plain textarea instead of CodeMirror:
+            // mobile virtual keyboards and IMEs interact poorly with the
+            // contenteditable editor (#5958). Enter inserts a newline
+            // natively; submission goes through the Send button.
+            <textarea
+              ref={core.mobileComposer.textareaRef}
+              className={styles.mobileTextarea}
+              value={core.mobileComposer.value}
+              onChange={core.mobileComposer.onChange}
+              onFocus={() => setMobileFocused(true)}
+              onBlur={() => {
+                setMobileFocused(false);
+                core.mobileComposer?.onBlur();
+              }}
+              placeholder={core.mobileComposer.placeholder}
+              disabled={core.disabled}
+              rows={1}
+              enterKeyHint="enter"
+              autoCapitalize="off"
+              autoCorrect="off"
+              spellCheck={false}
+              data-web-shell-composer-editor
+            />
+          ) : (
+            <div ref={core.containerRef} data-web-shell-composer-editor />
+          )}
+        </div>
+        <div
+          ref={toolbarRef}
+          className={styles.toolbar}
+          data-mobile-voice-active={mobileVoiceActive || undefined}
+        >
+          {!isSimple && toolbarLeading}
+          <div
+            ref={toolbarRightRef}
+            className={styles.toolbarRight}
+            data-web-shell-simple-idle={
+              isSimple && !core.hasContent && !isRunning && !composerPreparing
+                ? ''
+                : undefined
+            }
+          >
+            {!isSimple && toolbarSecondary}
+            {isMobile && isSimple && (
+              <button
+                type="button"
+                className={styles.toolBtn}
+                data-web-shell-composer-expand
+                aria-label={t('common.expand')}
+                title={t('common.expand')}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setSimpleExpanded(true);
+                  core.focus();
+                }}
+              >
+                <ChevronUpIcon />
+              </button>
+            )}
+            {showToolbarAction('voice') && (
+              <>
+                <LiveVoiceButton
+                  hideInactiveTrigger={
+                    isSimple || (isMobile && Boolean(showAddMenuAction))
+                  }
+                  open={liveVoiceOpen}
+                  onOpenChange={setLiveVoiceOpen}
+                  onSupportedChange={setLiveVoiceSupported}
+                  onRequestFocusFallback={() => {
+                    containerRef.current
+                      ?.querySelector<HTMLButtonElement>(
+                        '[data-testid="composer-add-menu-trigger"]',
+                      )
+                      ?.focus();
+                  }}
+                />
+                <span
+                  data-web-shell-simple-voice={isSimple ? '' : undefined}
+                  hidden={
+                    isSimple && (core.hasContent || isRunning) && !voiceActive
+                  }
+                  style={{ display: !isSimple ? 'contents' : undefined }}
+                >
+                  <VoiceButton
+                    disabled={disabled}
+                    onActiveChange={setVoiceActive}
+                    target={voiceTarget}
+                    statusRevision={voiceStatusRevision}
+                    onInsert={(text) => {
+                      const existing = core.getText();
+                      const sep = existing && !/\s$/.test(existing) ? ' ' : '';
+                      core.insertText(`${sep}${text} `);
+                      core.focus();
+                    }}
+                  />
+                </span>
+              </>
+            )}
+            {(isMobile || isSimple) && isRunning && core.hasContent && (
+              <button
+                type="button"
+                className={`${styles.sendBtn} ${styles.sendBtnRunning}`}
+                disabled={composerPreparing || !onCancel}
+                data-web-shell-composer-stop
+                aria-label={t('composerMobile.stop')}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onCancel?.();
+                }}
+              >
+                <StopIcon />
+              </button>
+            )}
+            <button
+              className={
+                composerPreparing || showCancelButton
+                  ? `${styles.sendBtn} ${styles.sendBtnRunning}${
+                      cancelArmed ? ` ${styles.sendBtnArmed}` : ''
+                    }`
+                  : styles.sendBtn
+              }
+              disabled={
+                composerPreparing
+                  ? true
+                  : showCancelButton
+                    ? !onCancel
+                    : !core.canSubmit
+              }
+              data-web-shell-composer-submit
+              onClick={(e) => {
+                e.stopPropagation();
+                if (composerPreparing) {
+                  return;
+                }
+                if (showCancelButton) {
+                  onCancel?.();
+                  return;
+                }
+                core.submitText();
+              }}
+              aria-label={
+                composerPreparing
+                  ? t('common.loading')
+                  : showCancelButton
+                    ? cancelArmed && !isMobile
+                      ? t('stream.cancelArmed')
+                      : t(isMobile ? 'composerMobile.stop' : 'stream.cancel')
+                    : t('editor.send')
+              }
+              title={
+                isRunning && cancelArmed && !isMobile
+                  ? t('stream.cancelArmed')
+                  : undefined
+              }
+            >
+              {composerPreparing ? (
+                <LoadingIcon />
+              ) : showCancelButton ? (
+                cancelArmed && !isMobile ? (
+                  <span className={styles.escLabel} aria-hidden="true">
+                    Esc
+                  </span>
+                ) : (
+                  <StopIcon />
+                )
+              ) : (
+                <SendIcon />
+              )}
+            </button>
+            <span role="status" aria-live="polite" className={styles.srOnly}>
+              {isRunning && cancelArmed && !isMobile
+                ? t('stream.cancelArmed')
+                : ''}
+            </span>
+          </div>
+        </div>
+      </>
+    );
+
     return (
       <div
         className={`${styles.editorShell} ${
@@ -2570,6 +3218,7 @@ export const ChatEditor = memo(
         }`}
         data-composer
         data-web-shell-composer
+        data-web-shell-composer-variant={isSimple ? 'simple' : 'default'}
         data-web-shell-mobile-composer={isMobile || undefined}
         data-web-shell-compact-composer={compactOverlays ? '' : undefined}
         onDragOver={cancelShellFileDrag}
@@ -3059,6 +3708,7 @@ export const ChatEditor = memo(
               />
             )}
             {isMobile &&
+              !isSimple &&
               !mobileVoiceActive &&
               (workspaceSelectVisible ||
                 workspaceIndicatorVisible ||
@@ -3067,7 +3717,7 @@ export const ChatEditor = memo(
                   {workspaceControls(false)}
                 </div>
               )}
-            {core.mobileComposer && !mobileVoiceActive && (
+            {core.mobileComposer && !isSimple && !mobileVoiceActive && (
               <div
                 className={styles.mobileEditingActions}
                 data-web-shell-mobile-editing-actions
@@ -3122,6 +3772,23 @@ export const ChatEditor = memo(
                   </button>
                 )}
                 <span className={styles.mobileEditingSpacer} />
+                {composerVariant === 'simple' && simpleExpanded && (
+                  <button
+                    type="button"
+                    className={styles.toolBtn}
+                    data-web-shell-composer-collapse
+                    aria-label={t('common.collapse')}
+                    title={t('common.collapse')}
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setSimpleExpanded(false);
+                      core.focus();
+                    }}
+                  >
+                    <ChevronDownIcon />
+                  </button>
+                )}
                 {mobileFocused && (
                   <button
                     type="button"
@@ -3154,627 +3821,17 @@ export const ChatEditor = memo(
                 </button>
               </div>
             )}
-            <div className={styles.editorArea}>
-              {core.shellMode && (
-                <span className={styles.shellPrefix} aria-hidden="true">
-                  !
-                </span>
-              )}
-              {core.mobileComposer ? (
-                // Touch devices get a plain textarea instead of CodeMirror:
-                // mobile virtual keyboards and IMEs interact poorly with the
-                // contenteditable editor (#5958). Enter inserts a newline
-                // natively; submission goes through the Send button.
-                <textarea
-                  ref={core.mobileComposer.textareaRef}
-                  className={styles.mobileTextarea}
-                  value={core.mobileComposer.value}
-                  onChange={core.mobileComposer.onChange}
-                  onFocus={() => setMobileFocused(true)}
-                  onBlur={() => {
-                    setMobileFocused(false);
-                    core.mobileComposer?.onBlur();
-                  }}
-                  placeholder={core.mobileComposer.placeholder}
-                  disabled={core.disabled}
-                  rows={1}
-                  enterKeyHint="enter"
-                  autoCapitalize="off"
-                  autoCorrect="off"
-                  spellCheck={false}
-                  data-web-shell-composer-editor
-                />
-              ) : (
-                <div ref={core.containerRef} data-web-shell-composer-editor />
-              )}
-            </div>
-            <div
-              ref={toolbarRef}
-              className={styles.toolbar}
-              data-mobile-voice-active={mobileVoiceActive || undefined}
-            >
-              <div
-                ref={toolbarLeadingRef}
-                className={styles.toolbarLeading}
-                data-web-shell-toolbar-leading
-              >
-                {ToolbarStart && (
-                  <div ref={toolbarStartRef} className={styles.toolbarStart}>
-                    <ToolbarStart
-                      disabled={disabled}
-                      isRunning={isRunning}
-                      currentMode={currentMode}
-                      currentModel={currentModel}
-                      sessionName={sessionName}
-                    />
-                  </div>
-                )}
-                <div className={styles.toolbarLeft}>
-                  {(showAddMenuAction ||
-                    (isMobile && showCommandAction && !core.shellMode)) && (
-                    <AddMenu
-                      key={JSON.stringify([
-                        sessionId,
-                        atWorkspaceCwd,
-                        Boolean(disabled),
-                      ])}
-                      disabled={disabled}
-                      commandsOnly={!showAddMenuAction}
-                      mobileActions={
-                        isMobile
-                          ? {
-                              commands,
-                              categoryOrder: slashCommandCategoryOrder,
-                              onHistory: core.searchState.openHistorySearch,
-                              onToggleShell: () => {
-                                core.toggleShellMode();
-                                core.focus();
-                              },
-                              shellMode: core.shellMode,
-                              onLiveVoice:
-                                liveVoiceSupported && showToolbarAction('voice')
-                                  ? () => setLiveVoiceOpen(true)
-                                  : undefined,
-                            }
-                          : undefined
-                      }
-                      availabilityKey={JSON.stringify([
-                        fileUploadEnabled === false,
-                        attachmentsEnabled,
-                        uploadEnabled,
-                        Boolean(
-                          core.workspaceActionsRef.current?.globWorkspace ??
-                            core.workspaceActionsRef.current?.listDirectory,
-                        ),
-                        Boolean(
-                          core.workspaceActionsRef.current
-                            ?.loadExtensionsStatus,
-                        ),
-                        Boolean(
-                          core.workspaceActionsRef.current?.loadMcpStatus,
-                        ),
-                        Boolean(onSkillsOpenChange) || Boolean(skills?.length),
-                      ])}
-                      addFileAvailable={attachmentsEnabled}
-                      uploadAvailable={uploadEnabled}
-                      onAddFiles={handleAddMenuFiles}
-                      onFilePickerCancel={focusComposer}
-                      onInsertReference={handleAddMenuInsertReference}
-                      onPrependSkill={handleAddMenuPrependSkill}
-                      getWorkspaceActions={getAddMenuWorkspaceActions}
-                      skills={skills ?? []}
-                      onSkillsOpenChange={
-                        onSkillsOpenChange ? setSkillSubmenuOpen : undefined
-                      }
-                      skillsLoading={skillsLoading}
-                      skillsLoadError={skillsLoadError}
-                      skillsLoaded={skillsLoaded}
-                      plan={
-                        showPlanInAddMenu
-                          ? {
-                              checked: planMode,
-                              disabled: modeControlsDisabled,
-                              onToggle: handlePlanMenuToggle,
-                            }
-                          : undefined
-                      }
-                    />
-                  )}
-                  {!isMobile && workspaceControls(true)}
-                  {showModeAction && (
-                    <div
-                      className={`${styles.dropdownWrapper} ${
-                        showModeLabel ? '' : styles.dropdownWrapperCompact
-                      }`}
-                    >
-                      <ToolbarPopover
-                        compact={compactOverlays}
-                        open={modeDropdownOpen}
-                        items={modeItems}
-                        activeId={currentMode}
-                        onOpenChange={(open) => {
-                          setModeDropdownOpen(open);
-                          if (open) setModelDropdownOpen(false);
-                        }}
-                        onSelect={handleModeSelect}
-                        tooltip={modeLabel}
-                        trigger={
-                          <button
-                            className={`${styles.toolBtn} ${styles.modeToolBtn} ${
-                              showModeLabel ? '' : styles.toolBtnCompact
-                            }`}
-                            data-web-shell-mode-button
-                            disabled={modeControlsDisabled}
-                            data-web-shell-toolbar-popover-trigger
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              core.closeSlashMenu();
-                              core.closeAtMenu();
-                            }}
-                            aria-label={t('status.mode')}
-                          >
-                            <span className={styles.toolBtnModeIcon}>
-                              <ModeIcon mode={currentMode} />
-                            </span>
-                            {showModeLabel && (
-                              <span className={styles.toolBtnText}>
-                                {modeLabel}
-                              </span>
-                            )}
-                            <span className={styles.toolBtnArrow}>
-                              <ChevronDownIcon />
-                            </span>
-                          </button>
-                        }
-                      />
-                    </div>
-                  )}
-                  {showPlanChip && (
-                    <TooltipProvider delayDuration={300}>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <button
-                            type="button"
-                            className={`${styles.toolBtn} ${styles.planChip}`}
-                            data-web-shell-plan-control
-                            data-web-shell-plan-button
-                            data-web-shell-plan-chip
-                            data-labelled={showPlanLabel ? '' : undefined}
-                            // Always true, since the chip renders only while
-                            // Plan is on; it is what tells a host reading
-                            // these hooks that the control is pressed.
-                            aria-pressed={planMode}
-                            aria-label={planLabel}
-                            aria-describedby={planDescriptionId}
-                            // Not the native attribute: both hosts go busy
-                            // inside the chip's own click, and a focused button
-                            // that becomes disabled loses focus to the body
-                            // there and then.
-                            aria-disabled={modeControlsDisabled || undefined}
-                            onFocus={() => {
-                              planChipHadFocusRef.current = true;
-                            }}
-                            onBlur={() => {
-                              planChipHadFocusRef.current = false;
-                            }}
-                            onClick={() => {
-                              // Inert while busy; the click still reaches the
-                              // composer surface, as one on a bare part of the
-                              // toolbar would.
-                              if (modeControlsDisabled) return;
-                              onTogglePlan?.();
-                              // The chip unmounts once Plan is off, so it
-                              // hands focus on rather than dropping it to the
-                              // body. The composer surface this click also
-                              // reaches would focus too; asking here does not
-                              // leave the handoff to that. Propagation is left
-                              // alone so the surface still closes the
-                              // permission and model menus and the touch
-                              // quick actions, as it did for the switch this
-                              // replaces.
-                              core.focus();
-                            }}
-                          >
-                            {/* The close mark shares the icon slot and takes
-                                it over on hover or keyboard focus, so a
-                                mouse user sees no × at rest and the chip
-                                keeps its width when the mark appears. */}
-                            <span
-                              className={`${styles.toolBtnModeIcon} ${styles.planChipIcon}`}
-                            >
-                              <ModeIcon mode="plan" />
-                              <span
-                                className={styles.planChipClose}
-                                aria-hidden="true"
-                              >
-                                <XIcon size={12} strokeWidth={2} />
-                              </span>
-                            </span>
-                            {showPlanLabel && (
-                              <span className={styles.toolBtnText}>
-                                {planLabel}
-                              </span>
-                            )}
-                          </button>
-                        </TooltipTrigger>
-                        <span id={planDescriptionId} className="sr-only">
-                          {planTooltip}
-                        </span>
-                        <TooltipContent side="top">
-                          {planTooltip}
-                        </TooltipContent>
-                      </Tooltip>
-                    </TooltipProvider>
-                  )}
-                  {showPlanSwitch && (
-                    <TooltipProvider delayDuration={300}>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <label
-                            className={`${styles.toolBtn} ${styles.planControl}`}
-                            data-web-shell-plan-control
-                            data-disabled={
-                              modeControlsDisabled ? '' : undefined
-                            }
-                          >
-                            {showPlanLabel ? (
-                              <span className={styles.toolBtnText}>
-                                {planLabel}
-                              </span>
-                            ) : (
-                              <span className={styles.toolBtnModeIcon}>
-                                <ModeIcon mode="plan" />
-                              </span>
-                            )}
-                            <Switch
-                              size="sm"
-                              className="after:inset-x-0"
-                              data-web-shell-plan-button
-                              aria-label={planLabel}
-                              aria-describedby={planDescriptionId}
-                              checked={planMode}
-                              disabled={modeControlsDisabled}
-                              onCheckedChange={onTogglePlan}
-                            />
-                          </label>
-                        </TooltipTrigger>
-                        <span id={planDescriptionId} className="sr-only">
-                          {planTooltip}
-                        </span>
-                        <TooltipContent side="top">
-                          {planTooltip}
-                        </TooltipContent>
-                      </Tooltip>
-                    </TooltipProvider>
-                  )}
-                  {showModelAction && (
-                    <div
-                      className={`${styles.dropdownWrapper} ${
-                        showModelLabel ? '' : styles.dropdownWrapperCompact
-                      }`}
-                    >
-                      <ToolbarPopover
-                        compact={compactOverlays}
-                        open={modelDropdownOpen}
-                        items={modelItems}
-                        activeId={currentModel}
-                        onOpenChange={(open) => {
-                          setModelDropdownOpen(open);
-                          if (open) setModeDropdownOpen(false);
-                        }}
-                        onSelect={handleModelSelect}
-                        tooltip={modelLabel}
-                        showCheck
-                        searchable
-                        searchLabel={t('common.search')}
-                        noResultsLabel={(query) =>
-                          t('model.noMatch', { query })
-                        }
-                        submenu={
-                          showReasoningOptions
-                            ? {
-                                triggerLabel: modelLabel,
-                                triggerAriaLabel: `${t('model.select')}: ${modelLabel}`,
-                                sectionLabel: t('model.section'),
-                              }
-                            : undefined
-                        }
-                        header={
-                          showReasoningOptions && reasoning ? (
-                            <ModelReasoningControls
-                              reasoning={reasoning}
-                              onSelect={onSelectReasoningEffort}
-                            />
-                          ) : undefined
-                        }
-                        trigger={
-                          <button
-                            className={`${styles.toolBtn} ${styles.modelToolBtn} ${
-                              showModelLabel ? '' : styles.toolBtnCompact
-                            }`}
-                            data-web-shell-model-button
-                            data-web-shell-toolbar-popover-trigger
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              core.closeSlashMenu();
-                              core.closeAtMenu();
-                            }}
-                            aria-label={`${t('model.select')}: ${normalizedModelChipLabel}`}
-                            title={normalizedModelChipLabel}
-                          >
-                            <span className={styles.toolBtnModelIcon}>
-                              <ModelIcon />
-                            </span>
-                            {showModelLabel && (
-                              <span className={styles.toolBtnText}>
-                                {normalizedModelChipLabel}
-                              </span>
-                            )}
-                            <span className={styles.toolBtnArrow}>
-                              <ChevronDownIcon />
-                            </span>
-                          </button>
-                        }
-                      />
-                    </div>
-                  )}
-                  {ToolbarEnd && (
-                    <div ref={toolbarEndRef} className={styles.toolbarEnd}>
-                      <ToolbarEnd
-                        disabled={disabled}
-                        isRunning={isRunning}
-                        currentMode={currentMode}
-                        currentModel={currentModel}
-                        sessionName={sessionName}
-                      />
-                    </div>
-                  )}
-                </div>
-              </div>
-              <div ref={toolbarRightRef} className={styles.toolbarRight}>
-                {ToolbarRight && (
-                  <div
-                    ref={toolbarRightCustomRef}
-                    className={styles.toolbarRightCustom}
-                    data-hide-during-mobile-voice
-                  >
-                    <ToolbarRight
-                      disabled={disabled}
-                      isRunning={isRunning}
-                      currentMode={currentMode}
-                      currentModel={currentModel}
-                      sessionName={sessionName}
-                    />
-                  </div>
-                )}
-                {!isMobile &&
-                  showChatWidthToggle &&
-                  widthToggleFits &&
-                  showToolbarAction('widthMode') && (
-                    <button
-                      className={`${styles.toolBtn} ${styles.widthModeBtn}`}
-                      data-hide-during-mobile-voice
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onChatWidthModeChange?.(
-                          chatWidthMode === 'wide' ? '1000' : 'wide',
-                        );
-                      }}
-                      disabled={!onChatWidthModeChange}
-                      aria-label={
-                        chatWidthMode === 'wide'
-                          ? t('settings.option.ui.chatWidth.1000')
-                          : t('settings.option.ui.chatWidth.wide')
-                      }
-                      title={
-                        chatWidthMode === 'wide'
-                          ? t('settings.option.ui.chatWidth.1000')
-                          : t('settings.option.ui.chatWidth.wide')
-                      }
-                      data-tooltip={
-                        chatWidthMode === 'wide'
-                          ? t('settings.option.ui.chatWidth.1000')
-                          : t('settings.option.ui.chatWidth.wide')
-                      }
-                    >
-                      <span className={styles.toolBtnIcon}>
-                        <WidthModeIcon mode={chatWidthMode} />
-                      </span>
-                    </button>
-                  )}
-                {showToolbarAction('contextUsage') &&
-                  (contextUsageAlwaysVisible ||
-                    (contextWindow > 0 && tokenCount > 0)) && (
-                    <ContextUsagePopover
-                      key={sessionId}
-                      tokenCount={tokenCount}
-                      contextWindow={contextWindow}
-                      controls={contextUsageControls}
-                      onOpenDetails={onOpenContextUsage}
-                      showSnapshotHint={Boolean(onShowContextUsage)}
-                    >
-                      <button
-                        className={`${styles.toolBtn} ${styles.contextUsageBtn}`}
-                        data-hide-during-mobile-voice
-                        data-web-shell-context-usage
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onShowContextUsage?.();
-                        }}
-                        disabled={!onShowContextUsage}
-                        aria-label={
-                          contextWindow > 0 && tokenCount > 0
-                            ? t('status.contextUsed', {
-                                pct: (
-                                  (tokenCount / contextWindow) *
-                                  100
-                                ).toFixed(1),
-                              })
-                            : t('contextUsage.title')
-                        }
-                      >
-                        <span className={styles.toolBtnIcon}>
-                          <ContextUsageRing
-                            pct={
-                              contextWindow > 0
-                                ? (tokenCount / contextWindow) * 100
-                                : 0
-                            }
-                          />
-                        </span>
-                        {contextWindow > 0 && tokenCount > 0 && (
-                          <span
-                            className={styles.contextUsagePercentage}
-                            data-level={getContextUsageLevel(
-                              (tokenCount / contextWindow) * 100,
-                            )}
-                            aria-hidden="true"
-                          >
-                            {((tokenCount / contextWindow) * 100).toFixed(1)}%
-                          </span>
-                        )}
-                      </button>
-                    </ContextUsagePopover>
-                  )}
-                {!isMobile && showCommandAction && (
-                  <button
-                    type="button"
-                    className={`${styles.toolBtn} ${styles.toolBtnCompact}`}
-                    data-web-shell-command-button
-                    aria-label={t('help.shortcut.commandMenu')}
-                    title={t('help.shortcut.commandMenu')}
-                    disabled={disabled}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      if (!core.openSlashMenu()) {
-                        core.insertText('/');
-                        core.focus();
-                      }
-                    }}
-                  >
-                    <span className={styles.toolBtnIcon}>
-                      <SlashIcon />
-                    </span>
-                  </button>
-                )}
-                {showToolbarAction('voice') && (
-                  <>
-                    <LiveVoiceButton
-                      hideInactiveTrigger={
-                        isMobile && Boolean(showAddMenuAction)
-                      }
-                      open={liveVoiceOpen}
-                      onOpenChange={setLiveVoiceOpen}
-                      onSupportedChange={setLiveVoiceSupported}
-                      onRequestFocusFallback={() => {
-                        containerRef.current
-                          ?.querySelector<HTMLButtonElement>(
-                            '[data-testid="composer-add-menu-trigger"]',
-                          )
-                          ?.focus();
-                      }}
-                    />
-                    <VoiceButton
-                      disabled={disabled}
-                      onActiveChange={setVoiceActive}
-                      target={voiceTarget}
-                      statusRevision={voiceStatusRevision}
-                      onInsert={(text) => {
-                        const existing = core.getText();
-                        const sep =
-                          existing && !/\s$/.test(existing) ? ' ' : '';
-                        core.insertText(`${sep}${text} `);
-                        core.focus();
-                      }}
-                    />
-                  </>
-                )}
-                {isMobile && isRunning && core.hasContent && (
-                  <button
-                    type="button"
-                    className={`${styles.sendBtn} ${styles.sendBtnRunning}`}
-                    disabled={composerPreparing || !onCancel}
-                    data-web-shell-composer-stop
-                    aria-label={t('composerMobile.stop')}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      onCancel?.();
-                    }}
-                  >
-                    <StopIcon />
-                  </button>
-                )}
-                <button
-                  className={
-                    composerPreparing || showCancelButton
-                      ? `${styles.sendBtn} ${styles.sendBtnRunning}${
-                          cancelArmed ? ` ${styles.sendBtnArmed}` : ''
-                        }`
-                      : styles.sendBtn
-                  }
-                  disabled={
-                    composerPreparing
-                      ? true
-                      : showCancelButton
-                        ? !onCancel
-                        : !core.canSubmit
-                  }
-                  data-web-shell-composer-submit
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    if (composerPreparing) {
-                      return;
-                    }
-                    if (showCancelButton) {
-                      onCancel?.();
-                      return;
-                    }
-                    core.submitText();
-                  }}
-                  aria-label={
-                    composerPreparing
-                      ? t('common.loading')
-                      : showCancelButton
-                        ? cancelArmed && !isMobile
-                          ? t('stream.cancelArmed')
-                          : t(
-                              isMobile
-                                ? 'composerMobile.stop'
-                                : 'stream.cancel',
-                            )
-                        : t('editor.send')
-                  }
-                  title={
-                    isRunning && cancelArmed && !isMobile
-                      ? t('stream.cancelArmed')
-                      : undefined
-                  }
+            {isSimple &&
+              renderAddMenu(
+                <div
+                  className={styles.simpleMenuToolbar}
+                  data-web-shell-simple-toolbar
                 >
-                  {composerPreparing ? (
-                    <LoadingIcon />
-                  ) : showCancelButton ? (
-                    cancelArmed && !isMobile ? (
-                      <span className={styles.escLabel} aria-hidden="true">
-                        Esc
-                      </span>
-                    ) : (
-                      <StopIcon />
-                    )
-                  ) : (
-                    <SendIcon />
-                  )}
-                </button>
-                <span
-                  role="status"
-                  aria-live="polite"
-                  className={styles.srOnly}
-                >
-                  {isRunning && cancelArmed && !isMobile
-                    ? t('stream.cancelArmed')
-                    : ''}
-                </span>
-              </div>
-            </div>
+                  {toolbarLeading}
+                  {toolbarSecondary}
+                </div>,
+              )}
+            {primaryInput}
             <div
               ref={toolbarMeasurementsRef}
               className={styles.toolbarMeasurements}
@@ -3955,7 +4012,7 @@ export const ChatEditor = memo(
         {/* Mobile voice mode strips the toolbar down to the microphone and
             send, so the row follows it out of the way. Mobile keeps its own
             touch-sized row inside the composer, so this one is desktop-only. */}
-        {!isMobile && contextRowVisible && !mobileVoiceActive && (
+        {!isSimple && !isMobile && contextRowVisible && !mobileVoiceActive && (
           <div
             className={styles.contextRow}
             data-web-shell-composer-context-row

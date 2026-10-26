@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { ChangeEvent } from 'react';
+import type { ChangeEvent, ReactNode } from 'react';
 import { ArrowLeftIcon, PlusIcon, SlashIcon, XIcon } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import type { CommandInfo } from '../../adapters/types';
@@ -80,6 +80,8 @@ export interface AddMenuProps {
     onLiveVoice?: () => void;
   };
   commandsOnly?: boolean;
+  toolbar?: ReactNode;
+  onLiveVoice?: () => void;
 }
 
 export interface AddMenuPlanControl {
@@ -309,6 +311,8 @@ export function AddMenu({
   plan,
   mobileActions,
   commandsOnly = false,
+  toolbar,
+  onLiveVoice,
 }: AddMenuProps) {
   const { t, language } = useI18n();
   const [open, setOpen] = useState(false);
@@ -701,6 +705,7 @@ export function AddMenu({
                       )}
                     </Button>
                   )}
+                  {toolbar}
                 </div>
               )}
               {(page === 'files' ||
@@ -836,6 +841,11 @@ export function AddMenu({
             sideOffset={6}
             className="min-w-56 max-w-[calc(100vw-1rem)] sm:min-w-64"
             onClick={(event) => event.stopPropagation()}
+            onKeyDownCapture={(event) => {
+              // The secondary toolbar contains regular buttons, outside the
+              // menu's roving focus list. Let Tab reach them in DOM order.
+              if (toolbar && event.key === 'Tab') event.stopPropagation();
+            }}
             onCloseAutoFocus={(event) => {
               const pendingCloseAction = pendingCloseActionRef.current;
               pendingCloseActionRef.current = null;
@@ -1051,6 +1061,15 @@ export function AddMenu({
                 </DropdownMenuCheckboxItem>
               </>
             ) : null}
+            {onLiveVoice && (
+              <LiveVoiceMenuItem onClick={() => closeAndRun(onLiveVoice)} />
+            )}
+            {toolbar && (
+              <div>
+                <DropdownMenuSeparator />
+                {toolbar}
+              </div>
+            )}
           </DropdownMenuContent>
         </DropdownMenu>
       )}

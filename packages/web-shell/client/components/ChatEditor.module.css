@@ -60,6 +60,113 @@
   padding: 10px;
 }
 
+.editorShell[data-web-shell-composer-variant='simple'] .container {
+  border-radius: 28px;
+  --chat-editor-min-height: 54px;
+  --chat-editor-input-min-height: 28px;
+  --chat-editor-input-max-height: 200px;
+}
+
+.editorShell[data-web-shell-composer-variant='simple'] .content {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: end;
+  column-gap: 6px;
+  padding: 4px 8px;
+}
+
+.editorShell[data-web-shell-composer-variant='simple'] .content > * {
+  grid-column: 1 / -1;
+}
+
+.editorShell[data-web-shell-composer-variant='simple'] .content > button {
+  grid-column: 1;
+}
+
+.editorShell[data-web-shell-composer-variant='simple'] .editorArea {
+  grid-column: 2;
+  min-width: 0;
+  padding: 9px 0;
+}
+
+.editorShell[data-web-shell-composer-variant='simple']
+  :global(.cm-placeholder) {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+
+.editorShell[data-web-shell-composer-variant='simple']
+  .mobileTextarea::placeholder {
+  white-space: nowrap;
+}
+
+.editorShell[data-web-shell-composer-variant='simple'] .toolbar {
+  display: contents;
+}
+
+.editorShell[data-web-shell-composer-variant='simple'] .toolbarRight {
+  grid-column: 3;
+  flex: 0 0 auto;
+  gap: 4px;
+  margin: 0;
+}
+
+.editorShell[data-web-shell-composer-variant='simple'] .content > button,
+.editorShell[data-web-shell-composer-variant='simple'] .toolbarRight > button,
+.editorShell[data-web-shell-composer-variant='simple']
+  [data-web-shell-simple-voice]
+  button {
+  width: 44px;
+  min-width: 44px;
+  height: 44px;
+  border-radius: 50%;
+}
+
+.editorShell[data-web-shell-composer-variant='simple']
+  [data-web-shell-simple-voice]:not([hidden]) {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+}
+
+.editorShell[data-web-shell-composer-variant='simple']
+  [data-web-shell-simple-idle]:has([data-web-shell-simple-voice] button)
+  [data-web-shell-composer-submit] {
+  display: none;
+}
+
+.simpleMenuToolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: min(320px, calc(100vw - 3rem));
+  padding: 8px;
+}
+
+.simpleMenuToolbar .toolbarLeading,
+.simpleMenuToolbar .toolbarLeft,
+.simpleMenuToolbar .toolbarRightCustom {
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+  margin: 0;
+}
+
+.simpleMenuToolbar .toolbarLeading {
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.simpleMenuToolbar button {
+  min-height: 36px;
+  max-width: 100%;
+}
+
 .container:focus-within .content,
 .container[data-at-panel-open] .content {
   border-color: var(--chat-editor-accent-color);

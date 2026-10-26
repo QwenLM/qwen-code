@@ -30,6 +30,134 @@ import {
 const COMPOSER_TEXTAREA = 'textarea[data-web-shell-composer-editor]';
 const SIDEBAR_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-sidebar-width';
 
+test('simple mobile composer grows and submits Chinese multiline input @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await page.goto(
+    `/e2e/composer-layout-harness.html?composerVariant=simple&tags=false&sessionId=${scenario.sessionId}`,
+  );
+  await completeReplay(page, daemon, scenario.sessionId);
+  const composer = page.locator('[data-web-shell-composer-variant="simple"]');
+  const textarea = composer.locator(COMPOSER_TEXTAREA);
+  const content = composer.locator('[data-web-shell-composer-content]');
+  await expect(textarea).toBeVisible();
+  await expect(composer.locator('.cm-editor')).toHaveCount(0);
+  const restingHeight = (await content.boundingBox())!.height;
+  expect(restingHeight).toBeLessThanOrEqual(72);
+  await textarea.fill('第一行');
+  await textarea.press('Enter');
+  await page.keyboard.insertText('第二行');
+  await expect(textarea).toHaveValue('第一行\n第二行');
+  expect(daemon.promptRequests()).toHaveLength(0);
+  await expect
+    .poll(async () => (await content.boundingBox())!.height)
+    .toBeGreaterThan(restingHeight);
+  await composer.locator('[data-web-shell-composer-submit]').tap();
+  await expect.poll(() => daemon.promptRequests().length).toBe(1);
+  expectPromptBodyToContainText(
+    firstRequestBody(daemon.promptRequests()),
+    '第一行\n第二行',
+  );
+  await expect(textarea).toHaveValue('');
+});
+
+test('simple mobile add drawer exposes secondary controls @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await page.goto(
+    `/e2e/composer-layout-harness.html?composerVariant=simple&tags=false&sessionId=${scenario.sessionId}`,
+  );
+  await completeReplay(page, daemon, scenario.sessionId);
+  const composer = page.locator('[data-web-shell-composer-variant="simple"]');
+  await expect(composer.locator('[data-web-shell-model-button]')).toHaveCount(
+    0,
+  );
+  await composer.getByTestId('composer-add-menu-trigger').tap();
+  const drawer = page.locator('[data-web-shell-mobile-add-menu]');
+  await expect(drawer).toBeVisible();
+  const model = drawer.locator('[data-web-shell-model-button]');
+  await expect(model).toBeVisible();
+  await model.tap();
+  const picker = page.locator('[data-web-shell-toolbar-popover]');
+  await expect(picker).toBeVisible();
+  await picker
+    .getByRole('button', { name: 'Qwen Test Alt', exact: true })
+    .tap();
+  await expect.poll(() => daemon.modelRequests().length).toBe(1);
+});
+
+test('simple mobile composer expands inline without losing its draft or attachments @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await page.goto(
+    `/e2e/composer-layout-harness.html?composerVariant=simple&tags=true&sessionId=${scenario.sessionId}`,
+  );
+  await completeReplay(page, daemon, scenario.sessionId);
+  const composer = page.locator('[data-web-shell-composer]');
+  const textarea = composer.locator(COMPOSER_TEXTAREA);
+  const attachments = composer.locator('[data-web-shell-composer-tag]');
+  await expect(attachments).toHaveCount(18);
+  await textarea.fill('保留中文草稿和附件');
+  const textareaNode = (await textarea.elementHandle())!;
+  const attachmentText = await attachments.allTextContents();
+  await expect(composer).toHaveAttribute(
+    'data-web-shell-composer-variant',
+    'simple',
+  );
+
+  await composer.locator('[data-web-shell-composer-expand]').tap();
+  await expect(composer).toHaveAttribute(
+    'data-web-shell-composer-variant',
+    'default',
+  );
+  await expect(
+    composer.locator('[data-web-shell-mobile-editing-actions]'),
+  ).toBeVisible();
+  await expect(composer.locator('[data-web-shell-model-button]')).toBeVisible();
+  await expect(page.locator('[data-web-shell-expanded-editor]')).toHaveCount(0);
+  await expect(textarea).toHaveValue('保留中文草稿和附件');
+  expect(
+    await textareaNode.evaluate(
+      (node) =>
+        node ===
+        document.querySelector('textarea[data-web-shell-composer-editor]'),
+    ),
+  ).toBe(true);
+  expect(await attachments.allTextContents()).toEqual(attachmentText);
+
+  await composer.locator('[data-web-shell-composer-collapse]').tap();
+  await expect(composer).toHaveAttribute(
+    'data-web-shell-composer-variant',
+    'simple',
+  );
+  await expect(
+    composer.locator('[data-web-shell-mobile-editing-actions]'),
+  ).toHaveCount(0);
+  await expect(textarea).toHaveValue('保留中文草稿和附件');
+  expect(
+    await textareaNode.evaluate(
+      (node) =>
+        node ===
+        document.querySelector('textarea[data-web-shell-composer-editor]'),
+    ),
+  ).toBe(true);
+  expect(await attachments.allTextContents()).toEqual(attachmentText);
+
+  await composer.locator('[data-web-shell-composer-submit]').tap();
+  await expect.poll(() => daemon.promptRequests().length).toBe(1);
+  const submitted = JSON.stringify(firstRequestBody(daemon.promptRequests()));
+  expect(submitted).toContain('保留中文草稿和附件');
+  expect(submitted).toContain('analytics_table_18');
+  await expect(textarea).toHaveValue('');
+  await expect(attachments).toHaveCount(0);
+});
+
 test('renders the textarea backend instead of CodeMirror on touch devices', async ({
   page,
 }, testInfo) => {
