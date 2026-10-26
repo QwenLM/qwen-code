@@ -13,6 +13,7 @@ import {
 import { tmpdir } from 'node:os';
 import { delimiter, join, resolve, sep } from 'node:path';
 import { setTimeout } from 'node:timers/promises';
+import semver from 'semver';
 import { afterEach, describe, expect, it } from 'vitest';
 
 const script = resolve('.github/scripts/install-pool-jdk.sh');
@@ -84,7 +85,12 @@ fcntl.flock(int(sys.argv[-1]), fcntl.LOCK_UN if '-u' in sys.argv else fcntl.LOCK
 `,
     );
   }
-  const shared = join(cache, 'Java_Temurin-Hotspot_jdk/11.0.32-101/x64');
+  const shared = join(
+    cache,
+    'Java_Temurin-Hotspot_jdk',
+    semver.clean('11.0.32+101'),
+    'x64',
+  );
   const prepare = (name) => {
     const temp = join(root, name);
     mkdirSync(temp);
@@ -138,31 +144,40 @@ describe.skipIf(process.platform === 'win32')(
   'pool JDK cache publication',
   () => {
     it.each([
-      ['x86_64', 'x64', 'x64'],
-      ['aarch64', 'aarch64', 'arm64'],
+      ['11', 'x86_64', '11.0.32+101', '11.0.32.1_1'],
+      ['11', 'aarch64', '11.0.32+101', '11.0.32.1_1'],
+      ['17', 'aarch64', '17.0.20+101', '17.0.20.1_1'],
+      ['17', 'x86_64', '17.0.21+9', '17.0.21_9'],
+      ['21', 'aarch64', '21.0.13+9.0.LTS', '21.0.13_9'],
+      ['21', 'x86_64', '21.0.13+9.0.LTS', '21.0.13_9'],
+      ['25', 'aarch64', '25.0.5+8.0.LTS', '25.0.5_8'],
     ])(
-      'uses mirror and cache coordinates for %s',
-      (machine, mirrorArch, cacheArch) => {
+      'uses mirror and normalized setup-java coordinates for Java %s on %s',
+      (spec, machine, setupVersion, release) => {
         const f = fixture('network');
+        const cacheArch = machine === 'x86_64' ? 'x64' : 'arm64';
+        const mirrorArch = cacheArch === 'arm64' ? 'aarch64' : 'x64';
         writeFileSync(
           join(f.root, 'bin/uname'),
           `#!/usr/bin/env python3\nprint('${machine}')\n`,
           { mode: 0o755 },
         );
-        const cold = f.run(f.prepare('cold'));
+        const cold = f.run({ ...f.prepare('cold'), JAVA_SPEC: spec });
         expect(cold.status).not.toBe(0);
         expect(cold.stdout).toContain(
-          `::error::could not download https://mirrors.tuna.tsinghua.edu.cn/Adoptium/11/jdk/${mirrorArch}/linux/OpenJDK11U-jdk_${mirrorArch}_linux_hotspot_11.0.32.1_1.tar.gz`,
+          `::error::could not download https://mirrors.tuna.tsinghua.edu.cn/Adoptium/${spec}/jdk/${mirrorArch}/linux/OpenJDK${spec}U-jdk_${mirrorArch}_linux_hotspot_${release}.tar.gz`,
         );
         const shared = join(
           f.cache,
-          'Java_Temurin-Hotspot_jdk/11.0.32-101',
+          'Java_Temurin-Hotspot_jdk',
+          semver.clean(setupVersion),
           cacheArch,
         );
-        seed(shared);
-        const warm = f.prepare('warm');
+        const inode = seed(shared);
+        const warm = { ...f.prepare('warm'), JAVA_SPEC: spec };
         success(f.run(warm));
         expect(f.home(warm)).toBe(shared);
+        expect(statSync(join(shared, 'bin/java')).ino).toBe(inode);
       },
     );
 
@@ -182,6 +197,7 @@ describe.skipIf(process.platform === 'win32')(
       const first = f.prepare('first');
       success(f.run(first));
       const home = f.home(first);
+      expect(home).toBe(join(f.cache, 'qwen-pool-jdk/11.0.32-101/x64'));
       expect(home.startsWith(`${f.cache}${sep}`)).toBe(true);
       expect(home.startsWith(join(f.cache, 'Java_Temurin-Hotspot_jdk'))).toBe(
         false,
