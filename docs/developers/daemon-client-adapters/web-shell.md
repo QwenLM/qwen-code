@@ -8,13 +8,30 @@ channel, and IDE integrations keep their existing default paths for now.
 
 ## Interface terminology
 
-The Web Shell labels directory-backed entries **Workspaces / 工作区** and
-ordinary conversations **Sessions / 会话**. Their creation action is
-**New session / 新建会话**. This display terminology also applies to the
-workspace Memory scope; scheduled tasks keep their separate domain name.
-The existing **No-workspace sessions / 无工作区会话** group retains its name
-and placement while its naming and hierarchy are discussed separately.
-These labels do not change API fields, configuration keys, or runtime behavior.
+This terminology update covers the sidebar workspace heading and workspace
+creation/management labels, ordinary session-creation actions (including the
+workspace overview and shared Managed workspace row action), the Recent heading,
+and the workspace Memory scope. On these surfaces, the labels use
+**Workspaces / 工作区**, **New session / 新建会话**, and **Recent / 最近**;
+a single directory-backed entry uses **Workspace / 工作区**.
+
+This is not a product-wide terminology migration. Existing Managed-agent page
+copy and registration-dialog copy (including 工作空间), the session-source
+**Tasks / 任务** tab, workspace execution hints, offline-host hints, and other
+session help text retain their existing wording. Agent, Skills, Workflow, MCP,
+and approval scope labels are outside this update. Scheduled tasks, todo items,
+agent/tool executions, external services' projects, and Git worktrees retain
+their domain meanings. The **No-workspace sessions / 无工作区会话** group
+retains its name and placement; its naming and hierarchy are separate follow-up
+work.
+
+Existing translation keys, SDK/API fields, stored identifiers, configuration
+keys, and runtime logic are unchanged. Label-derived DOM values do change,
+including dialog `aria-label`, `data-web-shell-dialog-title`, and button
+accessible names. Automation matching the old text must update its selectors;
+for example, the dialog title is now **Add workspace**, not **Add Workspace**.
+The Recent heading and its region name continue to share the same translation
+key; a separate descriptive region label is outside this copy-only update.
 
 ## Shared UI Contract
 
