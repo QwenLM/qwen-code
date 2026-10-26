@@ -246,6 +246,35 @@ export class JavaManagedAgentClient {
     return this.post('/workspaces/files/read', request, signal);
   }
 
+  async uploadWorkspaceFile(
+    request: {
+      workspaceId: string;
+      cwdRelative: string;
+      path: string;
+      expectedScopeRevision: string;
+      uploadId: string;
+    },
+    data: Blob,
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellWorkspaceFileUploadResult']> {
+    const query = new URLSearchParams(request);
+    const response = await this.fetchRequest(
+      `/workspaces/files/upload?${query}`,
+      data,
+      signal,
+      false,
+      'application/octet-stream',
+    );
+    return (await response.json()) as Schemas['WebShellWorkspaceFileUploadResult'];
+  }
+
+  queryWorkspaceFileUpload(
+    uploadId: string,
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellWorkspaceFileUploadStatus']> {
+    return this.post('/workspaces/files/uploads/query', { uploadId }, signal);
+  }
+
   workspaceDirectories(
     request: Schemas['WebShellWorkspaceDirectoryQueryRequest'],
     signal?: AbortSignal,
@@ -960,10 +989,29 @@ export class JavaManagedAgentClient {
     signal: AbortSignal | undefined,
     stream: boolean,
   ): Promise<Response> {
+    return this.fetchRequest(
+      path,
+      JSON.stringify(body),
+      signal,
+      stream,
+      'application/json',
+    );
+  }
+
+  private async fetchRequest(
+    path: string,
+    body: BodyInit,
+    signal: AbortSignal | undefined,
+    stream: boolean,
+    contentType: string,
+  ): Promise<Response> {
     const supplied = await this.options.getHeaders?.();
     const headers = new Headers(supplied);
-    if (!headers.has('content-type')) {
-      headers.set('content-type', 'application/json');
+    if (
+      contentType === 'application/octet-stream' ||
+      !headers.has('content-type')
+    ) {
+      headers.set('content-type', contentType);
     }
     headers.set('accept', stream ? 'text/event-stream' : 'application/json');
     const response = await this.fetchImpl(
@@ -972,7 +1020,7 @@ export class JavaManagedAgentClient {
         method: 'POST',
         headers,
         credentials: this.credentials,
-        body: JSON.stringify(body),
+        body,
         signal,
       },
     );
