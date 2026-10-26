@@ -6,6 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const {
@@ -627,11 +628,35 @@ describe('scripts/cli-entry.js production entry', () => {
         );
         try {
           await import('../cli-entry.js?xdg-dotenv');
+          // resolve() as the launcher does, which adds a drive on Windows.
           expect(normalizePath(process.env.QWEN_CODE_MANAGED_NPM_ROOT)).toBe(
-            '/data/qwen/updates/npm',
+            normalizePath(join(resolve('/data/qwen'), 'updates', 'npm')),
           );
         } finally {
           readFileSyncMock.mockImplementation(impl);
+        }
+      });
+
+      it('pre-resolves only QWEN_HOME from the .env in an existing ~/.qwen', async () => {
+        existsSyncMock.mockImplementation(
+          (file) => normalizePath(file) === '/home/test-user/.qwen',
+        );
+        const readFileSyncMock = vi.mocked(readFileSync);
+        const impl = readFileSyncMock.getMockImplementation();
+        readFileSyncMock.mockImplementation((file, ...rest) =>
+          normalizePath(file) === '/home/test-user/.qwen/.env'
+            ? 'QWEN_HOME=/data/qwen\nQWEN_TEST_DOTENV_KEY=copied\n'
+            : impl(file, ...rest),
+        );
+        try {
+          await import('../cli-entry.js?legacy-dotenv');
+          expect(normalizePath(process.env.QWEN_CODE_MANAGED_NPM_ROOT)).toBe(
+            normalizePath(join(resolve('/data/qwen'), 'updates', 'npm')),
+          );
+          expect(process.env.QWEN_TEST_DOTENV_KEY).toBeUndefined();
+        } finally {
+          readFileSyncMock.mockImplementation(impl);
+          delete process.env.QWEN_TEST_DOTENV_KEY;
         }
       });
     });

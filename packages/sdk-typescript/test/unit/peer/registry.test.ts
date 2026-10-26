@@ -8,6 +8,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { Storage } from '@qwen-code/qwen-code-core/storage';
 import {
   readLocalBootId,
   readPidNamespaceId,
@@ -291,6 +292,21 @@ describe('resolveQwenHome', () => {
     it.each(['darwin', 'win32'])('keeps ~/.qwen on %s', (value) => {
       Object.defineProperty(process, 'platform', { value });
       expect(resolveQwenHome()).toBe(legacyDir());
+    });
+
+    // Peers only find each other when they resolve the directory the CLI
+    // uses, and the CLI resolves it through core.
+    it('resolves the same directory as core', () => {
+      const agrees = () =>
+        expect(resolveQwenHome()).toBe(Storage.getGlobalQwenDir());
+      agrees();
+      fs.mkdirSync(legacyDir());
+      agrees();
+      fs.mkdirSync(xdgDir(), { recursive: true });
+      fs.writeFileSync(path.join(xdgDir(), '.qwen-global-dir'), '');
+      agrees();
+      process.env['XDG_CONFIG_HOME'] = path.join(home, 'xdg');
+      agrees();
     });
   });
 

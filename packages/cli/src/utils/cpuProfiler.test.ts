@@ -139,12 +139,21 @@ describe('cpuProfiler', () => {
   });
 
   describe('stopCpuProfile', () => {
-    it('writes under the global Qwen dir by default', () => {
+    it('writes under the global Qwen dir by default', async () => {
       vi.stubEnv('QWEN_HOME', tmpDir);
       try {
         expect(getCpuProfileOutputDir()).toBe(
           path.join(tmpDir, 'cpu-profiles'),
         );
+        await startCpuProfile();
+        const result = await stopCpuProfile();
+
+        expect(result.ok).toBe(true);
+        if (result.ok) {
+          expect(path.dirname(result.filePath)).toBe(
+            path.join(tmpDir, 'cpu-profiles'),
+          );
+        }
       } finally {
         vi.unstubAllEnvs();
       }

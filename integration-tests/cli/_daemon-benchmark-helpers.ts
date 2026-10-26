@@ -19,9 +19,9 @@
 
 import { spawn, execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { Storage } from '@qwen-code/qwen-code-core';
 import { DaemonClient } from '@qwen-code/sdk';
 
 import {
@@ -234,7 +234,8 @@ export function measureProcessTreeRss(daemonPid: number): ProcessTreeRss {
 export async function measureCliStartupWithProfiler(opts?: {
   cwd?: string;
 }): Promise<StartupPhasesResult> {
-  const perfDir = path.join(os.homedir(), '.qwen', 'startup-perf');
+  // Where the profiler writes; see finalizeStartupProfile().
+  const perfDir = path.join(Storage.getGlobalQwenDir(), 'startup-perf');
   const beforeFiles = new Set<string>();
   try {
     for (const f of fs.readdirSync(perfDir)) beforeFiles.add(f);
