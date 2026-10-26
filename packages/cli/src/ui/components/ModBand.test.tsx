@@ -7,7 +7,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import { render } from 'ink-testing-library';
 import type { ReactElement } from 'react';
-import type { ModRenderElement } from '@qwen-code/qwen-code-core/mods/render-tree.js';
+import type {
+  ModRenderElement,
+  ModRenderProps,
+} from '@qwen-code/qwen-code-core/mods/render-tree.js';
 import { theme } from '../semantic-colors.js';
 import { ModBand, drawModTree, modBandMaxRows } from './ModBand.js';
 
@@ -111,11 +114,12 @@ describe('ModBand', () => {
   });
 
   it('keeps a tree wider than the terminal within its columns', () => {
-    for (const props of [
+    const cases: ModRenderProps[] = [
       { width: 500 },
       { minWidth: 300 },
       { marginLeft: 200 },
-    ]) {
+    ];
+    for (const props of cases) {
       const lines = render(
         <ModBand
           maxRows={4}
