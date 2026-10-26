@@ -27,10 +27,16 @@ export interface ModerationChat {
 }
 
 export interface ModerationToolDeps {
-  /** Chat bound to the agent session that invoked the tool. */
+  /**
+   * Chat the turn in progress is about. The channel resolves this from the
+   * current turn's envelope, not from the session's routed target: one session
+   * can serve many chats under a shared `sessionScope`.
+   */
   resolveChat(sessionId: string): ModerationChat | undefined;
   /** True when the channel is configured not to resolve targets by member. */
   memberRecallDisabled: boolean;
+  /** Member whose turn is in progress, when the turn came from a member. */
+  currentSenderId(sessionId: string): string | undefined;
   /** Newest still-tracked message from a member in the chat. */
   recentMemberMessage(chatId: string, senderId: string): string | undefined;
   /** Forget a message that was just recalled, so a later call resolves the previous one. */
@@ -57,6 +63,8 @@ interface ToolRequest {
   body?: Record<string, unknown>;
   /** Only recall resolves a concrete message; the other tools carry no target. */
   target?: RecallTarget;
+  /** Model-visible subject of a call that names members directly (mute). */
+  summary?: string;
 }
 
 interface ToolSpec {
@@ -67,12 +75,19 @@ interface ToolSpec {
   groupOnly?: boolean;
   /** Bot-scoped endpoints (join-approval strategies) need no chat binding. */
   botLevel?: boolean;
+  /** The platform's 40062003 answer may name the target-member rule. */
+  memberTarget?: boolean;
   build(
     args: Record<string, unknown>,
     deps: ModerationToolDeps,
     chat: ModerationChat | undefined,
+    sessionId: string,
   ): ToolRequest;
-  format?(data: unknown, target: RecallTarget | undefined): string;
+  format?(
+    data: unknown,
+    target: RecallTarget | undefined,
+    request: ToolRequest,
+  ): string;
 }
 
 const ADMIN_NOTE =
@@ -124,7 +139,7 @@ function withQuery(
 const RECALL_TOOL: ToolSpec = {
   name: 'qq_recall_message',
   description:
-    "Recall a message in the current QQ group chat. The call requires a target: pass member_openid to recall that member's most recent message the channel still remembers from this chat, or message_id for an explicit platform message id. There is no implicit target, and the tool never recalls the bot's own messages. Member-targeted recall only reaches messages the channel actually received and still tracks: ordinary non-@ group messages arrive only when groupAllPolicy is 'keyword', 'all' or 'log'. Recalling another member's message requires the bot to be a group admin. Direct chats are unsupported, because the platform only recalls the bot's own messages there.",
+    "Recall a message in the current QQ group chat. The call requires a target: pass member_openid to recall that member's most recent message the channel still remembers from this chat, or message_id for a platform message id the operator or the channel logs supplied — the channel does not put message ids into the transcript, so ask for one instead of guessing. There is no implicit target, and the tool never recalls the bot's own messages. Member-targeted recall only reaches messages the channel actually received and still tracks: ordinary non-@ group messages arrive only when groupAllPolicy is 'keyword', 'all' or 'log', and the member must be a full member_openid, which requires allowMention (with allowMention: false the transcript carries only a truncated sender name, so only message_id works). A member_openid recall is allowed only when the turn's own sender is that member, or when the turn has no member sender (for example an operator-initiated turn). Recalling another member's message requires the bot to be a group admin. Direct chats are unsupported, because the platform only recalls the bot's own messages there.",
   inputSchema: {
     type: 'object',
     properties: {
@@ -140,19 +155,8 @@ const RECALL_TOOL: ToolSpec = {
     },
     additionalProperties: false,
   },
-  build(args, deps, chat) {
+  build(args, deps, chat, sessionId) {
     const bound = requireBoundChat(chat);
-    // The schema declares additionalProperties: false, but the model can still
-    // send a renamed key. Silently ignoring it would recall something other
-    // than what the model named, so reject the call instead.
-    const unknown = Object.keys(args).filter(
-      (key) => key !== 'message_id' && key !== 'member_openid',
-    );
-    if (unknown.length > 0) {
-      throw new ToolInputError(
-        `Unrecognized argument${unknown.length === 1 ? '' : 's'}: ${unknown.join(', ')}. qq_recall_message accepts only message_id and member_openid.`,
-      );
-    }
     // The platform recalls only the bot's own messages in a direct chat, and
     // this tool never recalls those, so every direct-chat call is unsupported.
     if (!bound.isGroup) {
@@ -169,12 +173,21 @@ const RECALL_TOOL: ToolSpec = {
       // the wrong one.
       if (!member) {
         throw new ToolInputError(
-          "qq_recall_message needs a target: pass member_openid to recall that member's most recent message the channel still remembers, or message_id for an explicit platform message id. There is no implicit target.",
+          "qq_recall_message needs a target: pass member_openid to recall that member's most recent message the channel still remembers, or message_id for an explicit platform message id (the channel does not make message ids visible, so that id must come from the operator or the channel logs). There is no implicit target.",
+        );
+      }
+      // A group member must not censor another member's message through the
+      // bot's admin token: a member-targeted recall is only allowed for the
+      // turn's own sender, or on a turn that has no member sender.
+      const requester = deps.currentSenderId(sessionId);
+      if (requester !== undefined && requester !== member) {
+        throw new ToolInputError(
+          `qq_recall_message can only recall the sender's own message: this turn was sent by ${requester}, not ${member}. Ask the operator for an explicit message_id instead.`,
         );
       }
       if (deps.memberRecallDisabled) {
         throw new ToolInputError(
-          'Member-targeted recall is disabled for this channel (moderationRecallWindowMs is 0); pass message_id explicitly instead.',
+          'Member-targeted recall is disabled for this channel (moderationRecallWindowMs is 0), so no message id is reachable from this turn. Do not guess one: ask the operator for the message_id and pass it explicitly.',
         );
       }
       messageId = deps.recentMemberMessage(bound.chatId, member);
@@ -202,9 +215,8 @@ const RECALL_TOOL: ToolSpec = {
 
 const GROUP_INFO_TOOL: ToolSpec = {
   name: 'qq_get_group_info',
-  description:
-    'Get the current QQ group profile: name, description, category, tags and member count.',
-  inputSchema: { type: 'object', properties: {} },
+  description: `Get the current QQ group profile: name, description, category, tags and member count. ${RESERVED_NOTE}`,
+  inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   groupOnly: true,
   build: (_args, _deps, chat) => ({
     method: 'GET',
@@ -214,9 +226,8 @@ const GROUP_INFO_TOOL: ToolSpec = {
 
 const BOT_STATE_TOOL: ToolSpec = {
   name: 'qq_get_bot_state',
-  description:
-    "Get the bot's own state in the current QQ group: member role (member/admin/owner), join time, whether proactive push is allowed, and which messages the group lets the bot receive.",
-  inputSchema: { type: 'object', properties: {} },
+  description: `Get the bot's own state in the current QQ group: member role (member/admin/owner), join time, whether proactive push is allowed, and which messages the group lets the bot receive. ${RESERVED_NOTE}`,
+  inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   groupOnly: true,
   build: (_args, _deps, chat) => ({
     method: 'GET',
@@ -239,6 +250,7 @@ const LIST_JOIN_REQUESTS_TOOL: ToolSpec = {
         description: 'Page size, default 20, maximum 50.',
       },
     },
+    additionalProperties: false,
   },
   groupOnly: true,
   build(args, _deps, chat) {
@@ -281,6 +293,7 @@ const REVIEW_JOIN_REQUEST_TOOL: ToolSpec = {
       },
     },
     required: ['member_openid', 'op'],
+    additionalProperties: false,
   },
   groupOnly: true,
   build(args, _deps, chat) {
@@ -310,7 +323,7 @@ const REVIEW_JOIN_REQUEST_TOOL: ToolSpec = {
 const GET_MUTE_STATUS_TOOL: ToolSpec = {
   name: 'qq_get_mute_status',
   description: `Query the current QQ group mute state: the group-wide mute rule and every member-level mute still in effect. ${ADMIN_NOTE}`,
-  inputSchema: { type: 'object', properties: {} },
+  inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   groupOnly: true,
   build: (_args, _deps, chat) => ({
     method: 'GET',
@@ -331,7 +344,7 @@ const SET_MUTE_TOOL: ToolSpec = {
       members: {
         type: 'array',
         description:
-          'Bulk form, at most 20 entries, each {member_openid, op, mute_expire_at}.',
+          'Bulk form, at most 20 entries, each {member_openid, op, mute_expire_at}. Both member_openid and op are required on every entry.',
         items: {
           type: 'object',
           properties: {
@@ -343,12 +356,15 @@ const SET_MUTE_TOOL: ToolSpec = {
                 'RFC3339 expiry, e.g. 2026-08-05T11:23:05+08:00. For op=del an empty string lifts the mute now.',
             },
           },
+          required: ['member_openid', 'op'],
+          additionalProperties: false,
         },
       },
       op: {
         type: 'string',
         enum: ['add', 'update', 'del'],
-        description: 'Operation for the single-member form. Default add.',
+        description:
+          'Operation for the single-member form: add mutes, update changes the expiry, del lifts the mute. Required.',
       },
       mute_expire_at: {
         type: 'string',
@@ -356,8 +372,10 @@ const SET_MUTE_TOOL: ToolSpec = {
           'RFC3339 expiry for the single-member form, e.g. 2026-08-05T11:23:05+08:00. For op=del an empty string lifts the mute now.',
       },
     },
+    additionalProperties: false,
   },
   groupOnly: true,
+  memberTarget: true,
   build(args, _deps, chat) {
     const members = readMembers(args);
     if (members.length === 0) {
@@ -370,9 +388,13 @@ const SET_MUTE_TOOL: ToolSpec = {
       method: 'POST',
       path: groupPath(chat, '/restrict_chat_setting'),
       body: { members },
+      summary: members
+        .map((member) => `${member.op} ${member.member_openid}`)
+        .join(', '),
     };
   },
-  format: () => 'Mute state updated.',
+  format: (_data, _target, request) =>
+    `Mute state updated (${request.summary ?? 'no member'}).`,
 };
 
 const LIST_STRATEGIES_TOOL: ToolSpec = {
@@ -391,6 +413,7 @@ const LIST_STRATEGIES_TOOL: ToolSpec = {
         description: 'Page size, default 20, maximum 50.',
       },
     },
+    additionalProperties: false,
   },
   botLevel: true,
   build(args) {
@@ -437,6 +460,7 @@ const CREATE_STRATEGY_TOOL: ToolSpec = {
         description: 'Human-readable note, at most 255 characters.',
       },
     },
+    additionalProperties: false,
   },
   botLevel: true,
   build(args) {
@@ -487,6 +511,7 @@ const UPDATE_STRATEGY_TOOL: ToolSpec = {
       remark: { type: 'string' },
     },
     required: ['strategy_id'],
+    additionalProperties: false,
   },
   botLevel: true,
   build(args) {
@@ -523,6 +548,7 @@ const DELETE_STRATEGY_TOOL: ToolSpec = {
       strategy_id: { type: 'string', description: 'Strategy id.' },
     },
     required: ['strategy_id'],
+    additionalProperties: false,
   },
   botLevel: true,
   build(args) {
@@ -544,6 +570,7 @@ const EXECUTE_STRATEGY_TOOL: ToolSpec = {
       strategy_id: { type: 'string', description: 'Strategy id.' },
     },
     required: ['strategy_id'],
+    additionalProperties: false,
   },
   botLevel: true,
   build(args) {
@@ -571,6 +598,7 @@ const SET_WHITELIST_TOOL: ToolSpec = {
       },
     },
     required: ['strategy_id', 'op', 'whitelist_users'],
+    additionalProperties: false,
   },
   botLevel: true,
   build(args) {
@@ -601,6 +629,7 @@ const LIST_MEMBERS_TOOL: ToolSpec = {
     properties: {
       cursor: { type: 'string', description: 'Pagination cursor.' },
     },
+    additionalProperties: false,
   },
   groupOnly: true,
   build(args, _deps, chat) {
@@ -622,6 +651,7 @@ const GET_MEMBER_TOOL: ToolSpec = {
       member_openid: { type: 'string', description: "The member's openid." },
     },
     required: ['member_openid'],
+    additionalProperties: false,
   },
   groupOnly: true,
   build(args, _deps, chat) {
@@ -651,24 +681,35 @@ const KICK_TOOL: ToolSpec = {
         description:
           'Bulk form, at most 20 members. Use instead of member_openid.',
       },
-      add_to_blacklist: {
+      add_to_member_blacklist: {
         type: 'boolean',
         description: 'Also add them to the group blacklist. Default false.',
       },
     },
+    additionalProperties: false,
   },
   groupOnly: true,
+  memberTarget: true,
   build(args, _deps, chat) {
     const single = readOptionalString(args, 'member_openid');
     const bulk = readStringArray(args, 'member_openids');
-    const memberOpenids = bulk ?? (single ? [single] : []);
+    // Reject ambiguity instead of ranking it: silently dropping a named
+    // member would remove someone other than what the model asked for.
+    if (single !== undefined && bulk !== undefined && bulk.length > 0) {
+      throw new ToolInputError(
+        'Pass either member_openid or member_openids, not both.',
+      );
+    }
+    // An empty bulk array is absence, so a supplied member_openid still resolves.
+    const memberOpenids =
+      bulk !== undefined && bulk.length > 0 ? bulk : single ? [single] : [];
     if (memberOpenids.length === 0) {
       throw new ToolInputError('member_openid or member_openids is required.');
     }
     if (memberOpenids.length > 20) {
       throw new ToolInputError('At most 20 members per call.');
     }
-    const addToBlacklist = readOptionalBoolean(args, 'add_to_blacklist');
+    const addToBlacklist = readOptionalBoolean(args, 'add_to_member_blacklist');
     return {
       method: 'POST',
       path: groupPath(chat, '/batch_remove_members'),
@@ -678,6 +719,7 @@ const KICK_TOOL: ToolSpec = {
           ? {}
           : { add_to_member_blacklist: addToBlacklist }),
       },
+      summary: memberOpenids.join(', '),
     };
   },
   format: (data) => `Platform response: ${stringify(data)}`,
@@ -695,6 +737,7 @@ const LIST_BLACKLIST_TOOL: ToolSpec = {
         description: 'Page size, default 20, maximum 100.',
       },
     },
+    additionalProperties: false,
   },
   groupOnly: true,
   build(args, _deps, chat) {
@@ -722,6 +765,7 @@ const UPDATE_BLACKLIST_TOOL: ToolSpec = {
       },
     },
     required: ['op', 'member_openids'],
+    additionalProperties: false,
   },
   groupOnly: true,
   build(args, _deps, chat) {
@@ -780,6 +824,21 @@ export function buildModerationTools(
         text,
         isError: true,
       });
+      // The schemas declare additionalProperties: false, but that is advisory
+      // to the model and a renamed key must not be dropped silently: dropping
+      // it would run something other than what the model named (a kick without
+      // the blacklist, a mute that never happens). Reject it instead.
+      const accepted = Object.keys(
+        (spec.inputSchema['properties'] ?? {}) as Record<string, unknown>,
+      );
+      const unknown = Object.keys(args).filter(
+        (key) => !accepted.includes(key),
+      );
+      if (unknown.length > 0) {
+        return fail(
+          `Unrecognized argument${unknown.length === 1 ? '' : 's'}: ${unknown.join(', ')}. ${spec.name} accepts only ${listArgs(accepted)}.`,
+        );
+      }
       const chat = deps.resolveChat(context.sessionId);
       if (!chat && !spec.botLevel) {
         return fail(
@@ -791,7 +850,7 @@ export function buildModerationTools(
       }
       let request: ToolRequest;
       try {
-        request = spec.build(args, deps, chat);
+        request = spec.build(args, deps, chat, context.sessionId);
       } catch (error) {
         if (error instanceof ToolInputError) return fail(error.message);
         throw error;
@@ -802,24 +861,36 @@ export function buildModerationTools(
         ...(request.body === undefined ? {} : { body: request.body }),
       });
       if (!result.ok) {
-        const text = describeFailure(spec.name, result, request.target);
+        const text = describeFailure(spec, result, request.target);
         deps.log(`${spec.name} failed: ${text}`);
+        if (request.target !== undefined && result.status === 0) {
+          // No platform verdict: the DELETE may or may not have landed, but
+          // the id is unusable either way. Leave the entry only on a
+          // platform-reported failure, where retrying the same target is safe.
+          deps.dropRecentMessage(
+            request.target.chatId,
+            request.target.messageId,
+          );
+        }
         return fail(text);
       }
-      deps.log(
+      const summary =
         request.target === undefined
+          ? request.summary
+          : `target=${request.target.chatId}/${request.target.messageId} via=${request.target.source}`;
+      deps.log(
+        summary === undefined
           ? `${spec.name} ok (HTTP ${result.status})`
-          : `${spec.name} ok (HTTP ${result.status}) target=${request.target.chatId}/${request.target.messageId} via=${request.target.source}`,
+          : `${spec.name} ok (HTTP ${result.status}) ${summary}`,
       );
       if (request.target !== undefined) {
         // A successful recall destroys the target, so a repeat member-targeted
-        // call must resolve the previous message rather than this one. The
-        // eviction is success-only: a failed DELETE must leave the target so
-        // the operator can retry the same message.
+        // call must resolve the previous message rather than this one.
         deps.dropRecentMessage(request.target.chatId, request.target.messageId);
       }
       const formatted =
-        spec.format?.(result.data, request.target) ?? stringify(result.data);
+        spec.format?.(result.data, request.target, request) ??
+        stringify(result.data);
       return formatted;
     },
   }));
@@ -828,16 +899,24 @@ export function buildModerationTools(
 /** Argument errors are reported to the model, not thrown at the bridge. */
 class ToolInputError extends Error {}
 
+/** Join accepted argument names for the unrecognized-key error. */
+function listArgs(keys: string[]): string {
+  if (keys.length === 0) return 'no arguments';
+  if (keys.length === 1) return keys[0]!;
+  return `${keys.slice(0, -1).join(', ')} and ${keys[keys.length - 1]}`;
+}
+
 function describeFailure(
-  tool: string,
+  spec: ToolSpec,
   result: Extract<ModerationApiResult, { ok: false }>,
   target: RecallTarget | undefined,
 ): string {
+  const tool = spec.name;
   switch (result.code) {
     case 11253:
       return `${tool}: the platform refused (11253 ${result.message}) — this endpoint is allowlist-only for the bot app.`;
     case 40062003:
-      return `${tool}: the platform refused (40062003 ${result.message}) — no permission for this operation: the bot must be a group admin, and the target must be an ordinary member (not the owner, an admin or a bot).`;
+      return `${tool}: the platform refused (40062003 ${result.message}) — no permission for this operation: the bot must be a group admin${spec.memberTarget === true ? ', and the target must be an ordinary member (not the owner, an admin or a bot)' : ''}.`;
     case 40064004:
       return `${tool}: the platform refused (40064004 ${result.message}) — the message can no longer be recalled.`;
     case 50065001:
@@ -846,22 +925,40 @@ function describeFailure(
       return `${tool}: the platform rejected the parameters (40061001 ${result.message}).`;
     default:
       return result.status === 0
-        ? `${tool}: the platform call did not complete: ${result.message}`
+        ? `${tool}: the platform call did not complete: ${result.message}${target === undefined ? '' : ` — message_id="${target.messageId}" may or may not have been recalled; retry by message_id instead of by member.`}`
         : `${tool}: platform call failed (HTTP ${result.status}${result.code === undefined ? '' : `, code ${result.code}`}): ${result.message}`;
   }
 }
 
-function readMembers(args: Record<string, unknown>): unknown[] {
+interface MemberEntry {
+  op: 'add' | 'update' | 'del';
+  member_openid: string;
+  mute_expire_at?: string;
+}
+
+function readMembers(args: Record<string, unknown>): MemberEntry[] {
   const bulk = args['members'];
+  // A present-but-wrong-typed `members` must not fall through to the
+  // single-member form: that would act on a different member than the one the
+  // model named.
+  if (bulk !== undefined && bulk !== null && !Array.isArray(bulk)) {
+    throw new ToolInputError('members must be an array of objects.');
+  }
   if (Array.isArray(bulk)) {
-    return bulk.map((entry) => {
+    return bulk.map((entry, index) => {
       if (typeof entry !== 'object' || entry === null) {
-        throw new ToolInputError('members entries must be objects.');
+        throw new ToolInputError(`members[${index}] must be an object.`);
       }
       const record = entry as Record<string, unknown>;
-      const expireAt = readOptionalString(record, 'mute_expire_at');
+      const op = readOptionalEnum(record, 'op', ['add', 'update', 'del']);
+      if (op === undefined) {
+        throw new ToolInputError(
+          `members[${index}].op is required (add, update or del).`,
+        );
+      }
+      const expireAt = readOptionalExpiry(record, 'mute_expire_at');
       return {
-        op: readEnum(record, 'op', ['add', 'update', 'del']),
+        op,
         member_openid: readString(record, 'member_openid'),
         ...(expireAt === undefined ? {} : { mute_expire_at: expireAt }),
       };
@@ -869,11 +966,10 @@ function readMembers(args: Record<string, unknown>): unknown[] {
   }
   const single = readOptionalString(args, 'member_openid');
   if (!single) return [];
-  const op = readOptionalEnum(args, 'op', ['add', 'update', 'del']) ?? 'add';
-  const expireAt = readOptionalString(args, 'mute_expire_at');
-  // mute_expire_at is optional in the platform schema, and the bulk form
-  // forwards it the same way: requiring it here alone would make the two
-  // forms disagree about the same request.
+  // The single-member form requires the operation: defaulting a missing op to
+  // the destructive 'add' would mute a member the model meant to unmute.
+  const op = readEnum(args, 'op', ['add', 'update', 'del']);
+  const expireAt = readOptionalExpiry(args, 'mute_expire_at');
   return [
     {
       op,
@@ -946,6 +1042,19 @@ function readOptionalString(
     throw new ToolInputError(`${key} must be a string.`);
   }
   return value.trim() === '' ? undefined : value.trim();
+}
+
+/**
+ * Read `mute_expire_at`: an explicit empty string is meaningful ("lift the
+ * mute now" for op=del), so it must reach the platform instead of being
+ * collapsed into an omitted field.
+ */
+function readOptionalExpiry(
+  args: Record<string, unknown>,
+  key: string,
+): string | undefined {
+  if (args[key] === '') return '';
+  return readOptionalString(args, key);
 }
 
 function readStringArray(

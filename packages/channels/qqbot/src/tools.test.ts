@@ -21,6 +21,7 @@ function harness(
   const deps: ModerationToolDeps = {
     resolveChat: () => ({ chatId: 'G123', isGroup: true }),
     memberRecallDisabled: false,
+    currentSenderId: () => undefined,
     recentMemberMessage: () => undefined,
     dropRecentMessage: (chatId, messageId) => {
       dropped.push({ chatId, messageId });
@@ -94,14 +95,18 @@ describe('buildModerationTools', () => {
     }
   });
 
-  it('declares the argument properties the model calls the tool with', () => {
+  it('declares additionalProperties false and the argument properties the model calls with', () => {
+    for (const tool of harness().tools) {
+      expect(tool.inputSchema).toMatchObject({
+        additionalProperties: false,
+      });
+    }
     const tool = harness().tools[0];
     const properties = (
       tool!.inputSchema as { properties?: Record<string, unknown> }
     ).properties;
     expect(properties).toHaveProperty('message_id');
     expect(properties).toHaveProperty('member_openid');
-    expect(tool!.inputSchema).toMatchObject({ additionalProperties: false });
   });
 
   it('tells the model a target is required and never claims a time limit', () => {
@@ -109,6 +114,7 @@ describe('buildModerationTools', () => {
     expect(description).toContain('requires a target');
     expect(description).toContain('There is no implicit target');
     expect(description).toContain("never recalls the bot's own messages");
+    expect(description).toContain('allowMention');
     expect(description).not.toMatch(/2.minute|two.minute/i);
   });
 });
@@ -187,8 +193,41 @@ describe('qq_recall_message', () => {
       member_openid: 'A'.repeat(32),
     });
     expect(isError(result)).toBe(true);
-    expect(textOf(result)).toContain('disabled');
+    expect(textOf(result)).toContain('moderationRecallWindowMs is 0');
+    expect(textOf(result)).toContain('ask the operator for the message_id');
+    expect(textOf(result)).not.toContain('pass message_id explicitly instead');
     expect(calls).toHaveLength(0);
+  });
+
+  it('refuses to recall another member’s message for the requester', async () => {
+    const { call, calls, dropped } = harness({
+      currentSenderId: () => 'REQUESTER',
+      recentMemberMessage: () => 'M-MEMBER',
+    });
+    const result = await call('qq_recall_message', {
+      member_openid: 'OTHER',
+    });
+    expect(isError(result)).toBe(true);
+    expect(textOf(result)).toContain("sender's own message");
+    expect(textOf(result)).toContain('REQUESTER');
+    expect(calls).toHaveLength(0);
+    expect(dropped).toHaveLength(0);
+  });
+
+  it('allows a member to recall their own message and an operator turn to target a member', async () => {
+    const own = harness({
+      currentSenderId: () => 'M1',
+      recentMemberMessage: () => 'M-OWN',
+    });
+    await own.call('qq_recall_message', { member_openid: 'M1' });
+    expect(own.calls[0]?.path).toBe('/v2/groups/G123/messages/M-OWN');
+
+    const operator = harness({
+      currentSenderId: () => undefined,
+      recentMemberMessage: () => 'M-MEMBER',
+    });
+    await operator.call('qq_recall_message', { member_openid: 'OTHER' });
+    expect(operator.calls[0]?.path).toBe('/v2/groups/G123/messages/M-MEMBER');
   });
 
   it('still recalls an explicit id when member-targeted recall is disabled', async () => {
@@ -245,6 +284,34 @@ describe('qq_recall_message', () => {
     await call('qq_recall_message', { member_openid: 'A'.repeat(32) });
     expect(dropped).toHaveLength(0);
   });
+
+  it('drops the target when the platform call never completed', async () => {
+    // No platform verdict: the id may or may not be gone, so a later recall
+    // must resolve the previous message instead of retrying this one.
+    const requests: Recorded[] = [];
+    let attempt = 0;
+    const { call, dropped } = harness({
+      recentMemberMessage: () => (attempt === 0 ? 'M2' : 'M1'),
+      request: async (input) => {
+        requests.push(input as Recorded);
+        attempt += 1;
+        return attempt === 1
+          ? { ok: false, status: 0, message: 'The operation was aborted' }
+          : { ok: true, status: 204, data: undefined };
+      },
+    });
+    const first = await call('qq_recall_message', {
+      member_openid: 'A'.repeat(32),
+    });
+    expect(textOf(first)).toContain('message_id="M2"');
+    expect(dropped).toEqual([{ chatId: 'G123', messageId: 'M2' }]);
+
+    const second = await call('qq_recall_message', {
+      member_openid: 'A'.repeat(32),
+    });
+    expect(second).toBe('Message recalled (M1).');
+    expect(requests[1]?.path).toBe('/v2/groups/G123/messages/M1');
+  });
 });
 
 describe('platform failure mapping', () => {
@@ -276,6 +343,7 @@ describe('platform failure mapping', () => {
     );
     const result = await call('qq_recall_message', { message_id: 'M1' });
     expect(textOf(result)).toContain('group admin');
+    expect(textOf(result)).not.toContain('ordinary member');
   });
 
   it('maps 40064004 to a no-longer-recallable explanation', async () => {
@@ -423,7 +491,9 @@ describe('platform failure mapping for the group tools', () => {
         message: '无操作权限',
       },
     );
-    const result = textOf(await call('qq_set_mute', { member_openid: 'M1' }));
+    const result = textOf(
+      await call('qq_set_mute', { member_openid: 'M1', op: 'add' }),
+    );
     expect(result).toContain('group admin');
     expect(result).toContain('ordinary member');
   });
@@ -676,13 +746,33 @@ describe('group-management request shapes', () => {
     const { call, calls } = harness();
     await call('qq_kick_member', {
       member_openids: ['M1', 'M2'],
-      add_to_blacklist: true,
+      add_to_member_blacklist: true,
     });
     expect(calls[0]).toEqual({
       method: 'POST',
       path: '/v2/groups/G123/batch_remove_members',
       body: { member_openids: ['M1', 'M2'], add_to_member_blacklist: true },
     });
+  });
+
+  it('rejects a kick that names both target forms instead of dropping one', async () => {
+    const { call, calls } = harness();
+    const result = await call('qq_kick_member', {
+      member_openid: 'M1',
+      member_openids: ['M2'],
+    });
+    expect(isError(result)).toBe(true);
+    expect(textOf(result)).toContain('not both');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('treats an empty member_openids array as absent', async () => {
+    const { call, calls } = harness();
+    await call('qq_kick_member', {
+      member_openid: 'M1',
+      member_openids: [],
+    });
+    expect(calls[0]?.body).toEqual({ member_openids: ['M1'] });
   });
 
   it('updates the blacklist with an op', async () => {
@@ -713,5 +803,155 @@ describe('group-management request shapes', () => {
     const { call, logs } = harness();
     await call('qq_get_group_info');
     expect(logs.join('\n')).toContain('qq_get_group_info ok');
+  });
+});
+
+describe('argument validation the schemas promise', () => {
+  it('rejects an unrecognized argument on every tool instead of dropping it', async () => {
+    const h = harness();
+    for (const tool of h.tools) {
+      const result = await tool.handler(
+        { __probe_unknown_key__: true },
+        { sessionId: 'S1' },
+      );
+      expect(isError(result)).toBe(true);
+      expect(textOf(result)).toContain('Unrecognized argument');
+    }
+    // qq_recall_message keeps its own wording for the accepted pair.
+    const recall = h.tools.find((tool) => tool.name === 'qq_recall_message');
+    const recallResult = await recall!.handler(
+      { openid: 'A'.repeat(32) },
+      { sessionId: 'S1' },
+    );
+    expect(textOf(recallResult)).toContain(
+      'qq_recall_message accepts only message_id and member_openid',
+    );
+    expect(h.calls).toHaveLength(0);
+  });
+
+  it('rejects a misspelled strategy argument instead of creating the strategy', async () => {
+    const { call, calls } = harness();
+    const result = await call('qq_create_join_approval_strategy', {
+      group_ids: ['123456'],
+      is_enabled: 'off',
+    });
+    expect(isError(result)).toBe(true);
+    expect(textOf(result)).toContain('is_enabled');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('marks every reserved endpoint in the model-facing description', () => {
+    const descriptions = new Map(
+      harness().tools.map((tool) => [tool.name, tool.description]),
+    );
+    for (const name of [
+      'qq_get_group_info',
+      'qq_get_bot_state',
+      'qq_list_group_members',
+      'qq_get_group_member',
+      'qq_kick_member',
+      'qq_list_member_blacklist',
+      'qq_update_member_blacklist',
+    ]) {
+      expect(descriptions.get(name)).toContain('Reserved interface');
+    }
+  });
+
+  it('forwards an explicit empty mute expiry so op=del lifts the mute now', async () => {
+    const { call, calls } = harness();
+    await call('qq_set_mute', {
+      member_openid: 'M1',
+      op: 'del',
+      mute_expire_at: '',
+    });
+    expect(calls[0]?.body).toEqual({
+      members: [{ op: 'del', member_openid: 'M1', mute_expire_at: '' }],
+    });
+  });
+
+  it('forwards an explicit empty mute expiry on a bulk entry too', async () => {
+    const { call, calls } = harness();
+    await call('qq_set_mute', {
+      members: [{ op: 'del', member_openid: 'M1', mute_expire_at: '' }],
+    });
+    expect(calls[0]?.body).toEqual({
+      members: [{ op: 'del', member_openid: 'M1', mute_expire_at: '' }],
+    });
+  });
+
+  it('rejects a bulk mute entry that omits op and names the entry', async () => {
+    const { call, calls } = harness();
+    const result = await call('qq_set_mute', {
+      members: [{ member_openid: 'M1' }],
+    });
+    expect(isError(result)).toBe(true);
+    expect(textOf(result)).toContain('members[0].op');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('declares op required on bulk mute items', () => {
+    const setMute = harness().byName.get('qq_set_mute')!;
+    const members = (
+      setMute.inputSchema as {
+        properties: { members: { items: Record<string, unknown> } };
+      }
+    ).properties.members.items;
+    expect(members).toMatchObject({ required: ['member_openid', 'op'] });
+  });
+
+  it('rejects a non-array members value instead of falling back to member_openid', async () => {
+    const { call, calls } = harness();
+    const result = await call('qq_set_mute', {
+      members: { member_openid: 'M1', op: 'add' },
+    });
+    expect(isError(result)).toBe(true);
+    expect(textOf(result)).toContain('must be an array');
+    expect(calls).toHaveLength(0);
+
+    const worse = harness();
+    const result2 = await worse.call('qq_set_mute', {
+      members: { member_openid: 'M1', op: 'add' },
+      member_openid: 'M2',
+    });
+    expect(isError(result2)).toBe(true);
+    expect(textOf(result2)).toContain('must be an array');
+    expect(worse.calls).toHaveLength(0);
+  });
+
+  it('requires op on the single-member mute form', async () => {
+    const { call, calls } = harness();
+    const result = await call('qq_set_mute', { member_openid: 'M1' });
+    expect(isError(result)).toBe(true);
+    expect(textOf(result)).toContain('op is required');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('reports the mute direction in the result text and the log', async () => {
+    const added = harness();
+    const addedText = await added.call('qq_set_mute', {
+      member_openid: 'M1',
+      op: 'add',
+    });
+    const deleted = harness();
+    const deletedText = await deleted.call('qq_set_mute', {
+      member_openid: 'M1',
+      op: 'del',
+    });
+    expect(addedText).not.toBe(deletedText);
+    expect(String(addedText)).toContain('add M1');
+    expect(String(deletedText)).toContain('del M1');
+    expect(added.logs.join('\n')).toContain('add M1');
+    expect(deleted.logs.join('\n')).toContain('del M1');
+  });
+
+  it('converts group_action group ids to JSON numbers on update', async () => {
+    const { call, calls } = harness();
+    await call('qq_update_join_approval_strategy', {
+      strategy_id: 'st_1',
+      group_action: { op: 'add', group_ids: ['123456'] },
+    });
+    expect(calls[0]?.body).toEqual({
+      group_action: { op: 'add', group_ids: [123456] },
+    });
   });
 });
