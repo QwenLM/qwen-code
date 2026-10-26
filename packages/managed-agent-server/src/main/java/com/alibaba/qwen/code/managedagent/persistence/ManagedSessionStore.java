@@ -384,6 +384,16 @@ public class ManagedSessionStore {
         if (!"legacy-close".equals(request.kind()) || !WorkspaceLifecycleStore.legacyClose(jdbc, tenantId, sessionId)) {
             requireOrdinaryAdmission(tenantId, sessionId);
         }
+        if (request.kind() != null && request.kind().startsWith("configuration:")) {
+            String operation = request.kind().substring("configuration:".length());
+            JsonNode current = ManagedMcpSettings.find(jdbc, tenantId, sessionId);
+            if (!ManagedConfigInstall.uuid(operation) || ManagedConfigInstall.blocked(jdbc, tenantId, sessionId)
+                    && (!ManagedConfigInstall.isPackageConfig(current) || !operation.equals(current.path("operationId").asText()))) {
+                throw conflict("session_config_recovery_required", "Only the original configuration operation may continue.");
+            }
+        } else {
+            ManagedConfigInstall.requireOpen(jdbc, tenantId, sessionId);
+        }
         HeadRow head = requireHeadForUpdate(tenantId, sessionId);
         requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
         requireWriter(head, request.writerId(), request.writerGeneration(), writerToken, databaseNow(), true);
@@ -397,7 +407,7 @@ public class ManagedSessionStore {
         }
         authorizeOrdinary(tenantId, sessionId, writerToken, request);
         var rows = jdbc.queryForList("SELECT agent_id, agent_definition_digest, tool_profile, workspace_id,"
-                + " approval_mode, selected_approval_mode, approval_revision FROM ma_session"
+                + " approval_mode, selected_approval_mode, approval_revision, permission_rules_json FROM ma_session"
                 + " WHERE tenant_id=? AND session_id=? FOR UPDATE", tenantId, sessionId);
         if (rows.size() != 1) {
             throw conflict("managed_session_scope_conflict", "The Managed Session is missing.");
@@ -408,6 +418,7 @@ public class ManagedSessionStore {
                 || ("qwen-code".equals(row.get("agent_id"))
                         ? row.get("agent_definition_digest") != null : row.get("agent_definition_digest") == null)
                 || !(com.alibaba.qwen.code.managedagent.workspace.WorkspaceToolProfiles.FILES.equals(profile)
+                        || com.alibaba.qwen.code.managedagent.workspace.WorkspaceToolProfiles.FILES_V3.equals(profile)
                         || com.alibaba.qwen.code.managedagent.workspace.WorkspaceToolProfiles.isPublicShell(profile))) {
             return null;
         }
@@ -420,7 +431,19 @@ public class ManagedSessionStore {
                 || revision < 0 || revision > 9_007_199_254_740_991L) {
             throw conflict("approval_selection_conflict", "The approval selection is invalid.");
         }
-        return java.util.Map.of("mode", mode, "revision", revision);
+        java.util.Map<String, Object> result = new java.util.LinkedHashMap<>(java.util.Map.of("mode", mode, "revision", revision));
+        if (row.get("permission_rules_json") != null) {
+            try {
+                var rules = com.alibaba.qwen.code.daemon.HostedPermissionRules.nonEmpty(com.alibaba.qwen.code.daemon.HostedPermissionRules.copyOf(
+                        CSI_JSON.readValue((String) row.get("permission_rules_json"), java.util.Map.class)));
+                if (rules != null) {
+                    result.put("permissionRules", rules);
+                }
+            } catch (java.io.IOException | IllegalArgumentException invalid) {
+                throw conflict("approval_selection_conflict", "The permission rules are invalid.");
+            }
+        }
+        return result;
     }
 
     // An ordinary write against a v2-claimed Session must fail with the
@@ -1349,6 +1372,7 @@ public class ManagedSessionStore {
         if (toolResults != null && csiOriginal == null) {
             toolResults.captureEvents(tenantId, request.workspaceId(), sessionId, revision, receiptEvents);
         }
+        ManagedUserMessageStore.capture(jdbc, tenantId, sessionId, applied.records());
         publishJournalAfterCommit(validated.recordBytes());
         return new CommitReceipt(revision, request.transactionId(),
                 request.commandId(), request.operation(),
@@ -2055,10 +2079,26 @@ public class ManagedSessionStore {
                 "managed-agent-skills", "agent-skills-", AgentDefinitionExtensions.skillsBytes(skills));
     }
 
+    @Transactional
+    public ToolResultResourceRef publishInheritedExtensionResource(String tenantId, String workspaceId, String sessionId, StoredResource source) {
+        validateScope(tenantId, workspaceId, sessionId);
+        ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenantId, sessionId);
+        if (!Set.of("managed-extension-config-bundle", "managed-extension-contributions", "managed-extension-contributions-part").contains(source.kind())
+                || source.schemaVersion() != 1 || source.byteLength() > ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES
+                || source.bytes().length != source.byteLength() || !sha256(source.bytes()).equals(source.digest())) {
+            throw invalid("Invalid inherited extension resource");
+        }
+        return publishAgentResource(tenantId, workspaceId, sessionId, source.kind(), source.bytes(), source.resourceId());
+    }
+
     private ToolResultResourceRef publishAgentResource(String tenantId,
             String workspaceId, String sessionId, String kind, String prefix, byte[] bytes) {
+        return publishAgentResource(tenantId, workspaceId, sessionId, kind, bytes, prefix + sha256(bytes));
+    }
+
+    private ToolResultResourceRef publishAgentResource(String tenantId, String workspaceId, String sessionId,
+            String kind, byte[] bytes, String resourceId) {
         String digest = sha256(bytes);
-        String resourceId = prefix + digest;
         String scopeKey = sessionScopeKey(tenantId, sessionId);
         Timestamp now = databaseNow();
         ResourceRow existing = findResource(scopeKey, resourceId);

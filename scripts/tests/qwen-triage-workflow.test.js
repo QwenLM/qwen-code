@@ -5241,6 +5241,41 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain('do not ask the maintainer to restate them');
   });
 
+  // Watch mode composes the shipped gate probe with cron_create. Each piece is
+  // pinned because dropping one turns the watch back into a polling task that
+  // spends a model turn per fire — the cost the design exists to avoid.
+  it('documents the watch mode on the shipped gate probe', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+
+    expect(flat).toContain('`--watch` installs a standing trigger');
+    // The gate runs the wrapper, not the bare probe: the probe also reports
+    // comments and failed checks, and every non-empty gate output wakes the
+    // model whether or not the head moved.
+    expect(flat).toContain('scripts/verify-pr-watch-gate.mjs');
+    expect(flat).toContain('resync');
+    // One cursor serves one consumer; installing over an existing autofix
+    // watch would starve this one of head moves and lose `stop`.
+    expect(flat).toContain('--check');
+    expect(flat).toContain('--claim');
+    expect(flat).toContain('--release');
+    expect(flat).toContain('one cursor serves one consumer');
+    expect(flat).toContain('head_moved_externally');
+    expect(flat).toContain('verify-pr-watch-');
+    expect(flat).toContain('cron_delete');
+    // A binary without the probe must stop the setup, not schedule a dead gate.
+    expect(flat).toContain('schedule nothing');
+  });
+
+  // The TUI renders `argument-hint` beside the command name; without the field
+  // `/verify-pr` looks like it takes no arguments, unlike `/review`.
+  it('declares an argument hint for the command prompt', () => {
+    const frontmatter = parse(/^---\n([\s\S]*?)\n---/.exec(verifySkill)[1]);
+
+    expect(frontmatter['argument-hint']).toBe(
+      '<pr-number> [--publish] [--watch] [--repo <owner>/<repo>] [--assets-repo <owner>/<repo>] [--assets-branch <branch>]',
+    );
+  });
+
   // PR #7836's report said "Verdict: merge-ready — the 7 failures are all
   // expected A/B base-cell failures proving the tests are load-bearing"
   // while assertions.json said fail:7 — so the publisher's trust rule

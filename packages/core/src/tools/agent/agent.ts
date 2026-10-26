@@ -110,6 +110,11 @@ import {
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { PermissionMode } from '../../hooks/types.js';
 import { approvalModeToPermissionMode } from '../../hooks/permission-mode.js';
+import {
+  hasUnattendedFixGrant,
+  isUnattendedFixConfig,
+  markUnattendedFixConfig,
+} from '../autofix-pr-grants.js';
 import type { StopHookOutput } from '../../hooks/types.js';
 import {
   appendStopHookBlockingCapWarning,
@@ -3454,19 +3459,44 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
       // Resolve the subagent's permission mode before creating it
       const isCodex = subagentConfig.executor?.kind === 'codex';
-      const parentApprovalMode = isCodex
-        ? this.config.getSessionApprovalMode()
-        : this.config.getApprovalMode();
+      // An agent a granted fix agent starts takes the session's own mode:
+      // the grant is that agent's, not one for whatever it launches.
+      const parentApprovalMode =
+        isCodex || isUnattendedFixConfig(this.config)
+          ? this.config.getSessionApprovalMode()
+          : this.config.getApprovalMode();
+      // The fix agent of a watch whose user let its commands run without
+      // asking (`autofix_pr` `unattended`), its watch checked again now: a
+      // general-purpose agent the session itself starts in that worktree,
+      // never one a subagent starts. Plan mode stays plan mode.
+      const unattendedFixes =
+        !isCodex &&
+        worktreeIsolation?.externallyManaged === true &&
+        this.params.subagent_type?.toLowerCase() === 'general-purpose' &&
+        // The built-in one: a project's or user's definition of that name may
+        // run another executor, which no deny rule of this session reaches.
+        subagentConfig.isBuiltin === true &&
+        !subagentConfig.executor &&
+        getCurrentAgentId() === null &&
+        parentApprovalMode !== ApprovalMode.PLAN &&
+        this.config.isTrustedFolder() &&
+        (await hasUnattendedFixGrant(
+          this.config.getSessionId(),
+          worktreeIsolation.path,
+          signal ?? new AbortController().signal,
+        ));
       // Codex has no Qwen classifier: native writes need an explicit grant,
       // not an intermediate subagent's implicit auto-edit or fork yolo mode.
-      const resolvedMode = resolveSubagentApprovalMode(
-        isCodex && parentApprovalMode === ApprovalMode.AUTO
-          ? ApprovalMode.DEFAULT
-          : parentApprovalMode,
-        subagentConfig.approvalMode ??
-          (isCodex ? parentApprovalMode : undefined),
-        this.config.isTrustedFolder(),
-      );
+      const resolvedMode = unattendedFixes
+        ? PermissionMode.Yolo
+        : resolveSubagentApprovalMode(
+            isCodex && parentApprovalMode === ApprovalMode.AUTO
+              ? ApprovalMode.DEFAULT
+              : parentApprovalMode,
+            subagentConfig.approvalMode ??
+              (isCodex ? parentApprovalMode : undefined),
+            this.config.isTrustedFolder(),
+          );
       const resolvedApprovalMode = permissionModeToApprovalMode(resolvedMode);
       // ALWAYS produce a child Config via an overlay, even when the
       // approval mode is identical to the parent. Subagents must run
@@ -3543,6 +3573,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         { externalExecutor: subagentConfig.executor !== undefined },
       );
       restoreParentPM = cleanup;
+      if (unattendedFixes) markUnattendedFixConfig(agentConfig);
 
       // Date.now() alone collides when two parallel background agents of the
       // same type land in the same ms; the registry is keyed by agentId.

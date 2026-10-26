@@ -6,6 +6,7 @@
 
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
+import type { ManagedPermissionRules } from '@qwen-code/qwen-code-core/managed-runtime/managed-permission-rules.js';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import {
   type ManagedSessionDurableRef,
@@ -32,25 +33,43 @@ export const HOSTED_APPROVAL_OPTIONS = [
   { id: 'deny', label: 'Deny' },
 ] as const;
 
-export type HostedApprovalMode = 'yolo' | 'default' | 'auto-edit';
+export type HostedApprovalMode = 'yolo' | 'default' | 'auto-edit' | 'auto';
 
 export interface HostedApprovalSettings {
   readonly mode: HostedApprovalMode;
   readonly timeoutMs: number;
+  readonly permissionRules?: ManagedPermissionRules;
 }
 
 // Listing what each mode pre-approves means a tool added to a profile later
 // is asked about until someone decides otherwise. `task_list` only reads the
-// Session's own team board (H4e-b1).
+// Session's own team board (H4e-b1). `todo_write` only writes the Session's
+// own task list, so it is as safe to pre-approve as a read. A tool that
+// reaches the network would not join this list: it contacts a URL nobody in
+// the Session chose.
 const PREAPPROVED_TOOLS: Readonly<
   Record<Exclude<HostedApprovalMode, 'yolo'>, readonly string[]>
 > = {
-  default: ['read_file', 'task_list', 'exit_plan_mode', 'team_plan_approval'],
+  default: [
+    'read_file',
+    'task_list',
+    'todo_write',
+    'exit_plan_mode',
+    'team_plan_approval',
+  ],
+  auto: [
+    'read_file',
+    'task_list',
+    'todo_write',
+    'exit_plan_mode',
+    'team_plan_approval',
+  ],
   'auto-edit': [
     'read_file',
     'write_file',
     'edit',
     'task_list',
+    'todo_write',
     'exit_plan_mode',
     'team_plan_approval',
   ],
@@ -65,8 +84,8 @@ const SEARCH_PREAPPROVED_TOOLS: readonly string[] = ['glob'];
 
 /**
  * Reads a tool profile's approval settings. `plan` needs its own planning
- * semantics and `auto` a classifier, which the Hosted path does not have, so
- * both are refused like any unknown mode. `yolo` retains a valid timeout for
+ * semantics and is refused as an execution approval mode. `yolo` retains a
+ * valid timeout for
  * a later policy selection, while preserving its legacy invalid-timeout fallback.
  */
 export function parseHostedApprovalSettings(
@@ -74,7 +93,12 @@ export function parseHostedApprovalSettings(
   timeoutMs: unknown,
 ): HostedApprovalSettings | undefined {
   const parsed = mode === undefined ? 'yolo' : mode;
-  if (parsed !== 'yolo' && parsed !== 'default' && parsed !== 'auto-edit')
+  if (
+    parsed !== 'yolo' &&
+    parsed !== 'default' &&
+    parsed !== 'auto-edit' &&
+    parsed !== 'auto'
+  )
     return undefined;
   if (
     timeoutMs !== undefined &&
@@ -141,6 +165,7 @@ interface HostedActionOptionsBase {
   readonly inputRevision: number;
   readonly createdAt: number;
   readonly expiresAt: number;
+  readonly requiresHumanDecision?: true;
   readonly options: ReadonlyArray<{
     readonly id: string;
     readonly label: string;
@@ -178,6 +203,11 @@ export function parseHostedActionOptions(bytes: Buffer): HostedActionOptions {
     'expiresAt',
     'options',
   ];
+  if (options['requiresHumanDecision'] !== undefined) {
+    if (options['requiresHumanDecision'] !== true)
+      throw new Error('Invalid Hosted Action human decision floor.');
+    fields.push('requiresHumanDecision');
+  }
   if (options['v'] === 2 || (options['v'] === 3 && options['inputRef']))
     fields.push('inputRef');
   if (options['v'] === 3) fields.push('continuationRef');
@@ -221,7 +251,15 @@ export function parseHostedActionOptions(bytes: Buffer): HostedActionOptions {
   ]) {
     if (!Object.hasOwn(options, field)) continue;
     const ref = assertManagedSessionDurableRef(options[field], field);
-    if (ref.kind !== kind || ref.schemaVersion !== 1)
+    if (
+      (ref.kind !== kind &&
+        !(
+          field === 'inputRef' &&
+          options['v'] === 3 &&
+          ref.kind === 'managed-extension-command-input'
+        )) ||
+      ref.schemaVersion !== 1
+    )
       throw new Error('Invalid Hosted Action reference.');
   }
   return options as unknown as HostedActionOptions;
@@ -549,6 +587,7 @@ export function hostedLiveApprovalPoll(
     if (isBlocked())
       throw new Error('Hosted approval policy is recovery blocked.');
     if (
+      options.requiresHumanDecision === true ||
       signal.aborted ||
       session.authority.writesStopped ||
       session.authority.action(options.requestId)?.state !== 'requested' ||

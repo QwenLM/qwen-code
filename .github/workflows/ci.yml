@@ -60,19 +60,12 @@ concurrency:
   # repo's namespace and PR runs DO cancel in progress, so a fork whose
   # default branch is `main` cancels a victim PR's run on every push.
   # Supersede within a PR is kept: one branch backs one open PR per fork.
-  # `main` never cancels in progress, and that is intended rather than
-  # accidental: a shared group holds at most one running plus one pending
-  # run, and a newer pending run REPLACES the older one even with
-  # cancel-in-progress: false, so back-to-back merges still coalesce onto the
-  # newest tree — but the in-flight run always finishes and reports. Merges
-  # land every ~18min (median) against this ~30min lane, and with no merge
-  # queue this run is the only fast witness of a merged tree; cancelling it
-  # starved the suite once already — e2e.yml measured 67 of 100 push runs
-  # cancelled and only 25 ever reported (#5859). The coverage upload is
-  # `always()`-gated, so a cancelled run would also publish partial coverage
-  # under the complete run's artifact name. Release branches are treated the
-  # same way.
-  group: '${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref }}'
+  # A ref-only group replaces older pending main pushes even when cancellation
+  # is disabled. Give each push-tip SHA its own group so every merged tree can
+  # report independently. Repeated pushes/reruns of one SHA still share a group.
+  # Keep running main and release validations uncancellable.
+  group: |-
+    ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.sha || github.head_ref || github.ref }}
   cancel-in-progress: |-
     ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/heads/release/') }}
 
@@ -100,8 +93,8 @@ env:
   # re-runs every suite after `npm ci`, and a push to main always classifies
   # `full` (classify_pr computes a profile only for pull_request), so what
   # the fast lane skips is still re-checked post-merge.
-  HELPER_TESTS_DEP_FREE: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/update-ecs-runner-qwen-workflow.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/check-lint-gate-freshness.test.mjs .github/scripts/review-runner-schedule.test.mjs .github/scripts/ecs-runner/qwen-docker-cleanup.test.mjs .github/scripts/check-test-growth.test.mjs .github/scripts/check-ci-budget.test.mjs'
-  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/update-ecs-runner-qwen-workflow.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/assign-pr-owner.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/check-lint-gate-freshness.test.mjs .github/scripts/ci-disk-pressure.test.mjs .github/scripts/e2e-build.test.mjs integration-tests/concurrent-runner/export-html-from-chatrecord-jsonl.test.mjs .github/scripts/review-runner-schedule.test.mjs .github/scripts/ecs-runner/qwen-docker-cleanup.test.mjs .github/scripts/ecs-runner/review-scratch-cleanup.test.mjs .github/scripts/check-test-growth.test.mjs .github/scripts/check-ci-budget.test.mjs'
+  HELPER_TESTS_DEP_FREE: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/update-ecs-runner-qwen-workflow.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/check-lint-gate-freshness.test.mjs .github/scripts/review-runner-schedule.test.mjs .github/scripts/ecs-runner/qwen-docker-cleanup.test.mjs .github/scripts/check-test-growth.test.mjs .github/scripts/check-ci-budget.test.mjs .github/scripts/ecs-runner/check-font-baseline.test.mjs'
+  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/update-ecs-runner-qwen-workflow.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/assign-pr-owner.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/check-lint-gate-freshness.test.mjs .github/scripts/ci-disk-pressure.test.mjs .github/scripts/e2e-build.test.mjs integration-tests/concurrent-runner/export-html-from-chatrecord-jsonl.test.mjs .github/scripts/review-runner-schedule.test.mjs .github/scripts/ecs-runner/qwen-docker-cleanup.test.mjs .github/scripts/ecs-runner/review-scratch-cleanup.test.mjs .github/scripts/check-test-growth.test.mjs .github/scripts/check-ci-budget.test.mjs .github/scripts/ecs-runner/check-font-baseline.test.mjs'
   # The growth ratchet and its vitest mirror compare each workflow against
   # the PR's base commit to tell "this PR grew the file" apart from "the
   # baseline went stale on main" (#9904). Wired once here so every lane
@@ -645,11 +638,12 @@ jobs:
           echo "Using persistent npm cache at ${cache_dir}"
           du -sh "${cache_dir}" 2>/dev/null || true
 
-      # test:scripts runs the standalone runtime regression against pinned
-      # Node and Bun archives. Keep them on the persistent host so only the
-      # first run per host downloads them: the download cost minutes per run,
-      # and a 502 from npm once reddened an otherwise green run. Exported here
-      # because the test step overrides HOME.
+      # The test step's side lane (.github/scripts/ci/run-unit-test-lanes.sh)
+      # runs the standalone runtime regression against pinned Node and Bun
+      # archives. Keep them on the persistent host so only the first run per
+      # host downloads them: the download cost minutes per run, and a 502 from
+      # npm once reddened an otherwise green run. Exported here because the
+      # test step overrides HOME.
       - name: 'Configure persistent standalone runtime cache (self-hosted)'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
         run: |-
@@ -833,12 +827,11 @@ jobs:
             retry_arg=(--retry="${VITEST_RETRY}")
           fi
           set +e
-          "${test_runner[@]}" npm run test:ci:workspaces -- "${retry_arg[@]}"
+          # Every workspace suite, the standalone regression and scripts/tests,
+          # in two concurrent lanes; the script says why. Each command it runs
+          # inherits the capabilities test_runner drops.
+          "${test_runner[@]}" .github/scripts/ci/run-unit-test-lanes.sh "${retry_arg[@]}"
           RC=$?
-          if [ "$RC" -eq 0 ]; then
-            "${test_runner[@]}" npm run test:scripts -- "${retry_arg[@]}"
-            RC=$?
-          fi
           set -e
           pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true
           kill "$SAMPLER_PID" 2>/dev/null || true
@@ -889,13 +882,20 @@ jobs:
           reporter: 'java-junit'
           fail-on-error: 'false'
 
-      - name: 'Upload Test Results Artifact (for forks)'
+      - name: 'Upload Test Results Artifact'
         if: |-
-          ${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
+          ${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}
+        # Advisory like the publisher above: a transient artifact-service
+        # failure must not turn a green suite red. `always()` also fires on a
+        # run cancelled mid-suite, so a partial report can be retained under
+        # the complete run's name.
+        continue-on-error: true
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
-          name: 'test-results-fork-22.x-ubuntu-latest'
+          name: "${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'test-results-fork-22.x-ubuntu-latest' || 'test-results-22.x-ubuntu-latest' }}"
           path: 'packages/*/junit.xml'
+          if-no-files-found: 'ignore'
+          retention-days: 7
 
       # Push only: that is the one lane where QWEN_CI_COVERAGE turns
       # collection on, so a pull-request run has nothing to upload.
@@ -938,7 +938,10 @@ jobs:
     # contention is why test runs 120/60 and no_ak 60/30; a flat 45 priced
     # only the warm half of that reality. Hosted runners keep the tighter
     # ceiling so a genuine hang there does not burn the ECS allowance.
-    timeout-minutes: '${{ fromJSON(contains(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'', ''ecs-qwen'') && ''90'' || ''45'') }}'
+    # Keyed on `self-hosted`, not on the x64 fleet's `ecs-qwen` label: the
+    # ARM64 fleet renders ["self-hosted", "linux", "arm64"], so a
+    # fleet-specific substring priced those reserved machines as hosted.
+    timeout-minutes: '${{ fromJSON(contains(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'', ''self-hosted'') && ''90'' || ''45'') }}'
     env:
       LINT_BASE_SHA: "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}"
     permissions:
@@ -1219,9 +1222,27 @@ jobs:
         env:
           LINT_HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
         run: |-
-          # Bound transfer on the shared runners. lint-scope falls back to full
-          # checks when this history cannot prove the PR's merge base.
-          git fetch --no-tags --depth=100 origin "${LINT_BASE_SHA}" "${LINT_HEAD_SHA}"
+          # Blobless: `Report test growth` may already have fetched the merge
+          # base with --filter=blob:none, and a plain fetch then dies resolving
+          # thin-pack deltas against blobs this checkout lacks. lint-scope
+          # reads only commits and trees.
+          partial=(-c extensions.partialClone=origin -c remote.origin.promisor=true)
+          git "${partial[@]}" fetch --no-tags --depth=100 --filter=blob:none \
+            origin "${LINT_BASE_SHA}" "${LINT_HEAD_SHA}"
+          # Deepen until Git can prove the merge base. A fixed 100-commit
+          # window expires in about a day at this merge rate, after which every
+          # longer-lived PR silently paid for a full scan; each deepen is
+          # blobless, so the extra transfer is trees, not the whole pack.
+          for _attempt in 1 2 3; do
+            if git merge-base --all "${LINT_BASE_SHA}" HEAD >/dev/null 2>&1; then
+              break
+            fi
+            git "${partial[@]}" fetch --no-tags --deepen=300 --filter=blob:none \
+              origin "${LINT_BASE_SHA}" "${LINT_HEAD_SHA}" || break
+          done
+          # Recorded on the remote by the filtered fetch; later fetches in this
+          # checkout must stay ordinary.
+          git config --unset remote.origin.partialclonefilter || true
 
       # Avoid setup-node downloads on ECS, where nodejs.org may be unreachable
       # through the egress proxy; reuse the machine's Node instead.
@@ -1471,15 +1492,19 @@ jobs:
 
   web_shell_e2e_smoke:
     name: 'web-shell E2E Smoke (ubuntu-latest, Node 22.x)'
+    # Gate on the classifier's own profile output instead of the copy `test`
+    # re-derives: it is the same value (the classifier already forces an
+    # unknown one to `full`), and dropping the `test` edge lets this
+    # 35-minute lane run beside Test instead of behind it. `|| 'full'`
+    # extends that fail-safe to a classifier that emitted nothing at all.
     needs:
       - 'classify_pr'
-      - 'test'
     if: |-
       ${{
         !cancelled() &&
         (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') &&
         needs.classify_pr.outputs.skip_ci != 'true' &&
-        needs.test.outputs.ci_profile == 'full'
+        (needs.classify_pr.outputs.ci_profile || 'full') == 'full'
       }}
     # Keep the classifier's trust and hosted overrides, but use ARM64 for
     # this lane independently of the ordinary Linux CI fleet. The history
@@ -1659,6 +1684,23 @@ jobs:
       - name: 'Disk floor gate (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
         run: 'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"'
+
+      # The smoke suite asserts exact text layout, which follows the host's
+      # default sans-serif (#15383). Checking it here turns a font-drifted
+      # host into a five-second actionable error instead of two failures 26
+      # minutes into the suite. See .github/scripts/ecs-runner/README.md.
+      - name: 'Check host font baseline (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          # A pull request whose head predates the guard does not carry the
+          # script in its checkout (this lane checks out the PR head, not the
+          # merge commit). Skip instead of failing that lane on a file it
+          # never had; every branch cut after the guard landed includes it.
+          if [ ! -f .github/scripts/ecs-runner/check-font-baseline.sh ]; then
+            echo 'font baseline check: skipped (script not present in this checkout)'
+            exit 0
+          fi
+          bash .github/scripts/ecs-runner/check-font-baseline.sh
 
       - name: 'Install dependencies'
         run: |-
@@ -2098,9 +2140,10 @@ jobs:
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
     # Dependency installation alone can exceed 30 minutes on a contended shared
     # ECS host, before the separately bounded 20-minute integration step starts.
-    # Same ECS-only scoping as the `test` job: hosted fallback routing keeps
-    # the pre-contention ceiling.
-    timeout-minutes: '${{ fromJSON(contains(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'', ''ecs-qwen'') && ''60'' || ''30'') }}'
+    # Same self-hosted scoping as `lint_and_static`: hosted fallback routing
+    # keeps the pre-contention ceiling, and the ARM64 fleet — which carries
+    # no `ecs-qwen` label — gets the contended-pool allowance it runs under.
+    timeout-minutes: '${{ fromJSON(contains(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'', ''self-hosted'') && ''60'' || ''30'') }}'
     permissions:
       contents: 'read'
     steps:

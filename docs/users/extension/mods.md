@@ -134,13 +134,16 @@ this recovery exception.
 | Commands   | Register during `session.start` using name, description and optional argumentHint; intercept registered Mod commands across plugins; return `{text}` or `{}`                            |
 | Tools      | In headless and local terminal model turns, intercept existing main-session tools with `tool.call`; inspect and restrict native permission decisions with `tool.check`                  |
 | Middleware | Patterns and recursive matchers; explicit, repeatable `next(e)`; `.catch` and per-plugin failure recovery; frozen input and host identity                                               |
-| API events | `command.register`, `session.version` and `ui.log` calls pass through the middleware chain with host-supplied origin                                                                    |
+| API events | `command.register`, `ui.log`, `ui.invalidate` and the session and clock methods pass through the middleware chain with host-supplied origin                                             |
+| Session    | `$.plugin`, read-only `$.session` facts, `$.clock.now` and `$.clock.sleep`, described in [Session facts and clock](#session-facts-and-clock)                                            |
+| Turns      | `turn.start`, `turn.complete` and `$.turn.abort` for the prompts a person submits, described in [Turn events](#turn-events)                                                             |
 | Logging    | `$.ui.log` returns void and queues delivery; transcript logs use stderr in text mode or `system/ui_log` in JSON modes; debug logs stay in the debug logger; neither becomes model input |
+| Elements   | `$.ui.resolve`, `$.ui.invalidate` and the `h` and `Fragment` globals, described in [Elements](#elements); no host draws `ui.render` yet                                                 |
 | Isolation  | Separate QuickJS environment per plugin inside a session worker; no Node, filesystem or network APIs; memory, stack, source/output and execution limits                                 |
 
 This is a supported subset, not full compatibility with existing Claude Mods.
 JSX/TSX, runtime package imports, built-in command interception, tool registration and active `$.tool` APIs, context,
-state/store, rendering, streaming events and hot reload are not implemented.
+`$.session.messages` and `repo`, state/store, `$.clock.after` and `every`, drawing `ui.render`, streaming events and hot reload are not implemented.
 Commands cannot return `context`, `exitCode` or engine references yet. Hooks for
 other Claude Code events load without running, as described in
 [Middleware and recovery](#middleware-and-recovery).
@@ -152,12 +155,13 @@ command names are matched against the resulting name.
 
 ## Middleware and recovery
 
-Patterns select among `session.start`, `session.end`, `command.run`,
-`command.register`, `session.version`, `ui.log`, `tool.call` and `tool.check`. Use an exact name, a prefix such as `command.*`,
+Patterns select among the engine events `session.start`, `session.end`,
+`command.run`, `tool.call`, `tool.check`, `turn.start` and `turn.complete`, and the API event of each supported
+`$` method, which `$.session.version()` lists. Use an exact name, a prefix such as `command.*`,
 `*`, or a single negation such as `!session.*`. The patterns `!*` and `!!...` are
 rejected.
 
-Claude Code 2.1.308 also defines events that Qwen Code does not run yet, such as
+Claude Code 2.1.310 also defines events that Qwen Code does not run yet, such as
 `prompt.submit`, `ui.render` or `classic.Stop`. A registration for one of them,
 or for a prefix such as `prompt.*` that matches none of the events above, loads
 but never runs, so the rest of the Mod keeps working. At startup each plugin
@@ -261,8 +265,10 @@ call does not approve it; and a headless run without a permission host denies
 it, giving the model the Mod's reason. A PermissionRequest hook can deny it but
 cannot answer for the user. Qwen's own ask passed up unchanged keeps the current
 approval mode's decision flow. If a native PermissionRequest hook rebuilds the
-arguments, they are checked again. A Mod-authored `rule`, `hook`, `ceiling` or
-`plugin` cannot create host permissions; the host sets `plugin`.
+arguments, they are checked again. A Mod-authored `rule`, `hook`, `setting`,
+`ceiling` or `plugin` cannot create host permissions. The host sets `plugin`.
+It drops a `setting` a hook writes: in Claude Code that field names a Claude
+Code option's own check, and Qwen Code reports none.
 
 Return `{deny: reason}` to block, or `{result: value}` to supply a JSON result
 without executing. Native next returns `{ref, result, text, isError?}`.
@@ -389,7 +395,8 @@ with tier `user`. Managed-tier `next.to`, tracing and custom namespace `lent`
 recovery are not available.
 
 API events begin at the chain head. Their input is the command specification,
-`{}` for `session.version`, or the `{text, to}` log payload. Return `next(e)`,
+the `{text, to}` log payload, `{ms}` for `clock.sleep`, the `{breakdown, columns}`
+arguments of `session.usage`, `{turnId}` for `turn.abort`, `{event}` for `ui.invalidate`, or `{}` for the other session and clock methods. Return `next(e)`,
 `{value}` to answer, or `{deny: reason}` to reject the API call. Registrations
 already in the event's call chain are skipped, including their catches. Other
 registrations in the same plugin remain eligible. This re-entry behavior follows
@@ -405,18 +412,49 @@ supports:
 {
   "version": "0.26.0",
   "qwen": {
-    "claudeCode": "2.1.308",
+    "claudeCode": "2.1.310",
     "events": [
+      "clock.now",
+      "clock.sleep",
       "command.register",
       "command.run",
+      "session.cwd",
       "session.end",
+      "session.id",
+      "session.model",
+      "session.root",
       "session.start",
+      "session.surface",
+      "session.surfaces",
+      "session.turns",
+      "session.usage",
       "session.version",
       "tool.call",
       "tool.check",
+      "turn.abort",
+      "turn.complete",
+      "turn.start",
+      "ui.invalidate",
       "ui.log"
     ],
-    "methods": ["command.register", "session.version", "ui.log"]
+    "methods": [
+      "clock.now",
+      "clock.sleep",
+      "command.register",
+      "session.cwd",
+      "session.id",
+      "session.model",
+      "session.root",
+      "session.surface",
+      "session.surfaces",
+      "session.turns",
+      "session.usage",
+      "session.version",
+      "turn.abort",
+      "ui.invalidate",
+      "ui.log",
+      "ui.resolve"
+    ]
   }
 }
 ```
@@ -427,7 +465,7 @@ call. A Mod can use it to choose a fallback, such as a command reply where a
 drawing hook would not run.
 
 A normal plugin layer has 10 seconds of its own time, excluding time waiting for
-cross-plugin `next` or API calls. Pending void `ui.log` notifications do not pause
+cross-plugin `next` or API calls other than `$.clock.sleep`. Pending void `ui.log` notifications do not pause
 the caller's budget. Catch recovery uses a one-second budget.
 Qwen additionally caps each root dispatch at 60 seconds of charged time and each
 uninterrupted guest execution slice at 10 seconds. Only tool roots exclude the
@@ -463,6 +501,152 @@ Native Qwen extensions with an absolute or external hooks manifest path continue
 to use only the classic hook loader. Claude hooks paths that conversion already
 ignores because they are absolute or outside the extension are also skipped by
 Mod discovery. Mod manifests must be relative paths inside the extension.
+
+## Session facts and clock
+
+`$.plugin.name` is the plugin's manifest name and `$.plugin.root` its absolute
+directory, the one that holds `qwen-extension.json` or
+`.claude-plugin/plugin.json`. They are plain properties.
+
+The other methods are API events that resolve to the shapes Claude Code 2.1.310
+declares:
+
+| Method                                | Resolves to                                                                             |
+| ------------------------------------- | --------------------------------------------------------------------------------------- |
+| `$.session.id()`                      | the session's id; it changes after `/clear` and `/resume`                               |
+| `$.session.cwd()`, `$.session.root()` | the session's working directory; the two are the same in Qwen Code                      |
+| `$.session.model()`                   | the main model's id                                                                     |
+| `$.session.turns()`                   | the user turns in the session's transcript, counting resumed turns and not rewound ones |
+| `$.session.surfaces()`                | `["terminal"]` in a terminal, `[]` in a headless run                                    |
+| `$.session.surface()`                 | the first surface, or `null`                                                            |
+| `$.session.usage()`                   | `{startedAt, context: {tokens, window, percent}, rateLimits}`                           |
+| `$.clock.now()`                       | the current time in epoch milliseconds                                                  |
+| `$.clock.sleep(ms, {signal})`         | `undefined`, after `ms` milliseconds                                                    |
+
+`$.session.usage()` reports the figures the status line shows. `tokens` is the
+input of the main conversation's last response, including cached tokens, and
+`window` is the model's context window. `percent` is a whole number. When the
+window size is unknown, `window` is 0 and `percent` is absent. `startedAt` is when the session began;
+for a resumed session it is the session's first record. A branch made with
+`/branch` copies its parent's records, so it keeps the parent's `startedAt` and
+its `turns` include the parent's turns. Qwen Code keeps no cost
+ledger, so `cost` is absent, and `rateLimits` is always empty. `breakdown` and
+`columns` are accepted, but no breakdown is computed. With chat recording turned
+off, `turns` is 0.
+
+The facts are read when a dispatch starts. At a `session.end` caused by `/clear`
+or `/resume`, the id, turns, start time and context figures still describe the
+session that is ending.
+
+Unlike other `$` calls, `$.clock.sleep` charges its wait to the calling hook's
+budget, so a sleep longer than the remaining budget times the hook out. Its
+`signal` option rejects the wait at once when it aborts; pass `next.signal`,
+because the Mod environment has no `AbortController`. A sleep ends with the hook
+that started it, so a sleep the hook does not await cannot hold up the dispatch.
+
+## Turn events
+
+`turn.start` and `turn.complete` follow the main loop's turns: each prompt a
+person submits, from its first model request through its tool calls to the
+answer. A retry with Ctrl+Y and the headless continuation of an interrupted turn
+are turns too. Subagent and teammate turns, scheduled prompts, background
+notifications and goal continuations fire no turn events.
+
+```javascript
+export function register(on) {
+  on('turn.start', ($, e, next) => {
+    $.ui.log(`turn ${e.turnId}: ${e.text}`, { to: 'debug' });
+    return next(e);
+  });
+  on('turn.complete', async ($, e, next) => {
+    const answer = await next(e);
+    if (e.reason !== 'answer') return answer;
+    const { context } = await $.session.usage();
+    return { text: `${context.percent ?? 0}% of the context window used` };
+  });
+}
+```
+
+`turn.start` fires once the prompt is admitted, after UserPromptSubmit hooks let
+it through and before the first model request. A prompt they block has no turn.
+`e.text` is the prompt as submitted, with pasted text expanded, or `""` for a
+retry or a continuation. `e.turnId` is new for each turn. The model request does
+not wait for the hooks, but the turn's tool middleware and its `turn.complete`
+run after them. Cancelling the turn ends the `turn.start` hooks still running,
+including one that calls `$.turn.abort` itself: its code after that call does
+not run.
+
+A prompt longer than 128 KiB as JSON reaches the hooks with its beginning and
+end around the line `[... truncated for Mods ...]`, and `e.isTextTruncated` is
+`true`. A long answer is cut the same way, with `e.isAnswerTruncated`. Claude
+Code passes both whole.
+
+`turn.complete` fires once the turn has ended. A turn still running when the
+session closes ends as `aborted` before `session.end`; a `turn.complete` that is
+already running or queued then still runs, within the same budget. The hook
+receives:
+
+| Field               | Value                                                                                                                                  |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `answer`            | the visible text of the turn's last model response, or `""`                                                                            |
+| `durationMs`        | how long the turn took                                                                                                                 |
+| `reason`            | `answer`; `aborted` when a person or a Mod cancelled the turn; `error` when an API error, a loop detection or a session limit ended it |
+| `isAborted`         | `true` when `reason` is `aborted`                                                                                                      |
+| `turnId`            | the id `turn.start` carried                                                                                                            |
+| `usage`             | `{input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, model}` summed over the turn's model responses    |
+| `isAnswerTruncated` | `true` when `answer` was cut to fit; absent otherwise                                                                                  |
+
+The fields of both events are pinned. `next(e)` resolves to `{text: e.answer}`,
+with `usage` when the turn has it. Return a different, non-blank `text` to show
+it beneath the answer, up to 4,096 characters:
+
+- in a terminal, as the transcript line `[Mod <plugins>] <text>`;
+- in headless text mode, as the same line on stderr after the answer;
+- in JSON modes, as a `system` `ui_log` message before the result.
+
+The conversation record keeps the answer. In a terminal the hooks run after the
+answer, and the next prompt can already start. A headless run waits for them
+before it writes its result.
+
+`usage` counts only the turn's own model requests; requests made by subagents,
+side queries and compaction are left out. It is absent when no response
+finished. `cache_creation_input_tokens` is 0 unless the provider reports cache
+writes separately, as Anthropic's does. `reason` is never `refusal`.
+
+`$.turn.abort({ turnId })` ends the running turn and its running tools as Esc
+does, but leaves no "Request cancelled." notice and does not put the prompt
+back in the composer. Queued prompts then run. The call rejects when no turn is
+running, when `turnId` is not the running turn's id, or when the turn is already
+ending. In a headless run the turn ends with the error result
+`A Mod ended the turn.` and exit code 130, and a stream-json session goes on to
+its next message. Qwen Code has no `$.prompt.submit` yet, so a Mod cannot send a
+prompt after it ends a turn.
+
+## Elements
+
+`$.ui.resolve(e)` returns the element table of the terminal: a frozen object
+with no prototype that holds Claude Code's eleven terminal constructors,
+`Box`, `Text`, `Button`, `Input`, `Select`, `Link`, `Code`, `Markdown`,
+`Client`, `Raster` and `Image`. It reads the table without a dispatch. `e` is a
+`ui.render` event; any argument whose `surface` is not `"terminal"` throws.
+
+A constructor takes the props, `children` among them, and returns a frozen
+plain-data element `{ type, props?, hover?, children? }`. Children are
+flattened: `null`, `undefined` and booleans are dropped, arrays are spread and
+numbers become strings. `key` is kept only on a `Box`. The `h(tag, props,
+...children)` and `Fragment` globals build the same elements, as Claude Code's
+JSX factory does; `Fragment` is a column `Box`. `h` calls a function tag with
+its props and its children flattened into an array, and throws for a string tag other than `Box` or `Text`.
+
+No host draws `ui.render` yet, so its hooks are skipped and listed at startup,
+and `$.session.version()` leaves it out. A tree a hook returns is judged with
+Claude Code 2.1.310's rules for `Box` and `Text`, and any other element refuses
+it with `<Element> is not drawn by Qwen Code yet`.
+
+`$.ui.invalidate("ui.render")` returns at once and asks for a redraw of the
+sites the plugin's `ui.render` hooks may draw. The cached-answer events
+Claude Code also accepts, such as `prompt.section`, do nothing in Qwen Code.
+Any other name throws.
 
 ## TypeScript and relative imports
 
@@ -584,6 +768,6 @@ Own `__proto__` keys in tool inputs and results are ordinary data on both sides.
 A hook answer whose getter throws while Qwen Code reads it fails as a whole;
 Claude Code 2.1.299 drops only that key.
 
-The author API is based on Claude Code 2.1.296 declarations, with event names
-recognized from Claude Code 2.1.308, and the
+The author API follows the Claude Code 2.1.310 declarations, event names
+included, and the
 [official Mod documentation](https://code.claude.com/docs/en/plugins/mods/create).
