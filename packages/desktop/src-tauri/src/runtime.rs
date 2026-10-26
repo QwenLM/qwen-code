@@ -561,11 +561,13 @@ mod tests {
     #[cfg(unix)]
     use super::{stop_runtime_handle, wait_for_listening};
     #[cfg(windows)]
-    use super::{layout_from_root, spawn_runtime_group};
+    use super::{layout_from_root, spawn_runtime_group, stop_runtime_handle};
     use std::path::Path;
     #[cfg(windows)]
     use std::path::PathBuf;
     #[cfg(unix)]
+    use std::sync::Arc;
+    #[cfg(windows)]
     use std::sync::Arc;
     use std::sync::Mutex;
     use url::Url;
@@ -686,6 +688,32 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(100));
         }
+    }
+
+    // The updater hook runs inline and its wait has no timeout, so a blocking
+    // stop would hang the update after the daemon is already dead (#15276).
+    #[cfg(windows)]
+    #[test]
+    fn pending_stop_reaps_a_child_taken_from_the_shared_handle_on_windows() {
+        let mut command = std::process::Command::new("powershell.exe");
+        command.args(["-NoProfile", "-NonInteractive", "-Command", "Start-Sleep 60"]);
+        let mut group_child =
+            spawn_runtime_group(&mut command).expect("spawn long-lived runtime child");
+        assert!(
+            group_child
+                .try_wait()
+                .expect("inspect runtime child")
+                .is_none(),
+            "probe exited before the stop"
+        );
+        let handle = Arc::new(Mutex::new(Some(group_child)));
+        let started = std::time::Instant::now();
+        stop_runtime_handle(&handle);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "stop blocked, so the child was not killed"
+        );
+        assert!(handle.lock().expect("handle").is_none());
     }
 
     #[cfg(windows)]
