@@ -31,6 +31,10 @@ import { trailingReattachPartCount } from '../../../services/image-payload-refer
 import { appendAutoMemoryContext } from '../../../memory/request-context.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 import type { OpenAIRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
+import {
+  buildDashScopeSourceConfig,
+  QWENCLOUD_MAAS_HOSTS,
+} from '../../dashscope-source-config.js';
 
 const mockDebugLogger = vi.hoisted(() => ({
   debug: vi.fn(),
@@ -396,6 +400,31 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       });
     });
 
+    // Admission and attribution read the same host list but apply different
+    // rules: admission suffix-matches (any MaaS subdomain is served as
+    // DashScope), attribution exact-matches only the bare and `token-plan.`
+    // forms. That split is deliberate — see the "Exact host match" bullet in
+    // docs/design/qwencloud-source-attribution.md — and its cost is that a new
+    // MaaS subdomain is routed as QwenCloud while going unattributed. Pinned on
+    // both sides so widening either one has to be a conscious edit.
+    it('admits every known QwenCloud host and its Token Plan form, and attributes both', () => {
+      for (const host of QWENCLOUD_MAAS_HOSTS) {
+        for (const baseUrl of [
+          `https://${host}/compatible-mode/v1`,
+          `https://token-plan.${host}/compatible-mode/v1`,
+        ]) {
+          expect(isDashScope(baseUrl)).toBe(true);
+          expect(buildDashScopeSourceConfig(baseUrl)).toBeDefined();
+        }
+      }
+    });
+
+    it('admits a MaaS subdomain that attribution deliberately leaves unattributed', () => {
+      const unattributed = 'https://other.maas.qwencloudapi.com/v1';
+      expect(isDashScope(unattributed)).toBe(true);
+      expect(buildDashScopeSourceConfig(unattributed)).toBeUndefined();
+    });
+
     it('should return false for non-DashScope configurations', () => {
       [
         'https://api.openai.com/v1',
@@ -623,6 +652,53 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(OpenAI).toHaveBeenCalledWith(
         expect.objectContaining({ timeout: DISABLED_REQUEST_TIMEOUT_MS }),
       );
+    });
+
+    // The attribution value is first-party: the user's entry is replaced before
+    // the request is built, so their value can never reach the wire. The
+    // dynamic-header warning says it "will not be sent" and offers a switch
+    // that cannot help, which describes the wrong thing (#15107 item 2).
+    it('does not warn about a placeholder in the reserved attribution header', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const cli = {
+        ...mockCliConfig,
+        getChannel: () => 'CLI',
+        getOutboundAllowDynamicHeaderValues: () => false,
+      } as unknown as Config;
+
+      gen(
+        {
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://maas.qwencloudapi.com/compatible-mode/v1',
+          customHeaders: { 'x-dashscope-source-config': '${session_id}' },
+        },
+        cli,
+      ).buildClient();
+
+      expect(warn).not.toHaveBeenCalled();
+      warn.mockRestore();
+    });
+
+    it('still warns about a placeholder in any other custom header', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const cli = {
+        ...mockCliConfig,
+        getChannel: () => 'CLI',
+        getOutboundAllowDynamicHeaderValues: () => false,
+      } as unknown as Config;
+
+      gen(
+        {
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://maas.qwencloudapi.com/compatible-mode/v1',
+          customHeaders: { 'X-Trace-Id': '${session_id}' },
+        },
+        cli,
+      ).buildClient();
+
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0][0])).toContain('X-Trace-Id');
+      warn.mockRestore();
     });
   });
 

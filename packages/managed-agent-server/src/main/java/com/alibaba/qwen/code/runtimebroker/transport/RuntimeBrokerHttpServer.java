@@ -218,6 +218,29 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
             }
             String relative = path.substring(ROUTE_PREFIX.length());
             if ("POST".equals(exchange.getRequestMethod()) && relative.startsWith("/harness-sessions/")
+                    && relative.endsWith("/extensions/control")) {
+                String sessionId = pathId(relative.substring("/harness-sessions/".length(),
+                        relative.length() - "/extensions/control".length()));
+                Map<String, Object> body = requestBody(exchange, "extension metadata control");
+                requireProtocol(body);
+                JsonCodec.requiredString(body, "requestId", "extension metadata control");
+                if (!sessionId.equals(JsonCodec.requiredString(body, "harnessSessionId", "extension metadata control"))
+                        || lifecycleAuthority(exchange) != null
+                        || !Set.of("protocolVersion", "requestId", "harnessSessionId", "operation",
+                                "expectedRuntimeBindingId", "expectedRuntimeGeneration").containsAll(body.keySet())
+                        || body.containsKey("expectedRuntimeBindingId") != body.containsKey("expectedRuntimeGeneration")) {
+                    throw new IllegalArgumentException("Invalid extension metadata control");
+                }
+                String binding = body.containsKey("expectedRuntimeBindingId")
+                        ? JsonCodec.requiredString(body, "expectedRuntimeBindingId", "extension metadata control") : null;
+                Long generation = body.containsKey("expectedRuntimeGeneration")
+                        ? Long.parseLong(JsonCodec.requiredString(body, "expectedRuntimeGeneration", "extension metadata control")) : null;
+                exchange.getResponseHeaders().set("Cache-Control", "no-store");
+                complete(exchange, service.extensionControl(sessionId, binding, generation,
+                        requiredObject(body, "operation", "extension metadata control")), result -> result);
+                return;
+            }
+            if ("POST".equals(exchange.getRequestMethod()) && relative.startsWith("/harness-sessions/")
                     && relative.endsWith("/mcp-definitions")) {
                 String sessionId = pathId(relative.substring("/harness-sessions/".length(),
                         relative.length() - "/mcp-definitions".length()));

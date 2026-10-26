@@ -57,7 +57,11 @@ import {
   getComposerTagValue,
 } from '../hooks/useComposerCore';
 import { AtMentionPanel } from './AtMentionPanel';
-import { useFileUpload, type FileUploadItem } from '../hooks/useFileUpload';
+import {
+  useFileUpload,
+  type FileUploadItem,
+  type UseFileUploadOptions,
+} from '../hooks/useFileUpload';
 import { fileReferenceInsertText } from '../hooks/useAtMentionMenu';
 import { AddMenu } from './composer/AddMenu';
 import { computePrependSkillTransaction } from './composer/prependSkillInvocation';
@@ -326,6 +330,9 @@ interface ChatEditorProps {
   shellModeEnabled?: boolean;
   workspaceFeaturesEnabled?: boolean;
   fileReferenceActions?: AtMentionWorkspaceActions;
+  fileUploadTarget?: UseFileUploadOptions & {
+    createReference(path: string): WebShellComposerTag;
+  };
   persistFileReferences?: boolean;
   attachmentsEnabled?: boolean;
   onChatWidthModeChange?: (mode: '1000' | 'wide') => void;
@@ -1610,6 +1617,7 @@ export const ChatEditor = memo(
       shellModeEnabled = true,
       workspaceFeaturesEnabled = true,
       fileReferenceActions,
+      fileUploadTarget,
       persistFileReferences,
       attachmentsEnabled = workspaceFeaturesEnabled,
       onChatWidthModeChange,
@@ -1667,12 +1675,11 @@ export const ChatEditor = memo(
     // item can be capability-gated (hidden on daemons without the feature).
     const uploadWorkspace = useOptionalWorkspace();
     const uploadTarget = useMemo(() => {
-      if (!uploadWorkspace || !workspaceFeaturesEnabled) return undefined;
-      // The host prop can force-disable upload even when the daemon advertises
-      // the capability; it does NOT bypass the capability check. Both must
-      // allow: `fileUploadEnabled === false` short-circuits, otherwise the
-      // `workspace_file_upload` capability is still required.
+      // The host switch also applies to an explicitly scoped Managed target;
+      // daemon targets require their own capability and trust checks below.
       if (fileUploadEnabled === false) return undefined;
+      if (fileUploadTarget?.client) return fileUploadTarget;
+      if (!uploadWorkspace || !workspaceFeaturesEnabled) return undefined;
       const features = uploadWorkspace.capabilities?.features ?? [];
       if (!features.includes('workspace_file_upload')) return undefined;
       if (atWorkspaceCwd) {
@@ -1687,6 +1694,7 @@ export const ChatEditor = memo(
         return {
           client: uploadWorkspace.client.workspaceByCwd(atWorkspaceCwd),
           targetKey: atWorkspaceCwd,
+          createReference: undefined,
         };
       }
       const primaryMatches = (
@@ -1694,15 +1702,21 @@ export const ChatEditor = memo(
       ).filter((workspace) => workspace.primary);
       if (primaryMatches.length !== 1 || primaryMatches[0].trusted !== true)
         return undefined;
-      return { client: uploadWorkspace.client, targetKey: '<primary>' };
+      return {
+        client: uploadWorkspace.client,
+        targetKey: '<primary>',
+        createReference: undefined,
+      };
     }, [
       uploadWorkspace,
       atWorkspaceCwd,
       fileUploadEnabled,
+      fileUploadTarget,
       workspaceFeaturesEnabled,
     ]);
     const uploadEnabled = uploadTarget !== undefined;
     const maxUploadBytes =
+      fileUploadTarget?.maxBytes ??
       uploadWorkspace?.capabilities?.limits?.maxWorkspaceFileUploadBytes ??
       50 * 1024 * 1024;
     const uploadTargetKey = `${sessionId ?? '<no-session>'}:${
@@ -1825,7 +1839,7 @@ export const ChatEditor = memo(
         const serialized = fileReferenceInsertText(path).trim();
         addComposerTags(
           [
-            {
+            uploadTarget?.createReference?.(path) ?? {
               id: `file:${serialized}`,
               kind: 'file',
               value: path,
@@ -1835,7 +1849,7 @@ export const ChatEditor = memo(
           { placement: 'inline', position: 'end' },
         );
       },
-      [addComposerTags],
+      [addComposerTags, uploadTarget],
     );
     const uploadStatusText = (upload: FileUploadItem): string => {
       switch (upload.status) {
