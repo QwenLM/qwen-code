@@ -2,9 +2,9 @@
 
 [English](2026-10-16-managed-turn-command-operations.md) | [简体中文](2026-10-16-managed-turn-command-operations.zh-CN.md)
 
-Status: implemented in this change. Turn input and cancellation are durable command operations of the kinds `submit_input` and `cancel`, readable through the operation query, in contract `1.58.0` and schema V8. #14318 landed contract `1.52.0` and schema V7, and #14358, #14412, #14413, #14405 and #14414 landed contracts `1.53.0` through `1.57.0` before this change, so it follows them. Admission responses do not carry the operation yet; that is D7-3.
+Status: implemented in this change. Turn input and cancellation are durable command operations of the kinds `submit_input` and `cancel`, readable through the operation query, in contract `1.58.0` and schema V8. #14318 landed contract `1.52.0` and schema V7, and #14358, #14412, #14413, #14405 and #14414 landed contracts `1.53.0` through `1.57.0` before this change, so it follows them. Admission responses carry the operation, its admission stage and delivery state only when the opt-in `java_durable` profile is enabled, which D7-3 added in #14470.
 
-This is slice **D7-1** of [#14122](https://github.com/QwenLM/qwen-code/issues/14122) (the D7 umbrella of [#12380](https://github.com/QwenLM/qwen-code/issues/12380), Stage D), tracked by [#14168](https://github.com/QwenLM/qwen-code/issues/14168). #12380 lets Stage D expose `java_durable` only with durable command delivery and original-command reconciliation. This slice supplies the first half. D7-2 ([#14166](https://github.com/QwenLM/qwen-code/issues/14166)) supplies reconciliation, and D7-3 ([#14167](https://github.com/QwenLM/qwen-code/issues/14167)), the opt-in profile, waits for both.
+This is slice **D7-1** of [#14122](https://github.com/QwenLM/qwen-code/issues/14122) (the D7 umbrella of [#12380](https://github.com/QwenLM/qwen-code/issues/12380), Stage D), tracked by [#14168](https://github.com/QwenLM/qwen-code/issues/14168). #12380 lets Stage D expose `java_durable` only with durable command delivery and original-command reconciliation. This slice supplies the first half. D7-2 ([#14166](https://github.com/QwenLM/qwen-code/issues/14166)) supplied reconciliation, and D7-3 ([#14167](https://github.com/QwenLM/qwen-code/issues/14167)), the opt-in profile, landed in #14470 after both.
 
 ## Problem
 
@@ -125,4 +125,4 @@ From #14168, for both kinds:
 ## Follow-up work
 
 - **D7-2:** one reconciliation rule over the evidence sources (the Turn row here, the task record for `TASK_CANCEL`), including whether a Turn-command operation ever needs `recovery_blocked`.
-- **D7-3:** the opt-in profile. It returns `Admission.operationId` with the admission stage and delivery state, advertises `durable_operations`, and keeps `harness_confirmed` the default. It also decides whether `PublicTurn` shows its input operation.
+- **D7-3:** the opt-in profile, landed in [managed java_durable admission](2026-10-17-managed-java-durable-admission.md). Turn input and cancel admissions that ask for it return the operation with its admission stage and delivery state, Sessions advertise `durable_operations`, and `harness_confirmed` stays the default. `PublicTurn` keeps its operation fields planned.

@@ -16,9 +16,8 @@
  * The one renderer-specific seam: ink replays the resumed transcript through
  * `buildResumedHistoryItems` into its own history; the OpenTUI transcript is
  * the neutral streaming model, so the visible replay additionally flows
- * through `resumeEventsFromSession` (the `--resume` replay path) as a single
- * commit, while the ink items still load into the host history for the
- * command context's consumption.
+ * through `projectHistoryToStreamEvents` from the same canonical items as a
+ * single commit. Those exact source IDs also load into the command host.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -45,7 +44,7 @@ import {
   resetBackgroundStateForSessionSwitch,
 } from '../utils/backgroundWorkUtils.js';
 import { waitForGoalRuntime } from '../utils/goal-runtime.js';
-import { resumeEventsFromSession } from './resume-session.js';
+import { projectHistoryToStreamEvents } from './item-projection.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
 
 /** The UI surfaces a session switch touches (backend-provided). */
@@ -72,9 +71,9 @@ const BACKGROUND_WORK_BRANCH_BLOCKED_MESSAGE =
   "Stop the current session's running background tasks before branching the conversation.";
 
 /** Collapse-policy application shared by resume and branch (ink parity). */
-function buildUiHistoryItems(
+export function buildUiHistoryItems(
   sessionData: ResumedSessionData,
-  host: SessionSwitchHost,
+  host: Pick<SessionSwitchHost, 'config' | 'settings'>,
 ): HistoryItem[] {
   const rawItems = buildResumedHistoryItems(sessionData, host.config);
   const collapseOnResume =
@@ -134,6 +133,7 @@ export async function handleResumeSession(
   const oldSessionId = config.getSessionId();
   let coreSwapped = false;
   let uiSwapped = false;
+  let toolsInvalidated = false;
 
   try {
     const cwd = config.getTargetDir();
@@ -169,6 +169,9 @@ export async function handleResumeSession(
     // 1. Core swap first (ink order): any failure before the UI commits
     //    rolls the core back to the previous session below.
     resetBackgroundStateForSessionSwitch(config);
+    const modSession = getInteractiveModSession(config);
+    modSession?.invalidateTools();
+    toolsInvalidated = modSession !== undefined;
     config.startNewSession(sessionId, sessionData);
     coreSwapped = true;
     await waitForGoalRuntime(config);
@@ -193,7 +196,9 @@ export async function handleResumeSession(
     host.clearPendingState();
     host.clearItems();
     host.loadHistory(uiHistoryItems);
-    host.resetTranscript(resumeEventsFromSession(sessionData, config));
+    host.resetTranscript(
+      projectHistoryToStreamEvents(uiHistoryItems, { config }),
+    );
     if (recoveredNotice) {
       host.addItem(
         { type: MessageType.INFO, text: recoveredNotice },
@@ -207,6 +212,7 @@ export async function handleResumeSession(
     if (coreSwapped && !uiSwapped) {
       try {
         resetBackgroundStateForSessionSwitch(config);
+        getInteractiveModSession(config)?.invalidateTools();
         config.startNewSession(oldSessionId, undefined);
         await config.loadPausedBackgroundAgents(oldSessionId).catch(() => {});
         // Re-hydrate the client against the restored session, mirroring the
@@ -227,12 +233,22 @@ export async function handleResumeSession(
       }
       // Core is back on the old session: restore the usage aggregate to
       // pre-swap state, dropping the abandoned session's replayed history.
+      if (toolsInvalidated && config.getSessionId() === oldSessionId) {
+        await getInteractiveModSession(config)?.restoreTools();
+      }
       config.getLlmClient()?.abortTelemetrySwap?.();
     } else {
       // Either the core swap never happened (nothing was replayed — the
       // transaction is unarmed) or the UI already committed (the replay
       // belongs to the session the user is on): close this attempt's
       // transaction without restoring.
+      if (
+        toolsInvalidated &&
+        !uiSwapped &&
+        config.getSessionId() === oldSessionId
+      ) {
+        await getInteractiveModSession(config)?.restoreTools();
+      }
       config.getLlmClient()?.commitTelemetrySwap?.();
     }
     host.addItem(
@@ -313,6 +329,7 @@ export async function handleBranchSession(
 
   let coreSwapped = false;
   let uiSwapped = false;
+  let toolsInvalidated = false;
   let forkCreated = false;
   let prevSessionData: ResumedSessionData | undefined;
 
@@ -364,6 +381,9 @@ export async function handleBranchSession(
     }
 
     // 7. Core swap first.
+    const modSession = getInteractiveModSession(config);
+    modSession?.invalidateTools();
+    toolsInvalidated = modSession !== undefined;
     config.startNewSession(newSessionId, resumed);
     coreSwapped = true;
     await waitForGoalRuntime(config);
@@ -375,7 +395,9 @@ export async function handleBranchSession(
     host.clearPendingState();
     host.clearItems();
     host.loadHistory(uiHistoryItems);
-    host.resetTranscript(resumeEventsFromSession(resumed, config));
+    host.resetTranscript(
+      projectHistoryToStreamEvents(uiHistoryItems, { config }),
+    );
     uiSwapped = true;
     resetBackgroundStateForSessionSwitch(config);
     // The UI re-key commits the swap: from here on a failure keeps the
@@ -406,6 +428,7 @@ export async function handleBranchSession(
   } catch (err) {
     if (coreSwapped && !uiSwapped) {
       try {
+        getInteractiveModSession(config)?.invalidateTools();
         config.startNewSession(oldSessionId, prevSessionData);
         await config.getGeminiClient()?.initialize?.();
       } catch (rollbackErr) {
@@ -414,10 +437,20 @@ export async function handleBranchSession(
           .warn(`Rollback after failed /branch init failed: ${rollbackErr}`);
       }
       // Core is back on the old session: restore the usage aggregate.
+      if (toolsInvalidated && config.getSessionId() === oldSessionId) {
+        await getInteractiveModSession(config)?.restoreTools();
+      }
       config.getLlmClient()?.abortTelemetrySwap?.();
     } else {
       // Unarmed (core never swapped) or already committed (UI re-keyed):
       // close this attempt's transaction without restoring.
+      if (
+        toolsInvalidated &&
+        !uiSwapped &&
+        config.getSessionId() === oldSessionId
+      ) {
+        await getInteractiveModSession(config)?.restoreTools();
+      }
       config.getLlmClient()?.commitTelemetrySwap?.();
     }
     if (forkCreated && !uiSwapped) {

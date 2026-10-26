@@ -4,6 +4,8 @@ import express, {
   type Response,
 } from 'express';
 import request from 'supertest';
+import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
+import { BridgeChannelClosedError } from '@qwen-code/acp-bridge/status';
 import { describe, expect, it, vi } from 'vitest';
 import { sendBridgeError } from '../server/error-response.js';
 import {
@@ -60,6 +62,10 @@ function createHarness(trusted = true, runtimeLive = false) {
     .fn()
     .mockResolvedValue(runtimeStatus);
   const getSkillsConfigStatus = vi.fn().mockResolvedValue(configStatus);
+  const getSkillsSnapshot = vi.fn(async (workspaceCwd: string) => ({
+    workspaceCwd,
+    skills: [{ name: 'enabled', description: 'Test', body: 'BODY' }],
+  }));
   const invalidateSkillsConfigStatus = vi.fn();
   const invalidateWorkspaceSkillsStatus = vi.fn();
   const installWorkspaceSkill = vi.fn().mockResolvedValue({
@@ -106,6 +112,10 @@ function createHarness(trusted = true, runtimeLive = false) {
   );
   const bridge = {
     knownClientIds: () => new Set(['client-1']),
+    getSessionSummary: vi.fn((sessionId: string) => {
+      if (sessionId === 'session-1') return { sessionId };
+      throw new SessionNotFoundError(sessionId);
+    }),
     getWorkspaceRuntimeLifecycleSnapshot: () => ({
       state: runtimeLive ? ('idle' as const) : ('cold' as const),
       runtimeLive,
@@ -113,6 +123,13 @@ function createHarness(trusted = true, runtimeLive = false) {
       activeWork: false,
     }),
   };
+  const refreshWorkspaceSkills = vi.fn().mockResolvedValue({
+    sessionsRefreshed: 1,
+    sessionsFailed: 0,
+    configsRefreshed: 1,
+    configsFailed: 0,
+    reason: 'all',
+  });
   const runtime = {
     workspaceId: 'workspace-1',
     workspaceCwd: '/workspace',
@@ -120,6 +137,7 @@ function createHarness(trusted = true, runtimeLive = false) {
     trusted,
     bridge,
     workspaceService: {
+      refreshWorkspaceSkills,
       getWorkspaceSkillsConfigStatus,
       getWorkspaceSkillsRuntimeStatus,
       invalidateWorkspaceSkillsStatus,
@@ -137,6 +155,7 @@ function createHarness(trusted = true, runtimeLive = false) {
     safeBody: (req: Request) => req.body as Record<string, unknown>,
     sendBridgeError,
     getSkillsConfigStatus,
+    getSkillsSnapshot,
     invalidateSkillsConfigStatus,
   };
   registerWorkspaceSkillsRoutes(app, {
@@ -156,12 +175,14 @@ function createHarness(trusted = true, runtimeLive = false) {
   return {
     app,
     runtime,
+    refreshWorkspaceSkills,
     workspaceRegistry,
     configStatus,
     runtimeStatus,
     getWorkspaceSkillsConfigStatus,
     getWorkspaceSkillsRuntimeStatus,
     getSkillsConfigStatus,
+    getSkillsSnapshot,
     invalidateSkillsConfigStatus,
     installWorkspaceSkill,
     deleteWorkspaceSkill,
@@ -171,6 +192,164 @@ function createHarness(trusted = true, runtimeLive = false) {
 }
 
 describe('workspace Skill management routes', () => {
+  it('exports only the explicitly selected trusted source and rejects missing or untrusted sources', async () => {
+    const h = createHarness();
+    const response = await request(h.app)
+      .get('/workspaces/workspace-1/config/skills/snapshot')
+      .expect(200);
+    expect(response.body).toMatchObject({
+      workspaceCwd: '/workspace',
+      skills: [{ body: 'BODY' }],
+    });
+    expect(response.headers['cache-control']).toBe('no-store');
+    await request(h.app)
+      .get('/workspaces/missing/config/skills/snapshot')
+      .expect(400);
+    expect(h.getSkillsSnapshot).toHaveBeenCalledTimes(1);
+    const untrusted = createHarness(false);
+    await request(untrusted.app)
+      .get('/workspaces/workspace-1/config/skills/snapshot')
+      .expect(403);
+    expect(untrusted.getSkillsSnapshot).not.toHaveBeenCalled();
+    h.getSkillsSnapshot.mockImplementation(async (cwd) => {
+      h.workspaceRegistry
+        .getManagedEntryByWorkspaceId('workspace-1')!
+        .current!.guard.close();
+      return {
+        workspaceCwd: cwd,
+        skills: [{ name: 'enabled', description: 'Test', body: 'BODY' }],
+      };
+    });
+    const stale = await request(h.app).get(
+      '/workspaces/workspace-1/config/skills/snapshot',
+    );
+    expect(stale.status).toBeGreaterThanOrEqual(400);
+    expect(stale.text).not.toContain('BODY');
+  });
+
+  it('refreshes only the selected secondary runtime and rejects primary-owned IDs', async () => {
+    const h = createHarness();
+    const secondaryRefresh = vi.fn().mockResolvedValue({
+      sessionsRefreshed: 1,
+      sessionsFailed: 0,
+      configsRefreshed: 1,
+      configsFailed: 0,
+      reason: 'all',
+    });
+    h.workspaceRegistry.add({
+      ...h.runtime,
+      workspaceId: 'workspace-2',
+      workspaceCwd: '/secondary',
+      primary: false,
+      bridge: {
+        ...h.runtime.bridge,
+        getSessionSummary: (sessionId) => {
+          if (sessionId !== 'secondary-session') {
+            throw new SessionNotFoundError(sessionId);
+          }
+          return {} as ReturnType<
+            WorkspaceRuntime['bridge']['getSessionSummary']
+          >;
+        },
+      },
+      workspaceService: {
+        ...h.runtime.workspaceService,
+        refreshWorkspaceSkills: secondaryRefresh,
+      },
+    });
+    const selected = await request(h.app)
+      .post('/workspaces/workspace-2/skills/refresh')
+      .send({ sessionIds: ['secondary-session'] });
+    expect(selected.status).toBe(200);
+    expect(secondaryRefresh).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceCwd: '/secondary' }),
+      ['secondary-session'],
+    );
+    const foreign = await request(h.app)
+      .post('/workspaces/workspace-2/skills/refresh')
+      .send({ sessionIds: ['session-1'] });
+    expect(foreign.status).toBe(404);
+    expect(secondaryRefresh).toHaveBeenCalledOnce();
+    expect(h.refreshWorkspaceSkills).not.toHaveBeenCalled();
+  });
+
+  describe.each([
+    '/workspace/skills/refresh',
+    '/workspaces/workspace-1/skills/refresh',
+  ])('explicit refresh at %s', (path) => {
+    it.each(['[]', '["session-1"]'])(
+      'rejects the bare array %s before refreshing',
+      async (body) => {
+        const h = createHarness();
+        const response = await request(h.app)
+          .post(path)
+          .set('Content-Type', 'application/json')
+          .send(body);
+        expect(response.status).toBe(400);
+        expect(response.body.code).toBe('invalid_request_body');
+        expect(h.refreshWorkspaceSkills).not.toHaveBeenCalled();
+      },
+    );
+
+    it('invalidates config status when the refresh loses its channel', async () => {
+      const h = createHarness();
+      h.refreshWorkspaceSkills.mockRejectedValue(
+        new BridgeChannelClosedError('mid-request'),
+      );
+
+      const response = await request(h.app).post(path).send({});
+
+      expect(response.status).toBe(500);
+      expect(h.invalidateSkillsConfigStatus).toHaveBeenCalledExactlyOnceWith(
+        '/workspace',
+      );
+    });
+
+    it.each([undefined, [], ['session-1', 'session-1']])(
+      'passes the selection %j to the bound workspace service',
+      async (sessionIds) => {
+        const h = createHarness();
+        const response = await request(h.app)
+          .post(path)
+          .send(sessionIds === undefined ? {} : { sessionIds });
+        expect(response.status).toBe(200);
+        expect(response.body.reason).toBe('all');
+        expect(h.refreshWorkspaceSkills).toHaveBeenCalledWith(
+          expect.objectContaining({ workspaceCwd: '/workspace' }),
+          sessionIds === undefined ? undefined : [...new Set(sessionIds)],
+        );
+      },
+    );
+
+    it.each([null, 'session-1', [1], [' ']])(
+      'rejects malformed selection %j before refreshing',
+      async (sessionIds) => {
+        const h = createHarness();
+        const response = await request(h.app).post(path).send({ sessionIds });
+        expect(response.status).toBe(400);
+        expect(response.body.code).toBe('invalid_session_ids');
+        expect(h.refreshWorkspaceSkills).not.toHaveBeenCalled();
+      },
+    );
+
+    it('rejects an unknown or foreign session before refreshing any selection', async () => {
+      const h = createHarness();
+      const response = await request(h.app)
+        .post(path)
+        .send({ sessionIds: ['session-1', 'foreign-session'] });
+      expect(response.status).toBe(404);
+      expect(response.body.code).toBe('session_not_found');
+      expect(h.refreshWorkspaceSkills).not.toHaveBeenCalled();
+    });
+
+    it('rejects refresh on an untrusted workspace', async () => {
+      const h = createHarness(false);
+      const response = await request(h.app).post(path).send({ sessionIds: [] });
+      expect(response.status).toBe(403);
+      expect(h.refreshWorkspaceSkills).not.toHaveBeenCalled();
+    });
+  });
+
   it('keeps config reads daemon-local and runtime reads explicit', async () => {
     const harness = createHarness();
 

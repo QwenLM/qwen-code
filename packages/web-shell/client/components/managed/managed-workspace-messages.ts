@@ -25,7 +25,7 @@ export const WORKSPACE_REGISTRATION_MESSAGES_EN: Record<string, string> = {
   'managed.remoteWorkspaceFailed':
     'Registration failed. Check the machine and directory before trying again.',
   'managed.remoteWorkspaceBlocked':
-    'Registration needs administrator review. You can clear this browser draft to register another directory; the original registration remains blocked.',
+    'The machine has not confirmed this registration yet. It completes, or releases the directory, on its own once the machine answers; if it stays blocked, it needs administrator review. You can clear this browser draft to register another directory.',
   'managed.remoteWorkspaceUnconfirmed':
     'Registration is unconfirmed. Continue confirming the saved request.',
 };
@@ -49,7 +49,7 @@ export const WORKSPACE_REGISTRATION_MESSAGES_ZH: Record<string, string> = {
     '目录不可用。请检查机器和目录后重试。',
   'managed.remoteWorkspaceFailed': '登记失败。请检查机器和目录后重试。',
   'managed.remoteWorkspaceBlocked':
-    '登记需要管理员检查。可以清除此浏览器草稿并登记其他目录；原登记仍保持阻塞。',
+    '机器尚未确认此登记。机器给出结果后，它会自动完成或释放该目录；若一直保持阻塞，则需要管理员检查。可以清除此浏览器草稿并登记其他目录。',
   'managed.remoteWorkspaceUnconfirmed':
     '登记结果尚未确认，请继续确认已保存的请求。',
 };

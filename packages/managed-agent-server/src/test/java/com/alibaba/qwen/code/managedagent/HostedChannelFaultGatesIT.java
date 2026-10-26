@@ -1,8 +1,8 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
+import com.alibaba.qwen.code.managedagent.channel.ManagedChannelService;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.service.ManagedChannelService;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -379,9 +379,9 @@ class HostedChannelFaultGatesIT {
                 if (!match.find()) {
                     return null;
                 }
-                // qwen serve falls back attemptPort+1 on EADDRINUSE; a
-                // harness on a fallback port invalidates the pre-baked
-                // harness.base-url, so the bound port must be the reserved one.
+                // --profile hosted-harness exits on EADDRINUSE instead of
+                // moving, so a collision surfaces as a harness exit; this check
+                // keeps the pre-baked harness.base-url honest should it move.
                 if (Integer.parseInt(match.group(1)) != harnessPort) {
                     return new IllegalStateException("harness bound port "
                             + match.group(1) + " instead of the reserved "

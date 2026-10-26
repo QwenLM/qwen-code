@@ -1,8 +1,8 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
-import com.alibaba.qwen.code.managedagent.service.HarnessEventProjector;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.session.HarnessEventProjector;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -68,7 +68,8 @@ final class HostedSseGapProbe implements AutoCloseable {
                         assertThat(terminalHeld.getCount()).isZero();
                         var events = events();
                         assertThat(events).extracting(row -> row.get("event_type"))
-                                .containsExactly("session.created", "item.output_text.delta");
+                                .containsExactly("session.created", "item.tool_call.updated",
+                                        "item.tool_call.updated", "item.output_text.delta");
                         yield events;
                     }
                     case "release" -> {
@@ -135,17 +136,16 @@ final class HostedSseGapProbe implements AutoCloseable {
         }
         assertThat(execution.get("execution_call_id")).isEqualTo(executionId);
         String storage = "storage-0";
-        var owner = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns("o") + " FROM ma_storage_owner o JOIN ma_storage s ON s.physical_key = o.storage_key WHERE s.alias_key = ? AND s.tenant_id = ? AND s.storage_id = ?",
+        var member = jdbc.queryForMap("SELECT m.execution_storage_key, m.execution_exclusive, s.physical_key"
+                + " FROM ma_runtime_session m JOIN ma_storage s ON s.tenant_id = m.tenant_id"
+                + " WHERE s.alias_key = ? AND s.tenant_id = ? AND s.storage_id = ?"
+                + " AND m.harness_session_id = ? AND m.binding_id = ?"
+                + " AND m.runtime_generation = ? AND m.runtime_session_id = ?",
                 com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage),
-                tenant, storage);
-        if (finished) {
-            assertThat(owner.get("holder_key")).isNull();
-        } else {
-            assertThat(owner.get("holder_key")).isNotNull();
-            assertThat(owner.get("binding_id")).isEqualTo(execution.get("binding_id"));
-            assertThat(owner.get("runtime_generation")).isEqualTo(execution.get("runtime_generation"));
-            assertThat(owner.get("runtime_session_id")).isEqualTo(promptId);
-        }
+                tenant, storage, session, execution.get("binding_id"), execution.get("runtime_generation"), promptId);
+        assertThat(member.get("physical_key")).isNotNull();
+        assertThat(member.get("execution_storage_key")).isEqualTo(finished ? null : member.get("physical_key"));
+        assertThat(member.get("execution_exclusive")).isEqualTo(false);
         assertThat(execution.get("turn_id")).isEqualTo(promptId);
         assertThat(execution.get("runtime_session_id")).isEqualTo(promptId);
         assertThat(execution.get("execution_state")).isEqualTo(finished ? "SETTLED" : "EXECUTING");
@@ -186,10 +186,11 @@ final class HostedSseGapProbe implements AutoCloseable {
         assertExecution(true);
         var events = events();
         assertThat(events).extracting(row -> row.get("event_type"))
-                .containsExactly("session.created", "item.output_text.delta", "turn.completed");
+                .containsExactly("session.created", "item.tool_call.updated",
+                        "item.tool_call.updated", "item.output_text.delta", "turn.completed");
         assertThat(events.stream().skip(1).map(row -> row.get("source_key")).toList()).isEqualTo(sourceKeys);
         assertThat(events.stream().map(row -> ((Number) row.get("sequence_id")).longValue()).toList())
-                .containsExactly(1L, 2L, 3L);
+                .containsExactly(1L, 2L, 3L, 4L, 5L);
         System.out.println("FG6E_LEDGER " + session + " " + report);
     }
 

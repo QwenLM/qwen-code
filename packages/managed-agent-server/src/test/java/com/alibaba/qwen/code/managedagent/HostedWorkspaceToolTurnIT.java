@@ -1,12 +1,24 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
-import com.alibaba.qwen.code.managedagent.service.EmbeddedRuntimeBroker;
-import com.alibaba.qwen.code.managedagent.service.HarnessEventProjector;
-import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard;
+import com.alibaba.qwen.code.managedagent.api.ToolPublicationController;
+import com.alibaba.qwen.code.managedagent.artifact.ToolPublicationObjectStore;
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
+import com.alibaba.qwen.code.managedagent.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.session.HarnessEventProjector;
+import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.EmbeddedRuntimeBroker;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -14,15 +26,22 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
+import org.springframework.context.support.GenericApplicationContext;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.transaction.PlatformTransactionManager;
 
+import java.io.ByteArrayInputStream;
+import java.io.InputStream;
 import java.lang.reflect.Proxy;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
@@ -31,15 +50,18 @@ import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.security.MessageDigest;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 
@@ -52,8 +74,23 @@ class HostedWorkspaceToolTurnIT {
     @Test
     @Timeout(360)
     void packagedHarnessUsesSavedWorkspacesThroughRealBrokerWorkerAndSqlStore() throws Exception {
-        runDriver(List.of("alpha", "beta", "shell", "storage-failure", "raw-reply-loss", "cancel"),
-                "workspace-tool-turn");
+        Process unrelated = new ProcessBuilder(System.getProperty("node.executable"),
+                "-e", "setInterval(() => {}, 60_000)").start();
+        try {
+            runDriver(List.of("alpha", "beta", "shell", "storage-failure", "raw-reply-loss", "cancel"),
+                    "workspace-tool-turn");
+            assertThat(unrelated.isAlive()).as("Unrelated fixture survives Broker shutdown").isTrue();
+        } finally {
+            unrelated.destroyForcibly();
+            assertThat(unrelated.waitFor(5, TimeUnit.SECONDS)).isTrue();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"local", "o2"})
+    @Timeout(360)
+    void malformedShellUnicodeIsCorrectableBeforeAcquisition(String capture) throws Exception {
+        runDriver(List.of(capture), "shell-unicode");
     }
 
     @Test
@@ -164,15 +201,69 @@ class HostedWorkspaceToolTurnIT {
         runDriver(cases, "provider-control");
     }
 
+    @Test
+    @Timeout(300)
+    @EnabledIfSystemProperty(named = "qwen.provider.media.bundle-ready", matches = "true")
+    void providerMediaReachesModelAndSurvivesReplyLossAndBrokerRestartOnMySql() throws Exception {
+        assertThat(System.getProperty("mysql.url")).as("M4 requires real MySQL").startsWith("jdbc:mysql:");
+        assertThat(System.getProperty("mysql.user")).as("M4 requires -Dmysql.user").isNotBlank();
+        runDriver(List.of("png", "jpeg", "webp", "gif", "native-pdf", "pdf-text", "pdf-render",
+                "image-disabled", "image-missing", "pdf-too-large", "lost-start", "lost-execute"), "provider-media");
+    }
+
+    private static void registerUnicodePublication(GenericApplicationContext context) {
+        var objects = new ConcurrentHashMap<String, byte[]>();
+        context.registerBean("unicodeObjects", ToolPublicationObjectStore.class, () -> new ToolPublicationObjectStore() {
+            @Override
+            public void putIfAbsent(String key, byte[] bytes) {
+                byte[] previous = objects.putIfAbsent(key, bytes.clone());
+                if (previous != null && !java.util.Arrays.equals(previous, bytes)) {
+                    throw new IllegalStateException("Immutable fixture object changed");
+                }
+            }
+            @Override
+            public InputStream open(String key) {
+                byte[] bytes = objects.get(key);
+                if (bytes == null) {
+                    throw new IllegalStateException("Missing fixture object");
+                }
+                return new ByteArrayInputStream(bytes);
+            }
+            @Override
+            public void validateConfiguration() {}
+        });
+        context.registerBean("unicodeGrants", ToolPublicationStore.class, () -> new ToolPublicationStore(
+                context.getBean(JdbcTemplate.class), context.getBean(PlatformTransactionManager.class),
+                context.getBean(ManagedSessionStore.class), context.getBean(ToolExecutionRepository.class),
+                context.getBean(RuntimeBindingRepository.class),
+                new ToolPublicationStore.Capacity(1024 * 1024, 16 * 1024 * 1024, 64 * 1024 * 1024, 4)));
+        context.registerBean("unicodeData", ToolPublicationDataStore.class, () -> new ToolPublicationDataStore(
+                context.getBean(JdbcTemplate.class), context.getBean(PlatformTransactionManager.class),
+                context.getBean(ToolPublicationStore.class), context.getBean(ManagedSessionStore.class),
+                context.getBean(ToolPublicationObjectStore.class), Duration.ofSeconds(30), Duration.ofSeconds(5),
+                new ToolPublicationDataStore.VerificationBudget(1024 * 1024, Duration.ofMinutes(25))));
+        context.registerBean("unicodePublicationController", ToolPublicationController.class, () -> {
+            var properties = context.getBean(ManagedAgentProperties.class);
+            properties.getToolPublication().setEntryConcurrency(4);
+            return new ToolPublicationController(context.getBean(ToolPublicationStore.class),
+                    context.getBean(ToolPublicationDataStore.class),
+                    new ToolPublicationAdmissionStore(context.getBean(JdbcTemplate.class),
+                            context.getBean(PlatformTransactionManager.class), context.getBean(ManagedSessionStore.class),
+                            context.getBean(ToolPublicationDataStore.class)), properties);
+        });
+    }
+
     private void runDriver(List<String> cases, String driverName) throws Exception {
         boolean latency = driverName.equals("latency");
+        boolean unicode = driverName.equals("shell-unicode");
         boolean operatorRecovery = driverName.equals("operator-recovery");
-        boolean faults = !driverName.equals("workspace-tool-turn") && !latency && !operatorRecovery;
+        boolean faults = !driverName.equals("workspace-tool-turn") && !latency && !unicode && !operatorRecovery;
         boolean storeFaults = driverName.equals("store-failure");
         boolean cancellations = driverName.equals("cancellation");
         boolean sseGaps = driverName.equals("sse-gap");
         boolean shellOutput = driverName.equals("shell-output");
         boolean providerControl = driverName.equals("provider-control");
+        boolean providerMedia = driverName.equals("provider-media");
         Path cli = Path.of(System.getProperty("qwen.cli.entry", "../../dist/cli.js")).toAbsolutePath().normalize();
         assertThat(cli).isRegularFile();
         String node = System.getProperty("node.executable");
@@ -226,6 +317,10 @@ class HostedWorkspaceToolTurnIT {
                 "--qwen.managed-agent.runtime-broker.credential-key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
                 "--qwen.managed-agent.runtime-broker.node-executable=" + node,
                 "--qwen.managed-agent.runtime-broker.worker-entry=" + worker));
+        if (operatorRecovery) {
+            arguments.add("--qwen.managed-agent.runtime-broker.previous-credential-keys["
+                    + HostedOperatorRecoveryProbe.RECOVERY_KEY_ID + "]=" + HostedOperatorRecoveryProbe.RECOVERY_KEY);
+        }
         for (int index = 0; index < workspaces.size(); index++) {
             String prefix = "--qwen.managed-agent.runtime-broker.workspace-mounts[" + index + "].";
             arguments.add(prefix + "tenant-id=" + tenant);
@@ -235,9 +330,12 @@ class HostedWorkspaceToolTurnIT {
             // Give initialized roots an unambiguous birth time without a timing-dependent sleep.
             Files.setLastModifiedTime(workspaces.get(index), FileTime.fromMillis(1));
         }
-        boolean verifiedRecovery = "Linux".equals(System.getProperty("os.name"));
+        boolean verifiedRecovery = List.of("Linux", "Mac OS X").contains(System.getProperty("os.name"));
         arguments.add("--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled=" + verifiedRecovery);
         var application = new SpringApplicationBuilder(ManagedAgentServerApplication.class);
+        if (unicode) {
+            application.initializers(context -> registerUnicodePublication((GenericApplicationContext) context));
+        }
         if (sseGaps) {
             // Keep SQL polling outside the 10s receive window to require live hub delivery.
             arguments.add("--qwen.managed-agent.events.poll-interval=60s");
@@ -247,12 +345,20 @@ class HostedWorkspaceToolTurnIT {
         }
         try (var spring = (ServletWebServerApplicationContext) application.run(arguments.toArray(String[]::new))) {
             JdbcTemplate jdbc = spring.getBean(JdbcTemplate.class);
+            if (unicode) {
+                spring.getBean(ManagedAgentProperties.class).getToolPublication()
+                        .setServiceBaseUrl("http://127.0.0.1:" + spring.getWebServer().getPort());
+            }
             if (faults) {
                 var metadata = jdbc.queryForMap("SELECT VERSION() AS version, @@version_comment AS engine");
-                System.out.println((shellOutput || providerControl ? "FG6F_DATABASE " : sseGaps ? "FG6E_DATABASE " : cancellations ? "FG6D_DATABASE " : storeFaults ? "FG6B_DATABASE " : "FG6A_DATABASE ") + metadata);
+                System.out.println((providerMedia ? "M4_DATABASE " : shellOutput || providerControl ? "FG6F_DATABASE " : sseGaps ? "FG6E_DATABASE " : cancellations ? "FG6D_DATABASE " : storeFaults ? "FG6B_DATABASE " : "FG6A_DATABASE ") + metadata);
                 try (var connection = jdbc.getDataSource().getConnection()) {
-                    assertThat(connection.getMetaData().getDatabaseProductName())
-                            .containsAnyOf("MySQL", "MariaDB");
+                    String product = connection.getMetaData().getDatabaseProductName();
+                    if (providerMedia) {
+                        assertThat(product).isEqualToIgnoringCase("MySQL");
+                    } else {
+                        assertThat(product).containsAnyOf("MySQL", "MariaDB");
+                    }
                 }
             }
             ManagedAgentStore store = spring.getBean(ManagedAgentStore.class);
@@ -269,7 +375,7 @@ class HostedWorkspaceToolTurnIT {
                         "sha256:" + "a".repeat(64), "qwen-code", null, null, List.of(), null,
                         new WorkspaceSelection(workspaceId, "child"));
                 String profile = operatorRecovery ? (index < 2 ? "hosted-workspace-shell/1" : "hosted-workspace-files/1")
-                        : !shellOutput && (faults || index < 2) ? "hosted-workspace-files/1" : "hosted-workspace-shell/1";
+                        : !unicode && !shellOutput && (faults || index < 2) ? "hosted-workspace-files/1" : "hosted-workspace-shell/1";
                 String secondary = operatorRecovery ? store.insertWorkspaceSessionCommand(tenant, "actor", "secondary-" + index,
                         "sha256:" + "a".repeat(64), "qwen-code", null, null, List.of(), null,
                         new WorkspaceSelection(workspaceId, "child")).sessionId() : "";
@@ -323,13 +429,19 @@ class HostedWorkspaceToolTurnIT {
                     ? new HostedShellOutputProbe(jdbc, tenant, sessions, broker, gateServer) : null;
             HostedProviderControlProbe providerProbe = providerControl
                     ? new HostedProviderControlProbe(jdbc, tenant, sessions, broker, gateServer) : null;
+            HostedProviderMediaProbe mediaProbe = providerMedia
+                    ? new HostedProviderMediaProbe(jdbc, tenant, sessions, broker, gateServer,
+                            () -> new EmbeddedRuntimeBroker(spring.getBean(AgentStateStore.class),
+                                    spring.getBean(ManagedAgentProperties.class), spring.getBean(RuntimeBindingRepository.class),
+                                    spring.getBean(RuntimeSessionRepository.class), spring.getBean(ToolExecutionRepository.class),
+                                    spring.getBean(WorkspaceExecutionStore.class))) : null;
             HostedWorkspaceColdLoadProbe coldLoadProbe = new HostedWorkspaceColdLoadProbe(jdbc, tenant, sessions,
                     "http://127.0.0.1:" + spring.getWebServer().getPort(), gateServer);
             HostedOperatorRecoveryProbe operatorProbe = operatorRecovery
                     ? new HostedOperatorRecoveryProbe(spring, sessions, temporary.resolve("runtime"), gateServer) : null;
             gateServer.start();
             List<String> triggers = new ArrayList<>();
-            try (shellProbe; providerProbe; coldLoadProbe; operatorProbe) {
+            try (shellProbe; providerProbe; mediaProbe; coldLoadProbe; operatorProbe) {
                 if (storeFaults || shellOutput) {
                     for (Map<String, Object> session : sessions) {
                         if (shellOutput ? session.get("fault").equals("receipt-failure")
@@ -358,10 +470,12 @@ class HostedWorkspaceToolTurnIT {
                         "integration-tests/helpers/hosted-" + driverName + "-driver.ts", config.toString())
                         .directory(root.toFile()).redirectErrorStream(true).redirectOutput(log.toFile()).start();
                 try {
-                    assertThat(driver.waitFor(faults || latency ? 130 : 270, TimeUnit.SECONDS)).as("Driver timeout: %s", Files.readString(log)).isTrue();
+                    assertThat(driver.waitFor(providerMedia ? 240 : faults || latency ? 130 : 270, TimeUnit.SECONDS)).as("Driver timeout: %s", Files.readString(log)).isTrue();
                     assertThat(driver.exitValue()).as("Driver output: %s", Files.readString(log)).isZero();
                     System.out.println(Files.readString(log));
-                    assertThat(Files.readString(log)).contains(operatorRecovery ? "HOSTED_OPERATOR_RECOVERY_OK" : latency ? "HOSTED_LATENCY_OK"
+                    assertThat(Files.readString(log)).contains(unicode ? "HOSTED_SHELL_UNICODE_OK: " + String.join(",", cases)
+                            : operatorRecovery ? "HOSTED_OPERATOR_RECOVERY_OK" : latency ? "HOSTED_LATENCY_OK"
+                            : providerMedia ? "HOSTED_PROVIDER_MEDIA_OK"
                             : providerControl ? "HOSTED_PROVIDER_FAULTS_OK"
                             : shellOutput ? "HOSTED_SHELL_OUTPUT_FAULTS_OK"
                             : sseGaps ? "HOSTED_SSE_GAP_OK"
@@ -378,7 +492,37 @@ class HostedWorkspaceToolTurnIT {
                         if (operatorRecovery) {
                             continue;
                         }
-                        if (providerControl) {
+                        if (providerMedia) {
+                            mediaProbe.assertReport(sessions.get(index), reports.get(index));
+                        } else if (unicode) {
+                            assertThat(workspace.resolve("child/invalid.txt")).doesNotExist();
+                            assertThat(workspace.resolve("child/sibling.txt")).doesNotExist();
+                            assertThat(Files.readString(workspace.resolve("child/unicode-ok.txt")))
+                                    .isEqualTo("中文😀é\\ud800");
+                            assertThat(Files.readString(workspace.resolve("child/unicode-secondary-ok.txt")))
+                                    .isEqualTo("中文😀é\\ud800");
+                            for (String sessionId : List.of(sessions.get(index).get("sessionId").toString(), secondarySessionId)) {
+                                var publications = jdbc.queryForList("SELECT state, producer_phase,"
+                                        + " CASE WHEN accepted_complete THEN 1 ELSE 0 END AS complete"
+                                        + " FROM ma_output_capture WHERE tenant_id = ? AND session_id = ?", tenant, sessionId);
+                                if (cases.contains("o2")) {
+                                    assertThat(publications).hasSize(1);
+                                    var publication = publications.getFirst();
+                                    assertThat(publication.get("state")).isIn("OPEN", "FENCED");
+                                    assertThat(publication.get("producer_phase")).isEqualTo("REFERENCED");
+                                    assertThat(((Number) publication.get("complete")).intValue()).isEqualTo(1);
+                                } else {
+                                    assertThat(publications).isEmpty();
+                                }
+                                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution"
+                                        + " WHERE harness_session_id = ?", Integer.class, sessionId)).isEqualTo(1);
+                                var execution = jdbc.queryForMap("SELECT dispatch_generation, execution_state, execution_status"
+                                        + " FROM ma_tool_execution WHERE harness_session_id = ?", sessionId);
+                                assertThat(((Number) execution.get("dispatch_generation")).longValue()).isEqualTo(1);
+                                assertThat(execution.get("execution_state")).isEqualTo("SETTLED");
+                                assertThat(execution.get("execution_status")).isEqualTo("success");
+                            }
+                        } else if (providerControl) {
                             providerProbe.assertReport(sessions.get(index), reports.get(index));
                         } else if (latency) {
                             boolean tool = cases.get(index).equals("tool");
@@ -424,13 +568,24 @@ class HostedWorkspaceToolTurnIT {
                         driver.destroyForcibly();
                     }
                 }
-                if (!faults && !latency && !operatorRecovery) {
-                    List<ProcessHandle> producers = ProcessHandle.current().descendants().toList();
+                if (!faults && !latency && !unicode && !operatorRecovery) {
+                    Object service = ReflectionTestUtils.getField(broker, "service");
+                    Object provisioner = ReflectionTestUtils.getField(service, "provisioner");
+                    Object local = ReflectionTestUtils.getField(provisioner, "delegate");
+                    var runtimes = new ArrayList<Object>(
+                            ((Map<?, ?>) ReflectionTestUtils.getField(local, "owned")).values());
+                    runtimes.addAll((Set<?>) ReflectionTestUtils.getField(local, "starting"));
+                    var producers = new HashSet<ProcessHandle>();
+                    // Other Hosted fixtures can retain workers in the same JVM.
+                    for (Object value : runtimes) {
+                        Process process = (Process) ReflectionTestUtils.getField(value, "process");
+                        producers.add(process.toHandle());
+                        producers.addAll(process.descendants().toList());
+                    }
                     assertThat(producers).as("Runtime producers before Broker shutdown").isNotEmpty();
                     broker.close();
                     for (ProcessHandle producer : producers) {
-                        producer.onExit().get(10, TimeUnit.SECONDS);
-                        assertThat(producer.isAlive()).as("Producer %s before retained read", producer.pid()).isFalse();
+                        HostedProcessLiveness.awaitStopped(producer, Duration.ofSeconds(10), "Producer before retained read");
                     }
                     System.out.println("HOSTED_SHELL_PRODUCERS_EXITED: " + producers.size());
                     Path readerLog = temporary.resolve("reader.log");
@@ -487,7 +642,7 @@ class HostedWorkspaceToolTurnIT {
         assertThat(Files.readString(Path.of(session.get("directory").toString()).resolve("proof.txt")))
                 .as(fault + " physical effect").isEqualTo(started ? "xx" : "x");
         List<Map<String, Object>> executions = jdbc.queryForList("SELECT execution_call_id, idempotency_key,"
-                + " runtime_session_id, dispatch_generation, execution_state, execution_status"
+                + " binding_id, runtime_generation, runtime_session_id, dispatch_generation, execution_state, execution_status"
                 + " FROM ma_tool_execution WHERE harness_session_id = ?", session.get("sessionId"));
         assertThat(executions).as(fault + " reservations").hasSize(List.of("acquire", "arguments").contains(fault) ? 0 : 1);
         for (Map<String, Object> execution : executions) {
@@ -501,31 +656,32 @@ class HostedWorkspaceToolTurnIT {
             }
         }
         String storageId = "storage-" + index;
-        Map<String, Object> owner = jdbc.queryForMap("SELECT o.holder_key, o.runtime_session_id"
-                + " FROM ma_storage_owner o JOIN ma_storage s ON s.physical_key = o.storage_key"
-                + " WHERE s.alias_key = ? AND s.tenant_id = ? AND s.storage_id = ?",
+        String physical = jdbc.queryForObject("SELECT physical_key FROM ma_storage"
+                + " WHERE alias_key = ? AND tenant_id = ? AND storage_id = ?", String.class,
                 com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storageId),
                 tenant, storageId);
+        assertThat(physical).isNotBlank();
+        Map<String, Object> member = jdbc.queryForMap("SELECT binding_id, runtime_generation, runtime_session_id,"
+                + " session_state, execution_storage_key, execution_exclusive FROM ma_runtime_session"
+                + " WHERE tenant_id = ? AND harness_session_id = ? AND runtime_session_id = ?",
+                tenant, session.get("sessionId"), report.path("promptId").asText());
         boolean released = storeFaults ? fault.equals("turn-reply") : List.of("prepare", "start", "release").contains(fault);
         // #13800: a turn that recovery-blocks no longer parks its mount
-        // forever — its handback frees the holder row once nothing is
+        // forever — its handback clears membership once nothing is
         // unproven (every execution SETTLED, no control in flight) and the
         // Runtime Session stays READY for the fleet. The one family whose
         // work genuinely never settles here — the PREPARED prepare-twice
-        // execution — keeps the mount honestly, the gate's busy freeze
-        // while anything is unproven, same as the fleet's.
+        // execution — retains its original membership until its outcome
+        // is known.
         boolean retained = !storeFaults && fault.equals("prepare-twice");
-        if (released) {
-            assertThat(owner.get("holder_key")).as(fault + " released owner").isNull();
-        } else if (retained) {
-            assertThat(owner.get("holder_key")).as(fault + " retained owner").isNotNull();
-            assertThat(owner.get("runtime_session_id")).isEqualTo(report.path("promptId").asText());
-        } else {
-            assertThat(owner.get("holder_key")).as(fault + " handed-back owner").isNull();
+        assertThat(member.get("execution_storage_key")).as(fault + " execution membership")
+                .isEqualTo(retained ? physical : null);
+        assertThat(member.get("execution_exclusive")).isEqualTo(false);
+        if (retained) {
+            assertThat(member.get("binding_id")).isEqualTo(executions.getFirst().get("binding_id"));
+            assertThat(member.get("runtime_generation")).isEqualTo(executions.getFirst().get("runtime_generation"));
         }
-        assertThat(jdbc.queryForObject("SELECT session_state FROM ma_runtime_session WHERE harness_session_id = ?"
-                + " AND runtime_session_id = ?", String.class, session.get("sessionId"), report.path("promptId").asText()))
-                .isEqualTo(released ? "RELEASED" : "READY");
+        assertThat(member.get("session_state")).isEqualTo(released ? "RELEASED" : "READY");
         if (storeFaults) {
             assertStoreJournal(jdbc, tenant, session, report);
         }
@@ -593,8 +749,10 @@ class HostedWorkspaceToolTurnIT {
                     .isEqualTo(target.path("lastSequence").asLong()).isEqualTo(receipt.path("committedSequence").asLong());
         }
         for (JsonNode resource : target.path("resources")) {
-            List<Map<String, Object>> stored = jdbc.queryForList("SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
-                    tenant, sessionId, resource.path("resourceId").asText());
+            // Led by the indexed session scope key, as in HostedGateTestSupport:
+            // the raw tenant+session form scans the lane's accumulated ma_resource rows.
+            List<Map<String, Object>> stored = jdbc.queryForList("SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE session_scope_key = ? AND resource_id = ? AND tenant_id = ? AND session_id = ?",
+                    ManagedSessionStore.sessionScopeKey(tenant, sessionId), resource.path("resourceId").asText(), tenant, sessionId);
             if (!applied) {
                 if (resource.has("bytesBase64")) {
                     assertThat(stored).as(fault + " rolled-back resource").isEmpty();
@@ -676,8 +834,8 @@ class HostedWorkspaceToolTurnIT {
         assertThat(head.get("last_commit_digest")).isEqualTo(digest);
         assertThat(head.get("latest_checkpoint_resource_id")).isEqualTo(checkpointId);
         byte[] checkpoint = jdbc.queryForObject("SELECT inline_bytes FROM ma_resource"
-                + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?", byte[].class,
-                tenant, sessionId, checkpointId);
+                + " WHERE session_scope_key = ? AND resource_id = ? AND tenant_id = ? AND session_id = ?", byte[].class,
+                ManagedSessionStore.sessionScopeKey(tenant, sessionId), checkpointId, tenant, sessionId);
         String phase = mapper.readTree(checkpoint).path("continuation").path("phase").asText();
         if (fault.startsWith("result-")) {
             assertThat(phase).isEqualTo("await_runtime");

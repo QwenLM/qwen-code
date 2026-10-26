@@ -19,10 +19,12 @@ import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/mana
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import {
   HostedWorkspaceToolTurn,
+  HostedToolRecoveryRequiredError,
   HOSTED_SEND_MESSAGE_TO_CHILD_TOOL,
   HOSTED_SEND_MESSAGE_TO_PARENT_TOOL,
 } from './hosted-workspace-tool-turn.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
+import { HostedTeamSession } from './hosted-team-session.js';
 import { ManagedSessionRecordError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { ManagedSessionStoreTransportError } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import {
@@ -51,6 +53,7 @@ const broker = vi.hoisted(() => ({
 vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./hosted-workspace-broker.js')>()),
   HostedWorkspaceBroker: class {
+    resolveCapabilities = async () => {};
     readonly runtimeSessionId = 'prompt';
     fileHistory = broker.fileHistory;
     warm = broker.warm;
@@ -95,6 +98,7 @@ function createTurn(
   depth = 0,
   lineage?: HostedSessionLineage,
   promptName = 'prompt',
+  teams?: HostedTeamSession,
 ): HostedWorkspaceToolTurn {
   return new HostedWorkspaceToolTurn(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
@@ -140,6 +144,7 @@ function createTurn(
         children,
         lineage,
       ),
+      teams,
     },
   );
 }
@@ -360,6 +365,160 @@ it('queues a child message to its parent', async () => {
     }),
   ]);
 });
+
+it.each(['child', 'task', 'member', 'broadcast'] as const)(
+  'refuses encoded overflow on the %s lane before routing (#14062)',
+  async (lane) => {
+    const taskId = lane === 'task' ? await launchChild() : undefined;
+    const teams =
+      lane === 'member' || lane === 'broadcast'
+        ? new HostedTeamSession(
+            { authority: session.authority, resources: session.resources },
+            sessionKey,
+          )
+        : undefined;
+    const turn = createTurn(
+      lane === 'child' ? 1 : 0,
+      lane === 'child' ? PARENT_LINEAGE() : undefined,
+      'prompt',
+      teams,
+    );
+    const target =
+      lane === 'task'
+        ? { task_id: taskId }
+        : { to: lane === 'child' ? 'parent' : lane === 'member' ? 'bob' : '*' };
+    const responses = await execute(
+      turn,
+      call({ ...target, message: '"\\\n\u0001中😀'.repeat(3000) }, 'dense'),
+    );
+    expect(responses[0].functionResponse).toMatchObject({
+      id: 'dense',
+      name: 'send_message',
+    });
+    expect(JSON.stringify(responses)).toContain(
+      'Hosted send_message exceeds the 65536-byte inline Session Store limit once encoded (byte_limit); shorten the message or other arguments and retry.',
+    );
+    expect(messages()).toHaveLength(0);
+    expect(
+      session.authority.extensionRecordsInDomain('child_run'),
+    ).toHaveLength(lane === 'task' ? 1 : 0);
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+    if (lane === 'child') {
+      const retry = await execute(
+        turn,
+        call({ to: 'parent', message: 'shorter' }, 'retry'),
+      );
+      expect(JSON.stringify(retry)).toContain('queued for delivery');
+      expect(messages()).toHaveLength(1);
+    }
+  },
+);
+
+it('keeps ordinary tool input overflow fatal (#14062)', async () => {
+  await expect(
+    execute(
+      createTurn(),
+      call(
+        { file_path: 'note', content: '"'.repeat(20_000) },
+        'write',
+        'write_file',
+      ),
+    ),
+  ).rejects.toThrow(
+    'Hosted tool input exceeds the inline Session Store limit.',
+  );
+  expect(broker.acquire).not.toHaveBeenCalled();
+});
+
+it.each([65_536, 65_537])(
+  'uses the real encoder at the %i-byte boundary (#14062)',
+  async (bytes) => {
+    const turn = createTurn(1, PARENT_LINEAGE());
+    const encoder = turn as unknown as {
+      encodeToolInput(payload: { toolName: string; input: unknown }): {
+        inputBytes: Buffer;
+      };
+    };
+    const overhead = encoder.encodeToolInput({
+      toolName: 'send_message',
+      input: { to: 'parent', message: '' },
+    }).inputBytes.length;
+    const encode = vi.spyOn(encoder, 'encodeToolInput');
+    const responses = await execute(
+      turn,
+      call({ to: 'parent', message: 'x'.repeat(bytes - overhead) }),
+    );
+    expect(encode).toHaveBeenCalledOnce();
+    if (bytes === 65_536) {
+      expect(encode.mock.results[0].value.inputBytes).toHaveLength(bytes);
+      expect(JSON.stringify(responses)).toContain('queued for delivery');
+      expect(messages()).toHaveLength(1);
+    } else {
+      expect(encode.mock.results[0].type).toBe('throw');
+      expect(JSON.stringify(responses)).toContain('once encoded (byte_limit)');
+      expect(messages()).toHaveLength(0);
+    }
+  },
+);
+
+it.each(['assistant', 'tool_result'] as const)(
+  'requires recovery when the overflow %s cannot commit (#14062)',
+  async (failedType) => {
+    const write = session.sink.write.bind(session.sink);
+    const writes = vi
+      .spyOn(session.sink, 'write')
+      .mockImplementation((record) => {
+        if (record.type === failedType) throw new Error('Store unavailable');
+        return write(record);
+      });
+    await expect(
+      execute(
+        createTurn(1, PARENT_LINEAGE()),
+        call({ to: 'parent', message: '"'.repeat(20_000) }),
+      ),
+    ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
+    expect(writes.mock.calls.map(([record]) => record.type)).toEqual(
+      failedType === 'assistant' ? ['assistant'] : ['assistant', 'tool_result'],
+    );
+    expect((await session.sink.project()).map((record) => record.type)).toEqual(
+      failedType === 'assistant' ? [] : ['assistant'],
+    );
+    expect(messages()).toHaveLength(0);
+  },
+);
+
+it.each(['to', 'task_id'] as const)(
+  'identifies oversized %s arguments when the message is short (#14062)',
+  async (recipientKey) => {
+    const teams =
+      recipientKey === 'to'
+        ? new HostedTeamSession(
+            { authority: session.authority, resources: session.resources },
+            sessionKey,
+          )
+        : undefined;
+    const responses = await execute(
+      createTurn(0, undefined, 'prompt', teams),
+      call(
+        { [recipientKey]: '"'.repeat(20_000), message: 'hi' },
+        'recipient-dense',
+      ),
+    );
+    expect(responses[0].functionResponse).toMatchObject({
+      id: 'recipient-dense',
+      name: 'send_message',
+      response: {
+        error: expect.stringContaining(
+          'shorten the message or other arguments',
+        ),
+      },
+    });
+    expect(messages()).toHaveLength(0);
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+  },
+);
 
 it('runs a launch and a message in one batch without the mount', async () => {
   const taskId = await launchChild();

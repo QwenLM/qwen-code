@@ -68,6 +68,10 @@ import {
   maybeAugmentOldStringForDeletion,
   normalizeEditStrings,
 } from '../utils/editHelper.js';
+import {
+  buildWorkspaceArtifactCandidate,
+  formatRecordArtifactReminder,
+} from './artifact/workspace-auto-record.js';
 
 const debugLogger = createDebugLogger('EDIT_PRIOR_READ');
 
@@ -138,6 +142,12 @@ export interface EditToolParams {
    * Initially proposed content.
    */
   ai_proposed_content?: string;
+
+  /**
+   * When false, do not create a session artifact for this edit. An artifact
+   * the session already has for this path is still refreshed.
+   */
+  record_as_artifact?: boolean;
 }
 
 interface CalculatedEdit {
@@ -737,12 +747,14 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       // pre-edit placeholder. Best-effort: a stat failure here does
       // not undo the successful write — the next Read will simply
       // re-stat and treat the cache entry as stale.
+      let postWriteSizeBytes: number | undefined;
       try {
         if (mutation && !committedStats)
           throw new Error('Scoped file write returned no committed stats.');
         const postWriteStats = mutation
           ? committedStats!
           : fs.statSync(this.params.file_path);
+        postWriteSizeBytes = postWriteStats.size;
         this.config
           .getFileReadCache()
           .recordWrite(this.params.file_path, postWriteStats);
@@ -809,6 +821,20 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
           : `The file: ${this.params.file_path} has been updated.`,
       ];
 
+      const artifact = buildWorkspaceArtifactCandidate(
+        this.config,
+        this.params.file_path,
+        {
+          recordAsArtifact: this.params.record_as_artifact,
+          sizeBytes: postWriteSizeBytes,
+        },
+      );
+      if (artifact && !artifact.updateOnly) {
+        llmSuccessMessageParts.push(
+          formatRecordArtifactReminder(artifact.workspacePath),
+        );
+      }
+
       const snippetResult = extractEditSnippet(
         editData.currentContent,
         editData.newContent,
@@ -821,6 +847,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       return {
         llmContent: llmSuccessMessageParts.join(' '),
         returnDisplay: displayResult,
+        ...(artifact ? { artifacts: [artifact] } : {}),
       };
     } catch (error) {
       return this.writeFailure(error);
@@ -901,6 +928,10 @@ Expectation for required parameters:
             type: 'boolean',
             description:
               'Replace all occurrences of old_string (default false).',
+          },
+          record_as_artifact: {
+            type: 'boolean',
+            description: 'Refresh existing only.',
           },
         },
         required: ['file_path', 'old_string', 'new_string'],

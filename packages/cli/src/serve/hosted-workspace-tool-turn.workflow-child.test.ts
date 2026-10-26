@@ -72,6 +72,7 @@ const broker = vi.hoisted(() => ({
 vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./hosted-workspace-broker.js')>()),
   HostedWorkspaceBroker: class {
+    resolveCapabilities = async () => {};
     readonly runtimeSessionId = 'prompt';
     fileHistory = broker.fileHistory;
     warm = broker.warm;
@@ -985,6 +986,39 @@ it('answers a failed workflow child as an ended run, never a wait forever', asyn
   // tool's own serialized name instead of the run-over answer.
   expect(JSON.stringify(responses)).toContain('Workflow child');
   expect(JSON.stringify(responses)).toContain('child_failed');
+});
+
+it('answers a recovery-blocked workflow child as an ended run, never a wait forever', async () => {
+  const harness = createManagedHarnessHandle(session);
+  const resolveAwait = vi.spyOn(harness, 'resolveAwaitAgent');
+  const turn = createTurn(0, false, harness);
+  const childRunId = `prompt:call-1`;
+  const driving = (async () => {
+    for (;;) {
+      if (children.record(childRunId) !== undefined) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    await children.dispatchStarted(childRunId, {
+      dispatchId: 'dispatch-1',
+      runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+    });
+    await children.attach(childRunId, '550e8400-e29b-41d4-a716-446655440001');
+    await children.settleRecoveryBlocked(childRunId, {
+      reason: 'runtime_lost',
+    });
+  })();
+  const responses = (
+    await Promise.all([
+      executeWorkflow(turn, call({ script: SCRIPT, run_in_background: false })),
+      driving,
+    ])
+  )[0];
+  // The blocked child ends the wait with its own honest line — the wait
+  // returns in bounded time and the await checkpoint resolves.
+  expect(JSON.stringify(responses)).toContain('Workflow child');
+  expect(JSON.stringify(responses)).toContain('recovery blocked');
+  expect(JSON.stringify(responses)).toContain('outcome unknown');
+  expect(resolveAwait).toHaveBeenCalledWith(childRunId);
 });
 
 it('parks the foreground workflow wait before it waits, exactly as the agent arm', async () => {
