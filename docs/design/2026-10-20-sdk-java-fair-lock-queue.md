@@ -30,10 +30,11 @@ hold at a time — no constant budget bounds the queue.
   error text (`lock not acquired within`) stays so the rerun classifier in
   `qwen-autofix.yml` is untouched.
 - Goal: keep a failed suite or gate red while still publishing the cache
-  delta its downloads produced, and record a failed seed copy, a lock-timeout
-  write-back or a failed/timed-out write-back in the step summary instead
-  of only in the job log. A failed copy is never allowed to turn a green
-  lane red.
+  delta its downloads produced, except the delta of a run whose log reports
+  a corrupt artifact download (bytes that failed validation are never
+  published), and record a failed seed copy, a lock-timeout write-back or a
+  failed/timed-out write-back in the step summary instead of only in the job
+  log. A failed copy is never allowed to turn a green lane red.
 - Goal: keep the test-lane wait at the 9600 s bound while this PR moves its
   suite off the lock. Before the split the test lane's own suite was the
   longest hold (925 s suite-alone since #14801, and 1031-1205 s as a whole
@@ -156,10 +157,15 @@ policy covers a host fault the helper cannot recover from: a missing `flock`
 or an unusable cache or queue directory warns and skips before the helper
 spins out its budget. In the bare-lock fallback, only `flock`'s timeout
 status is tolerated; any other status is an unknown setup failure and stays
-fatal. Both jobs capture their Maven result instead of letting errexit skip
-the lock, so a failed suite or gate still publishes the delta its downloads
-produced and still exits red; a skipped write-back exits with that same
-result rather than masking it. Every lock-timeout and write-back failure arm
+fatal. Both jobs capture their Maven result and its log instead of letting
+errexit skip the lock, so a failed suite or gate still publishes the delta
+its downloads produced and still exits red; a skipped write-back exits with
+that same result rather than masking it. The one exception is a run whose log
+reports a checksum or download-integrity failure: Maven's default
+warn policy keeps the validated-but-corrupt file at nlink 1, so publishing
+it would hardlink it into the host cache, where `-n` makes it permanent for
+every later job. That failure class skips the write-back and exits with the
+run's result. Every lock-timeout and write-back failure arm
 appends a host-attributed step-summary line with the seed's own exit status
 and host-cache presence, so a permanently unwritable or cross-filesystem
 host cache accumulates evidence instead of repeating an identical warning
@@ -309,7 +315,9 @@ order this section exists to prevent.
   `mkdir`, a stray queue file, a lock path that is a directory, a timed-out
   `flock`, and an unexpected `flock` status. The suite also pins the seed's
   contents-copy spelling, a failed seed's recorded status and summary line,
-  the write-back running after a failed suite while the step stays red, the
+  the write-back running after a failed suite while the step stays red, a run
+  that reported a corrupt download skipping the write-back so the host cache
+  stays untouched, the
   H2 suite skipped after a failed install, a write-back that cannot create
   the host cache staying green with a summary line, a timed-out write-back's
   124 status, resolver temporaries excluded from the write-back, a lock-timeout skip's
@@ -329,8 +337,10 @@ order this section exists to prevent.
   repository drops the two in-house fixed-release coordinates from the copy
   before running Maven.
 - A failed suite or gate still runs the write-back after the acquisition
-  and exits red; a failed seed or write-back records its status in the
-  step summary without failing an otherwise green lane.
+  and exits red, and a run whose log reports a corrupt artifact download
+  skips the write-back so the corrupt bytes never enter the host cache. A
+  failed seed or write-back records its status in the step summary without
+  failing an otherwise green lane.
 - `npx vitest run scripts/tests/sdk-java-lock.test.js
 scripts/tests/sdk-java-workflow.test.js scripts/tests/workflow-size.test.js`
   passes.

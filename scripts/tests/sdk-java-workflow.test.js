@@ -834,16 +834,16 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(block).toContain("MATRIX_JAVA: '${{ matrix.java }}'");
     expect(block).toContain("TIER: '${{ inputs.tier }}'");
     expect(block).toContain(
-      'mvn --batch-mode --no-transfer-progress clean test || result_status=$?\n' +
+      'mvn --batch-mode --no-transfer-progress clean test 2>&1 | tee "${mvn_log}" || result_status=$?\n' +
         '          if [ "${MATRIX_JAVA}" = "21" ] && [ "${result_status}" -eq 0 ]; then\n' +
-        '            mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install || result_status=$?\n' +
+        '            mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install 2>&1 | tee -a "${mvn_log}" || result_status=$?\n' +
         '            cd ../../managed-agent-server\n' +
         '            if [ "${result_status}" -eq 0 ]; then\n' +
         '              # The fast tier skips mysql-integration, which owns the full H2 unit suite.\n' +
         '              if [ "${TIER}" = "fast" ]; then\n' +
-        '                mvn --batch-mode --no-transfer-progress clean test || result_status=$?\n' +
+        '                mvn --batch-mode --no-transfer-progress clean test 2>&1 | tee -a "${mvn_log}" || result_status=$?\n' +
         '              else\n' +
-        `                mvn --batch-mode --no-transfer-progress '-Dtest=${brokerTestPattern}' clean test || result_status=$?\n` +
+        `                mvn --batch-mode --no-transfer-progress '-Dtest=${brokerTestPattern}' clean test 2>&1 | tee -a "\${mvn_log}" || result_status=$?\n` +
         '              fi\n' +
         '            fi\n' +
         '          fi',
@@ -1415,6 +1415,82 @@ describe('SDK Java self-hosted workflow guards', () => {
         // ... but the lock and the write-back still run.
         expect(calls).toContain('.m2/repository');
         expect(calls).toContain('timeout 300 find');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== 'linux').each(['test', 'mysql-integration'])(
+    'does not publish a corrupt download from a failed %s run',
+    (name) => {
+      const locked = parse(workflow).jobs[name].steps.find((candidate) =>
+        candidate.run?.includes('sdk-java-tests.lock'),
+      );
+      const dir = mkdtempSync(join(tmpdir(), `sdk-java-corrupt-${name}-`));
+      const shims = join(dir, 'bin');
+      const home = join(dir, 'home');
+      const runnerTemp = join(dir, 'runner-temp');
+      const workspace = join(dir, 'workspace');
+      const working = join(workspace, 'packages', 'sdk-java', 'qwencode');
+      mkdirSync(shims);
+      mkdirSync(home);
+      // Maven's default warn policy keeps a checksum-failing download
+      // complete at nlink 1 in the job-local repository.
+      mkdirSync(join(runnerTemp, 'm2-repo', 'com', 'example'), {
+        recursive: true,
+      });
+      mkdirSync(join(workspace, '.github', 'scripts'), { recursive: true });
+      mkdirSync(working, { recursive: true });
+      mkdirSync(join(workspace, 'packages', 'managed-agent-server'), {
+        recursive: true,
+      });
+      writeFileSync(
+        join(workspace, '.github', 'scripts', 'sdk-java-lock.sh'),
+        'sdk_java_lock_acquire() { return 0; }\n',
+      );
+      writeFileSync(
+        join(runnerTemp, 'm2-repo', 'com', 'example', 'bad.jar'),
+        'corrupt',
+      );
+      writeFileSync(
+        join(shims, 'mvn'),
+        '#!/bin/sh\n' +
+          'echo "[WARNING] Could not validate integrity of download: Checksum validation failed, expected abc but was def"\n' +
+          'exit 1\n',
+        { mode: 0o755 },
+      );
+      try {
+        const result = spawnSync(
+          'bash',
+          ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', locked.run],
+          {
+            encoding: 'utf8',
+            cwd: name === 'test' ? working : workspace,
+            timeout: 5000,
+            env: {
+              ...process.env,
+              PATH: `${shims}:${process.env.PATH}`,
+              HOME: home,
+              RUNNER_TEMP: runnerTemp,
+              GITHUB_WORKSPACE: workspace,
+              MATRIX_JAVA: '21',
+              TIER: 'fast',
+            },
+          },
+        );
+        expect(result.error).toBeUndefined();
+        expect(result.status, result.stderr).toBe(1);
+        expect(result.stdout).toContain(
+          '::warning::Maven cache write-back skipped: the Maven run reported a corrupt download',
+        );
+        // Publishing the corrupt bytes would make them permanent: the host
+        // cache is written with -n, so no later job can replace the file.
+        expect(
+          existsSync(
+            join(home, '.m2', 'repository', 'com', 'example', 'bad.jar'),
+          ),
+        ).toBe(false);
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
@@ -2477,6 +2553,7 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
           source "$GITHUB_ENV"
           set +a
           mvn() { printf 'MAVEN<%s>\\n' "$@"; }
+          mvn_log="$TRACE.mvn"
           ${command}
         `,
           ],
