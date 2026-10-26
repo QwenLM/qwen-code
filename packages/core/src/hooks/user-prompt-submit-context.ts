@@ -68,9 +68,9 @@ export function restoreUserPromptSubmitContextReceipt(
 
 /**
  * Drops a trailing part that is entirely a tagged UserPromptSubmit context
- * block. Injection always appends after the user's own part(s), so a sole
- * matching part is treated as user-authored and kept. Returns the same
- * array reference when nothing is stripped.
+ * block. Ordinary injection appends after the user's own part(s). Without
+ * provenance, a sole matching part is kept as user-authored text. Returns the
+ * same array reference when nothing is stripped.
  */
 export function stripTrailingUserPromptSubmitContextPart<T>(
   parts: readonly T[],
@@ -96,9 +96,10 @@ export function stripTrailingUserPromptSubmitContextPart<T>(
  * recognizes one exact payload and does not trim.
  *
  * A match requires injector-owned evidence, not shape: the trailing part must
- * carry the module-private receipt in a user entry with at least one part of
- * the user's own ahead of it. Tagged text that merely appears — authored by
- * the user or the model, in any entry shape — never carries the receipt, so it
+ * carry the module-private receipt in a user entry. Reactive compaction can
+ * rescue the block as the sole part, which carries the same receipt. Tagged
+ * text that merely appears — authored by the user or the model, in any entry
+ * shape — never carries the receipt, so it
  * does not suppress a fresh delivery; when provenance cannot be established,
  * injection proceeds as before.
  */
@@ -111,7 +112,7 @@ export function hasUserPromptSubmitContext(
     return false;
   }
   const parts = candidate.parts;
-  if (parts.length < 2) {
+  if (parts.length === 0) {
     return false;
   }
   const last = parts[parts.length - 1] as
