@@ -465,6 +465,7 @@ interface ChatEditorRenderProps
   atWorkspaceCwd?: string;
   composerScopeKey?: string;
   workspaceFeaturesEnabled?: boolean;
+  fileUploadTarget?: ComponentProps<typeof ChatEditor>['fileUploadTarget'];
   attachmentsEnabled?: boolean;
   sessionId?: string;
   customization?: WebShellCustomization;
@@ -5242,6 +5243,57 @@ describe('ChatEditor file upload gating', () => {
     expect(
       container.querySelector('[data-web-shell-upload-input]'),
     ).not.toBeNull();
+  });
+
+  it('uploads through an explicit Managed target without enabling daemon features', async () => {
+    const metadata = { managedUpload: { source: 'managed-workspace' } };
+    const client = {
+      uploadWorkspaceFile: vi.fn(async () => ({
+        kind: 'file_upload' as const,
+        path: 'a.pdf',
+        sizeBytes: 3,
+        hash: `sha256:${'a'.repeat(64)}` as const,
+      })),
+    };
+    const target = {
+      client,
+      targetKey: 'managed-workspace',
+      maxBytes: 8 * 1024 * 1024,
+      createReference: (path: string): WebShellComposerTag => ({
+        id: `file:${path}`,
+        kind: 'file',
+        value: path,
+        serialized: `@${path}`,
+        metadata,
+      }),
+    };
+    const container = renderChatEditor({
+      workspaceFeaturesEnabled: false,
+      attachmentsEnabled: false,
+      fileUploadTarget: target,
+    });
+    const input = container.querySelector<HTMLInputElement>(
+      '[data-web-shell-upload-input]',
+    )!;
+    expect(input).not.toBeNull();
+    act(() => composerCoreState.onFileUploadRequest?.('.'));
+    Object.defineProperty(input, 'files', {
+      value: [new File(['pdf'], 'a.pdf')],
+    });
+    await act(async () =>
+      input.dispatchEvent(new Event('change', { bubbles: true })),
+    );
+    expect(client.uploadWorkspaceFile).toHaveBeenCalledTimes(1);
+    expect(composerCoreState.addTags).toHaveBeenCalledWith(
+      [expect.objectContaining({ value: 'a.pdf', metadata })],
+      { placement: 'inline', position: 'end' },
+    );
+    rerenderChatEditor(container, {
+      workspaceFeaturesEnabled: false,
+      fileUploadTarget: target,
+      customization: { fileUploadEnabled: false },
+    });
+    expect(container.querySelector('[data-web-shell-upload-input]')).toBeNull();
   });
 
   it('fileUploadEnabled={false} force-disables even with the capability', () => {
