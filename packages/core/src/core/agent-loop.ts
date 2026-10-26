@@ -247,11 +247,17 @@ const STOP_EVENTS: Partial<Record<LlmEventType, AgentLoopStopReason>> = {
   [LlmEventType.UserPromptSubmitBlocked]: 'user_prompt_blocked',
 };
 
-async function runModelRound(
+/**
+ * One model round of the loop: the events go to `host.onModelEvent`, the
+ * calls of an attempt a retry or fallback replaced are dropped, and the
+ * client's terminal events become a stop reason. A surface that still runs
+ * its own tool step calls it directly.
+ */
+export async function runModelRound(
   client: LlmClient,
   round: AgentLoopRound,
   signal: AbortSignal,
-  host: AgentLoopHost,
+  host: Pick<AgentLoopHost, 'onModelEvent'>,
 ): Promise<{
   turn?: Turn;
   calls: ToolCallRequestInfo[];

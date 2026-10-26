@@ -91,6 +91,8 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_artifacts: { since: 'v1' },
   session_artifacts_persistence: { since: 'v1' },
   session_artifact_library: { since: 'v1' },
+  workspace_artifact_library: { since: 'v1' },
+  workspace_artifact_library_stream: { since: 'v1' },
   session_sources: { since: 'v1' },
   // Daemon emits `slow_client_warning` synthetic frames at 75% queue
   // fill and honors `?maxQueued=N` (range [16, 2048]) on
@@ -787,6 +789,14 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ],
   [
     'session_artifact_library',
+    (toggles) => toggles.sessionArtifactsPersistenceAvailable === true,
+  ],
+  [
+    'workspace_artifact_library',
+    (toggles) => toggles.sessionArtifactsPersistenceAvailable === true,
+  ],
+  [
+    'workspace_artifact_library_stream',
     (toggles) => toggles.sessionArtifactsPersistenceAvailable === true,
   ],
   [

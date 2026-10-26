@@ -1012,11 +1012,12 @@ const EN: Messages = {
   'approval.option.allowAlwaysUser': 'Always allow for this user',
   'approval.option.allowAlwaysServer': 'Always allow for this server',
   'approval.option.allowAlwaysTool': 'Always allow for this tool',
-  'assistant.branch': 'Branch',
-  'assistant.copy': 'Copy',
+  'assistant.branch': 'New chat from here',
+  'assistant.copyContent': 'Copy content',
   'assistant.selectionCopy': 'Copy selection',
   'assistant.copyPlainText': 'Copy plain text',
   'assistant.copyMarkdown': 'Copy Markdown',
+  'assistant.copyMarkdownSource': 'Copy Markdown source',
   'assistant.dissatisfied': 'Not satisfied',
   'assistant.satisfied': 'Satisfied',
   // A workspace agent's reply in a chat session. These render in exported
@@ -3914,10 +3915,8 @@ const EN: Messages = {
     return `${n} thought${n === 1 ? '' : 's'}`;
   },
   'turn.stopped': 'You cancelled this request',
-  'turn.stoppedAfter': (v) => {
-    const seconds = v?.seconds ?? 0;
-    return `You cancelled this request after ${seconds} second${seconds === 1 ? '' : 's'}`;
-  },
+  'turn.stoppedAfter': (v) =>
+    `You cancelled this request after ${v?.duration ?? '0s'}`,
   'message.renderError': 'This message could not be displayed.',
   'tasks.title': 'Background tasks',
   'tasks.empty': 'No tasks currently running',
@@ -5571,11 +5570,12 @@ const ZH: Messages = {
   'approval.option.allowAlwaysUser': '对此用户始终允许',
   'approval.option.allowAlwaysServer': '对此服务始终允许',
   'approval.option.allowAlwaysTool': '对此工具始终允许',
-  'assistant.branch': '分叉',
-  'assistant.copy': '复制',
+  'assistant.branch': '从此处新建对话',
+  'assistant.copyContent': '复制内容',
   'assistant.selectionCopy': '复制所选内容',
   'assistant.copyPlainText': '复制纯文本',
   'assistant.copyMarkdown': '复制 Markdown',
+  'assistant.copyMarkdownSource': '复制 Markdown 源文',
   'assistant.dissatisfied': '不满意',
   'assistant.satisfied': '满意',
   'agentMessage.status.failed': '失败',
@@ -8226,7 +8226,7 @@ const ZH: Messages = {
   'turn.toolCalls': (v) => `工具 ${v?.count ?? 0} 次`,
   'turn.thinkingCount': (v) => `思考 ${v?.count ?? 0} 次`,
   'turn.stopped': '你已取消请求',
-  'turn.stoppedAfter': (v) => `你在 ${v?.seconds ?? 0} 秒后取消了请求`,
+  'turn.stoppedAfter': (v) => `你在 ${v?.duration ?? '0s'} 后取消了请求`,
   'message.renderError': '此消息无法显示。',
   'tasks.title': '后台任务',
   'tasks.empty': '当前没有运行中的任务',
