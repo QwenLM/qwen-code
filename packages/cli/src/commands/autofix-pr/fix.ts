@@ -294,14 +294,19 @@ export interface FixEndArgs {
   abandon?: boolean;
 }
 
-export interface FixEndResult {
-  attempt: string;
-  head: string;
-  startedAt: string;
-  /** The snapshot of the round the attempt belongs to. */
-  snapshot: string;
-  brief: string;
-}
+export type FixEndResult =
+  | {
+      attempt: string;
+      head: string;
+      startedAt: string;
+      /** The snapshot of the round the attempt belongs to. */
+      snapshot: string;
+      brief: string;
+    }
+  /** Not claimed: the round's snapshot is gone, so no round goes on from
+   * the attempt. Its marker is left to go stale, and the round after it
+   * discards and redoes the fix. */
+  | { attempt: string; lostSnapshot: true };
 
 export function runFixEnd(args: FixEndArgs): FixEndResult {
   assertAttemptId(args.attempt);
@@ -325,9 +330,7 @@ export function runFixEnd(args: FixEndArgs): FixEndResult {
       // Gone, the attempt has no round to go on from: it is left to go
       // stale, and the round after it discards and redoes it.
       if (!isRegularFile(paths.snapshotPath)) {
-        throw new Error(
-          `attempt ${args.attempt} of PR #${args.pr}'s fix has lost its round's snapshot.`,
-        );
+        return { attempt: args.attempt, lostSnapshot: true };
       }
       rmSync(snapshot, { force: true, recursive: true });
       renameSync(paths.snapshotPath, snapshot);

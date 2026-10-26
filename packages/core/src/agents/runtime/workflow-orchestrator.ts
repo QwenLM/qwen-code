@@ -891,6 +891,9 @@ async function runSingleDispatch(
   // In the session's own directory, after a `/cd` into the worktree of a
   // background fix of /autofix-pr: beside it, on either path below.
   const ownDir = config.getTargetDir?.();
+  if (opts.workingDir === undefined && ownDir) {
+    await settleBackgroundFix({ within: ownDir });
+  }
   if (
     opts.workingDir === undefined &&
     ownDir &&

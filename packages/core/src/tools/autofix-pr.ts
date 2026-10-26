@@ -760,10 +760,12 @@ const FIX_STOP_WAIT_MS = 15_000;
  * not finish. */
 function helperRefusal(command: string, run: AutofixPrRun): string {
   // The CLI prints a helper's error with its stack: the reason is the line
-  // that names the error, not the last.
+  // that names the error — the last such, as what `gh` or git printed
+  // before the helper threw comes first.
   const lines = run.stderr.split('\n').map((line) => line.trim());
   const named = lines
-    .find((line) => /^(?:[A-Z]\w*)?Error: /.test(line))
+    .filter((line) => /^(?:[A-Z]\w*)?Error: /.test(line))
+    .pop()
     ?.replace(/^(?:[A-Z]\w*)?Error: /, '');
   const said = named ?? lines.filter(Boolean).pop();
   return `autofix-pr ${command} refused: ${said || run.failure || `exit ${run.exitCode}`}`;
@@ -1182,15 +1184,24 @@ class AutofixPrInvocation extends BaseToolInvocation<
       signal,
     );
     // A refusal leaves the attempt to claim again (a helper busy with the
-    // lock), until its deadline; one with its round's snapshot gone never
-    // will be, and goes stale now.
+    // lock), until its deadline.
     if (run.failure || run.exitCode !== 0) {
-      const refusal = helperRefusal('fix-end', run);
-      if (/has lost its round's snapshot/.test(refusal)) fix.drop();
-      return refuse(refusal);
+      return refuse(helperRefusal('fix-end', run));
+    }
+    const printed = lastJsonLine(run.stdout);
+    // Its round's snapshot is gone: no claim will ever take it, so it goes
+    // stale now, for the next round to discard and redo.
+    if (
+      printed !== null &&
+      typeof printed === 'object' &&
+      (printed as { lostSnapshot?: unknown }).lostSnapshot === true
+    ) {
+      fix.drop();
+      return refuse(
+        `Attempt ${fix.attempt} of PR #${pr} has lost its round's snapshot: a later round discards and redoes the fix.`,
+      );
     }
     fix.claim();
-    const printed = lastJsonLine(run.stdout);
     // The watch's options as this session's `schedule` printed them: the
     // turn goes on with these, whatever the follow-up it read said.
     const { task, reply, instructions } = fix.task;

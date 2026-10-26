@@ -27,6 +27,7 @@ import {
   backgroundFixHolding,
   backgroundFixOf,
   canonicalWorktreePath,
+  settleBackgroundFix,
   confirmedWatch,
   FIX_CLAIM_DEADLINE_MS,
   FIX_HEARTBEAT_MS,
@@ -52,8 +53,8 @@ if (process.env.FAKE_LOG) require('node:fs').appendFileSync(process.env.FAKE_LOG
 if (sub !== 'autofix-pr') { process.stderr.write('not autofix-pr'); process.exit(2); }
 if (mode === 'hang') setInterval(() => {}, 1000);
 else if (mode === 'refuse') { process.stderr.write('another session watches PR #12\\n'); process.exit(1); }
-else if (mode === 'lost') { process.stderr.write("An unexpected critical error occurred:\\nError: attempt x of PR #12's fix has lost its round's snapshot.\\n    at runFixEnd (fix.js:1:1)\\n"); process.exit(1); }
-else if (mode === 'refuse-stack') { process.stderr.write('An unexpected critical error occurred:\\nError: no round of PR #12 has a fix to start\\n    at runFixStart (fix.js:1:1)\\n    at handler (fix.js:2:2)\\n'); process.exit(1); }
+else if (mode === 'lost' && command === 'fix-end') { process.stdout.write(JSON.stringify({ attempt: 'x', lostSnapshot: true }) + '\\n'); }
+else if (mode === 'refuse-stack') { process.stderr.write('Error: gh said something first\\nAn unexpected critical error occurred:\\nError: no round of PR #12 has a fix to start\\n    at runFixStart (fix.js:1:1)\\n    at handler (fix.js:2:2)\\n'); process.exit(1); }
 else if (command === 'prepare') process.stdout.write(JSON.stringify({ worktreePath: process.env.FAKE_WORKTREE, preparedAt: process.env.FAKE_PREPARED_AT, host: process.env.FAKE_HOST || undefined, authorCanPush: process.env.FAKE_CAN_PUSH === '1', tookOver: process.env.FAKE_TOOK_OVER === '1' }) + '\\n');
 else if (command === 'status') process.stdout.write(process.env.FAKE_STATUS + '\\n');
 else if (command === 'fix-start') process.stdout.write(JSON.stringify({ attempt: (rest.find((a) => a.startsWith('--attempt=')) || '').slice(10), task: process.env.FAKE_TASK || 'feedc0ffee12' }) + '\\n');
@@ -1210,6 +1211,7 @@ describe('background fixes', () => {
     await expect(
       openBackgroundFix('session-a', worktree, signal()),
     ).rejects.toThrow(
+      // The last line naming an error: what `gh` printed first is not it.
       /^autofix-pr fix-start refused: no round of PR #12 has a fix to start$/,
     );
   });
@@ -1414,7 +1416,8 @@ describe('background fixes', () => {
     // The helper waits for the stopped agent to settle, at most 15 seconds:
     // given a real second to start, it has not.
     await vi.advanceTimersByTimeAsync(14_000);
-    execFileSync('sleep', ['1']);
+    // A real second, on every platform.
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
     expect(log().at(-1)).not.toMatch(/^sync/);
     await vi.advanceTimersByTimeAsync(1_000);
     expect((await syncing).error).toBeUndefined();
@@ -1429,7 +1432,8 @@ describe('background fixes', () => {
     expect(fix.done).toBe(true);
     const syncing = run({ command: 'sync', pr: 12 });
     await vi.advanceTimersByTimeAsync(14_000);
-    execFileSync('sleep', ['1']);
+    // A real second, on every platform.
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
     expect(log().at(-1)).not.toMatch(/^sync/);
     await vi.advanceTimersByTimeAsync(1_000);
     expect((await syncing).error).toBeUndefined();
@@ -1437,6 +1441,28 @@ describe('background fixes', () => {
     // Settled, or waited for once: the next helper goes on at once.
     fix.bodySettled();
     expect((await run({ command: 'push', pr: 12 })).error).toBeUndefined();
+  });
+
+  it("holds a dropped fix's worktree until its stopped agent settles, for writes and for launches in it", async () => {
+    await granted();
+    const fix = await launched();
+    // Its grant ends: dropped, its agent stopped but not settled yet.
+    await run({ command: 'attended', pr: 12 });
+    expect(fix.done).toBe(true);
+    const inside = path.join(worktree, 'src', 'a.ts');
+    expect(backgroundFixHolding(inside, null)).toBe(fix);
+    expect(backgroundFixHolding(inside, 'agent-1')).toBeUndefined();
+    // A launch in its directory waits for it, at most 15 seconds.
+    let waited = false;
+    const settling = settleBackgroundFix({
+      within: path.join(worktree, 'src'),
+    }).then(() => (waited = true));
+    await vi.advanceTimersByTimeAsync(14_000);
+    expect(waited).toBe(false);
+    fix.bodySettled();
+    await settling;
+    expect(waited).toBe(true);
+    expect(backgroundFixHolding(inside, null)).toBeUndefined();
   });
 
   it('is never late before its heartbeat starts: its helper may wait its turn', async () => {
@@ -1526,6 +1552,8 @@ describe('background fixes', () => {
       held(path.join(path.dirname(worktree), 'autofix-pr-12-plan.json')),
     ).toBe(false);
     expect(held(path.join(worktree, '..', 'autofix-pr-1'))).toBe(false);
+    // Links need privileges on Windows.
+    if (process.platform === 'win32') return;
     // Through a link, and a `..` after it, as the kernel goes.
     const out = fs.mkdtempSync(path.join(os.tmpdir(), 'autofix-out-'));
     try {
@@ -1552,9 +1580,7 @@ describe('background fixes', () => {
         held(`${path.join(worktree, 'escape')}${path.sep}..${path.sep}x.json`),
       ).toBe(true);
       // A backslash is a character of a name outside Windows.
-      if (process.platform !== 'win32') {
-        expect(held(`${worktree}/a\\..\\..\\..\\b/conftest.py`)).toBe(true);
-      }
+      expect(held(`${worktree}/a\\..\\..\\..\\b/conftest.py`)).toBe(true);
     } finally {
       fs.rmSync(out, { recursive: true, force: true });
     }
@@ -1604,12 +1630,17 @@ describe('background fixes', () => {
       for (const plant of [
         () => writeMarker('ba9876543210'),
         () => fs.rmSync(marker()),
-        () => {
-          const target = path.join(dir, 'target');
-          writeMarker(fix.attempt);
-          fs.renameSync(marker(), target);
-          fs.symlinkSync(target, marker());
-        },
+        // Links need privileges on Windows.
+        ...(process.platform === 'win32'
+          ? []
+          : [
+              () => {
+                const target = path.join(dir, 'target');
+                writeMarker(fix.attempt);
+                fs.renameSync(marker(), target);
+                fs.symlinkSync(target, marker());
+              },
+            ]),
       ]) {
         resetUnattendedFixGrantsForTests();
         cancel.mockReset();
@@ -1625,13 +1656,16 @@ describe('background fixes', () => {
       }
     });
 
-    it('never blocks on a FIFO planted at the marker', async () => {
-      fs.rmSync(marker());
-      execFileSync('mkfifo', [marker()]);
-      await vi.advanceTimersByTimeAsync(FIX_HEARTBEAT_MS);
-      expect(fix.done).toBe(true);
-      expect(cancel).toHaveBeenCalledWith('agent-1');
-    });
+    it.skipIf(process.platform === 'win32')(
+      'never blocks on a FIFO planted at the marker',
+      async () => {
+        fs.rmSync(marker());
+        execFileSync('mkfifo', [marker()]);
+        await vi.advanceTimersByTimeAsync(FIX_HEARTBEAT_MS);
+        expect(fix.done).toBe(true);
+        expect(cancel).toHaveBeenCalledWith('agent-1');
+      },
+    );
 
     it('counts the first refresh from when the attempt opened', async () => {
       const grant = {

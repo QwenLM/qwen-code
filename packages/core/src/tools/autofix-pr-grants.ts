@@ -502,18 +502,23 @@ function live(fix: BackgroundFix | undefined): BackgroundFix | undefined {
  * that agent was writing in.
  */
 export async function settleBackgroundFix(
-  where: { worktree: string } | { pr: number },
+  where: { worktree: string } | { pr: number } | { within: string },
 ): Promise<void> {
   // By the PR alone: another session of this process acting on it waits
   // too, and a PR of that number in another clone costs a wait at most.
   const at = (map: Map<string, BackgroundFix>) =>
     'worktree' in where
       ? map.get(canonicalWorktreePath(where.worktree))
-      : [...map.values()].find((f) => f.pr === where.pr);
+      : 'within' in where
+        ? containing(map, where.within)
+        : [...map.values()].find((f) => f.pr === where.pr);
   const fix = at(fixes);
   if (fix?.isLate()) fix.drop();
   const ended = at(settling);
-  if (ended) await ended.waitSettled(Math.max(0, ended.settleBy - Date.now()));
+  if (!ended) return;
+  await ended.waitSettled(Math.max(0, ended.settleBy - Date.now()));
+  // Waited for: what the caller does next is no longer held up by it.
+  if (settling.get(ended.worktree) === ended) settling.delete(ended.worktree);
 }
 
 /** The attempt whose agent works, or whose round has yet to claim it, at a
@@ -595,11 +600,27 @@ export function backgroundFixHolding(
   file: string,
   callerAgentId: string | null,
 ): BackgroundFix | undefined {
-  if (fixes.size === 0) return undefined;
+  if (fixes.size === 0 && settling.size === 0) return undefined;
+  // Before the agent attaches, it has no id: no caller is it.
+  const notItsAgent = (fix: BackgroundFix) =>
+    fix.agentId === null || fix.agentId !== callerAgentId;
+  const running = containing(fixes, file, notItsAgent);
+  if (running) return live(running);
+  // One whose stopped agent may still be writing there.
+  return containing(settling, file, notItsAgent);
+}
+
+/** The fix of `map` whose worktree holds `file` (and that `accept` takes). */
+function containing(
+  map: Map<string, BackgroundFix>,
+  file: string,
+  accept: (fix: BackgroundFix) => boolean = () => true,
+): BackgroundFix | undefined {
+  if (map.size === 0) return undefined;
   // As the kernel resolves it, and as Windows does, which drops `x\\..` as
   // text before it opens the file: inside either way is inside.
   const targets = [canonicalPathOf(file), canonicalPathOf(path.resolve(file))];
-  for (const fix of fixes.values()) {
+  for (const fix of map.values()) {
     const inside = targets.some((target) => {
       const rel = path.relative(fix.worktree, target);
       // `..foo` is a name inside it, not its parent.
@@ -610,9 +631,7 @@ export function backgroundFixHolding(
           !path.isAbsolute(rel))
       );
     });
-    // Before the agent attaches, it has no id: no caller is it.
-    const caller = fix.agentId === null || fix.agentId !== callerAgentId;
-    if (inside && caller) return live(fix);
+    if (inside && accept(fix)) return fix;
   }
   return undefined;
 }

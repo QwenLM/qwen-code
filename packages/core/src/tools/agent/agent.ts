@@ -3414,7 +3414,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       };
 
       // An agent in the session's own directory, after a `/cd` into the
-      // worktree of a background fix, would work beside it too.
+      // worktree of a background fix, would work beside it too — or beside
+      // a dropped one's stopped agent, which it waits for first.
+      if (this.params.working_dir === undefined) {
+        await settleBackgroundFix({ within: this.config.getTargetDir() });
+      }
       if (
         this.params.working_dir === undefined &&
         backgroundFixHolding(this.config.getTargetDir(), getCurrentAgentId())
@@ -5335,7 +5339,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     try {
       let cwd = this.config.getCwd();
       // In the session's own directory, after a `/cd` into the worktree of a
-      // background fix: beside it.
+      // background fix: beside it, or beside a dropped one's stopped agent.
+      if (!this.params.working_dir) await settleBackgroundFix({ within: cwd });
       if (
         !this.params.working_dir &&
         backgroundFixHolding(cwd, getCurrentAgentId())

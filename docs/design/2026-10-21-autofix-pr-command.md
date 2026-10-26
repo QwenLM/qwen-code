@@ -1280,10 +1280,12 @@ session may have taken the worktree meanwhile). A late refresh is also found as 
 agent tool looks the attempt up: after a laptop's sleep the gate can find the
 marker stale before the session's timer runs again, and the round it starts
 must not be refused for an attempt that is already over. Whoever acts on the
-worktree next — a helper through the tool, a launch of the agent tool —
-first waits, up to 15 seconds from when an attempt was dropped (by a late
+worktree next — a helper through the tool, a launch of the agent tool, of
+a teammate or of a workflow agent, whether pinned there or started in the
+session's own directory inside it — first waits, up to 15 seconds from when an attempt was dropped (by a late
 refresh, its deadline or a revoked grant), for its stopped agent to settle;
-a stop and a claim wait so themselves. The heartbeat counts no refresh as
+a stop and a claim wait so themselves, and the session's own writes into
+the worktree ask until then. The heartbeat counts no refresh as
 late before it starts. A helper takes the marker as
 fresh when it was refreshed within the last 90 seconds and its attempt
 started neither more than a minute ahead of the clock nor more than 45

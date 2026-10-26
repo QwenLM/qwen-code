@@ -205,13 +205,14 @@ describe('fix-start and fix-end', () => {
     expect(existsSync(fixSnapshotPath(paths, 7))).toBe(false);
   });
 
-  it("refuses a claim whose round's snapshot is gone, leaving the attempt to go stale", () => {
+  it("claims nothing whose round's snapshot is gone, saying so, the attempt left to go stale", () => {
     runFixStart({ pr: 7, attempt: ATTEMPT });
     rmSync(paths.snapshotPath);
     writeFileSync(fixSnapshotPath(paths, 7), '{"from":"an earlier round"}');
-    expect(() => runFixEnd({ pr: 7, attempt: ATTEMPT })).toThrow(
-      /has lost its round's snapshot/,
-    );
+    expect(runFixEnd({ pr: 7, attempt: ATTEMPT })).toEqual({
+      attempt: ATTEMPT,
+      lostSnapshot: true,
+    });
     expect(fixInFlight(paths)?.attempt).toBe(ATTEMPT);
     // Abandoned, it needs none.
     expect(runFixEnd({ pr: 7, attempt: ATTEMPT, abandon: true }).attempt).toBe(
