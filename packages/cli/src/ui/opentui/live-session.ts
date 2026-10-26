@@ -45,6 +45,7 @@ import { getInteractiveModSession } from '../../services/interactive-mod-session
 import type {
   AgentResultDisplay,
   Config,
+  ServerLlmStreamEvent,
   SteerInput,
   ToolCallConfirmationDetails,
   ToolCallRequestInfo,
@@ -175,6 +176,12 @@ export interface LivePromptOptions {
    * is minted here (first turn of a session, …).
    */
   promptId?: string;
+  /** Called once UserPromptSubmit admits the prompt, before its request. */
+  onPromptAdmitted?: () => void;
+  /** Sees every event of the turn's model streams, as the client sent it. */
+  onStreamEvent?: (event: ServerLlmStreamEvent) => void;
+  /** Called when every tool of a round was cancelled, which ends the turn. */
+  onToolsCancelled?: () => void;
 }
 
 /**
@@ -860,6 +867,9 @@ export async function* livePromptEvents(
           ...(!options?.retry && options?.workflowModeEligible === true
             ? { workflowModeEligible: true }
             : {}),
+          ...(options?.onPromptAdmitted
+            ? { onPromptAdmitted: options.onPromptAdmitted }
+            : {}),
           ...(!options?.retry && options?.humanInput
             ? { humanInput: options.humanInput }
             : {}),
@@ -915,6 +925,7 @@ export async function* livePromptEvents(
           sendOptions,
         );
         for await (const ev of stream) {
+          options?.onStreamEvent?.(ev);
           if (!current() || abort.aborted) return;
           dualOutput?.processEvent(ev);
           for (const event of acceptedSteerEvents.splice(0)) yield event;
@@ -1388,6 +1399,7 @@ export async function* livePromptEvents(
       if (responseParts.length > 0) {
         await client.addHistory({ role: 'user', parts: responseParts });
       }
+      options?.onToolsCancelled?.();
       return;
     }
     if (!turnModel.inline && !turnModel.current?.endsWith('\0')) {

@@ -391,6 +391,7 @@ export interface ChatRecord {
   /** Optional subtype for distinguishing non-standard records */
   subtype?:
     | 'chat_compression'
+    | 'memory_catalog_snapshot'
     | 'slash_command'
     | 'ui_telemetry'
     | 'at_command'
@@ -3529,6 +3530,19 @@ export class ChatRecordingService {
     }
   }
 
+  recordMemoryCatalogSnapshot(snapshot: Part): void {
+    try {
+      this.appendRecord({
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'memory_catalog_snapshot',
+        message: { role: 'user', parts: [snapshot] },
+      });
+    } catch (error) {
+      debugLogger.error('Error saving memory catalog snapshot:', error);
+    }
+  }
+
   /**
    * Records a chat compression checkpoint as a system record. This keeps the UI
    * history immutable while allowing resume/continue flows to reconstruct the
@@ -3536,9 +3550,12 @@ export class ChatRecordingService {
    */
   recordChatCompression(payload: ChatCompressionRecordPayload): void {
     try {
-      // Freeze the array so later live-history mutations cannot desynchronize
-      // entries from the parallel promptIds array.
-      const compressedHistory = [...payload.compressedHistory];
+      // Own the containers before hook rescue replaces parts on live entries;
+      // spread preserves the symbol metadata used to derive prompt identities.
+      const compressedHistory = payload.compressedHistory.map((content) => ({
+        ...content,
+        ...(content.parts ? { parts: [...content.parts] } : {}),
+      }));
       const previous = this.activeBranchRecords.findLast(
         (record) => record.subtype === 'chat_compression',
       )?.systemPayload as ChatCompressionRecordPayload | undefined;

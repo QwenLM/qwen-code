@@ -56,6 +56,9 @@ import {
   allocateCanonicalHistoryId,
   type LiveHistoryItem,
 } from './live-session-model.js';
+import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
+import type { ModTurn } from '../../services/mod-session.js';
+import type { ServerLlmStreamEvent } from '@qwen-code/qwen-code-core';
 import {
   livePromptEvents,
   nextLivePromptId,
@@ -250,6 +253,8 @@ export function useOpenTuiLiveTurn(
     toolStarted: boolean;
     meaningfulContent: boolean;
     canUndoLog: boolean;
+    // Set by Esc or another interrupt, even after a Mod ended the turn.
+    interrupted?: boolean;
     onCancelSettled?: OpenTuiCancelSettled;
   } | null>(null);
   const mountedRef = useRef(true);
@@ -342,6 +347,12 @@ export function useOpenTuiLiveTurn(
       activeTurnRef.current = active;
       const abort = new AbortController();
       abortRef.current = abort;
+      // The Mods hear the turn from its admission to its end below.
+      const mods = getInteractiveModSession(config);
+      let modTurn: ModTurn | undefined;
+      let modEnded = false;
+      // Declining every tool ends the turn as a cancel, as it does in ink.
+      let toolsCancelled = false;
       // A runTurn is a new user query, so the counter restarts; tool-result
       // continuations happen inside this same loop and keep accumulating.
       streamingCharsRef.current = 0;
@@ -399,6 +410,31 @@ export function useOpenTuiLiveTurn(
           workflowModeEligible: editablePrompt !== undefined,
           refreshContextFilesOnWrite: turnOptions?.refreshContextFilesOnWrite,
           isCurrentTurn: () => seq === turnSeqRef.current,
+          ...(mods && {
+            onPromptAdmitted: () => {
+              // A retry, like ink's, has no typed prompt.
+              modTurn = mods.startTurn(
+                retry
+                  ? ''
+                  : (turnOptions?.humanInput?.text ??
+                      turnOptions?.submittedPrompt ??
+                      ''),
+                abort.signal,
+                () => {
+                  if (abort.signal.aborted) return false;
+                  // Ends the turn as Esc does; nothing returns to the composer.
+                  modEnded = true;
+                  abort.abort();
+                  return true;
+                },
+                promptId,
+              );
+            },
+            onStreamEvent: (event: ServerLlmStreamEvent) => modTurn?.saw(event),
+            onToolsCancelled: () => {
+              toolsCancelled = true;
+            },
+          }),
           drainSteering: () => (seq === turnSeqRef.current ? drainQueue() : []),
           restoreSteering: (submissions) => {
             if (seq === turnSeqRef.current) restoreQueue(submissions);
@@ -463,6 +499,7 @@ export function useOpenTuiLiveTurn(
           void turnOptions?.onComplete?.().catch(() => {});
         }
       } catch (error) {
+        failed = true;
         if (seq !== turnSeqRef.current) return;
         if (abort.signal.aborted) {
           // Esc: ink settles every open tool as interrupted.
@@ -472,7 +509,6 @@ export function useOpenTuiLiveTurn(
           );
           setItems(itemsRef.current);
         } else {
-          failed = true;
           apply({ type: 'thinking-end' });
           apply({ type: 'segment-end' });
           apply({
@@ -481,6 +517,13 @@ export function useOpenTuiLiveTurn(
           });
         }
       } finally {
+        void modTurn?.complete(
+          abort.signal.aborted || toolsCancelled
+            ? 'aborted'
+            : failed
+              ? 'error'
+              : undefined,
+        );
         // A stale turn must not clear a successor's controller.
         if (abortRef.current === abort) abortRef.current = null;
         if (seq === turnSeqRef.current) {
@@ -500,7 +543,9 @@ export function useOpenTuiLiveTurn(
           setWaitingCalls([]);
           setBusy(false);
           if (activeTurnRef.current === active) activeTurnRef.current = null;
-          if (abort.signal.aborted) {
+          // An interrupt settles as a cancel whether or not a Mod ended the
+          // turn first; only a Mod's end alone lets the queue go on.
+          if (abort.signal.aborted && (!modEnded || active.interrupted)) {
             const settled = active.onCancelSettled;
             const queued = settled ? popQueue() : null;
             queueRef.current = queueRef.current.filter(
@@ -742,6 +787,7 @@ export function useOpenTuiLiveTurn(
     failedRequestRef.current = null;
     const active = activeTurnRef.current;
     if (active && active.seq === turnSeqRef.current) {
+      active.interrupted = true;
       active.onCancelSettled ??= onSettled;
       abortRef.current?.abort();
     } else {

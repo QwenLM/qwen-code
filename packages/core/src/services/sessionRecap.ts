@@ -6,6 +6,7 @@
 
 import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
+import { withoutAutoMemorySnapshots } from '../memory/request-context.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   getStartupContextLength,
@@ -54,7 +55,9 @@ export async function generateSessionRecap(
       return null;
     }
 
-    const fullHistory = llmClient.getHistoryShallow();
+    const fullHistory = withoutAutoMemorySnapshots(
+      llmClient.getHistoryShallow(),
+    );
     if (fullHistory.length < 2) {
       debugLogger.debug(
         `recap skipped: history too short (${fullHistory.length} messages)`,

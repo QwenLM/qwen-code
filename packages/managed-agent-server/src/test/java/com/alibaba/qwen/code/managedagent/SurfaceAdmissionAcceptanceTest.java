@@ -61,6 +61,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -370,6 +371,29 @@ class SurfaceAdmissionAcceptanceTest {
     void belowReadAndBelowFamilyProbesFollowTheRuleClass(SurfaceRegistry entry)
             throws Exception {
         switch (entry.ruleClass()) {
+            case SESSION_EXTENSION_READER -> {
+                expect(entry, null, 401, "actor_required");
+                expect(entry, STRANGER, 404, "session_not_found");
+                expectAdmitted(entry, READER);
+            }
+            case SESSION_EXTENSION_OPERATOR -> {
+                expect(entry, null, 401, "actor_required");
+                expect(entry, STRANGER, 404, "session_not_found");
+                expect(entry, READER, 403, "session_operation_forbidden");
+                expect(entry, OPERATOR, 409, "unsupported_feature");
+                expect(entry, OWNER_RANK, 409, "unsupported_feature");
+            }
+            case WORKSPACE_EXTENSION_READER -> {
+                expect(entry, null, 401, "actor_required");
+                expect(entry, STRANGER, 404, "extension_package_not_found");
+                expectAdmitted(entry, READER);
+            }
+            case WORKSPACE_EXTENSION_OPERATOR -> {
+                expect(entry, null, 401, "actor_required");
+                expect(entry, STRANGER, 404, "extension_package_not_found");
+                expect(entry, READER, 403, "extension_management_forbidden");
+                expect(entry, OPERATOR, 403, "extension_management_forbidden");
+            }
             case WORKSPACE_CREATE -> {
                 expect(entry, null, 401, "actor_required");
                 expect(entry, STRANGER, 404, "workspace_not_found");
@@ -470,7 +494,9 @@ class SurfaceAdmissionAcceptanceTest {
                 boolean actorRequired = entry.capabilities().contains(Capability.SESSION_CWD_CHANGE)
                         || entry.capabilities().contains(Capability.MCP_MANAGEMENT)
                         || entry.capabilities().contains(Capability.SESSION_MODEL_CHANGE)
-                        || entry.capabilities().contains(Capability.SESSION_CONTEXT_COMPRESSION);
+                        || entry.capabilities().contains(Capability.SESSION_CONTEXT_COMPRESSION)
+                        || entry.capabilities().contains(Capability.USER_MESSAGE_QUERY)
+                        || entry.capabilities().contains(Capability.USER_MESSAGE_COMMAND);
                 expect(entry, null, actorRequired ? 401 : 404,
                         actorRequired
                                 ? "actor_required" : "session_not_found");
@@ -502,7 +528,9 @@ class SurfaceAdmissionAcceptanceTest {
             }
             case WORKSPACE_FILES -> {
                 expect(entry, null, 401, "actor_required");
-                expect(entry, STRANGER, 404, "workspace_not_found");
+                expect(entry, STRANGER, 404, entry.capabilities().contains(
+                        Capability.WORKSPACE_FILES_UPLOAD_QUERY)
+                        ? "workspace_upload_not_found" : "workspace_not_found");
             }
             case WORKSPACE_ALLOCATION -> {
                 expect(entry, null, 401, "actor_required");
@@ -540,6 +568,7 @@ class SurfaceAdmissionAcceptanceTest {
             }
             case SESSION_OPTIONS ->
                 expect(entry, null, 401, "actor_required");
+            case INTERNAL_OPERATOR -> expect(entry, null, 403, "external_storage_registration_denied");
             case INTERNAL_WRITER ->
                 expectInternal(entry);
             default -> throw new AssertionError(
@@ -1345,7 +1374,7 @@ class SurfaceAdmissionAcceptanceTest {
      */
     private void expectInternal(SurfaceRegistry entry) throws Exception {
         int status = switch (entry.capabilities().iterator().next()) {
-            case STORE_WRITER_ACQUIRE, STORE_WRITER_RENEW, STORE_WRITER_SEAL,
+            case STORE_USER_MESSAGE_CLAIM, STORE_WRITER_ACQUIRE, STORE_WRITER_RENEW, STORE_WRITER_SEAL,
                     STORE_RECOVERY_BLOCK, STORE_TRANSACTION_COMMIT,
                     STORE_RESTORE, STORE_TOOL_RESULT_PUBLISH,
                     STORE_TRANSACTION_LIST, STORE_RESOURCE_GET, PUB_FINISHED,
@@ -1465,7 +1494,8 @@ class SurfaceAdmissionAcceptanceTest {
         String session = artifactArm ? ARTIFACT_SESSION : bound;
         Map<String, String> variables = new LinkedHashMap<>();
         variables.put("sessionId", session);
-        variables.put("operationId", entry.capabilities().contains(Capability.MCP_MANAGEMENT)
+        variables.put("operationId", (entry.capabilities().contains(Capability.MCP_MANAGEMENT) || entry.capabilities().contains(Capability.EXTENSION_CONFIG_GET)
+                || entry.capabilities().contains(Capability.EXTENSION_CONFIG_APPLY))
                 ? "11111111-1111-4111-8111-111111111111" : "op_0000000000000000");
         variables.put("taskId", entry.capabilities().contains(
                 Capability.TASK_CANCEL) ? settledTask
@@ -1484,6 +1514,9 @@ class SurfaceAdmissionAcceptanceTest {
                                 ? pendingActionPublic : pendingActionWeb
                 : pendingAction);
         variables.put("workspaceId", "ws");
+        variables.put("extensionId", "ext_11111111-1111-4111-8111-111111111111");
+        variables.put("packageRevision", "1");
+        variables.put("packageDigest", digest());
         variables.put("agentId", "agent-missing");
         variables.put("automationId", automation);
         variables.put("channelId", "channel-missing");
@@ -1504,6 +1537,30 @@ class SurfaceAdmissionAcceptanceTest {
             }
         }
         List<String> query = new ArrayList<>();
+        if (entry.capabilities().contains(Capability.WORKSPACE_FILES_UPLOAD)) {
+            query.add("workspaceId=workspace");
+            query.add("cwdRelative=.");
+            query.add("path=file.txt");
+            query.add("expectedScopeRevision=" + digest());
+            query.add("uploadId=11111111-1111-4111-8111-111111111111");
+        }
+        if (entry.capabilities().contains(Capability.EXTENSION_PUBLISH)) {
+            String manifest = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
+                    ("{\"schemaVersion\":1,\"compilerVersion\":1,\"name\":\"example\",\"version\":\"1\","
+                    + "\"target\":{\"platform\":\"linux\",\"arch\":\"any\"},\"components\":[]}")
+                            .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            query.add("manifest=" + manifest);
+            if ("POST".equals(entry.method())) {
+                query.add("packageDigest=" + digest());
+            }
+            if (entry.surface() == Surface.WEBSHELL) {
+                query.add("workspaceId=ws");
+            }
+        } else if (entry.surface() == Surface.PUBLIC
+                && (entry.capabilities().contains(Capability.EXTENSION_GET)
+                || entry.capabilities().contains(Capability.EXTENSION_ARCHIVE))) {
+            query.add("packageDigest=" + digest());
+        }
         if (path.startsWith("/internal/managed-tool-publications/")
                 && !path.endsWith("/grants")) {
             query.add("workspaceId=ws");
@@ -1518,14 +1575,16 @@ class SurfaceAdmissionAcceptanceTest {
         MockHttpServletRequestBuilder request = switch (entry.method()) {
             case "GET" -> get(path);
             case "PATCH" -> patch(path);
+            case "PUT" -> put(path);
             case "DELETE" -> delete(path);
             default -> post(path);
         };
         request.header(TenantContextFilter.HEADER, headerTenant);
-        if ("POST".equals(entry.method()) || "PATCH".equals(entry.method())) {
+        if ("POST".equals(entry.method()) || "PATCH".equals(entry.method()) || "PUT".equals(entry.method())) {
             boolean octets = entry.capabilities().contains(
                     Capability.PUB_SEGMENT) || entry.capabilities().contains(
-                    Capability.PUB_RESOURCE);
+                    Capability.PUB_RESOURCE) || entry.capabilities().contains(Capability.EXTENSION_PUBLISH)
+                    || entry.capabilities().contains(Capability.WORKSPACE_FILES_UPLOAD);
             request.contentType(octets ? MediaType.APPLICATION_OCTET_STREAM
                     : MediaType.APPLICATION_JSON);
             request.content(bodyFor(entry, headerTenant, session));
@@ -1550,7 +1609,7 @@ class SurfaceAdmissionAcceptanceTest {
             request.principal(actor(headerTenant, actor));
         }
         if (!"GET".equals(entry.method())
-                && entry.surface() == Surface.PUBLIC) {
+                && (entry.surface() == Surface.PUBLIC || entry.capabilities().contains(Capability.EXTENSION_PUBLISH))) {
             request.header("Idempotency-Key", nextKey());
         }
         return request;
@@ -1569,6 +1628,23 @@ class SurfaceAdmissionAcceptanceTest {
         Capability capability = entry.capabilities().iterator().next();
         boolean publicSurface = entry.surface() == Surface.PUBLIC;
         return switch (capability) {
+            case STORE_USER_MESSAGE_CLAIM -> "{\"workspaceId\":\"ws\",\"writerId\":\"writer-probe\",\"writerGeneration\":1,\"promptId\":\"prompt-probe\",\"initialOnly\":false}";
+            case EXTENSION_CONFIG_GET -> "{\"sessionId\":\"" + session + "\"}";
+            case EXTENSION_CONFIG_APPLY -> {
+                if (entry == SurfaceRegistry.PUBLIC_SESSION_EXTENSIONS_APPLY) {
+                    yield "{\"expectedConfigRevision\":0,\"extensions\":[]}";
+                }
+                if (entry == SurfaceRegistry.WEBSHELL_SESSION_EXTENSIONS_APPLY) {
+                    yield "{\"sessionId\":\"" + session + "\",\"idempotencyKey\":\"extensions-probe\",\"command\":{\"expectedConfigRevision\":0,\"extensions\":[]}}";
+                }
+                yield "{\"sessionId\":\"" + session + "\",\"operationId\":\"11111111-1111-4111-8111-111111111111\"}";
+            }
+            case EXTENSION_LIST -> "{\"workspaceId\":\"ws\"}";
+            case EXTENSION_GET -> "{\"workspaceId\":\"ws\",\"pin\":{\"extensionId\":\"ext_11111111-1111-4111-8111-111111111111\",\"packageRevision\":1,\"packageDigest\":\"" + digest() + "\"}}";
+            case EXTENSION_SETTINGS_GET -> "{\"workspaceId\":\"ws\",\"extensionId\":\"ext_11111111-1111-4111-8111-111111111111\"}";
+            case EXTENSION_SETTINGS_SET -> publicSurface ? "{\"expectedRevision\":0,\"values\":{}}"
+                    : "{\"workspaceId\":\"ws\",\"extensionId\":\"ext_11111111-1111-4111-8111-111111111111\",\"idempotencyKey\":\"settings-probe\",\"expectedRevision\":0,\"values\":{}}";
+            case EXTENSION_OPERATION -> "{\"workspaceId\":\"ws\",\"operationId\":\"operation-probe\"}";
             case SESSION_CREATE -> publicSurface
                     ? "{\"agent_id\":\"qwen-code\",\"input\":[],"
                             + "\"workspace\":{\"workspace_id\":\"ws\"}}"
@@ -1597,6 +1673,11 @@ class SurfaceAdmissionAcceptanceTest {
                             + nextKey() + "\",\"expectedCompactionRevision\":0}";
             case SESSION_LIST -> "{}";
             case SESSION_GET -> "{\"sessionId\":\"" + session + "\"}";
+            case USER_MESSAGE_QUERY -> "{\"sessionId\":\"" + session + "\"}";
+            case USER_MESSAGE_COMMAND -> publicSurface
+                    ? "{\"action\":\"resume\"}"
+                    : "{\"sessionId\":\"" + session + "\",\"idempotencyKey\":\"" + nextKey()
+                            + "\",\"command\":{\"action\":\"resume\"}}";
             case SESSION_RECOVERY_QUERY -> "{\"sessionId\":\"" + session + "\"}";
             case SESSION_RECOVERY_RECHECK -> publicSurface
                     ? "{\"turnId\":\"turn_0000000000000000\"}"
@@ -1646,6 +1727,7 @@ class SurfaceAdmissionAcceptanceTest {
             case WORKSPACE_CREATE -> "{\"displayName\":\"New workspace\",\"idempotencyKey\":\"create-key\"}";
             case WORKSPACE_FILES_QUERY -> "{\"workspaceId\":\"workspace\",\"cwdRelative\":\".\",\"directory\":\".\"}";
             case WORKSPACE_FILES_READ -> "{\"workspaceId\":\"workspace\",\"cwdRelative\":\".\",\"path\":\"file.txt\",\"expectedScopeRevision\":\"revision\"}";
+            case WORKSPACE_FILES_UPLOAD_QUERY -> "{\"uploadId\":\"11111111-1111-4111-8111-111111111111\"}";
             case WORKSPACE_DIRECTORIES -> "{\"workspaceId\":\"workspace\",\"cwdRelative\":\".\"}";
             case SESSION_OPTIONS -> "{\"agentId\":\"qwen-code\"}";
             case SESSION_APPROVAL, SESSION_MODELS, SESSION_SKILLS, SESSION_MCP -> "{\"sessionId\":\"" + session + "\"}";

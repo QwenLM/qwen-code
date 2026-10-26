@@ -124,6 +124,10 @@ Rename 前崩溃保留旧 journal，之后崩溃保留新快照；两者描述�
    Approval/model/Plan 选择、wake/cancel 恢复、工具结果、task、hook、automation、
    channel、transcript 投影和 SSE 都必须保持历史查询语义。
 
+[本地终态身份查询切片](2026-10-26-managed-terminal-identity-lookup.zh-CN.md)
+增加派生的按 key 查询，并用于终态重复准入。它保留 journal 权威与驻留 Map；
+独立权威的归档及完整性边界仍是淘汰前置条件。
+
 ## 验证计划
 
 - 在全局 CLI 支持的范围内复现基线；CLI 不暴露这些适配器方法时使用直接存储脚本。

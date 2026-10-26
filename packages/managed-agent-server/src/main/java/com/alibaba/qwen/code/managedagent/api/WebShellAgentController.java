@@ -228,6 +228,9 @@ public class WebShellAgentController {
             throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "unsupported_feature",
                     "Session Skills require a bound Workspace.");
         }
+        if (selection == null && request.extensionPins() != null) {
+            throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "unsupported_feature", "Extension packages require a bound Workspace.");
+        }
         // The WebShell handlers forward no metadata at all (null in its
         // slot): whatever the client sends is accepted and ignored, so no
         // clientId-only contract is asserted here and immediately
@@ -239,7 +242,7 @@ public class WebShellAgentController {
                 : service.createWorkspaceSession(tenant.tenantId(),
                         tenant.requireActorId(), request.idempotencyKey(),
                         request.agentId(), null, request.title(), null,
-                        request.input(), selection, request.approvalMode(), request.planMode(), request.skills(), request.modelId()));
+                        request.input(), selection, request.approvalMode(), request.planMode(), request.skills(), request.modelId(), request.extensionPins()));
         return ResponseEntity.accepted().body(admission);
     }
 

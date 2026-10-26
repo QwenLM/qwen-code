@@ -154,6 +154,11 @@ These are required serial follow-ups, not implemented by slice 1:
    wake/cancel recovery, tool results, tasks, hooks, automations, channels,
    transcript projection, and SSE must preserve their historical answers.
 
+The [local terminal-identity lookup slice](2026-10-26-managed-terminal-identity-lookup.md)
+adds a derived per-key query used by terminal duplicate admission. It keeps the
+journal authoritative and retains resident maps; an independently authoritative
+archive and its completeness boundary remain prerequisites for eviction.
+
 ## Validation plan
 
 - Reproduce the baseline using the globally installed CLI where supported and

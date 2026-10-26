@@ -384,6 +384,16 @@ public class ManagedSessionStore {
         if (!"legacy-close".equals(request.kind()) || !WorkspaceLifecycleStore.legacyClose(jdbc, tenantId, sessionId)) {
             requireOrdinaryAdmission(tenantId, sessionId);
         }
+        if (request.kind() != null && request.kind().startsWith("configuration:")) {
+            String operation = request.kind().substring("configuration:".length());
+            JsonNode current = ManagedMcpSettings.find(jdbc, tenantId, sessionId);
+            if (!ManagedConfigInstall.uuid(operation) || ManagedConfigInstall.blocked(jdbc, tenantId, sessionId)
+                    && (!ManagedConfigInstall.isPackageConfig(current) || !operation.equals(current.path("operationId").asText()))) {
+                throw conflict("session_config_recovery_required", "Only the original configuration operation may continue.");
+            }
+        } else {
+            ManagedConfigInstall.requireOpen(jdbc, tenantId, sessionId);
+        }
         HeadRow head = requireHeadForUpdate(tenantId, sessionId);
         requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
         requireWriter(head, request.writerId(), request.writerGeneration(), writerToken, databaseNow(), true);
@@ -1362,6 +1372,7 @@ public class ManagedSessionStore {
         if (toolResults != null && csiOriginal == null) {
             toolResults.captureEvents(tenantId, request.workspaceId(), sessionId, revision, receiptEvents);
         }
+        ManagedUserMessageStore.capture(jdbc, tenantId, sessionId, applied.records());
         publishJournalAfterCommit(validated.recordBytes());
         return new CommitReceipt(revision, request.transactionId(),
                 request.commandId(), request.operation(),
@@ -2068,10 +2079,26 @@ public class ManagedSessionStore {
                 "managed-agent-skills", "agent-skills-", AgentDefinitionExtensions.skillsBytes(skills));
     }
 
+    @Transactional
+    public ToolResultResourceRef publishInheritedExtensionResource(String tenantId, String workspaceId, String sessionId, StoredResource source) {
+        validateScope(tenantId, workspaceId, sessionId);
+        ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenantId, sessionId);
+        if (!Set.of("managed-extension-config-bundle", "managed-extension-contributions", "managed-extension-contributions-part").contains(source.kind())
+                || source.schemaVersion() != 1 || source.byteLength() > ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES
+                || source.bytes().length != source.byteLength() || !sha256(source.bytes()).equals(source.digest())) {
+            throw invalid("Invalid inherited extension resource");
+        }
+        return publishAgentResource(tenantId, workspaceId, sessionId, source.kind(), source.bytes(), source.resourceId());
+    }
+
     private ToolResultResourceRef publishAgentResource(String tenantId,
             String workspaceId, String sessionId, String kind, String prefix, byte[] bytes) {
+        return publishAgentResource(tenantId, workspaceId, sessionId, kind, bytes, prefix + sha256(bytes));
+    }
+
+    private ToolResultResourceRef publishAgentResource(String tenantId, String workspaceId, String sessionId,
+            String kind, byte[] bytes, String resourceId) {
         String digest = sha256(bytes);
-        String resourceId = prefix + digest;
         String scopeKey = sessionScopeKey(tenantId, sessionId);
         Timestamp now = databaseNow();
         ResourceRow existing = findResource(scopeKey, resourceId);
