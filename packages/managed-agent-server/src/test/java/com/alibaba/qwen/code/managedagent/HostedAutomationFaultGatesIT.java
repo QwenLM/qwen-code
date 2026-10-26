@@ -623,9 +623,13 @@ class HostedAutomationFaultGatesIT {
                 + "' AND NEW.definition_revision <> OLD.definition_revision", "NEW.definition_revision");
         Map<String, Object> update = Map.of("prompt", "FG11B_PROJECTION_TWO reply with FG11_DONE.");
         String path = "/v1/agent-automations/" + id;
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
         assertUnknown(send("POST", path, update, "projection-update"));
-        assertThat(refusedDetails("projection")).as("the store client's bounded retry")
-                .hasSizeGreaterThanOrEqualTo(STORE_ATTEMPTS).containsOnly("2");
+        long remaining = deadline - System.nanoTime();
+        assertThat(remaining).as("the original request window remains").isPositive();
+        waiting().pollDelay(Duration.ZERO).atMost(Duration.ofNanos(remaining)).untilAsserted(() ->
+                assertThat(refusedDetails("projection")).as("the store client's bounded retry")
+                        .hasSizeGreaterThanOrEqualTo(STORE_ATTEMPTS).containsOnly("2"));
         assertThat(commands(session, "defineSchedule")).as("the rolled-back revision").hasSize(1);
         assertThat(recordRevision(session, "schedule", id)).isEqualTo(1);
         assertThat(mirrorRevision(id)).isEqualTo(1);
