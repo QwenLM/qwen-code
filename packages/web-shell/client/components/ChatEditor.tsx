@@ -2649,10 +2649,9 @@ export const ChatEditor = memo(
     // Both chips say where the prompt goes rather than how it runs, so a caller
     // can move them out of the toolbar without touching their availability.
     const workspaceChipInToolbar =
-      workspaceSelectVisible &&
-      (isSimple || contextChipPlacement === 'toolbar');
+      workspaceSelectVisible && contextChipPlacement === 'toolbar';
     const gitChipInToolbar =
-      gitBranchVisible && (isSimple || contextChipPlacement !== 'below');
+      gitBranchVisible && contextChipPlacement !== 'below';
     const contextRowVisible =
       contextChipPlacement === 'below' &&
       (workspaceSelectVisible || gitBranchVisible);
@@ -2664,14 +2663,12 @@ export const ChatEditor = memo(
     }, [currentModelLabel, lastConfirmedModelLabel]);
 
     const showWorkspaceSelectLabel =
-      isSimple || isMobile || toolbarLabelVisibility.workspaceSelect;
-    const showWorkspaceLabel =
-      isSimple || isMobile || toolbarLabelVisibility.workspace;
-    const showGitBranchLabel =
-      isSimple || isMobile || toolbarLabelVisibility.gitBranch;
-    const showModeLabel = isSimple || toolbarLabelVisibility.mode;
-    const showPlanLabel = isSimple || toolbarLabelVisibility.plan;
-    const showModelLabel = isSimple || toolbarLabelVisibility.model;
+      isMobile || toolbarLabelVisibility.workspaceSelect;
+    const showWorkspaceLabel = isMobile || toolbarLabelVisibility.workspace;
+    const showGitBranchLabel = isMobile || toolbarLabelVisibility.gitBranch;
+    const showModeLabel = toolbarLabelVisibility.mode;
+    const showPlanLabel = toolbarLabelVisibility.plan;
+    const showModelLabel = toolbarLabelVisibility.model;
     // One renderer per chip so the toolbar, the row under the composer, and the
     // mobile row share them: the toolbar drops a label when its width budget is
     // tight, while the rows have a budget of their own and always keep it.
@@ -3548,6 +3545,7 @@ export const ChatEditor = memo(
                     isSimple && (core.hasContent || isRunning) && !voiceActive
                   }
                   style={{
+                    // Inline display must not override [hidden] in simple mode.
                     display: !isSimple ? 'contents' : undefined,
                   }}
                 >
