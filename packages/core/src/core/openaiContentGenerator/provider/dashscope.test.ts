@@ -31,6 +31,10 @@ import { trailingReattachPartCount } from '../../../services/image-payload-refer
 import { appendAutoMemoryContext } from '../../../memory/request-context.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 import type { OpenAIRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
+import {
+  buildDashScopeSourceConfig,
+  QWENCLOUD_MAAS_HOSTS,
+} from '../../dashscope-source-config.js';
 
 const mockDebugLogger = vi.hoisted(() => ({
   debug: vi.fn(),
@@ -394,6 +398,31 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       ].forEach((baseUrl) => {
         expect(isDashScope(baseUrl)).toBe(false);
       });
+    });
+
+    // Admission and attribution read the same host list but apply different
+    // rules: admission suffix-matches (any MaaS subdomain is served as
+    // DashScope), attribution exact-matches only the bare and `token-plan.`
+    // forms. That split is deliberate — see the "Exact host match" bullet in
+    // docs/design/qwencloud-source-attribution.md — and its cost is that a new
+    // MaaS subdomain is routed as QwenCloud while going unattributed. Pinned on
+    // both sides so widening either one has to be a conscious edit.
+    it('admits every known QwenCloud host and its Token Plan form, and attributes both', () => {
+      for (const host of QWENCLOUD_MAAS_HOSTS) {
+        for (const baseUrl of [
+          `https://${host}/compatible-mode/v1`,
+          `https://token-plan.${host}/compatible-mode/v1`,
+        ]) {
+          expect(isDashScope(baseUrl)).toBe(true);
+          expect(buildDashScopeSourceConfig(baseUrl)).toBeDefined();
+        }
+      }
+    });
+
+    it('admits a MaaS subdomain that attribution deliberately leaves unattributed', () => {
+      const unattributed = 'https://other.maas.qwencloudapi.com/v1';
+      expect(isDashScope(unattributed)).toBe(true);
+      expect(buildDashScopeSourceConfig(unattributed)).toBeUndefined();
     });
 
     it('should return false for non-DashScope configurations', () => {
