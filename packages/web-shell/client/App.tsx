@@ -5188,7 +5188,11 @@ export function App({
     ) === true;
   useEffect(() => {
     if (!daemonAvailable) {
+      if (logicalSessionKey) {
+        attachmentRetryCountRef.current.delete(logicalSessionKey);
+      }
       setSessionAttachmentsLoading(false);
+      setSessionAttachmentsError(undefined);
       return;
     }
     const attachmentsSupported =
@@ -13413,6 +13417,7 @@ export function App({
     ),
     activePanel === 'live' ||
       (activePanel === 'settings' && !liveSidebarEnabled),
+    t,
   );
   // Do not expose workflow surfaces until settings have loaded successfully.
   // The resource keeps stale data when a reload fails, so the error check is

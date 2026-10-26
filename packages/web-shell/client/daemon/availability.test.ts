@@ -98,6 +98,63 @@ it('closes business traffic synchronously and uses one bounded 5/15/30-second re
   expect(business).toHaveBeenCalledTimes(1);
 });
 
+it('honours a Retry-After hint from a cold-starting daemon', async () => {
+  vi.useFakeTimers();
+  const native = vi
+    .fn()
+    .mockResolvedValueOnce(health())
+    .mockResolvedValueOnce(
+      new Response('', { status: 503, headers: { 'retry-after': '1' } }),
+    );
+  const connection = connectionWith(native);
+  await connection.check();
+  expect(connection.getSnapshot()).toBe('unavailable');
+  await vi.advanceTimersByTimeAsync(999);
+  expect(native).toHaveBeenCalledTimes(2);
+  native.mockResolvedValueOnce(health()).mockResolvedValueOnce(capabilities());
+  await vi.advanceTimersByTimeAsync(1);
+  expect(native).toHaveBeenCalledTimes(4);
+  expect(connection.getSnapshot()).toBe('available');
+});
+
+it('clamps an excessive Retry-After to the operator-patience ceiling', async () => {
+  vi.useFakeTimers();
+  const native = vi
+    .fn()
+    .mockResolvedValueOnce(health())
+    .mockResolvedValueOnce(
+      new Response('', { status: 503, headers: { 'retry-after': '600' } }),
+    );
+  const connection = connectionWith(native);
+  await connection.check();
+  await vi.advanceTimersByTimeAsync(29_999);
+  expect(native).toHaveBeenCalledTimes(2);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(native).toHaveBeenCalledTimes(3);
+});
+
+it('gives each probe leg its own deadline', async () => {
+  vi.useFakeTimers();
+  const slow =
+    (response: () => Response) => (_input: unknown, init?: RequestInit) =>
+      new Promise<Response>((resolve, reject) => {
+        init?.signal?.addEventListener('abort', () =>
+          reject(init.signal?.reason),
+        );
+        setTimeout(() => resolve(response()), 4_000);
+      });
+  const native = vi
+    .fn()
+    .mockImplementationOnce(slow(health))
+    .mockImplementationOnce(slow(capabilities));
+  const connection = connectionWith(native);
+  const check = connection.check();
+  await vi.advanceTimersByTimeAsync(8_000);
+  await check;
+  expect(native).toHaveBeenCalledTimes(2);
+  expect(connection.getSnapshot()).toBe('available');
+});
+
 it('coalesces checks and does not overlap a slow probe with foreground retries', async () => {
   vi.useFakeTimers();
   const native = vi.fn(

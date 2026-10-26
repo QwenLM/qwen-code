@@ -488,14 +488,24 @@ export function useLiveBrowserHost({
       }
 
       void (async () => {
+        const mic = navigator.mediaDevices.getUserMedia(MICROPHONE_CONSTRAINTS);
         let stream: MediaStream;
         try {
           [stream] = await Promise.all([
-            navigator.mediaDevices.getUserMedia(MICROPHONE_CONSTRAINTS),
+            mic,
             capture.state === 'suspended' ? capture.resume() : undefined,
             playback.state === 'suspended' ? playback.resume() : undefined,
           ]);
         } catch (error) {
+          // A resume leg can reject after the microphone was already granted
+          // but before the stream reached `resourcesRef`. `release()` cannot
+          // stop tracks it never saw, so the abandoned stream must be stopped
+          // here, however late it arrives.
+          void mic.then(
+            (abandoned) =>
+              abandoned.getTracks().forEach((track) => track.stop()),
+            () => undefined,
+          );
           end(generation, 'error', 'microphone', describeMicError(error));
           return;
         }

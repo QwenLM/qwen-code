@@ -42,11 +42,15 @@ export interface UseLiveVoiceSetupResult {
 export function useLiveVoiceSetup(
   supported: boolean,
   active = true,
+  translate?: (key: string) => string,
 ): UseLiveVoiceSetupResult {
   const workspace = useWorkspace();
   const availability = useDaemonAvailability();
   const availabilityController = useDaemonAvailabilityController();
-  const { t } = useI18n();
+  // App calls this above the I18nProvider it renders, where the context
+  // default is a key passthrough; the caller's own translator must win.
+  const { t: contextT } = useI18n();
+  const t = translate ?? contextT;
   const translateRef = useRef(t);
   translateRef.current = t;
   const [status, setStatus] = useState<DaemonLiveSetupStatus>();

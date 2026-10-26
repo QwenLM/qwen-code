@@ -127,6 +127,51 @@ describe('useLiveVoice', () => {
     }
   });
 
+  it('retires the published presence while the daemon is unavailable', async () => {
+    vi.useFakeTimers();
+    const { server, availability } = offlineDaemon('https://daemon.example', [
+      'realtime_voice',
+    ]);
+    mocks.liveStatus.mockResolvedValue({
+      v: 1,
+      available: true,
+      state: 'listening',
+      shortcut: '',
+      callId: 'call-1',
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    function Harness() {
+      useLiveVoice();
+      return null;
+    }
+    try {
+      await act(async () =>
+        root.render(
+          <DaemonAvailabilityContext.Provider value={availability}>
+            <Harness />
+          </DaemonAvailabilityContext.Provider>,
+        ),
+      );
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(
+        getLivePresence(mocks.client as unknown as DaemonClient)?.state,
+      ).toBe('listening');
+      server.healthy = false;
+      await act(async () => availability.check(true));
+      expect(
+        getLivePresence(mocks.client as unknown as DaemonClient),
+      ).toBeUndefined();
+    } finally {
+      act(() => root.unmount());
+      availability.dispose();
+      vi.useRealTimers();
+    }
+  });
+
   it('publishes a pending voice row immediately and discovers its session without reload', async () => {
     mocks.liveStatus.mockResolvedValue({
       v: 1,

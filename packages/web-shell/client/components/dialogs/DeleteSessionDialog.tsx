@@ -51,14 +51,15 @@ export function DeleteSessionDialog({
     maxAgeMs: 1_000,
   });
   const currentSessionId = connection.sessionId;
-  const sessionErrorMessage =
+  const outageMessage =
     availability !== 'available'
       ? t(
           availability === 'auth-required'
             ? 'daemon.connection.authRequired'
             : 'daemon.connection.unavailable',
         )
-      : sessionsError?.message;
+      : undefined;
+  const sessionErrorMessage = outageMessage ?? sessionsError?.message;
   const [deleting, setDeleting] = useState(false);
   // `selectedIdx` is the keyboard/hover cursor (roving highlight, -1 = none —
   // see ResumeDialog for the rationale); `selectedIds` is the multi-select set
@@ -282,7 +283,7 @@ export function DeleteSessionDialog({
           placeholder=""
         />
         <span className={dp('picker-search-hint')}>
-          {sessionErrorMessage ||
+          {outageMessage ||
             message ||
             (deleting
               ? t('delete.deleting')

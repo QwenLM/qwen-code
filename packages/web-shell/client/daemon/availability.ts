@@ -66,6 +66,22 @@ export function registerDaemonAvailability(
   };
 }
 
+const PROBE_TIMEOUT_MS = 5_000;
+// A front proxy or rate limiter may ask for minutes; parking the shell past
+// operator patience is worse than re-probing a little early.
+const MAX_RETRY_AFTER_MS = 30_000;
+
+function retryAfterMsFrom(response: Response): number | undefined {
+  const header = response.headers.get('retry-after');
+  if (!header) return undefined;
+  const seconds = Number(header);
+  const requested = Number.isFinite(seconds)
+    ? seconds * 1_000
+    : Date.parse(header) - Date.now();
+  if (!Number.isFinite(requested)) return undefined;
+  return Math.max(0, Math.min(requested, MAX_RETRY_AFTER_MS));
+}
+
 /** One recovery loop for all requests owned by an active daemon connection. */
 export class DaemonAvailability {
   private state: DaemonAvailabilityState = 'available';
@@ -275,31 +291,45 @@ export class DaemonAvailability {
       superseded = generation !== this.generation;
       return !superseded;
     };
-    const controller = new AbortController();
-    this.controller = controller;
-    const timeout = setTimeout(
-      () => controller.abort(new DOMException('timeout', 'TimeoutError')),
-      5_000,
-    );
-    const init: RequestInit = {
-      headers: this.token ? { Authorization: `Bearer ${this.token}` } : {},
-      cache: 'no-store' as const,
-      signal: controller.signal,
+    // Each leg gets its own deadline: a slow /health must not consume the
+    // budget /capabilities needs to answer a cold-starting runtime.
+    const probeFetch = async (url: string): Promise<Response> => {
+      const controller = new AbortController();
+      this.controller = controller;
+      const timeout = setTimeout(
+        () => controller.abort(new DOMException('timeout', 'TimeoutError')),
+        PROBE_TIMEOUT_MS,
+      );
+      try {
+        return await this.nativeFetch(url, {
+          headers: this.token ? { Authorization: `Bearer ${this.token}` } : {},
+          cache: 'no-store' as const,
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timeout);
+        if (this.controller === controller) this.controller = undefined;
+      }
     };
     let authenticated = true;
+    let retryAfterMs: number | undefined;
     try {
-      const health = await this.nativeFetch(`${this.baseUrl}/health`, init);
+      const health = await probeFetch(`${this.baseUrl}/health`);
       authenticated = health.status !== 401 && health.status !== 403;
-      if (!health.ok || (await health.json()).status !== 'ok') {
+      if (!health.ok) {
+        retryAfterMs = retryAfterMsFrom(health);
+        throw new Error('Daemon health check failed');
+      }
+      if ((await health.json()).status !== 'ok') {
         throw new Error('Daemon health check failed');
       }
       if (!isCurrent()) return;
-      const response = await this.nativeFetch(
-        `${this.baseUrl}/capabilities`,
-        init,
-      );
+      const response = await probeFetch(`${this.baseUrl}/capabilities`);
       authenticated = response.status !== 401 && response.status !== 403;
-      if (!response.ok) throw new Error('Daemon capabilities check failed');
+      if (!response.ok) {
+        retryAfterMs = retryAfterMsFrom(response);
+        throw new Error('Daemon capabilities check failed');
+      }
       const capabilities = (await response.json()) as DaemonCapabilities;
       if (!Array.isArray(capabilities.features)) {
         throw new Error('Invalid daemon capabilities');
@@ -315,15 +345,14 @@ export class DaemonAvailability {
         this.publish('auth-required');
       } else {
         this.publish('unavailable');
-        const delay = [5_000, 15_000, 30_000][Math.min(this.attempt++, 2)];
+        const delay =
+          retryAfterMs ?? [5_000, 15_000, 30_000][Math.min(this.attempt++, 2)];
         this.timer = setTimeout(() => {
           this.timer = undefined;
           void this.check();
         }, delay);
       }
     } finally {
-      clearTimeout(timeout);
-      if (this.controller === controller) this.controller = undefined;
       this.probe = undefined;
       // A diagnostic probe started before a new outage cannot reopen traffic.
       if (superseded && !this.disposed) void this.check();

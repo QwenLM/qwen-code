@@ -165,6 +165,10 @@ export function useLiveVoice(): UseLiveVoiceResult {
       pollGenerationRef.current += 1;
       requestRef.current = undefined;
       setLoading(false);
+      // A torn-down call must stop advertising itself: nothing else clears a
+      // published 'listening' presence while the outage keeps every poll
+      // parked, and the sidebar would keep offering a call that is gone.
+      setLivePresence(workspace.client, undefined);
       return;
     }
     if (!supported) return undefined;

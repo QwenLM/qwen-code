@@ -161,8 +161,11 @@ class MockAudioContext {
     start: ReturnType<typeof vi.fn>;
     stop: ReturnType<typeof vi.fn>;
   }> = [];
+  static initialState: 'running' | 'suspended' = 'running';
+  static resumeRejectsOnClose = false;
 
-  state = 'running';
+  state = MockAudioContext.initialState;
+  rejectResume: (() => void) | undefined;
   currentTime = 0;
   readonly sampleRate: number;
   readonly destination = {};
@@ -195,9 +198,19 @@ class MockAudioContext {
     MockAudioContext.sources.push(source);
     return source;
   });
-  resume = vi.fn(async () => {});
+  resume = vi.fn(async () => {
+    if (!MockAudioContext.resumeRejectsOnClose) return;
+    if (this.state === 'closed') {
+      throw new DOMException('closed', 'InvalidStateError');
+    }
+    await new Promise<void>((_resolve, reject) => {
+      this.rejectResume = () =>
+        reject(new DOMException('closed', 'InvalidStateError'));
+    });
+  });
   close = vi.fn(async () => {
     this.state = 'closed';
+    this.rejectResume?.();
   });
 
   constructor(options?: { sampleRate?: number }) {
@@ -295,6 +308,8 @@ beforeEach(() => {
   MockAudioContext.processor = undefined;
   MockAudioContext.sources = [];
   MockAudioContext.addModule = undefined;
+  MockAudioContext.initialState = 'running';
+  MockAudioContext.resumeRejectsOnClose = false;
   MockWorkletNode.instances = [];
   MockWorkletNode.failConstruction = false;
   Object.defineProperty(globalThis, 'AudioWorkletNode', {
@@ -346,6 +361,37 @@ describe('useLiveBrowserHost', () => {
     });
     expect(getUserMedia).toHaveBeenCalledTimes(1);
     expect(MockWebSocket.instances).toHaveLength(1);
+  });
+
+  it('stops a granted microphone when an outage ends connect mid-handshake', async () => {
+    availabilityMock.enabled = true;
+    MockAudioContext.initialState = 'suspended';
+    MockAudioContext.resumeRejectsOnClose = true;
+    let resolveMic!: (stream: MediaStream) => void;
+    getUserMedia.mockImplementation(
+      () =>
+        new Promise<MediaStream>((resolve) => {
+          resolveMic = resolve;
+        }),
+    );
+    await render();
+    act(() => {
+      host!.connect();
+    });
+    await act(async () => {
+      availabilityMock.available = false;
+      availabilityMock.listener?.();
+    });
+    expect(host!.phase).toBe('error');
+    const stream = {
+      getTracks: () => [track],
+      getAudioTracks: () => [track],
+    } as unknown as MediaStream;
+    await act(async () => {
+      resolveMic(stream);
+      await Promise.resolve();
+    });
+    expect(track.stop).toHaveBeenCalled();
   });
 
   it('takes the lease on /live/web with the reduced browser hello', async () => {

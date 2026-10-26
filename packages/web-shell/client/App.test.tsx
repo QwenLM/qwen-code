@@ -3540,6 +3540,51 @@ describe('task activity key', () => {
     ).toBeNull();
   });
 
+  it('clears an attachment failure alert when the daemon goes unavailable', async () => {
+    vi.useFakeTimers();
+    mockConnection.capabilities.features = ['session_attachment_list'];
+    mockSessionActions.listAttachments.mockRejectedValue(
+      new TypeError('Failed to fetch'),
+    );
+    const { server, availability } = offlineDaemon();
+    try {
+      const { container } = renderApp(
+        { environmentPanel: { items: ['sources'] } },
+        undefined,
+        false,
+        false,
+        availability,
+      );
+      await flush();
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Toggle environment information"]',
+          )
+          ?.click(),
+      );
+      for (const delay of [0, 1_000, 0, 1_000, 0]) {
+        await act(async () => vi.advanceTimersByTimeAsync(delay));
+      }
+      expect(
+        container.querySelector(
+          '[data-testid="sources-section"] [role="alert"]',
+        ),
+      ).not.toBeNull();
+      server.healthy = false;
+      await act(async () => availability.check(true));
+      await flush();
+      expect(
+        container.querySelector(
+          '[data-testid="sources-section"] [role="alert"]',
+        ),
+      ).toBeNull();
+    } finally {
+      availability.dispose();
+      vi.useRealTimers();
+    }
+  });
+
   it('retries a failed first attachment listing without flashing empty', async () => {
     vi.useFakeTimers();
     mockConnection.capabilities.features = ['session_attachment_list'];

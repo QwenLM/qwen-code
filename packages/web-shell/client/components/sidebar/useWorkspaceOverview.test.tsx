@@ -465,10 +465,30 @@ describe('useWorkspaceOverview', () => {
       );
       await flush();
       expect(latest?.overview?.mcp).toBeDefined();
+      // Close the popover before the outage: the `!active` branch clears the
+      // live snapshot, so only the retained one could still show the facets.
+      await render(
+        makeClient(fullHandle),
+        '/w',
+        { enabled: false, items: ['mcp'] },
+        availability,
+      );
+      await flush();
+      expect(latest?.overview).toBeUndefined();
       await act(async () => {
         await availability.check(true);
       });
       await flush();
+      // Reopening during the outage must overwrite the retained snapshot with
+      // a defined, facet-less one instead of leaving it untouched.
+      await render(
+        makeClient(fullHandle),
+        '/w',
+        { enabled: true, items: ['mcp'] },
+        availability,
+      );
+      await flush();
+      expect(latest?.overview).toBeDefined();
       expect(latest?.overview?.mcp).toBeUndefined();
     } finally {
       availability.dispose();

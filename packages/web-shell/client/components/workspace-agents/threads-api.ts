@@ -84,13 +84,23 @@ export function createThreadsHttpApi(
     }
     return body;
   };
-  const post = <T>(path: string, body: unknown) =>
-    request<T>(path, { method: 'POST', body: JSON.stringify(body) });
+  const post = <T>(path: string, body: unknown, init?: RequestInit) =>
+    request<T>(path, {
+      ...init,
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
 
   return {
     // No `provider`: a v2 remote reports which programs it has, and the
-    // coordinator adds an agent per program once it heartbeats.
-    connectRemoteHost: (input) => post('/hosts/remote-connect', input),
+    // coordinator adds an agent per program once it heartbeats. The
+    // coordinator's own budget is two sequential 20 s remote legs, so the
+    // caller owns a deadline that outlasts it instead of inheriting the
+    // SDK's 30 s REST timeout.
+    connectRemoteHost: (input) =>
+      post('/hosts/remote-connect', input, {
+        signal: AbortSignal.timeout(60_000),
+      }),
     joinCoordinator: (input) => post('/hosts/connect', input),
     listAgents: () => request('/agents'),
     createJoinToken: (supersedesHostId) =>

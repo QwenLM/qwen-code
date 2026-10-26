@@ -143,6 +143,48 @@ it.each(['initial', 'refresh'] as const)(
   },
 );
 
+it('keeps a newer capabilities refresh when a diagnostic probe lands later', async () => {
+  let capabilitiesCalls = 0;
+  let releaseProbeCapabilities!: (response: Response) => void;
+  fetchMock.mockImplementation(async (input) => {
+    const path = new URL(String(input)).pathname;
+    if (path === '/health') return Response.json({ status: 'ok' });
+    if (path === '/capabilities') {
+      capabilitiesCalls++;
+      if (capabilitiesCalls === 1) {
+        return Response.json({ features: ['pre-add'] });
+      }
+      if (capabilitiesCalls === 2) {
+        return new Promise<Response>((resolve) => {
+          releaseProbeCapabilities = resolve;
+        });
+      }
+      return Response.json({ features: ['added'] });
+    }
+    return Response.json({});
+  });
+  await act(async () => {
+    root.render(provider('stale-probe'));
+  });
+  const current = () => connections.get('stale-probe')!;
+  expect(current().workspace.status).toBe('connected');
+  expect(current().workspace.capabilities?.features).toEqual(['pre-add']);
+  const diagnostics = current().availability.check();
+  await act(async () => {
+    await Promise.resolve();
+  });
+  await act(async () => {
+    await current().workspace.refreshCapabilities!();
+  });
+  expect(current().workspace.capabilities?.features).toEqual(['added']);
+  releaseProbeCapabilities(Response.json({ features: ['pre-add'] }));
+  await act(async () => diagnostics);
+  expect(current().workspace.capabilities?.features).toEqual(['added']);
+  await expect(current().workspace.getCapabilities!()).resolves.toMatchObject({
+    features: ['added'],
+  });
+});
+
 it('keeps brand retries bounded while successful diagnostics stay available', async () => {
   let releaseHealth!: (response: Response) => void;
   const health = new Promise<Response>((resolve) => {

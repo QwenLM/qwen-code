@@ -140,6 +140,8 @@ export function DaemonWorkspaceProvider({
   const [status, setStatus] = useState<DaemonWorkspaceStatus>(
     autoConnect ? 'connecting' : 'idle',
   );
+  const statusRef = useRef(status);
+  statusRef.current = status;
   const [error, setError] = useState<Error | undefined>(undefined);
 
   // Reset the brand in the RENDER that observes a new client, not in the
@@ -419,7 +421,11 @@ export function DaemonWorkspaceProvider({
       getSessionCatalogStore(client).setPaused(!ready);
       if (!ready) return;
       const caps = availability.recoveredCapabilities;
-      if (caps) {
+      // A diagnostic probe on a healthy connection republishes `available`
+      // with whatever payload it read; adopting it would let that older
+      // snapshot overwrite a newer refreshCapabilities result. Only a probe
+      // that repairs the connection may replace the cached capabilities.
+      if (caps && (recovered || statusRef.current !== 'connected')) {
         capabilitiesClientRef.current = client;
         capabilitiesGenerationRef.current++;
         capabilitiesPromiseRef.current = Promise.resolve(caps);

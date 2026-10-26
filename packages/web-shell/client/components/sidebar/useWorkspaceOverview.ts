@@ -212,9 +212,12 @@ export function useWorkspaceOverview(
     }
     if (!available) {
       // A paused poll cannot book a miss, so a facet the daemon can no longer
-      // answer would otherwise keep rendering its pre-outage count.
-      setOverview(
-        (previous) => previous && dropExpiredFacets(previous, requested),
+      // answer would otherwise keep rendering its pre-outage count. The
+      // fallback snapshot matters when the `!active` branch above already
+      // cleared `overview`: consumers fall back to `retainedOverview`, so an
+      // undefined result here would leave the pre-outage counts showing.
+      setOverview((previous) =>
+        dropExpiredFacets(previous ?? { fetchedAt: 0 }, requested),
       );
       return;
     }

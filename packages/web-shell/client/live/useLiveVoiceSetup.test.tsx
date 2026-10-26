@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonLiveSetupStatus } from '@qwen-code/sdk';
 import { offlineDaemon } from '../daemon/availability.test-fixtures.js';
 import { DaemonAvailabilityContext } from '../daemon/availability-context.js';
-import { I18nProvider } from '../i18n';
+import { getTranslator } from '../i18n';
 import {
   useLiveVoiceSetup,
   type UseLiveVoiceSetupResult,
@@ -68,17 +68,18 @@ describe('useLiveVoiceSetup', () => {
     document.body.appendChild(container);
     const root = createRoot(container);
     let setup!: UseLiveVoiceSetupResult;
+    // App calls this hook above the I18nProvider it renders, so the harness
+    // passes its own translator instead of wrapping the component.
+    const translate = getTranslator('zh-CN');
     function Harness() {
-      setup = useLiveVoiceSetup(true);
+      setup = useLiveVoiceSetup(true, true, translate);
       return <>{setup.error?.message ?? 'ok'}</>;
     }
     try {
       await act(async () =>
         root.render(
           <DaemonAvailabilityContext.Provider value={availability}>
-            <I18nProvider language="zh-CN">
-              <Harness />
-            </I18nProvider>
+            <Harness />
           </DaemonAvailabilityContext.Provider>,
         ),
       );
