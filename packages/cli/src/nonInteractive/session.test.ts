@@ -444,6 +444,32 @@ describe('runNonInteractiveStreamJson', () => {
     );
   });
 
+  it('forwards only per-message declared human input to the execution loop', async () => {
+    const human = createUserMessage('workflow declared');
+    human.origin = { kind: 'human' };
+    mockInputReader.read = async function* () {
+      yield createUserMessage('workflow unknown before');
+      await vi.waitFor(() =>
+        expect(runNonInteractiveMock).toHaveBeenCalledTimes(1),
+      );
+      yield human;
+      await vi.waitFor(() =>
+        expect(runNonInteractiveMock).toHaveBeenCalledTimes(2),
+      );
+      yield createUserMessage('workflow unknown after');
+    };
+
+    await runNonInteractiveStreamJson(config, '');
+
+    expect(runNonInteractiveMock).toHaveBeenCalledTimes(3);
+    expect(
+      runNonInteractiveMock.mock.calls.map((call) => call[4].humanInput),
+    ).toEqual([undefined, { text: 'workflow declared' }, undefined]);
+    for (const call of runNonInteractiveMock.mock.calls) {
+      expect(call[4]).not.toHaveProperty('userMessage');
+    }
+  });
+
   it('seeds the promptId counter past turns the resumed transcript claims', async () => {
     // A resumed headless chain reuses the session id, so restarting the
     // counter at 1 would re-mint ids the previous run already persisted —
@@ -515,6 +541,105 @@ describe('runNonInteractiveStreamJson', () => {
     await runNonInteractiveStreamJson(config, '');
 
     expect(runNonInteractiveMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('processes direct-mode startup messages in arrival order', async () => {
+    // No `initialize` control request: the first frame is a user message, so
+    // the session takes the direct-mode path.
+    let releaseInit: () => void = () => {};
+    config = createConfig({
+      initialize: vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseInit = resolve;
+          }),
+      ),
+    });
+
+    mockInputReader.read = async function* () {
+      yield createUserMessage('First message');
+      yield createUserMessage('Second message');
+      // Both frames have already reached the read loop by the time the
+      // generator resumes here, so config initialization is still pending
+      // for both of them. No sleeps, no polling.
+      releaseInit();
+    };
+
+    await runNonInteractiveStreamJson(config, '');
+
+    expect(runNonInteractiveMock.mock.calls.map((call) => call[2])).toEqual([
+      'First message',
+      'Second message',
+    ]);
+  });
+
+  it('mints the first direct-mode promptId after initialization resolves', async () => {
+    // Resumed data only becomes authoritative once initialize() re-reads the
+    // session file, so a promptId minted before that await restarts the
+    // counter at 1 and re-mints ids the previous run already persisted.
+    let releaseInit: () => void = () => {};
+    let initResolved = false;
+    config = createConfig({
+      initialize: vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseInit = () => {
+              initResolved = true;
+              resolve();
+            };
+          }),
+      ),
+      getResumedSessionData: () =>
+        initResolved
+          ? {
+              conversation: {
+                sessionId: 'test-session',
+                messages: [
+                  createResumedUserRecord('first turn'),
+                  createResumedTelemetryRecord('test-session########5'),
+                ],
+              },
+            }
+          : undefined,
+    });
+
+    mockInputReader.read = async function* () {
+      yield createUserMessage('resumed turn');
+      // The frame reaches the read loop while initialize() is still pending.
+      releaseInit();
+    };
+
+    await runNonInteractiveStreamJson(config, '');
+
+    expect(runNonInteractiveMock).toHaveBeenCalledTimes(1);
+    expect(runNonInteractiveMock.mock.calls[0][3]).toBe(
+      'test-session########6',
+    );
+  });
+
+  it('reports one error result when direct-mode config initialization fails', async () => {
+    // The first user message is enqueued before config initialization is
+    // awaited, so a rejected initialize() reaches the queued message and
+    // surfaces as a terminal result frame instead of leaving an SDK consumer
+    // waiting on a frame that is never written.
+    config = createConfig({
+      initialize: vi.fn().mockRejectedValue(new Error('bad credentials')),
+    });
+
+    mockInputReader.read = async function* () {
+      yield createUserMessage('Only message');
+    };
+
+    await runNonInteractiveStreamJson(config, '');
+
+    expect(runNonInteractiveMock).not.toHaveBeenCalled();
+    expect(mockOutputAdapter.emitResult).toHaveBeenCalledTimes(1);
+    expect(mockOutputAdapter.emitResult).toHaveBeenCalledWith(
+      expect.objectContaining({
+        isError: true,
+        errorMessage: 'bad credentials',
+      }),
+    );
   });
 
   it('rejects continue_last_turn when the Gemini client is not initialized', async () => {

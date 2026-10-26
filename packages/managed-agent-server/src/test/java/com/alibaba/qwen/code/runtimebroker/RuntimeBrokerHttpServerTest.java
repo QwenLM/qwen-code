@@ -39,6 +39,134 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RuntimeBrokerHttpServerTest {
     @Test
+    void capabilityReadsResolveAdmissionWithoutAllocatingOrAcquiringARuntime() throws Exception {
+        var scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
+                ResidentWorkspaceProfile.CAPABILITY_DIGEST, "workspace");
+        var admissions = new AtomicInteger();
+        HarnessSessionResolver resolver = new HarnessSessionResolver() {
+            @Override public CompletionStage<RuntimeScope> resolve(String id) {
+                throw new AssertionError("Capabilities must use the admission resolver");
+            }
+
+            @Override public CompletionStage<RuntimeScope> resolveAdmission(String id) {
+                return admissions.incrementAndGet() == 1 ? CompletableFuture.completedFuture(scope)
+                        : CompletableFuture.failedFuture(new RuntimeBrokerException(
+                                409, "runtime_admission_closed", "Session is closed", false));
+            }
+        };
+        try (Fixture fixture = new Fixture(false, resolver, scope)) {
+            var body = new HashMap<String, Object>(Map.of(
+                    "protocolVersion", 1, "requestId", "capabilities", "harnessSessionId", "harness"));
+            var response = fixture.post("/runtimes:capabilities", body);
+            assertEquals(200, response.statusCode(), response.body());
+            var actual = JSON.parseObject(response.body());
+            assertEquals(Set.of("protocolVersion", "harnessSessionId", "scope"), actual.keySet());
+            assertEquals(ResidentWorkspaceProfile.CAPABILITY_DIGEST,
+                    actual.getJSONObject("scope").getString("capabilityDigest"));
+            assertEquals("workspace", actual.getJSONObject("scope").getString("isolationClass"));
+            assertNull(fixture.bindings.findActive(new RuntimeProvisionRequest(scope, null, "static")));
+            assertEquals(0, fixture.transport.acquisitions.get());
+            assertEquals(0, fixture.transport.executions.get());
+            body.put("runtimeSessionId", "untrusted");
+            assertEquals(400, fixture.post("/runtimes:capabilities", body).statusCode());
+            assertEquals(1, admissions.get());
+            body.remove("runtimeSessionId");
+            assertEquals(409, fixture.post("/runtimes:capabilities", body).statusCode());
+            assertEquals(2, admissions.get());
+            assertNull(fixture.bindings.findActive(new RuntimeProvisionRequest(scope, null, "static")));
+        }
+    }
+
+    @Test
+    void residentUnsupportedToolsSettleBeforeDispatchAndDoNotBlockAReadOrRelease() throws Exception {
+        var scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
+                ResidentWorkspaceProfile.CAPABILITY_DIGEST, "workspace");
+        try (Fixture fixture = new Fixture(false, null, scope)) {
+            fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
+            for (String tool : List.of("web_fetch", "run_shell_command", "glob", "managed_mcp_call")) {
+                String payload = JSON.toJSONString(Map.of("toolName", tool, "input", Map.of()));
+                var prepared = prepare(fixture, tool, payload);
+                var refused = fixture.service.startExecution("harness", "runtime", prepared.getExecutionCallId(), payload)
+                        .toCompletableFuture().join();
+                assertTrue(refused.isSettled());
+                assertEquals("not_started", refused.getExecutionStatus());
+                assertEquals(0, refused.getDispatchGeneration());
+                assertTrue(refused.getResult().containsKey("capture"));
+                assertNull(refused.getResult().get("capture"));
+                assertEquals("resident_tool_unsupported", ((Map<?, ?>) refused.getResult().get("error")).get("type"));
+                assertEquals(refused.getVersion(), fixture.service.startExecution(
+                        "harness", "runtime", prepared.getExecutionCallId(), payload).toCompletableFuture().join().getVersion());
+            }
+            assertEquals(0, fixture.transport.executions.get());
+            assertFalse(fixture.executions.hasActiveByRuntimeSession("runtime"));
+            fixture.transport.fail = false;
+            String read = JSON.toJSONString(Map.of("toolName", "read_file", "input", Map.of("file_path", "proof.txt")));
+            var preparedRead = prepare(fixture, "read", read);
+            var result = fixture.service.startExecution("harness", "runtime", preparedRead.getExecutionCallId(), read)
+                    .toCompletableFuture().join();
+            assertEquals("success", result.getExecutionStatus());
+            assertEquals(1, fixture.transport.executions.get());
+            assertTrue(fixture.service.release("harness", "runtime").toCompletableFuture().join());
+        }
+    }
+
+    @Test
+    void residentToolRefusalCannotSettleAnExistingDispatchOrUnknownOutcome() throws Exception {
+        var scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
+                ResidentWorkspaceProfile.CAPABILITY_DIGEST, "workspace");
+        for (boolean unknown : List.of(false, true)) {
+            try (Fixture fixture = new Fixture(false, null, scope)) {
+                fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
+                String payload = JSON.toJSONString(Map.of("toolName", "web_fetch", "input", Map.of()));
+                var prepared = prepare(fixture, "old", payload);
+                var dispatched = fixture.executions.claimDispatch(prepared.getExecutionCallId(), "old-broker", Duration.ofMinutes(1));
+                var original = unknown ? fixture.executions.compareAndSet(dispatched,
+                        dispatched.withUnknown(), "old-broker", dispatched.getDispatchGeneration()) : dispatched;
+                var observed = fixture.service.startExecution("harness", "runtime", prepared.getExecutionCallId(), payload)
+                        .toCompletableFuture().join();
+                assertSame(original, observed);
+                assertEquals(1, observed.getDispatchGeneration());
+                assertNull(observed.getResult());
+                assertEquals(0, fixture.transport.executions.get());
+                assertTrue(fixture.executions.hasActiveByRuntimeSession("runtime"));
+            }
+        }
+    }
+
+    private static ToolExecutionRecord prepare(Fixture fixture, String key, String payload) throws Exception {
+        String digest = "sha256:" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                .digest(payload.getBytes(StandardCharsets.UTF_8)));
+        return fixture.service.prepareExecution("harness", "runtime", key, Map.of(
+                "sessionId", "runtime", "promptId", "turn", "callId", key, "argsDigest", digest))
+                .toCompletableFuture().join();
+    }
+
+    @Test
+    void mcpInventoryReadsTheSelectedBindingWithoutAcquiringOrReplacingAnOwner() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            String path = "/harness-sessions/harness/mcp-definitions";
+            var body = new HashMap<String, Object>(Map.of("protocolVersion", 1, "requestId", "inventory", "harnessSessionId", "harness"));
+            var first = fixture.post(path, body);
+            assertEquals(200, first.statusCode(), first.body());
+            assertEquals(0, fixture.transport.acquisitions.get());
+            assertEquals(0, fixture.transport.executions.get());
+            assertEquals("docs", JSON.parseObject(first.body()).getJSONArray("servers").getJSONObject(0).getString("serverId"));
+            assertEquals("no-store", first.headers().firstValue("Cache-Control").orElse(null));
+            var owner = fixture.service.acquire("harness", "original-mcp", "bootstrap").toCompletableFuture().join();
+            body.put("runtimeSessionId", "original-mcp");
+            assertEquals(200, fixture.post(path, body).statusCode());
+            assertEquals(owner.getBindingId(), fixture.transport.inventoryBinding.get());
+            assertEquals(1, fixture.transport.acquisitions.get());
+            body.put("runtimeSessionId", "missing-owner");
+            assertEquals(409, fixture.post(path, body).statusCode());
+            fixture.service.requestHarnessDrain("tenant", "harness");
+            body.put("runtimeSessionId", "original-mcp");
+            assertEquals(409, fixture.post(path, body).statusCode());
+            assertEquals(1, fixture.transport.acquisitions.get());
+        }
+    }
+
+    @Test
     void privateRecoveryReadRejectsIncompleteOrNonIntegralInstalledOwner() throws Exception {
         try (Fixture fixture = new Fixture()) {
             Map<String, Object> body = new HashMap<>(Map.of("protocolVersion", 1, "requestId", "read",
@@ -1615,6 +1743,7 @@ class RuntimeBrokerHttpServerTest {
         private final FailingTransport transport = new FailingTransport();
         private final HttpClient client = HttpClient.newHttpClient();
         private final ToolExecutionRepository executions;
+        private final InMemoryRuntimeBindingRepository bindings = new InMemoryRuntimeBindingRepository();
         private final RuntimeBrokerService service;
         private final RuntimeBrokerHttpServer server;
 
@@ -1673,7 +1802,7 @@ class RuntimeBrokerHttpServerTest {
                             : id -> CompletableFuture.completedFuture(scope),
                     new StaticRuntimeProvisioner(new RuntimeLease("instance",
                             URI.create("http://127.0.0.1:1234"), "token", "lease", 1)),
-                    transport, new InMemoryRuntimeBindingRepository(),
+                    transport, bindings,
                     new InMemoryRuntimeSessionRepository(),
                     executions,
                     "broker", Duration.ofMinutes(1), Duration.ofMinutes(1), verifier);
@@ -1711,6 +1840,15 @@ class RuntimeBrokerHttpServerTest {
     }
 
     private static final class FailingTransport implements RuntimeTransport {
+        private final AtomicInteger acquisitions = new AtomicInteger();
+        private final AtomicReference<String> inventoryBinding = new AtomicReference<>();
+
+        @Override
+        public CompletionStage<List<Map<String, Object>>> mcpDefinitions(RuntimeBindingRecord runtime) {
+            inventoryBinding.set(runtime.getBindingId());
+            return CompletableFuture.completedFuture(List.of(Map.of("serverId", "docs", "serverRevision", 1,
+                    "definitionDigest", "a".repeat(64), "transport", "stdio")));
+        }
         private static final Map<String, Object> MANIFEST = Map.of(
                 "tools", java.util.List.of(Map.of("name", "read_file")),
                 "capabilityDigest", "a".repeat(64), "policyRevision", "policy");
@@ -1755,6 +1893,7 @@ class RuntimeBrokerHttpServerTest {
 
         @Override
         public CompletionStage<Void> acquire(RuntimeLease lease, RuntimeSession session) {
+            acquisitions.incrementAndGet();
             return CompletableFuture.completedFuture(null);
         }
 
