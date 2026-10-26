@@ -443,6 +443,10 @@ public enum SurfaceRegistry {
             "/internal/managed-workspaces/v1/storage:register-external",
             Surface.INTERNAL, RuleClass.INTERNAL_OPERATOR,
             EnumSet.of(Capability.EXTERNAL_STORAGE_REGISTER)),
+    INTERNAL_EXTERNAL_WORKSPACE_MATERIALIZE(Method.POST,
+            "/internal/managed-workspaces/v1/workspace:materialize-external",
+            Surface.INTERNAL, RuleClass.INTERNAL_OPERATOR,
+            EnumSet.of(Capability.EXTERNAL_WORKSPACE_MATERIALIZE)),
     INTERNAL_APPROVAL_QUERY(Method.POST,
             "/internal/managed-session-store/v1/sessions/{sessionId}/approval:query",
             Surface.INTERNAL, RuleClass.INTERNAL_WRITER,
@@ -672,6 +676,7 @@ public enum SurfaceRegistry {
      */
     public enum Capability {
         EXTERNAL_STORAGE_REGISTER,
+        EXTERNAL_WORKSPACE_MATERIALIZE,
         USER_MESSAGE_QUERY, USER_MESSAGE_COMMAND, STORE_USER_MESSAGE_CLAIM,
         SESSION_CREATE,
         SESSION_LIST,

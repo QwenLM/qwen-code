@@ -173,11 +173,12 @@ public class ManagedWorkspaceRegistry {
         arguments.add(key);
         List<ReadableGrant> rows = jdbc.query(
                 "SELECT r.workspace_id, r.workspace_generation,"
-                        + " r.storage_id, r.state, a.role"
+                        + " r.storage_id, r.state, s.storage_kind, a.role"
                         + " FROM ma_workspace r"
                         + " JOIN ma_workspace_access a ON"
                         + " a.tenant_id = r.tenant_id"
                         + " AND a.workspace_id = r.workspace_id"
+                        + " LEFT JOIN ma_storage s ON s.tenant_id = r.tenant_id AND s.storage_id = r.storage_id"
                         + " WHERE r.tenant_id = ? AND r.workspace_id IN ("
                         + plain + ")"
                         + " AND a.actor_id = ? AND a.role IN ('READER',"
@@ -212,11 +213,12 @@ public class ManagedWorkspaceRegistry {
                 result.getString("display_name"), state,
                 WorkspaceAccess.valueOf(result.getString("role"))
                         .atLeast(WorkspaceAccess.OPERATOR)
-                        && "ACTIVE".equals(state), ".",
+                        && "ACTIVE".equals(state) && !"EXTERNAL".equals(result.getString("storage_kind")), ".",
                 "OWNER".equals(result.getString("role")) && "ACTIVE".equals(state)
                         && "ROOT".equals(result.getString("workspace_kind"))
                         && !"SSH_LOCAL".equals(result.getString("storage_kind"))
-                        && !"CSI".equals(result.getString("storage_kind")));
+                        && !"CSI".equals(result.getString("storage_kind"))
+                        && !"EXTERNAL".equals(result.getString("storage_kind")));
     }
 
     private List<WorkspaceSummary> withDefaults(String tenantId, List<WorkspaceSummary> items) {
@@ -250,7 +252,7 @@ public class ManagedWorkspaceRegistry {
                 result.getString("storage_id"),
                 WorkspaceAccess.valueOf(result.getString("role"))
                         .atLeast(WorkspaceAccess.OPERATOR)
-                        && "ACTIVE".equals(state));
+                        && "ACTIVE".equals(state) && !"EXTERNAL".equals(result.getString("storage_kind")));
     }
 
     /**

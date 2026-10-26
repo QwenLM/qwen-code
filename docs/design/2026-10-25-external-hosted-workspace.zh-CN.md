@@ -2,7 +2,21 @@
 
 [English](2026-10-25-external-hosted-workspace.md) | [简体中文](2026-10-25-external-hosted-workspace.zh-CN.md)
 
-状态：**设计提案，未实现**。接续阶段一 `docs/design/2026-10-23-external-runtime-provider.md`（external-scratch，已认可的契约）和已实测完成的 Aone 适配器链路。本阶段不削弱阶段一的任何性质：在首次远程调用前持久化确定的逻辑 handle、丢响应后禁止替换、不提供 release‑to‑kill、Broker 独立 attest、provider 按 `provisionRequestId` 幂等。
+状态：**切片 A 已实现但保持惰性；Session 激活和其余第二阶段执行设计尚未实现**。接续阶段一 `docs/design/2026-10-23-external-runtime-provider.md`（external-scratch，已认可的契约）和已实测完成的 Aone 适配器链路。本阶段不削弱阶段一的任何性质：在首次远程调用前持久化确定的逻辑 handle、丢响应后禁止替换、不提供 release‑to‑kill、Broker 独立 attest、provider 按 `provisionRequestId` 幂等。
+
+## 修订：有界切片 A（2026-10-27）
+
+本独立增量使用 main 已有的外部存储登记，不依赖 #15654，也不复制其 registry/provisioner。`POST /internal/managed-workspaces/v1/workspace:materialize-external` 为已有 `REGISTERED`、`EXTERNAL` 别名建立元数据。其闭合、16 KiB 上限的 JSON 请求体仅接受 `registeredAliasId`、`displayName`、`ownerActorId`、`idempotencyKey` 及可选且仅用于追踪的 `requestId`。`registeredAliasId` 就是登记的 `tenantWorkspaceId`，不是路径或登记回执 ID。
+
+现有精确 loopback 监听地址、本地/对端地址校验与 Broker bearer 凭证认证操作方委派授权的权限。经过验证的 `ownerActorId` 是**被授权人**，不是已认证调用者，也不是租户成员身份凭证。操作方必须选择正确的租户和被授权人；经验证的租户头限定登记查询、Workspace、授权和回执键的范围。公共签名及可信 actor 过滤器保持不变。仅提供租户头不能调用此路由。
+
+新事务获取租户 placement-domain 锁，核对已存登记与 owner 的租户、别名身份/键、完整 provider/physical 身份、revision 和 mount root，并拒绝已有 Workspace、Runtime binding、holder 或 maintenance。登记 JSON 仍是权威：aliasPath 使用现有登记值规则验证，并不检测任意带外数据库篡改。操作仅原子创建 `ma_workspace`（`workspaceId = storageId = tenantWorkspaceId`、generation 1、`ACTIVE`、`ROOT`、固定 `WorkspaceExecutionProfile.CONFIG_REF`/`POLICY_REF`、不设默认）、一条 `OWNER` 授权和已完成的 `EXTERNAL_WORKSPACE` 回执。存储及其 `UNVERIFIED` owner 不变。不执行中心文件系统、存储分配、provider HTTP 或 worker 操作。
+
+完全相同的重试返回原回执，即便授权已撤销、名称已改或 Workspace 已移除；不会恢复授权、名称或 active 状态。回执仅记录创建结果，不代表实时状态或执行权限。同一租户/幂等键下变更别名、显示名或被授权人会冲突。被授权人可读取发现结果，但 EXTERNAL 存储的 `canCreateSession` 和 WebShell `canSelectDirectory` 均为 false，批量 readable grant 也一致。空输入和带 prompt 的 Session 创建继续被现有 storage-kind 护栏拒绝。本切片不激活 resolver、transport、execution 或工具档案。
+
+独立回执 namespace 要求扩展现有枚举与 V1 CHECK。遵循发布前 fresh-catalog 策略：源码可以独立回退，但**不**承诺旧二进制能打开变更后的 catalog。任务/开发 catalog 应重建；不增加 V2 migration，不提升 schema version。
+
+A 的验证包括 operator/tenant/闭合请求测试、精确回执重放与不复活测试、已存元组和忙碌 owner 拒绝、诚实的公共/WebShell 发现结果和真实 Session-service 拒绝，以及 MySQL 同键/异键并发测试。这些测试不是外部 Hosted 执行能力的证据。完整工具、drain/ACK 安全、恢复及公共 worker E2E 留待后续增量。下文较早的执行提案必须先与已发布 boot/publication 契约对齐再实现；A 不实现也不认可第二套线上协议。
 
 ## 1. 本阶段存在的原因
 
