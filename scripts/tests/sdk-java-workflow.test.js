@@ -307,6 +307,41 @@ describe('SDK Java self-hosted workflow guards', () => {
     }
   });
 
+  it('keeps every seed de-alias and write-back exclusion list in step', () => {
+    // Both lists are hand-spelled at six sites. A marker dropped from the
+    // write-back side is republished into the host cache, where `cp -n`
+    // freezes the first publisher's copy, while a marker dropped from the
+    // seed side lets the unlocked Maven runs rewrite the host file through
+    // the hardlink. Compare the name sets, not just the lists' lengths.
+    const names = (text, pattern) =>
+      [...text.matchAll(pattern)].map((match) => match[1]).sort();
+    const seeds = [
+      ...workflow.matchAll(/find "\$\{RUNNER_TEMP\}\/m2-repo" .*?-delete/g),
+    ];
+    const writeBacks = [
+      ...workflow.matchAll(/timeout 300 find \..*?write_back=\$\?/g),
+    ];
+    expect(seeds).toHaveLength(4);
+    expect(writeBacks).toHaveLength(2);
+    const expected = [
+      '*.lastUpdated',
+      '_remote.repositories',
+      'maven-metadata-*.xml',
+      'resolver-status.properties',
+    ];
+    seeds.forEach((match, index) => {
+      expect(names(match[0], /-name '([^']+)'/g), `seed ${index}`).toEqual(
+        expected,
+      );
+    });
+    writeBacks.forEach((match, index) => {
+      expect(
+        names(match[0], /! -name '([^']+)'/g),
+        `write-back ${index}`,
+      ).toEqual(expected);
+    });
+  });
+
   it('binds the lock and queue probes to the helper paths', () => {
     // Both call sites spell the helper's lock/queue paths by hand. Read
     // them from the helper so a rename cannot leave a probe watching a
@@ -833,7 +868,7 @@ describe('SDK Java self-hosted workflow guards', () => {
     );
   });
 
-  it('keeps every Maven cache seed best-effort but observable', () => {
+  it('keeps every Maven cache seed in sdk-java.yml best-effort but observable', () => {
     const seeds = workflow.match(/cp -aln "\$\{HOME\}\/\.m2\/repository".*$/gm);
     expect(seeds).toHaveLength(4);
     for (const seed of seeds) {
@@ -863,6 +898,61 @@ describe('SDK Java self-hosted workflow guards', () => {
       from = seedAt + seed.length;
     }
   });
+
+  it.skipIf(process.platform !== 'linux')(
+    'publishes the delta but not resolver markers or version metadata',
+    () => {
+      const run = step(job('test'), 'Run Java SDK tests (self-hosted)');
+      const body = run.slice(
+        run.indexOf('mkdir -p "${HOME}/.m2/repository" 9>&-'),
+      );
+      const dir = mkdtempSync(join(tmpdir(), 'sdk-java-write-back-'));
+      const home = join(dir, 'home');
+      const runnerTemp = join(dir, 'runner-temp');
+      const jobLocal = join(runnerTemp, 'm2-repo');
+      const hostCache = join(home, '.m2', 'repository');
+      const planted = {
+        'marker.txt': 'downloaded\n',
+        'com/example/lib/maven-metadata-central.xml': '<metadata/>\n',
+        'com/example/lib/resolver-status.properties': 'resolved\n',
+      };
+      for (const [name, content] of Object.entries(planted)) {
+        mkdirSync(dirname(join(jobLocal, name)), { recursive: true });
+        writeFileSync(join(jobLocal, name), content);
+      }
+      try {
+        const result = spawnSync(
+          'bash',
+          ['-e', '-c', `suite_status=0\n${body}`],
+          {
+            encoding: 'utf8',
+            timeout: 5000,
+            env: {
+              ...process.env,
+              HOME: home,
+              RUNNER_TEMP: runnerTemp,
+              GITHUB_WORKSPACE: process.cwd(),
+            },
+          },
+        );
+        expect(result.error, body).toBeUndefined();
+        expect(result.status, body + result.stderr).toBe(0);
+        expect(existsSync(join(hostCache, 'marker.txt'))).toBe(true);
+        expect(
+          existsSync(
+            join(hostCache, 'com/example/lib/maven-metadata-central.xml'),
+          ),
+        ).toBe(false);
+        expect(
+          existsSync(
+            join(hostCache, 'com/example/lib/resolver-status.properties'),
+          ),
+        ).toBe(false);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it.skipIf(process.platform !== 'linux').each([
     { java: '11', failAt: 1 },
@@ -968,9 +1058,9 @@ describe('SDK Java self-hosted workflow guards', () => {
     },
   );
 
-  it.skipIf(process.platform !== 'linux')(
-    'demotes an unusable host cache to the suite status',
-    () => {
+  it.skipIf(process.platform !== 'linux').each([0, 1])(
+    'demotes an unusable host cache to the suite status (suite exit %i)',
+    (suiteStatus) => {
       const run = step(job('test'), 'Run Java SDK tests (self-hosted)');
       const body = run.slice(
         run.indexOf('if [ -d "${HOME}/.m2/repository" ]; then'),
@@ -984,7 +1074,7 @@ describe('SDK Java self-hosted workflow guards', () => {
       try {
         const result = spawnSync(
           'bash',
-          ['-e', '-c', `mvn() { :; }\n${body}`],
+          ['-e', '-c', `mvn() { return ${suiteStatus}; }\n${body}`],
           {
             encoding: 'utf8',
             timeout: 5000,
@@ -999,7 +1089,7 @@ describe('SDK Java self-hosted workflow guards', () => {
           },
         );
         expect(result.error, body).toBeUndefined();
-        expect(result.status, body + result.stderr).toBe(0);
+        expect(result.status, body + result.stderr).toBe(suiteStatus);
         expect(result.stdout).toContain(
           '::warning::Maven cache write-back skipped (host cache unusable)',
         );
@@ -1010,9 +1100,9 @@ describe('SDK Java self-hosted workflow guards', () => {
     },
   );
 
-  it.skipIf(process.platform !== 'linux')(
-    'demotes a missing job-local repository to the suite status',
-    () => {
+  it.skipIf(process.platform !== 'linux').each([0, 1])(
+    'demotes a missing job-local repository to the suite status (suite exit %i)',
+    (suiteStatus) => {
       const run = step(job('test'), 'Run Java SDK tests (self-hosted)');
       const body = run.slice(
         run.indexOf('if [ -d "${HOME}/.m2/repository" ]; then'),
@@ -1025,7 +1115,7 @@ describe('SDK Java self-hosted workflow guards', () => {
       try {
         const result = spawnSync(
           'bash',
-          ['-e', '-c', `mvn() { :; }\n${body}`],
+          ['-e', '-c', `mvn() { return ${suiteStatus}; }\n${body}`],
           {
             encoding: 'utf8',
             timeout: 5000,
@@ -1040,7 +1130,7 @@ describe('SDK Java self-hosted workflow guards', () => {
           },
         );
         expect(result.error, body).toBeUndefined();
-        expect(result.status, body + result.stderr).toBe(0);
+        expect(result.status, body + result.stderr).toBe(suiteStatus);
         expect(result.stdout).toContain(
           '::warning::Maven cache write-back skipped; the gate result above is unaffected',
         );
@@ -1141,6 +1231,52 @@ describe('SDK Java self-hosted workflow guards', () => {
         );
         // The pinned infrastructure line must not reach the log.
         expect(result.stdout).not.toContain('lock not acquired within');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== 'linux').each([0, 1])(
+    'exits with the suite status when the bare-lock fallback times out (suite exit %i)',
+    (suiteStatus) => {
+      const run = step(job('test'), 'Run Java SDK tests (self-hosted)');
+      const body = run.slice(run.indexOf('lock_setup_fault() {'));
+      const dir = mkdtempSync(join(tmpdir(), 'sdk-java-bare-lock-'));
+      const home = join(dir, 'home');
+      const runnerTemp = join(dir, 'runner-temp');
+      const workspace = join(dir, 'workspace');
+      const bin = join(dir, 'bin');
+      mkdirSync(join(home, '.cache', 'qwen-code-ci'), { recursive: true });
+      mkdirSync(join(runnerTemp, 'm2-repo'), { recursive: true });
+      // No helper in this checkout is what selects the bare-lock fallback.
+      mkdirSync(join(workspace, '.github', 'scripts'), { recursive: true });
+      mkdirSync(bin, { recursive: true });
+      writeFileSync(join(bin, 'flock'), '#!/bin/sh\nexit 1\n');
+      chmodSync(join(bin, 'flock'), 0o755);
+      try {
+        const result = spawnSync(
+          'bash',
+          ['-e', '-c', `suite_status=${suiteStatus}\n${body}`],
+          {
+            encoding: 'utf8',
+            timeout: 5000,
+            env: {
+              ...process.env,
+              HOME: home,
+              RUNNER_TEMP: runnerTemp,
+              GITHUB_WORKSPACE: workspace,
+              MATRIX_JAVA: '11',
+              TIER: 'fast',
+              PATH: `${bin}:${process.env.PATH}`,
+            },
+          },
+        );
+        expect(result.error, body).toBeUndefined();
+        expect(result.status, body + result.stderr).toBe(suiteStatus);
+        expect(result.stdout).toContain(
+          '::warning::Maven cache write-back skipped: the sdk-java host lock stayed busy',
+        );
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
@@ -2259,7 +2395,7 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     // artifact in the shared cache the next seed hardlinks from.
     expect(step.run).toContain('cd "${RUNNER_TEMP}/m2-repo"');
     expect(step.run).toContain(
-      "timeout 300 find . \\( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-server \\) -prune -o -type f -links 1 ! -name '*.lastUpdated' ! -name 'resolver-status.properties' ! -name '_remote.repositories' -exec cp -ln --parents -t \"${HOME}/.m2/repository\" {} + 9>&- || write_back=$?",
+      "timeout 300 find . \\( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-server \\) -prune -o -type f -links 1 ! -name '*.lastUpdated' ! -name 'resolver-status.properties' ! -name '_remote.repositories' ! -name 'maven-metadata-*.xml' -exec cp -ln --parents -t \"${HOME}/.m2/repository\" {} + 9>&- || write_back=$?",
     );
     expect(step.run).not.toMatch(/tar [^\n]*-xf/);
     expect(step.run).toContain(

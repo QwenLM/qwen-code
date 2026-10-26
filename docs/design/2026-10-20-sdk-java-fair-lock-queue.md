@@ -118,10 +118,10 @@ and a missing host cache stays quiet while a real copy failure warns, so the
 warning still means the seed failed. The Maven runs run unlocked; the
 write-back holds one acquisition, and its `mkdir` and bounded `find`/`cp`
 children drop fd 9 so a survivor cannot retain the lock. The write-back
-publishes artifacts only: the resolver markers record this run's resolution
-outcomes and are not copied into the shared cache. A hold now measures the
-copy instead of the suite, and the fast tier's budget is again far above one
-hold.
+publishes artifacts only: the resolver markers and version metadata record
+this run's resolution outcomes and are not copied into the shared cache. A
+hold now measures the copy instead of the suite, and the fast tier's budget
+is again far above one hold.
 
 The test job follows the same rule. Its suite was the other long hold: on
 2026-10-22, run 39771949573's fast-tier job failed at its 5400-second budget
@@ -298,11 +298,13 @@ order this section exists to prevent.
   5400 s budget and 310-minute ceiling, the identical prelude and write-back
   tail at both sites (modulo the intentional budget difference), both jobs'
   Maven runs above their acquisition, their write-back children's fd 9
-  close, the two in-house coordinates' and the tracking markers' absence
-  from every seeded job-local repository, and the seed-drop/prune sets
-  agreeing at every site. The fault arms cover a missing `flock`, a broken
-  `mkdir`, a stray queue file, a lock path that is a directory, a timed-out
-  `flock`, and an unexpected `flock` status. The `.size-baseline` entry is
+  close, the two in-house coordinates', tracking markers', and version
+  metadata's absence from every seeded job-local repository in
+  `sdk-java.yml`, and the seed-drop/prune sets agreeing at every site. The
+  fault arms cover a missing `flock`, a broken `mkdir`, a stray queue file,
+  a lock path that is a directory, a timed-out `flock`, an unexpected
+  `flock` status, an unusable host cache, and a missing job-local
+  repository. The `.size-baseline` entry is
   re-measured to the workflow's size after the last edit.
 - Real-host soak is CI itself: the first pool runs after merge either
   acquire in ticket order or time out with an attributable ticket number.
@@ -325,8 +327,9 @@ scripts/tests/sdk-java-workflow.test.js scripts/tests/workflow-size.test.js`
   Both call sites downgrade a failed acquisition or a setup fault to a
   warning, skip the write-back, and rewrite the helper's timeout text
   case-insensitively on the way to the log, so an acquisition this workflow
-  now tolerates leaves no classifier signature on a succeeding step. Only an
-  unexpected bare-`flock` status remains fatal.
+  now tolerates leaves no classifier signature on the step whether the suite
+  succeeds or fails, because every tolerated path exits with the captured
+  suite status. Only an unexpected bare-`flock` status remains fatal.
 
 ## Open questions
 

@@ -366,14 +366,14 @@ jobs:
           # (nlink >= 2), so the delta is nlink == 1. Each link is atomic and
           # -n never replaces a host file, so the backstop can leave an
           # artifact missing for the next job to re-resolve, never truncated.
-          # Maven's resolver tracking markers record this run's resolution
-          # outcomes, so they are not published.
+          # Maven's resolver tracking markers and version metadata record
+          # this run's resolution outcomes, so they are not published.
           # No write-back child inherits fd 9, or a cancelled job's survivor
           # would hold the host lock until it exits.
           mkdir -p "${HOME}/.m2/repository" 9>&- || { echo "::warning::Maven cache write-back skipped (host cache unusable); the gate result above is unaffected"; exit "${suite_status}"; }
           cd "${RUNNER_TEMP}/m2-repo" || { echo "::warning::Maven cache write-back skipped; the gate result above is unaffected"; exit "${suite_status}"; }
           write_back=0
-          timeout 300 find . \( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-server \) -prune -o -type f -links 1 ! -name '*.lastUpdated' ! -name 'resolver-status.properties' ! -name '_remote.repositories' -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
+          timeout 300 find . \( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-server \) -prune -o -type f -links 1 ! -name '*.lastUpdated' ! -name 'resolver-status.properties' ! -name '_remote.repositories' ! -name 'maven-metadata-*.xml' -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
           if [ "${write_back}" -eq 124 ]; then
             echo "::warning::Maven cache write-back stopped after 300 s; the gate result above is unaffected"
           elif [ "${write_back}" -ne 0 ]; then
@@ -989,14 +989,14 @@ jobs:
           # took up to 61 minutes (run 39563394993). Each link is atomic and
           # -n never replaces a host file, so the backstop can leave an
           # artifact missing for the next job to re-resolve, never truncated.
-          # Maven's resolver tracking markers record this run's resolution
-          # outcomes, so they are not published.
+          # Maven's resolver tracking markers and version metadata record
+          # this run's resolution outcomes, so they are not published.
           # No write-back child inherits fd 9, or a cancelled job's survivor
           # would hold the host lock until it exits.
           mkdir -p "${HOME}/.m2/repository" 9>&- || { echo "::warning::Maven cache write-back skipped (host cache unusable); the gate result above is unaffected"; exit "${suite_status}"; }
           cd "${RUNNER_TEMP}/m2-repo" || { echo "::warning::Maven cache write-back skipped; the gate result above is unaffected"; exit "${suite_status}"; }
           write_back=0
-          timeout 300 find . \( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-server \) -prune -o -type f -links 1 ! -name '*.lastUpdated' ! -name 'resolver-status.properties' ! -name '_remote.repositories' -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
+          timeout 300 find . \( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-server \) -prune -o -type f -links 1 ! -name '*.lastUpdated' ! -name 'resolver-status.properties' ! -name '_remote.repositories' ! -name 'maven-metadata-*.xml' -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
           if [ "${write_back}" -eq 124 ]; then
             echo "::warning::Maven cache write-back stopped after 300 s; the gate result above is unaffected"
           elif [ "${write_back}" -ne 0 ]; then
