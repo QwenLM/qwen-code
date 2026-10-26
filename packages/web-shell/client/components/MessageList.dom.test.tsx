@@ -47,6 +47,7 @@ vi.mock('./MessageItem', async () => {
     MessageItem: ({
       message,
       showAssistantActions,
+      assistantFooterAlwaysVisible,
       showAssistantBranch,
       onBranchSession,
       branchRecordId,
@@ -59,6 +60,7 @@ vi.mock('./MessageItem', async () => {
       message: Message;
       assistantFeedbackPromptId?: string;
       showAssistantActions?: boolean;
+      assistantFooterAlwaysVisible?: boolean;
       showAssistantBranch?: boolean;
       onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
       branchRecordId?: string;
@@ -79,6 +81,7 @@ vi.mock('./MessageItem', async () => {
         {
           'data-testid': `msg-${message.id}`,
           'data-assistant-actions': String(Boolean(showAssistantActions)),
+          'data-footer-visible': String(Boolean(assistantFooterAlwaysVisible)),
           'data-feedback-prompt': assistantFeedbackPromptId,
           'data-locate-flashing': isLocateFlashing ? 'true' : undefined,
           'data-send-failed': sendFailed ? 'true' : undefined,
@@ -4420,6 +4423,10 @@ describe('MessageList — turn collapse (DOM)', () => {
 
   it.each([
     [7069, '8s'],
+    [59999, '1m 0s'],
+    [60000, '1m 0s'],
+    [60001, '1m 1s'],
+    [397000, '6m 37s'],
     [0, '0s'],
     ['1000', '14s'],
     [-1, '14s'],
@@ -4561,6 +4568,31 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(
       c.querySelector('[data-testid="assistant-turn-footer"]')?.textContent,
     ).toBe('u1:a1:answer');
+  });
+
+  it('keeps only the newest completed turn footer visible and releases it on the next prompt', () => {
+    const messages = [
+      userMsg('u1'),
+      asstMsg('a1'),
+      userMsg('u2'),
+      asstMsg('a2'),
+    ];
+    const c = mount(messages);
+    c.querySelector<HTMLElement>('[data-web-shell-message-list]')!.scrollTo =
+      vi.fn();
+    const visible = (id: string) =>
+      c
+        .querySelector(`[data-testid="msg-${id}"]`)
+        ?.getAttribute('data-footer-visible');
+    expect(visible('a1')).toBe('false');
+    expect(visible('a2')).toBe('true');
+    rerenderMessages(c, [...messages, userShellMsg('shell')]);
+    expect(visible('a2')).toBe('true');
+    rerenderMessages(c, [...messages, userMsg('u3')], { isResponding: true });
+    expect(visible('a2')).toBe('false');
+    rerenderMessages(c, [...messages, userMsg('u3'), asstMsg('a3')]);
+    expect(visible('a2')).toBe('false');
+    expect(visible('a3')).toBe('true');
   });
 
   it('maps each completed turn footer to its own turn id', () => {
@@ -6362,6 +6394,61 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(scrollTop).toBe(1200);
     expect(scrollTo).not.toHaveBeenCalled();
   });
+
+  it.each(['before reconnect', 'during replay'])(
+    'preserves a reading pause started %s after catch-up completes',
+    async (timing) => {
+      let scrollTop = 600;
+      Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+        configurable: true,
+        value: 1200,
+      });
+      Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+        configurable: true,
+        value: 600,
+      });
+      Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+        configurable: true,
+        get: () => scrollTop,
+        set: (value: number) => {
+          scrollTop = Math.max(0, Math.min(value, 600));
+        },
+      });
+      const messages = [userMsg('u1'), asstMsg('a1')];
+      const ref = createRef<MessageListHandle>();
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container, transcriptRenderMode: 'interactive' });
+      renderInto(root, messages, ref);
+      const list = container.querySelector<HTMLElement>(
+        '[data-web-shell-message-list]',
+      )!;
+      if (timing === 'during replay') {
+        renderInto(root, messages, ref, { catchingUp: true });
+      }
+      act(() => {
+        list.dispatchEvent(new WheelEvent('wheel', { deltaY: -300 }));
+        list.scrollTop = 300;
+        list.dispatchEvent(new Event('scroll'));
+      });
+      if (timing === 'before reconnect') {
+        renderInto(root, messages, ref, { catchingUp: true });
+      }
+      renderInto(root, messages, ref, { catchingUp: false });
+      await nextFrame();
+      expect(scrollTop).toBe(300);
+
+      renderInto(root, [...messages, asstMsg('a2')], ref, {
+        catchingUp: false,
+      });
+      await nextFrame();
+      expect(scrollTop).toBe(300);
+
+      act(() => ref.current?.scrollToBottom('auto'));
+      expect(scrollTop).toBe(600);
+    },
+  );
 
   it('finishes cooldown following unless the user scrolls up', () => {
     resizeObserversFireOnObserve = false;

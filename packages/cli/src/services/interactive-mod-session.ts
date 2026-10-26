@@ -5,12 +5,13 @@
  */
 
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import type { ModToolCall } from '@qwen-code/qwen-code-core/mods/tool-events.js';
 import type { ModCommandPresentation } from '@qwen-code/qwen-code-core/mods/types.js';
 import type { LoadedSettings } from '../config/settings.js';
 import { CommandKind, type SlashCommand } from '../ui/commands/types.js';
 import { sanitizeTerminalLine } from '../ui/utils/textUtils.js';
 import { registerCleanup } from '../utils/cleanup.js';
-import { ModSession } from './mod-session.js';
+import { ModSession, type ModTurn } from './mod-session.js';
 import type { ICommandLoader } from './types.js';
 
 const sessions = new WeakMap<Config, InteractiveModSession>();
@@ -138,8 +139,38 @@ export class InteractiveModSession implements ICommandLoader {
     }
   }
 
+  captureToolSignal(): AbortSignal {
+    return AbortSignal.any([
+      this.lifetime.signal,
+      this.session.captureToolSignal(),
+    ]);
+  }
+
+  restoreTools(): Promise<void> {
+    return this.session.restoreTools();
+  }
+
+  invalidateTools(): void {
+    this.session.invalidateTools();
+  }
+
+  toolCall(): ModToolCall | undefined {
+    return this.session.toolCall(() => {});
+  }
+
   syncSession(reason: 'clear' | 'resume'): Promise<void> {
     return this.session.syncSession(reason);
+  }
+
+  startTurn(
+    text: string,
+    signal: AbortSignal,
+    abort: () => boolean,
+    promptId?: string,
+  ): ModTurn | undefined {
+    return this.closing
+      ? undefined
+      : this.session.startTurn(text, signal, abort, promptId);
   }
 
   close(): Promise<void> {

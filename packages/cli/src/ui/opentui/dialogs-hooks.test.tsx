@@ -32,9 +32,9 @@ const mocks = vi.hoisted(() => {
     ) => {
       const config = key === undefined ? props : { ...props, key };
       const children = (config?.children ?? null) as React.ReactNode;
-      if (type === 'box' || type === 'text') {
+      if (type === 'box' || type === 'text' || type === 'scrollbox') {
         return React.createElement(
-          type === 'box' ? 'div' : 'span',
+          type === 'text' ? 'span' : 'div',
           key === undefined ? null : { key },
           children,
         );
@@ -563,6 +563,72 @@ describe('OpenTuiHooksDialog', () => {
     expect(screen.getByText('[command] ./a.sh')).toBeTruthy();
     expect(screen.getByText('[command] ./b.sh')).toBeTruthy();
     expect(screen.queryByText('[command] ./c.sh')).toBeNull();
+  });
+
+  it('windows matchers and commits the visible final selection', async () => {
+    render(
+      <OpenTuiHooksDialog
+        config={configWith({
+          entries: Array.from({ length: 12 }, (_, index) => ({
+            eventName: HookEventName.PreToolUse,
+            matcher: `matcher-${index}`,
+            config: { type: HookType.Command, command: './lint.sh' },
+          })),
+        })}
+        settings={settingsWith()}
+        onClose={vi.fn()}
+        availableTerminalHeight={15}
+      />,
+    );
+    await press('return');
+    expect(screen.getByText('matcher-2')).toBeTruthy();
+    expect(screen.queryByText('matcher-3')).toBeNull();
+    for (let index = 0; index < 11; index++) await press('down');
+    expect(screen.getByText('matcher-11')).toBeTruthy();
+    await press('return');
+    expect(screen.getByText('PreToolUse - Matcher: matcher-11')).toBeTruthy();
+    await press('escape');
+    await press('escape');
+    expect(screen.getByText('PreToolUse')).toBeTruthy();
+  });
+
+  it('retains a selectable row at a one-row region and walks back from details', async () => {
+    const onClose = vi.fn();
+    render(
+      <OpenTuiHooksDialog
+        config={configWith({
+          entries: [
+            {
+              eventName: HookEventName.PreToolUse,
+              matcher: 'Read',
+              config: { type: HookType.Command, command: 'HEAD\nMIDDLE\nTAIL' },
+            },
+          ],
+        })}
+        settings={settingsWith()}
+        onClose={onClose}
+        availableTerminalHeight={1}
+      />,
+    );
+    expect(screen.queryByText('Hooks')).toBeNull();
+    for (
+      let i = 0;
+      i < DISPLAY_HOOK_EVENTS.indexOf(HookEventName.PreToolUse);
+      i++
+    ) {
+      await press('down');
+    }
+    await press('return');
+    expect(screen.getByText('Read')).toBeTruthy();
+    await press('return');
+    await press('return');
+    expect(screen.queryByText('Hook details')).toBeNull();
+    expect(screen.getByText('Event:')).toBeTruthy();
+    expect(screen.getByText('HEAD')).toBeTruthy();
+    expect(screen.getByText('MIDDLE')).toBeTruthy();
+    expect(screen.getByText('TAIL')).toBeTruthy();
+    for (let i = 0; i < 4; i++) await press('escape');
+    expect(onClose).toHaveBeenCalledOnce();
   });
 
   it('clips a wrapping matcher name to the one row the window charges for it', async () => {

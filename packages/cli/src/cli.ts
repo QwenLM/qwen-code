@@ -40,6 +40,7 @@ initCpuProfiler();
 type BootstrapRoute =
   | 'serve'
   | 'mcp'
+  | 'memory'
   | 'managed-runtime-worker'
   | 'session-send-mcp'
   | 'help'
@@ -48,6 +49,14 @@ type BootstrapRoute =
 
 export const TOP_LEVEL_COMMANDS = [
   ['agents <command>', 'Session agents: join a coordinator as a runtime'],
+  [
+    'attach --session <session-id>',
+    'Attach a terminal to a running daemon session',
+  ],
+  [
+    'autofix-pr <command>',
+    'Internal helpers used by the /autofix-pr skill (PR worktree setup, change snapshot and its gate probe, CI logs, guarded push, replies, re-runs, the scheduled task, status, cleanup)',
+  ],
   ['auth', 'Configure authentication (removed)'],
   [
     'batch <command>',
@@ -58,6 +67,7 @@ export const TOP_LEVEL_COMMANDS = [
   ['extensions <command>', 'Manage Qwen Code extensions.'],
   ['hooks', 'Manage Qwen Code hooks (use /hooks in interactive mode).'],
   ['mcp', 'Manage MCP servers'],
+  ['memory', 'Preview and import external memories'],
   [
     'review <command>',
     'Run a review non-interactively (`run`), plus the internal helpers used by the /review skill (PR worktree setup, context fetch, rules loading, presubmit checks, cleanup)',
@@ -70,6 +80,7 @@ export const TOP_LEVEL_COMMANDS = [
     'serve',
     'Run Qwen Code as a local HTTP daemon (Stage 1 experimental: --http-bridge)',
   ],
+  ['daemon <command>', 'Inspect and control local qwen serve daemons'],
   ['sessions <command>', 'Manage Qwen Code sessions'],
   ['update', 'Check for Qwen Code updates and install if available'],
 ] as const;
@@ -390,6 +401,7 @@ export function resolveBootstrapRoute(
   // Version-bearing mcp argv never reaches here: the intercept above owns
   // every exact version token before `--`, and post-`--` tokens are
   // positional data the fast path persists verbatim.
+  if (firstArg === 'memory') return 'memory';
   if (firstArg === 'mcp') {
     return 'mcp';
   }
@@ -424,6 +436,18 @@ function printMcpHelp(): void {
   writeStdoutLine(lines.join('\n'));
 }
 
+function printMemoryHelp(): void {
+  const lines = [
+    'Usage: qwen memory <command>',
+    '',
+    'Preview and import external memories',
+    '',
+    'Commands:',
+    '  qwen memory import codex  Preview Codex memory; explicitly confirm selected sections to consolidate',
+  ];
+  writeStdoutLine(lines.join('\n'));
+}
+
 async function printBootstrapVersion(): Promise<void> {
   if (process.env['CLI_VERSION']) {
     writeStdoutLine(process.env['CLI_VERSION']);
@@ -452,6 +476,43 @@ async function runMcpFastPath(rawArgv: readonly string[]): Promise<void> {
   const parser = yargsInstance([])
     .scriptName('qwen')
     .command(mcpCommand)
+    .version(false)
+    .help()
+    .alias('h', 'help')
+    .strict()
+    .strictCommands()
+    .demandCommand(1, 'You need at least one command before continuing.')
+    .fail((message: string | null, error: Error | undefined, yargs: Argv) => {
+      writeStderrLine(message || error?.message || 'Unknown argument error');
+      yargs.showHelp();
+      process.exitCode = 1;
+    })
+    .exitProcess(false);
+
+  if (hasFlag(argv.slice(2), '--help', '-h')) {
+    await parseYargsHelp(parser, argv);
+    return;
+  }
+
+  await parseYargsCommand(parser, argv);
+}
+
+async function runMemoryFastPath(rawArgv: readonly string[]): Promise<void> {
+  const argv: readonly string[] = normalizeServeFastPathArgv(rawArgv);
+  const hasSubcommand = argv.slice(1).some((token) => !token.startsWith('-'));
+  if (!hasSubcommand) {
+    printMemoryHelp();
+    return;
+  }
+
+  const [{ default: yargsInstance }, { memoryCommand }] = await Promise.all([
+    import('yargs'),
+    import('./commands/memory.js'),
+  ]);
+
+  const parser = yargsInstance([])
+    .scriptName('qwen')
+    .command(memoryCommand)
     .version(false)
     .help()
     .alias('h', 'help')
@@ -526,11 +587,19 @@ async function parseYargsCommand(
 export async function runCliEntry(
   rawArgv: readonly string[] = process.argv.slice(2),
 ): Promise<void> {
-  if (rawArgv.length === 1 && rawArgv[0] === 'managed-runtime-bootstrap') {
+  if (
+    rawArgv[0] === 'managed-runtime-bootstrap' &&
+    (rawArgv.length === 1 ||
+      (rawArgv.length === 2 &&
+        ['--help', '--workspace-file-upload'].includes(rawArgv[1]!)))
+  ) {
     const { runManagedRuntimeBootstrap } = await import(
       './serve/managed-runtime-bootstrap.js'
     );
-    await runManagedRuntimeBootstrap();
+    await runManagedRuntimeBootstrap(
+      rawArgv[1] === '--help',
+      rawArgv[1] === '--workspace-file-upload',
+    );
     return;
   }
   if (
@@ -595,6 +664,9 @@ export async function runCliEntry(
     if (await tryRunServeFastPath(argv)) {
       return;
     }
+  } else if (route === 'memory') {
+    await runMemoryFastPath(argv);
+    return;
   } else if (route === 'mcp') {
     await runMcpFastPath(argv);
     return;

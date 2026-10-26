@@ -1,4 +1,9 @@
 import {
+  beginLocalCommand,
+  finishLocalCommand,
+  clearPendingLocalCommands,
+} from './utils/message-deletion';
+import {
   createComposerTagForItem,
   fileReferenceInsertText,
   FILE_PROVIDER_ID,
@@ -9,6 +14,10 @@ import {
   resolveModelManagement,
   type WebShellModelManagementOptions,
 } from './modelManagement';
+import type {
+  WebShellUnavailableModel,
+  WebShellUnavailableModelTooltipMount,
+} from './unavailableModels';
 import './styles/globals.css';
 import {
   useMessageNavigation,
@@ -132,6 +141,7 @@ import { reorderChildrenUnderParents } from './components/messages/agentForest';
 import { SubagentDetailsProvider } from './subagentDetailsContext';
 import { TurnCallsProvider } from './turnCallsContext';
 import { useModelConfigurations } from './hooks/useModelConfigurations';
+import { useModelRefresh } from './hooks/useModelRefresh';
 import { MonitorDetailsProvider } from './monitorDetailsContext';
 import { WorkflowDetailsProvider } from './workflowDetailsContext';
 import { findMonitorTaskForTool } from './utils/monitorTasks';
@@ -200,7 +210,12 @@ import {
 } from './components/panels/EnvironmentPanel';
 import { ChatContextHeader } from './components/ChatContextHeader';
 import { WelcomeHeader } from './components/WelcomeHeader';
-import { EXECUTION_APPROVAL_MODES, parsePlanCommand } from './utils/planMode';
+import {
+  nextApprovalMode,
+  parsePlanCommand,
+  type WebShellApprovalMode,
+} from './utils/planMode';
+import { useApprovalModes } from './hooks/useApprovalModes';
 import { ApprovalModeDialog } from './components/dialogs/ApprovalModeDialog';
 import { ResumeDialog } from './components/dialogs/ResumeDialog';
 import { DialogShell } from './components/dialogs/DialogShell';
@@ -211,7 +226,12 @@ import {
 } from './components/dialogs/ModelDialog';
 import { ModelFallbacksDialog } from './components/dialogs/ModelFallbacksDialog';
 import { ManagedSessionsPage } from './components/managed/ManagedSessionsPage';
-import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
+import type {
+  ManagedAgentProvider,
+  ManagedAgentWorkspace,
+} from './components/managed/managed-agent-provider';
+import type { WorkspaceSelectorOption } from './components/WorkspaceSelector';
+import { DropdownMenuItem } from './components/ui/dropdown-menu';
 import {
   managedSelectionFromUrl,
   saveManagedSelection,
@@ -318,6 +338,7 @@ import {
   type WebShellSettingsOptions,
 } from './settings';
 import { SettingsMessage } from './components/messages/SettingsMessage';
+import { WorkspaceDirectoriesSection } from './components/workspaces/WorkspaceDirectoriesSection';
 import { isAskUserPermission } from './utils/askUserPermission';
 import { ToolApproval } from './components/messages/ToolApproval';
 import { AskUserQuestion } from './components/messages/AskUserQuestion';
@@ -327,6 +348,7 @@ import { DeleteSessionDialog } from './components/dialogs/DeleteSessionDialog';
 import { ReleaseSessionDialog } from './components/dialogs/ReleaseSessionDialog';
 import { RewindDialog } from './components/dialogs/RewindDialog';
 import { AddWorkspaceDialog } from './components/dialogs/AddWorkspaceDialog';
+import { WorkspaceExecutionSelect } from './components/workspaces/WorkspaceExecutionSelect';
 import { WorkspaceAddStatusDialog } from './components/dialogs/WorkspaceAddStatusDialog';
 import { StandaloneContext } from './config/standalone';
 import {
@@ -354,7 +376,6 @@ import {
   navigateToDaemon,
 } from './config/daemon';
 import { Button } from './components/ui/button';
-import { Tabs, TabsList, TabsTrigger } from './components/ui/tabs';
 import { isDesktopShell } from './utils/externalOpen';
 import {
   isPluginShadowPanel,
@@ -441,6 +462,7 @@ import { QueuedPromptDisplay } from './components/QueuedPromptDisplay';
 import { useQueuedPrompts } from './hooks/useQueuedPrompts';
 import { useNewSessionSuggestion } from './hooks/useNewSessionSuggestion';
 import {
+  shellTaskPanelTitle,
   TasksStatusMessage,
   type SerializedTasksMessage,
 } from './components/messages/TasksStatusMessage';
@@ -457,6 +479,7 @@ import {
 } from './components/messages/StatusMessage';
 import type { SerializedMcpStatusMessage } from './components/messages/McpStatusMessage';
 import { McpManagerPage } from './components/mcp/McpManagerPage';
+import { ManagedMcpManagerPage } from './components/managed/ManagedMcpManagerPage';
 import { BtwMessage } from './components/messages/BtwMessage';
 import {
   createAndAttachSessionForPrompt,
@@ -514,6 +537,7 @@ import {
 } from './themeContext';
 import {
   WebShellCustomizationProvider,
+  type WebShellCustomization,
   type WebShellAssistantFeedbackOptions,
   type WebShellComposerApi,
   type WebShellComposerInput,
@@ -561,7 +585,6 @@ import { WebShellPortalRootContext } from './portalRoot';
 import { CompactModeContext, TodoContextsProvider } from './WebShellContexts';
 import styles from './App.module.css';
 
-const MODES_CYCLE = EXECUTION_APPROVAL_MODES;
 const MAX_TOASTS = 4;
 const TOAST_AUTO_DISMISS_MS = 5000;
 const DEFAULT_REVIEW_PANEL_WIDTH = 500;
@@ -1341,10 +1364,16 @@ export type WebShellSlashCommandHandler = (
 ) => boolean | void;
 
 export interface WebShellProps {
+  /** Refresh and persist the host catalog before Qwen reloads models. No return data is required. */
+  onRefreshModels?: WebShellCustomization['onRefreshModels'];
   /** Native settings-page presentation. Does not restrict commands or daemon access. */
   settings?: WebShellSettingsOptions;
   /** Model add/delete interactions across WebShell. Not a backend permission policy. */
   modelManagement?: WebShellModelManagementOptions;
+  /** Extra catalog models shown disabled in the composer picker. */
+  unavailableModels?: readonly WebShellUnavailableModel[];
+  /** Host-owned hint for a disabled model. DOM/Solid hosts mount into the container. */
+  mountUnavailableModelTooltip?: WebShellUnavailableModelTooltipMount;
   /** Host-specific label for the Ask User Question free-text choice. */
   askUserFreeTextLabel?: string;
   /** Called whenever the attached daemon session or workspace changes. */
@@ -1461,6 +1490,8 @@ export interface WebShellProps {
    * needs them. Plan must be explicitly included.
    */
   composerToolbarActions?: readonly ComposerToolbarAction[];
+  /** Execution mode choices. Overrides ui.allowedApprovalModes; [] offers none. Presentation only. */
+  allowedApprovalModes?: readonly WebShellApprovalMode[];
   /** Optionally filter main-model entries without changing shared defaults. */
   mainModelFilter?: (model: ModelDialogModel) => boolean;
   /** Stack completion details vertically for narrow embedded hosts. */
@@ -1638,6 +1669,7 @@ export interface WebShellProps {
    * Override the witty phrases cycled while a prompt is streaming. Receives the
    * resolved UI language; return phrases to replace the built-in defaults, an
    * empty array to hide the phrase, or `undefined`/`null` to keep the defaults.
+   * `ui.accessibility.enableLoadingPhrases: false` hides even custom phrases.
    */
   loadingPhrases?: LoadingPhrasesResolver;
   /** When provided, all toast notifications are forwarded to this callback and the built-in ToastHost is hidden. */
@@ -3369,6 +3401,7 @@ function readScopedModelSetting(
 }
 
 export function App({
+  onRefreshModels,
   askUserFreeTextLabel,
   onSessionIdChange,
   onSessionInfoChange,
@@ -3424,6 +3457,8 @@ export function App({
   sidebar,
   settings: settingsPresentation,
   modelManagement,
+  unavailableModels,
+  mountUnavailableModelTooltip,
   header,
   rightPanel,
   showToolCalls = false,
@@ -3440,6 +3475,7 @@ export function App({
   filterArtifact,
   shellRef,
   composerToolbarActions,
+  allowedApprovalModes: allowedApprovalModesProp,
   mainModelFilter,
   compactComposerOverlays = false,
   autoSubmitSlashCommands = false,
@@ -3495,6 +3531,35 @@ export function App({
   managedModeRef.current = managedMode;
   const [managedNavigationTarget, setManagedNavigationTarget] =
     useState<HTMLDivElement | null>(null);
+  const [managedArchivedNavigationTarget, setManagedArchivedNavigationTarget] =
+    useState<HTMLDivElement | null>(null);
+  const [managedArchivedStatus, setManagedArchivedStatus] = useState({
+    count: 0,
+    loading: false,
+    error: false,
+  });
+  const [managedNavigationSearch, setManagedNavigationSearch] = useState('');
+  const [managedWorkspaceId, setManagedWorkspaceId] = useState<string | null>();
+  const [managedWorkspaceCreationOpen, setManagedWorkspaceCreationOpen] =
+    useState(false);
+  const managedWorkspaceCreationOpenRef = useRef(managedWorkspaceCreationOpen);
+  managedWorkspaceCreationOpenRef.current = managedWorkspaceCreationOpen;
+  const managedProviderKey = managedAgentProvider?.storageKey;
+  const [managedWorkspaceCatalog, setManagedWorkspaceCatalog] = useState<{
+    providerKey: string;
+    workspaces: ManagedAgentWorkspace[];
+  }>();
+  const handleManagedWorkspacesChange = useCallback(
+    (workspaces: ManagedAgentWorkspace[]) => {
+      if (managedProviderKey) {
+        setManagedWorkspaceCatalog({
+          providerKey: managedProviderKey,
+          workspaces,
+        });
+      }
+    },
+    [managedProviderKey],
+  );
   useAssistantTurnSettlementProjection(onAssistantTurnSettled);
   const [chatWidthMode, setChatWidthMode] =
     useState<ChatWidthMode>(readChatWidthMode);
@@ -3735,8 +3800,11 @@ export function App({
     [],
   );
 
+  const allowedApprovalModes = useShallowMemo(allowedApprovalModesProp);
   const customization = useMemo(
     () => ({
+      onRefreshModels,
+      allowedApprovalModes,
       artifact,
       filterArtifact,
       askUserFreeTextLabel,
@@ -3771,6 +3839,8 @@ export function App({
       fileDropAction,
     }),
     [
+      onRefreshModels,
+      allowedApprovalModes,
       artifact,
       filterArtifact,
       askUserFreeTextLabel,
@@ -3817,6 +3887,7 @@ export function App({
     structuralOnly: true,
   });
   const connection = useConnection();
+  const modelRefresh = useModelRefresh(onRefreshModels);
   const standalone = useContext(StandaloneContext);
   const logicalSessionKey = getLogicalSessionKey(
     connection.sessionId,
@@ -3866,6 +3937,58 @@ export function App({
   const sessionOwnerGuard = useDaemonSessionOwnerGuard();
   const transcriptHistory = useTranscriptHistory();
   const workspace = useWorkspace();
+  const [skillsSource, setSkillsSource] = useState<{
+    client: typeof workspace.client;
+    cwd: string;
+  }>();
+  const [pluginInitialTab, setPluginInitialTab] = useState<
+    'extensions' | 'skills'
+  >('extensions');
+  const skillsSourceCwd =
+    skillsSource?.client === workspace.client
+      ? skillsSource.cwd
+      : workspace.workspaceCwd;
+  const selectSkillsWorkspace = useCallback(
+    (cwd: string) => {
+      setSkillsSource((current) =>
+        current?.client === workspace.client && current.cwd === cwd
+          ? current
+          : { client: workspace.client, cwd },
+      );
+    },
+    [workspace.client],
+  );
+  const managedCreationSkills = useMemo(() => {
+    if (!managedAgentProvider || !skillsSourceCwd) return undefined;
+    const sourceCwd = skillsSourceCwd;
+    return {
+      workspaceCwd: sourceCwd,
+      async list(signal: AbortSignal) {
+        const status = await workspace.client
+          .workspaceByCwd(sourceCwd)
+          .workspaceConfigSkills();
+        signal.throwIfAborted();
+        if (status.workspaceCwd !== sourceCwd)
+          throw new Error('Skills source Workspace identity changed.');
+        if (!status.initialized || status.errors?.length)
+          throw new Error('Skills source Workspace is unavailable.');
+        return status.skills
+          .filter(
+            (skill) => skill.status === 'ok' && skill.userInvocable !== false,
+          )
+          .map(({ name, description }) => ({ name, description }));
+      },
+      async load(signal: AbortSignal) {
+        const snapshot = await workspace.client
+          .workspaceByCwd(sourceCwd)
+          .workspaceSkillsSnapshot(signal);
+        if (snapshot.workspaceCwd !== sourceCwd)
+          throw new Error('Skills source Workspace identity changed.');
+        return snapshot.skills;
+      },
+    };
+  }, [managedAgentProvider, skillsSourceCwd, workspace.client]);
+
   // Multi-daemon (#13727): saved hosts stay connected read-only alongside
   // the provider that owns this App subtree; the picker and sidebar consume
   // their live workspaces/sessions; embedded shells have no controller and
@@ -3996,7 +4119,9 @@ export function App({
         ...ordinaryWorkspaces.map((entry) => ({
           id: entry.id,
           cwd: entry.cwd,
-          label: workspaceLabel(entry),
+          label: managedAgentProvider
+            ? `${workspaceLabel(entry)} · ${t('managed.localMode')}`
+            : workspaceLabel(entry),
           primary: entry.primary,
           trusted: entry.trusted,
           hostOrigin: focusedHostOrigin,
@@ -4011,7 +4136,9 @@ export function App({
             .map((entry) => ({
               id: `${origin}${entry.id}`,
               cwd: entry.cwd,
-              label: workspaceLabel(entry),
+              label: managedAgentProvider
+                ? `${workspaceLabel(entry)} · ${t('managed.localMode')}`
+                : workspaceLabel(entry),
               primary: entry.primary,
               trusted: entry.trusted,
               hostOrigin: origin,
@@ -4106,6 +4233,18 @@ export function App({
     workspace.capabilities?.features?.includes(
       'scratch_workspace_registration',
     ) === true;
+  // SSH workspaces validate paths on the remote host; the daemon route
+  // refuses them, so do not offer the section at all. Registration rewrites an
+  // `ssh://` URL to a local mirror directory, so the cwd never carries that
+  // scheme: the selected workspace entry's SSH marker is the signal.
+  const workspaceDirectoriesSupported =
+    workspace.capabilities?.features?.includes('workspace_directories') ===
+      true &&
+    workspace.workspaceCwd !== undefined &&
+    workspaces.find((entry) => entry.cwd === workspace.workspaceCwd)?.ssh ===
+      undefined;
+  const gitWorkspaceCloneSupported =
+    workspace.capabilities?.features?.includes('git_workspace_clone') === true;
   const workspaceDisplayNameSupported =
     workspace.capabilities?.features?.includes('workspace_display_name') ===
     true;
@@ -4214,6 +4353,7 @@ export function App({
     () => pendingSessionContext ?? settledSessionContext,
     [pendingSessionContext, settledSessionContext],
   );
+  const sessionIsStandalone = effectiveSessionContext?.kind === 'standalone';
   const workspaceContextActive = effectiveSessionContext?.kind === 'workspace';
   // The composer picker chooses the target of the next session, so a
   // projectless draft keeps it enabled: that is where "no workspace" is
@@ -4320,6 +4460,14 @@ export function App({
   // a mismatch means connection.sessionId moved on (reconnect cycling or a
   // user-initiated switch) and the stale response is dropped.
   const worktreeSessionKeyRef = useRef<string | undefined>(undefined);
+  const sidebarStandaloneTitleRef = useRef<
+    | {
+        sessionId: string;
+        displayName?: string;
+        client: typeof workspace.client;
+      }
+    | undefined
+  >(undefined);
   const sessionStatusRequestRef = useRef(0);
   useLayoutEffect(() => {
     setSessionWorktree(undefined);
@@ -4338,17 +4486,22 @@ export function App({
     // session switch still starts from an empty title.
     setSessionStatusDisplayName(
       (prev) =>
-        peekSessionCatalogDisplayName(
-          workspace.client,
-          connection.sessionId,
-          connection.workspaceCwd,
-        ) ?? prev,
+        (connection.sessionContext?.kind === 'standalone' &&
+        sidebarStandaloneTitleRef.current?.client === workspace.client &&
+        sidebarStandaloneTitleRef.current.sessionId === connection.sessionId
+          ? sidebarStandaloneTitleRef.current.displayName
+          : peekSessionCatalogDisplayName(
+              workspace.client,
+              connection.sessionId,
+              connection.workspaceCwd,
+            )) ?? prev,
     );
   }, [
     logicalSessionKey,
     workspace.client,
     connection.sessionId,
     connection.workspaceCwd,
+    connection.sessionContext?.kind,
   ]);
   // Restore worktree info from the server when switching to an existing
   // session. The effect intentionally does NOT cancel in-flight fetches on
@@ -6454,6 +6607,11 @@ export function App({
               ...sessionActions,
               getTasks: () =>
                 workspace.client.sessionTasks(tab.sourceSessionId),
+              getTaskRuntime: (taskId) =>
+                workspace.client.sessionTaskRuntime(
+                  tab.sourceSessionId,
+                  taskId,
+                ),
               cancelTask: (taskId, kind) =>
                 workspace.client.sessionTaskCancel(
                   tab.sourceSessionId,
@@ -6474,7 +6632,7 @@ export function App({
                 : {
                     id: tab.id,
                     kind: 'shell',
-                    title: tab.title,
+                    title: shellTaskPanelTitle(task.command),
                     task,
                     sessionId: tab.sourceSessionId,
                     sessionActions: crossSessionActions,
@@ -7161,7 +7319,15 @@ export function App({
                   }
                   if (!task || task.kind !== tab.kind) return undefined;
                   const { taskId: _taskId, ...rest } = tab;
-                  return { ...rest, task, sessionActions } as ArtifactPanelTab;
+                  return {
+                    ...rest,
+                    title:
+                      task.kind === 'shell'
+                        ? shellTaskPanelTitle(task.command)
+                        : tab.title,
+                    task,
+                    sessionActions,
+                  } as ArtifactPanelTab;
                 }
                 case 'side_task':
                   return tab.sessionId ? tab : undefined;
@@ -7346,7 +7512,7 @@ export function App({
           ? `shell:${sourceSessionId}:${task.id}`
           : `shell:${task.id}`,
         kind: 'shell',
-        title: task.command,
+        title: shellTaskPanelTitle(task.command),
         task,
         ...(sourceSessionId ? { sessionId: sourceSessionId } : {}),
         ...(sourceSessionActions
@@ -7360,7 +7526,7 @@ export function App({
               const mergedTask = mergeShellTaskSnapshot(item.task, task);
               return {
                 ...tab,
-                title: mergedTask.command,
+                title: shellTaskPanelTitle(mergedTask.command),
                 task: mergedTask,
               };
             })
@@ -8530,7 +8696,7 @@ export function App({
         changed = true;
         return {
           ...tab,
-          title: mergedTask.command,
+          title: shellTaskPanelTitle(mergedTask.command),
           task: mergedTask,
         };
       });
@@ -9833,6 +9999,9 @@ export function App({
         navigation?.route.page !== 'chat' || !navigation.route.sessionId,
       );
       setManagedHome(selection.open);
+      if (managedSessionId !== selection.sessionId) {
+        setManagedWorkspaceId(undefined);
+      }
       setManagedSessionId(selection.sessionId);
     }
   }
@@ -9873,6 +10042,7 @@ export function App({
     if (activePanel !== 'settings') {
       setSettingsInitialCategory(undefined);
     }
+    if (activePanel !== 'plugins') setPluginInitialTab('extensions');
   }, [activePanel]);
   const closePanel = useCallback(() => {
     splitClassificationGenerationRef.current += 1;
@@ -10848,6 +11018,7 @@ export function App({
         store.dispatch([
           {
             type: 'status',
+            promptId: `local-command:${crypto.randomUUID()}`,
             text: change.version
               ? t('extensions.install.installedWithVersion', {
                   name,
@@ -10865,6 +11036,7 @@ export function App({
         store.dispatch([
           {
             type: 'status',
+            promptId: `local-command:${crypto.randomUUID()}`,
             text: t(key, { name, version: change.version ?? '' }),
           },
         ]);
@@ -11017,6 +11189,28 @@ export function App({
   );
   const refreshActiveSessionDisplayName = useCallback(async () => {
     const activeConnection = connectionRef.current;
+    if (
+      activeConnection.sessionId &&
+      activeConnection.sessionContext?.kind === 'standalone'
+    ) {
+      const owner = sessionOwnerGuard.capture();
+      try {
+        const summary = await workspace.client.getStandaloneSession(
+          activeConnection.sessionId,
+        );
+        if (
+          owner.isCurrent() &&
+          connectionRef.current.sessionId === activeConnection.sessionId &&
+          !('state' in summary) &&
+          summary.displayName?.trim()
+        ) {
+          setSessionStatusDisplayName(summary.displayName);
+        }
+      } catch {
+        // A title refresh must not disrupt the completed conversation.
+      }
+      return;
+    }
     if (
       !activeConnection.sessionId ||
       !activeConnection.workspaceCwd ||
@@ -12261,6 +12455,7 @@ export function App({
     showMemoryDialog ||
     (modelManagementPolicy.allowAdd && showAuthDialog) ||
     showAddWorkspaceDialog ||
+    managedWorkspaceCreationOpen ||
     scratchOutcomeUnknown !== 'clear' ||
     externalInteractionBlockCount > 0 ||
     // The Settings / Daemon Status panel replaces the chat surface, so — like a
@@ -12585,6 +12780,7 @@ export function App({
           isGoalGateBlocked() ||
           mcpAppQueueBusyRef.current ||
           queuedShellCommandsRef.current.length > 0 ||
+          isDrainingRef.current ||
           shellSubmitInFlightRef.current
         ) {
           throw new Error(t('mcpApp.message.busy'));
@@ -13056,14 +13252,26 @@ export function App({
   // read-only display commands wrap this in echoLocalCommandIfIdle and
   // intentionally ignore the suppression signal — their status-block output
   // does not split the active turn.
+  useEffect(() => {
+    clearPendingLocalCommands(store);
+  }, [connection.sessionId, store]);
   const echoOrDeferLocalCommand = useCallback(
-    (text: string, images?: PromptImage[]): boolean =>
+    (
+      text: string,
+      images?: PromptImage[],
+      localCommandId = `local-command:echo:${crypto.randomUUID()}`,
+    ): boolean =>
       appendOrDeferLocalUserMessage(
         streamingStateRef.current !== 'idle',
         text,
         images,
         {
-          append: (value: string) => store.appendLocalUserMessage(value),
+          append: (value: string) => {
+            store.appendLocalUserMessage(value, undefined, {
+              source: 'local_command',
+              localCommandId,
+            });
+          },
         },
       ),
     [store],
@@ -13074,10 +13282,18 @@ export function App({
   // block, which does not split the active turn, so they run immediately
   // mid-turn with only the echo skipped.
   const echoLocalCommandIfIdle = useCallback(
-    (text: string): void => {
-      void echoOrDeferLocalCommand(text);
+    (text: string): string => {
+      const localCommandId = `local-command:echo:${crypto.randomUUID()}`;
+      beginLocalCommand(store, localCommandId);
+      if (streamingStateRef.current === 'idle') {
+        store.appendLocalUserMessage(text, undefined, {
+          source: 'local_command',
+          localCommandId,
+        });
+      }
+      return localCommandId;
     },
-    [echoOrDeferLocalCommand],
+    [store],
   );
 
   // Shared result dispatch for those read-only commands: `clearActiveText:
@@ -13085,10 +13301,12 @@ export function App({
   // block mid-stream, which would split the streaming answer and orphan its
   // usage frames.
   const dispatchReadOnlyStatus = useCallback(
-    (text: string, data?: unknown) => {
+    (text: string, data?: unknown, localCommandId?: string) => {
+      finishLocalCommand(store, localCommandId);
       store.dispatch([
         {
           type: 'status',
+          promptId: localCommandId ?? `local-command:${crypto.randomUUID()}`,
           text,
           ...(data !== undefined ? { data } : {}),
           clearActiveText: false,
@@ -13163,10 +13381,18 @@ export function App({
     () => (projectFeaturesAvailable ? loadedWorkspaceSettings : []),
     [loadedWorkspaceSettings, projectFeaturesAvailable],
   );
+  const availableApprovalModes = useApprovalModes(
+    activeWorkspaceCwd,
+    allowedApprovalModes,
+  );
   const showResponseTokensPerSecond =
     workspaceSettings.find(
       (setting) => setting.key === 'ui.showResponseTokensPerSecond',
     )?.values.effective === true;
+  const enableLoadingPhrases =
+    workspaceSettings.find(
+      (setting) => setting.key === 'ui.accessibility.enableLoadingPhrases',
+    )?.values.effective !== false;
   const liveSetup = useLiveVoiceSetup(
     workspaceSettings.some(
       (setting) => setting.key === 'experimental.liveVoice.enabled',
@@ -13771,12 +13997,18 @@ export function App({
       if (sessionWriteBlocked) return;
       const owner = { current: sessionOwnerGuard.capture() };
       const previousLanguage = selectedLanguage;
+      // A standalone session refuses every workspace write, so its only
+      // writable language scope is the user one. The settings panel hides the
+      // row on the Workspace tab there; keep this guard for a scope that was
+      // picked before the session context settled.
+      const effectiveScope = sessionIsStandalone ? 'user' : scope;
       // Forward the settings tab's scope to the command so a Workspace-tab edit
       // persists to workspace settings instead of always writing user scope
       // (the /language command otherwise defaults to user). The command still
       // switches the daemon's live locale so command descriptions re-localize —
       // which a plain scoped settings write wouldn't do.
-      const scopeFlag = scope === 'workspace' ? ' --project' : ' --global';
+      const scopeFlag =
+        effectiveScope === 'workspace' ? ' --project' : ' --global';
       const command = `/language ui ${nextLanguage}${scopeFlag}`;
       const refreshSettings = async () => {
         if (!owner.current.isCurrent()) return;
@@ -13806,7 +14038,7 @@ export function App({
       sendPrompt(command, undefined, undefined, { ownerRef: owner })
         .then(() => {
           if (!owner.current.isCurrent()) return;
-          if (scope === 'user') {
+          if (effectiveScope === 'user') {
             // A user-scoped choice becomes the host's persisted opinion. A
             // workspace choice remains settings-owned for that workspace.
             handleLanguageChange(nextLanguage);
@@ -13836,13 +14068,67 @@ export function App({
       selectedLanguage,
       sessionActions,
       sessionOwnerGuard,
+      sessionIsStandalone,
+      isGoalGateBlocked,
+    ],
+  );
+
+  const handleSettingsOutputLanguageChange = useCallback(
+    async (language: string): Promise<boolean> => {
+      if (sessionWriteBlocked) return false;
+      const owner = { current: sessionOwnerGuard.capture() };
+      if (
+        streamingStateRef.current !== 'idle' ||
+        sessionHasActivePromptRef.current ||
+        isGoalGateBlocked()
+      ) {
+        blockCommand();
+        return false;
+      }
+      // Only the language command rewrites output-language.md and refreshes
+      // running sessions; a plain settings write would leave both stale.
+      const command = `/language output ${language.trim() || 'auto'}`;
+      try {
+        await sendPrompt(command, undefined, undefined, { ownerRef: owner });
+      } catch (error) {
+        if (owner.current.isCurrent()) {
+          reportError(error, 'Failed to sync /language output command');
+        }
+        return false;
+      }
+      if (!owner.current.isCurrent()) return true;
+      try {
+        await reloadWorkspaceSettings();
+      } catch (error) {
+        if (owner.current.isCurrent()) {
+          reportError(
+            error,
+            'Failed to refresh settings after /language output',
+          );
+        }
+      }
+      return true;
+    },
+    [
+      blockCommand,
+      reloadWorkspaceSettings,
+      reportError,
+      sessionWriteBlocked,
+      sendPrompt,
+      sessionOwnerGuard,
       isGoalGateBlocked,
     ],
   );
 
   const handleClearScreen = useCallback(() => {
     if (streamingStateRef.current !== 'idle') {
-      store.dispatch([{ type: 'status', text: t('clear.blocked') }]);
+      store.dispatch([
+        {
+          type: 'status',
+          promptId: `local-command:${crypto.randomUUID()}`,
+          text: t('clear.blocked'),
+        },
+      ]);
       return;
     }
     autoRecapVersionRef.current += 1;
@@ -13934,6 +14220,7 @@ export function App({
             store.dispatch([
               {
                 type: 'status',
+                promptId: `local-command:${crypto.randomUUID()}`,
                 text: t('mode.autoApproved', { tool: approval.title || '' }),
               },
             ]);
@@ -13965,9 +14252,20 @@ export function App({
   );
   const handleSetMode = useCallback(
     (modeId: string) => {
+      if (
+        isDaemonApprovalMode(modeId) &&
+        modeId !== 'plan' &&
+        !availableApprovalModes.some((mode) => mode === modeId)
+      ) {
+        reportError(
+          new Error(`Approval mode not offered here: ${modeId}`),
+          t('local.approvalMode'),
+        );
+        return;
+      }
       void setComposerMode(modeId, currentModeRef.current === 'plan');
     },
-    [setComposerMode],
+    [availableApprovalModes, setComposerMode, reportError, t],
   );
   const handleTogglePlan = useCallback(() => {
     void setComposerMode(
@@ -14208,6 +14506,9 @@ export function App({
             void refreshActiveSessionDisplayNameRef.current();
           }
         }
+      }
+      if (productContext?.kind === 'standalone' && !sessionDisplayName) {
+        void refreshActiveSessionDisplayNameRef.current();
       }
       dispatchSessionChangeRef.current?.({
         type: 'turn_complete',
@@ -14545,13 +14846,9 @@ export function App({
   ]);
 
   const handleCycleMode = useCallback(() => {
-    // findIndex, not indexOf: narrowing currentMode to the tuple member type
-    // silently degrades when the SDK's declaration bundle leaves its
-    // permission-mode import dangling, and the build must survive both states.
-    const idx = MODES_CYCLE.findIndex((mode) => mode === executionMode);
-    const next = MODES_CYCLE[(idx + 1) % MODES_CYCLE.length];
-    handleSetMode(next);
-  }, [executionMode, handleSetMode]);
+    const next = nextApprovalMode(availableApprovalModes, executionMode);
+    if (next) handleSetMode(next);
+  }, [availableApprovalModes, executionMode, handleSetMode]);
 
   // Shared by the /context slash command and the status-bar context
   // indicator. Echoes the command when idle — that also makes the transcript
@@ -14565,7 +14862,7 @@ export function App({
       // so the active turn is not split.
       if (!requireActiveSessionForLocalCommand()) return;
       const owner = sessionOwnerGuard.capture();
-      echoLocalCommandIfIdle(commandText);
+      const localCommandId = echoLocalCommandIfIdle(commandText);
       sessionActions
         .getContextUsage({ detail })
         .then((result) => {
@@ -14573,18 +14870,26 @@ export function App({
           dispatchReadOnlyStatus(
             t('contextUsage.title'),
             createContextUsageMessageData(result),
+            localCommandId,
           );
         })
         .catch((error: unknown) => {
           if (!owner.isCurrent()) return;
+          dispatchReadOnlyStatus(
+            t('messageDelete.commandFailed'),
+            undefined,
+            localCommandId,
+          );
           reportError(error, 'Failed to load context usage');
-        });
+        })
+        .finally(() => finishLocalCommand(store, localCommandId));
     },
     [
       echoLocalCommandIfIdle,
       dispatchReadOnlyStatus,
       requireActiveSessionForLocalCommand,
       sessionActions,
+      store,
       sessionOwnerGuard,
       reportError,
       t,
@@ -14642,6 +14947,7 @@ export function App({
           store.dispatch([
             {
               type: 'status',
+              promptId: `local-command:${crypto.randomUUID()}`,
               text: t('branch.success', {
                 name: result.displayName,
               }),
@@ -15232,6 +15538,7 @@ export function App({
         if (!reconciled) {
           throw new Error(t('sidebar.addWorkspaceRefreshError'));
         }
+        setManagedHome(false);
       } finally {
         if (workspaceMutationTokenRef.current === token) {
           workspaceMutationTokenRef.current = null;
@@ -15309,6 +15616,24 @@ export function App({
     hasRemoteWorkspaceLocation,
     workspaceAddSelectedLocation,
     workspace.baseUrl,
+    workspaceActions,
+  ]);
+
+  const gitCloneControls = useMemo(() => {
+    if (!gitWorkspaceCloneSupported || !workspaceAddLocationIsConnected) {
+      return undefined;
+    }
+    return {
+      start: (input: { url: string; target: string }) =>
+        workspaceActions.startGitWorkspaceClone(input),
+      poll: (jobId: string) => workspaceActions.getGitWorkspaceCloneJob(jobId),
+      cancel: async (jobId: string) => {
+        await workspaceActions.cancelGitWorkspaceClone(jobId);
+      },
+    };
+  }, [
+    gitWorkspaceCloneSupported,
+    workspaceAddLocationIsConnected,
     workspaceActions,
   ]);
 
@@ -15489,6 +15814,47 @@ export function App({
     },
     [daemonTarget, focusedHostOrigin, handleSelectComposerWorkspace],
   );
+  const handleSelectDaemonWorkspace = useCallback(
+    (workspace: WorkspaceSelectorOption) => {
+      const target = composerWorkspaces?.find(
+        (item) =>
+          item.id === workspace.id &&
+          item.cwd === workspace.cwd &&
+          item.hostOrigin === workspace.hostOrigin,
+      );
+      if (!target?.trusted) return;
+      if (target.hostOrigin && target.hostOrigin !== focusedHostOrigin) {
+        if (!daemonTarget) return;
+        setManagedHome(false);
+        handleSelectHostedWorkspace(target.hostOrigin, target.cwd);
+      } else if (connectionRef.current.sessionId) {
+        void createNewSession({ kind: 'workspace', cwd: target.cwd });
+      } else {
+        setManagedHome(false);
+        void switchWorkspace(target.cwd);
+        returnToChat();
+      }
+    },
+    [
+      composerWorkspaces,
+      createNewSession,
+      daemonTarget,
+      focusedHostOrigin,
+      handleSelectHostedWorkspace,
+      returnToChat,
+      switchWorkspace,
+    ],
+  );
+  const handleSelectManagedWorkspace = useCallback(
+    (workspaceId: string) => {
+      setManagedWorkspaceId(workspaceId);
+      setManagedSessionId(undefined);
+      setManagedHome(true);
+      closeMobileDrawer();
+      returnToChat();
+    },
+    [closeMobileDrawer, returnToChat],
+  );
   const handleSelectComposerStandalone = useCallback(() => {
     if (connectionRef.current.sessionId) {
       void createNewSession({ kind: 'global' });
@@ -15508,10 +15874,42 @@ export function App({
   const handleCreateComposerScratchWorkspace = useCallback(() => {
     void handleCreateScratchWorkspace();
   }, [handleCreateScratchWorkspace]);
-  const handleOpenExistingWorkspace = useCallback(() => {
+  const handleOpenLocalWorkspace = useCallback(() => {
     workspaceBrowseActiveRef.current = standalone;
     setShowAddWorkspaceDialog(true);
   }, [standalone]);
+  const handleOpenManagedWorkspace = useCallback(() => {
+    setShowAddWorkspaceDialog(false);
+    setWorkspaceAddLocation(undefined);
+    workspaceBrowseActiveRef.current = false;
+    completeRemoteWorkspaceAdd();
+    setManagedWorkspaceCreationOpen(true);
+    closeMobileDrawer();
+  }, [closeMobileDrawer]);
+  const handleOpenExistingWorkspace = useCallback(() => {
+    if (
+      managedMode &&
+      managedAgentProvider?.workspaceBinding?.createWorkspace
+    ) {
+      handleOpenManagedWorkspace();
+    } else {
+      handleOpenLocalWorkspace();
+    }
+  }, [
+    managedMode,
+    managedAgentProvider,
+    handleOpenManagedWorkspace,
+    handleOpenLocalWorkspace,
+  ]);
+  const workspaceExecutionField = managedAgentProvider?.workspaceBinding
+    ?.createWorkspace ? (
+    <WorkspaceExecutionSelect
+      value="daemon"
+      onValueChange={(mode) => {
+        if (mode === 'managed') handleOpenManagedWorkspace();
+      }}
+    />
+  ) : undefined;
 
   const handleComposerAttachmentsChange = useCallback(
     (hasAttachments: boolean) => {
@@ -17216,7 +17614,9 @@ export function App({
           if (commitComposerAccepted) commitComposerAccepted();
           else editorRef.current?.clear();
         }
-        store.appendLocalUserMessage(text);
+        store.appendLocalUserMessage(text, undefined, {
+          localCommandId: `local-command:${crypto.randomUUID()}`,
+        });
         const action = operation.kind === 'set' ? 'replace' : operation.kind;
         const objective =
           operation.kind === 'set' || operation.kind === 'edit'
@@ -17674,6 +18074,7 @@ export function App({
               store.dispatch([
                 {
                   type: 'status',
+                  promptId: `local-command:${crypto.randomUUID()}`,
                   text: [
                     t('language.current', {
                       language: languageLabel(selectedLanguage),
@@ -17692,6 +18093,7 @@ export function App({
                 store.dispatch([
                   {
                     type: 'status',
+                    promptId: `local-command:${crypto.randomUUID()}`,
                     text: [
                       t('language.set'),
                       '',
@@ -17778,6 +18180,7 @@ export function App({
                 store.dispatch([
                   {
                     type: result.status === 'error' ? 'error' : 'status',
+                    promptId: `local-command:${crypto.randomUUID()}`,
                     text: translateCopyMessage(result.message, t),
                   },
                 ]);
@@ -18055,29 +18458,37 @@ export function App({
             if (toolsArg === 'desc' || toolsArg === 'descriptions') {
               setShowToolsDialog(true);
             } else {
-              if (echoOrDeferLocalCommand(text, images)) return true;
+              const localCommandId = `local-command:echo:${crypto.randomUUID()}`;
+              if (echoOrDeferLocalCommand(text, images, localCommandId))
+                return true;
+              const owner = sessionOwnerGuard.capture();
+              beginLocalCommand(store, localCommandId);
               workspaceActions
                 .loadToolsStatus()
                 .then((status) => {
+                  if (!owner.isCurrent()) return;
                   const tools = status?.tools ?? [];
-                  if (tools.length === 0) {
-                    store.dispatch([{ type: 'status', text: t('tools.none') }]);
-                  } else {
-                    const list = tools
-                      .map((tool) => `- ${tool.displayName || tool.name}`)
-                      .join('\n');
-                    store.dispatch([
-                      {
-                        type: 'status',
-                        text: `${t('tools.available')}\n\n${list}`,
-                      },
-                    ]);
-                  }
-                  resumeChatBottomFollow('smooth');
+                  const list = tools
+                    .map((tool) => `- ${tool.displayName || tool.name}`)
+                    .join('\n');
+                  dispatchReadOnlyStatus(
+                    tools.length
+                      ? `${t('tools.available')}\n\n${list}`
+                      : t('tools.none'),
+                    undefined,
+                    localCommandId,
+                  );
                 })
                 .catch((error: unknown) => {
+                  if (!owner.isCurrent()) return;
+                  dispatchReadOnlyStatus(
+                    t('messageDelete.commandFailed'),
+                    undefined,
+                    localCommandId,
+                  );
                   reportError(error, 'Failed to load tools');
-                });
+                })
+                .finally(() => finishLocalCommand(store, localCommandId));
             }
             return true;
           }
@@ -18193,16 +18604,24 @@ export function App({
                   break;
                 }
               }
+              const localCommandId = `local-command:${crypto.randomUUID()}`;
               if (parseError) {
-                store.appendLocalUserMessage(text);
-                store.dispatch([{ type: 'error', text: parseError }]);
+                store.appendLocalUserMessage(text, undefined, {
+                  localCommandId,
+                });
+                store.dispatch([
+                  { type: 'error', promptId: localCommandId, text: parseError },
+                ]);
                 return true;
               }
               if (!source) {
-                store.appendLocalUserMessage(text);
+                store.appendLocalUserMessage(text, undefined, {
+                  localCommandId,
+                });
                 store.dispatch([
                   {
                     type: 'error',
+                    promptId: localCommandId,
                     text: t('extensions.install.usage'),
                   },
                 ]);
@@ -18213,10 +18632,11 @@ export function App({
                 pushToast('warning', t('extensions.install.waitForSession'));
                 return true;
               }
-              store.appendLocalUserMessage(text);
+              store.appendLocalUserMessage(text, undefined, { localCommandId });
               store.dispatch([
                 {
                   type: 'status',
+                  promptId: localCommandId,
                   text: t('extensions.install.started', { source }),
                 },
               ]);
@@ -18240,10 +18660,13 @@ export function App({
                 });
               return true;
             }
-            if (echoOrDeferLocalCommand(text, images)) return true;
+            const localCommandId = `local-command:echo:${crypto.randomUUID()}`;
+            if (echoOrDeferLocalCommand(text, images, localCommandId))
+              return true;
             store.dispatch([
               {
                 type: 'error',
+                promptId: localCommandId,
                 text: t('extensions.install.usage'),
               },
             ]);
@@ -18317,6 +18740,7 @@ export function App({
                 store.dispatch([
                   {
                     type: 'status',
+                    promptId: `local-command:${crypto.randomUUID()}`,
                     text: t('rename.success', { name: displayName }),
                   },
                 ]);
@@ -18388,7 +18812,7 @@ export function App({
             else if (statsArg === 'tools') statsView = 'tools';
             if (!requireActiveSessionForLocalCommand()) return false;
             const owner = sessionOwnerGuard.capture();
-            echoLocalCommandIfIdle(text);
+            const localCommandId = echoLocalCommandIfIdle(text);
             sessionActions
               .getStats()
               .then((result) => {
@@ -18396,16 +18820,24 @@ export function App({
                 dispatchReadOnlyStatus(
                   t('stats.title'),
                   createStatsMessageData(result, statsView),
+                  localCommandId,
                 );
               })
               .catch((error: unknown) => {
                 if (!owner.isCurrent()) return;
+                dispatchReadOnlyStatus(
+                  t('messageDelete.commandFailed'),
+                  undefined,
+                  localCommandId,
+                );
                 reportError(error, 'Failed to load stats');
-              });
+              })
+              .finally(() => finishLocalCommand(store, localCommandId));
             return true;
           }
           if (cmd === 'status' || cmd === 'about') {
-            echoLocalCommandIfIdle(text);
+            const owner = sessionOwnerGuard.capture();
+            const localCommandId = echoLocalCommandIfIdle(text);
             (workspaceContextActive
               ? Promise.all([
                   workspaceActions.loadPreflight().catch(() => null),
@@ -18415,6 +18847,7 @@ export function App({
               : Promise.resolve([null, null, null] as const)
             )
               .then(([preflight, providers, env]) => {
+                if (!owner.isCurrent()) return;
                 const sys = collectSystemInfo(preflight, env);
 
                 let authSource = sys.authSource;
@@ -18467,16 +18900,31 @@ export function App({
                   memoryUsage: sys.memoryUsage,
                 };
 
-                dispatchReadOnlyStatus(serializeStatusMessage(info));
+                dispatchReadOnlyStatus(
+                  serializeStatusMessage(info),
+                  undefined,
+                  localCommandId,
+                );
               })
               .catch((error: unknown) => {
+                if (owner.isCurrent())
+                  dispatchReadOnlyStatus(
+                    t('messageDelete.commandFailed'),
+                    undefined,
+                    localCommandId,
+                  );
                 reportError(error, 'Failed to load status info');
-              });
+              })
+              .finally(() => finishLocalCommand(store, localCommandId));
             return true;
           }
           if (cmd === 'bug') {
             const bugTitle = text.slice(match[0].length).trim();
-            if (echoOrDeferLocalCommand(text, images)) return true;
+            const localCommandId = `local-command:${crypto.randomUUID()}`;
+            if (echoOrDeferLocalCommand(text, images, localCommandId))
+              return true;
+            const owner = sessionOwnerGuard.capture();
+            beginLocalCommand(store, localCommandId);
             (workspaceContextActive
               ? Promise.all([
                   workspaceActions.loadPreflight().catch(() => null),
@@ -18501,9 +18949,12 @@ export function App({
                     title: bugTitle,
                     systemInfo: sysInfo,
                   });
-                  store.dispatch([
-                    { type: 'status', text: t('bug.submitted') },
-                  ]);
+                  if (owner.isCurrent())
+                    dispatchReadOnlyStatus(
+                      t('bug.submitted'),
+                      undefined,
+                      localCommandId,
+                    );
                 } else {
                   const fields = Object.entries(sysInfo)
                     .filter(([, v]) => v)
@@ -18516,17 +18967,34 @@ export function App({
                   const win = window.open(url, '_blank');
                   if (win) {
                     win.opener = null;
-                    store.dispatch([
-                      { type: 'status', text: t('bug.submitted') },
-                    ]);
+                    if (owner.isCurrent())
+                      dispatchReadOnlyStatus(
+                        t('bug.submitted'),
+                        undefined,
+                        localCommandId,
+                      );
                   } else {
-                    pushToast('error', t('bug.popupBlocked'));
+                    if (owner.isCurrent())
+                      dispatchReadOnlyStatus(
+                        t('bug.popupBlocked'),
+                        undefined,
+                        localCommandId,
+                      );
+                    if (owner.isCurrent())
+                      pushToast('error', t('bug.popupBlocked'));
                   }
                 }
               })
               .catch((error: unknown) => {
+                if (owner.isCurrent())
+                  dispatchReadOnlyStatus(
+                    t('messageDelete.commandFailed'),
+                    undefined,
+                    localCommandId,
+                  );
                 reportError(error, t('bug.failed'));
-              });
+              })
+              .finally(() => finishLocalCommand(store, localCommandId));
             return true;
           }
         }
@@ -18671,7 +19139,6 @@ export function App({
       runVisibleBtw,
       reconcileCatalogRename,
       requireActiveSessionForLocalCommand,
-      resumeChatBottomFollow,
       providedLanguage,
       selectedLanguage,
       setPendingModel,
@@ -19144,7 +19611,13 @@ export function App({
           );
         });
     } else {
-      store.dispatch([{ type: 'status', text: t('retry.none') }]);
+      store.dispatch([
+        {
+          type: 'status',
+          promptId: `local-command:${crypto.randomUUID()}`,
+          text: t('retry.none'),
+        },
+      ]);
     }
   }, [
     connected,
@@ -19512,6 +19985,7 @@ export function App({
             store.dispatch([
               {
                 type: 'status',
+                promptId: `local-command:${crypto.randomUUID()}`,
                 text: t('settings.models.runtimeSyncFailed'),
               },
             ]);
@@ -19520,7 +19994,11 @@ export function App({
           // settings panel does.
           if (owner.isCurrent() && result?.requiresRestart) {
             store.dispatch([
-              { type: 'status', text: t('settings.requiresRestart') },
+              {
+                type: 'status',
+                promptId: `local-command:${crypto.randomUUID()}`,
+                text: t('settings.requiresRestart'),
+              },
             ]);
           }
           // A transient reload failure shouldn't surface as "delete failed" —
@@ -19599,7 +20077,11 @@ export function App({
           // panel does for restart-required edits.
           if (result?.requiresRestart) {
             store.dispatch([
-              { type: 'status', text: t('settings.requiresRestart') },
+              {
+                type: 'status',
+                promptId: `local-command:${crypto.randomUUID()}`,
+                text: t('settings.requiresRestart'),
+              },
             ]);
           }
           // A reload failure shouldn't surface as "save failed" — the value
@@ -19775,7 +20257,11 @@ export function App({
       .then((result) => {
         if (owner.isCurrent() && result?.requiresRestart) {
           store.dispatch([
-            { type: 'status', text: t('settings.requiresRestart') },
+            {
+              type: 'status',
+              promptId: `local-command:${crypto.randomUUID()}`,
+              text: t('settings.requiresRestart'),
+            },
           ]);
         }
       })
@@ -20868,6 +21354,8 @@ export function App({
     onError: reportError,
     sessionWorkflowEnabled,
     modelManagement,
+    unavailableModels,
+    mountUnavailableModelTooltip,
     workflow: sessionWorkflowEnabled
       ? {
           todos: sessionWorkflowTodos,
@@ -20996,6 +21484,9 @@ export function App({
             >
               <ModelDialog
                 mode={modelDialogMode}
+                modelRefresh={
+                  modelDialogMode === 'main' ? modelRefresh : undefined
+                }
                 models={modelDialogModels[modelDialogMode]}
                 loading={
                   (modelDialogMode === 'advisor' && providersState.loading) ||
@@ -21030,6 +21521,7 @@ export function App({
             >
               <ApprovalModeDialog
                 currentMode={executionMode}
+                availableModes={availableApprovalModes}
                 sessionWorkflowEnabled={sessionWorkflowEnabled}
                 onSelect={(modeId) => {
                   handleSetMode(modeId);
@@ -21179,7 +21671,7 @@ export function App({
                   store.dispatch([
                     type === 'error'
                       ? { type: 'error', text }
-                      : { type: 'status', text },
+                      : { type: 'status', promptId: `local-command:${crypto.randomUUID()}`, text },
                   ]);
                 }}
                 onClose={handleCloseAuthDialog}
@@ -21234,6 +21726,7 @@ export function App({
                   store.dispatch([
                     {
                       type: 'status',
+                      promptId: `local-command:${crypto.randomUUID()}`,
                       text:
                         sessionIds.length === 1
                           ? `${t('delete.deleted')} (${sessionIds[0]!.slice(0, 8)})`
@@ -21265,6 +21758,7 @@ export function App({
                   store.dispatch([
                     {
                       type: 'status',
+                      promptId: `local-command:${crypto.randomUUID()}`,
                       text: `${t('release.released')} (${sessionId.slice(0, 8)})`,
                     },
                   ]);
@@ -21307,7 +21801,9 @@ export function App({
                 tone={workspace.status === 'error' ? 'alert' : 'status'}
                 subtitle={workspaceAddLocationSubtitle}
                 onClose={closeAddWorkspaceDialog}
-              />
+              >
+                {workspaceExecutionField}
+              </WorkspaceAddStatusDialog>
             ) : workspaceBrowseActiveRef.current &&
               workspaceAddLocationIsConnected &&
               !dynamicWorkspaceRegistrationSupported ? (
@@ -21316,9 +21812,19 @@ export function App({
                 tone="alert"
                 subtitle={workspaceAddLocationSubtitle}
                 onClose={closeAddWorkspaceDialog}
-              />
+              >
+                {workspaceExecutionField}
+              </WorkspaceAddStatusDialog>
             ) : (
               <AddWorkspaceDialog
+                executionMode={
+                  managedAgentProvider?.workspaceBinding?.createWorkspace
+                    ? 'daemon'
+                    : undefined
+                }
+                onExecutionModeChange={(mode) => {
+                  if (mode === 'managed') handleOpenManagedWorkspace();
+                }}
                 browseDirectories={workspaceBrowseActiveRef.current}
                 initialPath={
                   !workspaceBrowseActiveRef.current
@@ -21346,6 +21852,7 @@ export function App({
                     : handleAddWorkspace
                 }
                 onSuggest={suggestWorkspacePathsForLocation}
+                gitClone={gitCloneControls}
                 onPick={
                   workspaceAddLocationIsConnected &&
                   nativeDirectoryPickerSupported &&
@@ -21489,6 +21996,7 @@ export function App({
                       : undefined
                   }
                   onOpenPlugins={() => {
+                    setPluginInitialTab('extensions');
                     closeMobileDrawer();
                     openPanel('plugins');
                   }}
@@ -21557,7 +22065,14 @@ export function App({
                   // chat it opens an ordinary task; a fresh voice conversation
                   // comes from the Live controls.
                   onNewSession={(workspaceCwd) => {
-                    if (managedMode) {
+                    if (managedMode && typeof workspaceCwd !== 'string') {
+                      if (
+                        managedSessionId &&
+                        managedAgentProvider?.workspaceBinding &&
+                        managedWorkspaceId === undefined
+                      ) {
+                        return false;
+                      }
                       setManagedSessionId(undefined);
                       closeMobileDrawer();
                       returnToChat();
@@ -21569,32 +22084,23 @@ export function App({
                         : { kind: 'inherit', leaveLive: true },
                     );
                   }}
-                  sessionContent={
-                    managedMode ? (
+                  managedWorkspaces={
+                    managedAgentProvider ? (
                       <div ref={setManagedNavigationTarget} />
                     ) : undefined
                   }
-                  sessionHeader={managedAgentProvider ? (
-                    <Tabs
-                      className="px-2 pb-2"
-                      value={managedMode ? 'managed' : 'local'}
-                      onValueChange={(value) =>
-                        setManagedHome(value === 'managed')
-                      }
-                    >
-                      <TabsList
-                        aria-label={t('managed.executionMode')}
-                        className="w-full"
-                      >
-                        <TabsTrigger value="local" className="flex-1">
-                          {t('managed.localMode')}
-                        </TabsTrigger>
-                        <TabsTrigger value="managed" className="flex-1">
-                          {t('managed.managedMode')}
-                        </TabsTrigger>
-                      </TabsList>
-                    </Tabs>
-                  ) : undefined}
+                  managedArchivedSessions={
+                    managedAgentProvider?.lifecycle
+                      ? {
+                          ...managedArchivedStatus,
+                          content: <div ref={setManagedArchivedNavigationTarget} />,
+                        }
+                      : undefined
+                  }
+                  onSearchQueryChange={
+                    managedAgentProvider ? setManagedNavigationSearch : undefined
+                  }
+                  currentSessionActive={!managedMode}
                   onNewStandaloneSession={() =>
                     createNewSession({ kind: 'global' })
                   }
@@ -21603,7 +22109,8 @@ export function App({
                     return loadSidebarSession(sessionId, workspaceCwd);
                   }}
                   onOpenHostSession={handleOpenHostSession}
-                  onLoadStandaloneSession={(sessionId) => {
+                  onLoadStandaloneSession={(sessionId, displayName) => {
+                    sidebarStandaloneTitleRef.current = { sessionId, displayName, client: workspace.client };
                     setMainView('chat');
                     return loadSidebarSession(
                       sessionId,
@@ -21616,6 +22123,7 @@ export function App({
                   }
                   projectFeaturesEnabled={projectFeaturesAvailable}
                   onSelectCurrentSession={() => {
+                    setManagedHome(false);
                     closeMobileDrawer();
                     splitFoldedByShrinkRef.current = false;
                     returnToChat();
@@ -21704,7 +22212,8 @@ export function App({
                   }
                   onOpenAddWorkspace={
                     dynamicWorkspaceRegistrationSupported ||
-                    hasRemoteWorkspaceLocation
+                    hasRemoteWorkspaceLocation ||
+                    Boolean(managedAgentProvider?.workspaceBinding?.createWorkspace)
                       ? handleOpenExistingWorkspace
                       : undefined
                   }
@@ -22141,11 +22650,20 @@ export function App({
                         embedded
                         initialCategory={settingsInitialCategory}
                         onLanguageChange={handleSettingsLanguageChange}
+                        onOutputLanguageChange={
+                          handleSettingsOutputLanguageChange
+                        }
+                        workspaceSettingsWritable={!sessionIsStandalone}
                         onThemeChange={handleThemeChange}
                         chatWidthMode={chatWidthMode}
                         onChatWidthModeChange={handleChatWidthModeChange}
                         connections={
                           standalone ? <DaemonConnectionsSettings /> : undefined
+                        }
+                        workspaceDirectoriesSection={
+                          workspaceDirectoriesSupported ? (
+                            <WorkspaceDirectoriesSection />
+                          ) : undefined
                         }
                         modelManagementSectionProps={{
                           ...modelManagementPolicy,
@@ -22211,8 +22729,16 @@ export function App({
                       <DaemonStatusDialog />
                     ) : activePanel === 'extensions' ? (
                       <ExtensionsManagerPage
+                        managed={managedMode && managedAgentProvider ? { provider: managedAgentProvider, workspaceId: managedWorkspaceId ?? undefined, sessionId: managedSessionId } : undefined}
                         onClose={closePanel}
                         initialFocusRef={panelHeadingRef}
+                      />
+                    ) : activePanel === 'mcp' && managedMode && managedAgentProvider ? (
+                      <ManagedMcpManagerPage
+                        provider={managedAgentProvider}
+                        sessionId={managedSessionId}
+                        workspaceId={managedWorkspaceId ?? undefined}
+                        onClose={closePanel}
                       />
                     ) : activePanel === 'mcp' && mcpDialogMessage ? (
                       <McpManagerPage
@@ -22253,6 +22779,15 @@ export function App({
                         onClose={returnToChat}
                         onUseSkill={handleUseSkill}
                         initialFocusRef={pluginTabRef}
+                        initialTab={pluginInitialTab}
+                        skillsWorkspaceCwd={skillsSourceCwd}
+                        onSkillsWorkspaceChange={selectSkillsWorkspace}
+                        managedSkills={managedAgentProvider !== undefined}
+                        managedMcp={managedMode && managedAgentProvider ? {
+                          provider: managedAgentProvider,
+                          sessionId: managedSessionId,
+                          workspaceId: managedWorkspaceId ?? undefined,
+                        } : undefined}
                       />
                     ) : activePanel === 'channels' ? (
                       <ChannelsManagerPage
@@ -22388,6 +22923,9 @@ export function App({
                       }
                       currentSessionSchedulingAvailable={workspace.capabilities?.features?.includes(
                         'scheduled_task_session_reuse',
+                      )}
+                      gateAvailable={workspace.capabilities?.features?.includes(
+                        'scheduled_task_gate',
                       )}
                       onCreateViaChat={() => {
                         // Start a FRESH session and jump to it so the task-
@@ -22659,6 +23197,10 @@ export function App({
                       <SplitView
                         showResponseTokensPerSecond={showResponseTokensPerSecond}
                         modelManagement={modelManagement}
+                        unavailableModels={unavailableModels}
+                        mountUnavailableModelTooltip={
+                          mountUnavailableModelTooltip
+                        }
                         planControlVisible={visibleComposerToolbarActions.includes('plan')}
                         sessionIds={splitSessionIds}
                         onAssistantTurnSettled={onAssistantTurnSettled}
@@ -22714,21 +23256,69 @@ export function App({
                     <ManagedSessionsPage
                       key={managedAgentProvider.storageKey}
                       sessionId={managedSessionId}
-                      onSelectSession={(id) => {
+                      workspaceCreationOpen={managedWorkspaceCreationOpen}
+                      onWorkspaceCreationOpenChange={setManagedWorkspaceCreationOpen}
+                      onWorkspaceCreated={(workspaceId) => {
+                        if (!managedWorkspaceCreationOpenRef.current) return;
+                        setManagedWorkspaceId(workspaceId);
+                        setManagedSessionId(undefined);
+                        setManagedHome(true);
+                        returnToChat();
+                      }}
+                      onOpenLocalWorkspace={
+                        !lockedWorkspaceCwd &&
+                        (dynamicWorkspaceRegistrationSupported || hasRemoteWorkspaceLocation)
+                          ? handleOpenLocalWorkspace
+                          : undefined
+                      }
+                      workspaceId={managedWorkspaceId ?? undefined}
+                      onSessionWorkspaceChange={setManagedWorkspaceId}
+                      onSelectWorkspace={handleSelectManagedWorkspace}
+                      daemonWorkspaces={composerWorkspaces}
+                      onSelectDaemonWorkspace={handleSelectDaemonWorkspace}
+                      onWorkspacesChange={handleManagedWorkspacesChange}
+                      navigationActive={managedMode}
+                      navigationSearch={managedNavigationSearch}
+                      onOpenSession={(id, workspaceId) => {
+                        if (
+                          id !== managedSessionId ||
+                          workspaceId !== undefined
+                        ) {
+                          setManagedWorkspaceId(workspaceId);
+                        }
+                        setManagedSessionId(id);
+                        setManagedHome(true);
+                        closeMobileDrawer();
+                        returnToChat();
+                      }}
+                      onSelectSession={(id, workspaceId) => {
+                        if (
+                          id !== managedSessionId ||
+                          workspaceId !== undefined
+                        ) {
+                          setManagedWorkspaceId(workspaceId);
+                        }
                         setManagedSessionId(id);
                         if (managedModeRef.current) {
                           closeMobileDrawer();
                           returnToChat();
                         }
                       }}
-                      workspaceCwd={lockedWorkspaceCwd}
                       managedAgentProvider={managedAgentProvider}
+                      creationSkills={managedCreationSkills}
+                      onManageSkills={() => {
+                        setPluginInitialTab('skills');
+                        closeMobileDrawer();
+                        openPanel('plugins');
+                      }}
                       interactive={managedChatVisible}
                       navigationTarget={
                         sidebarOptions.enabled
                           ? managedNavigationTarget
                           : undefined
                       }
+                      archivedNavigationTarget={managedArchivedNavigationTarget}
+                      onArchivedSessionsStatusChange={setManagedArchivedStatus}
                     />
                   </WebShellCustomizationProvider>
                 </div>
@@ -23298,6 +23888,7 @@ export function App({
                         sessionHasActivePrompt ? (
                           suppressFailedPromptRetryStreaming ? null : (
                             <StreamingStatus
+                              showPhrase={enableLoadingPhrases}
                               showResponseTokensPerSecond={showResponseTokensPerSecond && !approvalOverlayActive}
                               startedAt={
                                 failedPromptRetry?.startedAt ??
@@ -23552,6 +24143,7 @@ export function App({
                           onPopQueuedMessages={editLastQueuedPrompt}
                           onClearQueuedMessages={clearQueuedPrompts}
                           currentMode={executionMode}
+                          availableModes={availableApprovalModes}
                           modeControlsDisabled={modeControlsBusy}
                           planMode={currentMode === 'plan'}
                           onTogglePlan={handleTogglePlan}
@@ -23625,7 +24217,12 @@ export function App({
                           onOpenContextUsage={
                             contextUsageAvailable ? openCurrentContextUsagePanel : undefined
                           }
+                          modelRefresh={modelRefresh}
                           availableModels={availableModels}
+                          unavailableModels={unavailableModels}
+                          mountUnavailableModelTooltip={
+                            mountUnavailableModelTooltip
+                          }
                           onSelectMode={handleSetMode}
                           onSelectModel={handleModelSelect}
                           reasoning={displayedReasoning}
@@ -23640,6 +24237,22 @@ export function App({
                             composerWorkspaceSelectEnabled
                               ? composerWorkspaces
                               : undefined
+                          }
+                          workspaceSelectorAlwaysVisible={Boolean(managedAgentProvider) && composerWorkspaceSelectEnabled}
+                          workspaceMenuItems={
+                            composerWorkspaceSelectEnabled && !lockedWorkspaceCwd &&
+                            managedAgentProvider &&
+                            managedWorkspaceCatalog &&
+                            managedWorkspaceCatalog.providerKey === managedProviderKey &&
+                            managedWorkspaceCatalog.workspaces.map((item) => (
+                              <DropdownMenuItem
+                                key={item.workspaceId}
+                                disabled={!item.canCreateSession}
+                                onSelect={() => handleSelectManagedWorkspace(item.workspaceId)}
+                              >
+                                {item.displayName} · {t('managed.managedMode')}
+                              </DropdownMenuItem>
+                            ))
                           }
                           selectedWorkspaceCwd={
                             workspaceContextActive
@@ -23759,7 +24372,7 @@ export function App({
                               goalSnapshot={goalSnapshot}
                               activeGoal={activeGoal}
                               tasks={footerTasks}
-                              availableModes={MODES_CYCLE}
+                              availableModes={availableApprovalModes}
                               availableModels={(connection.models ?? [])
                                 .filter(isVisibleComposerModel)
                                 .map((m) => ({
@@ -23787,7 +24400,7 @@ export function App({
                             goalSnapshot={goalSnapshot}
                             activeGoal={activeGoal}
                             tasks={footerTasks}
-                            availableModes={MODES_CYCLE}
+                            availableModes={availableApprovalModes}
                             availableModels={(connection.models ?? [])
                               .filter(isVisibleComposerModel)
                               .map((m) => ({

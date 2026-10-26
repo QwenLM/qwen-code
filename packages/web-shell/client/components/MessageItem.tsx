@@ -70,6 +70,8 @@ interface MessageItemProps {
    * owns the edit lifecycle — then the inline editor stays closed.
    */
   onEditUserMessage?: () => boolean | void;
+  onDeleteMessage?: () => void;
+  deleteMessageDisabled?: boolean;
   /**
    * Send the text the user confirmed in the inline editor. Resolves `false`
    * when the resend was refused or failed; the editor stays open then.
@@ -80,6 +82,7 @@ interface MessageItemProps {
   onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
   branchRecordId?: string;
   showAssistantActions?: boolean;
+  assistantFooterAlwaysVisible?: boolean;
   showAssistantBranch?: boolean;
   /** Turn id marks are keyed by; unset hides the marks for this message. */
   assistantFeedbackTurnId?: string;
@@ -114,10 +117,13 @@ export const MessageItem = memo(function MessageItem({
   sendFailed = false,
   onRetrySend,
   onEditUserMessage,
+  onDeleteMessage,
+  deleteMessageDisabled,
   onSubmitUserMessageEdit,
   onBranchSession,
   branchRecordId,
   showAssistantActions = false,
+  assistantFooterAlwaysVisible = false,
   showAssistantBranch = false,
   assistantFeedbackTurnId,
   assistantFeedbackPromptId,
@@ -227,6 +233,7 @@ export const MessageItem = memo(function MessageItem({
             timestamp={message.timestamp}
             onBranchSession={boundBranchSession}
             showFooterActions={showAssistantActions}
+            footerAlwaysVisible={assistantFooterAlwaysVisible}
             showBranchAction={showAssistantBranch}
             showAssistantFeedback={assistantFeedbackPromptId !== undefined}
             assistantFeedbackRating={assistantFeedbackRating}
@@ -428,6 +435,9 @@ export const MessageItem = memo(function MessageItem({
           : undefined
       }
       editTitle={t('userMessage.edit')}
+      onDelete={onDeleteMessage}
+      deleteDisabled={deleteMessageDisabled}
+      deleteTitle={t('messageDelete.entry')}
       onOpenTurnCalls={
         openTurnCalls && turnCallsTurnId
           ? () => openTurnCalls(turnCallsTurnId)
@@ -485,12 +495,16 @@ function areMessageItemPropsEqual(
   if (prev.sendFailed !== next.sendFailed) return false;
   if (prev.onRetrySend !== next.onRetrySend) return false;
   if (prev.onEditUserMessage !== next.onEditUserMessage) return false;
+  if (prev.onDeleteMessage !== next.onDeleteMessage) return false;
+  if (prev.deleteMessageDisabled !== next.deleteMessageDisabled) return false;
   if (prev.onSubmitUserMessageEdit !== next.onSubmitUserMessageEdit)
     return false;
   if (prev.onInsightReportOpen !== next.onInsightReportOpen) return false;
   if (prev.onBranchSession !== next.onBranchSession) return false;
   if (prev.branchRecordId !== next.branchRecordId) return false;
   if (prev.showAssistantActions !== next.showAssistantActions) return false;
+  if (prev.assistantFooterAlwaysVisible !== next.assistantFooterAlwaysVisible)
+    return false;
   if (prev.showAssistantBranch !== next.showAssistantBranch) return false;
   if (prev.assistantFeedbackTurnId !== next.assistantFeedbackTurnId)
     return false;

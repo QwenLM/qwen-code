@@ -1,21 +1,24 @@
 package com.alibaba.qwen.code.runtimebroker;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.alibaba.qwen.code.runtimebroker.transport.CsiNativeReadbackProtocol;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.junit.jupiter.api.Test;
+
 import java.io.IOException;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Function;
-import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class CsiNativeReadContinuationProofTest {
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -32,6 +35,94 @@ class CsiNativeReadContinuationProofTest {
             records(fixture.path("sessionCreate")), original, reader);
     private final CsiNativeActivationProof.Activation activation = CsiNativeActivationProof.activation(
             transaction(0), request(0), original, writer, genesis.definitionDigest(), null, reader);
+
+    @Test
+    void acceptsOnlyDeterministicNonAdmissionResultsBeforeDispatch() throws Exception {
+        var before = prefix(9);
+        var invalidCall = before.pendingBatch().calls().get(1);
+        var refusal = refusal(before, invalidCall, "CSI file input is invalid.");
+        var after = advance(refusal.transaction(), refusal.metadata(), before);
+        assertEquals(Set.of(invalidCall.id()), after.pendingBatch().refusedFunctionIds());
+        assertEquals(before.checkpoint(), after.checkpoint());
+        assertEquals(before.attempt(), after.attempt());
+        assertEquals(0, after.intents().size());
+        assertEquals(0, after.receipts().size());
+        assertThrows(RuntimeBrokerException.class, () -> {
+            var duplicate = refusal(after, invalidCall, "CSI file input is invalid.");
+            advance(duplicate.transaction(), duplicate.metadata(), after);
+        });
+        var dispatched = advance(9, after);
+        assertEquals(1, dispatched.intents().size());
+        assertThrows(RuntimeBrokerException.class, () -> {
+            var late = refusal(dispatched, invalidCall, "CSI file input is invalid.");
+            advance(late.transaction(), late.metadata(), dispatched);
+        });
+        var validCall = before.pendingBatch().calls().getFirst();
+        var fake = refusal(before, validCall, "CSI file input is invalid.");
+        assertThrows(RuntimeBrokerException.class, () -> advance(fake.transaction(), fake.metadata(), before));
+        var wrongReason = refusal(before, invalidCall, "CSI file input exceeds the durable Session limit.");
+        assertThrows(RuntimeBrokerException.class, () -> advance(wrongReason.transaction(), wrongReason.metadata(), before));
+    }
+
+    @Test
+    void aCompletelyRefusedBatchReleasesOnlyTheModelContinuation() throws Exception {
+        var prior = prefix(9);
+        var call = prior.pendingBatch().calls().get(1);
+        var batch = new CsiNativeActivationProof.PendingBatch(prior.pendingBatch().messageId(),
+                prior.pendingBatch().contentRef(), List.of(call));
+        // Derived semantic case: retain the original refused call, without its two valid peers.
+        var before = new CsiNativeActivationProof.Prefix(prior.input(), prior.checkpoint(), prior.lastMessageId(),
+                prior.attempt(), prior.assistantCommitted(), prior.stream(), prior.usedIds(), batch,
+                prior.batches(), prior.fileHistory(), prior.intents(), prior.receipts(), prior.nextDeltaOrdinal());
+        var refusal = refusal(before, call, "CSI file input is invalid.");
+        var after = advance(refusal.transaction(), refusal.metadata(), before);
+        assertNull(after.pendingBatch());
+        assertNull(after.attempt());
+        assertEquals(before.checkpoint(), after.checkpoint());
+        assertEquals(0, after.receipts().size());
+        var start = transaction(18);
+        ((ObjectNode) start.events().getFirst().path("payload")).set("inputCheckpointRef", after.checkpoint().ref());
+        assertEquals("started", advance(start, request(18), after).attempt().stage());
+    }
+
+    @Test
+    void refusalUsesTheSameRootAndFullInputCapacityLimits() {
+        var source = prefix(9).pendingBatch().calls().getFirst();
+        for (String path : List.of(".", " ./ ", "../outside", "/absolute")) {
+            ObjectNode args = JSON.createObjectNode().put("file_path", path);
+            var call = new CsiNativeActivationProof.FunctionCall(source.id(), "read_file", args, 0, 0);
+            assertEquals("CSI file input is invalid.", CsiNativeToolReservation.refusalReason(original, call));
+        }
+        ObjectNode args = JSON.createObjectNode().put("file_path", "owned.txt").put("content", "");
+        var call = new CsiNativeActivationProof.FunctionCall(source.id(), "write_file", args, 0, 0);
+        ObjectNode payload = JSON.createObjectNode().put("toolName", "write_file");
+        payload.set("input", args);
+        ObjectNode wrapper = JSON.createObjectNode().put("harnessSessionId", original.getIsolationKey())
+                .put("runtimeSessionId", original.getIsolationKey()).put("payloadJson", CsiNativeActivationProof.canonical(payload));
+        int overhead = CsiNativeActivationProof.utf8(CsiNativeActivationProof.canonical(wrapper)).length;
+        args.put("content", "x".repeat(64 * 1024 - overhead));
+        assertNull(CsiNativeToolReservation.refusalReason(original, call));
+        args.put("content", args.path("content").textValue() + "x");
+        assertEquals("CSI file input exceeds the durable Session limit.", CsiNativeToolReservation.refusalReason(original, call));
+    }
+
+    private Changed refusal(CsiNativeActivationProof.Prefix before, CsiNativeActivationProof.FunctionCall call,
+            String reason) throws Exception {
+        ObjectNode event = transaction(13).events().getFirst().deepCopy();
+        ObjectNode metadata = request(9).deepCopy();
+        String messageId = java.util.UUID.randomUUID().toString();
+        event.put("eventId", "message:" + messageId).put("sequence", metadata.path("expectedCommittedSequence").longValue() + 1);
+        ObjectNode payload = (ObjectNode) event.path("payload");
+        ObjectNode record = (ObjectNode) JSON.readTree(reader.apply(payload.path("contentRef")));
+        record.put("uuid", messageId).put("parentUuid", before.lastMessageId());
+        var response = ((ObjectNode) record.path("message")).putArray("parts").addObject().putObject("functionResponse");
+        response.put("id", call.id()).put("name", call.name()).putObject("response").put("error", reason);
+        payload.put("messageId", messageId).put("parentMessageId", before.lastMessageId());
+        payload.set("contentRef", publish("managed-message", JSON.writeValueAsBytes(record)));
+        metadata.put("operation", "commitMessage").put("commandId", "recorder:" + messageId)
+                .put("contentDigest", genesis.definitionDigest());
+        return new Changed(new CsiNativeActivationProof.Transaction(List.of(event), messageId), metadata);
+    }
 
     @Test
     void acceptsChunkedFullResultsAndRetainsExactConvertedHistory() throws Exception {

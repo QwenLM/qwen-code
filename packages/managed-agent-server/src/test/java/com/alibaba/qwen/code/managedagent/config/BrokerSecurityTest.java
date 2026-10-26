@@ -15,6 +15,43 @@ class BrokerSecurityTest {
             "0123456789abcdef0123456789abcdef";
 
     @Test
+    void localDirectoryImportRequiresExplicitTrustedLoopbackAuthority() throws Exception {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getRuntimeBroker().setLocalDirectoryImportEnabled(true);
+        assertThatThrownBy(() -> security(properties, "127.0.0.1"))
+                .hasMessageContaining("trusted actor header");
+        properties.setTrustedActorHeader("X-Qwen-Actor-Id");
+        assertThatCode(() -> security(properties, "127.0.0.1")).doesNotThrowAnyException();
+        properties.getAuth().setAllowInsecureBind(true);
+        assertThatThrownBy(() -> security(properties, "0.0.0.0")).hasMessageContaining("single-user");
+    }
+
+    @Test
+    void localDirectoryImportAcceptsSignedLoopbackAuthority() throws Exception {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getRuntimeBroker().setLocalDirectoryImportEnabled(true);
+        properties.getAuth().setMode("signed");
+        properties.getAuth().setSigningKey(KEY);
+        for (String address : new String[] {"127.0.0.1", "::1"}) {
+            assertThat(security(properties, address).getMode())
+                    .as(address).isEqualTo(BrokerSecurity.Mode.SIGNED);
+        }
+    }
+
+    @Test
+    void localDirectoryImportRefusesSignedRemoteListenersEvenWithInsecureOverride() throws Exception {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getRuntimeBroker().setLocalDirectoryImportEnabled(true);
+        properties.getAuth().setMode("signed");
+        properties.getAuth().setSigningKey(KEY);
+        properties.getAuth().setAllowInsecureBind(true);
+        for (String address : new String[] {"0.0.0.0", "10.0.0.8", null}) {
+            assertThatThrownBy(() -> security(properties, address))
+                    .as(address).hasMessageContaining("single-user");
+        }
+    }
+
+    @Test
     void autoResolvesOpenOnLoopback() throws Exception {
         BrokerSecurity security = security(new ManagedAgentProperties(),
                 "127.0.0.1");

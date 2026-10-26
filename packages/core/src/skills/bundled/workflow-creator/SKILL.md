@@ -11,6 +11,7 @@ Create and maintain saved Dynamic Workflows for the current workspace.
 
 - This skill manages `.qwen/workflows/<name>.js` files used by the `workflow` tool and exposed as `/<name>` slash commands.
 - Do not create or edit `qwen-workflow-design/*.yaml`; those Task Flow definitions are a different feature.
+- Local hosts may also discover trusted ancestor `.qwen/workflows` directories up to the nearest Git root, with the nearest definition first. Discovery does not change the project save destination: use the current session target.
 - Use project scope by default. Write to `~/.qwen/workflows` only when the user explicitly asks for a workflow shared across projects.
 
 ## Workflow

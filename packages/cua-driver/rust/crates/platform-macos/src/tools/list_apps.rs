@@ -21,8 +21,9 @@ fn def() -> &'static ToolDef {
             - kind: `\"desktop\"` for `.app` bundles on macOS.\n\
             - last_used: RFC3339 timestamp from the bundle's filesystem mtime, \
             when readable; otherwise null.\n\n\
-            Only apps with NSApplicationActivationPolicyRegular are included — \
-            background helpers and system UI agents are filtered out. Installed \
+            Standalone running entries include Regular-policy apps. Installed \
+            accessory apps also report live state when their bundle path matches; \
+            uninstalled background helpers stay excluded. Installed \
             apps come from scanning /Applications, /Applications/Utilities, \
             ~/Applications, /System/Applications, and /System/Applications/Utilities.\n\n\
             Use this for \"is X installed?\" as well as \"is X running?\". For \
@@ -34,7 +35,7 @@ fn def() -> &'static ToolDef {
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
-                "running_only": { "type": "boolean", "description": "Skip installed-app scanning when refreshing a bound app's process identity." }
+                "running_only": { "type": "boolean", "description": "Return only live applications, including installed accessory apps." }
             },
             "additionalProperties": false
         }),
@@ -57,11 +58,11 @@ impl Tool for ListAppsTool {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         let apps = tokio::task::spawn_blocking(move || {
+            let mut apps = crate::apps::list_all_apps();
             if running_only {
-                crate::apps::list_running_apps()
-            } else {
-                crate::apps::list_all_apps()
+                apps.retain(|app| app.running);
             }
+            apps
         })
         .await
         .unwrap_or_default();

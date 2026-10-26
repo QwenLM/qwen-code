@@ -1,6 +1,6 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.store.ToolPublicationContract;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationContract;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -38,7 +38,16 @@ class ToolPublicationContractTest {
         JsonNode schema = JSON.readTree(contracts().resolve(
                 "managed-tool-publication-v1.schema.json").toFile());
         var factory = JsonSchemaFactory.getInstance(VersionFlag.V202012);
-        for (JsonNode example : suite.required("cases")) {
+        var cases = (com.fasterxml.jackson.databind.node.ArrayNode) suite.required("cases").deepCopy();
+        for (JsonNode size : suite.required("referenceSizeCases")) {
+            ObjectNode value = (ObjectNode) cases.get(0).required("value").deepCopy();
+            ((ObjectNode) value.get(size.required("field").asText())).put("byteLength",
+                    size.required("byteLength").asLong());
+            cases.addObject().put("id", size.toString()).put("kind", "binding")
+                    .put("schemaValid", size.required("valid").asBoolean())
+                    .put("valid", size.required("valid").asBoolean()).set("value", value);
+        }
+        for (JsonNode example : cases) {
             String kind = example.required("kind").asText();
             JsonNode value = example.required("value");
             var selected = schema.deepCopy();

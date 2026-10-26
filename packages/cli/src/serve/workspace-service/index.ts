@@ -1600,14 +1600,34 @@ export function createDaemonWorkspaceService(
       invalidateWorkspaceSkillsSnapshot();
     },
 
-    async refreshExtensionsForAllSessions() {
+    async refreshWorkspaceSkills(_ctx, sessionIds) {
+      assertActiveGeneration();
+      try {
+        const result =
+          await invokeWorkspaceCommand<ServeWorkspaceSkillsRefreshResult>(
+            SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
+            {
+              cwd: boundWorkspace,
+              reason: 'all',
+              ...(sessionIds !== undefined ? { sessionIds } : {}),
+            },
+          );
+        assertActiveGeneration();
+        return result;
+      } finally {
+        invalidateWorkspaceSkillsSnapshot();
+      }
+    },
+
+    async refreshExtensionsForAllSessions(sessionIds) {
       assertActiveGeneration();
       try {
         if (!refreshExtensionsForAllSessionsOnBridge) {
           throw new Error('refreshExtensionsForAllSessions is not wired');
         }
-        return await refreshExtensionsForAllSessionsOnBridge();
+        return await refreshExtensionsForAllSessionsOnBridge(sessionIds);
       } catch (err) {
+        if (err instanceof SessionNotFoundError) throw err;
         writeStderrLine(
           `qwen serve: refreshExtensionsForAllSessions failed: ${err instanceof Error ? err.message : String(err)}`,
         );
