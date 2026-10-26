@@ -653,6 +653,8 @@ starts failing, not at every fire.
 | `standalone_session_options_v1`          | the complete standalone-session runtime is installed (same condition as `standalone_sessions_v1`), so the read-only, sessionless `GET /standalone/session-options` route is registered on the internal Conversations runtime.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `session_artifacts_persistence`          | session artifact persistence is wired for the runtime.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `session_artifact_library`               | Session artifact persistence is wired; supports trusted workspace-owner reads/removal of live, cold, and archived registrations via `/workspaces/:workspace/session/:id/artifact-library`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `workspace_artifact_library`             | Persisted workspace-wide artifact queries, batch session queries and explicit-pair removal via `/workspaces/:workspace/artifact-library`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `workspace_artifact_library_stream`      | Session metadata on all artifact-library reads and opt-in finite SSE for full and selected-session queries; requires artifact persistence.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `session_sources`                        | session source persistence is wired for the runtime. Registers metadata-only workspace files, uploaded attachments, and HTTP(S) links through the live session owner.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `session_generation`                     | session generation helpers are available.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `scheduled_task_session_reuse`           | durable scheduled-task session management is active and every managed daemon runtime has installed the callback that lets a task explicitly bind to its current existing session.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
@@ -671,7 +673,9 @@ starts failing, not at every fire.
 | `dynamic_workspace_registration`         | a workspace runtime factory is wired into the daemon, so an existing trusted directory can be registered as a secondary runtime at runtime.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `persistent_workspace_registration`      | a workspace registration store is wired into the daemon. Production `runQwenServe` supplies the user-level store automatically; direct `createServeApp` embeds must inject one explicitly and own startup restoration of their workspace registry.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `scratch_workspace_registration`         | managed scratch workspace creation is available — a runtime factory, a validated managed scratch root, and runtime disposal are wired, and every managed runtime respects the scratch root boundary.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `git_workspace_clone`                    | the daemon host has a `git` binary; `POST /workspaces` with `{ kind: "git", url, target }` starts an asynchronous clone job whose routes report progress, cancellation, and the canonical cwd. Hosts without `git` omit the tag.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `workspace_runtime_removal`              | removable dynamic or persistence-restored secondary runtimes can be drained and removed through the management route.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `workspace_directories`                  | the daemon persists workspace settings and every trusted local runtime can apply extra directories to its live sessions: `/workspaces/:workspace/directories` lists, adds, and removes the entries persisted at workspace scope (`context.includeDirectories`). SSH, managed, and standalone workspaces are rejected even when the tag is present, and experimental paired-engine daemons omit the tag and the route because a workspace-scoped mutation cannot reach the managed child.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `native_directory_picker`                | the daemon host can open a native OS directory picker (`osascript` on macOS, PowerShell on Windows, `zenity` on a Linux host with a display). Headless hosts omit the tag so clients hide the Browse affordance instead of surfacing a guaranteed picker failure.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `workspace_runtime_stop`                 | the daemon owns ACP process accounting, complete independent-activity and scheduled-task observations, and a runtime bridge supporting confirmed stop and receipt snapshots. Unsupported individual runtimes are disabled in the preview.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `workspace_runtime`                      | every active workspace bridge provides an authoritative runtime lifecycle snapshot; mixed or legacy injected bridges omit the tag.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
@@ -1441,6 +1445,8 @@ The Web Shell's product branding, for hosts that want to white-label the shell. 
 ### `POST /workspaces`
 
 Register an additional workspace runtime. The path must be an existing, accessible, absolute directory that does not duplicate or nest with another registered workspace. Registration is process-local unless the client sends `persist: true`; clients must pre-flight `persistent_workspace_registration` before requesting persistence. When `workspace_display_name` is advertised, the request may also include an optional `displayName`.
+
+When `git_workspace_clone` is advertised, the same route also accepts `{ "kind": "git", "url": "...", "target": "/absolute/new/path" }`. This form requires an absolute `target` that does not exist yet, starts an asynchronous clone, registers nothing, and returns `202 { "kind": "git-workspace-clone", "jobId": "..." }`. The `201` and `200` responses below describe the synchronous `cwd` and `scratch` forms; the git form registers nothing, and clone progress and cancellation use `GET`/`DELETE /workspace-git-clone-jobs/:jobId`.
 
 ```json
 {
@@ -3115,6 +3121,110 @@ Return aggregate persisted session counts for the selected workspace without cha
 The TypeScript daemon SDK exposes the plural route through `workspaceById(...)` or `workspaceByCwd(...)`, followed by `getWorkspaceSessionInfo()`.
 
 ### Workspace session artifact library
+
+`workspace_artifact_library` additionally advertises workspace-wide queries and
+batch operations:
+
+| Method | Route                                            | Input                                                                           |
+| ------ | ------------------------------------------------ | ------------------------------------------------------------------------------- |
+| GET    | `/workspaces/:workspace/artifact-library`        | All live, unloaded, and archived sessions in the workspace                      |
+| POST   | `/workspaces/:workspace/artifact-library/query`  | `{ "sessionIds": ["session-id"] }`                                              |
+| POST   | `/workspaces/:workspace/artifact-library/delete` | `{ "artifacts": [{ "sessionId": "session-id", "artifactId": "artifact-id" }] }` |
+
+Both POST bodies are strict objects containing 1–100 entries. Duplicate IDs or
+pairs are processed once. Query responses are
+`{ "v": 1, "sessions": [<session artifact envelope>], "errors": [<member error>] }`.
+Each member error contains `sessionId`, `status`, `code`, and `message`. Full
+discovery omits absent/foreign sessions; an explicit query reports them. Other
+member failures remain explicit while successful sessions are returned.
+
+With `workspace_artifact_library_stream`, every artifact-library session
+envelope (including the existing single-session GET) additionally contains:
+
+```json
+{
+  "session": {
+    "displayName": "Task title",
+    "createdAt": "2026-10-26T00:00:00.000Z",
+    "archiveState": "archived",
+    "sourceType": "scheduled_task",
+    "sourceId": "task-id"
+  }
+}
+```
+
+`displayName` and `sourceId` are optional. `createdAt` is the original session
+creation time, including after resume; it is not an artifact timestamp.
+`archiveState` is `active` or `archived`. Source types are open strings and
+missing attribution becomes `default`. Sources such as `resource_inspection`
+are preserved so clients can explicitly exclude them. A source ID is paired
+with its original source type. Names follow the current live title or persisted
+custom title/first prompt. The generic `/session/:id/artifacts` response is
+unchanged.
+
+The full GET and selected-session POST also accept `Accept: text/event-stream`.
+Without that negotiation they return the JSON response above. Use fetch-based
+streaming for POST; check the capability and response content type on older
+daemons. The finite SSE sequence is:
+
+| Event           | Data                                                                             |
+| --------------- | -------------------------------------------------------------------------------- |
+| `start`         | `{ "v": 1, "total": <candidate sessions> }`                                      |
+| `session`       | One complete artifact-library envelope including `session`                       |
+| `session_error` | `{ "v": 1, "sessionId": "...", "status": 404, "code": "...", "message": "..." }` |
+| `complete`      | `{ "v": 1, "total": 10, "succeeded": 8, "failed": 1, "skipped": 1 }`             |
+| `error`         | Fatal `{ "v": 1, "status": 503, "code": "...", "message": "..." }`               |
+
+Results arrive in completion order with up to four concurrent session reads;
+a slow session does not block other workers. JSON retains selection order.
+Full-query absent/foreign sessions count as `skipped`; explicit-query failures
+emit `session_error`. `total` counts candidates, not artifacts. Only `complete`
+marks a finished scan. Fatal `error` or disconnection without `complete` means
+partial results; there is no replay cursor, automatic reconnect, or subscription.
+Heartbeat comments may occur while waiting. Initial failures use ordinary HTTP
+status codes; after SSE headers, fatal errors are stream events. A disconnected
+request stops dispatching new reads; already running shared cache loads may
+finish. Backpressure bounds pending result frames and does not hold archive
+barriers while waiting for the client.
+
+Batch removal returns `{ "v": 1, "results": [...] }`. Each result contains
+`sessionId` and `artifactId`, plus either the existing mutation envelope
+(`v`, `changes`, optional `warnings`/`warningDetails`) or
+`error: { status, code, message }`. Missing artifacts are idempotent empty
+changes. Clients must inspect every result and persistence warning; a 200 batch
+response does not mean every member succeeded. Removal is grouped by session,
+is not transactional across sessions, preserves actual files, and requires
+the same strict operator authority as single-artifact removal. Invalid input
+returns 400 `invalid_artifact_library_request`; workspace-level errors retain
+ordinary HTTP status codes.
+
+Live artifacts and titles come from the bridge; bounded persisted identity
+metadata preserves original creation time and source attribution. Unloaded
+metadata, including empty results, is
+cached per runtime with a 32 MiB serialized-size budget. Unchanged files are not
+replayed on repeated queries or after a TTL. Transcript and ownership metadata
+identities are checked on each read; changed entries are rebuilt. Candidate
+discovery is cached by directory identity and refreshed on the first query at
+least two seconds after a completed scan, including when directory timestamps
+do not change. This filename-only refresh preserves unchanged artifact caches.
+Concurrent cold reads share a load; each request processes up to four sessions
+at a time.
+Admitted unchanged entries are retained; new results exceeding the budget are
+returned uncached so repeated full scans do not evict the whole cache. Those
+uncached sessions, or a daemon restart, require reconstruction. This avoids
+repeated JSONL parsing for cached entries, but filesystem checks and response
+size still scale with the workspace. Cold file availability retains the existing
+metadata-only semantics.
+
+The existing single-session artifact-library GET shares this same cache with
+full and batch queries, adding only the `session` summary to its response and
+retaining existing error shapes. Warming one
+route benefits the others; single and batch removal invalidate the shared
+entry. Title-only transcript appends and archive moves also refresh metadata;
+live titles are read on each request without waiting for disk persistence. Live
+persisted metadata and cold envelopes share the same 32 MiB budget, and live/cold
+transitions rebuild the entry. A cached envelope's `generatedAt` is its projection
+creation time.
 
 `session_artifact_library` advertises these persisted-workspace-scoped endpoints:
 

@@ -417,6 +417,7 @@ export const HOME_ENV_BOOTSTRAP_KEYS = [
 // through.
 export const INHERITED_LOADER_ENV_KEYS = [
   'NODE_OPTIONS',
+  'BUN_OPTIONS',
   // npm maps its `node-options` config onto npm_config_node_options in the
   // environment, and `npm run` lifecycle scripts apply it like NODE_OPTIONS —
   // the same hijack through an adjacent key. The config-file keys are the

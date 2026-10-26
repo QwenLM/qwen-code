@@ -78,7 +78,17 @@ import {
   estimateContentTokens,
   estimatePromptTokens,
 } from '../services/tokenEstimation.js';
-import { SYSTEM_REMINDER_OPEN } from './environmentContext.js';
+import { clampOutputTokensToWindow } from './tokenLimits.js';
+import { getAutoMemorySnapshot } from '../memory/request-context.js';
+import {
+  isSystemReminderContent,
+  SYSTEM_REMINDER_OPEN,
+} from './environmentContext.js';
+import {
+  countApiUserPrompts,
+  findApiRewindCutPoint,
+  isApiUserPrompt,
+} from '../services/api-user-prompt.js';
 import { selectForkHistory } from '../tools/agent/fork-subagent.js';
 import { composePostCompactHistory } from '../services/postCompactAttachments.js';
 import { detectTurnInterruption } from './turn-interruption.js';
@@ -88,6 +98,11 @@ import {
 } from '../utils/api-history-metadata.js';
 import { formatAgentMessageModelText } from '../agents/session-agents/envelope.js';
 import { SessionStartSource } from '../hooks/types.js';
+import {
+  createUserPromptSubmitContextPart,
+  hasUserPromptSubmitContext,
+  wrapUserPromptSubmitContext,
+} from '../hooks/user-prompt-submit-context.js';
 import * as sideQueryModule from '../utils/sideQuery.js';
 import {
   getToolCallPreparations,
@@ -2934,34 +2949,173 @@ describe('LlmChat', async () => {
       );
     });
 
-    it('sends the latest memory catalog without persisting it to history', async () => {
-      // The catalog part carries the volatile-boundary marker so the provider
-      // cache passes anchor their per-turn breakpoint before it.
-      const catalogPart = (text: string) => ({
-        text,
-        partMetadata: { 'qwen-code:reattach-boundary': true },
-      });
+    it('retains unchanged memory snapshots and appends only the latest revision', async () => {
       let catalog = 'first catalog';
       mockConfig.getAutoMemoryContext = () => catalog;
+      const snapshots = (history: Content[]) =>
+        history.flatMap((entry) =>
+          (entry.parts ?? []).filter(
+            (part) =>
+              part.partMetadata?.['qwen-code:memory-catalog-snapshot'] === true,
+          ),
+        );
       mockStream(textStream('response'));
       await sendDrain('first question', 'memory-tail-1');
-      expect(
-        (requestAt(0).contents as Content[]).at(-1)?.parts?.at(-1),
-      ).toEqual(catalogPart('first catalog'));
-      expect(JSON.stringify(chat.getHistory())).not.toContain('first catalog');
       const firstHistory = chat.getHistory();
-      catalog = 'updated catalog';
-      mockStream(textStream('done'));
-      await sendDrain('second question', 'memory-tail-2');
-      const second = requestAt(1).contents as Content[];
-      expect(second.slice(0, firstHistory.length)).toEqual(firstHistory);
-      expect(second.at(-1)?.parts?.at(-1)).toEqual(
-        catalogPart('updated catalog'),
+      expect(snapshots(firstHistory)).toHaveLength(1);
+      expect(snapshots(firstHistory)[0].text).toContain('first catalog');
+      expect(snapshots(firstHistory)[0].partMetadata).not.toHaveProperty(
+        'qwen-code:reattach-boundary',
       );
-      expect(JSON.stringify(second)).not.toContain('first catalog');
-      expect(JSON.stringify(chat.getHistory())).not.toContain(
+
+      for (const [index, next] of [
+        'first catalog',
         'updated catalog',
+        'first catalog',
+      ].entries()) {
+        catalog = next;
+        mockStream(textStream('done'));
+        await sendDrain(`question ${index}`, `memory-next-${index}`);
+        const request = requestAt(index + 1).contents as Content[];
+        expect(request.slice(0, firstHistory.length)).toEqual(firstHistory);
+        expect(snapshots(request)).toHaveLength(index + 1);
+        expect(snapshots(request).at(-1)?.text).toContain(next);
+        expect(snapshots(request).at(-1)?.text).toContain(
+          'supersedes all earlier memory catalogs',
+        );
+      }
+
+      catalog = '';
+      const retained = chat.getHistory();
+      expect(snapshots(chat.getHistoryShallow(true))).toEqual([]);
+      mockStream(textStream('memory disabled'));
+      await sendDrain('ordinary user text', 'memory-off');
+      expect(snapshots(requestAt(4).contents as Content[])).toEqual([]);
+      expect(JSON.stringify(requestAt(4).contents)).toContain(
+        'ordinary user text',
       );
+      expect(chat.getHistory().slice(0, retained.length)).toEqual(retained);
+
+      chat.setHistory([{ role: 'user', parts: [{ text: 'summary' }] }]);
+      catalog = 'first catalog';
+      mockStream(textStream('after compression'));
+      await sendDrain('continue', 'memory-reseed');
+      expect(snapshots(requestAt(5).contents as Content[])).toHaveLength(1);
+    });
+
+    it('records a snapshot only after successful assembly and deduplicates later sends', async () => {
+      mockConfig.getAutoMemoryContext = () => 'catalog';
+      const recordMemoryCatalogSnapshot = vi.fn();
+      const target = newChat({
+        recorder: { recordMemoryCatalogSnapshot, recordAssistantTurn: vi.fn() },
+      });
+      const preparation = target as unknown as {
+        getRequestHistory: (
+          current?: Content,
+          history?: Content[],
+        ) => Content[];
+      };
+      const prepare = preparation.getRequestHistory.bind(target);
+      vi.spyOn(preparation, 'getRequestHistory').mockImplementationOnce(
+        (...args) => {
+          prepare(...args);
+          throw new Error('assembly failed');
+        },
+      );
+      await expect(
+        send('failed prompt', 'memory-failed', target),
+      ).rejects.toThrow('assembly failed');
+      expect(target.getHistory()).toEqual([]);
+      expect(recordMemoryCatalogSnapshot).not.toHaveBeenCalled();
+      mockStream(textStream('answer'));
+      await sendDrain('retry prompt', 'memory-retry', target);
+      expect(recordMemoryCatalogSnapshot).toHaveBeenCalledOnce();
+      expect(recordMemoryCatalogSnapshot.mock.calls[0][0]).toEqual(
+        target.getHistory()[0].parts?.at(-1),
+      );
+      mockStream(textStream('next answer'));
+      await sendDrain('next prompt', 'memory-next', target);
+      expect(recordMemoryCatalogSnapshot).toHaveBeenCalledOnce();
+    });
+
+    it('sends only the current catalog in a recovery request after a catalog change', () => {
+      let catalog = 'STALE_CATALOG';
+      mockConfig.getAutoMemoryContext = () => catalog;
+      const recovery = userText('continue the truncated answer');
+      const target = newChat({
+        history: [
+          content('user', getAutoMemorySnapshot([], catalog)!),
+          modelText('partial'),
+          recovery,
+        ],
+      });
+      catalog = 'FRESH_CATALOG';
+      const request = (
+        target as unknown as {
+          getRequestHistoryForRoute: (
+            current: Content,
+            modalities: { image: boolean },
+            retain: boolean,
+          ) => Content[];
+        }
+      ).getRequestHistoryForRoute(recovery, { image: true }, false);
+      const sent = JSON.stringify(request);
+      expect(sent).not.toContain('STALE_CATALOG');
+      expect(sent.split('FRESH_CATALOG')).toHaveLength(2);
+      expect(JSON.stringify(target.getHistory())).toContain('STALE_CATALOG');
+    });
+
+    it('keeps transient recovery snapshots request-only until a durable request', async () => {
+      mockConfig.getAutoMemoryContext = () => 'current catalog';
+      const recordMemoryCatalogSnapshot = vi.fn();
+      const recovery = userText('continue the truncated answer');
+      const target = newChat({
+        history: [userText('summary'), modelText('partial'), recovery],
+        recorder: { recordMemoryCatalogSnapshot, recordAssistantTurn: vi.fn() },
+      });
+      const prepare = (
+        target as unknown as {
+          getRequestHistoryForRoute: (
+            current: Content,
+            modalities: { image: boolean },
+            retain: boolean,
+          ) => Content[];
+        }
+      ).getRequestHistoryForRoute.bind(target);
+      target.setLastPromptTokenCount(100, true);
+      const original = target.getHistory();
+      for (let retry = 0; retry < 2; retry++) {
+        const request = prepare(recovery, { image: true }, false);
+        expect(request.at(-1)?.parts?.at(-1)).toEqual({
+          text: 'current catalog',
+          partMetadata: { 'qwen-code:reattach-boundary': true },
+        });
+        expect(target.peekLastHistoryEntry()).toBe(recovery);
+        expect(target.getHistory()).toEqual(original);
+      }
+      expect(recordMemoryCatalogSnapshot).not.toHaveBeenCalled();
+      expect(target.getLastPromptTokenCount()).toBe(100);
+      prepare(recovery, { image: true }, true);
+      expect(recordMemoryCatalogSnapshot).toHaveBeenCalledOnce();
+      expect(target.getHistory().at(-1)?.parts?.at(-1)?.partMetadata).toEqual({
+        'qwen-code:memory-catalog-snapshot': true,
+      });
+      expect(prepare(recovery, { image: true }, false)).toEqual(
+        target.getHistory(),
+      );
+      expect(recordMemoryCatalogSnapshot).toHaveBeenCalledOnce();
+      expect(target.getLastPromptTokenCount()).toBe(100);
+      mockStream(textStream('answer'));
+      await sendDrain('follow up', 'catalog-recovery-durable', target);
+      const covered =
+        100 +
+        estimateContentTokens([
+          content('user', getAutoMemorySnapshot([], 'current catalog')!),
+        ]);
+      expect(target.getLastPromptTokenCount()).toBe(covered);
+      mockStream(textStream('next answer'));
+      await sendDrain('next', 'catalog-recovery-covered', target);
+      expect(target.getLastPromptTokenCount()).toBe(covered);
     });
 
     it('caps function responses at the provider send boundary without changing user text', async () => {
@@ -3788,6 +3942,112 @@ describe('LlmChat', async () => {
       );
     });
 
+    it('re-appends a suppressed hook block when the send compacts', async () => {
+      mockCompressOnce(
+        compressed(1000, 200, [userText('summary'), modelText('ok')]),
+      );
+      mockStream(textStream('answer'));
+
+      await drain(
+        await chat.sendMessageStream(
+          'test-model',
+          { message: 'go' },
+          'prompt-id-hook-compaction',
+          undefined,
+          { suppressedHookContext: 'CTX' },
+        ),
+      );
+
+      expect(
+        chat
+          .getHistory()
+          .flatMap((entry) => entry.parts ?? [])
+          .filter((part) => part.text === wrapUserPromptSubmitContext('CTX')),
+      ).toHaveLength(1);
+    });
+
+    it('does not append a second suppressed hook block when the request already carries it', async () => {
+      mockCompressOnce(
+        compressed(1000, 200, [userText('summary'), modelText('ok')]),
+      );
+      mockStream(textStream('answer'));
+
+      // The ACP send re-appends the block after a compaction of its own and
+      // still forwards the option, so this rescue must not add a second copy.
+      await drain(
+        await chat.sendMessageStream(
+          'test-model',
+          {
+            message: [{ text: 'go' }, createUserPromptSubmitContextPart('CTX')],
+          },
+          'prompt-id-hook-already-present',
+          undefined,
+          { suppressedHookContext: 'CTX' },
+        ),
+      );
+
+      expect(
+        chat
+          .getHistory()
+          .flatMap((entry) => entry.parts ?? [])
+          .filter((part) => part.text === wrapUserPromptSubmitContext('CTX')),
+      ).toHaveLength(1);
+    });
+
+    it('leaves a suppressed hook block unappended when the send does not compact', async () => {
+      mockCompress(noop());
+      mockStream(textStream('answer'));
+
+      await drain(
+        await chat.sendMessageStream(
+          'test-model',
+          { message: 'go' },
+          'prompt-id-hook-no-compaction',
+          undefined,
+          { suppressedHookContext: 'CTX' },
+        ),
+      );
+
+      // The COMPRESSED conjunct is the whole gate: `compressionInfo` is
+      // assigned on every send (NOOP on the exact-route arm), so without it
+      // the rescue would re-append on every suppressed turn.
+      expect(
+        chat
+          .getHistory()
+          .flatMap((entry) => entry.parts ?? [])
+          .filter((part) => part.text === wrapUserPromptSubmitContext('CTX')),
+      ).toHaveLength(0);
+    });
+
+    it('re-appends a suppressed hook block when a reactive compaction replaces history', async () => {
+      reactiveCompaction(135_000);
+      mockRequests(tooLong(), textStream('answer after compaction'));
+
+      await drain(
+        await chat.sendMessageStream(
+          'test-model',
+          { message: 'latest' },
+          'prompt-id-hook-reactive-compaction',
+          undefined,
+          { suppressedHookContext: 'CTX' },
+        ),
+      );
+
+      const sentParts = (
+        requestAt(1) as { contents: Content[] }
+      ).contents.flatMap((entry) => entry.parts ?? []);
+      expect(
+        sentParts.filter(
+          (part) => part.text === wrapUserPromptSubmitContext('CTX'),
+        ),
+      ).toHaveLength(1);
+      expect(
+        chat.findLastHistoryEntry((entry) =>
+          hasUserPromptSubmitContext(entry, 'CTX'),
+        ),
+      ).toBeDefined();
+    });
+
     it('yields a COMPRESSED stream event as the first event after auto-compression succeeds', async () => {
       mockCompressOnce(
         compressed(1000, 200, [userText('summary'), modelText('ok')]),
@@ -4016,6 +4276,88 @@ describe('LlmChat', async () => {
       expect(compressSpy.mock.calls[2][1].consecutiveFailures).toBe(0);
     });
 
+    it('keeps a catalog-only overflow reseed out of user and fork turn counts', async () => {
+      mockConfig.getAutoMemoryContext = () => 'OVERFLOW_CATALOG_SENTINEL';
+      const compacted = await composePostCompactHistory([], 'Summary.');
+      expect(compacted.at(-1)?.role).toBe('model');
+      const compressSpy = reactiveCompaction(135_000, compacted);
+      mockRequests(
+        new Error(
+          "This model's maximum context length is 128000 tokens. However, your messages resulted in 135000 tokens.",
+        ),
+        textStream('answer after compact'),
+      );
+
+      await sendCollect('continue the work', 'catalog-only-overflow');
+
+      expect(compressSpy).toHaveBeenCalledTimes(2);
+      expect(compressSpy.mock.calls[1][1].force).toBe(true);
+      const retry = requestAt(1).contents as Content[];
+      const reseed = retry.at(-1)!;
+      expect(reseed.role).toBe('user');
+      expect(reseed.parts).toHaveLength(1);
+      expect(reseed.parts?.[0].text).toContain('OVERFLOW_CATALOG_SENTINEL');
+      expect(isSystemReminderContent(reseed)).toBe(true);
+      expect(isApiUserPrompt(reseed)).toBe(false);
+      const snapshot = reseed.parts![0];
+      const realPrompt = content(
+        'user',
+        { text: 'real user prompt' },
+        snapshot,
+      );
+      expect(isSystemReminderContent(realPrompt)).toBe(false);
+      expect(isApiUserPrompt(realPrompt)).toBe(true);
+      for (const part of [
+        { text: '' },
+        { inlineData: { mimeType: 'image/png', data: 'image' } },
+        { text: '[Old inline media cleared: image/png]' },
+      ]) {
+        expect(
+          isApiUserPrompt(content('user', part, snapshot), {
+            excludeClearedMediaPlaceholders: true,
+          }),
+        ).toBe(false);
+      }
+      const history = [
+        realPrompt,
+        modelText('earlier answer'),
+        reseed,
+        modelText('continued'),
+      ];
+      expect(selectForkHistory(history, 1)).toEqual(history);
+      const notification = {
+        text: '<task-notification>task completed</task-notification>',
+      };
+      const delivered = content(
+        'user',
+        { text: '<system-reminder>active plan</system-reminder>' },
+        notification,
+        snapshot,
+      );
+      const options = { excludeTaskNotifications: true };
+      expect(isApiUserPrompt(delivered, options)).toBe(false);
+      expect(
+        isApiUserPrompt(
+          content(
+            'user',
+            { text: 'inspect the result' },
+            notification,
+            snapshot,
+          ),
+          options,
+        ),
+      ).toBe(true);
+      const rewindHistory = [
+        userText('first prompt'),
+        modelText('first answer'),
+        delivered,
+        modelText('notification answer'),
+        userText('second prompt'),
+      ];
+      expect(countApiUserPrompts(rewindHistory, options)).toBe(2);
+      expect(findApiRewindCutPoint(rewindHistory, 1, options)).toBe(4);
+    });
+
     it('reactively compresses and retries once after a context overflow error', async () => {
       const compressedHistory = [
         userText('summary'),
@@ -4063,6 +4405,135 @@ describe('LlmChat', async () => {
       expect(events[1]?.type).toBe(StreamEventType.RETRY);
       expect(events[1]).not.toHaveProperty('retryInfo');
       expect(hasChunkText(events, 'answer after compact')).toBe(true);
+    });
+
+    it('suppresses retained catalogs in advisor and non-cache follow-up inputs without changing raw history', async () => {
+      const { AdvisorTool } = await import('../tools/advisor.js');
+      const { runWithAgentChat } = await import(
+        '../agents/runtime/agent-context.js'
+      );
+      const forkedAgent = await import('../agents/forkedAgent.js');
+      const { generatePromptSuggestion } = await import(
+        '../followup/suggestionGenerator.js'
+      );
+      const CATALOG_SENTINEL = 'AUXILIARY_CATALOG_SENTINEL';
+      let catalog: string = CATALOG_SENTINEL;
+      mockConfig.getAutoMemoryContext = () => catalog;
+      const snapshot = getAutoMemorySnapshot([], catalog)!;
+      chat.setHistory([
+        content('user', { text: 'inspect the package' }, snapshot),
+        modelText('inspected'),
+        userText('check the tests'),
+        content('model', { text: 'checked' }, fnCall('advisor', {})),
+      ]);
+      const raw = chat.getHistory();
+      const last = chat.peekLastHistoryEntry();
+      expect(JSON.stringify(chat.getHistory(true))).toContain(CATALOG_SENTINEL);
+      expect(JSON.stringify(chat.getHistoryTail(40, true))).toContain(
+        CATALOG_SENTINEL,
+      );
+      catalog = '';
+
+      mockConfig.getFastModel = () => undefined;
+      mockConfig.getAdvisorModel = () => 'advisor-model';
+      mockConfig.tryConsumeAdvisorUse = () => true;
+      const reply = {
+        status: 'completed' as const,
+        filesTouched: [],
+        text: 'Review the test results.',
+        model: 'advisor-model',
+        usage: {
+          inputTokens: 1,
+          outputTokens: 1,
+          totalTokens: 2,
+          cacheHitTokens: 0,
+        },
+      };
+      const advisor = vi
+        .spyOn(forkedAgent, 'runForkedAgent')
+        .mockResolvedValue(reply);
+      const result = await runWithAgentChat(chat, () =>
+        new AdvisorTool(mockConfig)
+          .build({})
+          .execute(new AbortController().signal),
+      );
+      expect(result.error).toBeUndefined();
+      expect(advisor).toHaveBeenCalledOnce();
+      expect(advisor.mock.calls[0][0]).toHaveProperty(
+        'userMessage',
+        expect.stringContaining('inspect the package'),
+      );
+      expect(JSON.stringify(advisor.mock.calls[0][0])).not.toContain(
+        CATALOG_SENTINEL,
+      );
+
+      const generateText = vi.fn().mockResolvedValue({ text: 'run the tests' });
+      withBaseLlmClient(generateText);
+      await generatePromptSuggestion(
+        mockConfig,
+        chat.getHistoryTail(40, true),
+        new AbortController().signal,
+        { enableCacheSharing: false },
+      );
+      expect(generateText).toHaveBeenCalledOnce();
+      const outbound = JSON.stringify(generateText.mock.calls[0][0].contents);
+      expect(outbound).toContain('check the tests');
+      expect(outbound).not.toContain(CATALOG_SENTINEL);
+
+      // The side queries strip marked snapshots unconditionally, so witness
+      // them with the catalog ACTIVE: under suppression their strip and the
+      // curated readers' conditional filter produce the same payload.
+      catalog = CATALOG_SENTINEL;
+      expect(JSON.stringify(chat.getHistoryShallow())).toContain(
+        CATALOG_SENTINEL,
+      );
+      const { generateSessionRecap } = await import(
+        '../services/sessionRecap.js'
+      );
+      const { tryGenerateSessionTitle } = await import(
+        '../services/sessionTitle.js'
+      );
+      mockConfig.getLlmClient = () =>
+        ({
+          getHistoryShallow: (curated = false) =>
+            chat.getHistoryShallow(curated),
+        }) as ReturnType<Config['getLlmClient']>;
+      generateText.mockClear();
+      generateText.mockResolvedValue({
+        text: '<recap>Checked the package.</recap>',
+      });
+      expect(
+        await generateSessionRecap(mockConfig, new AbortController().signal),
+      ).toBe('Checked the package.');
+      expect(generateText).toHaveBeenCalledOnce();
+      expect(
+        JSON.stringify(generateText.mock.calls[0][0].contents),
+      ).not.toContain('memory catalog');
+      expect(
+        JSON.stringify(generateText.mock.calls[0][0].contents),
+      ).not.toContain(CATALOG_SENTINEL);
+      const generateJson = vi
+        .fn()
+        .mockResolvedValue({ title: 'Package checks' });
+      mockConfig.getFastModel = () => 'fast-model';
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        generateJson,
+      } as unknown as ReturnType<Config['getBaseLlmClient']>);
+      await tryGenerateSessionTitle(mockConfig, new AbortController().signal);
+      expect(generateJson).toHaveBeenCalledOnce();
+      expect(JSON.stringify(generateJson.mock.calls[0][0].contents)).toContain(
+        'check the tests',
+      );
+      expect(
+        JSON.stringify(generateJson.mock.calls[0][0].contents),
+      ).not.toContain('memory catalog');
+      expect(
+        JSON.stringify(generateJson.mock.calls[0][0].contents),
+      ).not.toContain(CATALOG_SENTINEL);
+      expect(chat.getHistory()).toEqual(raw);
+      expect(chat.getHistoryTail(40)).toEqual(raw);
+      expect(chat.getHistoryLength()).toBe(raw.length);
+      expect(chat.peekLastHistoryEntry()).toBe(last);
     });
 
     it('re-issues the durability snapshot after reactive compaction', async () => {
@@ -4788,6 +5259,34 @@ describe('LlmChat', async () => {
       ).toBeLessThan(100_000);
     });
 
+    it.each([
+      { catalog: 'c'.repeat(75_000), aborts: true },
+      { catalog: '', aborts: false },
+    ])(
+      'counts the pending catalog in the post-compression hard-rescue decision (catalog=$aborts)',
+      async ({ catalog, aborts }) => {
+        mockConfig.getAutoMemoryContext = () => catalog;
+        mockCompress(compressed(180_000, 175_000));
+        streamMock().mockImplementation(async () => textStream('after rescue'));
+        chat.setLastPromptTokenCount(176_999);
+
+        const send = sendDrain(
+          'next question',
+          `prompt-catalog-hard-${aborts}`,
+        );
+
+        if (aborts) {
+          await expect(send).rejects.toThrow(/hard limit/i);
+          expect(
+            mockContentGenerator.generateContentStream,
+          ).not.toHaveBeenCalled();
+        } else {
+          await send;
+          expectStreamCalls(1);
+        }
+      },
+    );
+
     it('stops pre-send hard-rescue after repeated failed hard-tier compactions', async () => {
       const compressSpy = mockCompress(failedRescue());
       streamMock().mockImplementation(async () =>
@@ -5006,6 +5505,562 @@ describe('LlmChat', async () => {
       const maxOutputTokens = sentMaxOutputTokens();
       expect(maxOutputTokens).toBe(19_998);
       expect(170_000 + maxOutputTokens!).toBeLessThanOrEqual(200_000);
+    });
+
+    it.each([
+      { name: 'changed', previous: 'a', current: 'b', seed: 150_000 },
+      { name: 'unchanged', previous: 'a', current: 'a', seed: 150_000 },
+      { name: 'first send', previous: 'a', current: 'b', seed: 0 },
+    ])(
+      'budgets $name catalog snapshots before compression and output clamping',
+      async ({ previous, current, seed }) => {
+        const oldSnapshot = getAutoMemorySnapshot([], previous.repeat(75_000))!;
+        mockConfig.getAutoMemoryContext = () => current.repeat(75_000);
+        const target = newChat({
+          history: [{ role: 'user', parts: [oldSnapshot] }, modelText('ack')],
+        });
+        target.setLastPromptTokenCount(seed);
+        const compressSpy = mockCompress(noop(seed));
+        mockStream(textStream('answer'));
+        await sendDrain('hi', `catalog-budget-${seed}-${current}`, target);
+        const request = requestAt(0).contents as Content[];
+        const pending = request.at(-1)!;
+        const addedTokens = estimateContentTokens([pending]);
+        expect(compressSpy.mock.calls[0][1].precomputedEffectiveTokens).toBe(
+          seed > 0 ? seed + addedTokens : estimateContentTokens(request),
+        );
+        expect(
+          request
+            .flatMap((entry) => entry.parts ?? [])
+            .filter(
+              (part) =>
+                part.partMetadata?.['qwen-code:memory-catalog-snapshot'] ===
+                true,
+            ),
+        ).toHaveLength(previous === current ? 1 : 2);
+        if (seed > 0) {
+          expect(sentMaxOutputTokens()).toBe(
+            Math.min(
+              32_000,
+              200_000 - seed - Math.ceil(addedTokens * 1.5) - 10_000,
+            ),
+          );
+        }
+      },
+    );
+
+    it.each(['same catalog', 'new workspace catalog'])(
+      'budgets retained catalogs after suppressed usage and %s re-enables memory',
+      async (mode) => {
+        const oldCatalog = 'a'.repeat(75_000);
+        let catalog = oldCatalog;
+        mockConfig.getAutoMemoryContext = () => catalog;
+        mockGeneratorConfig({ contextWindowSize: 128_000 });
+        chat.setHistory([userText('dialog '.repeat(34_286)), modelText('ack')]);
+        const compressSpy = mockCompress(noop());
+        mockStream(
+          textStream('seeded', {
+            promptTokenCount: 80_000,
+            totalTokenCount: 80_020,
+          }),
+        );
+        await sendDrain('seed catalog', 'visibility-seed');
+        catalog = '';
+        mockStream(
+          textStream('structured answer', {
+            promptTokenCount: 60_000,
+            totalTokenCount: 60_050,
+            cachedContentTokenCount: 100,
+          }),
+        );
+        await sendDrain('structured prompt', 'visibility-suppressed');
+        expect(JSON.stringify(requestAt(1).contents)).not.toContain(oldCatalog);
+        expect(chat.getLastPromptTokenCount()).toBe(60_000);
+        const retained = chat.getHistory();
+        catalog = mode === 'same catalog' ? oldCatalog : 'b'.repeat(75_000);
+        compressSpy.mockClear();
+        mockStream(textStream('reenabled answer'));
+        await sendDrain('continue after cd', 'visibility-reenabled');
+        const request = requestAt(2).contents as Content[];
+        const estimated = estimateContentTokens(request);
+        expect(compressSpy.mock.calls[0][1].precomputedEffectiveTokens).toBe(
+          estimated,
+        );
+        expect(
+          (requestAt(2).config as { maxOutputTokens?: number }).maxOutputTokens,
+        ).toBe(
+          Math.max(
+            4_000,
+            Math.min(32_000, 128_000 - estimated - 20_000 - 10_000),
+          ),
+        );
+        expect(JSON.stringify(request)).toContain(oldCatalog);
+        expect(JSON.stringify(request)).toContain(catalog);
+        expect(chat.getHistory().slice(0, retained.length)).toEqual(retained);
+      },
+    );
+
+    it.each([false, true])(
+      'keeps resume usage while retained catalogs stay visible, reused=%s',
+      (reused) => {
+        let catalog = 'restored catalog';
+        mockConfig.getAutoMemoryContext = () => catalog;
+        const target = newChat({
+          history: [
+            content('user', getAutoMemorySnapshot([], catalog)!),
+            modelText('answer'),
+          ],
+        });
+        if (reused) {
+          target.setLastPromptTokenCount(6000);
+          expect(target.getLastPromptTokenCount()).toBe(6000);
+        }
+        target.seedResumeTokenCounts(5000, 50);
+        expect(target.getLastPromptTokenCount()).toBe(5000);
+        expect(target.getLastOutputTokenCount()).toBe(50);
+        catalog = '';
+        expect(target.getLastPromptTokenCount()).toBe(5000);
+        catalog = 'restored catalog';
+        expect(target.getLastPromptTokenCount()).toBe(0);
+        expect(target.getLastOutputTokenCount()).toBe(0);
+      },
+    );
+
+    it('charges a changed snapshot after an authoritative count when usage is missing', async () => {
+      let catalog = 'catalog A';
+      mockConfig.getAutoMemoryContext = () => catalog;
+      mockStream(
+        textStream('seeded', { promptTokenCount: 5000, totalTokenCount: 5010 }),
+      );
+      await sendDrain('seed', 'catalog-authoritative-seed');
+      expect(chat.getLastPromptTokenCount()).toBe(5000);
+      catalog = 'catalog B';
+      mockStream(textStream('no usage'));
+      await sendDrain('next', 'catalog-authoritative-missing-usage');
+      expect(chat.getLastPromptTokenCount()).toBe(
+        5000 +
+          estimateContentTokens([
+            content('user', getAutoMemorySnapshot([], 'catalog B')!),
+          ]),
+      );
+    });
+
+    it('keeps an aborted turn’s newly retained catalog in the next gate estimate', async () => {
+      let catalog = 'catalog A';
+      mockConfig.getAutoMemoryContext = () => catalog;
+      mockStream(
+        textStream('seeded', { promptTokenCount: 5000, totalTokenCount: 5010 }),
+      );
+      await sendDrain('seed', 'catalog-gate-abort-seed');
+      expect(chat.getLastPromptTokenCount()).toBe(5000);
+
+      catalog = 'catalog B';
+      mockStream(
+        streamThenThrow([textChunk('half')], new Error('stream blew up')),
+      );
+      const failed = await send('commit then fail', 'catalog-gate-abort-fail');
+      await expect(drain(failed)).rejects.toThrow('stream blew up');
+      // The failed turn charges nothing: ownership must survive into the next
+      // turn's gate estimate even though the flag is authoritative — re-adding
+      // the estimation conjunct at the gate must turn this red.
+      expect(chat.getLastPromptTokenCount()).toBe(5000);
+
+      const compressSpy = mockCompress(noop());
+      mockStream(textStream('silent'));
+      await sendDrain('after failure', 'catalog-gate-abort-after');
+      expect(compressSpy.mock.calls[0][1].precomputedEffectiveTokens).toBe(
+        5000 +
+          estimateContentTokens([
+            content('user', getAutoMemorySnapshot([], 'catalog B')!),
+          ]) +
+          10 +
+          estimateContentTokens([userText('after failure')]),
+      );
+    });
+
+    it.each(['same catalog', 'changed catalog', 'suppressed catalog'])(
+      'budgets a pending replay snapshot once with %s',
+      async (mode) => {
+        const previous = 'v'.repeat(75_000);
+        const current =
+          mode === 'same catalog'
+            ? previous
+            : mode === 'changed catalog'
+              ? 'w'.repeat(75_000)
+              : '';
+        mockConfig.getAutoMemoryContext = () => current;
+        mockGeneratorConfig({ contextWindowSize: 128_000 });
+        const target = newChat({
+          history: [userText('dialog '.repeat(34_286)), modelText('ack')],
+        });
+        const compressSpy = mockCompress(noop());
+        mockStream(textStream('replayed answer'));
+        await sendDrain(
+          [{ text: 'retry' }, getAutoMemorySnapshot([], previous)!],
+          'catalog-pending-replay',
+          target,
+        );
+        const request = requestAt(0).contents as Content[];
+        const estimated = estimateContentTokens(request);
+        expect(compressSpy.mock.calls[0][1].precomputedEffectiveTokens).toBe(
+          estimated,
+        );
+        expect(sentMaxOutputTokens()).toBe(
+          Math.max(
+            4_000,
+            Math.min(32_000, 128_000 - estimated - 20_000 - 10_000),
+          ),
+        );
+        expect(
+          request
+            .flatMap((entry) => entry.parts ?? [])
+            .filter(
+              (part) =>
+                part.partMetadata?.['qwen-code:memory-catalog-snapshot'],
+            ),
+        ).toHaveLength(
+          mode === 'same catalog' ? 1 : mode === 'changed catalog' ? 2 : 0,
+        );
+      },
+    );
+
+    it('charges a replay-carried unchanged snapshot once', async () => {
+      mockConfig.getAutoMemoryContext = () => 'replay catalog';
+      const retained = getAutoMemorySnapshot([], 'replay catalog')!;
+      // A distinct part object with the same text: dedup compares text, so
+      // only the replayed copy is newly owned.
+      const replayed = { ...retained };
+      const target = newChat({
+        history: [content('user', retained), modelText('ack')],
+      });
+      target.setLastPromptTokenCount(5000, true);
+      mockStream(textStream('replayed again'));
+      // Dedup returns undefined here (the catalog text already matches), so
+      // the marking loop is the only thing that owns the replayed part.
+      await sendDrain(
+        [{ text: 'retry' }, replayed],
+        'catalog-replay-carried',
+        target,
+      );
+      expect(target.getLastPromptTokenCount()).toBe(
+        5000 + estimateContentTokens([content('user', replayed)]),
+      );
+    });
+
+    it.each([
+      { language: 'latin', retry: 'strip' },
+      { language: 'cjk', retry: 'strip' },
+      { language: 'latin', retry: 'retain' },
+      { language: 'latin', retry: 'retain suppressed' },
+      { language: 'latin', retry: 'retain through rescue' },
+      { language: 'latin', retry: 'detector clone' },
+      { language: 'latin', retry: 'partial tool' },
+      { language: 'latin', retry: 'retain with shallow writeback' },
+    ])(
+      'keeps reseeded catalog count coverage across missing usage and rollback: $language / $retry',
+      async ({ language, retry }) => {
+        const { buildAutoMemoryIndexContext } = await import(
+          '../memory/prompt.js'
+        );
+        const phrase =
+          language === 'cjk'
+            ? '部署之前核对服务依赖并记录回滚步骤。'
+            : 'Check service dependencies and document rollback before deployment. ';
+        const index = Array.from({ length: 160 }, (_, i) =>
+          `- [Operational note ${i}](notes/note-${i}.md) — ${phrase.repeat(8)}`.slice(
+            0,
+            145,
+          ),
+        ).join('\n');
+        const catalog = buildAutoMemoryIndexContext(
+          '/fixture/project',
+          index,
+          { memoryDir: '/fixture/user', indexContent: index },
+          { memoryDir: '/fixture/team', indexContent: index },
+        );
+        mockConfig.getAutoMemoryContext = () => catalog;
+        mockGeneratorConfig({
+          authType: AuthType.USE_OPENAI,
+          model: 'gpt-4o',
+          contextWindowSize: 128000,
+        });
+        vi.mocked(mockConfig.getModel).mockReturnValue('gpt-4o');
+        vi.mocked(mockConfig.getModelRouteIdentity).mockReturnValue(
+          'gpt-4o@catalog-coverage',
+        );
+        const target = newChat({
+          history: Array.from({ length: 12 }, (_, i) =>
+            i % 2 === 0
+              ? userText(
+                  `Task ${i}: ${'Review deployment prerequisites. '.repeat(20)}`,
+                )
+              : modelText('Reviewed.'),
+          ),
+        });
+        const compressSpy = vi.spyOn(
+          ChatCompressionService.prototype,
+          'compress',
+        );
+        const summary =
+          '<state_snapshot><overall_goal>Review deployment prerequisites</overall_goal><current_state>Prerequisites reviewed; continue with the next user instruction.</current_state></state_snapshot>';
+        const coldSpy = vi
+          .spyOn(sideQueryModule, 'runSideQuery')
+          .mockResolvedValue({ text: summary } as never);
+        vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+          generateText: vi.fn().mockResolvedValue({ text: summary }),
+        } as never);
+        let supplyUsage = false;
+        let abortResponse = false;
+        const controller = new AbortController();
+        streamMock().mockImplementation(async () =>
+          (async function* () {
+            if (abortResponse) {
+              if (retry === 'partial tool') {
+                yield modelChunk([
+                  {
+                    functionCall: {
+                      name: 'read_file',
+                      id: 'catalog-tool',
+                      args: { path: '/tmp/input' },
+                    },
+                  },
+                ]);
+                throw new Error('terminal partial tool failure');
+              }
+              controller.abort();
+              controller.signal.throwIfAborted();
+            }
+            if (retry === 'retain with shallow writeback') {
+              const previous = target.peekLastHistoryEntry()!;
+              const copied = target.getHistoryShallow();
+              expect(copied.at(-1)).toEqual(previous);
+              for (const [index, part] of previous.parts!.entries()) {
+                expect(copied.at(-1)!.parts![index]).not.toBe(part);
+              }
+              target.setHistory(copied, target.getCompletedToolCallIds());
+            }
+            yield textChunk(
+              'READY',
+              'STOP',
+              supplyUsage
+                ? {
+                    promptTokenCount: 43210,
+                    candidatesTokenCount: 1,
+                    totalTokenCount: 43211,
+                  }
+                : undefined,
+            );
+          })(),
+        );
+        const run = async (message: string | Part[]) =>
+          drain(
+            await target.sendMessageStream(
+              'gpt-4o',
+              {
+                message,
+                ...(abortResponse
+                  ? { config: { abortSignal: controller.signal } }
+                  : {}),
+              },
+              `catalog-coverage-${message}`,
+            ),
+          );
+        await run('Establish catalog.');
+        const info = await target.tryCompress(
+          'catalog-coverage-compress',
+          true,
+        );
+        expect(info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+        expect(info.newTokenCountIsEstimated).toBe(true);
+        expect(coldSpy).toHaveBeenCalledOnce();
+        const count = target.getLastPromptTokenCount();
+        const snapshot = getAutoMemorySnapshot(target.getHistory(), catalog)!;
+        expect(snapshot).toBeDefined();
+        const snapshotTokens = estimateContentTokens([
+          content('user', snapshot),
+        ]);
+        expect(snapshotTokens).toBeGreaterThan(10000);
+        await run('Reseed catalog.');
+        expect(
+          getAutoMemorySnapshot(target.getHistory(), catalog),
+        ).toBeUndefined();
+        expect(target.getLastPromptTokenCount()).toBe(count + snapshotTokens);
+        expect(
+          uiTelemetryService.setLastPromptTokenCount,
+        ).toHaveBeenLastCalledWith(count + snapshotTokens);
+        expect(target.isLastPromptTokenCountEstimated()).toBe(true);
+        const callsBefore = compressSpy.mock.calls.length;
+        await run('Next request.');
+        expect(
+          compressSpy.mock.calls[callsBefore][1].precomputedEffectiveTokens,
+        ).toBe(
+          count +
+            snapshotTokens +
+            estimateContentTokens([userText('Next request.')]),
+        );
+        expect(target.getLastPromptTokenCount()).toBe(count + snapshotTokens);
+        supplyUsage = true;
+        await run('Refresh usage.');
+        expect(target.getLastPromptTokenCount()).toBe(43210);
+        expect(target.isLastPromptTokenCountEstimated()).toBe(false);
+        expect(target.stripOrphanedUserEntriesFromHistory()).toEqual([]);
+        expect(
+          getAutoMemorySnapshot(target.getHistory(), catalog),
+        ).toBeUndefined();
+        const recompressed = await target.tryCompress(
+          'catalog-before-abort',
+          true,
+        );
+        expect(recompressed.compressionStatus).toBe(
+          CompressionStatus.COMPRESSED,
+        );
+        const abortCount = target.getLastPromptTokenCount();
+        abortResponse = true;
+        await expect(run('Abort this pending turn.')).rejects.toThrow();
+        const interruption = detectTurnInterruption(target.getHistory());
+        expect(interruption.kind).toBe(
+          retry === 'partial tool' ? 'interrupted_turn' : 'interrupted_prompt',
+        );
+        if (
+          retry !== 'partial tool' &&
+          interruption.kind !== 'interrupted_prompt'
+        )
+          throw new Error('missing retry parts');
+        if (!retry.startsWith('retain') && retry !== 'partial tool') {
+          const stripped = target.stripOrphanedUserEntriesFromHistory();
+          expect(stripped.flatMap((entry) => entry.parts ?? [])).toContainEqual(
+            snapshot,
+          );
+          expect(
+            getAutoMemorySnapshot(target.getHistory(), catalog),
+          ).toBeDefined();
+        }
+        expect(target.getLastPromptTokenCount()).toBe(abortCount);
+        const retryParts =
+          retry === 'detector clone' &&
+          interruption.kind === 'interrupted_prompt'
+            ? interruption.parts
+            : retry === 'partial tool'
+              ? [
+                  {
+                    functionResponse: {
+                      name: 'read_file',
+                      id: 'catalog-tool',
+                      response: { content: 'read' },
+                    },
+                  },
+                ]
+              : [{ text: 'Retry pending turn.' }];
+        const expectedPending =
+          retry === 'strip' ? [...retryParts, snapshot] : retryParts;
+        abortResponse = false;
+        supplyUsage = false;
+        if (retry === 'retain through rescue') {
+          const beforeRescue = target.getHistory();
+          mockGeneratorConfig({
+            authType: AuthType.USE_OPENAI,
+            model: 'gpt-4o',
+            contextWindowSize: 40000,
+          });
+          const rescueCall = compressSpy.mock.calls.length;
+          await expect(run('Rescue cannot fit.')).rejects.toThrow();
+          expect(
+            (await compressSpy.mock.results[rescueCall].value).info
+              .compressionStatus,
+          ).toBe(CompressionStatus.COMPRESSED);
+          expect(target.getHistory()).toEqual(beforeRescue);
+          expect(target.getLastPromptTokenCount()).toBe(abortCount);
+          mockGeneratorConfig({
+            authType: AuthType.USE_OPENAI,
+            model: 'gpt-4o',
+            contextWindowSize: 128000,
+          });
+        }
+        const snapshotVisible = retry !== 'retain suppressed';
+        if (!snapshotVisible) {
+          const { Config: RuntimeConfig } = await import('../config/config.js');
+          Object.assign(mockConfig, {
+            memoryRecallMode: 'legacy',
+            autoMemoryContext: catalog,
+            autoMemoryPrompt: 'Legacy policy',
+            getAutoMemoryContext: RuntimeConfig.prototype.getAutoMemoryContext,
+            getAutoMemoryPrompt: RuntimeConfig.prototype.getAutoMemoryPrompt,
+          });
+          expect(mockConfig.getAutoMemoryContext()).toBe(catalog);
+          RuntimeConfig.prototype.commitMemoryRecallTransition.call(
+            mockConfig,
+            {
+              from: 'legacy',
+              to: 'structured',
+              revision: 'ready-revision',
+              autoMemoryPrompt: 'Structured policy',
+              previousRevision: 'legacy-revision',
+              previousAutoMemoryPrompt: 'Legacy policy',
+            },
+          );
+          expect(mockConfig.getAutoMemoryContext()).toBe('');
+          expect(target.getLastPromptTokenCount()).toBe(abortCount);
+        }
+        const retryCallIndex = compressSpy.mock.calls.length;
+        const requestIndex = streamMock().mock.calls.length;
+        await run(retryParts);
+        if (!snapshotVisible) {
+          expect(
+            target.getHistory().flatMap((entry) => entry.parts ?? []),
+          ).toContainEqual(snapshot);
+          expect(
+            (requestAt(requestIndex).contents as Content[])
+              .flatMap((entry) => entry.parts ?? [])
+              .some((part) => part.text === snapshot.text),
+          ).toBe(false);
+        }
+        expect(
+          compressSpy.mock.calls[retryCallIndex][1].precomputedEffectiveTokens,
+        ).toBe(
+          abortCount +
+            estimateContentTokens([content('user', ...expectedPending)]) +
+            (snapshotVisible &&
+            (retry.startsWith('retain') || retry === 'partial tool')
+              ? snapshotTokens
+              : 0),
+        );
+        expect(target.getLastPromptTokenCount()).toBe(
+          abortCount + (snapshotVisible ? snapshotTokens : 0),
+        );
+      },
+    );
+
+    it('budgets reseeding when compression removes an unchanged catalog snapshot', async () => {
+      const catalog = 'a'.repeat(75_000);
+      mockConfig.getAutoMemoryContext = () => catalog;
+      const target = newChat({
+        history: [
+          { role: 'user', parts: [getAutoMemorySnapshot([], catalog)!] },
+          modelText('ack'),
+        ],
+      });
+      target.setLastPromptTokenCount(150_000);
+      const compressSpy = mockCompressOnce(
+        compressed(150_000, 120_000, [userText('summary'), modelText('ok')]),
+      );
+      mockStream(textStream('answer'));
+      await sendDrain('hi', 'catalog-budget-reseed', target);
+      expect(compressSpy.mock.calls[0][1].precomputedEffectiveTokens).toBe(
+        150_001,
+      );
+      const pending = (requestAt(0).contents as Content[]).at(-1)!;
+      expect(
+        pending.parts?.at(-1)?.partMetadata?.[
+          'qwen-code:memory-catalog-snapshot'
+        ],
+      ).toBe(true);
+      expect(sentMaxOutputTokens()).toBe(
+        200_000 -
+          120_000 -
+          Math.ceil(estimateContentTokens([pending]) * 1.5) -
+          20_000 -
+          10_000,
+      );
     });
 
     it('sends the default ceiling when the window has room (unknown model → 32K)', async () => {
@@ -5449,6 +6504,90 @@ describe('LlmChat', async () => {
     });
   });
 
+  describe('getHistoryReplacementRevision', () => {
+    it.each(['same array', 'new array retaining the same entries'] as const)(
+      'invalidates a captured revision when %s keeps the same raw tail and length',
+      (kind) => {
+        const history: Content[] = [userText('saved'), modelText('pending')];
+        chat.setHistory(history);
+        const tail = chat.peekLastHistoryEntry();
+        const length = chat.getHistoryLength();
+        const revision = chat.getHistoryReplacementRevision();
+
+        chat.setHistory(kind === 'same array' ? history : [...history]);
+
+        expect(chat.peekLastHistoryEntry()).toBe(tail);
+        expect(chat.getHistoryLength()).toBe(length);
+        expect(chat.getHistoryReplacementRevision()).toBe(revision + 1);
+      },
+    );
+
+    it.each([
+      'setHistory',
+      'clearHistory',
+      'truncateHistory',
+      'stripThoughtsFromHistory',
+    ] as const)('advances for every %s, including a no-op repeat', (method) => {
+      const history: Content[] = [userText('saved'), modelText('pending')];
+      chat.setHistory(history);
+      const revision = chat.getHistoryReplacementRevision();
+      const mutate = () => {
+        switch (method) {
+          case 'setHistory':
+            chat.setHistory(history);
+            break;
+          case 'clearHistory':
+            chat.clearHistory();
+            break;
+          case 'truncateHistory':
+            chat.truncateHistory(chat.getHistoryLength());
+            break;
+          case 'stripThoughtsFromHistory':
+            chat.stripThoughtsFromHistory();
+            break;
+          default:
+            throw new Error(`Unexpected history operation: ${method}`);
+        }
+      };
+
+      mutate();
+      expect(chat.getHistoryReplacementRevision()).toBe(revision + 1);
+      mutate();
+      expect(chat.getHistoryReplacementRevision()).toBe(revision + 2);
+    });
+
+    it('advances only when stripping orphaned users actually removes an entry', () => {
+      const kept = modelText('kept');
+      const orphan = userText('not delivered');
+      chat.setHistory([userText('saved'), kept, orphan]);
+      const revision = chat.getHistoryReplacementRevision();
+
+      expect(chat.stripOrphanedUserEntriesFromHistory()).toEqual([orphan]);
+      expect(chat.getHistoryReplacementRevision()).toBe(revision + 1);
+      expect(chat.peekLastHistoryEntry()).toBe(kept);
+      expect(chat.getHistoryLength()).toBe(2);
+      expect(chat.stripOrphanedUserEntriesFromHistory()).toEqual([]);
+      expect(chat.getHistoryReplacementRevision()).toBe(revision + 1);
+    });
+
+    it('keeps the replacement revision on append while the raw tail and length change', () => {
+      const initial = userText('saved');
+      chat.setHistory([initial]);
+      const revision = chat.getHistoryReplacementRevision();
+      const tail = chat.peekLastHistoryEntry();
+      const length = chat.getHistoryLength();
+      const appended = modelText('append');
+
+      chat.addHistory(appended);
+
+      expect(chat.getHistoryReplacementRevision()).toBe(revision);
+      expect(chat.peekLastHistoryEntry()).toBe(appended);
+      expect(chat.peekLastHistoryEntry()).not.toBe(tail);
+      expect(chat.getHistoryLength()).toBe(length + 1);
+      expect(chat.getHistory()).toEqual([initial, appended]);
+    });
+  });
+
   describe('getHistoryLength', () => {
     it('returns 0 for an empty history', () => {
       expect(chat.getHistoryLength()).toBe(0);
@@ -5607,6 +6746,32 @@ describe('LlmChat', async () => {
   });
 
   describe('getHistoryShallow', () => {
+    it('preserves raw indexes and writeback while suppressing curated snapshots', () => {
+      mockConfig.getAutoMemoryContext = () => '';
+      const snapshot = getAutoMemorySnapshot([], 'RETAINED_CATALOG')!;
+      const history = [
+        userText('<system-reminder>startup context</system-reminder>'),
+        userText('first prompt'),
+        modelText('first answer'),
+        content('user', snapshot),
+        modelText('continued answer'),
+        userText('second prompt'),
+      ];
+      chat.setHistory(history);
+      const raw = chat.getHistoryShallow();
+      expect(raw).toEqual(history);
+      expect(chat.getHistoryShallow(false)).toEqual(history);
+      expect(JSON.stringify(chat.getHistoryShallow(true))).not.toContain(
+        'RETAINED_CATALOG',
+      );
+      const cut = findApiRewindCutPoint(raw, 1);
+      expect(cut).toBe(5);
+      chat.setHistory(raw);
+      expect(chat.getHistory()).toEqual(history);
+      chat.truncateHistory(cut);
+      expect(chat.getHistory()).toEqual(history.slice(0, 5));
+    });
+
     it('copies Part containers without cloning large leaf payloads', () => {
       const payload = { output: 'x'.repeat(128 * 1024) };
       const topInlineData = { mimeType: 'image/png', data: 'top-level-image' };
@@ -5686,6 +6851,30 @@ describe('LlmChat', async () => {
       expect(tail).toEqual([recentContent]);
       expect(tail[0]).not.toBe(recentContent);
       expect(tail[0]!.parts).not.toBe(recentContent.parts);
+    });
+
+    it('omits marked snapshots from curated tails only while the catalog is suppressed', () => {
+      let catalog = '';
+      mockConfig.getAutoMemoryContext = () => catalog;
+      chat.addHistory(
+        content(
+          'user',
+          { text: 'question' },
+          getAutoMemorySnapshot([], 'TAIL_CATALOG')!,
+        ),
+      );
+      chat.addHistory(modelText('answer'));
+
+      expect(JSON.stringify(chat.getHistoryTailShallow(2, true))).not.toContain(
+        'TAIL_CATALOG',
+      );
+      expect(JSON.stringify(chat.getHistoryTailShallow(2))).toContain(
+        'TAIL_CATALOG',
+      );
+      catalog = 'TAIL_CATALOG';
+      expect(JSON.stringify(chat.getHistoryTailShallow(2, true))).toContain(
+        'TAIL_CATALOG',
+      );
     });
   });
 
@@ -6990,7 +8179,15 @@ describe('LlmChat', async () => {
         );
         expectStreamCalls(2);
         expect(eventsOfType(events, StreamEventType.RETRY)).toEqual([
-          { type: StreamEventType.RETRY, isContinuation: true },
+          {
+            type: StreamEventType.RETRY,
+            retryDiagnostics: {
+              kind: 'transport',
+              reason: 'transport-error',
+              transportCode: 'UND_ERR_SOCKET',
+            },
+            isContinuation: true,
+          },
         ]);
         expectWarned('Server stream retry not taken', {
           retryDecision: 'skipped_after_content',
@@ -8946,7 +10143,16 @@ describe('LlmChat', async () => {
         );
         const events = await collectStreamWithFakeTimers(stream, 5_000);
         const retries = eventsOfType(events, StreamEventType.RETRY);
-        expect(retries).toEqual([{ type: StreamEventType.RETRY }]);
+        expect(retries).toEqual([
+          {
+            type: StreamEventType.RETRY,
+            retryDiagnostics: {
+              kind: 'transport',
+              reason: 'transport-error',
+              transportCode: 'UND_ERR_SOCKET',
+            },
+          },
+        ]);
         expectStreamCalls(2);
         // The replay re-sends the original request: no synthetic model/user
         // turns carrying the delivered prefix or the resume instruction.
@@ -11633,6 +12839,124 @@ describe('LlmChat', async () => {
       ).toBe(1);
     }
 
+    it('keeps an output-recovery control prompt from owning a durable snapshot', async () => {
+      mockGeneratorConfig({
+        model: 'claude-sonnet-4-6',
+        contextWindowSize: 131_072,
+      });
+      mockCompress(noop(71_349));
+      let catalog = 'catalog A';
+      mockConfig.getAutoMemoryContext = () => catalog;
+      const recordMemoryCatalogSnapshot = vi.fn();
+      const target = newChat({
+        recorder: {
+          recordAssistantTurn: vi.fn(),
+          recordMemoryCatalogSnapshot,
+        },
+      });
+      const streams = [
+        streamOf(
+          textChunk('partial essay…', 'MAX_TOKENS', {
+            promptTokenCount: 71_349,
+            totalTokenCount: 121_071,
+          }),
+        ),
+        streamOf(modelChunk([{ text: 'still truncated' }], 'MAX_TOKENS')),
+        streamOf(modelChunk([{ text: ' …and done.' }], 'STOP')),
+      ];
+      const requests: Content[][] = [];
+      let served = 0;
+      streamMock().mockImplementation(async (request) => {
+        requests.push(structuredClone(request.contents as Content[]));
+        const stream = streams[served]!;
+        served += 1;
+        // The escalated request is assembled before this point and reuses the
+        // durable request's contents; a mid-turn memory write (the model's own
+        // manage-memory tool refreshing the catalog) is the reachable producer
+        // of a catalog change by the time the recovery request is built.
+        if (served === 2) catalog = 'catalog B';
+        return stream;
+      });
+
+      await drain(await sendPro('answer', 'recovery-snapshot-owner', target));
+
+      // Initial send, escalation, recovery: the recovery request really ran.
+      expectStreamCalls(3);
+      // Only the durable request may journal a snapshot: a recovery control
+      // prompt is popped right after, so a snapshot journalled for it would
+      // resurrect on resume a prefix the live session never kept.
+      expect(recordMemoryCatalogSnapshot).toHaveBeenCalledOnce();
+      expect(recordMemoryCatalogSnapshot.mock.calls[0]![0].text).toContain(
+        'catalog A',
+      );
+      expect(JSON.stringify(target.getHistory())).not.toContain('catalog B');
+      // The durable request carries the snapshot; the recovery control prompt
+      // carries the request-only catalog instead, so the wire never receives
+      // two competing catalogs and the discarded turn owns no snapshot.
+      const marked = (parts: Part[]) =>
+        parts.filter(
+          (part) =>
+            part.partMetadata?.['qwen-code:memory-catalog-snapshot'] === true,
+        );
+      expect(
+        marked(requests[0]!.flatMap((entry) => entry.parts ?? [])),
+      ).toHaveLength(1);
+      const recoveryParts = requests[2]!.flatMap((entry) => entry.parts ?? []);
+      expect(marked(recoveryParts)).toEqual([]);
+      expect(
+        recoveryParts.some(
+          (part) =>
+            part.partMetadata?.['qwen-code:reattach-boundary'] === true &&
+            part.text === 'catalog B',
+        ),
+      ).toBe(true);
+    });
+
+    it('budgets the recovery request from the catalog-bearing walk without usage', async () => {
+      mockGeneratorConfig({
+        model: 'claude-sonnet-4-6',
+        contextWindowSize: 131_072,
+      });
+      mockCompress(noop());
+      let catalog = 'CATALOG_A' + 'x'.repeat(40_000);
+      mockConfig.getAutoMemoryContext = () => catalog;
+      const target = newChat();
+      const streams = [
+        streamOf(textChunk('partial essay…', 'MAX_TOKENS')),
+        streamOf(modelChunk([{ text: 'still truncated' }], 'MAX_TOKENS')),
+        streamOf(modelChunk([{ text: ' …and done.' }], 'STOP')),
+      ];
+      const requests: Content[][] = [];
+      const maxOutputTokens: Array<number | undefined> = [];
+      let served = 0;
+      streamMock().mockImplementation(async (request) => {
+        requests.push(structuredClone(request.contents as Content[]));
+        maxOutputTokens.push(request.config?.maxOutputTokens);
+        const stream = streams[served]!;
+        served += 1;
+        if (served === 2) catalog = 'CATALOG_B' + 'y'.repeat(40_000);
+        return stream;
+      });
+
+      await drain(await sendPro('answer', 'recovery-catalog-budget', target));
+
+      expectStreamCalls(3);
+      // No usage ever arrived, so only the walk sizes the recovery request.
+      const recovery = requests[2]!;
+      const serialized = JSON.stringify(recovery);
+      // The request-only catalog replaces the superseded snapshot, so the
+      // stale catalog is gone and the current one appears exactly once.
+      expect(serialized.split('CATALOG_B')).toHaveLength(2);
+      expect(serialized).not.toContain('CATALOG_A');
+      expect(maxOutputTokens[2]).toBe(
+        clampOutputTokensToWindow(
+          maxOutputTokens[1]!,
+          131_072,
+          estimateContentTokens(recovery) + 20_000,
+        ),
+      );
+    });
+
     it('escalates an empty MAX_TOKENS response instead of retrying it as an empty stream', async () => {
       vi.useFakeTimers();
       const requestedMaxOutputTokens: Array<number | undefined> = [];
@@ -13403,6 +14727,34 @@ describe('LlmChat', async () => {
     const promptMirror = () => uiTelemetryService.setLastPromptTokenCount;
     const cachedMirror = () =>
       uiTelemetryService.setLastCachedContentTokenCount;
+
+    it('clears all retained routes when suppressed catalogs become visible', () => {
+      let catalog = '';
+      mockConfig.getAutoMemoryContext = () => catalog;
+      chat.setHistory([
+        content('user', getAutoMemorySnapshot([], 'catalog')!),
+        modelText('answer'),
+      ]);
+      chat.seedResumeTokenCounts(321, 45);
+      expect(chat.getLastPromptTokenCount()).toBe(321);
+      switchRoute('other-active@route');
+      expect(chat.getLastPromptTokenCount()).toBe(0);
+      chat.seedResumeTokenCounts(654, 67);
+      expect(chat.getLastPromptTokenCount()).toBe(654);
+      // The earlier route switch already zeroed both mirrors; clear them so
+      // only the flip's own writes can satisfy these assertions.
+      vi.mocked(promptMirror()).mockClear();
+      vi.mocked(cachedMirror()).mockClear();
+      catalog = 'catalog';
+      expect(chat.getLastPromptTokenCount()).toBe(0);
+      expect(chat.getLastOutputTokenCount()).toBe(0);
+      expect(chat.getLastCachedContentTokenCount()).toBe(0);
+      expect(promptMirror()).toHaveBeenCalledWith(0);
+      expect(cachedMirror()).toHaveBeenCalledWith(0);
+      switchRoute('gemini-pro@test0001');
+      expect(chat.getLastPromptTokenCount()).toBe(0);
+      expect(chat.getLastOutputTokenCount()).toBe(0);
+    });
 
     it('invalidates API-reported counts when the model route changes', () => {
       chat.setLastPromptTokenCount(691_000, false);

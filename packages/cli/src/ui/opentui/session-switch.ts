@@ -16,9 +16,8 @@
  * The one renderer-specific seam: ink replays the resumed transcript through
  * `buildResumedHistoryItems` into its own history; the OpenTUI transcript is
  * the neutral streaming model, so the visible replay additionally flows
- * through `resumeEventsFromSession` (the `--resume` replay path) as a single
- * commit, while the ink items still load into the host history for the
- * command context's consumption.
+ * through `projectHistoryToStreamEvents` from the same canonical items as a
+ * single commit. Those exact source IDs also load into the command host.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -45,7 +44,7 @@ import {
   resetBackgroundStateForSessionSwitch,
 } from '../utils/backgroundWorkUtils.js';
 import { waitForGoalRuntime } from '../utils/goal-runtime.js';
-import { resumeEventsFromSession } from './resume-session.js';
+import { projectHistoryToStreamEvents } from './item-projection.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
 
 /** The UI surfaces a session switch touches (backend-provided). */
@@ -72,9 +71,9 @@ const BACKGROUND_WORK_BRANCH_BLOCKED_MESSAGE =
   "Stop the current session's running background tasks before branching the conversation.";
 
 /** Collapse-policy application shared by resume and branch (ink parity). */
-function buildUiHistoryItems(
+export function buildUiHistoryItems(
   sessionData: ResumedSessionData,
-  host: SessionSwitchHost,
+  host: Pick<SessionSwitchHost, 'config' | 'settings'>,
 ): HistoryItem[] {
   const rawItems = buildResumedHistoryItems(sessionData, host.config);
   const collapseOnResume =
@@ -197,7 +196,9 @@ export async function handleResumeSession(
     host.clearPendingState();
     host.clearItems();
     host.loadHistory(uiHistoryItems);
-    host.resetTranscript(resumeEventsFromSession(sessionData, config));
+    host.resetTranscript(
+      projectHistoryToStreamEvents(uiHistoryItems, { config }),
+    );
     if (recoveredNotice) {
       host.addItem(
         { type: MessageType.INFO, text: recoveredNotice },
@@ -394,7 +395,9 @@ export async function handleBranchSession(
     host.clearPendingState();
     host.clearItems();
     host.loadHistory(uiHistoryItems);
-    host.resetTranscript(resumeEventsFromSession(resumed, config));
+    host.resetTranscript(
+      projectHistoryToStreamEvents(uiHistoryItems, { config }),
+    );
     uiSwapped = true;
     resetBackgroundStateForSessionSwitch(config);
     // The UI re-key commits the swap: from here on a failure keeps the
