@@ -227,6 +227,39 @@ describe('AutofixPrWatchesDialog', () => {
     expect(text).toContain('o/r#40');
   });
 
+  it('names the one workspace of a single-project daemon when it opens or stops a watch', async () => {
+    actions.listAutofixPrWatches.mockResolvedValue({
+      available: true,
+      watches: [watch()],
+    });
+    actions.listScheduledTasks.mockResolvedValue([task()]);
+    const onRunPrompt = vi.fn().mockResolvedValue(undefined);
+    const onOpenSession = vi.fn();
+    await mount({
+      onRunPrompt,
+      onOpenSession,
+      workspaces: [
+        {
+          id: 'main',
+          cwd: '/w/main',
+          primary: true,
+          trusted: true,
+          kind: 'ordinary',
+        },
+      ],
+    });
+    // By the primary's own route.
+    expect(actions.listAutofixPrWatches.mock.calls).toEqual([[undefined]]);
+    act(() => button('Open session')!.click());
+    expect(onOpenSession).toHaveBeenCalledWith(SESSION, '/w/main');
+    await act(async () => button('Stop watch')!.click());
+    expect(onRunPrompt).toHaveBeenCalledWith(
+      '/autofix-pr stop 12',
+      SESSION,
+      '/w/main',
+    );
+  });
+
   it('reads a locked workspace by its own route only', async () => {
     actions.listAutofixPrWatches.mockResolvedValue({
       available: true,

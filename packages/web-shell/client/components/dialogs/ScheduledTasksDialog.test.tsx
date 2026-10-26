@@ -101,6 +101,13 @@ async function mount(
     currentSessionSchedulingAvailable?: boolean;
     gateAvailable?: boolean;
     autofixPrWatchesAvailable?: boolean;
+    workspaces?: Array<{
+      id: string;
+      cwd: string;
+      primary: boolean;
+      trusted: boolean;
+      kind: 'ordinary';
+    }>;
     lockedWorkspace?: {
       id: string;
       cwd: string;
@@ -146,6 +153,7 @@ async function mount(
               }
               gateAvailable={nextOpts.gateAvailable}
               autofixPrWatchesAvailable={nextOpts.autofixPrWatchesAvailable}
+              workspaces={nextOpts.workspaces}
               lockedWorkspace={nextOpts.lockedWorkspace}
               onError={nextOpts.onError ?? vi.fn()}
             />
@@ -2555,6 +2563,38 @@ describe('ScheduledTasksDialog autofix-pr watches', () => {
     click(findButton('Stop watch'));
     await flush();
     expect(onRunPrompt).toHaveBeenCalledWith('/autofix-pr stop 12', SESSION);
+  });
+
+  it('names the one workspace of a single-project daemon when it stops a watch', async () => {
+    // From a standalone or Live conversation, the session is restored in
+    // the workspace, not in that context.
+    actions.listAutofixPrWatches.mockResolvedValue({
+      available: true,
+      watches: [watch()],
+    });
+    const onRunPrompt = vi.fn().mockResolvedValue(undefined);
+    await mount([watchTask()], {
+      autofixPrWatchesAvailable: true,
+      onRunPrompt,
+      workspaces: [
+        {
+          id: 'main',
+          cwd: '/w/main',
+          primary: true,
+          trusted: true,
+          kind: 'ordinary',
+        },
+      ],
+    });
+    await flush();
+    expect(actions.listScheduledTasks).toHaveBeenCalledWith();
+    click(findButton('Stop watch'));
+    await flush();
+    expect(onRunPrompt).toHaveBeenCalledWith(
+      '/autofix-pr stop 12',
+      SESSION,
+      '/w/main',
+    );
   });
 
   it("stops a watch of another workspace in its task's workspace", async () => {

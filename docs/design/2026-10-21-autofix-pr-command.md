@@ -1464,6 +1464,11 @@ a clone's watch once, as two checkouts of one clone can both be registered.
   with every confirmation it asks for there. The Web Shell does not write a
   watch's files or delete its task itself.
 
+Both restore the session in the workspace of its task — the one workspace
+of a single-project daemon included — whatever workspace the watch is
+listed under and whatever the current conversation is (another workspace's,
+a standalone or a Live one).
+
 A watch no session of this Web Shell runs, but whose gate checked within
 two intervals, runs in another process (a terminal session) and is stopped
 there; the page says so. Any other — ended, with no task, or checked by

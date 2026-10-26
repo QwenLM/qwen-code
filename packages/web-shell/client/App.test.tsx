@@ -1066,8 +1066,12 @@ const {
         autofixPrWatchesAvailable?: boolean;
       } | null,
       latestPrWatchesProps: null as {
-        onRunPrompt?: (prompt: string, sessionId: string) => Promise<void>;
-        onOpenSession?: (sessionId: string) => void;
+        onRunPrompt?: (
+          prompt: string,
+          sessionId: string,
+          workspaceCwd?: string,
+        ) => Promise<void>;
+        onOpenSession?: (sessionId: string, workspaceCwd?: string) => void;
       } | null,
       latestGoalsProps: null as {
         onCreateGoal?: (condition: string) => Promise<void>;
@@ -45736,6 +45740,67 @@ describe('App PR watches page', () => {
         ?.getAttribute('data-active-page'),
     ).not.toBe('prWatches');
   });
+});
+
+describe('App PR watches from another context', () => {
+  it.each(['standalone', 'live'] as const)(
+    "restores a watch's session in its workspace from a %s conversation",
+    async (kind) => {
+      // One ordinary workspace; the current conversation is not in it.
+      mockWorkspace.capabilities = {
+        ...mockWorkspace.capabilities,
+        features: ['autofix_pr_watches'],
+        workspaces: [
+          {
+            id: 'primary',
+            cwd: '/tmp/project',
+            primary: true,
+            trusted: true,
+            kind: 'ordinary',
+          },
+        ],
+      };
+      mockConnection.sessionContext = { kind };
+      const { container } = renderApp();
+      await flush();
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="open-pr-watches"]')
+          ?.click();
+        await Promise.resolve();
+      });
+      await flush();
+      const props = testState.latestPrWatchesProps;
+      expect(props).not.toBeNull();
+      const workspaceTarget = expect.objectContaining({
+        sessionContext: { kind: 'workspace', cwd: '/tmp/project' },
+      });
+
+      await act(async () => {
+        props!.onOpenSession!('session-2', '/tmp/project');
+        await Promise.resolve();
+      });
+      expect(mockSessionActions.loadSession).toHaveBeenLastCalledWith(
+        'session-2',
+        workspaceTarget,
+      );
+
+      vi.useFakeTimers();
+      await act(async () => {
+        void props!.onRunPrompt!(
+          '/autofix-pr stop 12',
+          'session-3',
+          '/tmp/project',
+        ).catch(() => {});
+        await Promise.resolve();
+      });
+      expect(mockSessionActions.loadSession).toHaveBeenLastCalledWith(
+        'session-3',
+        workspaceTarget,
+      );
+      vi.clearAllTimers();
+    },
+  );
 });
 
 describe('App /goal command', () => {

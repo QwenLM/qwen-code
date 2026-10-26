@@ -73,14 +73,16 @@ export function AutofixPrWatchesDialog({
   const workspaceList = useMemo(() => workspaces ?? [], [workspaces]);
   const isMultiWorkspace = !lockedWorkspace && workspaceList.length > 1;
   // As the scheduled-tasks page reads them: the primary by its unqualified
-  // route, the trusted others by theirs, a locked one by its own.
+  // route, the trusted others by theirs, a locked one by its own. The one
+  // workspace of a single-project daemon is named too: a session opened from
+  // a standalone or Live conversation is restored there, not in that context.
   const operable = useMemo(
     () =>
       lockedWorkspace
         ? [lockedWorkspace]
         : isMultiWorkspace
           ? workspaceList.filter((ws) => ws.primary || ws.trusted)
-          : [],
+          : workspaceList.filter((ws) => ws.primary),
     [isMultiWorkspace, lockedWorkspace, workspaceList],
   );
   const workspaceIds = useMemo(

@@ -922,7 +922,15 @@ export function ScheduledTasksDialog({
         );
         list = results.flat();
       } else {
-        list = await actions.listScheduledTasks();
+        // The one workspace of a single-project daemon: its tasks' sessions
+        // are restored there, not in a standalone or Live conversation's
+        // context.
+        const sole = workspaceList.find((ws) => ws.primary);
+        list = (await actions.listScheduledTasks()).map((task) =>
+          sole && workspaceList.length === 1
+            ? { ...task, workspaceCwd: sole.cwd }
+            : task,
+        );
       }
       if (!mountedRef.current || seq !== reloadSeqRef.current) return;
       // Newest first — matches the reference "sort by created, descending".
@@ -941,6 +949,7 @@ export function ScheduledTasksDialog({
     lockedWorkspaceId,
     operableWorkspaces,
     workspaceActionId,
+    workspaceList,
   ]);
 
   useEffect(() => {
