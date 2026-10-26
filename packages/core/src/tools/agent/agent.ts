@@ -112,6 +112,7 @@ import { createDebugLogger } from '../../utils/debugLogger.js';
 import { PermissionMode } from '../../hooks/types.js';
 import { approvalModeToPermissionMode } from '../../hooks/permission-mode.js';
 import {
+  backgroundFixAt,
   backgroundFixHolding,
   hasUnattendedFixGrant,
   isUnattendedFixConfig,
@@ -3606,7 +3607,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // cannot ask, and the round runs a fix that asks in the foreground.
         if (!unattendedFixes) {
           return failWorktreeProvisioning(
-            'Error: this fix no longer runs without asking (the watch changed, the session is in plan mode or an untrusted folder, or the general-purpose agent here is not the built-in one): run it in the foreground, without "run_in_background".',
+            'Error: this fix no longer runs without asking (the watch changed, the session is in plan mode or an untrusted folder, the general-purpose agent here is not the built-in one, or an agent rather than the session started it): run it in the foreground, without "run_in_background".',
           );
         }
         try {
@@ -5379,7 +5380,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // Not beside a background fix agent of /autofix-pr, nor before its
         // round went on.
         await settleBackgroundFix({ worktree: resolved.path });
-        if (backgroundFixHolding(resolved.path, getCurrentAgentId())) {
+        // (Only the top-level session spawns a teammate.)
+        if (backgroundFixAt(resolved.path)) {
           return this.buildSpawnBlockedResult(
             `Error: a background fix agent of /autofix-pr is working in ${resolved.path}; its round goes on when it ends.`,
             'Worktree in use by a background fix',

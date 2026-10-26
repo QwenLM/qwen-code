@@ -4696,16 +4696,10 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     return fix;
   };
 
-  it("dispatches what the fix's own agent asks for, in its worktree or the session's directory there", async () => {
+  // Only the top-level session dispatches (no subagent runs a workflow), but
+  // the guard is the agent tool's: a fix's own agent is not held off.
+  it("dispatches what the fix's own agent asks for in the session's directory there", async () => {
     try {
-      await fixAt('/fake/repo/.qwen/tmp/review-pr-7');
-      await expect(
-        runWithAgentContext(
-          'agent-x',
-          () => dispatchVia({ onCreate: ends('pinned') }, 'hi', PINNED).result,
-        ),
-      ).resolves.toBe('pinned');
-      resetUnattendedFixGrantsForTests();
       await fixAt('/fake/repo');
       await expect(
         runWithAgentContext(

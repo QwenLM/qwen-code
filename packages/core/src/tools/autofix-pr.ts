@@ -1230,8 +1230,9 @@ class AutofixPrInvocation extends BaseToolInvocation<
     });
     if (!fix.ended) {
       if (fix.agentId === null) {
-        // Stopped as it launches, with no round to go on.
-        await fix.abandon();
+        // Stopped as it launches, with no round to go on: as below, with no
+        // notification.
+        await fix.abandon({ notify: false });
         return refuse(
           `The fix agent of PR #${this.params.pr} was starting; it stops as it launches: run cleanup again.`,
         );

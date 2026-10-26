@@ -92,6 +92,7 @@ import { resolveExternalWorktreeDir } from '../worktree-pin.js';
 import { toModelVisibleSubagentResult } from '../subagent-result.js';
 import { SUBAGENT_PLAN_LIFECYCLE_TOOLS } from './subagent-plan-tool-policy.js';
 import {
+  backgroundFixAt,
   backgroundFixHolding,
   settleBackgroundFix,
 } from '../../tools/autofix-pr-grants.js';
@@ -1448,9 +1449,10 @@ async function runOverridePath(
       );
     }
     // Not beside a background fix agent of /autofix-pr, as the agent tool
-    // refuses too, unless that agent dispatched it.
+    // refuses too. (Only the top-level session dispatches: no subagent runs
+    // a workflow.)
     await settleBackgroundFix({ worktree: resolved.path });
-    if (backgroundFixHolding(resolved.path, getCurrentAgentId())) {
+    if (backgroundFixAt(resolved.path)) {
       throw new Error(
         `agent({workingDir}): a background fix agent of /autofix-pr is working in ${resolved.path}; its round goes on when it ends.`,
       );

@@ -42,7 +42,6 @@ import {
   watchTask,
 } from './autofix-pr-grants.js';
 import { ToolConfirmationOutcome } from './tools.js';
-import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 
 // Stands in for the CLI: `prepare` reports FAKE_WORKTREE and
 // FAKE_CAN_PUSH, `status` prints FAKE_STATUS, it refuses or hangs on
@@ -1559,9 +1558,11 @@ describe('background fixes', () => {
     );
     expect(log().at(-1)).toBe(`fix-end 12 --attempt=${fix.attempt} --abandon`);
     expect(fix.done).toBe(true);
-    // It launches anyway: stopped at once, with no round to go on.
-    fix.attach('agent-1', () => cancel('agent-1'));
-    expect(cancel).toHaveBeenCalledWith('agent-1');
+    // It launches anyway: stopped at once, with no round to go on, and no
+    // notification, as a stop of a running one.
+    const stopped = vi.fn();
+    fix.attach('agent-1', stopped);
+    expect(stopped).toHaveBeenCalledWith(false);
     expect(fix.followUp()).toBeUndefined();
   });
 
@@ -1577,24 +1578,6 @@ describe('background fixes', () => {
     expect(held(path.join(worktree, 'src', 'new', 'a.ts'))).toBe(true);
     expect(held(path.join(worktree, '..foo', 'x'))).toBe(true);
     expect(held(path.join(worktree, 'a.ts'), 'agent-1')).toBe(false);
-    // A workflow agent or teammate its agent started, in no registry: known
-    // by the frames it runs in — only when it is the agent running now.
-    const inFrames = (...ids: string[]) =>
-      ids.reduceRight<() => Promise<boolean>>(
-        (inner, id) => () => runWithAgentContext(id, inner),
-        async () => held(path.join(worktree, 'a.ts'), ids.at(-1)!),
-      )();
-    expect(await inFrames('agent-1', 'workflow-1')).toBe(false);
-    expect(await inFrames('agent-1', 'workflow-1', 'nested-1')).toBe(false);
-    expect(await inFrames('session-agent', 'workflow-2')).toBe(true);
-    expect(held(path.join(worktree, 'a.ts'), 'workflow-1')).toBe(true);
-    expect(
-      await runWithAgentContext('agent-1', () =>
-        runWithAgentContext('workflow-1', async () =>
-          held(path.join(worktree, 'a.ts'), 'someone-else'),
-        ),
-      ),
-    ).toBe(true);
     expect(
       held(path.join(path.dirname(worktree), 'autofix-pr-12-plan.json')),
     ).toBe(false);
@@ -1887,6 +1870,20 @@ describe('background fixes', () => {
         early.attach('agent-2', stopped);
         expect(stopped).toHaveBeenCalledWith(notify);
       }
+      // Once a stop said not to, none tells: a later one, or a reset after
+      // a drop, keeps it quiet.
+      const quiet = bare({ reply: true, instructions: '' });
+      quiet.stop({ notify: false });
+      quiet.stop();
+      const first = vi.fn();
+      quiet.attach('agent-3', first);
+      expect(first).toHaveBeenCalledWith(false);
+      const dropped = bare({ reply: true, instructions: '' });
+      dropped.drop();
+      dropped.drop({ notify: false });
+      const second = vi.fn();
+      dropped.attach('agent-4', second);
+      expect(second).toHaveBeenCalledWith(false);
     });
 
     it('tells the round to go on with the options the session scheduled', () => {

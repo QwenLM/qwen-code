@@ -28,10 +28,6 @@ import {
   realpathSync,
 } from 'node:fs';
 import path from 'node:path';
-import {
-  getCurrentAgentAncestors,
-  getCurrentAgentId,
-} from '../agents/runtime/agent-context.js';
 
 /** A watch as the `prepare` this session ran reported it. */
 export interface ConfirmedWatch {
@@ -276,7 +272,8 @@ export class BackgroundFix {
   private descends: ((callerAgentId: string) => boolean) | null = null;
   /** A stop asked for before the agent launched: done as it launches. */
   private stopRequested = false;
-  /** Whether that stop, or the latest, tells the model: not on a reset. */
+  /** Whether its stop tells the model: once any stop said not to (a reset,
+   * a stop the user asked for), none does. */
   private stopNotifies = true;
   private isSettled = false;
   /** Until when an ended attempt's agent is waited for. */
@@ -390,19 +387,15 @@ export class BackgroundFix {
 
   /**
    * Whether a call is this fix's own: its agent's, or an agent's that one
-   * started, at any depth — known by the frames it runs in (`ancestors`),
-   * or, for an agent the registry holds, by its parent links. Never the
-   * session's, nor an agent the session started.
+   * started, at any depth, by the registry's parent links (a subagent
+   * starts agents through the `agent` tool only: workflows and teammates
+   * are the top-level session's). Never the session's, nor an agent the
+   * session started.
    */
-  ownsCaller(
-    callerAgentId: string | null,
-    ancestors: readonly string[] = [],
-  ): boolean {
+  ownsCaller(callerAgentId: string | null): boolean {
     if (callerAgentId === null || this.agentId === null) return false;
     return (
-      callerAgentId === this.agentId ||
-      ancestors.includes(this.agentId) ||
-      this.descends?.(callerAgentId) === true
+      callerAgentId === this.agentId || this.descends?.(callerAgentId) === true
     );
   }
 
@@ -410,8 +403,8 @@ export class BackgroundFix {
    * notification is left out when the session's conversation is reset. */
   stop({ notify = true }: { notify?: boolean } = {}): void {
     if (this.ended) return;
-    this.stopNotifies = notify;
-    if (this.cancelAgent) this.cancelAgent(notify);
+    this.stopNotifies &&= notify;
+    if (this.cancelAgent) this.cancelAgent(this.stopNotifies);
     else this.stopRequested = true;
   }
 
@@ -473,7 +466,12 @@ export class BackgroundFix {
    * marker, no longer refreshed, is left to the gate and the next round.
    */
   drop(options: { notify?: boolean } = {}): void {
-    if (this.done) return;
+    if (this.done) {
+      // Dropped already, its agent yet to launch: a reset since still
+      // keeps the stop it gets as it launches quiet.
+      if (options.notify === false) this.stopNotifies = false;
+      return;
+    }
     this.stop(options);
     this.finish();
     // Stale as soon as its agent has stopped, not 90 seconds later: the
@@ -508,8 +506,8 @@ export class BackgroundFix {
 
   /** A launch that failed after the attempt opened, or while it opened:
    * no round claims it, and its marker goes now. */
-  async abandon(): Promise<void> {
-    this.stop();
+  async abandon(options: { notify?: boolean } = {}): Promise<void> {
+    this.stop(options);
     this.finish();
     await this.grant.close(this.attempt).catch(() => {});
   }
@@ -662,16 +660,8 @@ export function backgroundFixHolding(
   callerAgentId: string | null,
 ): BackgroundFix | undefined {
   if (fixes.size === 0 && settling.size === 0) return undefined;
-  // The frames the caller runs in, when it is the agent running now: a
-  // workflow agent or a teammate the fix's agent started is in no registry
-  // the parent links are read from.
-  const ancestors =
-    callerAgentId !== null && callerAgentId === getCurrentAgentId()
-      ? getCurrentAgentAncestors()
-      : [];
   // Before the agent attaches, it has no id: no caller is it.
-  const notItsAgent = (fix: BackgroundFix) =>
-    !fix.ownsCaller(callerAgentId, ancestors);
+  const notItsAgent = (fix: BackgroundFix) => !fix.ownsCaller(callerAgentId);
   const running = containing(fixes, file, notItsAgent);
   // One found late is dropped here, into `settling`: looked up there next.
   const held = running ? live(running) : undefined;

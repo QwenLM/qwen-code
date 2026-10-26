@@ -959,8 +959,8 @@ the reason for a state file that could not be read. Each watch carries:
   discards it, so a take-over or a resume says so before it asks;
 - `fix`: `{ attempt, startedAt, fresh }` for a background fix's attempt
   marker, or null. `fresh` is an attempt that has not ended: its agent works
-  in the worktree, or was stopped and the round may still claim the attempt
-  — either way the round's helpers refuse. Otherwise its session left it
+  in the worktree, or has ended — finished or stopped — and the round may
+  still claim the attempt; either way the round's helpers refuse. Otherwise its session left it
   behind, and the next round's `sync` removes it (Section 6.14).
 
 The gate cursor outlives a watch (Section 6.6), so it is read only when it
@@ -1260,14 +1260,9 @@ round. So every background agent at a worktree has an attempt tied to the
 round that prepared it, and while one lives no other agent, teammate or
 workflow agent launches there, in the foreground or the background — but
 one the fix agent starts, itself or through an agent it started, is its
-own. The fix's own agents are known by the frames their tools run in (an
-agent's frame is opened in the frame of the agent that starts it, through
-the `agent` tool, a workflow's dispatch or a teammate's spawn — for a
-teammate, the turns of its first task and of the messages its spawner sends
-it), and, for an agent in the background registry, by its parent links too.
-A frame opened from outside them — a resume, an approval's re-entry, a
-teammate's turn another agent's message starts — knows none, so its writes
-ask: the frames only ever make fewer of them ask. The session's own `edit`,
+own: a subagent starts agents through the `agent` tool only (workflows and
+teammates are the top-level session's), and the registry's parent links tie
+each such agent to the fix agent. The session's own `edit`,
 `write_file` and `notebook_edit` into the worktree — any but those of the
 fix's own agents — the path resolved as
 the kernel will, each link followed as written before a `..` after it, and
