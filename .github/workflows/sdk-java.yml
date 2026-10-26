@@ -230,6 +230,10 @@ jobs:
             sleep $((attempt * 15))
           done
 
+      - name: 'Point Maven at the pool mirror'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/configure-maven-mirror.sh'
+
       - name: 'Set up Maven (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
         run: |-
@@ -728,6 +732,10 @@ jobs:
             packages/sdk-java/qwencode/pom.xml
             packages/managed-agent-server/pom.xml
           settings-path: '${{ runner.temp }}/setup-java-m2'
+
+      - name: 'Point Maven at the pool mirror'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/configure-maven-mirror.sh'
 
       - name: 'Set up Maven (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -1613,6 +1621,10 @@ jobs:
             packages/sdk-java/**/pom.xml
             packages/managed-agent-server/pom.xml
           settings-path: '${{ runner.temp }}/setup-java-m2'
+      - name: 'Point Maven at the pool mirror'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/configure-maven-mirror.sh'
+
       - name: 'Set up Maven (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
         run: |-
@@ -1841,6 +1853,10 @@ jobs:
             packages/sdk-java/**/pom.xml
             packages/managed-agent-server/pom.xml
           settings-path: '${{ runner.temp }}/setup-java-m2'
+      - name: 'Point Maven at the pool mirror'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/configure-maven-mirror.sh'
+
       - name: 'Set up Maven (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
         run: |-
@@ -2173,6 +2189,10 @@ jobs:
           cache: "${{ runner.environment == 'github-hosted' && 'maven' || '' }}"
           cache-dependency-path: 'packages/sdk-java/qwencode/pom.xml'
           settings-path: '${{ runner.temp }}/setup-java-m2'
+
+      - name: 'Point Maven at the pool mirror'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/configure-maven-mirror.sh'
 
       - name: 'Set up Maven (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
