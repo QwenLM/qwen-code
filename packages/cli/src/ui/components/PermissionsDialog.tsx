@@ -25,6 +25,8 @@ import type {
   RuleType,
 } from '@qwen-code/qwen-code-core/permissions/types.js';
 import { parseRule } from '@qwen-code/qwen-code-core/permissions/rule-parser.js';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import { tildeifyPath } from '@qwen-code/qwen-code-core/utils/paths.js';
 import { isPathWithinRoot } from '@qwen-code/qwen-code-core/utils/workspaceContext.js';
 
 // ---------------------------------------------------------------------------
@@ -60,7 +62,7 @@ interface PermScopeItem {
   key: string;
 }
 
-function getPermScopeItems(): PermScopeItem[] {
+export function getPermScopeItems(): PermScopeItem[] {
   return [
     {
       label: t('Project settings'),
@@ -70,7 +72,9 @@ function getPermScopeItems(): PermScopeItem[] {
     },
     {
       label: t('User settings'),
-      description: t('Saved in at ~/.qwen/settings.json'),
+      description: t('Saved in {{path}}', {
+        path: tildeifyPath(Storage.getGlobalSettingsPath()),
+      }),
       value: SettingScope.User,
       key: 'user',
     },

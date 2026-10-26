@@ -1391,7 +1391,7 @@ export default {
   'Project settings': 'Configuració del projecte',
   'Checked in at .qwen/settings.json': 'Registrat a .qwen/settings.json',
   'User settings': "Configuració d'usuari",
-  'Saved in at ~/.qwen/settings.json': 'Desat a ~/.qwen/settings.json',
+  'Saved in {{path}}': 'Desat a {{path}}',
   'Add a new rule…': 'Afegeix una nova regla…',
   'Add {{type}} permission rule': 'Afegeix la regla de permís {{type}}',
   'Permission rules are a tool name, optionally followed by a specifier in parentheses.':

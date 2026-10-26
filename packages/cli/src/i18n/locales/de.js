@@ -1359,7 +1359,7 @@ export default {
   'Project settings': 'Projekteinstellungen',
   'Checked in at .qwen/settings.json': 'Eingecheckt in .qwen/settings.json',
   'User settings': 'Benutzereinstellungen',
-  'Saved in at ~/.qwen/settings.json': 'Gespeichert in ~/.qwen/settings.json',
+  'Saved in {{path}}': 'Gespeichert in {{path}}',
   'Add a new rule…': 'Neue Regel hinzufügen…',
   'Add {{type}} permission rule': '{{type}} permission rule hinzufügen',
   'Permission rules are a tool name, optionally followed by a specifier in parentheses.':

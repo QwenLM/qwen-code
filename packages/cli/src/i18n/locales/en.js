@@ -1909,7 +1909,7 @@ export default {
   'Project settings': 'Project settings',
   'Checked in at .qwen/settings.json': 'Checked in at .qwen/settings.json',
   'User settings': 'User settings',
-  'Saved in at ~/.qwen/settings.json': 'Saved in at ~/.qwen/settings.json',
+  'Saved in {{path}}': 'Saved in {{path}}',
   'Add a new rule…': 'Add a new rule…',
   'Add {{type}} permission rule': 'Add {{type}} permission rule',
   'Permission rules are a tool name, optionally followed by a specifier in parentheses.':

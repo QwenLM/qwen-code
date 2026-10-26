@@ -1307,7 +1307,7 @@ export default {
   'Project settings': 'Настройки проекта',
   'Checked in at .qwen/settings.json': 'Зафиксировано в .qwen/settings.json',
   'User settings': 'Пользовательские настройки',
-  'Saved in at ~/.qwen/settings.json': 'Сохранено в ~/.qwen/settings.json',
+  'Saved in {{path}}': 'Сохранено в {{path}}',
   'Add a new rule…': 'Добавить новое правило…',
   'Add {{type}} permission rule': 'Добавить {{type}} permission rule',
   'Permission rules are a tool name, optionally followed by a specifier in parentheses.':

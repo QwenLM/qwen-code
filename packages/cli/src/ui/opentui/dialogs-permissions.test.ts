@@ -78,7 +78,18 @@ describe('permissionScopeLabel', () => {
 });
 
 describe('getPermissionScopeItems', () => {
+  const originalQwenHome = process.env['QWEN_HOME'];
+
+  afterEach(() => {
+    if (originalQwenHome === undefined) {
+      delete process.env['QWEN_HOME'];
+    } else {
+      process.env['QWEN_HOME'] = originalQwenHome;
+    }
+  });
+
   it('lists project first, then user, with the save locations', () => {
+    delete process.env['QWEN_HOME'];
     const items = getPermissionScopeItems();
     expect(items).toHaveLength(2);
     expect(items[0]).toEqual({
@@ -89,10 +100,18 @@ describe('getPermissionScopeItems', () => {
     });
     expect(items[1]).toEqual({
       label: 'User settings',
-      description: 'Saved in at ~/.qwen/settings.json',
+      description: `Saved in ~${nodePath.sep}.qwen${nodePath.sep}settings.json`,
       value: SettingScope.User,
       key: 'user',
     });
+  });
+
+  it('names the resolved global directory when QWEN_HOME is set', () => {
+    const qwenHome = nodePath.join(os.tmpdir(), 'qwen-home-scope-items');
+    process.env['QWEN_HOME'] = qwenHome;
+    expect(getPermissionScopeItems()[1]?.description).toBe(
+      `Saved in ${qwenHome}${nodePath.sep}settings.json`,
+    );
   });
 });
 
