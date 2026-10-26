@@ -67,6 +67,7 @@
   transition: opacity 0.12s ease;
 }
 
+.messageFooterVisible,
 .message:hover .messageFooter,
 .message:focus-within .messageFooter {
   opacity: 1;
@@ -98,14 +99,17 @@
   height: 16px;
 }
 
-/* A thumb glyph fills its view box far more than the built-in copy and branch
-   icons do, so it takes a smaller box and a proportionally thicker stroke: at
-   13px the 2.4 stroke paints the same ~1.3px as their 16px default, so the
-   three read as one row instead of the thumb looking heavier. */
-.feedbackButton svg {
+/* Lucide glyphs fill more of their view box than the built-in copy icons.
+   At 13px, a 2.4 stroke matches their ~1.3px visible stroke. */
+.feedbackButton svg,
+.branchButton svg {
   width: 13px;
   height: 13px;
   stroke-width: 2.4;
+}
+
+.branchButton svg {
+  transform: rotate(90deg);
 }
 
 /* The mark reads as state: blue means satisfied, red means not.
@@ -128,6 +132,13 @@
 .footerTime {
   font-size: 11px;
   line-height: 1.4;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.message:hover .footerTime,
+.message:focus-within .footerTime {
+  opacity: 1;
 }
 
 .prefix {
@@ -469,7 +480,8 @@
 }
 
 @media (hover: none) {
-  .messageFooter {
+  .messageFooter,
+  .footerTime {
     opacity: 1;
   }
 

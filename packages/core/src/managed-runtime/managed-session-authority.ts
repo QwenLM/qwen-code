@@ -5,6 +5,15 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { parseManagedToolStage } from './managed-tool-stage-record.js';
+import {
+  assertManagedConfigInstallSuccessor,
+  isManagedExtensionConfig,
+  managedConfigBinding,
+  parseManagedConfigInstallContent,
+  parseManagedConfigInstallRecord,
+  type ManagedConfigBinding,
+} from './managed-config-install.js';
 import { SessionWriterLease } from '../services/session-writer-lease.js';
 import { managedToolDigest } from '../tools/managed-tool-protocol.js';
 import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-session-journal-store.js';
@@ -1578,6 +1587,7 @@ export class LocalManagedSessionAuthority {
     request: {
       domain: ManagedSessionDomain;
       content: Readonly<Record<string, unknown>>;
+      configBinding?: ManagedConfigBinding;
     },
     actor: ManagedSessionActor,
   ): Promise<ManagedSessionDomainReceipt> {
@@ -1614,18 +1624,54 @@ export class LocalManagedSessionAuthority {
       }
       const previous = this.domainRecords.get(request.domain);
       if (request.domain === 'config_install') {
-        const commandBody = request.content['command'];
-        if (
-          request.content['kind'] !== 'hosted-mcp-settings' ||
-          !commandBody ||
-          typeof commandBody !== 'object' ||
-          !('expectedRevision' in commandBody) ||
-          commandBody.expectedRevision !== (previous?.revision ?? 0)
-        ) {
-          throw new ManagedSessionConflictError(
-            'MCP settings revision conflicts.',
+        if (isManagedExtensionConfig(request.content)) {
+          const content = parseManagedConfigInstallContent(request.content);
+          const saved = previous
+            ? JSON.parse(
+                (await store.read(previous.recordRef)).toString('utf8'),
+              )
+            : undefined;
+          assertManagedConfigInstallSuccessor(
+            isManagedExtensionConfig(saved)
+              ? parseManagedConfigInstallRecord(saved)
+              : undefined,
+            content,
           );
+          if (
+            content.command.operationId !== command.commandId ||
+            (content.phase === 'committed'
+              ? JSON.stringify(request.configBinding) !==
+                JSON.stringify(managedConfigBinding(content))
+              : request.configBinding !== undefined)
+          )
+            throw new ManagedSessionConflictError(
+              'Extension configuration binding conflicts.',
+            );
+        } else {
+          const saved = previous
+            ? JSON.parse(
+                (await store.read(previous.recordRef)).toString('utf8'),
+              )
+            : undefined;
+          const commandBody = request.content['command'];
+          if (
+            isManagedExtensionConfig(saved) ||
+            request.content['kind'] !== 'hosted-mcp-settings' ||
+            !commandBody ||
+            typeof commandBody !== 'object' ||
+            !('expectedRevision' in commandBody) ||
+            commandBody.expectedRevision !== (previous?.revision ?? 0) ||
+            request.configBinding !== undefined
+          ) {
+            throw new ManagedSessionConflictError(
+              'MCP settings revision conflicts.',
+            );
+          }
         }
+      } else if (request.configBinding !== undefined) {
+        throw new ManagedSessionConflictError(
+          'Only an extension configuration install may bind configuration.',
+        );
       }
       let content = request.content;
       const incomingTitleRevision = content['managedRenameRevision'];
@@ -1700,8 +1746,21 @@ export class LocalManagedSessionAuthority {
               recordRef,
             },
           },
+          ...(request.configBinding
+            ? [
+                {
+                  v: MANAGED_SESSION_FORMAT_VERSION,
+                  sequence: this.committed + 2,
+                  eventId: `config-bound:${request.configBinding.revision}`,
+                  sessionKey: command.sessionKey,
+                  kind: 'config.bound' as const,
+                  occurredAt: this.now(),
+                  payload: { ...request.configBinding },
+                },
+              ]
+            : []),
         ],
-        [actor],
+        request.configBinding ? [actor, actor] : [actor],
       );
       return { receipt, recordRef, revision };
     });
@@ -3149,7 +3208,10 @@ export class LocalManagedSessionAuthority {
     replay = false,
   ): Promise<void> {
     let refs: ReadonlyArray<ManagedSessionDurableRef | null> = [];
-    if (domain === 'mcp_configuration') {
+    if (domain === 'tool_stage') {
+      const stage = parseManagedToolStage(record);
+      refs = [stage.inputRef, stage.permissionRef, stage.resultRef];
+    } else if (domain === 'mcp_configuration') {
       refs = [parseMcpConfiguration(record).catalogRef];
     } else if (domain === 'mcp_operation') {
       const operation = parseMcpOperation(record);

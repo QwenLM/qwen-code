@@ -2,7 +2,7 @@
 
 [English](2026-10-23-unified-agent-loop.md) | [简体中文](2026-10-23-unified-agent-loop.zh-CN.md)
 
-- **状态**：已在 #15343 中通过。PR 1（headless）是 #15369。
+- **状态**：已在 #15343 中通过。PR 1（headless）已在 #15369 合入。PR 2a（ACP prompt 轮次的模型轮）正在 #15509 中评审。
 - **日期**：2026-10-23，基于 upstream `779a4d5d0d`。
 - **相关**：
   - tracking issue #15327；
@@ -84,7 +84,7 @@ agent loop 指这样一个循环：发送提示、流式接收回复、执行模
 - `LlmChat` 与 provider 层；
 - loop 所需钩子之外的 `CoreToolScheduler` 内部逻辑；
 - UI 渲染与通信协议；
-- 在本轮修改任何默认值。
+- 在入口满足[迁移计划](#迁移计划)中的条件之前修改它的默认值。
 
 ## 设计
 
@@ -172,6 +172,27 @@ headless 的主循环以 `maxRounds: 1` 运行。因此它为每一轮做的准�
 
 策略只影响传入它的那个入口。
 
+### 宿主自持的发送选项
+
+有些入口在迁移前自己做了交互步骤中的一部分工作，迁到共享路径后还会继续自己做一段时间。这时用一个发送选项告诉 client 跳过这部分，避免执行两次。这类选项只是迁移期的过渡手段，不是长期 API。下表逐项列出，并写明由哪一步把它删除或改成输入。
+
+| 选项                     | 宿主为什么保留这部分                                                                                                                                                                               | 由哪一步移除                                                                                                |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `toolLoopGuardsByHost`   | ACP 的工具步骤运行 daemon 工具循环守卫：每轮工具调用上限、重复调用、探索提醒，以及重复工具失败守卫                                                                                                 | PR 2b，ACP 工具批迁移时：client 已有的守卫直接生效，只有 ACP 才有的守卫（例如重复工具失败守卫）改为入口策略 |
+| `stopHookRunByHost`      | ACP 的 Stop 循环还负责 Todo Stop Guard、当前轮次的后台结果和轮次中途的输入，因此由 ACP 决定轮次何时结束并安排记忆任务                                                                              | PR 2c，这些续发改为 stop 点策略时（见 [stop 点续发](#stop-点续发)）                                         |
+| `interactionSpanByHost`  | ACP 的 span 挂在 daemon 的 trace 下                                                                                                                                                                | 改为输入：client 加入宿主为该 prompt 开启的 span；ACP 修改默认值之前完成                                    |
+| `userTurnRecordedByHost` | ACP 在 slash 命令执行前，按用户输入的原样记录 prompt，连同显示文本、附件、resource link 和 daemon prompt id 一起记录，并在首次发送前为这一轮建立文件历史快照，所以发出前就被取消的 prompt 也有快照 | 改为输入：宿主传入这条记录，由 client 写入；ACP 修改默认值之前完成                                          |
+
+`toolCallPreparations` 和 `memoryRecallQuery` 不在表中：前者只是请求一个额外的事件，后者把宿主在发送前展开的 prompt 原文交给召回；两者都不关闭任何行为。
+
+新增任何为某个宿主关闭 client 部分工作的选项，都必须在这里登记一行。入口在表中还有未关闭的行时，不修改它的默认值。
+
+### stop 点续发
+
+回复结束且没有工具调用时，由 `LlmClient` 决定这一轮是否继续，依据是 Stop hook、steering 和 next-speaker 检查。Ink、OpenTUI 和 headless 原样依赖这条链。ACP 在同一个点上还有更多继续的理由：Todo Stop Guard、当前轮次的后台结果，以及轮次中途到达的输入。目前它的 Stop 循环负责所有这些，Stop hook 也在其中。
+
+在 ACP 的其他轮次迁移（PR 2c）之前，这些续发需要明确唯一的归属。提议做法：client 的这条链接受按顺序排列的入口 stop 策略。每个策略可以返回用于继续的 parts，链条按发送 Stop hook 续发的方式发送它们。这样 ACP 把它的三种续发作为策略传入，删掉自己的 Stop 循环和 `stopHookRunByHost`；其他入口不传策略，行为不变。
+
 ### 设置
 
 `experimental.unifiedAgentLoop` 是布尔值，默认 `false`，重启后生效。`QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=1` 可以覆盖它，便于 CI 和脚本在共享 loop 下运行测试。两者沿用 `experimental.agentTeam` / `QWEN_CODE_ENABLE_AGENT_TEAM` 的写法。
@@ -185,7 +206,9 @@ if (config.isUnifiedAgentLoopEnabled()) {
 // 现有 loop，保持不变
 ```
 
-现有 loop 作为 `else` 分支保留，在该设置存在期间不做重构。尚未迁移的入口忽略这个设置，设置的说明会列出它覆盖的入口。`qwen serve` 启动的 ACP 子进程读取同一份设置，所以 ACP 迁移后，daemon 和 Web Shell 也会遵循这个设置。在此之前，Web Shell 设置面板不显示这个设置，因为它在那里不起作用。
+现有 loop 作为 `else` 分支保留，在该设置存在期间不做重构。尚未迁移的入口忽略这个设置，设置的说明会列出它覆盖的入口。`qwen serve` 启动的 ACP 子进程读取同一份设置，所以对已迁移的 ACP 轮次，daemon 和 Web Shell 也会遵循这个设置。从 PR 2a 起，Web Shell 设置面板会列出这个设置。
+
+各入口分别修改默认值之后，这个设置不再有 schema 默认值。`Config.isUnifiedAgentLoopEnabled(surface)` 在设置有值时返回该值，否则返回该入口自己的默认值。环境变量仍然优先于两者。
 
 ### Headless 迁到共享 loop（PR 1）
 
@@ -209,22 +232,62 @@ if (config.isUnifiedAgentLoopEnabled()) {
 | 中止 → `routeAbort`（55 / 130）                                          | 停止原因 `cancelled`；中止仍由入口路由                                                 |
 | 空闲阶段：下一个 Goal、teammate、cron、后台任务等待、记忆、最终结果      | 不变，留在 loop 之外                                                                   |
 
+### ACP prompt 轮次迁到共享模型轮（PR 2a）
+
+PR 2 分三步迁移 ACP。PR 2a 迁移全新用户 prompt 的模型轮：不是 retry、continue 或 restore，也不是 Goal、channel 或 Goal 提案审批轮次的 prompt。模型轮就是共享 loop 自己的 `runModelRound`：一次 `LlmClient.sendMessageStream` 调用，事件交给 ACP，终止事件变成停止原因。ACP 保留自己的工具步骤（`runToolCalls`、工具之后的下一条消息、daemon 工具循环守卫）以及轮次前后的全部逻辑。PR 2b 把这些轮次的工具批迁到 scheduler 上，PR 2c 再把其他轮次整体迁到完整的 loop 上，因此 ACP 的每份 loop 主体只改动一次。
+
+| ACP 现在                                                                    | 设置开启后                                                                                                                                                                                      |
+| --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 通过 `#sendMessageStreamWithAutoCompression` 调用 `chat.sendMessageStream`  | 通过 `runModelRound` 调用 `LlmClient.sendMessageStream`：第一轮是 `UserQuery`，工具之后的一轮是 `ToolResult`，回复流式输出期间收到的输入是 `Steer`                                              |
+| 原始 chunk：文本、thought、usage、函数调用、工具调用准备                    | client 的事件：`Content`、带原始 `text` 的 `Thought`、`Finished` 上的 usage、带来源 `functionCall` 的 `ToolCallRequest`、`ToolCallPreparation`                                                  |
+| 经 message bus 触发 UserPromptSubmit                                        | `admitUserPrompt`，输入和时机都不变；第一轮应用这个结果，被拦截的 prompt 由这一轮报告，不发请求                                                                                                 |
+| 用户消息记录、todo 工作链和文件历史快照                                     | 仍由 ACP 处理；第一轮用 `userTurnRecordedByHost` 告知 client                                                                                                                                    |
+| 记忆召回、plan、arena 与 output-style 提醒、workflow intent、MessageDisplay | 由 client 处理                                                                                                                                                                                  |
+| 发送前压缩及其提示；session token 限制                                      | client 在发送过程中压缩，收到 `ChatCompressed` 时显示同样的提示；限制由 client 检查，报告方式不变（`max_tokens`）                                                                               |
+| 外部 Stop hook、它的上限和续发                                              | 仍由 ACP 的 Stop 循环处理，这个循环也负责 Todo Stop Guard 和当前轮次的后台结果；模型轮用 `stopHookRunByHost` 告知 client。这个 hook 在 PR 2c 中随这些续发一起迁移                               |
+| 请求失败时的 StopFailure hook 和 429 映射                                   | 仍由 ACP 处理，流中的 `Error` 事件也一样，抛出的是 provider 原本抛出的错误                                                                                                                      |
+| 轮次结束后的托管记忆任务                                                    | 轮次按现有条件结束时由 ACP 通过 client 的 `runManagedAutoMemoryBackgroundTasks` 安排；在 `stopHookRunByHost` 下 client 不安排，因为 ACP 的 Stop 循环还可能继续这个轮次                          |
+| interaction span                                                            | 仍由 ACP 处理；模型轮用 `interactionSpanByHost` 告知 client                                                                                                                                     |
+| daemon 工具循环守卫：每轮工具调用上限、重复调用、探索提醒                   | 仍由 ACP 处理；模型轮用 `toolLoopGuardsByHost` 告知 client，client 因此不检查工具调用模式，也不添加探索提醒和 ACP 消息里已有的 todo 提醒                                                        |
+| 没有内容和 thought 循环启发式检测，也没有会话轮数上限                       | `model.skipLoopDetection` 为 false 时启用 client 的内容和 thought 启发式检测，它的 `LoopDetected` 以循环为由拒绝这个 prompt（`LOOP_DETECTED`）；`MaxSessionTurns` 以 `max_turn_requests` 结束它 |
+
+这一步对 core 的改动都是增量的，不使用它们的调用方不受影响：
+
+- `Turn` 给 `Thought` 带上 chunk 的原始 `text`，给 `ToolCallRequest` 带上它所依据的 `functionCall`；发送时用 `toolCallPreparations` 要求后，模型开始流式输出一个调用时会产出 `ToolCallPreparation`；
+- `SendMessageOptions.userTurnRecordedByHost`、`stopHookRunByHost`、`interactionSpanByHost` 和 `toolLoopGuardsByHost`，以及循环检测器的检查选项 `toolCallPatterns`；
+- `SendMessageOptions.memoryRecallQuery`：`UserQuery` 的记忆召回用它代替请求作为查询；
+- `getStructuredErrorCause` 返回 `Turn` 的 `Error` 事件所依据的原始错误；
+- `admitUserPrompt` 接受 hook 的 `submitted_prompt` 和取消信号；
+- 导出 `runModelRound`。
+
 ## 迁移计划
 
-| PR  | 内容                                                                                              |
-| --- | ------------------------------------------------------------------------------------------------- |
-| 0   | 本设计                                                                                            |
-| 1   | 共享 loop、`beforeToolLaunch`、设置项、headless（`-p` 与 stream-json）、对拍测试                  |
-| 2   | ACP 会话；模型轮改为走 `LlmClient`，ACP 自己的重复实现不进入共享路径；可拆成模型轮与工具批两个 PR |
-| 3   | Ink TUI                                                                                           |
-| 4   | OpenTUI                                                                                           |
-| 5   | AgentCore 改用基于 `Turn` 的模型轮（subagent、后台与 fork agent、workflow）                       |
-| 6   | speculation                                                                                       |
-| —   | Hosted Harness：单独评估                                                                          |
-| 7   | 默认开启                                                                                          |
-| 8   | 删除现有的 loop                                                                                   |
+| PR  | 内容                                                                                                            |
+| --- | --------------------------------------------------------------------------------------------------------------- |
+| 0   | 本设计                                                                                                          |
+| 1   | 共享 loop、`beforeToolLaunch`、设置项、headless（`-p` 与 stream-json）、对拍测试                                |
+| 1d  | headless：默认开启                                                                                              |
+| 1r  | headless：删除现有 loop                                                                                         |
+| 2a  | ACP：全新用户 prompt 的模型轮改为走 `LlmClient`；ACP 自己的重复实现不进入共享路径，ACP 保留自己的工具步骤       |
+| 2b  | ACP：这些轮次的工具批迁到 scheduler 上；daemon 工具循环守卫改为 client 的守卫加一项入口策略                     |
+| 2c  | ACP：其他轮次（retry、continue、restore、Goal 轮次、cron、通知）迁到完整的 loop；ACP 自己的续发改为 stop 点策略 |
+| 2d  | ACP：默认开启，随后删除现有 loop                                                                                |
+| 3   | Ink TUI                                                                                                         |
+| 4   | OpenTUI                                                                                                         |
+| 5   | AgentCore 改用基于 `Turn` 的模型轮（subagent、后台与 fork agent、workflow）                                     |
+| 6   | speculation                                                                                                     |
+| —   | Hosted Harness：单独评估                                                                                        |
 
-一个入口在设置开启时通过它的对拍测试，并列出了已知差异，才算完成迁移。默认值的修改，要等范围内所有入口都完成迁移，并且该设置已在 CI 中、由主动开启的用户使用了至少一个版本。现有 loop 的删除，要等默认开启发布至少一个版本之后。
+PR 3–6 每一项之后，同样各自跟随默认开启和删除旧 loop 两步。
+
+一个入口在设置开启时通过它的对拍测试，并列出了已知差异，才算完成迁移。之后每个入口各自修改默认值，不必等其他入口。修改默认值需要同时满足：
+
+- 该设置对这个入口已经提供了至少一个版本；
+- 在设置开启的情况下运行该入口集成测试的定时任务，已在 main 上连续通过两周；
+- 该入口在[宿主自持的发送选项](#宿主自持的发送选项)中没有未关闭的行；
+- release notes 列出了它在[兼容性](#兼容性)中的有意差异。
+
+默认值修改发布一个版本之后，再删除该入口的现有 loop。在此之前，把 `experimental.unifiedAgentLoop` 设为 `false` 可以让这个入口回到现有 loop。
 
 ## 对拍测试
 
@@ -233,7 +296,7 @@ if (config.isUnifiedAgentLoopEnabled()) {
 **运行方式。** 对拍测试把每个脚本化场景在同一入口上跑两次：一次不设置 `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP`，一次设为 `1`。比较两样东西：
 
 - 模型看到的请求序列，比较前去掉时间戳、日期提醒、各类 id 和耗时；
-- 入口的输出：headless 是 stream-json 帧，之后 ACP 是 `session/update` 通知。
+- 入口的输出：headless 是 stream-json 帧；ACP 是 `session/update` 通知和每个 prompt 的停止原因，但不含按自己时机到达的 `available_commands_update`。
 
 出现差异即判该场景失败，除非这个差异已经列出并关联 issue。
 
@@ -255,11 +318,24 @@ if (config.isUnifiedAgentLoopEnabled()) {
 - 带同批调用的 structured output；
 - 合并进工具结果轮的 teammate 消息。
 
+**ACP 场景**（`integration-tests/cli/acp-agent-loop-parity.test.ts`）：
+
+- 纯文本，以及带 thought 的流式文本；
+- 一个工具，以及一次回复中的两个读取；
+- 两次读取之间一次获准的写入，以及一次被拒绝的写入；
+- 超过每轮工具调用上限的读取；
+- 被输出上限截断的编辑；
+- 中途断流后重试的流；
+- 同一会话中的两个 prompt；
+- 模型报错；
+- 拦截 prompt 的 UserPromptSubmit hook；
+- 拦截一次的 Stop hook，以及一直拦截到上限的 Stop hook。
+
 对拍测试在 integration 任务中运行。另有一个定时任务，在设置开启的情况下运行完整的 headless 集成测试。
 
 ## 兼容性
 
-- 设置关闭时，任何入口都不变。唯一改动的共享代码是 scheduler 新增的可选项 `beforeToolLaunch`，不传入时它不起作用。
+- 设置关闭时，任何入口都不变。共享代码的改动都是增量的：scheduler 的可选项 `beforeToolLaunch`，以及从 PR 2a 起上文所列的 `Turn` 事件字段和发送选项，不使用它们的调用方不受影响。
 - 设置开启时，headless 与现在相比有以下有意的差异。其中大多数源于把一批调用作为一个整体调度，这也是 TUI 现在的做法：
   - 在 stream-json 中，超过 `--max-session-turns` 的消息会在会话轮数上限处结束运行，与 `-p` 相同（错误写到 stderr，退出码 53），而不是返回一个重复上一条回答的成功结果（#15325）；
   - 通知轮次（cron、monitor 等排队条目）的每一轮模型调用都计入 `--max-session-turns`，与主轮次相同，而不是整个条目只计一轮，因此通知轮次中调用工具的运行可能更早到达上限；
@@ -273,19 +349,29 @@ if (config.isUnifiedAgentLoopEnabled()) {
 
   对拍测试覆盖了保持不变的常见场景，并对 #15325 的停止和 `--max-tool-calls` 下被审批的调用做了断言。headless 单测在两份 loop 上运行通知轮次的计数和重新提交的 `structured_output`。
 
+- 设置开启时，ACP 的 prompt 轮次与现在相比有以下有意的差异。其中大多数源于 client 为 ACP 做了它为其他入口做的事：
+  - 日期与上次不同时，prompt 会带上 client 的日期提醒；系统提醒改由 client 生成，包括 advisor 与已暂停 Goal 的提醒，并且排在 ACP 一次性提示的前面，而不是后面；
+  - UserPromptSubmit 也会为这一轮的工具结果请求运行，输入是请求的文本（请求只有工具结果时为空），与其他入口相同（#9511）；取消轮次会停止仍在这里运行的 hook；在这里被拦截时，轮次结束并显示拦截提示，这一轮的工具调用以“被 hook 拦截”的结果关闭，随结果一起取走的输入仍保留在历史中；
+  - session token 限制在 client 压缩历史之前检查，而不是之后；
+  - client 的会话轮数上限对 ACP prompt 生效；`model.skipLoopDetection` 为 false 时它的内容和 thought 循环启发式检测也生效，启用时 next-speaker 检查也一样（#14114）；
+  - 工具结果请求会带上召回结果和排队的循环提醒，并运行 client 只按大小判断的 microcompaction，托管记忆任务（包括 skill review）由 client 执行，prompt 计入提交署名；
+  - 每次压缩都会显示压缩提示，发送过程中的压缩也一样；
+
+  ACP 对拍测试覆盖了保持不变的常见场景，并对日期提醒、工具结果上的 UserPromptSubmit，以及该 hook 运行时取消做了断言。
+
 - 之后迁移的入口会带来各自的修复：#15324（ACP）、#15326（OpenTUI）、#14114 与 #12209（ACP）。
 
 - 不删除任何设置、协议字段或文件格式。
 
 ## 风险
 
-| 风险                                                                                | 缓解措施                                                                           |
-| ----------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| 整批调度改变 headless 的帧顺序或 `--max-tool-calls` 的精确计数                      | 按序流式输出结果；`beforeToolLaunch`；在预算边界上设对拍场景                       |
-| ACP 改走 `LlmClient` 后会多出一些行为（上限、启发式、提醒），并可能让 hook 执行两次 | ACP 自己的那份实现不进入共享路径；对拍测试列出每一项新增行为；单独成 PR            |
-| AgentCore 的延迟审批需要恢复四个 async-local 上下文帧                               | 把现有的契约测试随代码一起迁移；在 TUI 的 agent 视图中做一次真实的延迟审批（PR 5） |
-| 设置存在期间，两套实现并存                                                          | 不重构现有 loop；对拍测试在 CI 中运行；计划中已安排删除                            |
-| 大 PR 会改动 core                                                                   | 每个 PR 只迁移一个入口；PR 1 是位于默认关闭设置之后的功能 PR                       |
+| 风险                                                                                | 缓解措施                                                                                                             |
+| ----------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| 整批调度改变 headless 的帧顺序或 `--max-tool-calls` 的精确计数                      | 按序流式输出结果；`beforeToolLaunch`；在预算边界上设对拍场景                                                         |
+| ACP 改走 `LlmClient` 后会多出一些行为（上限、启发式、提醒），并可能让 hook 执行两次 | ACP 自己的那份实现不进入共享路径；对拍测试列出每一项新增行为；单独成 PR                                              |
+| AgentCore 的延迟审批需要恢复四个 async-local 上下文帧                               | 把现有的契约测试随代码一起迁移；在 TUI 的 agent 视图中做一次真实的延迟审批（PR 5）                                   |
+| 设置存在期间两套实现并存，新的 loop 层行为需要在两边都接一次                        | 每个入口准备好后立即修改默认值并删除现有 loop，不必等所有入口完成迁移；在此期间不重构现有 loop；对拍测试在 CI 中运行 |
+| 大 PR 会改动 core                                                                   | 每个 PR 只迁移一个入口；PR 1 是位于默认关闭设置之后的功能 PR                                                         |
 
 ## 验收标准
 
@@ -310,6 +396,7 @@ if (config.isUnifiedAgentLoopEnabled()) {
 - `model.maxSessionTurns: 0` 应该表示“不允许任何轮次”，还是应该被拒绝？目前各 loop 的理解不一致（#15325）。
 - 对拍测试按顺序比较各帧，目前还没有场景并发运行带实时输出的调用；这类调用的进度帧在两份 loop 中都没有固定顺序。这类场景是否应该按调用分别比较进度帧？
 - 被 `beforeToolLaunch` 拒绝的调用，对 PostToolBatch 来说仍是所在批次的成员，因此 hook 附加在它上面的停止指令或补充上下文不会到达模型。headless 只在运行结束时才拒绝调用，所以这在 headless 中不会表现出来。在其他入口使用 `beforeToolLaunch` 之前，应该让被拒绝的调用离开 hook 看到的批次，还是把 hook 的输出移到最后一个实际运行的调用上？
+- stop 点续发：client 链条中的入口 stop 策略，能否按 ACP 的 Stop 循环现在的顺序覆盖 Todo Stop Guard、后台结果和中途输入，并保持其中哪些可以被用户中断？这个问题需要在 PR 2c 之前解决。
 
 ## 后续工作
 

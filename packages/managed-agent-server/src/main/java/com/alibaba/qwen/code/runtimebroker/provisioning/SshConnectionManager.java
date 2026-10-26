@@ -104,8 +104,16 @@ public final class SshConnectionManager implements AutoCloseable {
 
     /** Sends credentials only through SSH stdin; command arguments contain trusted paths alone. */
     public Map<String, Object> bootstrap(SshRuntimeNode node, Map<String, Object> fields) {
+        return bootstrap(node, fields, false);
+    }
+
+    public Map<String, Object> upload(SshRuntimeNode node, Map<String, Object> fields) {
+        return bootstrap(node, fields, true);
+    }
+
+    private Map<String, Object> bootstrap(SshRuntimeNode node, Map<String, Object> fields, boolean upload) {
         byte[] input = JsonCodec.encode(fields);
-        if (input.length > RECORD_LIMIT) {
+        if (input.length > (upload ? WorkspaceFileProcess.MAX_UPLOAD_REQUEST_BYTES : RECORD_LIMIT)) {
             throw new IllegalArgumentException("SSH bootstrap request exceeds its size limit");
         }
         CommandResult exchange;
@@ -121,7 +129,10 @@ public final class SshConnectionManager implements AutoCloseable {
             if (fields.containsKey("files")) {
                 List<String> help = new ArrayList<>(command);
                 help.set(help.size() - 1, help.getLast() + " --help");
-                WorkspaceFileProcess.requireCapability(runner.run(List.copyOf(help), new byte[]{'{', '}'}, COMMAND_TIMEOUT));
+                WorkspaceFileProcess.requireCapability(runner.run(List.copyOf(help), new byte[]{'{', '}'}, COMMAND_TIMEOUT), upload);
+            }
+            if (upload) {
+                command.set(command.size() - 1, command.getLast() + " --workspace-file-upload");
             }
             exchange = runner.run(List.copyOf(command), input, COMMAND_TIMEOUT);
         } finally {
@@ -645,12 +656,17 @@ public final class SshConnectionManager implements AutoCloseable {
                             throw unavailable(failure);
                         }
                     });
-            try (var stdin = process.getOutputStream()) {
-                stdin.write(input);
-            }
+            CompletableFuture<Void> writer = CompletableFuture.runAsync(() -> {
+                try (var stdin = started.getOutputStream()) {
+                    stdin.write(input);
+                } catch (IOException failure) {
+                    throw unavailable(failure);
+                }
+            }, task -> Thread.ofVirtual().start(task));
             if (!process.waitFor(timeout.toMillis(), TimeUnit.MILLISECONDS)) {
                 throw unavailable(null);
             }
+            writer.get(1, TimeUnit.SECONDS);
             return new CommandResult(process.exitValue(), output.get(1, TimeUnit.SECONDS));
         } catch (InterruptedException failure) {
             Thread.currentThread().interrupt();

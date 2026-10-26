@@ -3723,6 +3723,13 @@ export const MessageList = memo(
       isResponding,
       latestTurnAwaitsAgentSummary,
     ]);
+    const latestFinalAssistantTurnId = useMemo(() => {
+      let latest: string | undefined;
+      for (const turnId of finalAssistantTurnIdByAssistantId.values()) {
+        latest = turnId;
+      }
+      return latest;
+    }, [finalAssistantTurnIdByAssistantId]);
 
     // ── Per-turn collapse ────────────────────────────────────────────────
     // Completed turns fold down to their prompt + final answer (toggle on the
@@ -6001,6 +6008,11 @@ export const MessageList = memo(
                 (agentReply ||
                   finalAssistantTurnIdByAssistantId.has(displayItem.message.id))
               }
+              assistantFooterAlwaysVisible={
+                !isResponding &&
+                finalAssistantTurnId !== undefined &&
+                finalAssistantTurnId === latestFinalAssistantTurnId
+              }
               showAssistantBranch={
                 displayItem.message.role === 'assistant' &&
                 !agentReply &&
@@ -6084,6 +6096,7 @@ export const MessageList = memo(
         visibleItems,
         flashTarget,
         finalAssistantTurnIdByAssistantId,
+        latestFinalAssistantTurnId,
         assistantFeedbackEnabled,
         assistantFeedbackHeadById,
         assistantFeedbackRatings,

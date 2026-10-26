@@ -38,6 +38,12 @@ import {
   managedRuntimeLedgerFromEnvironment,
 } from './managed-runtime-ledger.js';
 import type { ManagedSshRuntime } from './managed-runtime-ssh-worker.js';
+import {
+  MANAGED_EXTENSION_RETIRE_ROUTE,
+  MANAGED_EXTENSION_RUNTIME_ROUTE,
+  MANAGED_EXTENSION_UPLOAD_ROUTE,
+} from './managed-extension-runtime.js';
+import { MANAGED_EXTENSION_COMMAND_ROUTE } from './managed-extension-command-runtime.js';
 import { PUBLICATION_INSTALL_ROUTE } from './remote-shell-result-publication.js';
 import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 import {
@@ -378,9 +384,18 @@ export async function startManagedRuntimeAttestationWorker(
       boot.version === 2
         ? capturePublisher ||
           remotePublishers ||
-          boot.capabilityDigest === WORKSPACE_CAPABILITY_DIGEST
+          boot.capabilityDigest === WORKSPACE_CAPABILITY_DIGEST ||
+          boot.managedExtensions !== undefined
           ? [
               ...MANAGED_CONTEXT_WORKER_ROUTES,
+              ...(boot.managedExtensions
+                ? [
+                    MANAGED_EXTENSION_RUNTIME_ROUTE,
+                    MANAGED_EXTENSION_UPLOAD_ROUTE,
+                    MANAGED_EXTENSION_RETIRE_ROUTE,
+                    MANAGED_EXTENSION_COMMAND_ROUTE,
+                  ]
+                : []),
               ...(csiBoot
                 ? [
                     MANAGED_CSI_ATTEST_ROUTE,
@@ -393,12 +408,21 @@ export async function startManagedRuntimeAttestationWorker(
               ...(remotePublishers ? [MANAGED_SHELL_PUBLISHER_ROUTE] : []),
               ...(!capturePublisher &&
               !publication &&
-              boot.capabilityDigest === WORKSPACE_CAPABILITY_DIGEST
+              (boot.capabilityDigest === WORKSPACE_CAPABILITY_DIGEST ||
+                boot.managedExtensions !== undefined)
                 ? [PUBLICATION_INSTALL_ROUTE]
                 : []),
             ]
           : [
               ...MANAGED_CONTEXT_WORKER_ROUTES,
+              ...(boot.managedExtensions
+                ? [
+                    MANAGED_EXTENSION_RUNTIME_ROUTE,
+                    MANAGED_EXTENSION_UPLOAD_ROUTE,
+                    MANAGED_EXTENSION_RETIRE_ROUTE,
+                    MANAGED_EXTENSION_COMMAND_ROUTE,
+                  ]
+                : []),
               ...(csiBoot
                 ? [
                     MANAGED_CSI_ATTEST_ROUTE,
