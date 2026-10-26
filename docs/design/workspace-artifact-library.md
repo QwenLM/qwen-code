@@ -46,6 +46,12 @@ entry. Cache only successful cold artifact envelopes, including empty results;
 never retain transcripts or file contents. Share concurrent loads of the same
 unchanged session.
 
+The existing single-session artifact-library GET shares this cache with full
+and batch queries. Warming any of these routes benefits the others; either
+single or batch removal invalidates the shared entry. Single-session response
+and error shapes remain unchanged. A cached envelope's `generatedAt` records
+when that projection was built.
+
 Validate cold entries using `lstat` identities for both transcript locations and
 runtime ownership metadata: device, inode, mode, size, mtime, and ctime. Compare
 identities before and after loading and cache only an unchanged projection.
@@ -59,6 +65,11 @@ and discovery of removed sessions release cache space.
 
 Discover candidate filenames in both chat directories without parsing all
 transcripts. Cache discovery by directory identity and share concurrent scans.
+Re-enumerate on the first query at least two seconds after a completed scan even
+if directory identities match, so coarse timestamps cannot hide new cold
+sessions indefinitely. This refresh preserves unchanged artifact projections;
+it only scans filenames. Process at most four sessions concurrently per request
+to bound simultaneous transcript reads.
 Use existing session reads for project validation, avoiding the existing
 session enumeration method's silent 10,000-file limit. Merge live IDs on every
 request. Full responses still incur work proportional to returned metadata;

@@ -207,6 +207,33 @@ describe('workspace artifact cache', () => {
     expect(readPersistedWorkspaceArtifactLibrary).not.toHaveBeenCalled();
   });
 
+  it('refreshes discovery with unchanged directory fingerprints without replaying cached artifacts', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const archive = path.join(chats, 'archive');
+    await fs.mkdir(archive);
+    const identities = new Map([
+      [chats, await fs.lstat(chats)],
+      [archive, await fs.lstat(archive)],
+    ]);
+    const lstat = fs.lstat.bind(fs);
+    vi.spyOn(fs, 'lstat').mockImplementation(
+      async (entry) =>
+        (identities.get(String(entry)) ?? (await lstat(entry))) as never,
+    );
+    const scan = vi.spyOn(fs, 'readdir');
+    expect(await cache.sessionIds()).toEqual([id]);
+    const initial = await cache.read(id);
+    await fs.writeFile(path.join(archive, `${other}.jsonl`), 'archived');
+    vi.setSystemTime(Date.now() + 1_999);
+    expect(await cache.sessionIds()).toEqual([id]);
+    expect(scan).toHaveBeenCalledTimes(2);
+    vi.setSystemTime(Date.now() + 1);
+    expect(await cache.sessionIds()).toEqual([id, other]);
+    expect(scan).toHaveBeenCalledTimes(4);
+    expect(await cache.read(id)).toBe(initial);
+    expect(readPersistedWorkspaceArtifactLibrary).toHaveBeenCalledOnce();
+  });
+
   it('preserves cached entries during repeated scans exceeding the memory budget', async () => {
     const large = 'x'.repeat(17 * 1024 * 1024);
     vi.mocked(readPersistedWorkspaceArtifactLibrary).mockImplementation(

@@ -14,6 +14,7 @@ import { readPersistedWorkspaceArtifactLibrary } from './session-artifact-librar
 
 const SESSION_FILE = /^[0-9a-fA-F-]{32,36}\.jsonl$/;
 const MAX_CACHE_BYTES = 32 * 1024 * 1024;
+const DISCOVERY_REFRESH_INTERVAL_MS = 2_000;
 
 interface CachedArtifacts {
   fingerprint: string;
@@ -21,18 +22,20 @@ interface CachedArtifacts {
   bytes: number;
 }
 
-async function fingerprint(paths: string[]): Promise<string> {
+async function fingerprint(
+  paths: string[],
+  followSymlinks = true,
+): Promise<string> {
   return JSON.stringify(
     await Promise.all(
       paths.map(async (file) => {
         try {
           const stat = await fs.lstat(file);
-          const target = stat.isSymbolicLink()
-            ? await fs.stat(file).catch((error: NodeJS.ErrnoException) => {
-                if (error.code === 'ENOENT') return undefined;
-                throw error;
-              })
-            : undefined;
+          // Let storage readers validate links whose targets cannot be read.
+          const target =
+            followSymlinks && stat.isSymbolicLink()
+              ? await fs.stat(file).catch(() => undefined)
+              : undefined;
           return [
             stat.dev,
             stat.ino,
@@ -64,7 +67,11 @@ export class WorkspaceArtifactCache {
   private readonly directories: string[];
   private readonly entries = new Map<string, CachedArtifacts>();
   private bytes = 0;
-  private discovery?: { fingerprint: string; promise: Promise<string[]> };
+  private discovery?: {
+    fingerprint: string;
+    promise: Promise<string[]>;
+    expiresAt: number;
+  };
 
   constructor(private readonly runtime: WorkspaceRuntime) {
     this.storage = new Storage(
@@ -83,9 +90,13 @@ export class WorkspaceArtifactCache {
 
   async sessionIds(): Promise<string[]> {
     const version = await fingerprint(this.directories);
-    if (this.discovery?.fingerprint !== version) {
+    if (
+      this.discovery?.fingerprint !== version ||
+      Date.now() >= this.discovery.expiresAt
+    ) {
       const load = {
         fingerprint: version,
+        expiresAt: Infinity,
         promise: Promise.resolve().then(async () => {
           const names = await Promise.all(
             this.directories.map(async (directory) => {
@@ -106,9 +117,14 @@ export class WorkspaceArtifactCache {
         }),
       };
       this.discovery = load;
-      void load.promise.catch(() => {
-        if (this.discovery === load) this.discovery = undefined;
-      });
+      void load.promise.then(
+        () => {
+          load.expiresAt = Date.now() + DISCOVERY_REFRESH_INTERVAL_MS;
+        },
+        () => {
+          if (this.discovery === load) this.discovery = undefined;
+        },
+      );
     }
     const persisted = await this.discovery!.promise;
     const persistedIds = new Set(persisted);
@@ -131,13 +147,17 @@ export class WorkspaceArtifactCache {
     }
     if (!SESSION_FILE.test(`${sessionId}.jsonl`))
       throw new SessionNotFoundError(sessionId);
-    const files = [
-      ...this.directories.map((directory) =>
-        path.join(directory, `${sessionId}.jsonl`),
-      ),
-      this.storage.getRuntimeStatusPath(sessionId),
-    ];
-    const version = await fingerprint(files);
+    const files = this.directories.map((directory) =>
+      path.join(directory, `${sessionId}.jsonl`),
+    );
+    const readFingerprint = async () =>
+      JSON.stringify(
+        await Promise.all([
+          fingerprint(files, false),
+          fingerprint([this.storage.getRuntimeStatusPath(sessionId)]),
+        ]),
+      );
+    const version = await readFingerprint();
     const cached = this.entries.get(sessionId);
     if (cached?.fingerprint === version) {
       return cached.promise;
@@ -152,7 +172,7 @@ export class WorkspaceArtifactCache {
             this.runtime,
             sessionId,
           );
-          const unchanged = version === (await fingerprint(files));
+          const unchanged = version === (await readFingerprint());
           if (this.entries.get(sessionId) === entry) {
             const bytes = Buffer.byteLength(JSON.stringify(result));
             if (!unchanged || this.bytes + bytes > MAX_CACHE_BYTES) {

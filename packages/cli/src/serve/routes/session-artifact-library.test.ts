@@ -251,7 +251,7 @@ describe('workspace artifact collection routes', () => {
     expect(owner.bridge.listWorkspaceSessions).not.toHaveBeenCalled();
   });
 
-  it('reuses cold projections across full and batch queries and refreshes after grouped removal', async () => {
+  it('shares cold projections across single, full and batch queries and refreshes after removal', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-library-batch-'));
     try {
       const owner = {
@@ -328,6 +328,12 @@ describe('workspace artifact collection routes', () => {
         'removeSessionArtifactsForLibrary',
       );
       for (let attempt = 0; attempt < 2; attempt++) {
+        const single = await request(app).get(route);
+        expect(single.status).toBe(200);
+        expect(single.body.artifacts).toHaveLength(3);
+      }
+      expect(read).toHaveBeenCalledOnce();
+      for (let attempt = 0; attempt < 2; attempt++) {
         const response = await request(app).get(collectionRoute);
         expect(response.status).toBe(200);
         expect(response.body.errors).toEqual([]);
@@ -345,6 +351,11 @@ describe('workspace artifact collection routes', () => {
       expect(batch.body.errors).toEqual([
         expect.objectContaining({ sessionId: 'missing', status: 404 }),
       ]);
+      const archivedSingle = await request(app).get(
+        `/workspaces/primary/session/${secondId}/artifact-library`,
+      );
+      expect(archivedSingle.status).toBe(200);
+      expect(archivedSingle.body.artifacts).toEqual([]);
       expect(read).toHaveBeenCalledTimes(2);
       // Loading can overlap a cold read: only durable records may enter its cache.
       vi.mocked(owner.bridge.getSessionSummary).mockReturnValue({
@@ -391,6 +402,9 @@ describe('workspace artifact collection routes', () => {
         ),
       ).toBe(true);
       expect(bulkRemove).toHaveBeenCalledOnce();
+      const afterBatchSingle = await request(app).get(route);
+      expect(afterBatchSingle.status).toBe(200);
+      expect(afterBatchSingle.body.artifacts).toHaveLength(1);
       const refreshed = await request(app).get(collectionRoute);
       expect(refreshed.body.errors).toEqual([]);
       expect(
@@ -401,6 +415,9 @@ describe('workspace artifact collection routes', () => {
       expect(read).toHaveBeenCalledTimes(4);
       const single = await request(app).delete(`${route}/${ids[2]}`);
       expect(single.status).toBe(200);
+      const afterSingleGet = await request(app).get(route);
+      expect(afterSingleGet.status).toBe(200);
+      expect(afterSingleGet.body.artifacts).toEqual([]);
       const afterSingle = await request(app)
         .post(`${collectionRoute}/query`)
         .send({ sessionIds: [id] });
@@ -703,6 +720,32 @@ describe('workspace artifact library routes', () => {
         );
         expect(res.status).toBe(409);
         expect(res.body.code).toBe('session_storage_conflict');
+      } finally {
+        await fs.rm(dir, { recursive: true, force: true });
+      }
+    },
+  );
+  it.skipIf(process.platform === 'win32')(
+    'preserves storage conflict errors for a looping transcript symlink',
+    async () => {
+      const dir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-library-link-'),
+      );
+      try {
+        const owner = {
+          ...runtime('primary', false),
+          workspaceCwd: dir,
+          sessionRuntimeBaseDir: path.join(dir, 'runtime'),
+        };
+        const storage = new Storage(dir, owner.sessionRuntimeBaseDir);
+        const chats = path.join(storage.getProjectDir(), 'chats');
+        await fs.mkdir(chats, { recursive: true });
+        const file = path.join(chats, `${id}.jsonl`);
+        await fs.symlink(file, file);
+        const { app } = setup([owner]);
+        const response = await request(app).get(route);
+        expect(response.status).toBe(409);
+        expect(response.body.code).toBe('session_storage_conflict');
       } finally {
         await fs.rm(dir, { recursive: true, force: true });
       }

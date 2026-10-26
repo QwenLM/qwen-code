@@ -3152,13 +3152,22 @@ Live queries reuse the bridge. Unloaded metadata, including empty results, is
 cached per runtime with a 32 MiB serialized-size budget. Unchanged files are not
 replayed on repeated queries or after a TTL. Transcript and ownership metadata
 identities are checked on each read; changed entries are rebuilt. Candidate
-discovery is cached by directory identity. Concurrent cold reads share a load.
+discovery is cached by directory identity and refreshed on the first query at
+least two seconds after a completed scan, including when directory timestamps
+do not change. This filename-only refresh preserves unchanged artifact caches.
+Concurrent cold reads share a load; each request processes up to four sessions
+at a time.
 Admitted unchanged entries are retained; new results exceeding the budget are
 returned uncached so repeated full scans do not evict the whole cache. Those
 uncached sessions, or a daemon restart, require reconstruction. This avoids
 repeated JSONL parsing for cached entries, but filesystem checks and response
 size still scale with the workspace. Cold file availability retains the existing
 metadata-only semantics.
+
+The existing single-session artifact-library GET shares this same cache with
+full and batch queries, retaining its response and error shapes. Warming one
+route benefits the others; single and batch removal invalidate the shared
+entry. A cached envelope's `generatedAt` is its projection creation time.
 
 `session_artifact_library` advertises these persisted-workspace-scoped endpoints:
 

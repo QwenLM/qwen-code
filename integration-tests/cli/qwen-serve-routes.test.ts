@@ -406,6 +406,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_artifacts',
       'session_artifacts_persistence',
       'session_artifact_library',
+      'workspace_artifact_library',
       'session_sources',
       'slow_client_warning',
       'typed_event_schema',

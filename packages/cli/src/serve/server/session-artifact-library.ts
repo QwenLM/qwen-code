@@ -163,15 +163,6 @@ function isLive(runtime: WorkspaceRuntime, sessionId: string) {
   }
 }
 
-export async function readWorkspaceArtifactLibrary(
-  runtime: WorkspaceRuntime,
-  sessionId: string,
-) {
-  if (isLive(runtime, sessionId))
-    return runtime.bridge.getSessionArtifacts(sessionId);
-  return readPersistedWorkspaceArtifactLibrary(runtime, sessionId);
-}
-
 export async function readPersistedWorkspaceArtifactLibrary(
   runtime: WorkspaceRuntime,
   sessionId: string,

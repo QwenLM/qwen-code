@@ -57,7 +57,10 @@ import {
   parseGoalControlRequest,
   readArtifactSnapshot,
 } from '@qwen-code/qwen-code-core';
-import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifacts';
+import type {
+  SessionArtifactInput,
+  SessionArtifactsEnvelope,
+} from '@qwen-code/acp-bridge/sessionArtifacts';
 import {
   SESSION_ATTACHMENT_CHUNK_BYTES,
   SessionAttachmentUploadError,
@@ -168,7 +171,6 @@ import {
 import {
   ArtifactLibraryRequestError,
   artifactLibraryMemberError,
-  readWorkspaceArtifactLibrary,
   removeWorkspaceLibraryArtifact,
   removeWorkspaceLibraryArtifacts,
   type ArtifactLibraryRemovalResult,
@@ -350,6 +352,7 @@ const TRANSCRIPT_CURSOR_TOO_LARGE_REPLAY_ERROR =
   'Transcript pagination state exceeds the safe limit';
 // Must exceed CHANNEL_DELIVERY_IPC_TIMEOUT_MS (30 s, channel-delivery-ipc.ts) plus scheduling slack.
 const CHANNEL_DELIVERY_AUTHORIZATION_GRACE_MS = 60_000;
+const ARTIFACT_LIBRARY_CONCURRENCY = 4;
 // Media blocks are resolved into inline bytes at dispatch, so an unbounded
 // content array lets one small request fan out into gigabytes of heap (a
 // repeated reference resolves to the same 8 MiB image once per occurrence).
@@ -7411,9 +7414,7 @@ export function registerSessionRoutes(
               for (const id of await cache.sessionIds())
                 selected.set(id, new Set());
             }
-            const readResults: Array<
-              Awaited<ReturnType<typeof readWorkspaceArtifactLibrary>>
-            > = [];
+            const readResults: SessionArtifactsEnvelope[] = [];
             const errors: Array<
               ReturnType<typeof artifactLibraryMemberError> & {
                 sessionId: string;
@@ -7421,10 +7422,14 @@ export function registerSessionRoutes(
             > = [];
             const removed: ArtifactLibraryRemovalResult[] = [];
             const groups = [...selected];
-            for (let offset = 0; offset < groups.length; offset += 4) {
+            for (
+              let offset = 0;
+              offset < groups.length;
+              offset += ARTIFACT_LIBRARY_CONCURRENCY
+            ) {
               const batch = await Promise.all(
                 groups
-                  .slice(offset, offset + 4)
+                  .slice(offset, offset + ARTIFACT_LIBRARY_CONCURRENCY)
                   .map(async ([sessionId, artifactIds]) => {
                     const run = async () => {
                       assertOpen?.();
@@ -7599,7 +7604,7 @@ export function registerSessionRoutes(
             workspaceArtifactCaches.get(runtime)?.invalidate(sessionId);
           const result = await runWithWorkspaceRuntimeStorage(runtime, () =>
             operation === 'read'
-              ? readWorkspaceArtifactLibrary(runtime, sessionId)
+              ? artifactCache(runtime).read(sessionId)
               : removeWorkspaceLibraryArtifact(
                   runtime,
                   sessionId,
