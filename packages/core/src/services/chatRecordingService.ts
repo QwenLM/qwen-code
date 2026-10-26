@@ -3421,6 +3421,7 @@ export class ChatRecordingService {
         'session_source',
         'session_model',
         'session_approval_mode',
+        'session_workflow_mode',
         'attribution_snapshot',
       ]);
       const metadata = new Map<string, ChatRecord>();

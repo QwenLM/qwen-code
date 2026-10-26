@@ -207,6 +207,7 @@ describe('runNonInteractiveStreamJson', () => {
     >;
   };
   let mockOutputAdapter: {
+    send: ReturnType<typeof vi.fn>;
     emitResult: ReturnType<typeof vi.fn>;
     emitMessage: ReturnType<typeof vi.fn>;
     emitUserMessage: ReturnType<typeof vi.fn>;
@@ -242,11 +243,13 @@ describe('runNonInteractiveStreamJson', () => {
 
     // Setup mocks
     mockOutputAdapter = {
+      send: vi.fn(),
       emitResult: vi.fn(),
       emitMessage: vi.fn(),
       emitUserMessage: vi.fn(),
       emitSystemMessage: vi.fn(),
     } as {
+      send: ReturnType<typeof vi.fn>;
       emitResult: ReturnType<typeof vi.fn>;
       emitMessage: ReturnType<typeof vi.fn>;
       emitUserMessage: ReturnType<typeof vi.fn>;
@@ -443,6 +446,158 @@ describe('runNonInteractiveStreamJson', () => {
     expect(runNonInteractiveMock).not.toHaveBeenCalled();
     expect(mockOutputAdapter.emitResult).toHaveBeenCalled();
   });
+
+  it('rejects another initialize after payload validation fails', async () => {
+    const initialRequest = createControlRequest();
+    const retryRequest = {
+      ...createControlRequest(),
+      request_id: 'initialize-retry',
+    };
+    const error = new Error(
+      'Invalid effort value. Supported: low, medium, high, xhigh, max',
+    );
+    mockDispatcher.dispatch.mockImplementation(
+      async (request: CLIControlRequest, propagateError = false) => {
+        const failed = request.request_id === initialRequest.request_id;
+        mockOutputAdapter.send({
+          type: 'control_response',
+          response: failed
+            ? {
+                subtype: 'error',
+                request_id: request.request_id,
+                error: error.message,
+              }
+            : {
+                subtype: 'success',
+                request_id: request.request_id,
+                response: { subtype: 'initialize' },
+              },
+        });
+        if (failed && propagateError) throw error;
+      },
+    );
+    mockInputReader.read = async function* () {
+      yield initialRequest;
+      yield retryRequest;
+      yield createUserMessage('must not reach the model');
+    };
+
+    await runNonInteractiveStreamJson(config, '');
+
+    expect(mockDispatcher.dispatch).toHaveBeenCalledExactlyOnceWith(
+      initialRequest,
+      true,
+    );
+    expect(mockOutputAdapter.send.mock.calls.map(([frame]) => frame)).toEqual([
+      {
+        type: 'control_response',
+        response: {
+          subtype: 'error',
+          request_id: initialRequest.request_id,
+          error: error.message,
+        },
+      },
+      {
+        type: 'control_response',
+        response: {
+          subtype: 'error',
+          request_id: retryRequest.request_id,
+          error: `Session initialization failed: ${error.message}`,
+        },
+      },
+    ]);
+    expect(config.initialize).not.toHaveBeenCalled();
+    expect(runNonInteractiveMock).not.toHaveBeenCalled();
+    expect(mockOutputAdapter.emitResult).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        isError: true,
+        errorMessage: error.message,
+      }),
+    );
+  });
+
+  it.each([true, false])(
+    'waits for the initial config outcome before handling another initialize (success=%s)',
+    async (succeeds) => {
+      let resolveInitialization!: () => void;
+      let rejectInitialization!: (error: Error) => void;
+      const initialization = new Promise<void>((resolve, reject) => {
+        resolveInitialization = resolve;
+        rejectInitialization = reject;
+      });
+      let initializationStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        initializationStarted = resolve;
+      });
+      config = createConfig({
+        initialize: vi.fn(() => {
+          initializationStarted();
+          return initialization;
+        }),
+      });
+      const initialRequest = createControlRequest();
+      const retryRequest = {
+        ...createControlRequest(),
+        request_id: 'initialize-retry',
+      };
+      const error = new Error('bad credentials');
+      mockDispatcher.dispatch.mockImplementation(
+        async (request: CLIControlRequest) => {
+          mockOutputAdapter.send({
+            type: 'control_response',
+            response: {
+              subtype: 'success',
+              request_id: request.request_id,
+              response: { subtype: 'initialize' },
+            },
+          });
+        },
+      );
+      mockDispatcher.handleControlResponse.mockImplementation(() => {
+        if (succeeds) resolveInitialization();
+        else rejectInitialization(error);
+      });
+      let dispatchesWhileInitializing: number | undefined;
+      mockInputReader.read = async function* () {
+        yield initialRequest;
+        await started;
+        yield retryRequest;
+        dispatchesWhileInitializing = mockDispatcher.dispatch.mock.calls.length;
+        yield createControlResponse('mcp-initialize');
+        yield createUserMessage('run only after successful initialization');
+      };
+
+      await runNonInteractiveStreamJson(config, '');
+
+      expect(dispatchesWhileInitializing).toBe(1);
+      expect(
+        mockDispatcher.handleControlResponse,
+      ).toHaveBeenCalledExactlyOnceWith(
+        createControlResponse('mcp-initialize'),
+      );
+      expect(config.initialize).toHaveBeenCalledOnce();
+      expect(mockOutputAdapter.send).toHaveBeenCalledTimes(2);
+      expect(mockOutputAdapter.send).toHaveBeenLastCalledWith({
+        type: 'control_response',
+        response: succeeds
+          ? {
+              subtype: 'success',
+              request_id: retryRequest.request_id,
+              response: { subtype: 'initialize' },
+            }
+          : {
+              subtype: 'error',
+              request_id: retryRequest.request_id,
+              error: `Session initialization failed: ${error.message}`,
+            },
+      });
+      expect(mockDispatcher.dispatch).toHaveBeenCalledTimes(succeeds ? 2 : 1);
+      expect(runNonInteractiveMock).toHaveBeenCalledTimes(succeeds ? 1 : 0);
+      expect(mockOutputAdapter.emitResult).toHaveBeenCalledTimes(
+        succeeds ? 0 : 1,
+      );
+    },
+  );
 
   it('writes only warnings produced during deferred initialization to stderr', async () => {
     const warnings = ['Warning: already emitted before stream-json startup'];

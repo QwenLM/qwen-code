@@ -11762,7 +11762,7 @@ Other open files:
             const request = mockTurnRunFn.mock.lastCall?.[1];
             expect(Array.from(request!)).toEqual([
               { text: prepared.reminder },
-              'retry me',
+              { text: 'retry me' },
             ]);
             expect(mockConfig.prepareWorkflowMode).not.toHaveBeenCalled();
             expect(mode.snapshot()).toEqual(snapshot);
@@ -11809,7 +11809,7 @@ Other open files:
           expect(mockTurnRunFn.mock.lastCall?.[1]).toEqual([
             { text: previous },
             { text: final },
-            'retry me',
+            { text: 'retry me' },
           ]);
           expect(mockConfig.prepareWorkflowMode).not.toHaveBeenCalled();
         },
@@ -11839,8 +11839,8 @@ Other open files:
 
         expect(mockTurnRunFn.mock.lastCall?.[1]).toEqual([
           fnResponse('read_file', { output: 'done' }),
-          reminder,
-          'retry me',
+          { text: reminder },
+          { text: 'retry me' },
         ]);
         expect(mockConfig.prepareWorkflowMode).not.toHaveBeenCalled();
       });
@@ -11859,7 +11859,9 @@ Other open files:
         });
         mockTurnRunFn.mockReturnValue(textTurn('retry response'));
         await retryMe('mode-retry-retained');
-        expect(mockTurnRunFn.mock.lastCall?.[1]).toEqual(['retry me']);
+        expect(mockTurnRunFn.mock.lastCall?.[1]).toEqual([
+          { text: 'retry me' },
+        ]);
         expect(mockConfig.prepareWorkflowMode).not.toHaveBeenCalled();
       });
 
@@ -11879,7 +11881,7 @@ Other open files:
         expect(mockTurnRunFn.mock.lastCall?.[1]).toEqual([
           response,
           { text: reminder },
-          'retry me',
+          { text: 'retry me' },
         ]);
       });
 
@@ -11895,7 +11897,9 @@ Other open files:
           );
           mockTurnRunFn.mockReturnValue(textTurn('retry response'));
           await retryMe('mode-retry-invalid-envelope');
-          expect(mockTurnRunFn.mock.lastCall?.[1]).toEqual(['retry me']);
+          expect(mockTurnRunFn.mock.lastCall?.[1]).toEqual([
+            { text: 'retry me' },
+          ]);
         },
       );
 

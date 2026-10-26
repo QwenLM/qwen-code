@@ -469,7 +469,7 @@ class Session {
 
   /**
    * Handle control request asynchronously (fire-and-forget from main loop).
-   * Errors are handled internally and responses sent by dispatcher.
+   * Errors are handled internally.
    */
   private handleControlRequestAsync(request: CLIControlRequest): void {
     const dispatcher = this.getDispatcher();
@@ -480,7 +480,26 @@ class Session {
 
     // Fire-and-forget: dispatch runs concurrently
     // The dispatcher's pendingIncomingRequests tracks completion
-    void dispatcher.dispatch(request).catch((error) => {
+    void (async () => {
+      if (request.request.subtype === 'initialize') {
+        try {
+          await this.waitForInitialization();
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          this.outputAdapter.send({
+            type: 'control_response',
+            response: {
+              subtype: 'error',
+              request_id: request.request_id,
+              error: `Session initialization failed: ${message}`,
+            },
+          });
+          return;
+        }
+      }
+      await dispatcher.dispatch(request);
+    })().catch((error) => {
       debugLogger.error('[Session] Control request dispatch error:', error);
       // Error response is already sent by dispatcher.dispatch()
     });

@@ -1656,6 +1656,144 @@ describe('Session', () => {
   });
 
   describe('session Workflow mode', () => {
+    it.each(['throw', 'no stream'])(
+      'restores the original Retry entry when setup returns %s before pushing',
+      async (failure) => {
+        const orphan: Content = {
+          role: 'user',
+          parts: [
+            {
+              text: '<system-reminder>\nWorkflow mode is off for this session. Original guidance.\n</system-reminder>',
+            },
+            { text: 'retry me' },
+          ],
+        };
+        vi.mocked(mockChat.stripOrphanedUserEntriesFromHistory).mockReturnValue(
+          [orphan],
+        );
+        if (failure === 'throw') {
+          vi.mocked(mockChat.sendMessageStream).mockRejectedValueOnce(
+            new Error('setup before push'),
+          );
+        } else {
+          vi.mocked(mockChat.sendMessageStream).mockResolvedValueOnce(
+            null as unknown as AsyncGenerator<core.StreamEvent>,
+          );
+        }
+        const attempt = session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'retry me' }],
+          _meta: { 'qwen.daemon.retry': true },
+        });
+        if (failure === 'throw')
+          await expect(attempt).rejects.toThrow('setup before push');
+        else
+          await expect(attempt).resolves.toMatchObject({
+            stopReason: 'end_turn',
+          });
+        expect(mockChat.addHistory).toHaveBeenCalledExactlyOnceWith(orphan);
+      },
+    );
+
+    it('keeps the original envelope when a hook blocks Retry before the next retry', async () => {
+      const reminder =
+        '<system-reminder>\nWorkflow mode is enabled for this session. Original guidance.\n</system-reminder>';
+      const orphan: Content = {
+        role: 'user',
+        parts: [{ text: reminder }, { text: 'retry me' }],
+      };
+      const history = [orphan];
+      let pushes = 0;
+      Object.assign(mockChat, {
+        getUserContentPushCount: vi.fn(() => pushes),
+        stripOrphanedUserEntriesFromHistory: vi.fn(() => history.splice(0)),
+        addHistory: vi.fn((entry: Content) => history.push(entry)),
+      });
+      const messageBus = {
+        request: vi
+          .fn()
+          .mockResolvedValueOnce({
+            success: true,
+            output: { decision: 'block', reason: 'Retry paused by hook' },
+          })
+          .mockResolvedValue({ success: true, output: {} }),
+      };
+      mockConfig.getMessageBus = vi.fn(() => messageBus);
+      mockConfig.getDisableAllHooks = vi.fn(() => false);
+      mockConfig.hasHooksForEvent = vi.fn(
+        (event) => event === 'UserPromptSubmit',
+      );
+      mockConfig.prepareWorkflowMode = vi.fn();
+      const prompt = {
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text' as const, text: 'retry me' }],
+        _meta: { 'qwen.daemon.retry': true },
+      };
+
+      await session.prompt(prompt);
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      expect(history).toEqual([orphan]);
+      vi.mocked(mockChat.addHistory).mockClear();
+      vi.mocked(mockChat.sendMessageStream).mockImplementation(async () => {
+        pushes++;
+        return createEmptyStream();
+      });
+      await session.prompt(prompt);
+      expect(
+        textParts(firstSentMessage()).filter((text) => text === reminder),
+      ).toHaveLength(1);
+      expect(mockConfig.prepareWorkflowMode).not.toHaveBeenCalled();
+      expect(mockChat.addHistory).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      'is enabled for this session',
+      'remains enabled for this session',
+      'is off for this session',
+      'is temporarily unavailable',
+    ])(
+      'replays the original %s envelope on Retry without preparing a new turn',
+      async (state) => {
+        const reminder = `<system-reminder>\nWorkflow mode ${state}. Original turn guidance.\n</system-reminder>`;
+        const commit = vi.fn();
+        mockConfig.prepareWorkflowMode = vi.fn(() => ({
+          reminder,
+          onModelRequestDispatched: commit,
+        }));
+        vi.mocked(mockChat.sendMessageStream).mockImplementation(async () =>
+          createEmptyStream(),
+        );
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'ordinary request' }],
+        });
+        const originalParts = firstSentMessage();
+        vi.mocked(
+          mockChat.sendMessageStream,
+        ).mock.calls[0]?.[4]?.onModelRequestDispatched?.();
+        expect(commit).toHaveBeenCalledOnce();
+        vi.mocked(mockChat.stripOrphanedUserEntriesFromHistory).mockReturnValue(
+          [{ role: 'user', parts: originalParts }],
+        );
+        vi.mocked(mockChat.sendMessageStream).mockClear();
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'ordinary request' }],
+          _meta: { 'qwen.daemon.retry': true },
+        });
+
+        expect(
+          textParts(firstSentMessage()).filter((text) => text === reminder),
+        ).toHaveLength(1);
+        expect(mockConfig.prepareWorkflowMode).toHaveBeenCalledOnce();
+        expect(
+          vi.mocked(mockChat.sendMessageStream).mock.calls[0]?.[4]
+            ?.onModelRequestDispatched,
+        ).toBeUndefined();
+      },
+    );
+
     it('prepares mode for an ordinary unknown-origin ACP request and forwards only the dispatch token', async () => {
       const commit = vi.fn();
       mockConfig.prepareWorkflowMode = vi.fn(() => ({
@@ -4575,6 +4713,7 @@ describe('Session', () => {
 
     it('sends a fresh prompt as a UserQuery whose user turn it recorded', async () => {
       const send = useSharedRounds([text('Hello'), finished()]);
+      mockConfig.prepareWorkflowMode = vi.fn();
 
       const result = await prompt();
 
@@ -4584,6 +4723,7 @@ describe('Session', () => {
       expect(send.mock.calls[0][3]).toMatchObject({
         type: core.SendMessageType.UserQuery,
         userTurnRecordedByHost: true,
+        workflowModeEligible: true,
         stopHookRunByHost: true,
         interactionSpanByHost: true,
         toolLoopGuardsByHost: true,
@@ -4591,6 +4731,7 @@ describe('Session', () => {
         // Recall searches the prompt text, not the resolved request.
         memoryRecallQuery: 'hello',
       });
+      expect(mockConfig.prepareWorkflowMode).not.toHaveBeenCalled();
       expect(agentText()).toContain('Hello');
       // The session snapshots its user turn; the option keeps the client's off.
       expect(mockFileHistoryService.makeSnapshot).toHaveBeenCalledOnce();

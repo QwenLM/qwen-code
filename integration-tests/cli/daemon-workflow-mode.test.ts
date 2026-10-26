@@ -42,9 +42,9 @@ function currentTurnText(
         .join('\n');
 }
 
-describe.skipIf(process.platform === 'win32')(
-  'DW04: daemon owner Workflow mode',
-  () => {
+describe.skipIf(process.platform === 'win32').each([false, true])(
+  'DW04: daemon owner Workflow mode (shared=%s)',
+  (shared) => {
     let root: string;
     let server: FakeOpenAIServer;
     let daemon: SpawnedDaemon;
@@ -64,6 +64,7 @@ describe.skipIf(process.platform === 'win32')(
         path.join(home, 'settings.json'),
         JSON.stringify({
           tools: { workflowsEnabled: true },
+          experimental: { unifiedAgentLoop: shared },
           security: {
             auth: { selectedType: 'openai' },
             folderTrust: { enabled: true },

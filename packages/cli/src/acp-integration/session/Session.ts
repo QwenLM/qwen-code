@@ -6821,6 +6821,9 @@ export class Session implements SessionContext {
     channelTurn = false,
   ): Promise<PromptResponse> {
     let managedMemoryRecallStarted = false;
+    let strippedRetryEntries: Content[] = [];
+    let retryHistoryReplaced = false;
+    let retrySessionId: string | undefined;
     return Storage.runWithRuntimeBaseDir(
       this.runtimeBaseDir,
       this.config.getWorkingDir(),
@@ -7080,7 +7083,11 @@ export class Session implements SessionContext {
               // The orphaned content is already persisted; recording a new user
               // message would duplicate the turn in the transcript.
             } else if (isRetry) {
-              this.config.getLlmClient()!.stripOrphanedUserEntriesFromHistory();
+              retrySessionId = this.config.getSessionId();
+              strippedRetryEntries =
+                this.config
+                  .getLlmClient()!
+                  .stripOrphanedUserEntriesFromHistory() ?? [];
             } else if (!isSlashInput || slashCommandName !== 'advisor') {
               // record user message for session management. Only `/advisor`
               // defers its record to after command resolution below — a
@@ -7509,7 +7516,7 @@ export class Session implements SessionContext {
                 );
               }
             }
-            // ACP sends through LlmChat, bypassing LlmClient's injection.
+            // The legacy round bypasses LlmClient's reminder injection.
             // Resolve here before the interrupted-prompt reminder deduplication.
             const workflowIntent = sharedModelRound
               ? undefined
@@ -7526,9 +7533,31 @@ export class Session implements SessionContext {
                 : undefined;
             const workflowReminder =
               workflowMode?.reminder ?? workflowIntent?.reminder;
-            if (workflowReminder) {
-              systemReminders.push({ text: workflowReminder });
+            const workflowReminders = new Set(
+              workflowReminder ? [workflowReminder] : [],
+            );
+            // Retry replays its original envelope without consuming a fresh turn.
+            for (const entry of strippedRetryEntries) {
+              for (const { text } of entry.parts ?? []) {
+                if (
+                  text &&
+                  /^<system-reminder>\nWorkflow mode (?:is enabled for this session|remains enabled for this session|is off for this session|is temporarily unavailable)\. [\s\S]*\n<\/system-reminder>$/.test(
+                    text,
+                  ) &&
+                  text.indexOf('</system-reminder>') ===
+                    text.length - '</system-reminder>'.length &&
+                  text.indexOf('<system-reminder>', 1) === -1
+                ) {
+                  workflowReminders.delete(text);
+                  workflowReminders.add(text);
+                }
+              }
             }
+            systemReminders.push(
+              ...[...workflowReminders]
+                .filter((text) => !parts.some((part) => part.text === text))
+                .map((text) => ({ text })),
+            );
             if (workflowIntent) {
               logWorkflowKeyword(this.config, new WorkflowKeywordEvent());
             }
@@ -7771,11 +7800,15 @@ export class Session implements SessionContext {
 
               while (nextMessage !== null) {
                 turnCount++;
+                const restoresOriginalRetry =
+                  isRetry && turnCount === 1 && strippedRetryEntries.length > 0;
                 if (pendingSend.signal.aborted) {
                   this.todoStopGuard.suspend();
-                  const chat = this.#getCurrentChat();
-                  markApiHistoryPrompt(nextMessage, responseCapture.turnId);
-                  chat.addHistory(nextMessage);
+                  if (!restoresOriginalRetry) {
+                    const chat = this.#getCurrentChat();
+                    markApiHistoryPrompt(nextMessage, responseCapture.turnId);
+                    chat.addHistory(nextMessage);
+                  }
                   if (restorePostAnswerNoticesAttached) {
                     this.#clearPendingRestoreNotices();
                   }
@@ -8212,10 +8245,12 @@ export class Session implements SessionContext {
                           responseCapture.turnId,
                         );
                       }
-                      this.#preserveUnsentMessageHistory(
-                        nextMessage,
-                        preserveFullMessage,
-                      );
+                      if (!restoresOriginalRetry) {
+                        this.#preserveUnsentMessageHistory(
+                          nextMessage,
+                          preserveFullMessage,
+                        );
+                      }
                       if (
                         preserveFullMessage &&
                         restorePostAnswerNoticesAttached
@@ -8224,6 +8259,8 @@ export class Session implements SessionContext {
                       }
                       return { stopReason: sendResult.stopReason };
                     }
+                    // LlmChat pushes the user entry before returning a stream.
+                    if (restoresOriginalRetry) retryHistoryReplaced = true;
                     if (restorePostAnswerNoticesAttached) {
                       this.#clearPendingRestoreNotices();
                     }
@@ -8534,6 +8571,14 @@ export class Session implements SessionContext {
         );
       },
     ).finally(() => {
+      if (
+        !retryHistoryReplaced &&
+        retrySessionId === this.config.getSessionId()
+      ) {
+        for (const entry of strippedRetryEntries) {
+          this.#getCurrentChat().addHistory(entry);
+        }
+      }
       if (managedMemoryRecallStarted) {
         this.config.getLlmClient().finishManagedAutoMemoryRecall();
       }

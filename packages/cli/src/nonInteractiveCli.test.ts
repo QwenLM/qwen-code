@@ -2706,6 +2706,7 @@ describe('runNonInteractive', () => {
           workflowModeEligible: true,
           modelOverride: undefined,
           submittedPrompt: 'Test input',
+          ...(shared ? { onPromptAdmitted: expect.any(Function) } : {}),
         },
       );
       expect(processStdoutSpy).toHaveBeenCalledWith('Hello World\n');
@@ -3944,6 +3945,7 @@ describe('runNonInteractive', () => {
           modelOverride: undefined,
           submittedPrompt: 'Use a tool',
           humanInput: { text: 'ultracode use a tool' },
+          ...(shared ? { onPromptAdmitted: expect.any(Function) } : {}),
         },
       );
       // Verify second call (after tool execution) has type: ToolResult
@@ -7387,6 +7389,7 @@ describe('runNonInteractive', () => {
           workflowModeEligible: false,
           modelOverride: undefined,
           submittedPrompt: '/testcommand',
+          ...(shared ? { onPromptAdmitted: expect.any(Function) } : {}),
         },
       );
 
