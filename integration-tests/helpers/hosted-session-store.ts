@@ -106,6 +106,12 @@ export async function startHostedSessionStore(sessionId: string) {
           // the Harness writes Hosted recovery records at storage version 2.
           supportedStorageVersion: 2,
         });
+      } else if (route === '/user-messages:claim') {
+        assert.equal(req.method, 'POST');
+        assert(handle);
+        assert.equal(body.writerId, writerId);
+        assert.equal(body.writerGeneration, writerGeneration);
+        json([]);
       } else if (route === '/execution:authorize') {
         assert.equal(req.method, 'POST');
         assert(handle);

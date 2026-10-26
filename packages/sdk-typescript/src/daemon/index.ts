@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+export type {
+  ManagedPackageManifest,
+  ManagedPackagePreparationRequest,
+  ManagedPackagePreparation,
+} from './managed-extension-package-types.js';
 export { DaemonAttachmentUploadError } from './DaemonAttachmentUploadError.js';
 export {
   DaemonClient,
@@ -548,6 +553,8 @@ export type {
   DaemonWorkspaceTrustStatusResponse,
   DaemonWorkspaceTrustStatusV2,
   DaemonWorkspaceTrustReconciliationState,
+  DaemonGitCloneJob,
+  DaemonGitCloneJobStatus,
   DaemonWorkspaceCapability,
   DaemonWorkspaceUpdate,
   DaemonWorkspaceGitStatus,
@@ -760,6 +767,8 @@ export type {
   DaemonWorkspaceFileWriteRequest,
   DaemonWorkspaceFileWriteResult,
   DaemonWorkspaceMcpServerStatus,
+  DaemonWorkspaceDirectories,
+  DaemonWorkspaceDirectoriesMutation,
   DaemonWorkspaceMcpStatus,
   DaemonWorkspaceMcpConfigStatus,
   DaemonMcpConfigMutationResult,
