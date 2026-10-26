@@ -1779,9 +1779,10 @@ describe('Server Config (config.ts)', () => {
     it('keeps the remaining cleanup running when lsp stop rejects', async () => {
       const stop = vi.fn().mockRejectedValue(new Error('stop failed'));
       const config = makeConfig({ lspClient: { stop } as never });
-      await config.initialize(SKIP_ALL_INIT);
+      await config.initialize({ ...SKIP_ALL_INIT, skipSkillManager: false });
       await config.shutdown();
       expect(stop).toHaveBeenCalledTimes(1);
+      expect(config.getSkillManager()?.stopWatching).toHaveBeenCalledTimes(1);
     });
   });
 
