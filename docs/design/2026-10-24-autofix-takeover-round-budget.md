@@ -6,8 +6,9 @@ Status: implemented in this change, 2026-10-24.
 
 ## Problem statement
 
-`@qwen-code /takeover` is the only way to hand a human-authored PR to the
-autofix loop, and it is deliberately persistent: it applies `autofix/takeover`,
+The `autofix/takeover` label is what hands a human-authored PR to the autofix
+loop — applied by `@qwen-code /takeover` or by hand, since the scan posts a
+first-pickup ack for a manual label too. It is deliberately persistent: it
 raises the round cap from 10 to 100, and the ten-minute scan keeps managing the
 PR until the label is removed or a circuit breaker fires.
 
@@ -15,12 +16,14 @@ Maintainers routinely want something narrower — "look at this feedback, fix it
 then leave the PR alone" — and today they have to express it through the
 persistent mechanism:
 
-- `@qwen-code /takeover from 99` spends the whole cap in one round, so the
-  next scan pauses the PR. The counter is already past
+- `@qwen-code /takeover from 99` spends the whole cap in one change-producing
+  round, so the next scan pauses the PR. The counter is already past
   `CRITICAL_ONLY_AFTER_ROUND`, so that round is Critical-only and suggestions
   are merely recorded; the pause also applies `autofix/needs-human` and posts a
   "reached its round cap" notice, which reads as a failure rather than as a
-  finished, bounded engagement.
+  finished, bounded engagement. A no-op round leaves the counter untouched, so
+  on a PR whose rounds keep finding nothing this workaround does not bound
+  anything at all.
 - Bare `/takeover` followed by `/takeover stop` gives a full-scope round, but it
   requires a human to watch the run and remember to stop it. Forgetting costs up
   to 100 rounds.
@@ -37,8 +40,8 @@ Add one parameterized form to the existing command:
 ```
 
 `N` is a one- or two-digit decimal `>= 1`. It engages (or re-arms) takeover
-exactly like the bare command and additionally records a **window-scoped round
-budget of N** on the engage/re-arm ack:
+exactly like the bare command and additionally records an **engagement-scoped
+round budget of N** on the engage/re-arm ack:
 
 ```
 <!-- takeover-ack engaged -->
@@ -46,17 +49,23 @@ budget of N** on the engage/re-arm ack:
 ```
 
 The effective round cap for that window becomes `min(takeover cap, N)`, so the
-loop runs at most N rounds and then stops touching the PR.
+loop runs at most N rounds and then stops touching the PR. The budget and the
+attempts spent are read per **engagement** — a maintainer command opens one, an
+automatic growth-audit re-arm does not — so the audit keeps rebasing its round
+window while the remaining budget still applies. A hand-applied label opens an
+engagement too, and it carries no budget: it is the one route into management
+that `for N` cannot bound.
 
 ## Behavior at the boundary
 
-| State                                                  | What happens                                                                                                                                                                 |
-| ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Budget spent on a human-authored PR                    | One bilingual "budget spent — released" note, then `autofix/takeover` is removed. No `autofix/needs-human`, no paused notice.                                                |
-| Budget spent on a bot-authored PR                      | The label is NOT removed (the bot PR is managed without it), so it lands on the existing paused path: paused notice + `autofix/needs-human`. The budget still stops it at N. |
-| A breaker stops the loop BEFORE the budget is spent    | The existing paused path runs: paused notice + `autofix/needs-human`. A breaker asks for a human, so it is never reported as a finished budget.                              |
-| `/retry` or a bare `/takeover` after a budgeted window | Opens a new window with no budget — unbounded takeover, as today.                                                                                                            |
-| Budget window superseded while a round is queued       | The existing window-key check discards the queued job — conflicts included — so no old-cap work runs past the new limit.                                                     |
+| State                                                          | What happens                                                                                                                                                                                                                                                                                                                                                                                                 |
+| -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Budget spent on a human-authored PR                            | One bilingual "budget spent — released" note, then `autofix/takeover` is removed. No `autofix/needs-human`, no paused notice.                                                                                                                                                                                                                                                                                |
+| Budget spent on a bot-authored PR                              | The label is NOT removed (the bot PR is managed without it), so it lands on the existing paused path: paused notice + `autofix/needs-human`. The budget stops it at N for as long as the engagement is live — that is, while the label is present. The shepherd's three-day auto-release removes the label from a paused PR, and the PR then returns to standard ten-round management like any other bot PR. |
+| A breaker stops the loop BEFORE the budget is spent            | The existing paused path runs: paused notice + `autofix/needs-human`. A breaker asks for a human, so it is never reported as a finished budget.                                                                                                                                                                                                                                                              |
+| `/retry` or a bare `/takeover` while a budgeted window is live | Opens a new window with no budget — unbounded takeover, as today.                                                                                                                                                                                                                                                                                                                                            |
+| `/retry` after the budget released a human-authored PR         | Nothing happens until the PR is re-engaged. The release removed the label, so the PR is in neither selection pool; `/retry` posts its re-arm ack and says the counter reset, but no scan enumerates the PR. Use `/takeover` (with or without `for N`) to bring it back.                                                                                                                                      |
+| Budget window superseded while a round is queued               | The window-key check discards the queued job, and — new for a budget — also discards a queued CONFLICT round, which that check otherwise exempts: the queued job runs on the old cap, so a live window carrying a budget marks it stale and the next scan re-selects it under the new window.                                                                                                                |
 
 ## Key design decisions
 
@@ -71,10 +80,17 @@ loop runs at most N rounds and then stops touching the PR.
    five attempts — the breaker's escalation is preserved instead of being
    mistaken for a finished budget.
 
-2. **The budget is window-scoped through the ack.** It rides as its own marker
-   on the comment whose `created_at` is the window key, exactly like
-   `autofix-round-start`. A superseded window's budget can never leak forward,
-   and re-arming resets it by construction.
+2. **The budget is engagement-scoped, and carried on the ack.** It rides as its
+   own marker on the comment that anchors the engagement, and it is read back
+   from every ack/re-arm at or after that anchor — the scan's `BUDGET_FLOOR`
+   predicate: a `takeover-ack engaged`, or an `autofix-rearm` that does NOT also
+   carry an `autofix-eval ` marker. That exclusion is the whole point: it is
+   what tells a maintainer's command from the automatic growth-audit re-arm,
+   whose comment carries the round's eval marker. Round accounting
+   (`autofix-round-start`) stays window-keyed — equality with the ack comment's
+   `created_at` — so the two reads are deliberately NOT the same shape, and
+   collapsing the budget read into the window-key equality would silently drop
+   the budget and the spend census on every automatic re-arm.
 
 3. **Exhaustion releases instead of escalating.** `autofix/needs-human` means
    "the loop stopped and a human must unstick something"; a finished budget
@@ -101,12 +117,16 @@ loop runs at most N rounds and then stops touching the PR.
 
 7. **An automatic re-arm rebases the growth window, and the budget rides
    along.** The growth audit appends `<!-- autofix-rearm -->` to open a fresh
-   window for its own round accounting — that marker is also the only automatic
-   mover of the growth baseline, so suppressing it would pin the baseline after
-   the first over-budget round and make every later round Critical-only.
-   Budget and spend are therefore read per ENGAGEMENT rather than per window: a
+   window for its own round accounting, and suppressing that marker would pin
+   the growth baseline after the first over-budget round and make every later
+   round Critical-only — so it stays unconditional. It is not the only thing
+   that re-anchors the growth baseline: a base-branch update
+   (`autofix-base-updated`, which filters the earlier `autofix-growth-base`
+   markers out of the baseline read) and the scan's first-pickup heal ack move
+   it too. What keeps the budget honest is not the re-arm's exclusivity but its
+   key: budget and spend are read per ENGAGEMENT rather than per window — a
    maintainer command opens one, an automatic re-arm (its comment also carries
-   that round's eval marker) does not, so the audit rebases the baseline while
+   that round's eval marker) does not — so the audit rebases the baseline while
    the remaining budget and the attempts already spent continue to apply.
 
 8. **Prepare mirrors the scan's attempt census.** A queued round can outlive the
@@ -118,20 +138,27 @@ loop runs at most N rounds and then stops touching the PR.
 ## Files affected
 
 - `.github/workflows/qwen-autofix.yml` — parser, route output wire, engage/re-arm
-  ack markers, scan and prepare budget reads, cap override, cap-branch release.
-- `.github/scripts/autofix-push-and-report.sh` — the growth-audit marker helper
-  (budget carry across an automatic re-arm) and the release note.
+  ack markers, the scan's budget and attempt reads, the cap override, the
+  cap-branch release, and prepare's mirror of the same census (the live budget
+  read, the attempt recount and the two discard guards).
+- `.github/workflows/qwen-fleet-shepherd.yml` — resume detection accepts the
+  parameterized command forms, so a `for N` or `from N` body between the
+  maintainer's comment and the ack landing is still read as evidence of a live
+  engagement rather than as an idle paused PR.
 - `.github/workflows/qwen-autofix-round-seed.md` — operator guide for both
   parameterized forms.
-- `.github/workflows/qwen-autofix.md` — rationale record.
+- `.github/workflows/qwen-autofix.md` — rationale record (af-159; af-160 carries
+  the `env:` prose this change moves out of the workflow).
 - `.github/workflows/.size-baseline` — ratchet entry.
 - `scripts/tests/qwen-autofix-workflow.test.js` — parser, ack, cap-read and
   release coverage.
 
-The workflow file sits against a hard 470,000-byte start-runs gate, so this
-change also moves duplicated `env:` commentary into the rationale record
-(af-160), leaving a one-line summary plus a pointer per constant. That is a
-prose move only — no constant, default, or behaviour changes.
+The workflow file sits against this repository's 470,000-byte gate
+(`.github/scripts/check-workflow-size.sh`, env-overridable, and ~42 KB below
+GitHub's own 512,000-byte start-runs limit), so this change also moves
+duplicated `env:` commentary into the rationale record (af-160), leaving a
+one-line summary plus a pointer per constant. That is a prose move only — no
+constant, default, or behaviour changes.
 
 ## Scope boundaries
 
@@ -144,34 +171,45 @@ prose move only — no constant, default, or behaviour changes.
 
 ## Risks and limitations
 
-- A run cancelled before prepare writes no marker, so that round is free. The
-  error direction is a delayed release, never an early one, and the alternative
-  (a dedicated counter written from the always() finalizer) buys a much larger
-  surface for one edge case.
+- A run that is cancelled or dies in setup still spends an attempt: the
+  report step is gated on `always()`, so it reaches its neither-success-nor-
+  failure branch and writes an eval marker with a sentinel timestamp and the
+  round advanced by one. Only a run killed before that finalizer runs is free.
+  So the error direction is an EARLY release, not a delayed one, and the
+  alternative (a dedicated counter that the finalizer incremented) would not
+  change it.
 - The "budget spent" note posts before the DELETE, and is deduplicated per
   window: if the DELETE fails, the next scan retries only the DELETE.
+- The release note must land before the label goes: a failed note leaves the
+  label in place and the next scan retries both, because once the label is gone
+  the PR is in neither selection pool and nothing would ever re-post it.
 - A budget below `CRITICAL_ONLY_AFTER_ROUND` keeps every budgeted round
   suggestion-capable. That is intended: the point of a budget is to shorten the
   engagement, not to narrow it.
-- The budget is read only while `autofix/takeover` is present, so `stop` and a
-  hand-removed label both end it; without that gate a spent marker outlived the
-  label and re-parked a bot-authored PR at N/N on every scan.
-- The release note posts before the DELETE, so a failed note still releases the
-  PR and the warning's "retry next scan" cannot be kept once the label is gone.
+- The budget is read only while `autofix/takeover` is present, so `stop`, a
+  hand-removed label and the shepherd's own auto-release all end it; without
+  that gate a spent marker outlived the label and re-parked a bot-authored PR at
+  N/N on every scan. The consequence of the shepherd's release is that a paused
+  bot PR returns to standard ten-round management — the same policy every other
+  bot PR gets — rather than staying stopped at a budget nobody is tracking any
+  more.
 - The budget rides on the engage ack, so an ack that never lands loses it and the
   engagement degrades to unbounded takeover. This is the seed marker's existing
   exposure rather than a new failure mode: the command job retries the ack once
-  and warns loudly, and the scan's heal ack (posted only when no ack exists)
-  carries no budget, so the maintainer sees an ack without the budget sentence.
-  Persisting the number anywhere else would need a second writer for a case the
-  label already makes visible.
+  and warns loudly. The scan's heal ack has two triggers — no ack at all, or a
+  label event newer than the last ack — and neither carries the budget, so a
+  maintainer who re-applies the label by hand re-anchors the window and silently
+  loses the remaining budget. A hand-applied label never had one: the label, not
+  the command, is what engages management. Persisting the number anywhere else
+  would need a second writer for a case the label already makes visible.
 
 ## Validation
 
 - Parser replay of every accepted and rejected body shape.
 - Ack replay pinning the marker on both the fresh-engage and re-arm paths.
-- Cap-read replay proving the budget lowers the effective cap and that a
-  superseded window's budget is ignored.
+- Cap-read replay proving the budget lowers the effective cap, that the
+  engagement floor (not the window key) is what carries it across an automatic
+  re-arm, and that the census keeps `win=none` markers out.
 - Cap-branch replay proving the release path posts one note, deletes the label,
   and never applies `autofix/needs-human`.
 - Not verifiable locally end to end: the command only runs in the upstream

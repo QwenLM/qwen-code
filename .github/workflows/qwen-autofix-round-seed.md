@@ -143,40 +143,55 @@ cap of 100). When the counter reaches `N`, the loop **releases** the PR:
 
 **Every finished attempt counts.** The budget is measured by the round's eval
 marker, one per attempt: a no-op round writes one with its round number
-unchanged, and a round that errors, times out or crashes writes one with the
-next round number and a sentinel timestamp. N therefore means N attempts, not
-"N successes and however many retries it takes", and a PR whose rounds keep
-finding nothing still ends after N.
+unchanged, and a round that is cancelled or dies in setup writes one with the
+round advanced by one and a sentinel timestamp. So a PR whose rounds keep
+finding nothing still ends after N — that is the case a round counter cannot
+express. The guarantee is one attempt per marker, and it assumes the marker
+lands: the report step retries its post, but a comment-API outage that outlasts
+those retries leaves a round uncounted, which delays the release rather than
+ending it early.
+
+**Crash, timeout and breaker stops end the window at once.** Those paths stamp
+the round as the effective cap, so the very first such round parks the PR on
+the ordinary paused path (`autofix/needs-human` plus the paused notice) instead
+of spending the rest of the budget. That is the pre-existing breaker semantics,
+unchanged by `for N`; read a pause on a budgeted PR as "a human should look",
+never as "the budget finished".
 
 **A breaker stop is not a spent budget.** When the consecutive-failure, timeout
 or convergence breaker stops the loop early, it stamps a terminal sentinel round
 far past the real attempts and posts no extra marker — so the window is not
-"spent" and the PR lands on the normal paused path with `autofix/needs-human`. A
-breaker asks for a human; the release note would be wrong.
+"spent", and the release note is not posted. A breaker asks for a human.
 
 **An automatic re-arm rebases the growth window, and the budget rides along.**
-A growth-audit round appends `autofix-rearm` for its own round accounting — the
-only automatic mover of the growth baseline — so suppressing it would pin the
-baseline and make every later round Critical-only. The budget and the attempts
-spent are therefore counted per engagement: a command opens one, that automatic
-re-arm does not, so the audit rebases while the remaining budget still applies.
+A growth-audit round appends `autofix-rearm` for its own round accounting, and
+suppressing it would pin the growth baseline and make every later round
+Critical-only — so it is unconditional. It is not the only thing that re-anchors
+that baseline (a base-branch update and the scan's heal ack do too). What keeps
+the budget honest is its key: the budget and the attempts spent are counted per
+engagement — a command opens one, that automatic re-arm does not — so the audit
+rebases while the remaining budget still applies.
 
 **A queued round from the same window is discarded once the budget is spent.** A
 no-op leaves the round number UNCHANGED and the window key unchanged, so neither the
 superseded-window nor the round-cap check would catch a round that was queued
 before it; the address leg recounts the window's attempts and drops it.
 
-**The budget is window-scoped.** It is read from the comment whose timestamp is
-the window key, so `/retry` or a bare `/takeover` opens a new window with no
-budget (unbounded takeover, as before), and a budgeted re-arm
-(`@qwen-code /takeover for 3` on an already-managed PR) starts a fresh window at
-round 0 with a 3-round budget.
+**The budget is engagement-scoped, not window-scoped.** It is read from every
+ack or re-arm at or after the anchor that carries it, excluding the automatic
+growth-audit re-arm (whose comment carries that round's eval marker). So
+`/retry` or a bare `/takeover` opens a new engagement with no budget (unbounded
+takeover, as before), and a budgeted re-arm (`@qwen-code /takeover for 3` on an
+already-managed PR) starts a fresh one at round 0 with a 3-round budget. Round
+accounting is the read that stays window-keyed.
 
 **Bot-authored PRs are the one exception.** They are managed without the label,
 so releasing it would hand them back to standard ten-round management and the
 budget would be a lie. They land on the existing paused path instead: paused
 notice plus `autofix/needs-human`, and the fleet shepherd's auto-release ages the
-label out. The budget still stops them at N.
+label out. The budget stops them at N while the engagement is live; once that
+auto-release takes the label away, the PR is back to standard ten-round
+management like any other bot PR.
 
 **A budgeted re-arm also cancels queued work, conflicts included.** A conflict
 round is normally exempt from the superseded-window discard because it stays
