@@ -145,5 +145,4 @@ describe('agent identity transcript reduction', () => {
     const tool = state.blocks.find((b) => b.kind === 'tool');
     expect(tool).toMatchObject({ agent: SECURITY });
   });
-
 });
