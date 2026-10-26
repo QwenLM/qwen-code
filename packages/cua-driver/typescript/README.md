@@ -5,7 +5,7 @@ Rust-backed TypeScript/Node SDK for Cua Driver client applications.
 The package root exposes the complete typed driver SDK. The
 `@qwen-code/cua-sdk/computer-use` subpath exposes the smaller high-level API for
 application discovery, revision observations, element-token actions, and state
-verification. Both entrypoints ship in this one npm package. The `/runtime` entrypoint supplies global `cua` to Node REPL, including explicit desktop input and the repository browser SDK facade. SDK, browser SDK and native release use version 0.26.0; Node REPL ships the same version.
+verification. Both entrypoints ship in this one npm package. The `/runtime` entrypoint supplies global `cua` to Node REPL, including explicit desktop input and the repository browser SDK facade. SDK, browser SDK and native release use version 0.26.1; Node REPL ships the same version.
 
 ## Product boundary
 

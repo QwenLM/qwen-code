@@ -11,21 +11,21 @@ documented in [`.vendored-patches.md`](.vendored-patches.md) and
 
 ## Install
 
-The commands below target release **0.26.0** and require its GitHub Release
-(`cua-driver-rs-v0.26.0`) to be published. The native driver does not require
+The commands below target release **0.26.1** and require its GitHub Release
+(`cua-driver-rs-v0.26.1`) to be published. The native driver does not require
 Node.js or npm. Install the MCP client you want to use separately.
 
 macOS and Linux:
 
 ```bash
-CUA_DRIVER_RS_VERSION=0.26.0 \
+CUA_DRIVER_RS_VERSION=0.26.1 \
   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/install.sh)"
 ```
 
 Windows PowerShell:
 
 ```powershell
-$env:CUA_DRIVER_RS_VERSION = "0.26.0"
+$env:CUA_DRIVER_RS_VERSION = "0.26.1"
 irm https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/install.ps1 | iex
 ```
 
@@ -44,7 +44,7 @@ $driver = Join-Path $env:LOCALAPPDATA "Programs\Qwen\qwen-cua-driver\bin\qwen-cu
 & $driver --version
 ```
 
-Expected: qwen-cua-driver 0.26.0.
+Expected: qwen-cua-driver 0.26.1.
 
 If you chose a custom install directory, use its absolute executable path in
 the client commands below.
@@ -75,7 +75,7 @@ Choose an interface for your agent:
 
 Both interfaces work with Qwen Code, Claude Code, and Codex over stdio MCP.
 Claude Code and Codex can use them independently of Qwen Code. The version
-`0.26.0` here belongs to the CUA components; it does not require a Qwen Code
+`0.26.1` here belongs to the CUA components; it does not require a Qwen Code
 CLI or Web Shell release with that version.
 
 ### Qwen Code

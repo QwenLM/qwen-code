@@ -1,3 +1,14 @@
+# 0.26.1 (unreleased)
+
+- Windows UIA click and secondary actions return an unconfirmed receipt when the target popup closes or an ownerless modal appears. The original native operation retains its window, session and runtime cleanup guards until it ends; ambiguous results are not replayed through another actuator.
+- Bound SDK sessions wait through intermediate `session_cleanup_pending` results and preserve final cleanup failures.
+- macOS process identity checks can read the same PID/birth identity through `KERN_PROC_PID` when `PROC_PIDTBSDINFO` is unavailable. Synthetic events use the combined-session source, and failed focus-guard setup rolls back without running post-action restoration.
+- Clipboard transactions refuse an unserviced main-thread start after three seconds without a late clipboard write. Already-started transactions retain their completion and restoration semantics.
+- macOS accepts the case-preserved advertised secondary-action aliases. Windows recognizes writable Edit children inside ComboBoxEx controls and honors TokenUIAccess only for the foreground SendInput preflight.
+- Clarify the Node REPL's initial API documentation and app-option examples. Native driver, CUA SDK, Browser SDK and Node REPL remain version-aligned.
+
+Windows direct/embedded modal and SDK cleanup checks passed on a real host. Complete macOS JSONExport input validation and the full benchmark results remain pending; these checks do not establish overall GUI parity or quality improvements.
+
 # 0.26.0 (2026-10-16)
 
 Qwen Computer Use release; no longer follows the upstream version number. The SDK, native payload, browser SDK and Node REPL use this same version.
