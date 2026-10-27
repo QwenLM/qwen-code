@@ -300,6 +300,10 @@ export class DaemonSessionClient {
   /** In-flight `reattach()` so concurrent prompts re-register only once. */
   private reattaching?: Promise<void>;
   private generatedUiReadGeneration = 0;
+  private generatedUiRevocationRevision = 0;
+  private readonly generatedUiRevocationListeners = new Set<
+    (revision: number) => void
+  >();
   private cancelling?: Promise<void>;
   private readonly promptLimit: number;
   private readonly attachmentCache = new Map<
@@ -327,6 +331,7 @@ export class DaemonSessionClient {
   constructor(opts: DaemonSessionClientOptions) {
     this.client = opts.client;
     this.session = { ...opts.session };
+    this.updateGeneratedUi(this.session.generatedUi);
     const context = (opts.session as { context?: { kind?: unknown } }).context;
     this.restoreStrategy =
       opts.session.sourceType === 'standalone' && context?.kind === 'standalone'
@@ -354,6 +359,24 @@ export class DaemonSessionClient {
       opts.maxPendingPromptsPerSession === undefined
         ? opts.client.maxPendingPromptsPerSession
         : normalizePendingPromptLimit(opts.maxPendingPromptsPerSession);
+  }
+
+  /** Replays the latest confirmed denial so late subscribers cannot miss it. */
+  subscribeGeneratedUiRevocation(listener: (revision: number) => void) {
+    this.generatedUiRevocationListeners.add(listener);
+    if (this.generatedUiRevocationRevision > 0)
+      listener(this.generatedUiRevocationRevision);
+    return () => {
+      this.generatedUiRevocationListeners.delete(listener);
+    };
+  }
+
+  private updateGeneratedUi(status: DaemonSession['generatedUi']) {
+    this.session.generatedUi = status;
+    if (status?.version !== 1 || status.enabled !== false) return;
+    const revision = ++this.generatedUiRevocationRevision;
+    for (const listener of this.generatedUiRevocationListeners)
+      listener(revision);
   }
 
   /**
@@ -898,7 +921,7 @@ export class DaemonSessionClient {
       }
       // Refresh attachment identity and capabilities without moving the SSE cursor.
       if (generatedUiGeneration === this.generatedUiReadGeneration) {
-        this.session.generatedUi = session.generatedUi;
+        this.updateGeneratedUi(session.generatedUi);
       }
       this.session.clientId = session.clientId;
     });
@@ -1222,7 +1245,7 @@ export class DaemonSessionClient {
       );
       if (generation === this.generatedUiReadGeneration) {
         const value = status.state._meta?.['generatedUi'];
-        this.session.generatedUi = undefined;
+        let generatedUi: DaemonSession['generatedUi'];
         if (
           status.v === 1 &&
           status.sessionId === this.sessionId &&
@@ -1234,7 +1257,7 @@ export class DaemonSessionClient {
           'enabled' in value &&
           typeof value.enabled === 'boolean'
         ) {
-          this.session.generatedUi = {
+          generatedUi = {
             version: 1,
             enabled: value.enabled,
             ...('reason' in value && typeof value.reason === 'string'
@@ -1242,6 +1265,7 @@ export class DaemonSessionClient {
               : {}),
           };
         }
+        this.updateGeneratedUi(generatedUi);
       }
       return status;
     } catch (error) {

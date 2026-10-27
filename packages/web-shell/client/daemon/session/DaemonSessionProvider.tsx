@@ -1487,6 +1487,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const generatedUiSessionScopes = useRef(
     new WeakMap<DaemonSessionClient, string>(),
   );
+  const generatedUiRevocations = useRef(
+    new WeakMap<DaemonSessionClient, number>(),
+  );
   useLayoutEffect(() => {
     if (generatedUiScope !== ownGeneratedUiScope) return;
     const unregister = generatedUiLifecycle.registerScope(generatedUiScope);
@@ -1793,6 +1796,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       sessionRef.current === skipNextCleanupDetachSessionRef.current;
     const effectPendingSessionLoad = pendingSessionLoadRef.current;
     let runnerSession = sessionRef.current;
+    let generatedUiSubscriptionOwner: DaemonSessionClient | undefined;
+    let unsubscribeGeneratedUiRevocation: (() => void) | undefined;
 
     // ── Batched transcript dispatch ────────────────────────────────
     // The live SSE loop dispatches transcript events through this batcher
@@ -2753,6 +2758,30 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             if (scope) {
               generatedUiSessionScopes.current.set(activeSession, scope.id);
             }
+          }
+          if (generatedUiSubscriptionOwner !== activeSession) {
+            unsubscribeGeneratedUiRevocation?.();
+            generatedUiSubscriptionOwner = activeSession;
+            unsubscribeGeneratedUiRevocation =
+              activeSession.subscribeGeneratedUiRevocation?.((revision) => {
+                const scope = resolveGeneratedUiScope(
+                  activeSession.workspaceCwd,
+                );
+                if (
+                  disposed ||
+                  abort.signal.aborted ||
+                  !activeWorkspaceScoped ||
+                  sessionRef.current !== activeSession ||
+                  !scope ||
+                  generatedUiSessionScopes.current.get(activeSession) !==
+                    scope.id ||
+                  (generatedUiRevocations.current.get(activeSession) ?? 0) >=
+                    revision
+                )
+                  return;
+                generatedUiRevocations.current.set(activeSession, revision);
+                invalidateGeneratedUi(activeSession, 'policy', null);
+              });
           }
           if (runnerSession !== activeSession) {
             setConnectionSynchronous((current) => ({
@@ -4899,6 +4928,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       const session = runnerSession;
       if (session) trajectoryLiveStore.invalidate(session, 'stream_closed');
       disposed = true;
+      unsubscribeGeneratedUiRevocation?.();
       abort.abort();
       const ownsCurrentSession =
         session !== undefined && sessionRef.current === session;

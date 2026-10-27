@@ -137,6 +137,9 @@ interface MockSession {
     state: Record<string, unknown>;
     recovery?: NonNullable<DaemonConnectionState['context']>['recovery'];
   }>;
+  subscribeGeneratedUiRevocation?: (
+    listener: (revision: number) => void,
+  ) => () => void;
   supportedCommands: () => Promise<{
     v: 1;
     sessionId: string;
@@ -18491,6 +18494,39 @@ describe('DaemonSessionProvider', () => {
         return result;
       }
 
+      async function useSdkContextReader(
+        sessionContext: MockSession['context'],
+        enabled = true,
+      ) {
+        const sdk = await vi.importActual<
+          typeof import('@qwen-code/sdk/daemon')
+        >('@qwen-code/sdk/daemon');
+        sdkMocks.MockDaemonSessionClient.load.mockImplementationOnce(
+          async (client, sessionId) => {
+            Object.assign(client as MockClient, { sessionContext });
+            const reader = new sdk.DaemonSessionClient({
+              client: client as InstanceType<typeof sdk.DaemonClient>,
+              session: {
+                sessionId,
+                workspaceCwd: providerProps.workspaceCwd,
+                clientId: 'client-1',
+                generatedUi: { version: 1, enabled },
+              },
+            });
+            const session = createMockSession({
+              sessionId,
+              workspaceCwd: providerProps.workspaceCwd,
+              session: reader.session as unknown as Record<string, unknown>,
+              context: vi.fn(() => reader.context()),
+              subscribeGeneratedUiRevocation:
+                reader.subscribeGeneratedUiRevocation?.bind(reader),
+            });
+            session.client = client as MockClient;
+            return session;
+          },
+        );
+      }
+
       it.each(['action', 'controlled'] as const)(
         'retains a card across %s empty-session navigation',
         async (mode) => {
@@ -18618,59 +18654,95 @@ describe('DaemonSessionProvider', () => {
         expect(retained.attach(retainedSlot('main'))).toBe(entry);
       });
 
-      it('observes disabled receipts parsed by the actual SDK context reader without a policy event', async () => {
+      it.each(['separate commits', 'one commit'])(
+        'observes disabled SDK receipts followed by enabled receipts in %s',
+        async (commits) => {
+          let enabled: boolean | undefined = true;
+          const sessionContext = vi.fn(async () => ({
+            v: 1 as const,
+            sessionId: 'session-a',
+            workspaceCwd: providerProps.workspaceCwd,
+            state: {
+              _meta:
+                enabled === undefined
+                  ? {}
+                  : { generatedUi: { version: 1, enabled } },
+            },
+          }));
+          await useSdkContextReader(sessionContext);
+          await renderWithProvider(<Probe name="main" />, providerProps);
+          const entry = park('main');
+          const scopeId = probes.main.owner!.scopeId;
+          const session: MockSession =
+            await sdkMocks.MockDaemonSessionClient.load.mock.results[0].value;
+          enabled = undefined;
+          await act(async () => {
+            await probes.main.actions.getContext();
+          });
+          expect(retained.getEntries()).toEqual([entry]);
+          sessionContext.mockRejectedValueOnce(
+            new DaemonHttpError(503, undefined, 'Context unavailable'),
+          );
+          await act(async () => {
+            await expect(probes.main.actions.getContext()).rejects.toThrow(
+              'Context unavailable',
+            );
+          });
+          expect(retained.getEntries()).toEqual([entry]);
+          enabled = false;
+          await act(async () => {
+            await probes.main.actions.getContext();
+            expect(session.session!['generatedUi']).toMatchObject({
+              enabled: false,
+            });
+            if (commits === 'one commit') {
+              expect(retained.getEntries()).toEqual([]);
+              enabled = true;
+              await probes.main.actions.getContext();
+            }
+          });
+          expect(sessionContext).toHaveBeenCalled();
+          expect(session.session!['generatedUi']).toMatchObject({
+            enabled: commits === 'one commit',
+          });
+          expect(retained.getEntries()).toEqual([]);
+          expect(entry.container.isConnected).toBe(false);
+          expect(retained.getRecord(entry.key)?.reason).toBe('policy');
+          if (commits === 'separate commits') {
+            enabled = true;
+            await act(async () => {
+              await probes.main.actions.getContext();
+            });
+          }
+          expect(probes.main.owner!.scopeId).toBe(scopeId);
+          const returned = retainedSlot('main');
+          expect(retained.attach(returned)).toBeUndefined();
+          const reopened = retained.attach(returned, true);
+          expect(reopened?.runtime.reopened).toBe(true);
+          expect(reopened).not.toBe(entry);
+        },
+      );
+
+      it('observes a disabled SDK load receipt before an enabled metadata read', async () => {
         await renderWithProvider(<Probe name="main" />, providerProps);
         const entry = park('main');
-        const session: MockSession =
-          await sdkMocks.MockDaemonSessionClient.load.mock.results[0].value;
-        const sdk = await vi.importActual<
-          typeof import('@qwen-code/sdk/daemon')
-        >('@qwen-code/sdk/daemon');
-        let enabled: boolean | undefined = undefined;
-        const sessionContext = vi.fn(async () => ({
-          v: 1,
-          sessionId: 'session-a',
-          state: {
-            _meta:
-              enabled === undefined
-                ? {}
-                : { generatedUi: { version: 1, enabled } },
-          },
-        }));
-        Object.assign(session, { generatedUiReadGeneration: 0 });
-        Object.assign(session.client, { sessionContext });
-        session.context = vi.fn(() =>
-          sdk.DaemonSessionClient.prototype.context.call(
-            session as unknown as InstanceType<typeof sdk.DaemonSessionClient>,
-          ),
+        const scopeId = probes.main.owner!.scopeId;
+        await switchSession('main', 'session-b');
+        await useSdkContextReader(
+          async () => ({
+            v: 1,
+            sessionId: 'session-a',
+            workspaceCwd: providerProps.workspaceCwd,
+            state: { _meta: { generatedUi: { version: 1, enabled: true } } },
+          }),
+          false,
         );
-        await act(async () => {
-          await probes.main.actions.getContext();
-        });
-        expect(retained.getEntries()).toEqual([entry]);
-        sessionContext.mockRejectedValueOnce(
-          new DaemonHttpError(503, undefined, 'Context unavailable'),
-        );
-        await act(async () => {
-          await expect(probes.main.actions.getContext()).rejects.toThrow(
-            'Context unavailable',
-          );
-        });
-        expect(retained.getEntries()).toEqual([entry]);
-        enabled = false;
-        await act(async () => {
-          await probes.main.actions.getContext();
-        });
-        expect(sessionContext).toHaveBeenCalled();
-        expect(session.session!['generatedUi']).toMatchObject({
-          enabled: false,
-        });
+        await switchSession('main', 'session-a');
+        expect(probes.main.receipt?.status.enabled).toBe(true);
+        expect(probes.main.owner!.scopeId).toBe(scopeId);
         expect(retained.getEntries()).toEqual([]);
         expect(entry.container.isConnected).toBe(false);
-        enabled = true;
-        await act(async () => {
-          await probes.main.actions.getContext();
-        });
+        expect(retained.getRecord(entry.key)?.reason).toBe('policy');
         const returned = retainedSlot('main');
         expect(retained.attach(returned)).toBeUndefined();
         expect(retained.attach(returned, true)?.runtime.reopened).toBe(true);
@@ -26622,6 +26694,7 @@ function createMockSession(opts: Partial<MockSession> = {}): MockSession {
         workspaceCwd: opts.workspaceCwd ?? '/mock-workspace',
         state: {},
       })),
+    subscribeGeneratedUiRevocation: opts.subscribeGeneratedUiRevocation,
     supportedCommands:
       opts.supportedCommands ??
       vi.fn(async () => ({

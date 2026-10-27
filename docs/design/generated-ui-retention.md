@@ -55,11 +55,14 @@ age. All roots share these bounds. At most 128 identities are tracked; further
 cards require explicit opening without retention.
 
 Policy events and confirmed disabled receipts release the matching scope's
-instances. Missing/failed receipts revoke authority without certifying policy
-revocation. Authentication failure releases instances but keeps identity
-records, so recovery cannot silently restart them. Deletion, rewind, epoch
-changes, eviction, expiry, and changed resources likewise preserve released
-records. Only actual scope retirement forgets its records.
+instances. The SDK reports each validated current denial synchronously and
+replays its latest revocation revision to late subscribers. The workspace owner
+subscribes before reading context, so a later enabled receipt or React batching
+cannot erase a confirmed revocation. Missing/failed receipts revoke authority
+without certifying policy revocation. Authentication failure releases instances
+but keeps identity records, so recovery cannot silently restart them. Deletion,
+rewind, epoch changes, eviction, expiry, and changed resources likewise preserve
+released records. Only actual scope retirement forgets its records.
 
 Released eligible cards offer **Reopen interactive view**. **Reopen and reset**
 also resets retained, stopped, or failed cards. Both create a fresh activation
@@ -74,6 +77,8 @@ from the saved original content and display the interaction-loss notice.
   changes and foreign scopes remain isolated.
 - Disabled load/context receipts and attached-stream/heartbeat access failures
   release runtimes. Recovery of a released card requires explicit reopening.
+  Disabled then enabled receipts before one React commit must still release the
+  old activation; stale or foreign receipts must not release another owner.
 - Hidden main/split surfaces, including artifact fullscreen and missing-session
   states, reject tool/message RPCs while retaining eligible runtime identity.
 - Reopening resets only the affected activation; siblings and independent panes
