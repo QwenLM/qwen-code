@@ -36,6 +36,29 @@ describe('workspace host catalog', () => {
     }
   });
 
+  it('persists a remote host through the desktop store', () => {
+    const invoke = vi.fn(async (): Promise<unknown> => undefined);
+    (window as { __TAURI__?: unknown }).__TAURI__ = { core: { invoke } };
+    try {
+      rememberWorkspaceHost('https://remote.example', [
+        { id: 'remote', cwd: '/repo' },
+      ]);
+
+      expect(readWorkspaceHosts()).toEqual([
+        {
+          origin: 'https://remote.example',
+          workspaces: [{ id: 'remote', cwd: '/repo' }],
+        },
+      ]);
+      expect(invoke).toHaveBeenCalledWith('shell_state_write', {
+        key: 'qwen-workspace-hosts',
+        value: expect.stringContaining('https://remote.example'),
+      });
+    } finally {
+      delete (window as { __TAURI__?: unknown }).__TAURI__;
+    }
+  });
+
   it('does not notify or reorder hosts on an unchanged refresh', () => {
     rememberWorkspaceHost('https://first.example', []);
     rememberWorkspaceHost('https://second.example', []);

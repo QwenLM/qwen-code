@@ -19,6 +19,7 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const testState = vi.hoisted(() => ({
   bootEvents: [] as string[],
   containers: [] as Array<Element | null>,
+  daemonBaseUrl: '' as string,
   rendered: [] as Array<ReactNode>,
   resolveToken: undefined as ((token: string) => void) | undefined,
   removeToken: vi.fn(),
@@ -46,7 +47,7 @@ vi.mock('./components/WorkspaceSessionProvider', () => ({
   WorkspaceSessionProvider: () => null,
 }));
 vi.mock('./config/daemon', () => ({
-  getDaemonBaseUrl: () => '',
+  getDaemonBaseUrl: () => testState.daemonBaseUrl,
   getAllowedDaemonOrigin: (value: string) => value,
   confirmDaemonTarget: vi.fn(),
   isKnownDaemonTarget: () => false,
@@ -65,16 +66,14 @@ vi.mock('./config/shell-state', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./config/shell-state')>();
   return {
     ...actual,
-    hydrateShellState: vi.fn(
-      () =>
-        new Promise<void>((resolve) => {
-          testState.bootEvents.push('hydrate-start');
-          setTimeout(() => {
-            testState.bootEvents.push('hydrate-end');
-            resolve();
-          }, 10);
-        }),
-    ),
+    hydrateShellState: vi.fn(async () => {
+      testState.bootEvents.push('hydrate-start');
+      // The delay keeps the ordering assertion meaningful, and delegating to
+      // the real adapter lets a desktop-shape boot read a hydrated cache.
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      await actual.hydrateShellState();
+      testState.bootEvents.push('hydrate-end');
+    }),
   };
 });
 
@@ -82,6 +81,7 @@ describe('web shell boot', () => {
   beforeEach(() => {
     testState.bootEvents = [];
     testState.containers = [];
+    testState.daemonBaseUrl = '';
     testState.rendered = [];
     testState.resolveToken = undefined;
     testState.removeToken.mockClear();
@@ -90,6 +90,7 @@ describe('web shell boot', () => {
   });
 
   afterEach(() => {
+    delete (window as { __TAURI__?: unknown }).__TAURI__;
     document.body.innerHTML = '';
     document.documentElement.removeAttribute(
       'data-web-shell-unsupported-browser',
@@ -111,6 +112,41 @@ describe('web shell boot', () => {
         'render',
       ]),
     );
+  });
+
+  it('does not gate a daemon the desktop catalog already names', async () => {
+    // The desktop shell keeps the saved-connection catalog in its own settings
+    // file, so the boot-time confirmation decision cannot be made before
+    // hydration: a module-scope read sees an empty store and asks the user to
+    // confirm a host they added and saved themselves.
+    // The mirror is cleared because this run's vitest shares one
+    // `--localstorage-file` across files, and an unrelated catalog left by
+    // another file would otherwise look like a newer local copy.
+    window.localStorage.clear();
+    const invoke = vi.fn(
+      async (command: string, args?: Record<string, unknown>) => {
+        if (command !== 'shell_state_read') return undefined;
+        return args?.['key'] === 'qwen-remote-connections'
+          ? '["https://daemon.test"]'
+          : null;
+      },
+    );
+    (window as { __TAURI__?: unknown }).__TAURI__ = { core: { invoke } };
+    testState.daemonBaseUrl = 'https://daemon.test';
+    window.history.replaceState(null, '', '/?daemon=https://daemon.test');
+    document.body.innerHTML = '<div id="root"></div>';
+    await import('./main');
+    await vi.waitFor(() => expect(testState.rendered).toHaveLength(1));
+
+    const strictMode = testState.rendered[0] as React.ReactElement<{
+      children: React.ReactElement<{
+        baseUrl: string;
+        unconfirmedTarget: boolean;
+      }>;
+    }>;
+    const gate = strictMode.props.children;
+    expect(gate.props.baseUrl).toBe('https://daemon.test');
+    expect(gate.props.unconfirmedTarget).toBe(false);
   });
 
   it('keeps the native HTML update message on unsupported browsers', async () => {

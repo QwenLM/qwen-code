@@ -45,10 +45,10 @@ WebView2 按 origin 隔离 `localStorage` 与 `sessionStorage`，因此每次启
 
 `packages/web-shell/client/config/shell-state.ts` 负责桌面分支：
 
-- `hydrateShellState()` 在首次渲染前运行。它通过 IPC 读取两个键，缓存到内存，并且只在读取或写入成功后删除对应的 `localStorage` 副本。
+- `hydrateShellState()` 在首次渲染前运行。它通过 IPC 读取两个键并缓存到内存。与原生值相同的 `localStorage` 副本会被删除；与之不同的副本更新的 —— 在一次启动内 `writeShellState` 每次变更都写镜像，而水合会清空镜像 —— 因此必须回推而不是删除，否则重载会用过期目录复活并销毁唯一一份较新的副本。
 - 迁移只取当前 origin 的 `localStorage` 条目。更早的启动写入的是已无法解析的端口，无法恢复。
 - `readShellState` 在桌面外壳中优先使用已水合的缓存，在其他环境中退回 `localStorage`。
-- `writeShellState` 同时写入 `localStorage`（浏览器路径与会话内回退）和 IPC。IPC 写入是 fire-and-forget：失败时当前会话仍可用，但重启后会丢失该值。
+- `writeShellState` 同时写入 `localStorage`（浏览器路径与会话内回退）和 IPC。IPC 写入是 fire-and-forget：失败时当前会话仍可用，镜像在同源重载下存活，只有在全新 origin 上启动才会丢失该值。
 - `remote-connections.ts` 与 `workspace-hosts.ts` 调用该适配器；它们读取侧的校验保持不变。`rememberWorkspaceHost` 新增了仅限桌面外壳的写入路径拒绝，同时会跳过其变更事件派发；详见下方工作区主机目录规则。
 
 ### 工作区主机目录规则
@@ -65,9 +65,9 @@ WebView2 按 origin 隔离 `localStorage` 与 `sessionStorage`，因此每次启
 
 ## 失败模式
 
-- `QWEN_DESKTOP_DISABLE_SETTINGS_PERSISTENCE=1` 会让 `update()` 变成空操作。会话可用，但重启会丢失目录。
+- `QWEN_DESKTOP_DISABLE_SETTINGS_PERSISTENCE=1` 会让 `update()` 变成空操作。会话可用，同源重载会回推较新的镜像，重启会丢失目录。
 - 水合失败时该键不进入缓存，读取退回当前 origin 的 `localStorage`。
-- 原生写入失败时，内存副本和 `localStorage` 镜像仍然存在；下一次启动可能丢失该变更。
+- 原生写入失败时，内存副本和 `localStorage` 镜像仍然存在；下一次同源水合会回推镜像，只有在全新 origin 上启动才会丢失该变更。
 - 畸形的目录 JSON 会被既有目录读取器过滤。损坏的设置文件仍像以前一样回退到默认值。
 
 ## 验收标准
@@ -85,7 +85,8 @@ WebView2 按 origin 隔离 `localStorage` 与 `sessionStorage`，因此每次启
 - `cargo clippy --all-targets -- -D warnings`：干净。
 - `npm run typecheck --workspace=@qwen-code/web-shell`：干净。
 - 对改动文件运行 ESLint 与 Prettier：干净。
-- `vitest run client/config client/components/workspaces --no-file-parallelism`：覆盖桌面水合、迁移、写穿、仅限桌面外壳的页面 origin 规则，以及浏览器的离线快照。
+- `vitest run client/config client/components/workspaces client/main-boot.test.tsx --no-file-parallelism`：覆盖桌面水合、镜像回推、迁移、写穿、水合先于首渲的启动顺序、仅限桌面外壳的页面 origin 规则、目录已命名主机跳过确认门，以及浏览器的离线快照。
+- `node packages/desktop/scripts/test-release.js`：通过，其中包括两项钉住：capability 授予两个 shell-state 命令，以及每个命令体在触达存储前先调用 `require_runtime_origin`。
 - 在 Windows 上使用隔离的应用 identifier 进行手动实跑：通过 IPC 写入目录，重启进程，确认页面 origin 已变化，读回目录，打开 Settings → Connections 并看到已保存主机。同一次实跑先复现了每次启动累积工作区主机的问题，随后验证了修复。
 
 ## 限制与后续

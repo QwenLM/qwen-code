@@ -59,8 +59,9 @@ export function writeShellState(key: ShellStateKey, value: string): void {
   if (!invoke) return;
   cache.set(key, value);
   void invoke('shell_state_write', { key, value }).catch(() => {
-    // The in-memory copy keeps this session usable; the next launch falls back
-    // to this origin's localStorage, as the browser always does.
+    // The in-memory copy keeps this session usable, and the mirror below is
+    // re-pushed at the next same-origin hydration: only a launch on a fresh
+    // loopback origin loses a write the shell never stored.
   });
 }
 
@@ -83,19 +84,23 @@ async function hydrateDesktop(): Promise<void> {
       try {
         const native = await invoke('shell_state_read', { key });
         const local = readLocal(key);
+        if (local !== null && local !== native) {
+          // Within one launch every change writes the mirror and hydration
+          // clears it, so a copy that differs from the native value can only
+          // be newer: a native write that silently never landed. Re-push it
+          // instead of deleting the only surviving copy.
+          await invoke('shell_state_write', { key, value: local });
+          cache.set(key, local);
+          removeLocal(key);
+          return;
+        }
         if (typeof native === 'string') {
           cache.set(key, native);
-          // The native copy is authoritative; drop the origin-scoped duplicate.
+          // Equal copies: the native one stays, the mirror is redundant.
           if (local !== null) removeLocal(key);
           return;
         }
-        if (local === null) {
-          cache.set(key, null);
-          return;
-        }
-        await invoke('shell_state_write', { key, value: local });
-        cache.set(key, local);
-        removeLocal(key);
+        cache.set(key, null);
       } catch {
         // Leave the key uncached so reads keep falling back to localStorage.
       }

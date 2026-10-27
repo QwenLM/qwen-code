@@ -48,7 +48,7 @@ describe('desktop shell state', () => {
     });
   });
 
-  it('prefers the desktop copy and drops a stale origin copy', async () => {
+  it('drops a mirror that already matches the native copy', async () => {
     const invoke = vi.fn(
       async (command: string, args?: Record<string, unknown>) => {
         if (command !== 'shell_state_read') return undefined;
@@ -60,7 +60,7 @@ describe('desktop shell state', () => {
     installDesktop(invoke);
     window.localStorage.setItem(
       'qwen-remote-connections',
-      '["https://stale.example"]',
+      '["https://native.example"]',
     );
 
     const { hydrateShellState, readShellState } = await import('./shell-state');
@@ -73,6 +73,55 @@ describe('desktop shell state', () => {
     expect(invoke).not.toHaveBeenCalledWith(
       'shell_state_write',
       expect.objectContaining({ key: 'qwen-remote-connections' }),
+    );
+  });
+
+  it('re-pushes a newer mirror instead of restoring the stale native copy', async () => {
+    const invoke = vi.fn(
+      async (command: string, args?: Record<string, unknown>) => {
+        if (command !== 'shell_state_read') return undefined;
+        return args?.['key'] === 'qwen-remote-connections'
+          ? '["https://old.example"]'
+          : null;
+      },
+    );
+    installDesktop(invoke);
+    // The mirror only ever differs after a native write that silently did not
+    // land, so it is the surviving copy of the newer value.
+    window.localStorage.setItem('qwen-remote-connections', '[]');
+
+    const { hydrateShellState, readShellState } = await import('./shell-state');
+    await hydrateShellState();
+
+    expect(readShellState('qwen-remote-connections')).toBe('[]');
+    expect(window.localStorage.getItem('qwen-remote-connections')).toBeNull();
+    expect(invoke).toHaveBeenCalledWith('shell_state_write', {
+      key: 'qwen-remote-connections',
+      value: '[]',
+    });
+  });
+
+  it('keeps the mirror when re-pushing it is rejected', async () => {
+    const invoke = vi.fn(async (command: string): Promise<unknown> => {
+      if (command === 'shell_state_read') return '["https://old.example"]';
+      throw new Error(
+        'Desktop shell state value for qwen-remote-connections exceeds 262144 bytes',
+      );
+    });
+    installDesktop(invoke);
+    window.localStorage.setItem(
+      'qwen-remote-connections',
+      '["https://new.example"]',
+    );
+
+    const { hydrateShellState, readShellState } = await import('./shell-state');
+    await hydrateShellState();
+
+    expect(window.localStorage.getItem('qwen-remote-connections')).toBe(
+      '["https://new.example"]',
+    );
+    expect(readShellState('qwen-remote-connections')).toBe(
+      '["https://new.example"]',
     );
   });
 
@@ -131,6 +180,29 @@ describe('desktop shell state', () => {
     const { readRemoteConnections } = await import('./remote-connections');
 
     expect(readRemoteConnections()).toEqual(['https://native.example']);
+  });
+
+  it('feeds the workspace-host catalog from the desktop store', async () => {
+    const invoke = vi.fn(
+      async (command: string, args?: Record<string, unknown>) => {
+        if (command !== 'shell_state_read') return undefined;
+        return args?.['key'] === 'qwen-workspace-hosts'
+          ? '[{"origin":"https://native.example","workspaces":[{"id":"w1","cwd":"/srv/repo"}]}]'
+          : null;
+      },
+    );
+    installDesktop(invoke);
+
+    const { hydrateShellState } = await import('./shell-state');
+    await hydrateShellState();
+    const { readWorkspaceHosts } = await import('./workspace-hosts');
+
+    expect(readWorkspaceHosts()).toEqual([
+      {
+        origin: 'https://native.example',
+        workspaces: [{ id: 'w1', cwd: '/srv/repo' }],
+      },
+    ]);
   });
 
   it('keeps localStorage as the browser store', async () => {

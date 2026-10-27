@@ -45,10 +45,10 @@ Both call `require_runtime_origin`, which compares the calling webview's URL ori
 
 `packages/web-shell/client/config/shell-state.ts` owns the desktop branch:
 
-- `hydrateShellState()` runs before the first render. It reads both keys over IPC, caches them in memory, and removes a matching `localStorage` copy only after a successful read or write.
+- `hydrateShellState()` runs before the first render. It reads both keys over IPC and caches them in memory. A `localStorage` copy that matches the native value is dropped; one that differs is newer — within one launch `writeShellState` mirrors every change while hydration clears the copy — so it is re-pushed rather than deleted, otherwise a reload would resurrect a stale catalog and destroy the only surviving copy of the newer one.
 - Migration takes only the current origin's `localStorage` entries. Older launches wrote under ports that no longer resolve and are not recoverable.
 - `readShellState` prefers the hydrated cache in the desktop shell and falls back to `localStorage` elsewhere.
-- `writeShellState` writes through to `localStorage` (the browser path and an in-session fallback) and to IPC. The IPC write is fire-and-forget: a failure leaves the session working but loses the value on restart.
+- `writeShellState` writes through to `localStorage` (the browser path and an in-session fallback) and to IPC. The IPC write is fire-and-forget: a failure leaves the session working, the mirror survives a same-origin reload, and only a launch on a fresh origin loses the value.
 - `remote-connections.ts` and `workspace-hosts.ts` call the adapter; their readers' validation is unchanged. `rememberWorkspaceHost` adds a desktop-only write-path rejection that also skips its change-event dispatch; see the workspace-host catalog rule below.
 
 ### Workspace-host catalog rule
@@ -65,9 +65,9 @@ Both call `require_runtime_origin`, which compares the calling webview's URL ori
 
 ## Failure modes
 
-- `QWEN_DESKTOP_DISABLE_SETTINGS_PERSISTENCE=1` makes `update()` a no-op. The session works, but a restart loses the catalogs.
+- `QWEN_DESKTOP_DISABLE_SETTINGS_PERSISTENCE=1` makes `update()` a no-op. The session works, a same-origin reload re-pushes the newer mirror, and a restart loses the catalogs.
 - A hydration failure leaves the key uncached, so reads fall back to the current origin's `localStorage`.
-- A native write failure leaves the in-memory copy and the `localStorage` mirror; the next launch may lose the change.
+- A native write failure leaves the in-memory copy and the `localStorage` mirror; the next same-origin hydration re-pushes the mirror, and only a launch on a fresh origin loses the change.
 - Malformed catalog JSON is filtered by the existing catalog readers. A corrupt settings file still falls back to defaults as before.
 
 ## Acceptance criteria
@@ -85,7 +85,8 @@ Both call `require_runtime_origin`, which compares the calling webview's URL ori
 - `cargo clippy --all-targets -- -D warnings`: clean.
 - `npm run typecheck --workspace=@qwen-code/web-shell`: clean.
 - ESLint and Prettier on the touched files: clean.
-- `vitest run client/config client/components/workspaces --no-file-parallelism`: covers desktop hydration, migration, write-through, the desktop-only page-origin rule, and the browser offline snapshot.
+- `vitest run client/config client/components/workspaces client/main-boot.test.tsx --no-file-parallelism`: covers desktop hydration, mirror re-push, migration, write-through, the hydrate-before-render boot ordering, the desktop-only page-origin rule, the catalog-named host skipping the confirmation gate, and the browser offline snapshot.
+- `node packages/desktop/scripts/test-release.js`: passes, including the pins that the capability grants both shell-state commands and that each command body calls `require_runtime_origin` before touching the store.
 - Manual live run on Windows with an isolated app identifier: wrote a catalog over IPC, restarted the process, confirmed the page origin changed, read the catalog back, opened Settings → Connections, and saw the saved host. The same run reproduced, and then verified the fix for, the per-launch workspace-host accumulation.
 
 ## Limitations and follow-ups

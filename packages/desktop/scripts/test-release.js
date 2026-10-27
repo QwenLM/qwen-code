@@ -1627,6 +1627,26 @@ function testBootstrapBridgeConfiguration() {
     'allow-shell-state-write',
   ]);
 
+  // The capability is port-wildcarded, so any loopback page passes its ACL; the
+  // runtime-origin check is what keeps other documents out of the persisted
+  // catalogs. Pin the call inside each command body — and keep the match
+  // bounded, because an unbounded one walks past the closing brace into the
+  // sibling command and passes with the gate deleted.
+  for (const command of ['shell_state_read', 'shell_state_write']) {
+    const start = main.indexOf(`fn ${command}(`);
+    assert.ok(start > 0, `main.rs must keep the ${command} command.`);
+    const body = main.slice(start, main.indexOf('\n}', start));
+    assert.ok(
+      body.length > 0 && !body.includes('/*'),
+      `${command} must keep its origin gate live, not commented out.`,
+    );
+    assert.match(
+      body,
+      /\n\s*require_runtime_origin\(&webview, state\.inner\(\)\)\?;/,
+      `${command} must gate on require_runtime_origin.`,
+    );
+  }
+
   assert.match(main, /title_bar_style\(tauri::TitleBarStyle::Overlay\)/);
   assert.match(main, /hidden_title\(true\)/);
   assert.match(main, /initialization_script\(MACOS_TITLEBAR_INIT_SCRIPT\)/);
