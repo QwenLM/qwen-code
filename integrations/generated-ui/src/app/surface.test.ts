@@ -18,6 +18,44 @@ function harness(html: string) {
   return { surface, frame, content, onEvent, onError };
 }
 
+describe('view height', () => {
+  it('grows and shrinks with its content within the bounds', () => {
+    const h = harness('<p id="out">Ready</p>');
+    // jsdom lays out nothing; give the frame the width a browser would.
+    Object.defineProperty(h.frame, 'clientWidth', { value: 600 });
+    const body = h.content.body;
+    body.style.margin = '12px';
+    const sized = (height: number) => {
+      body.getBoundingClientRect = () => ({ height }) as DOMRect;
+      h.surface.fit();
+      return h.frame.style.height;
+    };
+    expect(sized(300)).toBe('326px');
+    expect(sized(40)).toBe('80px');
+    expect(sized(5000)).toBe('3600px');
+    body.getBoundingClientRect = () => ({ height: 200 }) as DOMRect;
+    h.surface.apply([{ kind: 'text', id: 'out', value: 'Updated' }]);
+    expect(h.frame.style.height).toBe('226px');
+  });
+});
+
+describe('view height before layout', () => {
+  it('does not measure a hidden or zero-width frame', () => {
+    const h = harness('<p id="out">Ready</p>');
+    h.content.body.getBoundingClientRect = () => ({ height: 5000 }) as DOMRect;
+    h.frame.style.height = '';
+    h.surface.fit();
+    expect(h.frame.style.height).toBe('');
+    Object.defineProperty(h.frame, 'clientWidth', { value: 600 });
+    h.frame.hidden = true;
+    h.surface.fit();
+    expect(h.frame.style.height).toBe('');
+    h.frame.hidden = false;
+    h.surface.fit();
+    expect(h.frame.style.height).toBe('3600px');
+  });
+});
+
 describe('host theme in the view document', () => {
   it('pins the color scheme and copies standard style variables', () => {
     const h = harness('<p id="out">Ready</p>');

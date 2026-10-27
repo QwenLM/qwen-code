@@ -103,6 +103,12 @@ function setup() {
   };
 }
 
+// A review that ended before dispatch reports why nothing was sent.
+const notSent = (phase: 'cancelled' | 'expired') => ({
+  isError: true,
+  _meta: { 'qwen-code/message-review': phase },
+});
+
 describe('MCP App host message review', () => {
   it('uses the host language inside the portal', async () => {
     const h = setup();
@@ -111,7 +117,7 @@ describe('MCP App host message review', () => {
     expect(h.container.textContent).toContain('审阅 App 消息');
     expect(h.container.textContent).toContain('目标会话');
     await act(async () => h.button('取消').click());
-    expect(await result).toEqual({ isError: true });
+    expect(await result).toEqual(notSent('cancelled'));
   });
   it('waits for host confirmation and resolves at the real receipt, before turn completion', async () => {
     const modelTurn = deferred<unknown>();
@@ -155,7 +161,7 @@ describe('MCP App host message review', () => {
     const first = h.request();
     expect(await h.request()).toEqual({ isError: true });
     await act(async () => h.button('cancel').click());
-    expect(await first).toEqual({ isError: true });
+    expect(await first).toEqual(notSent('cancelled'));
     expect(h.submit).not.toHaveBeenCalled();
     expect(h.container.querySelector('[role="dialog"]')).toBeNull();
   });
@@ -187,7 +193,7 @@ describe('MCP App host message review', () => {
         if (reason === 'disconnected') h.render({ enabled: false });
       });
       if (reason === 'session') h.render({ sessionId: 'session-a' });
-      expect(await result).toEqual({ isError: true });
+      expect(await result).toEqual(notSent('cancelled'));
       await act(async () => gate.resolve());
       expect(writes).not.toHaveBeenCalled();
       expect(h.submit).toHaveBeenCalledTimes(1);
@@ -259,7 +265,7 @@ describe('MCP App host message review', () => {
       expect(h.container.textContent).toContain('Review the full message');
       expect(h.submit).toHaveBeenCalledOnce();
       await act(async () => h.button('cancel').click());
-      expect(await next).toEqual({ isError: true });
+      expect(await next).toEqual(notSent('cancelled'));
       await act(async () => turn.resolve());
     },
   );
@@ -292,7 +298,7 @@ describe('MCP App host message review', () => {
     const h = setup();
     const result = h.request();
     await act(async () => h.button('Send to session').click());
-    expect(await result).toEqual({ isError: true });
+    expect(await result).toEqual(notSent('cancelled'));
     expect(h.container.textContent).toContain('Cancelled before sending');
   });
 
@@ -358,7 +364,7 @@ describe('MCP App host message review', () => {
         new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
       );
     });
-    expect(await result).toEqual({ isError: true });
+    expect(await result).toEqual(notSent('cancelled'));
     expect(h.submit).not.toHaveBeenCalled();
   });
 
@@ -367,7 +373,7 @@ describe('MCP App host message review', () => {
     const h = setup();
     const result = h.request();
     await act(async () => vi.advanceTimersByTime(90_000));
-    expect(await result).toEqual({ isError: true });
+    expect(await result).toEqual(notSent('expired'));
     expect(h.container.textContent).toContain('Review expired before sending');
     expect(h.submit).not.toHaveBeenCalled();
   });
@@ -459,7 +465,7 @@ describe('MCP App host message review', () => {
     const next = h.request();
     expect(h.container.textContent).toContain('Review the full message');
     await act(async () => h.button('cancel').click());
-    expect(await next).toEqual({ isError: true });
+    expect(await next).toEqual(notSent('cancelled'));
     await act(async () => turn.resolve());
   });
 
@@ -493,7 +499,7 @@ describe('MCP App host message review', () => {
       });
       const result = h.request();
       await act(async () => h.button('Send to session').click());
-      expect(await result).toEqual({ isError: true });
+      expect(await result).toEqual(notSent('cancelled'));
       expect(h.container.textContent).toContain('Cancelled before sending');
       expect(h.container.textContent).not.toContain(
         'Acceptance could not be confirmed',
@@ -501,7 +507,7 @@ describe('MCP App host message review', () => {
       expect(h.container.textContent).not.toContain('Session client changed');
       const next = h.request();
       await act(async () => h.button('cancel').click());
-      expect(await next).toEqual({ isError: true });
+      expect(await next).toEqual(notSent('cancelled'));
     },
   );
 

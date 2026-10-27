@@ -128,6 +128,94 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
+async function reconnect(context: Record<string, unknown>) {
+  await bridge.onteardown!();
+  vi.resetModules();
+  bridge.getHostContext.mockReturnValue(context);
+  await import('./main.js');
+  await vi.waitFor(() => expect(bridge.connect).toHaveBeenCalled());
+  await Promise.resolve();
+}
+
+describe('card frame', () => {
+  it('uses the host locale for its own text', async () => {
+    await reconnect({ locale: 'zh-CN' });
+    ready();
+    expect(text('stop')).toBe('停止');
+    expect(text('continue-analysis')).toBe('用当前参数继续分析');
+    expect(text('status')).toBe('已应用最新更新');
+    expect(document.documentElement.lang).toBe('zh-CN');
+  });
+
+  it('switches language when the host context changes', async () => {
+    ready();
+    expect(text('stop')).toBe('Stop');
+    bridge.getHostContext.mockReturnValue({ locale: 'zh-CN' });
+    bridge.events.get('hostcontextchanged')!();
+    expect(text('stop')).toBe('停止');
+    expect(text('status')).toBe('已应用最新更新');
+  });
+
+  it('overlays a stopped view instead of leaving its controls looking live', () => {
+    ready();
+    present({ phase: 'stopped', viewAvailable: true });
+    expect(document.getElementById('stopped')!.hidden).toBe(false);
+    expect(text('stopped-title')).toBe('This view is stopped.');
+  });
+
+  it('toggles the collapsed summary', () => {
+    ready();
+    const toggle = document.getElementById(
+      'summary-toggle',
+    ) as HTMLButtonElement;
+    const summary = document.getElementById('summary')!;
+    expect(summary.dataset['collapsed']).toBe('true');
+    toggle.click();
+    expect(summary.dataset['collapsed']).toBe('false');
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(toggle.textContent).toBe('Show less');
+    toggle.click();
+    expect(summary.dataset['collapsed']).toBe('true');
+  });
+});
+
+describe('review outcomes reported by the host', () => {
+  it.each([
+    ['cancelled', 'Not sent.'],
+    ['expired', 'The review timed out. Nothing was sent.'],
+  ])(
+    'returns to the original action after a %s review',
+    async (outcome, message) => {
+      bridge.sendMessage.mockResolvedValue({
+        isError: true,
+        _meta: { 'qwen-code/message-review': outcome },
+      });
+      ready();
+      continuation().click();
+      await vi.waitFor(() => expect(text('continuation-status')).toBe(message));
+      expect(text('continue-analysis')).toBe(
+        'Continue analysis with current parameters',
+      );
+      expect(continuation().disabled).toBe(false);
+    },
+  );
+
+  it('keeps the unconfirmed warning for outcomes after dispatch', async () => {
+    bridge.sendMessage.mockResolvedValue({
+      isError: true,
+      _meta: { 'qwen-code/message-review': 'unknown' },
+    });
+    ready();
+    continuation().click();
+    await vi.waitFor(() =>
+      expect(text('continuation-status')).toContain('could not be confirmed'),
+    );
+    expect(text('continue-analysis')).toBe(
+      'Review again after checking the session',
+    );
+  });
+});
+
 describe('ask the session to fix a failed view', () => {
   const error =
     "Script error: ReferenceError: 'total' is not defined (line 3, column 7).";
@@ -294,7 +382,7 @@ describe('continue analysis from the trusted App', () => {
         ),
       );
       expect(text('continuation-status')).toContain('could duplicate');
-      expect(text('continuation-status')).toContain('cancelled or rejected');
+      expect(text('continuation-status')).toContain('may still be in flight');
       expect(text('continue-analysis')).toContain('checking the session');
       present({});
       expect(bridge.sendMessage).toHaveBeenCalledTimes(1);
@@ -476,6 +564,8 @@ describe('generated view interaction feedback', () => {
     expect(document.getElementById('status')!.dataset['state']).toBe('dirty');
     expect(text('status')).toContain('Parameters changed');
     expect(text('status')).not.toContain('applied');
+    // The one-line status keeps its full text available as the title.
+    expect(document.getElementById('status')!.title).toBe(text('status'));
     expect(frame().hidden).toBe(false);
     expect(frame().getAttribute('aria-busy')).toBe('false');
   });
@@ -528,7 +618,7 @@ describe('generated view interaction feedback', () => {
       expect(frame().getAttribute('aria-busy')).toBe('false');
       expect(text('status')).toBe(
         phase === 'stopped'
-          ? 'Stopped. Reopen the card to start a new view.'
+          ? 'Stopped'
           : 'The event timed out. Use the summary.',
       );
     },

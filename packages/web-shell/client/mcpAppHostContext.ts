@@ -20,9 +20,21 @@ export interface McpAppMessageRequest {
   signal: AbortSignal;
 }
 
+/**
+ * Result metadata naming a review that ended before the message was sent:
+ * `cancelled` by the user or the host, or `expired` while awaiting review.
+ */
+export const MCP_APP_MESSAGE_REVIEW_META = 'qwen-code/message-review';
+
+export interface McpAppMessageResult {
+  isError?: boolean;
+  _meta?: { [MCP_APP_MESSAGE_REVIEW_META]?: 'cancelled' | 'expired' };
+  [key: string]: unknown;
+}
+
 export interface McpAppMessages {
   sessionId: string;
-  requestMessage(request: McpAppMessageRequest): Promise<{ isError?: boolean }>;
+  requestMessage(request: McpAppMessageRequest): Promise<McpAppMessageResult>;
 }
 
 export const McpAppMessagesContext = createContext<McpAppMessages | undefined>(

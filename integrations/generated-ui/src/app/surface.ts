@@ -71,6 +71,11 @@ const FRAME_DOCUMENT =
   'form-action &#39;none&#39;; base-uri &#39;none&#39;; object-src &#39;none&#39;; frame-src &#39;none&#39;">' +
   `<style>${VIEW_BASE_STYLE}</style></head><body></body></html>`;
 
+// The view grows with its content, so the card scrolls with the page instead
+// of nesting a scroll area; the bound only stops runaway layouts.
+export const MIN_VIEW_HEIGHT = 80;
+export const MAX_VIEW_HEIGHT = 3600;
+
 // Only standard style variables with plain values reach the view document.
 const STYLE_VARIABLE = /^--(color|font|border-radius)-[a-z0-9-]+$/;
 const STYLE_VALUE = /^[^;{}<>\\]*$/;
@@ -160,6 +165,10 @@ export class ViewSurface {
     doc.head.append(style);
     doc.body.replaceChildren(this.markup(html));
     this.validate(doc.body);
+    this.fit();
+    const refit = () => this.fit();
+    doc.defaultView?.addEventListener('resize', refit);
+    doc.body.addEventListener('toggle', refit, true);
     const listener = (event: Event) => {
       if (this.stopped) return;
       try {
@@ -188,6 +197,8 @@ export class ViewSurface {
       for (const type of ['input', 'change', 'click']) {
         doc.body.removeEventListener(type, listener);
       }
+      doc.defaultView?.removeEventListener('resize', refit);
+      doc.body.removeEventListener('toggle', refit, true);
     };
   }
 
@@ -328,6 +339,7 @@ export class ViewSurface {
       if (superseded) return { kind: 'superseded', inputs: current };
     }
     this.applyTo(body, patches);
+    this.fit();
     return { kind: 'applied', inputs: this.inputs() };
   }
 
@@ -369,6 +381,28 @@ export class ViewSurface {
       }
       this.validate(body);
     }
+  }
+
+  /** Sizes the frame to its content within the view height bounds. */
+  fit(): void {
+    const body = this.content?.body;
+    const view = this.content?.defaultView;
+    // A hidden or zero-width frame lays its text out one character per line;
+    // measuring then would flash a card thousands of pixels tall.
+    if (!body || !view || this.frame.hidden || this.frame.clientWidth === 0)
+      return;
+    // The root's scroll height never drops below the frame, so measure the
+    // body and its margins to let the frame shrink as well as grow.
+    const style = view.getComputedStyle(body);
+    const content =
+      body.getBoundingClientRect().height +
+      (parseFloat(style.marginTop) || 0) +
+      (parseFloat(style.marginBottom) || 0);
+    const height = Math.min(
+      MAX_VIEW_HEIGHT,
+      Math.max(MIN_VIEW_HEIGHT, Math.ceil(content) + 2),
+    );
+    this.frame.style.height = `${height}px`;
   }
 
   stop(): void {

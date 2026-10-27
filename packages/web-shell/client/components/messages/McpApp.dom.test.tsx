@@ -136,6 +136,12 @@ function renderApp(
   };
 }
 
+// A review that ended before dispatch reports why nothing was sent.
+const notSent = (phase: 'cancelled' | 'expired') => ({
+  isError: true,
+  _meta: { 'qwen-code/message-review': phase },
+});
+
 describe('McpApp host lifetime', () => {
   it('advertises messages only for the bound transcript session', () => {
     const requestMessage = vi.fn().mockResolvedValue({});
@@ -325,7 +331,7 @@ describe('McpApp host lifetime', () => {
           />,
         ),
       );
-      expect(await pendingMessage).toEqual({ isError: true });
+      expect(await pendingMessage).toEqual(notSent('cancelled'));
       expect(appBridgeMocks.last).toBe(bridge);
       expect(appBridgeMocks.constructed).toBe(constructed);
       expect(container.querySelector('iframe')).toBe(iframe);
@@ -342,7 +348,7 @@ describe('McpApp host lifetime', () => {
       await act(async () =>
         rerender(<BoundApp clientId="client-b" enabled={false} />),
       );
-      expect(await fresh).toEqual({ isError: true });
+      expect(await fresh).toEqual(notSent('cancelled'));
       expect(submit).not.toHaveBeenCalled();
       finishTool({ content: [] });
       await pendingTool;
