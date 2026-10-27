@@ -1771,7 +1771,11 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
     }
   });
 
-  it('keeps lexer passes length-preserving when a live value extends its mask', () => {
+  it('keeps the single lexer pass length-preserving over value data', () => {
+    // One derivation means one lexer pass per turn: the refreshed second pass
+    // that re-read a different mask is what let the documentation guard
+    // disagree with itself (R11-1). The mask must still preserve offsets, or
+    // the tag positions would not map back onto the unmasked text.
     const spy = vi.spyOn(Lexer, 'lexInline');
     try {
       const quoted = invoke('read_file', param('file_path', 'x.txt'));
@@ -1789,10 +1793,8 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
           args: { content: `Usage:\n${quoted}`, file_path: 'd.md' },
         },
       ]);
-      expect(spy).toHaveBeenCalledTimes(2);
-      for (const call of spy.mock.calls) {
-        expect(String(call[0]).length).toBe(text.length);
-      }
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(String(spy.mock.calls[0][0]).length).toBe(text.length);
     } finally {
       spy.mockRestore();
     }
@@ -1817,9 +1819,14 @@ describe('reviewed XML ownership and documentation regressions', () => {
       expected: [],
     },
     {
+      // The content value never closes, so the quoted shell never becomes
+      // structure, and the write cannot be recovered with a truncated value.
+      // Declining is the in-contract polarity (base declined this input too);
+      // the old `['run_shell_command']` expectation dispatched the destructive
+      // command the model had written as file content. See R14-1 / #13492.
       id: 'R2-1',
       text: '<invoke name="write_file"><parameter name="content">Usage:\n<invoke name="run_shell_command"><parameter name="command">rm -rf /tmp/x</parameter><parameter name="note">see <invoke name="read_file">...</invoke></parameter></invoke>\n<parameter name="stray"></parameter></invoke>',
-      expected: ['run_shell_command'],
+      expected: [],
     },
     {
       id: 'R3-2',
@@ -1855,14 +1862,12 @@ describe('reviewed XML ownership and documentation regressions', () => {
   );
 
   it('recovers the sibling after an unclosed value', () => {
-    // The unclosed write_file is ambiguous and stays inert, but the complete
-    // calls it swallowed are recovered on their own merits; the live sibling
-    // after it recovers too. See #13492.
+    // The unclosed write_file is ambiguous and stays inert, as do the calls its
+    // unclosed content value quotes; the live sibling after it recovers.
     const witness = cases.find(({ id }) => id === 'R2-1')!.text;
     const read = invoke('read_file', param('file_path', 'real.ts'));
     const text = `${witness}\n${read}`;
     expect(extractXmlToolCalls(text).map(({ name }) => name)).toEqual([
-      'run_shell_command',
       'read_file',
     ]);
     expect(tryRecoverXmlToolCalls(text).recovered).toBe(true);
@@ -2021,9 +2026,14 @@ describe('per-block ambiguity rejection', () => {
       expected: ['read_file'],
     },
     {
+      // The prose parameter mention stays inert under depth pairing, so the
+      // example wrapper's closer is structure and the call inside it never
+      // dispatches. The old `['write_file', 'run_shell_command']` expectation
+      // certified the dispatch the flat scan's mis-pairing caused. See R12-3 /
+      // R13-1 / #13492.
       id: 'R7-1-erased-pass1-protection',
       text: '<invoke name="write_file"><parameter name="file_path">anonymous-output.txt</parameter><parameter name="content"><invoke name="read_file"><parameter name="file_path">quoted-only.txt</parameter></invoke>\n<example>literal value tail</parameter></invoke>\nThe format mentions <parameter name="x"> without a terminator.\n<example>\n<invoke name="run_shell_command"><parameter name="command">printf DOC_ONLY</parameter></invoke>\n</example>',
-      expected: ['write_file', 'run_shell_command'],
+      expected: ['write_file'],
     },
     {
       id: 'R2-1-extra-quote-before-flat-match',
@@ -2043,4 +2053,149 @@ describe('per-block ambiguity rejection', () => {
       ).toEqual(expected);
     },
   );
+});
+
+// One derivation per turn: every guard below reads the same span model, and
+// each case here pins the mechanism a standing review finding named. Reverting
+// the derivation to independent scans reddens the corresponding case.
+describe('single-derivation documentation guards (#13492)', () => {
+  it('does not let a prose parameter mention release an example-wrapped call', () => {
+    // R13-1: the flat parameter scan paired this prose mention with the
+    // documented call's own `</parameter>`, turning the example wrapper into
+    // parameter data so the call inside it read as live structure.
+    const documented = invoke(
+      'run_shell_command',
+      param('command', 'rm -rf /tmp/x'),
+    );
+    const text =
+      'The format mentions ' +
+      PARAM_OPEN +
+      ' name="x"> without a terminator.\n<example>\n' +
+      documented +
+      '\n</example>';
+    expect(extractXmlToolCalls(text)).toEqual([]);
+    expect(tryRecoverXmlToolCalls(text)).toEqual({
+      recovered: false,
+      functionCallParts: [],
+      remainingText: text,
+    });
+  });
+
+  it('does not let an indented example closer end a documentation region', () => {
+    // R13-4: the example scan used to see only fences and parameter data, so a
+    // closer that the comment/indented scan classifies as documentation still
+    // closed the region and released the call behind it.
+    const documented = invoke(
+      'run_shell_command',
+      param('command', 'rm -rf /tmp/x'),
+    );
+    const text =
+      'Docs:\n\n<example>\n' +
+      invoke('w', param('note', 'see')) +
+      '\n\n    </example>\n\n' +
+      documented +
+      '\n\n</example>\n';
+    expect(extractXmlToolCalls(text)).toEqual([]);
+    expect(tryRecoverXmlToolCalls(text).recovered).toBe(false);
+  });
+
+  it('keeps an indented line inside a value from becoming documentation', () => {
+    // R15-3: the indented-code arm had no value-ownership term, so a content
+    // value ending with a blank line plus an indented line made the block's
+    // own tail documentation and the write silently never dispatched.
+    const content = 'body\n\n    indented tail';
+    const write = invoke(
+      'write_file',
+      param('file_path', 'a.txt') + param('content', content),
+    );
+    const read = invoke('read_file', param('file_path', 'real.ts'));
+    expect(extractXmlToolCalls(`${write}\n${read}`)).toEqual([
+      { name: 'write_file', args: { file_path: 'a.txt', content } },
+      { name: 'read_file', args: { file_path: 'real.ts' } },
+    ]);
+  });
+
+  it('does not end a comment at a terminator inside a never-closed value', () => {
+    // R15-4: the terminator filter consulted closed values only, so a `-->`
+    // inside a truncated value ended the comment early and exposed the
+    // documented call.
+    const documented = invoke(
+      'run_shell_command',
+      param('command', 'rm -rf /tmp/x'),
+    );
+    const text =
+      'Docs:\n\n<!--\n' +
+      '<invoke name="a"><parameter name="p">x --> y\n' +
+      documented +
+      '\n-->\n';
+    expect(extractXmlToolCalls(text)).toEqual([]);
+    expect(tryRecoverXmlToolCalls(text).recovered).toBe(false);
+  });
+
+  it('does not let a prose call opener unmask a comment', () => {
+    // R12-1: the truncated-value exemption asked only whether *some* unclosed
+    // call opener preceded the unclosed parameter, so a prose mention of the
+    // call tag disabled the comment mask for the rest of the turn. Ownership
+    // now requires the parameter to be a direct child of the call body.
+    const documented = invoke(
+      'run_shell_command',
+      param('command', 'rm -rf /tmp/x'),
+    );
+    const text =
+      'The dialect writes <invoke name="x"> and ' +
+      PARAM_OPEN +
+      ' name="value"> for arguments.\n\n<!--\n' +
+      documented +
+      '\n';
+    expect(extractXmlToolCalls(text)).toEqual([]);
+    expect(tryRecoverXmlToolCalls(text)).toEqual({
+      recovered: false,
+      functionCallParts: [],
+      remainingText: text,
+    });
+  });
+
+  it('keeps documentation markers working after a truncated value', () => {
+    // A truncated value is data for the comment scan, but it must not hide the
+    // markers that follow it: doing so would silently disable every later
+    // fence and comment guard for the rest of the turn.
+    const documented = invoke(
+      'run_shell_command',
+      param('command', 'rm -rf /tmp/x'),
+    );
+    for (const text of [
+      `<invoke name="a"><parameter name="p">x\n<!--\n${documented}\n-->\n`,
+      `<invoke name="a"><parameter name="p">x</function>\n\`\`\`\n${documented}\n\`\`\`\n`,
+      `<invoke name="a"><parameter name="p">x</function>\n<example>\n${documented}\n</example>\n`,
+    ]) {
+      expect(extractXmlToolCalls(text)).toEqual([]);
+    }
+  });
+
+  it('scans the turn a constant number of times regardless of comment openers', () => {
+    // R13-2 / R15-2: fence state used to be re-derived per query by slicing and
+    // splitting the whole prefix, so a dense-comment turn was quadratic in its
+    // own length. Counting prefix splits pins the shape without a wall clock.
+    const line = (opener: boolean) => (opener ? '<!-- x' : 'xxxxxx');
+    const prefix = (openers: boolean) =>
+      Array.from({ length: 400 }, (_, index) =>
+        line(openers && index < 399),
+      ).join('\n') + '\n-->\n';
+    const countPrefixSplits = (text: string) => {
+      const spy = vi.spyOn(String.prototype, 'split');
+      try {
+        extractXmlToolCalls(text);
+        return spy.mock.calls.filter(
+          (call, index) =>
+            String(call[0]) === '\n' &&
+            String(spy.mock.contexts[index]).length > text.length / 2,
+        ).length;
+      } finally {
+        spy.mockRestore();
+      }
+    };
+    const dense = countPrefixSplits(prefix(true));
+    const sparse = countPrefixSplits(prefix(false));
+    expect(dense).toBeLessThanOrEqual(sparse + 2);
+  });
 });
