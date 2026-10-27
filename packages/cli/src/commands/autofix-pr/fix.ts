@@ -22,6 +22,7 @@ import {
   isRegularFile,
   NO_FOLLOW,
   readGateCursor,
+  readRegularFile,
   repoRoot,
   requireState,
   TASK_OPTION,
@@ -94,7 +95,7 @@ export function readFixMarker(
   if (!stat.isFile()) return { attempt: null, mtimeMs: stat.mtimeMs };
   let parsed: unknown;
   try {
-    parsed = JSON.parse(readFileSync(paths.fixPath, 'utf8'));
+    parsed = JSON.parse(readRegularFile(paths.fixPath) ?? 'null');
   } catch {
     parsed = null;
   }
