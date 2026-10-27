@@ -754,7 +754,13 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     }
   });
 
-  it('re-scans exactly at the discovery window and restarts it after each scan', async () => {
+  it('re-scans exactly at the 5 s discovery window and restarts it after each scan', async () => {
+    // Pinned numerically on purpose: the boundary is the runtime endpoint's
+    // snapshot TTL (`WORKSPACE_SKILLS_SNAPSHOT_TTL_MS` in
+    // workspace-service/index.ts), so a change to either constant must show up
+    // here. Deriving every offset from `SKILLS_DISCOVERY_REFRESH_MS` would keep
+    // this test green when the window itself changed.
+    expect(SKILLS_DISCOVERY_REFRESH_MS).toBe(5_000);
     const workspace = await fsp.mkdtemp(
       path.join(os.tmpdir(), 'qwen-skills-window-'),
     );
@@ -767,16 +773,21 @@ describe('createWorkspaceSkillsStatusProvider', () => {
       const forcedScans = () =>
         listSpy.mock.calls.filter(([options]) => options?.force).length;
 
-      clock.mockReturnValue(startedAt + SKILLS_DISCOVERY_REFRESH_MS - 1);
+      clock.mockReturnValue(startedAt + 4_999);
       await provider(workspace);
       expect(forcedScans()).toBe(0);
 
-      clock.mockReturnValue(startedAt + SKILLS_DISCOVERY_REFRESH_MS);
+      clock.mockReturnValue(startedAt + 5_000);
       await provider(workspace);
       expect(forcedScans()).toBe(1);
 
       // The scan restarts the window, so the next read reuses its result.
-      clock.mockReturnValue(startedAt + SKILLS_DISCOVERY_REFRESH_MS + 1);
+      clock.mockReturnValue(startedAt + 5_001);
+      await provider(workspace);
+      expect(forcedScans()).toBe(1);
+
+      // And the restarted window is a full one: still no scan at 9 999 ms.
+      clock.mockReturnValue(startedAt + 9_999);
       await provider(workspace);
       expect(forcedScans()).toBe(1);
     } finally {
