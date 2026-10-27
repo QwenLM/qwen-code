@@ -373,10 +373,14 @@ function ToolPayloadBlock({
   const truncated = payload.text.length > limit;
   const displayed = truncateText(payload.text, limit);
   const shown = sanitizeControlChars(displayed);
+  // Highlight a canonical JSON payload as long as it fits the Markdown budget.
+  // The former 1000-line read-file guard is deliberately not applied here: a
+  // tool result is one logical value, not a file preview, and can be short in
+  // characters yet span many lines once pretty-printed (e.g. a compact array of
+  // records). formatJsonPayload already caps the formatted text by render mode,
+  // and the read-file line budget lives on to guard ExpandedReadContent below.
   const renderAsMarkdown =
-    payload.json &&
-    displayed.length <= MAX_MARKDOWN_READ_CHARS &&
-    !exceedsLineLimit(displayed, MAX_MARKDOWN_READ_LINES);
+    payload.json && displayed.length <= MAX_MARKDOWN_READ_CHARS;
   return (
     <>
       {renderAsMarkdown ? (

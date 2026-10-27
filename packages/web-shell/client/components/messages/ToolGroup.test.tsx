@@ -3609,7 +3609,7 @@ describe('generic tool card details', () => {
     expect(container.textContent).not.toContain('Show more');
   });
 
-  it('falls back to plain text for a many-line JSON result', () => {
+  it('keeps highlighting for a many-line JSON result within the char budget', () => {
     const items = Array.from({ length: 400 }, (_, i) => ({ id: i }));
     const container = renderToolGroup(
       [
@@ -3623,7 +3623,10 @@ describe('generic tool card details', () => {
       'document',
     );
 
-    expect(container.querySelector('[class*="payloadText"]')).not.toBeNull();
-    expect(container.querySelector('[class*="payloadJson"]')).toBeNull();
+    // Pretty-printed, the payload spans well over 1000 lines but stays within
+    // the render cap; it must render as a highlighted JSON block, not fall back
+    // to the plain-text container.
+    expect(container.querySelector('[class*="payloadJson"]')).not.toBeNull();
+    expect(container.querySelector('[class*="payloadText"]')).toBeNull();
   });
 });

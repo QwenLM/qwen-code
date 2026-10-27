@@ -233,6 +233,12 @@ function safeJson(value: unknown): string {
  * or non-canonical JSON — is returned as recorded so the caller can fall back
  * to plain text. Formatting therefore never rewrites literals, duplicate
  * keys, key order or string escapes.
+ *
+ * These rules are scoped to the transcript tool card. The sibling
+ * ToolCallDetail used by the turn-calls / trajectory panes still fences via a
+ * bare JSON.parse, so identical bytes can render differently per surface;
+ * lifting one shared Arguments/Result renderer is tracked as a follow-up
+ * rather than widened into this change.
  */
 export function formatJsonPayload(
   text: string,
