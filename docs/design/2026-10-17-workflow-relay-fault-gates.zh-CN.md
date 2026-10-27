@@ -73,7 +73,7 @@ ledger 以及 lead 收到的通知）都在 relay 驱动的流程里。在这条
 
   记录依次走过 revision 1 `admitted` → 3 `running`（子 Session 已挂上）→ 6
   `settled` / `completed`，投递状态 `consumed`。relay 台账（`ma_delivery`）里有
-  一行 `CHILD_RESULT`，`delivered`/`accepted`/`consumed`。
+  一行 `CHILD_RESULT`，`delivered`/`accepted`，消费快照为 `pending` 或 `consumed`。
 
 - **取消。** `workflow` 在 `CANCELLABLE_TASK_KINDS` 里
   （`store/ManagedExtensionProjection.java:133`；动作见 `:244`），所以公开的
@@ -173,17 +173,17 @@ store 客户端在一次提交调用内部重驱的丢弃，根本到不了 rela
 而在调用被扣住期间，relay 唯一的扫描线程阻塞在这次调用里，这一行不会有别的东西
 消耗那次 attempt —— 即 FG9f 的「基线加一」。子 Turn 自己的 journal 提交不涉及 relay 步骤，保持丢弃。
 
-| 用例                  | 注入                                                                                                      | 期望                                                                                                                                                                                                                                                                                                                                                           |
-| --------------------- | --------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `dispatch-reply`      | 扣住 lead 上 `dispatch_started` revision（`commitChildRunRecord`，revision 2）的应答，直到 relay 已 defer | 一个子 Session，一个 `CHILD_SESSION_START` 操作，一次 workflow 运行：模型处只有一次 `agent()` 派发。记录只走一遍，到 `settled` / `completed` / `consumed`，revision 6，`kind` 为 `workflow`。relay 的五个 revision 各提交一次，被扣住的那一次绝不重新提交。一行 `CHILD_RESULT`，`delivered`/`accepted`/`consumed`；一份携带脚本返回值的通知；lead 上一次唤醒轮 |
-| `child-message-reply` | 丢弃子 Session 第一次 `commitMessage`（workflow Turn 自己的 journal）提交后的应答                         | 被丢弃的确实是子 Session 的应答。store 客户端的重放让这条消息只落地一次，子 Turn 只完成一次，脚本只执行一次。`dispatch-reply` 的每条期望都成立                                                                                                                                                                                                                 |
-| `result-reply`        | 扣住 lead 上 `commit_result` revision（revision 4）的应答，直到 relay 已 defer                            | 记录只结算一次，绝没有第二个终态 revision，仍是 revision 6；只通知一次，由一次唤醒轮读取；脚本绝不重跑。`dispatch-reply` 的每条期望都成立                                                                                                                                                                                                                      |
+| 用例                  | 注入                                                                                                      | 期望                                                                                                                                                                                                                                                                                                                                                                                    |
+| --------------------- | --------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dispatch-reply`      | 扣住 lead 上 `dispatch_started` revision（`commitChildRunRecord`，revision 2）的应答，直到 relay 已 defer | 一个子 Session，一个 `CHILD_SESSION_START` 操作，一次 workflow 运行：模型处只有一次 `agent()` 派发。记录只走一遍，到 `settled` / `completed` / `consumed`，revision 6，`kind` 为 `workflow`。relay 的五个 revision 各提交一次，被扣住的那一次绝不重新提交。一行 `CHILD_RESULT`，`delivered`/`accepted`，消费快照为 `pending` 或 `consumed`；一份携带脚本返回值的通知；lead 上一次唤醒轮 |
+| `child-message-reply` | 丢弃子 Session 第一次 `commitMessage`（workflow Turn 自己的 journal）提交后的应答                         | 被丢弃的确实是子 Session 的应答。store 客户端的重放让这条消息只落地一次，子 Turn 只完成一次，脚本只执行一次。`dispatch-reply` 的每条期望都成立                                                                                                                                                                                                                                          |
+| `result-reply`        | 扣住 lead 上 `commit_result` revision（revision 4）的应答，直到 relay 已 defer                            | 记录只结算一次，绝没有第二个终态 revision，仍是 revision 6；只通知一次，由一次唤醒轮读取；脚本绝不重跑。`dispatch-reply` 的每条期望都成立                                                                                                                                                                                                                                               |
 
 ### FG10f —— 通知与输出投递（第 1 片，已交付）
 
 | 用例                  | 注入                                                                                                                                  | 期望                                                                                                                                                                                                         |
 | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `notification-reply`  | 扣住 lead 第一次 `acceptChildResult`（落地通知输入的那次提交）的应答，直到 relay 已 defer 这次 acceptance                             | lead 上恰好一份 `<task-notification>` 输入，由一次唤醒轮读取。记录只一次结束于 `consumed`（revision 6），`CHILD_RESULT` 行为 `delivered`/`accepted`/`consumed`                                               |
+| `notification-reply`  | 扣住 lead 第一次 `acceptChildResult`（落地通知输入的那次提交）的应答，直到 relay 已 defer 这次 acceptance                             | lead 上恰好一份 `<task-notification>` 输入，由一次唤醒轮读取。记录只一次结束于 `consumed`（revision 6），`CHILD_RESULT` 行为 `delivered`/`accepted`，消费快照为 `pending` 或 `consumed`                      |
 | `child-stream-resume` | 扣住 `agent()` 请求；打开子 Session 的公开流与 WebShell 流，追平后同时切断，放开请求，再分别按 `Last-Event-ID` / `afterSequence` 续传 | 子 agent 的回答、Turn 的输出及其终态，都在两个客户端断开期间提交，续传前由 JDBC 证明。每个续传后的视图都是从 1 起的一条序列，不缺失、不重复，逐帧等于该表面所提供的台账，并且恰好带一次 workflow Turn 的终态 |
 
 落地时记录的机制说明：
@@ -200,8 +200,10 @@ store 客户端在一次提交调用内部重驱的丢弃，根本到不了 rela
   在这些窗口上，单独中和其中任何一层都是等价变异，所以本片的变异一次去掉全部
   防线（见「变异检查」）。
 
-- `CHILD_RESULT` 台账行在记录的 consumed revision 落地之后才被归类，所以门禁两者
-  都要等。
+- `CHILD_RESULT` 台账行在 relay 分类时记录投递快照。分类可能早于父会话消费，
+  因此消费快照可以保持 `pending`，也可以读到 `consumed`。门禁要求恰好一行
+  `delivered`/`accepted`，同时独立要求当前 `child_run` 记录已提交 consumed revision，
+  以此证明唤醒 Turn 已读取通知。
 - lead 的唤醒 Turn 不投影到它的公开流（与 FG9e 对成员唤醒 Turn 的发现一致）；
   workflow 子 Session 的 Turn 会投影，从 `turn.accepted` 到 `turn.completed`。所以
   FG10f 切断的是子 Session 的流，而不是 lead 的流：lead 的台账在启动 Turn 之后就
