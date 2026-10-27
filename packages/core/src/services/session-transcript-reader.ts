@@ -300,6 +300,7 @@ export interface SessionRuntimeResumeState extends SessionSourcesRestoreState {
     lastCompression?: ChatCompressionRecordPayload;
     turnParentUuids: Array<string | null>;
     turnPromptIds?: Array<string | undefined>;
+    turnDaemonPromptIds?: Array<string | undefined>;
     customTitle?: string;
     titleSource?: TitleSource;
     parentSessionId?: string;
@@ -382,6 +383,7 @@ function buildManagedSessionRestoreProjection(
         )?.systemPayload as ChatCompressionRecordPayload | undefined,
         turnParentUuids: currentTurns.turnParentUuids,
         turnPromptIds: currentTurns.turnPromptIds,
+        turnDaemonPromptIds: currentTurns.turnDaemonPromptIds,
         ...(query.titleInfo.title === undefined
           ? {}
           : { customTitle: query.titleInfo.title }),
@@ -1639,6 +1641,7 @@ function estimateIndexCacheBytes(index: TranscriptIndex): number {
       estimateStringBytes(entry.daemonPromptId) +
       estimateStringBytes(entry.turnHint.turnParentUuid) +
       estimateStringBytes(entry.turnHint.turnPromptId) +
+      estimateStringBytes(entry.turnHint.turnDaemonPromptId) +
       estimateStringBytes(entry.turnHint.backgroundNotificationTaskId) +
       entry.segments.length * INDEX_SEGMENT_BYTES;
   }
@@ -3750,6 +3753,7 @@ export class SessionTranscriptReader {
         lastCompletedUuid: index.leafUuid,
         turnParentUuids: turnStateValue.turnParentUuids,
         turnPromptIds: turnStateValue.turnPromptIds,
+        turnDaemonPromptIds: turnStateValue.turnDaemonPromptIds,
         ...(customTitle !== undefined ? { customTitle } : {}),
         ...(titleSource !== undefined ? { titleSource } : {}),
         ...(parentSessionId !== undefined ? { parentSessionId } : {}),

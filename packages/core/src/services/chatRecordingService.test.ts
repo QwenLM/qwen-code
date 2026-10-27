@@ -1133,7 +1133,13 @@ describe('ChatRecordingService', () => {
     it('streams a new checkpoint after long history without retaining completed bodies or turn identities', async () => {
       const { service, writer, records } = managedRecorder();
       for (let index = 0; index < 1000; index++) {
-        service.recordUserMessage([{ text: `question ${index}` }]);
+        service.recordUserMessage(
+          [{ text: `question ${index}` }],
+          undefined,
+          undefined,
+          `prompt-${index}`,
+          `daemon-${index}`,
+        );
         reply(`answer ${index}`, service);
         await service.flush();
       }
@@ -1154,12 +1160,16 @@ describe('ChatRecordingService', () => {
         activeBranchRecords: unknown[];
         turnParentUuids: unknown[];
         turnPromptIds: unknown[];
+        turnDaemonPromptIds: unknown[];
         pendingBranchToolCalls: unknown[];
       };
       expect(retained.activeBranchRecords).toHaveLength(0);
       expect(retained.turnParentUuids).toHaveLength(0);
       expect(retained.turnPromptIds).toHaveLength(0);
+      expect(retained.turnDaemonPromptIds).toHaveLength(0);
       expect(retained.pendingBranchToolCalls).toHaveLength(0);
+      expect(service.getRewindTurnIndex('prompt-0')).toBe(-1);
+      expect(service.getRewindDaemonPromptId('prompt-0')).toBeUndefined();
       expect(writer.project).not.toHaveBeenCalled();
       const tail = service.getTranscriptCursor();
       expect(() => service.rewindRecording(0, { truncatedCount: 1 })).toThrow();
@@ -1181,7 +1191,9 @@ describe('ChatRecordingService', () => {
       ]);
       const { service, records } = managedRecorder([pending], {
         lastCompletedUuid: pending.uuid,
-        turnParentUuids: [],
+        turnParentUuids: [null],
+        turnPromptIds: ['old-prompt'],
+        turnDaemonPromptIds: ['old-daemon'],
         userTurnCount: 1000,
         pendingBranchToolCalls: [{ id: 'call-1', name: 'read_file' }],
         lastCompression: previous,
@@ -1208,6 +1220,12 @@ describe('ChatRecordingService', () => {
       ).toBe(1);
       expect(service.getUserTurnCount()).toBe(1000);
       expect(service.getBranchCheckpointCursor().pendingToolCalls).toEqual([]);
+      expect(service.getRewindTurnIndex('old-prompt')).toBe(-1);
+      expect(service.getRewindDaemonPromptId('old-prompt')).toBeUndefined();
+      expect(
+        (service as unknown as { turnDaemonPromptIds: unknown[] })
+          .turnDaemonPromptIds,
+      ).toHaveLength(0);
     });
 
     it('rejects a stale Managed cursor before committing a checkpoint', async () => {
@@ -1629,15 +1647,15 @@ describe('ChatRecordingService', () => {
       'resolves prompt boundaries through %s without counting automatic records',
       async (mode) => {
         if (mode === 'live') {
-          user('A', undefined, undefined, 'p1');
+          user('A', undefined, undefined, 'p1', 'daemon-A');
           svc.recordGoalRuntimeMessage('automatic', goalPermit('automatic'));
-          user('B', undefined, undefined, 'p2');
+          user('B', undefined, undefined, 'p2', 'daemon-B');
         } else {
           const records = resumedChain(
             null,
-            ['a', 'user', 'A', { promptId: 'p1' }],
+            ['a', 'user', 'A', { promptId: 'p1', daemonPromptId: 'daemon-A' }],
             ['auto', 'user', 'automatic', { subtype: 'goal_runtime' }],
-            ['b', 'user', 'B', { promptId: 'p2' }],
+            ['b', 'user', 'B', { promptId: 'p2', daemonPromptId: 'daemon-B' }],
           );
           if (mode === 'full restore') svc.rebuildTurnBoundaries(records);
           else
@@ -1646,13 +1664,18 @@ describe('ChatRecordingService', () => {
               ...collectSessionTurnState(records, 'test-session-id'),
             });
         }
+        expect(svc.getRewindDaemonPromptId('p1')).toBe('daemon-A');
+        expect(svc.getRewindDaemonPromptId('p2')).toBe('daemon-B');
+        expect(svc.getRewindDaemonPromptId('missing')).toBeUndefined();
         expect(svc.getRewindTurnIndex('p2')).toBe(1);
         expect(svc.getRewindTurnIndex('missing')).toBe(-1);
         svc.rewindRecording(1, { truncatedCount: 1 });
         expect(svc.getRewindTurnIndex('p2')).toBe(-1);
+        expect(svc.getRewindDaemonPromptId('p2')).toBeUndefined();
         expect(svc.getRewindTurnIndex('p1')).toBe(0);
         user('duplicate', undefined, undefined, 'p1');
         expect(svc.getRewindTurnIndex('p1')).toBe(-1);
+        expect(svc.getRewindDaemonPromptId('p1')).toBeUndefined();
         await svc.flush();
       },
     );

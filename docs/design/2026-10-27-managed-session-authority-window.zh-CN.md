@@ -72,6 +72,8 @@ Hook 是否有未完成工作的判断需要读取持久化 execution/occurrence
 
 Managed recorder 仅保留 tail、记录 ordinal、用户轮次数、未完成工具身份与一个压缩摘要，不保留完整分支记录或逐轮 rewind 数组。完成轮次的 checkpoint 流式读取固定 canonical 活跃链，发布前核对 cursor 到 tail 的条数。取消与 Goal 证据也跨压缩读取该链；Goal 候选及 proof 查询落在共享 owner 缓存的磁盘视图。Legacy recorder/rewind 保持原契约。CSI turn Map 只保留正在执行的工作；终态重试查询 canonical 前缀并返回原结果，不再次调用模型。
 
+恢复投影仅为选定的模型上下文携带平行的 parent、内部 prompt 与 daemon prompt 身份。这些临时数组受该上下文约束，不包含完整 canonical 历史。Managed recorder 在 activation 和 rebuild 时清空全部三组数组，记录时也不向其追加；既有 rewind 拒绝策略保持不变。Legacy 的 live、cold 及选择性分支恢复继续保留每个有效 rewind anchor 对应的 daemon 身份。
+
 当前 Harness checkpoint 只包含活跃工具（包括 settled 但结果尚未 consumed 的工具）以及既有的固定 inline tail。已完成且已消费的 tool/binding 页继续保留在 canonical 资源中。authorization 必须携带不可变历史视图，提供惰性 tool/binding 枚举、execution ID 点查，以及经过校验的条数、最大 ordinal、结算/消费摘要。execution ID 不能作为 function-call ID 的别名。视图固定 state ref、Session/Turn/prompt 和 archive 条数，后续 head 不能改变旧视图。冷验证将 page locator、身份/ordinal 唯一性和首次提交顺序落盘；热提交复用经过认证的 page proof，仅索引新页。prepared fork 只能在 canonical commit 已确定后发布。派生页缺失或损坏时从捕获的 root 重建，canonical 损坏则拒绝恢复。缓存 compact 当前视图，不缓存完整历史数组或另存 raw root。
 
 保留既有 `managed-checkpoint-paged/1` 字节格式、48 KiB/32 项页、4,096 页/64 MiB 资格限制和格式下界。新 Turn 的 `before_model` 清除当前 archive 引用，canonical 历史仍完整保留。CLI runtime owner 和 definition pin 检查流式读取完整固定视图，涵盖 inline tail 之外的 pin；pending-message 和原始回执按历史身份查询。生产消费者不通过兼容路径重构完整 tool/binding 数组。

@@ -65,7 +65,7 @@ sudo systemd-run --wait --pipe --collect \
 curl --fail http://127.0.0.1:8080/actuator/health
 ```
 
-`--check` 会实际绑定配置端口，服务运行期间运行会得到误报的失败。
+`--check` 会实际绑定配置端口，其 `workers` 行还会对上次启动遗留、仍在运行的 Runtime worker 给出警告，因此请在服务停止时运行。服务运行期间请加上 `--online`：端口相关的行改为检查服务端与 Broker 是否在监听；`workers` 行只报告已停止的服务端遗留的 worker，对持久模式的 Broker 则跳过，因为它会接管这些 worker。
 
 ## 两处 kill mode 的差异
 

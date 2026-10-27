@@ -294,10 +294,12 @@ describe('Managed Session log recording', () => {
           activeBranchRecords: unknown[];
           turnParentUuids: unknown[];
           turnPromptIds: unknown[];
+          turnDaemonPromptIds: unknown[];
         };
         expect(resident.activeBranchRecords).toHaveLength(0);
         expect(resident.turnParentUuids).toHaveLength(0);
         expect(resident.turnPromptIds).toHaveLength(0);
+        expect(resident.turnDaemonPromptIds).toHaveLength(0);
       } finally {
         await restored.closeSessionWriter();
       }
@@ -1129,6 +1131,14 @@ describe('Managed Session log recording', () => {
     expect(page.turns).toEqual([
       expect.objectContaining({ kind: 'prompt', promptId: 'daemon-prompt-1' }),
       expect.objectContaining({ kind: 'prompt', promptId: 'prompt-2' }),
+    ]);
+    const projection = await sessionService().readRestoreProjection(
+      SESSION_ID,
+      { replay: { kind: 'none' } },
+    );
+    expect(projection?.runtime.recording.turnDaemonPromptIds).toEqual([
+      'daemon-prompt-1',
+      undefined,
     ]);
   });
 

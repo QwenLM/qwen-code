@@ -182,6 +182,10 @@ class SessionRowLockOrderTest {
                             Set.of("ChildWorkspaceStore.find/3",
                                     "ChildWorkspaceStore.row/2",
                                     "Row.snapshot/0")),
+                    // WorkspaceExecutionStore.unavailable shares the local name;
+                    // both factories only construct an exception.
+                    Map.entry("ExternalStorageRegistrationStore.java",
+                            Set.of("ExternalStorageRegistrationStore.unavailable/0")),
                     // Same-package lifecycle refusals share this local name;
                     // both factories only construct an exception.
                     Map.entry("HarnessPlacementStore.java",
