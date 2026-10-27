@@ -29,13 +29,6 @@ export interface OtherWorkspaceSessionsResult {
    */
   loading: boolean;
   /**
-   * True while any workspace the fan-out actually queried can't prove a
-   * session is gone (see `notReadyCwds`). Consulted only while the hook is
-   * enabled — a disabled fan-out (single or workspace-locked split) has no
-   * other-workspace concern at all.
-   */
-  degraded: boolean;
-  /**
    * The workspaces the fan-out is actually querying (the daemon's listed
    * non-primary trusted workspaces). Empty while the hook is disabled or the
    * daemon lists none. Consumers that prune panes must reason over this set
@@ -133,11 +126,11 @@ export function useOtherWorkspaceSessions(
   // stale-retained after a failed refresh) and complete (not truncated, no
   // nextCursor, live merge intact). Everything else — never landed (whatever
   // the reason), errored-but-retained, incomplete — is "not ready".
-  const { degraded, notReadyCwds } = useMemo(() => {
+  const notReadyCwds = useMemo(() => {
     if (!enabled) {
       // A disabled fan-out sees no other workspace at all: it proves nothing
-      // about any of them, but it has no query to be degraded by.
-      return { degraded: false, notReadyCwds: [] as string[] };
+      // about any of them, but it has no query that could be not-ready.
+      return [] as string[];
     }
     const notReady: string[] = [];
     snapshots.forEach((snapshot, index) => {
@@ -153,7 +146,7 @@ export function useOtherWorkspaceSessions(
         page.liveMergeFailed !== true;
       if (!ready) notReady.push(cwd);
     });
-    return { degraded: notReady.length > 0, notReadyCwds: notReady };
+    return notReady;
   }, [enabled, queries, snapshots]);
   const store = useMemo(() => getSessionCatalogStore(client), [client]);
   const reload = useCallback(async () => {
@@ -161,5 +154,5 @@ export function useOtherWorkspaceSessions(
     await Promise.allSettled(queries.map((query) => store.refresh(query)));
   }, [queries, store]);
 
-  return { sessions, loading, degraded, queriedCwds, notReadyCwds, reload };
+  return { sessions, loading, queriedCwds, notReadyCwds, reload };
 }

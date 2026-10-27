@@ -65,25 +65,30 @@ import styles from './SplitView.module.css';
 const MAX_PANES = MAX_SPLIT_PANES;
 
 // A deterministic 409 that is not the not-found answer: the daemon knows the
-// id but refuses to serve it as a standalone session (for example, it belongs
-// to a workspace). The pane is kept on this outcome — the id exists
-// somewhere — and the verdict is cached so the round stops re-probing it.
+// id but refuses to serve it as a standalone session (a session-id case
+// conflict, or a stored/live shape mismatch). The pane is kept on this
+// outcome — the id exists somewhere — and the verdict is cached so the round
+// stops re-probing it. A conflict the daemon marks `retryable` (a pending
+// deletion journal) is transient: it caches nothing, so a later round asks
+// again.
 function isStandaloneSessionConflictError(error: unknown): boolean {
   if (!(error instanceof DaemonHttpError) || error.status !== 409) {
     return false;
   }
   const body: unknown = error.body;
   if (typeof body !== 'object' || body === null) return false;
+  const record = body as Record<string, unknown>;
   return (
-    (body as Record<string, unknown>)['code'] === 'standalone_session_conflict'
+    record['code'] === 'standalone_session_conflict' &&
+    record['retryable'] !== true
   );
 }
 
 /**
  * Reports, from inside a pane's own provider, the moment the connection
  * parks on the daemon's terminal `session_archived` answer (409). SplitView
- * consumes it as the one per-pane signal it may act on while the catalog
- * page is incomplete, where list-based inference is off the table.
+ * acts on it whether or not the catalog page is complete: it is the pane's
+ * own authoritative answer.
  */
 function TerminalArchivedReporter({
   sessionId,
@@ -94,8 +99,9 @@ function TerminalArchivedReporter({
 }) {
   const { connection } = useSession();
   const archived =
-    connection.status === 'error' &&
-    isSessionArchivedHttpError(connection.error);
+    connection.sessionArchived === true &&
+    connection.status === 'disconnected' &&
+    connection.sessionId === undefined;
   useEffect(() => {
     if (!archived) return;
     onReport(sessionId, true);
@@ -213,6 +219,15 @@ export function SplitView({
   const { t } = useI18n();
   const connection = useConnection();
   const currentSessionId = connection.sessionId;
+  // The provider clears `connection.sessionId` when the current session parks
+  // on a terminal answer (archived, deleted). The seed pane must keep its
+  // prune exemption and its workspace through that park, so it is keyed on
+  // the last defined id.
+  const seedSessionIdRef = useRef(currentSessionId);
+  if (currentSessionId !== undefined) {
+    seedSessionIdRef.current = currentSessionId;
+  }
+  const seedSessionId = seedSessionIdRef.current;
   const organizationEnabled =
     connection.capabilities?.features?.includes(SESSION_ORGANIZATION_FEATURE) ??
     false;
@@ -302,8 +317,8 @@ export function SplitView({
     otherNotReadyCwds,
   ]);
   // Sessions a pane's own provider has already answered terminal: parked on
-  // the daemon's 409 session_archived. The one per-pane signal SplitView may
-  // act on while the catalog page is incomplete.
+  // the daemon's 409 session_archived. Authoritative per pane, so it prunes
+  // whether or not the catalog page is complete.
   const [terminalArchivedIds, setTerminalArchivedIds] = useState<
     ReadonlySet<string>
   >(new Set());
@@ -415,14 +430,15 @@ export function SplitView({
   const paneIdsRef = useRef(paneIds);
   paneIdsRef.current = paneIds;
   // Probe verdicts per session id, recorded for the lifetime of the pane set.
-  // Only definitive outcomes are recorded: a successful probe (the id is a
-  // live standalone session), a not-found answer (it is not one — a workspace
-  // id is never a standalone session), and a deterministic conflict 409 (the
-  // daemon knows the id but refuses to serve it standalone — keep the pane
-  // and stop re-probing). A transient failure records nothing, so the next
-  // round re-probes. Without the cache, every catalog commit (the 5s live-
-  // state poll, every invalidation) would re-ask the daemon a question whose
-  // answer cannot change.
+  // Only definitive outcomes are recorded: a successful probe of a live
+  // standalone session, a not-found or archived answer (nothing a pane can
+  // load), and a non-retryable conflict 409 (the daemon knows the id but
+  // refuses to serve it standalone — keep the pane and stop re-probing). A
+  // transient failure, including a retryable conflict, records nothing, so
+  // the next round re-probes. A pane's own terminal answer is checked before
+  // this cache, so a cached verdict never outvotes it. Without the cache,
+  // every catalog commit (the 5s live-state poll, every invalidation) would
+  // re-ask the daemon a question whose answer cannot change.
   const probeVerdictsRef = useRef(
     new Map<string, 'alive' | 'absent' | 'conflict'>(),
   );
@@ -517,15 +533,11 @@ export function SplitView({
         if (known) map.set(id, known.workspaceCwd);
       }
     }
-    if (
-      currentSessionId &&
-      connection.workspaceCwd &&
-      !map.has(currentSessionId)
-    ) {
-      map.set(currentSessionId, connection.workspaceCwd);
+    if (seedSessionId && connection.workspaceCwd && !map.has(seedSessionId)) {
+      map.set(seedSessionId, connection.workspaceCwd);
     }
     return map;
-  }, [allSessions, currentSessionId, connection.workspaceCwd, paneIds]);
+  }, [allSessions, seedSessionId, connection.workspaceCwd, paneIds]);
 
   const addPane = useCallback(
     (sessionId: string) => {
@@ -598,44 +610,45 @@ export function SplitView({
   // page never landed is not proof of removal — a session may simply be
   // missing from what we saw. A pane whose workspace the daemon no longer
   // advertises is outside the catalog's coverage entirely: it is a candidate
-  // for the standalone probe, never for direct pruning. The current session
-  // is never pruned: it is the seed pane. Standalone panes (deep-linked)
-  // never appear in a workspace list: probe them and keep them on any
-  // non-not-found outcome — a transient probe failure must not close a live
-  // pane. While the page is incomplete, the only per-pane signal SplitView
-  // may act on is a pane's own provider parking on the terminal
-  // `session_archived` answer.
+  // for the standalone probe, never for direct pruning. The seed pane (the
+  // current session) is never pruned. Standalone panes (deep-linked) never
+  // appear in a workspace list: probe them and keep them on any non-not-found
+  // outcome — a transient probe failure must not close a live pane. A pane
+  // whose own provider parked on the terminal `session_archived` answer is
+  // pruned on that answer alone, whatever the page state.
   useEffect(() => {
     if (activeSessionPage === undefined || otherSessionsLoading) return;
-    const primaryIncomplete =
+    const terminalIds = paneIds.filter(
+      (id) => id !== seedSessionId && terminalArchivedIds.has(id),
+    );
+    const listInferenceOff =
       activeSessionTruncated ||
       activeSessionNextCursor !== undefined ||
-      activeSessionLiveMergeFailed;
-    if (
-      primaryIncomplete ||
+      activeSessionLiveMergeFailed ||
       activeSessionError !== undefined ||
-      activeSessionStale
-    ) {
-      // List-based inference is off the table, but a pane's own provider
-      // parked on terminal session_archived is an authoritative answer.
-      const terminalStale = paneIds.filter(
-        (id) => id !== currentSessionId && terminalArchivedIds.has(id),
-      );
-      if (terminalStale.length === 0) return;
-      const next = paneIds.filter((id) => !terminalStale.includes(id));
+      activeSessionStale;
+    const staleIds = listInferenceOff
+      ? []
+      : paneIds.filter((id) => {
+          if (id === seedSessionId || terminalArchivedIds.has(id)) {
+            return false;
+          }
+          if (knownSessionIds.has(id)) return false;
+          const cwd = workspaceCwdById.get(id);
+          // A pane of unknown workspace (cold mount, deep link) is settled
+          // only while every fan-out workspace can prove absence: the probe's
+          // not-found means "not a standalone session", which a live
+          // workspace session answers too.
+          if (cwd === undefined) return otherNotReadyCwds.length === 0;
+          return provenCwds.has(cwd);
+        });
+    if (staleIds.length === 0) {
+      if (terminalIds.length === 0) return;
+      const next = paneIds.filter((id) => !terminalIds.includes(id));
       if (sessionIdsControlled) onPanesChange?.(next);
       else setStatePaneIds(next);
       return;
     }
-    const staleIds = paneIds.filter((id) => {
-      if (id === currentSessionId) return false;
-      if (knownSessionIds.has(id)) return false;
-      const cwd = workspaceCwdById.get(id);
-      // Unknown cwd (cold mount) stays a candidate — covered by the probe
-      // and the catalog, as before.
-      return cwd === undefined || provenCwds.has(cwd);
-    });
-    if (staleIds.length === 0) return;
     let cancelled = false;
     const standaloneSessionsEnabled =
       connection.capabilities?.features?.includes(
@@ -663,10 +676,20 @@ export function SplitView({
           } else {
             const probe = (async () => {
               try {
-                await workspace.client.getStandaloneSession(id);
-                probeVerdictsRef.current.set(id, 'alive');
+                const lookup = await workspace.client.getStandaloneSession(id);
+                // An archived standalone session still answers 200 with its
+                // summary: readable, but nothing a pane can load.
+                probeVerdictsRef.current.set(
+                  id,
+                  'isArchived' in lookup && lookup.isArchived === true
+                    ? 'absent'
+                    : 'alive',
+                );
               } catch (error) {
-                if (isStandaloneSessionNotFoundError(error)) {
+                if (
+                  isStandaloneSessionNotFoundError(error) ||
+                  isSessionArchivedHttpError(error)
+                ) {
                   probeVerdictsRef.current.set(id, 'absent');
                 } else if (isStandaloneSessionConflictError(error)) {
                   probeVerdictsRef.current.set(id, 'conflict');
@@ -683,7 +706,7 @@ export function SplitView({
           if (settled === 'absent') toPrune.push(id);
         }),
       );
-      if (cancelled || toPrune.length === 0) return;
+      if (cancelled) return;
       // The probes may have taken a moment: re-check against the freshest
       // pane set and catalog before removing, so a re-unarchived session
       // survives the round trip. paneIdsRef tracks the prop-derived set in
@@ -691,7 +714,9 @@ export function SplitView({
       // parent just closed.
       const currentPaneIds = paneIdsRef.current;
       const next = currentPaneIds.filter(
-        (id) => !toPrune.includes(id) || knownSessionIdsRef.current.has(id),
+        (id) =>
+          !terminalIds.includes(id) &&
+          (!toPrune.includes(id) || knownSessionIdsRef.current.has(id)),
       );
       if (next.length === currentPaneIds.length) return;
       if (sessionIdsControlled) onPanesChange?.(next);
@@ -712,8 +737,9 @@ export function SplitView({
     paneIds,
     knownSessionIds,
     workspaceCwdById,
-    currentSessionId,
+    seedSessionId,
     terminalArchivedIds,
+    otherNotReadyCwds,
     connection.capabilities,
     workspace.client,
     sessionIdsControlled,

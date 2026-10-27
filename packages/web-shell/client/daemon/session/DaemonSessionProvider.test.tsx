@@ -17981,6 +17981,9 @@ describe('DaemonSessionProvider', () => {
     // session-deleted empty state, it shows the archived error.
     expect(connection?.missingSession).not.toBe(true);
     expect(connection?.sessionId).toBeUndefined();
+    // The structured signal a Split View pane reports from: `error` is a
+    // display string, so the archived park must be readable without it.
+    expect(connection?.sessionArchived).toBe(true);
     // Terminal: the reconnect loop stops instead of hammering the daemon
     // with 409s forever.
     expect(eventsCalls).toBe(1);
@@ -18034,6 +18037,7 @@ describe('DaemonSessionProvider', () => {
     // A generic 409 can clear on its own, so the provider keeps retrying.
     expect(eventsCalls).toBeGreaterThanOrEqual(2);
     expect(connection?.errorStatus).toBe(409);
+    expect(connection?.sessionArchived).not.toBe(true);
   });
 
   it('restores the workspace reasoning preview after an auth failure clears the stream', async () => {

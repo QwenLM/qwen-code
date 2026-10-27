@@ -2212,6 +2212,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 error: undefined,
                 errorStatus: undefined,
                 missingSession: false,
+                sessionArchived: undefined,
                 loadingTranscript: true,
               }));
             }
@@ -4223,6 +4224,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               error: undefined,
               errorStatus: undefined,
               missingSession: false,
+              sessionArchived: undefined,
             }));
             return;
           }
@@ -4542,6 +4544,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               // but they also must not clear one confirmed by load/heartbeat.
               missingSession:
                 missingLoadedSession || current.missingSession === true,
+              sessionArchived: isSessionArchivedHttpError(error) || undefined,
               capabilities: capabilities ?? current.capabilities,
               loadingTranscript: undefined,
               catchingUp: undefined,
@@ -4614,6 +4617,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               current.errorStatus,
             ),
             missingSession: false,
+            sessionArchived: undefined,
             loadingTranscript: undefined,
           }));
         }

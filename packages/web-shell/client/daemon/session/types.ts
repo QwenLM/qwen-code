@@ -161,6 +161,11 @@ export interface DaemonConnectionState {
   errorStatus?: number;
   /** True only when the server confirmed the current session is missing. */
   missingSession?: boolean;
+  /**
+   * True while the connection is parked on the daemon's terminal 409
+   * `session_archived` answer for the session it tried to load.
+   */
+  sessionArchived?: boolean;
 }
 
 export interface DaemonReasoningControls {

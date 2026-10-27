@@ -97,9 +97,8 @@ describe('useOtherWorkspaceSessions', () => {
     expect(latest.sessions).toEqual([]);
     expect(listWorkspaceSessionsPage).not.toHaveBeenCalled();
     // A disabled fan-out certifies nothing about the other workspaces: it must
-    // not report itself degraded (that would block every prune in a
+    // not report any cwd not-ready (that would block every prune in a
     // workspace-locked split).
-    expect(latest.degraded).toBe(false);
     expect(latest.loading).toBe(false);
     expect(latest.notReadyCwds).toEqual([]);
     expect(latest.queriedCwds).toEqual([]);
@@ -218,7 +217,7 @@ describe('useOtherWorkspaceSessions', () => {
     expect(latest.sessions.map((s) => s.sessionId)).toEqual(['c1']);
   });
 
-  it('reports a failed first fetch as settled-but-degraded, then settles once the retry lands', async () => {
+  it('reports a failed first fetch as settled-but-not-ready, then settles once the retry lands', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.useFakeTimers();
     try {
@@ -234,10 +233,10 @@ describe('useOtherWorkspaceSessions', () => {
       render();
       await flush();
       // The first fetch failed: the workspace is settled (not in flight), so
-      // `loading` must NOT be pinned — but it is degraded (errored with no
+      // `loading` must NOT be pinned — but it is not-ready (errored with no
       // page), so a consumer must not trust an absence from its list.
       expect(latest.loading).toBe(false);
-      expect(latest.degraded).toBe(true);
+      expect(latest.notReadyCwds).toEqual(['/b']);
       expect(latest.sessions).toEqual([]);
       // Advance past the store's error-retry window: it re-fetches /b and the
       // retry lands a page, so the fan-out can prove absence again.
@@ -246,7 +245,7 @@ describe('useOtherWorkspaceSessions', () => {
       });
       await flush();
       await flush();
-      expect(latest.degraded).toBe(false);
+      expect(latest.notReadyCwds).toEqual([]);
       expect(latest.loading).toBe(false);
       expect(latest.sessions.map((s) => s.sessionId)).toEqual(['b1']);
     } finally {
@@ -269,7 +268,6 @@ describe('useOtherWorkspaceSessions', () => {
     // though its sessions landed.
     expect(latest.queriedCwds).toEqual(['/b']);
     expect(latest.notReadyCwds).toEqual(['/b']);
-    expect(latest.degraded).toBe(true);
     expect(latest.loading).toBe(false);
     expect(latest.sessions.map((s) => s.sessionId)).toEqual(['b1']);
   });
@@ -286,7 +284,6 @@ describe('useOtherWorkspaceSessions', () => {
     await flush();
     expect(latest.queriedCwds).toEqual(['/b']);
     expect(latest.notReadyCwds).toEqual(['/b']);
-    expect(latest.degraded).toBe(true);
   });
 
   it('treats a fan-out page whose live merge failed as not-ready for its cwd', async () => {
@@ -301,7 +298,6 @@ describe('useOtherWorkspaceSessions', () => {
     await flush();
     expect(latest.queriedCwds).toEqual(['/b']);
     expect(latest.notReadyCwds).toEqual(['/b']);
-    expect(latest.degraded).toBe(true);
   });
 
   it('treats a never-landed fan-out page as not-ready, then ready once it lands', async () => {
@@ -318,12 +314,10 @@ describe('useOtherWorkspaceSessions', () => {
     render();
     await flush();
     // The page never landed: absence from the (empty) list proves nothing.
-    expect(latest.degraded).toBe(true);
     expect(latest.notReadyCwds).toEqual(['/b']);
     expect(latest.loading).toBe(true);
     resolveB({ sessions: [session('b1', '/b')] });
     await flush();
-    expect(latest.degraded).toBe(false);
     expect(latest.notReadyCwds).toEqual([]);
     expect(latest.sessions.map((s) => s.sessionId)).toEqual(['b1']);
   });
@@ -342,7 +336,6 @@ describe('useOtherWorkspaceSessions', () => {
     render();
     await flush();
     // A fresh, complete page: absence can be proven.
-    expect(latest.degraded).toBe(false);
     expect(latest.notReadyCwds).toEqual([]);
     // A failed refresh retains the page but marks it stale: it is no longer a
     // fresh answer from the daemon, so absence from it proves nothing.
@@ -350,9 +343,31 @@ describe('useOtherWorkspaceSessions', () => {
       await latest.reload();
     });
     await flush();
-    expect(latest.degraded).toBe(true);
     expect(latest.notReadyCwds).toEqual(['/b']);
     expect(latest.sessions.map((s) => s.sessionId)).toEqual(['b1']);
     warn.mockRestore();
+  });
+
+  it('treats a fan-out page mid-refresh as not-ready for its cwd', async () => {
+    capabilities = {
+      workspaces: [ws('/w', true, true), ws('/b', false, true)],
+    };
+    let calls = 0;
+    listWorkspaceSessionsPage.mockImplementation(() => {
+      calls += 1;
+      if (calls === 1)
+        return Promise.resolve({ sessions: [session('b1', '/b')] });
+      return new Promise(() => {});
+    });
+    render();
+    await flush();
+    expect(latest.notReadyCwds).toEqual([]);
+    // The store marks the retained page stale the moment a refresh starts,
+    // with no error yet: absence from it proves nothing until it lands.
+    act(() => {
+      void latest.reload();
+    });
+    expect(latest.notReadyCwds).toEqual(['/b']);
+    expect(latest.sessions.map((s) => s.sessionId)).toEqual(['b1']);
   });
 });
