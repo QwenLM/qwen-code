@@ -92,6 +92,14 @@ const TEXT_TRUNCATED_SUFFIX = '\n[truncated]\n';
  */
 const MAX_EMBEDDED_RESOURCE_BYTES = 256 * 1024;
 /**
+ * Real-JSON-byte headroom for the minimal-skeleton fallback. A resource the
+ * skeleton cascade sized exactly to the ceiling leaves no room for a distinct
+ * sibling's display skeleton, so the fallback admits that fixed-size identity
+ * within the retention invariant's 4096-byte block allowance.
+ */
+const MAX_EMBEDDED_RESOURCE_MINIMAL_AGGREGATE_BYTES =
+  MAX_EMBEDDED_RESOURCE_BYTES + 4096;
+/**
  * Estimate-unit bound on one retained resource's non-text payload
  * (`estimateRetainedBytes`, with the separately bounded text arm excluded).
  * The byte ceiling alone cannot bound what a scalar flood pins on the heap:
@@ -3074,8 +3082,10 @@ function selectEmbeddedResourceForAdmission(
       ...candidate,
       resource: { ...candidate.resource, text: '' },
     });
+    const minimalAggregate = aggregate(minimal);
     if (
-      aggregate(minimal).estimate <= MAX_EMBEDDED_RESOURCE_AGGREGATE_ESTIMATE
+      minimalAggregate.bytes <= MAX_EMBEDDED_RESOURCE_MINIMAL_AGGREGATE_BYTES &&
+      minimalAggregate.estimate <= MAX_EMBEDDED_RESOURCE_AGGREGATE_ESTIMATE
     ) {
       return { value: minimal, degraded: true };
     }

@@ -947,6 +947,47 @@ describe('daemon embedded text resources', () => {
     expect(resourceJsonBytes).toBeLessThanOrEqual(256 * 1024 + 4096);
   });
 
+  it('drops a minimal skeleton whose byte sum still exceeds the per-block ceiling', () => {
+    // R22-1: three conforming resources fold into one block. The first two
+    // carry 100,000-char ASCII texts (~100 KB of real JSON each), the third
+    // a 100,012-char non-ASCII uri with empty text (~200 KB). The block's
+    // byte sum (~400 KB) exceeds the ceiling, but `baseBytes` still fits, so
+    // the minimal-skeleton fallback admitted the third on the estimate arm
+    // alone and pinned the overage permanently: the newest block is never
+    // evicted, and admission is the only gate that can bound it.
+    const maxRetainedBytes = 1024 * 1024;
+    const store = createDaemonTranscriptStore({ now: 1, maxRetainedBytes });
+    const textResource = (uri: string, text: string) => ({
+      type: 'resource',
+      resource: { uri, text },
+    });
+    store.dispatch([
+      normalizeDaemonEvent(
+        frame(textResource('context://a', 'a'.repeat(100_000))),
+      )[0]!,
+      normalizeDaemonEvent(
+        frame(textResource('context://b', 'b'.repeat(100_000))),
+      )[0]!,
+      normalizeDaemonEvent(
+        frame(textResource(`context://c/${'\u00e9'.repeat(100_000)}`, '')),
+      )[0]!,
+    ]);
+
+    const block = store
+      .getSnapshot()
+      .blocks.find((entry) => entry.kind === 'user');
+    if (!block || block.kind !== 'user') {
+      throw new Error('expected one retained user block');
+    }
+    const resourceJsonBytes = block.embeddedResources!.reduce(
+      (sum, entry) =>
+        sum + new TextEncoder().encode(JSON.stringify(entry)).length,
+      0,
+    );
+    expect(resourceJsonBytes).toBeLessThanOrEqual(256 * 1024 + 4096);
+    expect(block.embeddedResources).toHaveLength(2);
+  });
+
   it('evicts the older block once retained resource charges cross the byte budget', () => {
     // R11-2: the block charge must see what a resource pins on the heap. A
     // `_meta` of 16,000 empty objects is ~48 KB of real JSON — inside both
