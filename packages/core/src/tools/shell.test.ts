@@ -1568,6 +1568,23 @@ describe('ShellTool', () => {
         expect(result.llmContent).toContain('sed edit applied');
       });
 
+      it('preserves CRLF metadata when dot consumes carriage returns', async () => {
+        const meta = { ...sedMeta(), lineEnding: 'crlf' };
+        mockFileSystemService.readTextFile.mockResolvedValue({
+          content: 'key=old\r\nk2=v\r\n',
+          _meta: meta,
+        });
+
+        await applySed("sed -i 's/=.*$/=new/' file.txt");
+
+        expect(mockFileSystemService.writeTextFile).toHaveBeenCalledWith({
+          path: expectedSedFilePath,
+          content: 'key=new\nk2=new\n',
+          toolWriteOrigin: 'shell_sed_edit',
+          _meta: meta,
+        });
+      });
+
       it('does not write when a simulated sed edit makes no changes', async () => {
         mockFileSystemService.readTextFile.mockResolvedValue(sedFile());
 
