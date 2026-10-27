@@ -1237,27 +1237,46 @@ jobs:
         env:
           LINT_HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
         run: |-
-          # Blobless: `Report test growth` may already have fetched the merge
-          # base with --filter=blob:none, and a plain fetch then dies resolving
-          # thin-pack deltas against blobs this checkout lacks. lint-scope
-          # reads only commits and trees.
+          # Blobless: an earlier blobless merge-base fetch leaves this
+          # checkout without those blobs, and lint-scope reads only commits and
+          # trees anyway.
           partial=(-c extensions.partialClone=origin -c remote.origin.promisor=true)
           git "${partial[@]}" fetch --no-tags --depth=100 --filter=blob:none \
             origin "${LINT_BASE_SHA}" "${LINT_HEAD_SHA}"
-          # Deepen until Git can prove the merge base. A fixed 100-commit
-          # window expires in about a day at this merge rate, after which every
-          # longer-lived PR silently paid for a full scan; each deepen is
-          # blobless, so the extra transfer is trees, not the whole pack.
+          # Match lint-scope's merge-base and shallow-boundary checks.
+          # Ambiguity stops deepening but still announces full-lint fallback.
+          history_usable() {
+            local merge_base above shallow
+            merge_base="$(git merge-base --all "${LINT_BASE_SHA}" HEAD 2>/dev/null)" || return 1
+            case "${merge_base}" in
+              '') return 1 ;;
+              *$'\n'*) return 2 ;;
+            esac
+            [ "$(git rev-parse --is-shallow-repository)" = 'true' ] || return 0
+            shallow="$(git rev-parse --git-path shallow)"
+            above="$(git rev-list "${merge_base}..HEAD" "${merge_base}..${LINT_BASE_SHA}")" || return 1
+            ! grep -qxF -f "${shallow}" <<< "${above}"
+          }
+          deepens=0
+          reason='deepen cap reached'
           for _attempt in 1 2 3; do
-            if git merge-base --all "${LINT_BASE_SHA}" HEAD >/dev/null 2>&1; then
-              break
-            fi
+            state=0
+            history_usable || state=$?
+            case "${state}" in 0|2) break ;; esac
             git "${partial[@]}" fetch --no-tags --deepen=300 --filter=blob:none \
-              origin "${LINT_BASE_SHA}" "${LINT_HEAD_SHA}" || break
+              origin "${LINT_BASE_SHA}" "${LINT_HEAD_SHA}" || { reason='deepen fetch aborted'; break; }
+            deepens=$((deepens + 1))
           done
-          # Recorded on the remote by the filtered fetch; later fetches in this
-          # checkout must stay ordinary.
+          # Later fetches in this checkout must stay ordinary.
           git config --unset remote.origin.partialclonefilter || true
+          state=0
+          history_usable || state=$?
+          if [ "${state}" != 0 ]; then
+            [ "${state}" != 2 ] || reason='ambiguous merge base'
+            message="Incremental lint history: ${deepens} deepen(s), base depth $(git rev-list --count "${LINT_BASE_SHA}") — ${reason}"
+            echo "::warning::${message}"
+            echo "- ${message}" >>"${GITHUB_STEP_SUMMARY}"
+          fi
 
       # Avoid setup-node downloads on ECS, where nodejs.org may be unreachable
       # through the egress proxy; reuse the machine's Node instead.
