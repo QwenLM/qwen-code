@@ -182,7 +182,7 @@ class ContextInstallationFaultGateTest {
         if (attester == Attester.SERVICE) {
             proxy.schedule("attest", FaultProxy.Action.PASS);
         }
-        // Read-only attestation can retry one EOF within its original budget.
+        // Neither attempt of the bounded read-only EOF retry can attest.
         proxy.schedule("attest", FaultProxy.Action.DROP);
         proxy.schedule("attest", FaultProxy.Action.DROP);
         BrokerProcess broker = rig.broker("broker", proxy,
@@ -193,6 +193,7 @@ class ContextInstallationFaultGateTest {
         BrokerProcess.Reply failed = broker.warm(HARNESS);
         assertFalse(failed.ok(), "an unattested managed worker became READY");
         assertFalse(failed.retryable());
+        assertEquals(attester == Attester.PROVISIONER ? 2 : 3, proxy.count("attest"));
         if (attester == Attester.PROVISIONER) {
             assertEquals("runtime_provision_failed", failed.code());
         } else {
