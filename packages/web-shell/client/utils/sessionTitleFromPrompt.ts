@@ -6,6 +6,10 @@ const MIN_PROMPT_TITLE_LENGTH = 4;
  * already a usable short title. Returns undefined for anything the fast-model
  * title should handle instead: multi-line prompts, long prompts, and a bare
  * slash command with no arguments.
+ *
+ * Deliberately lighter than core's `sanitizeTitle`: this runs in the browser
+ * bundle, which must not pull in the model client. Keep the trailing
+ * punctuation class in sync with that helper.
  */
 export function titleFromPrompt(text: string): string | undefined {
   const trimmed = text.trim();

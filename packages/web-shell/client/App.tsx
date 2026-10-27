@@ -11555,6 +11555,15 @@ export function App({
                   // Fall back to the first-prompt label.
                 }
               }
+              // Start the first catalog read only after the rename (or the
+              // carry) settled, so the row's first publish already carries
+              // the name instead of the session-id prefix.
+              if (catalogWorkspaceCwd) {
+                sessionCatalogController.sessionCreated(
+                  catalogWorkspaceCwd,
+                  sessionId,
+                );
+              }
               await onSessionCreatedRef.current?.(sessionId);
             },
             onSessionAllocated: (sessionId) => {
@@ -11567,10 +11576,6 @@ export function App({
                   sessionId,
                   workspaceCwd: catalogWorkspaceCwd,
                 };
-                sessionCatalogController.sessionCreated(
-                  catalogWorkspaceCwd,
-                  sessionId,
-                );
               }
             },
             getCurrentSessionId: () => connectionRef.current.sessionId,
@@ -11880,6 +11885,11 @@ export function App({
         onPreparedSubmit?: (prepared: WebShellPreparedSubmit) => void;
         onSessionAllocated?: (sessionId: string) => void;
         beforeAdmission?: () => Promise<void>;
+        /**
+         * Internal commands (settings language switches) reuse the prompt
+         * path but must not name the session they create.
+         */
+        suppressSessionTitle?: boolean;
         ownerRef?: { current: DaemonSessionOwnerSnapshot };
       },
     ) => {
@@ -12029,7 +12039,9 @@ export function App({
       try {
         allocatedSessionId = await ensureSessionForPrompt(
           opts?.onSessionAllocated,
-          titleFromPrompt(preparedPrompt),
+          opts?.suppressSessionTitle
+            ? undefined
+            : titleFromPrompt(preparedPrompt),
         );
         if (!admissionSourceIsCurrent(allocatedSessionId)) {
           restoreCancelledSubmitState();
@@ -14054,7 +14066,10 @@ export function App({
         setSelectedLanguage(nextLanguage);
         onLanguageResolvedRef.current?.(nextLanguage);
       }
-      sendPrompt(command, undefined, undefined, { ownerRef: owner })
+      sendPrompt(command, undefined, undefined, {
+        ownerRef: owner,
+        suppressSessionTitle: true,
+      })
         .then(() => {
           if (!owner.current.isCurrent()) return;
           if (effectiveScope === 'user') {
@@ -14108,7 +14123,10 @@ export function App({
       // running sessions; a plain settings write would leave both stale.
       const command = `/language output ${language.trim() || 'auto'}`;
       try {
-        await sendPrompt(command, undefined, undefined, { ownerRef: owner });
+        await sendPrompt(command, undefined, undefined, {
+          ownerRef: owner,
+          suppressSessionTitle: true,
+        });
       } catch (error) {
         if (owner.current.isCurrent()) {
           reportError(error, 'Failed to sync /language output command');
@@ -18160,6 +18178,7 @@ export function App({
                   undefined,
                   {
                     ownerRef: owner,
+                    suppressSessionTitle: true,
                     clearComposerOnPromptStart,
                     commitComposerAccepted: clearComposerOnPromptStart
                       ? commitComposerAccepted

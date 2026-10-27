@@ -26054,6 +26054,11 @@ describe('App session callbacks', () => {
     expect(
       mockSessionActions.renameSession.mock.invocationCallOrder[0],
     ).toBeLessThan(mockSessionActions.sendPrompt.mock.invocationCallOrder[0]);
+    expect(
+      mockSessionActions.renameSession.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      sessionCatalogController.sessionCreated.mock.invocationCallOrder[0],
+    );
     expect(sessionCatalogController.renamed).toHaveBeenCalledWith(
       '/workspace',
       'session-1',
@@ -26077,6 +26082,10 @@ describe('App session callbacks', () => {
     });
 
     expect(mockSessionActions.renameSession).not.toHaveBeenCalled();
+    expect(sessionCatalogController.sessionCreated).toHaveBeenCalledWith(
+      '/workspace',
+      'session-1',
+    );
   });
 
   it('discards an armed /clear carry when a shrink-fold lands on a split pane', async () => {
@@ -42747,6 +42756,62 @@ describe('App session callbacks', () => {
         (c) => c[0] === '/language output auto',
       ),
     ).toBe(true);
+  });
+
+  it('does not name a session created by a settings language change', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.displayName = undefined;
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="change-language-workspace"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(
+      mockSessionActions.sendPrompt.mock.calls.some(
+        (c) => c[0] === '/language ui en --project',
+      ),
+    ).toBe(true);
+    expect(mockSessionActions.createSession).toHaveBeenCalled();
+    expect(mockSessionActions.renameSession).not.toHaveBeenCalled();
+  });
+
+  it('does not name a session created by a settings output-language change', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.displayName = undefined;
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="change-output-language"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(
+      mockSessionActions.sendPrompt.mock.calls.some(
+        (c) => c[0] === '/language output English',
+      ),
+    ).toBe(true);
+    expect(mockSessionActions.createSession).toHaveBeenCalled();
+    expect(mockSessionActions.renameSession).not.toHaveBeenCalled();
   });
 
   it('resynchronizes the catalog when a settings prompt admission is ambiguous', async () => {
