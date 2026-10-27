@@ -463,6 +463,21 @@ describe('runBuildTest: a suite runs only the tests related to the diff', () => 
     );
   });
 
+  it('recomputes the whole-suite reason for a continuation', () => {
+    writePlan(['packages/core/package.json', 'packages/core/src/a.ts']);
+    const outPath = previousReport({
+      test: [],
+      testScope: {
+        workspaces: ['packages/core'],
+        notRun: ['packages/cli'],
+      },
+    });
+    const rep = runWith((c) => result(c), { out: outPath, resume: true });
+    expect(rep.test.length).toBeGreaterThan(0);
+    expect(rep.wholeSuiteReason).toBe('it changes packages/core/package.json');
+    expect(rep.note).toContain('because it changes packages/core/package.json');
+  });
+
   it('names a related run by its dir in the prose a continuation writes', () => {
     write('packages/core/src/b.ts');
     writePlan(['packages/core/src/a.ts', 'packages/core/src/b.ts']);
@@ -492,6 +507,44 @@ describe('runBuildTest: a suite runs only the tests related to the diff', () => 
       expect(prose).not.toContain('vitest related --run');
       expect(prose).not.toContain('src/b.ts');
     }
+  });
+
+  it('says why nothing was narrowed when a gate stopped every suite', () => {
+    manifest('packages/core', {
+      name: '@x/core',
+      scripts: { build: 'exit 0', test: 'vitest run', pretest: 'node p.js' },
+    });
+    manifest('packages/cli', {
+      name: '@x/cli',
+      dependencies: { '@x/core': '*' },
+      scripts: { build: 'exit 0', test: 'vitest run', pretest: 'node p.js' },
+    });
+    writePlan(['packages/core/src/a.ts']);
+    const rep = runWith();
+    expect(rep.relatedTests).toBeUndefined();
+    expect(rep.note).toContain(
+      "No suite's tests were narrowed to the diff (vitest related): it runs a pretest or posttest script.",
+    );
+  });
+
+  it('publishes no whole-suite reason when the budget ran no suite', () => {
+    writePlan(['packages/core/package.json', 'packages/core/src/a.ts']);
+    const rep = runWith((c) => result(c), { budget: 1 });
+    expect(rep.test).toEqual([]);
+    expect(rep.wholeSuiteReason).toBeUndefined();
+    expect(rep.note).not.toContain('Every suite ran whole');
+  });
+
+  it('keeps the scope caveat when a changed path spells "Caveat:"', () => {
+    // The whole-suite reason interpolates a PR-authored path; a note guard
+    // that greps for the marker would let the path suppress the caveat.
+    // A deleted root-level file: the reason embeds its name, and sitting
+    // outside every workspace it earns the scope its own caveat.
+    writePlan(['Caveat: notes.md', 'packages/core/src/a.ts']);
+    const rep = runWith();
+    expect(rep.wholeSuiteReason).toBe('it deletes Caveat: notes.md');
+    expect(rep.testScope?.caveat).toContain('outside every workspace');
+    expect(rep.note).toContain(rep.testScope!.caveat);
   });
 
   it('refuses to resume a report whose related command it could not have written', () => {

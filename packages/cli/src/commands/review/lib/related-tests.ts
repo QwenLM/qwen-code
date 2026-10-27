@@ -71,7 +71,7 @@ const PATH_TOKEN_RE = /^(?![-/])[\w@./-]+$/;
  */
 const WHOLE_SUITE_TRIGGER_RE = new RegExp(
   [
-    String.raw`(?:^|/)(?:pnpm-lock\.yaml|package-lock\.json|npm-shrinkwrap\.json|pnpm-workspace\.yaml|\.npmrc|\.pnpmfile\.[cm]?js)$`,
+    String.raw`(?:^|/)(?:pnpm-lock\.yaml|package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|bun\.lockb?|pnpm-workspace\.yaml|\.npmrc|\.yarnrc(?:\.yml)?|\.pnpmfile\.[cm]?js)$`,
     String.raw`(?:^|/)tsconfig[^/]*\.json$`,
     String.raw`(?:^|/)vite(?:st)?(?:\.[\w-]+)*\.(?:config|workspace|projects)\.[cm]?[jt]s$`,
     String.raw`^patches/`,
@@ -110,6 +110,9 @@ const DEFAULT_CONFIGS = ['vitest', 'vite'].flatMap((stem) =>
 
 /** A config key or shorthand that sets vitest's `root`. */
 const ROOT_KEY_RE = /\broot\s*:|[{,]\s*root\s*[,}]/;
+
+/** An inline projects list: each project may set its own root. */
+const PROJECTS_KEY_RE = /\bprojects\s*:/;
 
 /** An import of a local module: what it sets, a read of this file cannot see. */
 const LOCAL_IMPORT_RE =
@@ -231,12 +234,15 @@ function configTextOf(
 }
 
 /**
- * Whether a dependency's entry is its source: every path its manifest's
+ * Whether a dependency's entry is its source: every code path its manifest's
  * `main`/`module`/`exports` name is a TypeScript file or lies under `src/`.
  * Then a test importing it by package name is in the graph of its source.
+ * Non-code subpaths (`"./package.json"`, a stylesheet) are not what a test
+ * imports a package by, so a package that also exports them can still be
+ * source.
  */
 function entryIsSource(manifest: Manifest | undefined): boolean {
-  const paths = entryPathsOf(manifest);
+  const paths = entryPathsOf(manifest).filter((p) => SCRIPT_RE.test(p));
   return (
     paths.length > 0 &&
     paths.every((p) => /\.[cm]?tsx?$/.test(p) || /^src\//.test(p))
@@ -449,6 +455,12 @@ export interface RelatedTests {
   narrowable(dir: string): boolean;
   /** `dir`'s related run, or undefined when its whole suite runs. */
   select(dir: string): RelatedSelection | undefined;
+  /**
+   * Why `dir` runs whole, when it could have run related — the diff-level
+   * `reason`, or the gate that stopped it. Undefined for a suite with no
+   * vitest `test` script of its own.
+   */
+  bailReason(dir: string): string | undefined;
 }
 
 /**
@@ -472,36 +484,51 @@ export function relatedTests(input: RelatedTestsInput): RelatedTests {
   };
   const narrowable = (dir: string): boolean =>
     vitestRunConfig(scriptOf(manifestOf(root, dir))) !== undefined;
-  const select = (dir: string): RelatedSelection | undefined => {
-    if (reason !== undefined) return undefined;
+  // Every gate that stops a suite says so: a report that ran everything whole
+  // should name the knob an operator can act on (a cap, a pretest, a config).
+  const selectionIn = (
+    dir: string,
+  ): { selection?: RelatedSelection; bail?: string } => {
+    if (reason !== undefined) return { bail: reason };
     const manifest = manifestOf(root, dir);
     const config = vitestRunConfig(scriptOf(manifest));
-    if (config === undefined) return undefined;
+    if (config === undefined) return {};
     // `npm test` runs these around the script; `npm exec` does not.
     if (manifest?.scripts?.['pretest'] || manifest?.scripts?.['posttest']) {
-      return undefined;
+      return { bail: 'it runs a pretest or posttest script' };
     }
-    if (!sameVitest(root, dir)) return undefined;
+    if (!sameVitest(root, dir)) {
+      return { bail: 'npm exec would run a different vitest than npm test' };
+    }
     // A config named outside vitest's own names is no trigger by name.
-    if (config && changed.includes(posix.join(dir, config))) return undefined;
+    if (config && changed.includes(posix.join(dir, config))) {
+      return { bail: 'the diff changes the config its test script names' };
+    }
     const configText = configTextOf(root, dir, config);
+    if (configText === undefined) {
+      return { bail: 'its vitest config cannot be read' };
+    }
     if (
-      configText === undefined ||
       ROOT_KEY_RE.test(configText) ||
+      PROJECTS_KEY_RE.test(configText) ||
       LOCAL_IMPORT_RE.test(configText)
     ) {
-      return undefined;
+      return {
+        bail:
+          'its vitest config sets a root or projects, or imports a local ' +
+          'module',
+      };
     }
     try {
       if (readdirSync(join(root, dir)).some((n) => PROJECTS_FILE_RE.test(n))) {
-        return undefined;
+        return { bail: 'a vitest workspace or projects file sits beside it' };
       }
     } catch {
-      return undefined;
+      return { bail: 'its directory cannot be read' };
     }
     const setupNames = setupNamesOf(configText);
     if (changed.some((f) => setupNames.has(posix.basename(f)))) {
-      return undefined;
+      return { bail: 'the diff changes a setup file its config names' };
     }
     const reach = new Set(input.reachOf(dir));
     const reachable = (file: string): boolean => {
@@ -509,18 +536,29 @@ export function relatedTests(input: RelatedTestsInput): RelatedTests {
       return owner === null || owner === dir || reach.has(owner);
     };
     // A path no command can carry runs the suite whole where the suite can
-    // import it; outside every workspace it is only left off the list.
+    // import it; outside every workspace it is only left off the list. In a
+    // single-root repo every path is in reach (there is no owner to name), so
+    // only the root suite — the only one — escalates.
     const carried = changed.filter((f) => PATH_TOKEN_RE.test(f));
     if (
       changed.some(
-        (f) => !PATH_TOKEN_RE.test(f) && ownerOf(f) !== null && reachable(f),
+        (f) =>
+          !PATH_TOKEN_RE.test(f) &&
+          reachable(f) &&
+          (ownerOf(f) !== null || dir === '.'),
       )
     ) {
-      return undefined;
+      return { bail: 'a changed path cannot be carried on the command line' };
     }
-    if (carried.length > MAX_COMMAND_PATHS) return undefined;
+    if (carried.length > MAX_COMMAND_PATHS) {
+      return { bail: 'the diff changes more paths than one command can carry' };
+    }
     const byName = named();
-    if (byName === undefined) return undefined;
+    if (byName === undefined) {
+      return {
+        bail: 'the diff changes more distinct names than the lookup scans',
+      };
+    }
     const inDir = (file: string): boolean => {
       const owner = ownerOf(file);
       return dir === '.' ? owner === null : owner === dir;
@@ -545,7 +583,9 @@ export function relatedTests(input: RelatedTestsInput): RelatedTests {
         continue;
       }
       const output = buildOutputOf(root, owner, file);
-      if (output === undefined) return undefined;
+      if (output === undefined) {
+        return { bail: 'a package it imports has no build output to name' };
+      }
       built.push(...output);
     }
     const relative = (file: string): string =>
@@ -553,11 +593,21 @@ export function relatedTests(input: RelatedTestsInput): RelatedTests {
     const paths = [
       ...new Set([...carried, ...namers, ...built].map(relative)),
     ].sort();
-    if (paths.length === 0 || paths.length > MAX_COMMAND_PATHS) {
-      return undefined;
+    // Nothing related: the whole suite is the honest run, not a bail anyone
+    // can act on.
+    if (paths.length === 0) return {};
+    if (paths.length > MAX_COMMAND_PATHS) {
+      return {
+        bail: 'its related tests take more paths than one command can carry',
+      };
     }
-    if (!paths.every((p) => PATH_TOKEN_RE.test(p))) return undefined;
-    return { config, paths };
+    if (!paths.every((p) => PATH_TOKEN_RE.test(p))) {
+      return { bail: 'a related path cannot be carried on the command line' };
+    }
+    return { selection: { config, paths } };
   };
-  return { reason, narrowable, select };
+  const select = (dir: string): RelatedSelection | undefined =>
+    selectionIn(dir).selection;
+  const bailReason = (dir: string): string | undefined => selectionIn(dir).bail;
+  return { reason, narrowable, select, bailReason };
 }

@@ -49,7 +49,7 @@ import {
 } from './build-test.js';
 import { refuseUnsandboxedPhase } from './lib/sandboxed-exec.js';
 import { failingFilesOf } from './lib/failing-files.js';
-import { TEST_COMMAND_RE } from './lib/npm-toolchain.js';
+import { foundNoTests, TEST_COMMAND_RE } from './lib/npm-toolchain.js';
 
 /**
  * The exact shapes `build-test` emits for a test command — and the only ones
@@ -356,7 +356,7 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
     const baseRanNothing =
       base.exitCode === 0 &&
       baseFailingFiles.length === 0 &&
-      /No test files found/.test(base.output ?? '');
+      foundNoTests(base.output);
     const baseUnusable =
       base.timedOut ||
       baseRanNothing ||

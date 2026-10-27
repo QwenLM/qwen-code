@@ -100,8 +100,12 @@ describe('wholeSuiteReason', () => {
       'packages/a/package.json',
       'pnpm-lock.yaml',
       'package-lock.json',
+      'yarn.lock',
+      'bun.lock',
+      'bun.lockb',
       'pnpm-workspace.yaml',
       '.npmrc',
+      '.yarnrc.yml',
       '.pnpmfile.cjs',
       'packages/a/tsconfig.build.json',
       'packages/a/vitest.config.ts',
@@ -299,6 +303,91 @@ describe('relatedTests', () => {
     ]);
   });
 
+  it('runs the suite whole when the config declares projects inline', () => {
+    // vitest >= 3.2 replaced the workspace FILE with this key; a suite that
+    // collects other workspaces' tests cannot be handed this suite's seeds.
+    write(
+      'packages/core/vitest.config.ts',
+      "export default defineConfig({ test: { projects: ['../other'] } })",
+    );
+    expect(select(['packages/core/src/a.ts'], 'packages/core')).toBeUndefined();
+  });
+
+  it('runs the suite whole for a path no command can carry, root included', () => {
+    // Production hardcodes `ownerOf` to null for a single-root repo: every
+    // path is in its reach, so an uncarriable one must not be dropped.
+    write('package.json', JSON.stringify({ scripts: { test: 'vitest run' } }));
+    write('docs/a b.md');
+    const single = relatedTests({
+      root,
+      changed: ['docs/a b.md', 'docs/guide.md'],
+      renamedFrom: [],
+      ownerOf: () => null,
+      reachOf: (d) => [d],
+    });
+    expect(single.select('.')).toBeUndefined();
+    expect(single.bailReason('.')).toContain('cannot be carried');
+    // In a multi-root repo the same root-level path reaches only the root
+    // suite; a workspace suite keeps its selection.
+    expect(
+      select(['packages/core/src/a.ts', 'docs/a b.md'], '.'),
+    ).toBeUndefined();
+    expect(
+      select(['packages/core/src/a.ts', 'docs/a b.md'], 'packages/cli'),
+    ).toBeDefined();
+  });
+
+  it('never carries a path a shell or vitest would read differently', () => {
+    const hostile = [
+      'packages/core/src/a b.ts',
+      'packages/core/src/x$(id).ts',
+      'packages/core/-flag.ts',
+      'packages/core/src/q"uote.ts',
+    ];
+    for (const file of hostile) {
+      write(file);
+      expect(select([file], 'packages/core')).toBeUndefined();
+    }
+  });
+
+  it('treats a package whose runtime entry is source as source', () => {
+    // Exporting the manifest is not being built: `./package.json` decides
+    // nothing about where the module's code lives.
+    manifest('packages/core', {
+      scripts: { test: 'vitest run' },
+      exports: { '.': './src/index.ts', './package.json': './package.json' },
+    });
+    expect(select(['packages/core/src/a.ts'], 'packages/cli')?.paths).toEqual([
+      '../core/src/a.ts',
+    ]);
+  });
+
+  it('accepts a vitest linked between the workspace and the root', () => {
+    write(
+      'packages/group/member/package.json',
+      JSON.stringify({ scripts: { test: 'vitest run' } }),
+    );
+    write('packages/group/member/src/m.ts');
+    write('packages/group/member/src/m.test.ts');
+    const bin = join(root, 'packages/group/node_modules/.bin');
+    mkdirSync(bin, { recursive: true });
+    const link = join(bin, 'vitest');
+    symlinkSync(join(root, 'node_modules/vitest/vitest.mjs'), link);
+    const own = relatedTests({
+      root,
+      changed: ['packages/group/member/src/m.ts'],
+      renamedFrom: [],
+      ownerOf: (file) => /^packages\/group\/member/.exec(file)?.[0] ?? null,
+      reachOf: (d) => [d],
+    });
+    expect(own.select('packages/group/member')).toBeDefined();
+    // A different vitest at that level is the one npm exec would not run.
+    rmSync(link);
+    write('vendor/vitest.mjs');
+    symlinkSync(join(root, 'vendor/vitest.mjs'), link);
+    expect(own.select('packages/group/member')).toBeUndefined();
+  });
+
   it('hands a suite the build output of a package it imports by name', () => {
     // cli imports core by package name: its graph holds core's `dist`.
     manifest('packages/core', {
@@ -432,8 +521,13 @@ describe('relatedTests', () => {
   });
 
   it('runs the suite whole beside a vitest workspace or projects file', () => {
-    write('packages/core/vitest.workspace.ts', 'export default []');
-    expect(select(['packages/core/src/a.ts'], 'packages/core')).toBeUndefined();
+    for (const name of ['vitest.workspace.ts', 'vitest.projects.ts']) {
+      write(`packages/core/${name}`, 'export default []');
+      expect(
+        select(['packages/core/src/a.ts'], 'packages/core'),
+      ).toBeUndefined();
+      rmSync(join(root, 'packages/core', name));
+    }
   });
 
   it('reads the config the script names, and runs whole when it changes or is missing', () => {

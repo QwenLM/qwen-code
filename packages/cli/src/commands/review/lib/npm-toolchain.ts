@@ -96,6 +96,16 @@ export function relatedTestDir(command: string): string | undefined {
 }
 
 /**
+ * Whether a run found no test to run: vitest prints this and exits 0, unlike
+ * a whole suite that collects nothing (exit 1), so the exit code cannot say
+ * it. Every reader of that fact shares this predicate — one reworded message
+ * is one edit.
+ */
+export function foundNoTests(output: string | undefined): boolean {
+  return /No test files found/.test(output ?? '');
+}
+
+/**
  * The whole-suite command a related run stands in for (`npm test
  * --workspace="<dir>"`), or undefined for a command that is not one.
  */
@@ -118,6 +128,8 @@ function testCommands(
   commandFor: (dir: string) => string;
   /** Why the suites in `dirs` that could have run related ran whole. */
   wholeReason: (dirs: string[]) => string | undefined;
+  /** Why nothing in `dirs` was narrowed, when something could have been. */
+  bailReason: (dirs: string[]) => string | undefined;
 } {
   const related = relatedTests({
     root,
@@ -136,10 +148,26 @@ function testCommands(
       const command = relatedCommand(dir, selection);
       return RELATED_COMMAND_RE.test(command) ? command : testCommand(dir);
     },
+    // The diff-level reason publishes only where a suite that could have
+    // narrowed did so BECAUSE of it; a suite that could never narrow under
+    // any diff is not evidence for it.
     wholeReason: (dirs) =>
-      related.reason !== undefined && dirs.some((d) => related.narrowable(d))
+      related.reason !== undefined &&
+      dirs.some(
+        (d) =>
+          related.narrowable(d) && related.bailReason(d) === related.reason,
+      )
         ? related.reason
         : undefined,
+    bailReason: (dirs) => {
+      for (const dir of dirs) {
+        if (!related.narrowable(dir)) continue;
+        const bail = related.bailReason(dir);
+        // The diff-level reason has its own sentence.
+        if (bail !== undefined && bail !== related.reason) return bail;
+      }
+      return undefined;
+    },
   };
 }
 
@@ -149,8 +177,12 @@ const commandName = (command: string): string => {
   return dir === undefined ? command : `${dirName(dir)} (related tests)`;
 };
 
+/** An outstanding entry: a workspace dir, or a test command, as prose. */
+const outstandingName = (item: string): string =>
+  item === '.' ? dirName(item) : commandName(item);
+
 /** A dir as prose names it: the root is not a workspace. */
-const dirName = (dir: string): string =>
+export const dirName = (dir: string): string =>
   dir === '.' ? 'the root package' : dir;
 
 /**
@@ -160,6 +192,13 @@ const dirName = (dir: string): string =>
 function wholeSuiteSentence(reason: string | undefined): string {
   return reason
     ? ` Every suite ran whole, not only the tests related to the diff, because ${reason}.`
+    : '';
+}
+
+/** Why nothing was narrowed, for the note — actionable, unlike a bare timeout. */
+function narrowNoneSentence(bail: string | undefined): string {
+  return bail
+    ? ` No suite's tests were narrowed to the diff (vitest related): ${bail}.`
     : '';
 }
 
@@ -605,7 +644,7 @@ function resumeNpmToolchain(
       liveSegments.push(
         `a --resume call ran ${ranDirs.length + replaced.size} more ` +
           `command(s), ${outstanding.length} still to run: ` +
-          outstanding.map(commandName).join(', '),
+          outstanding.map(outstandingName).join(', '),
       );
     }
     // NOT an else: a resume can leave BOTH unattempted work and suites
@@ -643,11 +682,24 @@ function resumeNpmToolchain(
     ...previous.timedOut.filter((c) => !replaced.has(c)),
     ...fresh.filter((r) => r.timedOut).map((r) => r.command),
   ];
-  // Recomputed like `relatedTests`: the same diff gives the same reason.
-  const whole = commands.wholeReason([
-    ...(prevScope?.workspaces ?? previous.affected),
-    ...pendingDirs,
-  ]);
+  // Recomputed like `relatedTests`: the same diff gives the same reason, and
+  // only for a continuation that has suites in hand — a merged run with an
+  // empty `test[]` has nothing it can say ran whole.
+  const related = relatedDirs(mergedTest);
+  const whole =
+    mergedTest.length > 0
+      ? commands.wholeReason([
+          ...(prevScope?.workspaces ?? previous.affected),
+          ...pendingDirs,
+        ])
+      : undefined;
+  const notNarrowed =
+    mergedTest.length > 0 && related.length === 0
+      ? commands.bailReason([
+          ...(prevScope?.workspaces ?? previous.affected),
+          ...pendingDirs,
+        ])
+      : undefined;
   const merged: BuildTestReport = {
     ...previous,
     test: mergedTest,
@@ -680,12 +732,12 @@ function resumeNpmToolchain(
       ) +
       relatedTestsSentence(mergedTest) +
       wholeSuiteSentence(whole) +
+      narrowNoneSentence(notNarrowed) +
       (testScope?.caveat ? ` Caveat: ${testScope.caveat}.` : ''),
     ...(testScope ? { testScope } : {}),
   };
   // Read off the merged commands, not carried: a continuation's suites are
   // related or whole by the same selection, and the field names both.
-  const related = relatedDirs(mergedTest);
   if (related.length > 0) merged.relatedTests = related;
   else delete merged.relatedTests;
   if (whole) merged.wholeSuiteReason = whole;
@@ -1461,8 +1513,17 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
   }
   const related = relatedDirs(results.test);
   if (related.length > 0) results.relatedTests = related;
-  const whole = commands.wholeReason(runnableDirs);
+  // Only a suite that RAN can say why it ran whole: a call whose budget
+  // stopped before the first suite scheduled them and ran none.
+  const whole =
+    results.test.length > 0 ? commands.wholeReason(runnableDirs) : undefined;
   if (whole) results.wholeSuiteReason = whole;
+  // Nothing narrowed although a suite could have: name the gate that stopped
+  // it, or a deadline overrun reads as infrastructure with no actionable knob.
+  const notNarrowed =
+    results.test.length > 0 && related.length === 0
+      ? commands.bailReason(runnableDirs)
+      : undefined;
 
   // The test phase ran NOTHING and left work behind: stamp it. A single-root
   // run in this state writes no testScope and keeps ok: true (the build
@@ -1517,6 +1578,8 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
   // above, carries the scope precisely because the empty scope IS the answer.
   if (testScope) results.testScope = testScope;
 
+  // Structural, not a content match: a PR-authored path can contain any text.
+  let caveatAppended = false;
   if (!results.note) {
     const failed = [...results.build, ...results.test].filter(
       (r) => r.exitCode !== 0,
@@ -1558,8 +1621,12 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
       }
       testsClause +=
         relatedTestsSentence(results.test) +
-        wholeSuiteSentence(results.wholeSuiteReason);
-      if (testScope?.caveat) testsClause += ` Caveat: ${testScope.caveat}.`;
+        wholeSuiteSentence(results.wholeSuiteReason) +
+        narrowNoneSentence(notNarrowed);
+      if (testScope?.caveat) {
+        testsClause += ` Caveat: ${testScope.caveat}.`;
+        caveatAppended = true;
+      }
       // The root is not a workspace: count it separately, or a 22-member repo
       // reports "of 23" — a number in a report whose thesis is honest numbers.
       // (A single-root repo's one package IS '.', and counts as the one.)
@@ -1597,14 +1664,17 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
     if (!results.ok) {
       results.note +=
         relatedTestsSentence(results.test) +
-        wholeSuiteSentence(results.wholeSuiteReason);
+        wholeSuiteSentence(results.wholeSuiteReason) +
+        narrowNoneSentence(notNarrowed);
     }
   }
 
   // A failure note must carry the caveat too — the note is what the brief
   // renders first, and "a test failed AND the budget dropped suites" must not
-  // read as a plain failure. (The ok branch already appended it above.)
-  if (results.testScope?.caveat && !results.note.includes('Caveat:')) {
+  // read as a plain failure. (The ok branch already appended it above.) The
+  // decision is the boolean, not a search of prose: the whole-suite reason
+  // interpolates a PR-authored path, which may itself contain "Caveat:".
+  if (results.testScope?.caveat && !caveatAppended) {
     results.note += ` Caveat: ${results.testScope.caveat}.`;
   }
 
