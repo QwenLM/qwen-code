@@ -117,9 +117,6 @@ export function HotkeySetter({
           <Input
             ref={inputRef}
             readOnly
-            // Shell-level shortcut listeners skip events from this input so
-            // the chord being recorded reaches onKeyDown below.
-            data-web-shell-hotkey-capture=""
             aria-label={captureLabel}
             value={captureLabel}
             className="w-40"

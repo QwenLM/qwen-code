@@ -602,13 +602,17 @@ function isWebTerminalTarget(event: Event): boolean {
   );
 }
 
-// Open content of the shell's modal primitives (ui/dialog, ui/alert-dialog).
-// Matching the primitives rather than ARIA roles skips non-modal popovers
-// that carry role="dialog" (session/workspace details tooltips) and the
-// inline tool-approval card's role="alertdialog".
+// Open content of the shell's modal primitives (ui/dialog, ui/alert-dialog,
+// ui/drawer). Matching the primitives rather than ARIA roles skips non-modal
+// popovers that carry role="dialog" (session/workspace details tooltips) and
+// the inline tool-approval card's role="alertdialog". Every ui/drawer in the
+// shell is modal: DrawerContent always mounts its overlay, both for the
+// floating artifact panel (narrow viewport or split view, fullscreen or not)
+// and for the composer's mobile add menu.
 const OPEN_MODAL_SURFACE_SELECTOR =
   '[data-slot="dialog-content"][data-state="open"], ' +
-  '[data-slot="alert-dialog-content"][data-state="open"]';
+  '[data-slot="alert-dialog-content"][data-state="open"], ' +
+  '[data-slot="drawer-content"][data-state="open"]';
 
 // Modal confirms owned by a component (the Session Overview archive/delete
 // AlertDialog) are not in the shell's own dialog state. They portal into
@@ -19738,20 +19742,22 @@ export function App({
     closeMobileDrawer();
     openSplitView();
   }, [closeMobileDrawer, openSplitView]);
+  // The sidebar buttons' own availability gates, passed to WebShellSidebar
+  // below and shared with the view hotkeys.
+  const canOpenSessionsOverview = projectFeaturesAvailable;
+  const canOpenSplitView = isLargeScreen && projectFeaturesAvailable;
   // Each chord is live only while the sidebar offers its button (sidebar
-  // enabled, item in the footer, the button's own availability gate), so a
-  // key never opens what the host's chrome withholds and an inert chord
+  // enabled, item in the resolved footer, the button's availability gate),
+  // so a key never opens what the host's chrome withholds and an inert chord
   // leaves the key to the browser.
   const sidebarFooterItems =
     sidebarOptions.enabled && sidebarOptions.footer !== false
       ? (sidebarOptions.footer?.items ?? [])
       : [];
   const sessionsOverviewHotkeyAvailable =
-    projectFeaturesAvailable && sidebarFooterItems.includes('sessionsOverview');
+    canOpenSessionsOverview && sidebarFooterItems.includes('sessionsOverview');
   const splitViewHotkeyAvailable =
-    isLargeScreen &&
-    projectFeaturesAvailable &&
-    sidebarFooterItems.includes('splitView');
+    canOpenSplitView && sidebarFooterItems.includes('splitView');
 
   useEffect(() => {
     // View navigation hotkeys (#13175): Cmd/Ctrl+Shift+O presses the Session
@@ -19776,21 +19782,21 @@ export function App({
       }
       if (!open) return;
       // Covering surfaces keep the keyboard: a shell modal or a host
-      // interaction block (both in modalDialogOpen), the fullscreen artifact
-      // panel, a component-owned modal confirm, and the web terminal.
+      // interaction block (both in modalDialogOpen), the docked fullscreen
+      // artifact panel, a component-owned modal (dialog, confirm, drawer),
+      // and the web terminal.
       if (modalDialogOpen || artifactPanelFullscreen) return;
       if (isWebTerminalTarget(e)) return;
-      // A shortcut recorder (Live settings HotkeySetter) must receive the
-      // chord it is recording; this listener would otherwise consume it
-      // before the recorder's bubble-phase handler runs.
+      // Other editable targets — Session Overview search, session rename,
+      // settings inputs, the Live shortcut recorder — must not have the view
+      // yanked away while the user is typing, matching the codebase's
+      // isEditableTarget convention. The composer stays exempt: the chords
+      // produce no text there (issue #13175). Shadow-DOM portal hosts
+      // retarget the event to the host element, so resolve the real target.
+      const target = (e.composedPath()[0] ?? e.target) as HTMLElement | null;
       if (
-        e
-          .composedPath()
-          .some(
-            (node) =>
-              node instanceof Element &&
-              node.hasAttribute('data-web-shell-hotkey-capture'),
-          )
+        isEditableTarget(target) &&
+        !target?.closest('[data-web-shell-composer-editor]')
       ) {
         return;
       }
@@ -22197,9 +22203,9 @@ export function App({
                       }
                     : {})}
                   onOpenSessions={openSessionsOverviewFromSidebar}
-                  canOpenSessionsOverview={projectFeaturesAvailable}
+                  canOpenSessionsOverview={canOpenSessionsOverview}
                   onOpenSplitView={openSplitViewFromSidebar}
-                  canOpenSplitView={isLargeScreen && projectFeaturesAvailable}
+                  canOpenSplitView={canOpenSplitView}
                   theme={selectedTheme}
                   onThemeChange={(theme) => {
                     handleThemeChange(theme);
