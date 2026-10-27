@@ -44,6 +44,14 @@ delete process.env['SANDBOX_SET_UID_GID'];
 // pinning: tests that want the variable set it in-body.
 delete process.env['QWEN_RUNTIME_DIR'];
 
+import { EXTRACT_NOOP_SKIP_TURNS_ENV } from '@qwen-code/qwen-code-core/memory/extract-cadence.js';
+
+// The extraction-cadence experiment is default-off and its gate reads
+// process.env on every call, so an ambient export would switch it on for every
+// suite whose session schedules an extraction. Deleting rather than pinning:
+// tests that exercise the experiment stub the variable in-body.
+delete process.env[EXTRACT_NOOP_SKIP_TURNS_ENV];
+
 // Registration capacity is an OPERATOR daemon setting, and `createServeApp` /
 // `runQwenServe` read it straight from the ambient environment when no explicit
 // option or `daemonEnv` is supplied. A maintainer who exports the documented
