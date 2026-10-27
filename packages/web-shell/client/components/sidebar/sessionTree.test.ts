@@ -81,46 +81,32 @@ describe('buildSessionTree', () => {
     expect(ids(rows)).toEqual(['parent:0', 'child:1']);
   });
 
-  it('drops children whose parent is outside the page by default', () => {
-    const rows = buildSessionTree([session('orphan', 'missing'), session('a')]);
+  it('keeps a child flat when its parent is outside the page', () => {
+    const rows = buildSessionTree([
+      session('before'),
+      session('orphan', 'missing'),
+      session('a'),
+    ]);
 
-    expect(ids(rows)).toEqual(['a:0']);
-  });
-
-  it('keeps unanchored children in place when a search needs them', () => {
-    const rows = buildSessionTree(
-      [session('before'), session('orphan', 'missing'), session('a')],
-      { includeUnanchoredChildren: true },
-    );
-
+    // No sidebar list would show an unarchived child whose parent left the
+    // active catalog, so a missing anchor must not hide the row.
     expect(ids(rows)).toEqual(['before:0', 'orphan:0', 'a:0']);
     expect(rows[1]!.childCount).toBe(0);
   });
 
+  it('keeps a child flat when its parent was archived out of the page', () => {
+    const rows = buildSessionTree([session('child', 'archived-parent')]);
+
+    expect(ids(rows)).toEqual(['child:0']);
+  });
+
   it('leaves a child of an unanchored parent ungrouped instead of nesting it', () => {
-    const rows = buildSessionTree(
-      [session('middle', 'missing'), session('leaf', 'middle')],
-      { includeUnanchoredChildren: true },
-    );
+    const rows = buildSessionTree([
+      session('middle', 'missing'),
+      session('leaf', 'middle'),
+    ]);
 
     expect(ids(rows)).toEqual(['middle:0', 'leaf:0']);
-  });
-
-  it('flattens children of a parent rendered elsewhere', () => {
-    const rows = buildSessionTree(
-      [session('orphan', 'pinned-parent'), session('a')],
-      { flattenChildrenOf: new Set(['pinned-parent']) },
-    );
-
-    expect(ids(rows)).toEqual(['orphan:0', 'a:0']);
-  });
-
-  it('still hides children whose parent is merely absent', () => {
-    const rows = buildSessionTree([session('orphan', 'missing')], {
-      flattenChildrenOf: new Set(['pinned-parent']),
-    });
-
-    expect(ids(rows)).toEqual([]);
   });
 });
 

@@ -73,18 +73,12 @@ Truncation and counting follow the tree, not the raw page: the preview limit and
 each group header's count apply to rendered rows, so a collapsed parent counts as
 one row and its hidden children count as zero.
 
-Two cases fall back to the current flat behavior:
-
-- When the parent is not in the loaded page, its children have no anchor. In the
-  default list they are hidden, matching the Recent section's existing rule and
-  keeping unanchored derived rows out of the main list. During a search they
-  stay visible as flat rows, because hiding them would make a content match
-  unreachable.
-- A child whose parent is filtered out by a group's membership (the two landed
-  in different groups) is rendered flat inside the group that carries it.
-- A child whose parent moved to the Pinned section stays flat in this list: the
-  project list does not render that parent row, so nesting would hide the child
-  behind a row that lives elsewhere.
+One case falls back to the flat row: when the parent is not in the list at all —
+archived away from the active page, lifted into the Pinned section, filtered into
+another group, or outside the loaded page. The child then keeps its own row,
+because no other sidebar list would show it: the Archived query only returns
+archived sessions, and the Recent section excludes derived sessions. Hiding it
+would make a session that still exists unreachable from the sidebar.
 
 Searching expands the matched parents: when a child matches and its parent is in
 the filtered result, the parent's children are shown regardless of the stored
@@ -139,10 +133,10 @@ indented form.
   only rendered rows.
 - `view=organized` rejects `parentSessionId` (HTTP 400), which is why the design
   never fetches children separately.
-- Archiving a parent does not imply archiving its children. Because the active
-  list no longer carries the archived parent, its children have no anchor there
-  and are hidden by the default rule; they remain visible, flat, in the
-  Archived section.
+- Archiving a parent does not imply archiving its children. The archived parent
+  leaves the active page, so its still-active children fall back to flat rows
+  there and stay openable. The Archived section only carries archived sessions,
+  so it does not show them.
 - An untrusted secondary workspace keeps its read-only flat list: those rows
   render through a separate path with no hover actions and no chevron.
 
@@ -168,6 +162,8 @@ rows. The E2E plan and results live under `.qwen/e2e-tests/`.
 - Expanding a parent reveals exactly the children present in the loaded page,
   indented one level, in activity order.
 - A content search that matches only a child still shows that child.
+- Archiving only a parent leaves its still-active child reachable from the
+  sidebar list.
 - The Recent, Pinned, and Archived sections keep their current behavior.
 
 ## Open questions

@@ -4383,16 +4383,6 @@ export function WebShellSidebar({
     searchedSessions,
     searchQuery.trim().length > 0,
   );
-  // A parent pinned into its own section has no row here, so its children keep
-  // their flat rows instead of disappearing behind a row rendered elsewhere.
-  const pinnedAwayParentIds = useMemo(() => {
-    const visibleIds = new Set(filteredSessions.map((s) => s.sessionId));
-    const parents = new Set<string>();
-    for (const session of searchedSessions) {
-      if (!visibleIds.has(session.sessionId)) parents.add(session.sessionId);
-    }
-    return parents.size > 0 ? parents : undefined;
-  }, [filteredSessions, searchedSessions]);
   const channelCatalogLoaded = channelCatalogData !== undefined;
   const channelSessionSections = useMemo(
     () =>
@@ -5583,16 +5573,8 @@ export function WebShellSidebar({
   );
 
   const buildSessionTreeRows = useCallback(
-    (
-      treeSessions: readonly DaemonSessionSummary[],
-      options: { includeUnanchoredChildren: boolean },
-    ) => {
-      const rows = sessionTree.buildRows(treeSessions, {
-        includeUnanchoredChildren: options.includeUnanchoredChildren,
-        ...(pinnedAwayParentIds
-          ? { flattenChildrenOf: pinnedAwayParentIds }
-          : {}),
-      });
+    (treeSessions: readonly DaemonSessionSummary[]) => {
+      const rows = sessionTree.buildRows(treeSessions);
       return {
         rows,
         nodes: rows.map((row) => (
@@ -5604,7 +5586,7 @@ export function WebShellSidebar({
         )),
       };
     },
-    [pinnedAwayParentIds, renderSessionRow, sessionTree],
+    [renderSessionRow, sessionTree],
   );
 
   const body = useMemo(() => {
@@ -5613,11 +5595,7 @@ export function WebShellSidebar({
         editingSessionIdentity !== null ||
         showAllProjectSessions ||
         Boolean(searchQuery.trim());
-      const treeRows = sessionTree.buildRows(filteredSessions, {
-        ...(pinnedAwayParentIds
-          ? { flattenChildrenOf: pinnedAwayParentIds }
-          : {}),
-      });
+      const treeRows = sessionTree.buildRows(filteredSessions);
       const displayedRows = showAll
         ? treeRows
         : treeRows.slice(0, SIDEBAR_SESSION_PREVIEW_LIMIT);
@@ -5670,9 +5648,7 @@ export function WebShellSidebar({
     }
     if (channelSessionSections) {
       return channelSessionSections.map((section) => {
-        const tree = buildSessionTreeRows(section.sessions, {
-          includeUnanchoredChildren: true,
-        });
+        const tree = buildSessionTreeRows(section.sessions);
         return (
           <SessionGroupSection
             key={section.id}
@@ -5700,9 +5676,7 @@ export function WebShellSidebar({
     return sessionSections.map((section) => {
       const expanded = !collapsedSessionSectionIds.has(section.id);
       const group = section.group;
-      const tree = buildSessionTreeRows(section.sessions, {
-        includeUnanchoredChildren: true,
-      });
+      const tree = buildSessionTreeRows(section.sessions);
       return (
         <SessionGroupSection
           key={section.id}
@@ -5773,7 +5747,6 @@ export function WebShellSidebar({
     pinnedExpanded,
     pinnedSessions,
     buildSessionTreeRows,
-    pinnedAwayParentIds,
     reload,
     renderSessionRow,
     sessionTree,

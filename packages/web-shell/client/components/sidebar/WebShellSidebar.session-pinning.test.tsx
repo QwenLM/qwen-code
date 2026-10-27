@@ -1949,6 +1949,29 @@ describe('WebShellSidebar session tree', () => {
     ).toContain('Group child');
   });
 
+  it('keeps an unarchived child reachable after its parent is archived', async () => {
+    // Archiving only the parent removes it from the active page; the child is
+    // still active and must stay reachable from the sidebar.
+    active.sessions = [
+      makeSession('orphaned-child', {
+        displayName: 'Archived parent child',
+        parentSessionId: 'archived-parent',
+      }),
+    ];
+    active.data = active.sessions;
+
+    renderSidebar();
+    await flushSidebar();
+
+    expect(container.textContent).toContain('Archived parent child');
+    const row = [
+      ...container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ].find((candidate) =>
+      candidate.textContent?.includes('Archived parent child'),
+    );
+    expect(row?.getAttribute('data-session-tree-depth')).toBe('0');
+  });
+
   it('does not open the session when Enter is pressed on the chevron', async () => {
     primeDerived();
     renderSidebar();

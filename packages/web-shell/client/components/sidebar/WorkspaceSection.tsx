@@ -750,28 +750,10 @@ export function WorkspaceSection({
     sessions,
   ]);
   const sessionTree = useSessionTree(storageId, searchedSessions, searchActive);
-  // Rows the pinned filter lifted out of this list. A child of one of them has
-  // no parent row here, so it keeps its flat row instead of vanishing behind a
-  // parent that only the Pinned section renders.
-  const pinnedAwayParentIds = useMemo(() => {
-    if (visibleSessions.length === searchedSessions.length) return undefined;
-    const visibleIds = new Set(visibleSessions.map((s) => s.sessionId));
-    return new Set(
-      searchedSessions
-        .filter((candidate) => !visibleIds.has(candidate.sessionId))
-        .map((candidate) => candidate.sessionId),
-    );
-  }, [searchedSessions, visibleSessions]);
   const buildSessionTreeRows = (
     treeSessions: readonly DaemonSessionSummary[],
-    options: { includeUnanchoredChildren: boolean },
   ) => {
-    const rows = sessionTree.buildRows(treeSessions, {
-      includeUnanchoredChildren: options.includeUnanchoredChildren,
-      ...(pinnedAwayParentIds
-        ? { flattenChildrenOf: pinnedAwayParentIds }
-        : {}),
-    });
+    const rows = sessionTree.buildRows(treeSessions);
     return {
       rows,
       nodes: rows.map((row) => (
@@ -823,11 +805,7 @@ export function WorkspaceSection({
         childCount: 0,
         expanded: false,
       }))
-    : sessionTree.buildRows(visibleSessions, {
-        ...(pinnedAwayParentIds
-          ? { flattenChildrenOf: pinnedAwayParentIds }
-          : {}),
-      });
+    : sessionTree.buildRows(visibleSessions);
   const directSessions =
     searchActive || showAllSessions || !limitSessions
       ? directTreeRows
@@ -879,9 +857,7 @@ export function WorkspaceSection({
   ]);
 
   const ungroupedTree = groupedSessions
-    ? buildSessionTreeRows(groupedSessions.ungrouped, {
-        includeUnanchoredChildren: true,
-      })
+    ? buildSessionTreeRows(groupedSessions.ungrouped)
     : undefined;
 
   const channelSessionGroups = useMemo(
@@ -1064,9 +1040,7 @@ export function WorkspaceSection({
             ) : channelSessionGroups ? (
               <>
                 {channelSessionGroups.map((group) => {
-                  const tree = buildSessionTreeRows(group.sessions, {
-                    includeUnanchoredChildren: true,
-                  });
+                  const tree = buildSessionTreeRows(group.sessions);
                   return (
                     <SessionGroupSection
                       id={group.id}
@@ -1092,9 +1066,7 @@ export function WorkspaceSection({
             ) : groupedSessions && !channelGroupingEnabled ? (
               <>
                 {groupedSessions.sections.map(({ group, sessions }) => {
-                  const tree = buildSessionTreeRows(sessions, {
-                    includeUnanchoredChildren: true,
-                  });
+                  const tree = buildSessionTreeRows(sessions);
                   return (
                     <SessionGroupSection
                       id={`group:${group.id}`}

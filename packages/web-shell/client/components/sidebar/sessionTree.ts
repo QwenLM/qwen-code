@@ -15,20 +15,6 @@ export interface SessionTreeOptions {
    * uses this so a matched child is never hidden behind a collapsed parent.
    */
   forceExpandedParentIds?: ReadonlySet<string>;
-  /**
-   * Keep rows whose parent is not in the list. A search needs them, because
-   * hiding an unanchored match would make it unreachable; a group section
-   * needs them because a child can land in a different group than its parent.
-   * The default flat list leaves them out so derived sessions do not reappear
-   * as flat siblings.
-   */
-  includeUnanchoredChildren?: boolean;
-  /**
-   * Parent ids rendered by another surface (the Pinned section). Their children
-   * keep their flat rows here instead of disappearing behind a parent row that
-   * this list does not render.
-   */
-  flattenChildrenOf?: ReadonlySet<string>;
 }
 
 export interface SessionTreeRow {
@@ -92,14 +78,11 @@ export function buildSessionTree(
       }
       continue;
     }
-    // A child whose parent is in the page was already emitted under it.
+    // A child whose parent is in the page was already emitted under it. When
+    // the parent is absent — archived, pinned into another surface, or outside
+    // the loaded page — the child keeps a flat row so it stays reachable: no
+    // other sidebar list would show an unarchived child of an archived parent.
     if (rootIds.has(parentId)) continue;
-    if (
-      !options.includeUnanchoredChildren &&
-      options.flattenChildrenOf?.has(parentId) !== true
-    ) {
-      continue;
-    }
     rows.push({ session, depth: 0, childCount: 0, expanded: false });
   }
   return rows;

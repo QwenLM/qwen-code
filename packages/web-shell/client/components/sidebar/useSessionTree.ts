@@ -17,15 +17,7 @@ import {
 
 export interface SessionTreeControllers {
   /** Rows for one surface (a flat list or one group section). */
-  buildRows: (
-    sessions: readonly DaemonSessionSummary[],
-    options?: {
-      /** Keep rows whose parent is not in `sessions`. */
-      includeUnanchoredChildren?: boolean;
-      /** Parents rendered by another surface; their children stay flat. */
-      flattenChildrenOf?: ReadonlySet<string>;
-    },
-  ) => SessionTreeRow[];
+  buildRows: (sessions: readonly DaemonSessionSummary[]) => SessionTreeRow[];
   /** Per-row state to hand to the session row renderer. */
   renderOptions: (row: SessionTreeRow) => SessionTreeRenderOptions;
 }
@@ -77,27 +69,16 @@ export function useSessionTree(
   }, [searchActive, searchedSessions]);
 
   const buildRows = useCallback(
-    (
-      sessions: readonly DaemonSessionSummary[],
-      options: {
-        includeUnanchoredChildren?: boolean;
-        flattenChildrenOf?: ReadonlySet<string>;
-      } = {},
-    ) => {
+    (sessions: readonly DaemonSessionSummary[]) => {
       const treeOptions: SessionTreeOptions = {
         expandedParentIds,
         ...(forcedExpandedParentIds
           ? { forceExpandedParentIds: forcedExpandedParentIds }
           : {}),
-        includeUnanchoredChildren:
-          options.includeUnanchoredChildren ?? searchActive,
-        ...(options.flattenChildrenOf
-          ? { flattenChildrenOf: options.flattenChildrenOf }
-          : {}),
       };
       return buildSessionTree(sessions, treeOptions);
     },
-    [expandedParentIds, forcedExpandedParentIds, searchActive],
+    [expandedParentIds, forcedExpandedParentIds],
   );
 
   const renderOptions = useCallback(
