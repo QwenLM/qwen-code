@@ -386,7 +386,7 @@ vi.mock('./server/git-branch-ops.js', () => ({
 // Observe the prompt route's binding hand-off without running the real
 // pipeline (which would query the platform). Only this export is replaced;
 // the backfill route registration stays real via importOriginal.
-const bindSessionPrsFromReviewPromptMock = vi.hoisted(() =>
+const bindSessionPrsFromPromptCommandMock = vi.hoisted(() =>
   vi.fn(async () => {}),
 );
 vi.mock('./routes/session-pr-backfill.js', async (importOriginal) => {
@@ -394,7 +394,7 @@ vi.mock('./routes/session-pr-backfill.js', async (importOriginal) => {
     await importOriginal<typeof import('./routes/session-pr-backfill.js')>();
   return {
     ...original,
-    bindSessionPrsFromReviewPrompt: bindSessionPrsFromReviewPromptMock,
+    bindSessionPrsFromPromptCommand: bindSessionPrsFromPromptCommandMock,
   };
 });
 
@@ -20251,7 +20251,7 @@ describe('createServeApp', () => {
     });
 
     it('hands the first text block of an admitted /review prompt to the binder', async () => {
-      bindSessionPrsFromReviewPromptMock.mockClear();
+      bindSessionPrsFromPromptCommandMock.mockClear();
       const bridge = fakeBridge({
         promptImpl: async () => ({ stopReason: 'end_turn' }),
       });
@@ -20266,7 +20266,7 @@ describe('createServeApp', () => {
       expect(res.status).toBe(202);
       // Allow the fire-and-forget bind hand-off to run.
       await new Promise((r) => setTimeout(r, 20));
-      expect(bindSessionPrsFromReviewPromptMock).toHaveBeenCalledWith(
+      expect(bindSessionPrsFromPromptCommandMock).toHaveBeenCalledWith(
         expect.objectContaining({ workspaceCwd: expect.any(String) }),
         'session-A',
         '/review 42 --comment',
@@ -20276,10 +20276,47 @@ describe('createServeApp', () => {
       );
     });
 
+    it('warns when a live bind was declined by the repository qualifier', async () => {
+      // A policy decline leaves no visible side effect on the session, so the
+      // hook's warning is the only place an operator can see it happen.
+      bindSessionPrsFromPromptCommandMock.mockClear();
+      bindSessionPrsFromPromptCommandMock.mockResolvedValueOnce({
+        workspaceCwd: '/workspace',
+        scanned: 1,
+        bound: 0,
+        written: 0,
+        alreadyBound: 0,
+        overLimit: 0,
+        unresolved: 0,
+        repoDeclined: 1,
+      });
+      const daemonLog = fakeDaemonLog();
+      const bridge = fakeBridge({
+        promptImpl: async () => ({ stopReason: 'end_turn' }),
+      });
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        primaryWorkspaceTrusted: true,
+        daemonLog,
+      });
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [{ type: 'text', text: '/verify-pr 42 --repo other/x' }],
+        });
+      expect(res.status).toBe(202);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(daemonLog.warn).toHaveBeenCalledWith(
+        'session PR bind incomplete',
+        expect.objectContaining({ repoDeclined: 1 }),
+      );
+    });
+
     it('does not hand a /review line from a later text block to the binder', async () => {
       // @-imported file content and other later blocks can quote `/review N`
       // without requesting one; only the first text block is the user prompt.
-      bindSessionPrsFromReviewPromptMock.mockClear();
+      bindSessionPrsFromPromptCommandMock.mockClear();
       const bridge = fakeBridge({
         promptImpl: async () => ({ stopReason: 'end_turn' }),
       });
@@ -20298,13 +20335,13 @@ describe('createServeApp', () => {
         });
       expect(res.status).toBe(202);
       await new Promise((r) => setTimeout(r, 20));
-      expect(bindSessionPrsFromReviewPromptMock).toHaveBeenCalledWith(
+      expect(bindSessionPrsFromPromptCommandMock).toHaveBeenCalledWith(
         expect.anything(),
         'session-A',
         'please look',
         expect.anything(),
       );
-      expect(bindSessionPrsFromReviewPromptMock).not.toHaveBeenCalledWith(
+      expect(bindSessionPrsFromPromptCommandMock).not.toHaveBeenCalledWith(
         expect.anything(),
         'session-A',
         expect.stringContaining('/review'),
@@ -20315,7 +20352,7 @@ describe('createServeApp', () => {
     it('does not hand a /review prompt to the binder in an untrusted workspace', async () => {
       // Direct app tests default to an untrusted primary workspace; the
       // route's own gate must keep the bind out even before the helper runs.
-      bindSessionPrsFromReviewPromptMock.mockClear();
+      bindSessionPrsFromPromptCommandMock.mockClear();
       const bridge = fakeBridge({
         promptImpl: async () => ({ stopReason: 'end_turn' }),
       });
@@ -20326,12 +20363,12 @@ describe('createServeApp', () => {
         .send({ prompt: [{ type: 'text', text: '/review 42' }] });
       expect(res.status).toBe(202);
       await new Promise((r) => setTimeout(r, 20));
-      expect(bindSessionPrsFromReviewPromptMock).not.toHaveBeenCalled();
+      expect(bindSessionPrsFromPromptCommandMock).not.toHaveBeenCalled();
     });
 
     it('keeps the 202 response when the binder rejects', async () => {
-      bindSessionPrsFromReviewPromptMock.mockClear();
-      bindSessionPrsFromReviewPromptMock.mockRejectedValueOnce(
+      bindSessionPrsFromPromptCommandMock.mockClear();
+      bindSessionPrsFromPromptCommandMock.mockRejectedValueOnce(
         new Error('draining'),
       );
       const bridge = fakeBridge({
@@ -20351,8 +20388,8 @@ describe('createServeApp', () => {
     });
 
     it('keeps the 202 response when the binder never settles', async () => {
-      bindSessionPrsFromReviewPromptMock.mockClear();
-      bindSessionPrsFromReviewPromptMock.mockImplementationOnce(
+      bindSessionPrsFromPromptCommandMock.mockClear();
+      bindSessionPrsFromPromptCommandMock.mockImplementationOnce(
         () => new Promise(() => {}),
       );
       const bridge = fakeBridge({
@@ -20372,7 +20409,7 @@ describe('createServeApp', () => {
     });
 
     it('does not bind a channel-relayed /review prompt', async () => {
-      bindSessionPrsFromReviewPromptMock.mockClear();
+      bindSessionPrsFromPromptCommandMock.mockClear();
       const bridge = fakeBridge({
         promptImpl: async () => ({ stopReason: 'end_turn' }),
       });
@@ -20389,7 +20426,7 @@ describe('createServeApp', () => {
         });
       expect(res.status).toBe(202);
       await new Promise((r) => setTimeout(r, 20));
-      expect(bindSessionPrsFromReviewPromptMock).not.toHaveBeenCalled();
+      expect(bindSessionPrsFromPromptCommandMock).not.toHaveBeenCalled();
     });
 
     it('400 when the prompt carries more than 256 media blocks', async () => {

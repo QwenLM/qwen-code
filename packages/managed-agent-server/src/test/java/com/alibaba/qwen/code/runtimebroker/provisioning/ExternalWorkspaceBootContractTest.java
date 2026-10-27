@@ -7,6 +7,8 @@ import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.condition.DisabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
@@ -63,14 +65,14 @@ class ExternalWorkspaceBootContractTest {
                 WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session");
     }
 
-    private static Map<String, Object> mintedBoot(Path mountRoot) throws Exception {
+    private static Map<String, Object> mintedBoot(String mountRoot) throws Exception {
         ExternalStorageRegistry registry = (tenant, alias) -> Optional.of(
                 new ExternalStorageRegistry.RegisteredExternalStorage(PROVIDER, PHYSICAL, 1,
-                        ALIAS, ALIAS_PATH, mountRoot.toString()));
+                        ALIAS, ALIAS_PATH, mountRoot));
         var client = new CapturingClient();
         try (var provisioner = new ExternalWorkspaceProvisioner(client, registry, PROVIDER,
                 Duration.ofSeconds(5))) {
-            RuntimeProvisionRequest request = provisioner.createRequest(scope(mountRoot.toString()),
+            RuntimeProvisionRequest request = provisioner.createRequest(scope(mountRoot),
                     "isolation-a");
             RuntimeProvisionSeed seed = new RuntimeProvisionSeed("request-a", "runtime-a",
                     "incarnation-a", "lease-a", 1, "token-a");
@@ -86,10 +88,7 @@ class ExternalWorkspaceBootContractTest {
 
     @Test
     void theMintedBootKeepsTheShippedManagedContextShape() throws Exception {
-        Path mountRoot = Files.createDirectory(temporary.toRealPath().resolve("workspace"));
-        privateDirectory(mountRoot, Set.of(PosixFilePermission.OWNER_READ,
-                PosixFilePermission.OWNER_WRITE, PosixFilePermission.OWNER_EXECUTE));
-        Map<String, Object> boot = mintedBoot(mountRoot);
+        Map<String, Object> boot = mintedBoot("/mnt/external/workspace-a");
 
         List<String> keys = new ArrayList<>(boot.keySet());
         keys.sort(String::compareTo);
@@ -111,6 +110,7 @@ class ExternalWorkspaceBootContractTest {
 
     @Test
     @Timeout(120)
+    @DisabledOnOs(OS.WINDOWS)
     void theShippedWorkerParserAdmitsTheMintedBoot() throws Exception {
         Path repoRoot = repoRoot();
         Assumptions.assumeTrue(Files.isRegularFile(repoRoot.resolve(
@@ -127,7 +127,7 @@ class ExternalWorkspaceBootContractTest {
         Path mountRoot = Files.createDirectory(directory.resolve("workspace"));
         privateDirectory(mountRoot, Set.of(PosixFilePermission.OWNER_READ,
                 PosixFilePermission.OWNER_WRITE, PosixFilePermission.OWNER_EXECUTE));
-        Map<String, Object> boot = mintedBoot(mountRoot);
+        Map<String, Object> boot = mintedBoot(mountRoot.toString());
         Path bootFile = writeBoot(directory, boot);
         writeDescriptor(directory, PHYSICAL);
 
