@@ -360,6 +360,9 @@ public class HarnessPoolConnector implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsUserMessageQueue() { return feature("user-message-queue/1"); }
+
+    @Override
     public boolean supportsContextCompression() {
         return feature("context-compression/1");
     }
@@ -377,6 +380,21 @@ public class HarnessPoolConnector implements HarnessConnector {
     @Override
     public boolean supportsSessionSkills() {
         return feature("session-skills/2");
+    }
+
+    @Override
+    public boolean supportsSessionExtensions() {
+        return feature("session-extension-packages/1");
+    }
+
+    @Override
+    public Map<String, Object> applyExtensions(String tenant, String session, Map<String, Object> command) {
+        return call(tenant, session, leaf -> leaf.applyExtensions(tenant, session, command));
+    }
+
+    @Override
+    public Map<String, Object> continueExtensionOperation(String tenant, String session, String operationId, boolean recoverPrevious) {
+        return call(tenant, session, leaf -> leaf.continueExtensionOperation(tenant, session, operationId, recoverPrevious));
     }
 
     @Override

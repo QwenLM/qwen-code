@@ -366,7 +366,7 @@ export async function retryWithBackoff<T>(
       // Qwen quota fast-fail so the original error (status, request id,
       // provider body) is always classified and logged, even when we replace it
       // with a guidance message.
-      const retryDiagnostics = classifyRetryError(error, {
+      const fullClassification = classifyRetryError(error, {
         authType,
         extraRetryErrorCodes,
       });
@@ -374,7 +374,7 @@ export async function retryWithBackoff<T>(
       // Cancellation is authoritative: once the caller aborts (or the call
       // throws an abort/cancel error), never schedule another attempt,
       // regardless of a permissive shouldRetryOnError predicate.
-      if (retryDiagnostics.kind === 'abort') {
+      if (fullClassification.kind === 'abort') {
         throw error;
       }
 
@@ -382,7 +382,7 @@ export async function retryWithBackoff<T>(
       if (authType === AuthType.QWEN_OAUTH && isQwenQuotaExceededError(error)) {
         debugLogger.error(
           'Qwen OAuth quota exceeded, fast-failing',
-          retryDiagnostics,
+          fullClassification,
           error,
         );
         throw new Error(
@@ -404,7 +404,7 @@ export async function retryWithBackoff<T>(
       if (isQuotaExhaustedError(error)) {
         debugLogger.error(
           'Quota exhausted, fast-failing',
-          retryDiagnostics,
+          fullClassification,
           error,
         );
         // Intentionally throws a plain Error with no `.status`: a 429 status
@@ -432,7 +432,7 @@ export async function retryWithBackoff<T>(
       // Excluding them here falls back to the normal, maxAttempts-bounded retry
       // path so the request still gets a few attempts but is guaranteed to
       // terminate.
-      const isFailFast = retryDiagnostics.diagnosis === 'fail-fast';
+      const isFailFast = fullClassification.diagnosis === 'fail-fast';
       const shouldPersist =
         persistent && isTransient && callerAllowsRetry && !isFailFast;
 
@@ -473,7 +473,7 @@ export async function retryWithBackoff<T>(
         debugLogger.warn(
           `[Persistent] Attempt ${reportedAttempt} failed with status ${errorStatus ?? 'unknown'}. ` +
             `Retrying in ${Math.ceil(delayMs / 1000)}s...`,
-          retryDiagnostics,
+          fullClassification,
           error,
         );
 
@@ -532,7 +532,7 @@ export async function retryWithBackoff<T>(
           currentDelay = initialDelayMs;
           logRetryAtStatusLevel(
             `Attempt ${attempt} failed with status ${errorStatus ?? 'unknown'}. Retrying after explicit delay of ${retryAfterMs}ms...`,
-            retryDiagnostics,
+            fullClassification,
             error,
             errorStatus,
           );
@@ -549,7 +549,7 @@ export async function retryWithBackoff<T>(
           logRetryAttempt(
             attempt,
             error,
-            retryDiagnostics,
+            fullClassification,
             errorStatus,
             actualDelayMs,
           );
@@ -602,7 +602,7 @@ export async function retryWithBackoff<T>(
 function logRetryAttempt(
   attempt: number,
   error: unknown,
-  retryDiagnostics: ReturnType<typeof classifyRetryError>,
+  fullClassification: ReturnType<typeof classifyRetryError>,
   errorStatus?: number,
   delayMs?: number,
 ): void {
@@ -614,7 +614,7 @@ function logRetryAttempt(
     ? `Attempt ${attempt} failed with status ${errorStatus}. ${backoff}`
     : `Attempt ${attempt} failed. ${backoff}`;
 
-  logRetryAtStatusLevel(message, retryDiagnostics, error, errorStatus);
+  logRetryAtStatusLevel(message, fullClassification, error, errorStatus);
 }
 
 /**
@@ -624,13 +624,13 @@ function logRetryAttempt(
  */
 function logRetryAtStatusLevel(
   message: string,
-  retryDiagnostics: ReturnType<typeof classifyRetryError>,
+  fullClassification: ReturnType<typeof classifyRetryError>,
   error: unknown,
   errorStatus?: number,
 ): void {
   if (errorStatus !== undefined && errorStatus >= 500 && errorStatus < 600) {
-    debugLogger.error(message, retryDiagnostics, error);
+    debugLogger.error(message, fullClassification, error);
   } else {
-    debugLogger.warn(message, retryDiagnostics, error);
+    debugLogger.warn(message, fullClassification, error);
   }
 }

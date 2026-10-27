@@ -135,12 +135,13 @@ class SessionRowLockOrderTest {
     // unaudited.
     private static final Set<String> SIBLING_SESSION_LOCKERS = Set.of(
             "HarnessPlacementStore.java",
-            "ManagedActionStore.java", "ManagedExtensionRecordStore.java",
+            "ManagedActionStore.java", "ManagedExtensionAgentLaunch.java", "ManagedExtensionRecordStore.java",
             "ManagedLegacySessionGuard.java",
             "ManagedProjectionResourceCollector.java",
             "ManagedRuntimeRetentionGuard.java",
             "ManagedSessionRetirementStore.java", "ManagedSessionStore.java",
             "ManagedSnapshotStore.java", "ManagedToolResultStore.java",
+            "ManagedUserMessageStore.java",
             "ResidentWorkspaceRetirementStore.java", "ResidentWorkspaces.java",
             "ToolPublicationRetentionStore.java",
             "WakeRecoveryStore.java",
@@ -148,7 +149,7 @@ class SessionRowLockOrderTest {
     private static final Set<String> SIBLING_TURN_READERS = Set.of(
             "AutomationLedgerStore.java", "ChildResultRelayStore.java",
             "ManagedActionStore.java", "ManagedToolDetailsStore.java",
-            "ManagedToolResultProjector.java",
+            "ManagedToolResultProjector.java", "ManagedUserMessageStore.java",
             "WorkspaceCsiApplicationInventory.java",
             "WorkspaceExecutionStore.java", "WorkspaceMigrationStore.java",
             "WorkspaceRecoveryStore.java");
@@ -181,6 +182,10 @@ class SessionRowLockOrderTest {
                             Set.of("ChildWorkspaceStore.find/3",
                                     "ChildWorkspaceStore.row/2",
                                     "Row.snapshot/0")),
+                    // WorkspaceExecutionStore.unavailable shares the local name;
+                    // both factories only construct an exception.
+                    Map.entry("ExternalStorageRegistrationStore.java",
+                            Set.of("ExternalStorageRegistrationStore.unavailable/0")),
                     // Same-package lifecycle refusals share this local name;
                     // both factories only construct an exception.
                     Map.entry("HarnessPlacementStore.java",
@@ -206,10 +211,15 @@ class SessionRowLockOrderTest {
                     // rows or accesses Turn rows.
                     Map.entry("ManagedHostedRecoveryRecords.java",
                             Set.of("HistoricalResources.checkpointHistory/1")),
+                    // Package configuration delegates to a same-named JSON-only validator.
+                    Map.entry("ManagedMcpSettings.java",
+                            Set.of("ManagedMcpSettings.require/1")),
                     Map.entry("ManagedSchemaJdbcTemplate.java",
                             Set.of("ManagedSchemaJdbcTemplate.getSingleColumnRowMapper/1")),
+                    // Both publisher overloads avoid Session and Turn rows.
                     Map.entry("ManagedSessionStore.java",
-                            Set.of("ManagedSessionStore.sha256/1",
+                            Set.of("ManagedSessionStore.publishAgentResource/6",
+                                    "ManagedSessionStore.sha256/1",
                                     "ManagedSessionStore.storedTransaction/1",
                                     "ManagedSessionStore.usesDataSource/1")),
                     Map.entry("ManagedSnapshotStore.java",
@@ -224,6 +234,9 @@ class SessionRowLockOrderTest {
                     Map.entry("ManagedToolResultStore.java",
                             Set.of("ManagedToolResultStore.artifact/2",
                                     "Source.sessionKey/0")),
+                    // URLDecoder.decode shares the pure JSON helper's name/arity.
+                    Map.entry("ManagedUserMessageStore.java",
+                            Set.of("ManagedUserMessageStore.decode/2")),
                     Map.entry("ManagedWorkspaceRegistry.java",
                             Set.of("ManagedWorkspaceRegistry.findReadable/3")),
                     // Builder/API receiver calls share local names; retirement
@@ -394,6 +407,7 @@ class SessionRowLockOrderTest {
         assertThat(audit.lockers()).containsExactlyInAnyOrder(
                 "insertTurnCommand", "insertCancelCommand", "changeSessionModel", "changeSessionApproval",
                 "requireMcpManagement", "requireMcpSettingsCommit",
+                "requireConfigurationCommit", "requireExtensionManagement",
                 "insertSessionCommand", "insertWorkspaceSessionCommand",
                 "insertChildSessionCommand", "insertPublicChildSessionCommand",
                 "insertInternalTeamLeadSessionCommand",
@@ -402,7 +416,7 @@ class SessionRowLockOrderTest {
                 "beginOperation",
                 "beginWorkspaceClose", "beginWorkspaceLifecycle",
                 "beginContextCompression", "markContextCompressionSubmitted",
-                "unarchiveWorkspaceSession", "beginCwdChangeOperation",
+                "unarchiveWorkspaceSession",
                 "completeCwdChangeOperation", "completeOperation",
                 "advanceReplayFloor", "materializeNextBatch", "bindHarness",
                 "bindRecoveredHarness", "recordAdmission",
@@ -448,7 +462,7 @@ class SessionRowLockOrderTest {
         // check — is what fails loudly when one appears.
         assertThat(audit.turnRowAccessors())
                 .containsExactlyInAnyOrder("advanceReplayFloor",
-                        "beginChildClose", "beginContextCompression", "beginCwdChangeOperation",
+                        "beginChildClose", "beginContextCompression",
                         "beginLifecycle", "beginOperation",
                         "beginWorkspaceClose", "beginWorkspaceLifecycle",
                         "bindHarness", "bindRecoveredHarness",
@@ -485,6 +499,7 @@ class SessionRowLockOrderTest {
                         "recordHarnessEvents", "recordRecoveryAdmission",
                         "releaseTurnLease", "renewTurn", "requireTurn",
                         "requireTurnForUpdate", "requirePolicyChange", "requireMcpManagement", "requireMcpSettingsCommit",
+                        "requireConfigurationCommit", "requireExtensionManagement", "requireChildExtensionBootstrap",
                         "requireMcpManagementIdle", "retractContinuationOutput",
                         "retractHarnessTurnOutput", "scheduleTurnRetry",
                         "settleTurnCommands",
@@ -572,13 +587,15 @@ class SessionRowLockOrderTest {
         Set<String> orderAudited = new TreeSet<>(sessionLockers);
         orderAudited.retainAll(turnReaders);
         assertThat(orderAudited).containsExactly("ManagedActionStore.java",
+                "ManagedUserMessageStore.java",
                 "WorkspaceRecoveryStore.java");
         // ManagedActionStore.admit takes the tenant lock before the
         // session row and never touches the turn row — the file's single
         // turn read lives in a locker-less query method — and
         // WorkspaceRecoveryStore's conditional source lock precedes its
-        // turn count, so both stay violation-free under the same order
-        // audit the main file gets.
+        // turn count. ManagedUserMessageStore locks the session before
+        // reading turn state. All stay violation-free under the same
+        // order audit the main file gets.
         for (String name : orderAudited) {
             assertThat(audits.get(name).violations())
                     .as("%s keeps the session-first order", name).isEmpty();

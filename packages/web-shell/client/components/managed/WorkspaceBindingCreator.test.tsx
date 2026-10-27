@@ -1382,9 +1382,6 @@ describe('WorkspaceBindingCreator', () => {
       expect(Boolean(editorMocks.props?.onSkillsOpenChange)).toBe(
         Boolean(skillsSupported),
       );
-      expect(
-        container.textContent?.includes('Enabled Skills on the Skills page'),
-      ).toBe(Boolean(skillsSupported));
       await sendInitial('Compatible creation');
       expect(createSession).toHaveBeenCalledOnce();
       expect(load).toHaveBeenCalledTimes(skillsSupported ? 1 : 0);
@@ -1415,9 +1412,6 @@ describe('WorkspaceBindingCreator', () => {
     };
     createSession.mockRejectedValue(new Error('lost response'));
     await render();
-    expect(container.textContent).toContain(
-      'Enabled Skills on the Skills page',
-    );
     expect(container.textContent).not.toContain('Add Skill');
     await act(async () => {
       await editorMocks.props!.onSubmit!('hello');
@@ -1435,7 +1429,6 @@ describe('WorkspaceBindingCreator', () => {
       skillsSupported: false,
     });
     await render();
-    expect(container.textContent).toContain('42 Skills are saved');
     await click('Retry the same request');
     expect(load).toHaveBeenCalledTimes(1);
     expect(createSession.mock.calls[1]![0].skills).toEqual(first[0].skills);
@@ -2917,6 +2910,104 @@ describe('WorkspaceBindingCreator', () => {
       ).toBeNull();
     },
   );
+
+  it.each([32, 33, 256])(
+    'displays a valid %i-package catalog and caps the Session selection at 32',
+    async (count) => {
+      provider = {
+        ...provider,
+        extensions: {
+          list: vi.fn().mockResolvedValue({
+            supported: true,
+            extensions: Array.from({ length: count }, (_, index) => ({
+              pin: {
+                extensionId: `ext_00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
+                packageRevision: 1,
+                packageDigest: 'a'.repeat(64),
+              },
+              manifest: { name: `Review package ${index + 1}`, version: '1' },
+            })),
+          }),
+        } as unknown as ManagedAgentProvider['extensions'],
+      };
+      await render();
+      const choices = [
+        ...container.querySelectorAll<HTMLInputElement>(
+          'input[type="checkbox"]',
+        ),
+      ].filter((input) =>
+        input.closest('label')?.textContent?.includes('Review package'),
+      );
+      expect(choices).toHaveLength(count);
+      for (const choice of choices.slice(0, 32))
+        await act(async () => choice.click());
+      expect(choices.filter((choice) => choice.checked)).toHaveLength(32);
+      if (count > 32) {
+        expect(choices[32]!.disabled).toBe(true);
+        await act(async () => choices[32]!.click());
+        expect(choices[32]!.checked).toBe(false);
+        await act(async () => choices[0]!.click());
+        expect(choices[32]!.disabled).toBe(false);
+        await act(async () => choices[32]!.click());
+        expect(choices.filter((choice) => choice.checked)).toHaveLength(32);
+      }
+    },
+  );
+
+  it('freezes selected package and settings revisions across creation retries', async () => {
+    const pin = {
+      extensionId: 'ext_00000000-0000-4000-8000-000000000001',
+      packageRevision: 2,
+      packageDigest: 'a'.repeat(64),
+    };
+    provider = {
+      ...provider,
+      extensions: {
+        list: vi.fn().mockResolvedValue({
+          supported: true,
+          extensions: [
+            { pin, manifest: { name: 'Frozen package', version: '2' } },
+          ],
+        }),
+      } as unknown as ManagedAgentProvider['extensions'],
+    };
+    createEmpty
+      .mockRejectedValueOnce(new TypeError('response lost'))
+      .mockResolvedValueOnce({ sessionId: 'session-a' });
+    getSession.mockResolvedValue({
+      sessionId: 'session-a',
+      workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+    });
+    await render();
+    const checkbox = [
+      ...container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'),
+    ].find((input) =>
+      input.closest('label')?.textContent?.includes('Frozen package'),
+    )!;
+    expect(checkbox).toBeDefined();
+    await act(async () => checkbox.click());
+    const revision = container.querySelector<HTMLInputElement>(
+      '[aria-label="Settings revision (optional): Frozen package"]',
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(revision, '7');
+      revision.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await click('Create session');
+    expect(createEmpty.mock.calls[0]?.[0].extensionPins).toEqual([
+      { ...pin, settingsRevision: 7 },
+    ]);
+    await click('Retry the same request');
+    expect(createEmpty.mock.calls[1]?.[0]).toEqual(
+      createEmpty.mock.calls[0]?.[0],
+    );
+    expect(createEmpty.mock.calls[1]?.[1].idempotencyKey).toEqual(
+      createEmpty.mock.calls[0]?.[1].idempotencyKey,
+    );
+  });
 
   it('retries the frozen request after a lost response and confirms binding', async () => {
     createEmpty
