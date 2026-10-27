@@ -864,16 +864,17 @@ class Issue13181QueryBudgetTest {
     }
 
     @Test
-    void cwdCapabilitySharesTheGrantAndFactsBatchesRegardlessOfPageSize() {
+    void contextChangeCapabilitySharesTheGrantAndFactsBatchesRegardlessOfPageSize() {
         for (int size : new int[] {1, 20}) {
-            Fixture fixture = new Fixture(Clock.systemUTC(), true);
+            Fixture fixture = new Fixture(Clock.systemUTC(), true, true);
+            when(fixture.harness.supportsModelSelection()).thenReturn(true);
             when(fixture.harness.isWorkspaceFilesAvailable()).thenReturn(true);
             String tenant = "cwd-" + UUID.randomUUID();
             fixture.createCwdSessions(tenant, size);
             fixture.ledger.reset();
             var page = fixture.service.listWebShellSessions(tenant, "actor", null, 20).data();
             assertThat(page).hasSize(size);
-            assertThat(page).allSatisfy(row -> assertThat(JSON.valueToTree(row).path("capabilities").path("cwdChange").asBoolean()).isTrue());
+            assertThat(page).allSatisfy(row -> assertThat(JSON.valueToTree(row).path("capabilities").path("modelChange").asBoolean()).isTrue());
             assertThat(fixture.ledger.total()).isEqualTo(13);
             assertThat(fixture.ledger.count("select session_id, revision from ma_session_record")).isEqualTo(1);
             assertThat(fixture.ledger.count("head_kind = 'managed_session'")).isEqualTo(1);
@@ -889,7 +890,8 @@ class Issue13181QueryBudgetTest {
 
     @Test
     void executableFactsBatchInheritsOnlyAnExactParentBindingAndRejectsCycles() {
-        Fixture fixture = new Fixture(Clock.systemUTC(), true);
+        Fixture fixture = new Fixture(Clock.systemUTC(), true, true);
+        when(fixture.harness.supportsModelSelection()).thenReturn(true);
         String tenant = "lineage-" + UUID.randomUUID();
         List<String> ids = fixture.createCwdSessions(tenant, 3);
         String parent = ids.get(0);
@@ -912,31 +914,33 @@ class Issue13181QueryBudgetTest {
     }
 
     @Test
-    void cwdCapabilityMirrorsAdmissionWithoutTheTurnProfileRestrictions() {
-        Fixture fixture = new Fixture(Clock.systemUTC(), true);
+    void contextChangeCapabilityMirrorsAdmissionWithoutTheTurnProfileRestrictions() {
+        Fixture fixture = new Fixture(Clock.systemUTC(), true, true);
+        when(fixture.harness.supportsModelSelection()).thenReturn(true);
         String tenant = "cwd-" + UUID.randomUUID();
         String id = fixture.createCwdSessions(tenant, 1).getFirst();
         fixture.jdbc.update("UPDATE ma_session SET agent_id = 'custom' WHERE tenant_id = ? AND session_id = ?", tenant, id);
         var view = fixture.service.getWebShellSession(tenant, "actor", id);
         assertThat(view.capabilities().workspaceTurns()).isFalse();
-        assertThat(JSON.valueToTree(view).path("capabilities").path("cwdChange").asBoolean()).isTrue();
+        assertThat(JSON.valueToTree(view).path("capabilities").path("modelChange").asBoolean()).isTrue();
         // Busy admission remains separate from support and authorization.
         fixture.store.insertTurnCommand(tenant, "SUBMIT", "busy", "digest", id, List.of(Map.of("type", "text", "text", "test")), "digest");
-        assertThat(JSON.valueToTree(fixture.service.getWebShellSession(tenant, "actor", id)).path("capabilities").path("cwdChange").asBoolean()).isTrue();
+        assertThat(JSON.valueToTree(fixture.service.getWebShellSession(tenant, "actor", id)).path("capabilities").path("modelChange").asBoolean()).isTrue();
     }
 
     @Test
-    void cwdCapabilityRequiresOperatorRoleAndExactRegistryFacts() {
-        Fixture fixture = new Fixture(Clock.systemUTC(), true);
+    void contextChangeCapabilityRequiresOperatorRoleAndExactRegistryFacts() {
+        Fixture fixture = new Fixture(Clock.systemUTC(), true, true);
+        when(fixture.harness.supportsModelSelection()).thenReturn(true);
         String tenant = "cwd-" + UUID.randomUUID();
         String id = fixture.createCwdSessions(tenant, 1).getFirst();
         // A non-creator holding OPERATOR on the Workspace sees the
         // capability, mirroring admission's atLeast(OPERATOR); a READER
         // does not.
         fixture.jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, "other".getBytes(StandardCharsets.UTF_8));
-        assertThat(JSON.valueToTree(fixture.service.getWebShellSession(tenant, "other", id)).path("capabilities").path("cwdChange").asBoolean()).isTrue();
+        assertThat(JSON.valueToTree(fixture.service.getWebShellSession(tenant, "other", id)).path("capabilities").path("modelChange").asBoolean()).isTrue();
         fixture.jdbc.update("UPDATE ma_workspace_access SET role = 'READER' WHERE tenant_id = ? AND workspace_id = X'776f726b7370616365' AND actor_id = ?", tenant, "other".getBytes(StandardCharsets.UTF_8));
-        assertThat(JSON.valueToTree(fixture.service.getWebShellSession(tenant, "other", id)).path("capabilities").path("cwdChange").asBoolean()).isFalse();
+        assertThat(JSON.valueToTree(fixture.service.getWebShellSession(tenant, "other", id)).path("capabilities").path("modelChange").asBoolean()).isFalse();
         for (String mutation : new String[] {
                 "UPDATE ma_workspace SET state = 'DRAINING'",
                 "UPDATE ma_workspace SET state = 'ACTIVE', workspace_generation = 2",
@@ -947,16 +951,17 @@ class Issue13181QueryBudgetTest {
             for (String statement : mutation.split(";")) {
                 fixture.jdbc.update(statement);
             }
-            assertThat(JSON.valueToTree(fixture.service.getWebShellSession(tenant, "actor", id)).path("capabilities").path("cwdChange").asBoolean()).isFalse();
+            assertThat(JSON.valueToTree(fixture.service.getWebShellSession(tenant, "actor", id)).path("capabilities").path("modelChange").asBoolean()).isFalse();
         }
         fixture.jdbc.update("UPDATE ma_workspace_access SET role = 'OPERATOR'");
         fixture.jdbc.update("UPDATE ma_session SET status = 'CLOSED'");
-        assertThat(JSON.valueToTree(fixture.service.getWebShellSession(tenant, "actor", id)).path("capabilities").path("cwdChange").asBoolean()).isFalse();
+        assertThat(JSON.valueToTree(fixture.service.getWebShellSession(tenant, "actor", id)).path("capabilities").path("modelChange").asBoolean()).isFalse();
     }
 
     @Test
-    void cwdCapabilityChecksTheCallerRoleOnEachWorkspaceOfAMixedPage() {
-        Fixture fixture = new Fixture(Clock.systemUTC(), true);
+    void contextChangeCapabilityChecksTheCallerRoleOnEachWorkspaceOfAMixedPage() {
+        Fixture fixture = new Fixture(Clock.systemUTC(), true, true);
+        when(fixture.harness.supportsModelSelection()).thenReturn(true);
         String tenant = "cwd-" + UUID.randomUUID();
         String readRow = fixture.createCwdSessions(tenant, 1).getFirst();
         fixture.jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id, display_name, config_ref, policy_ref, state) VALUES (?, 'workspace-2', 1, 'storage-2', 'Workspace 2', ?, ?, 'ACTIVE')", tenant, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
@@ -968,23 +973,24 @@ class Issue13181QueryBudgetTest {
         var page = fixture.service.listWebShellSessions(tenant, "other", null, 20).data();
         java.util.Map<String, Boolean> cwd = new java.util.HashMap<>();
         for (var row : page) {
-            cwd.put(row.sessionId(), row.capabilities().cwdChange());
+            cwd.put(row.sessionId(), row.capabilities().modelChange());
         }
         assertThat(cwd).hasSize(2).containsEntry(operateRow, true).containsEntry(readRow, false);
         assertThat(fixture.ledger.count("from ma_session s left join ma_workspace", "creator_actor_key")).isEqualTo(1);
     }
 
     @Test
-    void cwdCapabilityDoesNotPayForRegistryFactsWhenDisabledOrReaderOnly() {
+    void contextChangeCapabilityDoesNotPayForRegistryFactsWhenDisabledOrReaderOnly() {
         for (boolean enabled : new boolean[] {false, true}) {
-            Fixture fixture = new Fixture(Clock.systemUTC(), enabled);
+            Fixture fixture = new Fixture(Clock.systemUTC(), enabled, true);
+            when(fixture.harness.supportsModelSelection()).thenReturn(true);
             String tenant = "cwd-" + UUID.randomUUID();
             fixture.createCwdSessions(tenant, 1);
             fixture.jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'workspace', ?, 'READER')", tenant, "reader".getBytes(StandardCharsets.UTF_8));
             fixture.ledger.reset();
             var page = fixture.service.listWebShellSessions(tenant, "reader", null, 20).data();
             assertThat(page).hasSize(1);
-            assertThat(JSON.valueToTree(page.getFirst()).path("capabilities").path("cwdChange").asBoolean()).isFalse();
+            assertThat(JSON.valueToTree(page.getFirst()).path("capabilities").path("modelChange").asBoolean()).isFalse();
             assertThat(fixture.ledger.count("from ma_session s left join ma_workspace", "creator_actor_key")).isZero();
         }
     }
@@ -1198,13 +1204,18 @@ class Issue13181QueryBudgetTest {
         fixture.ledger.reset();
         try (var verifier = new ToolPublicationVerifier(data, 1)) {
             assertThat(verifier.runOnce()).isTrue();
+            long renewals = fixture.ledger.count("update ma_operation set",
+                    "claim_until = ?, verification_next_at = case when");
+            assertThat(renewals).isGreaterThanOrEqualTo(2);
+            assertThat(fixture.ledger.count("from ma_session_journal_tx")).isZero();
+            assertThat(fixture.ledger.count("from ma_session_head", "for update"))
+                    .isGreaterThanOrEqualTo(2 * (renewals + 1));
+            await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+                verifier.runOnce();
+                assertThat(data.operationStatus(binding.path("sessionKey"), "pub-1", PUBLICATION_TOKEN, "async-heartbeat")
+                        .path("state").asText()).isEqualTo("SUCCEEDED");
+            });
         }
-        long renewals = fixture.ledger.count("update ma_operation set",
-                "claim_until = ?, verification_next_at = case when");
-        assertThat(renewals).isGreaterThanOrEqualTo(2);
-        assertThat(fixture.ledger.count("from ma_session_journal_tx")).isZero();
-        assertThat(fixture.ledger.count("from ma_session_head", "for update"))
-                .isGreaterThanOrEqualTo(2 * (renewals + 1));
         fixture.ledger.reset();
         for (int i = 0; i < 12; i++) {
             assertThat(data.operationStatus(binding.path("sessionKey"), "pub-1", PUBLICATION_TOKEN, "async-heartbeat")
@@ -1724,6 +1735,10 @@ class Issue13181QueryBudgetTest {
         }
 
         Fixture(Clock clock, boolean workspaceFilesEnabled) {
+            this(clock, workspaceFilesEnabled, false);
+        }
+
+        Fixture(Clock clock, boolean workspaceFilesEnabled, boolean modelSelection) {
             JdbcDataSource raw = new JdbcDataSource();
             raw.setURL("jdbc:h2:mem:repro-" + UUID.randomUUID()
                     + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE;"
@@ -1738,6 +1753,13 @@ class Issue13181QueryBudgetTest {
                     new ManagedWorkspaceRegistry(jdbc);
             ManagedAgentProperties properties = new ManagedAgentProperties();
             properties.getHarness().setWorkspaceFilesEnabled(workspaceFilesEnabled);
+            if (modelSelection) {
+                var option = new ManagedAgentProperties.ModelOption();
+                option.setModelId("model-a");
+                option.setLabel("Model A");
+                properties.setModelCatalog(List.of(option));
+                when(harness.supportsModelSelection()).thenReturn(true);
+            }
             store = new ManagedAgentStore(jdbc, JSON, clock, hub::publish,
                     registry, properties);
             service = new ManagedAgentService(store, new RequestDigests(),

@@ -55,6 +55,7 @@ class SshRuntimeProvisionerTest {
             WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session");
     private final List<Map<String, Object>> commands = new ArrayList<>();
     private Map<String, Object> boot;
+    private Map<String, Object> attestation;
     private String state = "INTENT";
     private int startingObservations;
     private boolean corruptProof;
@@ -68,7 +69,7 @@ class SshRuntimeProvisionerTest {
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/internal/managed-runtime/v3/attest", exchange -> {
             assertEquals("Bearer " + boot.get("token"), exchange.getRequestHeaders().getFirst("Authorization"));
-            exchange.getRequestBody().readAllBytes();
+            attestation = JsonCodec.parseObject(exchange.getRequestBody().readAllBytes(), "test attestation");
             byte[] response = JsonCodec.encode(ManagedContextProtocol.attestationResponse(boot));
             exchange.getResponseHeaders().set("Cache-Control", "no-store");
             exchange.getResponseHeaders().set("Content-Type", "application/json");
@@ -217,6 +218,23 @@ class SshRuntimeProvisionerTest {
                 release.countDown();
             }
         }
+    }
+
+    @Test
+    void extendedStartupReadyAndHttpAttestationShareTheOriginalConfiguration() throws Exception {
+        String directory = controlDirectory.resolve("extension-cache").toString();
+        provisioner.withManagedExtensionCacheDirectory(directory, null);
+        var scope = new RuntimeScope("tenant", "workspace", "1", "/workspace/project",
+                com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.DEVELOPER_CAPABILITY_DIGEST, "session");
+        var request = provisioner.createRequest(scope, "session");
+        var seed = RuntimeProvisionSeed.create("extended-binding", 1);
+        await(provisioner.ensureResource(request, seed, null));
+        var lease = await(provisioner.provision(request, seed));
+        Map<String, Object> expected = com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.configuration(scope.getCapabilityDigest(), directory, null);
+        assertEquals(expected, boot.get("managedExtensions"));
+        assertEquals(expected, attestation.get("managedExtensions"));
+        assertEquals(URI.create("http://127.0.0.1:30001/"), lease.getEndpoint());
+        assertEquals(1, commands.stream().filter(command -> Boolean.TRUE.equals(command.get("launch"))).count());
     }
 
     @Test

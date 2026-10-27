@@ -10,7 +10,9 @@ import {
   chmod,
   mkdtemp,
   mkdir,
+  readdir,
   readFile,
+  realpath,
   rm,
   stat,
   symlink,
@@ -22,9 +24,13 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import {
+  accountCanEnter,
+  directoriesToEnter,
   generateSecrets,
+  lookupServiceUser,
   renderApplicationYml,
   renderHarnessEnv,
+  renderMysqlSetup,
   renderServerEnv,
 } from '../../packages/managed-agent-server/distribution/bin/qwen-managed-agent-bootstrap.mjs';
 import { createReferenceDistribution } from '../package-managed-agent-reference.mjs';
@@ -294,7 +300,16 @@ test('ships systemd units with the documented kill modes', async () => {
   assert.match(harness, /^StateDirectory=qwen-managed-agent$/m);
   assert.match(harness, /--profile hosted-harness/);
   assert.match(harness, /--no-web/);
-  assert.match(harness, /QWEN_HOSTED_HARNESS_BROKER_ARGS/);
+  // The Broker token reaches the Harness through harness.env, never argv.
+  assert.doesNotMatch(harness, /BROKER/);
+  assert.match(
+    harness,
+    /^EnvironmentFile=\/etc\/qwen-managed-agent\/harness\.env$/m,
+  );
+  assert.match(
+    harness,
+    /^ExecStart=\/usr\/local\/bin\/qwen serve --profile hosted-harness --hostname 127\.0\.0\.1 --port 4170 --no-web$/m,
+  );
   assert.ok(server.endsWith('\n'));
   assert.ok(harness.endsWith('\n'));
   assert.doesNotMatch(server, /\t/);
@@ -309,17 +324,136 @@ test('bootstrap renders matching credentials and a 32-byte key', () => {
   assert.ok(harness.includes(secrets.token));
   // The control plane refuses a `;` comment, which a shell stops reading the file at.
   assert.doesNotMatch(harness, /^\s*;/m);
-  const server = renderServerEnv(
-    secrets,
-    '/tmp/application.yml',
-    '/tmp/harness.env',
+  assert.ok(
+    harness
+      .split('\n')
+      .includes(`QWEN_MANAGED_RUNTIME_BROKER_TOKEN=${secrets.brokerToken}`),
   );
+  assert.match(
+    harness,
+    /^QWEN_MANAGED_RUNTIME_BROKER_URL=http:\/\/127\.0\.0\.1:4182$/m,
+  );
+  const paths = {
+    databasePassword: secrets.databasePassword,
+    applicationConfigPath: '/tmp/application.yml',
+    harnessEnvPath: '/tmp/harness.env',
+  };
+  const server = renderServerEnv(paths);
   assertReadsHarnessCredentials(server, secrets, '/tmp/harness.env');
   assertDerivesSessionStoreWiring(server);
+  assert.ok(
+    server
+      .split('\n')
+      .includes(`SPRING_DATASOURCE_PASSWORD=${secrets.databasePassword}`),
+  );
+  assert.doesNotMatch(server, /SERVICE_USER/);
+  assert.match(
+    renderServerEnv({ ...paths, serviceUser: 'qwen-managed-agent' }),
+    /^QWEN_MANAGED_AGENT_SERVICE_USER=qwen-managed-agent$/m,
+  );
   assert.match(
     renderApplicationYml(secrets),
     /credential-key-id: 'reference-test'/,
   );
+});
+
+test('bootstrap writes the MySQL setup for the generated password', () => {
+  const secrets = generateSecrets();
+  assert.match(secrets.databasePassword, /^[0-9a-f]{64}$/);
+  const sql = renderMysqlSetup(secrets);
+  const statements = sql.split('\n').filter((line) => !line.startsWith('--'));
+  assert.deepEqual(statements, [
+    'CREATE DATABASE qwen_managed_agent CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;',
+    `CREATE USER 'qwen'@'localhost' IDENTIFIED BY '${secrets.databasePassword}';`,
+    `CREATE USER 'qwen'@'127.0.0.1' IDENTIFIED BY '${secrets.databasePassword}';`,
+    "GRANT ALL ON qwen_managed_agent.* TO 'qwen'@'localhost';",
+    "GRANT ALL ON qwen_managed_agent.* TO 'qwen'@'127.0.0.1';",
+    "GRANT SELECT ON performance_schema.user_variables_by_thread TO 'qwen'@'localhost';",
+    "GRANT SELECT ON performance_schema.user_variables_by_thread TO 'qwen'@'127.0.0.1';",
+    '',
+  ]);
+});
+
+test('bootstrap resolves the service account before changing owners', () => {
+  const ids = { '-u': [990], '-g': [985], '-G': [985, 4] };
+  const lookup = (flag) => ids[flag];
+  assert.deepEqual(
+    lookupServiceUser('qwen-managed-agent', { lookup, uid: 0 }),
+    { uid: 990, gid: 985, groups: [985, 4] },
+  );
+  // The name is written unquoted into server.env.
+  for (const name of ['', 'Qwen', '-x', 'a b', 'a;b', 'x'.repeat(33)]) {
+    assert.match(
+      lookupServiceUser(name, { lookup, uid: 0 }).error,
+      /must be a user name/,
+    );
+  }
+  assert.match(
+    lookupServiceUser('qwen-managed-agent', { lookup, uid: 1000 }).error,
+    /run the bootstrap as root/,
+  );
+  assert.match(
+    lookupServiceUser('missing', {
+      lookup: () => {
+        throw new Error('no such user');
+      },
+      uid: 0,
+    }).error,
+    /User missing does not exist/,
+  );
+});
+
+test('bootstrap checks directory entry the way the kernel does', () => {
+  const account = { uid: 990, gid: 985, groups: [985, 4] };
+  // The owner bits alone apply to the owner, even when others may enter.
+  assert.equal(
+    accountCanEnter({ uid: 990, gid: 0, mode: 0o055 }, account),
+    false,
+  );
+  assert.equal(
+    accountCanEnter({ uid: 990, gid: 0, mode: 0o700 }, account),
+    true,
+  );
+  assert.equal(accountCanEnter({ uid: 0, gid: 4, mode: 0o750 }, account), true);
+  assert.equal(
+    accountCanEnter({ uid: 0, gid: 4, mode: 0o705 }, account),
+    false,
+  );
+  assert.equal(accountCanEnter({ uid: 0, gid: 0, mode: 0o755 }, account), true);
+  assert.equal(
+    accountCanEnter({ uid: 0, gid: 0, mode: 0o750 }, account),
+    false,
+  );
+});
+
+test('bootstrap follows symbolic links to the directories the account enters', async () => {
+  const temporary = await realpath(
+    await mkdtemp(path.join(os.tmpdir(), 'qwen-bootstrap-links-')),
+  );
+  try {
+    const target = path.join(temporary, 'private', 'config');
+    await mkdir(target, { recursive: true });
+    await mkdir(path.join(temporary, 'etc'));
+    const absolute = path.join(temporary, 'etc', 'qwen-managed-agent');
+    await symlink(target, absolute);
+    const relative = path.join(temporary, 'etc', 'relative');
+    await symlink(path.join('..', 'private', 'config'), relative);
+    for (const link of [absolute, relative]) {
+      const entered = await directoriesToEnter(link);
+      // The directory holding the link, and one that only the target names.
+      assert.ok(entered.includes(path.join(temporary, 'etc')), link);
+      assert.ok(entered.includes(path.join(temporary, 'private')), link);
+      assert.equal(entered.at(-1), target, link);
+    }
+    await symlink('loop-b', path.join(temporary, 'loop-a'));
+    await symlink('loop-a', path.join(temporary, 'loop-b'));
+    await assert.rejects(
+      directoriesToEnter(path.join(temporary, 'loop-a')),
+      /Too many symbolic links/,
+    );
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
 });
 
 test('bootstrap writes private files without printing secrets', async () => {
@@ -348,19 +482,34 @@ test('bootstrap writes private files without printing secrets', async () => {
     const digest = harness.match(
       /^QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST=(sha256:[0-9a-f]{64})$/m,
     )[1];
+    const brokerToken = harness.match(
+      /^QWEN_MANAGED_RUNTIME_BROKER_TOKEN=([0-9a-f]{64})$/m,
+    )[1];
     assertReadsHarnessCredentials(
       server,
-      { token, digest },
+      { token, digest, brokerToken },
       path.join(directory, 'harness.env'),
     );
     assert.match(application, /credential-key: '[A-Za-z0-9+/=]{44}'/);
-    for (const name of ['harness.env', 'server.env', 'application.yml']) {
+    const sql = await readFile(path.join(directory, 'mysql-setup.sql'), 'utf8');
+    const password = server.match(
+      /^SPRING_DATASOURCE_PASSWORD=([0-9a-f]{64})$/m,
+    )[1];
+    assert.ok(sql.includes(`IDENTIFIED BY '${password}';`));
+    for (const name of [
+      'harness.env',
+      'server.env',
+      'application.yml',
+      'mysql-setup.sql',
+    ]) {
       assert.equal(
         (await stat(path.join(directory, name))).mode & 0o777,
         0o600,
       );
     }
-    assert.ok(!output.includes(token));
+    for (const secret of [token, digest, brokerToken, password]) {
+      assert.ok(!output.includes(secret));
+    }
     assert.throws(
       () =>
         execFileSync(process.execPath, [script, '--directory', directory], {
@@ -377,6 +526,81 @@ test('bootstrap writes private files without printing secrets', async () => {
     await rm(temporary, { recursive: true, force: true });
   }
 });
+
+test(
+  'bootstrap gives the service account its files',
+  { skip: process.getuid?.() !== 0 && 'needs root to change owners' },
+  async () => {
+    const temporary = await mkdtemp(
+      path.join(os.tmpdir(), 'qwen-bootstrap-owner-'),
+    );
+    try {
+      const script = fileURLToPath(
+        new URL(
+          '../../packages/managed-agent-server/distribution/bin/' +
+            'qwen-managed-agent-bootstrap.mjs',
+          import.meta.url,
+        ),
+      );
+      const user = 'nobody';
+      const ids = (flag) =>
+        execFileSync('id', [flag, user], { encoding: 'utf8' })
+          .trim()
+          .split(/\s+/)
+          .map(Number);
+      const [uid] = ids('-u');
+      const [gid] = ids('-g');
+      const directory = path.join(temporary, 'config');
+      const run = (target = directory) =>
+        execFileSync(
+          process.execPath,
+          [script, '--directory', target, '--service-user', user],
+          { encoding: 'utf8', stdio: 'pipe' },
+        );
+      // mkdtemp's 0700 parent keeps the account out, so nothing is written.
+      assert.throws(run, (error) =>
+        String(error.stderr).includes(`${user} cannot enter ${temporary}`),
+      );
+      await chmod(temporary, 0o755);
+      await rm(directory, { recursive: true, force: true });
+      run();
+      const owners = {
+        '.': [0, gid, 0o750],
+        'harness.env': [uid, gid, 0o600],
+        'application.yml': [uid, gid, 0o600],
+        'server.env': [0, gid, 0o640],
+        'mysql-setup.sql': [0, 0, 0o600],
+      };
+      for (const [name, expected] of Object.entries(owners)) {
+        const info = await stat(path.join(directory, name));
+        assert.deepEqual(
+          [info.uid, info.gid, info.mode & 0o777],
+          expected,
+          name,
+        );
+      }
+      assert.match(
+        await readFile(path.join(directory, 'server.env'), 'utf8'),
+        /^QWEN_MANAGED_AGENT_SERVICE_USER=nobody$/m,
+      );
+      // A 0700 directory reached only through a symbolic link keeps the
+      // account out too.
+      const hidden = path.join(temporary, 'private');
+      await mkdir(path.join(hidden, 'config'), { recursive: true });
+      await chmod(hidden, 0o700);
+      const linked = path.join(temporary, 'linked');
+      await symlink(path.join(hidden, 'config'), linked);
+      assert.throws(
+        () => run(linked),
+        (error) =>
+          String(error.stderr).includes(`${user} cannot enter ${hidden}`),
+      );
+      assert.deepEqual(await readdir(path.join(hidden, 'config')), []);
+    } finally {
+      await rm(temporary, { recursive: true, force: true });
+    }
+  },
+);
 
 test('bootstrap runs through a symlinked entry point', async () => {
   const temporary = await mkdtemp(
@@ -531,6 +755,7 @@ test('leaves the Session Store wiring to the server defaults in the env template
     template,
     /^QWEN_MANAGED_AGENT_(HARNESS_TOKEN|CAPABILITY_DIGEST)=/m,
   );
+  assert.doesNotMatch(template, /RUNTIME_BROKER_TOKEN/);
   assert.match(
     template,
     /^QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE=\/etc\/qwen-managed-agent\/harness\.env$/m,
@@ -549,12 +774,17 @@ function assertDerivesSessionStoreWiring(env) {
 }
 
 // harness.env is the one copy of the shared credentials; server.env names it.
-function assertReadsHarnessCredentials(server, { token, digest }, harnessEnv) {
+function assertReadsHarnessCredentials(
+  server,
+  { token, digest, brokerToken },
+  harnessEnv,
+) {
   assert.ok(!server.includes(token));
   assert.ok(!server.includes(digest));
+  assert.ok(!server.includes(brokerToken));
   assert.doesNotMatch(
     server,
-    /^QWEN_MANAGED_AGENT_(HARNESS_TOKEN|CAPABILITY_DIGEST)=/m,
+    /^QWEN_MANAGED_AGENT_(HARNESS_TOKEN|CAPABILITY_DIGEST|RUNTIME_BROKER_TOKEN)=/m,
   );
   assert.ok(
     server
@@ -580,6 +810,16 @@ test('ships the Harness credential keys the control plane reads', async () => {
   );
   // It refuses a `;` comment, which a shell stops reading the file at.
   assert.doesNotMatch(template, /^\s*;/m);
+  // The tool path's pair ships commented, for the operator to enable together.
+  assert.match(
+    template,
+    /^# QWEN_MANAGED_RUNTIME_BROKER_URL=http:\/\/127\.0\.0\.1:4182$/m,
+  );
+  assert.match(
+    template,
+    /^# QWEN_MANAGED_RUNTIME_BROKER_TOKEN=[A-Za-z0-9._:/+=-]+$/m,
+  );
+  assert.doesNotMatch(template, /^#? *QWEN_HOSTED_HARNESS_BROKER_ARGS=/m);
 });
 
 test('rejects a stable distribution version', async () => {
