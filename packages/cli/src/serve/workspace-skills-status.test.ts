@@ -719,6 +719,38 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     expect(await readSkill()).toBeUndefined();
   });
 
+  it('discovers a project Skill written directly to disk after the refresh interval', async () => {
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-refresh-'),
+    );
+    try {
+      const startedAt = Date.now();
+      const provider = createWorkspaceSkillsStatusProvider();
+      const skillNames = async () =>
+        (await provider(workspace)).skills.map((skill) => skill.name);
+      expect(await skillNames()).not.toContain('external-skill');
+
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(startedAt + 1_000);
+      const directory = path.join(
+        workspace,
+        '.qwen',
+        'skills',
+        'external-skill',
+      );
+      await fsp.mkdir(directory, { recursive: true });
+      await fsp.writeFile(
+        path.join(directory, 'SKILL.md'),
+        '---\nname: external-skill\ndescription: External\n---\nBODY_external',
+      );
+      expect(await skillNames()).not.toContain('external-skill');
+
+      clock.mockReturnValue(startedAt + 60_000);
+      expect(await skillNames()).toContain('external-skill');
+    } finally {
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
   it.each(['safe', 'untrusted', 'inert-untrusted'] as const)(
     'does not load extensions in %s mode',
     async (mode) => {

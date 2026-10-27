@@ -80,6 +80,13 @@ const VALID_SKILL_LEVELS: ReadonlySet<string> = new Set<SkillLevel>([
 ]);
 
 /**
+ * Re-discover Skills at most this often per workspace. Matches the runtime
+ * endpoint's snapshot TTL so both views converge on the same bounded
+ * staleness when a Skill is created on disk outside the config APIs.
+ */
+const SKILLS_DISCOVERY_REFRESH_MS = 5_000;
+
+/**
  * The `Config` surface `SkillManager.listSkills()` actually reads. Declaring it
  * as a `Pick` (rather than casting an inline object literal) type-checks the
  * shimmed getters against `Config`'s real signatures, so a signature drift is
@@ -101,6 +108,7 @@ interface WorkspaceSkillManagers {
   skillManager: SkillManager;
   extensionManager?: ExtensionManager;
   extensionSkillStates: Map<Extension, Map<string, boolean>>;
+  discoveredAt: number;
 }
 
 export function createWorkspaceSkillsStatusProvider(
@@ -110,9 +118,10 @@ export function createWorkspaceSkillsStatusProvider(
 } {
   // Reuse one SkillManager per workspace so repeat queries hit its in-memory
   // skills cache instead of re-scanning (and re-parsing frontmatter / compiling
-  // globs for) every level on each call. This is a best-effort pre-child
-  // fallback, so slight staleness between explicit invalidation points is
-  // acceptable: the live child re-lists authoritatively once a session exists.
+  // globs for) every level on each call. Discovery is re-run on a bounded
+  // interval so a Skill written directly to disk becomes visible without a
+  // configuration mutation; the live child still re-lists authoritatively
+  // once a session exists.
   const managers = new Map<string, WorkspaceSkillManagers>();
   const provider = ((workspaceCwd: string) =>
     buildWorkspaceSkillsStatus(
@@ -283,13 +292,23 @@ async function buildWorkspaceSkillsStatus(
           }
         }
       }
-      cached = { skillManager, extensionManager, extensionSkillStates };
+      cached = {
+        skillManager,
+        extensionManager,
+        extensionSkillStates,
+        discoveredAt: Date.now(),
+      };
       managers.set(workspaceCwd, cached);
     }
     const { disablements, enabledNames } = resolveSkillSettings(settings);
     const { skillManager, extensionManager, extensionSkillStates } = cached;
     const extensions = extensionManager?.getLoadedExtensions() ?? [];
-    const skills = await skillManager.listSkills();
+    const discoveryStale =
+      Date.now() - cached.discoveredAt >= SKILLS_DISCOVERY_REFRESH_MS;
+    const skills = await skillManager.listSkills(
+      discoveryStale ? { force: true } : {},
+    );
+    if (discoveryStale) cached.discoveredAt = Date.now();
     const statuses = skills.map((skill) => {
       const extension =
         skill.level === 'extension'
