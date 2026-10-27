@@ -24,6 +24,7 @@ import { TurnBudget } from '../core/turn-budget.js';
 import { uiTelemetryService, type UiEvent } from '../telemetry/uiTelemetry.js';
 import { ApiResponseEvent } from '../telemetry/types.js';
 import { EVENT_API_RESPONSE } from '../telemetry/constants.js';
+import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
 
 const operation = {
   operationId: 'operation-1',
@@ -55,13 +56,6 @@ afterEach(async () => {
 async function fixture() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hook-model-'));
   dirs.push(root);
-  const ref = {
-    resourceId: 'resource',
-    kind: 'managed-test',
-    schemaVersion: 1,
-    byteLength: 2,
-    digest: '9'.repeat(64),
-  };
   const options = {
     runtimeBaseDir: root,
     sessionId: '550e8400-e29b-41d4-a716-446655440000',
@@ -76,6 +70,8 @@ async function fixture() {
     workerId: 'worker-1',
     activationLeaseDurationMs: 60_000,
   };
+  const resources = LocalManagedSessionResourceStore.create(options);
+  const ref = await resources.publish('managed-test', Buffer.from('{}'));
   const session = await openManagedSession({
     ...options,
     create: { definitionRef: ref, rootSnapshotRef: ref, createdBy: 'test' },

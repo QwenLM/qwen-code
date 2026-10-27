@@ -65,7 +65,7 @@ public interface RuntimeWarmer {
         throw WorkspaceExecutionStore.unavailable();
     }
 
-    default boolean supportsWorkspaceCwdChange(ContextBinding binding) {
+    default boolean supportsWorkspaceContextChange(ContextBinding binding) {
         return true;
     }
 

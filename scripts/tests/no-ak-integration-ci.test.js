@@ -147,7 +147,7 @@ describe('no-AK integration CI wiring', () => {
       'SCRIPTS_RC=$?',
       'if [ "$SCRIPTS_RC" -ne 0 ]; then',
       '::warning::The complete Windows script suite has known baseline failures',
-      'npx vitest run scripts/tests/install-script.test.js --config scripts/tests/vitest.config.ts',
+      'npx vitest run scripts/tests/install-script.test.js scripts/tests/opentui-preview-install.test.js --config scripts/tests/vitest.config.ts --retry=0 --bail=1 --maxWorkers=1 --minWorkers=1 --dangerouslyIgnoreUnhandledErrors=false',
       'INSTALLER_RC=$?',
       'set -e',
       'pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true',
@@ -227,6 +227,7 @@ describe('no-AK integration CI wiring', () => {
       './cli/tool-hook-context.test.ts',
       './cli/tool-hook-updated-input.test.ts',
       './cli/qwen-serve-routes.test.ts',
+      './cli/qwen-serve-session-cd.test.ts',
       './cli/qwen-serve-streaming.test.ts',
       './cli/qwen-serve-standalone-concurrency.test.ts',
       './interactive/workflow-completion.test.ts',
@@ -369,6 +370,9 @@ describe('no-AK integration CI wiring', () => {
       'interactive/submitted-prompt-provenance.test.ts': 'Runtime budget',
       'interactive/tui-checkpoint-restore.test.ts': 'Dedicated TUI parity gate',
       'interactive/tui-clipboard-source.test.ts': 'Dedicated TUI parity gate',
+      'interactive/tui-extension-acquisition.test.ts':
+        'Dedicated TUI parity gate',
+      'interactive/tui-foreground-shell.test.ts': 'Dedicated TUI parity gate',
       'interactive/tui-dual-output.test.ts': 'Dedicated TUI parity gate',
       'interactive/tui-migration.test.ts': 'Runtime budget',
       'interactive/tui-session-recovery.test.ts': 'Dedicated TUI parity gate',
@@ -984,7 +988,7 @@ describe('no-AK integration CI wiring', () => {
     expect(nodeAction).toContain('::warning::Expected Node 22.x but found');
   });
 
-  it('keeps install-script.test.js out of the win32 exclude list', () => {
+  it('keeps both installer files out of the win32 exclude list', () => {
     // install-script.test.js is the only home of the nine Windows installer
     // end-to-end cases; excluding it on win32 would silently drop coverage
     // docs/design/windows-ecs-ci-validation.md declares required.
@@ -994,6 +998,9 @@ describe('no-AK integration CI wiring', () => {
     );
     expect(scriptSuiteConfig).not.toContain(
       "'scripts/tests/install-script.test.js'",
+    );
+    expect(scriptSuiteConfig).not.toContain(
+      "'scripts/tests/opentui-preview-install.test.js'",
     );
   });
 
