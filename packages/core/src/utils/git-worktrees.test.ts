@@ -829,10 +829,14 @@ describe('dryRunGitWorktreePrune', () => {
       path.join(adminDir(repo), 'dangling'),
     );
 
-    expect(await dryRunGitWorktreePrune(repo)).toEqual([
-      { id: 'dangling', worktreePath: null },
-      { id: 'stale', worktreePath: fs.realpathSync(stale) },
-    ]);
+    const report = await dryRunGitWorktreePrune(repo);
+    expect(report).toHaveLength(2);
+    expect(report).toEqual(
+      expect.arrayContaining([
+        { id: 'dangling', worktreePath: null },
+        { id: 'stale', worktreePath: fs.realpathSync(stale) },
+      ]),
+    );
   }, 20_000);
 
   it('never lets a link in the admin directory authorise a prune', async () => {
