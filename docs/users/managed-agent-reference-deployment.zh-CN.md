@@ -133,8 +133,8 @@ Hosted Harness 通过它自己的环境访问同一个 Broker，既不经命令�
 2. 停止新的入口准入，按照部署既有 drain 流程等待已准入工作完成结算。
 3. 备份 MySQL、`QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY`、完整 Runtime credential key ring、运维自有的 `server.env` 与 `harness.env`，以及精确旧版分发产物。分发产物升级期间不要轮换 credential key。
 4. 停止 Java 服务与 Hosted Harness，保留 Workspace 和 durable Runtime state。随包的控制面 unit 使用 `KillMode=process`，`systemctl stop` 不会终止 Runtime worker；启动新版本前先用 `systemctl kill --kill-whom=all -s TERM qwen-managed-agent-server` 回收。
-5. 安装与 manifest 匹配的 Qwen Code/Harness，并使用既有 token 与 capability digest 启动。工具路径的主机需先把 `harness.env` 中的 `QWEN_HOSTED_HARNESS_BROKER_ARGS` 行换成 `QWEN_MANAGED_RUNTIME_BROKER_URL` 和 `QWEN_MANAGED_RUNTIME_BROKER_TOKEN`：已经没有组件读取那一行，不替换的话 Harness 启动时没有 Broker。如果 `server.env` 启用了 Harness 并把 `harness.env` 指定为凭据文件（bootstrap 生成的文件就是这样），还要从 `server.env` 中删除 `QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN`：此后控制面从 `harness.env` 读取 token，两份都保留会拒绝启动。旧版分发产物不读取这两个新键，缺少被删除的 token 时也不会启动其 Broker，因此回滚到旧版时要从第 3 步的备份恢复这两个文件。
-6. 使用相同数据库和 durable 配置启动新版 `bin/qwen-managed-agent-server`，由 Flyway 向前迁移 schema。其 `--check` 的 `workers` 行会列出仍未退出的 worker；请在 Harness 启动后运行，因为 Harness 停止期间 `harness` 行会失败。
+5. 安装与 manifest 匹配的 Qwen Code/Harness，并使用既有 token 与 capability digest 启动。工具路径的主机需先把 `harness.env` 中的 `QWEN_HOSTED_HARNESS_BROKER_ARGS` 行换成 `QWEN_MANAGED_RUNTIME_BROKER_URL` 和 `QWEN_MANAGED_RUNTIME_BROKER_TOKEN`：已经没有组件读取那一行，不替换的话 Harness 启动时没有 Broker。如果 `server.env` 启用了 Harness 并把 `harness.env` 指定为凭据文件（bootstrap 生成的文件就是这样），还要从 `server.env` 中删除 `QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN`：此后控制面从 `harness.env` 读取 token，两份都保留会拒绝启动。旧版分发产物不读取这两个新键，缺少被删除的 token 时也不会启动其 Broker，因此回滚到旧版时要从第 3 步的备份恢复这两个文件。新版发行产物的 `--check` 会在 `workers` 行列出现在仍存活的 worker；请在此处以离线模式运行——服务仍停止、Harness 已启动——因为在线模式下持久模式的 Broker 会让该行 SKIP。
+6. 使用相同数据库和 durable 配置启动新版 `bin/qwen-managed-agent-server`，由 Flyway 向前迁移 schema。
 7. 要求 actuator 健康检查通过，读取一个既有 Session 与历史，再完成一个新的无工具 Turn，之后才能恢复入口流量。任何可选工具 capability 都必须在重新验收后才能开启。
 
 不支持数据库降级。如果在恢复流量前启动或验证失败，应修正配置并重试同一产物。如需退回到 manifest 声明较旧 schema 范围的版本，必须在接受任何新写入前同时恢复升级前的数据库与 Runtime-state 备份；不得假设旧 server 可以直接运行在已迁移数据库上。任何退回旧版分发产物的操作，都要从同一份备份恢复 `server.env` 与 `harness.env`，因为第 5 步已为新版本改写了它们。

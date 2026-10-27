@@ -590,8 +590,9 @@ public final class ManagedAgentPreflight {
                     "set QWEN_MANAGED_AGENT_HARNESS_BASE_URL");
         }
         // A URL the probe cannot use fails on its setting alone: the parser's
-        // own message quotes the value, credentials included.
-        String base = baseUrl.strip();
+        // own message quotes the value, credentials included. The server parses
+        // this property untrimmed, so a padded value has to fail here too.
+        String base = baseUrl;
         URI origin = harnessOrigin(base);
         if (origin == null) {
             return unusableHarnessUrl();
@@ -867,11 +868,19 @@ public final class ManagedAgentPreflight {
                         + " --kill-whom=all -s TERM qwen-managed-agent-server,"
                         + " or kill those pids";
             }
-            return new Check("workers", Status.WARN, alive.size()
+            String detail = alive.size()
                     + " Runtime worker(s) of an earlier run are alive (pid "
                     + alive.stream().map(String::valueOf)
                             .collect(Collectors.joining(", "))
-                    + ")", fix);
+                    + ")";
+            // The list is not complete when a matching process was not read.
+            if (uninspected > 0) {
+                detail += "; " + uninspected + " more matching process(es) could"
+                        + " not be inspected, so leftover workers were not ruled"
+                        + " out";
+                fix += "; run --check as root or as the service account";
+            }
+            return new Check("workers", Status.WARN, detail, fix);
         }
         // Another account's workers look exactly like this: argv readable,
         // /proc/<pid>/exe and cwd not.
@@ -948,7 +957,18 @@ public final class ManagedAgentPreflight {
 
     // --online: the running server holds the ports, so check that it
     // listens there instead of trying to bind them.
+    // A port outside the TCP range would throw out of the row, aborting the
+    // whole report instead of failing this one check.
+    private static Check portRangeCheck(String name, int port) {
+        return new Check(name + "-port", Status.FAIL,
+                port + " is not a TCP port",
+                "set the configured port between 0 and 65535");
+    }
+
     static Check listeningCheck(String name, String address, int port) {
+        if (port < 0 || port > 65535) {
+            return portRangeCheck(name, port);
+        }
         String host = address == null || address.isBlank()
                 || "0.0.0.0".equals(address) || "::".equals(address)
                 ? "127.0.0.1" : address;
@@ -1379,6 +1399,9 @@ public final class ManagedAgentPreflight {
     }
 
     static Check portCheck(String name, String address, int port) {
+        if (port < 0 || port > 65535) {
+            return portRangeCheck(name, port);
+        }
         InetSocketAddress endpoint = new InetSocketAddress(address, port);
         if (endpoint.isUnresolved()) {
             return new Check(name + "-port", Status.FAIL,

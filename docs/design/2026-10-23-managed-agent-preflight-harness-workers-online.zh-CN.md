@@ -74,6 +74,7 @@ PASS 信息为"compatible: Hosted Harness protocol 1, capability digest matches,
   - 有存活的 worker 时为 `WARN`，给出数量和 pid。没有持久模式 Broker 时，修复建议为 `systemctl kill --kill-whom=all -s TERM qwen-managed-agent-server`，或结束这些 pid。持久模式的 Broker 会在启动时接管它的 worker，修复建议会说明这一点，并只在需要干净启动（例如升级）时才回收。
   - 没有 local-process Runtime、没有 `/proc`，或状态目录尚不存在时为 `SKIP`。
   - 状态目录存在但无法解析（例如权限不足）时为 `WARN`，因为预检此时无法判断。
+  - 某个进程的 argv 指向 worker、但无法检查它（例如它属于另一个账号，读取它的 `/proc` 条目需要调用者的 ptrace 权限）时为 `WARN`。若同一次扫描既发现了遗留进程又有无法检查的进程，则同时给出存活 pid 与无法检查的数量，绝不把不完整的列表当成完整结果。
 
 这里报 WARN 而不是 FAIL，是因为持久模式的 Broker 可以接管它的 worker；不过部署文档仍要求升级前干净启动。
 

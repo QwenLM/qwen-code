@@ -74,6 +74,7 @@ A new `workers` row runs only when the local-process Runtime is enabled with a s
   - `WARN` with the count and pids. Without a durable Broker, the fix is `systemctl kill --kill-whom=all -s TERM qwen-managed-agent-server` or killing those pids. With one, which adopts its workers at startup, the fix says so and keeps the reap for a clean start, as an upgrade does.
   - `SKIP` without a local-process Runtime, without `/proc`, or before the state directory exists.
   - `WARN` when the state directory exists but cannot be resolved, for example for lack of permission, since preflight then cannot tell.
+  - `WARN` when a process whose argv names a worker cannot be inspected, for example because another account owns it: its `/proc` entries need the caller's ptrace access. A scan that also found leftovers names both the alive pids and the uninspected count, so a partial list is never presented as the whole one.
 
 It is a WARN rather than a FAIL because a durable Broker can adopt its workers. The guide still asks for a clean start before an upgrade.
 

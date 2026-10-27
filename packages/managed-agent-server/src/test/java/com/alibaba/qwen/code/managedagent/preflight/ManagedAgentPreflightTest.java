@@ -535,19 +535,23 @@ class ManagedAgentPreflightTest {
                             state.toRealPath(), worker.pid()));
         } finally {
             for (Process process : List.of(worker, other, notWorker, imitation, diagnostic)) {
-                process.destroyForcibly().waitFor();
+                reap(process);
             }
         }
         assertEquals(ManagedAgentPreflight.Status.PASS, ManagedAgentPreflight
                 .workersCheck(properties, () -> List.of(worker.toHandle()), false).status());
         properties.getRuntimeBroker().setProvisioner("static");
-        assertEquals("no local-process Runtime configured", ManagedAgentPreflight
-                .workersCheck(properties, List::of, false).detail());
+        ManagedAgentPreflight.Check noRuntime = ManagedAgentPreflight
+                .workersCheck(properties, List::of, false);
+        assertEquals(ManagedAgentPreflight.Status.SKIP, noRuntime.status());
+        assertEquals("no local-process Runtime configured", noRuntime.detail());
         properties.getRuntimeBroker().setProvisioner("local-process");
         properties.getRuntimeBroker().setEnabled(false);
         // Online reports the same reason when no worker can exist.
-        assertEquals("no local-process Runtime configured", ManagedAgentPreflight
-                .workersCheck(properties, List::of, true).detail());
+        ManagedAgentPreflight.Check disabled = ManagedAgentPreflight
+                .workersCheck(properties, List::of, true);
+        assertEquals(ManagedAgentPreflight.Status.SKIP, disabled.status());
+        assertEquals("no local-process Runtime configured", disabled.detail());
     }
 
     @Test
@@ -574,6 +578,32 @@ class ManagedAgentPreflightTest {
                 Optional.of(new String[] {"-f", "/dev/null"}));
         assertEquals(ManagedAgentPreflight.Status.PASS, ManagedAgentPreflight
                 .workersCheck(properties, () -> List.of(other), false).status());
+    }
+
+    @Test
+    @org.junit.jupiter.api.condition.EnabledOnOs(org.junit.jupiter.api.condition.OS.LINUX)
+    void reportsBothLeftoversAndUninspectedWorkers(@TempDir Path directory)
+            throws Exception {
+        Path state = Files.createDirectory(directory.resolve("state"));
+        ManagedAgentProperties properties = workerProperties(state);
+        Process worker = worker(node(directory), state);
+        ProcessHandle unreadable = handle(ProcessHandle.current().pid() + 100_000L,
+                Optional.empty(), Optional.of(new String[] {
+                        "/opt/qwen-code/dist/cli.js", "managed-runtime-worker"}));
+        try {
+            // The pid list is not the whole answer, so the row says so.
+            ManagedAgentPreflight.Check check = ManagedAgentPreflight.workersCheck(
+                    properties, () -> List.of(worker.toHandle(), unreadable), false);
+            assertEquals(ManagedAgentPreflight.Status.WARN, check.status());
+            assertEquals("1 Runtime worker(s) of an earlier run are alive (pid "
+                    + worker.pid() + "); 1 more matching process(es) could not be"
+                    + " inspected, so leftover workers were not ruled out",
+                    check.detail());
+            assertTrue(check.fix().endsWith(
+                    "run --check as root or as the service account"), check.fix());
+        } finally {
+            reap(worker);
+        }
     }
 
     @Test
@@ -694,7 +724,14 @@ class ManagedAgentPreflightTest {
                         java.nio.charset.StandardCharsets.UTF_8)).readLine().trim());
         launcher.waitFor();
         ProcessHandle handle = ProcessHandle.of(orphan).orElseThrow();
+        // $! names the child at fork; until its own exec lands, /proc holds
+        // the launcher's argv and the worker does not match yet.
+        long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+        while (System.nanoTime() < deadline && !endsWithWorkerMarker(handle)) {
+            Thread.sleep(10);
+        }
         try {
+            assertTrue(endsWithWorkerMarker(handle), "the worker reached its exec");
             ManagedAgentPreflight.Check check = ManagedAgentPreflight.workersCheck(
                     properties, () -> List.of(handle), true);
             assertEquals(ManagedAgentPreflight.Status.WARN, check.status());
@@ -710,6 +747,14 @@ class ManagedAgentPreflightTest {
             handle.descendants().forEach(ProcessHandle::destroyForcibly);
             handle.destroyForcibly();
         }
+    }
+
+    private static boolean endsWithWorkerMarker(ProcessHandle handle) {
+        return handle.info().arguments()
+                .map(arguments -> arguments.length > 0
+                        && "managed-runtime-worker".equals(
+                                arguments[arguments.length - 1]))
+                .orElse(false);
     }
 
     @Test
@@ -735,8 +780,8 @@ class ManagedAgentPreflightTest {
                     + stale.pid() + ")", ManagedAgentPreflight.workersCheck(
                             properties, () -> List.of(stale.toHandle()), false).detail());
         } finally {
-            linked.destroyForcibly().waitFor();
-            stale.destroyForcibly().waitFor();
+            reap(linked);
+            reap(stale);
         }
         properties.getRuntimeBroker().setStateDirectory(
                 directory.resolve("missing").toString());
@@ -777,6 +822,12 @@ class ManagedAgentPreflightTest {
                 .directory(directory.toFile()).start();
     }
 
+    // The shell's `sleep 60` child outlives it unless it is killed too.
+    private static void reap(Process process) throws InterruptedException {
+        process.descendants().forEach(ProcessHandle::destroyForcibly);
+        process.destroyForcibly().waitFor();
+    }
+
     @Test
     void checksTheListenersInsteadOfBindingThemOnline() throws IOException {
         // Nothing accepts, so the backlog holds every connect below.
@@ -793,6 +844,8 @@ class ManagedAgentPreflightTest {
             assertTrue(valued.contains("server-port:PASS"), valued.toString());
             List<String> invalid = statuses("--check", "--online=maybe", "--server.port=" + live);
             assertTrue(invalid.contains("online:FAIL"), invalid.toString());
+            // A malformed value still runs the remaining rows offline.
+            assertTrue(invalid.contains("server-port:FAIL"), invalid.toString());
             // The Broker port is checked the same way.
             List<String> broker = statuses("--check", "--online", "--server.port=" + live,
                     "--qwen.managed-agent.runtime-broker.enabled=true",
@@ -1033,7 +1086,7 @@ class ManagedAgentPreflightTest {
     }
 
     @Test
-    void keepsCredentialsInAMistypedHarnessUrlOutOfTheReport() {
+    void keepsCredentialsInAMistypedHarnessUrlOutOfTheReport() throws IOException {
         // The parser's own message quotes the value it rejected, so the row
         // fails on the setting alone.
         for (String base : List.of("user:secret@127.0.0.1:1",
@@ -1052,6 +1105,20 @@ class ManagedAgentPreflightTest {
             assertFalse(check.fix().contains("secret"), check.fix());
             assertTrue(check.fix().startsWith(
                     "set QWEN_MANAGED_AGENT_HARNESS_BASE_URL"), check.fix());
+        }
+        // One trailing space still parses to a reachable probe, but the server
+        // parses the property untrimmed and cannot start with it.
+        HttpServer live = capabilitiesServer(capabilities(DIGEST, ""));
+        try {
+            ManagedAgentPreflight.Check padded = ManagedAgentPreflight.harnessCheck(
+                    harness("http://127.0.0.1:" + live.getAddress().getPort() + " "),
+                    "0.26.0");
+            assertEquals(ManagedAgentPreflight.Status.FAIL, padded.status(),
+                    padded.detail());
+            assertTrue(padded.fix().startsWith(
+                    "set QWEN_MANAGED_AGENT_HARNESS_BASE_URL"), padded.fix());
+        } finally {
+            live.stop(0);
         }
     }
 
