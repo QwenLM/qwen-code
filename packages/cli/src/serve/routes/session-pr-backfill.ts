@@ -25,6 +25,10 @@ import {
   type SessionPr,
   type SessionPrSource,
 } from '@qwen-code/qwen-code-core';
+import {
+  hostsEquivalent,
+  normalizeSegment,
+} from '../../commands/review/lib/remote-match.js';
 import type { SendBridgeError } from '../server/error-response.js';
 import {
   AONE_MAX_MR_VIEW_CALLS_PER_RUN,
@@ -57,13 +61,13 @@ export interface SessionPrBackfillOptions {
    */
   aoneBackend?: AoneMrBackend;
   /**
-   * A `/review` command from a prompt the daemon has just admitted. Its
-   * mentions are bound directly instead of being discovered by the
-   * transcript scan: the live turn's user record may not be on disk yet, and
-   * the badge must not wait for a later sweep. When set, no other session is
-   * scanned.
+   * A `/review` or `/verify-pr` command from a prompt the daemon has just
+   * admitted. Its mentions are bound directly instead of being discovered by
+   * the transcript scan: the live turn's user record may not be on disk yet,
+   * and the badge must not wait for a later sweep. When set, no other session
+   * is scanned.
    */
-  liveReview?: { sessionId: string; rawCommand: string };
+  liveCommand?: { sessionId: string; rawCommand: string };
 }
 
 // `--worktree=#<N>` launches persist slug `pr-<N>` with branch
@@ -111,6 +115,14 @@ export interface SessionPrBackfillWorkspaceResult {
    */
   unresolved: number;
   /**
+   * Numbers (or url forms) a `/verify-pr` claim named for ANOTHER
+   * repository, so the binding was declined by the `--repo` gate rather
+   * than failing to resolve. A zero `bound` count with this above zero is a
+   * policy decline, not a degraded run — without it the two are
+   * indistinguishable in the result.
+   */
+  repoDeclined?: number;
+  /**
    * GitHub only: whether the workspace's `gh pr list` succeeded. False
    * means URL/state resolution degraded to the `/review <url>` forms and
    * the remote-web-URL fallback, so a zero `bound` count is a degraded
@@ -132,64 +144,114 @@ interface BackfillCandidate {
   /** PR number named by the worktree slug/branch convention, if any. */
   conventionNumber: number | undefined;
   /**
-   * `/review <N|#N|url>` numbers in TRANSCRIPT ORDER (first mention wins,
-   * bare and url forms interleaved as typed): the cap trim tie-breaks
-   * same-rank plan members by plan position as an age proxy, so appending
-   * one form after the other would evict the wrong (younger) review.
-   * `bare` is true when ANY mention was bare or `#N` — those name THIS
-   * repo's PR N.
+   * Numbers named by the session's `/review` and `/verify-pr` commands in
+   * TRANSCRIPT ORDER (first mention wins, bare and url forms interleaved as
+   * typed): the cap trim tie-breaks same-rank plan members by plan position
+   * as an age proxy, so appending one form after the other would evict the
+   * wrong (younger) review. `bare` is true when ANY mention was bare or
+   * `#N` — those name one repo's PR N: this workspace's, unless the mention
+   * carries `/verify-pr`'s `--repo` qualifier.
    */
-  mentions: ReadonlyArray<{ number: number; bare: boolean }>;
-  /** `/review <url>` forms, repo-gated once the page key is known. */
-  reviewedUrlForms: ReadonlyArray<{ number: number; url: string }>;
+  mentions: readonly CommandMention[];
+  /** URL forms, repo-gated once the page key is known. */
+  urlForms: ReadonlyArray<{ number: number; url: string }>;
 }
 
-// `/review 9584`, `/review #9584`, `/review https://…/pull/9584 …`, read
-// only at COMMAND position — the very start of the prompt the user typed.
-// User records lead with that prompt; @-imported file content is appended
-// as later text parts, and shipped docs contain line-leading `/review N`
-// examples, so nothing after the first part may seed a binding. `[ \t]+`
-// (not `\s+`) keeps the number on the command's own line and isolates the
-// command token — `/review-skill …` is another command and must not forge
-// a binding. The bare-number alternative closes its token against filename
-// characters (`(?!\w)`-class): `/review <file-path>` is another documented
-// invocation form, so `/review 001_init.sql` must not forge PR 1. The URL
-// alternative keeps `(?!\d)`: it rejects 10+-digit numbers instead of
-// truncating them to a 9-digit prefix. The bare-number alternative comes
-// first: `/review 42 and fix #7` names 42. Bare session git branches are
-// NOT a source: they bind the workspace's current branch PR onto every
-// session — measured pure noise, removed with cleanup.
-const REVIEW_COMMAND_PATTERN =
-  /^\s*\/review(?:[ \t]+#?(\d{1,9})(?![\w./-])|[ \t]+[^\n"\\]*?(https?:\/\/[A-Za-z0-9][^\s"'<>)]*\/pull\/(\d{1,9})(?!\d)))/;
+/** One PR number a prompt command names. */
+interface CommandMention {
+  number: number;
+  bare: boolean;
+  /**
+   * Every `[HOST/]OWNER/REPO` spelling a `/verify-pr` claim on this number
+   * carried: the number names THAT repo's PR, not this workspace's. Absent
+   * means this workspace's, the only reading `/review` has. Kept as a list —
+   * not the first spelling alone — so a later claim on this workspace's own
+   * repository binds after an earlier one named another.
+   */
+  repoForms?: readonly string[];
+}
+
+// `/review 9584`, `/review #9584`, `/review https://…/pull/9584 …` and the
+// same forms after `/verify-pr`, read only at COMMAND position — the very
+// start of the prompt the user typed. User records lead with that prompt;
+// @-imported file content is appended as later text parts, and shipped docs
+// contain line-leading `/review N` examples, so nothing after the first part
+// may seed a binding. `[ \t]+` (not `\s+`) keeps the number on the command's
+// own line and isolates the command token — `/review-skill …` and
+// `/verify-pr-watch …` are other commands and must not forge a binding. The
+// bare-number alternative closes its token against filename characters
+// (`(?!\w)`-class): `/review <file-path>` is another documented invocation
+// form, so `/review 001_init.sql` must not forge PR 1. The URL alternative
+// keeps `(?!\d)`: it rejects 10+-digit numbers instead of truncating them to
+// a 9-digit prefix. The bare-number alternative comes first: `/review 42 and
+// fix #7` names 42. Bare session git branches are NOT a source: they bind the
+// workspace's current branch PR onto every session — measured pure noise,
+// removed with cleanup.
+const PR_COMMAND_PATTERN =
+  /^\s*\/(review|verify-pr)(?:[ \t]+#?(\d{1,9})(?![\w./-])|[ \t]+[^\n"\\]*?(https?:\/\/[A-Za-z0-9][^\s"'<>)]*\/pull\/(\d{1,9})(?!\d)))/;
+
+// `/verify-pr --repo <owner>/<repo>` scopes the number to another repository;
+// a bare number beside it must never bind this workspace's same-numbered PR.
+// The flag is recognised by its TOKEN, not by whether its value parses: the
+// value capture below tolerates quotes, but a URL, an scp form, a
+// `host:port`, gh's `-R`, or a value on the next line would otherwise parse
+// as no qualifier at all — and an unread qualifier must decline, never fall
+// through to this workspace's PR. `--assets-repo` is a different flag of the
+// same command and must not count as one. `/review` takes no `--repo`, so a
+// stray occurrence in its prompt reads as a qualifier too — the safer
+// reading, and never a binding this workspace's number.
+const REPO_FLAG_PATTERN =
+  /(?:^|[^-\w])--repo(?![\w-])|(?:^|[\s])-R[ \t\r\n]*=?[ \t\r\n]*["']?(?:[a-z][a-z0-9+.-]*:\/\/[^\s"']+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)?(?![\w./-]))["']?/g;
+const REPO_VALUE_PATTERN = /--repo(?:[ \t]*=[ \t]*|[ \t]+)["']?[^\s"']+/g;
+const REPO_FORM_PATTERN = /--repo(?:[ \t]*=[ \t]*|[ \t]+)["']?([^\s"']+)/;
 
 /**
  * Longest prompt the grammar scans. The lazy URL alternative in
- * `REVIEW_COMMAND_PATTERN` backtracks quadratically past this size, and the
- * live hook runs the match on the synchronous prefix of every admitted
- * prompt. 16 KiB matches `MID_TURN_MESSAGE_MAX_LENGTH` and leaves room above
- * the 2048-char `SESSION_PR_URL_MAX_LENGTH` for flags.
+ * `PR_COMMAND_PATTERN` backtracks quadratically past this size, and the live
+ * hook runs the match on the synchronous prefix of every admitted prompt.
+ * 16 KiB matches `MID_TURN_MESSAGE_MAX_LENGTH` and leaves room above the
+ * 2048-char `SESSION_PR_URL_MAX_LENGTH` for flags.
  */
-const REVIEW_COMMAND_MAX_LENGTH = 16 * 1024;
+const PR_COMMAND_MAX_LENGTH = 16 * 1024;
 
 // The URL form names the repo it reviewed; it is repo-gated once gh's page
 // key is known (see backfillWorkspaceSessionPrs) rather than here.
-function parseReviewCommand(prompt: string): {
-  mention?: { number: number; bare: boolean };
+function parsePrCommand(prompt: string): {
+  mention?: CommandMention;
   urlForm?: { number: number; url: string };
 } {
-  if (prompt.length > REVIEW_COMMAND_MAX_LENGTH) return {};
-  const match = REVIEW_COMMAND_PATTERN.exec(prompt);
+  if (prompt.length > PR_COMMAND_MAX_LENGTH) return {};
+  const match = PR_COMMAND_PATTERN.exec(prompt);
   if (!match) return {};
-  const bareNumber = match[1];
+  const bareNumber = match[2];
   if (bareNumber !== undefined) {
     // `\d{1,9}` admits 0; PR 0 does not exist and the sidecar write
     // declines it, so it must never count as a binding.
-    return Number(bareNumber) > 0
-      ? { mention: { number: Number(bareNumber), bare: true } }
-      : {};
+    if (Number(bareNumber) <= 0) return {};
+    const repoForm = REPO_FORM_PATTERN.exec(prompt)?.[1];
+    // The TOKEN decides, not the VALUE: a qualifier this grammar cannot read
+    // is still a qualifier, so the number must decline. Comparing the counts
+    // keeps the two independent — an unrelated readable `--repo` later in the
+    // prompt must not excuse an unreadable one on the command itself — and the
+    // empty list keeps the decline countable instead of looking like a prompt
+    // that named no PR at all.
+    const flagCount = (prompt.match(REPO_FLAG_PATTERN) ?? []).length;
+    const valueCount = (prompt.match(REPO_VALUE_PATTERN) ?? []).length;
+    if (valueCount < flagCount) {
+      return {
+        mention: { number: Number(bareNumber), bare: true, repoForms: [] },
+      };
+    }
+    return {
+      mention: {
+        number: Number(bareNumber),
+        bare: true,
+        ...(repoForm !== undefined ? { repoForms: [repoForm] } : {}),
+      },
+    };
   }
-  const url = match[2];
-  const urlNumber = match[3];
+  const url = match[3];
+  const urlNumber = match[4];
   if (url === undefined || urlNumber === undefined) return {};
   const number = Number(urlNumber);
   return number > 0
@@ -197,15 +259,15 @@ function parseReviewCommand(prompt: string): {
     : {};
 }
 
-/** The single-command shape of {@link collectReviewedPrNumbers}. */
-function liveReviewTargets(prompt: string): {
-  mentions: ReadonlyArray<{ number: number; bare: boolean }>;
-  reviewedUrlForms: ReadonlyArray<{ number: number; url: string }>;
+/** The single-command shape of {@link collectCommandPrNumbers}. */
+function liveCommandTargets(prompt: string): {
+  mentions: readonly CommandMention[];
+  urlForms: ReadonlyArray<{ number: number; url: string }>;
 } {
-  const parsed = parseReviewCommand(prompt);
+  const parsed = parsePrCommand(prompt);
   return {
     mentions: parsed.mention ? [parsed.mention] : [],
-    reviewedUrlForms: parsed.urlForm ? [parsed.urlForm] : [],
+    urlForms: parsed.urlForm ? [parsed.urlForm] : [],
   };
 }
 
@@ -218,27 +280,54 @@ function liveReviewTargets(prompt: string): {
 // `/review <N>` survives only in the `slash_command` system record's
 // `rawCommand` — read that when present, falling back to the user record's
 // first text part (the daemon-provided prompt path carries no payload).
-function collectReviewedPrNumbers(raw: string): {
-  mentions: ReadonlyArray<{ number: number; bare: boolean }>;
-  reviewedUrlForms: ReadonlyArray<{ number: number; url: string }>;
+function collectCommandPrNumbers(raw: string): {
+  mentions: readonly CommandMention[];
+  urlForms: ReadonlyArray<{ number: number; url: string }>;
 } {
-  const mentions: Array<{ number: number; bare: boolean }> = [];
-  const mentionByNumber = new Map<number, { number: number; bare: boolean }>();
-  const noteMention = (number: number, bare: boolean): void => {
-    const known = mentionByNumber.get(number);
+  const mentions: CommandMention[] = [];
+  const mentionByNumber = new Map<number, CommandMention>();
+  // A number an unqualified claim (`/review N`) named is THIS workspace's for
+  // good: a later `--repo` claim must not overwrite that meaning, or a session
+  // that reviewed PR N and then asked about another repo's N would lose the
+  // binding it already earned.
+  const ownClaimed = new Set<number>();
+  const noteMention = (mention: CommandMention): void => {
+    const known = mentionByNumber.get(mention.number);
     if (known) {
-      // A later bare mention still marks the number as naming THIS repo's
-      // PR; the position stays with the first mention.
-      if (bare) known.bare = true;
+      // The position stays with the first mention: it is the cap trim's age
+      // proxy. Qualifiers ACCUMULATE — a later `/verify-pr N` naming this
+      // workspace's repo must bind after an earlier one named another —
+      // unless an unqualified claim already settled the meaning.
+      if (mention.bare) {
+        known.bare = true;
+        if (mention.repoForms === undefined) {
+          ownClaimed.add(mention.number);
+          delete known.repoForms;
+        } else if (ownClaimed.has(mention.number)) {
+          // Settled as this workspace's; the later qualifier changes nothing.
+        } else if (mention.repoForms.length > 0) {
+          known.repoForms = [
+            ...new Set([...(known.repoForms ?? []), ...mention.repoForms]),
+          ];
+        } else {
+          // A qualifier this grammar cannot read: the number is qualified but
+          // its repository is unknown, which must stay distinct from "no
+          // qualifier at all" so it declines rather than binding this
+          // workspace's number.
+          known.repoForms ??= [];
+        }
+      }
       return;
     }
-    const mention = { number, bare };
-    mentionByNumber.set(number, mention);
+    if (mention.bare && mention.repoForms === undefined) {
+      ownClaimed.add(mention.number);
+    }
+    mentionByNumber.set(mention.number, mention);
     mentions.push(mention);
   };
   const urlForms: Array<{ number: number; url: string }> = [];
   for (const line of raw.split('\n')) {
-    if (!line.includes('/review')) continue;
+    if (!line.includes('/review') && !line.includes('/verify-pr')) continue;
     let record: {
       type?: string;
       subtype?: string;
@@ -267,19 +356,17 @@ function collectReviewedPrNumbers(raw: string): {
       }
     }
     if (prompt === undefined) continue;
-    const parsed = parseReviewCommand(prompt);
-    if (parsed.mention) {
-      noteMention(parsed.mention.number, parsed.mention.bare);
-    }
+    const parsed = parsePrCommand(prompt);
+    if (parsed.mention) noteMention(parsed.mention);
     if (parsed.urlForm) urlForms.push(parsed.urlForm);
   }
-  return { mentions, reviewedUrlForms: urlForms };
+  return { mentions, urlForms };
 }
 
 /**
  * Backfills PR bindings onto a workspace's persisted sessions. Sources, in
- * ascending authority order: `/review <N|#N|url>` commands the user typed
- * (the session merely looked at that PR), and the worktree slug/branch
+ * ascending authority order: `/review` and `/verify-pr` commands the user
+ * typed (the session merely looked at that PR), and the worktree slug/branch
  * convention last (the session exists FOR that PR, so it must never be
  * evicted by weaker numbers). Transcript `gh pr create` traces and bare
  * session git branches are deliberately NOT sources: text alone carries no
@@ -287,7 +374,7 @@ function collectReviewedPrNumbers(raw: string): {
  * bound the workspace's current-branch PR onto every session (measured
  * pure noise) — on every platform. GitHub workspaces resolve numbers to
  * URLs via one batched `gh pr list --state all` per workspace (repo-gated),
- * else `/review <url>` forms, else the workspace's git remote web URL.
+ * else URL forms, else the workspace's git remote web URL.
  * Aone workspaces view each planned number through `a1 repo mr view`
  * (capped per run) — Aone links are never assembled from the remote — and
  * repair the fabricated `<origin>/pull/<N>` bindings the pre-Aone backfill
@@ -330,7 +417,7 @@ export async function backfillWorkspaceSessionPrs(
     runtime.workspaceCwd,
     runtime.env.effectiveEnv,
   );
-  const live = options.liveReview;
+  const live = options.liveCommand;
   // The live turn may not have a transcript yet; resolve its archive state
   // best-effort and default to active, matching the shell post-hook.
   let liveArchiveState: SessionArchiveState = 'active';
@@ -391,8 +478,8 @@ export async function backfillWorkspaceSessionPrs(
       }
       const reviewed =
         liveCandidate && live
-          ? liveReviewTargets(live.rawCommand)
-          : collectReviewedPrNumbers(transcriptRaw);
+          ? liveCommandTargets(live.rawCommand)
+          : collectCommandPrNumbers(transcriptRaw);
       const conventionNumber = worktree
         ? parsePrNumberFromWorktree(worktree.slug, worktree.worktreeBranch)
         : undefined;
@@ -417,7 +504,7 @@ export async function backfillWorkspaceSessionPrs(
         transcriptPath: path.join(dir, `${sessionId}.jsonl`),
         conventionNumber,
         mentions: reviewed.mentions,
-        reviewedUrlForms: reviewed.reviewedUrlForms,
+        urlForms: reviewed.urlForms,
       });
     }
   }
@@ -554,6 +641,111 @@ export async function backfillWorkspaceSessionPrs(
   if (pageMapTrusted && pageRepoKey !== undefined) {
     sameRepoKeys.add(pageRepoKey);
   }
+  // `/verify-pr --repo <owner>/<repo>` is gh's `[HOST/]OWNER/REPO` form. The
+  // comparison runs on the qualifier, against the workspace's FULL origin
+  // path: `repoKeyFromWebUrl` keeps only two path segments, so a nested group
+  // (`group/sub/cli`) collapses to `sub/cli` and the collapsed key cannot tell
+  // the only correct spelling from a sibling project or from a bare group.
+  // Segments and hosts normalize through the shared review helpers; the keys
+  // stay exactly as their source built them.
+  const repoSegments = (
+    form: string,
+  ): { host?: string; path: string[] } | undefined => {
+    let v = form.trim().replace(/^["']|["']$/g, '');
+    v = v.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '');
+    v = v.replace(/^[^@/\s]+@/, '');
+    // scp syntax `host:group/...`; a port keeps its colon.
+    v = v.replace(/^([^/:@\s]+):(?!\d+\/)/, '$1/');
+    v = v.replace(/[.,;]+$/, '').replace(/\/+$/, '');
+    const parts = v.split('/').filter(Boolean);
+    if (parts.length < 2) return undefined;
+    // A first segment carrying a dot or a colon is read as a HOST. That makes
+    // a nested group whose first segment contains a dot (`a.b/c`) indistinguish-
+    // able from `host/owner`: nothing in gh's `[HOST/]OWNER/REPO` shape tells
+    // them apart. The host reading wins, which leaves one path segment, so such
+    // a qualifier declines — the safe side, and the reason this is a decision
+    // rather than a spelling to patch.
+    if (/[.:]/.test(parts[0])) {
+      const path = parts.slice(1).map(normalizeSegment);
+      return path.length >= 2 ? { host: parts[0], path } : undefined;
+    }
+    return { path: parts.map(normalizeSegment) };
+  };
+  const ownedIdentities: Array<{ host?: string; path: string[] }> = [];
+  if (remote !== undefined) {
+    try {
+      const url = new URL(remote);
+      const path = url.pathname
+        .split('/')
+        .filter(Boolean)
+        .map(normalizeSegment);
+      if (path.length >= 2) ownedIdentities.push({ host: url.host, path });
+    } catch {
+      // An unparseable remote leaves the workspace identity unknown, which
+      // fails closed: a qualifier can match nothing.
+    }
+  }
+  if (pageMapTrusted && pageRepoKey !== undefined) {
+    const [host, owner, repo] = pageRepoKey.split('/');
+    if (owner !== undefined && repo !== undefined) {
+      ownedIdentities.push({ host, path: [owner, repo] });
+    }
+  }
+  // One comparison for the two questions this file asks of a repository name:
+  // whether a `--repo` qualifier names this workspace, and whether a resolved
+  // PR URL landed in the repository the qualifier named. Paths must be equal
+  // segment for segment — a suffix comparison would admit `sub/cli` (or
+  // `host/sub/cli`) for `host/group/sub/cli`, a different project. A spelled
+  // host is compared through the shared host equivalence, which normalizes
+  // case and a `:port`, and is `www.`-insensitive here.
+  const hostKey = (host: string): string => host.replace(/^www\./i, '');
+  const segmentsMatch = (
+    form: { host?: string; path: string[] },
+    identity: { host?: string; path: string[] },
+  ): boolean => {
+    if (form.host !== undefined) {
+      if (identity.host === undefined) return false;
+      if (!hostsEquivalent(hostKey(form.host), hostKey(identity.host))) {
+        return false;
+      }
+    }
+    if (form.path.length !== identity.path.length) return false;
+    return form.path.every(
+      (segment, index) => segment === identity.path[index],
+    );
+  };
+  /** The repository a PR URL belongs to: host plus the path above its PR/MR id. */
+  const identityFromUrl = (
+    prUrl: string,
+  ): { host: string; path: string[] } | undefined => {
+    try {
+      const parsed = new URL(prUrl);
+      // Strip the PR/MR route from the END: a repository may legitimately be
+      // named `pull` (`/o/pull/pull/77`), so the first matching segment is not
+      // the marker.
+      const route = /\/(?:pull|merge_requests|codereview)\/[^/]+\/?$/.exec(
+        parsed.pathname,
+      );
+      const repoPath = (
+        route
+          ? parsed.pathname.slice(0, route.index).replace(/\/-$/, '')
+          : parsed.pathname
+      )
+        .split('/')
+        .filter(Boolean)
+        .map(normalizeSegment);
+      return repoPath.length >= 2
+        ? { host: parsed.host, path: repoPath }
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const repoFormMatches = (repoForm: string): boolean => {
+    const form = repoSegments(repoForm);
+    if (form === undefined) return false;
+    return ownedIdentities.some((identity) => segmentsMatch(form, identity));
+  };
 
   for (const candidate of candidates) {
     // The live command names one session; the commit below uses this to
@@ -582,32 +774,57 @@ export async function backfillWorkspaceSessionPrs(
     // comparison, because the two-segment repo key collapses nested groups
     // and would let a sibling project's form through — and it supplies
     // the NUMBER only: the URL always comes from `mr view`.
-    const formUrlByNumber = new Map<number, string>(
-      candidate.reviewedUrlForms
-        .filter((form) => {
-          if (!isValidSessionPrUrl(form.url)) return false;
-          if (isLegacyFabricated) {
-            return isLegacyFabricated(form.url, form.number);
-          }
-          const repoKey = repoKeyFromWebUrl(form.url);
-          return repoKey !== undefined && allowedRepoKeys.has(repoKey);
-        })
-        .map((form) => [form.number, form.url]),
-    );
+    const formUrlByNumber = new Map<number, string>();
+    for (const form of candidate.urlForms) {
+      if (!isValidSessionPrUrl(form.url)) continue;
+      if (isLegacyFabricated) {
+        if (isLegacyFabricated(form.url, form.number)) {
+          formUrlByNumber.set(form.number, form.url);
+        } else {
+          // Aone-only: a form that is not this workspace's fabricated shape
+          // names a different repository (real MR links are `…/codereview/
+          // <id>`), so it is a decline for the same reason a GitHub form from
+          // another repo is.
+          result.repoDeclined = (result.repoDeclined ?? 0) + 1;
+        }
+        continue;
+      }
+      const repoKey = repoKeyFromWebUrl(form.url);
+      if (repoKey !== undefined && allowedRepoKeys.has(repoKey)) {
+        formUrlByNumber.set(form.number, form.url);
+      } else {
+        // A url form naming another repository: declined, not unresolved.
+        result.repoDeclined = (result.repoDeclined ?? 0) + 1;
+      }
+    }
     const numbers: number[] = [];
+    // A bare number names this workspace's PR N unless EVERY `/verify-pr
+    // --repo` claim on it names another repository: one claim on this
+    // workspace's own repo (or the page's trusted fork parent) is enough, so
+    // a later correct spelling is not lost to an earlier foreign one.
+    const ownsBareNumber = (mention: CommandMention): boolean =>
+      mention.bare &&
+      (mention.repoForms === undefined ||
+        mention.repoForms.some((form) => repoFormMatches(form)));
     for (const mention of candidate.mentions) {
       // A number mentioned ONLY through url forms is planned only when a
       // form passed the gate; a bare mention names this repo's PR N and
       // plans regardless.
-      if (mention.bare || formUrlByNumber.has(mention.number)) {
-        numbers.push(mention.number);
+      const owned = ownsBareNumber(mention);
+      const plannedByForm = formUrlByNumber.has(mention.number);
+      if (!owned && mention.bare) {
+        // Counted even when a form still supplies the number: the BARE claim
+        // was declined, and a zero-`bound` run caused by that must be
+        // distinguishable from a silent miss.
+        result.repoDeclined = (result.repoDeclined ?? 0) + 1;
       }
+      if (owned || plannedByForm) numbers.push(mention.number);
     }
     // Numbers named as THIS repo's PR N (bare or convention): a form may
     // lend such a number its URL only when it names the same PR.
     const namedAsOwn = new Set<number>(
       candidate.mentions
-        .filter((mention) => mention.bare)
+        .filter(ownsBareNumber)
         .map((mention) => mention.number),
     );
     if (candidate.conventionNumber !== undefined) {
@@ -627,6 +844,27 @@ export async function backfillWorkspaceSessionPrs(
       numbers.length = 0;
       numbers.push(...rest, conventionNumber);
     }
+    // Numbers whose meaning is ONLY qualified — no unqualified claim, no
+    // convention, no url form. The resolver's page and remote fallbacks can
+    // point at the other side of a fork, which is a different PR with the same
+    // number, so their resolved URL has to land in a repository the user
+    // named.
+    const qualifiedForms = new Map<number, string[]>();
+    for (const mention of candidate.mentions) {
+      if (mention.repoForms === undefined) continue;
+      qualifiedForms.set(mention.number, [
+        ...(qualifiedForms.get(mention.number) ?? []),
+        ...mention.repoForms,
+      ]);
+    }
+    const urlMatchesQualifier = (prUrl: string, forms: string[]): boolean => {
+      const identity = identityFromUrl(prUrl);
+      if (identity === undefined) return false;
+      return forms.some((form) => {
+        const parsed = repoSegments(form);
+        return parsed !== undefined && segmentsMatch(parsed, identity);
+      });
+    };
     // The legacy-repair pass below must stay reachable for a session with
     // nothing planned this run, so only the GitHub path — which has no
     // repairs — skips on empty numbers before reading the sidecar.
@@ -696,8 +934,8 @@ export async function backfillWorkspaceSessionPrs(
     // provenance; create/worktree and pre-provenance entries keep their
     // slots — ordered oldest-first, so the cap trims the oldest review and
     // the new command survives.
-    const liveReviewOccupants =
-      options.liveReview === undefined
+    const liveEvictableNumbers =
+      options.liveCommand === undefined
         ? []
         : (existing ?? [])
             .filter(
@@ -738,6 +976,23 @@ export async function backfillWorkspaceSessionPrs(
         result.unresolved += 1;
         continue;
       }
+      // A number named only through `--repo` must bind in the repository the
+      // user named. `me/fork` beside a trusted parent page resolves to the
+      // parent's same-numbered PR, and `parent/repo` for a number the page
+      // lacks falls back to the fork's — both are different PRs, so the URL is
+      // declined rather than substituted. A url form names its own repository
+      // explicitly and is not gated here.
+      const forms = qualifiedForms.get(number);
+      if (
+        number !== candidate.conventionNumber &&
+        forms !== undefined &&
+        forms.length > 0 &&
+        !formUrlByNumber.has(number) &&
+        !urlMatchesQualifier(url, forms)
+      ) {
+        result.repoDeclined = (result.repoDeclined ?? 0) + 1;
+        continue;
+      }
       urls.set(number, url);
       // The page's state belongs to the page's OWN url for the number: a
       // `/review <url>` form that resolved another repo's URL (the fork
@@ -762,7 +1017,7 @@ export async function backfillWorkspaceSessionPrs(
         (number) => existingNumbers.has(number) || urls.has(number),
       ),
     );
-    for (const number of liveReviewOccupants) droppable.add(number);
+    for (const number of liveEvictableNumbers) droppable.add(number);
     const createdAt = new Date().toISOString();
     let added = 0;
     // A closed generation is a whole-run condition, not a per-session write
@@ -885,7 +1140,7 @@ export async function backfillWorkspaceSessionPrs(
         );
         const foreignCount = foreignEntries.length;
         const slots = Math.max(0, SESSION_PR_LIST_LIMIT - foreignCount);
-        let plan = [...liveReviewOccupants, ...numbers].filter(
+        let plan = [...liveEvictableNumbers, ...numbers].filter(
           (number) => droppable.has(number) && !foreignNumbers.has(number),
         );
         if (plan.length > slots) {
@@ -1072,7 +1327,7 @@ export async function backfillWorkspaceSessionPrs(
   // A live bind bypasses the sweep route, which owns the catalog mark for
   // its own runs. Publish here so the badge does not wait for unrelated
   // catalog churn.
-  if (options.liveReview && result.written > 0) {
+  if (options.liveCommand && result.written > 0) {
     publishSessionPrWrites(runtime);
   }
   return result;
@@ -1096,22 +1351,22 @@ function publishSessionPrWrites(runtime: WorkspaceRuntime): void {
 }
 
 /**
- * Binds the PR named by a `/review` prompt the daemon has just admitted.
- * The transcript sweep would find the same command later (or never, for a
- * brand-new session), so the live path injects it instead of waiting.
- * Best-effort: callers must not fail the prompt on a binding error.
+ * Binds the PR named by a `/review` or `/verify-pr` prompt the daemon has
+ * just admitted. The transcript sweep would find the same command later (or
+ * never, for a brand-new session), so the live path injects it instead of
+ * waiting. Best-effort: callers must not fail the prompt on a binding error.
  */
-export async function bindSessionPrsFromReviewPrompt(
+export async function bindSessionPrsFromPromptCommand(
   runtime: WorkspaceRuntime,
   sessionId: string,
   promptText: string,
   options: SessionPrBackfillOptions = {},
 ): Promise<SessionPrBackfillWorkspaceResult | undefined> {
   if (!runtime.trusted) return undefined;
-  if (parseReviewCommand(promptText).mention === undefined) return undefined;
+  if (parsePrCommand(promptText).mention === undefined) return undefined;
   return backfillWorkspaceSessionPrs(runtime, undefined, undefined, {
     ...options,
-    liveReview: { sessionId, rawCommand: promptText },
+    liveCommand: { sessionId, rawCommand: promptText },
   });
 }
 

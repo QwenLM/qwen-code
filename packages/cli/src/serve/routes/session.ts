@@ -175,7 +175,7 @@ import {
 } from '../server/session-artifact-library.js';
 import { WorkspaceArtifactCache } from '../server/workspace-artifact-cache.js';
 import { ArtifactLibraryStream } from '../server/artifact-library-stream.js';
-import { bindSessionPrsFromReviewPrompt } from './session-pr-backfill.js';
+import { bindSessionPrsFromPromptCommand } from './session-pr-backfill.js';
 import { acquireWorktreeOwnershipOp } from '../server/worktree-ownership-op.js';
 import {
   exportSessionTranscript,
@@ -8608,9 +8608,10 @@ export function registerSessionRoutes(
         }
         res.off('close', onResClose);
 
-        // A `/review <N|url>` prompt binds the PR to this session as soon as
-        // the turn is admitted, instead of waiting for an on-demand backfill
-        // sweep. Off the prompt path: a failed bind never affects the turn.
+        // A `/review` or `/verify-pr` prompt binds the PR to this session as
+        // soon as the turn is admitted, instead of waiting for an on-demand
+        // backfill sweep. Off the prompt path: a failed bind never affects
+        // the turn.
         if (runtime.trusted && channelPrompt === undefined) {
           // Only the prompt the user typed is a source: take the first text
           // block. Later blocks can carry @-imported file content whose
@@ -8626,7 +8627,7 @@ export function registerSessionRoutes(
               ? (firstTextBlock['text'] as string)
               : undefined;
           if (promptText !== undefined) {
-            void bindSessionPrsFromReviewPrompt(
+            void bindSessionPrsFromPromptCommand(
               runtime,
               sessionId,
               promptText,
@@ -8636,10 +8637,19 @@ export function registerSessionRoutes(
             )
               .then((result) => {
                 if (!result) return;
-                if (result.writeErrors || result.unresolved) {
-                  daemonLog?.warn('review PR bind incomplete', {
+                // A `--repo` decline is a policy outcome, not a failure, but
+                // it still has to reach the log: a badge missing because the
+                // number named another repository is otherwise
+                // indistinguishable from one that never resolved.
+                if (
+                  result.writeErrors ||
+                  result.unresolved ||
+                  result.repoDeclined
+                ) {
+                  daemonLog?.warn('session PR bind incomplete', {
                     sessionId,
                     unresolved: result.unresolved,
+                    repoDeclined: result.repoDeclined,
                     writeErrors: result.writeErrors,
                     overLimit: result.overLimit,
                   });
@@ -8652,7 +8662,7 @@ export function registerSessionRoutes(
                 ) {
                   return;
                 }
-                daemonLog?.warn('review PR bind failed', {
+                daemonLog?.warn('session PR bind failed', {
                   sessionId,
                   error: describePromptTurnFailure(error),
                 });
