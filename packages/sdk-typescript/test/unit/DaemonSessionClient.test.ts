@@ -3935,9 +3935,12 @@ describe('DaemonSessionClient clientId self-heal', () => {
         new DaemonClient({ baseUrl: 'http://daemon', fetch }),
       );
       session.session.generatedUi = { version: 1, enabled: true };
+      const revoked = vi.fn();
+      session.subscribeGeneratedUiRevocation(revoked);
       await session.prompt({ prompt: [{ type: 'text', text: 'hello' }] });
       expect(session.clientId).toBe('client-2');
       expect(session.session.generatedUi).toEqual(generatedUi);
+      expect(revoked).toHaveBeenCalledTimes(enabled === false ? 1 : 0);
     },
   );
 
@@ -3948,6 +3951,16 @@ describe('DaemonSessionClient clientId self-heal', () => {
       expected: { version: 1, enabled: false },
     },
     { sessionId: 's-1', generatedUi: undefined, expected: undefined },
+    {
+      sessionId: 's-1',
+      generatedUi: { version: 1, enabled: true },
+      expected: { version: 1, enabled: true },
+    },
+    {
+      sessionId: 'other',
+      generatedUi: { version: 1, enabled: false },
+      expected: undefined,
+    },
     {
       sessionId: 'other',
       generatedUi: { version: 1, enabled: true },
@@ -3978,8 +3991,13 @@ describe('DaemonSessionClient clientId self-heal', () => {
         new DaemonClient({ baseUrl: 'http://daemon', fetch }),
       );
       session.session.generatedUi = { version: 1, enabled: true };
+      const revoked = vi.fn();
+      session.subscribeGeneratedUiRevocation(revoked);
       await session.context();
       expect(session.session.generatedUi).toEqual(expected);
+      expect(revoked).toHaveBeenCalledTimes(
+        expected?.enabled === false ? 1 : 0,
+      );
     },
   );
 
@@ -3991,35 +4009,92 @@ describe('DaemonSessionClient clientId self-heal', () => {
       new DaemonClient({ baseUrl: 'http://daemon', fetch }),
     );
     session.session.generatedUi = { version: 1, enabled: true };
+    const revoked = vi.fn();
+    session.subscribeGeneratedUiRevocation(revoked);
     await expect(session.context()).rejects.toThrow('unavailable');
     expect(session.session.generatedUi).toBeUndefined();
+    expect(revoked).not.toHaveBeenCalled();
   });
 
-  it('ignores an older Generated UI context response after a newer restriction', async () => {
-    let resolveOlder!: (response: Response) => void;
-    let calls = 0;
-    const older = new Promise<Response>((resolve) => {
-      resolveOlder = resolve;
-    });
-    const reply = (enabled: boolean) =>
+  it.each([true, false])(
+    'ignores an older Generated UI context receipt: enabled=%s',
+    async (olderEnabled) => {
+      let resolveOlder!: (response: Response) => void;
+      let calls = 0;
+      const older = new Promise<Response>((resolve) => {
+        resolveOlder = resolve;
+      });
+      const reply = (enabled: boolean) =>
+        jsonResponse(200, {
+          v: 1,
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          state: { _meta: { generatedUi: { version: 1, enabled } } },
+        });
+      const { fetch } = recordingFetch(() =>
+        ++calls === 1 ? older : reply(!olderEnabled),
+      );
+      const session = newSession(
+        new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+      );
+      const revoked = vi.fn();
+      session.subscribeGeneratedUiRevocation(revoked);
+      const first = session.context();
+      await session.context();
+      expect(session.session.generatedUi?.enabled).toBe(!olderEnabled);
+      resolveOlder(reply(olderEnabled));
+      await first;
+      expect(session.session.generatedUi?.enabled).toBe(!olderEnabled);
+      expect(revoked).toHaveBeenCalledTimes(olderEnabled ? 1 : 0);
+    },
+  );
+
+  it('replays confirmed Generated UI revocations after re-enabling and releases subscriptions', async () => {
+    let enabled = true;
+    const { fetch } = recordingFetch(() =>
       jsonResponse(200, {
         v: 1,
         sessionId: 's-1',
         workspaceCwd: '/work/a',
         state: { _meta: { generatedUi: { version: 1, enabled } } },
-      });
-    const { fetch } = recordingFetch(() =>
-      ++calls === 1 ? older : reply(false),
+      }),
     );
     const session = newSession(
       new DaemonClient({ baseUrl: 'http://daemon', fetch }),
     );
-    const first = session.context();
+    const first = vi.fn();
+    const unsubscribe = session.subscribeGeneratedUiRevocation(first);
+    expect(first).not.toHaveBeenCalled();
+    enabled = false;
     await session.context();
-    expect(session.session.generatedUi?.enabled).toBe(false);
-    resolveOlder(reply(true));
-    await first;
-    expect(session.session.generatedUi?.enabled).toBe(false);
+    expect(first).toHaveBeenCalledTimes(1);
+    expect(first).toHaveBeenLastCalledWith(1);
+    enabled = true;
+    await session.context();
+    const late = vi.fn();
+    session.subscribeGeneratedUiRevocation(late);
+    expect(late).toHaveBeenCalledTimes(1);
+    expect(late).toHaveBeenLastCalledWith(1);
+    unsubscribe();
+    enabled = false;
+    await session.context();
+    expect(first).toHaveBeenCalledTimes(1);
+    expect(late).toHaveBeenLastCalledWith(2);
+  });
+
+  it('replays a disabled load receipt to the first Generated UI subscriber', () => {
+    const session = new DaemonSessionClient({
+      client: new DaemonClient({ baseUrl: 'http://daemon' }),
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        generatedUi: { version: 1, enabled: false },
+      },
+    });
+    const revoked = vi.fn();
+    session.subscribeGeneratedUiRevocation(revoked);
+    expect(revoked).toHaveBeenCalledTimes(1);
+    expect(revoked).toHaveBeenLastCalledWith(1);
   });
 
   it('does not replace a newer Generated UI restriction with an older reattach response', async () => {
