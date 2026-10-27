@@ -5481,19 +5481,32 @@ export function WebShellSidebar({
     ],
   );
 
-  const body = useMemo(() => {
-    // Rename only has to reveal the edited row. Expanding the whole catalog —
-    // or even the whole section — mounted hundreds of rows exactly when the
-    // rename editor opened, which is what made typing lag.
-    // When the Pinned section hosts the editor, the row is already mounted
-    // there and this catalog's copy is `renameFormDisabled`; expanding here
-    // would only add rows nobody is editing.
-    const pinnedSectionHostsEditing =
+  // When the Pinned section hosts the editor, the row is already mounted
+  // there and a catalog's copy is `renameFormDisabled`; expanding that
+  // catalog would only add rows nobody is editing. Shared with the
+  // WorkspaceSection prop below so both reveal paths use one rule.
+  const pinnedSectionHostsEditing = useMemo(
+    () =>
       editingSessionIdentity !== null &&
       pinnedExpanded &&
       pinnedSessions.some(
         (session) => getIdentityForSession(session) === editingSessionIdentity,
-      );
+      ),
+    [
+      editingSessionIdentity,
+      getIdentityForSession,
+      pinnedExpanded,
+      pinnedSessions,
+    ],
+  );
+  const editingSessionIdForSections = pinnedSectionHostsEditing
+    ? undefined
+    : editingSession?.sessionId;
+
+  const body = useMemo(() => {
+    // Rename only has to reveal the edited row. Expanding the whole catalog —
+    // or even the whole section — mounted hundreds of rows exactly when the
+    // rename editor opened, which is what made typing lag.
     const editingSessionBeyondPreview = (
       items: readonly DaemonSessionSummary[],
     ): boolean =>
@@ -5649,6 +5662,7 @@ export function WebShellSidebar({
     organizationEnabled,
     pinnedExpanded,
     pinnedSessions,
+    pinnedSectionHostsEditing,
     reload,
     renderSessionRow,
     searchQuery,
@@ -6987,6 +7001,7 @@ export function WebShellSidebar({
                       </span>
                     )}
                     client={workspace.client}
+                    editingSessionId={editingSessionIdForSections}
                     pendingSession={
                       livePresence &&
                       (!livePresence.coordinator ||
@@ -7248,6 +7263,7 @@ export function WebShellSidebar({
                                 : undefined
                             }
                             client={workspace.client}
+                            editingSessionId={editingSessionIdForSections}
                             reloadToken={workspaceSessionsReloadToken}
                             untrustedLabel={t('sidebar.workspaceUntrusted')}
                             readOnlyLabel={t('sidebar.workspaceReadOnly')}
