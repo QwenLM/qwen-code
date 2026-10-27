@@ -4023,6 +4023,72 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     },
   );
 
+  it.each(['_qwen/session/context', 'session/load', 'session/resume'])(
+    'omits Workflow mode from trusted SSH raw state for %s',
+    async (method) => {
+      await restartServer({
+        fsFactory: {
+          sshWorkspace: { host: 'host', directory: '/srv/project' },
+        } as WorkspaceFileSystemFactory,
+      });
+      const context = await bridge.getSessionContextStatus('sess-1');
+      const workflow = {
+        id: 'workflow_mode',
+        name: 'Workflow mode',
+        category: 'other',
+        type: 'select',
+        currentValue: 'on',
+        options: [],
+      };
+      const configOptions = [...context.state.configOptions, workflow];
+      const contextSpy = vi
+        .spyOn(bridge, 'getSessionContextStatus')
+        .mockImplementation(async (sessionId) => ({
+          ...context,
+          sessionId,
+          state: { configOptions },
+        }));
+      bridge.loadState = { configOptions, _meta: { marker: 'preserved' } };
+      const resume = bridge.resumeSession.bind(bridge);
+      vi.spyOn(bridge, 'resumeSession').mockImplementation(async (request) => {
+        const session = await resume(request);
+        return { ...session, state: { ...session.state, ...bridge.loadState } };
+      });
+      const connId = await initialize();
+      const connection = frameReader(await openStream(connId));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 90,
+        method: 'session/new',
+        params: {},
+      });
+      expect(await connection.next()).toMatchObject({ id: 90, result: {} });
+
+      if (method !== '_qwen/session/context') {
+        contextSpy.mockRejectedValueOnce(new Error('context unavailable'));
+      }
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 91,
+        method,
+        params: { sessionId: 'sess-1' },
+      });
+      expect(await connection.next()).toMatchObject({
+        id: 91,
+        result:
+          method === '_qwen/session/context'
+            ? { state: { configOptions: context.state.configOptions } }
+            : {
+                configOptions: context.state.configOptions,
+                _meta: { marker: 'preserved' },
+              },
+      });
+      expect(configOptions.at(-1)).toBe(workflow);
+      expect(bridge.loadState['configOptions']).toBe(configOptions);
+      connection.close();
+    },
+  );
+
   it('session/set_config_option (mode) routes to setSessionApprovalMode', async () => {
     const connId = await initialize();
     await newSession(connId);

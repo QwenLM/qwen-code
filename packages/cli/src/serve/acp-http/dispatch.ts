@@ -2516,9 +2516,10 @@ export class AcpDispatcher {
               );
               const loadModels = this.extractModelState(loadConfigOptions);
               const loadModes = this.extractModeState(loadConfigOptions);
-              const loadState = this.isWorkspaceTrusted()
-                ? (restored.state ?? {})
-                : redactWorkflowModeFromConfigOptions(restored.state ?? {});
+              const loadState =
+                this.fsFactory?.sshWorkspace || !this.isWorkspaceTrusted()
+                  ? redactWorkflowModeFromConfigOptions(restored.state ?? {})
+                  : (restored.state ?? {});
               const loadMeta = isObject(loadState._meta)
                 ? loadState._meta
                 : undefined;
@@ -3431,9 +3432,9 @@ export class AcpDispatcher {
           this.replyConn(
             conn,
             id,
-            this.isWorkspaceTrusted()
-              ? status
-              : redactWorkflowModeFromSessionState(status),
+            this.fsFactory?.sshWorkspace || !this.isWorkspaceTrusted()
+              ? redactWorkflowModeFromSessionState(status)
+              : status,
           );
           return;
         }
