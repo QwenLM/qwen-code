@@ -77,8 +77,10 @@ import {
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import {
   createDaemonTranscriptState,
+  findDaemonRewindUserBlock,
   DaemonHttpError,
   getSessionUpdatePayload,
+  isDaemonRewindUserBlock,
   isDaemonTurnError,
   isStandaloneSessionNotFoundError,
   isStaleBranchPointError,
@@ -330,7 +332,12 @@ import { ExtensionsManagerPage } from './components/extensions/ExtensionsManager
 import { PluginManagerPage } from './components/plugins/PluginManagerPage';
 import { ChannelsManagerPage } from './components/channels/ChannelsManagerPage';
 import { ShadowDomBoundary } from './components/ShadowDomBoundary';
-import { McpAppHostContext, McpAppMessagesContext } from './mcpAppHostContext';
+import {
+  McpAppHostContext,
+  McpAppMessagesContext,
+  McpAppVisibilityContext,
+} from './mcpAppHostContext';
+import { GeneratedUiRuntimeProvider } from './generated-ui/GeneratedUiRuntimeProvider';
 import {
   useMcpAppMessages,
   type McpAppPromptSubmission,
@@ -488,6 +495,7 @@ import {
   createAndAttachSessionForPrompt,
   isDaemonApprovalMode,
 } from './utils/sessionPreparation';
+import { titleFromPrompt } from './utils/sessionTitleFromPrompt';
 import {
   getComposerPlaceholderKey,
   getComposerPlaceholderState,
@@ -793,6 +801,7 @@ interface SendPromptOptionsWithRetry {
   submittedPrompt?: string;
   source?: 'mcp-app';
   optimisticUserMessage?: boolean;
+  bindBlockId?: string;
   images?: PromptImage[];
   files?: PromptFile[];
   inputAnnotations?: DaemonInputAnnotation[];
@@ -979,10 +988,7 @@ function getLatestUserBlock(
 ): DaemonTranscriptBlock | undefined {
   for (let index = blocks.length - 1; index >= 0; index -= 1) {
     const block = blocks[index];
-    if (
-      block?.kind === 'user' &&
-      block.meta?.['source'] !== 'background_notification'
-    ) {
+    if (isDaemonRewindUserBlock(block)) {
       return block;
     }
   }
@@ -996,10 +1002,7 @@ function getLatestUserBlock(
 function countUserTurns(blocks: readonly DaemonTranscriptBlock[]): number {
   let count = 0;
   for (const block of blocks) {
-    if (
-      block?.kind === 'user' &&
-      block.meta?.['source'] !== 'background_notification'
-    ) {
+    if (isDaemonRewindUserBlock(block)) {
       count += 1;
     }
   }
@@ -1495,6 +1498,8 @@ export interface WebShellProps {
   composerToolbarActions?: readonly ComposerToolbarAction[];
   /** Execution mode choices. Overrides ui.allowedApprovalModes; [] offers none. Presentation only. */
   allowedApprovalModes?: readonly WebShellApprovalMode[];
+  /** Composer presentation shared by the main chat, split panes, and side tasks. */
+  composerVariant?: 'default' | 'simple';
   /** Optionally filter main-model entries without changing shared defaults. */
   mainModelFilter?: (model: ModelDialogModel) => boolean;
   /** Stack completion details vertically for narrow embedded hosts. */
@@ -3480,6 +3485,7 @@ export function App({
   shellRef,
   composerToolbarActions,
   allowedApprovalModes: allowedApprovalModesProp,
+  composerVariant = 'default',
   mainModelFilter,
   compactComposerOverlays = false,
   autoSubmitSlashCommands = false,
@@ -3813,6 +3819,7 @@ export function App({
       filterArtifact,
       askUserFreeTextLabel,
       composerTagIcons,
+      composerVariant,
       builtinAtProviders,
       atProviders,
       renderToolHeaderExtra,
@@ -3849,6 +3856,7 @@ export function App({
       filterArtifact,
       askUserFreeTextLabel,
       composerTagIcons,
+      composerVariant,
       builtinAtProviders,
       atProviders,
       renderToolHeaderExtra,
@@ -11465,7 +11473,7 @@ export function App({
     );
   }, []);
   const ensureSessionForPrompt = useCallback(
-    (notify?: (id: string) => void) => {
+    (notify?: (id: string) => void, initialTitle?: string) => {
       const currentSessionId = connectionRef.current.sessionId;
       if (createSessionPromiseRef.current) {
         if (
@@ -11575,27 +11583,79 @@ export function App({
                   await sessionActions.renameSession(
                     pendingManualTitle.displayName,
                   );
+                  if (catalogWorkspaceCwd) {
+                    sessionCatalogController.renamed(
+                      catalogWorkspaceCwd,
+                      sessionId,
+                      pendingManualTitle.displayName,
+                    );
+                  }
                 } catch {
                   pendingManualTitleRef.current = undefined;
                 }
+              } else if (initialTitle) {
+                // Name the new session from its first prompt before the row
+                // is first rendered, so it never shows the session-id
+                // fallback. Best-effort: on failure the daemon's first-prompt
+                // label still names it.
+                try {
+                  await sessionActions.renameSession(initialTitle);
+                  if (catalogWorkspaceCwd) {
+                    sessionCatalogController.renamed(
+                      catalogWorkspaceCwd,
+                      sessionId,
+                      initialTitle,
+                    );
+                  }
+                } catch {
+                  // Fall back to the first-prompt label.
+                }
               }
-              await onSessionCreatedRef.current?.(sessionId);
-            },
-            onSessionAllocated: (sessionId) => {
-              draftMaterializedSessionIdRef.current = sessionId;
-              notify?.(sessionId);
-              preparingSessionIdRef.current = sessionId;
-              allocatedSessionId = sessionId;
+              // Start the first catalog read only after the rename (or the
+              // carry) settled, so the row's first publish already carries
+              // the name instead of the session-id prefix.
               if (catalogWorkspaceCwd) {
-                allocatedSessionCatalogOwnerRef.current = {
-                  sessionId,
-                  workspaceCwd: catalogWorkspaceCwd,
-                };
                 sessionCatalogController.sessionCreated(
                   catalogWorkspaceCwd,
                   sessionId,
                 );
               }
+              await onSessionCreatedRef.current?.(sessionId);
+            },
+            onSessionAllocated: (sessionId) => {
+              draftMaterializedSessionIdRef.current = sessionId;
+              // A still-armed /clear carry wins over the fresh prompt title;
+              // do not register a provisional title it would have to undo.
+              const carryWillApply =
+                pendingManualTitle !== undefined &&
+                pendingManualTitleRef.current === pendingManualTitle;
+              if (catalogWorkspaceCwd) {
+                allocatedSessionCatalogOwnerRef.current = {
+                  sessionId,
+                  workspaceCwd: catalogWorkspaceCwd,
+                };
+                if (carryWillApply && pendingManualTitle) {
+                  // The carry title is authoritative for this successor; use
+                  // it as the provisional name too so no read can publish the
+                  // id before the rename lands.
+                  sessionCatalogController.setPendingSessionTitle(
+                    catalogWorkspaceCwd,
+                    sessionId,
+                    pendingManualTitle.displayName,
+                  );
+                } else if (initialTitle) {
+                  // Register the title before notify() so a render triggered
+                  // by the callback cannot publish the row first.
+                  sessionCatalogController.setPendingSessionTitle(
+                    catalogWorkspaceCwd,
+                    sessionId,
+                    initialTitle,
+                  );
+                }
+              }
+              notify?.(sessionId);
+              preparingSessionIdRef.current = sessionId;
+              allocatedSessionId = sessionId;
             },
             getCurrentSessionId: () => connectionRef.current.sessionId,
             getCurrentWorkspaceCwd: getComposerWorkspaceCwd,
@@ -11884,6 +11944,7 @@ export function App({
       files?: PromptFile[],
       opts?: {
         optimisticUserMessage?: boolean;
+        bindBlockId?: string;
         retry?: boolean;
         // Skips prepareSubmit without daemon retry semantics; used
         // by the failed-prompt retry, whose user message was never
@@ -11904,6 +11965,11 @@ export function App({
         onPreparedSubmit?: (prepared: WebShellPreparedSubmit) => void;
         onSessionAllocated?: (sessionId: string) => void;
         beforeAdmission?: () => Promise<void>;
+        /**
+         * Internal commands (settings language switches) reuse the prompt
+         * path but must not name the session they create.
+         */
+        suppressSessionTitle?: boolean;
         ownerRef?: { current: DaemonSessionOwnerSnapshot };
       },
     ) => {
@@ -12053,6 +12119,9 @@ export function App({
       try {
         allocatedSessionId = await ensureSessionForPrompt(
           opts?.onSessionAllocated,
+          opts?.suppressSessionTitle
+            ? undefined
+            : titleFromPrompt(preparedPrompt),
         );
         if (!admissionSourceIsCurrent(allocatedSessionId)) {
           restoreCancelledSubmitState();
@@ -12177,6 +12246,7 @@ export function App({
             ? preparedInputAnnotations
             : undefined,
         optimisticUserMessage: opts?.optimisticUserMessage,
+        ...(opts?.bindBlockId ? { bindBlockId: opts.bindBlockId } : {}),
         retry: opts?.retry,
         ...(opts?.beforeDispatch
           ? { beforeDispatch: opts.beforeDispatch }
@@ -12644,6 +12714,8 @@ export function App({
     let admissionStarted = false;
     sendPrompt(failed.text, failed.images, failed.files, {
       optimisticUserMessage: false,
+      // The failed attempt appended this block but never got it bound.
+      bindBlockId: failed.messageId,
       skipPrepareSubmit: true,
       inputAnnotations: failed.inputAnnotations,
       onAdmissionStarted: () => {
@@ -13186,39 +13258,47 @@ export function App({
         isPending: true,
       });
 
-      sessionActions
-        .btwSession(question, { signal: abortController.signal })
-        .then(
-          (result) => {
+      void (async () => {
+        try {
+          for await (const event of sessionActions.btwSessionStream(question, {
+            signal: abortController.signal,
+          })) {
             if (
               currentSessionIdRef.current !== sessionId ||
-              connectionRef.current.workspaceCwd !== workspaceCwd
+              connectionRef.current.workspaceCwd !== workspaceCwd ||
+              btwAbortControllerRef.current !== abortController
             )
               return;
-            if (btwAbortControllerRef.current !== abortController) return;
-            btwAbortControllerRef.current = null;
+            const done = event.type === 'done';
             setBtwMessage({
               id: messageId,
               role: 'btw',
               question,
-              answer: result.answer || t('btw.emptyAnswer'),
-              isPending: false,
+              answer: event.answer || (done ? t('btw.emptyAnswer') : ''),
+              isPending: !done,
             });
-          },
-          (error: unknown) => {
-            if (
-              currentSessionIdRef.current !== sessionId ||
-              connectionRef.current.workspaceCwd !== workspaceCwd
-            )
-              return;
-            if (btwAbortControllerRef.current !== abortController) return;
-            btwAbortControllerRef.current = null;
-            setBtwMessage(null);
-            if (!isAbortError(error) && !isAlreadyDispatched(error)) {
-              console.warn('[web-shell] unhandled btw failure', error);
-            }
-          },
-        );
+            if (done) btwAbortControllerRef.current = null;
+          }
+        } catch (error) {
+          if (
+            currentSessionIdRef.current !== sessionId ||
+            connectionRef.current.workspaceCwd !== workspaceCwd ||
+            btwAbortControllerRef.current !== abortController
+          )
+            return;
+          btwAbortControllerRef.current = null;
+          setBtwMessage((current) =>
+            current?.id === messageId &&
+            current.role === 'btw' &&
+            current.answer
+              ? { ...current, isPending: false }
+              : null,
+          );
+          if (!isAbortError(error) && !isAlreadyDispatched(error)) {
+            console.warn('[web-shell] unhandled btw failure', error);
+          }
+        }
+      })();
     },
     [
       connection.sessionId,
@@ -14077,7 +14157,10 @@ export function App({
         setSelectedLanguage(nextLanguage);
         onLanguageResolvedRef.current?.(nextLanguage);
       }
-      sendPrompt(command, undefined, undefined, { ownerRef: owner })
+      sendPrompt(command, undefined, undefined, {
+        ownerRef: owner,
+        suppressSessionTitle: true,
+      })
         .then(() => {
           if (!owner.current.isCurrent()) return;
           if (effectiveScope === 'user') {
@@ -14131,7 +14214,10 @@ export function App({
       // running sessions; a plain settings write would leave both stale.
       const command = `/language output ${language.trim() || 'auto'}`;
       try {
-        await sendPrompt(command, undefined, undefined, { ownerRef: owner });
+        await sendPrompt(command, undefined, undefined, {
+          ownerRef: owner,
+          suppressSessionTitle: true,
+        });
       } catch (error) {
         if (owner.current.isCurrent()) {
           reportError(error, 'Failed to sync /language output command');
@@ -17452,9 +17538,18 @@ export function App({
             }
             const { snapshots } = await sessionActions.getRewindSnapshots();
             assertTarget();
-            const snapshot = snapshots.find(
-              (entry) => entry.turnIndex === turnIndex,
-            );
+            const current = getLatestUserBlock(store.getSnapshot().blocks);
+            const matches =
+              current?.promptId &&
+              findDaemonRewindUserBlock(
+                store.getSnapshot().blocks,
+                current.promptId,
+              )?.id === current.id
+                ? snapshots.filter(
+                    (entry) => entry.daemonPromptId === current.promptId,
+                  )
+                : [];
+            const snapshot = matches.length === 1 ? matches[0] : undefined;
             if (!snapshot) throw new Error(t('rewind.empty'));
             rewindStarted = true;
             await sessionActions.rewindSession(snapshot.promptId, {
@@ -18189,6 +18284,7 @@ export function App({
                   undefined,
                   {
                     ownerRef: owner,
+                    suppressSessionTitle: true,
                     clearComposerOnPromptStart,
                     commitComposerAccepted: clearComposerOnPromptStart
                       ? commitComposerAccepted
@@ -18748,6 +18844,9 @@ export function App({
             pendingManualTitleRef.current = undefined;
             const renameArg = parseRenameArgument(text.slice(match[0].length));
             if (renameArg.type === 'auto' || renameArg.type === 'delegate') {
+              // `/rename --auto` renames the current session; without one it
+              // must not provision a session just to title it with the command.
+              if (!requireActiveSessionForLocalCommand()) return false;
               if (commandBlocked) {
                 return enqueueBlockedCommand(text);
               }
@@ -19312,7 +19411,19 @@ export function App({
         // it reached the model has no snapshot of its own, and the newest one
         // then belongs to the turn before it.
         const newest = snapshots[snapshots.length - 1];
-        if (!newest || newest.turnIndex !== bareTurnIndex()) return;
+        const blocks = store.getSnapshot().blocks;
+        const current = getLatestUserBlock(blocks);
+        if (
+          bareTurnIndex() === undefined ||
+          !newest?.daemonPromptId ||
+          !current?.promptId ||
+          newest.daemonPromptId !== current.promptId ||
+          findDaemonRewindUserBlock(blocks, current.promptId)?.id !==
+            current.id ||
+          snapshots.filter((entry) => entry.daemonPromptId === current.promptId)
+            .length !== 1
+        )
+          return;
         target = newest.promptId;
         await sessionActions.rewindSession(target, {
           rewindFiles: false,
@@ -20198,6 +20309,7 @@ export function App({
       const owner = { current: sessionOwnerGuard.capture() };
       sendPrompt(`/model --fast ${modelId}${scopeFlag}`, undefined, undefined, {
         ownerRef: owner,
+        suppressSessionTitle: true,
       })
         .then(() => {
           if (!owner.current.isCurrent()) return;
@@ -21497,6 +21609,7 @@ export function App({
           data-compact-sidebar={compactShell ? '' : undefined}
           lang={selectedLanguage}
         >
+          <GeneratedUiRuntimeProvider>
           {mcpAppMessages.review}
           {capacityRecovery && <CapacityRecoveryDialog intent={capacityRecovery} onClose={dismissCapacityRecovery} />}
           {!onToast && (
@@ -23313,6 +23426,7 @@ export function App({
                       session chat does (todo contexts stay chat-only — they
                       belong to the outer session, not the panes). */}
                   <WebShellCustomizationProvider value={customization}>
+                    <McpAppVisibilityContext.Provider value={!activePanel && !artifactPanelFullscreen}>
                       <SplitView
                         showResponseTokensPerSecond={showResponseTokensPerSecond}
                         modelManagement={modelManagement}
@@ -23362,6 +23476,7 @@ export function App({
                         }
                         sessionWorkflowEnabled={sessionWorkflowEnabled}
                       />
+                    </McpAppVisibilityContext.Provider>
                   </WebShellCustomizationProvider>
                 </div>
               )}
@@ -23495,665 +23610,980 @@ export function App({
                   }
                 >
                   <WebShellCustomizationProvider value={mainChatCustomization}>
-                    <QuoteToComposerContext.Provider
-                      value={
-                        approvalOverlayActive ||
-                        unknownPromptAdmission?.payloadAvailable === true
-                          ? null
-                          : handleQuoteSelection
-                      }
-                    >
-                      <TodoContextsProvider
-                        timeline={todoTimeline}
-                        details={todoDetails}
-                      >
-                        <InteractionBlockContext.Provider
-                          value={registerInteractionBlocker}
-                        >
-                          {(() => {
-                            const contentClassName = [
-                              styles.content,
-                              showFloatingTodos ||
-                              displayMessages.length > 0 ||
-                              pendingApproval
-                                ? styles.contentHasMessages
-                                : undefined,
-                            ]
-                              .filter(Boolean)
-                              .join(' ');
-
-                            const messageListContent = (
-                              <ConversationSearch
-                                key={`${connection.workspaceCwd ?? connection.sessionContext?.kind}:${connection.sessionId}`}
-                                threshold={conversationSearchThreshold}
-                                active={chatActive}
-                                registerInteractionBlocker={registerInteractionBlocker}
-                                messageListRef={messageListRef}
-                                className={styles.conversationSearchButton}
-                                onRestoreFocus={restoreConversationSearchFocus}
-                              >
-                                {(searchTrigger) => (
-                              <LiveMessageList
-                                ref={messageListRef}
-                                sessionKey={connection.sessionId}
-                                baselineBlocks={blocks}
-                                baselineSummary={blockChangeSummary}
-                                baselineMessages={messages}
-                                recapMessage={recapMessage}
-                                messagesRef={messagesRef}
-                                onTranscriptChange={onTranscriptChange}
-                                t={t}
-                                terminalBackgroundShellTaskIds={
-                                  terminalBackgroundShellTaskIds
-                                }
-                                pendingApproval={pendingToolApproval}
-                                onShowContextDetail={
-                                  contextUsageAvailable
-                                    ? openCurrentContextUsagePanel
-                                    : undefined
-                                }
-                                loadingTranscript={connection.loadingTranscript}
-                                catchingUp={connection.catchingUp}
-                                hasOlderHistory={transcriptHistory.hasMore}
-                                loadingOlderHistory={transcriptHistory.loading}
-                                historyCapacityReached={
-                                  transcriptHistory.capacityReached
-                                }
-                                historyPaginationError={
-                                  transcriptHistory.paginationError}
-                                onLoadOlderHistory={transcriptHistory.loadMore}
-                                transcriptActivity={store}
-                                onReloadTranscript={
-                                  transcriptReloadSupported
-                                    ? reloadTranscript
-                                    : undefined
-                                }
-                                isResponding={
-                                  streamingState !== 'idle' &&
-                                  !suppressFailedPromptRetryStreaming
-                                }
-                                transcriptReloadPaused={
-                                  streamingState !== 'idle'
-                                }
-                                activeTurnStartedAt={
-                                  suppressFailedPromptRetryStreaming
-                                    ? undefined
-                                    : (failedPromptRetry?.startedAt ??
-                                      activeTurnStartedAt)
-                                }
-                                workspaceCwd={connection.workspaceCwd || ''}
-                                timelineAction={connection.sessionId ? searchTrigger : undefined}
-                                hideSessionTimeline={
-                                  effectiveChatWidthMode === 'wide'
-                                }
-                                showRetryHint={showCurrentRetryHint}
-                                onRetryClick={handleRetry}
-                                failedPromptMessageId={
-                                  isPreparingPrompt ||
-                                  streamingState !== 'idle' ||
-                                  sessionHasActivePrompt
-                                    ? undefined
-                                    : visibleFailedPromptBlock?.id
-                                }
-                                onRetryFailedPrompt={handleFailedPromptRetry}
-                                onEditUserMessage={
-                                  userMessageEditing
-                                    ? beginUserMessageEdit
-                                    : undefined
-                                }
-                                onSubmitUserMessageEdit={
-                                  userMessageEditing
-                                    ? submitUserMessageEdit
-                                    : undefined
-                                }
-                                onBranchSession={handleBranchCurrentSession}
-                                bottomOverlayInset={bottomPanelInset}
-                                welcomeHeader={
-                                  isChatEmptyState ? welcomeHeader : undefined
-                                }
-                                centerWelcomeHeader={
-                                  showMobileWelcomeFooterMiddle || undefined
-                                }
-                                tailContent={sessionAgentTail}
-                                tailKey="session-agent-runs"
-                                onCanScrollToBottomChange={
-                                  handleCanScrollToBottomChange
-                                }
-                                virtualScrollThreshold={virtualScrollThreshold}
-                                turnFileChanges={
-                                  visibleTurnOutputKinds.has('file')
-                                    ? fileChangesByTurn
-                                    : undefined
-                                }
-                                sourceEntries={sourceEntries}
-                                sourceSessionId={connection.sessionId}
-                                onSourceOpen={openTurnSource}
-                                turnArtifacts={
-                                  visibleTurnOutputKinds.has('artifact')
-                                    ? artifactsByTurn
-                                    : undefined
-                                }
-                                turnScheduledTasks={
-                                  visibleTurnOutputKinds.has('scheduled_task')
-                                    ? scheduledTasksByTurn
-                                    : undefined
-                                }
-                                onTurnOutputOpen={handleTurnOutputOpen}
-                                onImagePreview={openImagePanel}
-                                onAttachmentPreview={openAttachmentPanel}
-                                onInsightReportOpen={onInsightReportOpen}
-                                onReviewChanges={openReviewPanel}
-                                onOpenArtifact={openArtifactPanel}
-                                onOpenScheduledTask={openScheduledTaskPanel}
-                                onError={reportError}
-                                generateContent={
-                                  connection.capabilities?.features.includes(
-                                    'session_generation',
-                                  )
-                                    ? sessionActions.generateSessionContent
-                                    : undefined
-                                }
-                              />
-                                )}
-                              </ConversationSearch>
-                            );
-                            const messageListWithTurnCalls = (
-                              <TurnCallsProvider
-                                onOpen={showToolCalls ? openTurnCalls : undefined}
-                              >
-                                {messageListContent}
-                              </TurnCallsProvider>
-                            );
-                            const messageListWithWorkflowDetails = (
-                              <WorkflowDetailsProvider tasks={sessionTasks}>
-                                {messageListWithTurnCalls}
-                              </WorkflowDetailsProvider>
-                            );
-                            const messageListWithSubagentDetails = (
-                              <SubagentDetailsProvider
-                                onOpen={openSubagentPanel}
-                                onOpenBackground={(turn) => {
-                                  if (!connection.sessionId) return;
-                                  handleTurnOutputOpen({
-                                    id: `background:${connection.sessionId}:${turn.taskId}`,
-                                    kind: 'background_task',
-                                    title: turn.label ?? turn.kind,
-                                    turnId: turn.turnId,
-                                    backgroundTurn: turn,
-                                    sourceSessionId: connection.sessionId,
-                                    workspaceCwd: connection.workspaceCwd,
-                                  });
-                                }}
-                              >
-                                {messageListWithWorkflowDetails}
-                              </SubagentDetailsProvider>
-                            );
-                            const messageList = monitorDetailsSupported ? (
-                              <MonitorDetailsProvider
-                                onOpen={openMonitorPanelFromTool}
-                              >
-                                {messageListWithSubagentDetails}
-                              </MonitorDetailsProvider>
-                            ) : (
-                              messageListWithSubagentDetails
-                            );
-
-                            const btwPanel =
-                              !showMobileWelcomeFooterMiddle &&
-                              btwMessage?.role === 'btw' ? (
-                                <div className={styles.btwPanel}>
-                                  <BtwMessage
-                                    question={btwMessage.question}
-                                    answer={btwMessage.answer}
-                                    isPending={btwMessage.isPending}
-                                  />
-                                </div>
-                              ) : null;
-
-                            if (showMobileWelcomeFooterMiddle) {
-                              return (
-                                <div className={styles.mobileWelcomeGroup}>
-                                  <div
-                                    style={contentStyle}
-                                    className={contentClassName}
-                                  >
-                                    {messageList}
-                                    {btwPanel}
-                                  </div>
-                                  <div
-                                    className={styles.mobileWelcomeFooterMiddle}
-                                  >
-                                    {welcomeFooter}
-                                  </div>
-                                </div>
-                              );
-                            }
-                            return (
-                              <div
-                                style={contentStyle}
-                                className={contentClassName}
-                              >
-                                {messageList}
-                                {btwPanel}
-                              </div>
-                            );
-                          })()}
-                        </InteractionBlockContext.Provider>
-                      </TodoContextsProvider>
-
-                    <div
-                      ref={footerRef}
-                      style={contentStyle}
-                      className={
-                        CustomFooter
-                          ? `${styles.footer} ${styles.footerWithCustomFooter}`
-                          : styles.footer
-                      }
-                    >
-                      {canScrollMessageListToBottom && (
-                        <div
-                          className={
-                            showBottomPanels
-                              ? `${styles.scrollToBottomLayer} ${styles.scrollToBottomLayerWithTodos}`
-                              : styles.scrollToBottomLayer
-                          }
-                        >
-                          <button
-                            type="button"
-                            className={styles.scrollToBottomButton}
-                            aria-label={t('chat.scrollToBottom')}
-                            onClick={() => resumeChatBottomFollow('smooth')}
-                          >
-                            <svg
-                              className={styles.scrollToBottomIcon}
-                              viewBox="0 0 24 24"
-                              aria-hidden="true"
-                            >
-                              <path
-                                d="M12 5v13M6.5 12.5 12 18l5.5-5.5"
-                                fill="none"
-                                stroke="currentColor"
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
-                              />
-                            </svg>
-                          </button>
-                        </div>
-                      )}
-                      {showBottomPanels && (
-                        <div
-                          ref={bottomPanelsRef}
-                          className={styles.bottomPanels}
-                        >
-                          <TodoPanel
-                            todos={showFloatingTodos ? floatingTodos : []}
-                            statusItems={floatingBottomStatusItems}
-                            hasLiveActivity={
-                              streamingState !== 'idle' ||
-                              sessionHasActivePrompt ||
-                              sessionActiveWorkState === 'active'
-                            }
-                            onOpen={
-                              sessionWorkflowEnabled && showFloatingTodos
-                                ? floatingTodosUseSessionWorkflow
-                                  ? openWorkflowInspector
-                                  : openTasksPanel
-                                : undefined
-                            }
-                          />
-                        </div>
-                      )}
-                      {/* Only render the outer session's approval on the chat
-                          view. Under a full-page view (Workflow / split / scheduled tasks)
-                          it would sit hidden and unreachable. Each split pane
-                          surfaces its own approval. `keyboardActive` tells the
-                          overlay to grab focus only when it's the topmost one. */}
-                      {pendingToolApproval && mainView === 'chat' && (
-                        <div
-                          data-testid="approval-overlay"
-                          className={styles.approvalOverlay}
-                        >
-                          <ToolApproval
-                            showBrowserNotifications
-                            disabled={isExitPlanApprovalRequest(pendingToolApproval) && modeControlsBusy}
-                            planExecutionMode={connection.planExecutionMode}
-                            request={pendingToolApproval}
-                            onConfirm={handleConfirm}
-                            variant="floating"
-                            keyboardActive={toolApprovalOverlayVisible}
-                            generateContent={
-                              connection.capabilities?.features.includes(
-                                'session_generation',
-                              )
-                                ? sessionActions.generateSessionContent
-                                : undefined
-                            }
-                            planTodos={
-                              sessionWorkflowEnabled ? approvalPlanTodos : []
-                            }
-                          />
-                        </div>
-                      )}
-                      {pendingAskUserApproval && mainView === 'chat' && (
-                        <div
-                          data-testid="approval-overlay"
-                          className={styles.approvalOverlay}
-                        >
-                          <AskUserQuestion
-                            request={pendingAskUserApproval}
-                            onConfirm={handleAskUserConfirm}
-                            onError={reportError}
-                            variant="floating"
-                            keyboardActive={askUserOverlayVisible}
-                            customInputLabel={askUserFreeTextLabel}
-                          />
-                        </div>
-                      )}
-                      <div
-                        className={
-                          approvalOverlayActive && mainView === 'chat'
-                            ? `${styles.composer} ${styles.composerHidden}`
-                            : styles.composer
+                    <McpAppVisibilityContext.Provider value={chatActive && !showMissingSessionState}>
+                      <QuoteToComposerContext.Provider
+                        value={
+                          approvalOverlayActive ||
+                          unknownPromptAdmission?.payloadAvailable === true
+                            ? null
+                            : handleQuoteSelection
                         }
                       >
-                        {connection.runtimeStopped && (
-                          <div className={styles.composerActionTip} role="status" data-testid="workspace-runtime-stopped">
-                            <span className={styles.composerActionTipText}>{t('capacityChoice.stopped')}
-                              {connection.runtimeStopPersistenceUnconfirmed ? ` ${t('capacityChoice.persistenceUnconfirmed')}` : ''}
-                            </span>
-                            <button type="button" className={styles.composerActionTipButton}
-                              onClick={() => { if (connection.sessionId) void sessionActions.loadSession(connection.sessionId, { sessionContext: connection.sessionContext }).catch((error: unknown) => reportError(error, 'Failed to resume session')); }}>
-                              {t('capacityChoice.resume')}
-                            </button>
-                          </div>
-                        )}
-                        {standaloneWriterBlocked && (
-                          <div
-                            className={styles.composerActionTip}
-                            role="alert"
-                            data-testid="standalone-writer-blocked"
+                        <TodoContextsProvider
+                          timeline={todoTimeline}
+                          details={todoDetails}
+                        >
+                          <InteractionBlockContext.Provider
+                            value={registerInteractionBlocker}
                           >
-                            <span className={styles.composerActionTipText}>
-                              {connection.sessionId?.slice(0, 8)}:{' '}
-                              {t('session.writerBlocked')}
-                            </span>
-                            <button
-                              type="button"
-                              className={styles.composerActionTipButton}
-                              disabled={standaloneRetrySessionId === connection.sessionId}
-                              onClick={handleRetryStandaloneSession}
-                            >
-                              {t('common.retry')}
-                            </button>
-                          </div>
-                        )}
-                        {standaloneCreationRecovery && (
-                          <div
-                            className={styles.composerActionTip}
-                            role="alert"
-                            data-testid="standalone-creation-recovery"
-                          >
-                            <span
-                              className={styles.composerActionTipIcon}
-                              aria-hidden="true"
-                            >
-                              !
-                            </span>
-                            <span className={styles.composerActionTipText}>
-                              {standaloneRecoveryResolution === 'checking'
-                                ? t('session.recoveryChecking')
-                                : standaloneRecoveryResolution === 'creating'
-                                  ? t('session.recoveryStillCreating')
-                                  : standaloneRecoveryResolution === 'absent'
-                                    ? t('session.recoveryAbsent')
-                                    : standaloneRecoveryResolution ===
-                                        'unknown'
-                                      ? t('session.recoveryUnknown')
-                                      : standaloneRecoveryResolution ===
-                                          'archived'
-                                        ? t('session.recoveryArchived')
-                                        : t('session.recoveryPending')}
-                            </span>
-                            <div className={styles.composerActionTipActions}>
-                              {standaloneRecoveryResolution === 'archived' ? (
-                                <button
-                                  type="button"
-                                  className={`${styles.composerActionTipButton} ${styles.composerActionTipButtonPrimary}`}
-                                  onClick={() =>
-                                    void handleUnarchiveRecoveredStandalone()
-                                  }
+                            {(() => {
+                              const contentClassName = [
+                                styles.content,
+                                showFloatingTodos ||
+                                displayMessages.length > 0 ||
+                                pendingApproval
+                                  ? styles.contentHasMessages
+                                  : undefined,
+                              ]
+                                .filter(Boolean)
+                                .join(' ');
+
+                              const messageListContent = (
+                                <ConversationSearch
+                                  key={`${connection.workspaceCwd ?? connection.sessionContext?.kind}:${connection.sessionId}`}
+                                  threshold={conversationSearchThreshold}
+                                  active={chatActive}
+                                  registerInteractionBlocker={registerInteractionBlocker}
+                                  messageListRef={messageListRef}
+                                  className={styles.conversationSearchButton}
+                                  onRestoreFocus={restoreConversationSearchFocus}
                                 >
-                                  {t('session.unarchive')}
-                                </button>
+                                  {(searchTrigger) => (
+                                <LiveMessageList
+                                  ref={messageListRef}
+                                  sessionKey={connection.sessionId}
+                                  baselineBlocks={blocks}
+                                  baselineSummary={blockChangeSummary}
+                                  baselineMessages={messages}
+                                  recapMessage={recapMessage}
+                                  messagesRef={messagesRef}
+                                  onTranscriptChange={onTranscriptChange}
+                                  t={t}
+                                  terminalBackgroundShellTaskIds={
+                                    terminalBackgroundShellTaskIds
+                                  }
+                                  pendingApproval={pendingToolApproval}
+                                  onShowContextDetail={
+                                    contextUsageAvailable
+                                      ? openCurrentContextUsagePanel
+                                      : undefined
+                                  }
+                                  loadingTranscript={connection.loadingTranscript}
+                                  catchingUp={connection.catchingUp}
+                                  hasOlderHistory={transcriptHistory.hasMore}
+                                  loadingOlderHistory={transcriptHistory.loading}
+                                  historyCapacityReached={
+                                    transcriptHistory.capacityReached
+                                  }
+                                  historyPaginationError={
+                                    transcriptHistory.paginationError}
+                                  onLoadOlderHistory={transcriptHistory.loadMore}
+                                  transcriptActivity={store}
+                                  onReloadTranscript={
+                                    transcriptReloadSupported
+                                      ? reloadTranscript
+                                      : undefined
+                                  }
+                                  isResponding={
+                                    streamingState !== 'idle' &&
+                                    !suppressFailedPromptRetryStreaming
+                                  }
+                                  transcriptReloadPaused={
+                                    streamingState !== 'idle'
+                                  }
+                                  activeTurnStartedAt={
+                                    suppressFailedPromptRetryStreaming
+                                      ? undefined
+                                      : (failedPromptRetry?.startedAt ??
+                                        activeTurnStartedAt)
+                                  }
+                                  workspaceCwd={connection.workspaceCwd || ''}
+                                  timelineAction={connection.sessionId ? searchTrigger : undefined}
+                                  hideSessionTimeline={
+                                    effectiveChatWidthMode === 'wide'
+                                  }
+                                  showRetryHint={showCurrentRetryHint}
+                                  onRetryClick={handleRetry}
+                                  failedPromptMessageId={
+                                    isPreparingPrompt ||
+                                    streamingState !== 'idle' ||
+                                    sessionHasActivePrompt
+                                      ? undefined
+                                      : visibleFailedPromptBlock?.id
+                                  }
+                                  onRetryFailedPrompt={handleFailedPromptRetry}
+                                  onEditUserMessage={
+                                    userMessageEditing
+                                      ? beginUserMessageEdit
+                                      : undefined
+                                  }
+                                  onSubmitUserMessageEdit={
+                                    userMessageEditing
+                                      ? submitUserMessageEdit
+                                      : undefined
+                                  }
+                                  onBranchSession={handleBranchCurrentSession}
+                                  bottomOverlayInset={bottomPanelInset}
+                                  welcomeHeader={
+                                    isChatEmptyState ? welcomeHeader : undefined
+                                  }
+                                  centerWelcomeHeader={
+                                    showMobileWelcomeFooterMiddle || undefined
+                                  }
+                                  tailContent={sessionAgentTail}
+                                  tailKey="session-agent-runs"
+                                  onCanScrollToBottomChange={
+                                    handleCanScrollToBottomChange
+                                  }
+                                  virtualScrollThreshold={virtualScrollThreshold}
+                                  turnFileChanges={
+                                    visibleTurnOutputKinds.has('file')
+                                      ? fileChangesByTurn
+                                      : undefined
+                                  }
+                                  sourceEntries={sourceEntries}
+                                  sourceSessionId={connection.sessionId}
+                                  onSourceOpen={openTurnSource}
+                                  turnArtifacts={
+                                    visibleTurnOutputKinds.has('artifact')
+                                      ? artifactsByTurn
+                                      : undefined
+                                  }
+                                  turnScheduledTasks={
+                                    visibleTurnOutputKinds.has('scheduled_task')
+                                      ? scheduledTasksByTurn
+                                      : undefined
+                                  }
+                                  onTurnOutputOpen={handleTurnOutputOpen}
+                                  onImagePreview={openImagePanel}
+                                  onAttachmentPreview={openAttachmentPanel}
+                                  onInsightReportOpen={onInsightReportOpen}
+                                  onReviewChanges={openReviewPanel}
+                                  onOpenArtifact={openArtifactPanel}
+                                  onOpenScheduledTask={openScheduledTaskPanel}
+                                  onError={reportError}
+                                  generateContent={
+                                    connection.capabilities?.features.includes(
+                                      'session_generation',
+                                    )
+                                      ? sessionActions.generateSessionContent
+                                      : undefined
+                                  }
+                                />
+                                  )}
+                                </ConversationSearch>
+                              );
+                              const messageListWithTurnCalls = (
+                                <TurnCallsProvider
+                                  onOpen={showToolCalls ? openTurnCalls : undefined}
+                                >
+                                  {messageListContent}
+                                </TurnCallsProvider>
+                              );
+                              const messageListWithWorkflowDetails = (
+                                <WorkflowDetailsProvider tasks={sessionTasks}>
+                                  {messageListWithTurnCalls}
+                                </WorkflowDetailsProvider>
+                              );
+                              const messageListWithSubagentDetails = (
+                                <SubagentDetailsProvider
+                                  onOpen={openSubagentPanel}
+                                  onOpenBackground={(turn) => {
+                                    if (!connection.sessionId) return;
+                                    handleTurnOutputOpen({
+                                      id: `background:${connection.sessionId}:${turn.taskId}`,
+                                      kind: 'background_task',
+                                      title: turn.label ?? turn.kind,
+                                      turnId: turn.turnId,
+                                      backgroundTurn: turn,
+                                      sourceSessionId: connection.sessionId,
+                                      workspaceCwd: connection.workspaceCwd,
+                                    });
+                                  }}
+                                >
+                                  {messageListWithWorkflowDetails}
+                                </SubagentDetailsProvider>
+                              );
+                              const messageList = monitorDetailsSupported ? (
+                                <MonitorDetailsProvider
+                                  onOpen={openMonitorPanelFromTool}
+                                >
+                                  {messageListWithSubagentDetails}
+                                </MonitorDetailsProvider>
                               ) : (
-                                <button
-                                  type="button"
-                                  className={`${styles.composerActionTipButton} ${styles.composerActionTipButtonPrimary}`}
-                                  disabled={
-                                    standaloneRecoveryResolution === 'checking'
-                                  }
-                                  onClick={() =>
-                                    void handleCheckStandaloneRecovery()
-                                  }
-                                >
-                                  {t('session.checkStatus')}
-                                </button>
-                              )}
-                              {standaloneRecoveryResolution === 'absent' && (
-                                <button
-                                  type="button"
-                                  className={styles.composerActionTipButton}
-                                  onClick={handleRetryStandaloneCreation}
-                                >
-                                  {t('session.retryCreation')}
-                                </button>
-                              )}
-                            </div>
-                          </div>
-                        )}
-                        {standaloneWorkingDirectory?.state === 'recreated' && (
-                          <div
-                            className={styles.composerActionTip}
-                            role="status"
-                            data-testid="standalone-directory-recreated"
-                          >
-                            <span
-                              className={styles.composerActionTipIcon}
-                              aria-hidden="true"
-                            >
-                              !
-                            </span>
-                            <span className={styles.composerActionTipText}>
-                              {t('session.directoryRecreated')}
-                            </span>
-                          </div>
-                        )}
-                        {standaloneDirectoryErrorCode ===
-                          'working_directory_missing' && (
-                          <div
-                            className={styles.composerActionTip}
-                            role="alert"
-                            data-testid="standalone-directory-missing"
-                          >
-                            <span className={styles.composerActionTipText}>
-                              {t('session.directoryMissing')}
-                            </span>
-                            <div className={styles.composerActionTipActions}>
-                              <button
-                                type="button"
-                                className={`${styles.composerActionTipButton} ${styles.composerActionTipButtonPrimary}`}
-                                disabled={standaloneRepairBusy}
-                                onClick={() =>
-                                  void handleRepairStandaloneDirectory()
-                                }
-                              >
-                                {standaloneRepairBusy
-                                  ? t('session.repairing')
-                                  : t('session.repair')}
-                              </button>
-                            </div>
-                          </div>
-                        )}
-                        {standaloneDirectoryErrorCode ===
-                          'working_directory_compromised' && (
-                          <div
-                            className={styles.composerActionTip}
-                            role="alert"
-                            data-testid="standalone-directory-compromised"
-                          >
-                            <span className={styles.composerActionTipText}>
-                              {t('session.directoryCompromised')}
-                            </span>
-                          </div>
-                        )}
-                        {streamingState !== 'idle' ||
-                        sessionHasActivePrompt ? (
-                          suppressFailedPromptRetryStreaming ? null : (
-                            <StreamingStatus
-                              showPhrase={enableLoadingPhrases}
-                              showResponseTokensPerSecond={showResponseTokensPerSecond && !approvalOverlayActive}
-                              startedAt={
-                                failedPromptRetry?.startedAt ??
-                                activeTurnStartedAt
+                                messageListWithSubagentDetails
+                              );
+
+                              const btwPanel =
+                                !showMobileWelcomeFooterMiddle &&
+                                btwMessage?.role === 'btw' ? (
+                                  <div className={styles.btwPanel}>
+                                    <BtwMessage
+                                      key={btwMessage.id}
+                                      question={btwMessage.question}
+                                      answer={btwMessage.answer}
+                                      isPending={btwMessage.isPending}
+                                    />
+                                  </div>
+                                ) : null;
+
+                              if (showMobileWelcomeFooterMiddle) {
+                                return (
+                                  <div className={styles.mobileWelcomeGroup}>
+                                    <div
+                                      style={contentStyle}
+                                      className={contentClassName}
+                                    >
+                                      {messageList}
+                                      {btwPanel}
+                                    </div>
+                                    <div
+                                      className={styles.mobileWelcomeFooterMiddle}
+                                    >
+                                      {welcomeFooter}
+                                    </div>
+                                  </div>
+                                );
                               }
-                              hasActivePrompt={sessionHasActivePrompt}
-                              backgroundLabel={
-                                connection.backgroundTurn?.label ??
-                                connection.backgroundTurn?.kind
-                              }
-                            />
-                          )
-                        ) : newSessionSuggestion ? (
+                              return (
+                                <div
+                                  style={contentStyle}
+                                  className={contentClassName}
+                                >
+                                  {messageList}
+                                  {btwPanel}
+                                </div>
+                              );
+                            })()}
+                          </InteractionBlockContext.Provider>
+                        </TodoContextsProvider>
+
+                      <div
+                        ref={footerRef}
+                        style={contentStyle}
+                        className={
+                          CustomFooter
+                            ? `${styles.footer} ${styles.footerWithCustomFooter}`
+                            : styles.footer
+                        }
+                      >
+                        {canScrollMessageListToBottom && (
                           <div
-                            className={styles.composerActionTip}
-                            role="status"
-                            data-testid={
-                              newSessionSuggestion.suggestion === 'btw'
-                                ? 'btw-suggestion'
-                                : 'new-session-suggestion'
+                            className={
+                              showBottomPanels
+                                ? `${styles.scrollToBottomLayer} ${styles.scrollToBottomLayerWithTodos}`
+                                : styles.scrollToBottomLayer
                             }
                           >
-                            <span
-                              className={styles.composerActionTipIcon}
-                              aria-hidden="true"
+                            <button
+                              type="button"
+                              className={styles.scrollToBottomButton}
+                              aria-label={t('chat.scrollToBottom')}
+                              onClick={() => resumeChatBottomFollow('smooth')}
                             >
-                              ✦
-                            </span>
-                            <span className={styles.composerActionTipText}>
-                              {newSessionSuggestion.suggestion === 'btw'
-                                ? t('editor.btwSuggestionTitle')
-                                : t('editor.newSessionSuggestionTitle')}
-                            </span>
-                            <div className={styles.composerActionTipActions}>
-                              <button
-                                type="button"
-                                className={`${styles.composerActionTipButton} ${styles.composerActionTipButtonPrimary}`}
-                                data-testid={
-                                  newSessionSuggestion.suggestion === 'btw'
-                                    ? 'btw-suggestion-send'
-                                    : 'new-session-suggestion-start'
-                                }
-                                onMouseDown={(event) => event.preventDefault()}
-                                onClick={
-                                  newSessionSuggestion.suggestion === 'btw'
-                                    ? handleAcceptBtwSuggestion
-                                    : handleAcceptNewSessionSuggestion
-                                }
+                              <svg
+                                className={styles.scrollToBottomIcon}
+                                viewBox="0 0 24 24"
+                                aria-hidden="true"
                               >
-                                {newSessionSuggestion.suggestion === 'btw'
-                                  ? t('editor.btwSuggestionSend')
-                                  : t('editor.newSessionSuggestionStart')}
+                                <path
+                                  d="M12 5v13M6.5 12.5 12 18l5.5-5.5"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                />
+                              </svg>
+                            </button>
+                          </div>
+                        )}
+                        {showBottomPanels && (
+                          <div
+                            ref={bottomPanelsRef}
+                            className={styles.bottomPanels}
+                          >
+                            <TodoPanel
+                              todos={showFloatingTodos ? floatingTodos : []}
+                              statusItems={floatingBottomStatusItems}
+                              hasLiveActivity={
+                                streamingState !== 'idle' ||
+                                sessionHasActivePrompt ||
+                                sessionActiveWorkState === 'active'
+                              }
+                              onOpen={
+                                sessionWorkflowEnabled && showFloatingTodos
+                                  ? floatingTodosUseSessionWorkflow
+                                    ? openWorkflowInspector
+                                    : openTasksPanel
+                                  : undefined
+                              }
+                            />
+                          </div>
+                        )}
+                        {/* Only render the outer session's approval on the chat
+                            view. Under a full-page view (Workflow / split / scheduled tasks)
+                            it would sit hidden and unreachable. Each split pane
+                            surfaces its own approval. `keyboardActive` tells the
+                            overlay to grab focus only when it's the topmost one. */}
+                        {pendingToolApproval && mainView === 'chat' && (
+                          <div
+                            data-testid="approval-overlay"
+                            className={styles.approvalOverlay}
+                          >
+                            <ToolApproval
+                              showBrowserNotifications
+                              disabled={isExitPlanApprovalRequest(pendingToolApproval) && modeControlsBusy}
+                              planExecutionMode={connection.planExecutionMode}
+                              request={pendingToolApproval}
+                              onConfirm={handleConfirm}
+                              variant="floating"
+                              keyboardActive={toolApprovalOverlayVisible}
+                              generateContent={
+                                connection.capabilities?.features.includes(
+                                  'session_generation',
+                                )
+                                  ? sessionActions.generateSessionContent
+                                  : undefined
+                              }
+                              planTodos={
+                                sessionWorkflowEnabled ? approvalPlanTodos : []
+                              }
+                            />
+                          </div>
+                        )}
+                        {pendingAskUserApproval && mainView === 'chat' && (
+                          <div
+                            data-testid="approval-overlay"
+                            className={styles.approvalOverlay}
+                          >
+                            <AskUserQuestion
+                              request={pendingAskUserApproval}
+                              onConfirm={handleAskUserConfirm}
+                              onError={reportError}
+                              variant="floating"
+                              keyboardActive={askUserOverlayVisible}
+                              customInputLabel={askUserFreeTextLabel}
+                            />
+                          </div>
+                        )}
+                        <div
+                          className={
+                            approvalOverlayActive && mainView === 'chat'
+                              ? `${styles.composer} ${styles.composerHidden}`
+                              : styles.composer
+                          }
+                        >
+                          {connection.runtimeStopped && (
+                            <div className={styles.composerActionTip} role="status" data-testid="workspace-runtime-stopped">
+                              <span className={styles.composerActionTipText}>{t('capacityChoice.stopped')}
+                                {connection.runtimeStopPersistenceUnconfirmed ? ` ${t('capacityChoice.persistenceUnconfirmed')}` : ''}
+                              </span>
+                              <button type="button" className={styles.composerActionTipButton}
+                                onClick={() => { if (connection.sessionId) void sessionActions.loadSession(connection.sessionId, { sessionContext: connection.sessionContext }).catch((error: unknown) => reportError(error, 'Failed to resume session')); }}>
+                                {t('capacityChoice.resume')}
                               </button>
                             </div>
-                          </div>
-                        ) : escapeHintVisible && streamingState === 'idle' ? (
-                          <div className={styles.escClearStatus} role="status">
-                            {t('editor.escClearHint')}
-                          </div>
-                        ) : null}
-                        {unknownPromptAdmission &&
-                          unknownPromptAdmission.sessionId ===
-                            connection.sessionId && (
-                          <div
-                            className={styles.composerActionTip}
-                            role="status"
-                            data-testid="prompt-admission-unknown"
-                          >
-                            <span
-                              className={styles.composerActionTipIcon}
-                              aria-hidden="true"
+                          )}
+                          {standaloneWriterBlocked && (
+                            <div
+                              className={styles.composerActionTip}
+                              role="alert"
+                              data-testid="standalone-writer-blocked"
                             >
-                              !
-                            </span>
-                            <span className={styles.composerActionTipText}>
-                              {t('queue.admissionUnknown')}
-                            </span>
-                            {unknownPromptAdmission.payloadAvailable && (
-                              <div
-                                className={styles.composerActionTipActions}
+                              <span className={styles.composerActionTipText}>
+                                {connection.sessionId?.slice(0, 8)}:{' '}
+                                {t('session.writerBlocked')}
+                              </span>
+                              <button
+                                type="button"
+                                className={styles.composerActionTipButton}
+                                disabled={standaloneRetrySessionId === connection.sessionId}
+                                onClick={handleRetryStandaloneSession}
                               >
+                                {t('common.retry')}
+                              </button>
+                            </div>
+                          )}
+                          {standaloneCreationRecovery && (
+                            <div
+                              className={styles.composerActionTip}
+                              role="alert"
+                              data-testid="standalone-creation-recovery"
+                            >
+                              <span
+                                className={styles.composerActionTipIcon}
+                                aria-hidden="true"
+                              >
+                                !
+                              </span>
+                              <span className={styles.composerActionTipText}>
+                                {standaloneRecoveryResolution === 'checking'
+                                  ? t('session.recoveryChecking')
+                                  : standaloneRecoveryResolution === 'creating'
+                                    ? t('session.recoveryStillCreating')
+                                    : standaloneRecoveryResolution === 'absent'
+                                      ? t('session.recoveryAbsent')
+                                      : standaloneRecoveryResolution ===
+                                          'unknown'
+                                        ? t('session.recoveryUnknown')
+                                        : standaloneRecoveryResolution ===
+                                            'archived'
+                                          ? t('session.recoveryArchived')
+                                          : t('session.recoveryPending')}
+                              </span>
+                              <div className={styles.composerActionTipActions}>
+                                {standaloneRecoveryResolution === 'archived' ? (
+                                  <button
+                                    type="button"
+                                    className={`${styles.composerActionTipButton} ${styles.composerActionTipButtonPrimary}`}
+                                    onClick={() =>
+                                      void handleUnarchiveRecoveredStandalone()
+                                    }
+                                  >
+                                    {t('session.unarchive')}
+                                  </button>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    className={`${styles.composerActionTipButton} ${styles.composerActionTipButtonPrimary}`}
+                                    disabled={
+                                      standaloneRecoveryResolution === 'checking'
+                                    }
+                                    onClick={() =>
+                                      void handleCheckStandaloneRecovery()
+                                    }
+                                  >
+                                    {t('session.checkStatus')}
+                                  </button>
+                                )}
+                                {standaloneRecoveryResolution === 'absent' && (
+                                  <button
+                                    type="button"
+                                    className={styles.composerActionTipButton}
+                                    onClick={handleRetryStandaloneCreation}
+                                  >
+                                    {t('session.retryCreation')}
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          )}
+                          {standaloneWorkingDirectory?.state === 'recreated' && (
+                            <div
+                              className={styles.composerActionTip}
+                              role="status"
+                              data-testid="standalone-directory-recreated"
+                            >
+                              <span
+                                className={styles.composerActionTipIcon}
+                                aria-hidden="true"
+                              >
+                                !
+                              </span>
+                              <span className={styles.composerActionTipText}>
+                                {t('session.directoryRecreated')}
+                              </span>
+                            </div>
+                          )}
+                          {standaloneDirectoryErrorCode ===
+                            'working_directory_missing' && (
+                            <div
+                              className={styles.composerActionTip}
+                              role="alert"
+                              data-testid="standalone-directory-missing"
+                            >
+                              <span className={styles.composerActionTipText}>
+                                {t('session.directoryMissing')}
+                              </span>
+                              <div className={styles.composerActionTipActions}>
                                 <button
                                   type="button"
                                   className={`${styles.composerActionTipButton} ${styles.composerActionTipButtonPrimary}`}
-                                  onClick={restoreUnknownPromptPayload}
+                                  disabled={standaloneRepairBusy}
+                                  onClick={() =>
+                                    void handleRepairStandaloneDirectory()
+                                  }
                                 >
-                                  {t('queue.restoreUnknown')}
-                                </button>
-                                <button
-                                  type="button"
-                                  className={styles.composerActionTipButton}
-                                  onClick={discardUnknownPromptPayload}
-                                >
-                                  {t('queue.discardUnknown')}
+                                  {standaloneRepairBusy
+                                    ? t('session.repairing')
+                                    : t('session.repair')}
                                 </button>
                               </div>
-                            )}
-                          </div>
-                        )}
-                        {(queuedPrompts.length > 0 ||
-                          liveGoalSnapshot?.goal) && (
-                          <div
-                            className={composerStatusStyles.root}
-                            data-testid="composer-status-stack"
-                          >
-                            <QueuedPromptDisplay
-                              prompts={queuedPrompts}
-                              t={t}
-                              canMutateMidTurn={canMutateMidTurn}
-                              canInsertMidTurn={
-                                streamingState !== 'idle' ||
-                                sessionHasActivePrompt
-                              }
-                              onDelete={removeQueuedPrompt}
-                              canSendMidTurnNow={canSendMidTurnNow}
-                              onInsert={insertQueuedPrompt}
-                              onSendNow={sendQueuedPromptNow}
-                              onEdit={editQueuedPrompt}
-                              onImagePreview={openImagePanel}
-                              onAttachmentPreview={openAttachmentPanel}
-                            />
-                            {liveGoalSnapshot?.goal && (
-                              <GoalStatusStrip
-                                snapshot={liveGoalSnapshot}
-                                busy={goalControlBusy}
-                                onEdit={() => {
-                                  setGoalEditError(null);
-                                  setGoalEditOpen(true);
-                                }}
-                                onPause={() => runGoalControl('pause')}
-                                onResume={() => runGoalControl('resume')}
-                                onClear={() => runGoalControl('clear')}
+                            </div>
+                          )}
+                          {standaloneDirectoryErrorCode ===
+                            'working_directory_compromised' && (
+                            <div
+                              className={styles.composerActionTip}
+                              role="alert"
+                              data-testid="standalone-directory-compromised"
+                            >
+                              <span className={styles.composerActionTipText}>
+                                {t('session.directoryCompromised')}
+                              </span>
+                            </div>
+                          )}
+                          {streamingState !== 'idle' ||
+                          sessionHasActivePrompt ? (
+                            suppressFailedPromptRetryStreaming ? null : (
+                              <StreamingStatus
+                                showPhrase={enableLoadingPhrases}
+                                showResponseTokensPerSecond={showResponseTokensPerSecond && !approvalOverlayActive}
+                                startedAt={
+                                  failedPromptRetry?.startedAt ??
+                                  activeTurnStartedAt
+                                }
+                                hasActivePrompt={sessionHasActivePrompt}
+                                backgroundLabel={
+                                  connection.backgroundTurn?.label ??
+                                  connection.backgroundTurn?.kind
+                                }
                               />
-                            )}
-                          </div>
-                        )}
-                        {CustomComposerHeader && (
-                          <div className={styles.composerHeader}>
-                            <CustomComposerHeader
-                              disabled={
-                                isDisabled ||
-                                unknownPromptAdmission?.payloadAvailable === true
+                            )
+                          ) : newSessionSuggestion ? (
+                            <div
+                              className={styles.composerActionTip}
+                              role="status"
+                              data-testid={
+                                newSessionSuggestion.suggestion === 'btw'
+                                  ? 'btw-suggestion'
+                                  : 'new-session-suggestion'
                               }
+                            >
+                              <span
+                                className={styles.composerActionTipIcon}
+                                aria-hidden="true"
+                              >
+                                ✦
+                              </span>
+                              <span className={styles.composerActionTipText}>
+                                {newSessionSuggestion.suggestion === 'btw'
+                                  ? t('editor.btwSuggestionTitle')
+                                  : t('editor.newSessionSuggestionTitle')}
+                              </span>
+                              <div className={styles.composerActionTipActions}>
+                                <button
+                                  type="button"
+                                  className={`${styles.composerActionTipButton} ${styles.composerActionTipButtonPrimary}`}
+                                  data-testid={
+                                    newSessionSuggestion.suggestion === 'btw'
+                                      ? 'btw-suggestion-send'
+                                      : 'new-session-suggestion-start'
+                                  }
+                                  onMouseDown={(event) => event.preventDefault()}
+                                  onClick={
+                                    newSessionSuggestion.suggestion === 'btw'
+                                      ? handleAcceptBtwSuggestion
+                                      : handleAcceptNewSessionSuggestion
+                                  }
+                                >
+                                  {newSessionSuggestion.suggestion === 'btw'
+                                    ? t('editor.btwSuggestionSend')
+                                    : t('editor.newSessionSuggestionStart')}
+                                </button>
+                              </div>
+                            </div>
+                          ) : escapeHintVisible && streamingState === 'idle' ? (
+                            <div className={styles.escClearStatus} role="status">
+                              {t('editor.escClearHint')}
+                            </div>
+                          ) : null}
+                          {unknownPromptAdmission &&
+                            unknownPromptAdmission.sessionId ===
+                              connection.sessionId && (
+                            <div
+                              className={styles.composerActionTip}
+                              role="status"
+                              data-testid="prompt-admission-unknown"
+                            >
+                              <span
+                                className={styles.composerActionTipIcon}
+                                aria-hidden="true"
+                              >
+                                !
+                              </span>
+                              <span className={styles.composerActionTipText}>
+                                {t('queue.admissionUnknown')}
+                              </span>
+                              {unknownPromptAdmission.payloadAvailable && (
+                                <div
+                                  className={styles.composerActionTipActions}
+                                >
+                                  <button
+                                    type="button"
+                                    className={`${styles.composerActionTipButton} ${styles.composerActionTipButtonPrimary}`}
+                                    onClick={restoreUnknownPromptPayload}
+                                  >
+                                    {t('queue.restoreUnknown')}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className={styles.composerActionTipButton}
+                                    onClick={discardUnknownPromptPayload}
+                                  >
+                                    {t('queue.discardUnknown')}
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                          {(queuedPrompts.length > 0 ||
+                            liveGoalSnapshot?.goal) && (
+                            <div
+                              className={composerStatusStyles.root}
+                              data-testid="composer-status-stack"
+                            >
+                              <QueuedPromptDisplay
+                                prompts={queuedPrompts}
+                                t={t}
+                                canMutateMidTurn={canMutateMidTurn}
+                                canInsertMidTurn={
+                                  streamingState !== 'idle' ||
+                                  sessionHasActivePrompt
+                                }
+                                onDelete={removeQueuedPrompt}
+                                canSendMidTurnNow={canSendMidTurnNow}
+                                onInsert={insertQueuedPrompt}
+                                onSendNow={sendQueuedPromptNow}
+                                onEdit={editQueuedPrompt}
+                                onImagePreview={openImagePanel}
+                                onAttachmentPreview={openAttachmentPanel}
+                              />
+                              {liveGoalSnapshot?.goal && (
+                                <GoalStatusStrip
+                                  snapshot={liveGoalSnapshot}
+                                  busy={goalControlBusy}
+                                  onEdit={() => {
+                                    setGoalEditError(null);
+                                    setGoalEditOpen(true);
+                                  }}
+                                  onPause={() => runGoalControl('pause')}
+                                  onResume={() => runGoalControl('resume')}
+                                  onClear={() => runGoalControl('clear')}
+                                />
+                              )}
+                            </div>
+                          )}
+                          {CustomComposerHeader && (
+                            <div className={styles.composerHeader}>
+                              <CustomComposerHeader
+                                disabled={
+                                  isDisabled ||
+                                  unknownPromptAdmission?.payloadAvailable === true
+                                }
+                                isRunning={
+                                  streamingState !== 'idle' ||
+                                  sessionHasActivePrompt
+                                }
+                                currentMode={currentMode}
+                                currentModel={currentModel}
+                                sessionName={sessionDisplayName}
+                              />
+                            </div>
+                          )}
+                          {sessionAgentRuns.anyLive && (
+                            <StopAllAgentsButton
+                              onStopAll={stopAllSessionAgents}
+                            />
+                          )}
+                          <SessionRecoveryBanner
+                            blocked={
+                              isDisabled ||
+                              isStartingNewSessionSuggestion ||
+                              interactionBlocked ||
+                              sessionHasActivePrompt ||
+                              unknownPromptAdmission?.payloadAvailable === true
+                            }
+                          />
+                          <ChatEditor
+                            ref={setEditorHandle}
+                            liveVoicePortalContainer={
+                              liveVoiceSlot ?? liveVoicePageSlot
+                            }
+                            compactOverlays={compactComposerOverlays}
+                            onSubmit={
+                              collaborationAvailable
+                                ? agentChatEntry.submit
+                                : handleEditorSubmit
+                            }
+                            onInputTextChange={handleComposerTextChange}
+                            onAttachmentsChange={
+                              handleComposerAttachmentsChange
+                            }
+                            btwEnabled={
+                              Boolean(connection.sessionId) &&
+                              !hiddenCommands.has('btw')
+                            }
+                            onImageIngestionNotice={pushToast}
+                            onImagePreview={openImagePanel}
+                            onAttachmentPreview={openAttachmentPanel}
+                            onCycleMode={handleCycleMode}
+                            cycleModeOnTab={cycleModeOnTab}
+                            onToggleShortcuts={handleToggleShortcuts}
+                            onCancel={handleCancel}
+                            isRunning={
+                              streamingState !== 'idle' ||
+                              sessionHasActivePrompt
+                            }
+                            isPreparing={
+                              isPreparingPrompt || isStartingNewSessionSuggestion
+                            }
+                            cancelArmed={cancelArmed}
+                            disabled={
+                              (collaborationAvailable && agentChatEntry.pending) ||
+                              isDisabled ||
+                              isStartingNewSessionSuggestion ||
+                              interactionBlocked ||
+                              approvalOverlayActive ||
+                              unknownPromptAdmission?.payloadAvailable === true
+                            }
+                            commands={commands}
+                            skills={composerSkills}
+                            onSkillsOpenChange={
+                              workspaceContextActive
+                                ? setComposerSkillsOpen
+                                : undefined
+                            }
+                            skillsLoading={
+                              skillsLoading || Boolean(
+                                connection.sessionId &&
+                                  commandsRefreshingSession === connection.sessionId,
+                              )
+                            }
+                            skillsLoadError={
+                              skillsLoadError ||
+                              commandsRefreshErrorOwner?.isCurrent() === true
+                            }
+                            skillsLoaded={
+                              !sessionCatalogPending &&
+                              (Boolean(
+                                connection.sessionId &&
+                                  connection.skills !== undefined,
+                              ) ||
+                                (loadedSkillsReady &&
+                                  skillsCatalogCacheRef.current?.key ===
+                                    skillsCatalogKey))
+                            }
+                            slashCommandCategoryOrder={slashCommandCategoryOrder}
+                            autoSubmitSlashCommands={autoSubmitSlashCommands}
+                            builtinAtProviders={
+                              workspaceContextActive ? builtinAtProviders : false
+                            }
+                            atProviders={composerAtProviders}
+                            composerTagIcons={composerTagIcons}
+                            voiceTarget={
+                              activePanel !== null || mainView !== 'chat'
+                                ? undefined
+                                : mainVoiceTarget
+                            }
+                            voiceStatusRevision={mainVoiceStatusRevision}
+                            queuedMessages={queuedTexts}
+                            onFocusFooter={handleFocusTaskPill}
+                            onPopQueuedMessages={editLastQueuedPrompt}
+                            onClearQueuedMessages={clearQueuedPrompts}
+                            currentMode={executionMode}
+                            availableModes={availableApprovalModes}
+                            modeControlsDisabled={modeControlsBusy}
+                            planMode={currentMode === 'plan'}
+                            onTogglePlan={handleTogglePlan}
+                            sessionWorkflowEnabled={sessionWorkflowEnabled}
+                            currentModel={currentModel}
+                            gitBranch={
+                              workspaceContextActive
+                                ? activeGitBranch
+                                : undefined
+                            }
+                            gitWorktree={
+                              workspaceContextActive && Boolean(sessionWorktree)
+                            }
+                            gitCwd={
+                              workspaceContextActive
+                                ? sessionWorktree?.path
+                                : undefined
+                            }
+                            gitModeIntent={gitModeEligible ? gitModeIntent : undefined}
+                            onGitModeIntentChange={gitModeEligible ? setGitModeIntent : undefined}
+                            gitStatus={
+                              workspaceContextActive
+                                ? selectedWorkspaceGitStatus
+                                : undefined
+                            }
+                            onOpenGitDiff={
+                              gitDiffWorkspaceCwd
+                                ? handleOpenGitDiff
+                                : undefined
+                            }
+                            onOpenCommit={
+                              gitDiffWorkspaceCwd
+                                ? handleOpenCommit
+                                : undefined
+                            }
+                            onOpenWorktrees={
+                              gitDiffWorkspaceCwd && gitWorktreesSupported
+                                ? handleOpenWorktrees
+                                : undefined
+                            }
+                            onOpenLog={
+                              gitDiffWorkspaceCwd
+                                ? handleOpenLog
+                                : undefined
+                            }
+                            chatWidthMode={chatWidthMode}
+                            showChatWidthToggle={!isChatEmptyState}
+                            chatWidthToggleMin={chatWidthToggleMin}
+                            visibleToolbarActions={visibleComposerToolbarActions}
+                            // Before the session exists the workspace and git
+                            // chips sit under the composer, next to the prompt
+                            // they describe; once it does, the header owns the
+                            // workspace and the composer keeps only git.
+                            contextChipPlacement={
+                              isChatEmptyState ? 'below' : 'header'
+                            }
+                            tokenCount={
+                              contextUsageAvailable ? (connection.tokenCount ?? 0) : 0
+                            }
+                            contextWindow={
+                              contextUsageAvailable ? (connection.contextWindow ?? 0) : 0
+                            }
+                            contextUsageAlwaysVisible={
+                              contextUsageAlwaysVisible
+                            }
+                            contextUsageControls={
+                              connection.sessionId
+                                ? contextUsageControls[connection.sessionId]
+                                : undefined
+                            }
+                            onOpenContextUsage={
+                              contextUsageAvailable ? openCurrentContextUsagePanel : undefined
+                            }
+                            modelRefresh={modelRefresh}
+                            availableModels={availableModels}
+                            unavailableModels={unavailableModels}
+                            mountUnavailableModelTooltip={
+                              mountUnavailableModelTooltip
+                            }
+                            onSelectMode={handleSetMode}
+                            onSelectModel={handleModelSelect}
+                            reasoning={displayedReasoning}
+                            onSelectReasoningEffort={
+                              hasAuthoritativeReasoningContext
+                                ? handleReasoningEffort
+                                : welcomeReasoningPreview && !sessionWriteBlocked
+                                  ? handleWelcomeReasoningEffort
+                                  : undefined
+                            }
+                            workspaces={
+                              composerWorkspaceSelectEnabled
+                                ? composerWorkspaces
+                                : undefined
+                            }
+                            workspaceSelectorAlwaysVisible={Boolean(managedAgentProvider) && composerWorkspaceSelectEnabled}
+                            workspaceMenuItems={
+                              composerWorkspaceSelectEnabled && !lockedWorkspaceCwd &&
+                              managedAgentProvider &&
+                              managedWorkspaceCatalog &&
+                              managedWorkspaceCatalog.providerKey === managedProviderKey &&
+                              managedWorkspaceCatalog.workspaces.map((item) => (
+                                <DropdownMenuItem
+                                  key={item.workspaceId}
+                                  disabled={!item.canCreateSession}
+                                  onSelect={() => handleSelectManagedWorkspace(item.workspaceId)}
+                                >
+                                  {item.displayName} · {t('managed.managedMode')}
+                                </DropdownMenuItem>
+                              ))
+                            }
+                            selectedWorkspaceCwd={
+                              workspaceContextActive
+                                ? connection.sessionId
+                                  ? ordinaryWorkspaces.find(
+                                      (entry) =>
+                                        entry.cwd === connection.workspaceCwd &&
+                                        !entry.primary,
+                                    )?.cwd
+                                  : selectedWorkspaceCwd
+                                : undefined
+                            }
+                            workspaceSelectionDisabled={
+                              !composerWorkspaceSelectEnabled
+                            }
+                            atWorkspaceCwd={
+                              workspaceContextActive
+                                ? (ordinaryWorkspaces.find(
+                                    (entry) => entry.cwd === lockedWorkspaceCwd,
+                                  )?.cwd ??
+                                  (connection.sessionId
+                                    ? connection.workspaceCwd
+                                    : resolveWorkspaceMaintenanceTargetCwd()))
+                                : undefined
+                            }
+                            composerScopeKey={
+                              effectiveSessionContext?.kind === 'standalone'
+                                ? 'standalone'
+                                : effectiveSessionContext?.kind === 'live'
+                                  ? 'live'
+                                  : undefined
+                            }
+                            workspaceFeaturesEnabled={workspaceContextActive}
+                            attachmentsEnabled={composerAttachmentsEnabled}
+                            onSelectWorkspace={
+                              composerWorkspaceSelectEnabled
+                                ? handleSelectComposerWorkspace
+                                : undefined
+                            }
+                            onSelectHostedWorkspace={
+                              composerWorkspaceSelectEnabled
+                                ? handleSelectHostedWorkspace
+                                : undefined
+                            }
+                            standaloneTargetSupported={
+                              composerWorkspaceSelectEnabled &&
+                              standaloneSessionsSupported &&
+                              !lockedWorkspaceCwd
+                            }
+                            selectedStandaloneTarget={
+                              effectiveSessionContext?.kind === 'standalone'
+                            }
+                            onSelectStandaloneTarget={
+                              composerWorkspaceSelectEnabled
+                                ? handleSelectComposerStandalone
+                                : undefined
+                            }
+                            scratchWorkspaceSupported={
+                              composerWorkspaceSelectEnabled &&
+                              scratchWorkspaceRegistrationSupported
+                            }
+                            existingFolderWorkspaceSupported={
+                              composerWorkspaceSelectEnabled &&
+                              dynamicWorkspaceRegistrationSupported
+                            }
+                            workspaceMutationBusy={workspaceMutationBusy}
+                            onCreateScratchWorkspace={
+                              composerWorkspaceSelectEnabled
+                                ? handleCreateComposerScratchWorkspace
+                                : undefined
+                            }
+                            onOpenExistingWorkspace={
+                              composerWorkspaceSelectEnabled
+                                ? handleOpenExistingWorkspace
+                                : undefined
+                            }
+                            onChatWidthModeChange={handleChatWidthModeChange}
+                            sessionId={connection.sessionId}
+                            sessionName={sessionDisplayName}
+                            dialogOpen={
+                              interactionBlocked || approvalOverlayActive
+                            }
+                            followupState={followupState}
+                            onAcceptFollowup={onAcceptFollowup}
+                            onDismissFollowup={onDismissFollowup}
+                            composerInput={composerInput}
+                            composerInputVersion={composerInputVersion}
+                            placeholderText={composerPlaceholderText}
+                          />
+                          {CustomComposerFooter && (
+                            <CustomComposerFooter
+                              disabled={isDisabled}
                               isRunning={
                                 streamingState !== 'idle' ||
                                 sessionHasActivePrompt
@@ -24162,324 +24592,39 @@ export function App({
                               currentModel={currentModel}
                               sessionName={sessionDisplayName}
                             />
-                          </div>
-                        )}
-                        {sessionAgentRuns.anyLive && (
-                          <StopAllAgentsButton
-                            onStopAll={stopAllSessionAgents}
-                          />
-                        )}
-                        <SessionRecoveryBanner
-                          blocked={
-                            isDisabled ||
-                            isStartingNewSessionSuggestion ||
-                            interactionBlocked ||
-                            sessionHasActivePrompt ||
-                            unknownPromptAdmission?.payloadAvailable === true
-                          }
-                        />
-                        <ChatEditor
-                          ref={setEditorHandle}
-                          liveVoicePortalContainer={
-                            liveVoiceSlot ?? liveVoicePageSlot
-                          }
-                          compactOverlays={compactComposerOverlays}
-                          onSubmit={
-                            collaborationAvailable
-                              ? agentChatEntry.submit
-                              : handleEditorSubmit
-                          }
-                          onInputTextChange={handleComposerTextChange}
-                          onAttachmentsChange={
-                            handleComposerAttachmentsChange
-                          }
-                          btwEnabled={
-                            Boolean(connection.sessionId) &&
-                            !hiddenCommands.has('btw')
-                          }
-                          onImageIngestionNotice={pushToast}
-                          onImagePreview={openImagePanel}
-                          onAttachmentPreview={openAttachmentPanel}
-                          onCycleMode={handleCycleMode}
-                          cycleModeOnTab={cycleModeOnTab}
-                          onToggleShortcuts={handleToggleShortcuts}
-                          onCancel={handleCancel}
-                          isRunning={
-                            streamingState !== 'idle' ||
-                            sessionHasActivePrompt
-                          }
-                          isPreparing={
-                            isPreparingPrompt || isStartingNewSessionSuggestion
-                          }
-                          cancelArmed={cancelArmed}
-                          disabled={
-                            (collaborationAvailable && agentChatEntry.pending) ||
-                            isDisabled ||
-                            isStartingNewSessionSuggestion ||
-                            interactionBlocked ||
-                            approvalOverlayActive ||
-                            unknownPromptAdmission?.payloadAvailable === true
-                          }
-                          commands={commands}
-                          skills={composerSkills}
-                          onSkillsOpenChange={
-                            workspaceContextActive
-                              ? setComposerSkillsOpen
-                              : undefined
-                          }
-                          skillsLoading={
-                            skillsLoading || Boolean(
-                              connection.sessionId &&
-                                commandsRefreshingSession === connection.sessionId,
-                            )
-                          }
-                          skillsLoadError={
-                            skillsLoadError ||
-                            commandsRefreshErrorOwner?.isCurrent() === true
-                          }
-                          skillsLoaded={
-                            !sessionCatalogPending &&
-                            (Boolean(
-                              connection.sessionId &&
-                                connection.skills !== undefined,
-                            ) ||
-                              (loadedSkillsReady &&
-                                skillsCatalogCacheRef.current?.key ===
-                                  skillsCatalogKey))
-                          }
-                          slashCommandCategoryOrder={slashCommandCategoryOrder}
-                          autoSubmitSlashCommands={autoSubmitSlashCommands}
-                          builtinAtProviders={
-                            workspaceContextActive ? builtinAtProviders : false
-                          }
-                          atProviders={composerAtProviders}
-                          composerTagIcons={composerTagIcons}
-                          voiceTarget={
-                            activePanel !== null || mainView !== 'chat'
-                              ? undefined
-                              : mainVoiceTarget
-                          }
-                          voiceStatusRevision={mainVoiceStatusRevision}
-                          queuedMessages={queuedTexts}
-                          onFocusFooter={handleFocusTaskPill}
-                          onPopQueuedMessages={editLastQueuedPrompt}
-                          onClearQueuedMessages={clearQueuedPrompts}
-                          currentMode={executionMode}
-                          availableModes={availableApprovalModes}
-                          modeControlsDisabled={modeControlsBusy}
-                          planMode={currentMode === 'plan'}
-                          onTogglePlan={handleTogglePlan}
-                          sessionWorkflowEnabled={sessionWorkflowEnabled}
-                          currentModel={currentModel}
-                          gitBranch={
-                            workspaceContextActive
-                              ? activeGitBranch
-                              : undefined
-                          }
-                          gitWorktree={
-                            workspaceContextActive && Boolean(sessionWorktree)
-                          }
-                          gitCwd={
-                            workspaceContextActive
-                              ? sessionWorktree?.path
-                              : undefined
-                          }
-                          gitModeIntent={gitModeEligible ? gitModeIntent : undefined}
-                          onGitModeIntentChange={gitModeEligible ? setGitModeIntent : undefined}
-                          gitStatus={
-                            workspaceContextActive
-                              ? selectedWorkspaceGitStatus
-                              : undefined
-                          }
-                          onOpenGitDiff={
-                            gitDiffWorkspaceCwd
-                              ? handleOpenGitDiff
-                              : undefined
-                          }
-                          onOpenCommit={
-                            gitDiffWorkspaceCwd
-                              ? handleOpenCommit
-                              : undefined
-                          }
-                          onOpenWorktrees={
-                            gitDiffWorkspaceCwd && gitWorktreesSupported
-                              ? handleOpenWorktrees
-                              : undefined
-                          }
-                          onOpenLog={
-                            gitDiffWorkspaceCwd
-                              ? handleOpenLog
-                              : undefined
-                          }
-                          chatWidthMode={chatWidthMode}
-                          showChatWidthToggle={!isChatEmptyState}
-                          chatWidthToggleMin={chatWidthToggleMin}
-                          visibleToolbarActions={visibleComposerToolbarActions}
-                          // Before the session exists the workspace and git
-                          // chips sit under the composer, next to the prompt
-                          // they describe; once it does, the header owns the
-                          // workspace and the composer keeps only git.
-                          contextChipPlacement={
-                            isChatEmptyState ? 'below' : 'header'
-                          }
-                          tokenCount={
-                            contextUsageAvailable ? (connection.tokenCount ?? 0) : 0
-                          }
-                          contextWindow={
-                            contextUsageAvailable ? (connection.contextWindow ?? 0) : 0
-                          }
-                          contextUsageAlwaysVisible={
-                            contextUsageAlwaysVisible
-                          }
-                          contextUsageControls={
-                            connection.sessionId
-                              ? contextUsageControls[connection.sessionId]
-                              : undefined
-                          }
-                          onOpenContextUsage={
-                            contextUsageAvailable ? openCurrentContextUsagePanel : undefined
-                          }
-                          modelRefresh={modelRefresh}
-                          availableModels={availableModels}
-                          unavailableModels={unavailableModels}
-                          mountUnavailableModelTooltip={
-                            mountUnavailableModelTooltip
-                          }
-                          onSelectMode={handleSetMode}
-                          onSelectModel={handleModelSelect}
-                          reasoning={displayedReasoning}
-                          onSelectReasoningEffort={
-                            hasAuthoritativeReasoningContext
-                              ? handleReasoningEffort
-                              : welcomeReasoningPreview && !sessionWriteBlocked
-                                ? handleWelcomeReasoningEffort
-                                : undefined
-                          }
-                          workspaces={
-                            composerWorkspaceSelectEnabled
-                              ? composerWorkspaces
-                              : undefined
-                          }
-                          workspaceSelectorAlwaysVisible={Boolean(managedAgentProvider) && composerWorkspaceSelectEnabled}
-                          workspaceMenuItems={
-                            composerWorkspaceSelectEnabled && !lockedWorkspaceCwd &&
-                            managedAgentProvider &&
-                            managedWorkspaceCatalog &&
-                            managedWorkspaceCatalog.providerKey === managedProviderKey &&
-                            managedWorkspaceCatalog.workspaces.map((item) => (
-                              <DropdownMenuItem
-                                key={item.workspaceId}
-                                disabled={!item.canCreateSession}
-                                onSelect={() => handleSelectManagedWorkspace(item.workspaceId)}
-                              >
-                                {item.displayName} · {t('managed.managedMode')}
-                              </DropdownMenuItem>
-                            ))
-                          }
-                          selectedWorkspaceCwd={
-                            workspaceContextActive
-                              ? connection.sessionId
-                                ? ordinaryWorkspaces.find(
-                                    (entry) =>
-                                      entry.cwd === connection.workspaceCwd &&
-                                      !entry.primary,
-                                  )?.cwd
-                                : selectedWorkspaceCwd
-                              : undefined
-                          }
-                          workspaceSelectionDisabled={
-                            !composerWorkspaceSelectEnabled
-                          }
-                          atWorkspaceCwd={
-                            workspaceContextActive
-                              ? (ordinaryWorkspaces.find(
-                                  (entry) => entry.cwd === lockedWorkspaceCwd,
-                                )?.cwd ??
-                                (connection.sessionId
-                                  ? connection.workspaceCwd
-                                  : resolveWorkspaceMaintenanceTargetCwd()))
-                              : undefined
-                          }
-                          composerScopeKey={
-                            effectiveSessionContext?.kind === 'standalone'
-                              ? 'standalone'
-                              : effectiveSessionContext?.kind === 'live'
-                                ? 'live'
-                                : undefined
-                          }
-                          workspaceFeaturesEnabled={workspaceContextActive}
-                          attachmentsEnabled={composerAttachmentsEnabled}
-                          onSelectWorkspace={
-                            composerWorkspaceSelectEnabled
-                              ? handleSelectComposerWorkspace
-                              : undefined
-                          }
-                          onSelectHostedWorkspace={
-                            composerWorkspaceSelectEnabled
-                              ? handleSelectHostedWorkspace
-                              : undefined
-                          }
-                          standaloneTargetSupported={
-                            composerWorkspaceSelectEnabled &&
-                            standaloneSessionsSupported &&
-                            !lockedWorkspaceCwd
-                          }
-                          selectedStandaloneTarget={
-                            effectiveSessionContext?.kind === 'standalone'
-                          }
-                          onSelectStandaloneTarget={
-                            composerWorkspaceSelectEnabled
-                              ? handleSelectComposerStandalone
-                              : undefined
-                          }
-                          scratchWorkspaceSupported={
-                            composerWorkspaceSelectEnabled &&
-                            scratchWorkspaceRegistrationSupported
-                          }
-                          existingFolderWorkspaceSupported={
-                            composerWorkspaceSelectEnabled &&
-                            dynamicWorkspaceRegistrationSupported
-                          }
-                          workspaceMutationBusy={workspaceMutationBusy}
-                          onCreateScratchWorkspace={
-                            composerWorkspaceSelectEnabled
-                              ? handleCreateComposerScratchWorkspace
-                              : undefined
-                          }
-                          onOpenExistingWorkspace={
-                            composerWorkspaceSelectEnabled
-                              ? handleOpenExistingWorkspace
-                              : undefined
-                          }
-                          onChatWidthModeChange={handleChatWidthModeChange}
-                          sessionId={connection.sessionId}
-                          sessionName={sessionDisplayName}
-                          dialogOpen={
-                            interactionBlocked || approvalOverlayActive
-                          }
-                          followupState={followupState}
-                          onAcceptFollowup={onAcceptFollowup}
-                          onDismissFollowup={onDismissFollowup}
-                          composerInput={composerInput}
-                          composerInputVersion={composerInputVersion}
-                          placeholderText={composerPlaceholderText}
-                        />
-                        {CustomComposerFooter && (
-                          <CustomComposerFooter
-                            disabled={isDisabled}
-                            isRunning={
-                              streamingState !== 'idle' ||
-                              sessionHasActivePrompt
-                            }
-                            currentMode={currentMode}
-                            currentModel={currentModel}
-                            sessionName={sessionDisplayName}
-                          />
-                        )}
-                      </div>
-                      {CustomFooter ? (
-                        hasMobileComposerBottom ? (
-                          <div className={styles.customFooter}>
+                          )}
+                        </div>
+                        {CustomFooter ? (
+                          hasMobileComposerBottom ? (
+                            <div className={styles.customFooter}>
+                              <CustomFooter
+                                connected={connected}
+                                mode={currentMode}
+                                model={currentModel}
+                                streamingState={streamingState}
+                                contextUsageRatio={
+                                  (connection.contextWindow ?? 0) > 0
+                                    ? (connection.tokenCount ?? 0) /
+                                      (connection.contextWindow ?? 0)
+                                    : 0
+                                }
+                                goalSnapshot={goalSnapshot}
+                                activeGoal={activeGoal}
+                                tasks={footerTasks}
+                                availableModes={availableApprovalModes}
+                                availableModels={(connection.models ?? [])
+                                  .filter(isVisibleComposerModel)
+                                  .map((m) => ({
+                                    id: m.id,
+                                    label: getModelDisplayName(m.label || m.id),
+                                    contextWindow: m.contextWindow,
+                                  }))}
+                                skills={composerSkills}
+                                onSelectMode={handleSetMode}
+                                onSelectModel={handleModelSelect}
+                              />
+                            </div>
+                          ) : (
                             <CustomFooter
                               connected={connected}
                               mode={currentMode}
@@ -24506,87 +24651,60 @@ export function App({
                               onSelectMode={handleSetMode}
                               onSelectModel={handleModelSelect}
                             />
-                          </div>
+                          )
                         ) : (
-                          <CustomFooter
-                            connected={connected}
-                            mode={currentMode}
-                            model={currentModel}
-                            streamingState={streamingState}
-                            contextUsageRatio={
-                              (connection.contextWindow ?? 0) > 0
-                                ? (connection.tokenCount ?? 0) /
-                                  (connection.contextWindow ?? 0)
-                                : 0
+                          <StatusBar
+                            onSelectMode={() =>
+                              setShowApprovalModeDialog((v) => !v)
                             }
-                            goalSnapshot={goalSnapshot}
-                            activeGoal={activeGoal}
-                            tasks={footerTasks}
-                            availableModes={availableApprovalModes}
-                            availableModels={(connection.models ?? [])
-                              .filter(isVisibleComposerModel)
-                              .map((m) => ({
-                                id: m.id,
-                                label: getModelDisplayName(m.label || m.id),
-                                contextWindow: m.contextWindow,
-                              }))}
-                            skills={composerSkills}
-                            onSelectMode={handleSetMode}
-                            onSelectModel={handleModelSelect}
+                            onSelectModel={() =>
+                              isStandaloneModelPickerUnavailable({
+                                sessionId: connection.sessionId,
+                                sessionContextKind: effectiveSessionContext?.kind,
+                                models: connection.models,
+                              })
+                                ? pushToast('info', t('model.unavailable'))
+                                : setModelDialogMode((v) =>
+                                    v ? null : 'main',
+                                  )
+                            }
+                            onShowContext={() =>
+                              showContextUsage('/context', false)
+                            }
+                            onOpenSettings={() => openPanel('settings')}
+                            ref={statusBarRef}
+                            onOpenTasks={() => openTasksPanel()}
+                            onReturnToInput={handleReturnToEditor}
+                            tasks={
+                              isChatEmptyState ||
+                              !environmentTasksReplacementEnabled
+                                ? backgroundTasks
+                                : []
+                            }
+                            hideSettings={
+                              hideSettings || !workspaceContextActive
+                            }
+                            onToggleShortcuts={handleToggleShortcuts}
+                            compact={true}
                           />
-                        )
-                      ) : (
-                        <StatusBar
-                          onSelectMode={() =>
-                            setShowApprovalModeDialog((v) => !v)
-                          }
-                          onSelectModel={() =>
-                            isStandaloneModelPickerUnavailable({
-                              sessionId: connection.sessionId,
-                              sessionContextKind: effectiveSessionContext?.kind,
-                              models: connection.models,
-                            })
-                              ? pushToast('info', t('model.unavailable'))
-                              : setModelDialogMode((v) =>
-                                  v ? null : 'main',
-                                )
-                          }
-                          onShowContext={() =>
-                            showContextUsage('/context', false)
-                          }
-                          onOpenSettings={() => openPanel('settings')}
-                          ref={statusBarRef}
-                          onOpenTasks={() => openTasksPanel()}
-                          onReturnToInput={handleReturnToEditor}
-                          tasks={
-                            isChatEmptyState ||
-                            !environmentTasksReplacementEnabled
-                              ? backgroundTasks
-                              : []
-                          }
-                          hideSettings={
-                            hideSettings || !workspaceContextActive
-                          }
-                          onToggleShortcuts={handleToggleShortcuts}
-                          compact={true}
-                        />
-                      )}
-                      {isChatEmptyState && welcomeFooter && (
-                        <div
-                          className={[
-                            styles.emptyWelcomeFooter,
-                            showMobileWelcomeFooterMiddle
-                              ? styles.desktopWelcomeFooter
-                              : undefined,
-                          ]
-                            .filter(Boolean)
-                            .join(' ')}
-                        >
-                          {welcomeFooter}
-                        </div>
-                      )}
-                    </div>
-                    </QuoteToComposerContext.Provider>
+                        )}
+                        {isChatEmptyState && welcomeFooter && (
+                          <div
+                            className={[
+                              styles.emptyWelcomeFooter,
+                              showMobileWelcomeFooterMiddle
+                                ? styles.desktopWelcomeFooter
+                                : undefined,
+                            ]
+                              .filter(Boolean)
+                              .join(' ')}
+                          >
+                            {welcomeFooter}
+                          </div>
+                        )}
+                      </div>
+                      </QuoteToComposerContext.Provider>
+                    </McpAppVisibilityContext.Provider>
                   </WebShellCustomizationProvider>
                 </div>
               </div>
@@ -24862,6 +24980,7 @@ export function App({
                 artifactPanelSlotEl,
               )}
           </div>
+          </GeneratedUiRuntimeProvider>
         </div>
         </CompactModeContext.Provider>
         </WebShellPortalRootContext.Provider>
