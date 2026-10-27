@@ -234,7 +234,10 @@ function safeJson(value: unknown): string {
  * to plain text. Formatting therefore never rewrites literals, duplicate
  * keys, key order or string escapes.
  */
-export function formatJsonPayload(text: string): {
+export function formatJsonPayload(
+  text: string,
+  maxFormattedLength = EXPANDED_TOOL_PAYLOAD_LENGTH,
+): {
   text: string;
   json: boolean;
 } {
@@ -247,7 +250,7 @@ export function formatJsonPayload(text: string): {
   const trimmed = text.trim();
   if (!trimmed) return { text, json: false };
 
-  const document = formatJsonDocument(trimmed);
+  const document = formatJsonDocument(trimmed, maxFormattedLength);
   if (document !== undefined) return { text: document, json: true };
 
   return { text, json: false };
@@ -255,7 +258,10 @@ export function formatJsonPayload(text: string): {
 
 const MAX_JSON_FORMAT_DEPTH = 32;
 
-function formatJsonDocument(text: string): string | undefined {
+function formatJsonDocument(
+  text: string,
+  maxFormattedLength: number,
+): string | undefined {
   if (!/^[[{]/.test(text)) return undefined;
   let value: unknown;
   try {
@@ -272,8 +278,8 @@ function formatJsonDocument(text: string): string | undefined {
   if (text === pretty) return text;
 
   const compact = JSON.stringify(value);
-  if (text === compact) return pretty;
-  return undefined;
+  if (text !== compact || pretty.length > maxFormattedLength) return undefined;
+  return pretty;
 }
 
 function exceedsJsonDepth(root: unknown, maxDepth: number): boolean {

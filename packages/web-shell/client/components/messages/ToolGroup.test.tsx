@@ -3548,6 +3548,49 @@ describe('generic tool card details', () => {
     expect(text.split('"method": "ping"').length - 1).toBe(1);
   });
 
+  it('offers Show more for a large arguments payload', () => {
+    const tail = 'ARG-TAIL';
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__bigargs',
+        args: { body: `${'y'.repeat(4200)}${tail}` },
+      }),
+      { forceExpanded: true },
+    );
+
+    expect(container.textContent).not.toContain(tail);
+    const more = [...container.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Show more',
+    );
+    expect(more).toBeDefined();
+    act(() => more?.click());
+    expect(container.textContent).toContain(tail);
+    expect(
+      [...container.querySelectorAll('button')].find(
+        (button) => button.textContent === 'Show more',
+      ),
+    ).toBeUndefined();
+  });
+
+  it('bounds generic arguments in document mode', () => {
+    const tail = 'ARG-DOCUMENT-TAIL';
+    const container = renderToolGroup(
+      [
+        makeTool({
+          toolName: 'mcp__demo__bigargs',
+          args: { content: `${'x'.repeat(50_000)}${tail}` },
+          rawOutput: 'ok',
+        }),
+      ],
+      {},
+      undefined,
+      'document',
+    );
+
+    expect(container.textContent).not.toContain(tail);
+    expect(container.textContent).toContain('Content truncated');
+  });
+
   it('shows the full payload without Show more in document mode', () => {
     const tail = 'DOCUMENT-TAIL';
     const container = renderToolGroup(

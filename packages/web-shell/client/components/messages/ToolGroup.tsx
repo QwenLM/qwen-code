@@ -420,21 +420,25 @@ function GenericToolDetails({
   const { t } = useI18n();
   const renderMode = useTranscriptRenderMode();
   const documentMode = renderMode === 'document';
+  const formatLimit = documentMode
+    ? Number.POSITIVE_INFINITY
+    : EXPANDED_TOOL_PAYLOAD_LENGTH;
   const [expanded, setExpanded] = useState(false);
   const limit = documentMode
     ? Number.POSITIVE_INFINITY
     : expanded
       ? EXPANDED_TOOL_PAYLOAD_LENGTH
       : MAX_TOOL_PAYLOAD_LENGTH;
+  const argumentsLimit = documentMode ? EXPANDED_TOOL_PAYLOAD_LENGTH : limit;
   // Pretty-printing grows a compact payload, and the blocks truncate what they
   // render, so the "Show more" decision has to use the formatted lengths.
   const argumentsPayload = useMemo(
-    () => formatJsonPayload(argumentsText),
-    [argumentsText],
+    () => formatJsonPayload(argumentsText, formatLimit),
+    [argumentsText, formatLimit],
   );
   const resultPayload = useMemo(
-    () => formatJsonPayload(resultText),
-    [resultText],
+    () => formatJsonPayload(resultText, formatLimit),
+    [resultText, formatLimit],
   );
   const canExpand =
     !documentMode &&
@@ -446,7 +450,7 @@ function GenericToolDetails({
       {argumentsText && (
         <section className={styles.payloadSection}>
           <div className={styles.payloadLabel}>{t('turnCalls.arguments')}</div>
-          <ToolPayloadBlock payload={argumentsPayload} limit={limit} />
+          <ToolPayloadBlock payload={argumentsPayload} limit={argumentsLimit} />
         </section>
       )}
       {(resultText || pending || cancelled) && (

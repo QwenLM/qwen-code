@@ -657,6 +657,11 @@ describe('formatJsonPayload', () => {
     expect(formatJsonPayload(text)).toEqual({ text, json: false });
   });
 
+  it('falls back when formatted output exceeds the render cap', () => {
+    const text = '{"a":1}';
+    expect(formatJsonPayload(text, 5)).toEqual({ text, json: false });
+  });
+
   it('leaves an oversized payload alone instead of parsing it', () => {
     const text = JSON.stringify({
       value: 'x'.repeat(EXPANDED_TOOL_PAYLOAD_LENGTH),
