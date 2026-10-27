@@ -11571,6 +11571,13 @@ export function App({
                   await sessionActions.renameSession(
                     pendingManualTitle.displayName,
                   );
+                  if (catalogWorkspaceCwd) {
+                    sessionCatalogController.renamed(
+                      catalogWorkspaceCwd,
+                      sessionId,
+                      pendingManualTitle.displayName,
+                    );
+                  }
                 } catch {
                   pendingManualTitleRef.current = undefined;
                 }
@@ -11605,18 +11612,19 @@ export function App({
             },
             onSessionAllocated: (sessionId) => {
               draftMaterializedSessionIdRef.current = sessionId;
-              notify?.(sessionId);
-              preparingSessionIdRef.current = sessionId;
-              allocatedSessionId = sessionId;
+              // A still-armed /clear carry wins over the fresh prompt title;
+              // do not register a provisional title it would have to undo.
+              const carryWillApply =
+                pendingManualTitle !== undefined &&
+                pendingManualTitleRef.current === pendingManualTitle;
               if (catalogWorkspaceCwd) {
                 allocatedSessionCatalogOwnerRef.current = {
                   sessionId,
                   workspaceCwd: catalogWorkspaceCwd,
                 };
-                if (initialTitle) {
-                  // Register the title before any periodic or in-flight
-                  // catalog read can publish the row, not only before the
-                  // refresh this callback schedules later.
+                if (initialTitle && !carryWillApply) {
+                  // Register the title before notify() so a render triggered
+                  // by the callback cannot publish the row first.
                   sessionCatalogController.setPendingSessionTitle(
                     catalogWorkspaceCwd,
                     sessionId,
@@ -11624,6 +11632,9 @@ export function App({
                   );
                 }
               }
+              notify?.(sessionId);
+              preparingSessionIdRef.current = sessionId;
+              allocatedSessionId = sessionId;
             },
             getCurrentSessionId: () => connectionRef.current.sessionId,
             getCurrentWorkspaceCwd: getComposerWorkspaceCwd,
@@ -18791,6 +18802,9 @@ export function App({
             pendingManualTitleRef.current = undefined;
             const renameArg = parseRenameArgument(text.slice(match[0].length));
             if (renameArg.type === 'auto' || renameArg.type === 'delegate') {
+              // `/rename --auto` renames the current session; without one it
+              // must not provision a session just to title it with the command.
+              if (!requireActiveSessionForLocalCommand()) return false;
               if (commandBlocked) {
                 return enqueueBlockedCommand(text);
               }

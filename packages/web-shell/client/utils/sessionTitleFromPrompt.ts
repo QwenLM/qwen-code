@@ -22,6 +22,16 @@ export function titleFromPrompt(text: string): string | undefined {
     .replace(/\s+/g, ' ')
     .trim();
 
+  // Control characters cannot be persisted as a title (the daemon rejects
+  // them) and must not become a client-only pending label. A loop keeps the
+  // source free of control-character regex literals (eslint no-control-regex).
+  for (const character of title) {
+    const code = character.codePointAt(0) ?? 0;
+    if (code <= 0x1f || code === 0x7f || (code >= 0x80 && code <= 0x9f)) {
+      return undefined;
+    }
+  }
+
   const length = Array.from(title).length;
   if (length < MIN_PROMPT_TITLE_LENGTH || length > MAX_PROMPT_TITLE_LENGTH) {
     return undefined;

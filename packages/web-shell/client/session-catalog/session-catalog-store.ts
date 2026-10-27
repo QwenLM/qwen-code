@@ -620,6 +620,20 @@ export class SessionCatalogStore {
   }
 
   /**
+   * Drop a pending prompt title once a real rename lands (or the session is
+   * closed), so a later catalog page cannot revive the provisional label.
+   */
+  clearPendingSessionTitle(workspaceCwd: string, sessionId: string): void {
+    const pending = this.pendingSessionTitles.get(workspaceCwd);
+    if (!pending?.delete(sessionId)) return;
+    if (pending.size === 0) this.pendingSessionTitles.delete(workspaceCwd);
+    for (const entry of this.entries.values()) {
+      if (entry.query.workspaceCwd !== workspaceCwd) continue;
+      this.setSnapshot(entry, entry.snapshot);
+    }
+  }
+
+  /**
    * Apply a pin toggle optimistically to every loaded page of the workspace,
    * so the store owns the optimistic state's lifetime (the R5-1 fix
    * direction). Pinned-view pages gain or lose the row; every other page

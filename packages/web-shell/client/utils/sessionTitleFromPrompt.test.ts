@@ -41,6 +41,12 @@ describe('titleFromPrompt', () => {
 
   it('collapses internal whitespace', () => {
     expect(titleFromPrompt('fix   login')).toBe('fix login');
+    expect(titleFromPrompt('fix\tlogin')).toBe('fix login');
+  });
+
+  it('rejects control characters', () => {
+    expect(titleFromPrompt('fix \u001b[31mred')).toBeUndefined();
+    expect(titleFromPrompt('fix\u0000login')).toBeUndefined();
   });
 
   it('rejects blank prompts', () => {

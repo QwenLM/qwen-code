@@ -166,6 +166,28 @@ describe('SessionCatalogStore', () => {
     ).toBeUndefined();
   });
 
+  it('drops a pending title when a real rename clears it', async () => {
+    store.setPendingSessionTitle('/work', 'session-1', 'Fix login');
+    store.clearPendingSessionTitle('/work', 'session-1');
+    legacy.mockResolvedValueOnce(page('session-1'));
+    await store.loadOnce(query('/work'), { fresh: true });
+    expect(
+      store.getSnapshot(query('/work')).page?.sessions[0]?.displayName,
+    ).toBeUndefined();
+  });
+
+  it('does not let a cleared pending title overwrite a manual rename', async () => {
+    legacy.mockResolvedValueOnce(page('session-1'));
+    await store.loadOnce(query('/work'), { fresh: true });
+    store.setPendingSessionTitle('/work', 'session-1', 'Fix login');
+    store.clearPendingSessionTitle('/work', 'session-1');
+    store.patchSession('/work', 'session-1', { displayName: 'Bug hunt' });
+    store.invalidateWorkspace('/work');
+    expect(
+      store.getSnapshot(query('/work')).page?.sessions[0]?.displayName,
+    ).toBe('Bug hunt');
+  });
+
   it('peeks a cached display name without scheduling a request', async () => {
     const response = deferred<DaemonSessionListPage>();
     legacy.mockReturnValue(response.promise);
