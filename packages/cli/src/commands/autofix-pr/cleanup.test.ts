@@ -25,6 +25,31 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: stdout,
   writeStderrLineSafe: () => {},
 }));
+// What happens while cleanup reads the watch, and while it asks the remote
+// for the PR's head: a fix attempt that opens meanwhile.
+const hooks = vi.hoisted(() => ({
+  afterRead: null as (() => void) | null,
+  remoteHead: null as (() => string) | null,
+}));
+vi.mock('./state.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./state.js')>();
+  return {
+    ...actual,
+    readState: (...args: Parameters<typeof actual.readState>) => {
+      const state = actual.readState(...args);
+      hooks.afterRead?.();
+      return state;
+    },
+  };
+});
+vi.mock('./worktree.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./worktree.js')>();
+  return {
+    ...actual,
+    remoteRef: (...args: Parameters<typeof actual.remoteRef>) =>
+      hooks.remoteHead ? hooks.remoteHead() : actual.remoteRef(...args),
+  };
+});
 
 import { runCleanup } from './cleanup.js';
 import {
@@ -87,6 +112,8 @@ describe('runCleanup (real git)', () => {
   });
 
   afterEach(() => {
+    hooks.afterRead = null;
+    hooks.remoteHead = null;
     process.chdir(savedCwd);
     if (savedSession === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
     else process.env['QWEN_CODE_SESSION_ID'] = savedSession;
@@ -255,6 +282,74 @@ describe('runCleanup (real git)', () => {
       reason: expect.stringMatching(/uncommitted changes/),
     });
     expect(kept.lastKnownHeadSha).toBe(headSha);
+  });
+
+  describe('a fix attempt that opens while it runs', () => {
+    const openAttempt = () =>
+      writeFileSync(
+        paths.fixPath,
+        JSON.stringify({
+          version: 1,
+          attempt: '0123456789ab',
+          task: 'aaaaaaaaaaaa',
+          head: headSha,
+          startedAt: new Date().toISOString(),
+        }),
+      );
+    const refused = /a fix agent is working in PR #7's worktree/;
+
+    it('keeps the worktree it was about to remove', () => {
+      run(paths.worktreePath, 'commit', '-q', '--allow-empty', '-m', 'fix');
+      const pushed = run(paths.worktreePath, 'rev-parse', 'HEAD');
+      // The commit is on the PR: nothing would be lost.
+      hooks.remoteHead = () => {
+        openAttempt();
+        return pushed;
+      };
+      expect(() => runCleanup(7, false)).toThrow(refused);
+      expect(existsSync(paths.worktreePath)).toBe(true);
+      expect(branchExists()).toBe(true);
+      expect(existsSync(paths.statePath)).toBe(true);
+    });
+
+    it('leaves the watch it would end with the work it keeps running', () => {
+      writeState(paths.statePath, {
+        ...readState(paths.statePath)!,
+        watch: { every: 2, reply: true, instructions: '' },
+      });
+      run(paths.worktreePath, 'commit', '-q', '--allow-empty', '-m', 'fix');
+      hooks.remoteHead = () => {
+        openAttempt();
+        return headSha;
+      };
+      expect(() => runCleanup(7, false)).toThrow(refused);
+      expect(readState(paths.statePath)).toMatchObject({
+        watch: { every: 2 },
+      });
+      expect(readState(paths.statePath)).not.toHaveProperty('ended');
+    });
+
+    it('names the running fix before anything else, an unreadable watch too', () => {
+      // Before it reads the watch: a state file it cannot read would
+      // otherwise send the user to --force, which then refuses the same.
+      writeFileSync(paths.statePath, '{');
+      openAttempt();
+      for (const force of [false, true]) {
+        expect(() => runCleanup(7, force)).toThrow(refused);
+      }
+      expect(existsSync(paths.worktreePath)).toBe(true);
+    });
+
+    it('keeps the worktree --force would discard', () => {
+      run(paths.worktreePath, 'commit', '-q', '--allow-empty', '-m', 'fix');
+      hooks.afterRead = () => {
+        hooks.afterRead = null;
+        openAttempt();
+      };
+      expect(() => runCleanup(7, true)).toThrow(refused);
+      expect(existsSync(paths.worktreePath)).toBe(true);
+      expect(existsSync(paths.statePath)).toBe(true);
+    });
   });
 
   it('keeps everything when the worktree has unpushed commits', () => {

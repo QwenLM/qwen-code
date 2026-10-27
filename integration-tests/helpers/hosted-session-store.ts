@@ -10,10 +10,17 @@ import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import path from 'node:path';
-import { LocalJsonlManagedSessionJournalStore } from '@qwen-code/qwen-code-core/managed-runtime/local-jsonl-managed-session-journal-store.js';
+import {
+  LocalJsonlManagedSessionJournalHandle,
+  LocalJsonlManagedSessionJournalStore,
+} from '@qwen-code/qwen-code-core/managed-runtime/local-jsonl-managed-session-journal-store.js';
+import { SessionWriterLease } from '@qwen-code/qwen-code-core/services/session-writer-lease.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
-import type { ManagedSessionJournalHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-storage.js';
+import type {
+  ManagedSessionJournalHandle,
+  ManagedSessionJournalStore,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-session-storage.js';
 import { HOSTED_STORE_PREFIX } from '../scratch-dir.js';
 
 // An HTTP transport fixture, not a substitute for the Spring/MySQL slice.
@@ -25,11 +32,21 @@ export async function startHostedSessionStore(sessionId: string) {
     sessionId,
   };
   const transcriptPath = path.join(root, `${sessionId}.jsonl`);
-  const journal = new LocalJsonlManagedSessionJournalStore({
-    runtimeBaseDir: root,
-    sessionId,
-    transcriptPath,
-  });
+  // This transport fixture retains the HTTP journal's native transaction shape.
+  const journal: ManagedSessionJournalStore = {
+    open: async (request) =>
+      new LocalJsonlManagedSessionJournalHandle(
+        await SessionWriterLease.acquire({
+          runtimeBaseDir: root,
+          sessionId,
+          transcriptPath,
+          takeoverPolicy: 'certified',
+          lockSchema: { schemaVersion: 3, formatVersion: 1 },
+        }),
+        request.sessionKey,
+        true,
+      ),
+  };
   const resources = LocalManagedSessionResourceStore.create({
     runtimeBaseDir: root,
     sessionKey,
@@ -44,7 +61,11 @@ export async function startHostedSessionStore(sessionId: string) {
   let writerGeneration = 0;
   let seals = 0;
   const scan = () =>
-    LocalJsonlManagedSessionJournalStore.read(transcriptPath, sessionKey);
+    LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath,
+      sessionKey,
+      runtimeBaseDir: root,
+    });
   const server = createServer((req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     const request = (async () => {

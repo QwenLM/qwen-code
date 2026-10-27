@@ -8280,6 +8280,87 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it.each([
+    'inside',
+    'sibling',
+    'symlink',
+    'missing',
+    'file',
+    'outside-noop',
+  ] as const)(
+    'enforces ordinary session cd containment for %s targets without Git',
+    async (targetKind) => {
+      await withEmptyTrustedFolders(async (directory) => {
+        const root = path.join(directory, 'workspace');
+        const inside = path.join(root, 'session-a');
+        const sibling = path.join(directory, 'workspace-other');
+        const linked = path.join(root, 'escaped');
+        const file = path.join(root, 'not-a-directory');
+        await fs.mkdir(inside, { recursive: true });
+        await fs.mkdir(sibling);
+        await fs.writeFile(file, 'not a directory');
+        if (targetKind === 'symlink') {
+          await fs.symlink(
+            sibling,
+            linked,
+            process.platform === 'win32' ? 'junction' : 'dir',
+          );
+        }
+        const canonicalRoot = await fs.realpath(root);
+        const targetPath = {
+          inside,
+          sibling,
+          symlink: linked,
+          missing: path.join(root, 'missing'),
+          file,
+          'outside-noop': sibling,
+        }[targetKind]!;
+        const { agent, agentPromise, sessionId, innerConfig } =
+          await bootRelocatableSession(makeSessionSettings({ mcpServers: {} }));
+        if (targetKind === 'outside-noop') {
+          innerConfig.getTargetDir.mockReturnValue(await fs.realpath(sibling));
+        }
+
+        try {
+          const relocation = agent.extMethod(
+            SERVE_CONTROL_EXT_METHODS.sessionCd,
+            {
+              sessionId,
+              path: targetPath,
+              allowedRoots: [canonicalRoot],
+            },
+          );
+          if (targetKind === 'inside') {
+            const canonicalTarget = await fs.realpath(inside);
+            await expect(relocation).resolves.toMatchObject({
+              newCwd: canonicalTarget,
+            });
+            expect(
+              innerConfig.relocateWorkingDirectory,
+            ).toHaveBeenCalledExactlyOnceWith(
+              canonicalTarget,
+              canonicalTarget,
+              { skipProcessChdir: true, skipArtifactMigration: true },
+            );
+          } else {
+            await expect(relocation).rejects.toMatchObject({
+              data: {
+                errorKind:
+                  targetKind === 'missing' || targetKind === 'file'
+                    ? 'directory_not_found'
+                    : 'containment_violation',
+              },
+            });
+            expect(innerConfig.relocateWorkingDirectory).not.toHaveBeenCalled();
+          }
+        } finally {
+          mockConnectionState.resolve();
+          await agentPromise;
+        }
+      });
+    },
+  );
+
   it('refuses to move a Managed session, whose Runtime worker is bound to its directory', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const targetDir = await fs.mkdtemp(

@@ -492,7 +492,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
     }
 
     @Override
-    public boolean supportsWorkspaceCwdChange(ContextBinding binding) {
+    public boolean supportsWorkspaceContextChange(ContextBinding binding) {
         return residents.find(binding) == null;
     }
 

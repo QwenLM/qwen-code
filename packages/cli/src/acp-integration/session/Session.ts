@@ -527,6 +527,7 @@ import {
   unrestorableGoalStatus,
 } from './recovered-goal-update.js';
 import { SubAgentTracker } from './SubAgentTracker.js';
+import { runAcpToolBatch, type AcpToolBatchHost } from './acp-tool-batch.js';
 import {
   buildPermissionRequestContent,
   interactionMetaFields,
@@ -550,6 +551,7 @@ import {
   REPEATED_TOOL_FAILURE_STOP_MESSAGE,
   parseRepeatedToolFailureGuardMode,
   type RepeatedToolFailureBatch,
+  type RepeatedToolFailureObservation,
   type RepeatedToolFailureGuardMode,
   type RepeatedToolFailureGuardDecision,
   type RepeatedToolFailureGuardState,
@@ -7338,6 +7340,10 @@ export class Session implements SessionContext {
               !goalTurn &&
               !channelTurn &&
               !responseCapture.goalProposalTurn;
+            // Its tool batches run on the shared loop's batch, and the
+            // client then runs its own tool-call guards.
+            const sharedToolBatch =
+              sharedModelRound && this.#runsToolsOnSharedBatch();
             let promptAdmission: UserPromptAdmission | undefined;
             if (sharedModelRound) {
               promptAdmission = await this.config
@@ -7858,6 +7864,7 @@ export class Session implements SessionContext {
                 }
 
                 const functionCalls: FunctionCall[] = [];
+                const toolRequests: ToolCallRequestInfo[] = [];
                 const preparationTracker = new ToolCallPreparationTracker(
                   this.toolCallEmitter,
                 );
@@ -7949,7 +7956,9 @@ export class Session implements SessionContext {
                           modelOverride: fullTurnModelOverride,
                           stopHookRunByHost: true,
                           interactionSpanByHost: true,
-                          toolLoopGuardsByHost: true,
+                          ...(!sharedToolBatch && {
+                            toolLoopGuardsByHost: true,
+                          }),
                           toolCallPreparations: true,
                           ...(roundType === SendMessageType.UserQuery && {
                             userTurnRecordedByHost: true,
@@ -8041,6 +8050,7 @@ export class Session implements SessionContext {
                                   event.functionCall,
                                 ]);
                                 functionCalls.push(event.functionCall);
+                                toolRequests.push(event.value);
                               }
                               break;
                             case LlmEventType.Finished:
@@ -8075,6 +8085,7 @@ export class Session implements SessionContext {
                                 `main prompt ${event.type}`,
                               );
                               functionCalls.length = 0;
+                              toolRequests.length = 0;
                               attempt = newModelResponseFacts();
                               break;
                             }
@@ -8143,14 +8154,31 @@ export class Session implements SessionContext {
                   } finally {
                     responseInterrupt.end();
                     // A round that stopped, such as on the client's loop
-                    // guard, runs none of the calls it already yielded.
-                    await finalizeToolCallPreparations(
-                      preparationTracker,
-                      streamFailed ||
-                        pendingSend.signal.aborted ||
-                        roundStop !== undefined,
-                      'main prompt',
-                    );
+                    // guard, runs none of the calls it already yielded. The
+                    // loop guard's calls are skipped, as ACP's guard skips
+                    // them.
+                    if (
+                      roundStop === 'loop_detected' &&
+                      !streamFailed &&
+                      !pendingSend.signal.aborted
+                    ) {
+                      await this.#emitLoopSkippedToolCalls(
+                        preparationTracker
+                          .takePending()
+                          .map(({ callId, toolName }) => ({
+                            callId,
+                            name: toolName,
+                          })),
+                      );
+                    } else {
+                      await finalizeToolCallPreparations(
+                        preparationTracker,
+                        streamFailed ||
+                          pendingSend.signal.aborted ||
+                          roundStop !== undefined,
+                        'main prompt',
+                      );
+                    }
                   }
                   // A round that stopped before its request pushed the message
                   // keeps it in history, as a send the current path drops does.
@@ -8470,13 +8498,21 @@ export class Session implements SessionContext {
                   const toolRun = await this.#runWithFullTurnModel(
                     fullTurnModelOverride,
                     () =>
-                      this.runToolCalls(
-                        pendingSend.signal,
-                        promptId,
-                        functionCalls,
-                        toolLoopState,
-                        onFullTurnModel,
-                      ),
+                      sharedToolBatch
+                        ? this.#runSharedToolBatch(
+                            pendingSend.signal,
+                            promptId,
+                            toolRequests,
+                            toolLoopState,
+                            onFullTurnModel,
+                          )
+                        : this.runToolCalls(
+                            pendingSend.signal,
+                            promptId,
+                            functionCalls,
+                            toolLoopState,
+                            onFullTurnModel,
+                          ),
                   );
                   if (
                     toolRun.stopAfterPermissionCancel ||
@@ -8522,6 +8558,7 @@ export class Session implements SessionContext {
                       toolLoopState,
                       onFullTurnModel,
                       rejectOnLoopDetected,
+                      sharedToolBatch,
                     );
                   nextMessage = nextAfterTools.message;
                   if (nextAfterTools.stoppedByRepeatedToolFailure) {
@@ -10702,6 +10739,8 @@ export class Session implements SessionContext {
     toolLoopState: DaemonToolLoopState,
     onFullTurnModel?: (model: string) => boolean,
     rejectOnLoopDetected = false,
+    // The client adds the todo and exploration reminders to the request.
+    clientToolGuards = false,
   ): Promise<NextMessageAfterToolRun> {
     if (toolRun.loopDetected) {
       debugLogger.debug('Stopping ACP turn after daemon loop detection.');
@@ -10734,9 +10773,11 @@ export class Session implements SessionContext {
           canonicalToolName(observation.policyToolName ?? '') ===
             ToolNames.AGENT && observation.executionStatus !== 'not_started',
       );
-    const activeTodoReminder = carriesAgentToolResult
-      ? this.config.takeActiveTodoReminder(promptId, true)
-      : this.config.takeActiveTodoReminder(promptId);
+    const activeTodoReminder = clientToolGuards
+      ? undefined
+      : carriesAgentToolResult
+        ? this.config.takeActiveTodoReminder(promptId, true)
+        : this.config.takeActiveTodoReminder(promptId);
     if (abortSignal.aborted) {
       return {
         message: {
@@ -10789,7 +10830,8 @@ export class Session implements SessionContext {
     const parts = [
       ...toolRun.parts,
       ...(activeTodoReminder ? [{ text: activeTodoReminder }] : []),
-      ...(toolLoopState.explorationBudget?.takeReminder(
+      ...(!clientToolGuards &&
+      toolLoopState.explorationBudget?.takeReminder(
         this.config.getMaxToolCallsPerTurn(),
       )
         ? [{ text: TOOL_EXPLORATION_REMINDER }]
@@ -14511,6 +14553,338 @@ export class Session implements SessionContext {
    * sequential batch to preserve the implicit ordering the model may rely
    * on. Response-part ordering matches the original `functionCalls` order.
    */
+  /**
+   * Whether a fresh prompt's tool batches run on the shared loop's batch.
+   * Live tools, which ACP trusts without the permission flow, and a
+   * read-only Agent Host session, which refuses approvals, keep ACP's own
+   * tool step.
+   */
+  #runsToolsOnSharedBatch(): boolean {
+    return (
+      !this.liveScreenContextTool &&
+      this.liveTaskTools.length === 0 &&
+      !this.liveSpeakToUserTool &&
+      this.config.getSessionSourceType?.() !== 'agent-host'
+    );
+  }
+
+  /** The calls a loop stop left unrun, shown as skipped. */
+  async #emitLoopSkippedToolCalls(
+    requests: ReadonlyArray<{ callId: string; name: string }>,
+  ): Promise<void> {
+    for (const { callId, name } of requests) {
+      try {
+        const lifecycle =
+          name === ToolNames.TODO_WRITE
+            ? undefined
+            : createToolLifecycle(this.config, callId, name).finish(
+                'error',
+                'not_started',
+              );
+        if (lifecycle) await this.toolCallEmitter.emitLifecycle(lifecycle);
+        await this.toolCallEmitter.emitError(
+          callId,
+          name,
+          new Error(LOOP_DETECTED_SKIP_MESSAGE),
+        );
+      } catch (error) {
+        debugLogger.debug('Failed to emit skipped tool call', error);
+      }
+    }
+  }
+
+  #toolBatchHost(): AcpToolBatchHost {
+    return {
+      ctx: this,
+      client: this.client,
+      toolCallEmitter: this.toolCallEmitter,
+      messageEmitter: this.messageEmitter,
+      sendUpdate: (update) => this.sendUpdate(update),
+      requestPermission: (params, signal) =>
+        this.#requestPermissionQueued(params, signal),
+      permissionPersistencePolicy: this.requiresManagedConversationBinding
+        ? STANDALONE_PERMISSION_PERSISTENCE_POLICY
+        : undefined,
+      sendModeUpdate: () => this.sendCurrentModeUpdateNotification(),
+      onPlanModeEntered: () => {
+        this.clearActiveTodoPlanRevision();
+        this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
+      },
+      todoPlanApproval: () => {
+        const workflowPlanRevision =
+          this.config.getSessionWorkflowPlanRevision?.();
+        const revision = this.activeTodoPlanRevision;
+        return revision &&
+          workflowPlanRevision?.planId === revision.planId &&
+          workflowPlanRevision.sourceCallId === revision.sourceCallId
+          ? { revision, generation: this.todoPlanRevisionGeneration }
+          : undefined;
+      },
+      isTodoPlanApprovalStale: ({ revision, generation }) => {
+        const configRevision = this.config.getSessionWorkflowPlanRevision?.();
+        return !(
+          generation === this.todoPlanRevisionGeneration &&
+          this.activeTodoPlanRevision?.planId === revision.planId &&
+          this.activeTodoPlanRevision?.sourceCallId === revision.sourceCallId &&
+          configRevision?.planId === revision.planId &&
+          configRevision?.sourceCallId === revision.sourceCallId
+        );
+      },
+      onTodoWriteSettled: (status, resultDisplay) => {
+        const tool = this.config
+          .getToolRegistry()
+          .getTool(ToolNames.TODO_WRITE);
+        const trusted =
+          tool?.kind === Kind.Think &&
+          tool.constructor.name === 'TodoWriteTool';
+        if (trusted && status === 'success') {
+          this.todoStopGuard.observeTodoWrite(
+            resultDisplay as ToolResultDisplay,
+            this.config.getApprovalMode() !== ApprovalMode.PLAN,
+          );
+        } else if (trusted && status === 'cancelled') {
+          this.todoStopGuard.suspend();
+        }
+      },
+      continueRelatedAgent: (args) => {
+        const agentId =
+          typeof args['task_id'] === 'string' && args['task_id'].length > 0
+            ? args['task_id']
+            : undefined;
+        if (!agentId || this.relatedAgentIds.has(agentId)) return undefined;
+        this.provisionalRelatedAgentCounts.set(
+          agentId,
+          (this.provisionalRelatedAgentCounts.get(agentId) ?? 0) + 1,
+        );
+        return (succeeded) => {
+          const remaining =
+            (this.provisionalRelatedAgentCounts.get(agentId) ?? 1) - 1;
+          if (remaining > 0) {
+            this.provisionalRelatedAgentCounts.set(agentId, remaining);
+          } else {
+            this.provisionalRelatedAgentCounts.delete(agentId);
+          }
+          if (succeeded) this.relatedAgentIds.add(agentId);
+        };
+      },
+      sendTerminalSequence: (terminalSequence) => {
+        void this.client
+          .extNotification('qwen/notify/session/terminal-sequence', {
+            v: 1,
+            sessionId: this.sessionId,
+            terminalSequence,
+          })
+          .catch((error: unknown) =>
+            debugLogger.debug(
+              `ACP terminalSequence notification dropped (session=${this.sessionId}): ${this.#formatError(error)}`,
+            ),
+          );
+      },
+      refuseToolCall: (request) => {
+        const name = canonicalToolName(request.name);
+        if (
+          name === ToolNames.PROPOSE_GOAL &&
+          (this.activeGoalProposalTurn?.turnKey !== request.prompt_id ||
+            this.activeGoalProposalTurn.controller.signal.aborted)
+        ) {
+          return 'The Goal was not set: this turn cannot own a Goal approval. Hand the user a `/goal set <objective>` line instead.';
+        }
+        const requestsAgentWorkingDirectory =
+          name === ToolNames.AGENT &&
+          (request.args['isolation'] === 'worktree' ||
+            (typeof request.args['working_dir'] === 'string' &&
+              request.args['working_dir'].trim().length > 0));
+        if (
+          this.requiresManagedConversationBinding &&
+          (requestsAgentWorkingDirectory ||
+            name === ToolNames.ENTER_WORKTREE ||
+            name === ToolNames.EXIT_WORKTREE)
+        ) {
+          return STANDALONE_WORKTREE_ACTION_ERROR;
+        }
+        return undefined;
+      },
+    };
+  }
+
+  /**
+   * A fresh prompt's tool batch on the shared loop's batch. The client checks
+   * the tool-call patterns, the per-turn cap and the exploration budget; ACP
+   * keeps its repeated parameter-error and partial-edit stops, per turn.
+   */
+  async #runSharedToolBatch(
+    abortSignal: AbortSignal,
+    promptId: string,
+    requests: ToolCallRequestInfo[],
+    toolLoopState: DaemonToolLoopState,
+    onFullTurnModel?: (model: string) => boolean,
+  ): Promise<RunToolResult> {
+    promptIdContext.enterWith(promptId);
+    todoWorkChainContext.enterWith(
+      this.config.getActiveTodoWorkChainOwner(promptId),
+    );
+    const batch = await runAcpToolBatch(this.#toolBatchHost(), {
+      requests,
+      signal: abortSignal,
+      onFullTurnModel,
+      duplicates: {
+        handled: new Map(
+          this.#getCurrentChat().getHistoryToolCallFingerprints(),
+        ),
+        responded: this.duplicateProviderToolCallResponseIds,
+      },
+    });
+    if (batch.stop === 'duplicate_provider_call') {
+      recordDaemonLoopDetected(
+        this.config,
+        promptId,
+        LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+        'Stopping ACP turn after a repeated duplicate provider tool-call id.',
+        toolLoopState,
+        { loopDetail: { loopReason: LoopReason.PROVIDER_DUPLICATE_ID } },
+      );
+      await this.#emitLoopSkippedToolCalls(requests);
+      return {
+        parts: [],
+        stopAfterPermissionCancel: false,
+        loopDetected: true,
+      };
+    }
+
+    const registry = this.config.getToolRegistry();
+    const refusedPartialEdits = new Set<string>();
+    const memoryWriteCandidates: MemoryWriteCandidate[] = [];
+    const observations: RepeatedToolFailureObservation[] = [];
+    for (const {
+      origin,
+      executionRequest,
+      response,
+      status,
+    } of batch.results) {
+      const tool = registry.getTool(executionRequest.name);
+      const toolName = executionRequest.name;
+      observations.push({
+        callId: response.callId,
+        policyToolName: tool?.name,
+        toolType: tool
+          ? tool instanceof DiscoveredMCPTool
+            ? 'mcp'
+            : 'native'
+          : undefined,
+        terminalStatus: status,
+        executionStatus: response.executionStatus ?? 'not_started',
+        executionErrorType: response.errorType,
+        providerDuplicate: origin === 'replayed' || origin === 'duplicate',
+      });
+      if (origin !== 'executed') continue;
+      if (status === 'success') {
+        memoryWriteCandidates.push({
+          toolName,
+          args: executionRequest.args,
+          status,
+        });
+      }
+      if (abortSignal.aborted) continue;
+      const ran = response.executionStatus !== 'not_started';
+      const partialEdit =
+        !ran &&
+        tool?.kind === Kind.Edit &&
+        (executionRequest.wasOutputTruncated === true ||
+          executionRequest.hadIncompleteArguments === true) &&
+        (response.errorType === ToolErrorType.OUTPUT_TRUNCATED ||
+          response.errorType === ToolErrorType.INVALID_TOOL_PARAMS);
+      if (partialEdit) {
+        const count = recordDaemonPartialEditRefusal(
+          toolLoopState,
+          toolName,
+          executionRequest.wasOutputTruncated === true
+            ? TRUNCATION_EDIT_REJECTION
+            : INCOMPLETE_ARGS_EDIT_REJECTION,
+          { outputTruncated: false, refusedPartialEdits },
+        );
+        if (
+          this.config.getLoopProtection() !== 'warn' &&
+          count >= DAEMON_INVALID_TOOL_PARAMS_THRESHOLD
+        ) {
+          onDaemonLoopStopPoint(
+            this.config,
+            promptId,
+            toolLoopState,
+            `partial-edit:${toolName}`,
+            {
+              loopType: LoopType.INVALID_TOOL_PARAMS_STAGNATION,
+              toolName,
+              count,
+            },
+            {},
+            `Stopping ACP turn after repeated refused partial edits from ${toolName}`,
+          );
+        }
+        continue;
+      }
+      if (
+        response.errorType === ToolErrorType.INVALID_TOOL_PARAMS ||
+        response.errorType === ToolErrorType.TOOL_NOT_REGISTERED
+      ) {
+        recordDaemonInvalidToolParams(
+          this.config,
+          promptId,
+          toolLoopState,
+          toolName,
+          response.error ?? new Error(`Invalid parameters for ${toolName}.`),
+        );
+        continue;
+      }
+      if (ran) toolLoopState.partialEditRefusals?.delete(toolName);
+    }
+
+    // A Managed session's batch closes once its results are recorded.
+    const outcomes = this.config.getManagedRuntimeOutcomes?.();
+    if (outcomes !== undefined && batch.results.length > 0) {
+      try {
+        await this.config.getChatRecordingService()?.flush();
+        await outcomes.finalizeBatch();
+      } catch (error) {
+        debugLogger.warn(
+          `Failed to flush Managed tool batch: ${this.#formatError(error)}`,
+        );
+      }
+    }
+    await this.#refreshMemoryAfterToolBatch(memoryWriteCandidates);
+
+    return {
+      parts: batch.parts,
+      stopAfterPermissionCancel: batch.stopAfterPermissionCancel,
+      ...(toolLoopState.loopDetected ? { loopDetected: true } : {}),
+      ...(batch.stop === 'tool_ended_turn' ? { terminateTurn: true } : {}),
+      repeatedToolFailureBatch: {
+        complete: batch.results.length === requests.length,
+        observations,
+      },
+      memoryWriteCandidates,
+    };
+  }
+
+  async #refreshMemoryAfterToolBatch(
+    memoryWriteCandidates: MemoryWriteCandidate[],
+  ): Promise<void> {
+    await refreshMemoryAfterManagedWrite(this.config, memoryWriteCandidates, {
+      logContext: `ACP session ${this.sessionId} memory tool batch`,
+    });
+    if (
+      !this.refreshContextFilesOnWrite ||
+      !didWriteProjectContextFile(
+        memoryWriteCandidates,
+        this.config.getProjectRoot(),
+      )
+    ) {
+      return;
+    }
+    await refreshMemoryInstruction(this.config, {
+      logContext: `ACP session ${this.sessionId} context-file memory tool batch`,
+    });
+  }
+
   private async runToolCalls(
     abortSignal: AbortSignal,
     promptId: string,

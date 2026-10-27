@@ -2519,7 +2519,10 @@ describe('SessionWriterLease', () => {
         lockSchema: { schemaVersion: 3, formatVersion: 2 },
       });
       expect(replacement.takeoverCommitProof).toEqual(commitProof);
-      await replacement.release();
+      await expect(replacement.release()).rejects.toBeInstanceOf(
+        SessionWriterUnavailableError,
+      );
+      await replacement.sealForHandoff(commitProof);
     });
 
     it('rebuilds the transcript proof after discarding an uncommitted tail', async () => {
@@ -2623,7 +2626,10 @@ describe('SessionWriterLease', () => {
         ...fixture.options,
         lockSchema: { schemaVersion: 3, formatVersion: 2 },
       });
-      await newer.release();
+      await expect(newer.release()).rejects.toBeInstanceOf(
+        SessionWriterUnavailableError,
+      );
+      await newer.sealForHandoff(commitProof);
     });
 
     it('lets a newer managed format take over an older sealed lock', async () => {
@@ -2649,7 +2655,10 @@ describe('SessionWriterLease', () => {
         state: 'active',
         format_version: 2,
       });
-      await replacement.release();
+      await expect(replacement.release()).rejects.toBeInstanceOf(
+        SessionWriterUnavailableError,
+      );
+      await replacement.sealForHandoff(commitProof);
     });
   });
 

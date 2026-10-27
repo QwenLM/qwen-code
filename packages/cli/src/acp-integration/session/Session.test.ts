@@ -143,6 +143,12 @@ const TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD =
 // Session computed (e.g. the home confinement root) without a private-field peek.
 const loopTickResolverDepsSpy = vi.hoisted(() => vi.fn());
 const structuredErrorCauses = vi.hoisted(() => new WeakMap<object, unknown>());
+const runAcpToolBatchSpy = vi.hoisted(() => vi.fn());
+
+// The shared tool batch has its own tests; here it runs each call's tool.
+vi.mock('./acp-tool-batch.js', () => ({
+  runAcpToolBatch: (...args: unknown[]) => runAcpToolBatchSpy(...args),
+}));
 
 // Session imports getStructuredErrorCause from the turn module, not the barrel.
 vi.mock('@qwen-code/qwen-code-core/core/turn.js', async (importOriginal) => {
@@ -4447,7 +4453,46 @@ describe('Session', () => {
       functionCall,
     });
 
+    /** Runs each call of a shared batch with the registry's tool. */
+    async function runEachTool(
+      _host: unknown,
+      { requests }: { requests: core.ToolCallRequestInfo[] },
+    ) {
+      const results = [];
+      for (const request of requests) {
+        const output = await mockToolRegistry
+          .getTool(request.name)
+          .build(request.args)
+          .execute(new AbortController().signal);
+        const part = {
+          functionResponse: {
+            id: request.callId,
+            name: request.name,
+            response: { output: output.llmContent },
+          },
+        };
+        results.push({
+          request,
+          executionRequest: request,
+          response: {
+            callId: request.callId,
+            responseParts: [part],
+            resultDisplay: output.returnDisplay,
+            executionStatus: 'success',
+          },
+          status: 'success',
+          origin: 'executed',
+        });
+      }
+      return {
+        parts: results.flatMap(({ response }) => response.responseParts),
+        results,
+        stopAfterPermissionCancel: false,
+      };
+    }
+
     function useTool(kind: core.Kind, name: string) {
+      runAcpToolBatchSpy.mockImplementation(runEachTool);
       const execute = vi.fn().mockResolvedValue({
         llmContent: 'done',
         returnDisplay: 'done',
@@ -4499,11 +4544,12 @@ describe('Session', () => {
         userTurnRecordedByHost: true,
         stopHookRunByHost: true,
         interactionSpanByHost: true,
-        toolLoopGuardsByHost: true,
         promptAdmission: { blocked: false },
         // Recall searches the prompt text, not the resolved request.
         memoryRecallQuery: 'hello',
       });
+      // The client runs its own tool-call guards for the shared tool batch.
+      expect(send.mock.calls[0][3]).not.toHaveProperty('toolLoopGuardsByHost');
       expect(agentText()).toContain('Hello');
       // The session snapshots its user turn; the option keeps the client's off.
       expect(mockFileHistoryService.makeSnapshot).toHaveBeenCalledOnce();
@@ -4545,7 +4591,7 @@ describe('Session', () => {
       );
     });
 
-    it("runs the requested tools with the session's executor and sends their results", async () => {
+    it('runs the requested tools on the shared tool batch and sends their results', async () => {
       const execute = useTool(core.Kind.Read, 'read_file');
       const send = useSharedRounds(
         [
@@ -4561,6 +4607,10 @@ describe('Session', () => {
 
       await prompt();
 
+      expect(runAcpToolBatchSpy).toHaveBeenCalledOnce();
+      expect(runAcpToolBatchSpy.mock.calls[0][1].requests).toEqual([
+        expect.objectContaining({ callId: 'call-read', name: 'read_file' }),
+      ]);
       expect(execute).toHaveBeenCalledOnce();
       expect(send).toHaveBeenCalledTimes(2);
       const [parts, , , options] = send.mock.calls[1];
@@ -4570,8 +4620,11 @@ describe('Session', () => {
       ).toContain('call-read');
     });
 
-    it('refuses an edit from a response the output limit cut off', async () => {
+    it('keeps its own tool step and tool-call guards in a session with live tools', async () => {
       const execute = useTool(core.Kind.Edit, 'write_file');
+      (
+        session as unknown as { liveScreenContextTool: object }
+      ).liveScreenContextTool = {};
       const send = useSharedRounds([
         toolCall({
           id: 'call-cut',
@@ -4583,6 +4636,11 @@ describe('Session', () => {
 
       await prompt();
 
+      expect(runAcpToolBatchSpy).not.toHaveBeenCalled();
+      expect(send.mock.calls[0][3]).toMatchObject({
+        toolLoopGuardsByHost: true,
+      });
+      // The session's own executor refuses the edit the limit cut off.
       expect(execute).not.toHaveBeenCalled();
       expect(JSON.stringify(send.mock.calls[1][0])).toContain(
         'truncated due to max_tokens limit',
@@ -4918,7 +4976,7 @@ describe('Session', () => {
       );
     });
 
-    it('discards the tool cards of a round the loop guard stopped', async () => {
+    it('shows the calls of a round the loop guard stopped as skipped', async () => {
       const execute = useTool(core.Kind.Read, 'read_file');
       useSharedRounds([
         {
@@ -4937,9 +4995,141 @@ describe('Session', () => {
           sessionUpdate: 'tool_call_update',
           toolCallId: 'call-read',
           status: 'failed',
+          content: [
+            expect.objectContaining({
+              content: expect.objectContaining({
+                text: 'Skipped because loop detection stopped the current turn before this tool call could run.',
+              }),
+            }),
+          ],
+        }),
+      );
+      expect(updates()).not.toContainEqual(
+        expect.objectContaining({
           _meta: expect.objectContaining({ preparationDiscarded: true }),
         }),
       );
+    });
+
+    const readCall = (id: string) =>
+      toolCall({ id, name: 'read_file', args: { file_path: '/tmp/a.txt' } });
+
+    it('stops the turn on its third parameter error from one tool, as its own guard does', async () => {
+      useTool(core.Kind.Read, 'read_file');
+      runAcpToolBatchSpy.mockImplementation(
+        async (
+          _host: unknown,
+          { requests }: { requests: core.ToolCallRequestInfo[] },
+        ) => {
+          const results = requests.map((request) => ({
+            request,
+            executionRequest: request,
+            response: {
+              callId: request.callId,
+              responseParts: [
+                {
+                  functionResponse: {
+                    id: request.callId,
+                    name: request.name,
+                    response: { error: 'bad params' },
+                  },
+                },
+              ],
+              error: new Error('bad params'),
+              errorType: core.ToolErrorType.INVALID_TOOL_PARAMS,
+              executionStatus: 'not_started',
+            },
+            status: 'error',
+            origin: 'executed',
+          }));
+          return {
+            parts: results.flatMap(({ response }) => response.responseParts),
+            results,
+            stopAfterPermissionCancel: false,
+          };
+        },
+      );
+      const send = useSharedRounds(
+        [readCall('call-1'), finished()],
+        [readCall('call-2'), finished()],
+        [readCall('call-3'), finished()],
+        [text('never'), finished()],
+      );
+
+      await expect(prompt()).rejects.toMatchObject({
+        data: expect.objectContaining({
+          loopType: core.LoopType.INVALID_TOOL_PARAMS_STAGNATION,
+        }),
+      });
+
+      expect(send).toHaveBeenCalledTimes(3);
+    });
+
+    it('ends the turn when a permission request is cancelled', async () => {
+      useTool(core.Kind.Edit, 'write_file');
+      runAcpToolBatchSpy.mockResolvedValue({
+        parts: [],
+        results: [],
+        stopAfterPermissionCancel: true,
+      });
+      const send = useSharedRounds([
+        toolCall({ id: 'call-write', name: 'write_file', args: {} }),
+        finished(),
+      ]);
+
+      const result = await prompt();
+
+      expect(result.stopReason).toBe('end_turn');
+      expect(send).toHaveBeenCalledOnce();
+    });
+
+    it('ends the turn when a tool asks to end it', async () => {
+      useTool(core.Kind.Other, 'goal_checkpoint');
+      runAcpToolBatchSpy.mockImplementation(
+        async (
+          host: unknown,
+          options: { requests: core.ToolCallRequestInfo[] },
+        ) => ({
+          ...(await runEachTool(host, options)),
+          stop: 'tool_ended_turn',
+        }),
+      );
+      const send = useSharedRounds([
+        toolCall({ id: 'call-end', name: 'goal_checkpoint', args: {} }),
+        finished(),
+      ]);
+
+      const result = await prompt();
+
+      expect(result.stopReason).toBe('end_turn');
+      expect(send).toHaveBeenCalledOnce();
+    });
+
+    it('refuses a Goal approval the turn cannot own', async () => {
+      useTool(core.Kind.Read, 'read_file');
+      useSharedRounds([readCall('call-read'), finished()]);
+
+      await prompt();
+
+      const host = runAcpToolBatchSpy.mock.calls[0][0] as {
+        refuseToolCall: (request: object) => string | undefined;
+      };
+      expect(
+        host.refuseToolCall({
+          callId: 'call-goal',
+          name: 'propose_goal',
+          args: {},
+          prompt_id: 'test-session-id########1',
+        }),
+      ).toContain('this turn cannot own a Goal approval');
+      expect(
+        host.refuseToolCall({
+          callId: 'call-read',
+          name: 'read_file',
+          args: {},
+          prompt_id: 'test-session-id########1',
+        }),
+      ).toBeUndefined();
     });
 
     it('throws the error the provider threw', async () => {
