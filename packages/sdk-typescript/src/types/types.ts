@@ -204,6 +204,13 @@ export interface EffortOverride {
   field: 'enable_thinking' | 'reasoning_effort' | 'thinking_budget';
 }
 
+export interface WorkflowModeState {
+  requested: boolean;
+  available: boolean;
+  effective: boolean;
+  reason?: string;
+}
+
 export interface EffortStatus {
   applied: boolean;
   override: EffortOverride | null;
@@ -561,6 +568,9 @@ export interface QueryOptions {
    * Use {@link Query.setEffort} to change the tier at runtime.
    */
   effort?: EffortTier;
+
+  /** Initial durable session choice. Omit to keep the restored value. */
+  workflowMode?: boolean;
 
   /**
    * Include partial messages in the response stream.

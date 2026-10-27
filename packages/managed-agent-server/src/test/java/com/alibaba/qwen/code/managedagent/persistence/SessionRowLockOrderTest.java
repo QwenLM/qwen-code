@@ -182,6 +182,10 @@ class SessionRowLockOrderTest {
                             Set.of("ChildWorkspaceStore.find/3",
                                     "ChildWorkspaceStore.row/2",
                                     "Row.snapshot/0")),
+                    // WorkspaceExecutionStore.unavailable shares the local name;
+                    // both factories only construct an exception.
+                    Map.entry("ExternalStorageRegistrationStore.java",
+                            Set.of("ExternalStorageRegistrationStore.unavailable/0")),
                     // Same-package lifecycle refusals share this local name;
                     // both factories only construct an exception.
                     Map.entry("HarnessPlacementStore.java",
@@ -412,7 +416,7 @@ class SessionRowLockOrderTest {
                 "beginOperation",
                 "beginWorkspaceClose", "beginWorkspaceLifecycle",
                 "beginContextCompression", "markContextCompressionSubmitted",
-                "unarchiveWorkspaceSession", "beginCwdChangeOperation",
+                "unarchiveWorkspaceSession",
                 "completeCwdChangeOperation", "completeOperation",
                 "advanceReplayFloor", "materializeNextBatch", "bindHarness",
                 "bindRecoveredHarness", "recordAdmission",
@@ -458,7 +462,7 @@ class SessionRowLockOrderTest {
         // check — is what fails loudly when one appears.
         assertThat(audit.turnRowAccessors())
                 .containsExactlyInAnyOrder("advanceReplayFloor",
-                        "beginChildClose", "beginContextCompression", "beginCwdChangeOperation",
+                        "beginChildClose", "beginContextCompression",
                         "beginLifecycle", "beginOperation",
                         "beginWorkspaceClose", "beginWorkspaceLifecycle",
                         "bindHarness", "bindRecoveredHarness",

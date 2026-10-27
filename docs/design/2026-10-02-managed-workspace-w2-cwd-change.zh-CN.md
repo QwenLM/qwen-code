@@ -2,6 +2,8 @@
 
 [English](2026-10-02-managed-workspace-w2-cwd-change.md) | [简体中文](2026-10-02-managed-workspace-w2-cwd-change.zh-CN.md)
 
+当前状态：新建目录切换的准入和界面已移除，仅保留既有操作查询与清算。见[移除设计](2026-10-26-retire-managed-cwd-change.zh-CN.md)。
+
 状态:已在本次变更中实现。属于 [proposal #12380](https://github.com/QwenLM/qwen-code/issues/12380)(2026-10-02 交付快照中的"W2 同 Workspace 内 cwd 变更:受控目录变更准入与结算;公开/WebShell 路由仍为 `planned`")。
 调研基线:main `d5c22d336b`(2026-10-02);随后合入 #13138(W1b,V31)、#13135 + #13223(绑定 close,V32)、#13142(D8a,契约 v1.29.0,V33)、#13194(绑定 archive/delete)与 #13112(绑定会话后续 Turn)之上——PR 并入的 origin/main 已越过以上全部;V34 被 #13090 占用、V35 被会话工具画像占用、V36–V39 被会话 journal 链占用(`V36` activation、`V37` event-type index、`V38` deferral marker、`V39` sequence index),V40–V44 又被会话创建者记录与 CSI 链占用、V45 被任务 journal 占用,迁移号改为 V46。
 目标契约是 [Workspace v1.12 第 4 节](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-workspace-context.en.md),以及仓库内已评审的 OpenAPI 契约 v1.27.0——后者已固定两条 `planned` 路由及其 schema。

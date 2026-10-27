@@ -33,32 +33,35 @@ The command binds the same inputs Spring would load:
 
 ## Checks
 
-| Check        | Passing condition                                                                                                                                                |
-| ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `java`       | Runtime feature version is 21 or later.                                                                                                                          |
-| `config`     | The external YAML exists and is readable; a file containing secrets is not group- or world-readable.                                                             |
-| `key-ring`   | At least an active key ID is configured; previous key IDs are reported.                                                                                          |
-| `validation` | The startup property validations accept the bound configuration.                                                                                                 |
-| `auth`       | A non-loopback bind does not use `auto`; signed mode has a signing key; insecure bind is reported.                                                               |
-| `harness`    | Enabled Harness has a token, a well-formed digest, and answers `GET /capabilities` with 200.                                                                     |
-| `tool-path`  | Workspace files and Shell enablement, the isolation class, and the mount, creation-root or SSH-node requirement match the startup rules.                         |
-| `broker`     | Token, active and previous credential keys decode to 32 bytes, the state directory is writable, and the provisioner's Node/worker or static endpoint is present. |
-| `workspace`  | The configured Workspace `cwd` exists and is writable.                                                                                                           |
-| `*-port`     | The server port and the enabled broker port can be bound.                                                                                                        |
-| `database`   | MySQL answers `SELECT 1`, the `performance_schema` grant works, and the Flyway version matches the release manifest when that manifest is present.               |
+| Check        | Passing condition                                                                                                                                                                                                                                                                                    |
+| ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `java`       | Runtime feature version is 21 or later.                                                                                                                                                                                                                                                              |
+| `config`     | The external YAML exists and is readable; a file containing secrets is not group- or world-readable.                                                                                                                                                                                                 |
+| `key-ring`   | At least an active key ID is configured; previous key IDs are reported.                                                                                                                                                                                                                              |
+| `validation` | The startup property validations accept the bound configuration.                                                                                                                                                                                                                                     |
+| `auth`       | A non-loopback bind does not use `auto`; signed mode has a signing key; insecure bind is reported.                                                                                                                                                                                                   |
+| `harness`    | Enabled Harness has a token and a well-formed digest, answers `GET /capabilities` with 200, and negotiates as the first Session does, including the capability digest and each Workspace profile's lifecycle; another Qwen Code version than the manifest's warns. A Harness pool is not negotiated. |
+| `tool-path`  | Workspace files and Shell enablement, the isolation class, and the mount, creation-root or SSH-node requirement match the startup rules.                                                                                                                                                             |
+| `broker`     | Token, active and previous credential keys decode to 32 bytes, the state directory is writable, and the provisioner's Node/worker or static endpoint is present.                                                                                                                                     |
+| `workspace`  | The configured Workspace `cwd` exists and is writable.                                                                                                                                                                                                                                               |
+| `*-port`     | The server port and the enabled broker port can be bound, or, with `--online`, accept a connection.                                                                                                                                                                                                  |
+| `workers`    | No Runtime worker of an earlier run is alive in the local-process state directory.                                                                                                                                                                                                                   |
+| `database`   | MySQL answers `SELECT 1`, the `performance_schema` grant works, and the Flyway version matches the release manifest when that manifest is present.                                                                                                                                                   |
 
 `WARN` and `SKIP` do not fail the command. Any `FAIL` makes the exit code 1.
 The port checks bind the configured addresses, so run the command while the
-service is stopped.
+service is stopped, or pass `--online` against a running service.
+[2026-10-23-managed-agent-preflight-harness-workers-online.md](2026-10-23-managed-agent-preflight-harness-workers-online.md)
+describes the Harness negotiation, the `workers` row and `--online`.
 
 ## Non-goals
 
-- It does not verify the Harness capability digest. That value is only
-  observable on an authenticated Hosted Session request, so the command
-  reports reachability and leaves the digest to the first Turn.
+- It does not negotiate with each endpoint of a Harness pool. With
+  `harness.pool.enabled`, the `harness` row skips a pool's endpoints once the
+  Session Store is enabled with a binding key, and fails until then, mirroring
+  the startup guard.
 - It does not verify Workspace mount registration or storage identity; those
   remain the "Verified physical Workspace recovery" procedure's responsibility.
-- It does not compare the installed Qwen Code version with the manifest.
 - It never repairs, migrates or writes. Read-only probes only.
 
 ## Implementation
