@@ -4136,6 +4136,84 @@ describe('qwen-autofix workflow', () => {
     ).toBe('2|true');
   });
 
+  it('reads the prepare budget from the engagement, and only while it is live', () => {
+    // prepare mirrors the scan's census: the same engagement floor (a re-arm
+    // carrying an eval marker does NOT open one) and the same liveness rule
+    // (the label, or a bot PR whose budget is already spent). Both reads used
+    // to be injected as literals by the discard tests, so a wrong key or a
+    // dropped marker scan stayed green.
+    const prepareReads = workflow.match(
+      /(LIVE_BUDGET_FLOOR="\$\(jq[\s\S]*?LIVE_ROUND_BUDGET=0)/,
+    )?.[1];
+    expect(prepareReads).toBeTruthy();
+    const read = ({
+      comments,
+      marks,
+      takeover = 'true',
+      author = 'maint-a',
+    }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-prepare-budget-'));
+      try {
+        writeFileSync(join(dir, 'ic.json'), JSON.stringify(comments));
+        return execFileSync(
+          'bash',
+          [
+            '-c',
+            `AUTOFIX_BOT='qwen-code-dev-bot'\nWORKDIR='${dir}'\nLIVE_TAKEOVER='${takeover}'\nLIVE_AUTHOR='${author}'\nLIVE_MARKS='${JSON.stringify(marks)}'\n${prepareReads.replace(/\n {10}/g, '\n')}\nprintf '%s|%s|%s' "$LIVE_ROUND_BUDGET" "$LIVE_ATTEMPTS" "$LIVE_BUDGET_SPENT"`,
+          ],
+          { encoding: 'utf8' },
+        ).trim();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    const ack = (at, budget) => ({
+      user: { login: 'qwen-code-dev-bot' },
+      created_at: at,
+      body: `<!-- takeover-ack engaged -->\n<!-- autofix-round-budget ${budget} -->`,
+    });
+    const rearm = (at) => ({
+      user: { login: 'qwen-code-dev-bot' },
+      created_at: at,
+      body: '<!-- autofix-eval ts=2026-07-18T09:00:00Z acted=true round=1 win=T1 -->\n<!-- autofix-rearm -->',
+    });
+    const mark = (win, round, run) => ({
+      ts: '2026-07-18T09:00:00Z',
+      round,
+      win,
+      run,
+    });
+    const T1 = '2026-07-18T10:00:00Z';
+    const T2 = '2026-07-18T12:00:00Z';
+    // The automatic re-arm advances the window key, but the budget rides on
+    // the engagement: floor = the ack, budget = 2, two attempts, spent.
+    expect(
+      read({
+        comments: [ack(T1, '2'), rearm(T2)],
+        marks: [mark(T1, 1, 'r1'), mark(T2, 2, 'r2')],
+      }),
+    ).toBe('2|2|true');
+    // A human release ends the budget: the label is gone, the author is not
+    // the bot, so the panel reads nothing even though the marker is present.
+    expect(
+      read({
+        comments: [ack(T1, '2'), rearm(T2)],
+        marks: [mark(T1, 1, 'r1'), mark(T2, 2, 'r2')],
+        takeover: 'false',
+      }),
+    ).toBe('0|2|true');
+    // …but a SPENT budget on a bot-authored PR survives that removal, which is
+    // what keeps rounds N+1..10 from running (R4-2).
+    expect(
+      read({
+        comments: [ack(T1, '3'), rearm(T2)],
+        marks: [mark(T1, 1, 'r1'), mark(T2, 2, 'r2'), mark(T2, 3, 'r3')],
+        takeover: 'false',
+        author: 'qwen-code-dev-bot',
+      }),
+    ).toBe('3|3|true');
+  });
+
   it('discards a queued conflict round when the live window carries a budget', () => {
     // Conflicts are exempt from the superseded-window discard because they
     // stay actionable — but a NEW budgeted window must not admit work that
