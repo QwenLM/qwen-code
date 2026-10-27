@@ -348,6 +348,7 @@ export function HooksManagementDialog({
                 source: HooksConfigSource.Project,
                 sourceDisplay: sourceDisplayMap[HooksConfigSource.Project],
                 enabled: !config.isProjectHooksPendingApproval(),
+                rejected: config.isProjectHooksRejected(),
               },
               groupByMatcher,
             );

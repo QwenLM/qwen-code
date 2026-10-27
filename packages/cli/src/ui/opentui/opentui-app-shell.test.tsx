@@ -985,6 +985,60 @@ describe('OpenTuiApp shell wiring', () => {
     view.unmount();
   });
 
+  it('keeps a focused foreground shell behind the project hooks approval', async () => {
+    const owner = { callId: 'shell', pid: 4300, turn: 1 };
+    const control = {
+      foregroundShell: owner,
+      promoteShellToBackground: vi.fn(() => true),
+      writeShellInput: vi.fn(() => true),
+      resizeShell: vi.fn(() => true),
+      scrollShell: vi.fn(() => true),
+    };
+    const props = {
+      config: {
+        ...CONFIG,
+        getShellExecutionConfig: () => ({}),
+        setShellExecutionConfig: vi.fn(),
+      } as unknown as Config,
+      settings: SETTINGS,
+      logger: null,
+      commands: [],
+      getSessionStats,
+      foregroundShellControl: control,
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+    const key = (name: string, sequence: string, ctrl = false) => ({
+      name,
+      sequence,
+      ctrl,
+      preventDefault: vi.fn(),
+      stopPropagation: vi.fn(),
+    });
+    act(() =>
+      (mocks.state.inputProps!['onShellKey'] as (key: unknown) => boolean)(
+        key('f', '\x06', true),
+      ),
+    );
+    expect(mocks.state.inputProps?.['focus']).toBe(false);
+    mocks.state.pendingHookLines = ['SessionStart  ./setup.sh'];
+    const before = mocks.state.keyboardHandlers.length;
+    view.rerender(<OpenTuiApp {...props} />);
+    expect(screen.getByText('hooks-approval')).toBeTruthy();
+    const handlers = mocks.state.keyboardHandlers.slice(before);
+    for (const k of [
+      key('a', 'a'),
+      key('f', '\x06', true),
+      key('a', 'a'),
+      key('b', '\x02', true),
+    ]) {
+      for (const handler of handlers) act(() => handler(k));
+    }
+    expect(control.writeShellInput).not.toHaveBeenCalled();
+    expect(control.promoteShellToBackground).not.toHaveBeenCalled();
+    view.unmount();
+  });
+
   it('routes composer cancellation to the running command without interrupting the model', async () => {
     const onInterrupt = vi.fn();
     renderApp({ onInterrupt });
@@ -1789,6 +1843,64 @@ describe('OpenTuiApp shell wiring', () => {
         });
         expect(signals[0].aborted).toBe(true);
         expect(onInterrupt).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => {
+          release();
+          await done;
+        });
+        await settle();
+      }
+    },
+  );
+
+  it.each([
+    { name: 'c', ctrl: true, sequence: '\x03' },
+    { name: 'escape', ctrl: false, sequence: '\x1b' },
+  ])(
+    'leaves the local shell running on $name while the project hooks approval is open',
+    async (key) => {
+      let release!: () => void;
+      const done = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const signals: AbortSignal[] = [];
+      mocks.state.executeUserShell.mockImplementation(((
+        _config: unknown,
+        _command: string,
+        _emit: unknown,
+        signal: AbortSignal,
+      ) => {
+        signals.push(signal);
+        return done;
+      }) as unknown as () => Promise<void>);
+      mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
+      const props: AppProps = {
+        config: CONFIG,
+        settings: SETTINGS,
+        logger: null,
+        commands: [],
+        getSessionStats,
+        streaming: false,
+        onTranscriptEvent: vi.fn(),
+      };
+      const view = render(<OpenTuiApp {...props} />);
+      await settle();
+      await act(async () => {
+        (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
+      });
+      try {
+        await submit('sleep 10');
+        expect(signals).toHaveLength(1);
+        mocks.state.pendingHookLines = ['SessionStart  ./setup.sh'];
+        view.rerender(<OpenTuiApp {...props} />);
+        await act(async () => {
+          mocks.state.keyboardHandlers.at(-1)!({
+            ...key,
+            eventType: 'press',
+            preventDefault: vi.fn(),
+          });
+        });
+        expect(signals[0].aborted).toBe(false);
       } finally {
         await act(async () => {
           release();

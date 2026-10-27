@@ -1256,6 +1256,17 @@ describe('Server Config (config.ts)', () => {
       },
     );
 
+    it('re-arms a --yolo session once it leaves YOLO', () => {
+      const config = makeConfig({
+        approvalMode: ApprovalMode.YOLO,
+        projectHooksPendingApproval: false,
+        projectHooksYoloExempt: true,
+      });
+      expect(config.isProjectHooksApprovalGated()).toBe(false);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+      expect(config.isProjectHooksApprovalGated()).toBe(true);
+    });
+
     it('withholds the legacy merged hooks from both getters while pending', () => {
       const config = makeConfig({
         hooks: projectHooks,

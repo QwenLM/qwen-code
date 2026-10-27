@@ -667,6 +667,7 @@ export default {
   'disabled (safe mode)': '已禁用（安全模式）',
   'disabled (disableAllHooks)': '已禁用（disableAllHooks）',
   'disabled (not approved)': '已禁用（未核准）',
+  'disabled (rejected)': '已禁用（已拒絕）',
   'disabled (folder not trusted)': '已禁用（資料夾未受信任）',
   'disabled (turned off for this session)': '已禁用（本工作階段中已關閉）',
   'View Details': '查看詳情',

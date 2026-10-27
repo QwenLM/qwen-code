@@ -4,18 +4,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import {
   getProjectHooksApprovalState,
   getProjectHooksForApproval,
   getProjectHooksRoot,
+  hashProjectHooks,
   loadHookApprovals,
   summarizeProjectHooks,
 } from '../../config/hook-approvals.js';
 import { ProjectHooksApprovalChoice } from '../components/hooks/ProjectHooksApprovalDialog.js';
 import { appEvents, AppEvent } from '../../utils/events.js';
+import { getErrorMessage } from '@qwen-code/qwen-code-core/utils/errors.js';
 import { t } from '../../i18n/index.js';
 
 export interface PendingProjectHooks {
@@ -31,7 +33,8 @@ export interface PendingProjectHooks {
  * after the user approves this exact configuration. Approving persists the
  * hash-bound decision, un-gates the hooks for this session and reloads the
  * registry; rejecting persists the rejection; dismissing (Esc) leaves the
- * decision open until the next start or `/hooks`, and says so via `addInfo`.
+ * decision open until the next start or until the block changes, and says so
+ * via `addInfo`.
  */
 export const useProjectHooksApproval = (
   config: Config,
@@ -39,6 +42,11 @@ export const useProjectHooksApproval = (
   addInfo?: (text: string) => void,
 ) => {
   const [pending, setPending] = useState<PendingProjectHooks | undefined>();
+  // Latest caller callback without making the select handler unstable.
+  const addInfoRef = useRef(addInfo);
+  addInfoRef.current = addInfo;
+  // A dismissed block stays dismissed this session, so `/hooks` can show it.
+  const dismissedHashRef = useRef<string | undefined>(undefined);
 
   const computePending = useCallback((): PendingProjectHooks | undefined => {
     if (!config.isProjectHooksPendingApproval()) return undefined;
@@ -46,7 +54,8 @@ export const useProjectHooksApproval = (
     if (
       !hooks ||
       getProjectHooksApprovalState(hooks, getProjectHooksRoot(settings)) !==
-        'pending'
+        'pending' ||
+      hashProjectHooks(hooks) === dismissedHashRef.current
     ) {
       return undefined;
     }
@@ -76,22 +85,41 @@ export const useProjectHooksApproval = (
     async (choice: ProjectHooksApprovalChoice) => {
       if (!pending) return;
       const root = getProjectHooksRoot(settings);
-      if (choice === ProjectHooksApprovalChoice.APPROVE) {
-        await loadHookApprovals().setState(root, pending.hooks, 'approved');
-        config.setProjectHooksPendingApproval(false);
-        await config.getHookSystem()?.reload();
-      } else if (choice === ProjectHooksApprovalChoice.REJECT) {
-        await loadHookApprovals().setState(root, pending.hooks, 'rejected');
-      } else {
-        addInfo?.(
+      setPending(undefined);
+      if (choice === ProjectHooksApprovalChoice.DISMISS) {
+        dismissedHashRef.current = hashProjectHooks(pending.hooks);
+        addInfoRef.current?.(
           t(
             'Project hooks in .qwen/settings.json were not loaded. Open /hooks or restart Qwen Code to review them.',
           ),
         );
+        return;
       }
-      setPending(undefined);
+      const approve = choice === ProjectHooksApprovalChoice.APPROVE;
+      try {
+        await loadHookApprovals().setState(
+          root,
+          pending.hooks,
+          approve ? 'approved' : 'rejected',
+        );
+      } catch (error) {
+        // Nothing was saved: keep the hooks withheld and say so.
+        addInfoRef.current?.(
+          t(
+            'Project hooks were not loaded: the decision could not be saved ({{error}}).',
+            { error: getErrorMessage(error) },
+          ),
+        );
+        return;
+      }
+      if (approve) {
+        config.setProjectHooksPendingApproval(false);
+        await config.getHookSystem()?.reload();
+      } else {
+        config.setProjectHooksPendingApproval(true, true);
+      }
     },
-    [config, settings, pending, addInfo],
+    [config, settings, pending],
   );
 
   return {

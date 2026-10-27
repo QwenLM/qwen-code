@@ -2234,7 +2234,9 @@ describe('llm.tsx main function', () => {
         shouldOpenAuthDialog: false,
         memoryFileCount: 0,
       });
-      vi.spyOn(nonInteractiveModule, 'runNonInteractive').mockResolvedValue(0);
+      const runNonInteractiveSpy = vi
+        .spyOn(nonInteractiveModule, 'runNonInteractive')
+        .mockResolvedValue(0);
       const configStub = {
         isInteractive: () => false,
         isProjectHooksPendingApproval: () => true,
@@ -2305,6 +2307,8 @@ describe('llm.tsx main function', () => {
       expect(mockWriteStderrLine).toHaveBeenCalledWith(
         expect.stringContaining(expected),
       );
+      // Warn and continue: the prompt still runs, only the hooks are withheld.
+      expect(runNonInteractiveSpy).toHaveBeenCalledTimes(1);
     },
   );
 

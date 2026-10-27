@@ -442,6 +442,7 @@ export default {
   'disabled (safe mode)': 'desactivada (mode segur)',
   'disabled (disableAllHooks)': 'desactivada (disableAllHooks)',
   'disabled (not approved)': 'desactivada (no aprovada)',
+  'disabled (rejected)': 'desactivada (rebutjada)',
   'disabled (folder not trusted)': 'desactivada (carpeta no fiable)',
   'disabled (turned off for this session)':
     'desactivada (apagada en aquesta sessió)',

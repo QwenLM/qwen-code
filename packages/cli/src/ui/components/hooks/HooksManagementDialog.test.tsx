@@ -53,6 +53,7 @@ function disabledHooksConfig(): ReturnType<typeof useConfig> {
     })),
     getSessionId: vi.fn(() => 'test-session-id'),
     isProjectHooksPendingApproval: vi.fn(() => false),
+    isProjectHooksRejected: vi.fn(() => false),
   } as unknown as ReturnType<typeof useConfig>;
 }
 
@@ -100,6 +101,7 @@ vi.mock('../../contexts/ConfigContext.js', async (importOriginal) => {
       })),
       getSessionId: vi.fn(() => 'test-session-id'),
       isProjectHooksPendingApproval: vi.fn(() => false),
+      isProjectHooksRejected: vi.fn(() => false),
     })),
   };
 });
@@ -432,47 +434,54 @@ describe('HooksManagementDialog', () => {
     });
   });
 
-  it('marks project hooks withheld for approval', async () => {
-    const defaultConfig = mockedUseConfig.getMockImplementation();
-    onTestFinished(() => {
-      mockedUseConfig.mockImplementation(defaultConfig!);
-    });
-    mockedUseConfig.mockImplementation(
-      () =>
-        ({
-          ...disabledHooksConfig(),
-          getDisableAllHooks: vi.fn(() => false),
-          isProjectHooksPendingApproval: vi.fn(() => true),
-        }) as unknown as ReturnType<typeof useConfig>,
-    );
-    mockSettingsHooks(
-      {},
-      {
-        PreToolUse: [
-          {
-            matcher: 'Bash',
-            hooks: [{ type: 'command', command: './repo-hook.sh' }],
-          },
-        ],
-      },
-    );
+  it.each([
+    [false, 'approved)'],
+    [true, 'rejected)'],
+  ])(
+    'marks withheld project hooks (rejected: %s) as %s',
+    async (rejected, label) => {
+      const defaultConfig = mockedUseConfig.getMockImplementation();
+      onTestFinished(() => {
+        mockedUseConfig.mockImplementation(defaultConfig!);
+      });
+      mockedUseConfig.mockImplementation(
+        () =>
+          ({
+            ...disabledHooksConfig(),
+            getDisableAllHooks: vi.fn(() => false),
+            isProjectHooksPendingApproval: vi.fn(() => true),
+            isProjectHooksRejected: vi.fn(() => rejected),
+          }) as unknown as ReturnType<typeof useConfig>,
+      );
+      mockSettingsHooks(
+        {},
+        {
+          PreToolUse: [
+            {
+              matcher: 'Bash',
+              hooks: [{ type: 'command', command: './repo-hook.sh' }],
+            },
+          ],
+        },
+      );
 
-    const { lastFrame } = renderWithProviders(
-      <HooksManagementDialog onClose={mockOnClose} />,
-    );
-    await vi.waitFor(() => {
-      expect(lastFrame()).toContain('Hooks');
-    });
-    pressKey('return');
-    await vi.waitFor(() => {
-      expect(lastFrame()).toContain('Bash');
-    });
-    pressKey('return');
+      const { lastFrame } = renderWithProviders(
+        <HooksManagementDialog onClose={mockOnClose} />,
+      );
+      await vi.waitFor(() => {
+        expect(lastFrame()).toContain('Hooks');
+      });
+      pressKey('return');
+      await vi.waitFor(() => {
+        expect(lastFrame()).toContain('Bash');
+      });
+      pressKey('return');
 
-    await vi.waitFor(() => {
-      expect(lastFrame()).toContain('./repo-hook.sh');
-      expect(lastFrame()).toContain('Local Settings · disabled');
-      expect(lastFrame()).toContain('approved)');
-    });
-  });
+      await vi.waitFor(() => {
+        expect(lastFrame()).toContain('./repo-hook.sh');
+        expect(lastFrame()).toContain('Local Settings · disabled');
+        expect(lastFrame()).toContain(label);
+      });
+    },
+  );
 });

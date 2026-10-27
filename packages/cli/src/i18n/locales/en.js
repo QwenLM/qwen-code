@@ -728,6 +728,7 @@ export default {
   'disabled (safe mode)': 'disabled (safe mode)',
   'disabled (disableAllHooks)': 'disabled (disableAllHooks)',
   'disabled (not approved)': 'disabled (not approved)',
+  'disabled (rejected)': 'disabled (rejected)',
   'disabled (folder not trusted)': 'disabled (folder not trusted)',
   'disabled (turned off for this session)':
     'disabled (turned off for this session)',

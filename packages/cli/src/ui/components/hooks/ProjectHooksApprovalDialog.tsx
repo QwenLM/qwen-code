@@ -26,8 +26,6 @@ const PROJECT_HOOKS_DIALOG_DESCRIPTION =
 
 /** Rows besides the title and description: border, padding, two margins, two options, the Esc hint. */
 const PROJECT_HOOKS_DIALOG_FIXED_ROWS = 9;
-/** Hook rows kept even on a short terminal: never ask to approve an empty list. */
-const PROJECT_HOOKS_DIALOG_MIN_HOOK_ROWS = 3;
 
 /** Rows `text` takes when word-wrapped at `width` columns. */
 function wrappedRows(text: string, width: number): number {
@@ -61,16 +59,12 @@ export function layoutProjectHooksLines(
   const chrome =
     PROJECT_HOOKS_DIALOG_FIXED_ROWS +
     header.reduce((rows, text) => rows + wrappedRows(text, width), 0);
+  // On a short terminal the options win: the list shrinks to its
+  // `… and N more` row rather than push them out of the frame.
   const shown =
     availableHeight === undefined
       ? lines
-      : fitHookLines(
-          lines,
-          Math.max(
-            PROJECT_HOOKS_DIALOG_MIN_HOOK_ROWS,
-            availableHeight - chrome,
-          ),
-        );
+      : fitHookLines(lines, availableHeight - chrome);
   // Rows are indented by two columns.
   return shown.map((line) => fitHookLine(line, width - 2));
 }

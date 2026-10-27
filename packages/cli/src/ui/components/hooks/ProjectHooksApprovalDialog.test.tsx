@@ -11,6 +11,7 @@ import { renderWithProviders } from '../../../test-utils/render.js';
 import {
   ProjectHooksApprovalChoice,
   ProjectHooksApprovalDialog,
+  layoutProjectHooksLines,
 } from './ProjectHooksApprovalDialog.js';
 
 /** The dialog inside the main-area box `DefaultAppLayout` gives it. */
@@ -41,6 +42,7 @@ describe('ProjectHooksApprovalDialog', () => {
   });
 
   it.each([
+    [80, 16],
     [80, 20],
     [80, 24],
     [40, 24],
@@ -56,10 +58,21 @@ describe('ProjectHooksApprovalDialog', () => {
     },
   );
 
-  it('keeps hook rows on a terminal shorter than the chrome', () => {
-    const frame = renderAt(lines, 80, 6).lastFrame() ?? '';
-    expect(frame).toContain('hook-1.sh');
-    expect(frame).toContain('… and 28 more');
+  it.each([
+    ['unconstrained', undefined, 30],
+    ['roomy', 40, 25],
+    ['one row past the chrome', 16, 1],
+    ['shorter than the chrome', 6, 1],
+  ])('lays out the list when %s', (_label, height, rows) => {
+    // Chrome at 80 columns: 9 fixed rows, the title and a 5-row description.
+    const header = ['title', `${'word '.repeat(64)}`];
+    const shown = layoutProjectHooksLines(lines, header, 80, height);
+    expect(shown).toHaveLength(rows);
+    if (rows < lines.length) {
+      expect(shown.at(-1)).toBe(
+        `… and ${lines.length - rows + 1} more (see .qwen/settings.json)`,
+      );
+    }
   });
 
   it('cuts a long hook to one row with a marker', () => {

@@ -1534,9 +1534,13 @@ export interface ConfigParameters {
    * Settings-file project hooks have no approval bound to their current
    * configuration (pending or rejected); `getProjectHooks()` withholds them
    * until `setProjectHooksPendingApproval(false)`. `undefined` means the
-   * session does not gate them (bare, safe, all hooks off, `--yolo`).
+   * session does not gate them (bare, safe, all hooks off).
    */
   projectHooksPendingApproval?: boolean;
+  /** The withheld block was rejected, not just left undecided. */
+  projectHooksRejected?: boolean;
+  /** Started with `--yolo`: the gate is off only while the mode stays YOLO. */
+  projectHooksYoloExempt?: boolean;
   noBrowser?: boolean;
   folderTrustFeature?: boolean;
   folderTrust?: boolean;
@@ -3012,6 +3016,8 @@ export class Config {
   private excludedMcpServers?: string[];
   private pendingMcpServers?: string[];
   private projectHooksPendingApproval?: boolean;
+  private projectHooksRejected: boolean;
+  private readonly projectHooksYoloExempt: boolean;
   private readonly mcpToolIdleTimeoutMs: number;
   /**
    * Guards against concurrent MCP reconcile passes (hot-reload watcher vs.
@@ -3498,6 +3504,8 @@ export class Config {
     this.excludedMcpServers = params.excludedMcpServers;
     this.pendingMcpServers = params.pendingMcpServers;
     this.projectHooksPendingApproval = params.projectHooksPendingApproval;
+    this.projectHooksRejected = params.projectHooksRejected ?? false;
+    this.projectHooksYoloExempt = params.projectHooksYoloExempt ?? false;
     const envTimeout = process.env['QWEN_CODE_MCP_TOOL_IDLE_TIMEOUT_MS'];
     const parsedEnv = envTimeout !== undefined ? Number(envTimeout) : NaN;
     this.mcpToolIdleTimeoutMs =
@@ -8899,15 +8907,28 @@ export class Config {
   }
 
   isProjectHooksApprovalGated(): boolean {
-    return this.projectHooksPendingApproval !== undefined;
+    return (
+      this.projectHooksPendingApproval !== undefined &&
+      !(
+        this.projectHooksYoloExempt &&
+        this.getApprovalMode() === ApprovalMode.YOLO
+      )
+    );
   }
 
   /**
    * Set by the CLI when the user decides on the project hooks mid-session
    * (approval dialog, `/hooks` reload). Takes effect on the next hook reload.
    */
-  setProjectHooksPendingApproval(pending: boolean): void {
+  setProjectHooksPendingApproval(pending: boolean, rejected = false): void {
     this.projectHooksPendingApproval = pending;
+    this.projectHooksRejected = rejected;
+  }
+
+  isProjectHooksRejected(): boolean {
+    return (
+      this.projectHooksPendingApproval === true && this.projectHooksRejected
+    );
   }
 
   addMcpServers(servers: Record<string, MCPServerConfig>): void {

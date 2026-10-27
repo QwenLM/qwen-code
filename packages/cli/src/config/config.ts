@@ -133,7 +133,7 @@ export { isValidSessionId } from './session-id.js';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { assembleMcpServers } from './mcpServers.js';
 import { getPendingGatedMcpServers } from './mcpApprovals.js';
-import { isProjectHooksPendingApproval } from './hook-approvals.js';
+import { getProjectHooksApprovalState } from './hook-approvals.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import {
   parseDurationSeconds,
@@ -2540,23 +2540,28 @@ export async function loadCliConfig(
   // Project hooks are gated like project MCP servers (#4615): a cloned
   // repository's `.qwen/settings.json` must not run commands unreviewed. Only
   // a YOLO asked for on the command line skips it — a workspace can set
-  // `tools.approvalMode` itself. Without separated scopes core serves the
-  // merged block, so that is what gets gated.
+  // `tools.approvalMode` itself — and only while the session stays in YOLO.
+  // Without separated scopes core serves the merged block, so that is what
+  // gets gated.
   const commandLineYolo =
     approvalMode === ApprovalMode.YOLO &&
     (argv.approvalMode !== undefined || argv.yolo === true);
-  const projectHooksPendingApproval =
-    bareMode || safeMode || settings.disableAllHooks || commandLineYolo
-      ? undefined
-      : hooksConfig?.projectHooksApproval
-        ? isProjectHooksPendingApproval(
+  const gateHooks = !(bareMode || safeMode || settings.disableAllHooks);
+  const projectHooksState =
+    gateHooks && !commandLineYolo
+      ? hooksConfig?.projectHooksApproval
+        ? getProjectHooksApprovalState(
             hooksConfig.projectHooksApproval.hooks,
             hooksConfig.projectHooksApproval.root,
           )
-        : isProjectHooksPendingApproval(
+        : getProjectHooksApprovalState(
             hooksConfig ? hooksConfig.projectHooks : settings.hooks,
             cwd,
-          );
+          )
+      : undefined;
+  const projectHooksPendingApproval = gateHooks
+    ? projectHooksState !== undefined && projectHooksState !== 'approved'
+    : undefined;
   const advisorModel =
     bareMode || safeMode ? undefined : resolveAdvisorModel(argv, settings);
 
@@ -2705,6 +2710,8 @@ export async function loadCliConfig(
     ),
     pendingMcpServers,
     projectHooksPendingApproval,
+    projectHooksRejected: projectHooksState === 'rejected',
+    projectHooksYoloExempt: commandLineYolo,
     allowedMcpServers: allowedMcpServers
       ? Array.from(allowedMcpServers)
       : undefined,

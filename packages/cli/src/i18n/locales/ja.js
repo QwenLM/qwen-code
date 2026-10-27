@@ -893,6 +893,7 @@ export default {
   'disabled (safe mode)': '無効（セーフモード）',
   'disabled (disableAllHooks)': '無効（disableAllHooks）',
   'disabled (not approved)': '無効（未承認）',
+  'disabled (rejected)': '無効（拒否済み）',
   'disabled (folder not trusted)': '無効（フォルダーが信頼されていません）',
   'disabled (turned off for this session)': '無効（このセッションでオフ）',
   'Server:': 'サーバー:',

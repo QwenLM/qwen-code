@@ -24,6 +24,7 @@ import {
 describe('useProjectHooksApproval', () => {
   let dir: string;
   let pending: boolean;
+  let rejected: boolean;
   let reload: ReturnType<typeof vi.fn>;
   const hooks = {
     SessionStart: [{ hooks: [{ type: 'command', command: './setup.sh' }] }],
@@ -33,8 +34,9 @@ describe('useProjectHooksApproval', () => {
     reload = vi.fn().mockResolvedValue(undefined);
     return {
       isProjectHooksPendingApproval: () => pending,
-      setProjectHooksPendingApproval: (value: boolean) => {
+      setProjectHooksPendingApproval: (value: boolean, rej = false) => {
         pending = value;
+        rejected = rej;
       },
       getWorkingDir: () => path.join(dir, 'elsewhere'),
       getHookSystem: () => ({ reload }),
@@ -57,6 +59,7 @@ describe('useProjectHooksApproval', () => {
     );
     resetHookApprovalsForTesting();
     pending = true;
+    rejected = false;
   });
 
   afterEach(() => {
@@ -146,9 +149,41 @@ describe('useProjectHooksApproval', () => {
     );
     expect(result.current.isProjectHooksApprovalDialogOpen).toBe(false);
     expect(pending).toBe(true);
+    expect(rejected).toBe(true);
     expect(reload).not.toHaveBeenCalled();
     resetHookApprovalsForTesting();
     expect(loadHookApprovals().getState(dir, hooks)).toBe('rejected');
+  });
+
+  it('keeps the hooks withheld and says so when the decision cannot be saved', async () => {
+    fs.mkdirSync(path.join(dir, HOOK_APPROVALS_FILENAME));
+    const addInfo = vi.fn();
+    const config = makeConfig();
+    const settings = makeSettings(hooks);
+    const { result } = renderHook(() =>
+      useProjectHooksApproval(config, settings, addInfo),
+    );
+    await act(() =>
+      result.current.handleProjectHooksApprovalSelect(
+        ProjectHooksApprovalChoice.APPROVE,
+      ),
+    );
+    expect(pending).toBe(true);
+    expect(reload).not.toHaveBeenCalled();
+    expect(addInfo.mock.calls[0][0]).toContain('could not be saved');
+  });
+
+  it('keeps one select handler across a new addInfo', () => {
+    const config = makeConfig();
+    const settings = makeSettings(hooks);
+    const { result, rerender } = renderHook(
+      ({ addInfo }: { addInfo: (text: string) => void }) =>
+        useProjectHooksApproval(config, settings, addInfo),
+      { initialProps: { addInfo: vi.fn() } },
+    );
+    const before = result.current.handleProjectHooksApprovalSelect;
+    rerender({ addInfo: vi.fn() });
+    expect(result.current.handleProjectHooksApprovalSelect).toBe(before);
   });
 
   it('dismiss closes without storing a decision, so the next start asks again', async () => {
@@ -166,6 +201,40 @@ describe('useProjectHooksApproval', () => {
     expect(pending).toBe(true);
     resetHookApprovalsForTesting();
     expect(loadHookApprovals().getState(dir, hooks)).toBe('pending');
+  });
+
+  it('stays dismissed for the session until the block changes', async () => {
+    const config = makeConfig();
+    const current = { hooks: hooks as Record<string, unknown> };
+    const settings = {
+      getProjectHooks: () => current.hooks,
+      workspace: {
+        path: path.join(dir, '.qwen', 'settings.json'),
+        get originalSettings() {
+          return { hooks: current.hooks };
+        },
+      },
+    } as unknown as LoadedSettings;
+    const { result } = renderHook(() =>
+      useProjectHooksApproval(config, settings),
+    );
+    await act(() =>
+      result.current.handleProjectHooksApprovalSelect(
+        ProjectHooksApprovalChoice.DISMISS,
+      ),
+    );
+    // A `/hooks` reload of the same block must not re-open it.
+    act(() => {
+      appEvents.emit(AppEvent.ProjectHooksPendingApprovalChanged);
+    });
+    expect(result.current.isProjectHooksApprovalDialogOpen).toBe(false);
+    act(() => {
+      current.hooks = {
+        SessionStart: [{ hooks: [{ type: 'command', command: './other.sh' }] }],
+      };
+      appEvents.emit(AppEvent.ProjectHooksPendingApprovalChanged);
+    });
+    expect(result.current.isProjectHooksApprovalDialogOpen).toBe(true);
   });
 
   it('re-evaluates when a hooks reload leaves the block pending', () => {

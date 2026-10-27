@@ -29,6 +29,7 @@ export type HooksListingDisabledReason =
   | 'allHooksDisabled'
   | 'untrusted'
   | 'pendingApproval'
+  | 'rejected'
   | 'registryDisabled';
 
 /** One configured hook, flattened for display. */
@@ -112,7 +113,7 @@ export type HooksListingConfig = Pick<
   | 'getProjectHooks'
   | 'getExtensions'
 > &
-  Partial<Pick<Config, 'getWithheldProjectHooks'>>;
+  Partial<Pick<Config, 'getWithheldProjectHooks' | 'isProjectHooksRejected'>>;
 
 const PROMPT_DISPLAY_LIMIT = 50;
 
@@ -167,7 +168,7 @@ interface RowPlacement {
   entryEnabled: boolean;
   trustGated?: boolean;
   /** A project hook the approval gate keeps out of the registry. */
-  pendingApproval?: boolean;
+  pendingApproval?: boolean | 'rejected';
   agentScope?: string;
   hookId?: string;
   skillRoot?: string;
@@ -191,7 +192,7 @@ export function resolveRowEnabled(
   placement: {
     entryEnabled: boolean;
     trustGated?: boolean;
-    pendingApproval?: boolean;
+    pendingApproval?: boolean | 'rejected';
   },
   gates: HooksListingGates,
 ): { enabled: true } | { enabled: false; reason: HooksListingDisabledReason } {
@@ -200,6 +201,9 @@ export function resolveRowEnabled(
   if (gates.allDisabled) return { enabled: false, reason: 'allHooksDisabled' };
   if (placement.trustGated === true && !gates.trustedFolder) {
     return { enabled: false, reason: 'untrusted' };
+  }
+  if (placement.pendingApproval === 'rejected') {
+    return { enabled: false, reason: 'rejected' };
   }
   if (placement.pendingApproval === true) {
     return { enabled: false, reason: 'pendingApproval' };
@@ -317,7 +321,7 @@ function rowsFromSettings(
 function settingsRows(
   scopes: ReadonlyArray<[unknown, HooksConfigSource]>,
   gates: HooksListingGates,
-  pendingApproval = false,
+  pendingApproval: boolean | 'rejected' = false,
 ): HooksListingRow[] {
   const rows: HooksListingRow[] = [];
   // The registry drops a hook whose source, event, identity, matcher and
@@ -450,7 +454,11 @@ export function buildHooksListing(config: HooksListingConfig): HooksListing {
   const withheld = config.getWithheldProjectHooks?.();
   if (withheld) {
     listing.rows.push(
-      ...settingsRows([[withheld, HooksConfigSource.Project]], gates, true),
+      ...settingsRows(
+        [[withheld, HooksConfigSource.Project]],
+        gates,
+        config.isProjectHooksRejected?.() ? 'rejected' : true,
+      ),
     );
   }
 

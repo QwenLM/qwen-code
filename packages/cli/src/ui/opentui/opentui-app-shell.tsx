@@ -650,6 +650,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       activeModal ||
       activeToolCall ||
       mcpApproval.isMcpApprovalDialogOpen ||
+      hooksApproval.isProjectHooksApprovalDialogOpen ||
       shellModeActive,
   );
   const shellFocused =
@@ -756,6 +757,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       !activeModal &&
       !activeToolCall &&
       !mcpApproval.isMcpApprovalDialogOpen &&
+      !hooksApproval.isProjectHooksApprovalDialogOpen &&
       (name === 'escape' || (name === 'c' && ctrl))
     ) {
       for (const controller of shellControllersRef.current) {
@@ -1569,6 +1571,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             <OpenTuiProjectHooksApprovalDialog
               key="project-hooks-approval"
               lines={hooksApproval.pendingProjectHooks.lines}
+              availableTerminalHeight={dialogRegionHeight}
               onSelect={hooksApproval.handleProjectHooksApprovalSelect}
             />
           ) : activeToolCall ? (

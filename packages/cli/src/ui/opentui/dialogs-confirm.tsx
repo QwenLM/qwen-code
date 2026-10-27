@@ -1469,6 +1469,8 @@ export function OpenTuiMcpApprovalDialog(props: OpenTuiMcpApprovalProps) {
 interface OpenTuiProjectHooksApprovalProps {
   /** One line per configured hook, e.g. `SessionStart  ./setup.sh`. */
   lines: readonly string[];
+  /** The shell's dialog region, so the list budget matches the ink renderer. */
+  availableTerminalHeight?: number;
   onSelect: (choice: ProjectHooksApprovalChoice) => void;
 }
 
@@ -1487,7 +1489,7 @@ const PROJECT_HOOKS_APPROVAL_OPTIONS: Array<
 export function OpenTuiProjectHooksApprovalDialog(
   props: OpenTuiProjectHooksApprovalProps,
 ) {
-  const { lines, onSelect } = props;
+  const { lines, availableTerminalHeight, onSelect } = props;
   const { width, height } = useTerminalDimensions();
   const select = useDialogSelect<DialogListItem<ProjectHooksApprovalChoice>>({
     items: PROJECT_HOOKS_APPROVAL_OPTIONS,
@@ -1519,7 +1521,7 @@ export function OpenTuiProjectHooksApprovalDialog(
               lines,
               [title, description],
               width,
-              height,
+              availableTerminalHeight ?? height,
             ).map((line, index) => (
               <text key={`${index}-${line}`} fg={C.text} wrapMode="none">
                 {`  ${line}`}

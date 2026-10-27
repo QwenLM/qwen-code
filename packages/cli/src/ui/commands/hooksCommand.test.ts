@@ -82,6 +82,7 @@ describe('hooksCommand', () => {
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     delete process.env['QWEN_CODE_HOOK_APPROVALS_PATH'];
     resetHookApprovalsForTesting();
     fs.rmSync(approvalsDir, { recursive: true, force: true });
@@ -263,15 +264,18 @@ describe('hooksCommand', () => {
     };
 
     it.each([
-      ['unapproved', undefined, true, true],
-      ['rejected', 'rejected', true, false],
-      ['approved', 'approved', false, false],
+      ['unapproved', undefined, undefined, true, true],
+      ['rejected', 'rejected', undefined, true, false],
+      ['approved', 'approved', undefined, false, false],
+      ['approved before ${TOKEN} changed', 'approved', 'other', true, true],
     ] as const)(
       'gates %s project hooks before the registry reloads',
-      async (_label, decision, gated, prompted) => {
+      async (_label, decision, tokenAfter, gated, prompted) => {
+        vi.stubEnv('TOKEN', 'secret');
         if (decision) {
           await loadHookApprovals().setState('/work/repo', runnable, decision);
         }
+        if (tokenAfter) vi.stubEnv('TOKEN', tokenAfter);
         const onPending = vi.fn();
         appEvents.on(AppEvent.ProjectHooksPendingApprovalChanged, onPending);
         // The decision binds the unresolved block, as startup hashed it.
@@ -286,6 +290,7 @@ describe('hooksCommand', () => {
         appEvents.off(AppEvent.ProjectHooksPendingApprovalChanged, onPending);
         expect(config.setProjectHooksPendingApproval).toHaveBeenCalledWith(
           gated,
+          decision === 'rejected' && !tokenAfter,
         );
         expect(
           config.setProjectHooksPendingApproval.mock.invocationCallOrder[0],
@@ -295,7 +300,7 @@ describe('hooksCommand', () => {
       },
     );
 
-    it('leaves a session that does not gate project hooks (bare, safe, --yolo) ungated', async () => {
+    it('leaves an ungated session alone', async () => {
       const onPending = vi.fn();
       appEvents.on(AppEvent.ProjectHooksPendingApprovalChanged, onPending);
       const { context, config } = makeReloadContext({ projectHooks: runnable });

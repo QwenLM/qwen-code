@@ -28,7 +28,6 @@ import {
   getProjectHooksApprovalState,
   getProjectHooksForApproval,
   getProjectHooksRoot,
-  reloadHookApprovals,
 } from '../../config/hook-approvals.js';
 import { appEvents, AppEvent } from '../../utils/events.js';
 
@@ -83,7 +82,6 @@ async function reloadHooksFromSettings(
   // out of the registry and let the approval dialog ask again. Keyed like
   // startup, by the project the settings came from, not the live cwd.
   const gated = config.isProjectHooksApprovalGated();
-  if (gated) reloadHookApprovals();
   const state = gated
     ? getProjectHooksApprovalState(
         getProjectHooksForApproval(settings),
@@ -93,6 +91,7 @@ async function reloadHooksFromSettings(
   if (gated) {
     config.setProjectHooksPendingApproval(
       state !== undefined && state !== 'approved',
+      state === 'rejected',
     );
   }
   await hookSystem.reload();

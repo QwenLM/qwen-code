@@ -35,7 +35,7 @@ export function HandlerListBody({
         // Only project hooks withheld by the approval gate are listed disabled.
         const sourceDisplay = config.enabled
           ? getConfigSourceDisplay(config)
-          : `${getConfigSourceDisplay(config)} · ${t('disabled (not approved)')}`;
+          : `${getConfigSourceDisplay(config)} · ${config.rejected ? t('disabled (rejected)') : t('disabled (not approved)')}`;
         const hookDisplay = describeHook(config);
         const typeDisplay = formatTypeDisplay(config);
 
