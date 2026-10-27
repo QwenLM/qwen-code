@@ -1566,7 +1566,7 @@ export class LocalManagedSessionAuthority {
   ): Promise<ManagedSessionCommitReceipt> {
     return this.runSerial(
       async () =>
-        await this.commit(command, [event(this.committed + 1)], [actor]),
+        await this.commit(command, (sequence) => [event(sequence)], actor),
     );
   }
   appendExecutionEvents(
@@ -1574,14 +1574,9 @@ export class LocalManagedSessionAuthority {
     events: (firstSequence: number) => readonly unknown[],
     actor: ManagedSessionActor,
   ): Promise<ManagedSessionCommitReceipt> {
-    return this.runSerial(async () => {
-      const values = events(this.committed + 1);
-      return await this.commit(
-        command,
-        values,
-        values.map(() => actor),
-      );
-    });
+    return this.runSerial(
+      async () => await this.commit(command, events, actor),
+    );
   }
   /** The latest committed action for this request, if any. */
   async action(requestId: string): Promise<ManagedSessionAction | undefined> {
@@ -4321,8 +4316,10 @@ export class LocalManagedSessionAuthority {
    */
   private async commit(
     command: ManagedSessionCommand,
-    values: readonly unknown[],
-    actors: readonly ManagedSessionActor[],
+    values:
+      | readonly unknown[]
+      | ((firstSequence: number) => readonly unknown[]),
+    actors: readonly ManagedSessionActor[] | ManagedSessionActor,
     extension?: {
       readonly eventId: string;
       readonly apply: (
@@ -4354,6 +4351,7 @@ export class LocalManagedSessionAuthority {
       this.pendingViewFailure = undefined;
     }
     this.assertExpectedSequence(command);
+    if (typeof values === 'function') values = values(this.committed + 1);
     if (values.length > MANAGED_SESSION_LIMITS.maxTransactionEvents)
       throw new ManagedSessionRecordError(
         'Transaction event count exceeds its budget.',
@@ -4381,7 +4379,7 @@ export class LocalManagedSessionAuthority {
               'Session history maintenance is active.',
             );
         }
-        const actor = actors[index];
+        const actor = 'class' in actors ? actors : actors[index];
         assertManagedSessionEventActor(event, actor.class);
         if (!managedSessionKeysEqual(event.sessionKey, this.sessionKey)) {
           throw new ManagedSessionConflictError(

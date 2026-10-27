@@ -162,6 +162,81 @@ const inputRequest = {
   wakeReason: 'input',
 };
 
+describe('lazy execution command replay', () => {
+  it.each([
+    ['single', false],
+    ['single', true],
+    ['batch', false],
+    ['batch', true],
+  ] as const)(
+    'does not rebuild a %s command with cold=%s',
+    async (kind, cold) => {
+      const fixture = await createFixture();
+      let opened = await openAuthority(fixture);
+      const command = inputCommand(fixture, {
+        operation: 'cancelHistory',
+        expectedSequence: 0,
+      });
+      const produce = vi.fn((sequence: number) => ({
+        v: 1,
+        sequence,
+        eventId: `cancel-${sequence}`,
+        sessionKey: sessionKeyFor(fixture),
+        kind: 'cancel.requested',
+        occurredAt: 1,
+        payload: {
+          requestId: `cancel-${sequence}`,
+          reason: 'test',
+          requestedBy: 'user',
+          target: { turnId: 'turn' },
+        },
+      }));
+      const append = (value: ManagedSessionCommand) =>
+        kind === 'single'
+          ? opened.authority.appendExecutionEvent(value, produce, {
+              class: 'trusted_entry',
+            })
+          : opened.authority.appendExecutionEvents(
+              value,
+              (sequence) => [produce(sequence)],
+              { class: 'trusted_entry' },
+            );
+      try {
+        const original = await append(command);
+        expect(produce).toHaveBeenCalledTimes(1);
+        await append({ ...command, commandId: 'later', expectedSequence: 1 });
+        if (cold) {
+          await opened.release();
+          opened = await openAuthority(fixture, { create: false });
+        }
+        produce.mockClear();
+        expect(await append(command)).toEqual({
+          ...original,
+          committedSequence: 2,
+          replayed: true,
+        });
+        expect(produce).not.toHaveBeenCalled();
+        await expect(
+          append({ ...command, contentDigest: 'c'.repeat(64) }),
+        ).rejects.toBeInstanceOf(ManagedSessionConflictError);
+        await expect(
+          append({
+            ...command,
+            sessionKey: { ...command.sessionKey, sessionId: 'foreign' },
+          }),
+        ).rejects.toBeInstanceOf(ManagedSessionConflictError);
+        await expect(
+          append({ ...command, commandId: 'new-stale-prefix' }),
+        ).rejects.toBeInstanceOf(ManagedSessionConflictError);
+        expect(produce).not.toHaveBeenCalled();
+        expect(opened.authority.committedSequence).toBe(2);
+      } finally {
+        await opened.release();
+      }
+    },
+  );
+});
+
 describe('history publication failures', () => {
   it('returns a known committed receipt and pauses new writes until its overlay flushes', async () => {
     const fixture = await createFixture();

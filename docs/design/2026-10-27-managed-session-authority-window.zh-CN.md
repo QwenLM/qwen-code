@@ -66,6 +66,8 @@ CSI application inventory 包含两张历史表的完整类型定义，共 40 �
 
 已提交模型输出的恢复判断读取固定前缀的完整尾部：后续终态记录必须阻止再次恢复已结算输出。终态身份来自 payload 中的 prompt ID，即使记录没有 daemon prompt ID；其他 prompt 的终态不能阻止本次恢复。该判断与选择对话 parent 不同，不能使用仅消息的流。
 
+单事件和批量事件 producer 仅在完成命令历史重放、范围、内容冲突及预期前缀检查后执行。重试返回原 transaction 和当前提交水位，不再次调用 producer，冷恢复后同样如此。这补齐新增真实 HTTP 恢复验收暴露的既有 producer 顺序缺口，不改变追加结算或 actor fence。
+
 Hook 是否有未完成工作的判断需要读取持久化 execution/occurrence 事实，因此 await `hasPendingOperations()`。模型边界、恢复状态检查和 Hook 准入调用方同步使用这一必需方法。测试替身必须提供它；把缺失方法静默视为 false，可能在 Hook 工作尚未结算时准入模型工作。同步回答需要另外常驻一份随历史增长的 pending/历史投影。
 
 Managed recorder 仅保留 tail、记录 ordinal、用户轮次数、未完成工具身份与一个压缩摘要，不保留完整分支记录或逐轮 rewind 数组。完成轮次的 checkpoint 流式读取固定 canonical 活跃链，发布前核对 cursor 到 tail 的条数。取消与 Goal 证据也跨压缩读取该链；Goal 候选及 proof 查询落在共享 owner 缓存的磁盘视图。Legacy recorder/rewind 保持原契约。CSI turn Map 只保留正在执行的工作；终态重试查询 canonical 前缀并返回原结果，不再次调用模型。
