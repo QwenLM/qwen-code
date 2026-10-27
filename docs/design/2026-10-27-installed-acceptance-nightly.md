@@ -6,7 +6,7 @@
 
 The installed npm producer and its four native distribution jobs currently run on every matching PR update. They bypass the source TUI impact classifier. Even Java-only changes launch the installed suite. Five successful runs sampled on 2026-10-27 showed a median producer queue of 67.3 minutes versus 8.8 minutes executing, with 90.7–108.5 total runner minutes for the five installed jobs per run. These samples explain the scheduling change, not a guaranteed future speedup.
 
-Change only scheduling in the existing `tui-parity` workflow. Keep all installed assertions, canonical artifact dependencies, native host coverage, toolchain versions, runner routing and failure behavior intact. Do not change product code or release automation.
+Change scheduling in the existing `tui-parity` workflow and connect its nightly failures to the existing main-CI issue reporter. Keep all installed assertions, canonical artifact dependencies, native host coverage, toolchain versions, runner routing and failure behavior intact. Do not change product code or release automation.
 
 ## Scheduling decision
 
@@ -22,6 +22,12 @@ Change only scheduling in the existing `tui-parity` workflow. Keep all installed
 Ordinary regressions in installation may now be detected on the next nightly run rather than before merge. A nightly pass covers only its tested commit and artifact, not later changes. Packaging, dependencies, launcher/private Bun, native assets and startup compatibility can affect these tests even when the tests themselves do not change.
 
 Maintainers should manually run this workflow against the candidate ref for high-risk installation/runtime changes before merge and for the exact release candidate before publishing. This change does not automate or enforce a release gate, alter required checks, cancel existing queued runs, or claim public released-upgrade coverage. The schedule becomes active only after the workflow change reaches the default branch.
+
+## Nightly failure reporting
+
+Watch `tui-parity` completions in `Main CI Failure Issue` and admit its `schedule` failures on `main`. Reuse the existing log analysis, failing-test signatures, issue creation/reuse and recurrence comments; do not introduce another issue writer. Matching failures reuse their tracker rather than opening a new issue every night. Runs without a test signature use the existing workflow aggregate.
+
+Successful, cancelled and skipped runs do not report. Neither PR runs nor manual dispatches of `tui-parity` enter this new reporting route, including manual runs on `main`; maintainers inspect those runs directly. Stale attempts retain existing suppression. Infrastructure-only failures retain the existing first-attempt rerun policy: a successful rerun request defers filing, a subsequent failure or failed rerun request reports through the existing issue path. Reporting still depends on the reporter being scheduled and its GitHub API/token access working; changing cadence does not guarantee immediate delivery.
 
 ## Validation and acceptance
 
