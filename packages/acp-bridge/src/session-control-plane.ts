@@ -1718,6 +1718,7 @@ function isIdleBookkeepingSessionUpdate(event: BridgeEvent): boolean {
   if (
     subtype === 'available_commands_update' ||
     subtype === 'current_mode_update' ||
+    subtype === 'config_option_update' ||
     subtype === 'session_info_update'
   ) {
     return true;
@@ -11799,7 +11800,14 @@ export function createSessionControlPlane(
                       meta[CHANNEL_OUTPUT_MODE_META_KEY] = channelOutputMode;
                     }
                   }
-                  meta[INVOCATION_CONTEXT_META_KEY] = invocationContext;
+                  meta[INVOCATION_CONTEXT_META_KEY] =
+                    opts.isWorkflowModeWriteAllowed
+                      ? {
+                          ...invocationContext,
+                          workflowModeWriteAllowed:
+                            opts.isWorkflowModeWriteAllowed(sessionId) === true,
+                        }
+                      : invocationContext;
                   if (Object.keys(meta).length > 0) {
                     copy._meta = meta;
                   } else {
@@ -14755,24 +14763,33 @@ export function createSessionControlPlane(
       return response;
     },
 
-    async setSessionConfigOption(sessionId, req) {
+    async setSessionConfigOption(sessionId, req, context, assertCanCommit) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
-      const info = channelInfoForEntry(entry);
-      if (!info || info.harness.isDying)
-        throw new SessionNotFoundError(sessionId);
+      const assertCurrentOwner = () => {
+        assertCanCommit?.();
+        assertAttachableSessionEntry(sessionId, entry);
+        resolveTrustedClientId(entry, context?.clientId);
+      };
+      assertCurrentOwner();
       const normalized: SetSessionConfigOptionRequest = { ...req, sessionId };
       const transportClosed = getTransportClosedReject(entry);
-      const work = entry.modelChangeQueue.then(() =>
-        raceLongLived(
+      const work = entry.modelChangeQueue.then(async () => {
+        assertCurrentOwner();
+        const response = await raceLongLived(
           withTimeout(
             entry.connection.setSessionConfigOption(normalized),
             initTimeoutMs,
             'setSessionConfigOption',
           ),
           transportClosed,
-        ),
-      );
+        );
+        assertCurrentOwner();
+        if (entry.restoreState) {
+          entry.restoreState.configOptions = response.configOptions;
+        }
+        return response;
+      });
       entry.modelChangeQueue = work.then(
         () => undefined,
         () => undefined,
@@ -16132,6 +16149,153 @@ export function createSessionControlPlane(
         if (entry.closing) {
           throw new SessionNotFoundError(sessionId, 'The session is closing');
         }
+        const directory = await requestSessionStatus<{
+          snapshots: Array<{ promptId: string; daemonPromptId?: string }>;
+        }>(sessionId, SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots);
+        const snapshots = Array.isArray(directory.snapshots)
+          ? directory.snapshots
+          : [];
+        const targets = snapshots.filter(
+          (snapshot) => snapshot.promptId === req.promptId,
+        );
+        const daemonPromptId = targets[0]?.daemonPromptId;
+        const snapshot = entry.events.snapshotReplay('full');
+        if (
+          targets.length !== 1 ||
+          !daemonPromptId ||
+          snapshots.filter(
+            (candidate) => candidate.daemonPromptId === daemonPromptId,
+          ).length !== 1 ||
+          !snapshot ||
+          snapshot.degraded ||
+          entry.restoreReplayPartial ||
+          entry.restoreReplayError
+        ) {
+          throw new InvalidRewindTargetError(
+            sessionId,
+            'Cannot prove the surviving transcript; reload the session before retrying rewind',
+          );
+        }
+        let replay = [...snapshot.compactedTurns, ...snapshot.liveJournal];
+        if (entry.restoreHistoryHasMore) {
+          const lastEventId = entry.events.lastEventId;
+          const eventEpoch = entry.events.epoch;
+          const seenCursors = new Set<string>();
+          let cursor: string | undefined;
+          let replayBytes = 0;
+          let emptyPages = 0;
+          replay = [];
+          do {
+            const page = await requestSessionTranscriptPage({
+              sessionId,
+              ...(cursor !== undefined ? { cursor } : {}),
+              limit: SESSION_TRANSCRIPT_MAX_LIMIT,
+            });
+            if (
+              page.v !== 1 ||
+              page.sessionId !== sessionId ||
+              !Array.isArray(page.events) ||
+              typeof page.hasMore !== 'boolean' ||
+              page.partial ||
+              page.replayError !== undefined ||
+              (page.hasMore &&
+                (!page.nextCursor || seenCursors.has(page.nextCursor)))
+            ) {
+              throw new InvalidRewindTargetError(
+                sessionId,
+                'Cannot prove a complete persisted transcript for rewind',
+              );
+            }
+            const pageReplay = page.events.map((event) => {
+              if (
+                event.type !== 'session_update' ||
+                !isRecord(event.data) ||
+                isRecord(event.data['update'])
+              )
+                return event;
+              return { ...event, data: { sessionId, update: event.data } };
+            });
+            // Reserve the IDs and timestamps assigned when replay is reseeded.
+            replayBytes += Buffer.byteLength(
+              JSON.stringify(
+                pageReplay.map((event) => ({
+                  ...event,
+                  id: Number.MAX_SAFE_INTEGER,
+                  _meta: {
+                    ...event._meta,
+                    serverTimestamp: Number.MAX_SAFE_INTEGER,
+                  },
+                })),
+              ),
+              'utf8',
+            );
+            if (
+              replayBytes > compactedReplayMaxBytes ||
+              (page.events.length === 0 &&
+                ++emptyPages >= MAX_EMPTY_TRANSCRIPT_PAGES)
+            ) {
+              throw new InvalidRewindTargetError(
+                sessionId,
+                'Persisted rewind replay exceeds the bounded replay budget',
+              );
+            }
+            replay.push(...pageReplay);
+            cursor = page.hasMore ? page.nextCursor : undefined;
+            if (cursor !== undefined) seenCursors.add(cursor);
+          } while (cursor !== undefined);
+          if (
+            entry.events.lastEventId !== lastEventId ||
+            entry.events.epoch !== eventEpoch
+          ) {
+            throw new InvalidRewindTargetError(
+              sessionId,
+              'Session changed while recovering the rewind transcript; retry rewind',
+            );
+          }
+        }
+        const boundaries: number[] = [];
+        let previousTargetChunk = false;
+        for (const [index, event] of replay.entries()) {
+          if (event.type === 'history_truncated') {
+            throw new InvalidRewindTargetError(
+              sessionId,
+              'Cannot rewind from an incomplete transcript replay',
+            );
+          }
+          const data = isRecord(event.data) ? event.data : undefined;
+          const update = isRecord(data?.['update'])
+            ? data['update']
+            : undefined;
+          const meta = isRecord(update?.['_meta'])
+            ? update['_meta']
+            : undefined;
+          const isOrdinaryUserChunk =
+            event.type === 'session_update' &&
+            update?.['sessionUpdate'] === 'user_message_chunk' &&
+            meta?.['source'] !== 'background_notification' &&
+            meta?.['source'] !== 'mid_turn_message_injected' &&
+            meta?.['backgroundTurn'] === undefined;
+          const isTargetChunk =
+            isOrdinaryUserChunk &&
+            (event.promptId ?? meta?.['promptId']) === daemonPromptId;
+          if (isTargetChunk && !previousTargetChunk) boundaries.push(index);
+          if (
+            isOrdinaryUserChunk ||
+            event.type === 'turn_complete' ||
+            event.type === 'turn_error' ||
+            (event.type === 'session_update' &&
+              update?.['sessionUpdate'] !== 'user_message_chunk')
+          ) {
+            previousTargetChunk = isTargetChunk;
+          }
+        }
+        if (boundaries.length !== 1) {
+          throw new InvalidRewindTargetError(
+            sessionId,
+            'Rewind target does not uniquely match the cached transcript',
+          );
+        }
+        const prefix = replay.slice(0, boundaries[0]);
         let response: Record<string, unknown>;
         try {
           // ACP cannot cancel a rewind after dispatch. Keep the queue until
@@ -16165,6 +16329,14 @@ export function createSessionControlPlane(
           throw err;
         }
 
+        entry.events.resetReplay();
+        const survivingReplay = entry.events.seedReplayEvents(
+          prefix.map(({ id: _id, v: _v, ...event }) => event),
+        );
+        entry.restoreReplayPartial = undefined;
+        entry.restoreReplayError = undefined;
+        entry.restoreHistoryHasMore = undefined;
+        entry.restoreHistoryAnchorRecordId = undefined;
         entry.terminalTurnStatuses.clear();
         entry.enrichedTerminalPromptIds.clear();
         entry.rewindGeneration += 1;
@@ -16231,6 +16403,8 @@ export function createSessionControlPlane(
               sessionId,
               promptId: req.promptId,
               targetTurnIndex,
+              replay: survivingReplay,
+              ...(daemonPromptId ? { daemonPromptId } : {}),
               filesChanged,
               filesFailed,
               ...(artifactWarnings.length > 0
