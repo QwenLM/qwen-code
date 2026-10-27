@@ -457,8 +457,8 @@ class ManagedAgentPreflightTest {
             throws IOException {
         Path lib = Files.createDirectories(directory.resolve("lib"));
         Path jar = Files.writeString(lib.resolve("server.jar"), "");
-        Path driver = Files.writeString(lib.resolve("mysql-connector.jar"), "");
-        Path elsewhere = Files.createDirectories(directory.resolve("elsewhere"));
+        // Two levels below the root, so the first entry resolves nothing.
+        Path elsewhere = Files.createDirectories(directory.resolve("elsewhere/deep"));
         Path other = Files.writeString(elsewhere.resolve("other.jar"), "");
         Path manifest = Files.writeString(directory.resolve("manifest.json"),
                 "{\"compatibility\":{\"qwenCodeVersion\":\"0.26.0\"}}");
@@ -471,6 +471,30 @@ class ManagedAgentPreflightTest {
         assertNull(ManagedAgentPreflight.manifestQwenCodeVersion(manifest));
         Files.delete(manifest);
         assertNull(ManagedAgentPreflight.manifestQwenCodeVersion(manifest));
+    }
+
+    @Test
+    @org.junit.jupiter.api.condition.EnabledOnOs(org.junit.jupiter.api.condition.OS.LINUX)
+    void reportsAWorkerStartedFromTheConfiguredExecutable(@TempDir Path directory)
+            throws Exception {
+        Path state = Files.createDirectory(directory.resolve("state"));
+        ManagedAgentProperties properties = workerProperties(state);
+        // A copy, because /proc/<pid>/exe resolves a symlink back to its target.
+        Path runtime = Files.copy(Path.of("/bin/sh"), directory.resolve("qwen-runtime"),
+                java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        runtime.toFile().setExecutable(true);
+        properties.getRuntimeBroker().setNodeExecutable(runtime.toString());
+        Process worker = worker(runtime, state);
+        try {
+            ManagedAgentPreflight.Check check = ManagedAgentPreflight.workersCheck(
+                    properties, () -> List.of(worker.toHandle()), false);
+            assertEquals(ManagedAgentPreflight.Status.WARN, check.status(),
+                    check.detail());
+            assertEquals("1 Runtime worker(s) of an earlier run are alive (pid "
+                    + worker.pid() + ")", check.detail());
+        } finally {
+            reap(worker);
+        }
     }
 
     @Test
@@ -496,7 +520,7 @@ class ManagedAgentPreflightTest {
         try {
             ProcessHandle.Info info = worker.toHandle().info();
             assertTrue(ManagedAgentPreflight.isWorkerCommand(info.command().orElseThrow(),
-                    info.arguments().orElseThrow()), "the fixture keeps its argv");
+                    info.arguments().orElseThrow(), null), "the fixture keeps its argv");
             ManagedAgentPreflight.Check check = ManagedAgentPreflight.workersCheck(
                     properties, () -> List.of(worker.toHandle(), other.toHandle(),
                             notWorker.toHandle(), imitation.toHandle(),
@@ -529,10 +553,10 @@ class ManagedAgentPreflightTest {
             // The preflight process never counts itself.
             assertEquals(ManagedAgentPreflight.WorkerMatch.MATCH,
                     ManagedAgentPreflight.workerMatch(worker.toHandle(),
-                            state.toRealPath(), ProcessHandle.current().pid()));
+                            state.toRealPath(), ProcessHandle.current().pid(), null));
             assertEquals(ManagedAgentPreflight.WorkerMatch.OTHER,
                     ManagedAgentPreflight.workerMatch(worker.toHandle(),
-                            state.toRealPath(), worker.pid()));
+                            state.toRealPath(), worker.pid(), null));
         } finally {
             for (Process process : List.of(worker, other, notWorker, imitation, diagnostic)) {
                 reap(process);
@@ -1069,7 +1093,8 @@ class ManagedAgentPreflightTest {
                     "0.26.0");
             assertEquals(ManagedAgentPreflight.Status.FAIL, check.status());
             assertTrue(check.detail().endsWith(
-                    "/capabilities rejected the configured token (401)"),
+                    "/capabilities rejected the configured token on the"
+                            + " compatibility request (401)"),
                     check.detail());
             assertEquals("set QWEN_MANAGED_AGENT_HARNESS_TOKEN to the token"
                     + " the Harness accepts", check.fix());
@@ -1094,7 +1119,8 @@ class ManagedAgentPreflightTest {
                 "user:secret@harness.internal:8080",
                 "https://svc:tok|en@127.0.0.1:1",
                 "http://user:p@ss word@127.0.0.1:1",
-                "http://user:secret@127.0.0.1:1/?query")) {
+                "http://user:secret@127.0.0.1:1/?query",
+                "harness.internal:8080")) {
             ManagedAgentPreflight.Check check =
                     ManagedAgentPreflight.harnessCheck(harness(base), "0.26.0");
             assertEquals(ManagedAgentPreflight.Status.FAIL, check.status(),
@@ -1105,6 +1131,8 @@ class ManagedAgentPreflightTest {
             assertFalse(check.fix().contains("secret"), check.fix());
             assertTrue(check.fix().startsWith(
                     "set QWEN_MANAGED_AGENT_HARNESS_BASE_URL"), check.fix());
+            // A forgotten scheme is the likeliest typo, so the fix names http.
+            assertTrue(check.fix().contains("http"), check.fix());
         }
         // One trailing space still parses to a reachable probe, but the server
         // parses the property untrimmed and cannot start with it.
@@ -1131,18 +1159,60 @@ class ManagedAgentPreflightTest {
     }
 
     @Test
+    void keepsAnUnparsableCompatibilityAnswerOnOneLine() throws IOException {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        byte[] envelope = capabilities(DIGEST, "")
+                .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        // Invalid JSON: the newline and the escape are inside a string.
+        byte[] hostile = ("{\"v\":1,\"broken\":\"line\n\u001b[2JPASS harness"
+                + " forged\"}").getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        AtomicInteger requests = new AtomicInteger();
+        server.createContext("/capabilities", exchange -> {
+            byte[] body = requests.getAndIncrement() == 0 ? envelope : hostile;
+            exchange.getResponseHeaders().add("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
+        server.start();
+        try {
+            // The negation is refused; the parser's message quotes the body,
+            // so the row has to keep it on one line.
+            ManagedAgentPreflight.Check check = ManagedAgentPreflight.harnessCheck(
+                    harness("http://127.0.0.1:" + server.getAddress().getPort()),
+                    "0.26.0");
+            assertEquals(ManagedAgentPreflight.Status.FAIL, check.status(),
+                    check.detail());
+            assertFalse(check.detail().contains("\n"), check.detail());
+            assertFalse(check.detail().contains("\u001b"), check.detail());
+            assertFalse(check.detail().contains("forged PASS"), check.detail());
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
     void readsTheArgvARealRuntimeWorkerHas() {
         // EmbeddedRuntimeBroker builds [node, <entry>, managed-runtime-worker],
         // and ProcessHandle.Info.arguments() leaves out argv[0].
         assertTrue(ManagedAgentPreflight.isWorkerCommand("/opt/qwen-code/node/bin/node",
-                new String[] {"/opt/qwen-code/dist/cli.js", "managed-runtime-worker"}));
+                new String[] {"/opt/qwen-code/dist/cli.js", "managed-runtime-worker"},
+                null));
         assertFalse(ManagedAgentPreflight.isWorkerCommand("/opt/qwen-code/node/bin/node",
-                new String[] {"managed-runtime-worker"}));
+                new String[] {"managed-runtime-worker"}, null));
         // The executable is the operator-configured one, matched by prefix.
         assertTrue(ManagedAgentPreflight.isWorkerCommand("/usr/bin/nodejs",
-                new String[] {"/opt/qwen-code/dist/cli.js", "managed-runtime-worker"}));
+                new String[] {"/opt/qwen-code/dist/cli.js", "managed-runtime-worker"},
+                null));
         assertFalse(ManagedAgentPreflight.isWorkerCommand("tail",
-                new String[] {"-f", "/dev/null", "managed-runtime-worker"}));
+                new String[] {"-f", "/dev/null", "managed-runtime-worker"}, null));
+        // A renamed build the Broker was told to use is a worker too.
+        assertTrue(ManagedAgentPreflight.isWorkerCommand("/opt/qwen/bin/qwen-runtime",
+                new String[] {"/opt/qwen-code/dist/cli.js", "managed-runtime-worker"},
+                "/opt/qwen/bin/qwen-runtime"));
+        assertFalse(ManagedAgentPreflight.isWorkerCommand("/opt/qwen/bin/qwen-runtime",
+                new String[] {"/opt/qwen-code/dist/cli.js", "managed-runtime-worker"},
+                "/usr/bin/node"));
     }
 
     @Test
@@ -1365,8 +1435,11 @@ class ManagedAgentPreflightTest {
                             .status());
             assertEquals(ManagedAgentPreflight.Status.PASS,
                     ManagedAgentPreflight.harnessCheck(properties, null).status());
-            assertEquals("Bearer " + token, authorizations.get(0));
-            assertFalse(authorizations.contains(null), authorizations.toString());
+            // The probe's, then the negotiation's: both send the file's token.
+            assertEquals(2, authorizations.size(), authorizations.toString());
+            authorizations.forEach(actual ->
+                    assertEquals("Bearer " + token, actual,
+                            authorizations.toString()));
             // A direct token beside the file is refused, so it is not sent.
             authorizations.clear();
             ManagedAgentProperties conflicting = new ManagedAgentProperties();

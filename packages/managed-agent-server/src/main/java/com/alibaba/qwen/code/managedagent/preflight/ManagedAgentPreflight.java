@@ -598,8 +598,6 @@ public final class ManagedAgentPreflight {
             return unusableHarnessUrl();
         }
         String url = trimTrailingSlash(base) + "/capabilities";
-        // Credentials in a mistyped URL stay out of the report.
-        String shown = withoutUserInfo(url);
         try {
             HttpClient client = HttpClient.newBuilder()
                     .connectTimeout(Duration.ofMillis(TIMEOUT_MILLIS))
@@ -614,27 +612,27 @@ public final class ManagedAgentPreflight {
                     HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() == 401 || response.statusCode() == 403) {
                 return new Check("harness", Status.FAIL,
-                        shown + " rejected the configured token ("
+                        url + " rejected the configured token ("
                                 + response.statusCode() + ")",
                         "set " + tokenSetting + " to the token the"
                                 + " Harness accepts");
             }
             if (response.statusCode() != 200) {
                 return new Check("harness", Status.FAIL,
-                        shown + " answered " + response.statusCode(),
+                        url + " answered " + response.statusCode(),
                         "start a compatible Hosted Harness");
             }
-            return compatibilityCheck(shown, origin, response.body(), properties,
+            return compatibilityCheck(url, origin, response.body(), properties,
                     tokenSetting, StringUtils.isBlank(file), digestSetting,
                     expectedQwenCodeVersion);
         } catch (IOException | RuntimeException error) {
             return new Check("harness", Status.FAIL,
-                    shown + " is unreachable: " + printable(rootMessage(error)),
+                    url + " is unreachable: " + printable(rootMessage(error)),
                     "start `qwen serve --profile hosted-harness`");
         } catch (InterruptedException error) {
             Thread.currentThread().interrupt();
             return new Check("harness", Status.FAIL,
-                    shown + " probe was interrupted", null);
+                    url + " probe was interrupted", null);
         }
     }
 
@@ -676,7 +674,8 @@ public final class ManagedAgentPreflight {
             // The status alone: the response body is the Harness's text.
             return status == 401 || status == 403
                     ? new Check("harness", Status.FAIL,
-                            url + " rejected the configured token (" + status + ")",
+                            url + " rejected the configured token on the"
+                                    + " compatibility request (" + status + ")",
                             "set " + tokenSetting + " to the token the Harness accepts")
                     : new Check("harness", Status.FAIL,
                             url + " answered the compatibility request with HTTP " + status,
@@ -689,8 +688,8 @@ public final class ManagedAgentPreflight {
             return new Check("harness", Status.FAIL,
                     "the Harness base URL is not usable: "
                             + printable(rootMessage(unusable)),
-                    "set QWEN_MANAGED_AGENT_HARNESS_BASE_URL to the Harness origin,"
-                            + " without credentials, a query or a fragment");
+                    "set QWEN_MANAGED_AGENT_HARNESS_BASE_URL to the Harness http(s)"
+                            + " origin, without credentials, a query or a fragment");
         }
         Check lifecycle = lifecycleCheck(url, properties, capabilities, install);
         if (lifecycle != null) {
@@ -841,7 +840,8 @@ public final class ManagedAgentPreflight {
         List<Long> alive = new ArrayList<>();
         long uninspected = 0;
         for (ProcessHandle process : processes.get()) {
-            WorkerMatch match = workerMatch(process, state, self);
+            WorkerMatch match = workerMatch(process, state, self,
+                    broker.getNodeExecutable());
             if (match == WorkerMatch.UNREADABLE) {
                 uninspected++;
             } else if (match == WorkerMatch.MATCH
@@ -899,7 +899,8 @@ public final class ManagedAgentPreflight {
         MATCH, UNREADABLE, OTHER
     }
 
-    static WorkerMatch workerMatch(ProcessHandle process, Path state, long self) {
+    static WorkerMatch workerMatch(ProcessHandle process, Path state, long self,
+            String nodeExecutable) {
         ProcessHandle.Info info = process.info();
         if (process.pid() == self || info.arguments().isEmpty()) {
             return WorkerMatch.OTHER;
@@ -908,7 +909,8 @@ public final class ManagedAgentPreflight {
             return isWorkerArguments(info.arguments().get())
                     ? WorkerMatch.UNREADABLE : WorkerMatch.OTHER;
         }
-        if (!isWorkerCommand(info.command().get(), info.arguments().get())) {
+        if (!isWorkerCommand(info.command().get(), info.arguments().get(),
+                nodeExecutable)) {
             return WorkerMatch.OTHER;
         }
         try {
@@ -926,10 +928,20 @@ public final class ManagedAgentPreflight {
 
     // A worker runs `node <entry> managed-runtime-worker`. The command is
     // the executable's real path, and the arguments leave out argv[0], so the
-    // marker follows the entry's absolute path.
-    static boolean isWorkerCommand(String command, String[] arguments) {
-        return Path.of(command).getFileName().toString().startsWith("node")
-                && isWorkerArguments(arguments);
+    // marker follows the entry's absolute path. The Broker spawns whatever
+    // node-executable names, so a renamed build counts too; an earlier run's
+    // worker may still be a `node*` binary.
+    static boolean isWorkerCommand(String command, String[] arguments,
+            String nodeExecutable) {
+        return isWorkerArguments(arguments)
+                && (Path.of(command).getFileName().toString().startsWith("node")
+                        || samePath(command, nodeExecutable));
+    }
+
+    private static boolean samePath(String command, String configured) {
+        return configured != null && !configured.isBlank()
+                && Path.of(command).toAbsolutePath().normalize()
+                        .equals(Path.of(configured).toAbsolutePath().normalize());
     }
 
     private static boolean isWorkerArguments(String[] arguments) {
@@ -1693,14 +1705,10 @@ public final class ManagedAgentPreflight {
         return trimmed;
     }
 
-    private static String withoutUserInfo(String url) {
-        return url.strip().replaceFirst(
-                "^([A-Za-z][A-Za-z0-9+.-]*://)?[^/?#@]*@", "$1");
-    }
-
     // Nothing the URL contains reaches the report, so a typo cannot print
     // credentials. Null unless it is an HTTP origin without user information,
-    // a query or a fragment.
+    // a query or a fragment; the getUserInfo check is what keeps credentials
+    // out, since every URL that carries them is rejected here.
     private static URI harnessOrigin(String base) {
         try {
             URI origin = URI.create(base);
@@ -1719,8 +1727,8 @@ public final class ManagedAgentPreflight {
     private static Check unusableHarnessUrl() {
         return new Check("harness", Status.FAIL,
                 "the Harness base URL is not usable",
-                "set QWEN_MANAGED_AGENT_HARNESS_BASE_URL to the Harness origin,"
-                        + " without credentials, a query or a fragment");
+                "set QWEN_MANAGED_AGENT_HARNESS_BASE_URL to the Harness http(s)"
+                        + " origin, without credentials, a query or a fragment");
     }
 
     // Text another process controls, kept to one bounded line.
