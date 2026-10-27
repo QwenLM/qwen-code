@@ -27,7 +27,10 @@ import { t } from '../../i18n/index.js';
 import { SettingScope } from '../../config/settings.js';
 import { parseRule } from '@qwen-code/qwen-code-core/permissions/rule-parser.js';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
-import { tildeifyPath } from '@qwen-code/qwen-code-core/utils/paths.js';
+import {
+  shortenPath,
+  tildeifyPath,
+} from '@qwen-code/qwen-code-core/utils/paths.js';
 import { isPathWithinRoot } from '@qwen-code/qwen-code-core/utils/workspaceContext.js';
 import { toOriginalKey } from './key-map.js';
 import { useBatchSafeCursor, useBatchSafeState } from './batch-cursor.js';
@@ -47,7 +50,6 @@ import {
 import { clampDialogHeight } from '../utils/layoutUtils.js';
 
 import {
-  clipToWidth,
   getCachedStringWidth,
   sanitizeTerminalLine,
   truncateToWidth,
@@ -133,7 +135,9 @@ export function getPermissionScopeItems(): Array<{
     {
       label: t('User settings'),
       description: t('Saved in {{path}}', {
-        path: tildeifyPath(Storage.getGlobalSettingsPath()),
+        // Bounded so the file name survives the row's right-edge clip: 41 is
+        // the path column this row gets at an 80-column terminal.
+        path: shortenPath(tildeifyPath(Storage.getGlobalSettingsPath()), 41),
       }),
       value: SettingScope.User,
       key: 'user',
@@ -777,7 +781,7 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
             onSelectIndex={scopeList.selectIndex}
             renderLabel={(item, { titleColor }) => (
               <text fg={titleColor}>
-                {clipToWidth(
+                {truncateToWidth(
                   `${item.label}    ${item.description}`,
                   rowLabelWidth(areaWidth - 4, scopeItems.length),
                 )}

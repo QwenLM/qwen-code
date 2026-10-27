@@ -11,6 +11,12 @@ import { getPermScopeItems } from './PermissionsDialog.js';
 
 describe('getPermScopeItems', () => {
   const originalQwenHome = process.env['QWEN_HOME'];
+  // Anchored at the filesystem root so the fixture can never sit under the
+  // home directory, where tildeifyPath would rewrite it to `~/...`.
+  const qwenHome = nodePath.join(
+    nodePath.parse(os.tmpdir()).root,
+    'qwen-home-perm-dialog',
+  );
 
   afterEach(() => {
     if (originalQwenHome === undefined) {
@@ -28,10 +34,23 @@ describe('getPermScopeItems', () => {
   });
 
   it('names the resolved global directory when QWEN_HOME is set', () => {
-    const qwenHome = nodePath.join(os.tmpdir(), 'qwen-home-perm-dialog');
     process.env['QWEN_HOME'] = qwenHome;
     expect(getPermScopeItems()[1]?.description).toBe(
       `Saved in ${qwenHome}${nodePath.sep}settings.json`,
     );
+  });
+
+  it('keeps the settings file name when the global directory is deep', () => {
+    process.env['QWEN_HOME'] = nodePath.join(
+      qwenHome,
+      'srv',
+      'qwen-runtime',
+      'shared',
+      'fixtures',
+    );
+    const description = getPermScopeItems()[1]?.description ?? '';
+    expect(description.endsWith(`${nodePath.sep}settings.json`)).toBe(true);
+    // 50 is the description column this row gets at an 80-column terminal.
+    expect(description.length).toBeLessThanOrEqual(50);
   });
 });
