@@ -1893,6 +1893,42 @@ const EN: Messages = {
   'scheduledTasks.gate.hint':
     'Runs from the project directory before each scheduled fire, outside the model. Exit 0 with output wakes the session with that output attached as data; exit 0 with nothing on stdout skips the fire with no turn; a non-zero exit reports only its stderr, and only when the gate starts failing. It runs unattended only where the session would run the same command without asking — a saved Monitor(…) or Bash(…) rule, a read-only command, or an auto or yolo session; otherwise every fire is blocked.',
   'scheduledTasks.gate.cardPrefix': 'Gate:',
+  'autofixPrWatches.title': 'PR watches',
+  'autofixPrWatches.description':
+    'The /autofix-pr watches of your workspaces: what each round did, and what waits for you.',
+  'autofixPrWatches.empty':
+    'No /autofix-pr watch yet. Run /autofix-pr <PR> in a session to start one.',
+  'autofixPrWatches.loadFailed': 'Could not load the PR watches',
+  'autofixPrWatches.unreadable': (v) =>
+    `Could not read the watch of PR #${v?.pr ?? ''}: ${v?.error ?? ''}`,
+  'autofixPrWatches.phase.merged': 'PR merged — the watch can be stopped',
+  'autofixPrWatches.phase.closed': 'PR closed — the watch can be stopped',
+  'autofixPrWatches.phase.ended': (v) => `Stopped: ${v?.reason ?? ''}`,
+  'autofixPrWatches.phase.unscheduled': 'No scheduled check',
+  'autofixPrWatches.phase.fixing': (v) =>
+    `Fixing in the background (${v?.minutes ?? 0} min)`,
+  'autofixPrWatches.phase.fixingStarting': 'Fixing in the background',
+  'autofixPrWatches.phase.abandonedFix':
+    'A background fix was left behind — the next round redoes it',
+  'autofixPrWatches.phase.watching': 'Watching',
+  'autofixPrWatches.phase.idle': 'Not checked recently',
+  'autofixPrWatches.pushes': (v) => `Pushes ${v?.count ?? 0}/${v?.max ?? 0}`,
+  'autofixPrWatches.lastCheck': (v) => `Last check ${v?.when ?? ''}`,
+  'autofixPrWatches.neverChecked': 'Not checked yet',
+  'autofixPrWatches.lastRound': (v) => `Last round ${v?.when ?? ''}`,
+  'autofixPrWatches.needsHuman': (v) =>
+    `Needs your decision (${v?.count ?? 0})`,
+  'autofixPrWatches.staleTask':
+    'This task no longer drives the watch; it stops at its next fire.',
+  'autofixPrWatches.openSession': 'Open session',
+  'autofixPrWatches.stop': 'Stop watch',
+  'autofixPrWatches.stopHint': (v) =>
+    `Runs /autofix-pr stop ${v?.pr ?? ''} in the session that owns the watch`,
+  'autofixPrWatches.outsideDaemon':
+    'Owned by a session outside this Web Shell (a terminal, perhaps): stop it there.',
+  'autofixPrWatches.stopFailed': 'Could not stop the watch',
+  'autofixPrWatches.noOwner': (v) =>
+    `No session of this Web Shell runs it. In a session of its workspace, /autofix-pr stop ${v?.pr ?? ''} cleans it up, or /autofix-pr resume ${v?.pr ?? ''} starts it again.`,
   'scheduledTasks.gate.notRunYet': 'gate not run yet',
   'scheduledTasks.gate.neverDelivered': 'never',
   'scheduledTasks.gate.lastFailed': 'last run failed',
@@ -2272,6 +2308,7 @@ const EN: Messages = {
   'sidebar.scheduledTasks': 'Scheduled Tasks',
   'sidebar.workflows': 'Workflows',
   'sidebar.goals': 'Goals',
+  'sidebar.prWatches': 'PR watches',
   'sidebar.themeLight': 'Switch to light theme',
   'sidebar.themeDark': 'Switch to dark theme',
   'sidebar.collapse': 'Collapse',
@@ -6357,6 +6394,40 @@ const ZH: Messages = {
   'scheduledTasks.gate.hint':
     '每次定时触发前在模型之外、从项目目录运行。退出码 0 且有输出时唤醒会话，并把输出作为数据附上；退出码 0 且 stdout 为空则跳过本次触发、不产生回合；非零退出只报告其 stderr，且只在闸门开始失败时报告。只有在会话本身不经询问就会运行这条命令时(已保存的 Monitor(…) 或 Bash(…) 规则、只读命令，或 auto/yolo 模式)才会无人值守运行，否则每次触发都会被阻止。',
   'scheduledTasks.gate.cardPrefix': '闸门：',
+  'autofixPrWatches.title': 'PR 监视',
+  'autofixPrWatches.description':
+    '各工作区的 /autofix-pr 监视：每一轮做了什么，哪些事在等你决定。',
+  'autofixPrWatches.empty':
+    '还没有 /autofix-pr 监视。在会话里运行 /autofix-pr <PR> 即可开始。',
+  'autofixPrWatches.loadFailed': '加载 PR 监视失败',
+  'autofixPrWatches.unreadable': (v) =>
+    `读取 PR #${v?.pr ?? ''} 的监视失败：${v?.error ?? ''}`,
+  'autofixPrWatches.phase.merged': 'PR 已合入，可以停止监视',
+  'autofixPrWatches.phase.closed': 'PR 已关闭，可以停止监视',
+  'autofixPrWatches.phase.ended': (v) => `已停止：${v?.reason ?? ''}`,
+  'autofixPrWatches.phase.unscheduled': '没有定时检查',
+  'autofixPrWatches.phase.fixing': (v) =>
+    `后台修复进行中（${v?.minutes ?? 0} 分钟）`,
+  'autofixPrWatches.phase.fixingStarting': '后台修复进行中',
+  'autofixPrWatches.phase.abandonedFix': '后台修复被中断，下一轮会重做',
+  'autofixPrWatches.phase.watching': '监视中',
+  'autofixPrWatches.phase.idle': '最近没有检查',
+  'autofixPrWatches.pushes': (v) => `推送 ${v?.count ?? 0}/${v?.max ?? 0}`,
+  'autofixPrWatches.lastCheck': (v) => `上次检查 ${v?.when ?? ''}`,
+  'autofixPrWatches.neverChecked': '尚未检查',
+  'autofixPrWatches.lastRound': (v) => `上一轮 ${v?.when ?? ''}`,
+  'autofixPrWatches.needsHuman': (v) => `待你决定（${v?.count ?? 0}）`,
+  'autofixPrWatches.staleTask':
+    '这个任务已不再驱动该监视，下次触发时会自行停止。',
+  'autofixPrWatches.openSession': '打开会话',
+  'autofixPrWatches.stop': '停止监视',
+  'autofixPrWatches.stopHint': (v) =>
+    `在该监视所属的会话里运行 /autofix-pr stop ${v?.pr ?? ''}`,
+  'autofixPrWatches.outsideDaemon':
+    '属于本 Web Shell 之外的会话（例如终端），请在那里停止。',
+  'autofixPrWatches.stopFailed': '停止监视失败',
+  'autofixPrWatches.noOwner': (v) =>
+    `本 Web Shell 中没有会话在运行它。在该工作区的会话里，/autofix-pr stop ${v?.pr ?? ''} 可清理它，/autofix-pr resume ${v?.pr ?? ''} 可重新开始。`,
   'scheduledTasks.gate.notRunYet': '闸门尚未运行',
   'scheduledTasks.gate.neverDelivered': '从未',
   'scheduledTasks.gate.lastFailed': '上次运行失败',
@@ -6703,6 +6774,7 @@ const ZH: Messages = {
   'sidebar.scheduledTasks': '定时任务',
   'sidebar.workflows': '工作流',
   'sidebar.goals': '目标',
+  'sidebar.prWatches': 'PR 监视',
   'sidebar.themeLight': '切换到浅色主题',
   'sidebar.themeDark': '切换到深色主题',
   'sidebar.collapse': '收起',
