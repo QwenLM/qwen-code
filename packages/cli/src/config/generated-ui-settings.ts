@@ -65,6 +65,9 @@ export function prepareBundledGeneratedUi(
       args: [join(assetsDir, entry)],
       includeTools: ['generated_ui_show'],
       trust: false,
+      // Declared up front: the model should see the view as an option when it
+      // decides how to answer, not only after searching for deferred tools.
+      alwaysLoadTools: true,
     },
   };
 }
