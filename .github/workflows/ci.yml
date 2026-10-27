@@ -1735,7 +1735,7 @@ jobs:
             exit 0
           fi
           # A recoverable setup gap should not emit a failure annotation.
-          if GITHUB_ACTIONS= bash .github/scripts/ecs-runner/check-font-baseline.sh; then
+          if GITHUB_ACTIONS='' bash .github/scripts/ecs-runner/check-font-baseline.sh; then
             exit 0
           fi
           if [ "$(id -u)" -eq 0 ]; then
