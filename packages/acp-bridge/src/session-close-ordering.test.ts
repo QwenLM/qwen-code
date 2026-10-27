@@ -5,8 +5,15 @@
  */
 
 import { ClientSideConnection } from '@agentclientprotocol/sdk';
-import { describe, expect, it, vi } from 'vitest';
-import { makeBridge, makeChannel, WS_A } from './internal/testUtils.js';
+import { describe, expect, it, vi, type MockInstance } from 'vitest';
+import type { AcpSessionBridge } from './bridgeTypes.js';
+import {
+  collectedAfterGc,
+  makeBridge,
+  makeChannel,
+  nativeRaceRetainsValues,
+  WS_A,
+} from './internal/testUtils.js';
 import { BridgeChannelClosedError } from './status.js';
 
 function deferred<T>() {
@@ -17,6 +24,28 @@ function deferred<T>() {
     reject = rej;
   });
   return { promise, resolve, reject };
+}
+
+// Switches in a frame of its own, so nothing but the returned WeakRef points
+// at the first response once it returns. The spy records every value it
+// returns, so its history is cleared after each switch.
+async function switchModels(
+  bridge: AcpSessionBridge,
+  sessionId: string,
+  setModel: MockInstance<ClientSideConnection['unstable_setSessionModel']>,
+): Promise<WeakRef<object>> {
+  let first: WeakRef<object> | undefined;
+  for (let call = 0; call < 3; call++) {
+    const response = {};
+    setModel.mockResolvedValueOnce(response);
+    await bridge.setSessionModel(sessionId, {
+      sessionId,
+      modelId: `model-${call}`,
+    });
+    setModel.mockClear();
+    first ??= new WeakRef(response);
+  }
+  return first!;
 }
 
 describe('session calls racing the transport', () => {
@@ -52,6 +81,29 @@ describe('session calls racing the transport', () => {
     } finally {
       setModel.mockRestore();
       reply.resolve({});
+      await bridge.shutdown();
+    }
+  });
+
+  it('leave each model switch response collectable while the session stays open', async ({
+    skip,
+  }) => {
+    skip(
+      !(await nativeRaceRetainsValues()),
+      'native Promise.race does not retain finished values on this runtime',
+    );
+    const handle = makeChannel();
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const setModel = vi.spyOn(
+      ClientSideConnection.prototype,
+      'unstable_setSessionModel',
+    );
+    try {
+      const { sessionId } = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const first = await switchModels(bridge, sessionId, setModel);
+      expect(await collectedAfterGc(first)).toBe(true);
+    } finally {
+      setModel.mockRestore();
       await bridge.shutdown();
     }
   });
