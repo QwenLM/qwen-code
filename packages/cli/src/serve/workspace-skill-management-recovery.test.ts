@@ -678,4 +678,130 @@ describe('workspace Skill install recovery', () => {
       else process.env['QWEN_HOME'] = previousQwenHome;
     }
   });
+
+  it('reclaims dead-owner install artifacts and keeps a live peer artifact', async () => {
+    const workspace = await temporary();
+    const source = await temporary();
+    await fs.writeFile(path.join(source, 'SKILL.md'), markdown('foo'));
+    const workDir = path.join(workspace, '.qwen');
+    await fs.mkdir(workDir, { recursive: true });
+    const live = path.join(workDir, '.skills-foo.installing-55555-live');
+    const dead = path.join(workDir, '.skills-foo.installing-424242-dead');
+    await fs.mkdir(live);
+    await fs.mkdir(dead);
+    const kill = vi.spyOn(process, 'kill').mockImplementation((pid: number) => {
+      if (pid === 424242) {
+        throw Object.assign(new Error('no such process'), { code: 'ESRCH' });
+      }
+      return true;
+    });
+
+    try {
+      await installWorkspaceSkill(workspace, {
+        name: 'foo',
+        scope: 'workspace',
+        source: { type: 'folder', path: source },
+      });
+      expect((await fs.lstat(live)).isDirectory()).toBe(true);
+      await expect(fs.access(dead)).rejects.toThrow();
+    } finally {
+      kill.mockRestore();
+    }
+  });
+
+  it('registers the staging directory before it exists on disk', async () => {
+    const workspace = await temporary();
+    const source = await temporary();
+    const invalid = await temporary();
+    await fs.writeFile(path.join(source, 'SKILL.md'), markdown('foo'));
+    await fs.writeFile(path.join(source, 'a.txt'), 'must survive');
+    await fs.writeFile(path.join(invalid, 'SKILL.md'), markdown('other'));
+    const previousQwenHome = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = path.join(workspace, '.qwen');
+    const nativeMkdir = fs.mkdir.bind(fs);
+    let staging = '';
+    let parked!: () => void;
+    let release!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      parked = resolve;
+    });
+    const pause = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let parkedOnce = false;
+    const mkdirSpy = vi.spyOn(fs, 'mkdir').mockImplementation(((
+      ...args: Parameters<typeof fs.mkdir>
+    ) =>
+      Promise.resolve(nativeMkdir(...args)).then(async (created) => {
+        const target = String(args[0]);
+        if (!parkedOnce && target.includes('.skills-foo.installing-')) {
+          parkedOnce = true;
+          staging = target;
+          parked();
+          await pause;
+        }
+        return created;
+      })) as typeof fs.mkdir);
+    try {
+      const victim = installWorkspaceSkill(workspace, {
+        name: 'foo',
+        scope: 'workspace',
+        source: { type: 'folder', path: source },
+      });
+      await ready;
+      await expect(
+        installWorkspaceSkill(workspace, {
+          name: 'foo',
+          scope: 'global',
+          source: { type: 'folder', path: invalid },
+        }),
+      ).rejects.toMatchObject({ code: 'skill_name_mismatch' });
+      expect((await fs.lstat(staging)).isDirectory()).toBe(true);
+      release();
+      await victim;
+      expect(
+        (await fs.readdir(path.join(workspace, '.qwen/skills/foo'))).sort(),
+      ).toEqual(['SKILL.md', 'a.txt']);
+    } finally {
+      release();
+      mkdirSpy.mockRestore();
+      if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = previousQwenHome;
+    }
+  });
+
+  it('rejects a package whose staged file disappears before commit', async () => {
+    const workspace = await temporary();
+    const source = await temporary();
+    await fs.writeFile(path.join(source, 'SKILL.md'), markdown('foo'));
+    await fs.writeFile(path.join(source, 'a.txt'), 'must survive');
+    const nativeCopyFile = fs.copyFile.bind(fs);
+    const staged: string[] = [];
+    const copyFile = vi
+      .spyOn(fs, 'copyFile')
+      .mockImplementation(async (from, to) => {
+        await nativeCopyFile(from, to);
+        staged.push(String(to));
+        const [first] = staged;
+        if (staged.length === 2 && first) await fs.rm(first);
+      });
+
+    try {
+      await expect(
+        installWorkspaceSkill(workspace, {
+          name: 'foo',
+          scope: 'workspace',
+          source: { type: 'folder', path: source },
+        }),
+      ).rejects.toMatchObject({
+        code: 'skill_staging_failed',
+        statusCode: 500,
+      });
+      await expect(
+        fs.access(path.join(workspace, '.qwen/skills/foo')),
+      ).rejects.toThrow();
+    } finally {
+      copyFile.mockRestore();
+    }
+  });
 });

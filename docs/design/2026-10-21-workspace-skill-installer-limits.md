@@ -308,16 +308,20 @@ package array. No new type of temp directory and no new route.
 
 **Retry and cleanup isolation.** Before a Contents API failure falls back
 to git, empty the same staging directory and reset paths, file count, and
-byte count together. Artifact cleanup matches the complete suffix after
-the skill-specific prefix, so installing `foo` cannot sweep the staging
-or backup of `foo.backup-1` or `foo.installing-abc123`. Requested names
-that the sweep itself would recognise — a `.backup-` or `.installing-`
-suffix whose trailing characters are limited to `[A-Za-z0-9-]` — are
-rejected with `invalid_skill_name`; without that reservation a committed
-install named `.foo.installing-123456` would be deleted by a later install
-of `foo`. The tightening also rejects names such as
-`release.installing-notes`, which the sweep cannot distinguish from a
-crash artifact. This does not introduce cross-process install locks.
+byte count together. Staging and backup names embed the owning pid, so a
+second daemon reclaims a crashed run's artifacts but leaves a live peer's
+in place; the in-process registry covers the window from before the
+staging directory exists to after commit. Artifact cleanup matches the
+complete suffix after the skill-specific prefix, so installing `foo`
+cannot sweep the staging or backup of `foo.backup-1` or
+`foo.installing-abc123`. Requested names are rejected only when the sweep
+could reach them: a leading-dot name ending in `.backup-` or
+`.installing-` followed by `[A-Za-z0-9-]`, or a name ending in a
+two-number `backup`/`installing` suffix that the skill loaders already
+skip. Names such as `release.installing-notes` or `db.backup-2024` carry
+no leading dot and stay installable. This does not introduce
+cross-process install locks; the route mutex keys on the resolved skills
+directory so aliased scopes serialize.
 
 **Keep one size error code.** `skill_package_too_large` (413) still covers
 the archive, one file, and the package total. Messages stay specific.
@@ -442,9 +446,13 @@ the allowed size`.
   `Skill package has too many files (max 2000)` and `Skill ZIP contains
 too many files (max 2000)`.
 - A staging write fault (an errno in `ENOSPC`, `EDQUOT`, `EROFS`, `EIO`,
-  `EMFILE`, `ENFILE`, `EBUSY`) whose path is the staging directory:
-  `500 skill_staging_failed`. Source-side `ENOENT`, `ENOTDIR`, and
-  `EACCES` keep the per-source 400/502 mapping.
+  `EMFILE`, `ENFILE`, `EBUSY`) raised by a write into the staging
+  directory: `500 skill_staging_failed`. The folder copy is the
+  exception: Node reports both the source `path` and the target `dest`
+  for every `copyFile` failure, so only the write-only errnos `ENOSPC`,
+  `EDQUOT`, and `EROFS` map to 500; `EIO` and the other read-or-write
+  errnos keep the per-source 400/502 mapping. A staged file that
+  disappeared before finalize is also `500 skill_staging_failed`.
 - Empty package, bad paths, duplicates, and excess depth: unchanged
   `invalid_skill_package` messages and status 400.
 - A folder or ZIP whose expanded size is over 6 MiB and within the new

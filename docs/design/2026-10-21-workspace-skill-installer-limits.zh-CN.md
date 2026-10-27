@@ -261,14 +261,17 @@ MAX_ZIP_ARCHIVE_BYTES   = 3 * floor(10_485_430 / 4) // 7_864_071
 那里，并去掉内存中的整包数组。不新增另一种临时目录，也不新增路由。
 
 **重试与清理隔离。** Contents API 失败后回退到 git 之前，就地清空暂存
-目录，同时重置路径集合、文件数与字节数。清理安装产物时匹配技能专属
-前缀后的完整后缀，安装 `foo` 不会误删 `foo.backup-1` 或
-`foo.installing-abc123` 的暂存和备份。请求名若本身命中清扫语言——以
-`.backup-` 或 `.installing-` 结尾，且其后缀字符限于 `[A-Za-z0-9-]`——
-会以 `invalid_skill_name` 拒绝；否则，一个名为 `.foo.installing-123456`
-的已提交安装会被后来安装 `foo` 的请求删除。该收紧也会拒绝
-`release.installing-notes` 这类名字，因为清扫无法把它与崩溃残留区分开。
-本次不引入跨进程安装锁。
+目录，同时重置路径集合、文件数与字节数。暂存与备份目录名内嵌持有进程
+的 pid，因此第二个守护进程会回收崩溃运行的残留，但不会删除活跃对等进程
+的目录；进程内登记表覆盖从暂存目录创建之前到提交之后的窗口。清理安装
+产物时匹配技能专属前缀后的完整后缀，安装 `foo` 不会误删
+`foo.backup-1` 或 `foo.installing-abc123` 的暂存和备份。只有清扫真正
+可能触及的请求名才以 `invalid_skill_name` 拒绝：以点开头且以
+`.backup-` 或 `.installing-` 加 `[A-Za-z0-9-]` 结尾的名字，或者以技能
+加载器本就跳过的双数字 `backup`/`installing` 后缀结尾的名字。
+`release.installing-notes`、`db.backup-2024` 这类不带前导点的名字仍可
+安装。本次不引入跨进程安装锁；路由互斥锁按解析后的技能目录加键，使
+别名 scope 串行。
 
 **保留一个大小错误码。** `skill_package_too_large`（413）仍覆盖压缩包、
 单个文件和包总量。文案保持区分。文件数使用单独的错误码，以便 Web Shell
@@ -370,9 +373,12 @@ closes` 在第三次 `assertGenerationOpen` 时抛出，并期望不存在 `.qwe
 - 已安装文件超过 2000 个：`400 skill_too_many_files`。文案：
   `Skill package has too many files (max 2000)` 和
   `Skill ZIP contains too many files (max 2000)`。
-- 暂存目录发生写入故障（errno 为 `ENOSPC`、`EDQUOT`、`EROFS`、`EIO`、
-  `EMFILE`、`ENFILE`、`EBUSY`）：`500 skill_staging_failed`。来源侧
-  `ENOENT`、`ENOTDIR`、`EACCES` 保持按来源映射为 400/502。
+- 写入暂存目录时抛出写入故障（errno 为 `ENOSPC`、`EDQUOT`、`EROFS`、
+  `EIO`、`EMFILE`、`ENFILE`、`EBUSY`）：`500 skill_staging_failed`。
+  文件夹复制是例外：Node 对每次 `copyFile` 失败都会同时报告来源 `path`
+  与目标 `dest`，因此只有只可能来自写入的 `ENOSPC`、`EDQUOT`、`EROFS`
+  映射为 500；`EIO` 等读写皆可能的 errno 保持按来源映射为 400/502。
+  暂存文件在 finalize 前消失同样为 `500 skill_staging_failed`。
 - 空包、非法路径、重复路径和过深目录：`invalid_skill_package` 的文案和
   HTTP 400 不变。
 - 展开后超过 6 MiB、但仍在新上限内的文件夹或 ZIP 可以安装。2 MiB 再加

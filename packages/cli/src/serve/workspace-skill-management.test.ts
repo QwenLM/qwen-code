@@ -15,6 +15,27 @@ import {
   MAX_ZIP_ARCHIVE_BYTES,
 } from './workspace-skill-management.js';
 
+const streamPromises = vi.hoisted(() => ({ failNextPipeline: false }));
+vi.mock('node:stream/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:stream/promises')>();
+  return {
+    ...actual,
+    pipeline: vi.fn((...args: unknown[]) => {
+      if (streamPromises.failNextPipeline) {
+        streamPromises.failNextPipeline = false;
+        return Promise.reject(
+          Object.assign(new Error('no space left on device'), {
+            code: 'ENOSPC',
+          }),
+        );
+      }
+      return (actual.pipeline as (...inner: unknown[]) => Promise<unknown>)(
+        ...args,
+      );
+    }),
+  };
+});
+
 const temporaryDirectories: string[] = [];
 
 function skillMarkdown(name: string): string {
@@ -133,6 +154,7 @@ async function temporaryDirectory(label: string): Promise<string> {
 afterEach(async () => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+  streamPromises.failNextPipeline = false;
   await Promise.all(
     temporaryDirectories
       .splice(0)
@@ -473,9 +495,8 @@ describe('workspace Skill management', () => {
     for (const name of [
       'foo.backup-1-2',
       'foo.installing-12345-67890',
-      'foo.backup-1-2-extra',
       '.probe.installing-123456',
-      'release.installing-notes',
+      '.foo.backup-abc123',
     ]) {
       await expect(
         installWorkspaceSkill(workspace, {
@@ -498,6 +519,10 @@ describe('workspace Skill management', () => {
       'foo-backup-1-2',
       'foo.backup.notes',
       'foo.backup-1_2',
+      'foo.backup-1-2-extra',
+      'release.installing-notes',
+      'db.backup-2024',
+      'db.backup-2024-1234-archive',
     ]) {
       await fs.writeFile(path.join(source, 'SKILL.md'), skillMarkdown(name));
 
@@ -788,10 +813,11 @@ describe('workspace Skill management', () => {
     const source = await temporaryDirectory('qwen-skill-source-');
     const sourceFile = path.join(source, 'SKILL.md');
     await fs.writeFile(sourceFile, skillMarkdown('source-fault'));
-    vi.spyOn(fs, 'copyFile').mockImplementationOnce(async () => {
+    vi.spyOn(fs, 'copyFile').mockImplementationOnce(async (_source, target) => {
       throw Object.assign(new Error('input/output error'), {
         code: 'EIO',
         path: sourceFile,
+        dest: String(target),
       });
     });
 
@@ -802,6 +828,227 @@ describe('workspace Skill management', () => {
         source: { type: 'folder', path: source },
       }),
     ).rejects.toMatchObject({ code: 'invalid_skill_folder', statusCode: 400 });
+  });
+
+  it('reports a path-less staging write fault on the GitHub path', async () => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(new Uint8Array(8));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(githubSkillListing())
+        .mockResolvedValueOnce(new Response(body, { status: 200 })),
+    );
+    vi.spyOn(fs, 'open').mockResolvedValueOnce({
+      write: async () => {
+        throw Object.assign(new Error('no space left on device'), {
+          code: 'ENOSPC',
+        });
+      },
+      close: async () => undefined,
+    } as unknown as Awaited<ReturnType<typeof fs.open>>);
+
+    await expect(
+      installWorkspaceSkill(workspace, {
+        name: 'pathless-fault',
+        scope: 'workspace',
+        source: {
+          type: 'github',
+          url: 'https://github.com/owner/repo/blob/main/SKILL.md',
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: 'skill_staging_failed',
+      statusCode: 500,
+    });
+    expect(cancelled).toBe(true);
+    await expectNoPartialInstall(workspace, 'pathless-fault');
+  });
+
+  it('reports a path-less staging fault when writing an empty GitHub file', async () => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(githubSkillListing())
+        .mockResolvedValueOnce(new Response(null, { status: 200 })),
+    );
+    vi.spyOn(fs, 'writeFile').mockRejectedValueOnce(
+      Object.assign(new Error('no space left on device'), { code: 'ENOSPC' }),
+    );
+
+    await expect(
+      installWorkspaceSkill(workspace, {
+        name: 'empty-fault',
+        scope: 'workspace',
+        source: {
+          type: 'github',
+          url: 'https://github.com/owner/repo/blob/main/SKILL.md',
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: 'skill_staging_failed',
+      statusCode: 500,
+    });
+    await expectNoPartialInstall(workspace, 'empty-fault');
+  });
+
+  it('reports a path-less staging fault when creating a staging subdirectory', async () => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+    const source = await temporaryDirectory('qwen-skill-source-');
+    await fs.writeFile(
+      path.join(source, 'SKILL.md'),
+      skillMarkdown('mkdir-fault'),
+    );
+    const nativeMkdir = fs.mkdir.bind(fs);
+    let stagingMkdirs = 0;
+    vi.spyOn(fs, 'mkdir').mockImplementation(((
+      ...args: Parameters<typeof fs.mkdir>
+    ) => {
+      if (
+        String(args[0]).includes('.skills-mkdir-fault.installing-') &&
+        ++stagingMkdirs === 2
+      ) {
+        return Promise.reject(
+          Object.assign(new Error('no space left on device'), {
+            code: 'ENOSPC',
+          }),
+        );
+      }
+      return nativeMkdir(...args);
+    }) as typeof fs.mkdir);
+
+    await expect(
+      installWorkspaceSkill(workspace, {
+        name: 'mkdir-fault',
+        scope: 'workspace',
+        source: { type: 'folder', path: source },
+      }),
+    ).rejects.toMatchObject({
+      code: 'skill_staging_failed',
+      statusCode: 500,
+    });
+    await expectNoPartialInstall(workspace, 'mkdir-fault');
+  });
+
+  it('reports a path-less staging write fault on the ZIP path', async () => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+    streamPromises.failNextPipeline = true;
+
+    await expect(
+      installWorkspaceSkill(workspace, {
+        name: 'zip-staging-fault',
+        scope: 'workspace',
+        source: {
+          type: 'zip',
+          contentBase64: await zip({
+            'zip-staging-fault/SKILL.md': skillMarkdown('zip-staging-fault'),
+          }),
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: 'skill_staging_failed',
+      statusCode: 500,
+    });
+    await expectNoPartialInstall(workspace, 'zip-staging-fault');
+  });
+
+  it('cancels a GitHub file body when the generation closes before the read', async () => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+    let cancelled = false;
+    let closed = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(new TextEncoder().encode(skillMarkdown('closed')));
+        controller.close();
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(githubSkillListing())
+        .mockImplementationOnce(async () => {
+          closed = true;
+          return new Response(body, { status: 200 });
+        }),
+    );
+    const assertGenerationOpen = () => {
+      if (closed) {
+        const error = new Error('generation closed');
+        error.name = 'WorkspaceGenerationClosedError';
+        throw error;
+      }
+    };
+
+    await expect(
+      installWorkspaceSkill(
+        workspace,
+        {
+          name: 'closed-skill',
+          scope: 'workspace',
+          source: {
+            type: 'github',
+            url: 'https://github.com/owner/repo/blob/main/SKILL.md',
+          },
+        },
+        undefined,
+        assertGenerationOpen,
+      ),
+    ).rejects.toMatchObject({ name: 'WorkspaceGenerationClosedError' });
+    expect(cancelled).toBe(true);
+  });
+
+  it('cancels a GitHub file body when the staging file cannot be opened', async () => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(new Uint8Array(8));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(githubSkillListing())
+        .mockResolvedValueOnce(new Response(body, { status: 200 })),
+    );
+    vi.spyOn(fs, 'open').mockRejectedValueOnce(
+      Object.assign(new Error('too many open files'), { code: 'EMFILE' }),
+    );
+
+    await expect(
+      installWorkspaceSkill(workspace, {
+        name: 'open-fault',
+        scope: 'workspace',
+        source: {
+          type: 'github',
+          url: 'https://github.com/owner/repo/blob/main/SKILL.md',
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: 'skill_staging_failed',
+      statusCode: 500,
+    });
+    expect(cancelled).toBe(true);
+    await expectNoPartialInstall(workspace, 'open-fault');
   });
 
   it('installs a ZIP entry larger than the previous 2 MiB file cap', async () => {

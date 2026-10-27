@@ -52,6 +52,25 @@ const execFileAsync = promisify(execFile);
 // concurrent install that has not committed yet.
 const liveInstallArtifacts = new Set<string>();
 
+function artifactToken(): string {
+  return `${process.pid}-${randomUUID().replaceAll('-', '').slice(0, 8)}`;
+}
+
+// Artifact names embed the owning pid so a second daemon can reclaim a crashed
+// run without deleting a live peer's staging directory.
+function artifactOwnerIsLive(suffix: string): boolean {
+  const match = /^(\d+)-/.exec(suffix);
+  if (!match) return false;
+  const pid = Number(match[1]);
+  if (pid <= 0 || pid === process.pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH';
+  }
+}
+
 interface PackageState {
   count: number;
   totalBytes: number;
@@ -93,7 +112,10 @@ export function validateWorkspaceSkillName(name: string): string {
 }
 
 function rejectInstallArtifactSkillName(name: string): void {
-  if (/\.(backup|installing)-[A-Za-z0-9-]+$/.test(name)) {
+  if (
+    /^\..*\.(backup|installing)-[A-Za-z0-9-]+$/.test(name) ||
+    /\.(backup|installing)-\d+-\d+$/.test(name)
+  ) {
     skillError(
       'invalid_skill_name',
       'Skill name ends with a reserved install-artifact suffix',
@@ -130,31 +152,44 @@ const STAGING_DISK_ERRNOS = new Set([
   'EBUSY',
 ]);
 
-function isStagingFailure(
-  error: unknown,
-  staging: string,
-): error is NodeJS.ErrnoException {
-  if (!(error instanceof Error)) return false;
-  const { code } = error as NodeJS.ErrnoException;
-  if (!code || !STAGING_DISK_ERRNOS.has(code)) return false;
-  return [
-    (error as NodeJS.ErrnoException).path,
-    (error as { dest?: unknown }).dest,
-  ].some(
-    (failedPath) =>
-      typeof failedPath === 'string' &&
-      (failedPath === staging ||
-        failedPath.startsWith(`${staging}${path.sep}`)),
-  );
-}
+// Errnos a read cannot produce, so a copyFile failure carrying one of these
+// is the destination write. Node reports both `path` (source) and `dest`
+// (target) for every copyFile error, so the other errnos stay source-side.
+const COPY_STAGING_ERRNOS = new Set(['ENOSPC', 'EDQUOT', 'EROFS']);
 
-function rethrowStagingFailure(error: unknown, staging: string): void {
-  if (!isStagingFailure(error, staging)) return;
-  throw new WorkspaceSkillManagementError(
+function stagingWriteError(
+  error: unknown,
+): WorkspaceSkillManagementError | undefined {
+  if (!(error instanceof Error)) return undefined;
+  if (error instanceof WorkspaceSkillManagementError) return undefined;
+  if (error.name === 'WorkspaceGenerationClosedError') return undefined;
+  const { code } = error as NodeJS.ErrnoException;
+  if (!code || !STAGING_DISK_ERRNOS.has(code)) return undefined;
+  return new WorkspaceSkillManagementError(
     'skill_staging_failed',
     error.message,
     500,
   );
+}
+
+async function stageWrite<T>(write: () => Promise<T>): Promise<T> {
+  try {
+    return await write();
+  } catch (error) {
+    throw stagingWriteError(error) ?? error;
+  }
+}
+
+async function copyIntoStaging(source: string, target: string): Promise<void> {
+  try {
+    await fs.copyFile(source, target);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code && COPY_STAGING_ERRNOS.has(code)) {
+      throw stagingWriteError(error) ?? error;
+    }
+    throw error;
+  }
 }
 
 function normalizeRelativePath(value: string): string {
@@ -222,7 +257,7 @@ async function prepareTarget(
   assertGenerationOpen?: () => void,
 ): Promise<void> {
   assertGenerationOpen?.();
-  await fs.mkdir(path.dirname(target), { recursive: true });
+  await stageWrite(() => fs.mkdir(path.dirname(target), { recursive: true }));
   assertGenerationOpen?.();
 }
 
@@ -287,14 +322,21 @@ async function writeGitHubFile(
       413,
     );
   }
-  await prepareTarget(staged.target, assertGenerationOpen);
   if (!response.body) {
-    await fs.writeFile(staged.target, '');
+    await prepareTarget(staged.target, assertGenerationOpen);
+    await stageWrite(() => fs.writeFile(staged.target, ''));
     commitStagedFile(staged.normalized, 0, state);
     return;
   }
+  let handle: Awaited<ReturnType<typeof fs.open>>;
+  try {
+    await prepareTarget(staged.target, assertGenerationOpen);
+    handle = await stageWrite(() => fs.open(staged.target, 'w'));
+  } catch (error) {
+    await response.body.cancel().catch(() => undefined);
+    throw error;
+  }
   const reader = response.body.getReader();
-  const handle = await fs.open(staged.target, 'w');
   let size = 0;
   try {
     while (true) {
@@ -316,7 +358,9 @@ async function writeGitHubFile(
       }
       let offset = 0;
       while (offset < value.byteLength) {
-        const result = await handle.write(value.subarray(offset));
+        const result = await stageWrite(() =>
+          handle.write(value.subarray(offset)),
+        );
         if (result.bytesWritten <= 0) {
           throw new Error('Failed to write Skill file');
         }
@@ -324,8 +368,9 @@ async function writeGitHubFile(
       }
     }
   } finally {
+    await reader.cancel().catch(() => undefined);
     reader.releaseLock();
-    await handle.close();
+    await stageWrite(() => handle.close());
   }
   commitStagedFile(staged.normalized, size, state);
 }
@@ -490,7 +535,6 @@ async function downloadGitHubDirectoryWithGit(
     ) {
       throw error;
     }
-    rethrowStagingFailure(error, staging);
     throw new WorkspaceSkillManagementError(
       'github_skill_download_failed',
       `Failed to download GitHub Skill: ${error instanceof Error ? error.message : String(error)}`,
@@ -694,7 +738,7 @@ async function writeZipEntry(
       callback(null, chunk);
     },
   });
-  await pipeline(stream, guard, createWriteStream(target));
+  await stageWrite(() => pipeline(stream, guard, createWriteStream(target)));
   return size;
 }
 
@@ -843,7 +887,7 @@ async function copyFolder(
         );
       }
       await prepareTarget(staged.target, assertGenerationOpen);
-      await fs.copyFile(absolutePath, staged.target);
+      await copyIntoStaging(absolutePath, staged.target);
       const copied = await fs.lstat(staged.target);
       if (copied.size !== stats.size) {
         skillError(
@@ -857,6 +901,24 @@ async function copyFolder(
   await visit(root);
 }
 
+async function assertStagedFilesPresent(
+  staging: string,
+  state: PackageState,
+): Promise<void> {
+  for (const filePath of state.paths) {
+    const stats = await fs
+      .lstat(path.join(staging, ...filePath.split('/')))
+      .catch(() => undefined);
+    if (!stats?.isFile()) {
+      skillError(
+        'skill_staging_failed',
+        'Skill staging directory was modified during install',
+        500,
+      );
+    }
+  }
+}
+
 async function finalizeStagedPackage(
   staging: string,
   state: PackageState,
@@ -868,6 +930,7 @@ async function finalizeStagedPackage(
       'Skill package has an invalid file count',
     );
   }
+  await assertStagedFilesPresent(staging, state);
   if (state.paths.has('SKILL.md')) return;
   const roots = new Set(
     [...state.paths].map((filePath) => filePath.split('/')[0]),
@@ -957,7 +1020,6 @@ async function stageSkillSource(
     ) {
       throw error;
     }
-    rethrowStagingFailure(error, staging);
     const code =
       source.type === 'github'
         ? 'github_skill_download_failed'
@@ -972,7 +1034,10 @@ async function stageSkillSource(
   }
 }
 
-function skillBaseDir(workspace: string, scope: WorkspaceSkillScope): string {
+export function workspaceSkillBaseDir(
+  workspace: string,
+  scope: WorkspaceSkillScope,
+): string {
   return scope === 'workspace'
     ? path.join(workspace, '.qwen', 'skills')
     : path.join(Storage.getGlobalQwenDir(), 'skills');
@@ -1003,11 +1068,13 @@ async function removeInstallArtifacts(
           if (liveInstallArtifacts.has(path.join(directory, entry.name))) {
             return false;
           }
-          return prefixes.some(
-            (prefix) =>
-              entry.name.startsWith(prefix) &&
-              /^[A-Za-z0-9-]+$/.test(entry.name.slice(prefix.length)),
-          );
+          return prefixes.some((prefix) => {
+            if (!entry.name.startsWith(prefix)) return false;
+            const suffix = entry.name.slice(prefix.length);
+            return (
+              /^[A-Za-z0-9-]+$/.test(suffix) && !artifactOwnerIsLive(suffix)
+            );
+          });
         })
         .map(async (entry) => {
           assertGenerationOpen?.();
@@ -1066,7 +1133,7 @@ export async function installWorkspaceSkill(
   if (request.source.type === 'zip') {
     assertBase64Shape(request.source.contentBase64);
   }
-  const baseDir = skillBaseDir(workspace, request.scope);
+  const baseDir = workspaceSkillBaseDir(workspace, request.scope);
   assertGenerationOpen?.();
   await ensureDirectoryWithoutSymlinks(baseDir, assertGenerationOpen);
   assertGenerationOpen?.();
@@ -1079,14 +1146,18 @@ export async function installWorkspaceSkill(
   const workDir = path.dirname(baseDir);
   const workPrefix = `.${path.basename(baseDir)}-${skillName}`;
   assertGenerationOpen?.();
-  const staging = await fs.mkdtemp(
-    path.join(workDir, `${workPrefix}.installing-`),
+  const staging = path.join(
+    workDir,
+    `${workPrefix}.installing-${artifactToken()}`,
   );
   liveInstallArtifacts.add(staging);
-  const backup = path.join(
-    workDir,
-    `${workPrefix}.backup-${process.pid}-${randomUUID().slice(0, 8).replaceAll('-', '')}`,
-  );
+  try {
+    await fs.mkdir(staging, { mode: 0o700 });
+  } catch (error) {
+    liveInstallArtifacts.delete(staging);
+    throw error;
+  }
+  const backup = path.join(workDir, `${workPrefix}.backup-${artifactToken()}`);
   let movedExisting = false;
   let committedStaging = false;
   try {
