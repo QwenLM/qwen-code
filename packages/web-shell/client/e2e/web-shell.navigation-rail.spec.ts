@@ -464,6 +464,7 @@ test('narrow Plugins header keeps the workspace picker clear of the tabs', async
     await page.waitForTimeout(50);
     const tabBox = (await lastTab.boundingBox())!;
     const selectBox = (await select.boundingBox())!;
+    const hostBox = (await host.boundingBox())!;
     expect(selectBox.width).toBeGreaterThan(0);
     const overlaps =
       tabBox.x < selectBox.x + selectBox.width &&
@@ -471,6 +472,13 @@ test('narrow Plugins header keeps the workspace picker clear of the tabs', async
       tabBox.y < selectBox.y + selectBox.height &&
       selectBox.y < tabBox.y + tabBox.height;
     expect(overlaps).toBe(false);
+    // Wrapping the header must not push the picker out of the host: a build
+    // that only shrinks the tab group keeps the tabs off the picker but leaves
+    // it clipped at the host's right edge.
+    expect(selectBox.x).toBeGreaterThanOrEqual(hostBox.x);
+    expect(selectBox.x + selectBox.width).toBeLessThanOrEqual(
+      hostBox.x + hostBox.width + 1,
+    );
   }
 });
 
