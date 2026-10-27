@@ -4247,14 +4247,7 @@ describe('qwen-autofix workflow', () => {
     // unconditional. The budget survives it because the scan reads budget and
     // spend per ENGAGEMENT: a command anchor opens one, an automatic re-arm
     // (that comment also carries an eval marker) does not.
-    const script = readFileSync(
-      resolve(
-        dirname(fileURLToPath(import.meta.url)),
-        '../../.github/scripts/autofix-push-and-report.sh',
-      ),
-      'utf8',
-    );
-    const fn = script.match(
+    const fn = pushAndReportScript.match(
       /(emit_growth_audit_marker\(\) \{[\s\S]*?\n\})/,
     )?.[1];
     expect(fn).toBeTruthy();
