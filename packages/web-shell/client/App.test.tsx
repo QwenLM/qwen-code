@@ -1106,6 +1106,7 @@ const {
       promptAdmitted: vi.fn(),
       promptAdmissionUncertain: vi.fn(),
       renamed: vi.fn(),
+      setPendingSessionTitle: vi.fn(),
       turnCompleted: vi.fn(),
     },
     mockReleaseWebTerminal: vi.fn(),
@@ -26093,6 +26094,19 @@ describe('App session callbacks', () => {
     ).toBeLessThan(
       sessionCatalogController.sessionCreated.mock.invocationCallOrder[0],
     );
+    expect(
+      sessionCatalogController.setPendingSessionTitle,
+    ).toHaveBeenCalledWith(
+      '/workspace',
+      'session-1',
+      '修复登录按钮在移动端错位',
+    );
+    expect(
+      sessionCatalogController.setPendingSessionTitle.mock
+        .invocationCallOrder[0],
+    ).toBeLessThan(
+      mockSessionActions.renameSession.mock.invocationCallOrder[0],
+    );
     expect(sessionCatalogController.renamed).toHaveBeenCalledWith(
       '/workspace',
       'session-1',
@@ -42847,6 +42861,45 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.createSession).toHaveBeenCalled();
     expect(mockSessionActions.renameSession).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ['open-fast-model', '--project'],
+    ['open-fast-model-user', '--global'],
+  ] as const)(
+    'does not name a session created by a fast-model change (%s)',
+    async (openTestId, scopeFlag) => {
+      mockConnection.sessionId = undefined;
+      mockConnection.displayName = undefined;
+      const { container } = renderApp();
+      await flush();
+      testState.prompt = '/settings';
+      await clickSubmit(container);
+      await flush();
+
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>(`[data-testid="${openTestId}"]`)
+          ?.click();
+        await Promise.resolve();
+      });
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="model-select"]')
+          ?.click();
+        await Promise.resolve();
+      });
+      await vi.waitFor(() => {
+        expect(
+          mockSessionActions.sendPrompt.mock.calls.some(
+            (c) => c[0] === `/model --fast fast-model-x ${scopeFlag}`,
+          ),
+        ).toBe(true);
+      });
+
+      expect(mockSessionActions.createSession).toHaveBeenCalled();
+      expect(mockSessionActions.renameSession).not.toHaveBeenCalled();
+    },
+  );
 
   it('resynchronizes the catalog when a settings prompt admission is ambiguous', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});

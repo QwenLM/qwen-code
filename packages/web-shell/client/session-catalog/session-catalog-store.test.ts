@@ -120,6 +120,52 @@ describe('SessionCatalogStore', () => {
     }
   });
 
+  it('keeps a pending prompt title on every catalog read until a custom title lands', async () => {
+    store.setPendingSessionTitle('/work', 'session-1', 'Fix login');
+    legacy.mockResolvedValueOnce(page('session-1'));
+    await store.loadOnce(query('/work'), { fresh: true });
+    expect(
+      store.getSnapshot(query('/work')).page?.sessions[0]?.displayName,
+    ).toBe('Fix login');
+
+    legacy.mockResolvedValueOnce({
+      ...page('session-1'),
+      sessions: [
+        {
+          sessionId: 'session-1',
+          workspaceCwd: '/work',
+          displayName: 'a long first prompt',
+        },
+      ],
+    });
+    await store.loadOnce(query('/work'), { fresh: true });
+    expect(
+      store.getSnapshot(query('/work')).page?.sessions[0]?.displayName,
+    ).toBe('Fix login');
+
+    legacy.mockResolvedValueOnce({
+      ...page('session-1'),
+      sessions: [
+        {
+          sessionId: 'session-1',
+          workspaceCwd: '/work',
+          displayName: 'Server title',
+          titleSource: 'manual',
+        },
+      ],
+    });
+    await store.loadOnce(query('/work'), { fresh: true });
+    expect(
+      store.getSnapshot(query('/work')).page?.sessions[0]?.displayName,
+    ).toBe('Server title');
+
+    legacy.mockResolvedValueOnce(page('session-1'));
+    await store.loadOnce(query('/work'), { fresh: true });
+    expect(
+      store.getSnapshot(query('/work')).page?.sessions[0]?.displayName,
+    ).toBeUndefined();
+  });
+
   it('peeks a cached display name without scheduling a request', async () => {
     const response = deferred<DaemonSessionListPage>();
     legacy.mockReturnValue(response.promise);

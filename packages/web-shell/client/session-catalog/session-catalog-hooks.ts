@@ -454,6 +454,15 @@ export function useSessionCatalogController(client: DaemonClient) {
           store.invalidateWorkspace(workspaceCwd);
         });
       },
+      setPendingSessionTitle(
+        workspaceCwd: string,
+        sessionId: string,
+        displayName: string,
+      ) {
+        update(() => {
+          store.setPendingSessionTitle(workspaceCwd, sessionId, displayName);
+        });
+      },
       toggleSessionPinned(
         workspaceCwd: string,
         session: DaemonSessionSummary,

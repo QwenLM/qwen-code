@@ -11613,6 +11613,16 @@ export function App({
                   sessionId,
                   workspaceCwd: catalogWorkspaceCwd,
                 };
+                if (initialTitle) {
+                  // Register the title before any periodic or in-flight
+                  // catalog read can publish the row, not only before the
+                  // refresh this callback schedules later.
+                  sessionCatalogController.setPendingSessionTitle(
+                    catalogWorkspaceCwd,
+                    sessionId,
+                    initialTitle,
+                  );
+                }
               }
             },
             getCurrentSessionId: () => connectionRef.current.sessionId,
@@ -20231,6 +20241,7 @@ export function App({
       const owner = { current: sessionOwnerGuard.capture() };
       sendPrompt(`/model --fast ${modelId}${scopeFlag}`, undefined, undefined, {
         ownerRef: owner,
+        suppressSessionTitle: true,
       })
         .then(() => {
           if (!owner.current.isCurrent()) return;
