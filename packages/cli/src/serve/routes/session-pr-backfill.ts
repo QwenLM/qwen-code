@@ -200,8 +200,10 @@ const PR_COMMAND_PATTERN =
 // same command and must not count as one. `/review` takes no `--repo`, so a
 // stray occurrence in its prompt reads as a qualifier too — the safer
 // reading, and never a binding this workspace's number.
-const REPO_FLAG_PATTERN = /(?:^|[^-\w])--repo(?![\w-])|(?:^|[\s])-R(?![\w-])/;
-const REPO_FORM_PATTERN = /--repo(?:[ \t]+|=)[ \t]*["']?([^\s"']+)/;
+const REPO_FLAG_PATTERN =
+  /(?:^|[^-\w])--repo(?![\w-])|(?:^|[\s])-R(?:[ \t]*=?[ \t]*)?[^\s=][^\s]*\//g;
+const REPO_VALUE_PATTERN = /--repo(?:[ \t]*=[ \t]*|[ \t]+)["']?[^\s"']+/g;
+const REPO_FORM_PATTERN = /--repo(?:[ \t]*=[ \t]*|[ \t]+)["']?([^\s"']+)/;
 
 /**
  * Longest prompt the grammar scans. The lazy URL alternative in
@@ -227,11 +229,15 @@ function parsePrCommand(prompt: string): {
     // declines it, so it must never count as a binding.
     if (Number(bareNumber) <= 0) return {};
     const repoForm = REPO_FORM_PATTERN.exec(prompt)?.[1];
-    // The token decides, not the value: a qualifier this grammar cannot read
-    // is still a qualifier, so the number must decline. It keeps an EMPTY
-    // list rather than no mention, so the decline is countable instead of
-    // looking like a prompt that named no PR at all.
-    if (repoForm === undefined && REPO_FLAG_PATTERN.test(prompt)) {
+    // The TOKEN decides, not the VALUE: a qualifier this grammar cannot read
+    // is still a qualifier, so the number must decline. Comparing the counts
+    // keeps the two independent — an unrelated readable `--repo` later in the
+    // prompt must not excuse an unreadable one on the command itself — and the
+    // empty list keeps the decline countable instead of looking like a prompt
+    // that named no PR at all.
+    const flagCount = (prompt.match(REPO_FLAG_PATTERN) ?? []).length;
+    const valueCount = (prompt.match(REPO_VALUE_PATTERN) ?? []).length;
+    if (valueCount < flagCount) {
       return {
         mention: { number: Number(bareNumber), bare: true, repoForms: [] },
       };
@@ -669,13 +675,8 @@ export async function backfillWorkspaceSessionPrs(
         .map(normalizeSegment);
       if (path.length >= 2) ownedIdentities.push({ host: url.host, path });
     } catch {
-      // A remote that will not parse falls back to the collapsed key below.
-    }
-  }
-  if (ownedIdentities.length === 0 && workspaceRepoKey !== undefined) {
-    const [host, owner, repo] = workspaceRepoKey.split('/');
-    if (owner !== undefined && repo !== undefined) {
-      ownedIdentities.push({ host, path: [owner, repo] });
+      // An unparseable remote leaves the workspace identity unknown, which
+      // fails closed: a qualifier can match nothing.
     }
   }
   if (pageMapTrusted && pageRepoKey !== undefined) {
@@ -686,24 +687,26 @@ export async function backfillWorkspaceSessionPrs(
   }
   // One comparison for the two questions this file asks of a repository name:
   // whether a `--repo` qualifier names this workspace, and whether a resolved
-  // PR URL landed in the repository the qualifier named. A qualifier that
-  // spells a HOST must match the whole path — suffix matching would admit
-  // `host/sub/cli` for `host/group/sub/cli`, a different project — while the
-  // skill's `[--repo [HOST/]OWNER/REPO]` form keeps owner/repo suffix matching
-  // against a nested-group origin.
+  // PR URL landed in the repository the qualifier named. Paths must be equal
+  // segment for segment — a suffix comparison would admit `sub/cli` (or
+  // `host/sub/cli`) for `host/group/sub/cli`, a different project. A spelled
+  // host is compared through the shared host equivalence, which normalizes
+  // case and a `:port`, and is `www.`-insensitive here.
+  const hostKey = (host: string): string => host.replace(/^www\./i, '');
   const segmentsMatch = (
     form: { host?: string; path: string[] },
     identity: { host?: string; path: string[] },
-    exactPath: boolean,
   ): boolean => {
     if (form.host !== undefined) {
       if (identity.host === undefined) return false;
-      if (!hostsEquivalent(form.host, identity.host)) return false;
+      if (!hostsEquivalent(hostKey(form.host), hostKey(identity.host))) {
+        return false;
+      }
     }
-    if (form.path.length > identity.path.length) return false;
-    if (exactPath && form.path.length !== identity.path.length) return false;
-    const tail = identity.path.slice(-form.path.length);
-    return form.path.every((segment, index) => segment === tail[index]);
+    if (form.path.length !== identity.path.length) return false;
+    return form.path.every(
+      (segment, index) => segment === identity.path[index],
+    );
   };
   /** The repository a PR URL belongs to: host plus the path above its PR/MR id. */
   const identityFromUrl = (
@@ -731,9 +734,7 @@ export async function backfillWorkspaceSessionPrs(
   const repoFormMatches = (repoForm: string): boolean => {
     const form = repoSegments(repoForm);
     if (form === undefined) return false;
-    return ownedIdentities.some((identity) =>
-      segmentsMatch(form, identity, form.host !== undefined),
-    );
+    return ownedIdentities.some((identity) => segmentsMatch(form, identity));
   };
 
   for (const candidate of candidates) {
@@ -769,6 +770,12 @@ export async function backfillWorkspaceSessionPrs(
       if (isLegacyFabricated) {
         if (isLegacyFabricated(form.url, form.number)) {
           formUrlByNumber.set(form.number, form.url);
+        } else {
+          // Aone-only: a form that is not this workspace's fabricated shape
+          // names a different repository (real MR links are `…/codereview/
+          // <id>`), so it is a decline for the same reason a GitHub form from
+          // another repo is.
+          result.repoDeclined = (result.repoDeclined ?? 0) + 1;
         }
         continue;
       }
@@ -845,10 +852,7 @@ export async function backfillWorkspaceSessionPrs(
       if (identity === undefined) return false;
       return forms.some((form) => {
         const parsed = repoSegments(form);
-        return (
-          parsed !== undefined &&
-          segmentsMatch(parsed, identity, parsed.host !== undefined)
-        );
+        return parsed !== undefined && segmentsMatch(parsed, identity);
       });
     };
     // The legacy-repair pass below must stay reachable for a session with
@@ -970,6 +974,7 @@ export async function backfillWorkspaceSessionPrs(
       // explicitly and is not gated here.
       const forms = qualifiedForms.get(number);
       if (
+        number !== candidate.conventionNumber &&
         forms !== undefined &&
         forms.length > 0 &&
         !formUrlByNumber.has(number) &&

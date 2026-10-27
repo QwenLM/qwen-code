@@ -8662,7 +8662,7 @@ export function registerSessionRoutes(
                 ) {
                   return;
                 }
-                daemonLog?.warn('review PR bind failed', {
+                daemonLog?.warn('session PR bind failed', {
                   sessionId,
                   error: describePromptTurnFailure(error),
                 });

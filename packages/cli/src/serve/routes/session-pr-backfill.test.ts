@@ -4251,6 +4251,120 @@ describe('backfillWorkspaceSessionPrs', () => {
     ).toBeNull();
   });
 
+  it('declines the attached -R shorthand', async () => {
+    // gh accepts `-Rowner/repo`; the attached value must count as a
+    // qualifier, or the number binds this workspace's same-numbered PR.
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/verify-pr 77 -Rother/x');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'f77')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 0, written: 0 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+  });
+
+  it('does not read a shell -R as the qualifier', async () => {
+    // `chmod -R 755` carries no repository value; treating it as one would
+    // silently drop ordinary review prompts.
+    await seedSession(SESSION_A);
+    await appendUserText(
+      SESSION_A,
+      '/review 77\n\nAfter merging, run chmod -R 755 dist before publishing.',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'f77')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 1 });
+    expect(
+      (
+        await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+        )
+      )?.[0],
+    ).toMatchObject({ number: 77, url: 'https://github.com/o/r/pull/77' });
+  });
+
+  it('keeps the convention binding above a foreign qualifier', async () => {
+    // The session exists FOR PR 42 by convention; a foreign `--repo` on the
+    // same number must not suppress the strongest binding.
+    await seedSession(SESSION_A);
+    await seedWorktreeSidecar(SESSION_A, 'pr-42', 'worktree-pr-42');
+    await appendUserText(SESSION_A, '/verify-pr 42 --repo other/x');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'f42')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 1 });
+    expect(
+      (
+        await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+        )
+      )?.[0],
+    ).toMatchObject({ number: 42, source: 'worktree' });
+  });
+
+  it('declines a two-segment qualifier against a nested origin', async () => {
+    // `sub/cli` is a different top-level project from `group/sub/cli`, so the
+    // path comparison is exact in both directions.
+    fetchRemoteWebUrlMock.mockResolvedValue(
+      'https://gitlab.corp.com/group/sub/cli',
+    );
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/verify-pr 77 --repo sub/cli');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 0, repoDeclined: 1 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+  });
+
+  it('declines an unreadable -R beside readable prose', async () => {
+    // A readable `--repo` in pasted prose must not excuse an unreadable one on
+    // the command itself.
+    await seedSession(SESSION_A);
+    await appendUserText(
+      SESSION_A,
+      '/verify-pr 77 -R other/x\nSee: gh pr view 9 --repo o/r',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'f77')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 0, written: 0 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+  });
+
   it('declines a /review url form the sidecar reader would reject', async () => {
     // The capture is unbounded user text; an over-long or control-
     // character url passes the repo gate (only the first two path
