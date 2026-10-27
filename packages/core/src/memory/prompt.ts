@@ -289,15 +289,11 @@ function truncateManagedAutoMemoryIndex(indexContent: string): string {
         : `${lineCount} lines and ${charCount} UTF-16 code units`;
 
   const shorteningAdvice =
-    canFitWithoutDescriptions === undefined
-      ? 'Check whether you can shorten `description` frontmatter in the topic files, or prune or merge memory files to fit the character budget.'
-      : `Prune or merge memory files, or shorten \`description\` frontmatter in the topic files to bring the total within ${MAX_INDEX_CHARS} UTF-16 code units; check the regenerated index.`;
+    'Try shortening nonempty `description` frontmatter in the topic files; check the regenerated index, and prune or merge memory files if it still exceeds the character budget.';
   const combinedCharacterAdvice =
     canFitWithoutDescriptions === false
       ? 'prune or merge more entries.'
-      : canFitWithoutDescriptions === true
-        ? `shorten \`description\` frontmatter in the topic files enough to fit ${MAX_INDEX_CHARS} UTF-16 code units, or prune or merge more memory files; check the regenerated index.`
-        : 'check whether shortening `description` frontmatter in the topic files helps, or prune or merge more memory files.';
+      : 'try shortening nonempty `description` frontmatter in the topic files; check the regenerated index, and prune or merge more memory files if necessary.';
 
   const lever = overlongEntriesCauseOverflow
     ? ` Keep index entries to one line at most ${MAX_INDEX_LINE_CHARS} UTF-16 code units by shortening topic-file frontmatter; never cut link targets. Prune or merge memory files if the count is still over budget.`
