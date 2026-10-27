@@ -147,10 +147,13 @@ bash .github/scripts/ecs-runner/check-font-baseline.sh --with-metrics
 ```
 
 The web-shell smoke lane runs the L0 half as `Check host font baseline
-(self-hosted)` before installing dependencies, so a drifted host fails in
-seconds with an actionable message instead of failing two layout assertions
-26 minutes into the suite. L1 stays a manual/host-provisioning check because
-it needs a Chromium that the lane has not installed yet at that point.
+(self-hosted)` before installing dependencies. When L0 fails, the lane runs the installer
+above as root, using non-interactive sudo when necessary, then verifies L0
+again as the runner user. Healthy hosts require no installation or sudo;
+installation failures and remaining runner-user drift still fail the gate.
+This reports an actionable setup error before the layout assertions run.
+L1 stays a manual/host-provisioning check because it needs a Chromium that the
+lane has not installed yet at that point.
 
 ## Regression check
 

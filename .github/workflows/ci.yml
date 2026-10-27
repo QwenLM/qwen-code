@@ -1734,6 +1734,16 @@ jobs:
             echo 'font baseline check: skipped (script not present in this checkout)'
             exit 0
           fi
+          # A recoverable setup gap should not emit a failure annotation.
+          if GITHUB_ACTIONS= bash .github/scripts/ecs-runner/check-font-baseline.sh; then
+            exit 0
+          fi
+          if [ "$(id -u)" -eq 0 ]; then
+            bash .github/scripts/ecs-runner/install-qwen-font-baseline.sh
+          else
+            sudo -n bash .github/scripts/ecs-runner/install-qwen-font-baseline.sh
+          fi
+          # The browser uses the runner's font configuration, not root's.
           bash .github/scripts/ecs-runner/check-font-baseline.sh
 
       - name: 'Install dependencies'

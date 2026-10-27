@@ -26,6 +26,10 @@ function makeCase({
   installed = true,
   metrics = BASELINE,
   browser = true,
+  uid = '1000',
+  repairFamily = false,
+  rootFamily,
+  sudoStatus = '0',
 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'qwen-font-baseline-test-'));
   const bin = join(dir, 'bin');
@@ -33,14 +37,25 @@ function makeCase({
   const write = (name, body) =>
     writeFileSync(join(bin, name), body, { mode: 0o755 });
 
-  write('fc-match', '#!/usr/bin/env bash\nprintf "%s" "$CASE_FAMILY"\n');
+  write(
+    'fc-match',
+    '#!/usr/bin/env bash\nif [ "${CASE_AS_ROOT:-0}" = 1 ] && [ -n "${CASE_ROOT_FAMILY:-}" ]; then printf "%s" "$CASE_ROOT_FAMILY"; elif [ -f "$CASE_DIR/repaired" ]; then printf "DejaVu Sans"; else printf "%s" "$CASE_FAMILY"; fi\n',
+  );
   write(
     'fc-cache',
     '#!/usr/bin/env bash\nprintf "fc-cache %s\\n" "$*" >> "$CASE_DIR/calls"\n',
   );
   write(
     'apt-get',
-    '#!/usr/bin/env bash\nprintf "apt-get %s\\n" "$*" >> "$CASE_DIR/calls"\n',
+    '#!/usr/bin/env bash\nprintf "apt-get %s\\n" "$*" >> "$CASE_DIR/calls"\nif [ "$1" = install ] && [ "$CASE_REPAIR_FAMILY" = 1 ]; then touch "$CASE_DIR/repaired"; fi\n',
+  );
+  write(
+    'id',
+    '#!/usr/bin/env bash\nif [ "${CASE_AS_ROOT:-0}" = 1 ]; then printf "0\\n"; else printf "%s\\n" "$CASE_UID"; fi\n',
+  );
+  write(
+    'sudo',
+    '#!/usr/bin/env bash\nprintf "sudo %s\\n" "$*" >> "$CASE_DIR/calls"\nif [ "$CASE_SUDO_STATUS" != 0 ]; then exit "$CASE_SUDO_STATUS"; fi\n[ "$1" = -n ] || exit 2\nshift\nCASE_AS_ROOT=1 exec "$@"\n',
   );
   write(
     'dpkg-query',
@@ -64,6 +79,10 @@ function makeCase({
     CASE_DIR: dir,
     CASE_FAMILY: family,
     CASE_INSTALLED: installed ? '1' : '0',
+    CASE_UID: uid,
+    CASE_REPAIR_FAMILY: repairFamily ? '1' : '0',
+    CASE_ROOT_FAMILY: rootFamily ?? '',
+    CASE_SUDO_STATUS: sudoStatus,
     CASE_METRICS: JSON.stringify(metrics),
     GITHUB_ACTIONS: '',
     HOME: join(dir, 'home'),
@@ -79,6 +98,7 @@ function makeCase({
 function run(script, args, env) {
   const result = spawnSync('bash', [script, ...args], {
     env,
+    cwd: join(scriptDir, '../../..'),
     encoding: 'utf8',
     timeout: 60_000,
   });
@@ -169,8 +189,6 @@ test('installer refuses to run as non-root', () => {
       ...env,
       QWEN_FONT_BASELINE_TEST_ALLOW_NON_ROOT: '0',
     });
-    // The test suite itself may not run as root; when it does, skip the guard.
-    if (process.getuid?.() === 0) return;
     assert.equal(result.status, 1);
     assert.match(result.stderr, /as root/);
   });
@@ -216,5 +234,71 @@ test('installer fails when the host still resolves the wrong family', () => {
     });
     assert.equal(result.status, 1);
     assert.match(result.stderr, /fonts-dejavu-core/);
+  });
+});
+
+function runCiFontStep(env) {
+  const workflow = readFileSync(
+    join(scriptDir, '../../workflows/ci.yml'),
+    'utf8',
+  );
+  const step = workflow.match(
+    /- name: 'Check host font baseline \(self-hosted\)'[\s\S]*?run: \|-\n([\s\S]*?)(?=\n {6}- name:)/,
+  );
+  assert.ok(step, 'the actual CI font step must be present');
+  const script = join(env.CASE_DIR, 'ci-font-step.sh');
+  writeFileSync(script, `set -eo pipefail\n${step[1].replace(/^ {10}/gm, '')}`);
+  return run(script, [], { ...env, GITHUB_ACTIONS: 'true' });
+}
+
+test('CI leaves a healthy runner unmodified', () => {
+  withCase({}, (env) => {
+    const result = runCiFontStep(env);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.calls, '');
+    assert.match(result.stdout, /default sans-serif = DejaVu Sans/);
+  });
+});
+
+for (const uid of ['0', '1000']) {
+  test(`CI repairs missing fonts for runner uid ${uid}`, () => {
+    withCase(
+      {
+        uid,
+        installed: false,
+        family: 'WenQuanYi Zen Hei',
+        repairFamily: true,
+      },
+      (env) => {
+        const result = runCiFontStep(env);
+        assert.equal(result.status, 0, result.stderr);
+        assert.match(result.calls, /apt-get install .*fonts-dejavu-core/);
+        assert.match(result.stdout, /default sans-serif = DejaVu Sans/);
+        assert.doesNotMatch(result.stdout, /::error::/);
+        if (uid === '0') assert.doesNotMatch(result.calls, /sudo/);
+        else assert.match(result.calls, /sudo -n bash/);
+      },
+    );
+  });
+}
+
+test('CI rejects runner font drift after successful root verification', () => {
+  withCase(
+    { family: 'WenQuanYi Zen Hei', rootFamily: 'DejaVu Sans' },
+    (env) => {
+      const result = runCiFontStep(env);
+      assert.equal(result.status, 1);
+      assert.match(result.stdout, /default sans-serif = DejaVu Sans/);
+      assert.match(result.stdout, /::error::default sans-serif is 'WenQuanYi/);
+    },
+  );
+});
+
+test('CI fails when non-interactive elevation is unavailable', () => {
+  withCase({ family: 'WenQuanYi Zen Hei', sudoStatus: '1' }, (env) => {
+    const result = runCiFontStep(env);
+    assert.equal(result.status, 1);
+    assert.match(result.calls, /sudo -n bash/);
+    assert.doesNotMatch(result.calls, /apt-get/);
   });
 });
