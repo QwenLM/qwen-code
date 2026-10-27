@@ -198,6 +198,15 @@ function getPollInterval(entry: CatalogEntry): number | undefined {
 
 export class SessionCatalogStore {
   private readonly entries = new Map<string, CatalogEntry>();
+  /**
+   * Prompt-derived titles for sessions whose rename has not landed yet.
+   * Applied to every published page so periodic and in-flight catalog reads
+   * cannot surface the session-id fallback first.
+   */
+  private readonly pendingSessionTitles = new Map<
+    string,
+    Map<string, string>
+  >();
   private readonly queue: QueueJob[] = [];
   private readonly trailingRefreshTimers = new Map<
     string,
@@ -584,6 +593,43 @@ export class SessionCatalogStore {
         ...entry.snapshot,
         page: { ...entry.snapshot.page, sessions },
       });
+    }
+  }
+
+  /**
+   * Record a prompt-derived title for a session whose rename is still in
+   * flight. Every subsequent page (poll, in-flight load, live merge) gets the
+   * title until the daemon reports a real custom title, so no read can publish
+   * the session-id fallback first.
+   */
+  setPendingSessionTitle(
+    workspaceCwd: string,
+    sessionId: string,
+    displayName: string,
+  ): void {
+    let pending = this.pendingSessionTitles.get(workspaceCwd);
+    if (!pending) {
+      pending = new Map();
+      this.pendingSessionTitles.set(workspaceCwd, pending);
+    }
+    pending.set(sessionId, displayName);
+    for (const entry of this.entries.values()) {
+      if (entry.query.workspaceCwd !== workspaceCwd) continue;
+      this.setSnapshot(entry, entry.snapshot);
+    }
+  }
+
+  /**
+   * Drop a pending prompt title once a real rename lands (or the session is
+   * closed), so a later catalog page cannot revive the provisional label.
+   */
+  clearPendingSessionTitle(workspaceCwd: string, sessionId: string): void {
+    const pending = this.pendingSessionTitles.get(workspaceCwd);
+    if (!pending?.delete(sessionId)) return;
+    if (pending.size === 0) this.pendingSessionTitles.delete(workspaceCwd);
+    for (const entry of this.entries.values()) {
+      if (entry.query.workspaceCwd !== workspaceCwd) continue;
+      this.setSnapshot(entry, entry.snapshot);
     }
   }
 
@@ -1015,7 +1061,10 @@ export class SessionCatalogStore {
       entry.invalidated = false;
       entry.retryAt = undefined;
       entry.snapshot = {
-        page: stagedPage.page,
+        page: this.applyPendingSessionTitlesToPage(
+          staged.workspaceCwd,
+          stagedPage.page,
+        ),
         loading: false,
         stale: false,
         updatedAt: Date.now(),
@@ -1023,7 +1072,7 @@ export class SessionCatalogStore {
     }
     for (const { entry, stagedPage } of entries) {
       for (const subscriber of entry.subscribers) subscriber.listener();
-      this.resolveWaiters(entry, stagedPage.page);
+      this.resolveWaiters(entry, entry.snapshot.page ?? stagedPage.page);
     }
     return true;
   }
@@ -1420,9 +1469,50 @@ export class SessionCatalogStore {
     entry: CatalogEntry,
     snapshot: SessionCatalogSnapshot,
   ): void {
-    if (entry.snapshot === snapshot) return;
-    entry.snapshot = snapshot;
+    const next = this.applyPendingSessionTitles(
+      entry.query.workspaceCwd,
+      snapshot,
+    );
+    if (entry.snapshot === next) return;
+    entry.snapshot = next;
     for (const subscriber of entry.subscribers) subscriber.listener();
+  }
+
+  private applyPendingSessionTitles(
+    workspaceCwd: string,
+    snapshot: SessionCatalogSnapshot,
+  ): SessionCatalogSnapshot {
+    const page = snapshot.page;
+    if (!page) return snapshot;
+    const nextPage = this.applyPendingSessionTitlesToPage(workspaceCwd, page);
+    return nextPage === page ? snapshot : { ...snapshot, page: nextPage };
+  }
+
+  private applyPendingSessionTitlesToPage(
+    workspaceCwd: string,
+    page: DaemonSessionListPage,
+  ): DaemonSessionListPage {
+    const pending = this.pendingSessionTitles.get(workspaceCwd);
+    if (!pending || pending.size === 0 || page.sessions.length === 0) {
+      return page;
+    }
+    let changed = false;
+    const sessions = page.sessions.map((session) => {
+      const pendingTitle = pending.get(session.sessionId);
+      if (pendingTitle === undefined) return session;
+      // A real custom title confirms the rename; stop overriding and keep
+      // the daemon's authoritative name.
+      if (session.titleSource !== undefined) {
+        pending.delete(session.sessionId);
+        return session;
+      }
+      // The pending title also beats the daemon's first-prompt label (which
+      // has no titleSource) until the rename lands.
+      if (session.displayName === pendingTitle) return session;
+      changed = true;
+      return { ...session, displayName: pendingTitle };
+    });
+    return changed ? { ...page, sessions } : page;
   }
 
   private resetPollSchedule(entry: CatalogEntry): void {

@@ -1195,17 +1195,17 @@ describe('legacy session telemetry route catalog', () => {
   // MCP App calls, attachment uploads, the batch live-state snapshot, shell
   // runtime, and message group routes resolve the live session owner in the
   // handler, preserving the two pre-resolved routes.
-  it('contains 84 unique routes with the audited 82/2 attribution split', () => {
+  it('contains 86 unique routes with the audited 84/2 attribution split', () => {
     const keys = legacySessionTelemetryRoutes.map(
       ({ method, path }) => `${method} ${path}`,
     );
-    expect(keys).toHaveLength(84);
-    expect(new Set(keys).size).toBe(84);
+    expect(keys).toHaveLength(86);
+    expect(new Set(keys).size).toBe(86);
     expect(
       legacySessionTelemetryRoutes.filter(
         ({ attribution }) => attribution === 'handler_resolved',
       ),
-    ).toHaveLength(82);
+    ).toHaveLength(84);
     expect(
       legacySessionTelemetryRoutes.filter(
         ({ attribution }) => attribution === 'pre_resolved',
@@ -1239,7 +1239,7 @@ describe('legacy session telemetry route catalog', () => {
         route: entry.route,
         attribution: entry.attribution,
         ...(entry.path.includes('/:id') ? { sessionId: 'session-1' } : {}),
-        ...(entry.path.includes('/:requestId')
+        ...(entry.path.endsWith('/permission/:requestId')
           ? { permissionRequestId: 'request-1' }
           : {}),
       });
@@ -1276,6 +1276,18 @@ describe('legacy session telemetry route catalog', () => {
       });
     },
   );
+
+  it('does not label a BTW cancellation request as a permission request', () => {
+    const route = resolveDaemonTelemetryRoute(
+      mockReq('DELETE', '/session/session-1/btw/stream/btw-123'),
+    );
+    expect(route).toEqual({
+      route: 'DELETE /session/:id/btw/stream/:requestId',
+      attribution: 'handler_resolved',
+      sessionId: 'session-1',
+    });
+    expect(route).not.toHaveProperty('permissionRequestId');
+  });
 
   it('decodes and validates permission request ids after segment matching', () => {
     expect(
