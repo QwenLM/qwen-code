@@ -947,6 +947,40 @@ describe('standalone release packaging', () => {
     }
   });
 
+  it('keeps retrying a transient download until a later attempt succeeds', async () => {
+    const { downloadWithRetry } = await import(standaloneReleaseScriptUrl);
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-download-retry-'));
+    const destination = path.join(tmpDir, 'node-v22.0.0-linux-x64.tar.xz');
+    const sleepImpl = vi.fn(async () => {});
+    const fetchImpl = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('fetch failed'))
+      .mockRejectedValueOnce(new Error('fetch failed'))
+      .mockRejectedValueOnce(new Error('fetch failed'))
+      .mockRejectedValueOnce(new Error('fetch failed'))
+      .mockResolvedValueOnce(new Response('runtime-bytes'));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      await downloadWithRetry(
+        'https://nodejs.org/dist/v22.0.0/node-v22.0.0-linux-x64.tar.xz',
+        destination,
+        { fetchImpl, sleepImpl },
+      );
+
+      // A fourth transient failure must still leave one attempt, and a
+      // success on the final attempt must still write the destination.
+      expect(fetchImpl).toHaveBeenCalledTimes(5);
+      expect(sleepImpl.mock.calls.map(([ms]) => ms)).toEqual([
+        5_000, 10_000, 20_000, 40_000,
+      ]);
+      expect(readFileSync(destination, 'utf8')).toBe('runtime-bytes');
+    } finally {
+      warnSpy.mockRestore();
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it('re-downloads a runtime archive that fails verification', async () => {
     const { downloadWithRetry } = await import(standaloneReleaseScriptUrl);
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-download-retry-'));
@@ -992,8 +1026,10 @@ describe('standalone release packaging', () => {
           { fetchImpl, sleepImpl },
         ),
       ).rejects.toThrow(/Failed to download/);
-      expect(fetchImpl).toHaveBeenCalledTimes(3);
-      expect(sleepImpl.mock.calls.map(([ms]) => ms)).toEqual([5_000, 10_000]);
+      expect(fetchImpl).toHaveBeenCalledTimes(5);
+      expect(sleepImpl.mock.calls.map(([ms]) => ms)).toEqual([
+        5_000, 10_000, 20_000, 40_000,
+      ]);
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
     }
@@ -1078,7 +1114,7 @@ describe('standalone release packaging', () => {
         ).rejects.toThrow(
           `ERROR: ${label} SHASUMS256.txt does not list ${missingArchives.join(', ')}`,
         );
-        expect(fetchImpl).toHaveBeenCalledTimes(3);
+        expect(fetchImpl).toHaveBeenCalledTimes(5);
       } finally {
         rmSync(tmpDir, { recursive: true, force: true });
       }
@@ -1175,7 +1211,7 @@ describe('standalone release packaging', () => {
     expect(normalised).toMatch(
       /downloadRuntimeChecksums\(\{[^;]*expectedArchives: RELEASE_TARGETS\.map/,
     );
-    expect(normalised).toContain('const MAX_DOWNLOAD_ATTEMPTS = 3;');
+    expect(normalised).toContain('const MAX_DOWNLOAD_ATTEMPTS = 5;');
     expect(normalised).toContain('const INITIAL_DOWNLOAD_BACKOFF_MS = 5_000;');
     expect(normalised).toContain('const DOWNLOAD_TIMEOUT_MS = 120_000;');
     expect(normalised).toContain('AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS)');
