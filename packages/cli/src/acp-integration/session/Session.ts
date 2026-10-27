@@ -7250,10 +7250,10 @@ export class Session implements SessionContext {
             // the shared agent loop's round. `LlmClient` then does the steps
             // the current path does here itself: UserPromptSubmit on the
             // admitted verdict, memory recall, system reminders and workflow
-            // intent. ACP keeps the user turn with its file-history snapshot,
-            // the interaction span, its tool step with the tool-call guards,
-            // and the Stop hook in its Stop loop, which also runs ACP's own
-            // continuations.
+            // intent, then the Stop hook and stop-policy continuations. ACP
+            // keeps the user turn with its file-history snapshot and the
+            // interaction span. Live and Agent Host sessions also keep ACP's
+            // tool executor and guards instead of the shared tool batch.
             const sharedModelRound =
               this.config.isUnifiedAgentLoopEnabled?.() === true &&
               isFreshUserTurn &&
@@ -7600,18 +7600,32 @@ export class Session implements SessionContext {
             // A continuation the client starts follows the usage of the
             // response it continues, as on the current path.
             let emitResponseUsage = async () => {};
+            let toolLoopState = createDaemonToolLoopState(
+              channelTurn ? 'off' : this.repeatedToolFailureGuardMode,
+            );
+            const resetToolLoopState = () => {
+              toolLoopState = createDaemonToolLoopState(
+                channelTurn ? 'off' : this.repeatedToolFailureGuardMode,
+              );
+            };
+            let stopHookCapped = false;
             // The shared round's stop point is the client's: the Stop hook,
             // then the Todo Stop Guard.
             const stopPolicies = sharedModelRound
-              ? [this.#todoStopGuardStopPolicy(() => emitResponseUsage())]
+              ? [
+                  this.#todoStopGuardStopPolicy(
+                    () => emitResponseUsage(),
+                    resetToolLoopState,
+                    () => {
+                      stopHookCapped = true;
+                    },
+                  ),
+                ]
               : undefined;
             // Whether the client ran the turn's memory tasks, which it does
             // when a round's response stops on its own.
             let memoryTasksRanInClient = false;
             let restorePostAnswerNoticesAttached = false;
-            const toolLoopState = createDaemonToolLoopState(
-              channelTurn ? 'off' : this.repeatedToolFailureGuardMode,
-            );
 
             // conversation_finished must fire on every terminal path of the
             // turn — restore of ask_user_question, the loop below's
@@ -7789,6 +7803,7 @@ export class Session implements SessionContext {
                 let requestRouteKey = '';
 
                 if (sharedModelRound) {
+                  stopHookCapped = false;
                   const message = nextMessage;
                   nextMessage = null;
                   requestRouteKey = await this.#requestRouteKeyForModel(
@@ -7809,9 +7824,9 @@ export class Session implements SessionContext {
                     );
                   };
                   let attempt: ModelResponseFacts = newModelResponseFacts();
-                  // The user-content push a response answers. A next-speaker
-                  // continuation sends another request within the round, and
-                  // its response starts its own facts and usage, as a new send
+                  // The user-content push a response answers. A continuation
+                  // sends another request within the round, and its response
+                  // starts its own facts, capture and usage, as a new send
                   // does on the current path.
                   let responsePushCount: number | undefined;
                   let loopStop:
@@ -7896,17 +7911,32 @@ export class Session implements SessionContext {
                               attempt = newModelResponseFacts();
                               await emitResponseUsage();
                               streamStartTime = Date.now();
+                              channelDeliveryResponseBlock =
+                                beginChannelDeliveryResponseBlock(
+                                  responseCapture,
+                                );
+                              channelDeliveryCheckpoint =
+                                channelDeliveryResponseBlock?.parts.length ?? 0;
                             }
                             responsePushCount = pushCount;
                           }
                           // Closed when a response finishes and opened by the
-                          // next one, such as a next-speaker continuation. The
-                          // first event also takes input that arrived before
-                          // the request went out.
+                          // next model response, not by hook diagnostics. The
+                          // first response event also takes input that arrived
+                          // before the request went out.
                           if (event.type === LlmEventType.Finished) {
                             responseOpened = false;
                             responseInterrupt.end();
-                          } else if (!responseOpened) {
+                          } else if (
+                            !responseOpened &&
+                            (event.type === LlmEventType.Content ||
+                              event.type === LlmEventType.Thought ||
+                              event.type === LlmEventType.Retry ||
+                              event.type === LlmEventType.ModelFallback ||
+                              event.type === LlmEventType.ToolCallPreparation ||
+                              event.type === LlmEventType.ToolCallRequest ||
+                              event.type === LlmEventType.Citation)
+                          ) {
                             responseOpened = true;
                             responseInterrupt.begin();
                           }
@@ -8026,6 +8056,7 @@ export class Session implements SessionContext {
                               break;
                             case LlmEventType.StopHookLoop:
                               await emitResponseUsage();
+                              resetToolLoopState();
                               // Reported from the second block on, as the
                               // session's own Stop loop does.
                               if (event.value.iterationCount > 1) {
@@ -8170,6 +8201,7 @@ export class Session implements SessionContext {
                   memoryTasksRanInClient =
                     roundType !== SendMessageType.Steer &&
                     functionCalls.length === 0 &&
+                    !stopHookCapped &&
                     !streamFailed &&
                     !cutForInput();
                 } else {
@@ -9804,7 +9836,11 @@ export class Session implements SessionContext {
    * response stop, it continues while todos remain, up to its attempts, and
    * yields to a prompt the host has queued.
    */
-  #todoStopGuardStopPolicy(beforeDecision: () => Promise<void>): StopPolicy {
+  #todoStopGuardStopPolicy(
+    beforeDecision: () => Promise<void>,
+    onContinuation: () => void,
+    onStopHookCap: () => void,
+  ): StopPolicy {
     return {
       continueAt: async ({ signal }) => {
         await beforeDecision();
@@ -9833,10 +9869,14 @@ export class Session implements SessionContext {
         ) {
           return undefined;
         }
+        onContinuation();
         await this.#emitTodoStopGuardContinuation(decision);
         return [{ text: this.#buildTodoStopGuardPrompt(decision) }];
       },
-      onStopHookCap: () => this.todoStopGuard.suspend(),
+      onStopHookCap: () => {
+        this.todoStopGuard.suspend();
+        onStopHookCap();
+      },
     };
   }
 

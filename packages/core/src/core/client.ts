@@ -3228,7 +3228,7 @@ export class LlmClient {
 
   /**
    * Schedules the memory work due when a response ends without tool calls.
-   * A host that runs the Stop hook itself calls this once its turn ends.
+   * A host calls this at turn completion if the client did not schedule it.
    */
   runManagedAutoMemoryBackgroundTasks(messageType: SendMessageType): void {
     // During shutdown, skip all background memory tasks so the process

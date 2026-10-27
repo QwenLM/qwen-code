@@ -4977,6 +4977,139 @@ describe('Session', () => {
       ]);
     });
 
+    it('runs completion memory work when the client ends at the Stop hook cap', async () => {
+      const send = useSharedRounds();
+      send.mockImplementationOnce(
+        (
+          _parts: Part[],
+          _signal: AbortSignal,
+          _promptId: string,
+          options: { stopPolicies?: core.StopPolicy[] },
+        ) =>
+          (async function* () {
+            yield text('not done');
+            yield finished();
+            for (const policy of options.stopPolicies ?? []) {
+              policy.onStopHookCap?.();
+            }
+            // The client returns at the cap before scheduling memory tasks.
+            yield {
+              type: core.LlmEventType.HookSystemMessage,
+              value:
+                'Stop hook blocked continuation 1 consecutive time; overriding and ending the turn.',
+            };
+          })(),
+      );
+
+      await expect(prompt()).resolves.toEqual({ stopReason: 'end_turn' });
+
+      expect(
+        mockLlmClient.runManagedAutoMemoryBackgroundTasks,
+      ).toHaveBeenCalledExactlyOnceWith(core.SendMessageType.UserQuery);
+    });
+
+    it.each(['Stop hook', 'Todo Stop Guard'])(
+      'records only the final answer after a %s continuation',
+      async (continuation) => {
+        const send = useSharedRounds();
+        let pushes = 0;
+        Object.assign(mockChat, {
+          getUserContentPushCount: vi.fn(() => pushes),
+        });
+        send.mockImplementationOnce(() =>
+          (async function* () {
+            pushes++;
+            yield text('Superseded answer.');
+            yield finished();
+            if (continuation === 'Stop hook') {
+              yield {
+                type: core.LlmEventType.StopHookLoop,
+                value: {
+                  iterationCount: 1,
+                  reasons: ['Finish the requested work'],
+                  stopHookCount: 1,
+                },
+              };
+            }
+            pushes++;
+            yield text('Final answer.');
+            yield finished();
+          })(),
+        );
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'finish the work' }],
+          },
+          {
+            version: 1,
+            sessionId: 'test-session-id',
+            promptId: 'daemon-stop-continuation',
+          },
+        );
+
+        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
+          expect.objectContaining({
+            state: 'completed',
+            resultText: 'Final answer.',
+          }),
+          'test-session-id########1',
+        );
+      },
+    );
+
+    it('gives a Stop hook continuation a fresh host-owned tool budget with Live tools', async () => {
+      const execute = useTool(core.Kind.Read, 'read_file');
+      const registered = new Map<string, core.AnyDeclarativeTool>();
+      registered.set('read_file', mockToolRegistry.getTool('read_file'));
+      mockToolRegistry.registerTool = vi.fn((tool) => {
+        registered.set(tool.name, tool);
+      });
+      mockToolRegistry.getTool = vi.fn((name: string) => registered.get(name));
+      await session.enableLiveScreenContext();
+      useStopHook([{ decision: 'block', reason: 'Check the other file' }]);
+      mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(1);
+      mockConfig.isMaxToolCallsPerTurnExplicit = vi.fn().mockReturnValue(true);
+      const send = useSharedRounds(
+        [
+          toolCall({
+            id: 'before-stop',
+            name: 'read_file',
+            args: { file_path: '/tmp/before.txt' },
+          }),
+          finished(),
+        ],
+        [
+          text('Initial answer.'),
+          finished(),
+          {
+            type: core.LlmEventType.StopHookLoop,
+            value: {
+              iterationCount: 1,
+              reasons: ['Check the other file'],
+              stopHookCount: 1,
+            },
+          },
+          toolCall({
+            id: 'after-stop',
+            name: 'read_file',
+            args: { file_path: '/tmp/after.txt' },
+          }),
+          finished(),
+        ],
+        [text('Final answer.'), finished()],
+      );
+
+      await expect(prompt()).resolves.toEqual({ stopReason: 'end_turn' });
+
+      expect(send.mock.calls[0][3]).toMatchObject({
+        toolLoopGuardsByHost: true,
+      });
+      expect(execute).toHaveBeenCalledTimes(2);
+      expect(runAcpToolBatchSpy).not.toHaveBeenCalled();
+    });
+
     it("leaves the turn's background results that arrive after its response to a notification turn", async () => {
       const send = useSharedRounds();
       send.mockImplementationOnce(() =>
@@ -28568,6 +28701,75 @@ describe('Session', () => {
             expect(signals[0].aborted).toBe(false);
             expect(signals).toHaveLength(1);
           });
+
+          it.each([
+            {
+              type: core.LlmEventType.HookSystemMessage,
+              value:
+                'Stop hook blocked continuation 1 consecutive time; overriding and ending the turn.',
+            },
+            {
+              type: core.LlmEventType.StopHookLoop,
+              value: {
+                iterationCount: 1,
+                reasons: ['Finish the requested work'],
+                stopHookCount: 1,
+              },
+            },
+          ] as const)(
+            'keeps stop-time input queued when the client emits $type',
+            async (hookEvent) => {
+              mockClient.extMethod = vi
+                .fn()
+                .mockResolvedValueOnce({ messages: ['use plan B instead'] })
+                .mockResolvedValue({ messages: [] });
+              let markHookStarted!: () => void;
+              const hookStarted = new Promise<void>((resolve) => {
+                markHookStarted = resolve;
+              });
+              let releaseHook!: () => void;
+              const hookReleased = new Promise<void>((resolve) => {
+                releaseHook = resolve;
+              });
+              const signals: AbortSignal[] = [];
+              mockConfig.isUnifiedAgentLoopEnabled = vi
+                .fn()
+                .mockReturnValue(true);
+              Object.assign(mockLlmClient, {
+                admitUserPrompt: vi.fn().mockResolvedValue({ blocked: false }),
+                sendMessageStream: vi.fn(
+                  (_parts: Part[], signal: AbortSignal) => {
+                    signals.push(signal);
+                    if (signals.length > 1) return createEmptyStream();
+                    return (async function* () {
+                      yield {
+                        type: core.LlmEventType.Content,
+                        value: 'plan A',
+                      };
+                      yield {
+                        type: core.LlmEventType.Finished,
+                        value: { reason: FinishReason.STOP },
+                      };
+                      markHookStarted();
+                      await hookReleased;
+                      yield hookEvent;
+                      await nextTick();
+                    })();
+                  },
+                ),
+              });
+
+              const done = startPrompt();
+              await hookStarted;
+              session.sendMidTurnInputNow();
+              releaseHook();
+
+              await expect(done).resolves.toEqual({ stopReason: 'end_turn' });
+              expect(signals[0].aborted).toBe(false);
+              expect(drainCalls()).toHaveLength(0);
+              expect(signals).toHaveLength(1);
+            },
+          );
         });
 
         it('cuts a response that has not streamed anything yet', async () => {
