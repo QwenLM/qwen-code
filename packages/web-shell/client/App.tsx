@@ -1496,6 +1496,8 @@ export interface WebShellProps {
   composerToolbarActions?: readonly ComposerToolbarAction[];
   /** Execution mode choices. Overrides ui.allowedApprovalModes; [] offers none. Presentation only. */
   allowedApprovalModes?: readonly WebShellApprovalMode[];
+  /** Composer presentation shared by the main chat, split panes, and side tasks. */
+  composerVariant?: 'default' | 'simple';
   /** Optionally filter main-model entries without changing shared defaults. */
   mainModelFilter?: (model: ModelDialogModel) => boolean;
   /** Stack completion details vertically for narrow embedded hosts. */
@@ -3481,6 +3483,7 @@ export function App({
   shellRef,
   composerToolbarActions,
   allowedApprovalModes: allowedApprovalModesProp,
+  composerVariant = 'default',
   mainModelFilter,
   compactComposerOverlays = false,
   autoSubmitSlashCommands = false,
@@ -3814,6 +3817,7 @@ export function App({
       filterArtifact,
       askUserFreeTextLabel,
       composerTagIcons,
+      composerVariant,
       builtinAtProviders,
       atProviders,
       renderToolHeaderExtra,
@@ -3850,6 +3854,7 @@ export function App({
       filterArtifact,
       askUserFreeTextLabel,
       composerTagIcons,
+      composerVariant,
       builtinAtProviders,
       atProviders,
       renderToolHeaderExtra,

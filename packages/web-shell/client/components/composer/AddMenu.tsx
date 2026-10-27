@@ -88,6 +88,7 @@ export interface AddMenuProps {
     onLiveVoice?: () => void;
   };
   commandsOnly?: boolean;
+  simpleMode?: boolean;
 }
 
 export interface AddMenuPlanControl {
@@ -319,6 +320,7 @@ export function AddMenu({
   btw,
   mobileActions,
   commandsOnly = false,
+  simpleMode = false,
 }: AddMenuProps) {
   const { t, language } = useI18n();
   const [open, setOpen] = useState(false);
@@ -597,6 +599,14 @@ export function AddMenu({
             <div className="min-h-0 overflow-y-auto px-3" data-vaul-no-drag>
               {page === 'root' && (
                 <div className="flex flex-col gap-1">
+                  {simpleMode && !anyAvailable && (
+                    <div
+                      className="p-3 text-muted-foreground"
+                      data-testid="composer-add-menu-empty"
+                    >
+                      {t('composerAdd.emptyState')}
+                    </div>
+                  )}
                   {addFileAvailable && (
                     <>
                       <Button
@@ -657,42 +667,48 @@ export function AddMenu({
                         {pageLabels[id]}
                       </Button>
                     ))}
-                  <div className="my-1 border-t" />
-                  {!mobileActions.shellMode &&
-                    mobileActions.commands.length > 0 && (
+                  {!simpleMode && (
+                    <>
+                      <div className="my-1 border-t" />
+                      {!mobileActions.shellMode &&
+                        mobileActions.commands.length > 0 && (
+                          <Button
+                            variant="ghost"
+                            className={mobileRowClass}
+                            onClick={() => setPage('commands')}
+                          >
+                            {t('composerMobile.commands')}
+                          </Button>
+                        )}
                       <Button
                         variant="ghost"
                         className={mobileRowClass}
-                        onClick={() => setPage('commands')}
+                        onClick={() => closeAndRun(mobileActions.onHistory)}
                       >
-                        {t('composerMobile.commands')}
+                        {t('composerMobile.history')}
                       </Button>
-                    )}
-                  <Button
-                    variant="ghost"
-                    className={mobileRowClass}
-                    onClick={() => closeAndRun(mobileActions.onHistory)}
-                  >
-                    {t('composerMobile.history')}
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    className={mobileRowClass}
-                    onClick={() => closeAndRun(mobileActions.onToggleShell)}
-                  >
-                    {t(
-                      mobileActions.shellMode
-                        ? 'quickActions.exitShellMode'
-                        : 'quickActions.shellMode',
-                    )}
-                  </Button>
-                  {mobileActions.onLiveVoice && (
-                    <LiveVoiceMenuItem
-                      className={mobileRowClass}
-                      onClick={() => closeAndRun(mobileActions.onLiveVoice!)}
-                    />
+                      <Button
+                        variant="ghost"
+                        className={mobileRowClass}
+                        onClick={() => closeAndRun(mobileActions.onToggleShell)}
+                      >
+                        {t(
+                          mobileActions.shellMode
+                            ? 'quickActions.exitShellMode'
+                            : 'quickActions.shellMode',
+                        )}
+                      </Button>
+                      {mobileActions.onLiveVoice && (
+                        <LiveVoiceMenuItem
+                          className={mobileRowClass}
+                          onClick={() =>
+                            closeAndRun(mobileActions.onLiveVoice!)
+                          }
+                        />
+                      )}
+                    </>
                   )}
-                  {btw && (
+                  {btw && !simpleMode && (
                     <Button
                       variant="ghost"
                       className={`${mobileRowClass} py-2`}
@@ -713,7 +729,7 @@ export function AddMenu({
                       </span>
                     </Button>
                   )}
-                  {plan && (
+                  {plan && !simpleMode && (
                     <Button
                       variant="ghost"
                       className={mobileRowClass}
@@ -877,7 +893,7 @@ export function AddMenu({
             }}
           >
             {!anyAvailable ? (
-              !btw && (
+              (simpleMode || !btw) && (
                 <DropdownMenuLabel data-testid="composer-add-menu-empty">
                   {t('composerAdd.emptyState')}
                 </DropdownMenuLabel>
@@ -1056,7 +1072,7 @@ export function AddMenu({
                 </DropdownMenuSub>
               </>
             )}
-            {btw ? (
+            {btw && !simpleMode ? (
               <>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem
@@ -1075,7 +1091,7 @@ export function AddMenu({
                 </DropdownMenuItem>
               </>
             ) : null}
-            {plan ? (
+            {plan && !simpleMode ? (
               <>
                 <DropdownMenuSeparator />
                 <DropdownMenuCheckboxItem
