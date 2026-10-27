@@ -123,6 +123,8 @@ PR3 [#15599](https://github.com/QwenLM/qwen-code/pull/15599) 已合入 PR2 分�
    固定 inode、元数据、rolling hash 与 sealed commit proof。在 journal 适配器中
    直接 rename transcript 会违反当前 lease 的身份校验。先持久化原生快照，再推进
    新的原生重放下界；该下界独立于上下文摘要覆盖范围。
+   [PR4 本地设计](2026-10-26-managed-local-journal-snapshots.zh-CN.md) 实现仅一次的
+   sealed 恢复转换，保留完整前缀；不实现轮换、GC、紧凑状态或内存/存储有界。
 5. **Authority 窗口：** 淘汰前增加持久历史查询或 read-through，并迁移从 sequence 1
    开始的同步消费者。除 `events` 外，还要约束 `transactions`、event ID、receipt、
    checkpoint、domain、extension 索引、Action 和 extension 唯一性证据。
