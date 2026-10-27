@@ -1745,7 +1745,10 @@ public final class ManagedAgentPreflight {
                 .collect(StringBuilder::new, StringBuilder::appendCodePoint,
                         StringBuilder::append)
                 .toString();
-        return line.length() > 200 ? line.substring(0, 200) + "..." : line;
+        int points = line.codePointCount(0, line.length());
+        return points > 200
+                ? line.substring(0, line.offsetByCodePoints(0, 200)) + "..."
+                : line;
     }
 
     private static String rootMessage(Throwable error) {

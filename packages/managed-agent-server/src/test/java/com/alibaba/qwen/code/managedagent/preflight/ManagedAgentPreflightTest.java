@@ -1187,6 +1187,10 @@ class ManagedAgentPreflightTest {
                 ManagedAgentPreflight.printable("\n\u001b[2JPASS harness forged"));
         assertEquals("x".repeat(200) + "...",
                 ManagedAgentPreflight.printable("x".repeat(500)));
+        // The cut must not split a surrogate pair.
+        assertEquals("x".repeat(199) + "\uD83D\uDE00" + "...",
+                ManagedAgentPreflight.printable(
+                        "x".repeat(199) + "\uD83D\uDE00y"));
     }
 
     @Test
