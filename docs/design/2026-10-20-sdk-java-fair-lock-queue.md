@@ -171,6 +171,22 @@ and host-cache presence, so a permanently unwritable or cross-filesystem
 host cache accumulates evidence instead of repeating an identical warning
 in every job log.
 
+A red suite still reaches the write-back. The test job's Maven runs record a
+failure in `mvn_status` instead of aborting under errexit, the failure stops
+the remaining suites, and that deferred status fails the step after the copy.
+The downloads the failed run made are therefore published instead of
+re-fetched by the next leg, and a tolerated skip of the copy reports the same
+status rather than turning the step green. A red leg queues only as long as
+the copy itself may run (300 s) instead of spending the green lane's 9600 s
+budget to repeat a failure signal that is already decided. The copy publishes
+artifacts only: the resolver tracking markers and the `*.tmp` fragments an
+interrupted transfer leaves behind stay out, because a published marker would
+make every later reader of the host cache inherit that resolution outcome.
+Because the write-back output now sits between the failure and the log tail,
+every exit that can end a red step names the failing stage in an annotation;
+Maven exits 1 for nearly every failure mode, so the bare exit code cannot tell
+the three suites apart.
+
 The 9600 s test-lane and 5400 s write-back budgets are unchanged by this PR.
 They bound the queue, not the hold; the test lane's 9600 s is carried from
 the pre-split topology where its suite could queue behind several holds, and
@@ -305,25 +321,32 @@ order this section exists to prevent.
   head cannot loop and be overtaken.
 - The workflow pins move with the mechanism:
   `scripts/tests/sdk-java-workflow.test.js` pins the sourced helper, the
-  test lane's 9600 s budget and 200-minute ceiling, the MariaDB write-back's
-  5400 s budget and 310-minute ceiling, the identical prelude and write-back
-  tail at both sites (modulo the intentional budget difference), both jobs'
-  Maven runs above their acquisition, their write-back children's fd 9
-  close, the two in-house coordinates' and the tracking markers' absence
-  from every seeded job-local repository, and the seed-drop/prune sets
-  agreeing at every site. The fault arms cover a missing `flock`, a broken
-  `mkdir`, a stray queue file, a lock path that is a directory, a timed-out
-  `flock`, and an unexpected `flock` status. The suite also pins the seed's
-  contents-copy spelling, a failed seed's recorded status and summary line,
-  the write-back running after a failed suite while the step stays red, a run
-  that reported a corrupt download skipping the write-back so the host cache
-  stays untouched, the
-  H2 suite skipped after a failed install, a write-back that cannot create
-  the host cache staying green with a summary line, a timed-out write-back's
-  124 status, resolver temporaries excluded from the write-back, a lock-timeout skip's
-  summary line, a setup fault preserving a failed suite's red status, and a
-  failed suite staying red when the lock is skipped. The `.size-baseline`
-  entry is re-measured to the workflow's size after the last edit.
+  test lane's 9600 s budget, the red leg's 300 s clamp and 200-minute
+  ceiling, the MariaDB write-back's 5400 s budget and 310-minute ceiling, the
+  prelude and write-back tail at both sites — byte-identical apart from the
+  deliberate differences the comparison normalizes: the wait budget, the
+  red-path clamp, and each site's deferred status variable and exits (the
+  test job's `mvn_status` with a named-stage reporter, the MariaDB site's
+  `result_status`); both jobs' Maven runs above their acquisition, the test
+  lane's `mvn` lines ending in `|| mvn_status=$?` with a named stage and the
+  MariaDB site's in `|| result_status=$?`, the tolerated-skip arms exercised
+  with both a green and a red status (the red ones assert the stage
+  annotation and the 300 s budget), their write-back children's fd 9 close,
+  the two in-house coordinates' and the tracking-marker and `*.tmp` names'
+  absence from every seeded job-local repository and from both write-back
+  prunes, the annotation staying clear of `INFRA_FAILURE_SIGNATURES`, and the
+  seed-drop/prune sets agreeing at every site. The fault arms cover a missing
+  `flock`, a broken `mkdir`, a stray queue file, a lock path that is a
+  directory, a timed-out `flock`, and an unexpected `flock` status. The
+  suite also pins the seed's contents-copy spelling, a failed seed's recorded
+  status and summary line, a run that reported a corrupt download skipping
+  the write-back so the host cache stays untouched, the H2 suite skipped
+  after a failed install, a write-back that cannot create the host cache
+  staying green with a summary line, a timed-out write-back's 124 status, a
+  lock-timeout skip's summary line, a setup fault preserving a failed
+  suite's red status, and a failed suite staying red when the lock is
+  skipped. The `.size-baseline` entry is re-measured to the workflow's size
+  after the last edit.
 - Real-host soak is CI itself: the first pool runs after merge either
   acquire in ticket order or time out with an attributable ticket number.
 
