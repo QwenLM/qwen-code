@@ -95,7 +95,9 @@ daemon 接纳 `/review` 或 `/verify-pr` 提示词时，立即绑定 PR。
 - `/verify-pr 15172` 与 `/review 15172` 绑定同一枚徽标，实时路径与 transcript
   回填路径都成立。
 - 不带限定、或限定指向本 workspace 仓库（含 gh 页已确认的 fork 父仓库）的
-  `/verify-pr <N>` 绑定 PR `<N>`；全部限定都指向另一仓库的号码不产生绑定。
+  `/verify-pr <N>` 绑定 PR `<N>`，且解析出的 PR 必须属于该仓库：解析结果是 fork
+  另一侧的同号 PR、或在该仓库中无法解析时，号码保持不绑定。全部限定都指向另一
+  仓库的号码不产生绑定，除非该号码由 URL 形态或 worktree 约定提供。
 - 被限定到另一仓库的 `/verify-pr` 号码不产生绑定、不写 sidecar、不标记 catalog
   变更；拒绝会计入 `repoDeclined` 并进入 live 钩子的告警。
 - 非显式 PR 审查的提示词不创建绑定，也不发起平台查询。

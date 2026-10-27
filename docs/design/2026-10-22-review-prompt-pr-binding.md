@@ -121,8 +121,11 @@ Bind the PR when the daemon admits a `/review` or `/verify-pr` prompt.
 - `/verify-pr 15172` binds PR #15172 exactly as `/review 15172` does, live and
   from the transcript sweep.
 - A `/verify-pr <N>` carrying no qualifier, or one naming this workspace's
-  repository (or the page's confirmed fork parent), binds PR `<N>`; a number
-  whose qualifiers all name another repository binds nothing.
+  repository (or the page's confirmed fork parent), binds PR `<N>`, and the PR
+  it resolves to must belong to that repository: when the resolved PR is the
+  other side of a fork, or cannot be resolved there, the number stays unbound.
+  A number whose qualifiers all name another repository binds nothing, unless a
+  url form or the worktree convention supplies the number.
 - A `/verify-pr` number qualified to another repository binds nothing, writes
   no sidecar and marks no catalog change; the decline is counted in
   `repoDeclined` and reaches the live hook's warning.

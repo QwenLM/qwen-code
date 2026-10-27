@@ -4587,14 +4587,17 @@ describe('backfillWorkspaceSessionPrs', () => {
 
   it('declines a dotted first segment rather than guessing a group', async () => {
     // `a.b/c` cannot be told apart from `host/owner`: the host reading wins,
-    // which leaves one path segment, so the qualifier declines. Pinned as a
-    // decision — the alternative (reading it as a dotted nested group) would
-    // bind a repository the user may not have named.
+    // which leaves one path segment, so the qualifier declines. The origin is
+    // itself dotted so the case discriminates: reading the first segment as a
+    // group would match `a.b/c` and bind this PR.
+    fetchRemoteWebUrlMock.mockResolvedValue('https://github.com/a.b/c');
     await seedSession(SESSION_A);
     await appendUserText(SESSION_A, '/verify-pr 77 --repo a.b/c');
     fetchGitHubPullRequestsMock.mockResolvedValue({
       kind: 'ok',
-      pullRequests: [pr(77, 'f77')],
+      pullRequests: [
+        { ...pr(77, 'f77'), url: 'https://github.com/a.b/c/pull/77' },
+      ],
     });
 
     const result = await backfillWorkspaceSessionPrs(runtime);
