@@ -2264,11 +2264,47 @@ describe('OpenAIContentConverter', () => {
 
       expect(response.usageMetadata?.promptTokenCount).toBe(3);
       expect(response.usageMetadata?.candidatesTokenCount).toBe(1);
+      expect(response.usageMetadata?.cachedContentTokenCount).toBe(0);
+      expect(
+        getGenAiUsageProvenance(response.usageMetadata)
+          ?.cachedInputTokensReported,
+      ).toBe(false);
       expect(
         getGenAiUsageProvenance(response.usageMetadata)
           ?.cacheCreationInputTokens,
       ).toBe(256);
     });
+
+    it.each([
+      [
+        'non-streaming',
+        (extra: Record<string, unknown>) =>
+          toLlm([], { usage: usage(3, 1, 4, extra) }),
+      ],
+      [
+        'streaming usage-only',
+        (extra: Record<string, unknown>) =>
+          usageChunk(withStreamParser(), usage(3, 1, 4, extra)),
+      ],
+    ])(
+      'keeps cache reads and writes distinct for %s usage',
+      (_title, convert) => {
+        const response = convert({
+          prompt_tokens_details: {
+            cached_tokens: 100,
+            cache_write_tokens: 256,
+          },
+        });
+
+        expect(response.usageMetadata?.promptTokenCount).toBe(3);
+        expect(response.usageMetadata?.candidatesTokenCount).toBe(1);
+        expect(response.usageMetadata?.cachedContentTokenCount).toBe(100);
+        expect(getGenAiUsageProvenance(response.usageMetadata)).toMatchObject({
+          cachedInputTokensReported: true,
+          cacheCreationInputTokens: 256,
+        });
+      },
+    );
 
     it.each([
       [
