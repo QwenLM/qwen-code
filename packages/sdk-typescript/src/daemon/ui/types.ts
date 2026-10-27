@@ -618,7 +618,9 @@ export interface DaemonUiSessionRewoundEvent extends DaemonUiEventBase {
   type: 'session.rewound';
   sessionId?: string;
   promptId: string;
+  daemonPromptId?: string;
   targetTurnIndex: number;
+  replay?: DaemonUiEvent[];
 }
 
 export interface DaemonUiSessionBranchedEvent extends DaemonUiEventBase {
@@ -1353,11 +1355,13 @@ export interface DaemonTranscriptTruncationDetail {
   /**
    * Set for `kind: 'blocks'`: whether the eviction removed blocks from the
    * OLDEST end. True for retention trimming (oldest-first), which can evict
-   * the record an exclusive pagination anchor points at; false for a rewind
-   * (which drops the newest blocks and leaves the oldest anchor intact).
+   * the record an exclusive pagination anchor points at; false for a tail-only
+   * rewind. Replay replacement can also change the oldest retained anchor.
    * Consumers should only re-anchor pagination when this is true.
    */
   evictedOldest?: boolean;
+  /** True when an authoritative rewind installs a replacement replay. */
+  replacedReplay?: boolean;
   /**
    * Set for `kind: 'blocks'`: the post-trim window occupancy. Lets consumers
    * decide whether a previously rejected history page would now be admitted,

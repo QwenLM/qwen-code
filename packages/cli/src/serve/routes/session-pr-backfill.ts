@@ -659,6 +659,12 @@ export async function backfillWorkspaceSessionPrs(
     v = v.replace(/[.,;]+$/, '').replace(/\/+$/, '');
     const parts = v.split('/').filter(Boolean);
     if (parts.length < 2) return undefined;
+    // A first segment carrying a dot or a colon is read as a HOST. That makes
+    // a nested group whose first segment contains a dot (`a.b/c`) indistinguish-
+    // able from `host/owner`: nothing in gh's `[HOST/]OWNER/REPO` shape tells
+    // them apart. The host reading wins, which leaves one path segment, so such
+    // a qualifier declines — the safe side, and the reason this is a decision
+    // rather than a spelling to patch.
     if (/[.:]/.test(parts[0])) {
       const path = parts.slice(1).map(normalizeSegment);
       return path.length >= 2 ? { host: parts[0], path } : undefined;
