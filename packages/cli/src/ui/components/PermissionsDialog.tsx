@@ -104,7 +104,16 @@ function savedSettingsPath(label: string): string {
     SCOPE_LABEL_GAP -
     nonPathWidth;
   const settingsPath = tildeifyPath(Storage.getGlobalSettingsPath());
-  const shortened = shortenPath(settingsPath, Math.max(10, budget));
+  // shortenPath budgets code units, but this row is clipped in display
+  // columns: wide characters make a path wider than its length, so charge that
+  // overhead first or a path that fits the budget is clipped and loses its
+  // file name.
+  const widthOverhead =
+    getCachedStringWidth(settingsPath) - settingsPath.length;
+  const shortened = shortenPath(
+    settingsPath,
+    Math.max(10, budget - Math.max(0, widthOverhead)),
+  );
   const name = settingsPath.slice(settingsPath.lastIndexOf(nodePath.sep) + 1);
   // shortenPath always keeps the first segment, which can crowd out the file
   // name this row exists to show; keep the name alone when that happens.
