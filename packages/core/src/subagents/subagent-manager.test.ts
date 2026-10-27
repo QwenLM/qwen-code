@@ -2353,32 +2353,18 @@ describe('SubagentManager', () => {
         ).toBe('unknown-vendor:some-model');
       });
 
-      it('routes a modelProviders-prefixed fastModel selected via "fast"', async () => {
-        const config = makeFakeConfig({
-          modelProvidersConfig: {
-            'huawei-maas': [
-              {
-                id: 'deepseek-v4.1-flash',
-                envKey: 'MAAS_API_KEY',
-                baseUrl: 'https://maas.example.com/v2',
-              },
-            ],
-          },
-          providerProtocolConfig: { 'huawei-maas': 'openai' },
-        });
-        vi.spyOn(config, 'getFastModel').mockReturnValue(
-          'huawei-maas:deepseek-v4.1-flash',
-        );
-        const mgr = new SubagentManager(config);
+      it('trims whitespace around a modelProviders-prefixed selector', () => {
+        const mgr = providerManager();
 
         expect(
-          (
-            await mgr.convertToRuntimeConfig(
-              { ...validConfig, model: 'fast' },
-              config,
-            )
-          ).modelConfig.model,
-        ).toBe('deepseek-v4.1-flash');
+          mgr.resolveSubagentModelRoute({
+            ...validConfig,
+            model: ' huawei-maas : deepseek-v4.1-flash ',
+          }),
+        ).toEqual({
+          modelId: 'deepseek-v4.1-flash',
+          authType: AuthType.USE_OPENAI,
+        });
       });
     });
 
