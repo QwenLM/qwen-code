@@ -127,4 +127,8 @@ jobs:
           q 'status?id' "https://central.sonatype.com/api/v1/publisher/status?id=${DEPLOYMENT_ID}"
           q 'status?deploymentId' "https://central.sonatype.com/api/v1/publisher/status?deploymentId=${DEPLOYMENT_ID}"
           q 'published' "https://central.sonatype.com/api/v1/publisher/published?namespace=com.alibaba&name=qwen-managed-agent-server&version=0.26.1"
+          # Control 1: a UUID that cannot exist -> distinguishes API-wide failure from our deployment.
+          q 'status-nonexistent-id' "https://central.sonatype.com/api/v1/publisher/status?id=00000000-0000-0000-0000-000000000000"
+          # Control 2: a version known to be published -> proves auth and the published endpoint work.
+          q 'published-known-good' "https://central.sonatype.com/api/v1/publisher/published?namespace=com.alibaba&name=qwencode-sdk&version=0.0.3-alpha"
           exit 0
