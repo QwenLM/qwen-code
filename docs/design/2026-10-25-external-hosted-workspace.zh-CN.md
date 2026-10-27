@@ -175,8 +175,13 @@ step 3 的第一片以 Broker/适配器前置层的形式落地，而不是产�
   并以永久错误码拒绝（`external_storage_registration_not_found`、
   `external_storage_registration_mismatch`、`external_storage_continuity_denied`）。
   provider 身份、physical key、revision、alias 路径与 mount root 一律与注册记录比对，
-  绝不与请求或 provider 回包比对。`storageRef` 是注册身份元组（providerId、physicalKey、registrationRevision）的 canonical-JSON SHA-256；
-  revision 变化会让既有 handle 不可采纳，而不是悄悄重绑。
+  绝不与请求或 provider 回包比对。查询使用注册记录的主键（与写入路径插入的 alias key 相同），
+  按 owner 行的主键关联该行，且只接受 `REGISTERED` 状态；`RETIRING` 或 `RETIRED`
+  均视为未注册。revision 不得超过 2^53-1，这是协议两端均能精确表示的最大整数。
+  `storageRef` 是注册身份元组（providerId、physicalKey、registrationRevision）的 canonical-JSON SHA-256；
+  revision 变化会让既有 handle 不可采纳，而不是悄悄重绑。无法完整读取查询结果时，返回可重试的
+  `runtime_external_unavailable`，使 Broker 保持该 placement 可采纳；已经读出的行若自身信息
+  不一致，则永久拒绝。
 - **boot 文档不变。** Broker 铸造已上线的 `managed-context/1` 文档，并追加已被 worker
   准入的 `storage` 成员（`kind/physicalKey/aliasPath/mountRoot/registrationRevision`），
   在 `session` 隔离与 Workspace capability digest 下由现有 worker 接受。因此本片
