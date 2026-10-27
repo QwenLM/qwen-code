@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -17,6 +18,17 @@ import java.util.concurrent.CompletionStage;
  * completion only with {@code true}.
  */
 public interface RuntimeTransport {
+    default CompletionStage<Map<String, Object>> extensionControl(RuntimeBindingRecord runtime,
+            String harnessSessionId, Map<String, Object> operation) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "managed_extension_unavailable", "Extension metadata controls are unavailable.", false));
+    }
+
+    default CompletionStage<List<Map<String, Object>>> mcpDefinitions(RuntimeBindingRecord runtime) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "managed_mcp_management_unavailable", "Runtime MCP definitions are unavailable.", false));
+    }
+
     /**
      * Re-proves the identity behind a restored lease. The default fails
      * closed: a transport that cannot attest can never adopt a binding.

@@ -10,10 +10,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   ChatCompressionService,
+  firePostCompact,
   COMPACT_MAX_OUTPUT_TOKENS,
   COMPACTION_BUDGET_SAFETY_MARGIN,
   computeCompactionOutputBudget,
   computeThresholds,
+  isBelowCompactionWarn,
   MAX_CONSECUTIVE_FAILURES,
   MAX_HOOK_INSTRUCTIONS_CHARS,
   PAYLOAD_OVERFLOW_SIDE_QUERY_TEXT_CAP,
@@ -37,6 +39,8 @@ import * as postCompactModule from './postCompactAttachments.js';
 import * as slimmingModule from './compactionInputSlimming.js';
 import { logChatCompression } from '../telemetry/loggers.js';
 import { estimateContentTokens } from './tokenEstimation.js';
+import { getAutoMemorySnapshot } from '../memory/request-context.js';
+import { detectTurnInterruption } from '../core/turn-interruption.js';
 import {
   content,
   fnCall,
@@ -354,6 +358,46 @@ describe('ChatCompressionService', () => {
     // Default 0.85; window 1000 is degenerate → auto = 850. 600 < 850, so NOOP.
     arrange(turns('hi'), 600);
     expectNoNewHistory(await run(), CompressionStatus.NOOP);
+  });
+
+  it('#13004: drops a parked memory-extraction snapshot when the shrink is decided', async () => {
+    const invalidatePendingExtract = vi.fn();
+    Object.assign(mockConfig, {
+      getMemoryManager: () => ({ invalidatePendingExtract }),
+      getSessionId: () => 'sess-compact',
+    });
+    arrangeAuto();
+    expectCompressed(await run());
+    expect(invalidatePendingExtract).toHaveBeenCalledWith(
+      'sess-compact',
+      mockConfig,
+    );
+  });
+
+  // Regression (#13004 R18-3): `compress()` runs per chat, while the cadence
+  // entry is per session. A forked chat shares the session's Config instance,
+  // so its own shrink must not drop a snapshot cut from the session's history.
+  it('#13004: keeps the parked snapshot when a forked chat compacts', async () => {
+    const invalidatePendingExtract = vi.fn();
+    Object.assign(mockConfig, {
+      getMemoryManager: () => ({ invalidatePendingExtract }),
+      getSessionId: () => 'sess-compact',
+    });
+    mockChat.isForkedChat = true;
+    arrangeAuto();
+    expectCompressed(await run());
+    expect(invalidatePendingExtract).not.toHaveBeenCalled();
+  });
+
+  it('#13004: keeps the parked memory-extraction snapshot when nothing shrinks', async () => {
+    const invalidatePendingExtract = vi.fn();
+    Object.assign(mockConfig, {
+      getMemoryManager: () => ({ invalidatePendingExtract }),
+      getSessionId: () => 'sess-compact',
+    });
+    arrange(turns('hi'), 600);
+    expectNoNewHistory(await run(), CompressionStatus.NOOP);
+    expect(invalidatePendingExtract).not.toHaveBeenCalled();
   });
 
   describe('screenshot-overflow trigger', () => {
@@ -1011,6 +1055,70 @@ describe('ChatCompressionService', () => {
   describe('PreCompact hook', () => {
     beforeEach(installHookSystem);
 
+    it('awaits a durable candidate before PostCompact and resumes the saved candidate without generating again', async () => {
+      arrangeForced();
+      let saved:
+        | import('./chatCompressionService.js').ChatCompressionCandidate
+        | undefined;
+      let release: () => void = () => {};
+      let prepared: () => void = () => {};
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const ready = new Promise<void>((resolve) => {
+        prepared = resolve;
+      });
+      const pending = run({
+        force: true,
+        onPreparedCompaction: async (candidate) => {
+          saved = structuredClone(candidate);
+          prepared();
+          await blocked;
+        },
+      });
+      await ready;
+      expect(saved?.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(saved?.newHistory.length).toBeGreaterThanOrEqual(2);
+      expect(mockFirePostCompactEvent).not.toHaveBeenCalled();
+      release();
+      expectCompressed(await pending);
+      expect(mockFirePostCompactEvent).toHaveBeenCalledWith(
+        PostCompactTrigger.Manual,
+        saved!.summary,
+        undefined,
+      );
+      const calls = vi.mocked(mockConfig.getBaseLlmClient().generateText).mock
+        .calls.length;
+      await firePostCompact(mockConfig, saved!);
+      expect(
+        vi.mocked(mockConfig.getBaseLlmClient().generateText).mock.calls,
+      ).toHaveLength(calls);
+    });
+
+    it('does not run PostCompact after candidate persistence fails', async () => {
+      arrangeForced();
+      await expect(
+        run({
+          force: true,
+          onPreparedCompaction: async () => {
+            throw new Error('writer fenced');
+          },
+        }),
+      ).rejects.toThrow('writer fenced');
+      expect(mockFirePostCompactEvent).not.toHaveBeenCalled();
+    });
+
+    it('disables local file restoration for a Hosted compression', async () => {
+      arrangeForced();
+      const compose = vi.spyOn(postCompactModule, 'composePostCompactHistory');
+      expectCompressed(await run({ force: true, restoreRecentFiles: false }));
+      expect(compose).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        expect.objectContaining({ maxFiles: 0 }),
+      );
+    });
+
     it('should fire PreCompact hook with Manual trigger when force=true', async () => {
       arrangeForced();
       await run({ force: true }); // force = true -> Manual trigger
@@ -1532,6 +1640,75 @@ describe('ChatCompressionService.compress cache sharing', () => {
       });
       const request = generateText.mock.calls[0]![0] as GenerateTextOptions;
       expect(request.promptCacheSharing).toBe(true);
+    },
+  );
+
+  it.each([
+    { cacheSharing: false, visible: false },
+    { cacheSharing: true, visible: false },
+    { cacheSharing: false, visible: true },
+    { cacheSharing: true, visible: true },
+  ])(
+    'projects replayed tool-result catalogs for compression: $cacheSharing / $visible',
+    async ({ cacheSharing, visible }) => {
+      const history = [
+        userText('read the file ' + 'earlier conversation '.repeat(2_000)),
+        content('model', fnCall('read_file', { path: 'README.md' }, 'call-1')),
+      ];
+      const snapshot = getAutoMemorySnapshot(
+        [],
+        'retained catalog '.repeat(100),
+      )!;
+      const response = fnResponse(
+        'read_file',
+        { output: 'contents' },
+        'call-1',
+      );
+      const quoted = { text: snapshot.text! };
+      const raw = content('user', response, quoted, snapshot);
+      const interruption = detectTurnInterruption([...history, raw]);
+      if (interruption.kind !== 'interrupted_prompt')
+        throw new Error('missing replay parts');
+      const pendingUserMessage = content('user', ...interruption.parts);
+      const before = structuredClone(pendingUserMessage);
+      const { config, generateText, run } = makeFixture({
+        history,
+        enableCacheControl: cacheSharing,
+      });
+      config.getAutoMemoryContext = () => (visible ? 'current catalog' : '');
+      const coldSpy = cacheSharing
+        ? vi.spyOn(sideQueryModule, 'runSideQuery')
+        : spyCold();
+      const result = await run({ trigger: 'auto', pendingUserMessage });
+      expectCompressed(result);
+      expectCacheLog(config, cacheSharing, cacheSharing);
+      expect(generateText).toHaveBeenCalledTimes(cacheSharing ? 1 : 0);
+      expect(coldSpy).toHaveBeenCalledTimes(cacheSharing ? 0 : 1);
+      const request = (
+        cacheSharing
+          ? generateText.mock.calls[0]![0]
+          : coldSpy.mock.calls[0]![1]
+      ) as { contents: Content[] };
+      const expectedPending = content(
+        'user',
+        response,
+        quoted,
+        ...(visible ? [snapshot] : []),
+      );
+      expect(request.contents.slice(0, -1)).toEqual([
+        ...history,
+        expectedPending,
+      ]);
+      expect(pendingUserMessage).toEqual(before);
+      expect(raw.parts).toEqual([response, quoted, snapshot]);
+      expect(result.newHistory?.at(-1)?.parts).toContainEqual(
+        history[1].parts![0],
+      );
+      if (!cacheSharing) {
+        expect(result.info.newTokenCount).toBe(
+          11_500 + estimateContentTokens([expectedPending]),
+        );
+      }
     },
   );
 
@@ -2272,6 +2449,73 @@ describe('ChatCompressionService.compress cheap-gate uses estimated tokens', () 
     await expectGate(false, 200_000, 80_000, {
       pendingUserMessage: userText('short'),
     });
+  });
+});
+
+describe('isBelowCompactionWarn', () => {
+  const config = {
+    getContentGeneratorConfig: () => ({ contextWindowSize: 200_000 }),
+    getAutoCompactThreshold: () => undefined,
+  } as unknown as Config;
+
+  it('compares the prompt with the warning tier', () => {
+    const { warn } = computeThresholds(200_000);
+    expect(isBelowCompactionWarn(config, warn - 1)).toBe(true);
+    expect(isBelowCompactionWarn(config, warn)).toBe(false);
+  });
+
+  it('fails closed on a zero count, which means no report for the route', () => {
+    expect(isBelowCompactionWarn(config, 0)).toBe(false);
+  });
+
+  // The fake above reports exactly what the implementation falls back to —
+  // DEFAULT_TOKEN_LIMIT is 200_000, and computeThresholds already defaults an
+  // undefined pct to DEFAULT_PCT — so it cannot fail when a fallback is taken.
+  // Each case below follows one config value instead of one fallback; the
+  // fallback itself is pinned by the no-window case at the end.
+  it('follows the config window, not the DEFAULT_TOKEN_LIMIT fallback', () => {
+    const config32k = {
+      getContentGeneratorConfig: () => ({ contextWindowSize: 32_000 }),
+      getAutoCompactThreshold: () => undefined,
+    } as unknown as Config;
+    expect(
+      isBelowCompactionWarn(config32k, computeThresholds(32_000).warn - 1),
+    ).toBe(true);
+    // Below the 200K tier but far above the 32K one: green only while the
+    // window comes from the config.
+    expect(
+      isBelowCompactionWarn(config32k, computeThresholds(200_000).warn - 1),
+    ).toBe(false);
+  });
+
+  it('follows an autoCompactThreshold override, not DEFAULT_PCT', () => {
+    const configHalf = {
+      getContentGeneratorConfig: () => ({ contextWindowSize: 200_000 }),
+      getAutoCompactThreshold: () => 0.5,
+    } as unknown as Config;
+    const overridden = computeThresholds(200_000, 0.5).warn; // 80_000
+    // Pins this case's own teeth: if DEFAULT_PCT ever moved to 0.5 the two
+    // tiers would coincide and the assertions below would stop discriminating.
+    expect(overridden).not.toBe(computeThresholds(200_000).warn); // 147_000
+    expect(isBelowCompactionWarn(configHalf, overridden - 1)).toBe(true);
+    expect(isBelowCompactionWarn(configHalf, overridden)).toBe(false);
+  });
+
+  it('uses the default limit when the config reports no window at all', () => {
+    // The `?.contextWindowSize ?? DEFAULT_TOKEN_LIMIT` arm no earlier case
+    // reaches: a config without a generator config. Falling back to 0 instead
+    // would put every prompt above the tier, so the cadence experiment would
+    // never skip a turn and the paired runs would measure nothing.
+    const configNoWindow = {
+      getContentGeneratorConfig: () => undefined,
+      getAutoCompactThreshold: () => undefined,
+    } as unknown as Config;
+    const configZeroWindow = {
+      getContentGeneratorConfig: () => ({ contextWindowSize: 0 }),
+      getAutoCompactThreshold: () => undefined,
+    } as unknown as Config;
+    expect(isBelowCompactionWarn(configNoWindow, 1_000)).toBe(true);
+    expect(isBelowCompactionWarn(configZeroWindow, 1_000)).toBe(false);
   });
 });
 

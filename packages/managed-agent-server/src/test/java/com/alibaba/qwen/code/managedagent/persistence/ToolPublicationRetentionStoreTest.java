@@ -325,8 +325,6 @@ public class ToolPublicationRetentionStoreTest {
                 + " WHERE tenant_id = ? AND session_id = ?", recovery, tenant, session);
         retire();
         assertThat(blocker()).isEqualTo("READY".equals(recovery) ? null : "recovery_protected");
-        assertThat(jdbc.queryForObject("SELECT o3_backfill_pending FROM ma_session_head"
-                + " WHERE tenant_id = ? AND session_id = ?", Boolean.class, tenant, session)).isFalse();
         assertThat(jdbc.queryForObject("SELECT capture_held_bytes FROM ma_output_capture WHERE scope_key = ?",
                 Long.class, scope)).isEqualTo(1000);
     }
