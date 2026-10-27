@@ -295,6 +295,11 @@ describe('runHostedWorkflowTurn', () => {
     // pinned untrusted.
     const loadCalls = vi.mocked(loadCliConfig).mock.calls;
     expect(loadCalls).toHaveLength(1);
+    expect(loadCalls[0]![1]).toMatchObject({
+      sessionId: base.sessionId,
+      sessionIdGenerated: true,
+      chatRecording: false,
+    });
     expect(loadCalls[0]).toHaveLength(10);
     expect((loadCalls[0]![1] as { safeMode?: boolean }).safeMode).toBe(true);
     // #13858: the agents' chats open without this Harness's cwd listing.

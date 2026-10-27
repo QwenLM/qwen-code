@@ -77,8 +77,10 @@ import {
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import {
   createDaemonTranscriptState,
+  findDaemonRewindUserBlock,
   DaemonHttpError,
   getSessionUpdatePayload,
+  isDaemonRewindUserBlock,
   isDaemonTurnError,
   isStandaloneSessionNotFoundError,
   isStaleBranchPointError,
@@ -320,6 +322,7 @@ import {
 } from './utils/splitUrl';
 import { ScheduledTasksDialog } from './components/dialogs/ScheduledTasksDialog';
 import { GoalsDialog } from './components/dialogs/GoalsDialog';
+import { AutofixPrWatchesDialog } from './components/dialogs/AutofixPrWatchesDialog';
 import { WorkflowRunsPage } from './components/workflows/WorkflowRunsPage';
 import { parseWebShellGoalCommand } from './utils/goalCondition';
 import { buildGoalControlRequest } from './utils/goalControlRequest';
@@ -485,6 +488,7 @@ import {
   createAndAttachSessionForPrompt,
   isDaemonApprovalMode,
 } from './utils/sessionPreparation';
+import { titleFromPrompt } from './utils/sessionTitleFromPrompt';
 import {
   getComposerPlaceholderKey,
   getComposerPlaceholderState,
@@ -790,6 +794,7 @@ interface SendPromptOptionsWithRetry {
   submittedPrompt?: string;
   source?: 'mcp-app';
   optimisticUserMessage?: boolean;
+  bindBlockId?: string;
   images?: PromptImage[];
   files?: PromptFile[];
   inputAnnotations?: DaemonInputAnnotation[];
@@ -976,10 +981,7 @@ function getLatestUserBlock(
 ): DaemonTranscriptBlock | undefined {
   for (let index = blocks.length - 1; index >= 0; index -= 1) {
     const block = blocks[index];
-    if (
-      block?.kind === 'user' &&
-      block.meta?.['source'] !== 'background_notification'
-    ) {
+    if (isDaemonRewindUserBlock(block)) {
       return block;
     }
   }
@@ -993,10 +995,7 @@ function getLatestUserBlock(
 function countUserTurns(blocks: readonly DaemonTranscriptBlock[]): number {
   let count = 0;
   for (const block of blocks) {
-    if (
-      block?.kind === 'user' &&
-      block.meta?.['source'] !== 'background_notification'
-    ) {
+    if (isDaemonRewindUserBlock(block)) {
       count += 1;
     }
   }
@@ -1889,6 +1888,7 @@ type MainView =
   | 'chat'
   | 'cockpit'
   | 'scheduledTasks'
+  | 'prWatches'
   | 'workflows'
   | 'goals'
   | 'split';
@@ -4315,6 +4315,9 @@ export function App({
     (workspace.capabilities?.workspaces === undefined &&
       Boolean(workspace.capabilities?.workspaceCwd));
   const externalManagedAgentAvailable = managedAgentProvider !== undefined;
+  // The daemon lists the `/autofix-pr` watches of its workspaces' clones.
+  const prWatchesAvailable =
+    workspace.capabilities?.features?.includes('autofix_pr_watches') === true;
   const [pendingSessionContext, setPendingSessionContextState] = useState<
     DaemonProductSessionContext | undefined
   >(undefined);
@@ -10083,6 +10086,7 @@ export function App({
       mainView === 'cockpit' ||
       (!projectFeaturesAvailable &&
         (mainView === 'scheduledTasks' ||
+          mainView === 'prWatches' ||
           mainView === 'goals' ||
           mainView === 'split'))
     ) {
@@ -10170,6 +10174,24 @@ export function App({
     setMainView('goals');
     navigationRef.current?.openPage('goals');
   }, [showChat]);
+  const openPrWatches = useCallback(() => {
+    splitClassificationGenerationRef.current += 1;
+    setActivePanel(null);
+    // See openScheduledTasks: leaving the cockpit must strip its deep link.
+    if (!navigationRef.current) showChat();
+    setMainView('prWatches');
+    navigationRef.current?.openPage('pr-watches');
+  }, [showChat]);
+  // A daemon that stops listing watches (another daemon behind the same
+  // origin) leaves no page to show.
+  useEffect(() => {
+    if (
+      mainView === 'prWatches' &&
+      (!projectFeaturesAvailable || !prWatchesAvailable)
+    ) {
+      showChat();
+    }
+  }, [mainView, prWatchesAvailable, projectFeaturesAvailable, showChat]);
   const returnToChat = useCallback(() => {
     if (navigationRef.current && navigationRef.current.route.page !== 'chat') {
       navigationRef.current.returnToChat();
@@ -10187,6 +10209,7 @@ export function App({
         if (!projectFeaturesAvailable) return false;
         if (item === 'live') return sidebarOptions.showLive;
         if (item === 'workflows') return workflowsEnabled;
+        if (item === 'prWatches') return prWatchesAvailable;
         return true;
       }) ||
         (sidebarOptions.footer !== false &&
@@ -10378,9 +10401,11 @@ export function App({
       ? activePanel
       : mainView === 'scheduledTasks'
         ? 'scheduled-tasks'
-        : mainView === 'goals'
-          ? 'goals'
-          : undefined;
+        : mainView === 'prWatches'
+          ? 'pr-watches'
+          : mainView === 'goals'
+            ? 'goals'
+            : undefined;
   useEffect(() => {
     if (!navigation || !workspaceCapabilitiesReady) return;
     const page = navigation.route.page;
@@ -10389,11 +10414,17 @@ export function App({
       navigationSettledRef.current = true;
       return;
     }
-    const primaryItem = page === 'scheduled-tasks' ? 'scheduledTasks' : page;
+    const primaryItem =
+      page === 'scheduled-tasks'
+        ? 'scheduledTasks'
+        : page === 'pr-watches'
+          ? 'prWatches'
+          : page;
     const allowed =
       page === 'chat' ||
       (projectFeaturesAvailable &&
         (page !== 'live' || liveSidebarEnabled) &&
+        (page !== 'pr-watches' || prWatchesAvailable) &&
         (page === 'settings'
           ? hostSidebar?.footer !== false &&
             (hostSidebar?.footer?.items?.includes('settings') ?? true)
@@ -10417,9 +10448,11 @@ export function App({
     setMainView(
       nextPage === 'scheduled-tasks'
         ? 'scheduledTasks'
-        : nextPage === 'goals'
-          ? 'goals'
-          : 'chat',
+        : nextPage === 'pr-watches'
+          ? 'prWatches'
+          : nextPage === 'goals'
+            ? 'goals'
+            : 'chat',
     );
     if (nextPage === 'settings') setSettingsInitialCategory(undefined);
     if (!allowed) navigation.reconcilePage(undefined);
@@ -10429,6 +10462,7 @@ export function App({
     hostSidebar?.footer,
     hostSidebar?.primaryNav?.items,
     liveSidebarEnabled,
+    prWatchesAvailable,
     workspaceCapabilitiesReady,
   ]);
   useEffect(() => {
@@ -10930,6 +10964,7 @@ export function App({
     if (
       mainView === 'cockpit' ||
       mainView === 'scheduledTasks' ||
+      mainView === 'prWatches' ||
       mainView === 'workflows' ||
       mainView === 'goals'
     ) {
@@ -11423,7 +11458,7 @@ export function App({
     );
   }, []);
   const ensureSessionForPrompt = useCallback(
-    (notify?: (id: string) => void) => {
+    (notify?: (id: string) => void, initialTitle?: string) => {
       const currentSessionId = connectionRef.current.sessionId;
       if (createSessionPromiseRef.current) {
         if (
@@ -11533,27 +11568,79 @@ export function App({
                   await sessionActions.renameSession(
                     pendingManualTitle.displayName,
                   );
+                  if (catalogWorkspaceCwd) {
+                    sessionCatalogController.renamed(
+                      catalogWorkspaceCwd,
+                      sessionId,
+                      pendingManualTitle.displayName,
+                    );
+                  }
                 } catch {
                   pendingManualTitleRef.current = undefined;
                 }
+              } else if (initialTitle) {
+                // Name the new session from its first prompt before the row
+                // is first rendered, so it never shows the session-id
+                // fallback. Best-effort: on failure the daemon's first-prompt
+                // label still names it.
+                try {
+                  await sessionActions.renameSession(initialTitle);
+                  if (catalogWorkspaceCwd) {
+                    sessionCatalogController.renamed(
+                      catalogWorkspaceCwd,
+                      sessionId,
+                      initialTitle,
+                    );
+                  }
+                } catch {
+                  // Fall back to the first-prompt label.
+                }
               }
-              await onSessionCreatedRef.current?.(sessionId);
-            },
-            onSessionAllocated: (sessionId) => {
-              draftMaterializedSessionIdRef.current = sessionId;
-              notify?.(sessionId);
-              preparingSessionIdRef.current = sessionId;
-              allocatedSessionId = sessionId;
+              // Start the first catalog read only after the rename (or the
+              // carry) settled, so the row's first publish already carries
+              // the name instead of the session-id prefix.
               if (catalogWorkspaceCwd) {
-                allocatedSessionCatalogOwnerRef.current = {
-                  sessionId,
-                  workspaceCwd: catalogWorkspaceCwd,
-                };
                 sessionCatalogController.sessionCreated(
                   catalogWorkspaceCwd,
                   sessionId,
                 );
               }
+              await onSessionCreatedRef.current?.(sessionId);
+            },
+            onSessionAllocated: (sessionId) => {
+              draftMaterializedSessionIdRef.current = sessionId;
+              // A still-armed /clear carry wins over the fresh prompt title;
+              // do not register a provisional title it would have to undo.
+              const carryWillApply =
+                pendingManualTitle !== undefined &&
+                pendingManualTitleRef.current === pendingManualTitle;
+              if (catalogWorkspaceCwd) {
+                allocatedSessionCatalogOwnerRef.current = {
+                  sessionId,
+                  workspaceCwd: catalogWorkspaceCwd,
+                };
+                if (carryWillApply && pendingManualTitle) {
+                  // The carry title is authoritative for this successor; use
+                  // it as the provisional name too so no read can publish the
+                  // id before the rename lands.
+                  sessionCatalogController.setPendingSessionTitle(
+                    catalogWorkspaceCwd,
+                    sessionId,
+                    pendingManualTitle.displayName,
+                  );
+                } else if (initialTitle) {
+                  // Register the title before notify() so a render triggered
+                  // by the callback cannot publish the row first.
+                  sessionCatalogController.setPendingSessionTitle(
+                    catalogWorkspaceCwd,
+                    sessionId,
+                    initialTitle,
+                  );
+                }
+              }
+              notify?.(sessionId);
+              preparingSessionIdRef.current = sessionId;
+              allocatedSessionId = sessionId;
             },
             getCurrentSessionId: () => connectionRef.current.sessionId,
             getCurrentWorkspaceCwd: getComposerWorkspaceCwd,
@@ -11842,6 +11929,7 @@ export function App({
       files?: PromptFile[],
       opts?: {
         optimisticUserMessage?: boolean;
+        bindBlockId?: string;
         retry?: boolean;
         // Skips prepareSubmit without daemon retry semantics; used
         // by the failed-prompt retry, whose user message was never
@@ -11862,6 +11950,11 @@ export function App({
         onPreparedSubmit?: (prepared: WebShellPreparedSubmit) => void;
         onSessionAllocated?: (sessionId: string) => void;
         beforeAdmission?: () => Promise<void>;
+        /**
+         * Internal commands (settings language switches) reuse the prompt
+         * path but must not name the session they create.
+         */
+        suppressSessionTitle?: boolean;
         ownerRef?: { current: DaemonSessionOwnerSnapshot };
       },
     ) => {
@@ -12011,6 +12104,9 @@ export function App({
       try {
         allocatedSessionId = await ensureSessionForPrompt(
           opts?.onSessionAllocated,
+          opts?.suppressSessionTitle
+            ? undefined
+            : titleFromPrompt(preparedPrompt),
         );
         if (!admissionSourceIsCurrent(allocatedSessionId)) {
           restoreCancelledSubmitState();
@@ -12135,6 +12231,7 @@ export function App({
             ? preparedInputAnnotations
             : undefined,
         optimisticUserMessage: opts?.optimisticUserMessage,
+        ...(opts?.bindBlockId ? { bindBlockId: opts.bindBlockId } : {}),
         retry: opts?.retry,
         ...(opts?.beforeDispatch
           ? { beforeDispatch: opts.beforeDispatch }
@@ -12602,6 +12699,8 @@ export function App({
     let admissionStarted = false;
     sendPrompt(failed.text, failed.images, failed.files, {
       optimisticUserMessage: false,
+      // The failed attempt appended this block but never got it bound.
+      bindBlockId: failed.messageId,
       skipPrepareSubmit: true,
       inputAnnotations: failed.inputAnnotations,
       onAdmissionStarted: () => {
@@ -13144,39 +13243,47 @@ export function App({
         isPending: true,
       });
 
-      sessionActions
-        .btwSession(question, { signal: abortController.signal })
-        .then(
-          (result) => {
+      void (async () => {
+        try {
+          for await (const event of sessionActions.btwSessionStream(question, {
+            signal: abortController.signal,
+          })) {
             if (
               currentSessionIdRef.current !== sessionId ||
-              connectionRef.current.workspaceCwd !== workspaceCwd
+              connectionRef.current.workspaceCwd !== workspaceCwd ||
+              btwAbortControllerRef.current !== abortController
             )
               return;
-            if (btwAbortControllerRef.current !== abortController) return;
-            btwAbortControllerRef.current = null;
+            const done = event.type === 'done';
             setBtwMessage({
               id: messageId,
               role: 'btw',
               question,
-              answer: result.answer || t('btw.emptyAnswer'),
-              isPending: false,
+              answer: event.answer || (done ? t('btw.emptyAnswer') : ''),
+              isPending: !done,
             });
-          },
-          (error: unknown) => {
-            if (
-              currentSessionIdRef.current !== sessionId ||
-              connectionRef.current.workspaceCwd !== workspaceCwd
-            )
-              return;
-            if (btwAbortControllerRef.current !== abortController) return;
-            btwAbortControllerRef.current = null;
-            setBtwMessage(null);
-            if (!isAbortError(error) && !isAlreadyDispatched(error)) {
-              console.warn('[web-shell] unhandled btw failure', error);
-            }
-          },
-        );
+            if (done) btwAbortControllerRef.current = null;
+          }
+        } catch (error) {
+          if (
+            currentSessionIdRef.current !== sessionId ||
+            connectionRef.current.workspaceCwd !== workspaceCwd ||
+            btwAbortControllerRef.current !== abortController
+          )
+            return;
+          btwAbortControllerRef.current = null;
+          setBtwMessage((current) =>
+            current?.id === messageId &&
+            current.role === 'btw' &&
+            current.answer
+              ? { ...current, isPending: false }
+              : null,
+          );
+          if (!isAbortError(error) && !isAlreadyDispatched(error)) {
+            console.warn('[web-shell] unhandled btw failure', error);
+          }
+        }
+      })();
     },
     [
       connection.sessionId,
@@ -14035,7 +14142,10 @@ export function App({
         setSelectedLanguage(nextLanguage);
         onLanguageResolvedRef.current?.(nextLanguage);
       }
-      sendPrompt(command, undefined, undefined, { ownerRef: owner })
+      sendPrompt(command, undefined, undefined, {
+        ownerRef: owner,
+        suppressSessionTitle: true,
+      })
         .then(() => {
           if (!owner.current.isCurrent()) return;
           if (effectiveScope === 'user') {
@@ -14089,7 +14199,10 @@ export function App({
       // running sessions; a plain settings write would leave both stale.
       const command = `/language output ${language.trim() || 'auto'}`;
       try {
-        await sendPrompt(command, undefined, undefined, { ownerRef: owner });
+        await sendPrompt(command, undefined, undefined, {
+          ownerRef: owner,
+          suppressSessionTitle: true,
+        });
       } catch (error) {
         if (owner.current.isCurrent()) {
           reportError(error, 'Failed to sync /language output command');
@@ -16907,7 +17020,13 @@ export function App({
     );
   }, [clearPendingBoundRun, enqueueManualRun]);
   const runTaskManually = useCallback(
-    (prompt: string, sessionId: string | null): Promise<void> => {
+    (
+      prompt: string,
+      sessionId: string | null,
+      // The workspace the bound session lives in: restoring it from another
+      // workspace's conversation would name the wrong one.
+      workspaceCwd?: string,
+    ): Promise<void> => {
       showChat();
       if (!sessionId) {
         // Unbound: runs in the current session — resolves at admission.
@@ -16929,7 +17048,7 @@ export function App({
           reject,
         };
         pendingBoundRunRef.current = pending;
-        loadSidebarSession(sessionId)
+        loadSidebarSession(sessionId, workspaceCwd)
           // Fire immediately when the session was already active (no dep change
           // to trigger the effect); a no-op if the load is still settling, in
           // which case the effect picks it up.
@@ -17404,9 +17523,18 @@ export function App({
             }
             const { snapshots } = await sessionActions.getRewindSnapshots();
             assertTarget();
-            const snapshot = snapshots.find(
-              (entry) => entry.turnIndex === turnIndex,
-            );
+            const current = getLatestUserBlock(store.getSnapshot().blocks);
+            const matches =
+              current?.promptId &&
+              findDaemonRewindUserBlock(
+                store.getSnapshot().blocks,
+                current.promptId,
+              )?.id === current.id
+                ? snapshots.filter(
+                    (entry) => entry.daemonPromptId === current.promptId,
+                  )
+                : [];
+            const snapshot = matches.length === 1 ? matches[0] : undefined;
             if (!snapshot) throw new Error(t('rewind.empty'));
             rewindStarted = true;
             await sessionActions.rewindSession(snapshot.promptId, {
@@ -18141,6 +18269,7 @@ export function App({
                   undefined,
                   {
                     ownerRef: owner,
+                    suppressSessionTitle: true,
                     clearComposerOnPromptStart,
                     commitComposerAccepted: clearComposerOnPromptStart
                       ? commitComposerAccepted
@@ -18700,6 +18829,9 @@ export function App({
             pendingManualTitleRef.current = undefined;
             const renameArg = parseRenameArgument(text.slice(match[0].length));
             if (renameArg.type === 'auto' || renameArg.type === 'delegate') {
+              // `/rename --auto` renames the current session; without one it
+              // must not provision a session just to title it with the command.
+              if (!requireActiveSessionForLocalCommand()) return false;
               if (commandBlocked) {
                 return enqueueBlockedCommand(text);
               }
@@ -19264,7 +19396,19 @@ export function App({
         // it reached the model has no snapshot of its own, and the newest one
         // then belongs to the turn before it.
         const newest = snapshots[snapshots.length - 1];
-        if (!newest || newest.turnIndex !== bareTurnIndex()) return;
+        const blocks = store.getSnapshot().blocks;
+        const current = getLatestUserBlock(blocks);
+        if (
+          bareTurnIndex() === undefined ||
+          !newest?.daemonPromptId ||
+          !current?.promptId ||
+          newest.daemonPromptId !== current.promptId ||
+          findDaemonRewindUserBlock(blocks, current.promptId)?.id !==
+            current.id ||
+          snapshots.filter((entry) => entry.daemonPromptId === current.promptId)
+            .length !== 1
+        )
+          return;
         target = newest.promptId;
         await sessionActions.rewindSession(target, {
           rewindFiles: false,
@@ -20150,6 +20294,7 @@ export function App({
       const owner = { current: sessionOwnerGuard.capture() };
       sendPrompt(`/model --fast ${modelId}${scopeFlag}`, undefined, undefined, {
         ownerRef: owner,
+        suppressSessionTitle: true,
       })
         .then(() => {
           if (!owner.current.isCurrent()) return;
@@ -22037,6 +22182,14 @@ export function App({
                     closeMobileDrawer();
                     openGoals();
                   }}
+                  {...(prWatchesAvailable
+                    ? {
+                        onOpenPrWatches: () => {
+                          closeMobileDrawer();
+                          openPrWatches();
+                        },
+                      }
+                    : {})}
                   onOpenSessions={() => {
                     closeMobileDrawer();
                     openPanel('sessions');
@@ -22932,6 +23085,7 @@ export function App({
                       gateAvailable={workspace.capabilities?.features?.includes(
                         'scheduled_task_gate',
                       )}
+                      autofixPrWatchesAvailable={prWatchesAvailable}
                       onCreateViaChat={() => {
                         // Start a FRESH session and jump to it so the task-
                         // creation chat doesn't pile onto the current
@@ -22961,11 +23115,12 @@ export function App({
                           }, 0);
                         });
                       }}
-                      onOpenSession={(sessionId) => {
+                      onOpenSession={(sessionId, workspaceCwd) => {
                         // The task's bound session IS its run history — switch
-                        // to the chat view and load that session's transcript.
+                        // to the chat view and load that session's transcript,
+                        // in the task's own workspace.
                         showChat();
-                        loadSidebarSession(sessionId).catch(
+                        loadSidebarSession(sessionId, workspaceCwd).catch(
                           (error: unknown) => {
                             reportError(error, 'Failed to open session');
                           },
@@ -23038,6 +23193,62 @@ export function App({
                   </div>
                 </div>
               )}
+              {projectFeaturesAvailable &&
+                prWatchesAvailable &&
+                mainView === 'prWatches' && (
+                  <div className={styles.fullPage} data-testid="pr-watches-page">
+                    <div className={styles.fullPageHeader}>
+                      {!navigationRailVisible && (
+                        <button
+                          type="button"
+                          className={styles.fullPageBack}
+                          onClick={returnToChat}
+                          aria-label={t('common.back')}
+                          title={t('common.back')}
+                        >
+                          <svg
+                            viewBox="0 0 24 24"
+                            width="18"
+                            height="18"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            aria-hidden="true"
+                          >
+                            <path d="M15 18l-6-6 6-6" />
+                          </svg>
+                        </button>
+                      )}
+                      <div className={styles.fullPageTitle}>
+                        {t('autofixPrWatches.title')}
+                      </div>
+                    </div>
+                    <div className={styles.fullPageBody}>
+                      <AutofixPrWatchesDialog
+                        // Stopping runs the skill in the watch's own session,
+                        // as a scheduled task's manual run does.
+                        onRunPrompt={runTaskManually}
+                        workspaces={
+                          lockedWorkspaceCwd
+                            ? visibleWorkspaces
+                            : ordinaryWorkspaces
+                        }
+                        lockedWorkspace={lockedWorkspaceCapability}
+                        onOpenSession={(sessionId, workspaceCwd) => {
+                          showChat();
+                          loadSidebarSession(sessionId, workspaceCwd).catch(
+                            (error: unknown) => {
+                              reportError(error, 'Failed to open session');
+                            },
+                          );
+                        }}
+                        onError={reportError}
+                      />
+                    </div>
+                  </div>
+                )}
               {projectFeaturesAvailable && mainView === 'goals' && (
                 <div className={styles.fullPage} data-testid="goals-page">
                   <div className={styles.fullPageHeader}>
@@ -23581,6 +23792,7 @@ export function App({
                               btwMessage?.role === 'btw' ? (
                                 <div className={styles.btwPanel}>
                                   <BtwMessage
+                                    key={btwMessage.id}
                                     question={btwMessage.question}
                                     answer={btwMessage.answer}
                                     isPending={btwMessage.isPending}

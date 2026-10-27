@@ -333,6 +333,8 @@ export async function runHostedHarnessTextTurn(input: {
     safeMode: true,
     chatRecording: false,
     sessionId: input.sessionId,
+    // The Hosted store owns this ID, independently of local transcripts.
+    sessionIdGenerated: true,
   } as CliArgs;
   const config = await loadCliConfig(
     settings.merged,

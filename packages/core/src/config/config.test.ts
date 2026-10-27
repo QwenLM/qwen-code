@@ -3949,6 +3949,27 @@ describe('Server Config (config.ts)', () => {
     const emptyResume = () =>
       ({ conversation: { messages: [] } }) as unknown as ResumedSessionData;
 
+    it('drops the extraction-cadence state of both sides of a session switch', async () => {
+      const config = await initConfig({}, LEGACY_SKIP_ALL_INIT);
+      const discard = vi.spyOn(
+        config.getMemoryManager(),
+        'discardExtractCadence',
+      );
+      const previous = config.getSessionId();
+
+      config.startNewSession('replacement-session');
+      expect(discard).toHaveBeenLastCalledWith(previous, 'replacement-session');
+
+      // Resuming the id the session already has is not a lifecycle transition,
+      // but the resumed id still must not inherit the earlier skip.
+      discard.mockClear();
+      config.startNewSession('replacement-session');
+      expect(discard).toHaveBeenCalledWith(
+        'replacement-session',
+        'replacement-session',
+      );
+    });
+
     it('clears loaded Skill state at the session boundary', async () => {
       const config = await initConfig({}, LEGACY_SKIP_ALL_INIT);
       const clearLoadedSkills = stubSkillTool(config);
