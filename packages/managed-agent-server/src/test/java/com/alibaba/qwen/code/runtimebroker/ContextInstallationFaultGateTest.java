@@ -182,6 +182,8 @@ class ContextInstallationFaultGateTest {
         if (attester == Attester.SERVICE) {
             proxy.schedule("attest", FaultProxy.Action.PASS);
         }
+        // Read-only attestation can retry one EOF within its original budget.
+        proxy.schedule("attest", FaultProxy.Action.DROP);
         proxy.schedule("attest", FaultProxy.Action.DROP);
         BrokerProcess broker = rig.broker("broker", proxy,
                 FaultGateRig.Provisioner.LOCAL_PROCESS);
