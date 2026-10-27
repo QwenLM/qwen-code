@@ -125,6 +125,35 @@ describe('wholeSuiteReason', () => {
     );
   });
 
+  it('owns a nested workspace by the deepest listed member', () => {
+    const declared = ['packages/channels', 'packages/channels/dingtalk'];
+    const deepest = (file: string): string | null =>
+      declared
+        .filter((d) => file === d || file.startsWith(`${d}/`))
+        .sort((a, b) => b.length - a.length)[0] ?? null;
+    touch('packages/channels/dingtalk/package.json');
+    touch('packages/channels/other/package.json');
+    expect(
+      wholeSuiteReason(
+        root,
+        ['packages/channels/dingtalk/package.json'],
+        [],
+        deepest,
+      ),
+    ).toBe('it changes packages/channels/dingtalk/package.json');
+    // A sibling's manifest belongs to the declared parent, not to its own
+    // directory: the first-segment stub would call both of them the nesting
+    // workspace's own.
+    expect(
+      wholeSuiteReason(
+        root,
+        ['packages/channels/other/package.json'],
+        [],
+        deepest,
+      ),
+    ).toBeUndefined();
+  });
+
   it('runs every suite whole for a deletion, a rename, or a diff too wide', () => {
     expect(reasonOf(['packages/a/src/gone.ts'])).toBe(
       'it deletes packages/a/src/gone.ts',

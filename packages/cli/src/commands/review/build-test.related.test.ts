@@ -463,6 +463,32 @@ describe('runBuildTest: a suite runs only the tests related to the diff', () => 
     );
   });
 
+  it('names a re-killed command in the provisional clause', () => {
+    writePlan(['packages/core/src/a.ts']);
+    const outPath = previousReport({
+      test: [
+        {
+          ...result(CORE_RUN),
+          exitCode: null,
+          timedOut: true,
+          clamped: true,
+        },
+      ],
+      ok: false,
+      timedOut: [CORE_RUN],
+      testScope: { workspaces: ['packages/core'] },
+    });
+    // A deadline the budget shortened, then killed again: the command RAN and
+    // is not still-to-run, so only the provisional clause can name it.
+    const rep = runWith(
+      (c) => ({ ...result(c), exitCode: null, timedOut: true }),
+      { out: outPath, resume: true, timeout: 60, budget: 18 },
+    );
+    expect(rep.testScope?.caveat).toContain('provisional');
+    expect(rep.testScope?.caveat).toContain('packages/core (related tests)');
+    expect(rep.testScope?.caveat).not.toContain('vitest related --run');
+  });
+
   it('recomputes the whole-suite reason for a continuation', () => {
     writePlan(['packages/core/package.json', 'packages/core/src/a.ts']);
     const outPath = previousReport({
