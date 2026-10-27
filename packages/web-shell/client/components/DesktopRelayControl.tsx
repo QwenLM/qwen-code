@@ -141,7 +141,14 @@ type CopyKey = keyof (typeof COPY)['en'];
 
 function useDesktopRelayCopy(): (key: CopyKey) => string {
   const { language } = useI18n();
-  return useCallback((key: CopyKey) => COPY[language][key], [language]);
+  // The shell only ships en + zh-CN strings. An out-of-catalog language value
+  // (e.g. 'ru-RU' from an embedding host rendering I18nProvider directly)
+  // must fall back to English instead of crashing on undefined[key] and
+  // taking down web-shell-root during render (#15445).
+  return useCallback(
+    (key: CopyKey) => (COPY[language] ?? COPY.en)[key],
+    [language],
+  );
 }
 
 export interface DesktopRelayStatus {

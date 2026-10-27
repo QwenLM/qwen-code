@@ -72,6 +72,11 @@ const button = (label: string) =>
   );
 
 describe('DesktopRelayPanel', () => {
+  it('falls back to English for out-of-catalog language values (issue #15445)', () => {
+    mount({ phase: 'idle' }, 'ru-RU' as WebShellLanguage);
+    expect(button('Connect this computer')).toBeDefined();
+  });
+
   it('shows the one-time setup command when the relay is not installed', () => {
     const handlers = mount({ phase: 'missing' });
     expect(text()).toContain('desktop-relay install');

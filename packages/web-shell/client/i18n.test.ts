@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { getTranslator } from './i18n';
+import type { WebShellLanguage } from './i18n';
 
 // getTranslator returns the raw key when EN has no entry. SettingsMessage
 // translateSettingText then substitutes the settingsSchema.ts description,
@@ -102,5 +103,18 @@ describe('web-shell i18n catalog', () => {
         t('settings.liveSetup.modelCustom'),
       );
     }
+  });
+
+  // getTranslator used to index MESSAGES directly, so an out-of-catalog
+  // language value (e.g. 'ru-RU' from an embedding host rendering
+  // I18nProvider directly) made every t() call throw
+  // `TypeError: Cannot read properties of undefined` during render (#15445).
+  it('falls back to English for out-of-catalog language values', () => {
+    const t = getTranslator('ru-RU' as WebShellLanguage);
+    expect(t('managed.tasks.title')).toBe('Session tasks');
+    expect(t('messageDelete.unsupported')).toBe(
+      'Deleting saved messages is not supported for this session.',
+    );
+    expect(t('some.missing.key')).toBe('some.missing.key');
   });
 });
