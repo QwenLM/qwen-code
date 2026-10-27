@@ -374,11 +374,17 @@ function vitestTargetOf(bin: string): string | undefined {
   } catch {
     return real;
   }
-  const named = [...text.matchAll(/[^\s"']*vitest[^\s"']*\.(?:mjs|cjs|js)/g)]
-    .map((m) =>
-      m[0].replace(/^\$basedir[\\/]/, '').replace(/^%~dp0[\\/]?/i, ''),
-    )
-    .filter((p) => !p.startsWith('-'));
+  // pnpm appends metadata as a comment (`# cmd-shim-target=/…/vitest.mjs`):
+  // it names a vitest, but not one this launcher executes. Drop comment lines,
+  // and any `key=value` token — an option or a metadata field, not a path.
+  const body = text
+    .split(/\r?\n/)
+    .filter((line) => !/^\s*#/.test(line))
+    .join('\n');
+  const named = [...body.matchAll(/[^\s"']*vitest[^\s"']*\.(?:mjs|cjs|js)/g)]
+    .map((m) => m[0])
+    .filter((p) => !p.startsWith('-') && !p.includes('='))
+    .map((p) => p.replace(/^\$basedir[\\/]/, '').replace(/^%~dp0[\\/]?/i, ''));
   const last = named.at(-1);
   if (last === undefined) return real;
   try {

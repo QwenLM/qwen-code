@@ -460,12 +460,13 @@ describe('relatedTests', () => {
 
   it('accepts pnpm launchers that exec the same vitest', () => {
     // pnpm writes one shell launcher per install root. Each execs its own
-    // relative path to the same vitest.mjs; the launchers' own real paths
-    // differ, but the vitest they run does not.
+    // relative path to the same vitest.mjs, and appends a `cmd-shim-target`
+    // comment naming the module — metadata, not the command the shell runs.
     rmSync(join(root, 'node_modules/.bin/vitest'));
     write(
       'node_modules/.bin/vitest',
-      '#!/bin/sh\nexec "$basedir/node" "$basedir/../vitest/vitest.mjs" "$@"\n',
+      '#!/bin/sh\nexec "$basedir/node" "$basedir/../vitest/vitest.mjs" "$@"\n' +
+        '# cmd-shim-target=/private/tmp/install/node_modules/vitest/vitest.mjs\n',
     );
     write(
       'packages/group/member/package.json',
@@ -475,10 +476,12 @@ describe('relatedTests', () => {
     const bin = join(root, 'packages/group/node_modules/.bin');
     mkdirSync(bin, { recursive: true });
     const launcher = join(bin, 'vitest');
+    // The comment names a DIFFERENT module: the exec line still decides.
     writeFileSync(
       launcher,
       '#!/bin/sh\nexec "$basedir/node" ' +
-        '"$basedir/../../../../node_modules/vitest/vitest.mjs" "$@"\n',
+        '"$basedir/../../../../node_modules/vitest/vitest.mjs" "$@"\n' +
+        '# cmd-shim-target=/private/tmp/install/node_modules/vendor/vitest.mjs\n',
     );
     const own = relatedTests({
       root,
@@ -488,12 +491,14 @@ describe('relatedTests', () => {
       reachOf: (d) => [d],
     });
     expect(own.select('packages/group/member')).toBeDefined();
-    // A launcher naming a different vitest is a different vitest.
+    // A launcher that EXECS a different vitest is a different vitest, even
+    // when its comment names the root's.
     write('vendor/vitest/vitest.mjs');
     writeFileSync(
       launcher,
       '#!/bin/sh\nexec "$basedir/node" ' +
-        '"$basedir/../../../../vendor/vitest/vitest.mjs" "$@"\n',
+        '"$basedir/../../../../vendor/vitest/vitest.mjs" "$@"\n' +
+        '# cmd-shim-target=/private/tmp/install/node_modules/vitest/vitest.mjs\n',
     );
     expect(own.select('packages/group/member')).toBeUndefined();
   });
