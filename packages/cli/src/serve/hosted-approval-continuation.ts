@@ -21,6 +21,7 @@ import {
   assertManagedSessionStableId,
   type ManagedSessionDurableRef,
   type ManagedSessionKey,
+  type ManagedSessionJsonValue,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import {
   hostedActionAllowed,
@@ -36,6 +37,7 @@ const NATIVE_TOOLS = new Set([
   'write_file',
   'edit',
   'glob',
+  'todo_write',
   'web_fetch',
 ]);
 
@@ -86,6 +88,12 @@ export interface HostedApprovalContinuation {
   readonly stage: 'approval' | 'final';
   readonly approvalOrdinal: number;
   readonly actionId: string | null;
+  readonly commandStep?: {
+    readonly toolStageId: string;
+    readonly toolName: 'read_file' | 'shell';
+    readonly inputRef: ManagedSessionDurableRef;
+    readonly configRevision: number;
+  };
   readonly calls: readonly HostedNativePlannedCall[];
 }
 
@@ -113,7 +121,8 @@ export async function readHostedApprovalContinuation(
   const plan = raw as unknown as HostedApprovalContinuation;
   const header = session.authority.sessionHeader;
   if (
-    Object.keys(raw).length !== 15 + (plan.publicChildModel ? 1 : 0) ||
+    Object.keys(raw).length !==
+      15 + (plan.publicChildModel ? 1 : 0) + (plan.commandStep ? 1 : 0) ||
     plan.promptId !== promptId ||
     !['approval', 'final'].includes(plan.stage) ||
     !isDeepStrictEqual(plan.definitionRef, header.definitionRef) ||
@@ -127,7 +136,8 @@ export async function readHostedApprovalContinuation(
     plan.approvalOrdinal >= plan.calls.length ||
     !plan.runtime ||
     Object.keys(plan.runtime).length !== 4 ||
-    plan.runtime.runtimeSessionId !== hostedRuntimeSessionId(promptId) ||
+    (!plan.commandStep &&
+      plan.runtime.runtimeSessionId !== hostedRuntimeSessionId(promptId)) ||
     !/^[1-9][0-9]{0,18}$/u.test(plan.runtime.generation) ||
     !/^[1-9][0-9]{0,18}$/u.test(plan.runtime.workspaceGeneration) ||
     BigInt(plan.runtime.generation) > 2n ** 63n - 1n ||
@@ -140,6 +150,27 @@ export async function readHostedApprovalContinuation(
     throw new Error(
       'Hosted approval continuation conflicts with the original Turn.',
     );
+  if (plan.commandStep) {
+    if (
+      Object.keys(plan.commandStep).sort().join(',') !==
+        'configRevision,inputRef,toolName,toolStageId' ||
+      !Number.isSafeInteger(plan.commandStep.configRevision) ||
+      plan.commandStep.configRevision < 1 ||
+      !['read_file', 'shell'].includes(plan.commandStep.toolName) ||
+      plan.stage !== 'approval' ||
+      plan.calls.some((item) => item.call.name !== 'skill')
+    )
+      throw new Error('Invalid command step continuation.');
+    assertManagedSessionStableId(plan.commandStep.toolStageId, 'command step');
+    assertManagedSessionStableId(
+      plan.runtime.runtimeSessionId,
+      'command owner',
+    );
+    assertManagedSessionDurableRef(
+      plan.commandStep.inputRef as unknown as ManagedSessionJsonValue,
+      'command approval input',
+    );
+  }
   for (const id of [
     plan.batchId,
     plan.runtime.bindingId,
@@ -216,6 +247,7 @@ export async function readHostedApprovalContinuation(
       !item.call ||
       !(
         NATIVE_TOOLS.has(item.call.name) ||
+        (plan.commandStep && item.call.name === 'skill') ||
         publicPlanExit ||
         (publicShell && ['agent', 'run_shell_command'].includes(item.call.name))
       ) ||
@@ -232,8 +264,8 @@ export async function readHostedApprovalContinuation(
       parts[item.partIndex]?.functionCall?.id !== item.call.callId ||
       parts[item.partIndex]?.functionCall?.name !== item.call.name ||
       item.prepareKey !==
-        `${hostedRuntimeSessionId(promptId)}:${item.runtimeCallId}` ||
-      item.prepareReference?.sessionId !== hostedRuntimeSessionId(promptId) ||
+        `${plan.runtime.runtimeSessionId}:${item.runtimeCallId}` ||
+      item.prepareReference?.sessionId !== plan.runtime.runtimeSessionId ||
       item.prepareReference.promptId !== promptId ||
       item.prepareReference.callId !== item.runtimeCallId ||
       item.prepareReference.argsDigest !== item.requestDigest ||
@@ -265,7 +297,7 @@ export async function readHostedApprovalContinuation(
     };
     if (
       saved.harnessSessionId !== header.sessionKey.sessionId ||
-      saved.runtimeSessionId !== hostedRuntimeSessionId(promptId) ||
+      saved.runtimeSessionId !== plan.runtime.runtimeSessionId ||
       typeof saved.payloadJson !== 'string' ||
       item.requestDigest !==
         `sha256:${createHash('sha256').update(saved.payloadJson).digest('hex')}`
@@ -305,9 +337,19 @@ export async function readHostedApprovalContinuation(
         options.v !== 3 ||
         options.functionCallId !== item.call.callId ||
         options.turnId !== promptId ||
-        options.toolName !== item.call.name ||
+        options.toolName !==
+          (plan.commandStep && ordinal === plan.approvalOrdinal
+            ? plan.commandStep.toolName === 'shell'
+              ? 'run_shell_command'
+              : 'read_file'
+            : item.call.name) ||
         (options.inputRef &&
-          !isDeepStrictEqual(options.inputRef, item.inputRef)) ||
+          !isDeepStrictEqual(
+            options.inputRef,
+            plan.commandStep && ordinal === plan.approvalOrdinal
+              ? plan.commandStep.inputRef
+              : item.inputRef,
+          )) ||
         (action.state === 'decided' &&
           !hostedActionAllowed(action, options.policyRevision) &&
           !hostedActionDenied(action, options.policyRevision)) ||

@@ -16,6 +16,8 @@ import {
   resolveWebShellSessions,
 } from '../../test/sidebarHarness';
 import { setLivePresence } from '../../live/live-presence';
+import sidebarStyles from './WebShellSidebar.module.css';
+import workspaceStyles from './WorkspaceSection.module.css';
 import { useSessionCatalogController } from '../../session-catalog/session-catalog-hooks';
 
 const {
@@ -149,6 +151,7 @@ const {
           }
         | undefined,
       client: {
+        listWorkspaceSessionsPage: vi.fn().mockResolvedValue({ sessions: [] }),
         listStandaloneSessionsPage,
         archiveStandaloneSessions: archiveSessionsData,
         unarchiveStandaloneSessions: unarchiveSessionsData,
@@ -176,6 +179,7 @@ const {
       updateWorkspace: vi.fn(),
       removeWorkspace: vi.fn(),
       listSessionGroups: vi.fn(),
+      createSessionGroup: vi.fn(),
     },
     active,
     archived,
@@ -792,6 +796,9 @@ beforeEach(() => {
   workspace.refreshCapabilities.mockReset();
   workspace.refreshCapabilities.mockResolvedValue(capabilities);
   workspace.client.workspaceByCwd.mockReset();
+  workspace.client.listWorkspaceSessionsPage
+    .mockReset()
+    .mockResolvedValue({ sessions: [] });
   listWorkspaceSessions.mockReset();
   listWorkspaceSessions.mockResolvedValue([]);
   listStandaloneSessionsPage.mockReset();
@@ -844,6 +851,7 @@ beforeEach(() => {
     exportSession,
     exportArchivedSession,
   }));
+  workspaceActions.createSessionGroup.mockReset();
   workspaceActions.removeWorkspace.mockReset();
   workspaceActions.removeWorkspace.mockResolvedValue({ removed: true });
   workspaceActions.addWorkspace.mockReset();
@@ -1635,14 +1643,15 @@ describe('WebShellSidebar workspace removal', () => {
     expect(
       container.querySelector('button[aria-label="Create session group"]'),
     ).toBeNull();
-    const newTaskButtons = Array.from(
-      container.querySelectorAll<HTMLButtonElement>(
-        'button[aria-label="New task"]',
-      ),
+    const workspaceSection = Array.from(
+      container.querySelectorAll<HTMLElement>(`.${workspaceStyles.section}`),
+    ).find((section) => section.querySelector('[title="/tmp/other"]'))!;
+    const newTask = workspaceSection.querySelector<HTMLButtonElement>(
+      'button[aria-label="New task"]',
     );
-    expect(newTaskButtons.length).toBeGreaterThanOrEqual(2);
+    expect(newTask).not.toBeNull();
     await act(async () => {
-      click(newTaskButtons.at(-1)!);
+      click(newTask!);
       await Promise.resolve();
     });
     expect(onNewSession).toHaveBeenCalledWith('/tmp/other');
@@ -1774,20 +1783,115 @@ describe('WebShellSidebar workspace removal', () => {
     expect(container.textContent).toContain('Visible session');
   });
 
-  it('shows a native tooltip for the workspace create-group action', async () => {
-    connection.capabilities = {
-      ...capabilities,
-      features: [...capabilities.features, 'session_organization'],
-    };
-    renderSidebar({ lockedWorkspaceCwd: '/tmp/other' });
-    await expandWorkspace('other');
+  it.each([
+    { cwd: '/tmp/project', locked: false },
+    { cwd: '/tmp/other', locked: false },
+    { cwd: '/tmp/other', locked: true },
+  ])(
+    'creates a group through the workspace menu in $cwd (locked: $locked)',
+    async ({ cwd, locked }) => {
+      connection.capabilities = {
+        ...capabilities,
+        features: [...capabilities.features, 'session_organization'],
+      };
+      const group = { id: 'created-group', name: 'My group', color: 'blue' };
+      const createSecondaryGroup = vi.fn().mockResolvedValue(group);
+      workspaceActions.listSessionGroups.mockResolvedValue({
+        groups: [],
+        colorOptions: ['blue'],
+      });
+      workspaceActions.createSessionGroup.mockResolvedValue(group);
+      const defaultWorkspaceByCwd =
+        workspace.client.workspaceByCwd.getMockImplementation()!;
+      workspace.client.workspaceByCwd.mockImplementation(
+        (workspaceCwd: string) => ({
+          ...defaultWorkspaceByCwd(),
+          listSessionGroups: vi
+            .fn()
+            .mockResolvedValue({ groups: [], colorOptions: ['blue'] }),
+          ...(workspaceCwd === '/tmp/other'
+            ? { createSessionGroup: createSecondaryGroup }
+            : {}),
+        }),
+      );
+      const onNewSession = vi.fn(() => true);
+      renderSidebar({
+        lockedWorkspaceCwd: locked ? cwd : undefined,
+        onNewSession,
+      });
+      await ensureWorkspaceExpanded(cwd.split('/').at(-1)!);
 
-    const createGroupButton = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Create group"]',
-    );
-    expect(createGroupButton).not.toBeNull();
-    expect(createGroupButton?.getAttribute('title')).toBe('Create group');
-  });
+      expect(
+        container.querySelector('button[aria-label="Create group"]'),
+      ).toBeNull();
+      const trigger = workspaceAction(cwd);
+      expect(trigger).toBeDefined();
+      const newSession =
+        trigger!.parentElement!.querySelector<HTMLButtonElement>(
+          'button[aria-label="New task"]',
+        );
+      expect(newSession).not.toBeNull();
+      await act(async () => click(newSession!));
+      expect(onNewSession).toHaveBeenCalledWith(cwd);
+
+      await act(async () => click(trigger!));
+      expect(menuItemLabels()).toContain('Create group');
+      if (locked) expect(menuItemLabels()).toEqual(['Create group']);
+      const createGroupItem = Array.from(
+        document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+      ).find((item) => item.textContent === 'Create group');
+      await act(async () => {
+        click(createGroupItem!);
+        await Promise.resolve();
+      });
+      expect(document.body.querySelector('[role="menu"]')).toBeNull();
+      const groupName = document.body.querySelector<HTMLInputElement>(
+        '#session-group-name',
+      );
+      expect(groupName).not.toBeNull();
+      await act(async () => setInputValue(groupName!, 'My group'));
+      await act(async () => {
+        groupName!.form!.dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        );
+        await Promise.resolve();
+      });
+      const expectedClient =
+        cwd === '/tmp/project'
+          ? workspaceActions.createSessionGroup
+          : createSecondaryGroup;
+      const otherClient =
+        cwd === '/tmp/project'
+          ? createSecondaryGroup
+          : workspaceActions.createSessionGroup;
+      expect(expectedClient).toHaveBeenCalledExactlyOnceWith({
+        name: 'My group',
+        color: 'blue',
+      });
+      expect(otherClient).not.toHaveBeenCalled();
+      expect(document.body.querySelector('#session-group-name')).toBeNull();
+    },
+  );
+
+  it.each([
+    { cwd: '/tmp/other', enabled: false, items: ['group'] as const },
+    { cwd: '/tmp/other', enabled: true, items: [] as const },
+    { cwd: '/tmp/danger', enabled: true, items: ['group'] as const },
+  ])(
+    'omits group creation when unavailable ($cwd, enabled: $enabled, items: $items)',
+    async ({ cwd, enabled, items }) => {
+      connection.capabilities = {
+        ...capabilities,
+        features: [
+          ...capabilities.features,
+          ...(enabled ? ['session_organization'] : []),
+        ],
+      };
+      renderSidebar({ sessionActions: { items: [...items] } });
+      await act(async () => click(workspaceAction(cwd)!));
+      expect(menuItemLabels()).not.toContain('Create group');
+    },
+  );
 
   it('applies items and inlineItems consistently to locked normal, pinned, and archived rows', async () => {
     connection.capabilities = {
@@ -1857,7 +1961,16 @@ describe('WebShellSidebar workspace removal', () => {
 
     expect(
       container.querySelector('button[aria-label="Create group"]'),
-    ).not.toBeNull();
+    ).toBeNull();
+    await act(async () => click(workspaceAction('/tmp/other')!));
+    expect(menuItemLabels()).toEqual(['Create group']);
+    await act(async () => {
+      document.body
+        .querySelector('[role="menu"]')!
+        .dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+        );
+    });
     expect(inlineSessionAction('Configured normal', 'Pin')).toBeDefined();
     expect(inlineSessionAction('Configured normal', 'Archive')).toBeUndefined();
     const normalItems = await openSessionMenuItems('Configured normal');
@@ -2642,6 +2755,185 @@ describe('WebShellSidebar workspace removal', () => {
     expect(onLoadSession).not.toHaveBeenCalled();
   });
 
+  it('does not expand the session preview while renaming a visible row', async () => {
+    connection.sessionId = 'current-session';
+    active.sessions.push(
+      ...Array.from({ length: 7 }, (_, index) => ({
+        sessionId: `preview-session-${index + 1}`,
+        workspaceCwd: '/tmp/project',
+        displayName: `Preview session ${index + 1}`,
+      })),
+    );
+    vi.spyOn(HTMLInputElement.prototype, 'focus').mockImplementation(() => {});
+
+    renderSidebar({
+      sessionActions: { items: ['rename'], inlineItems: ['rename'] },
+    });
+    await expandWorkspace('project');
+
+    const sessionRows = () =>
+      container.querySelectorAll<HTMLElement>('[class*="sessionRow"]');
+    expect(sessionRows()).toHaveLength(5);
+
+    await act(async () => {
+      click(inlineSessionAction('Preview session 1', 'Rename')!);
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector('input')).not.toBeNull();
+    // The edited row stays mounted inside the five-row preview; renaming it
+    // must not pull the other two sessions into the DOM.
+    expect(sessionRows()).toHaveLength(5);
+    expect(
+      Array.from(container.querySelectorAll('button')).some(
+        (button) => button.textContent === 'Show all',
+      ),
+    ).toBe(true);
+    expect(container.textContent).not.toContain('Preview session 6');
+  });
+
+  it('keeps a typed draft when the group catalog arrives mid-edit', async () => {
+    const organizationCapabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'session_organization'],
+    };
+    connection.capabilities = organizationCapabilities;
+    workspace.capabilities = organizationCapabilities;
+    connection.sessionId = 'current-session';
+    active.sessions.push(
+      ...Array.from({ length: 6 }, (_, index) => ({
+        sessionId: `draft-session-${index + 1}`,
+        workspaceCwd: '/tmp/project',
+        displayName: `Draft session ${index + 1}`,
+        isPinned: false,
+      })),
+    );
+    let resolveGroups!: (value: unknown) => void;
+    workspaceActions.listSessionGroups.mockReturnValue(
+      new Promise((resolve) => {
+        resolveGroups = resolve;
+      }),
+    );
+    vi.spyOn(HTMLInputElement.prototype, 'focus').mockImplementation(() => {});
+
+    renderSidebar({
+      sessionActions: { items: ['rename'], inlineItems: ['rename'] },
+    });
+    await expandWorkspace('project');
+
+    await act(async () => {
+      click(inlineSessionAction('Draft session 5', 'Rename')!);
+      await Promise.resolve();
+    });
+    const inputBefore = container.querySelector<HTMLInputElement>('input');
+    expect(inputBefore).not.toBeNull();
+    await act(async () => {
+      setInputValue(inputBefore!, 'My unsaved draft');
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[class*="sessionGroupSection"]'),
+    ).toBeNull();
+
+    // The first non-empty group catalog switches the flat list to grouped
+    // sections, which remounts the edited row.
+    await act(async () => {
+      resolveGroups({
+        groups: [{ id: 'group-1', name: 'Group 1', color: 'blue' }],
+        colorOptions: ['blue'],
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(
+      container.querySelector('[class*="sessionGroupSection"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('section[aria-label="Group 1"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('section[aria-label="Ungrouped"]'),
+    ).not.toBeNull();
+    const inputAfter = container.querySelector<HTMLInputElement>('input');
+    // The structure switch remounts the row; the draft must come from the
+    // parent's store rather than the new editor's initial state.
+    expect(inputAfter?.closest('section')?.getAttribute('aria-label')).toBe(
+      'Ungrouped',
+    );
+    expect(inputAfter).not.toBe(inputBefore);
+    expect(inputAfter?.value).toBe('My unsaved draft');
+  });
+
+  it('keeps a pinned channel rename draft when the channel list reorders', async () => {
+    enableChannelOrganization();
+    setChannelCatalog();
+    let channelSessions: DaemonSessionSummary[] = Array.from(
+      { length: 6 },
+      (_, index) => ({
+        sessionId: `channel-pinned-${index + 1}`,
+        displayName: `Channel pinned ${index + 1}`,
+        workspaceCwd: '/tmp/project',
+        sourceType: 'channel',
+        sourceId: 'ding-one',
+        isPinned: true,
+      }),
+    );
+    useSessions.mockImplementation(
+      (options?: {
+        archiveState?: string;
+        sourceType?: string;
+        group?: string;
+      }) => {
+        if (options?.archiveState === 'archived') return archived;
+        if (options?.sourceType === 'channel' || options?.group === 'pinned') {
+          return { ...active, sessions: channelSessions };
+        }
+        return { ...active, sessions: [] };
+      },
+    );
+    vi.spyOn(HTMLInputElement.prototype, 'focus').mockImplementation(() => {});
+
+    renderSidebar({
+      sessionActions: { items: ['rename'], inlineItems: ['rename'] },
+    });
+    await switchSessionSource('Channels');
+
+    await act(async () => {
+      click(inlineSessionAction('Channel pinned 5', 'Rename')!);
+      await Promise.resolve();
+    });
+    const input = container.querySelector<HTMLInputElement>('input');
+    expect(input).not.toBeNull();
+    await act(async () => {
+      setInputValue(input!, 'My channel draft');
+      await Promise.resolve();
+    });
+
+    // Another session's activity moves ahead of the edited pinned row. The
+    // Pinned section is not rendered in Channels, so a refresh must reveal
+    // the row in the channel section instead of truncating it.
+    channelSessions = [
+      channelSessions[5]!,
+      channelSessions[0]!,
+      channelSessions[1]!,
+      channelSessions[2]!,
+      channelSessions[3]!,
+      channelSessions[4]!,
+    ];
+    renderSidebar({
+      sessionActions: { items: ['rename'], inlineItems: ['rename'] },
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector<HTMLInputElement>('input')?.value).toBe(
+      'My channel draft',
+    );
+  });
+
   it('keeps the next rename editor when an earlier rename settles late', async () => {
     connection.sessionId = 'current-session';
     active.sessions.push(
@@ -3004,16 +3296,11 @@ describe('WebShellSidebar workspace removal', () => {
     expect(updateSessionOrganization).not.toHaveBeenCalled();
 
     expect(container.textContent).toContain('Restricted group');
-    const secondaryCreateGroup = Array.from(
-      container.querySelectorAll<HTMLButtonElement>(
-        'button[aria-label="Create group"]',
-      ),
-    ).find((button) =>
-      button
-        .closest<HTMLElement>('[class*="headerRow"]')
-        ?.textContent?.includes('other'),
-    );
-    expect(secondaryCreateGroup).toBeDefined();
+    expect(
+      container.querySelector('button[aria-label="Create group"]'),
+    ).toBeNull();
+    await act(async () => click(workspaceAction('/tmp/other')!));
+    expect(menuItemLabels()).toContain('Create group');
     expect(
       container.querySelector('button[aria-label="Rename group"]'),
     ).not.toBeNull();
@@ -5227,7 +5514,9 @@ describe('WebShellSidebar session source switch', () => {
       enabled: false,
     });
     expect(container.textContent).toContain('Legacy channel');
-    expect(container.querySelector('section[aria-label]')).toBeNull();
+    expect(
+      container.querySelector(`section.${sidebarStyles.sessionGroupSection}`),
+    ).toBeNull();
   });
 
   it('groups channel sessions by platform type and toggles each group', async () => {
@@ -6712,6 +7001,10 @@ describe('WebShellSidebar standalone grouping', () => {
   });
 
   it('keeps project lists mounted while Projects is collapsed', async () => {
+    window.localStorage.setItem(
+      'qwen.web-shell.sidebar.workspace-expanded:recent-sessions',
+      'false',
+    );
     const standaloneCapabilities = {
       ...capabilities,
       features: [...capabilities.features, 'standalone_sessions_v1'],
@@ -6739,6 +7032,10 @@ describe('WebShellSidebar standalone grouping', () => {
   });
 
   it('refreshes both standalone groups after archive and restore', async () => {
+    window.localStorage.setItem(
+      'qwen.web-shell.sidebar.workspace-expanded:recent-sessions',
+      'false',
+    );
     const standaloneCapabilities = {
       ...capabilities,
       features: [...capabilities.features, 'standalone_sessions_v1'],

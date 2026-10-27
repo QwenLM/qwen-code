@@ -52,6 +52,14 @@ const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockUpdateHandler = vi.hoisted(() => vi.fn());
 const mockBatchHandler = vi.hoisted(() => vi.fn());
+const mockMemoryHandler = vi.hoisted(() => vi.fn());
+vi.mock('../commands/memory.js', () => ({
+  memoryCommand: {
+    command: 'memory <subcommand> <source>',
+    builder: { 'dry-run': { type: 'boolean' }, json: { type: 'boolean' } },
+    handler: mockMemoryHandler,
+  },
+}));
 const mockSessionServiceInstance = vi.hoisted(() => ({
   loadLastSession: vi.fn(),
   loadSession: vi.fn(),
@@ -516,6 +524,27 @@ describe('parseArguments', () => {
     process.argv = ['node', 'script.js', '-p', 'query'];
     expect((await parseArguments()).sandbox).toBeUndefined();
   });
+
+  it.each(['--debug', '--safe-mode'])(
+    'exits after prefixed memory preview: %s',
+    async (flag) => {
+      process.argv = [
+        'node',
+        'script.js',
+        flag,
+        'memory',
+        'import',
+        'codex',
+        '--dry-run',
+        '--json',
+      ];
+      mockMemoryHandler.mockClear();
+      await expect(parseArguments()).rejects.toThrow(
+        'process.exit unexpectedly called with "0"',
+      );
+      expect(mockMemoryHandler).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it('includes every approval mode description in --help', async () => {
     process.argv = ['node', 'script.js', '--help'];
@@ -4052,6 +4081,39 @@ describe('loadCliConfig', () => {
         tools: { webSearch: { maxPerSession: 10 } },
       });
       expect(config.getWebSearchSettings()).toEqual({ maxPerSession: 10 });
+    });
+
+    it('lets WEB_SEARCH_ALLOWED_HOSTS override tools.webSearch.allowedHosts', async () => {
+      vi.stubEnv(
+        'WEB_SEARCH_ALLOWED_HOSTS',
+        ' gw.example.com , other.example.net ,',
+      );
+      const config = await loadWithSettings({
+        tools: { webSearch: { allowedHosts: ['settings.example.com'] } },
+      });
+      expect(config.getWebSearchSettings()?.allowedHosts).toEqual([
+        'gw.example.com',
+        'other.example.net',
+      ]);
+    });
+
+    it('falls back to tools.webSearch.allowedHosts when the env var is empty', async () => {
+      vi.stubEnv('WEB_SEARCH_ALLOWED_HOSTS', '   ');
+      const config = await loadWithSettings({
+        tools: { webSearch: { allowedHosts: ['settings.example.com'] } },
+      });
+      expect(config.getWebSearchSettings()?.allowedHosts).toEqual([
+        'settings.example.com',
+      ]);
+    });
+
+    it('passes an allowedHosts-only setting through without other web search keys', async () => {
+      const config = await loadWithSettings({
+        tools: { webSearch: { allowedHosts: ['gw.example.com'] } },
+      });
+      expect(config.getWebSearchSettings()).toEqual({
+        allowedHosts: ['gw.example.com'],
+      });
     });
 
     // Both modes must turn the tool off explicitly: leaving the settings

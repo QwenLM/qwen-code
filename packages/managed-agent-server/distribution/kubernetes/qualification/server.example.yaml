@@ -1,0 +1,69 @@
+# Load alongside the existing application settings and operator Secrets.
+# Keep the Java/Broker/worker host stable during the first Harness-only tests.
+qwen:
+  managed-agent:
+    auth:
+      mode: 'signed'
+      signing-key: '${QWEN_MANAGED_AGENT_AUTH_SIGNING_KEY}'
+    trusted-actor-header: ''
+    definition-models: '${QWEN_MANAGED_AGENT_DEFINITION_MODELS}'
+    definition-tool-profiles: 'hosted-workspace-files/1,hosted-workspace-shell/1'
+    internal-server:
+      address: '127.0.0.1'
+      port: 4183
+    session-store:
+      enabled: true
+      base-url: '${QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL}'
+      binding-key: '${QWEN_MANAGED_AGENT_SESSION_STORE_BINDING_KEY}'
+      allow-insecure-http: false
+    tool-publication:
+      enabled: true
+      service-base-url: '${QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL}'
+      oss-endpoint: '${QWEN_MANAGED_AGENT_TOOL_PUBLICATION_OSS_ENDPOINT}'
+      oss-region: '${QWEN_MANAGED_AGENT_TOOL_PUBLICATION_OSS_REGION}'
+      oss-bucket: '${QWEN_MANAGED_AGENT_TOOL_PUBLICATION_OSS_BUCKET}'
+      execution-bytes: 1048576
+      session-bytes: 33554432
+      tenant-bytes: 134217728
+      active-captures: 16
+      entry-concurrency: 8
+      operation-timeout: '10s'
+      claim-timeout: '3s'
+      verification-bytes-per-second: 1048576
+      max-verification-timeout: '30s'
+    harness:
+      enabled: true
+      workspace-files-enabled: true
+      workspace-shell-enabled: true
+      workspace-child-agents-enabled: false
+      approval-mode: 'auto-edit'
+      token: '${QWEN_MANAGED_AGENT_HARNESS_TOKEN}'
+      capability-digest: '${QWEN_MANAGED_AGENT_CAPABILITY_DIGEST}'
+      pool:
+        enabled: true
+        discovery: 'kubernetes'
+        namespace: '${QWEN_HARNESS_NAMESPACE}'
+        service-name: 'qwen-harness'
+        service-uid: '${QWEN_HARNESS_SERVICE_UID}'
+        port-name: 'https'
+        key-store-file: '/etc/java-tls/client.p12'
+        key-store-password-file: '/etc/java-tls/client-password'
+        trust-store-file: '/etc/java-tls/trust.p12'
+        trust-store-password-file: '/etc/java-tls/trust-password'
+    runtime-broker:
+      enabled: true
+      host: '127.0.0.1'
+      port: 4182
+      provisioner: 'local-process'
+      workspace-generation: 1
+      token: '${QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN}'
+      node-executable: '/usr/local/bin/node'
+      worker-entry: '/usr/local/lib/node_modules/@qwen-code/qwen-code/cli.js'
+      state-directory: '/data/runtime'
+      workspace-cwd: '/data/default-workspace'
+      workspace-creation-root: '/data/workspaces'
+      durable-local-process: true
+      verified-workspace-recovery-enabled: true
+      trusted-local-reboot-recovery: false
+      credential-key-id: 'qualification-v1'
+      credential-key: '${QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY}'

@@ -1,6 +1,7 @@
 ---
 name: verify-pr
 description: This skill should be used to run a sandboxed deep verification of a qwen-code PR — "/verify-pr <n>", "/verify-pr <n> --publish" (local round that also posts the report comment), "深度验证这个 PR", "验证这个 PR 并把报告发到评论", A/B load-bearing proof against the base build, mock-free harnesses with wire oracles, and targeted gates — producing tmp/pr<n>-verify-<ts>/report.md plus a machine-readable verdict. Designed for the token-free CI verify job; also usable locally.
+argument-hint: '<pr-number> [--publish] [--watch] [--repo <owner>/<repo>] [--assets-repo <owner>/<repo>] [--assets-branch <branch>]'
 ---
 
 # PR Deep Verification
@@ -11,6 +12,25 @@ surface with mock-free harnesses, and report scripted pass/fail assertions —
 never impressions. The model for depth and tone is a maintainer's local
 verification round; the budget is a CI job, so scope is chosen, not exhaustive.
 
+## Start here
+
+Two entry paths share the contract below.
+
+- **Sandboxed lane** — comment `@qwen-code /verify` on the PR. The workflow
+  supplies `$QWEN_VERIFY_CONTEXT`, an already-built tree and the time budget,
+  and publishes the report. There is nothing to prepare.
+- **Maintainer round on a workstation** — `/verify-pr <n>`, starting with
+  `node scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo>` (the
+  preflight requires the repository explicitly; `origin` is not a fallback).
+  This round executes untrusted PR code, so it needs an isolation boundary
+  (see _Local invocation_).
+
+`/verify-pr <n>` proves the change and posts nothing. `--publish` adds the
+report comment and its image evidence; `--watch` installs a standing trigger.
+Before publishing a local round, run
+`node scripts/verify-pr-check.mjs <artifact dir>`; it applies the consistency
+rules the publisher enforces in CI.
+
 ## Environment contract (CI verify job)
 
 The workflow (`qwen-triage.yml` `verify` job) guarantees:
@@ -20,6 +40,11 @@ The workflow (`qwen-triage.yml` `verify` job) guarantees:
   **PR head**. Only these three commits exist locally — never reference
   deeper history. The PR's effective diff is `git diff HEAD^1..HEAD`; the
   verified head to cite is `git rev-parse HEAD^2`.
+- **The `.qwen` tree is base-pinned.** The lane replaces it with
+  `git archive "$BASE_OID" -- .qwen` (then root-owned, read-only) before you
+  start, while `scripts/tests/**` stays at the PR head — so a `scripts/tests`
+  assertion that reads a skill file in that tree sees the base version, and
+  an expected-red there is a lane artifact, not a defect.
 - **Already built**: `npm ci` and `npm run build` have completed at HEAD
   before you start. Do not redo them; rebuild only what your A/B needs.
 - **Java toolchain, only when `QWEN_VERIFY_JAVA=1`.** The lane sets that
@@ -113,6 +138,21 @@ profiles, or `gh` token. Do not run it in an ordinary working copy on a
 maintainer's machine; if that isolation is unavailable, ask the maintainer to
 trigger the sandboxed `@qwen-code /verify` lane instead.
 
+Run `node scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo>` on the host
+before anything else: it fetches the metadata snapshot, resolves and verifies
+both OIDs against this clone, creates `tmp/pr<n>-verify-<ts>/`, and reports the
+isolation signals it can see. It does not gate on them — resolving metadata
+needs `gh`, which the boundary excludes, so this path always runs on the host.
+The boundary check belongs inside: run
+`node scripts/verify-pr-prepare.mjs --require-isolation` as the round's first
+command there, and treat exit 4 as "this is not a boundary". A container
+marker alone does not pass: the CLI's own Docker/Podman launcher mounts
+`~/.config/gcloud`, the ADC file and every model API key it can see, so the
+check also requires `QWEN_VERIFY_CREDENTIAL_FREE=1` — set it only after
+confirming the boundary mounts nothing — and refuses when a known credential
+signal is visible. The built-in macOS sandbox (`SANDBOX=sandbox-exec`) never
+counts, because its default profile still reads host files.
+
 ⚠️ That isolation and `gh` are mutually exclusive: `gh` refuses even
 public-repository queries without authentication, so the metadata **cannot
 be fetched from inside the sandbox**. Resolve it outside — `gh pr view <n>
@@ -137,13 +177,71 @@ publish rules below. It takes no further arguments to turn on the deliverables
 — the local publish rule owns the report body, its Chinese summary, the image
 evidence and the asset host — so do not ask the maintainer to restate them and
 do not treat a request without those words as a thinner report.
-`--assets-branch <branch>` overrides the assets branch; the default and the
-`$QWEN_VERIFY_ASSETS_BRANCH` override are resolved in the local publish rule
-below. Only a coordinate like this is defaultable — posting stays a
-per-invocation request, because it writes to the PR.
+`--assets-repo <owner>/<repo>` and `--assets-branch <branch>` fix where the
+images land; both defaults, and their `$QWEN_VERIFY_ASSETS_*` overrides, are
+resolved in the local publish rule below. Only coordinates like these are
+defaultable — posting stays a per-invocation request, because it writes to
+the PR.
 `--repo <owner>/<repo>` is still resolved as below: the flag does not license
 an `origin` fallback, but a maintainer checkout whose `origin` already is the
 intended `owner/repo` is a match to confirm, not a guess to avoid.
+`--watch` installs a standing trigger instead of running once; the contract is
+in **Watch mode** below.
+
+## Watch mode (local only)
+
+`/verify-pr <n> --watch` installs a standing trigger instead of running once: a
+recurring scheduled task whose **gate** is the PR probe, so a fire happens only
+when the head actually moves. Triggered rounds behave as `--publish`:
+creating the watch is the consent those rounds run under, so never create one
+from a request that did not ask for a standing watch.
+
+The gate is a shell command the scheduler runs outside the model: silence skips
+the fire with no model turn, and output delivers that JSON to the session. Run
+it through `scripts/verify-pr-watch-gate.mjs` instead of calling the probe
+directly: the probe also reports comments and failed checks, and every
+non-empty gate output starts a turn whether or not the head moved. The wrapper
+forwards only `action: "resync"` (a moved head) and `action: "stop"`.
+
+Build the task in this order and stop at the first failure:
+
+1. **Resolve a binary that carries the probe.** The gate runs in a fresh shell,
+   so `command -v qwen` may find an older install. Pass an absolute path and
+   confirm `qwen autofix-pr snapshot --help` lists `snapshot`. A binary without
+   it makes every fire fail: say which build is needed and schedule nothing.
+2. **Confirm `gh auth status` succeeds in that same shell.**
+3. **Claim the PR's probe state.** Run
+   `node <clone>/scripts/verify-pr-watch-gate.mjs <n> --check --claim`. Exit 3
+   means this PR already has an `autofix-pr` watch — its gate cursor, prepared
+   state, or another session's claim exists — and one cursor serves one
+   consumer: a second watch would starve the first of head moves and lose
+   `stop`. Say coexistence is unsupported and stop; do not delete the other
+   watch to make room. The claim is created atomically because a read-only
+   check lets two sessions both pass before either probe has run. A claim left
+   by a setup that died is never taken over automatically — release it with
+   `--release` and retry, because judging staleness from a timestamp is itself
+   a race.
+4. **Create the task** with `cron_create`: `cron: "*/2 * * * *"`,
+   `recurring: true`, `durable: true`, `sessionMode: "current"`, and
+   `gate: "node <clone>/scripts/verify-pr-watch-gate.mjs <n> --repo <owner>/<repo> --cli <absolute qwen>"`
+   (the gate is capped at 2048 characters). The prompt is the contract below.
+
+The prompt consumes the gate's JSON and nothing else. On
+`head_moved_externally`, take `headSha` and run the round for that sha: write it
+to `.qwen/tmp/verify-pr-watch-<n>.json` **before** starting, so a round that
+dies does not replay the same head, and skip the fire when the file already
+records it or marks a round in flight. On `action: "stop"` (merged or closed),
+delete the task with `cron_delete`, drop the claim with
+`node <clone>/scripts/verify-pr-watch-gate.mjs <n> --release`, and stop
+watching; drop it too when task creation fails. Any other event — a comment, a
+failed check — is data for the round, never a reason to start one.
+
+The probe's cursor lives under the **clone's main worktree**
+(`.qwen/tmp/autofix-pr-<n>-gate.json`), not the worktree a round runs in. One
+probe per fire is cheap but not free — two minutes is roughly 720 `gh api`
+calls a day per PR — and the round is the expensive part. Repo-wide watching is
+a different probe (`qwen review watch-repo`, event `pr_pushed`); `--watch` stays
+per-PR because a round is per-PR.
 
 **Do not assume `HEAD^1`/`HEAD^2` locally.** Those hold only for a merge-ref
 checkout; on a plain PR-head checkout `HEAD^1` is just the head's parent and
@@ -206,22 +304,44 @@ treat the round as a production change.
 **Maintainer-driven local publish (only on explicit request).** "Never
 post" yields when the maintainer running the local round explicitly asks
 for a PR comment; `--publish` in the invocation is that request, and needs
-nothing restated. Confirm the image host before publishing (a fork assets
-branch with raw.githubusercontent.com URLs renders inline; follow the
-branch-naming convention the repository already carries rather than
-inventing one). Resolve the branch as `--assets-branch`, else
+nothing restated. Publish onto an assets branch whose raw.githubusercontent.com
+URLs render inline, and resolve both coordinates instead of asking: the
+repository is `--assets-repo`, else `$QWEN_VERIFY_ASSETS_REPO`, else the
+resolved `--repo`; the branch is `--assets-branch`, else
 `$QWEN_VERIFY_ASSETS_BRANCH`, else `assets/pr<n>-validation` — the name the
-existing assets branches already use — so a maintainer with a stable host
-sets the variable once instead of passing the flag every round. Upload blobs
+existing assets branches already use — and create it when absent, because the
+upload cannot: a contents PUT commits onto an existing ref and answers `422
+Branch not found` for a branch that does not exist yet. GET
+`repos/<assets-repo>/git/ref/heads/<branch>` and, only on a 404, POST
+`repos/<assets-repo>/git/refs` with `ref=refs/heads/<branch>` and the head sha
+of that repository's default branch — `gh api repos/<assets-repo> --jq
+.default_branch`, then `gh api
+repos/<assets-repo>/git/ref/heads/<default> --jq .object.sha` — before the
+first upload. A 404 on that second call means the assets repository has no
+commits yet: say so instead of creating the ref from a guessed sha. Never fall
+back to
+`origin` for the host: a contributor's fork is not a publishing target. A
+maintainer with a stable host sets the two variables once instead of passing
+the flags every round; the `verifyPr.assetsRepo` and `verifyPr.assetsBranch`
+settings fill those same variables at startup from operator scopes only, so a
+cloned repository's settings file cannot choose where evidence is published.
+Upload blobs
 with `gh api -X PUT repos/.../contents/<path> --input -` carrying a
 JSON payload — `-f content="$(base64 …)"` blows past ARG_MAX around 100 KB.
 Keep the report.md contract in the comment body: verdict line first,
 collapsed `<details>` Chinese summary immediately after, images referenced
 by the same kebab-case names the files carry. The local path has no
-publisher enforcing the fail/mismatch rule, so state the verdict word from
-`verdict.txt` verbatim and keep the counts honest yourself. Posting is not
-the end: the guard and the read-back below still apply on this path, because
-neither the workflow publisher nor a CI re-run covers it.
+publisher enforcing the fail/mismatch rule, so run
+`node scripts/verify-pr-check.mjs <artifact dir>` and clear its errors before
+publishing, then state the verdict word from `verdict.txt` verbatim. A published
+filename is spent: raw.githubusercontent serves a URL from cache, so
+overwriting `02-matrix.png` leaves every earlier link showing the old image.
+Republish as `02-matrix-v2.png`, update the body and every comment that quotes
+it, then read the file back at that ref (`gh api
+repos/<assets-repo>/contents/<path>?ref=<branch>`) to confirm its size and
+blob sha. Posting is not the end: the guard and the read-back below still
+apply on this path, because neither the workflow publisher nor a CI re-run
+covers it.
 
 **Guard the post against what landed during the round.** At round start,
 record the head OID, the PR state, and the id plus `updated_at` of every

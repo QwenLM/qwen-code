@@ -38,9 +38,13 @@ const prSkill = readFileSync(
   'utf8',
 );
 const triageSkillDoc = readFileSync('.qwen/skills/triage/SKILL.md', 'utf8');
+import { VERDICTS } from '../../scripts/verify-pr-check.mjs';
+
 const verifySkill = readFileSync('.qwen/skills/verify-pr/SKILL.md', 'utf8');
 const hasGnuRealpath =
-  spawnSync('realpath', ['-m', '--', '/'], { stdio: 'ignore' }).status === 0;
+  spawnSync('realpath', ['-m', '--', '/'], {
+    stdio: 'ignore',
+  }).status === 0;
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -5212,15 +5216,68 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain('`--publish` in the invocation is that request');
     // A stable host is a coordinate, so it resolves once and needs no flag.
     expect(flat).toContain(
-      'Resolve the branch as `--assets-branch`, else `$QWEN_VERIFY_ASSETS_BRANCH`, else `assets/pr<n>-validation`',
+      'the repository is `--assets-repo`, else `$QWEN_VERIFY_ASSETS_REPO`, else the resolved `--repo`',
+    );
+    expect(flat).toContain(
+      'the branch is `--assets-branch`, else `$QWEN_VERIFY_ASSETS_BRANCH`, else `assets/pr<n>-validation`',
+    );
+    // settings.json fills the same variables, from operator scopes only.
+    expect(flat).toContain(
+      'fill those same variables at startup from operator scopes only',
     );
     // Posting is consent, not a coordinate: it stays per-invocation.
-    expect(flat).toContain('Only a coordinate like this is defaultable');
+    expect(flat).toContain('Only coordinates like these are defaultable');
     expect(flat).toContain('posting stays a per-invocation request');
     // The flag is not a shortcut around the metadata rule.
     expect(flat).toContain('does not license an `origin` fallback');
+    // ...nor may the image host fall back to a contributor's fork.
+    expect(flat).toContain('Never fall back to `origin` for the host');
+    // Overwriting a published name leaves every older link on the old image.
+    expect(flat).toContain('A published filename is spent');
+    // A contents PUT cannot create the branch the first upload needs.
+    expect(flat).toContain('git/refs');
+    // ...and the sha to create it from is looked up in THAT repository.
+    expect(flat).toContain('.object.sha');
+    // The read-back must query the repository the blob was written to, not
+    // the PR's own repository, whose same path may not exist or may differ.
+    expect(flat).toContain('repos/<assets-repo>/contents/<path>?ref=');
     // The deliverables are the skill's, not the maintainer's list.
     expect(flat).toContain('do not ask the maintainer to restate them');
+  });
+
+  // Watch mode composes the shipped gate probe with cron_create. Each piece is
+  // pinned because dropping one turns the watch back into a polling task that
+  // spends a model turn per fire — the cost the design exists to avoid.
+  it('documents the watch mode on the shipped gate probe', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+
+    expect(flat).toContain('`--watch` installs a standing trigger');
+    // The gate runs the wrapper, not the bare probe: the probe also reports
+    // comments and failed checks, and every non-empty gate output wakes the
+    // model whether or not the head moved.
+    expect(flat).toContain('scripts/verify-pr-watch-gate.mjs');
+    expect(flat).toContain('resync');
+    // One cursor serves one consumer; installing over an existing autofix
+    // watch would starve this one of head moves and lose `stop`.
+    expect(flat).toContain('--check');
+    expect(flat).toContain('--claim');
+    expect(flat).toContain('--release');
+    expect(flat).toContain('one cursor serves one consumer');
+    expect(flat).toContain('head_moved_externally');
+    expect(flat).toContain('verify-pr-watch-');
+    expect(flat).toContain('cron_delete');
+    // A binary without the probe must stop the setup, not schedule a dead gate.
+    expect(flat).toContain('schedule nothing');
+  });
+
+  // The TUI renders `argument-hint` beside the command name; without the field
+  // `/verify-pr` looks like it takes no arguments, unlike `/review`.
+  it('declares an argument hint for the command prompt', () => {
+    const frontmatter = parse(/^---\n([\s\S]*?)\n---/.exec(verifySkill)[1]);
+
+    expect(frontmatter['argument-hint']).toBe(
+      '<pr-number> [--publish] [--watch] [--repo <owner>/<repo>] [--assets-repo <owner>/<repo>] [--assets-branch <branch>]',
+    );
   });
 
   // PR #7836's report said "Verdict: merge-ready — the 7 failures are all
@@ -5270,6 +5327,24 @@ describe('qwen-triage verify hardening round 2', () => {
     const publishStep = step('Post verification report comment');
     expect(publishStep).toContain('.total == .pass + .fail');
     expect(publishStep).toContain('all(type == "number" and . >= 0');
+  });
+
+  // The local artifact checker mirrors this step instead of sharing code with
+  // it (design decision 3), so the mirror needs a pin. The numeric rule is
+  // already asserted on both sides; the verdict vocabulary was the axis with
+  // nothing holding the two implementations together, so a fifth word added to
+  // the publisher would leave the local path silently accepting four.
+  it('keeps the local checker aligned with the publisher verdicts', () => {
+    const publishStep = step('Post verification report comment');
+    const agentCase = publishStep
+      .slice(publishStep.indexOf('case "$AGENT_VERDICT"'))
+      .split('esac')[0];
+    const labels = new Set(
+      [...agentCase.matchAll(/^\s+([a-z][a-z-]*)\)/gm)].map(
+        (match) => match[1],
+      ),
+    );
+    expect(labels).toEqual(new Set(VERDICTS));
   });
 });
 

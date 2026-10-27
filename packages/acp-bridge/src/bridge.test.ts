@@ -2648,6 +2648,43 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('starts a workspace-owned channel for import consolidation without a chat session', async () => {
+    const proposal = {
+      decision: 'skip',
+      reason: 'No durable knowledge.',
+      documents: [],
+    };
+    const input = {
+      scope: 'project',
+      source: 'Synthetic historical context',
+      existing: [],
+    };
+    const handle = makeChannel({
+      extMethodImpl: async (method) =>
+        method === SERVE_CONTROL_EXT_METHODS.workspaceMemoryImportPlan
+          ? proposal
+          : {},
+    });
+    const channelFactory = vi.fn().mockResolvedValue(handle.channel);
+    const bridge = makeBridge({ channelFactory });
+    try {
+      await expect(
+        bridge.invokeWorkspaceCommand(
+          SERVE_CONTROL_EXT_METHODS.workspaceMemoryImportPlan,
+          input,
+        ),
+      ).resolves.toEqual(proposal);
+      expect(channelFactory).toHaveBeenCalledTimes(1);
+      expect(handle.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.workspaceMemoryImportPlan,
+        params: input,
+      });
+      expect(handle.killed).toBe(true);
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
   it('starts a workspace channel when reconnecting an MCP server', async () => {
     const handle = makeChannel({
       extMethodImpl: async (method, params) =>
@@ -6992,24 +7029,36 @@ describe('createAcpSessionBridge', () => {
       }
       return undefined;
     })();
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
 
-    await expect(
-      bridge.rewindSession(
-        session.sessionId,
-        { promptId: 'prompt-1' },
-        { clientId: session.clientId },
-      ),
-    ).resolves.toMatchObject({
-      targetTurnIndex: 0,
-      warnings: ['artifact snapshot not persisted'],
-    });
-    await expect(rewoundEvent).resolves.toMatchObject({
-      type: 'session_rewound',
-      data: { warnings: ['artifact snapshot not persisted'] },
-    });
-    abort.abort();
-
-    await bridge.shutdown();
+    try {
+      await expect(
+        bridge.rewindSession(
+          session.sessionId,
+          { promptId: 'prompt-1' },
+          { clientId: session.clientId },
+        ),
+      ).resolves.toMatchObject({
+        targetTurnIndex: 0,
+        warnings: ['artifact snapshot not persisted'],
+      });
+      await expect(rewoundEvent).resolves.toMatchObject({
+        type: 'session_rewound',
+        data: { warnings: ['artifact snapshot not persisted'] },
+      });
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining('action=snapshot_failed'),
+      );
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining('action=rewind_snapshot_warning'),
+      );
+    } finally {
+      abort.abort();
+      await bridge.shutdown();
+      stderr.mockRestore();
+    }
   });
 
   it('loads history replay from response metadata when requested', async () => {

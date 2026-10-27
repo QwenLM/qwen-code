@@ -116,7 +116,10 @@ describe('no-AK integration CI wiring', () => {
       let previous = -1;
       for (const command of [
         'set +e',
-        'npm run test:ci',
+        // The Linux job runs the suites through the lane script.
+        jobName === 'test'
+          ? '.github/scripts/ci/run-unit-test-lanes.sh'
+          : 'npm run test:ci',
         'RC=$?',
         'set -e',
         'pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true',
@@ -144,7 +147,7 @@ describe('no-AK integration CI wiring', () => {
       'SCRIPTS_RC=$?',
       'if [ "$SCRIPTS_RC" -ne 0 ]; then',
       '::warning::The complete Windows script suite has known baseline failures',
-      'npx vitest run scripts/tests/install-script.test.js --config scripts/tests/vitest.config.ts',
+      'npx vitest run scripts/tests/install-script.test.js scripts/tests/opentui-preview-install.test.js --config scripts/tests/vitest.config.ts --retry=0 --bail=1 --maxWorkers=1 --minWorkers=1 --dangerouslyIgnoreUnhandledErrors=false',
       'INSTALLER_RC=$?',
       'set -e',
       'pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true',
@@ -211,6 +214,8 @@ describe('no-AK integration CI wiring', () => {
       './qwen-live-m2-permission.test.ts',
       './qwen-live-m2-steering.test.ts',
       './cli/_prompt-latency-policy.test.ts',
+      './cli/agent-loop-parity.test.ts',
+      './cli/acp-agent-loop-parity.test.ts',
       './cli/hosted-harness-process.test.ts',
       './cli/daemon-invocation-context.test.ts',
       './cli/headless-workflow-skill.test.ts',
@@ -222,6 +227,7 @@ describe('no-AK integration CI wiring', () => {
       './cli/tool-hook-context.test.ts',
       './cli/tool-hook-updated-input.test.ts',
       './cli/qwen-serve-routes.test.ts',
+      './cli/qwen-serve-session-cd.test.ts',
       './cli/qwen-serve-streaming.test.ts',
       './cli/qwen-serve-standalone-concurrency.test.ts',
       './interactive/workflow-completion.test.ts',
@@ -362,8 +368,14 @@ describe('no-AK integration CI wiring', () => {
       'interactive/mixed-input-crash.test.ts': 'Runtime budget',
       'interactive/protocol-tags-interactive.test.ts': 'Runtime budget',
       'interactive/submitted-prompt-provenance.test.ts': 'Runtime budget',
+      'interactive/tui-checkpoint-restore.test.ts': 'Dedicated TUI parity gate',
+      'interactive/tui-clipboard-source.test.ts': 'Dedicated TUI parity gate',
+      'interactive/tui-extension-acquisition.test.ts':
+        'Dedicated TUI parity gate',
+      'interactive/tui-foreground-shell.test.ts': 'Dedicated TUI parity gate',
       'interactive/tui-dual-output.test.ts': 'Dedicated TUI parity gate',
       'interactive/tui-migration.test.ts': 'Runtime budget',
+      'interactive/tui-session-recovery.test.ts': 'Dedicated TUI parity gate',
       'renderer-matrix.test.ts': 'Runtime budget',
       'scratch-dir.test.ts': 'Runtime budget',
       'sdk-typescript/configuration-options.test.ts': 'Real model required',
@@ -976,7 +988,7 @@ describe('no-AK integration CI wiring', () => {
     expect(nodeAction).toContain('::warning::Expected Node 22.x but found');
   });
 
-  it('keeps install-script.test.js out of the win32 exclude list', () => {
+  it('keeps both installer files out of the win32 exclude list', () => {
     // install-script.test.js is the only home of the nine Windows installer
     // end-to-end cases; excluding it on win32 would silently drop coverage
     // docs/design/windows-ecs-ci-validation.md declares required.
@@ -986,6 +998,9 @@ describe('no-AK integration CI wiring', () => {
     );
     expect(scriptSuiteConfig).not.toContain(
       "'scripts/tests/install-script.test.js'",
+    );
+    expect(scriptSuiteConfig).not.toContain(
+      "'scripts/tests/opentui-preview-install.test.js'",
     );
   });
 

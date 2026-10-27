@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { registerManagedPackagePreparation } from './managed-package-preparation.js';
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
@@ -861,6 +862,7 @@ export function registerWorkspaceExtensionRoutes(
   }
 
   const registerFor = (base: string, resolve: ResolveController): void => {
+    registerManagedPackagePreparation(app, base, resolve, mutate);
     // GET {base} — read-only installed extension status.
     app.get(base, async (req, res) => {
       const assertGenerationOpen = deps.captureGenerationAssertion?.();

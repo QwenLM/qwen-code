@@ -1,0 +1,108 @@
+# HTTPS plus the existing Store writer/Broker application credentials.
+# Harness outbound clients do not present the Java-to-Harness mTLS identity.
+static_resources:
+  listeners:
+    - name: 'store_and_broker_https'
+      address:
+        socket_address:
+          address: '0.0.0.0'
+          port_value: 8443
+      filter_chains:
+        - transport_socket:
+            name: 'envoy.transport_sockets.tls'
+            typed_config:
+              '@type': 'type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext'
+              common_tls_context:
+                tls_params:
+                  tls_minimum_protocol_version: 'TLSv1_2'
+                tls_certificates:
+                  - certificate_chain:
+                      filename: '/etc/server-tls/tls.crt'
+                    private_key:
+                      filename: '/etc/server-tls/tls.key'
+          filters:
+            - name: 'envoy.filters.network.http_connection_manager'
+              typed_config:
+                '@type': 'type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager'
+                stat_prefix: 'qualification_private'
+                normalize_path: true
+                merge_slashes: true
+                path_with_escaped_slashes_action: 'REJECT_REQUEST'
+                stream_idle_timeout: '60s'
+                route_config:
+                  name: 'store_and_broker'
+                  virtual_hosts:
+                    - name: 'private'
+                      domains: ['*']
+                      request_headers_to_remove:
+                        - 'x-envoy-retry-on'
+                        - 'x-envoy-retry-grpc-on'
+                        - 'x-envoy-max-retries'
+                      routes:
+                        - match:
+                            prefix: '/'
+                            headers:
+                              - name: 'origin'
+                                present_match: true
+                          direct_response:
+                            status: 403
+                        - match:
+                            prefix: '/internal/managed-session-store/'
+                          route:
+                            cluster: 'store'
+                            host_rewrite_literal: '127.0.0.1:4183'
+                            timeout: '0s'
+                            retry_policy:
+                              retry_on: ''
+                              num_retries: 0
+                        - match:
+                            prefix: '/internal/managed-tool-publications/v1/'
+                          route:
+                            cluster: 'store'
+                            host_rewrite_literal: '127.0.0.1:4183'
+                            timeout: '0s'
+                            retry_policy:
+                              retry_on: ''
+                              num_retries: 0
+                        - match:
+                            prefix: '/internal/runtime-broker/v1/'
+                          route:
+                            cluster: 'broker'
+                            host_rewrite_literal: '127.0.0.1:4182'
+                            timeout: '0s'
+                            retry_policy:
+                              retry_on: ''
+                              num_retries: 0
+                        - match:
+                            prefix: '/'
+                          direct_response:
+                            status: 404
+                http_filters:
+                  - name: 'envoy.filters.http.router'
+                    typed_config:
+                      '@type': 'type.googleapis.com/envoy.extensions.filters.http.router.v3.Router'
+  clusters:
+    - name: 'store'
+      type: 'STATIC'
+      connect_timeout: '2s'
+      load_assignment:
+        cluster_name: 'store'
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: '127.0.0.1'
+                      port_value: 4183
+    - name: 'broker'
+      type: 'STATIC'
+      connect_timeout: '2s'
+      load_assignment:
+        cluster_name: 'broker'
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: '127.0.0.1'
+                      port_value: 4182
