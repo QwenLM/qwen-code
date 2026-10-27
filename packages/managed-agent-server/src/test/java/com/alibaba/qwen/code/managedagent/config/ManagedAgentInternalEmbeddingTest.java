@@ -64,6 +64,15 @@ class ManagedAgentInternalEmbeddingTest {
         });
     }
 
+    @Test
+    void hostPublicRouteMustRemainAccessible() {
+        runner().withPropertyValues("qwen.managed-agent.session-store.binding-key=" + "k".repeat(32)).run(context -> {
+            var mvc = MockMvcBuilders.webAppContextSetup(context)
+                    .addFilters(context.getBean(TenantContextFilter.class)).build();
+            mvc.perform(get("/v1/agents")).andExpect(status().isOk());
+        });
+    }
+
     record HostResponse(String hostValue) { }
 
     @Configuration(proxyBeanMethods = false)
@@ -76,7 +85,7 @@ class ManagedAgentInternalEmbeddingTest {
 
     @RestController
     static class HostController {
-        @GetMapping("/host")
+        @GetMapping({"/host", "/v1/agents"})
         HostResponse response() {
             return new HostResponse("host");
         }
