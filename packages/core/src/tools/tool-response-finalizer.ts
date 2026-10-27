@@ -28,7 +28,6 @@ import {
   persistAndTruncateToolResult,
 } from './truncation.js';
 import {
-  attachToolOutputRecovery,
   getToolOutputRecovery,
   setToolOutputRecovery,
   type ToolOutputRecovery,
@@ -390,33 +389,24 @@ function replaceTextSlots(
       slot.recovery,
     );
 
+    const updated = { ...part };
     if (slot.field === 'text') {
-      entry.responseParts[slot.partIndex] = attachToolOutputRecovery(
-        [{ ...part, text: replacement }],
-        recovery,
-      )[0];
-      continue;
-    }
-
-    const functionResponse = part.functionResponse;
-    if (!functionResponse) continue;
-    entry.responseParts[slot.partIndex] = attachToolOutputRecovery(
-      [
-        {
-          ...part,
-          functionResponse: {
-            ...functionResponse,
-            response: {
-              ...functionResponse.response,
-              [slot.field]: slot.protectedPrefix
-                ? `${slot.protectedPrefix}${replacement}`
-                : replacement,
-            },
-          },
+      updated.text = replacement;
+    } else {
+      const functionResponse = part.functionResponse;
+      if (!functionResponse) continue;
+      updated.functionResponse = {
+        ...functionResponse,
+        response: {
+          ...functionResponse.response,
+          [slot.field]: slot.protectedPrefix
+            ? `${slot.protectedPrefix}${replacement}`
+            : replacement,
         },
-      ],
-      recovery,
-    )[0];
+      };
+    }
+    setToolOutputRecovery(updated, recovery);
+    entry.responseParts[slot.partIndex] = updated;
   }
 
   return result;

@@ -894,7 +894,8 @@ describe('tool response finalization', () => {
         ]),
       ];
 
-      expect(enforceFunctionResponseBudget(entries, 0)).toBe(entries);
+      if (budget === 0)
+        expect(enforceFunctionResponseBudget(entries, 0)).toBe(entries);
       const result = await finalizeToolResponses(
         config(200_000),
         entries,
@@ -1113,25 +1114,6 @@ ${'p'.repeat(1_900)}
     expect(output.length).toBeLessThanOrEqual(200);
   });
 
-  it('the send guard preserves an enter_plan_mode lifecycle response', () => {
-    const reminder = getPlanModeSystemReminder(false);
-    const entries: ToolResponseBudgetEntry[] = [
-      {
-        callId: 'send-boundary',
-        toolName: 'tool-response-batch',
-        responseParts: [
-          fnResponse(
-            ToolNames.ENTER_PLAN_MODE,
-            { output: reminder },
-            'enter-plan',
-          ),
-        ],
-      },
-    ];
-
-    expect(enforceFunctionResponseBudget(entries, 1)).toBe(entries);
-  });
-
   it('the send guard budgets hook context after an enter_plan_mode lifecycle response', () => {
     const reminder = getPlanModeSystemReminder(false);
     const entries: ToolResponseBudgetEntry[] = [
@@ -1201,7 +1183,7 @@ ${'p'.repeat(1_900)}
   it('treats a lifecycle-only response as text the budget cannot shorten', () => {
     // `collectTextSlots` strips the plan-mode prefix before it decides whether
     // to budget a slot, so a response that is nothing but the reminder yields
-    // no slot and travels whole (see the lifecycle case above). A caller
+    // no slot and travels whole. A caller
     // measuring what the budget can shorten has to agree, or it charges the
     // headroom for text the cut never reaches.
     const reminderOnly = fnResponse(

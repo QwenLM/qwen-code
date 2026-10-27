@@ -3609,16 +3609,16 @@ export class LlmChat {
             toolName: 'tool-response-batch',
             responseParts: [part],
           }));
+          let preview = enforceFunctionResponseBudget(
+            entries,
+            toolOutputBudget,
+            true,
+            false,
+          );
           if (
             pressureBudget !== undefined &&
             pressureBudget < (batchBudget ?? Number.POSITIVE_INFINITY)
           ) {
-            const preview = enforceFunctionResponseBudget(
-              entries,
-              toolOutputBudget,
-              true,
-              false,
-            );
             if (
               preview !== entries &&
               estimatePendingPrompt({
@@ -3643,16 +3643,12 @@ export class LlmChat {
                     (entry) => entry.responseParts,
                   ),
                 }) < hard
-              )
+              ) {
                 toolOutputBudget = aggregateBudget;
+                preview = aggregatePreview;
+              }
             }
           }
-          const preview = enforceFunctionResponseBudget(
-            entries,
-            toolOutputBudget,
-            true,
-            false,
-          );
           const cutResults = preview.flatMap((entry, index) => {
             const before = entries[index].responseParts[0].functionResponse;
             const after = entry.responseParts[0].functionResponse;
