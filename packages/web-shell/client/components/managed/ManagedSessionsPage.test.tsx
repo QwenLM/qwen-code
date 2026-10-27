@@ -497,6 +497,41 @@ describe('ManagedSessionsPage', () => {
     }
   });
 
+  it.each([
+    ['closed', 'session_not_active', false],
+    ['closing', 'session_not_active', true],
+    ['closed', 'recovery_blocked', true],
+  ] as const)(
+    'shows recovery for %s and %s only when needed',
+    async (lifecycleStatus, reasonCode, visible) => {
+      mocks.client.getSession.mockResolvedValue(
+        summary('s1', {
+          lifecycleStatus,
+          capabilities: { canSend: false, canCancel: false },
+          recovery: {
+            state: 'operator_required',
+            reasonCode,
+            nextTurnAllowed: false,
+            actions: {
+              recheck: false,
+              cancel: false,
+              continueInNewSession: false,
+            },
+          },
+        }),
+      );
+
+      await render('s1');
+      expect(container.textContent).toContain('Persisted answer');
+      expect(container.querySelector('textarea')?.disabled).toBe(true);
+      expect(
+        container.textContent?.includes(
+          'This Session needs operator attention',
+        ),
+      ).toBe(visible);
+    },
+  );
+
   it.each(['closed', 'archived'])(
     'keeps %s history read only when native recovery is ready',
     async (lifecycleStatus) => {
