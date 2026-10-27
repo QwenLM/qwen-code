@@ -3947,6 +3947,7 @@ export type ReasoningSelection = (typeof DAEMON_REASONING_SELECTIONS)[number];
 
 export interface DaemonSessionConfigOptionResult {
   configOptions: unknown[];
+  /** For workflow_mode, confirms session persistence; reasoning_effort retains settings persistence semantics. */
   persisted: boolean;
 }
 
