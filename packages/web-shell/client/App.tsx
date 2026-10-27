@@ -13242,39 +13242,47 @@ export function App({
         isPending: true,
       });
 
-      sessionActions
-        .btwSession(question, { signal: abortController.signal })
-        .then(
-          (result) => {
+      void (async () => {
+        try {
+          for await (const event of sessionActions.btwSessionStream(question, {
+            signal: abortController.signal,
+          })) {
             if (
               currentSessionIdRef.current !== sessionId ||
-              connectionRef.current.workspaceCwd !== workspaceCwd
+              connectionRef.current.workspaceCwd !== workspaceCwd ||
+              btwAbortControllerRef.current !== abortController
             )
               return;
-            if (btwAbortControllerRef.current !== abortController) return;
-            btwAbortControllerRef.current = null;
+            const done = event.type === 'done';
             setBtwMessage({
               id: messageId,
               role: 'btw',
               question,
-              answer: result.answer || t('btw.emptyAnswer'),
-              isPending: false,
+              answer: event.answer || (done ? t('btw.emptyAnswer') : ''),
+              isPending: !done,
             });
-          },
-          (error: unknown) => {
-            if (
-              currentSessionIdRef.current !== sessionId ||
-              connectionRef.current.workspaceCwd !== workspaceCwd
-            )
-              return;
-            if (btwAbortControllerRef.current !== abortController) return;
-            btwAbortControllerRef.current = null;
-            setBtwMessage(null);
-            if (!isAbortError(error) && !isAlreadyDispatched(error)) {
-              console.warn('[web-shell] unhandled btw failure', error);
-            }
-          },
-        );
+            if (done) btwAbortControllerRef.current = null;
+          }
+        } catch (error) {
+          if (
+            currentSessionIdRef.current !== sessionId ||
+            connectionRef.current.workspaceCwd !== workspaceCwd ||
+            btwAbortControllerRef.current !== abortController
+          )
+            return;
+          btwAbortControllerRef.current = null;
+          setBtwMessage((current) =>
+            current?.id === messageId &&
+            current.role === 'btw' &&
+            current.answer
+              ? { ...current, isPending: false }
+              : null,
+          );
+          if (!isAbortError(error) && !isAlreadyDispatched(error)) {
+            console.warn('[web-shell] unhandled btw failure', error);
+          }
+        }
+      })();
     },
     [
       connection.sessionId,
@@ -23762,6 +23770,7 @@ export function App({
                               btwMessage?.role === 'btw' ? (
                                 <div className={styles.btwPanel}>
                                   <BtwMessage
+                                    key={btwMessage.id}
                                     question={btwMessage.question}
                                     answer={btwMessage.answer}
                                     isPending={btwMessage.isPending}

@@ -45,6 +45,7 @@ import {
   DaemonHttpError,
   GOAL_PAUSE_REASON_COMMAND,
   type DaemonInputAnnotation,
+  type DaemonSessionBtwStreamEvent,
   type DaemonSessionArtifact,
   type DaemonSessionAttachmentReference,
   type DaemonSessionSummary,
@@ -693,7 +694,16 @@ const {
     setDaemonActivePrompt: vi.fn(),
     sendPrompt: vi.fn().mockResolvedValue(undefined),
     continueSession: vi.fn().mockResolvedValue(undefined),
-    btwSession: vi.fn().mockResolvedValue({ answer: 'side answer' }),
+    btwSessionStream: vi.fn(
+      async function* (): AsyncGenerator<DaemonSessionBtwStreamEvent> {
+        yield {
+          v: 1,
+          type: 'done',
+          requestId: 'btw-request',
+          answer: 'side answer',
+        } as const;
+      },
+    ),
     generateSessionContent: vi.fn(async function* () {}),
     createSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
     attachSession: vi.fn().mockResolvedValue(undefined),
@@ -12470,7 +12480,14 @@ beforeEach(() => {
     if (typeof value === 'function' && 'mockClear' in value) value.mockClear();
   }
   mockSessionActions.sendPrompt.mockResolvedValue(undefined);
-  mockSessionActions.btwSession.mockResolvedValue({ answer: 'side answer' });
+  mockSessionActions.btwSessionStream.mockImplementation(async function* () {
+    yield {
+      v: 1,
+      type: 'done',
+      requestId: 'btw-request',
+      answer: 'side answer',
+    } as const;
+  });
   mockSessionActions.createSession.mockResolvedValue({
     sessionId: 'session-1',
   });
@@ -29231,7 +29248,7 @@ describe('App session callbacks', () => {
       await Promise.resolve();
     });
 
-    expect(mockSessionActions.btwSession).toHaveBeenCalledWith(
+    expect(mockSessionActions.btwSessionStream).toHaveBeenCalledWith(
       sideQuestion,
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
@@ -29358,7 +29375,7 @@ describe('App session callbacks', () => {
       await Promise.resolve();
     });
 
-    expect(mockSessionActions.btwSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.btwSessionStream).not.toHaveBeenCalled();
     expect(editorCommit).not.toHaveBeenCalled();
   });
 
@@ -32443,7 +32460,7 @@ describe('App session callbacks', () => {
     await flush();
 
     expect(mockSessionActions.forkSession).not.toHaveBeenCalled();
-    expect(mockSessionActions.btwSession).toHaveBeenCalledWith(
+    expect(mockSessionActions.btwSessionStream).toHaveBeenCalledWith(
       'explain the current implementation',
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
@@ -32525,9 +32542,95 @@ describe('App session callbacks', () => {
     ).toBe(true);
   });
 
+  it('replaces partial BTW text with the completed snapshot', async () => {
+    const finish = deferred<void>();
+    mockSessionActions.btwSessionStream.mockImplementationOnce(
+      async function* () {
+        yield {
+          v: 1,
+          type: 'answer',
+          requestId: 'btw-request',
+          answer: 'Partial answer',
+        } as const;
+        await finish.promise;
+        yield {
+          v: 1,
+          type: 'done',
+          requestId: 'btw-request',
+          answer: 'Partial answer, complete.',
+        } as const;
+      },
+    );
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/btw Explain';
+    await clickSubmit(container);
+    await flush();
+    expect(testState.latestBtwMessageProps).toMatchObject({
+      answer: 'Partial answer',
+      isPending: true,
+    });
+    await act(async () => {
+      finish.resolve();
+      await finish.promise;
+    });
+    expect(testState.latestBtwMessageProps).toMatchObject({
+      answer: 'Partial answer, complete.',
+      isPending: false,
+    });
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('keeps received BTW text after a terminal failure', async () => {
+    const fail = deferred<void>();
+    mockSessionActions.btwSessionStream.mockImplementationOnce(
+      async function* () {
+        yield {
+          v: 1,
+          type: 'answer',
+          requestId: 'request',
+          answer: 'Already received text',
+        } as const;
+        await fail.promise;
+        throw Object.assign(new Error('Stream failed'), {
+          _alreadyDispatched: true,
+        });
+      },
+    );
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/btw Explain';
+    await clickSubmit(container);
+    await flush();
+    expect(testState.latestBtwMessageProps).toMatchObject({
+      answer: 'Already received text',
+      isPending: true,
+    });
+    await act(async () => {
+      fail.resolve();
+      await fail.promise;
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps).toMatchObject({
+      answer: 'Already received text',
+      isPending: false,
+    });
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+  });
+
   it('settles visible btw after a same-id attachment replacement', async () => {
     const btw = deferred<{ answer: string }>();
-    mockSessionActions.btwSession.mockReturnValueOnce(btw.promise);
+    mockSessionActions.btwSessionStream.mockImplementationOnce(
+      async function* () {
+        const result = await btw.promise;
+        yield {
+          v: 1,
+          type: 'done',
+          requestId: 'btw-request',
+          answer: result.answer,
+        } as const;
+      },
+    );
     const { container, rerender } = renderApp();
     await flush();
 
@@ -32564,7 +32667,7 @@ describe('App session callbacks', () => {
     await flush();
 
     expect(mockSessionActions.forkSession).not.toHaveBeenCalled();
-    expect(mockSessionActions.btwSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.btwSessionStream).not.toHaveBeenCalled();
     expect(container.querySelector('button[title="Side task"]')).not.toBeNull();
   });
 
@@ -33253,7 +33356,7 @@ describe('App session callbacks', () => {
         { name: 'Side task' },
         'client-1',
       );
-      expect(mockSessionActions.btwSession).not.toHaveBeenCalled();
+      expect(mockSessionActions.btwSessionStream).not.toHaveBeenCalled();
       expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
       expect(mockWorkspace.client.detachSession).toHaveBeenCalledWith(
         'secondary-side-task',
@@ -33353,7 +33456,7 @@ describe('App session callbacks', () => {
     await clickSubmit(container);
     await flush();
 
-    expect(mockSessionActions.btwSession).toHaveBeenCalledWith(
+    expect(mockSessionActions.btwSessionStream).toHaveBeenCalledWith(
       'side explain the current implementation',
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
