@@ -247,7 +247,7 @@ async function openCards(
     history = false,
   } = {},
 ) {
-  await page.setViewportSize({ width: history ? 1440 : 1280, height: 900 });
+  await page.setViewportSize({ width: history ? 1600 : 1280, height: 900 });
   const probe = await observeRuntime(page, holdInit);
   if (!moveBefore) {
     await page.addInitScript(() => {

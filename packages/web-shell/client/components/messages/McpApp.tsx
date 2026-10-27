@@ -198,6 +198,7 @@ export function McpApp({
     display.requiredFeature === 'generated-ui' ||
     display.resourceUri === 'ui://qwen-code-generated-ui/view-v1.html';
   if (
+    import.meta.env.MODE !== 'transcript' &&
     allowed &&
     retention &&
     toolId &&
