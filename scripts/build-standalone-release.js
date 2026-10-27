@@ -67,8 +67,10 @@ const DEFAULT_BUN_VERSION = '1.4.4';
 const BUN_RELEASE_BASE_URL = 'https://github.com/oven-sh/bun/releases/download';
 // The runtime downloads are the publish job's least reliable leg: one
 // transient download failure aborted the v0.23.4 publish while the
-// unchanged re-run passed. Three attempts still aborted the
-// v0.26.2-preview.0 archive step; five attempts back off to ~75s.
+// unchanged re-run passed. The v0.26.2-preview.0 archive step aborted and
+// passed on rerun, but its log was not retrievable, so this raises the
+// retry budget as defence-in-depth without pinning the failing leg; five
+// attempts back off to ~75s.
 const MAX_DOWNLOAD_ATTEMPTS = 5;
 const INITIAL_DOWNLOAD_BACKOFF_MS = 5_000;
 const DOWNLOAD_TIMEOUT_MS = 120_000;

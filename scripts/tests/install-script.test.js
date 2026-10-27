@@ -968,9 +968,8 @@ describe('standalone release packaging', () => {
         { fetchImpl, sleepImpl },
       );
 
-      // The v0.26.2-preview.0 archive step aborted on a transient failure
-      // and passed unchanged on re-run; a fourth failure must still leave
-      // one attempt.
+      // A fourth transient failure must still leave one attempt, and a
+      // success on the final attempt must still write the destination.
       expect(fetchImpl).toHaveBeenCalledTimes(5);
       expect(sleepImpl.mock.calls.map(([ms]) => ms)).toEqual([
         5_000, 10_000, 20_000, 40_000,
