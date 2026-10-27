@@ -14,8 +14,11 @@ import { Storage } from './storage.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { ToolMode } from '../tools/code-mode.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
+import { LlmChat } from '../core/llm-chat.js';
+import { CompressionStatus } from '../core/turn.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import type { ExecutionEnvironment } from '../services/execution-environment.js';
+import { buildSessionHistoryFromConversation } from '../services/session-api-history.js';
 import { runWithInvocationContext } from '../utils/invocation-context.js';
 
 let root: string;
@@ -370,11 +373,114 @@ describe('Config durable workflow mode', () => {
     expect(listener).not.toHaveBeenCalled();
     config.startNewSession(oldId);
     config.restoreWorkflowModeState(snapshot);
+    oldToken.onModelRequestDispatched?.();
     expect(config.getWorkflowMode().effective).toBe(true);
-    expect(await config.captureWorkflowModeState()).toEqual(snapshot);
+    expect(await config.captureWorkflowModeState()).toEqual({
+      ...snapshot,
+      pending: true,
+      announced: undefined,
+      turns: 0,
+    });
     expect(config.getChatRecordingService()?.getSessionWorkflowMode()).toBe(
       true,
     );
+    const notice = config.prepareWorkflowMode(null);
+    expect(notice.reminder).toContain('is enabled');
+    notice.onModelRequestDispatched?.();
+    expect(config.prepareWorkflowMode(null).reminder).toBeUndefined();
+  });
+
+  it('reannounces off after rollback replays a compressed enabled notice', async () => {
+    const config = createConfig({ workflowMode: true });
+    await config.initialize();
+    const recorder = config.getChatRecordingService()!;
+    const enabled = config.prepareWorkflowMode(null);
+    expect(enabled.reminder).toContain('is enabled');
+    const reply = [
+      { text: 'thinking '.repeat(100), thought: true },
+      { text: 'answer' },
+    ];
+    recorder.recordUserMessage('before compression');
+    recorder.recordAssistantTurn({ model: 'test-model', message: reply });
+    const chat = new LlmChat(
+      config,
+      {},
+      [
+        {
+          role: 'user',
+          parts: [{ text: enabled.reminder }, { text: 'before compression' }],
+        },
+        { role: 'model', parts: reply },
+      ],
+      recorder,
+    );
+    enabled.onModelRequestDispatched?.();
+    const client = config.getLlmClient();
+    vi.spyOn(client, 'getChat').mockReturnValue(chat);
+    expect((await client.tryCompressChatFast()).compressionStatus).toBe(
+      CompressionStatus.COMPRESSED,
+    );
+
+    await config.setWorkflowMode(false);
+    const off = config.prepareWorkflowMode(null);
+    expect(off.reminder).toContain('is off');
+    recorder.recordUserMessage('after compression');
+    chat.addHistory({
+      role: 'user',
+      parts: [{ text: off.reminder }, { text: 'after compression' }],
+    });
+    recorder.recordAssistantTurn({
+      model: 'test-model',
+      message: [{ text: 'off acknowledged' }],
+    });
+    off.onModelRequestDispatched?.();
+    const snapshot = await config.captureWorkflowModeState();
+    expect(snapshot).toMatchObject({ requested: false, pending: false });
+    await recorder.flush();
+    const oldId = config.getSessionId();
+    const data = await config.getSessionService().loadSession(oldId);
+    expect(data).toBeDefined();
+    const { apiHistory } = buildSessionHistoryFromConversation(
+      data!.conversation,
+    );
+    expect(JSON.stringify(apiHistory)).toContain('Workflow mode is enabled');
+    expect(JSON.stringify(apiHistory)).not.toContain('Workflow mode is off');
+
+    config.startNewSession();
+    config.startNewSession(oldId, data);
+    config.restoreWorkflowModeState(snapshot);
+    expect(config.getWorkflowMode()).toMatchObject({
+      requested: false,
+      effective: false,
+    });
+    expect(config.getChatRecordingService()?.getSessionWorkflowMode()).toBe(
+      false,
+    );
+    const recovered = config.prepareWorkflowMode(null);
+    expect(recovered.reminder).toContain('Workflow mode is off');
+    recovered.onModelRequestDispatched?.();
+    for (let turn = 0; turn < 30; turn++) {
+      expect(config.prepareWorkflowMode(null).reminder).toBeUndefined();
+    }
+    expect(
+      (await modeRecords(config)).map((record) => record.systemPayload),
+    ).toEqual([{ enabled: true }, { enabled: false }]);
+  });
+
+  it('keeps a never-recorded default session quiet after rollback', async () => {
+    const config = createConfig();
+    await config.initialize();
+    const oldId = config.getSessionId();
+    const snapshot = await config.captureWorkflowModeState();
+    config.startNewSession();
+    config.startNewSession(oldId);
+    config.restoreWorkflowModeState(snapshot);
+    expect(await config.captureWorkflowModeState()).toEqual(snapshot);
+    expect(config.prepareWorkflowMode(null).reminder).toBeUndefined();
+    expect(
+      config.getChatRecordingService()?.getSessionWorkflowMode(),
+    ).toBeUndefined();
+    expect(await modeRecords(config)).toEqual([]);
   });
 
   it.each(['commitTelemetrySwap', 'abortTelemetrySwap'] as const)(

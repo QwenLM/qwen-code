@@ -10935,6 +10935,8 @@ export class Config {
     this.chatRecordingService?.restoreSessionWorkflowMode(
       snapshot.recorded ? snapshot.requested : undefined,
     );
+    // Rollback replays persisted history, which can omit live notices.
+    this.workflowModeContext.resetContext();
     this.refreshWorkflowMode();
   }
 

@@ -74,6 +74,9 @@ unavailable fail initialization. A new or cleared session starts off. A fork
 inherits its selected checkpoint independently; rewind preserves
 the current preference and anchors it in the restored branch. Successful
 compression reannounces the state on the next eligible fresh submission.
+After a failed resume or branch switch rebuilds the previous session's history,
+the next eligible submission reannounces its saved state. A session with no
+saved preference stays quiet.
 
 ## TypeScript SDK and ACP
 
