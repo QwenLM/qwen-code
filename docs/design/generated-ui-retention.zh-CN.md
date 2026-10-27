@@ -21,6 +21,8 @@ guest 状态。本设计在同一浏览器页面中为符合条件的内置 Gene
 Provider 将 session client 绑定到原 scope。在重连和分离期间，daemon 已确认的规范 cwd
 仍是身份依据；请求路径的别名不会因传输故障生成新 scope。真正切换宿主、凭据或工作区
 会退役原 scope。绑定守卫不得将旧 client 重新指派给不同的 scope。
+通过 action 创建的 client 仅在 scope 与 daemon 的规范 cwd 匹配后绑定。创建成功后、
+attachment 前的 connected 渲染不得将其绑定到请求别名的临时 scope。
 
 ## 停放与授权
 
@@ -54,6 +56,8 @@ Provider 将 session client 绑定到原 scope。在重连和分离期间，daem
 - 在仍符合保活条件时，新任务、受控空会话导航、虚拟列表、历史和临时加载失败后的成功
   重试，保持真实 realm、Worker、已应用结果和未应用输入。
 - 规范 cwd 重连保持 scope 和 owner source 稳定。真正的 scope 变化和外部 scope 保持隔离。
+  创建可以在 attachment 前提交；连接后的 client 仍须拥有规范 owner，并在首次 prompt
+  后保留激活实例。
 - 禁用的 load/context 回执及已连接流/heartbeat 的访问失败会释放运行时。已释放卡片恢复
   后需要显式重开。在同一次 React 提交前先收到禁用、再收到启用回执，仍须释放旧实例；
   过时或属于其他会话的回执不得释放另一 owner 的实例。

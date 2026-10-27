@@ -18749,6 +18749,68 @@ describe('DaemonSessionProvider', () => {
       });
 
       it.each(['/tmp', '/private/tmp'])(
+        'keeps a canonical owner after action creation commits before attachment from %s',
+        async (requested) => {
+          const session = createMockSession({
+            sessionId: 'created-session',
+            workspaceCwd: '/private/tmp',
+            session: { generatedUi: { version: 1, enabled: true } },
+          });
+          sdkMocks.MockDaemonSessionClient.createOrAttach.mockImplementationOnce(
+            async (client) => {
+              session.client = client as MockClient;
+              return session;
+            },
+          );
+          await renderWithProvider(<Probe name="main" />, {
+            ...providerProps,
+            sessionId: undefined,
+            workspaceCwd: requested,
+          });
+          await act(async () => {
+            await probes.main.actions.createSession({
+              workspaceCwd: requested,
+            });
+            await flushPromises();
+          });
+          expect(probes.main.connection).toMatchObject({
+            status: 'connected',
+            sessionId: session.sessionId,
+            workspaceCwd: '/private/tmp',
+          });
+
+          let attaching!: Promise<void>;
+          act(() => {
+            attaching = probes.main.actions.attachSession();
+          });
+          await act(async () => {
+            await attaching;
+            await flushPromises();
+          });
+          expect(probes.main.owner?.source).toBeDefined();
+          expect(probes.main.owner?.workspaceCwd).toBe('/private/tmp');
+          const entry = park('main');
+          const scopeId = probes.main.owner!.scopeId;
+          await act(async () => {
+            await probes.main.actions.submitPrompt('first prompt');
+            await flushPromises();
+          });
+          expect(session.submitPrompt).toHaveBeenCalledTimes(1);
+          expect(probes.main.owner?.scopeId).toBe(scopeId);
+          expect(probes.main.owner?.source?.captureOwner().isCurrent()).toBe(
+            true,
+          );
+          expect(retained.attach(retainedSlot('main'))).toBe(entry);
+          expect(entry.container.dataset.dirtyInput).toBe('9');
+          expect(entry.runtime.reopened).toBe(false);
+          expect(
+            sdkMocks.MockDaemonSessionClient.createOrAttach,
+          ).toHaveBeenCalledTimes(1);
+          expect(sdkMocks.MockDaemonSessionClient.load).not.toHaveBeenCalled();
+        },
+      );
+
+      it.each(['/tmp', '/private/tmp'])(
         'keeps canonical scope through reconnect and detachment when requesting %s',
         async (requested) => {
           const disconnected = createDeferred<void>();

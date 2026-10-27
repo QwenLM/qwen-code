@@ -5807,7 +5807,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       !generatedUiClientId ||
       connection.status !== 'connected' ||
       connection.sessionId !== appSession.sessionId ||
-      connection.workspaceCwd !== appSession.workspaceCwd
+      connection.workspaceCwd !== appSession.workspaceCwd ||
+      generatedUiScope.workspaceCwd !== appSession.workspaceCwd
     )
       return undefined;
     const previousScope = generatedUiSessionScopes.current.get(appSession);

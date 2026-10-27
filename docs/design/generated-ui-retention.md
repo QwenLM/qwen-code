@@ -28,6 +28,9 @@ confirmed canonical cwd remains authoritative during reconnect and detachment;
 requested aliases do not create new scopes on transport failure. Actual host,
 credential, or workspace changes retire the old scope. The binding guard must
 never reassign an old client to a different scope.
+An action-created client binds only when its scope matches the daemon's
+canonical cwd. A connected render before attachment cannot bind it to a
+provisional requested alias.
 
 ## Parking and authorization
 
@@ -75,6 +78,8 @@ from the saved original content and display the interaction-loss notice.
   Worker, applied result, and dirty input when retention remains eligible.
 - Canonical-cwd reconnection keeps scope and owner source stable. Actual scope
   changes and foreign scopes remain isolated.
+  Creation may commit before attachment; the attached client must still have a
+  canonical owner and retain its activation after the first prompt.
 - Disabled load/context receipts and attached-stream/heartbeat access failures
   release runtimes. Recovery of a released card requires explicit reopening.
   Disabled then enabled receipts before one React commit must still release the
