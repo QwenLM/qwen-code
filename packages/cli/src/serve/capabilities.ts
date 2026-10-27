@@ -166,6 +166,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // model, so a quiet watch costs no turn. Clients that send `gate` to an
   // older daemon would have it silently dropped on POST.
   scheduled_task_gate: { since: 'v1' },
+  // `GET /autofix-pr/watches` and its workspace-qualified form: the
+  // `/autofix-pr` watches of a workspace's clone, as `qwen autofix-pr status`
+  // lists them.
+  autofix_pr_watches: { since: 'v1' },
   session_monitor_tool_correlation: { since: 'v1' },
   session_stats: { since: 'v1' },
   session_lsp: { since: 'v1' },
