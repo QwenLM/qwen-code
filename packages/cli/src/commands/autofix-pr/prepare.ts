@@ -280,15 +280,23 @@ function localCopy(
 
 /**
  * Paths of this clone's worktrees that have `branch` checked out: the copies
- * the user may be working in, or null when git cannot list them. `-z` keeps a
- * path git would otherwise C-quote, which `git -C` then cannot open.
+ * the user may be working in, or null when git cannot list them.
  */
 function worktreeCheckouts(branch: string): string[] | null {
-  const listing = gitOpt('worktree', 'list', '--porcelain', '-z');
-  if (listing === null) return null;
+  // `-z` keeps a path git would otherwise C-quote, which `git -C` then
+  // cannot open. Git before 2.36 has no `-z`; the line form still answers,
+  // and a path it quotes reads as unknown rather than as no work.
+  const z = gitOpt('worktree', 'list', '--porcelain', '-z');
+  if (z !== null) return parseWorktrees(z.split('\0'), branch);
+  const plain = gitOpt('worktree', 'list', '--porcelain');
+  return plain === null ? null : parseWorktrees(plain.split('\n'), branch);
+}
+
+/** `git worktree list --porcelain` records, split into fields. */
+function parseWorktrees(fields: string[], branch: string): string[] {
   const paths: string[] = [];
   let worktree: string | null = null;
-  for (const field of listing.split('\0')) {
+  for (const field of fields) {
     if (field === '') {
       worktree = null;
     } else if (field.startsWith('worktree ')) {

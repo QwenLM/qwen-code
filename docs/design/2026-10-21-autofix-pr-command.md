@@ -233,12 +233,14 @@ worktree included:
    helpers write, is left out, and anything else under `.qwen` is the user's.
    It is computed only when the copy exists and only for checkouts of that
    branch; work in a checkout of another branch is not work on that copy.
-   `localWorkUnknown` says the comparison could not be made at all — the PR
-   head is not in this clone, or git could not read a checkout — which is
-   never reported as "no work". The helper reports them and does not refuse:
-   the skill's start does not go on while the work or that flag is set, unless
-   the user asks once told, because the watch's push and the user's own go to
-   the same head branch.
+   `worktree list --porcelain -z` keeps a path git would quote, with the line
+   form as the fallback where git has no `-z` (before 2.36): a path it quotes
+   then reads as unknown, not as no work. `localWorkUnknown` says the
+   comparison could not be made at all — the PR head is not in this clone, or
+   git could not read a checkout — which is never reported as "no work". The
+   helper reports them and does not refuse: the skill's start does not go on
+   while the work or that flag is set, unless the user asks once told, because
+   the watch's push and the user's own go to the same head branch.
 
 ### 6.2 `snapshot <pr> [--repo <owner>/<repo>] [--host <host>] [--gate] [--session <id>] [--task <id>]`
 

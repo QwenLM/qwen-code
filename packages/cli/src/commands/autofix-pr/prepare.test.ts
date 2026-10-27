@@ -614,6 +614,73 @@ describe('runPrepare (real git)', () => {
     });
   });
 
+  it('falls back when git has no worktree -z', () => {
+    const realGit = execFileSync('sh', ['-c', 'command -v git'], {
+      encoding: 'utf8',
+    }).trim();
+    const bin = join(dir, 'old-git');
+    mkdirSync(bin);
+    writeFileSync(
+      join(bin, 'git'),
+      `#!/bin/sh\nif [ "$1" = worktree ] && [ "$2" = list ] && [ "$4" = -z ]; then exit 129; fi\nexec ${realGit} "$@"\n`,
+      { mode: 0o755 },
+    );
+    const savedPath = process.env['PATH'];
+    process.env['PATH'] = `${bin}:${savedPath}`;
+    try {
+      runPrepare({ pr: 7, repo: 'o/r' });
+    } finally {
+      process.env['PATH'] = savedPath;
+    }
+    expect(lastReport()).toMatchObject({
+      localUncommittedChanges: false,
+      localWorkUnknown: false,
+    });
+  });
+
+  it('counts a dirty submodule whatever diff.ignoreSubmodules says', () => {
+    const sub = join(dir, 'subsrc');
+    run(dir, 'init', '-q', '-b', 'main', sub);
+    run(sub, 'config', 'user.email', 't@example.com');
+    run(sub, 'config', 'user.name', 't');
+    writeFileSync(join(sub, 'a.txt'), 'a\n');
+    run(sub, 'add', 'a.txt');
+    run(sub, 'commit', '-q', '-m', 'sub');
+    run(
+      clone,
+      '-c',
+      'protocol.file.allow=always',
+      'submodule',
+      'add',
+      '-q',
+      sub,
+      'mod',
+    );
+    run(clone, 'commit', '-q', '-m', 'add submodule');
+    run(clone, 'config', 'diff.ignoreSubmodules', 'all');
+    writeFileSync(join(clone, 'mod', 'a.txt'), 'dirty\n');
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(lastReport()).toMatchObject({ localUncommittedChanges: true });
+  });
+
+  it('reads a linked checkout of the head branch', () => {
+    // The work belongs to a checkout beside this one, so a scan that asked
+    // the directory prepare ran in would miss it.
+    run(clone, 'checkout', '-q', 'main');
+    const linked = join(dir, 'linked');
+    run(clone, 'worktree', 'add', '-q', linked, 'feat');
+    writeFileSync(join(linked, 'dirty.txt'), 'work\n');
+    const savedServe = process.env['QWEN_CODE_SERVE'];
+    delete process.env['QWEN_CODE_SERVE'];
+    try {
+      runPrepare({ pr: 7, repo: 'o/r' });
+    } finally {
+      if (savedServe === undefined) delete process.env['QWEN_CODE_SERVE'];
+      else process.env['QWEN_CODE_SERVE'] = savedServe;
+    }
+    expect(lastReport()).toMatchObject({ localUncommittedChanges: true });
+  });
+
   it('counts commits against the live head when it resumes a watch', () => {
     runPrepare({ pr: 7, repo: 'o/r' });
     run(clone, 'config', 'user.email', 't@example.com');
