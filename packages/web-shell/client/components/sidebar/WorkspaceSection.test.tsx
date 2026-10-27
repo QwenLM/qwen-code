@@ -11,6 +11,7 @@ import type {
   DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
 import type { WorkspaceSessionStats } from './workspaceOverviewModel';
+import type { SessionTreeRenderOptions } from './sessionTree';
 
 const {
   workspaceGit,
@@ -148,7 +149,10 @@ function renderSection(
     gitBranchWanted: boolean;
     renderSession: (
       session: DaemonSessionSummary,
-      options?: { searchSnippet?: string | undefined },
+      options?: {
+        searchSnippet?: string | undefined;
+        tree?: SessionTreeRenderOptions;
+      },
     ) => ReactNode;
     onOpenPathLocally: (cwd: string) => Promise<void>;
     onOpenTerminalLocally: (cwd: string) => Promise<void>;
@@ -2533,5 +2537,169 @@ describe('WorkspaceSection overview plumbing', () => {
     await flush();
     await openDetailsDialog();
     expect(sessionCount('Total')).toBe('3+');
+  });
+});
+
+describe('WorkspaceSection session tree', () => {
+  function treeClient(sessions: DaemonSessionSummary[]): DaemonClient {
+    return {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessionsPage: vi.fn().mockResolvedValue({ sessions }),
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+  }
+
+  function treeRow(
+    session: DaemonSessionSummary,
+    options?: {
+      searchSnippet?: string | undefined;
+      tree?: SessionTreeRenderOptions;
+    },
+  ): ReactNode {
+    const tree = options?.tree;
+    return (
+      <div
+        key={session.sessionId}
+        data-session-id={session.sessionId}
+        data-tree-depth={tree?.depth}
+        data-tree-children={tree?.childCount}
+      >
+        {session.displayName}
+        {tree && tree.childCount > 0 ? (
+          <button
+            type="button"
+            aria-label={`toggle ${session.sessionId}`}
+            aria-expanded={tree.expanded}
+            onClick={tree.onToggle}
+          >
+            toggle
+          </button>
+        ) : null}
+      </div>
+    );
+  }
+
+  const parent: DaemonSessionSummary = {
+    sessionId: 'parent',
+    displayName: 'Parent session',
+    sourceType: 'default',
+    updatedAt: '2026-01-02T00:00:00.000Z',
+  } as DaemonSessionSummary;
+  const child: DaemonSessionSummary = {
+    sessionId: 'child',
+    displayName: 'Derived session',
+    parentSessionId: 'parent',
+    sourceType: 'default',
+    updatedAt: '2026-01-03T00:00:00.000Z',
+  } as DaemonSessionSummary;
+
+  it('renders a derived session under its collapsed parent', async () => {
+    renderSection({
+      client: treeClient([parent, child]),
+      expanded: true,
+      sourceType: 'default',
+      renderSession: treeRow,
+    });
+    await flush();
+
+    expect(container.textContent).toContain('Parent session');
+    expect(container.textContent).not.toContain('Derived session');
+    const toggle = container.querySelector<HTMLElement>(
+      '[aria-label="toggle parent"]',
+    );
+    expect(toggle).not.toBeNull();
+    expect(toggle?.getAttribute('aria-expanded')).toBe('false');
+    expect(
+      container
+        .querySelector('[data-session-id="parent"]')
+        ?.getAttribute('data-tree-children'),
+    ).toBe('1');
+  });
+
+  it('reveals the derived session after expanding and remembers it', async () => {
+    renderSection({
+      client: treeClient([parent, child]),
+      expanded: true,
+      sourceType: 'default',
+      renderSession: treeRow,
+    });
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLElement>('[aria-label="toggle parent"]')
+        ?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(container.textContent).toContain('Derived session');
+    expect(
+      container
+        .querySelector('[data-session-id="child"]')
+        ?.getAttribute('data-tree-depth'),
+    ).toBe('1');
+    expect(
+      window.localStorage.getItem(
+        'qwen.web-shell.sidebar.session-tree-expanded:primary',
+      ),
+    ).toContain('parent');
+  });
+
+  it('keeps a matched derived session visible when only it matches', async () => {
+    renderSection({
+      client: treeClient([parent, child]),
+      expanded: true,
+      sourceType: 'default',
+      searchQuery: 'Derived',
+      renderSession: treeRow,
+    });
+    await flush();
+
+    expect(container.textContent).toContain('Derived session');
+    expect(
+      container
+        .querySelector('[data-session-id="child"]')
+        ?.getAttribute('data-tree-depth'),
+    ).toBe('0');
+  });
+
+  it('expands a parent that also matches the search', async () => {
+    const matchingParent = { ...parent, displayName: 'Derived parent' };
+    const matchingChild = { ...child, displayName: 'Derived child' };
+    renderSection({
+      client: treeClient([matchingParent, matchingChild]),
+      expanded: true,
+      sourceType: 'default',
+      searchQuery: 'Derived',
+      renderSession: treeRow,
+    });
+    await flush();
+
+    expect(container.textContent).toContain('Derived child');
+    expect(
+      container
+        .querySelector('[data-session-id="child"]')
+        ?.getAttribute('data-tree-depth'),
+    ).toBe('1');
+  });
+
+  it('counts a collapsed parent as one preview row', async () => {
+    const others = Array.from({ length: 4 }, (_, index) => ({
+      sessionId: `other-${index}`,
+      displayName: `Other ${index}`,
+      sourceType: 'default',
+      updatedAt: `2026-01-0${index + 4}T00:00:00.000Z`,
+    })) as DaemonSessionSummary[];
+    renderSection({
+      client: treeClient([parent, child, ...others]),
+      expanded: true,
+      sourceType: 'default',
+      renderSession: treeRow,
+    });
+    await flush();
+
+    expect(container.textContent).not.toContain('Derived session');
+    expect(container.textContent).not.toContain('Show all');
   });
 });
