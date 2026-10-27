@@ -485,6 +485,7 @@ import {
   createAndAttachSessionForPrompt,
   isDaemonApprovalMode,
 } from './utils/sessionPreparation';
+import { titleFromPrompt } from './utils/sessionTitleFromPrompt';
 import {
   getComposerPlaceholderKey,
   getComposerPlaceholderState,
@@ -11423,7 +11424,7 @@ export function App({
     );
   }, []);
   const ensureSessionForPrompt = useCallback(
-    (notify?: (id: string) => void) => {
+    (notify?: (id: string) => void, initialTitle?: string) => {
       const currentSessionId = connectionRef.current.sessionId;
       if (createSessionPromiseRef.current) {
         if (
@@ -11535,6 +11536,23 @@ export function App({
                   );
                 } catch {
                   pendingManualTitleRef.current = undefined;
+                }
+              } else if (initialTitle) {
+                // Name the new session from its first prompt before the row
+                // is first rendered, so it never shows the session-id
+                // fallback. Best-effort: on failure the daemon's first-prompt
+                // label still names it.
+                try {
+                  await sessionActions.renameSession(initialTitle);
+                  if (catalogWorkspaceCwd) {
+                    sessionCatalogController.renamed(
+                      catalogWorkspaceCwd,
+                      sessionId,
+                      initialTitle,
+                    );
+                  }
+                } catch {
+                  // Fall back to the first-prompt label.
                 }
               }
               await onSessionCreatedRef.current?.(sessionId);
@@ -12011,6 +12029,7 @@ export function App({
       try {
         allocatedSessionId = await ensureSessionForPrompt(
           opts?.onSessionAllocated,
+          titleFromPrompt(preparedPrompt),
         );
         if (!admissionSourceIsCurrent(allocatedSessionId)) {
           restoreCancelledSubmitState();

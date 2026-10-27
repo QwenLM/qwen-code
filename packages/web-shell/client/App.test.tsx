@@ -26023,6 +26023,59 @@ describe('App session callbacks', () => {
       expect(mockSessionActions.sendPrompt).toHaveBeenCalled();
     });
 
+    // The automatic title must not be carried; the fresh prompt names the
+    // successor on its own.
+    expect(mockSessionActions.renameSession).not.toHaveBeenCalledWith(
+      'Session One',
+    );
+  });
+
+  it('names a new session from a short first prompt', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.displayName = undefined;
+    renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('修复登录按钮在移动端错位');
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalled();
+    });
+
+    expect(mockSessionActions.renameSession).toHaveBeenCalledWith(
+      '修复登录按钮在移动端错位',
+    );
+    expect(
+      mockSessionActions.renameSession.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      mockSessionActions.attachSession.mock.invocationCallOrder[0],
+    );
+    expect(
+      mockSessionActions.renameSession.mock.invocationCallOrder[0],
+    ).toBeLessThan(mockSessionActions.sendPrompt.mock.invocationCallOrder[0]);
+    expect(sessionCatalogController.renamed).toHaveBeenCalledWith(
+      '/workspace',
+      'session-1',
+      '修复登录按钮在移动端错位',
+    );
+  });
+
+  it('leaves a long first prompt to the automatic session title', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.displayName = undefined;
+    renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit(
+        'Investigate and fix the session title generation issue in the chat recording service',
+      );
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalled();
+    });
+
     expect(mockSessionActions.renameSession).not.toHaveBeenCalled();
   });
 
@@ -26117,7 +26170,10 @@ describe('App session callbacks', () => {
       expect(mockSessionActions.sendPrompt).toHaveBeenCalled();
     });
 
-    expect(mockSessionActions.renameSession).not.toHaveBeenCalled();
+    // The stale carry must not name the successor; the fresh prompt may.
+    expect(mockSessionActions.renameSession).not.toHaveBeenCalledWith(
+      'Bug hunt',
+    );
   });
 
   it('focuses a cleared new session without waiting for detach', async () => {
