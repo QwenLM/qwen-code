@@ -34,6 +34,24 @@ class ManagedEventEnvelopesTest {
     }
 
     @Test
+    void jsNumberToStringRendersIntegersAcrossTheSafeIntegerBoundary() {
+        // Node 22's String(...) output. Below 2^53 the integer shortcut
+        // answers; 2^53 itself takes the shortest-digits path.
+        assertEquals("-42", ManagedEventEnvelopes.jsNumberToString(-42.0));
+        assertEquals("0", ManagedEventEnvelopes.jsNumberToString(-0.0));
+        assertEquals("1760900000000",
+                ManagedEventEnvelopes.jsNumberToString(1760900000000.0));
+        assertEquals("4503599627370497",
+                ManagedEventEnvelopes.jsNumberToString(4503599627370497.0));
+        assertEquals("9007199254740991",
+                ManagedEventEnvelopes.jsNumberToString(9007199254740991.0));
+        assertEquals("-9007199254740991",
+                ManagedEventEnvelopes.jsNumberToString(-9007199254740991.0));
+        assertEquals("9007199254740992",
+                ManagedEventEnvelopes.jsNumberToString(9007199254740992.0));
+    }
+
+    @Test
     void jsNumberToStringMatchesEcmaScriptOnSubnormals() {
         // ECMAScript picks the shortest digits that round-trip; Java's
         // Double.toString diverges on these deep subnormals (wenshao's :233).

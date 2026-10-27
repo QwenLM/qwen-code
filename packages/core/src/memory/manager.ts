@@ -1343,7 +1343,18 @@ export class MemoryManager {
     } finally {
       this.extractCurrentTaskId.delete(params.projectRoot);
       this.extractRunning.delete(params.projectRoot);
-      void this.startQueuedExtract(params.projectRoot);
+      // A queued extraction has no caller left to inform: scheduleExtract
+      // already returned a 'queued' result, and the task record plus the
+      // telemetry event carry the failure. Without this handler the rejection
+      // reaches the process-wide unhandledRejection handler.
+      void this.startQueuedExtract(params.projectRoot).catch(
+        (error: unknown) => {
+          debugLogger.warn(
+            'Failed to run queued managed auto-memory extraction.',
+            error,
+          );
+        },
+      );
     }
   }
 

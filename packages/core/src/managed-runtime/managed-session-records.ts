@@ -4,6 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  MANAGED_SESSION_LIMITS,
+  ManagedSessionRecordError,
+} from '../utils/managed-session-format.js';
+export {
+  MANAGED_SESSION_LIMITS,
+  ManagedSessionRecordError,
+} from '../utils/managed-session-format.js';
+
 import { createHash } from 'node:crypto';
 import { parseBranchCheckpointPayload } from '../services/branch-points.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
@@ -27,6 +36,7 @@ export const MANAGED_SESSION_FORMAT_VERSION = 1;
 // created in between (H3 round-5 verification matrix), so the stamp
 // rises only when a change genuinely breaks an older reader mid-scan.
 export const MANAGED_SESSION_MINIMUM_READER = 'managed-session/1';
+export const MANAGED_SESSION_READER_CAPABILITY = 'managed-session/2';
 
 const MANAGED_SESSION_DOMAIN_RECORD_VERSION = 1;
 const MAX_ERROR_VALUE_LENGTH = 4096;
@@ -34,22 +44,6 @@ const MAX_ERROR_VALUE_LENGTH = 4096;
 export const MANAGED_SESSION_HEADER_SUBTYPE = 'managed_session_header_v1';
 export const MANAGED_SESSION_EVENT_SUBTYPE = 'managed_session_event_v1';
 export const MANAGED_SESSION_COMMIT_SUBTYPE = 'managed_session_commit_v1';
-
-export const MANAGED_SESSION_LIMITS = {
-  maxIdBytes: 512,
-  // Not frozen by the storage spec: a bound for free-form enum-adjacent fields
-  // such as `source` or `stopReason`, borrowed from its error-message cap.
-  maxTextBytes: 4096,
-  maxTimeMs: 8_640_000_000_000_000,
-  maxJsonDepth: 64,
-  maxHeaderBytes: 64 * 1024,
-  maxEventBytes: 1024 * 1024,
-  maxCommitMarkerBytes: 64 * 1024,
-  maxTransactionEvents: 256,
-  maxTransactionBytes: 8 * 1024 * 1024,
-  defaultReadEvents: 100,
-  maxReadEvents: 256,
-} as const;
 
 export const MANAGED_SESSION_EVENT_KINDS = [
   'input.accepted',
@@ -116,6 +110,7 @@ export const MANAGED_SESSION_DOMAINS = [
   'session_metadata',
   'file_history',
   'session_source',
+  'hosted_harness_release',
 ] as const;
 
 export type ManagedSessionDomain = (typeof MANAGED_SESSION_DOMAINS)[number];
@@ -127,7 +122,10 @@ export type ManagedSessionDomain = (typeof MANAGED_SESSION_DOMAINS)[number];
  */
 export const MANAGED_SESSION_ENABLED_DOMAINS: readonly ManagedSessionDomain[] =
   [
+    'tool_stage',
+    'config_install',
     'goal_state',
+    'todo_state',
     'session_metadata',
     'file_history',
     'session_source',
@@ -135,6 +133,7 @@ export const MANAGED_SESSION_ENABLED_DOMAINS: readonly ManagedSessionDomain[] =
     'mcp_operation',
     'hook_registration',
     'hook_execution',
+    'history_maintenance',
     'schedule',
     'automation_run',
     'child_acceptance',
@@ -293,7 +292,14 @@ export function assertManagedSessionChannelAdapterEnabled(
  * list; the bodies module refuses to load over a name left here.
  */
 export const MANAGED_SESSION_ENVELOPE_DOMAINS: readonly ManagedSessionDomain[] =
-  ['goal_state', 'session_metadata', 'file_history', 'session_source'];
+  [
+    'config_install',
+    'goal_state',
+    'todo_state',
+    'session_metadata',
+    'file_history',
+    'session_source',
+  ];
 
 export function assertManagedSessionDomainEnabled(
   domain: ManagedSessionDomain,
@@ -408,15 +414,6 @@ export interface ManagedSessionCommitMarker {
   readonly eventCount: number;
   readonly eventsDigest: string;
   readonly previousCommitDigest: string | null;
-}
-
-export class ManagedSessionRecordError extends Error {
-  readonly code: string = 'managed_session_invalid_record';
-
-  constructor(message: string) {
-    super(message);
-    this.name = 'ManagedSessionRecordError';
-  }
 }
 
 /**
@@ -1783,7 +1780,7 @@ export function parseManagedSessionHeader(
   const minimumReader = record['minimumReader'];
   const requiredReaderVersion = managedSessionReaderVersion(minimumReader);
   const currentReaderVersion = managedSessionReaderVersion(
-    MANAGED_SESSION_MINIMUM_READER,
+    MANAGED_SESSION_READER_CAPABILITY,
   );
   if (
     requiredReaderVersion === null ||

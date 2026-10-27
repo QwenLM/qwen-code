@@ -193,6 +193,26 @@ export interface DaemonWorkspaceUpdate {
   displayName: string | null;
 }
 
+export type DaemonGitCloneJobStatus =
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'cancelled';
+
+export interface DaemonGitCloneJob {
+  jobId: string;
+  status: DaemonGitCloneJobStatus;
+  startedAt: number;
+  finishedAt?: number;
+  /** Latest reported completion percentage, when the clone reports one. */
+  percent?: number;
+  /** Latest sanitized progress or failure line. */
+  message?: string;
+  /** Canonical clone directory, present when `status` is `succeeded`. */
+  cwd?: string;
+  error?: { code: string; message: string };
+}
+
 export interface DaemonWorkspaceRemovalActivity {
   sessions: number;
   activePrompts: number;
@@ -1438,8 +1458,16 @@ export function parseDaemonBackgroundTurn(
   return value as DaemonBackgroundTurn;
 }
 
+/** Effective built-in Generated UI state of the owning runtime session. */
+export interface DaemonGeneratedUiStatus {
+  version: 1;
+  enabled: boolean;
+  reason?: string;
+}
+
 /** Returned from `POST /session`. */
 export interface DaemonSession {
+  generatedUi?: DaemonGeneratedUiStatus;
   startupConfigApplied?: SessionStartupConfigApplied;
   sessionId: string;
   /** Immutable runtime ownership root used for daemon routing. */
@@ -2380,6 +2408,20 @@ export interface DaemonMcpBudgetStatusCell extends DaemonStatusCell {
   refusedCount: number;
 }
 
+/** Extra workspace directories persisted at workspace scope. */
+export interface DaemonWorkspaceDirectories {
+  v: 1;
+  primaryDirectory: string;
+  directories: string[];
+}
+
+/** Result of adding or removing one extra workspace directory. */
+export interface DaemonWorkspaceDirectoriesMutation
+  extends DaemonWorkspaceDirectories {
+  changed: boolean;
+  warnings: string[];
+}
+
 export interface DaemonWorkspaceMcpStatus {
   v: 1;
   workspaceCwd: string;
@@ -2506,6 +2548,17 @@ export interface DaemonWorkspaceSkillStatus extends DaemonStatusCell {
   extensionName?: string;
   /** Localized presentation name; never use as an extension identity. */
   extensionDisplayName?: string;
+}
+
+export interface DaemonWorkspaceSkillsSnapshot {
+  workspaceCwd: string;
+  skills: Array<{
+    name: string;
+    description: string;
+    body: string;
+    model_invocable?: boolean;
+    user_invocable?: boolean;
+  }>;
 }
 
 export interface DaemonWorkspaceSkillsStatus {
@@ -3574,6 +3627,28 @@ export interface DaemonSessionTasksStatus {
   sessionId: string;
   now: number;
   tasks: DaemonSessionTaskStatus[];
+}
+
+/**
+ * On-demand detail for one shell task. `memoryBytes` is the resident memory
+ * of the shell's process tree (shared pages counted once per process);
+ * `outputTail` is the last few KB of the captured stdout/stderr.
+ */
+export interface DaemonSessionShellTaskRuntime {
+  memoryBytes?: number;
+  outputBytes?: number;
+  outputModifiedAt?: number;
+  outputTail?: string;
+  outputTailTruncated?: boolean;
+  outputError?: string;
+}
+
+export interface DaemonSessionTaskRuntimeStatus {
+  v: 1;
+  sessionId: string;
+  taskId: string;
+  /** Null when the task is unknown/evicted or is not a shell task. */
+  runtime: DaemonSessionShellTaskRuntime | null;
 }
 
 export interface DaemonSessionAgentsStatus {
@@ -5313,6 +5388,21 @@ export interface PermissionResponse {
   /** Answers to ask_user_question, keyed by its `answerKey`. */
   answers?: Record<string, string>;
   [key: string]: unknown;
+}
+
+export interface DaemonMessageGroupsSnapshot {
+  snapshot: string;
+  groups: Array<{
+    id: string;
+    promptId?: string;
+    promptIds?: string[];
+    recordIds: string[];
+  }>;
+}
+
+export interface DaemonDeleteMessageGroupsResult {
+  deletedGroupIds: string[];
+  deletedPromptIds: string[];
 }
 
 export interface DaemonRewindSnapshotInfo {

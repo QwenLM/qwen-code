@@ -303,6 +303,7 @@ export type {
   PublishArtifactInput,
   PublishedArtifact,
 } from './tools/artifact/publisher.js';
+export type { AutofixPrTool, AutofixPrParams } from './tools/autofix-pr.js';
 export type { CronCreateTool, CronCreateParams } from './tools/cron-create.js';
 export type {
   CurrentSessionScheduledTaskCreateRequest,
@@ -362,9 +363,13 @@ export type {
   DurableCronTask,
   CronTaskRun,
   CronRunSessionOutcome,
+  CronGateStatus,
+  CronGateOutcome,
+  CronGateRunOutcome,
 } from './services/cronTasksFile.js';
 export {
   readCronTasks,
+  withTaskGate,
   cronTaskSessionDeletionId,
   updateCronTasks,
   removeCronTasks,
@@ -379,6 +384,7 @@ export {
   MAX_CHANNEL_DELIVERY_NAME_LENGTH,
   MAX_CHANNEL_DELIVERY_TARGET_ID_LENGTH,
 } from './services/cronTasksFile.js';
+export { MAX_CRON_GATE_CHARS, gateCommandError } from './services/cron-gate.js';
 export * from './services/fileDiscoveryService.js';
 export * from './services/fileHistoryService.js';
 export * from './services/fileReadCache.js';
@@ -400,8 +406,9 @@ export {
   DEFAULT_MAX_TOOL_CALLS_PER_TURN,
   GLOBAL_DUPLICATE_THRESHOLD,
   getToolCallRepeatKey,
-  shouldHaltOnTurnToolCallCap,
+  getTurnToolCallCapHalt,
 } from './services/loopDetectionService.js';
+export type { TurnToolCallCapHalt } from './services/loopDetectionService.js';
 export * from './services/visionBridge/vision-bridge-service.js';
 export * from './services/visionBridge/tool-result-vision-bridge.js';
 export * from './services/visionBridge/image-part-utils.js';
@@ -667,6 +674,7 @@ export {
   IdeConnectionEvent,
   IdeConnectionType,
   LoopDetectedEvent,
+  LoopReason,
   LoopType,
   RepeatedToolFailureGuardEvent,
   ModelSlashCommandEvent,
@@ -676,6 +684,7 @@ export {
   WorkflowRunEvent,
   WorkflowSizeWarningEvent,
 } from './telemetry/types.js';
+export type { LoopStopDetail } from './telemetry/types.js';
 
 // ============================================================================
 // Extensions, Skills, Subagents & Agents

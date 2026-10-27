@@ -4,210 +4,202 @@
 
 ## Problem and scope
 
-Issue #13184 audits time-unbounded growth in the managed-agent persistence and
-projection layers. This design covers the two remaining Core items:
+Issue #13184 tracks growth in managed-agent journals and resident state. This
+change is **slice 1**: compact the local activation and inbox journals without
+changing the identity, deduplication, lease, fence, ordering, or outcome contract.
+It bounds repeated transition and renewal records relative to the current state.
+It does **not** bound the number of completed identities or finish #13184.
 
-- **Item 1**: the session authority keeps every event in process memory, and
-  every read path replays the whole journal (local JSONL) or pages it from
-  revision 0 (HTTP).
-- **Item 2**: the activation store and inbox journals never compact, and the
-  activation renewal loop appends a durable record for the life of an open
-  session.
+The remaining native session journal and authority work is described below as
+future implementation, including its dependencies. Resource-store limits,
+settled-dispatch eviction, and renewal-loop stopping belong to companion PRs
+#14656, #14657, and #14658 and are outside this change.
 
-The audit's item 4 (resource-store hardening and a publish bound) and the
-process-map bound for settled dispatch entries are implemented in companion
-branches of this series, not yet merged. The renewal stop condition is
-implemented there as well. Those changes are referenced here only to keep the
-retention model in one place.
+## Current state and corrected boundaries
 
-## Current state
+The activation store and inbox append v1 JSONL events and replay them from
+sequence 1. Both retain every identity indefinitely. An activation's lease
+renewals and a message's successive processing fences accumulate on disk even
+though their earlier transitions are no longer needed to reconstruct its state.
+There is no existing identity-expiration or deduplication window.
 
-Verified against `origin/main` at `e584d4d197`:
+Three existing fields describe different domains and must remain separate:
 
-- `LocalManagedSessionAuthority` pushes every committed event into `events`
-  and never removes one. `readEvents`, `eventsInSequenceRange` and
-  `lastEventOfKind` read that array synchronously, and one path indexes it as
-  `events[sequence - 1]`, which assumes the array still starts at sequence 1.
-- `LocalJsonlManagedSessionJournalStore.read` reads the whole transcript file
-  with `readFile` on every open.
-- `HttpManagedSessionStore.readJournal` pages `/transactions` from
-  `afterRevision = 0` at 100 transactions per page, concatenates every chunk,
-  then scans the result. `readOnlyManagedSessionSnapshot` rejects a head whose
-  `compactedThroughRevision` is not 0 with
-  `snapshot recovery or compaction is unsupported.`, and
-  `requireHeadMatchesGrant` rejects the same head with
-  `restore head is not readable by this writer.`
-- The Java server already persists `last_sequence`, `covered_sequence`,
-  `replay_floor_sequence` and `current_snapshot_id` per event stream, and has a
-  replay-floor advancer. The TypeScript client does not consume any of it.
-- `FileManagedActivationStore.open` and `FileManagedSessionInbox.open` replay
-  every JSONL line, and both require contiguous sequences starting at 1.
-  Released activations and acknowledged messages stay in their in-memory maps.
-  A lease renewal appends a record every `leaseDurationMs / 3`.
-- The renewal loop on `origin/main` retries on every interval and never
-  stops; a stop condition is implemented in this series (not yet merged).
+| Field                                                             | Owner and meaning                                                                                                         |
+| ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `ma_event_stream.replay_floor_sequence` and `current_snapshot_id` | Java public event projection and immutable item-pagination snapshots. These snapshots cannot restore a Harness authority. |
+| `ma_session_head.compacted_through_revision`                      | Native Harness journal compaction. It remains 0; there is no native journal snapshot publish/read endpoint yet.           |
+| `LocalManagedSessionAuthority.compactedThroughSequence`           | Coverage of model-history `context.compacted` summaries, not a physical journal replay floor.                             |
+
+The previous proposal treated the public projection snapshot as a native journal
+snapshot and the context-summary coverage as a physical floor. Those assumptions
+are corrected here. Slice 1 changes none of these fields.
 
 ## Goals
 
-1. Bound memory per open session by a configured number of events, independent
-   of total session length.
-2. Bound each durable journal by a snapshot plus a retained tail, without
-   losing any committed state that a reader can still be asked to serve.
-3. Make every read that falls below the replay floor fail explicitly instead of
-   returning a silently truncated range.
-4. Keep the TypeScript and Java stores on the same retention contract.
+1. Replace redundant activation and inbox transitions with one verified
+   current-state snapshot plus a contiguous tail.
+2. Preserve every accepted identity and its exact replay result across compaction,
+   crashes, and reopen, including terminal entries.
+3. Keep sequence positions, Session FIFO, activation epochs, processing fences,
+   cancellation state, canonical payloads, and outcomes unchanged.
+4. Make replacement fail closed without losing an already accepted operation.
 
 ## Non-goals
 
-- The Web Shell projection work (issue item 5) and the server-side quarantine
-  of an undecodable event row (the open half of item 6).
-- Reclaiming orphaned resources; that needs the reference-closure ledger.
-- Changing the public event or checkpoint formats beyond adding a journal
-  snapshot record and a compacted-session read path.
+- Expiring completed identities, deleting inbox payloads, or bounding resident maps.
+- Compacting the native session authority journal or changing public event floors.
+- Changing admission, scheduler renewal, or HTTP behavior.
+- Supporting concurrent owners of one local activation/inbox file; these adapters
+  retain their existing single-process, single-owner requirement.
 
-## Proposed design
+## Proposed solution
 
-### 1. One retention boundary: the replay floor
+### Snapshot format and replay
 
-The floor is the highest sequence below which a snapshot covers every event.
-It is persisted per stream and is monotonically non-decreasing. Readers below
-the floor receive an explicit expired-cursor error carrying the floor, which
-the existing event-replay design already defines for cursors.
+The first JSONL record may be a v2 `activation.snapshot` or `inbox.snapshot`.
+Its `state` object is protected by a SHA-256 `digest` over its JSON encoding.
+Each store validates the snapshot's state shape and invariants before accepting
+any tail records. A snapshot is permitted only as the first record. Unknown
+versions, checksum mismatches, duplicate identities, invalid ordering, and
+invalid lease/fence relationships fail closed.
 
-The existing `compactedThroughSequence` on the authority is the local
-counterpart; this design ties its advancement to the floor. Compaction may only
-advance it after the snapshot that covers the same range is durable.
+The activation snapshot retains `nextSequence`, all current activation snapshots,
+and the complete per-Session `nextEpoch` map. It includes released and cancelled
+activations, preserves their original queue sequences, and keeps the latest lease
+for each assigned activation. The inbox snapshot retains `nextSequence` and all
+current messages, including finished ones, their payloads, admission positions,
+readiness, cancellation flag, latest fence, outcome, and finish time.
 
-### 2. TypeScript HTTP store: consume the snapshot and the floor
+Subsequent events keep the existing v1 format and must continue exactly at
+`nextSequence`. Snapshotting consumes no sequence number, epoch, queue position,
+or admission position. Readers without v2 support reject the first snapshot
+rather than treating the retained tail as complete history. The public methods
+and their return values are unchanged.
 
-1. `requireHeadMatchesGrant` accepts `compactedThroughRevision > 0` when the
-   head names a snapshot the client can fetch.
-2. Opening a compacted session fetches that snapshot, rebuilds the authority's
-   initial state from it, and then pages `/transactions` from
-   `compactedThroughRevision + 1` instead of 0.
-3. A head that names a snapshot the client cannot fetch remains a hard
-   failure; it never falls back to a full replay from 0.
-4. `readJournal` returns the floor with the scan so callers can distinguish
-   "no more events" from "events were compacted away".
+### Automatic compaction and growth bound
 
-The server endpoint that returns the snapshot body for `current_snapshot_id`
-must be confirmed before this slice starts; the existing head fields are the
-contract it has to satisfy.
+Each store tracks the byte length of the snapshot and the complete journal.
+Before a new event append, it compacts if tail bytes have reached
+`max(64 KiB, snapshot bytes)`. A legacy file has zero snapshot bytes and becomes
+eligible after 64 KiB. A read-only open does not compact a healthy file.
 
-### 3. Local JSONL journal: snapshot plus truncate
+Replacement serializes the state that is already durable, then the requested
+append runs normally. Thus a compaction error precedes the requested operation:
+it cannot report that an operation failed after committing it. Idempotent calls
+that do not append also do not trigger compaction.
 
-1. Write a `journal.snapshot` record at the head of a new file. It carries the
-   format version, the covered sequence, the checkpoint reference, the
-   activation epoch and the base commit proof.
-2. Append the events after the covered sequence, fsync, then atomically rename
-   the new file over the old one and fsync the directory.
-3. Keep the previous file as `transcript.jsonl.compacted-<sequence>` until the
-   rename is durable, so a crash leaves either the old or the new journal.
-4. Rebase the takeover commit proof onto the snapshot base and reject a
-   takeover whose proof predates it.
-5. `open` reads the snapshot first and replays only the tail.
+After replacement there is one current-state snapshot. Until the next
+replacement, the retained tail is bounded by the threshold plus one existing
+record's size. Rewrites grow with the snapshot size rather than rewriting an
+ever larger identity set after a fixed small number of appends. A live activation
+with any number of renewals retains one latest lease plus a bounded tail.
+Completed identities and their payloads still contribute to the snapshot size;
+this is an explicit remaining scope item, not evidence of a constant disk or
+memory bound for the whole service.
 
-### 4. Authority memory: window plus indexes
+### Durable replacement and failure handling
 
-1. Retain events after `max(last checkpoint covered sequence, floor)`, plus a
-   fixed overlap for predecessor validation.
-2. Maintain `latestByKind` and `executionCallId` indexes so
-   `lastEventOfKind` and receipt lookups no longer scan the array.
-3. Replace `events[sequence - 1]` with a sequence-keyed lookup that tolerates a
-   window that does not start at 1.
-4. `readEvents` and `eventsInSequenceRange` serve from the window. A request
-   below the floor raises the expired-range error; a request inside the window
-   but before the retained start is served from the journal through an async
-   variant accepted by the caller.
-5. The window size is a configured limit, not a time-based one, so a slow
-   session and a fast one have the same memory envelope.
+Both stores share a small snapshot codec and atomic replacement helper. The
+existing general atomic-write utility has in-place fallback behavior and cannot
+provide the required replacement contract.
 
-### 5. Activation and inbox journals
+1. Remove a stale fixed `<journal>.snapshot.pending` file. It is never an
+   authority or a recovery candidate.
+2. Create that pending file exclusively with mode `0600`, write the full
+   snapshot, fsync it, and close it.
+3. Atomically rename it over the journal, then fsync the parent directory on
+   platforms supporting directory fsync. Windows retains atomic replacement and
+   file flushing; Node does not provide the same directory-fsync facility there.
+4. Only after success update the in-process byte counters and append the new
+   event. No backup chain accumulates; at most one pending snapshot can remain
+   after a process crash.
 
-1. Add the same snapshot record to both JSONL formats, with the next queue
-   sequence and the next epoch per session.
-2. Drop released activations older than one lease from memory and from the
-   snapshot; retain the identity long enough for the existing enqueue
-   deduplication window.
-3. Drop acknowledged inbox messages from the snapshot after the same window;
-   pending messages are never dropped.
-4. Keep renewal records out of the snapshot except for the latest lease per
-   activation.
+A crash before rename leaves the old journal; a crash after rename leaves the
+new snapshot. Both describe the same committed state. Any replacement error
+fences that store instance until reopen, including a directory-fsync failure
+after rename. A snapshot-bearing reopen syncs the parent directory before
+allowing another append, so an interrupted replacement cannot be followed by
+writes to an unconfirmed directory entry. An incomplete snapshot line fails
+closed rather than being repaired into an empty store. Existing torn-tail repair
+continues to apply only after a complete snapshot or legacy event prefix.
 
-### 6. Renewal
+## Remaining native-journal and authority design
 
-Implemented in this series (not yet merged): the loop stops on writes stopped
-or three consecutive failures. The snapshot work above replaces the accumulated
-renewal records with the latest lease, so a long-lived session no longer grows
-its journal by one record per lease third.
+These are required follow-ups, not implemented by slice 1. Identity storage
+and the native snapshot contract can be developed in parallel. HTTP and local
+replay can proceed in parallel once the snapshot contract is stable; the
+authority window depends on identity storage and both verified replay paths.
+See the [PR2 protocol design](2026-10-26-managed-native-journal-snapshots.md)
+for its implementation boundary and the lossless first payload format.
 
-## Design decisions
+PR3 [#15599](https://github.com/QwenLM/qwen-code/pull/15599) is merged into the PR2 branch; [#15569](https://github.com/QwenLM/qwen-code/pull/15569) delivers native snapshot storage and [HTTP recovery](2026-10-26-managed-http-snapshot-recovery.md) together to main. These remain separate design and acceptance slices within that PR. Local lease-aware recovery, complete historical-reader migration, compact state and the authority window remain follow-ups; the combined delivery does not enable journal deletion or memory eviction.
 
-- **Floor, not TTL, for the event log.** A time-based cutoff can discard an
-  event a slow reader still needs; the floor is tied to a durable snapshot and
-  is therefore safe to enforce at every read.
-- **Snapshot plus tail, not row deletion.** Deleting individual rows breaks
-  contiguity and the commit-proof chain; a snapshot gives a new base and keeps
-  the tail contiguous.
-- **Window in events, not bytes.** Event count is the unit every store already
-  validates, and it is what the in-memory indexes need.
-- **Explicit expiry over silent truncation.** A partial range presented as
-  complete is worse than a failure a caller can handle.
+1. **Identity storage:** move terminal bodies and deduplication evidence to a
+   durable lookup/archival structure before removing them from resident maps.
+   `enqueue` and `admit` must still return the original result for an old key and
+   reject conflicting reuse. An expired TTL must never permit duplicate effects.
+   Inbox reconciliation must still find the matching activation outcome.
+2. **Native snapshot contract:** add a separate native journal snapshot publish
+   and read contract under the writer's tenant/Workspace scope, revision CAS,
+   lease/generation fencing, digest, and complete resource-reference closure.
+   Snapshot state must include command replay and authority indexes as well as
+   execution recovery state; a Harness checkpoint alone is insufficient.
+3. **Native HTTP replay:** consume that native snapshot and contiguous tail.
+   Migrate `WakeRecoveryStore`, original-CSI recovery/qualification, lifecycle
+   cleanup, publication proofs, tool details/results, child relays, and recovery
+   exports before deleting a native transaction they can still query.
+4. **Local native replay:** extend `SessionWriterLease` with an ownership-checked
+   replacement operation that repins inode, metadata, rolling hash, and sealed
+   commit proof. Renaming a transcript directly from its journal adapter violates
+   the current lease's identity proof. Publish the native snapshot durably before
+   advancing a new native replay floor, separate from context-summary coverage.
+   [PR4's local design](2026-10-26-managed-local-journal-snapshots.md) implements
+   a one-time sealed-resume conversion with the complete prefix retained; it
+   does not implement rotation, GC, compact state or bounded memory/storage.
+5. **Authority window:** add durable historical lookup/read-through and migrate
+   synchronous sequence-1 readers before eviction. Bound `transactions`, event
+   IDs, receipt/checkpoint/domain/extension indexes, Actions, and extension
+   uniqueness evidence as well as `events`. Approval/model/Plan selection,
+   wake/cancel recovery, tool results, tasks, hooks, automations, channels,
+   transcript projection, and SSE must preserve their historical answers.
 
-## Constraints and risks
-
-- The local journal commit proof is a prefix hash. Truncation must rebase it;
-  an implementation that keeps the old proof will reject every takeover.
-- Crash consistency needs the old journal to remain readable until the new one
-  is durable. The rename ordering above is part of the contract, not an
-  optimization.
-- The HTTP snapshot format and endpoint are server-owned. The TypeScript client
-  must not invent a second snapshot format.
-- Reads below the floor are currently synchronous. Converting every caller to
-  an async read is a wide change; the design allows a synchronous explicit
-  error first, with async read-through added per call site.
-- Resource references inside a snapshot still have to resolve after the old
-  events are gone; the snapshot must retain the referenced resource ids.
+The [local terminal-identity lookup slice](2026-10-26-managed-terminal-identity-lookup.md)
+adds a derived per-key query used by terminal duplicate admission. It keeps the
+journal authoritative and retains resident maps; an independently authoritative
+archive and its completeness boundary remain prerequisites for eviction.
 
 ## Validation plan
 
-1. Replay equivalence: for a scripted session, the state rebuilt from
-   `snapshot + tail` equals the state rebuilt from the full log, at every
-   checkpoint boundary.
-2. Crash injection: fail between snapshot write, rename and directory fsync;
-   every outcome must open as either the old journal or the new one.
-3. Floor behaviour: a cursor below the floor returns the expired error with the
-   floor; a cursor at the floor returns the tail.
-4. Memory bound: a session with 100k events keeps at most the configured window
-   of events resident.
-5. Mutation witnesses for each guard: floor off-by-one, snapshot coverage,
-   index staleness, and a takeover proof that predates the snapshot.
+- Reproduce the baseline using the globally installed CLI where supported and
+  use a direct store script when the CLI does not expose these adapter methods.
+- Compare every activation/message state before and after a snapshot and reopen,
+  including released/finished identities, multiple Sessions, FIFO, epoch advance,
+  cancelled messages, pending work, exact retries, and conflicting retries.
+- Run a single activation through at least 1,024 renewals and a message through
+  repeated increasing processing epochs; verify obsolete transition rows are
+  replaced and latest state and fences survive reopen.
+- Inject pending write/fsync, rename, and directory-fsync failures. The failed
+  instance must stop; reopen must see the same accepted state, allow retry,
+  preserve sequence continuity, and accept only the latest fence.
+- Reject torn/checksum-invalid snapshots, repeated snapshots, duplicate IDs,
+  regressed counters, impossible state combinations, and noncontiguous tails.
+- Run focused activation/inbox, scheduler, admission, and store growth tests,
+  then the required build, typecheck, bundle, self-audit, and code review.
 
 ## Acceptance criteria
 
-- A session with any number of checkpoints retains at most the configured
-  event window in memory and at most `window + snapshot` events on disk.
-- No read silently returns a truncated range; every below-floor read raises the
-  documented error.
-- A compacted HTTP session opens without replaying from revision 0.
-- The activation and inbox journals stop growing with released or acknowledged
-  entries after the retention window.
-- TypeScript and Java agree on the floor and snapshot contract.
-
-## Slices
-
-1. TypeScript HTTP store: snapshot-aware open and tail paging (server endpoint
-   confirmed first).
-2. Local JSONL journal: snapshot record, truncate and proof rebase.
-3. Authority: indexes, windowed reads and explicit expiry.
-4. Activation and inbox: snapshot record and released/message retention.
-5. Java parity checks and cross-language replay equivalence.
+- Both stores automatically compact redundant transitions before the next append
+  once eligible, without adding an unused configuration switch.
+- All existing identities, replay outcomes, ordering, and fencing survive.
+- A live activation's retained renewal rows stop growing with elapsed lifetime.
+- A replacement failure cannot acknowledge a new event or admit later writes
+  through that failed instance.
+- Terminal-identity memory/disk growth and native journal/authority work remain
+  explicitly open under #13184.
 
 ## Open questions
 
-- Which server endpoint returns the snapshot body, and is its payload the same
-  `current_snapshot_id` body used by recovery?
-- Is a synchronous expired-range error sufficient for every current caller, or
-  does any caller need read-through below the floor in the same release?
-- What window size fits the largest supported session without changing the
-  current checkpoint cadence?
+There are no unresolved behavior choices for slice 1. The remaining work needs a
+native snapshot protocol and durable historical-index storage; neither can be
+substituted with the public projection snapshot or an identity TTL.

@@ -51,7 +51,7 @@ PR #13674 also separates the existing internal TeamLead rig with the reserved
 `hosted-workspace-team-lead/1` profile and a trusted Java-only empty-creation
 entry. Public create and AgentDefinition cannot select this identity, including
 through idempotency replay. These public Shell rules still apply only to
-Shell/1 and /2. Authorized input, Actions and protocol-0 close on an internally
+the unified Shell/1 profile. Authorized input, Actions and protocol-0 close on an internally
 created Session retain their private policy; opening public foreground Shell
 does not expose team tools. See the [internal admission design](2026-10-11-internal-team-lead-admission.md)
 for the persisted boundary and pending Linux/MySQL process acceptance.
@@ -86,8 +86,8 @@ Before returning a cached attachment or making a create/load/recovery request,
 the Connector validates that a persisted Shell profile has `default` or
 `auto-edit` approval mode. Invalid modes never silently become YOLO. Harness
 confirmation still must match the stored mode. Existing file YOLO behavior is
-unchanged. The helper recognizes existing Shell /2 records defensively but
-public creation emits only /1.
+unchanged. The unreleased Shell /2 identifier has been removed; public
+creation emits only the unified /1 profile.
 
 Recovery reuses current G3 behavior. Requested approvals remain requested on a
 plain owner reattach. Durable allow/deny remains durable. Recovery may refuse
@@ -114,15 +114,7 @@ of fresh-creation grants. Its dedicated cached attachment path performs the
 same persisted Shell approval validation. Older clients remain protected by
 the transactional admission gate.
 
-Shell close, archive, unarchive and delete capabilities are false. Fresh public
-lifecycle requests, including protocol-0 close, are rejected before an
-operation or command is created. The internal child close uses the 8-argument
-`beginWorkspaceLifecycle` overload and is not subject to that Shell refusal.
-Public Shell parents stay uncloseable. The refusal includes seeded
-CLOSED/ARCHIVED Shell records. Existing command replay keeps
-its original result. Existing non-Shell lifecycle declarations and L2 behavior are unchanged;
-this does not certify files/2 L3 support. Turn cancellation is distinct from
-Session lifecycle and retains its authorization, attachment and recovery guards.
+The canonical Shell profile uses the existing lifecycle v2 path, advertised by default. An explicit `QWEN_HOSTED_LIFECYCLE_V2_PROFILES` value replaces the list; an empty value disables v2. Public close and active delete additionally require reliable original-Worker stop support, Session ownership and current read access. A completed close enables archive/unarchive; unarchive restores CLOSED. Foreground work and pending approvals return `turn_active`: cancel the original Turn and wait for settlement before requesting close again. Background Shell, Monitor and child Sessions use the existing drain and cascade. Missing execution, output or stop proof remains blocked for recovery. Turn cancellation and Session lifecycle retain their separate authorization and recovery guards. See the [current lifecycle design](2026-10-23-managed-shell-lifecycle.md).
 
 ## Changes by component
 

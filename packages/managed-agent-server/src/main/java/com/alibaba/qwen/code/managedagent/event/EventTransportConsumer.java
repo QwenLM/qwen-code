@@ -11,13 +11,9 @@ import java.io.Closeable;
 import java.nio.ByteBuffer;
 import java.util.OptionalLong;
 import java.util.Set;
-import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
-import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
 
 /**
  * The message listener of both EventTransport consumer lanes (design
@@ -70,14 +66,10 @@ public class EventTransportConsumer implements Closeable {
 
     public EventTransportConsumer(TransportWakeActivator wakes,
             TransportConsumerStore store, MessageMaterializer materializer) {
-        this(wakes, store, materializer, new ThreadPoolExecutor(1, 1, 0,
-                TimeUnit.MILLISECONDS,
-                new ArrayBlockingQueue<>(MATERIALIZE_QUEUE), runnable -> {
-                    Thread thread = new Thread(runnable,
-                            "event-transport-materialize");
-                    thread.setDaemon(true);
-                    return thread;
-                }, new ThreadPoolExecutor.AbortPolicy()));
+        this(wakes, store, materializer, TransportExecutors.bounded(
+                Thread.ofPlatform().daemon()
+                        .name("event-transport-materialize").factory(),
+                1, MATERIALIZE_QUEUE));
     }
 
     // The executor is injectable so a test can materialize synchronously.
@@ -93,14 +85,7 @@ public class EventTransportConsumer implements Closeable {
     /** Stops the materialization thread; the scheduled pass carries on. */
     @Override
     public void close() {
-        if (materializations instanceof ExecutorService service) {
-            service.shutdown();
-            try {
-                service.awaitTermination(2, TimeUnit.SECONDS);
-            } catch (InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-            }
-        }
+        TransportExecutors.close(materializations);
     }
 
     public ConsumeResult consume(MessageView message) {

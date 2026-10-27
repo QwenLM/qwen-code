@@ -2,8 +2,9 @@
 
 [English](2026-10-19-automation-publication-fault-gates.md) | [简体中文](2026-10-19-automation-publication-fault-gates.zh-CN.md)
 
-Status: proposed. Slice 1 (in-process arms) and slice 2 (publisher death) are
-scoped here; neither is implemented yet.
+Status: slice 1 is delivered. All three in-process arms — `fail-before-write`,
+`drop-ack-after-write` and `timeout` — run green against the packaged stack.
+Slice 2 (publisher death) is scoped here and untouched.
 
 Issue: #14446, the FG11 tracker. The tracker's gate table names FG11f as one
 of the two slices the round owes. FG11c is delivered; this is the remainder.
@@ -27,8 +28,9 @@ The production seams this gate pins:
   team lead (the `create` builder).
 - `ToolPublicationRetentionStore` writes through
   `ToolPublicationObjectStore.putIfAbsent` and marks the `OBJECT_PUT`
-  operation `UNKNOWN` when the write throws (`:630-641`); a later attempt on
-  an unresolved put is refused with `tool_output_put_unresolved`.
+  operation `UNKNOWN` when the write throws (`:630-641`); a retry reconciles
+  by reading the object first, and only one that cannot prove the object is
+  refused with `409 tool_output_put_unresolved`.
 
 ## Fixture
 
@@ -62,12 +64,12 @@ real `AliyunToolPublicationObjectStore` adapter in the path, so the gate also
 exercises its error mapping (`ToolPublicationStorageException`), which a
 hand-written store would skip.
 
-| Arm                         | Injected at `putObject`                                                                                     | Expected                                                                                                                                                                                                                                                                                                                                                 |
-| --------------------------- | ----------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `fail-before-write`         | Throw `OSSException` (`InternalError`) without storing the object                                           | The operation stays `UNKNOWN`; the next attempt reconciles by reading the object, finds none, and refuses with `409 tool_output_put_unresolved`. The tool result is honestly failed or unknown, and the Shell is not re-executed.                                                                                                                        |
-| `drop-ack-after-write`      | Store the object, then throw `ClientException`, so the caller cannot tell a committed write from a lost one | The `OBJECT_PUT` row is transiently `UNKNOWN` (`abandonScan` frees the claim). The packaged caller resubmits the same operation and bytes, and the store then reconciles by reading the object and settling `RETURNED`; the gate asserts that final state, exactly one physical PUT, a byte-identical readable object, and no re-execution of the Shell. |
-| `timeout`                   | Stay silent past `operation-timeout`, then throw `SocketTimeout` without storing the object                 | Same refusal as `fail-before-write`, and the wake turn's Workspace lease is released; one run, one Turn, one execution.                                                                                                                                                                                                                                  |
-| `publisher-death` (slice 2) | Park the put inside the child JVM, then SIGKILL it                                                          | On restart the run settles once from the journal; a committed object reconciles to `RETURNED`, an absent one refuses; the Shell is not re-executed and the lease is released.                                                                                                                                                                            |
+| Arm                         | Injected at `putObject`                                                                                     | Expected                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fail-before-write`         | Throw `OSSException` (`InternalError`) without storing the object                                           | The operation stays `UNKNOWN`; the next attempt reconciles by reading the object, finds none, and refuses with `409 tool_output_put_unresolved`. The tool result is honestly failed or unknown, and the Shell is not re-executed.                                                                                                                                                                                                                                                                                    |
+| `drop-ack-after-write`      | Store the object, then throw `ClientException`, so the caller cannot tell a committed write from a lost one | The `OBJECT_PUT` row is transiently `UNKNOWN`; the resubmission is admitted off that state alone, and there is no claim to free — `abandonScan` resets claims only for the capture kinds, and an `OBJECT_PUT` row is inserted without one. The packaged caller resubmits the same operation and bytes, and the store then reconciles by reading the object and settling `RETURNED`; the gate asserts that final state, exactly one physical PUT, a byte-identical readable object, and no re-execution of the Shell. |
+| `timeout`                   | Stay silent past `operation-timeout`, then throw `SocketTimeout` without storing the object                 | Same refusal as `fail-before-write`, and the wake turn's Workspace lease is released; one run, one Turn, one execution.                                                                                                                                                                                                                                                                                                                                                                                              |
+| `publisher-death` (slice 2) | Park the put inside the child JVM, then SIGKILL it                                                          | On restart the run settles once from the journal; a committed object reconciles to `RETURNED`, an absent one refuses; the Shell is not re-executed and the lease is released.                                                                                                                                                                                                                                                                                                                                        |
 
 The two shapes are deliberately different. `fail-before-write` pins the refusal
 (`tool_output_put_unresolved`) and the honest failure; `drop-ack-after-write`

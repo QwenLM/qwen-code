@@ -2,7 +2,9 @@
 
 [English](2026-10-19-automation-publication-fault-gates.md) | [简体中文](2026-10-19-automation-publication-fault-gates.zh-CN.md)
 
-状态：提案。第 1 片（进程内故障臂）与第 2 片（发布者死亡）在此定界，均未实现。
+状态：第 1 片已交付。三条进程内故障臂——`fail-before-write`、
+`drop-ack-after-write`、`timeout`——均已在打包栈上实跑绿。
+第 2 片（发布者死亡）在此定界，尚未触碰。
 
 Issue：#14446，FG11 tracker。tracker 的 gate 表把 FG11f 列为本轮欠的两片之一。
 FG11c 已交付；本设计是剩余部分。
@@ -23,8 +25,8 @@ FG11c 已交付；本设计是剩余部分。
   或内部 team lead 时下发 `captureBytes`（`create` 构建器）。
 - `ToolPublicationRetentionStore` 通过
   `ToolPublicationObjectStore.putIfAbsent` 写入；写入抛错时把 `OBJECT_PUT`
-  操作置为 `UNKNOWN`（`:630-641`）；对未决写入的后续尝试以
-  `tool_output_put_unresolved` 拒绝。
+  操作置为 `UNKNOWN`（`:630-641`）；重提会先读对象对账，只有读回无法证明该
+  对象的尝试才以 `409 tool_output_put_unresolved` 拒绝。
 
 ## 夹具
 
@@ -55,12 +57,12 @@ bean。故障打在 `OSS` 客户端上，真实的 `AliyunToolPublicationObjectS
 适配器仍在路径上，因此门禁同时覆盖它的错误映射
 （`ToolPublicationStorageException`）；手写 store 会跳过这一段。
 
-| 故障臂                       | 在 `putObject` 注入                                                      | 预期                                                                                                                                                                                                                                |
-| ---------------------------- | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `fail-before-write`          | 抛 `OSSException`（`InternalError`），不写对象                           | 操作留在 `UNKNOWN`；下一次尝试读对象对账，读不到，以 `409 tool_output_put_unresolved` 拒绝。工具结果如实失败或未知，Shell 不被重跑                                                                                                  |
-| `drop-ack-after-write`       | 先写入对象，再抛 `ClientException`，让调用方分不清「已提交」与「已丢失」 | `OBJECT_PUT` 行短暂停在 `UNKNOWN`（`abandonScan` 只释放 claim）。打包夹具里的调用方会以同一 operation 与同一份字节重提，store 随后读对象对账并结算为 `RETURNED`；断言钉住该终态、恰好一次物理 PUT、对象按字节一致可读、Shell 不重跑 |
-| `timeout`                    | 静默超过 `operation-timeout`，再抛 `SocketTimeout`，不写对象             | 与 `fail-before-write` 同样被拒绝；wake turn 的 Workspace lease 被释放；一次 run、一次 Turn、一次执行                                                                                                                               |
-| `publisher-death`（第 2 片） | 在子 JVM 内扣住 put，随后 SIGKILL                                        | 重启后 run 从 journal 恰好结算一次；已提交的对象对账为 `RETURNED`，不存在的则被拒绝；Shell 不被重跑，lease 被释放                                                                                                                   |
+| 故障臂                       | 在 `putObject` 注入                                                      | 预期                                                                                                                                                                                                                                                                                                                                    |
+| ---------------------------- | ------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fail-before-write`          | 抛 `OSSException`（`InternalError`），不写对象                           | 操作留在 `UNKNOWN`；下一次尝试读对象对账，读不到，以 `409 tool_output_put_unresolved` 拒绝。工具结果如实失败或未知，Shell 不被重跑                                                                                                                                                                                                      |
+| `drop-ack-after-write`       | 先写入对象，再抛 `ClientException`，让调用方分不清「已提交」与「已丢失」 | `OBJECT_PUT` 行短暂停在 `UNKNOWN`；重提仅凭该状态即被准入，此处没有 claim 可释放——`abandonScan` 只重置 capture 类操作，且 `OBJECT_PUT` 行插入时本就没有 claim owner。打包夹具里的调用方会以同一 operation 与同一份字节重提，store 随后读对象对账并结算为 `RETURNED`；断言钉住该终态、恰好一次物理 PUT、对象按字节一致可读、Shell 不重跑 |
+| `timeout`                    | 静默超过 `operation-timeout`，再抛 `SocketTimeout`，不写对象             | 与 `fail-before-write` 同样被拒绝；wake turn 的 Workspace lease 被释放；一次 run、一次 Turn、一次执行                                                                                                                                                                                                                                   |
+| `publisher-death`（第 2 片） | 在子 JVM 内扣住 put，随后 SIGKILL                                        | 重启后 run 从 journal 恰好结算一次；已提交的对象对账为 `RETURNED`，不存在的则被拒绝；Shell 不被重跑，lease 被释放                                                                                                                                                                                                                       |
 
 两种形态刻意不同：`fail-before-write` 钉住拒绝
 （`tool_output_put_unresolved`）与如实失败；`drop-ack-after-write` 钉住
