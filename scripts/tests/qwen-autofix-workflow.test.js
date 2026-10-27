@@ -17660,15 +17660,15 @@ exit 1
     // instead of re-handing-off every tick.
     expect(reviewAddressReportStep).toContain('MARK_ROUND="${MAX_ROUNDS}"');
     expect(reviewAddressReportStep).toContain(
-      '<!-- autofix-eval ts=${MARK_TS} acted=false round=${MARK_ROUND} win=${WINDOW:-none} -->',
+      '<!-- autofix-eval ts=${MARK_TS} acted=false round=${MARK_ROUND} win=${WINDOW:-none} run=${GITHUB_RUN_ID} -->',
     );
     // Per-site (not just the global count-3): each producer keeps its win
     // key, or windowed ROUND silently restarts at 0 and the cap never fires.
     expect(pushAndReportStep).toContain(
-      '<!-- autofix-eval ts=${NEWEST} acted=true round=${NEXT_ROUND} win=${WINDOW:-none} -->',
+      '<!-- autofix-eval ts=${NEWEST} acted=true round=${NEXT_ROUND} win=${WINDOW:-none} run=${GITHUB_RUN_ID} -->',
     );
     expect(pushAndReportStep).toContain(
-      '<!-- autofix-eval ts=${NEWEST} acted=false round=${ROUND} win=${WINDOW:-none} -->',
+      '<!-- autofix-eval ts=${NEWEST} acted=false round=${ROUND} win=${WINDOW:-none} run=${GITHUB_RUN_ID} -->',
     );
     // The ts fallback must be non-empty even under cascading API failure (empty
     // WATERMARK), or the scan's `ts=([^ ]+)` regex would not match the terminal
@@ -31219,10 +31219,10 @@ describe('review-address: regression accounting (af-157)', () => {
     // round that consumes no number makes the NEXT round reuse it, and
     // the brake's regression walk then charges two rounds as one.
     expect(giveUpArm).toContain(
-      '<!-- autofix-eval ts=${NEWEST} acted=true round=${NEXT_ROUND} win=${WINDOW:-none} -->',
+      '<!-- autofix-eval ts=${NEWEST} acted=true round=${NEXT_ROUND} win=${WINDOW:-none} run=${GITHUB_RUN_ID} -->',
     );
     expect(giveUpArm).toContain(
-      '<!-- autofix-eval ts=${NEWEST} acted=false round=${ROUND} win=${WINDOW:-none} -->',
+      '<!-- autofix-eval ts=${NEWEST} acted=false round=${ROUND} win=${WINDOW:-none} run=${GITHUB_RUN_ID} -->',
     );
     // The emitter's headline shape and the brake's reader agree on where
     // the round number sits.
