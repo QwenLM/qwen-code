@@ -1184,6 +1184,15 @@ export function createServeApp(
           )
         );
       },
+      sessionBtwStreamAvailable: () => {
+        const runtimes = workspaceRegistry.listAll();
+        return (
+          runtimes.length > 0 &&
+          runtimes.every(
+            (runtime) => runtime.bridge.generateSessionBtwStream !== undefined,
+          )
+        );
+      },
       currentSessionSchedulingAvailable:
         deps.manageScheduledTaskSessions === true &&
         deps.currentSessionSchedulingAvailable === true,

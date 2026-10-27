@@ -1490,15 +1490,15 @@ describe('ChatRecordingService', () => {
       'resolves prompt boundaries through %s without counting automatic records',
       async (mode) => {
         if (mode === 'live') {
-          user('A', undefined, undefined, 'p1');
+          user('A', undefined, undefined, 'p1', 'daemon-A');
           svc.recordGoalRuntimeMessage('automatic', goalPermit('automatic'));
-          user('B', undefined, undefined, 'p2');
+          user('B', undefined, undefined, 'p2', 'daemon-B');
         } else {
           const records = resumedChain(
             null,
-            ['a', 'user', 'A', { promptId: 'p1' }],
+            ['a', 'user', 'A', { promptId: 'p1', daemonPromptId: 'daemon-A' }],
             ['auto', 'user', 'automatic', { subtype: 'goal_runtime' }],
-            ['b', 'user', 'B', { promptId: 'p2' }],
+            ['b', 'user', 'B', { promptId: 'p2', daemonPromptId: 'daemon-B' }],
           );
           if (mode === 'full restore') svc.rebuildTurnBoundaries(records);
           else
@@ -1507,13 +1507,18 @@ describe('ChatRecordingService', () => {
               ...collectSessionTurnState(records, 'test-session-id'),
             });
         }
+        expect(svc.getRewindDaemonPromptId('p1')).toBe('daemon-A');
+        expect(svc.getRewindDaemonPromptId('p2')).toBe('daemon-B');
+        expect(svc.getRewindDaemonPromptId('missing')).toBeUndefined();
         expect(svc.getRewindTurnIndex('p2')).toBe(1);
         expect(svc.getRewindTurnIndex('missing')).toBe(-1);
         svc.rewindRecording(1, { truncatedCount: 1 });
         expect(svc.getRewindTurnIndex('p2')).toBe(-1);
+        expect(svc.getRewindDaemonPromptId('p2')).toBeUndefined();
         expect(svc.getRewindTurnIndex('p1')).toBe(0);
         user('duplicate', undefined, undefined, 'p1');
         expect(svc.getRewindTurnIndex('p1')).toBe(-1);
+        expect(svc.getRewindDaemonPromptId('p1')).toBeUndefined();
         await svc.flush();
       },
     );

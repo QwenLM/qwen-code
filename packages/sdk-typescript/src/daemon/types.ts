@@ -4540,6 +4540,10 @@ export interface DaemonSessionRecapResult {
   recap: string | null;
 }
 
+export type DaemonSessionBtwStreamEvent =
+  | { v: 1; type: 'answer' | 'done'; requestId: string; answer: string }
+  | { v: 1; type: 'error'; requestId: string; code: string; message: string };
+
 export type DaemonSessionGenerationEvent =
   | {
       v: 1;
@@ -5408,6 +5412,7 @@ export interface DaemonDeleteMessageGroupsResult {
 
 export interface DaemonRewindSnapshotInfo {
   promptId: string;
+  daemonPromptId?: string;
   turnIndex: number;
   timestamp: string;
   diffStats: { filesChanged: number; insertions: number; deletions: number };
