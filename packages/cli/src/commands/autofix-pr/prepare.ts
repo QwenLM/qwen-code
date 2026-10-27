@@ -429,9 +429,12 @@ export function runPrepare(args: PrepareArgs): void {
           '-R',
           args.repo,
           '--json',
-          'author,headRepository,headRepositoryOwner',
+          'author,headRepository,headRepositoryOwner,headRefOid',
         ),
-      ) as Pick<PrView, 'author' | 'headRepository' | 'headRepositoryOwner'>;
+      ) as Pick<
+        PrView,
+        'author' | 'headRepository' | 'headRepositoryOwner' | 'headRefOid'
+      >;
       if (!live.headRepository || !live.headRepositoryOwner) {
         throw new Error(
           `PR #${args.pr}'s head repository no longer exists; nothing can be pushed to it.`,
@@ -478,7 +481,9 @@ export function runPrepare(args: PrepareArgs): void {
         { ...existing, worktreePath: paths.worktreePath },
         {
           resumed: true,
-          ...localCopy(existing),
+          // Against the PR's head now, not the one the watch last synced:
+          // a commit the user has since pushed is not unpushed.
+          ...localCopy({ ...existing, lastKnownHeadSha: live.headRefOid }),
           ...(tookOver ? { tookOver } : {}),
           ...(wasEnded ? { wasEnded } : {}),
         },

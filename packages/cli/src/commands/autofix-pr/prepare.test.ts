@@ -568,6 +568,30 @@ describe('runPrepare (real git)', () => {
     });
   });
 
+  it('counts commits against the live head when it resumes a watch', () => {
+    runPrepare({ pr: 7, repo: 'o/r' });
+    run(clone, 'config', 'user.email', 't@example.com');
+    run(clone, 'config', 'user.name', 't');
+    run(clone, 'commit', '-q', '--allow-empty', '-m', 'pushed to the PR');
+    const pushed = run(clone, 'rev-parse', 'HEAD');
+    run(clone, 'push', '-q', 'origin', 'feat');
+    // GitHub moves the PR head with the branch.
+    run(join(dir, 'bare.git'), 'update-ref', 'refs/pull/7/head', pushed);
+    mocks.gh.mockImplementation((...args: string[]) => {
+      if (args[0] === 'pr') {
+        return JSON.stringify(prView({ headRefOid: pushed }));
+      }
+      if (args[0] === 'repo') return JSON.stringify(writable);
+      if (args[0] === 'config') return 'https';
+      throw new Error(`unexpected gh ${args.join(' ')}`);
+    });
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(lastReport()).toMatchObject({
+      resumed: true,
+      localUnpushedCommits: 0,
+    });
+  });
+
   it('resumes in the owning session without touching the worktree', () => {
     runPrepare({ pr: 7, repo: 'o/r' });
     const answer = mocks.gh.getMockImplementation()!;
@@ -575,7 +599,7 @@ describe('runPrepare (real git)', () => {
     mocks.gh.mockImplementation((...args: string[]) => {
       if (
         args[0] !== 'pr' ||
-        args.at(-1) !== 'author,headRepository,headRepositoryOwner'
+        args.at(-1) !== 'author,headRepository,headRepositoryOwner,headRefOid'
       ) {
         throw new Error(`a resume must not call gh ${args.join(' ')}`);
       }
