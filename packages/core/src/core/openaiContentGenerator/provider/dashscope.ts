@@ -28,6 +28,7 @@ import { buildSessionAwareFetch } from '../../outbound-session-id.js';
 import {
   QWENCLOUD_MAAS_HOSTS,
   withDashScopeSourceConfig,
+  withoutDashScopeSourceConfig,
 } from '../../dashscope-source-config.js';
 
 const debugLogger = createDebugLogger('DashScopeOpenAICompatibleProvider');
@@ -365,7 +366,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       fetch: buildSessionAwareFetch(
         runtimeOptions?.fetch,
         this.cliConfig,
-        this.contentGeneratorConfig.customHeaders,
+        withoutDashScopeSourceConfig(this.contentGeneratorConfig.customHeaders),
       ),
     });
   }

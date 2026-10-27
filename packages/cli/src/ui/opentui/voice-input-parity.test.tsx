@@ -45,6 +45,7 @@ const mocks = vi.hoisted(() => {
   const state = {
     buffer: null as TextBuffer | null,
     closeDialog: null as (() => void) | null,
+    dimensions: { width: 80, height: 24 },
   };
   const renderer = {
     widthMethod: 'unicode',
@@ -147,7 +148,7 @@ vi.mock('@opentui/react', async () => {
       }, [handler]);
     },
     useRenderer: () => mocks.renderer,
-    useTerminalDimensions: () => ({ width: 80, height: 24 }),
+    useTerminalDimensions: () => mocks.state.dimensions,
   };
 });
 vi.mock('@opentui/react/jsx-runtime', () => mocks.buildJsxRuntime());
@@ -398,6 +399,7 @@ beforeEach(() => {
   mocks.handlers.clear();
   mocks.state.buffer = null;
   mocks.state.closeDialog = null;
+  mocks.state.dimensions = { width: 80, height: 24 };
   mocks.start.mockReset().mockResolvedValue(undefined);
   mocks.stop.mockReset().mockResolvedValue({
     data: new Uint8Array([1, 2, 3]),
@@ -426,6 +428,39 @@ beforeEach(() => {
 });
 
 describe('OpenTUI voice input through the real shell and composer', () => {
+  it.each([
+    { width: 1, expected: '─' },
+    { width: 5, expected: '─────' },
+    { width: 6, expected: '─ … ──' },
+  ])(
+    'keeps the active voice border within $width columns',
+    async ({ width, expected }) => {
+      mocks.state.dimensions = { width, height: 24 };
+      const submit = vi.fn(() => true);
+      const { container } = render(
+        <OpenTuiInputPrompt
+          config={config}
+          userMessages={[]}
+          onSubmit={submit}
+          voice={{ settings: voiceSettings() }}
+        />,
+      );
+      await space();
+      await waitFor(() => expect(mocks.start).toHaveBeenCalledTimes(1));
+      const root = container.firstElementChild;
+      const borders = Array.from(root?.children ?? []).filter(
+        (node) => node.tagName === 'SPAN',
+      );
+      expect(borders).toHaveLength(1);
+      expect(borders[0]?.textContent).toBe(expected);
+      expect(getCachedStringWidth(borders[0]?.textContent ?? '')).toBe(width);
+      expect(mocks.state.buffer?.text).toBe('');
+      expect(mocks.stop).not.toHaveBeenCalled();
+      expect(mocks.transcribe).not.toHaveBeenCalled();
+      expect(submit).not.toHaveBeenCalled();
+    },
+  );
+
   it('respects actual composer focus before starting the shared voice hook', async () => {
     const props = {
       config,
@@ -440,7 +475,7 @@ describe('OpenTUI voice input through the real shell and composer', () => {
     view.rerender(<OpenTuiInputPrompt {...props} focus />);
     await space();
     await waitFor(() => expect(mocks.start).toHaveBeenCalledTimes(1));
-    expect(screen.getByText('Voice: recording')).toBeTruthy();
+    expect(screen.getByText('Voice: recording', { exact: false })).toBeTruthy();
     expect(props.onSubmit).not.toHaveBeenCalled();
   });
 
@@ -557,12 +592,16 @@ describe('OpenTUI voice input through the real shell and composer', () => {
     await space();
     await waitFor(() => expect(mocks.start).toHaveBeenCalledTimes(1));
     await space();
-    expect(screen.getByText('Voice: transcribing')).toBeTruthy();
+    expect(
+      screen.getByText('Voice: transcribing', { exact: false }),
+    ).toBeTruthy();
     expect(mocks.refine).not.toHaveBeenCalled();
     expect(submit).not.toHaveBeenCalled();
     await act(async () => transcription.resolve('RAW_甲🙂'));
     await waitFor(() =>
-      expect(screen.getByText('Voice: refining')).toBeTruthy(),
+      expect(
+        screen.getByText('Voice: refining', { exact: false }),
+      ).toBeTruthy(),
     );
     expect(mocks.refine).toHaveBeenCalledWith(
       config,
@@ -667,7 +706,7 @@ describe('OpenTUI voice input through the real shell and composer', () => {
     });
     expect(mocks.state.buffer?.text).toBe('');
     expect(submit).not.toHaveBeenCalled();
-    expect(screen.getByText('Voice: recording')).toBeTruthy();
+    expect(screen.getByText('Voice: recording', { exact: false })).toBeTruthy();
     await space();
     await waitFor(() => expect(submit).toHaveBeenCalledTimes(1));
     expect(mocks.stop).toHaveBeenCalledTimes(1);
@@ -726,7 +765,9 @@ describe('OpenTUI voice input through the real shell and composer', () => {
       expect(mocks.stop).not.toHaveBeenCalled();
       expect(mocks.transcribe).not.toHaveBeenCalled();
       expect(submit).not.toHaveBeenCalled();
-      expect(screen.getByText('Voice: recording')).toBeTruthy();
+      expect(
+        screen.getByText('Voice: recording', { exact: false }),
+      ).toBeTruthy();
     },
   );
 
@@ -742,11 +783,15 @@ describe('OpenTUI voice input through the real shell and composer', () => {
       await space();
       await space();
       await waitFor(() =>
-        expect(screen.getByText('Voice: transcribing')).toBeTruthy(),
+        expect(
+          screen.getByText('Voice: transcribing', { exact: false }),
+        ).toBeTruthy(),
       );
       const cancel = await pressKey(event);
       await waitFor(() =>
-        expect(screen.queryByText('Voice: transcribing')).toBeNull(),
+        expect(
+          screen.queryByText('Voice: transcribing', { exact: false }),
+        ).toBeNull(),
       );
       expect(cancel.preventDefault).toHaveBeenCalled();
       await act(async () => {
@@ -757,7 +802,9 @@ describe('OpenTUI voice input through the real shell and composer', () => {
       expect(submit).not.toHaveBeenCalled();
       await space();
       await waitFor(() => expect(mocks.start).toHaveBeenCalledTimes(2));
-      expect(screen.getByText('Voice: recording')).toBeTruthy();
+      expect(
+        screen.getByText('Voice: recording', { exact: false }),
+      ).toBeTruthy();
     },
   );
 
@@ -768,12 +815,16 @@ describe('OpenTUI voice input through the real shell and composer', () => {
     await space();
     await space();
     await waitFor(() =>
-      expect(screen.getByText('Voice: transcribing')).toBeTruthy(),
+      expect(
+        screen.getByText('Voice: transcribing', { exact: false }),
+      ).toBeTruthy(),
     );
     expect(mocks.stop).toHaveBeenCalledTimes(1);
     updateSettings(voiceSettings(false));
     await waitFor(() =>
-      expect(screen.queryByText('Voice: transcribing')).toBeNull(),
+      expect(
+        screen.queryByText('Voice: transcribing', { exact: false }),
+      ).toBeNull(),
     );
     await act(async () => {
       pending.resolve('LATE_DISABLED_TRANSCRIPT');
@@ -804,7 +855,9 @@ describe('OpenTUI voice input through the real shell and composer', () => {
     await space();
     await space();
     await waitFor(() =>
-      expect(screen.getByText('Voice: transcribing')).toBeTruthy(),
+      expect(
+        screen.getByText('Voice: transcribing', { exact: false }),
+      ).toBeTruthy(),
     );
     expect(mocks.stop).toHaveBeenCalledTimes(1);
     const oldBuffer = mocks.state.buffer;
