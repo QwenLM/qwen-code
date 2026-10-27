@@ -68,6 +68,9 @@ vi.mock('@opentui/core', () => ({
 vi.mock('@opentui/react', async () => {
   const React = await import('react');
   return {
+    useAppContext: (
+      await import('../../test-utils/opentui-catalog.js')
+    ).catalogAppContext(mocks.state.keyboardHandlers),
     // Mount-stable registration: the wrapper is registered once per consumer
     // and always invokes the latest handler closure — the real renderer's
     // semantics — so a key event can be broadcast to every mounted consumer.

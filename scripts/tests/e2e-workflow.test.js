@@ -238,6 +238,14 @@ describe('TUI product evidence', () => {
     expect(
       existsSync('integration-tests/interactive/tui-session-recovery.test.ts'),
     ).toBe(true);
+    expect(commands[0].split(/\s+/)).toContain(
+      'interactive/tui-extension-acquisition.test.ts',
+    );
+    expect(
+      existsSync(
+        'integration-tests/interactive/tui-extension-acquisition.test.ts',
+      ),
+    ).toBe(true);
   });
 
   it('keeps fresh evidence retrievable when the same head is rerun', () => {
