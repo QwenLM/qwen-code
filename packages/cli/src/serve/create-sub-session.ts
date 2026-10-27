@@ -81,6 +81,7 @@ import {
 } from '@qwen-code/acp-bridge/sessionSource';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import type { StandaloneSessionService } from './conversations/standalone-session-service.js';
+import type { SessionArchiveCoordinator } from './server/session-archive.js';
 import { createSessionOrganizationService } from './session-organization-helpers.js';
 
 type StandaloneSubSessionService = Pick<
@@ -270,6 +271,14 @@ export interface CreateSubSessionLauncherOptions {
    * {@link DEFAULT_SUB_SESSION_COMPLETION_TTL_MS} (`0` = keep forever —
    * auto-removal is opt-in). */
   completionTtlMs?: number;
+  /** The serve app's per-session lifecycle guard (the one archive, delete,
+   * and prompt admission take). A TTL removal decides "still terminal and
+   * inactive" and mutates under its exclusive lane, so a revival cannot be
+   * admitted between that decision and the close/delete. Read per removal:
+   * the app is built after the launcher. */
+  getArchiveCoordinator?: () =>
+    | Pick<SessionArchiveCoordinator, 'runExclusiveMany'>
+    | undefined;
 }
 
 type IsolatedWorkspace = NonNullable<
@@ -828,6 +837,7 @@ export function createSubSessionLauncher(
     runtimeBaseDir,
     notifySentCompletion = false,
     isolatedWorkspace,
+    getArchiveCoordinator,
   } = opts;
   const firstTurnTimeoutMs = opts.firstTurnTimeoutMs ?? FIRST_TURN_TIMEOUT_MS;
   const sentModeDrainTimeoutMs =
@@ -972,65 +982,135 @@ export function createSubSessionLauncher(
     }
   };
 
-  /** Remove a TTL-expired completed sub-session: close the live entry (it
-   * may already be gone — the idle reaper wins that race all the time),
-   * re-validate that no revival re-created it, remove the persisted
-   * transcript/catalog row, and advance the catalog clock. Mirrors the
-   * rollback cleanup of a failed launch. Any failure keeps the entry in
-   * `completedAt` so the next sweep retries. Terminal state: once the live
-   * entry is confirmed gone and the transcript is gone (removed here or
-   * already absent), the id leaves both clocks, so a later sweep cannot
-   * re-process it; the operator line prints only when this call actually
-   * removed the transcript. */
-  const removeExpiredSubSession = async (sessionId: string): Promise<void> => {
+  /** A live entry is a removal candidate only when it is free of work: an
+   * admitted prompt, running background tasks, or an active work state each
+   * keep the transcript. */
+  const isWorkFree = (summary: BridgeSessionSummary): boolean =>
+    !summary.hasActivePrompt &&
+    summary.hasRunningBackgroundTasks !== true &&
+    summary.activeWorkState !== 'active';
+
+  /** Remove a TTL-expired completed sub-session whose clock fell due at
+   * `due`. The eligibility decision and the mutation are one step under the
+   * session's exclusive lifecycle lane (the guard archive/delete take and
+   * prompt admission shares): while it is held no prompt can be admitted, and
+   * a lane already held — an in-flight admission, an archive or delete —
+   * refuses the removal, which keeps the clock armed for the next sweep.
+   * Under the lane the removal re-checks "still terminal and inactive"
+   * (archived rows and newer activity drop out; activity newer than `due`
+   * restarts the clock), closes the live entry (it may already be gone — the
+   * idle reaper wins that race all the time), re-validates that no revival
+   * re-created it, removes the persisted transcript/catalog row, and advances
+   * the catalog clock. Mirrors the rollback cleanup of a failed launch. Any
+   * failure keeps the entry in `completedAt` so the next sweep retries.
+   * Terminal state: once the live entry is confirmed gone and the transcript
+   * is gone (removed here or already absent), the id leaves both clocks, so a
+   * later sweep cannot re-process it; the operator line prints only when this
+   * call actually removed the transcript. */
+  const removeExpiredSubSession = async (
+    sessionId: string,
+    due: number,
+  ): Promise<void> => {
     const bridge = getBridge();
     if (!bridge) return;
-    try {
-      await bridge.closeSession(sessionId, undefined, {
-        reason: 'sub_session_completion_ttl',
-        agentCloseTimeoutMs: ACTIVE_WORK_CLOSE_TIMEOUT_MS,
-      });
-    } catch (error) {
-      if (error instanceof SessionNotFoundError) {
-        // Already gone (idle-reaped) — proceed to the persisted row.
-      } else {
-        log.debug('sub-session: TTL close failed', sessionId, error);
-        return; // keep the entry armed for the next sweep
+    /** The live summary; `undefined` when the entry is gone, `null` when the
+     * read failed (skip — the next sweep retries). */
+    const readSummary = (): BridgeSessionSummary | undefined | null => {
+      try {
+        return bridge.getSessionSummary(sessionId);
+      } catch (error) {
+        if (error instanceof SessionNotFoundError) return undefined;
+        log.debug('sub-session: TTL summary failed', sessionId, error);
+        return null;
       }
-    }
-    // Re-validate immediately before the persisted mutation: a send_message
-    // revival can admit a live entry between the close attempt and the
-    // deletion, and that session must keep its transcript (the next sweep
-    // restarts its clock from the fresh activity).
-    try {
-      if (bridge.getSessionSummary(sessionId) !== undefined) return;
-    } catch (error) {
-      if (!(error instanceof SessionNotFoundError)) {
+    };
+    const removeUnderLane = async (): Promise<void> => {
+      let summary = readSummary();
+      if (summary === null) return;
+      if (summary === undefined) {
+        // A reaped (or discovered) transcript: a row the user archived
+        // meanwhile is explicitly kept, and activity newer than the armed
+        // clock restarts it (a revived turn re-created the transcript).
+        const persisted = await persistedRemovalState(sessionId);
+        if (persisted.archived) {
+          completedAt.delete(sessionId);
+          return;
+        }
+        if (
+          persisted.lastActivity !== undefined &&
+          persisted.lastActivity > due
+        ) {
+          completedAt.set(sessionId, persisted.lastActivity);
+          return;
+        }
+        // The read above awaited: decide on the live entry as it is now.
+        summary = readSummary();
+        if (summary === null) return;
+      }
+      if (summary !== undefined) {
+        if (!isWorkFree(summary)) return;
+        if (summary.isArchived) {
+          completedAt.delete(sessionId);
+          return;
+        }
+        const lastActivity = Date.parse(summary.updatedAt ?? summary.createdAt);
+        if (Number.isFinite(lastActivity) && lastActivity > due) {
+          completedAt.set(sessionId, lastActivity);
+          return;
+        }
+      }
+      // No await between the decision above and the close.
+      try {
+        await bridge.closeSession(sessionId, undefined, {
+          reason: 'sub_session_completion_ttl',
+          agentCloseTimeoutMs: ACTIVE_WORK_CLOSE_TIMEOUT_MS,
+        });
+      } catch (error) {
+        if (error instanceof SessionNotFoundError) {
+          // Already gone (idle-reaped) — proceed to the persisted row.
+        } else {
+          log.debug('sub-session: TTL close failed', sessionId, error);
+          return; // keep the entry armed for the next sweep
+        }
+      }
+      // Re-validate immediately before the persisted mutation: a revival
+      // that bypasses the lifecycle lane can still re-create a live entry
+      // after the close, and that session must keep its transcript (the next
+      // sweep restarts its clock from the fresh activity).
+      if (readSummary() !== undefined) return;
+      let transcriptRemoved: boolean;
+      try {
+        transcriptRemoved = await removeSubSessionTranscript(sessionId);
+      } catch (error) {
         log.debug(
-          'sub-session: TTL pre-removal check failed',
+          'sub-session: TTL transcript removal failed',
           sessionId,
           error,
         );
-        return;
+        return; // keep the entry armed for the next sweep
       }
-    }
-    let transcriptRemoved: boolean;
+      // Terminal state: the live entry is confirmed gone and the transcript
+      // is gone. Leave no clock behind for the id.
+      completedAt.delete(sessionId);
+      spawnedSessionIds.delete(sessionId);
+      if (transcriptRemoved) {
+        bridge.markSessionCatalogChanged();
+        writeStderrLine(
+          `qwen serve: removed completed sub-session ${sessionId} from the roster ` +
+            `(completion TTL ${Math.round(completionTtlMs / 60_000)}min expired)`,
+        );
+      }
+    };
+    const coordinator = getArchiveCoordinator?.();
     try {
-      transcriptRemoved = await removeSubSessionTranscript(sessionId);
+      await (coordinator
+        ? coordinator.runExclusiveMany([sessionId], removeUnderLane)
+        : removeUnderLane());
     } catch (error) {
-      log.debug('sub-session: TTL transcript removal failed', sessionId, error);
-      return; // keep the entry armed for the next sweep
-    }
-    // Terminal state: the live entry is confirmed gone and the transcript is
-    // gone. Leave no clock behind for the id.
-    completedAt.delete(sessionId);
-    spawnedSessionIds.delete(sessionId);
-    if (transcriptRemoved) {
-      bridge.markSessionCatalogChanged();
-      writeStderrLine(
-        `qwen serve: removed completed sub-session ${sessionId} from the roster ` +
-          `(completion TTL ${Math.round(completionTtlMs / 60_000)}min expired)`,
-      );
+      // The lane is held (SessionArchivingError: a prompt being admitted, an
+      // archive, delete, or restore) or the daemon is draining: keep the
+      // entry armed for the next sweep.
+      log.debug('sub-session: TTL removal deferred', sessionId, error);
     }
   };
 
@@ -1125,9 +1205,7 @@ export function createSubSessionLauncher(
         }
       }
       if (summary !== undefined) {
-        if (summary.hasActivePrompt) continue; // running — never remove
-        if (summary.hasRunningBackgroundTasks === true) continue;
-        if (summary.activeWorkState === 'active') continue;
+        if (!isWorkFree(summary)) continue; // running — never remove
         if (summary.isArchived) {
           completedAt.delete(sessionId);
           continue;
@@ -1153,25 +1231,7 @@ export function createSubSessionLauncher(
         }
       }
       if (now - due < completionTtlMs) continue;
-      if (summary === undefined) {
-        // Removal-path confirmation: a row the user archived meanwhile is
-        // explicitly kept, and activity newer than the armed clock restarts
-        // it (a revived turn re-created the transcript after discovery).
-        const persisted = await persistedRemovalState(sessionId);
-        if (persisted.archived) {
-          completedAt.delete(sessionId);
-          continue;
-        }
-        if (
-          persisted.lastActivity !== undefined &&
-          persisted.lastActivity > due
-        ) {
-          due = persisted.lastActivity;
-          completedAt.set(sessionId, due);
-          continue;
-        }
-      }
-      await removeExpiredSubSession(sessionId);
+      await removeExpiredSubSession(sessionId, due);
     }
   };
 

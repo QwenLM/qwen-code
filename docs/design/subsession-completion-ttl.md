@@ -79,9 +79,17 @@ meantime drops out of the candidate set.
 
 ### Removal and terminal state
 
-Removal closes the live entry (tolerating `SessionNotFoundError` — the idle
-reaper usually wins that race), re-validates that no revival re-created the
-entry immediately before the persisted mutation, removes the transcript via
+Removal runs under the session's exclusive lifecycle lane — the
+`SessionArchiveCoordinator` guard that archive, delete, and restore take and
+prompt admission shares. A lane already held (an in-flight prompt admission,
+an archive or delete) refuses the removal and the clock stays armed for the
+next sweep; while the removal holds it, no prompt can be admitted. Under the
+lane the removal re-decides "still terminal and inactive" (work state,
+archive state, and activity newer than the clock, which restarts it), then
+closes the live entry with no await in between (tolerating
+`SessionNotFoundError` — the idle reaper usually wins that race),
+re-validates that no revival re-created the entry immediately before the
+persisted mutation, removes the transcript via
 `SessionService.removeSession` (resolved under the launcher's runtime base
 dir so the removed row is the one the disk-scan listing reads), and prints
 the operator line only when a transcript was actually removed. Once the live
@@ -131,10 +139,11 @@ live roster. A scan failure re-arms the discovery for the next sweep.
 
 ## Constraints and risks
 
-- The pre-mutation revalidation is synchronous and best-effort; a revival
-  admitted inside the millisecond-scale window between the check and the
-  deletion is a residual race. A per-session lifecycle lease (the Standalone
-  mutation guard) is the full fix and is out of scope here.
+- Eligibility and mutation are one decision under the session's exclusive
+  lifecycle lane, so prompt admission through the serve routes cannot
+  revive a session between the check and the close/delete. A revival path
+  that bypasses the lane is still caught by the post-close re-validation
+  before the transcript is deleted.
 - Discovery runs once per launcher lifetime; transcripts completed during
   the current process lifetime are tracked in memory and do not need
   re-scanning.
@@ -152,7 +161,9 @@ live roster. A scan failure re-arms the discovery for the next sweep.
   mtime-tied batch (the old paged cursor's skip class), failed/cancelled and
   unclassifiable transcript retention after a restart, revival restart,
   work-state guards, removal retry after close/removal failure,
-  serialization of overlapping sweeps, FIFO-eviction retention, and the
+  serialization of overlapping sweeps, the lifecycle lane (deferral while
+  it is held, admission refused mid-removal, the in-lane re-check),
+  FIFO-eviction retention, and the
   sent-mode completion path.
 - Settings tests pin the schema default (`0`), the reader's warning
   contract, and the absent-key no-op.

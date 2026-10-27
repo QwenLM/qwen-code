@@ -8,12 +8,16 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
-import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
+import {
+  SessionArchivingError,
+  SessionNotFoundError,
+} from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   ACTIVE_WORK_CLOSE_TIMEOUT_MS,
   type AcpSessionBridge,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { SessionService, Storage } from '@qwen-code/qwen-code-core';
+import { SessionArchiveCoordinator } from './server/session-archive.js';
 
 /** Captures the launcher's operator-facing stderr output. */
 const { stderrLines, updateSessionOrganization } = vi.hoisted(() => ({
@@ -2831,6 +2835,145 @@ describe('sub-session completion TTL', () => {
         callerSessionId: 'c1',
       });
       await vi.advanceTimersByTimeAsync(SWEEP_MS * 2);
+      expect(fake.closes).toEqual([]);
+      expect(removeSession).not.toHaveBeenCalled();
+    } finally {
+      launcher.stop();
+      removeSession.mockRestore();
+    }
+  });
+
+  it('defers a due removal while the session lifecycle lane is held, then removes it', async () => {
+    const fake = makeTtlBridge();
+    const coordinator = new SessionArchiveCoordinator();
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: TTL_MS,
+      getArchiveCoordinator: () => coordinator,
+    });
+
+    try {
+      await launcher.launch({
+        prompt: 'x',
+        completion: 'first-turn',
+        callerSessionId: 'c1',
+      });
+      // A prompt admission (shared lane) is in flight when the clock falls
+      // due: the removal must not race it.
+      let releaseLease!: () => void;
+      const lease = coordinator.runSharedMany(
+        ['sub-1'],
+        () =>
+          new Promise<void>((resolve) => {
+            releaseLease = resolve;
+          }),
+      );
+      await vi.advanceTimersByTimeAsync(SWEEP_MS * 2);
+      expect(fake.closes).toEqual([]);
+      expect(removeSession).not.toHaveBeenCalled();
+      // The lane is free again: the still-armed clock removes it.
+      releaseLease();
+      await lease;
+      await vi.advanceTimersByTimeAsync(SWEEP_MS);
+      expect(fake.closes).toEqual(['sub-1']);
+      expect(removeSession).toHaveBeenCalledWith('sub-1');
+    } finally {
+      launcher.stop();
+      removeSession.mockRestore();
+    }
+  });
+
+  it('closes and removes under the exclusive lane, so a revival cannot be admitted mid-removal', async () => {
+    const fake = makeTtlBridge();
+    const coordinator = new SessionArchiveCoordinator();
+    const admissionErrors: unknown[] = [];
+    const tryAdmit = async (): Promise<void> => {
+      try {
+        await coordinator.runSharedMany(['sub-1'], async () => undefined);
+        admissionErrors.push('admitted');
+      } catch (error) {
+        admissionErrors.push(error);
+      }
+    };
+    const close = fake.bridge.closeSession.bind(fake.bridge);
+    fake.bridge.closeSession = async (
+      ...args: Parameters<typeof close>
+    ): Promise<void> => {
+      await tryAdmit();
+      return close(...args);
+    };
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockImplementation(async () => {
+        await tryAdmit();
+        return true;
+      });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: TTL_MS,
+      getArchiveCoordinator: () => coordinator,
+    });
+
+    try {
+      await launcher.launch({
+        prompt: 'x',
+        completion: 'first-turn',
+        callerSessionId: 'c1',
+      });
+      await vi.advanceTimersByTimeAsync(SWEEP_MS);
+      expect(fake.closes).toEqual(['sub-1']);
+      expect(removeSession).toHaveBeenCalledWith('sub-1');
+      // Both the close and the transcript removal ran while the lane was
+      // exclusively held: a send_message admission there is refused.
+      expect(admissionErrors).toHaveLength(2);
+      for (const error of admissionErrors) {
+        expect(error).toBeInstanceOf(SessionArchivingError);
+      }
+    } finally {
+      launcher.stop();
+      removeSession.mockRestore();
+    }
+  });
+
+  it('re-checks eligibility under the lane: a prompt admitted after the sweep check keeps the session', async () => {
+    const fake = makeTtlBridge();
+    const coordinator = new SessionArchiveCoordinator();
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: TTL_MS,
+      getArchiveCoordinator: () => ({
+        runExclusiveMany: (ids, fn) => {
+          // A revival lands after the sweep read the entry as work-free
+          // and before the removal holds the lane.
+          liveSummaries.set('sub-1', {
+            createdAt: OLD,
+            updatedAt: OLD,
+            hasActivePrompt: true,
+          });
+          return coordinator.runExclusiveMany(ids, fn);
+        },
+      }),
+    });
+
+    try {
+      await launcher.launch({
+        prompt: 'x',
+        completion: 'first-turn',
+        callerSessionId: 'c1',
+      });
+      await vi.advanceTimersByTimeAsync(SWEEP_MS);
       expect(fake.closes).toEqual([]);
       expect(removeSession).not.toHaveBeenCalled();
     } finally {

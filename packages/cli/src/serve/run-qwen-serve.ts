@@ -6331,6 +6331,10 @@ async function runQwenServeImpl(
       ...subSessionCompletionTtlMsFromSettings(
         runtimeBootSettings?.merged.serve ?? {},
       ),
+      getArchiveCoordinator: () =>
+        (runtimeApp ?? runtimeAppForCleanup)?.locals?.[
+          'sessionArchiveCoordinator'
+        ],
     });
     const attachmentsRoots = sessionAttachmentsRoots(
       boundWorkspace,
@@ -6982,6 +6986,10 @@ async function runQwenServeImpl(
         ...subSessionCompletionTtlMsFromSettings(
           secondarySettings?.merged.serve ?? {},
         ),
+        getArchiveCoordinator: () =>
+          (runtimeApp ?? runtimeAppForCleanup)?.locals?.[
+            'sessionArchiveCoordinator'
+          ],
       });
       const secondaryAttachmentsRoots = sessionAttachmentsRoots(
         workspaceInput.cwd,
@@ -7714,6 +7722,10 @@ async function runQwenServeImpl(
         ...subSessionCompletionTtlMsFromSettings(
           wsSettings?.merged.serve ?? {},
         ),
+        getArchiveCoordinator: () =>
+          (runtimeApp ?? runtimeAppForCleanup)?.locals?.[
+            'sessionArchiveCoordinator'
+          ],
       });
       let wsBridge: ReturnType<typeof runtime.createAcpSessionBridge>;
       try {
