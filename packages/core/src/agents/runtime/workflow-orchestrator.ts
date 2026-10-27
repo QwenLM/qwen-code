@@ -91,6 +91,11 @@ import { rebuildToolRegistryOnOverride } from '../../tools/agent/agent.js';
 import { resolveExternalWorktreeDir } from '../worktree-pin.js';
 import { toModelVisibleSubagentResult } from '../subagent-result.js';
 import { SUBAGENT_PLAN_LIFECYCLE_TOOLS } from './subagent-plan-tool-policy.js';
+import {
+  backgroundFixAt,
+  backgroundFixHolding,
+  settleBackgroundFix,
+} from '../../tools/autofix-pr-grants.js';
 import { getCurrentAgentId, runWithAgentContext } from './agent-context.js';
 import { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
 import {
@@ -883,6 +888,22 @@ async function runSingleDispatch(
   ctx.set('task_prompt', prompt);
   debugLogger.debug(`[workflow] Dispatch ${workflowAgentId}`);
 
+  // In the session's own directory, after a `/cd` into the worktree of a
+  // background fix of /autofix-pr: beside it, on either path below.
+  const ownDir = config.getTargetDir?.();
+  if (opts.workingDir === undefined && ownDir) {
+    await settleBackgroundFix({ within: ownDir });
+  }
+  if (
+    opts.workingDir === undefined &&
+    ownDir &&
+    backgroundFixHolding(ownDir, getCurrentAgentId())
+  ) {
+    throw new Error(
+      `agent(): a background fix agent of /autofix-pr is working in ${ownDir}; its round goes on when it ends.`,
+    );
+  }
+
   // The fast path hands `config` to AgentHeadless untouched, so it has no
   // way to honour a directory rebind — `workingDir` MUST route through the
   // override path or it would be silently dropped and the agent would run in
@@ -1425,6 +1446,15 @@ async function runOverridePath(
       // the same threat the agentType SECURITY note above names.
       throw new Error(
         `agent({workingDir: ${sanitizeForErrorMessage(JSON.stringify(opts.workingDir))}}): ${sanitizeForErrorMessage(resolved.error)}`,
+      );
+    }
+    // Not beside a background fix agent of /autofix-pr, as the agent tool
+    // refuses too. (Only the top-level session dispatches: no subagent runs
+    // a workflow.)
+    await settleBackgroundFix({ worktree: resolved.path });
+    if (backgroundFixAt(resolved.path)) {
+      throw new Error(
+        `agent({workingDir}): a background fix agent of /autofix-pr is working in ${resolved.path}; its round goes on when it ends.`,
       );
     }
     effectiveContext = deriveWorktreeConfig(config, resolved.path, {

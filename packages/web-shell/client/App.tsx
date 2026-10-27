@@ -320,6 +320,7 @@ import {
 } from './utils/splitUrl';
 import { ScheduledTasksDialog } from './components/dialogs/ScheduledTasksDialog';
 import { GoalsDialog } from './components/dialogs/GoalsDialog';
+import { AutofixPrWatchesDialog } from './components/dialogs/AutofixPrWatchesDialog';
 import { WorkflowRunsPage } from './components/workflows/WorkflowRunsPage';
 import { parseWebShellGoalCommand } from './utils/goalCondition';
 import { buildGoalControlRequest } from './utils/goalControlRequest';
@@ -1894,6 +1895,7 @@ type MainView =
   | 'chat'
   | 'cockpit'
   | 'scheduledTasks'
+  | 'prWatches'
   | 'workflows'
   | 'goals'
   | 'split';
@@ -4320,6 +4322,9 @@ export function App({
     (workspace.capabilities?.workspaces === undefined &&
       Boolean(workspace.capabilities?.workspaceCwd));
   const externalManagedAgentAvailable = managedAgentProvider !== undefined;
+  // The daemon lists the `/autofix-pr` watches of its workspaces' clones.
+  const prWatchesAvailable =
+    workspace.capabilities?.features?.includes('autofix_pr_watches') === true;
   const [pendingSessionContext, setPendingSessionContextState] = useState<
     DaemonProductSessionContext | undefined
   >(undefined);
@@ -10088,6 +10093,7 @@ export function App({
       mainView === 'cockpit' ||
       (!projectFeaturesAvailable &&
         (mainView === 'scheduledTasks' ||
+          mainView === 'prWatches' ||
           mainView === 'goals' ||
           mainView === 'split'))
     ) {
@@ -10175,6 +10181,24 @@ export function App({
     setMainView('goals');
     navigationRef.current?.openPage('goals');
   }, [showChat]);
+  const openPrWatches = useCallback(() => {
+    splitClassificationGenerationRef.current += 1;
+    setActivePanel(null);
+    // See openScheduledTasks: leaving the cockpit must strip its deep link.
+    if (!navigationRef.current) showChat();
+    setMainView('prWatches');
+    navigationRef.current?.openPage('pr-watches');
+  }, [showChat]);
+  // A daemon that stops listing watches (another daemon behind the same
+  // origin) leaves no page to show.
+  useEffect(() => {
+    if (
+      mainView === 'prWatches' &&
+      (!projectFeaturesAvailable || !prWatchesAvailable)
+    ) {
+      showChat();
+    }
+  }, [mainView, prWatchesAvailable, projectFeaturesAvailable, showChat]);
   const returnToChat = useCallback(() => {
     if (navigationRef.current && navigationRef.current.route.page !== 'chat') {
       navigationRef.current.returnToChat();
@@ -10192,6 +10216,7 @@ export function App({
         if (!projectFeaturesAvailable) return false;
         if (item === 'live') return sidebarOptions.showLive;
         if (item === 'workflows') return workflowsEnabled;
+        if (item === 'prWatches') return prWatchesAvailable;
         return true;
       }) ||
         (sidebarOptions.footer !== false &&
@@ -10383,9 +10408,11 @@ export function App({
       ? activePanel
       : mainView === 'scheduledTasks'
         ? 'scheduled-tasks'
-        : mainView === 'goals'
-          ? 'goals'
-          : undefined;
+        : mainView === 'prWatches'
+          ? 'pr-watches'
+          : mainView === 'goals'
+            ? 'goals'
+            : undefined;
   useEffect(() => {
     if (!navigation || !workspaceCapabilitiesReady) return;
     const page = navigation.route.page;
@@ -10394,11 +10421,17 @@ export function App({
       navigationSettledRef.current = true;
       return;
     }
-    const primaryItem = page === 'scheduled-tasks' ? 'scheduledTasks' : page;
+    const primaryItem =
+      page === 'scheduled-tasks'
+        ? 'scheduledTasks'
+        : page === 'pr-watches'
+          ? 'prWatches'
+          : page;
     const allowed =
       page === 'chat' ||
       (projectFeaturesAvailable &&
         (page !== 'live' || liveSidebarEnabled) &&
+        (page !== 'pr-watches' || prWatchesAvailable) &&
         (page === 'settings'
           ? hostSidebar?.footer !== false &&
             (hostSidebar?.footer?.items?.includes('settings') ?? true)
@@ -10422,9 +10455,11 @@ export function App({
     setMainView(
       nextPage === 'scheduled-tasks'
         ? 'scheduledTasks'
-        : nextPage === 'goals'
-          ? 'goals'
-          : 'chat',
+        : nextPage === 'pr-watches'
+          ? 'prWatches'
+          : nextPage === 'goals'
+            ? 'goals'
+            : 'chat',
     );
     if (nextPage === 'settings') setSettingsInitialCategory(undefined);
     if (!allowed) navigation.reconcilePage(undefined);
@@ -10434,6 +10469,7 @@ export function App({
     hostSidebar?.footer,
     hostSidebar?.primaryNav?.items,
     liveSidebarEnabled,
+    prWatchesAvailable,
     workspaceCapabilitiesReady,
   ]);
   useEffect(() => {
@@ -10935,6 +10971,7 @@ export function App({
     if (
       mainView === 'cockpit' ||
       mainView === 'scheduledTasks' ||
+      mainView === 'prWatches' ||
       mainView === 'workflows' ||
       mainView === 'goals'
     ) {
@@ -16912,7 +16949,13 @@ export function App({
     );
   }, [clearPendingBoundRun, enqueueManualRun]);
   const runTaskManually = useCallback(
-    (prompt: string, sessionId: string | null): Promise<void> => {
+    (
+      prompt: string,
+      sessionId: string | null,
+      // The workspace the bound session lives in: restoring it from another
+      // workspace's conversation would name the wrong one.
+      workspaceCwd?: string,
+    ): Promise<void> => {
       showChat();
       if (!sessionId) {
         // Unbound: runs in the current session — resolves at admission.
@@ -16934,7 +16977,7 @@ export function App({
           reject,
         };
         pendingBoundRunRef.current = pending;
-        loadSidebarSession(sessionId)
+        loadSidebarSession(sessionId, workspaceCwd)
           // Fire immediately when the session was already active (no dep change
           // to trigger the effect); a no-op if the load is still settling, in
           // which case the effect picks it up.
@@ -22043,6 +22086,14 @@ export function App({
                     closeMobileDrawer();
                     openGoals();
                   }}
+                  {...(prWatchesAvailable
+                    ? {
+                        onOpenPrWatches: () => {
+                          closeMobileDrawer();
+                          openPrWatches();
+                        },
+                      }
+                    : {})}
                   onOpenSessions={() => {
                     closeMobileDrawer();
                     openPanel('sessions');
@@ -22789,6 +22840,11 @@ export function App({
                         skillsWorkspaceCwd={skillsSourceCwd}
                         onSkillsWorkspaceChange={selectSkillsWorkspace}
                         managedSkills={managedAgentProvider !== undefined}
+                        managedExtensions={managedMode && managedAgentProvider ? {
+                          provider: managedAgentProvider,
+                          sessionId: managedSessionId,
+                          workspaceId: managedWorkspaceId ?? undefined,
+                        } : undefined}
                         managedMcp={managedMode && managedAgentProvider ? {
                           provider: managedAgentProvider,
                           sessionId: managedSessionId,
@@ -22933,6 +22989,7 @@ export function App({
                       gateAvailable={workspace.capabilities?.features?.includes(
                         'scheduled_task_gate',
                       )}
+                      autofixPrWatchesAvailable={prWatchesAvailable}
                       onCreateViaChat={() => {
                         // Start a FRESH session and jump to it so the task-
                         // creation chat doesn't pile onto the current
@@ -22962,11 +23019,12 @@ export function App({
                           }, 0);
                         });
                       }}
-                      onOpenSession={(sessionId) => {
+                      onOpenSession={(sessionId, workspaceCwd) => {
                         // The task's bound session IS its run history — switch
-                        // to the chat view and load that session's transcript.
+                        // to the chat view and load that session's transcript,
+                        // in the task's own workspace.
                         showChat();
-                        loadSidebarSession(sessionId).catch(
+                        loadSidebarSession(sessionId, workspaceCwd).catch(
                           (error: unknown) => {
                             reportError(error, 'Failed to open session');
                           },
@@ -23039,6 +23097,62 @@ export function App({
                   </div>
                 </div>
               )}
+              {projectFeaturesAvailable &&
+                prWatchesAvailable &&
+                mainView === 'prWatches' && (
+                  <div className={styles.fullPage} data-testid="pr-watches-page">
+                    <div className={styles.fullPageHeader}>
+                      {!navigationRailVisible && (
+                        <button
+                          type="button"
+                          className={styles.fullPageBack}
+                          onClick={returnToChat}
+                          aria-label={t('common.back')}
+                          title={t('common.back')}
+                        >
+                          <svg
+                            viewBox="0 0 24 24"
+                            width="18"
+                            height="18"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            aria-hidden="true"
+                          >
+                            <path d="M15 18l-6-6 6-6" />
+                          </svg>
+                        </button>
+                      )}
+                      <div className={styles.fullPageTitle}>
+                        {t('autofixPrWatches.title')}
+                      </div>
+                    </div>
+                    <div className={styles.fullPageBody}>
+                      <AutofixPrWatchesDialog
+                        // Stopping runs the skill in the watch's own session,
+                        // as a scheduled task's manual run does.
+                        onRunPrompt={runTaskManually}
+                        workspaces={
+                          lockedWorkspaceCwd
+                            ? visibleWorkspaces
+                            : ordinaryWorkspaces
+                        }
+                        lockedWorkspace={lockedWorkspaceCapability}
+                        onOpenSession={(sessionId, workspaceCwd) => {
+                          showChat();
+                          loadSidebarSession(sessionId, workspaceCwd).catch(
+                            (error: unknown) => {
+                              reportError(error, 'Failed to open session');
+                            },
+                          );
+                        }}
+                        onError={reportError}
+                      />
+                    </div>
+                  </div>
+                )}
               {projectFeaturesAvailable && mainView === 'goals' && (
                 <div className={styles.fullPage} data-testid="goals-page">
                   <div className={styles.fullPageHeader}>
@@ -23314,11 +23428,6 @@ export function App({
                       }}
                       managedAgentProvider={managedAgentProvider}
                       creationSkills={managedCreationSkills}
-                      onManageSkills={() => {
-                        setPluginInitialTab('skills');
-                        closeMobileDrawer();
-                        openPanel('plugins');
-                      }}
                       interactive={managedChatVisible}
                       navigationTarget={
                         sidebarOptions.enabled

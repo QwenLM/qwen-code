@@ -42,6 +42,7 @@ import {
   FolderKanbanIcon,
   ActivityIcon,
   CalendarClockIcon,
+  GitPullRequestIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   Columns2Icon,
@@ -292,6 +293,7 @@ export type WebShellSidebarPrimaryNavItem =
   | 'channels'
   | 'live'
   | 'scheduledTasks'
+  | 'prWatches'
   | 'workflows'
   | 'goals'
   | 'managed';
@@ -340,6 +342,7 @@ export const DEFAULT_PRIMARY_NAV_ITEMS: readonly WebShellSidebarPrimaryNavItem[]
     'channels',
     'live',
     'scheduledTasks',
+    'prWatches',
     'workflows',
     'goals',
     'managed',
@@ -459,6 +462,9 @@ interface WebShellSidebarProps {
   onOpenManagedSessions?: () => void;
   onOpenDaemonStatus: () => void;
   onOpenScheduledTasks: () => void;
+  /** Opens the PR watches page; absent when the daemon does not list
+   * `/autofix-pr` watches (`autofix_pr_watches`). */
+  onOpenPrWatches?: () => void;
   onOpenWorkflows: () => void;
   onOpenGoals: () => void;
   onOpenSessions: () => void;
@@ -1107,6 +1113,7 @@ export function WebShellSidebar({
   onOpenManagedSessions,
   onOpenDaemonStatus,
   onOpenScheduledTasks,
+  onOpenPrWatches,
   onOpenWorkflows,
   onOpenGoals,
   onOpenSessions,
@@ -1257,6 +1264,7 @@ export function WebShellSidebar({
         primaryNavItems.has('channels') ||
         (showLive && primaryNavItems.has('live') && Boolean(onOpenLive)) ||
         primaryNavItems.has('scheduledTasks') ||
+        (primaryNavItems.has('prWatches') && Boolean(onOpenPrWatches)) ||
         primaryNavItems.has('workflows') ||
         primaryNavItems.has('goals'))) ||
     (primaryNavItems.has('managed') && Boolean(onOpenManagedSessions)) ||
@@ -6025,6 +6033,25 @@ export function WebShellSidebar({
           )}
         </button>
       )}
+      {projectFeaturesEnabled &&
+        primaryNavItems.has('prWatches') &&
+        onOpenPrWatches && (
+          <button
+            className={styles.pluginButton}
+            type="button"
+            title={railLayout ? undefined : t('sidebar.prWatches')}
+            aria-label={t('sidebar.prWatches')}
+            aria-current={
+              railLayout && activePage === 'prWatches' ? 'page' : undefined
+            }
+            onClick={() => openNavigation(onOpenPrWatches)}
+          >
+            <span className={styles.navIcon}>
+              <GitPullRequestIcon size={16} strokeWidth={1.2} />
+            </span>
+            {!collapsed && !railLayout && <span>{t('sidebar.prWatches')}</span>}
+          </button>
+        )}
       {projectFeaturesEnabled &&
         primaryNavItems.has('workflows') &&
         workflowsEnabled && (

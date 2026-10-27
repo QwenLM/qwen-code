@@ -419,7 +419,7 @@ describe('ModRuntime with the real QuickJS worker', () => {
       {
         version: '1.2.3+wrapped',
         qwen: {
-          claudeCode: '2.1.308',
+          claudeCode: '2.1.310',
           events: [
             'clock.now',
             'clock.sleep',
@@ -441,6 +441,7 @@ describe('ModRuntime with the real QuickJS worker', () => {
             'turn.abort',
             'turn.complete',
             'turn.start',
+            'ui.invalidate',
             'ui.log',
           ],
           methods: [
@@ -457,7 +458,9 @@ describe('ModRuntime with the real QuickJS worker', () => {
             'session.usage',
             'session.version',
             'turn.abort',
+            'ui.invalidate',
             'ui.log',
+            'ui.resolve',
           ],
         },
       },
