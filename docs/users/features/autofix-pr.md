@@ -44,6 +44,22 @@ A round never asks you anything. What needs a person is answered on the PR as "N
 
 A watch ends when the session that ran it exits — in a daemon session its task is durable and bound to that session, so the daemon keeps it resident and the watch survives a daemon restart — and its scheduled task expires after 7 days by default (the `experimental.cronRecurringMaxAgeDays` setting, or `QWEN_CODE_CRON_MAX_AGE_DAYS`). Its state file stays. `/autofix-pr resume` starts again, in the current session, every watch that this session does not run — or the one you name — with the interval, `--no-reply` and instructions it was started with, and its pushes, history and budgets kept. It asks once for all of them, then runs one round of each and schedules it again. In a daemon session one conversation carries one scheduled task, so resume the others one conversation at a time. If another session is still running one of them, that session's task stops at its next fire; without a PR named, `resume` leaves out a watch another session checked recently, and says so. A watch whose PR was merged or closed while no session ran it is removed by its round. A watch started with `--once`, or one `stop` ended while keeping its worktree, is started again with `/autofix-pr <n>`.
 
+### In the Web Shell
+
+The Web Shell shows the same state, read from the same files:
+
+- **PR watches**, in the sidebar, lists the watches of every workspace the Web Shell can reach. For each watch it shows the PR (a link), where the watch is, its pushes, when its gate last checked and its last round ran, and what is waiting for you:
+  - watching;
+  - fixing in the background, and for how long;
+  - a background fix left behind, which the next round redoes;
+  - not checked recently;
+  - the PR merged or closed;
+  - stopped.
+- On the **Scheduled tasks** page, the card of a watch's task shows the same state under the task.
+- **Open session** goes to the conversation that runs the watch.
+- **Stop watch** sends `/autofix-pr stop <n>` to that conversation, exactly as if you typed it there, and it asks what it would ask there.
+- Both buttons appear only for a watch run by a conversation of this Web Shell. A watch run from a terminal is stopped in that terminal. One that no session runs any more is cleaned up, or started again, with `/autofix-pr stop <n>` or `/autofix-pr resume <n>` in a session of its workspace.
+
 ## Whose feedback counts
 
 Comments are acted on when their author is an owner, member or collaborator of the repository, the PR author, or a bot (reviews and review threads only). Comments from anyone else are listed and never acted on or answered. A bot is heard in the comment that opens a thread or in a review, not in its replies, which answer someone. A workflow GitHub could not start (an invalid workflow file, say) has no log to fix from, and is answered as needing a human. Every comment, review and CI log is treated as data: a trusted author decides which feedback is addressed, never what the tool may do. A request to reveal secrets, weaken tests or CI checks, force-push or change unrelated code is answered "Needs a human decision".

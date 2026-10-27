@@ -450,8 +450,20 @@ export function useSessionCatalogController(client: DaemonClient) {
       },
       renamed(workspaceCwd: string, sessionId: string, displayName: string) {
         update(() => {
+          // A landed rename is authoritative; drop the provisional title so
+          // the following stale snapshot cannot restore it over this name.
+          store.clearPendingSessionTitle(workspaceCwd, sessionId);
           store.patchSession(workspaceCwd, sessionId, { displayName });
           store.invalidateWorkspace(workspaceCwd);
+        });
+      },
+      setPendingSessionTitle(
+        workspaceCwd: string,
+        sessionId: string,
+        displayName: string,
+      ) {
+        update(() => {
+          store.setPendingSessionTitle(workspaceCwd, sessionId, displayName);
         });
       },
       toggleSessionPinned(

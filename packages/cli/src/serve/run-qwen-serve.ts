@@ -2465,6 +2465,7 @@ function currentServeFeaturesForRunQwenServe(
     sessionShellCommandEnabled,
     sessionArtifactsPersistenceAvailable,
     sessionGenerationAvailable: true,
+    sessionBtwStreamAvailable: true,
     currentSessionSchedulingAvailable,
     workspaceGenerationAvailable: true,
     rateLimit: opts.rateLimit === true,
@@ -6595,7 +6596,7 @@ async function runQwenServeImpl(
         trustMaterialization: primaryTrustMaterialization,
       },
     ];
-    if (trustedWorkspace) {
+    if (trustedWorkspace && opts.profile !== 'hosted-harness') {
       await recoverBranchWorktreePreparations({
         workspaceCwd: boundWorkspace,
         sessionService: await createBranchRecoverySessionService(
@@ -7461,35 +7462,37 @@ async function runQwenServeImpl(
     // closure check forbids in this pre-listen root's static closure.
     sessionPrRefreshTimer?.dispose();
     const refreshGeneration = ++sessionPrRefreshGeneration;
-    void import('./server/session-pr-refresh.js')
-      .then((mod) => {
-        if (refreshGeneration !== sessionPrRefreshGeneration) return;
-        sessionPrRefreshTimer = mod.startSessionPrRefreshTimer({
-          workspaceRegistry,
-          // The coordinator lives on the serve app (createServeApp below),
-          // which is built after this timer starts; read it per tick like
-          // the metrics sampler reads `acpHandle`.
-          getArchiveCoordinator: () =>
-            (
-              app.locals as {
-                sessionArchiveCoordinator?: SessionArchiveCoordinator;
-              }
-            ).sessionArchiveCoordinator,
+    if (opts.profile !== 'hosted-harness') {
+      void import('./server/session-pr-refresh.js')
+        .then((mod) => {
+          if (refreshGeneration !== sessionPrRefreshGeneration) return;
+          sessionPrRefreshTimer = mod.startSessionPrRefreshTimer({
+            workspaceRegistry,
+            // The coordinator lives on the serve app (createServeApp below),
+            // which is built after this timer starts; read it per tick like
+            // the metrics sampler reads `acpHandle`.
+            getArchiveCoordinator: () =>
+              (
+                app.locals as {
+                  sessionArchiveCoordinator?: SessionArchiveCoordinator;
+                }
+              ).sessionArchiveCoordinator,
+          });
+        })
+        .catch((error) => {
+          // Degrade to "no PR-state sweep" instead of leaking an unhandled
+          // rejection: the serve fast path installs no process-level
+          // unhandledRejection handler before this runs, and Node's default
+          // for one is to exit — a failed chunk load (e.g. an in-place
+          // upgrade replacing dist/ under the running daemon) would take
+          // down every runtime, session, and connection the daemon serves.
+          daemonLog.warn(
+            `session-pr-refresh load failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
         });
-      })
-      .catch((error) => {
-        // Degrade to "no PR-state sweep" instead of leaking an unhandled
-        // rejection: the serve fast path installs no process-level
-        // unhandledRejection handler before this runs, and Node's default
-        // for one is to exit — a failed chunk load (e.g. an in-place
-        // upgrade replacing dist/ under the running daemon) would take
-        // down every runtime, session, and connection the daemon serves.
-        daemonLog.warn(
-          `session-pr-refresh load failed: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      });
+    }
 
     // Factory for dynamically creating workspace runtimes (POST /workspaces).
     interface WorkspaceRuntimeBuildOptions {
@@ -8072,7 +8075,11 @@ async function runQwenServeImpl(
           });
         }
       }
-      if (wsRuntime.primary && wsRuntime.trusted) {
+      if (
+        wsRuntime.primary &&
+        wsRuntime.trusted &&
+        opts.profile !== 'hosted-harness'
+      ) {
         await recoverBranchWorktreePreparations({
           workspaceCwd: cwd,
           sessionService: await createBranchRecoverySessionService(wsRuntime),
