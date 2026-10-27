@@ -808,6 +808,10 @@ function testRuntimeSmokeChecks(directory, canSpawnShebang) {
     ['node/bin/node', "#!/usr/bin/env sh\nprintf 'v22.0.0\\n'\n"],
     ['lib/cli-entry.js', ''],
     ['lib/web-shell/index.html', '<div id="root"></div>\n'],
+    ['lib/generated-ui/main.js', '// bundled Generated UI\n'],
+    ['lib/generated-ui/app.html', '<html></html>\n'],
+    ['lib/generated-ui/skills/generated-ui/SKILL.md', '# Generated UI\n'],
+    ['lib/generated-ui/THIRD_PARTY_NOTICES.txt', 'third-party licenses\n'],
     [
       'lib/vendor/ripgrep/x64-linux/rg',
       "#!/usr/bin/env sh\nprintf 'ripgrep 15.0.0\\n'\n",
@@ -861,6 +865,30 @@ function testRuntimeSmokeChecks(directory, canSpawnShebang) {
   );
   fs.renameSync(hiddenWebShell, webShell);
   fs.writeFileSync(checksumsPath, `${JSON.stringify(checksums)}\n`);
+
+  const generatedUiAssets = [
+    'lib/generated-ui/main.js',
+    'lib/generated-ui/app.html',
+    'lib/generated-ui/skills/generated-ui/SKILL.md',
+    'lib/generated-ui/THIRD_PARTY_NOTICES.txt',
+  ];
+  for (const relative of generatedUiAssets) {
+    const asset = path.join(runtimeRoot, relative);
+    fs.renameSync(asset, `${asset}.missing`);
+    assert.throws(
+      () => verifyRuntimeIntegrity(runtimeRoot),
+      /Bundled runtime file is missing: lib\/generated-ui\//,
+    );
+    fs.renameSync(`${asset}.missing`, asset);
+    const incompleteChecksums = { ...checksums };
+    delete incompleteChecksums[relative];
+    fs.writeFileSync(checksumsPath, `${JSON.stringify(incompleteChecksums)}\n`);
+    assert.throws(
+      () => verifyRuntimeIntegrity(runtimeRoot),
+      /Bundled runtime checksum is missing: lib\/generated-ui\//,
+    );
+    fs.writeFileSync(checksumsPath, `${JSON.stringify(checksums)}\n`);
+  }
 
   const hiddenNode = `${node}.missing`;
   fs.renameSync(node, hiddenNode);
@@ -959,6 +987,40 @@ function testRuntimeTargetMappings() {
       `@lydell/node-pty-${target}`,
       `${target} must stage the prebuild package its own wrapper requires`,
     );
+  }
+
+  const assetFilter =
+    /const opentuiScope =[\s\S]*?(?=\n {2}stageNodePty\(target\);)/.exec(
+      prepareRuntime,
+    )?.[0];
+  assert.ok(
+    assetFilter,
+    'the final copied runtime must filter OpenTUI native targets',
+  );
+  for (const target of supported) {
+    const libDir = path.join(root, 'opentui-targets', target);
+    const scope = path.join(libDir, 'opentui-assets', '@opentui');
+    for (const candidate of supported) {
+      const directory = path.join(scope, `core-${candidate}`);
+      fs.mkdirSync(directory, { recursive: true });
+      const library = candidate.startsWith('darwin')
+        ? 'libopentui.dylib'
+        : candidate.startsWith('win32')
+          ? 'opentui.dll'
+          : 'libopentui.so';
+      fs.writeFileSync(path.join(directory, library), candidate);
+    }
+    fs.mkdirSync(path.join(scope, 'core'), { recursive: true });
+    fs.writeFileSync(path.join(scope, 'core', 'parser.worker.js'), 'common');
+    // Run the actual preparation block against disk for every release target;
+    // the full cross-build preparation fixture below verifies its call site.
+    vm.runInNewContext(assetFilter, { fs, path, libDir, target });
+    assert.deepEqual(fs.readdirSync(scope).sort(), ['core', `core-${target}`]);
+    assert.equal(
+      fs.readFileSync(path.join(scope, 'core', 'parser.worker.js'), 'utf8'),
+      'common',
+    );
+    assert.equal(fs.readdirSync(path.join(scope, `core-${target}`)).length, 1);
   }
 
   const runtimeSmokeChecks = fs.readFileSync(
@@ -1068,7 +1130,14 @@ function testRuntimePreparation(directory) {
     'cli-entry.js',
     path.join('web-shell', 'index.html'),
     path.join('web-shell', 'assets', 'app.js'),
+    path.join('generated-ui', 'main.js'),
+    path.join('generated-ui', 'app.html'),
+    path.join('generated-ui', 'skills', 'generated-ui', 'SKILL.md'),
+    path.join('generated-ui', 'THIRD_PARTY_NOTICES.txt'),
   ]) {
+    fs.mkdirSync(path.dirname(path.join(sourceRoot, 'dist', file)), {
+      recursive: true,
+    });
     fs.writeFileSync(path.join(sourceRoot, 'dist', file), 'test');
   }
   const sourceRipgrep = path.join(
@@ -1081,6 +1150,28 @@ function testRuntimePreparation(directory) {
   );
   fs.mkdirSync(path.dirname(sourceRipgrep), { recursive: true });
   fs.writeFileSync(sourceRipgrep, 'test ripgrep');
+  const sourceOpenTui = path.join(
+    sourceRoot,
+    'dist',
+    'opentui-assets',
+    '@opentui',
+  );
+  for (const target of [
+    'darwin-arm64',
+    'darwin-x64',
+    'linux-arm64',
+    'linux-x64',
+    'win32-x64',
+  ]) {
+    const directory = path.join(sourceOpenTui, `core-${target}`);
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, 'native-library'), target);
+  }
+  fs.mkdirSync(path.join(sourceOpenTui, 'core'), { recursive: true });
+  fs.writeFileSync(
+    path.join(sourceOpenTui, 'core', 'parser.worker.js'),
+    'shared-worker',
+  );
   // Staging installs the target's pinned packages into a throwaway prefix
   // instead of reading a host node_modules that cannot hold a cross-built
   // target's addon (#11872), so npm is stubbed: it records the argv it is
@@ -1167,6 +1258,36 @@ globalThis.fetch = async (url) => {
   assert.ok(
     fs.existsSync(path.join(runtimeDir, 'qwen-code', 'checksums.json')),
   );
+  const stagedOpenTui = path.join(
+    runtimeDir,
+    'qwen-code',
+    'lib',
+    'opentui-assets',
+    '@opentui',
+  );
+  assert.deepEqual(fs.readdirSync(stagedOpenTui).sort(), [
+    'core',
+    'core-darwin-x64',
+  ]);
+  assert.equal(
+    fs.readFileSync(
+      path.join(stagedOpenTui, 'core-darwin-x64', 'native-library'),
+      'utf8',
+    ),
+    'darwin-x64',
+  );
+  assert.equal(
+    fs.readFileSync(
+      path.join(stagedOpenTui, 'core', 'parser.worker.js'),
+      'utf8',
+    ),
+    'shared-worker',
+  );
+  assert.equal(
+    fs.readdirSync(sourceOpenTui).length,
+    6,
+    'filter only the owned copied runtime, not the reusable dist',
+  );
 
   // The Web Terminal resolves its PTY backend from lib/, so the runtime has to
   // carry the wrapper and this target's prebuild under lib/node_modules
@@ -1201,6 +1322,21 @@ globalThis.fetch = async (url) => {
       'utf8',
     ),
   );
+  for (const relative of [
+    'lib/generated-ui/main.js',
+    'lib/generated-ui/app.html',
+    'lib/generated-ui/skills/generated-ui/SKILL.md',
+    'lib/generated-ui/THIRD_PARTY_NOTICES.txt',
+  ]) {
+    assert.equal(
+      fs.readFileSync(path.join(runtimeDir, 'qwen-code', relative), 'utf8'),
+      'test',
+    );
+    assert.equal(
+      stagedChecksums[relative],
+      crypto.createHash('sha256').update('test').digest('hex'),
+    );
+  }
   assert.equal(
     stagedChecksums[
       'lib/node_modules/@lydell/node-pty-darwin-x64/prebuilds/darwin-x64/pty.node'

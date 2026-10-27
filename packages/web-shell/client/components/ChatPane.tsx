@@ -4,8 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { useModelRefresh } from '../hooks/useModelRefresh';
 import { CapacityRecoveryDialog } from './workspaces/CapacityRecoveryDialog';
 import { useCapacityRecovery } from '../hooks/useCapacityRecovery';
+import {
+  beginLocalCommand,
+  finishLocalCommand,
+} from '../utils/message-deletion';
 import {
   useCallback,
   useEffect,
@@ -62,6 +67,10 @@ import {
   resolveModelManagement,
   type WebShellModelManagementOptions,
 } from '../modelManagement';
+import type {
+  WebShellUnavailableModel,
+  WebShellUnavailableModelTooltipMount,
+} from '../unavailableModels';
 import { isAskUserPermission } from '../utils/askUserPermission';
 import { isDaemonApprovalMode } from '../utils/sessionPreparation';
 import { isVisibleComposerModel } from '../utils/composerModels';
@@ -229,6 +238,8 @@ export interface ChatPaneProps {
   /** Host slash-command callback shared with the main chat composer. */
   onSlashCommand?: WebShellSlashCommandHandler;
   modelManagement?: WebShellModelManagementOptions;
+  unavailableModels?: readonly WebShellUnavailableModel[];
+  mountUnavailableModelTooltip?: WebShellUnavailableModelTooltipMount;
   onOpenGoals?: () => void;
   onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
   onOpenMonitor?: (
@@ -283,6 +294,8 @@ export function ChatPane({
   onImageIngestionNotice,
   onSlashCommand,
   modelManagement,
+  unavailableModels,
+  mountUnavailableModelTooltip,
   onOpenGoals,
   onRightPanelOpen,
   onOpenMonitor,
@@ -306,9 +319,11 @@ export function ChatPane({
   const {
     renderComposerFooter: CustomComposerFooter,
     askUserFreeTextLabel,
+    onRefreshModels,
     allowedApprovalModes,
   } = useWebShellCustomization();
   const connection = useConnection();
+  const modelRefresh = useModelRefresh(onRefreshModels);
   const actions = useActions();
   const sessionOwnerGuard = useDaemonSessionOwnerGuard();
   const workspace = useWorkspace();
@@ -1057,7 +1072,9 @@ export function ChatPane({
           operation.kind === 'set' || operation.kind === 'edit'
             ? operation.objective
             : undefined;
-        store.appendLocalUserMessage(text);
+        store.appendLocalUserMessage(text, undefined, {
+          localCommandId: `local-command:${crypto.randomUUID()}`,
+        });
         void controlGoal(action, objective).catch((error: unknown) => {
           reportError(error, `Failed to ${operation.kind} /goal`);
         });
@@ -1453,16 +1470,20 @@ export function ChatPane({
       return;
     }
     const owner = sessionOwnerGuard.capture();
+    const localCommandId = `local-command:${crypto.randomUUID()}`;
+    beginLocalCommand(store, localCommandId);
     if (streamingStateRef.current === 'idle') {
-      store.appendLocalUserMessage('/context');
+      store.appendLocalUserMessage('/context', undefined, { localCommandId });
     }
     actions
       .getContextUsage({ detail: false })
+      .finally(() => finishLocalCommand(store, localCommandId))
       .then((result) => {
         if (!owner.isCurrent()) return;
         store.dispatch([
           {
             type: 'status',
+            promptId: localCommandId,
             text: t('contextUsage.title'),
             data: createContextUsageMessageData(result),
             clearActiveText: false,
@@ -1990,7 +2011,10 @@ export function ChatPane({
             onTogglePlan={handleTogglePlan}
             sessionWorkflowEnabled={sessionWorkflowEnabled}
             currentModel={connection.currentModel ?? ''}
+            modelRefresh={modelRefresh}
             availableModels={availableModels}
+            unavailableModels={unavailableModels}
+            mountUnavailableModelTooltip={mountUnavailableModelTooltip}
             onSelectMode={handleSelectMode}
             onSelectModel={handleSelectModel}
             reasoning={connection.reasoning}

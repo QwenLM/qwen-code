@@ -39,6 +39,7 @@ import {
   isControlCancel,
 } from './types.js';
 import { createMinimalSettings } from '../config/settings.js';
+import { readHumanInputFromSdkMessage } from './sdk-human-input.js';
 import type { LoadedSettings } from '../config/settings.js';
 import {
   runNonInteractive,
@@ -438,21 +439,25 @@ class Session {
 
   /**
    * Direct mode initialization flow
-   * Initializes config and enqueues the first user message
+   * Enqueues the first user message, then initializes config
    */
   private async initializeDirectMode(
     userMessage: CLIUserMessage,
   ): Promise<void> {
     this.ensureInitializationPromise();
     try {
+      // Enqueue the first user message before awaiting initialization. Any
+      // message that arrives while config is still initializing is enqueued by
+      // the read loop, so waiting here would let it overtake this one and run
+      // first. processUserMessage awaits initialization before touching
+      // config, so enqueuing early cannot start work too soon.
+      this.enqueueUserMessage(userMessage);
+
       // Initialize config
       await this.ensureConfigInitialized();
 
       // Initialization complete!
       this.completeInitialization();
-
-      // Enqueue the first user message for processing
-      this.enqueueUserMessage(userMessage);
     } catch (error) {
       debugLogger.error('[Session] Direct mode initialization failed:', error);
       this.failInitialization(
@@ -504,6 +509,7 @@ class Session {
 
   private async processUserMessage(userMessage: CLIUserMessage): Promise<void> {
     const input = extractUserMessageText(userMessage);
+    const humanInput = readHumanInputFromSdkMessage(userMessage);
     if (!input) {
       debugLogger.debug('[Session] No text content in user message');
       return;
@@ -517,6 +523,7 @@ class Session {
 
     try {
       await runNonInteractive(this.config, this.settings, input, promptId, {
+        ...(humanInput ? { humanInput } : {}),
         modSession: this.modSession,
         abortController: turnAbortController,
         adapter: this.outputAdapter,
@@ -558,6 +565,7 @@ class Session {
 
     const chat = llmClient.getChat();
     const historyTail =
+      chat.getHistoryForRecovery?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
       chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
       chat.getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT);
     const cancellation = getLastApiPromptCancellation(

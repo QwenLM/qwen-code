@@ -1,9 +1,9 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.runtimebroker.JdbcRepositoryContract;
-import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBrokerSchema;
 import com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
+import com.alibaba.qwen.code.runtimebroker.managedschema.JdbcRuntimeBrokerSchema;
 import org.assertj.core.api.SoftAssertions;
 import org.flywaydb.core.Flyway;
 import org.flywaydb.core.api.MigrationVersion;
@@ -38,7 +38,7 @@ class RuntimeBrokerFlywaySchemaTest {
         Map<String, TableShape> actual = describe(migrate(dataSource(), MigrationVersion.LATEST));
 
         assertThat(expected)
-                .hasSize(32)
+                .hasSize(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.TABLES.size())
                 .containsKeys(
                         "ma_runtime_slot",
                         "ma_runtime_binding",
@@ -81,7 +81,7 @@ class RuntimeBrokerFlywaySchemaTest {
         JdbcRuntimeBrokerSchema.initialize(source);
         assertThat(executions.findByIdempotencyKey("retention-key")).usingRecursiveComparison().isEqualTo(settled);
         Map<String, TableShape> shape = describe(source);
-        assertThat(shape).hasSize(32);
+        assertThat(shape).hasSize(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.TABLES.size());
         assertThat(shape.get("ma_runtime_binding").indexes()).contains(
                 "INDEX [binding_state, last_active_at, binding_id]", "INDEX [tenant_id, binding_state]");
         assertThat(shape.get("ma_storage_owner").indexes())

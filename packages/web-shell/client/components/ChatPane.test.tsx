@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as messageDeletion from '../utils/message-deletion';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, forwardRef, useImperativeHandle } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
@@ -1121,6 +1122,8 @@ describe('ChatPane', () => {
     });
     expect(appendLocalUserMessage).toHaveBeenCalledWith(
       '/goal set ship the other thing',
+      undefined,
+      { localCommandId: expect.stringMatching(/^local-command:/) },
     );
   });
 
@@ -1671,6 +1674,18 @@ describe('ChatPane', () => {
     render({ title: 'Side task', embedded: true });
     expect(container!.querySelector('header')).toBeNull();
     expect(testid('pane-messages')).not.toBeNull();
+  });
+
+  it('threads unavailable models onto its composer', () => {
+    const unavailableModels = [
+      { id: 'qwen-max', label: 'Qwen Max', tooltip: 'Need Pro' },
+    ];
+    const mountUnavailableModelTooltip = () => null;
+    render({ unavailableModels, mountUnavailableModelTooltip });
+    expect(latestChatEditorProps.unavailableModels).toEqual(unavailableModels);
+    expect(latestChatEditorProps.mountUnavailableModelTooltip).toBe(
+      mountUnavailableModelTooltip,
+    );
   });
 
   it('shows the Plan entry only when explicitly enabled and hides it on removal', () => {
@@ -3120,6 +3135,29 @@ describe('ChatPane', () => {
     expect(latestChatEditorProps.contextUsageControls).toBeUndefined();
   });
 
+  it('keeps the local context group unavailable for deletion until its result settles', async () => {
+    let resolve!: (value: unknown) => void;
+    getContextUsage.mockReturnValueOnce(
+      new Promise((done) => {
+        resolve = done;
+      }),
+    );
+    const begin = vi.spyOn(messageDeletion, 'beginLocalCommand');
+    render();
+    act(() => latestChatEditorProps.onShowContextUsage());
+    expect(begin).toHaveBeenCalledTimes(1);
+    const [store] = begin.mock.calls[0]!;
+    expect(messageDeletion.hasPendingLocalCommands(store)).toBe(true);
+    transcriptDispatch.mockImplementationOnce(() => {
+      expect(messageDeletion.hasPendingLocalCommands(store)).toBe(false);
+    });
+    await act(async () => {
+      resolve({ usage: {} });
+    });
+    expect(messageDeletion.hasPendingLocalCommands(store)).toBe(false);
+    begin.mockRestore();
+  });
+
   it.each(['idle', 'responding'])(
     'shows context usage for this pane session while %s',
     async (state) => {
@@ -3131,7 +3169,11 @@ describe('ChatPane', () => {
       });
 
       if (state === 'idle')
-        expect(appendLocalUserMessage).toHaveBeenCalledWith('/context');
+        expect(appendLocalUserMessage).toHaveBeenCalledWith(
+          '/context',
+          undefined,
+          { localCommandId: expect.stringMatching(/^local-command:/) },
+        );
       else expect(appendLocalUserMessage).not.toHaveBeenCalled();
       expect(getContextUsage).toHaveBeenCalledWith({ detail: false });
       expect(transcriptDispatch).toHaveBeenCalledWith([
