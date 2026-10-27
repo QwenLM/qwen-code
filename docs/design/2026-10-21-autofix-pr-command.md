@@ -225,6 +225,15 @@ worktree included:
    head branch that the PR does not have. The worktree never sees them. Only a
    local branch whose upstream is the head branch on the push remote counts as
    that copy, so a fork's `main` is never compared with the user's `main`.
+   The report also carries `localUncommittedChanges`: whether a worktree of
+   this clone has that copy checked out and holds changes git reports, its own
+   `.qwen` directory aside — the state file is written before this runs — read
+   with `--no-optional-locks`. It is computed only when the copy exists, and
+   only for checkouts of that branch; work in a checkout of another branch is
+   not work on that copy. The helper reports it and does not refuse: the
+   skill's start does not go on while it is true, unless the user asks once
+   told, because the watch's push and the user's own go to the same head
+   branch.
 
 ### 6.2 `snapshot <pr> [--repo <owner>/<repo>] [--host <host>] [--gate] [--session <id>] [--task <id>]`
 

@@ -524,6 +524,50 @@ describe('runPrepare (real git)', () => {
     expect(lastReport()).toMatchObject({ localUnpushedCommits: 1 });
   });
 
+  it("reports uncommitted changes in the user's own checkout", () => {
+    expect(run(clone, 'branch', '--show-current')).toBe('feat');
+    writeFileSync(join(clone, 'scratch.txt'), 'work in progress\n');
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(lastReport()).toMatchObject({
+      localUnpushedCommits: 0,
+      localUncommittedChanges: true,
+    });
+  });
+
+  it('reports no uncommitted changes for a clean checkout', () => {
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(lastReport()).toMatchObject({ localUncommittedChanges: false });
+  });
+
+  it('reports uncommitted changes when it resumes a watch', () => {
+    runPrepare({ pr: 7, repo: 'o/r' });
+    writeFileSync(join(clone, 'scratch.txt'), 'work in progress\n');
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(lastReport()).toMatchObject({
+      resumed: true,
+      localUncommittedChanges: true,
+    });
+  });
+
+  it('reports no uncommitted work on the head branch no checkout has', () => {
+    // The local branch whose upstream is the head branch stays, but nothing
+    // has it checked out: work in another checkout is not work on that copy.
+    run(clone, 'checkout', '-q', '-b', 'scratch');
+    writeFileSync(join(clone, 'scratch.txt'), 'work in progress\n');
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(lastReport()).toMatchObject({ localUncommittedChanges: false });
+  });
+
+  it('reports no uncommitted work on a branch that does not track the head', () => {
+    run(clone, 'branch', '--unset-upstream');
+    writeFileSync(join(clone, 'scratch.txt'), 'work in progress\n');
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(lastReport()).toMatchObject({
+      localUnpushedCommits: 0,
+      localUncommittedChanges: false,
+    });
+  });
+
   it('resumes in the owning session without touching the worktree', () => {
     runPrepare({ pr: 7, repo: 'o/r' });
     const answer = mocks.gh.getMockImplementation()!;
