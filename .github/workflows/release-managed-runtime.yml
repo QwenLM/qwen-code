@@ -147,7 +147,12 @@ jobs:
       - name: 'Verify the executable JAR and publication profile'
         run: |-
           mvn --batch-mode --no-transfer-progress -f packages/managed-agent-server/pom.xml clean verify -Pcentral-release -Dgpg.skip=true -DforkCount=1 -DreuseForks=false -Dproject.build.outputTimestamp="${BUILD_TIMESTAMP}"
-          node .qwen/managed-release-tools/scripts/managed-runtime-release.js --jar "packages/managed-agent-server/target/qwen-managed-agent-server-${CLI_VERSION}.jar" --version "${CLI_VERSION}" --out-dir dist/managed-runtime
+          runtime_jar="packages/managed-agent-server/target/qwen-managed-agent-server-${CLI_VERSION}-exec.jar"
+          # Older release tags shipped the executable as the main artifact.
+          if [[ ! -f "${runtime_jar}" ]]; then runtime_jar="packages/managed-agent-server/target/qwen-managed-agent-server-${CLI_VERSION}.jar"; fi
+          unzip -p "${runtime_jar}" META-INF/MANIFEST.MF | tr -d '\r' | grep -Fx 'Main-Class: org.springframework.boot.loader.launch.JarLauncher'
+          echo "MANAGED_RUNTIME_JAR=${runtime_jar}" >> "${GITHUB_ENV}"
+          node .qwen/managed-release-tools/scripts/managed-runtime-release.js --jar "${runtime_jar}" --version "${CLI_VERSION}" --out-dir dist/managed-runtime
 
       - name: 'Retain verified JAR and checksum'
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
@@ -201,8 +206,20 @@ jobs:
           fi
           gh api "repos/QwenLM/qwen-code/releases/tags/${RELEASE_TAG}" | jq --exit-status '.draft == false'
           jar="qwen-managed-agent-server-${CLI_VERSION}.jar"
-          central="https://repo.maven.apache.org/maven2/com/alibaba/qwen-managed-agent-server/${CLI_VERSION}/${jar}"
-          state=$(node .qwen/managed-release-tools/scripts/managed-runtime-release.js --check-url "${central}" --file "dist/managed-runtime/${jar}") || exit 1
+          central_files=("packages/managed-agent-server/target/${jar}")
+          if [[ "${MANAGED_RUNTIME_JAR}" != "${central_files[0]}" ]]; then central_files+=("${MANAGED_RUNTIME_JAR}"); fi
+          present=0
+          missing=0
+          for file in "${central_files[@]}"; do
+            central="https://repo.maven.apache.org/maven2/com/alibaba/qwen-managed-agent-server/${CLI_VERSION}/$(basename "${file}")"
+            state=$(node .qwen/managed-release-tools/scripts/managed-runtime-release.js --check-url "${central}" --file "${file}") || exit 1
+            case "${state}" in present) present=$((present+1));; missing) missing=$((missing+1));; *) exit 1;; esac
+          done
+          if (( present > 0 && missing > 0 )); then
+            echo 'Partial Central publication; refusing an immutable redeploy.' >&2
+            exit 1
+          fi
+          if (( missing > 0 )); then state=missing; else state=present; fi
           echo "central=${state}" >> "${GITHUB_OUTPUT}"
           : > "${RUNNER_TEMP}/managed-github-missing"
           : > "${RUNNER_TEMP}/managed-oss-missing"
@@ -244,16 +261,22 @@ jobs:
             [[ -n "${!name}" ]] || { echo "Missing production-release secret: ${name}" >&2; exit 1; }
           done
           mvn --batch-mode --no-transfer-progress -f packages/managed-agent-server/pom.xml deploy -Pcentral-release -DskipTests -Dproject.build.outputTimestamp="${BUILD_TIMESTAMP}"
-          cmp "packages/managed-agent-server/target/qwen-managed-agent-server-${CLI_VERSION}.jar" "dist/managed-runtime/qwen-managed-agent-server-${CLI_VERSION}.jar"
+          cmp "${MANAGED_RUNTIME_JAR}" "dist/managed-runtime/qwen-managed-agent-server-${CLI_VERSION}.jar"
 
       - name: 'Verify Central availability before distribution'
         if: "${{ github.event_name == 'release' || !inputs.dry_run }}"
         run: |-
           set -euo pipefail
           jar="qwen-managed-agent-server-${CLI_VERSION}.jar"
+          central_files=("packages/managed-agent-server/target/${jar}")
+          if [[ "${MANAGED_RUNTIME_JAR}" != "${central_files[0]}" ]]; then central_files+=("${MANAGED_RUNTIME_JAR}"); fi
           for attempt in {1..40}; do
-            state=$(node .qwen/managed-release-tools/scripts/managed-runtime-release.js --check-url "https://repo.maven.apache.org/maven2/com/alibaba/qwen-managed-agent-server/${CLI_VERSION}/${jar}" --file "dist/managed-runtime/${jar}")
-            if [[ "${state}" == 'present' ]]; then exit 0; fi
+            missing=0
+            for file in "${central_files[@]}"; do
+              state=$(node .qwen/managed-release-tools/scripts/managed-runtime-release.js --check-url "https://repo.maven.apache.org/maven2/com/alibaba/qwen-managed-agent-server/${CLI_VERSION}/$(basename "${file}")" --file "${file}")
+              case "${state}" in present) ;; missing) missing=$((missing+1));; *) exit 1;; esac
+            done
+            if (( missing == 0 )); then exit 0; fi
             sleep 30
           done
           echo 'The exact server JAR is not yet available on Central.' >&2

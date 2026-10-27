@@ -1467,7 +1467,7 @@ class AutomationScannerTest {
         assertThat(applicationContext.containsBean("managedAutomationScheduler"))
                 .isTrue();
         assertThat(applicationContext.getBean("managedAutomationScheduler"))
-                .isNotSameAs(applicationContext.getBean("taskScheduler"));
+                .isNotSameAs(applicationContext.getBean("managedAgentScheduler"));
         var scheduled = AutomationScanner.class.getMethod("scan")
                 .getAnnotation(org.springframework.scheduling.annotation.Scheduled.class);
         assertThat(scheduled.scheduler())

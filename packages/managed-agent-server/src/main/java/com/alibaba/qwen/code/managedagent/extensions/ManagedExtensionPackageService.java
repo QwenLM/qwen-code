@@ -20,6 +20,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -50,9 +51,9 @@ public class ManagedExtensionPackageService {
     private final ObjectMapper json;
     private final SecretProtector secrets;
 
-    public ManagedExtensionPackageService(JdbcTemplate jdbc, PlatformTransactionManager manager,
+    public ManagedExtensionPackageService(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager,
             ManagedWorkspaceRegistry workspaces, ManagedAgentProperties properties,
-            ManagedExtensionArchiveStore archives, ObjectMapper json, ObjectProvider<SecretProtector> secrets) {
+            ManagedExtensionArchiveStore archives, @Qualifier("managedAgentObjectMapper") ObjectMapper json, ObjectProvider<SecretProtector> secrets) {
         this.jdbc = jdbc;
         this.transaction = new TransactionTemplate(manager);
         this.workspaces = workspaces;

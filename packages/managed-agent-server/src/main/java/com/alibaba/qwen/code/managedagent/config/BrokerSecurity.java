@@ -274,7 +274,7 @@ public class BrokerSecurity {
     }
 
     // The broker→harness attach leg carries the issued writer credential.
-    private void checkHarnessTransport(ManagedAgentProperties properties,
+    static void checkHarnessTransport(ManagedAgentProperties properties,
             java.util.List<String> skippedGuards) {
         if (!properties.getHarness().isEnabled()) {
             return;
@@ -304,7 +304,7 @@ public class BrokerSecurity {
         }
         if ("http".equalsIgnoreCase(uri.getScheme())
                 && !isLoopback(hostOf(uri))) {
-            if (!allowInsecureBind) {
+            if (!properties.getAuth().isAllowInsecureBind()) {
                 throw new IllegalStateException(
                         "qwen.managed-agent.harness.base-url uses plaintext"
                                 + " http on a non-loopback host, exposing"
