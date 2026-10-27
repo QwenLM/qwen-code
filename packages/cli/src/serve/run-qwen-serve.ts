@@ -156,6 +156,7 @@ import {
   SERVE_CAPABILITY_REGISTRY,
 } from './capabilities.js';
 import { isNativeDirectoryPickerAvailable } from './native-directory-picker.js';
+import { isGitAvailable } from './git-availability.js';
 import {
   isLocalPathOpenAvailable,
   isLocalTerminalAvailable,
@@ -1884,6 +1885,32 @@ export function subSessionConcurrencyCapsFromSettings(
 }
 
 /**
+ * Reads the optional `serve.maxSessions` override. A non-negative integer or
+ * `Infinity` is honored; anything else is reported and ignored so a mistyped
+ * cap falls back to the built-in default instead of failing boot or silently
+ * disabling backpressure. Workspace settings never reach here: the key is
+ * workspace-restricted, and the serve fast path skips it structurally.
+ */
+export function maxSessionsFromSettings(
+  serve: { maxSessions?: unknown } | undefined,
+  onWarning: (message: string) => void = writeStderrLine,
+): number | undefined {
+  const value = serve?.maxSessions;
+  if (value === undefined) return undefined;
+  if (
+    value === Number.POSITIVE_INFINITY ||
+    (typeof value === 'number' && Number.isInteger(value) && value >= 0)
+  ) {
+    return value;
+  }
+  onWarning(
+    `qwen serve: ignoring invalid serve.maxSessions (${JSON.stringify(value)}); ` +
+      `expected a non-negative integer (0 = unlimited), falling back to the built-in default.`,
+  );
+  return undefined;
+}
+
+/**
  * Per-workspace promise chain that serializes settings read-modify-write
  * cycles inside this process.
  *
@@ -2447,6 +2474,7 @@ function currentServeFeaturesForRunQwenServe(
     channelManagementAvailable: true,
     persistentWorkspaceRegistrationAvailable: true,
     workspaceRuntimeRemovalAvailable: true,
+    workspaceDirectoriesAvailable: opts.experimentalPairedEngines !== true,
     // Advertise the same host-conditional and WS feature flags as the runtime
     // path (serve-features.ts) so the bootstrap `/capabilities` window doesn't
     // briefly under-report them.
@@ -2459,6 +2487,7 @@ function currentServeFeaturesForRunQwenServe(
     // serves all five once the app is up.
     dynamicWorkspaceRegistrationAvailable: true,
     scratchWorkspaceRegistrationAvailable: true,
+    gitWorkspaceCloneAvailable: isGitAvailable(),
     standaloneSessionsAvailable: true,
     workspaceTrustHotReloadAvailable: true,
     acpHttpEnabled:
@@ -4187,7 +4216,15 @@ async function runQwenServeImpl(
   let sessionArtifactsPersistenceAvailable = true;
   try {
     bootSettings =
-      deps.bootSettings ?? loadServeFastPathSettings(boundWorkspace);
+      deps.bootSettings ??
+      loadServeFastPathSettings(boundWorkspace, {
+        onWorkspaceSettingsError: (error) => {
+          writeStderrLine(
+            `qwen serve: ignoring unreadable workspace settings for ${boundWorkspace} ` +
+              `(${error.message}); operator settings are still applied.`,
+          );
+        },
+      });
     sessionArtifactsPersistenceAvailable =
       sessionArtifactsPersistenceAvailableFromSettings(bootSettings);
     contextFilenameForInit = extractContextFilename(
@@ -4210,12 +4247,18 @@ async function runQwenServeImpl(
     // disk IO) fall back to defaults so the daemon stays bootable.
     writeStderrLine(
       `qwen serve: could not read settings for context.fileName / ` +
-        `policy.* / serve.channels / serve.tokenQr ` +
+        `policy.* / serve.channels / serve.tokenQr / serve.maxSessions ` +
         `(${err instanceof Error ? err.message : String(err)}); ` +
         `falling back to defaults. Restart with a valid settings.json ` +
         `to apply context.fileName / policy.* / serve.channels / ` +
-        `serve.tokenQr overrides.`,
+        `serve.tokenQr / serve.maxSessions overrides.`,
     );
+  }
+  if (opts.maxSessions === undefined) {
+    const settingsMaxSessions = maxSessionsFromSettings(bootSettings?.serve);
+    if (settingsMaxSessions !== undefined) {
+      opts.maxSessions = settingsMaxSessions;
+    }
   }
   assertExecutionSandboxSupported(
     bootSettings ?? {},
@@ -4777,6 +4820,8 @@ async function runQwenServeImpl(
         env: daemonRuntimeBaseEnv,
         token,
         externalToolGuardToken: optsIn.externalToolGuard?.token,
+        managedRuntimeBrokerUrl: opts.managedRuntimeBrokerUrl,
+        managedRuntimeBrokerToken: opts.managedRuntimeBrokerToken,
         getPort: () => actualPort,
         close: () => serveAppLifecycle.close(),
       })
@@ -6194,6 +6239,7 @@ async function runQwenServeImpl(
         cron,
         prompt,
         recurring,
+        gate,
         assertCallerPromptActive,
       }) => {
         const targetBridge = getBridge();
@@ -6221,10 +6267,11 @@ async function runQwenServeImpl(
               cron,
               prompt,
               recurring,
+              ...(gate !== undefined ? { gate } : {}),
             },
             { source: 'cron-tool', assertCallerPromptActive },
           );
-        return { id: task.id, cron: task.cron };
+        return { id: task.id, cron: task.cron, gate: task.gate ?? null };
       };
     // Late-binds the bridge (constructed just below) via `() => bridgeRef`. Only
     // wired on the daemon-created bridge — an injected `deps.bridge` (embed/test)
@@ -6548,7 +6595,7 @@ async function runQwenServeImpl(
         trustMaterialization: primaryTrustMaterialization,
       },
     ];
-    if (trustedWorkspace) {
+    if (trustedWorkspace && opts.profile !== 'hosted-harness') {
       await recoverBranchWorktreePreparations({
         workspaceCwd: boundWorkspace,
         sessionService: await createBranchRecoverySessionService(
@@ -7414,35 +7461,37 @@ async function runQwenServeImpl(
     // closure check forbids in this pre-listen root's static closure.
     sessionPrRefreshTimer?.dispose();
     const refreshGeneration = ++sessionPrRefreshGeneration;
-    void import('./server/session-pr-refresh.js')
-      .then((mod) => {
-        if (refreshGeneration !== sessionPrRefreshGeneration) return;
-        sessionPrRefreshTimer = mod.startSessionPrRefreshTimer({
-          workspaceRegistry,
-          // The coordinator lives on the serve app (createServeApp below),
-          // which is built after this timer starts; read it per tick like
-          // the metrics sampler reads `acpHandle`.
-          getArchiveCoordinator: () =>
-            (
-              app.locals as {
-                sessionArchiveCoordinator?: SessionArchiveCoordinator;
-              }
-            ).sessionArchiveCoordinator,
+    if (opts.profile !== 'hosted-harness') {
+      void import('./server/session-pr-refresh.js')
+        .then((mod) => {
+          if (refreshGeneration !== sessionPrRefreshGeneration) return;
+          sessionPrRefreshTimer = mod.startSessionPrRefreshTimer({
+            workspaceRegistry,
+            // The coordinator lives on the serve app (createServeApp below),
+            // which is built after this timer starts; read it per tick like
+            // the metrics sampler reads `acpHandle`.
+            getArchiveCoordinator: () =>
+              (
+                app.locals as {
+                  sessionArchiveCoordinator?: SessionArchiveCoordinator;
+                }
+              ).sessionArchiveCoordinator,
+          });
+        })
+        .catch((error) => {
+          // Degrade to "no PR-state sweep" instead of leaking an unhandled
+          // rejection: the serve fast path installs no process-level
+          // unhandledRejection handler before this runs, and Node's default
+          // for one is to exit — a failed chunk load (e.g. an in-place
+          // upgrade replacing dist/ under the running daemon) would take
+          // down every runtime, session, and connection the daemon serves.
+          daemonLog.warn(
+            `session-pr-refresh load failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
         });
-      })
-      .catch((error) => {
-        // Degrade to "no PR-state sweep" instead of leaking an unhandled
-        // rejection: the serve fast path installs no process-level
-        // unhandledRejection handler before this runs, and Node's default
-        // for one is to exit — a failed chunk load (e.g. an in-place
-        // upgrade replacing dist/ under the running daemon) would take
-        // down every runtime, session, and connection the daemon serves.
-        daemonLog.warn(
-          `session-pr-refresh load failed: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      });
+    }
 
     // Factory for dynamically creating workspace runtimes (POST /workspaces).
     interface WorkspaceRuntimeBuildOptions {
@@ -8025,7 +8074,11 @@ async function runQwenServeImpl(
           });
         }
       }
-      if (wsRuntime.primary && wsRuntime.trusted) {
+      if (
+        wsRuntime.primary &&
+        wsRuntime.trusted &&
+        opts.profile !== 'hosted-harness'
+      ) {
         await recoverBranchWorktreePreparations({
           workspaceCwd: cwd,
           sessionService: await createBranchRecoverySessionService(wsRuntime),
@@ -11290,7 +11343,13 @@ async function runQwenServeImpl(
       const handleError = (err: NodeJS.ErrnoException): void => {
         server.removeListener('listening', handleListening);
         const nextPort = attemptPort + 1;
-        if (
+        // The control plane names the Hosted Harness by its exact port, so a
+        // moved Harness would start while no Session could reach it.
+        if (err.code === 'EADDRINUSE' && opts.profile === 'hosted-harness') {
+          writeStderrLine(
+            `qwen serve: port ${attemptPort} is in use; --profile hosted-harness does not move to another port`,
+          );
+        } else if (
           err.code === 'EADDRINUSE' &&
           opts.port !== 0 &&
           nextPort <= 65535 &&

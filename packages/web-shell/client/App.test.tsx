@@ -116,7 +116,6 @@ vi.mock('./components/managed/ManagedSessionsPage', async () => {
       navigationSearch?: string;
       navigationTarget?: HTMLElement | null;
       interactive?: boolean;
-      onManageSkills?: () => void;
       creationSkills?: { workspaceCwd: string };
       workspaceCreationOpen?: boolean;
       onWorkspaceCreationOpenChange?: (open: boolean) => void;
@@ -134,12 +133,6 @@ vi.mock('./components/managed/ManagedSessionsPage', async () => {
           data-search={props.navigationSearch}
           data-workspace-creation-open={Boolean(props.workspaceCreationOpen)}
         >
-          <button
-            data-testid="managed-manage-skills"
-            onClick={props.onManageSkills}
-          >
-            Manage Skills
-          </button>
           <input
             aria-label="Managed draft"
             value={draft}
@@ -1060,6 +1053,7 @@ const {
         onRunPrompt?: (
           prompt: string,
           sessionId: string | null,
+          workspaceCwd?: string,
         ) => Promise<void>;
         onCreateViaChat?: () => void;
         workspaces?: Array<{ id: string; cwd: string }>;
@@ -1069,6 +1063,15 @@ const {
           pendingInteractionCount?: number;
         };
         currentSessionSchedulingAvailable?: boolean;
+        autofixPrWatchesAvailable?: boolean;
+      } | null,
+      latestPrWatchesProps: null as {
+        onRunPrompt?: (
+          prompt: string,
+          sessionId: string,
+          workspaceCwd?: string,
+        ) => Promise<void>;
+        onOpenSession?: (sessionId: string, workspaceCwd?: string) => void;
       } | null,
       latestGoalsProps: null as {
         onCreateGoal?: (condition: string) => Promise<void>;
@@ -1649,6 +1652,7 @@ vi.mock('./components/messages/SettingsMessage', async () => {
         language: string,
         scope: 'user' | 'workspace',
       ) => void;
+      onOutputLanguageChange?: (language: string) => void;
       presentation?: WebShellSettingsOptions;
       modelManagementSectionProps?: {
         busy?: boolean;
@@ -1736,6 +1740,24 @@ vi.mock('./components/messages/SettingsMessage', async () => {
             onClick: () => props.onLanguageChange?.('en', 'workspace'),
           },
           'language (workspace)',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'change-output-language',
+            type: 'button',
+            onClick: () => props.onOutputLanguageChange?.('English'),
+          },
+          'output language',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'change-output-language-auto',
+            type: 'button',
+            onClick: () => props.onOutputLanguageChange?.(''),
+          },
+          'output language (auto)',
         ),
       );
     },
@@ -1862,6 +1884,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
       onOpenChannels?: () => void;
       onOpenLive?: () => void;
       onOpenDaemonStatus?: () => void;
+      onOpenPrWatches?: () => void;
       onOpenSessions?: () => void;
       onOpenSplitView?: () => void;
       onMobileClose?: () => void;
@@ -1872,7 +1895,10 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
       onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
       onOpenWorkspacesOverview?: () => void;
       onLoadSession?: (sessionId: string) => Promise<void> | void;
-      onLoadStandaloneSession?: (sessionId: string) => Promise<void> | void;
+      onLoadStandaloneSession?: (
+        sessionId: string,
+        displayName?: string,
+      ) => Promise<void> | void;
       onSelectCurrentSession?: () => void;
       onSessionsDeleted?: (
         sessionIds: string[],
@@ -2003,6 +2029,16 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
         React.createElement(
           'button',
           {
+            'data-testid': 'open-pr-watches',
+            'data-has-pr-watches': String(Boolean(props.onOpenPrWatches)),
+            type: 'button',
+            onClick: () => props.onOpenPrWatches?.(),
+          },
+          'open pr watches',
+        ),
+        React.createElement(
+          'button',
+          {
             'data-testid': 'open-workspaces-overview',
             type: 'button',
             onClick: () => props.onOpenWorkspacesOverview?.(),
@@ -2034,7 +2070,10 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
             type: 'button',
             onClick: () => {
               void Promise.resolve(
-                props.onLoadStandaloneSession?.('standalone-session-2'),
+                props.onLoadStandaloneSession?.(
+                  'standalone-session-2',
+                  'Standalone sidebar title',
+                ),
               ).catch(() => undefined);
             },
           },
@@ -2270,14 +2309,17 @@ vi.doMock('./components/StreamingStatus', async () => {
     StreamingStatus: ({
       startedAt,
       hasActivePrompt,
+      showPhrase,
     }: {
       startedAt?: number;
       hasActivePrompt?: boolean;
+      showPhrase?: boolean;
     }) =>
       React.createElement('div', {
         'data-testid': 'streaming-status',
         'data-started-at': startedAt,
         'data-has-active-prompt': String(hasActivePrompt === true),
+        'data-show-phrase': String(showPhrase !== false),
       }),
   };
 });
@@ -2706,6 +2748,18 @@ vi.doMock('./components/dialogs/ScheduledTasksDialog', async () => {
     },
   };
 });
+vi.doMock('./components/dialogs/AutofixPrWatchesDialog', async () => {
+  const React = await import('react');
+  return {
+    AutofixPrWatchesDialog: (props: {
+      onRunPrompt?: (prompt: string, sessionId: string) => Promise<void>;
+      onOpenSession?: (sessionId: string) => void;
+    }) => {
+      testState.latestPrWatchesProps = props;
+      return React.createElement('div');
+    },
+  };
+});
 // Capturing mock: stores App's real onCreateGoal / onOpenSession handlers so
 // tests can drive the goal-creation orchestration without a daemon.
 vi.doMock('./components/dialogs/GoalsDialog', async () => {
@@ -2741,10 +2795,20 @@ vi.doMock('./components/extensions/ExtensionsManagerPage', async () => {
       onClose: () => void;
       initialFocusRef?: React.Ref<HTMLHeadingElement>;
       embedded?: unknown;
+      managed?: {
+        provider: ManagedAgentProvider;
+        sessionId?: string;
+        workspaceId?: string;
+      };
     }) =>
       React.createElement(
         'div',
-        { 'data-testid': 'extensions-manager-page' },
+        {
+          'data-testid': 'extensions-manager-page',
+          'data-managed-provider': props.managed?.provider.storageKey,
+          'data-managed-session': props.managed?.sessionId,
+          'data-managed-workspace': props.managed?.workspaceId,
+        },
         React.createElement(
           'h1',
           {
@@ -12362,6 +12426,7 @@ beforeEach(() => {
   testState.latestSettingsPresentation = undefined;
   testState.latestModelManagement = null;
   testState.latestScheduledTasksProps = null;
+  testState.latestPrWatchesProps = null;
   testState.latestGoalsProps = null;
   testState.latestWorkflowRunsProps = null;
   testState.latestSplitViewProps = null;
@@ -13924,6 +13989,51 @@ describe('App conversation indicator keep-alive (#9487)', () => {
       },
     );
   });
+
+  it.each([false, true, undefined])(
+    'applies loading phrase visibility (%s) before host customization',
+    async (enabled) => {
+      testState.sessionHasActivePrompt = true;
+      testState.settings =
+        enabled === undefined
+          ? []
+          : [
+              {
+                key: 'ui.accessibility.enableLoadingPhrases',
+                type: 'boolean',
+                label: 'Enable Loading Phrases',
+                category: 'UI',
+                requiresRestart: true,
+                default: true,
+                values: { effective: enabled },
+              },
+            ];
+      const loadingPhrases = () => ['Custom loading phrase'];
+      const { container, rerender } = renderApp({ loadingPhrases });
+      await flush();
+      const status = () =>
+        container.querySelector('[data-testid="streaming-status"]');
+      expect(status()?.getAttribute('data-show-phrase')).toBe(
+        String(enabled !== false),
+      );
+      testState.settings = [
+        {
+          key: 'ui.accessibility.enableLoadingPhrases',
+          type: 'boolean',
+          label: 'Enable Loading Phrases',
+          category: 'UI',
+          requiresRestart: true,
+          default: true,
+          values: { effective: enabled === false },
+        },
+      ];
+      rerender({ loadingPhrases });
+      await flush();
+      expect(status()?.getAttribute('data-show-phrase')).toBe(
+        String(enabled === false),
+      );
+    },
+  );
 
   it('keeps the indicator mounted and composer running through a silent gap', async () => {
     const composerFooterProps: WebShellComposerToolbarRenderInfo[] = [];
@@ -16627,6 +16737,57 @@ describe('App session callbacks', () => {
         'session-1',
       );
     });
+  });
+
+  it('refreshes a new standalone title after its first turn completes', async () => {
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.workspaceCwd = undefined;
+    mockConnection.displayName = undefined;
+    const { container, rerender } = renderApp();
+    await flush();
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender();
+    });
+    mockWorkspace.client.getStandaloneSession.mockResolvedValue({
+      sessionId: 'session-1',
+      sourceType: 'standalone',
+      context: { kind: 'standalone' },
+      isArchived: false,
+      displayName: 'First standalone prompt',
+    });
+    act(() => {
+      testState.streamingState = 'idle';
+      rerender();
+    });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="chat-context-header"]')
+        ?.textContent,
+    ).toContain('First standalone prompt');
+  });
+
+  it('seeds a standalone sidebar title while the transcript is loading', async () => {
+    const { container, rerender } = renderApp();
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="load-standalone-session"]',
+        )!
+        .click();
+    });
+    mockConnection.sessionId = 'standalone-session-2';
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.workspaceCwd = undefined;
+    mockConnection.displayName = undefined;
+    mockConnection.loadingTranscript = true;
+    rerender();
+    const header = container.querySelector(
+      '[data-testid="chat-context-header"]',
+    )?.textContent;
+    expect(header).toContain('Standalone sidebar title');
+    expect(header).not.toContain('New session');
   });
 
   it('seeds the catalog title before the session finishes loading', async () => {
@@ -26993,6 +27154,9 @@ describe('App session callbacks', () => {
           source: 'mcp-app',
         }),
       );
+      const options = mockSessionActions.sendPrompt.mock.calls[0][1];
+      expect(options).not.toHaveProperty('submittedPrompt');
+      expect(options).not.toHaveProperty('humanInput');
       expect(testState.prompt).toBe('hello');
       expect(editorClear).not.toHaveBeenCalled();
       expect(editorCommit).not.toHaveBeenCalled();
@@ -27011,6 +27175,7 @@ describe('App session callbacks', () => {
       'recovery',
       'client',
       'session',
+      'workspace',
       'write-block',
     ] as const)(
       'does not dispatch after %s invalidates an asynchronous preparation',
@@ -27036,6 +27201,8 @@ describe('App session callbacks', () => {
           if (change === 'recovery') testState.recoveryVersion += 1;
           if (change === 'client') mockConnection.clientId = 'client-2';
           if (change === 'session') mockConnection.sessionId = 'session-2';
+          if (change === 'workspace')
+            mockConnection.workspaceCwd = '/tmp/other';
           if (change === 'write-block') mockConnection.loadingTranscript = true;
           rerender({ prepareSubmit, onSubmitBefore });
         });
@@ -27214,12 +27381,14 @@ describe('App session callbacks', () => {
       });
     });
 
-    it.each(['streaming', 'active', 'goal'] as const)(
+    it.each(['streaming', 'active', 'goal', 'queued'] as const)(
       'refuses a known %s session without enqueuing the App text',
       async (busy) => {
         if (busy === 'streaming') testState.streamingState = 'responding';
         if (busy === 'active') testState.sessionHasActivePrompt = true;
         if (busy === 'goal') mockConnection.goalState = activeGoalSnapshot();
+        if (busy === 'queued')
+          testState.queuedPrompts = [{ id: 1, text: 'follow up' }];
         const prepareSubmit = vi.fn();
         renderApp({ prepareSubmit });
         await flush();
@@ -27232,6 +27401,40 @@ describe('App session callbacks', () => {
         expect(testState.prompt).toBe('hello');
       },
     );
+
+    it('refuses App text while shell commands are draining', async () => {
+      const running = deferred<void>();
+      mockSessionActions.sendShellCommand.mockReturnValueOnce(running.promise);
+      const { rerender } = renderApp();
+      await flush();
+      act(() => {
+        testState.streamingState = 'responding';
+        rerender();
+      });
+      await act(async () => {
+        testState.latestChatEditorProps!.onSubmit('!first');
+        testState.latestChatEditorProps!.onSubmit('!second');
+      });
+      act(() => {
+        testState.streamingState = 'idle';
+        rerender();
+      });
+      await flush();
+      expect(mockSessionActions.sendShellCommand).toHaveBeenCalledOnce();
+      await expect(
+        mcpAppMessageHost.current!.submit('App parameters', submission()),
+      ).rejects.toThrow();
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+      expect(rawEnqueuePrompt).not.toHaveBeenCalled();
+      await act(async () => {
+        running.resolve();
+      });
+      await flush();
+      expect(mockSessionActions.sendShellCommand).toHaveBeenNthCalledWith(
+        2,
+        'second',
+      );
+    });
 
     it('leaves dispatch without a receipt distinguishable from admission', async () => {
       mockSessionActions.sendPrompt.mockImplementationOnce(
@@ -42476,6 +42679,54 @@ describe('App session callbacks', () => {
     expect(onLanguageChange).not.toHaveBeenCalled();
   });
 
+  it('sends /language output for a model output language change from Settings', async () => {
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="change-output-language"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(
+      mockSessionActions.sendPrompt.mock.calls.some(
+        (c) => c[0] === '/language output English',
+      ),
+    ).toBe(true);
+  });
+
+  it('sends auto when the model output language is cleared in Settings', async () => {
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="change-output-language-auto"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(
+      mockSessionActions.sendPrompt.mock.calls.some(
+        (c) => c[0] === '/language output auto',
+      ),
+    ).toBe(true);
+  });
+
   it('resynchronizes the catalog when a settings prompt admission is ambiguous', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const lostResponse = deferred<void>();
@@ -45428,6 +45679,130 @@ describe('App prompt send failure retry', () => {
   });
 });
 
+describe('App PR watches page', () => {
+  it('offers the page and the watch state on task cards only when the daemon lists watches', async () => {
+    const { container, rerender } = renderApp();
+    await flush();
+    const openButton = () =>
+      container.querySelector<HTMLButtonElement>(
+        '[data-testid="open-pr-watches"]',
+      )!;
+    expect(openButton().dataset.hasPrWatches).toBe('false');
+    testState.prompt = '/schedule';
+    await clickSubmit(container);
+    await flush();
+    expect(testState.latestScheduledTasksProps?.autofixPrWatchesAvailable).toBe(
+      false,
+    );
+
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      features: ['autofix_pr_watches'],
+    };
+    rerender();
+    await flush();
+    expect(openButton().dataset.hasPrWatches).toBe('true');
+    expect(testState.latestScheduledTasksProps?.autofixPrWatchesAvailable).toBe(
+      true,
+    );
+    await act(async () => {
+      openButton().click();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="pr-watches-page"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="scheduled-tasks-page"]'),
+    ).toBeNull();
+    expect(
+      container
+        .querySelector('[data-testid="sidebar"]')
+        ?.getAttribute('data-active-page'),
+    ).toBe('prWatches');
+    expect(typeof testState.latestPrWatchesProps?.onRunPrompt).toBe('function');
+
+    // A daemon that stops listing watches leaves no page to show.
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      features: [],
+    };
+    rerender();
+    await flush();
+    expect(
+      container.querySelector('[data-testid="pr-watches-page"]'),
+    ).toBeNull();
+    // The view itself goes back to the chat, not only its page.
+    expect(
+      container
+        .querySelector('[data-testid="sidebar"]')
+        ?.getAttribute('data-active-page'),
+    ).not.toBe('prWatches');
+  });
+});
+
+describe('App PR watches from another context', () => {
+  it.each(['standalone', 'live'] as const)(
+    "restores a watch's session in its workspace from a %s conversation",
+    async (kind) => {
+      // One ordinary workspace; the current conversation is not in it.
+      mockWorkspace.capabilities = {
+        ...mockWorkspace.capabilities,
+        features: ['autofix_pr_watches'],
+        workspaces: [
+          {
+            id: 'primary',
+            cwd: '/tmp/project',
+            primary: true,
+            trusted: true,
+            kind: 'ordinary',
+          },
+        ],
+      };
+      mockConnection.sessionContext = { kind };
+      const { container } = renderApp();
+      await flush();
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="open-pr-watches"]')
+          ?.click();
+        await Promise.resolve();
+      });
+      await flush();
+      const props = testState.latestPrWatchesProps;
+      expect(props).not.toBeNull();
+      const workspaceTarget = expect.objectContaining({
+        sessionContext: { kind: 'workspace', cwd: '/tmp/project' },
+      });
+
+      await act(async () => {
+        props!.onOpenSession!('session-2', '/tmp/project');
+        await Promise.resolve();
+      });
+      expect(mockSessionActions.loadSession).toHaveBeenLastCalledWith(
+        'session-2',
+        workspaceTarget,
+      );
+
+      vi.useFakeTimers();
+      await act(async () => {
+        void props!.onRunPrompt!(
+          '/autofix-pr stop 12',
+          'session-3',
+          '/tmp/project',
+        ).catch(() => {});
+        await Promise.resolve();
+      });
+      expect(mockSessionActions.loadSession).toHaveBeenLastCalledWith(
+        'session-3',
+        workspaceTarget,
+      );
+      vi.clearAllTimers();
+    },
+  );
+});
+
 describe('App /goal command', () => {
   it('opens the Goals page for a bare /goal instead of sending a prompt', async () => {
     const { container } = renderApp();
@@ -46971,7 +47346,13 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
   // Opening the page with /schedule mounts the dialog and captures the handler.
   async function openRunHandler(
     container: HTMLElement,
-  ): Promise<(prompt: string, sessionId: string | null) => Promise<void>> {
+  ): Promise<
+    (
+      prompt: string,
+      sessionId: string | null,
+      workspaceCwd?: string,
+    ) => Promise<void>
+  > {
     mockConnection.goalState ??= {
       v: 2,
       activity: 'idle',
@@ -47120,6 +47501,31 @@ describe('App manual-run orchestration (scheduled tasks)', () => {
     expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-1', {
       workspaceCwd: undefined,
     });
+  });
+
+  it("restores a bound run's session in the workspace it is given", async () => {
+    // A watch or task of another workspace: restoring its session from this
+    // conversation's workspace would be refused.
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      workspaces: [
+        { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+        { id: 'other', cwd: '/other', primary: false, trusted: true },
+      ],
+    };
+    const { container } = renderApp();
+    await flush();
+    const run = await openRunHandler(container);
+    vi.useFakeTimers();
+    await act(async () => {
+      void run('/autofix-pr stop 12', 'session-2', '/other').catch(() => {});
+      await Promise.resolve();
+    });
+    expect(mockSessionActions.loadSession).toHaveBeenCalledWith(
+      'session-2',
+      expect.objectContaining({ workspaceCwd: '/other' }),
+    );
+    vi.clearAllTimers();
   });
 
   it('supersedes an older pending bound run with a newer one', async () => {
@@ -48811,6 +49217,48 @@ describe('approval mode allowlist', () => {
 });
 
 describe('Managed home integration', () => {
+  it.each([undefined, 'managed-target'])(
+    'passes the Managed Extensions target through Plugins (Session: %s)',
+    async (sessionId) => {
+      window.history.replaceState(
+        null,
+        '',
+        '/?managed=1' + (sessionId ? `&managedSession=${sessionId}` : ''),
+      );
+      const provider = managedProvider();
+      const { container } = renderApp({
+        managedAgentProvider: provider,
+        language: 'en',
+      });
+      await flush();
+      if (sessionId) {
+        const resolve = [
+          ...container.querySelectorAll<HTMLButtonElement>('button'),
+        ].find((button) => button.textContent === 'Resolve Managed workspace');
+        await act(async () => resolve!.click());
+        await flush();
+      }
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="open-plugins"]')!
+          .click(),
+      );
+      await flush();
+      const page = container.querySelector(
+        '[data-testid="inline-panel"] [data-testid="extensions-manager-page"]',
+      );
+      expect(page?.getAttribute('data-managed-provider')).toBe(
+        provider.storageKey,
+      );
+      expect(page?.getAttribute('data-managed-session')).toBe(
+        sessionId ?? null,
+      );
+      expect(page?.getAttribute('data-managed-workspace')).toBe(
+        sessionId ? 'resolved-workspace' : null,
+      );
+    },
+  );
+
   it('opens the Managed MCP manager from Plugins without falling back to daemon management', async () => {
     window.history.replaceState(null, '', '/?managed=1');
     const { container } = renderApp({
@@ -49227,16 +49675,15 @@ describe('Managed home integration', () => {
 
   function managedProvider(): ManagedAgentProvider {
     return {
-      kind: 'java',
       storageKey: 'managed-test',
       canCancel: true,
-      acceptsWorkspaceCwd: false,
       listSessions: vi.fn(),
       getSession: vi.fn(),
       getTranscript: vi.fn(),
       createSession: vi.fn(),
       submitPrompt: vi.fn(),
       cancel: vi.fn(),
+      queryCancelOperation: vi.fn(),
       async *subscribeEvents() {
         yield* [];
       },
@@ -49919,47 +50366,6 @@ describe('Managed home integration', () => {
     },
   );
 
-  it('consumes Manage Skills navigation intent before reopening from the URL', async () => {
-    window.history.replaceState(null, '', '/?managed=1');
-    const { container } = renderApp(
-      { managedAgentProvider: managedProvider(), language: 'en' },
-      undefined,
-      false,
-      true,
-    );
-    await flush();
-    await act(async () =>
-      container
-        .querySelector<HTMLButtonElement>(
-          '[data-testid="managed-manage-skills"]',
-        )!
-        .click(),
-    );
-    await flush();
-    const selected = () =>
-      container.querySelector(
-        '[data-testid="inline-panel"] [role="tab"][aria-selected="true"]',
-      )?.textContent;
-    expect(selected()).toBe('Skills');
-    await act(async () =>
-      container.querySelector('[data-testid="inline-panel"]')!.dispatchEvent(
-        new KeyboardEvent('keydown', {
-          key: 'Escape',
-          bubbles: true,
-          cancelable: true,
-        }),
-      ),
-    );
-    await flush();
-    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
-    await act(async () => {
-      window.history.pushState(null, '', '/plugins?managed=1');
-      window.dispatchEvent(new PopStateEvent('popstate'));
-    });
-    await flush();
-    expect(selected()).toBe('Extensions');
-  });
-
   it.each([false, true])(
     'keeps plugin entry tabs and focus independent (shadow DOM: %s)',
     async (shadowDom) => {
@@ -50001,8 +50407,12 @@ describe('Managed home integration', () => {
         await flush();
       };
 
+      await click(container.querySelector('[data-testid="open-plugins"]'));
+      expectSelectedTab('Extensions');
       await click(
-        container.querySelector('[data-testid="managed-manage-skills"]'),
+        Array.from(
+          tabRoot().querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+        ).find((tab) => tab.textContent === 'Skills') ?? null,
       );
       expectSelectedTab('Skills');
       await click(

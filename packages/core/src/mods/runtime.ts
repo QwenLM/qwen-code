@@ -12,7 +12,20 @@ import { pathToFileURL } from 'node:url';
 import { resolveBundleDir } from '../utils/bundlePaths.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type { AnyDeclarativeTool } from '../tools/tools.js';
-import { ModBudget, record, validateResult } from './dispatch.js';
+import {
+  ModBudget,
+  assertModDepth,
+  record,
+  validateResult,
+} from './dispatch.js';
+import {
+  ENGINE_NODE,
+  adjustRenderTree,
+  validateRenderTree,
+  type ModRenderElement,
+  type ModRenderInput,
+  type ModRenderSite,
+} from './render-tree.js';
 import type {
   ModToolCallInput,
   ModToolNext,
@@ -27,6 +40,9 @@ import {
   type ModLog,
   type ModReply,
   type ModRequest,
+  type ModSessionFacts,
+  type ModTurnComplete,
+  type ModTurnStart,
   type ModWorkerReply,
   type ModSource,
   type ModOptions,
@@ -36,6 +52,14 @@ import {
 type ModToolResolver = (
   name: string,
 ) => Promise<AnyDeclarativeTool | undefined>;
+
+/** What a host that draws offers its Mods. */
+export interface ModRenderHost {
+  /** The render sites the host draws. */
+  sites: readonly ModRenderSite[];
+  /** A plugin whose `ui.render` hooks may draw asked for a redraw. */
+  invalidate: (plugin: string) => void;
+}
 
 function workerEntry(): URL | string {
   if (import.meta.url.endsWith('.ts')) {
@@ -57,6 +81,16 @@ export class ModRuntime {
   private pending?: (reply: ModReply) => void;
   private commands: Array<ModCommand & { plugin: string }> = [];
   private tools = false;
+  private turns: { start: boolean; complete: string[] } = {
+    start: false,
+    complete: [],
+  };
+  private renders: string[] = [];
+  // Asked for during the load, before the host knows which plugins draw.
+  private early?: Set<string> = new Set();
+  // Refusal lines are said once per load and reason, adjustment lines once
+  // per load, site and kind.
+  private readonly noted = new Set<string>();
   private sequence = 0;
   private root?: {
     id: number;
@@ -83,8 +117,11 @@ export class ModRuntime {
 
   private constructor(
     private readonly log: (entry: ModLog, plugin: string) => void,
+    private readonly facts: () => ModSessionFacts,
     private readonly resolveTool?: ModToolResolver,
     private readonly surface: 'terminal' | null = null,
+    private readonly abortTurn?: (turnId: string) => void,
+    private readonly renderHost?: ModRenderHost,
   ) {
     this.worker = new Worker(workerEntry(), {
       stdout: true,
@@ -102,7 +139,14 @@ export class ModRuntime {
           this.tool?.operations.get(id)?.controller.abort();
       } else if (reply.type === 'check-result')
         this.tool?.checks.get(reply.id)?.(reply);
-      else if (reply.type === 'activity') {
+      else if (reply.type === 'turn-abort')
+        this.answerTurnAbort(reply, root.id);
+      else if (reply.type === 'invalidate') {
+        if (reply.event !== 'ui.render' || this.failure) return;
+        if (this.early) this.early.add(reply.plugin);
+        else if (this.renders.includes(reply.plugin))
+          this.renderHost?.invalidate(reply.plugin);
+      } else if (reply.type === 'activity') {
         if (
           reply.phase !== root.phase ||
           reply.revision <= root.revision ||
@@ -150,26 +194,64 @@ export class ModRuntime {
     signal: AbortSignal,
     resolveTool?: ModToolResolver,
     surface: 'terminal' | null = null,
+    version = 'unknown',
+    facts?: () => ModSessionFacts,
+    abortTurn?: (turnId: string) => void,
+    render?: ModRenderHost,
   ): Promise<ModRuntime> {
     if (
       plugins.length > 32 ||
       new Set(plugins.map((p) => p.id)).size !== plugins.length
     )
       throw new Error('Invalid Mod plugin group.');
+    const startedAt = Date.now();
     const runtime = new ModRuntime(
       log,
+      facts ??
+        (() => ({
+          id: '',
+          cwd,
+          root: cwd,
+          model: '',
+          turns: 0,
+          usage: {
+            startedAt,
+            context: { tokens: 0, window: 0 },
+            rateLimits: [],
+          },
+        })),
       plugins.some((plugin) => plugin.toolDialect === 'claude')
         ? resolveTool
         : undefined,
       surface,
+      abortTurn,
+      render,
     );
     try {
       const result = await runtime.request(
-        { type: 'load', plugins, cwd, surface },
+        {
+          type: 'load',
+          plugins,
+          cwd,
+          surface,
+          version,
+          sites: render?.sites ?? [],
+        },
         signal,
         60_000,
       );
-      if (!record(result) || typeof result['tools'] !== 'boolean')
+      const names = (value: unknown): value is string[] =>
+        Array.isArray(value) &&
+        value.every((name) => plugins.some((plugin) => plugin.name === name));
+      const turnComplete = record(result) ? result['turnComplete'] : undefined;
+      const renders = record(result) ? result['render'] : undefined;
+      if (
+        !record(result) ||
+        typeof result['tools'] !== 'boolean' ||
+        typeof result['turnStart'] !== 'boolean' ||
+        !names(turnComplete) ||
+        !names(renders)
+      )
         throw new Error('Invalid Mod declarations.');
       const commands = result['commands'];
       if (
@@ -189,6 +271,15 @@ export class ModRuntime {
         throw new Error('Invalid Mod command declarations.');
       runtime.commands = commands as Array<ModCommand & { plugin: string }>;
       runtime.tools = result['tools'];
+      runtime.turns = {
+        start: result['turnStart'],
+        complete: turnComplete,
+      };
+      runtime.renders = renders;
+      const early = runtime.early!;
+      runtime.early = undefined;
+      for (const plugin of early)
+        if (renders.includes(plugin)) render?.invalidate(plugin);
       return runtime;
     } catch (error) {
       await runtime.dispose();
@@ -204,6 +295,54 @@ export class ModRuntime {
 
   get hasToolHooks(): boolean {
     return this.tools;
+  }
+
+  /** Whether `turn.start` has hooks, and the plugins `turn.complete` reaches. */
+  get turnHooks(): {
+    readonly start: boolean;
+    readonly complete: readonly string[];
+  } {
+    return this.turns;
+  }
+
+  /** The plugins whose `ui.render` hooks may draw where this host draws. */
+  get renderHooks(): readonly string[] {
+    return this.renders;
+  }
+
+  /**
+   * Raises `ui.render` for a site and judges the tree the chain settles on.
+   * A tree that fails draws the engine's own, nothing at the band; `notes`
+   * holds what the debug log is told, each refusal and kind of adjustment
+   * once per load.
+   */
+  async render(
+    input: ModRenderInput,
+    signal: AbortSignal,
+  ): Promise<{ tree: ModRenderElement; notes: string[] }> {
+    const settled = await this.request({ type: 'render', input }, signal);
+    const owner = this.renders.length === 1 ? this.renders[0] : 'hooks';
+    const notes: string[] = [];
+    const note = (line: string, key = line) => {
+      if (this.noted.has(key)) return;
+      this.noted.add(key);
+      notes.push(`${owner}: ${line}`);
+    };
+    try {
+      validateRenderTree(settled);
+    } catch (error) {
+      note(
+        `ui.render (${input.component}) refused: ${error instanceof Error ? error.message : String(error)}; nothing was drawn`,
+      );
+      return { tree: ENGINE_NODE, notes };
+    }
+    const adjusted = adjustRenderTree(
+      settled as ModRenderElement,
+      input.component,
+    );
+    for (const { key, text } of adjusted.notes)
+      note(text, `${input.component}\0${key}`);
+    return { tree: adjusted.tree, notes };
   }
 
   private async builtinTool(name: string): Promise<string | undefined> {
@@ -370,8 +509,10 @@ export class ModRuntime {
 
   private post(request: ModRequest, root: number): void {
     if (this.root?.id !== root) return;
-    if (Buffer.byteLength(JSON.stringify(request)) > MOD_MAX_BYTES + 8192)
+    const json = JSON.stringify(request);
+    if (Buffer.byteLength(json) > MOD_MAX_BYTES + 8192)
       throw new Error('Mod host message is too large.');
+    assertModDepth(json, 'Mod host message');
     this.worker.postMessage({ ...request, root, phase: this.root.phase });
   }
 
@@ -404,6 +545,43 @@ export class ModRuntime {
       throw new Error('Invalid Mod command result.');
     }
     return 'text' in result ? (result.text as string) : '';
+  }
+
+  async startTurn(input: ModTurnStart, signal: AbortSignal): Promise<void> {
+    validateResult(
+      'turn.start',
+      await this.request({ type: 'turn-start', input }, signal),
+    );
+  }
+
+  async completeTurn(
+    input: ModTurnComplete,
+    signal: AbortSignal,
+  ): Promise<string> {
+    const result = await this.request({ type: 'turn-complete', input }, signal);
+    validateResult('turn.complete', result);
+    return (result as { text: string }).text;
+  }
+
+  // The host owns the running turn, so it judges the id and ends the turn.
+  private answerTurnAbort(
+    reply: Extract<ModReply, { type: 'turn-abort' }>,
+    root: number,
+  ): void {
+    let error: string | undefined;
+    try {
+      if (!this.abortTurn)
+        throw new Error(
+          `$.turn.abort: no turn is running (asked for ${reply.turnId})`,
+        );
+      this.abortTurn(reply.turnId);
+    } catch (caught) {
+      error = (caught instanceof Error ? caught.message : String(caught)).slice(
+        0,
+        4000,
+      );
+    }
+    this.post({ type: 'turn-abort-result', id: reply.id, error }, root);
   }
 
   async end(
@@ -442,11 +620,14 @@ export class ModRuntime {
     signal.throwIfAborted();
     if (this.failure) throw this.failure;
     if (this.pending) throw new Error('A Mod dispatch is already running.');
+    const message = { ...request, facts: this.facts() };
+    const json = JSON.stringify(message);
     if (
-      Buffer.byteLength(JSON.stringify(request)) >
+      Buffer.byteLength(json) >
       (request.type === 'load' ? 32 : 1) * MOD_MAX_BYTES + 8192
     )
       throw new Error('Mod request is too large.');
+    assertModDepth(json, 'Mod request');
     let timer: ReturnType<typeof setTimeout> | undefined;
     let cancelTimer: ReturnType<typeof setTimeout> | undefined;
     let aborted = false;
@@ -507,7 +688,7 @@ export class ModRuntime {
         signal.addEventListener('abort', onAbort, { once: true });
         root.refresh();
         this.worker.postMessage({
-          ...request,
+          ...message,
           root: root.id,
           phase: root.phase,
         });

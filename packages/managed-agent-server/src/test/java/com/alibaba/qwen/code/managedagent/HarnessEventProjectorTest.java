@@ -17,6 +17,35 @@ class HarnessEventProjectorTest {
             new HarnessEventProjector();
 
     @Test
+    void forwardsOnlyBoundedCommittedTodoSnapshots() {
+        String snapshot = "[{\"id\":\"a\",\"content\":\"first\",\"status\":\"pending\"}]";
+        Map<String, Object> update = Map.of("sessionUpdate", "tool_call_update",
+                "toolCallId", "call-1", "name", "todo_write", "status", "completed",
+                "todoSnapshot", snapshot, "rawOutput", "must-not-leak");
+        ProjectedEvent committed = projector.project(new SourceEvent(1L,
+                "managed_journal_event", Map.of("update", update), "prompt", Map.of()), "turn-1");
+        assertThat(committed.data()).containsEntry("todoSnapshot", snapshot)
+                .doesNotContainKey("rawOutput");
+        ProjectedEvent uncommitted = projector.project(new SourceEvent(2L,
+                "session_update", Map.of("update", update), "prompt", Map.of()), "turn-1");
+        assertThat(uncommitted.data()).doesNotContainKey("todoSnapshot");
+        for (Map<String, Object> refused : java.util.List.of(
+                Map.<String, Object>of("name", "read_file", "status", "completed",
+                        "todoSnapshot", snapshot),
+                Map.<String, Object>of("name", "todo_write", "status", "failed",
+                        "todoSnapshot", snapshot),
+                Map.<String, Object>of("name", "todo_write", "status", "completed",
+                        "todoSnapshot", "x".repeat(16 * 1024 + 1)))) {
+            Map<String, Object> candidate = new java.util.LinkedHashMap<>(refused);
+            candidate.put("sessionUpdate", "tool_call_update");
+            candidate.put("toolCallId", "call-1");
+            ProjectedEvent event = projector.project(new SourceEvent(3L,
+                    "managed_journal_event", Map.of("update", candidate), "prompt", Map.of()), "turn-1");
+            assertThat(event.data()).doesNotContainKey("todoSnapshot");
+        }
+    }
+
+    @Test
     void projectsTextWithoutLeakingOtherUpdateFields() {
         ProjectedEvent event = projector.project(new SourceEvent(1L,
                 "session_update", Map.of("update", Map.of(

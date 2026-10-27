@@ -241,7 +241,7 @@ describe('Hosted real-process gates', () => {
       step: 'Hosted process suite',
       after: /^Run tests and generate reports$/,
       condition:
-        "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' }}",
+        "${{ !cancelled() && steps.install.outcome == 'success' && needs.classify_pr.outputs.skip_ci != 'true' }}",
       run: windowsRun,
       minutes: 10,
     },
@@ -259,6 +259,15 @@ describe('Hosted real-process gates', () => {
       expect(steps[index]['continue-on-error']).toBeUndefined();
     },
   );
+
+  it('gates the Windows Hosted suite on a successful install', () => {
+    const steps = ci.jobs.test_windows.steps;
+    // An unknown step id reads as '' and silently disables the condition
+    // above, so the suite would never run again.
+    expect(steps.find((step) => step.name === 'Install dependencies').id).toBe(
+      'install',
+    );
+  });
 
   it('keeps Hosted MySQL separate from the non-Hosted MySQL slice and fails on missing tests', () => {
     const job = java.jobs['hosted-harness-mysql'];
@@ -571,9 +580,9 @@ describe('Hosted real-process gates', () => {
   });
 
   it.each([
-    // Step ceilings today (198 + 20 + 50 + 20): Verify, the Broker fault
+    // Step ceilings today (201 + 20 + 50 + 20): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
-    ['hosted-harness-mysql', 288, 301],
+    ['hosted-harness-mysql', 291, 304],
     // Twenty failover arms at 10 each.
     ['hosted-failover-e2e', 200, 215],
   ])(
@@ -825,12 +834,14 @@ describe('Hosted real-process gates', () => {
       // (2x its measured 6.5 s), moving the fork to 11236 and leaving the step at
       // 198 minutes; the FG12e Runtime connection replacement cell adds 28 s
       // (2x its measured 13.8 s), moving the fork to 11264 and leaving the step
-      // at 198 minutes):
+      // at 198 minutes). The pool fixture provisionally adds 180 s (its
+      // 120 s method ceiling plus 60 s for process/context cleanup), moving
+      // the fork to 11444 and the step to 201 minutes until CI measures it:
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(11264);
+        expect(forkSeconds).toBe(11444);
       }
     },
   );
@@ -926,13 +937,15 @@ describe('Hosted real-process gates', () => {
   // measured 12.3s), so it becomes 10612s; the cancel-isolation cell adds 11s (2x its measured
   // 5.1s), so it becomes 10623s; the queue-one cell adds 13s (2x its measured
   // 6.5s), so it becomes 10636s; the FG12e Runtime connection replacement cell
-  // adds 28s (2x its measured 13.8s), so it becomes 10664s. The
+  // adds 28s (2x its measured 13.8s), so it becomes 10664s. The pool fixture
+  // provisionally reserves 180s (its 120s method ceiling plus 60s for
+  // process/context cleanup), so it becomes 10844s until CI measures it. The
   // largest
   // ceiling (600s) plus
   // that healthy sum still fits the fork. A larger ceiling lets failsafe
   // kill the fork mid-run, and the classes left unrun never report, failing
   // the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 10664;
+  const hostedForkHealthySeconds = 10844;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/pom.xml')
@@ -1001,6 +1014,7 @@ describe('Hosted real-process gates', () => {
       'HostedEventStreamLivenessIT',
       'HostedExtensionsIT',
       'HostedHarnessMySqlIT',
+      'HostedHarnessPoolMySqlIT',
       'HostedHookCancelFaultGatesIT',
       'HostedHookFaultGatesIT',
       'HostedHookMessageDisplayReloadIT',

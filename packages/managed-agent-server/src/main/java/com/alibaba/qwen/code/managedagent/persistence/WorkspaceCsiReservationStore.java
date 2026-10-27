@@ -67,7 +67,7 @@ public final class WorkspaceCsiReservationStore {
         }
         transaction.executeWithoutResult(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, registration.tenantId());
-            if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE alias_key = ? AND storage_kind = 'LOCAL'",
+            if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE alias_key = ? AND storage_kind IN ('LOCAL', 'EXTERNAL')",
                     Long.class, registration.aliasKey()) != 0) {
                 throw unavailable();
             }

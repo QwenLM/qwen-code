@@ -29,6 +29,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, render, screen } from '@testing-library/react';
 import { OpenTuiDialogMount } from './opentui-dialog-mount.js';
+import { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
+import { AppEvent } from '../../utils/events.js';
 import {
   addWorkspaceDirectory,
   applyModelSelection,
@@ -199,12 +201,14 @@ vi.mock('./dialogs-stats-skills.js', () => ({
 vi.mock('./dialogs-hooks.js', () => ({
   OpenTuiHooksDialog: mocks.stub('hooks'),
 }));
+vi.mock('./session-rewind.js', () => ({
+  OpentuiRewindSelector: mocks.stub('rewind'),
+}));
 vi.mock('./dialogs-misc.js', () => ({
   OpenTuiDeleteDialog: mocks.stub('delete'),
   OpenTuiDiffDialog: mocks.stub('diff'),
   OpenTuiEditorDialog: mocks.stub('editor'),
   OpenTuiResumeDialog: mocks.stub('resume'),
-  OpenTuiRewindDialog: mocks.stub('rewind'),
   OpenTuiSubagentCreateDialog: mocks.stub('subagent_create'),
   OpenTuiSubagentListDialog: mocks.stub('subagent_list'),
   OpenTuiTrustDialog: mocks.stub('trust'),
@@ -213,7 +217,11 @@ vi.mock('./dialogs-misc.js', () => ({
 const mockGetHookSystem = vi.fn<Config['getHookSystem']>();
 const recordSlashCommand = vi.fn();
 const CONFIG = {
+  getTargetDir: () => '/owned/workspace',
+  getSessionId: () => 'owned-session',
+  getExtensionManager: () => undefined,
   getModel: () => 'fake-model',
+  getFileCheckpointingEnabled: () => true,
   getHookSystem: mockGetHookSystem,
   getChatRecordingService: () => ({ recordSlashCommand }),
 } as unknown as Config;
@@ -757,4 +765,176 @@ describe('OpenTuiDialogMount routing', () => {
     const bad = { dialog: 'nope' } as unknown as OpenTuiDialogRequest;
     expect(() => mount(bad)).toThrow(/Unhandled OpenTUI dialog request/);
   });
+});
+
+describe('extension catalog shared refresh lifecycle', () => {
+  function heldRefresh() {
+    let resolve!: () => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<void>((yes, no) => {
+      resolve = yes;
+      reject = no;
+    });
+    return { promise, resolve, reject };
+  }
+
+  function refreshOwnerHarness() {
+    const state = new ExtensionRefreshState();
+    const needed = vi.fn();
+    const content = vi.fn();
+    state.on(AppEvent.ExtensionRefreshNeeded, needed);
+    state.on(AppEvent.ExtensionContentChanged, content);
+    let cwd = '/owned/refresh-a';
+    const refreshCache = vi.fn<() => Promise<void>>();
+    const refreshTools = vi.fn(async () => {});
+    const manager = { refreshCache, refreshTools };
+    const config = {
+      ...CONFIG,
+      getTargetDir: () => cwd,
+      getExtensionManager: () => manager,
+      isSafeMode: () => false,
+      getActiveExtensions: () => [],
+    } as unknown as Config;
+    const reloadCommands = vi.fn(async () => {});
+    const host = { ...HOST, reloadCommands } as unknown as OpenTuiAppHost;
+    const request: OpenTuiDialogRequest = { dialog: 'extensions_manage' };
+    const element = () => (
+      <OpenTuiDialogMount
+        request={request}
+        host={host}
+        config={config}
+        settings={SETTINGS}
+        commands={[]}
+        extensionRefreshState={state}
+        onClose={() => {}}
+        notify={() => {}}
+        availableTerminalHeight={35}
+      />
+    );
+    const view = render(element());
+    const reload = () => {
+      const catalog = mocks.state.dialogProps['extensions_manage'][
+        'catalog'
+      ] as {
+        reload: () => Promise<void>;
+        isCurrent: () => boolean;
+      };
+      expect(catalog.isCurrent()).toBe(true);
+      return catalog.reload;
+    };
+    const replace = (kind: 'unmount' | 'cwd') => {
+      if (kind === 'unmount') {
+        view.unmount();
+        return render(element());
+      }
+      cwd = '/owned/refresh-b';
+      view.rerender(element());
+      return view;
+    };
+    return {
+      state,
+      needed,
+      content,
+      refreshCache,
+      refreshTools,
+      reloadCommands,
+      view,
+      reload,
+      replace,
+      invalidate: (kind: 'unmount' | 'cwd') => {
+        if (kind === 'unmount') view.unmount();
+        else {
+          cwd = '/owned/refresh-b';
+          view.rerender(element());
+        }
+      },
+    };
+  }
+
+  it.each(['unmount', 'cwd'] as const)(
+    'settles shared refresh after the only reload owner is invalidated by %s',
+    async (kind) => {
+      const h = refreshOwnerHarness();
+      const gate = heldRefresh();
+      h.refreshCache.mockImplementationOnce(() => gate.promise);
+      let settled!: Promise<unknown>;
+      act(() => {
+        settled = h
+          .reload()()
+          .then(
+            () => null,
+            (error: unknown) => error,
+          );
+      });
+      expect(h.refreshCache).toHaveBeenCalledTimes(1);
+      expect(h.state.isReloadInProgress()).toBe(true);
+      act(() => h.invalidate(kind));
+      await act(async () => {
+        gate.resolve();
+        await settled;
+      });
+      expect(await settled).toBeInstanceOf(Error);
+      expect(h.reloadCommands).not.toHaveBeenCalled();
+      expect(h.state.isReloadInProgress()).toBe(false);
+      expect(h.state.needsExtensionRefresh()).toBe(true);
+      expect(h.needed).toHaveBeenCalled();
+      h.state.clearExtensionsChanged();
+      expect(h.state.markExtensionContentChanged('later actual content')).toBe(
+        true,
+      );
+      expect(h.content).toHaveBeenCalledWith('later actual content');
+    },
+  );
+
+  it.each(['unmount', 'cwd'] as const)(
+    'does not let old owner late failure settle the successor reload after %s',
+    async (kind) => {
+      const h = refreshOwnerHarness();
+      const a = heldRefresh();
+      const b = heldRefresh();
+      h.refreshCache
+        .mockImplementationOnce(() => a.promise)
+        .mockImplementationOnce(() => b.promise);
+      let old!: Promise<unknown>;
+      act(() => {
+        old = h
+          .reload()()
+          .then(
+            () => null,
+            (error: unknown) => error,
+          );
+      });
+      expect(h.state.isReloadInProgress()).toBe(true);
+      let successor!: ReturnType<typeof render>;
+      act(() => {
+        successor = h.replace(kind);
+      });
+      let next!: Promise<void>;
+      act(() => {
+        next = h.reload()();
+      });
+      expect(h.refreshCache).toHaveBeenCalledTimes(2);
+      expect(h.state.isReloadInProgress()).toBe(true);
+      const neededBeforeOldFailure = h.needed.mock.calls.length;
+      await act(async () => {
+        a.reject(new Error('old refresh failure'));
+        await old;
+      });
+      expect(await old).toBeInstanceOf(Error);
+      expect(h.state.isReloadInProgress()).toBe(true);
+      expect(h.needed).toHaveBeenCalledTimes(neededBeforeOldFailure);
+      expect(h.reloadCommands).not.toHaveBeenCalled();
+      await act(async () => {
+        b.resolve();
+        await next;
+      });
+      expect(h.state.isReloadInProgress()).toBe(false);
+      expect(h.reloadCommands).toHaveBeenCalledTimes(1);
+      expect(h.state.needsExtensionRefresh()).toBe(false);
+      expect(h.state.markExtensionsChanged('new owner change')).toBe(true);
+      expect(h.needed).toHaveBeenCalledTimes(neededBeforeOldFailure + 1);
+      expect(h.needed).toHaveBeenLastCalledWith('new owner change');
+      successor.unmount();
+    },
+  );
 });

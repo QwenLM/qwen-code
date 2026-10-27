@@ -1,13 +1,11 @@
 package com.alibaba.qwen.code.managedagent.api;
 
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
-import com.alibaba.qwen.code.managedagent.model.ApiModels.ChangeCwdRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.CompressSessionRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.CreateSessionRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicCommandOperation;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicContextCompressionOperation;
-import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicCwdOperation;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicItemList;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicList;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicSession;
@@ -96,6 +94,9 @@ public class PublicAgentController {
             throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "unsupported_feature",
                     "Session Skills require a bound Workspace.");
         }
+        if (selection == null && request.extensionPins() != null) {
+            throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "unsupported_feature", "Extension packages require a bound Workspace.");
+        }
         CommandAdmission admission = selection == null
                 ? service.createSession(tenant.tenantId(), tenant.actorId(),
                         idempotencyKey, request.agentId(),
@@ -104,7 +105,7 @@ public class PublicAgentController {
                 : service.createWorkspaceSession(tenant.tenantId(),
                         tenant.requireActorId(), idempotencyKey,
                         request.agentId(), request.agentRevision(), null,
-                        request.metadata(), request.input(), selection, null, null, request.skills());
+                        request.metadata(), request.input(), selection, null, null, request.skills(), null, request.extensionPins());
         PublicSession session = service.getPublicSession(tenant.tenantId(),
                 tenant.actorId(), admission.sessionId());
         return ResponseEntity.status(HttpStatus.ACCEPTED)
@@ -118,10 +119,9 @@ public class PublicAgentController {
             @RequestParam(required = false) String cursor,
             @RequestParam(defaultValue = "20") int limit,
             @RequestParam(name = "archive_state", required = false) String archiveState,
-            @RequestParam(name = "include_archived", required = false) Boolean includeArchived,
             @RequestParam(name = "title_query", required = false) String titleQuery) {
         return service.listPublicSessions(tenant.tenantId(), tenant.actorId(),
-                cursor, limit, archiveState, includeArchived, titleQuery);
+                cursor, limit, archiveState, titleQuery);
     }
 
     @GetMapping("/{sessionId}")
@@ -204,17 +204,6 @@ public class PublicAgentController {
                 tenant.actorId(), sessionId, idempotencyKey, request.expectedCompactionRevision()));
     }
 
-    @PostMapping("/{sessionId}/cwd")
-    public ResponseEntity<PublicCwdOperation> changeCwd(TenantContext tenant,
-            @PathVariable String sessionId,
-            @RequestHeader("Idempotency-Key") String idempotencyKey,
-            @Valid @RequestBody ChangeCwdRequest request) {
-        return ResponseEntity.accepted().body(lifecycle.admitPublicCwdChange(
-                tenant.tenantId(), tenant.actorId(), sessionId,
-                idempotencyKey, request.cwdRelative(),
-                request.expectedContextRevision()));
-    }
-
     @PostMapping("/{sessionId}/events")
     public ResponseEntity<CommandAdmission> postEvent(TenantContext tenant,
             @PathVariable String sessionId,
@@ -223,8 +212,7 @@ public class PublicAgentController {
         CommandAdmission admission;
         if ("agent.session.input.message".equals(request.type())) {
             admission = service.submitTurn(tenant.tenantId(), tenant.actorId(),
-                    idempotencyKey, sessionId, request.input(),
-                    request.admissionProfile());
+                    idempotencyKey, sessionId, request.input());
         } else if ("agent.session.cancel".equals(request.type())) {
             if (request.turnId() == null || request.turnId().isBlank()) {
                 throw new ManagedAgentException(HttpStatus.BAD_REQUEST,
@@ -232,8 +220,7 @@ public class PublicAgentController {
                         "Cancellation requires turn_id.");
             }
             admission = service.cancelTurn(tenant.tenantId(), tenant.actorId(),
-                    idempotencyKey, sessionId, request.turnId(),
-                    request.admissionProfile());
+                    idempotencyKey, sessionId, request.turnId());
         } else {
             throw new ManagedAgentException(HttpStatus.BAD_REQUEST,
                     "unsupported_event",
