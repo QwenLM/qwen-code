@@ -2852,6 +2852,24 @@ it -C ${cmdPath(outsideRepo)} reset --hard`,
     },
   );
 
+  it.runIf(bashSemanticsLane).each([
+    { command: `bash <<'EOF'\necho hi\nEOF`, allowed: false },
+    { command: `cat <<'EOF' | bash\necho hi\nEOF`, allowed: false },
+    { command: `cat <<'EOF'\nsome body\nEOF`, allowed: true },
+  ])(
+    'applies the heredoc receiver gate with permissionChecked=true %#',
+    async ({ command, allowed }) => {
+      const guard = createDaemonToolGuard();
+
+      await expect(
+        guard({ ...request(command), permissionChecked: true }),
+      ).resolves.toMatchObject({
+        allowed,
+        ...(allowed ? {} : { reason: expect.stringContaining('heredoc') }),
+      });
+    },
+  );
+
   it.runIf(bashSemanticsLane)(
     'still allows heredocs whose receiver consumes data',
     async () => {

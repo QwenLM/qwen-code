@@ -2470,6 +2470,7 @@ function scanHeredocLine(line: string): HeredocLineScan {
 // over-collecting only ever denies.
 function collectHeredocDefinedNames(command: string): Set<string> {
   const names = new Set<string>();
+  if (!command.includes('<<')) return names;
   for (const match of command.matchAll(
     /\bfunction\s+([A-Za-z_][A-Za-z0-9_]*)/g,
   )) {
@@ -3904,6 +3905,12 @@ async function evaluateBuiltInGuard(
     request.permissionChecked === true &&
     canonicalEffectiveCwd === sessionCwd
   ) {
+    // Permission admission cannot make a program delivered over stdin visible.
+    const windowsNative =
+      process.platform === 'win32' && getShellConfiguration().shell !== 'bash';
+    if (!windowsNative && stripHeredocBodies(command).kind !== 'ok') {
+      return { allowed: false, reason: INTERPRETER_HEREDOC_DENIAL };
+    }
     return { allowed: true };
   }
 
