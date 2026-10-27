@@ -41,6 +41,7 @@ import {
   FolderKanbanIcon,
   ActivityIcon,
   CalendarClockIcon,
+  GitPullRequestIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   Columns2Icon,
@@ -109,6 +110,8 @@ import {
 import { useFanoutOrigins } from '../../config/host-fanout';
 import { WorkspaceRemovalDialog } from '../workspaces/WorkspaceRemovalDialog';
 import { WorkspaceSection, isAbsolutePath } from './WorkspaceSection';
+import type { SessionTreeRenderOptions } from './sessionTree';
+import { useSessionTree } from './useSessionTree';
 import { WorkspaceMenu, type WorkspaceMenuActions } from './WorkspaceMenu';
 import {
   moveWorkspace,
@@ -290,6 +293,7 @@ export type WebShellSidebarPrimaryNavItem =
   | 'channels'
   | 'live'
   | 'scheduledTasks'
+  | 'prWatches'
   | 'workflows'
   | 'goals'
   | 'managed';
@@ -338,6 +342,7 @@ export const DEFAULT_PRIMARY_NAV_ITEMS: readonly WebShellSidebarPrimaryNavItem[]
     'channels',
     'live',
     'scheduledTasks',
+    'prWatches',
     'workflows',
     'goals',
     'managed',
@@ -457,6 +462,9 @@ interface WebShellSidebarProps {
   onOpenManagedSessions?: () => void;
   onOpenDaemonStatus: () => void;
   onOpenScheduledTasks: () => void;
+  /** Opens the PR watches page; absent when the daemon does not list
+   * `/autofix-pr` watches (`autofix_pr_watches`). */
+  onOpenPrWatches?: () => void;
   onOpenWorkflows: () => void;
   onOpenGoals: () => void;
   onOpenSessions: () => void;
@@ -1105,6 +1113,7 @@ export function WebShellSidebar({
   onOpenManagedSessions,
   onOpenDaemonStatus,
   onOpenScheduledTasks,
+  onOpenPrWatches,
   onOpenWorkflows,
   onOpenGoals,
   onOpenSessions,
@@ -1254,6 +1263,7 @@ export function WebShellSidebar({
         primaryNavItems.has('channels') ||
         (showLive && primaryNavItems.has('live') && Boolean(onOpenLive)) ||
         primaryNavItems.has('scheduledTasks') ||
+        (primaryNavItems.has('prWatches') && Boolean(onOpenPrWatches)) ||
         primaryNavItems.has('workflows') ||
         primaryNavItems.has('goals'))) ||
     (primaryNavItems.has('managed') && Boolean(onOpenManagedSessions)) ||
@@ -4368,6 +4378,11 @@ export function WebShellSidebar({
     selectedSessionSource,
   ]);
 
+  const sessionTree = useSessionTree(
+    primaryWorkspaceExpansionId,
+    searchedSessions,
+    searchQuery.trim().length > 0,
+  );
   const channelCatalogLoaded = channelCatalogData !== undefined;
   const channelSessionSections = useMemo(
     () =>
@@ -4747,6 +4762,7 @@ export function WebShellSidebar({
         renameFormDisabled?: boolean;
         searchSnippet?: string | undefined;
         standalone?: StandaloneSessionRowAdapter;
+        tree?: SessionTreeRenderOptions;
         recent?: {
           isCurrent: boolean;
           isStandalone: boolean;
@@ -4762,6 +4778,7 @@ export function WebShellSidebar({
           ? contentSearchHits.get(session.sessionId)?.snippet
           : undefined,
         standalone,
+        tree,
         recent,
       } = options;
       const sessionIdentity = getIdentityForSession(session);
@@ -5109,11 +5126,15 @@ export function WebShellSidebar({
         <div
           className={cx(
             styles.sessionRow,
+            tree &&
+              (tree.childCount > 0 || tree.depth > 0) &&
+              styles.sessionTreeRow,
             isSelected && styles.currentSession,
             session.isPinned && styles.pinnedSession,
             running && !backgroundRunning && styles.runningSession,
             busy && styles.busySession,
           )}
+          data-session-tree-depth={tree ? tree.depth : undefined}
           onMouseEnter={(event) =>
             measureSessionTitleScroll(event.currentTarget)
           }
@@ -5133,6 +5154,34 @@ export function WebShellSidebar({
             }
           }}
         >
+          {tree && tree.childCount > 0 && (
+            <button
+              type="button"
+              className={styles.sessionTreeToggle}
+              aria-expanded={tree.expanded}
+              aria-label={t('sidebar.subSessions', { count: tree.childCount })}
+              title={t('sidebar.subSessions', { count: tree.childCount })}
+              onClick={(event) => {
+                event.stopPropagation();
+                tree.onToggle();
+              }}
+              // Enter/Space on this button must not reach the row's own
+              // keydown, which opens the session: one keypress would both
+              // toggle the tree and navigate away.
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.stopPropagation();
+                }
+              }}
+              onDoubleClick={(event) => event.stopPropagation()}
+            >
+              {tree.expanded ? (
+                <ChevronDownIcon size={12} />
+              ) : (
+                <ChevronRightIcon size={12} />
+              )}
+            </button>
+          )}
           <span className={styles.sessionStatusSlot}>
             {liveStarting ? (
               <LoaderCircleIcon
@@ -5523,28 +5572,51 @@ export function WebShellSidebar({
     ],
   );
 
+  const buildSessionTreeRows = useCallback(
+    (treeSessions: readonly DaemonSessionSummary[]) => {
+      const rows = sessionTree.buildRows(treeSessions);
+      return {
+        rows,
+        nodes: rows.map((row) => (
+          <Fragment key={row.session.sessionId}>
+            {renderSessionRow(row.session, {
+              tree: sessionTree.renderOptions(row),
+            })}
+          </Fragment>
+        )),
+      };
+    },
+    [renderSessionRow, sessionTree],
+  );
+
   const body = useMemo(() => {
     const renderFlatSessions = () => {
       const showAll =
         editingSessionIdentity !== null ||
         showAllProjectSessions ||
         Boolean(searchQuery.trim());
-      const displayedSessions = showAll
-        ? filteredSessions
-        : filteredSessions.slice(0, SIDEBAR_SESSION_PREVIEW_LIMIT);
+      const treeRows = sessionTree.buildRows(filteredSessions);
+      const displayedRows = showAll
+        ? treeRows
+        : treeRows.slice(0, SIDEBAR_SESSION_PREVIEW_LIMIT);
       return (
         <>
-          {displayedSessions.map((session) => renderSessionRow(session))}
-          {!showAll &&
-            filteredSessions.length > SIDEBAR_SESSION_PREVIEW_LIMIT && (
-              <button
-                type="button"
-                className={styles.showAllSessions}
-                onClick={() => setShowAllProjectSessions(true)}
-              >
-                {t('sidebar.showAllSessions')}
-              </button>
-            )}
+          {displayedRows.map((row) => (
+            <Fragment key={row.session.sessionId}>
+              {renderSessionRow(row.session, {
+                tree: sessionTree.renderOptions(row),
+              })}
+            </Fragment>
+          ))}
+          {!showAll && treeRows.length > SIDEBAR_SESSION_PREVIEW_LIMIT && (
+            <button
+              type="button"
+              className={styles.showAllSessions}
+              onClick={() => setShowAllProjectSessions(true)}
+            >
+              {t('sidebar.showAllSessions')}
+            </button>
+          )}
         </>
       );
     };
@@ -5575,19 +5647,24 @@ export function WebShellSidebar({
       return <div className={styles.notice}>{t('sidebar.noSessions')}</div>;
     }
     if (channelSessionSections) {
-      return channelSessionSections.map((section) => (
-        <SessionGroupSection
-          key={section.id}
-          id={section.id}
-          label={section.label}
-          count={section.sessions.length}
-          limitSessions={editingSessionIdentity === null && !searchQuery.trim()}
-          expanded={!collapsedSessionSectionIds.has(section.id)}
-          onToggle={() => toggleSessionSection(section.id)}
-        >
-          {section.sessions.map((session) => renderSessionRow(session))}
-        </SessionGroupSection>
-      ));
+      return channelSessionSections.map((section) => {
+        const tree = buildSessionTreeRows(section.sessions);
+        return (
+          <SessionGroupSection
+            key={section.id}
+            id={section.id}
+            label={section.label}
+            count={tree.rows.length}
+            limitSessions={
+              editingSessionIdentity === null && !searchQuery.trim()
+            }
+            expanded={!collapsedSessionSectionIds.has(section.id)}
+            onToggle={() => toggleSessionSection(section.id)}
+          >
+            {tree.nodes}
+          </SessionGroupSection>
+        );
+      });
     }
     if (selectedSessionSource === 'channel') {
       return renderFlatSessions();
@@ -5599,12 +5676,13 @@ export function WebShellSidebar({
     return sessionSections.map((section) => {
       const expanded = !collapsedSessionSectionIds.has(section.id);
       const group = section.group;
+      const tree = buildSessionTreeRows(section.sessions);
       return (
         <SessionGroupSection
           key={section.id}
           id={section.id}
           label={section.label}
-          count={section.sessions.length}
+          count={tree.rows.length}
           color={section.color}
           icon={
             section.kind === 'scheduled-task' ? (
@@ -5628,25 +5706,28 @@ export function WebShellSidebar({
           deleteLabel={t('sidebar.groupDelete')}
           actionsDisabled={groupBusy}
         >
-          {section.sessions.map((session) =>
-            renderSessionRow(session, {
-              // Pinned members also render in the Pinned section; while that
-              // section is expanded its row hosts the rename form, so this
-              // duplicate row must not mount a second autofocused input.
-              // Gate on the Pinned section actually carrying the row —
-              // content-search ghosts never appear there, so without the
-              // membership check no row would host the form at all and
-              // rename would be silently inoperable for them.
-              renameFormDisabled:
-                Boolean(session.isPinned) &&
-                pinnedExpanded &&
-                pinnedSessions.some(
-                  (candidate) =>
-                    getIdentityForSession(candidate) ===
-                    getIdentityForSession(session),
-                ),
-            }),
-          )}
+          {tree.rows.map((row) => (
+            <Fragment key={row.session.sessionId}>
+              {renderSessionRow(row.session, {
+                tree: sessionTree.renderOptions(row),
+                // Pinned members also render in the Pinned section; while that
+                // section is expanded its row hosts the rename form, so this
+                // duplicate row must not mount a second autofocused input.
+                // Gate on the Pinned section actually carrying the row —
+                // content-search ghosts never appear there, so without the
+                // membership check no row would host the form at all and
+                // rename would be silently inoperable for them.
+                renameFormDisabled:
+                  Boolean(row.session.isPinned) &&
+                  pinnedExpanded &&
+                  pinnedSessions.some(
+                    (candidate) =>
+                      getIdentityForSession(candidate) ===
+                      getIdentityForSession(row.session),
+                  ),
+              })}
+            </Fragment>
+          ))}
         </SessionGroupSection>
       );
     });
@@ -5665,8 +5746,10 @@ export function WebShellSidebar({
     organizationEnabled,
     pinnedExpanded,
     pinnedSessions,
+    buildSessionTreeRows,
     reload,
     renderSessionRow,
+    sessionTree,
     searchQuery,
     selectedSessionSource,
     sessionSections,
@@ -6017,6 +6100,25 @@ export function WebShellSidebar({
           )}
         </button>
       )}
+      {projectFeaturesEnabled &&
+        primaryNavItems.has('prWatches') &&
+        onOpenPrWatches && (
+          <button
+            className={styles.pluginButton}
+            type="button"
+            title={railLayout ? undefined : t('sidebar.prWatches')}
+            aria-label={t('sidebar.prWatches')}
+            aria-current={
+              railLayout && activePage === 'prWatches' ? 'page' : undefined
+            }
+            onClick={() => openNavigation(onOpenPrWatches)}
+          >
+            <span className={styles.navIcon}>
+              <GitPullRequestIcon size={16} strokeWidth={1.2} />
+            </span>
+            {!collapsed && !railLayout && <span>{t('sidebar.prWatches')}</span>}
+          </button>
+        )}
       {projectFeaturesEnabled &&
         primaryNavItems.has('workflows') &&
         workflowsEnabled && (
