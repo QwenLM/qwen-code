@@ -5,7 +5,14 @@
  */
 
 import path from 'node:path';
-import { accessSync, constants, lstatSync, statSync } from 'node:fs';
+import {
+  accessSync,
+  constants,
+  lstatSync,
+  readlinkSync,
+  realpathSync,
+  statSync,
+} from 'node:fs';
 import { watch, type FSWatcher } from 'chokidar';
 import { closeFileWatcher } from '../utils/file-watcher-cleanup.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -42,10 +49,29 @@ function discoveryRoot(filePath: string): string | undefined {
   }
 }
 
+function observationPath(filePath: string): string {
+  try {
+    return realpathSync(filePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return filePath;
+  }
+  try {
+    return observationPath(
+      path.resolve(path.dirname(filePath), readlinkSync(filePath)),
+    );
+  } catch {
+    const parent = path.dirname(filePath);
+    return parent === filePath
+      ? filePath
+      : path.join(observationPath(parent), path.basename(filePath));
+  }
+}
+
 export class FileChangedWatcher {
   private watcher?: FSWatcher;
   private paths: string[] = [];
   private staticFiles: string[] = [];
+  private observedPaths: string[] = [];
   private readonly lifetime = new AbortController();
   private changes: Array<{ filePath: string; event: FileChangeEvent }> = [];
   private draining?: Promise<void>;
@@ -72,17 +98,26 @@ export class FileChangedWatcher {
       .filter((file) => next.includes(file))
       .sort();
     const staticSet = new Set(files);
-    const dynamic = next.filter((root) => !staticSet.has(root));
     this.reconfiguration = this.reconfiguration.then(async () => {
+      if (this.lifetime.signal.aborted) return;
+      const observed = next.map(observationPath);
+      const staticTargets = new Set(
+        observed.filter((_, index) => staticSet.has(next[index])),
+      );
+      const dynamic = observed.filter(
+        (_, index) => !staticSet.has(next[index]),
+      );
       if (
-        this.lifetime.signal.aborted ||
-        (next.length === this.paths.length &&
-          next.every((filePath, index) => filePath === this.paths[index]) &&
-          files.length === this.staticFiles.length &&
-          files.every(
-            (filePath, index) => filePath === this.staticFiles[index],
-          ) &&
-          (next.length > 0 || !this.watcher))
+        next.length === this.paths.length &&
+        next.every((filePath, index) => filePath === this.paths[index]) &&
+        files.length === this.staticFiles.length &&
+        files.every(
+          (filePath, index) => filePath === this.staticFiles[index],
+        ) &&
+        observed.every(
+          (filePath, index) => filePath === this.observedPaths[index],
+        ) &&
+        (next.length > 0 || !this.watcher)
       ) {
         return;
       }
@@ -90,10 +125,11 @@ export class FileChangedWatcher {
       if (this.lifetime.signal.aborted) return;
       this.paths = next;
       this.staticFiles = files;
+      this.observedPaths = observed;
       if (next.length === 0) return;
       try {
         // Observe surviving ancestors so missing or replaced roots can reappear.
-        const anchors = next.map(discoveryRoot);
+        const anchors = observed.map(discoveryRoot);
         if (anchors.some((root) => root === undefined)) this.paths = [];
         // Keep a ready parent observer when an anchor's unlinkDir is missed.
         const watchRoots = [
@@ -122,7 +158,7 @@ export class FileChangedWatcher {
             if (
               stats?.isFile() &&
               /\.[0-9a-f]{12}\.tmp$/.test(path.basename(file)) &&
-              !next.includes(file)
+              !observed.includes(file)
             )
               return true;
             if (
@@ -136,9 +172,9 @@ export class FileChangedWatcher {
               )
             )
               return false;
-            if (staticSet.has(file)) return stats?.isDirectory() ?? false;
+            if (staticTargets.has(file)) return stats?.isDirectory() ?? false;
             // Only ancestors of requested paths may lead discovery downward.
-            return !next.some((root) => isWithin(file, root));
+            return !observed.some((root) => isWithin(file, root));
           },
           followSymlinks: false,
           awaitWriteFinish: { stabilityThreshold: 200, pollInterval: 50 },
@@ -164,12 +200,19 @@ export class FileChangedWatcher {
               }
               if (event !== 'add' && event !== 'change' && event !== 'unlink')
                 return;
-              if (
-                !staticSet.has(resolved) &&
-                !dynamic.some((root) => isWithin(root, resolved))
-              )
-                return;
-              this.changes.push({ filePath: resolved, event });
+              const aliases = next.flatMap((alias, index) => {
+                const target = observed[index];
+                if (
+                  staticSet.has(alias)
+                    ? resolved !== target
+                    : !isWithin(target, resolved)
+                )
+                  return [];
+                return [path.join(alias, path.relative(target, resolved))];
+              });
+              for (const filePath of new Set(aliases)) {
+                this.changes.push({ filePath, event });
+              }
               this.drain();
             })
             .on('error', (error) => {

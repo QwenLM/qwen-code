@@ -174,8 +174,12 @@ To clear dynamic paths from a `FileChanged` handler, return:
 ## Observation limits
 
 The initial directory scan is not replayed. Native filesystem events from a
-recent write may arrive after registration. Symbolic links are not traversed;
-register the real directory root. Events are reported after writes settle.
+recent write may arrive after registration. Explicitly registered symbolic-link
+files and directory roots observe their targets, including links in ancestor paths.
+Notifications use the configured alias; registering multiple aliases to one target
+produces a notification for each alias. Refresh registration after retargeting a
+link. Symbolic links discovered inside a recursive root are not traversed.
+Events are reported after writes settle.
 Watching is best effort: filesystem coalescing, inaccessible paths, process
 downtime, and path reconfiguration can leave gaps. Integrations that require a
 complete synchronized copy must handle initial scans, reconciliation, and retry.

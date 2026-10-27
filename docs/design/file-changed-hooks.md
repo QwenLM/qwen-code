@@ -36,7 +36,8 @@ Successful synchronous `SessionStart` and `FileChanged` outputs can return absol
 or directories in `hookSpecificOutput.watchPaths`. Directories are watched
 recursively, including future children. Recursive discovery skips `.git` and
 `node_modules` subtrees unless a path inside them is explicitly registered.
-Only regular files and directories are eligible; no depth limit is imposed.
+Only regular files and directories are eligible after resolving explicitly
+registered symbolic links; no depth limit is imposed.
 Discovery observes the nearest existing
 parent directory so deeply missing paths and deleted/recreated roots can appear
 later. Only requested files and directory descendants produce notifications;
@@ -52,8 +53,12 @@ them present. Explicitly registered files remain observable, and directories
 with this suffix remain traversable. Other `.tmp` files are observed normally.
 
 The initial directory scan is not replayed. Native filesystem events from a
-recent write may arrive after registration. Symbolic links are not traversed;
-register the real directory root. Watchers settle writes before reporting them,
+recent write may arrive after registration. Explicit file and directory registrations
+resolve symbolic links, including links in their ancestors, while notifications keep
+the configured path spelling. Each registered alias receives its own notification
+when aliases share a target. Registration refreshes resolve the targets again;
+retargeting a link requires a refresh. Symbolic links discovered inside a recursive
+root are not traversed. Watchers settle writes before reporting them,
 using the existing chokidar dependency. Initial registration waits for watcher
 readiness during HookSystem initialization, even without a SessionStart hook;
 dynamic registration waits before SessionStart returns. Reconfiguration is best effort, rather
@@ -101,6 +106,9 @@ is logged without changing the originating file operation.
   handling; do not add a second memory persistence pipeline.
 - Register only paths explicitly requested by hooks. There is no implicit memory
   directory registration, memory enable/disable event, or content in the payload.
+- Resolve explicit registrations inside FileChangedWatcher and map observations
+  back to their configured aliases there. This keeps basename matching and queued
+  events independent of a target's real path without enabling recursive link following.
 - Deliver only file `add`, `change`, and `unlink` events, excluding directory-self
   `addDir` and `unlinkDir`. Integrations tracking a watched root's own lifecycle
   must check filesystem state (for example with `stat`) and reconcile independently;
@@ -126,6 +134,9 @@ after a rotation without SessionStart must rebind only to the current session.
 Temporary siblings must stay silent through delayed rename and orphan cleanup;
 the final target, ordinary `.tmp` files, explicit file registrations, and
 similarly named directories must remain observable.
+Explicit symbolic-link files and directory roots must report target changes with
+the configured alias, including multiple aliases to one target and target changes
+after a registration refresh. Implicit child links and unrelated siblings stay silent.
 Existing SessionStart additional context must still
 work when another hook returns watchPaths.
 

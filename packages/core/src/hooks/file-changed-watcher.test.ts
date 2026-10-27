@@ -378,6 +378,168 @@ describe('FileChangedWatcher with real files', () => {
     );
   });
 
+  it.each(['static', 'dynamic'])(
+    'reports an external file through each %s symlink alias',
+    async (registration) => {
+      const workspace = path.join(root, 'workspace');
+      const external = path.join(root, 'external');
+      await Promise.all([fs.mkdir(workspace), fs.mkdir(external)]);
+      const target = path.join(external, 'target.md');
+      const aliases = ['first.md', 'second.md'].map((name) =>
+        path.join(workspace, name),
+      );
+      await fs.writeFile(target, 'initial');
+      for (const alias of aliases) await fs.symlink(target, alias);
+      await delay(500);
+      const notify = vi.fn().mockResolvedValue(undefined);
+      watcher = new FileChangedWatcher(notify);
+      const staticFiles = registration === 'static' ? aliases : [];
+      await watcher.setPaths(aliases, staticFiles);
+      await fs.writeFile(target, 'changed through real path');
+      await vi.waitFor(() => {
+        for (const alias of aliases) {
+          expect(notify).toHaveBeenCalledWith(
+            alias,
+            'change',
+            expect.any(AbortSignal),
+          );
+        }
+      }, waitOptions);
+      await fs.writeFile(path.join(external, 'unrelated.md'), 'ignored');
+      await delay(400);
+      expect(notify.mock.calls.map(([file]) => file).sort()).toEqual(aliases);
+
+      await watcher.setPaths([aliases[0]], staticFiles.slice(0, 1));
+      notify.mockClear();
+      await fs.writeFile(target, 'only the retained alias');
+      await vi.waitFor(() => {
+        expect(notify.mock.calls.map(([file]) => file)).toEqual([aliases[0]]);
+      }, waitOptions);
+    },
+  );
+
+  it('maps a symlinked directory root without following implicit child links', async () => {
+    const workspace = path.join(root, 'workspace');
+    const target = path.join(root, 'external', 'memory');
+    const unrelated = path.join(root, 'unrelated');
+    await Promise.all(
+      [workspace, target, unrelated].map((directory) =>
+        fs.mkdir(directory, { recursive: true }),
+      ),
+    );
+    const alias = path.join(workspace, 'data');
+    const directoryLinkType = process.platform === 'win32' ? 'junction' : 'dir';
+    await fs.symlink(target, alias, directoryLinkType);
+    await fs.symlink(unrelated, path.join(target, 'linked'), directoryLinkType);
+    const notify = vi.fn().mockResolvedValue(undefined);
+    watcher = new FileChangedWatcher(notify);
+    await watcher.setPaths([alias, target]);
+
+    for (const relative of [
+      '.git/config',
+      'node_modules/package/index.js',
+      'topic.md.a1b2c3d4e5f6.tmp',
+    ]) {
+      const file = path.join(target, relative);
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.writeFile(file, 'ignored');
+    }
+    await fs.writeFile(path.join(unrelated, 'linked.md'), 'ignored');
+    await fs.writeFile(
+      path.join(path.dirname(target), 'sibling.md'),
+      'ignored',
+    );
+    const relative = path.join('nested', 'topic.md');
+    await fs.mkdir(path.join(target, 'nested'));
+    await fs.writeFile(path.join(target, relative), 'included');
+    const expected = [path.join(alias, relative), path.join(target, relative)];
+    await vi.waitFor(() => {
+      for (const file of expected) {
+        expect(notify).toHaveBeenCalledWith(
+          file,
+          'add',
+          expect.any(AbortSignal),
+        );
+      }
+    }, waitOptions);
+    await delay(400);
+    expect(notify.mock.calls.map(([file]) => file).sort()).toEqual(
+      expected.sort(),
+    );
+  });
+
+  it.each(['file', 'directory'])(
+    'refreshes a symlinked %s target with the same configured path',
+    async (kind) => {
+      const workspace = path.join(root, 'workspace');
+      const first = path.join(root, 'first');
+      const second = path.join(root, 'second');
+      await Promise.all([workspace, first, second].map((dir) => fs.mkdir(dir)));
+      const firstFile = path.join(first, 'topic.md');
+      const secondFile = path.join(second, 'topic.md');
+      await fs.writeFile(firstFile, 'initial first');
+      await fs.writeFile(secondFile, 'initial second');
+      const alias = path.join(workspace, 'alias');
+      const linkType =
+        kind === 'file'
+          ? 'file'
+          : process.platform === 'win32'
+            ? 'junction'
+            : 'dir';
+      await fs.symlink(kind === 'file' ? firstFile : first, alias, linkType);
+      await delay(500);
+      const notify = vi.fn().mockResolvedValue(undefined);
+      watcher = new FileChangedWatcher(notify);
+      const staticFiles = kind === 'file' ? [alias] : [];
+      await watcher.setPaths([alias], staticFiles);
+      await fs.unlink(alias);
+      await fs.symlink(kind === 'file' ? secondFile : second, alias, linkType);
+      await watcher.setPaths([alias], staticFiles);
+
+      await fs.writeFile(firstFile, 'old target is no longer watched');
+      await delay(400);
+      expect(notify).not.toHaveBeenCalled();
+      await fs.writeFile(secondFile, 'new target');
+      const expected = kind === 'file' ? alias : path.join(alias, 'topic.md');
+      await vi.waitFor(() => {
+        expect(notify).toHaveBeenCalledWith(
+          expected,
+          'change',
+          expect.any(AbortSignal),
+        );
+      }, waitOptions);
+      expect(notify.mock.calls).toHaveLength(1);
+    },
+  );
+
+  it('keeps a symlinked file armed while its real target is missing', async () => {
+    const target = path.join(root, 'target.md');
+    const alias = path.join(root, 'alias.md');
+    await fs.writeFile(target, 'initial');
+    await fs.symlink(target, alias);
+    await delay(500);
+    const notify = vi.fn().mockResolvedValue(undefined);
+    watcher = new FileChangedWatcher(notify);
+    await watcher.setPaths([alias], [alias]);
+    await fs.unlink(target);
+    await vi.waitFor(() => {
+      expect(notify).toHaveBeenCalledWith(
+        alias,
+        'unlink',
+        expect.any(AbortSignal),
+      );
+    }, waitOptions);
+    await watcher.setPaths([alias], [alias]);
+    await fs.writeFile(target, 'recreated');
+    await vi.waitFor(() => {
+      expect(notify).toHaveBeenCalledWith(
+        alias,
+        'add',
+        expect.any(AbortSignal),
+      );
+    }, waitOptions);
+  });
+
   it('continues observing a root deleted and recreated after a gap', async () => {
     const directory = path.join(root, 'memory');
     await fs.mkdir(directory);
