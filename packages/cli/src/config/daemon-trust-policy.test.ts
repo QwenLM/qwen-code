@@ -231,6 +231,58 @@ describe('daemon trust policy', () => {
     });
   });
 
+  it('accepts a UTF-8 BOM in trustedFolders.json, like the CLI reader', async () => {
+    // The primary CLI reads this same file through `parseJsoncObject`, which
+    // strips exactly one leading BOM, so one BOM must be tolerated here too.
+    installFiles({
+      '/config/user.json': JSON.stringify({
+        security: { folderTrust: { enabled: true } },
+      }),
+      '/config/system.json': '{}',
+      '/config/trusted.json': `\uFEFF${JSON.stringify({
+        '/work': TrustLevel.TRUST_FOLDER,
+      })}`,
+    });
+
+    const snapshot = await readDaemonTrustPolicySnapshot();
+
+    expect(snapshot.trustedFoldersError).toBeUndefined();
+    expect(
+      evaluateDaemonWorkspaceTrust(snapshot, '/work/project'),
+    ).toMatchObject({
+      state: 'trusted',
+      targetTrusted: true,
+      source: 'file',
+    });
+  });
+
+  it('rejects a doubled BOM in trustedFolders.json, like the CLI reader', async () => {
+    // `parseJsoncObject` strips one BOM; pre-stripping it here as well would
+    // let the daemon parse a file whose remaining U+FEFF makes the primary
+    // CLI's `readTrustedFoldersFile` throw and report no trusted folders. A
+    // daemon-served workspace would then act on a folder the CLI's own trust
+    // surface calls untrusted. Both readers must agree on the same file.
+    installFiles({
+      '/config/user.json': JSON.stringify({
+        security: { folderTrust: { enabled: true } },
+      }),
+      '/config/system.json': '{}',
+      '/config/trusted.json': `\uFEFF\uFEFF${JSON.stringify({
+        '/work': TrustLevel.TRUST_FOLDER,
+      })}`,
+    });
+
+    const snapshot = await readDaemonTrustPolicySnapshot();
+
+    expect(snapshot.trustedFoldersError?.code).toBe('trust_policy_invalid');
+    expect(
+      evaluateDaemonWorkspaceTrust(snapshot, '/work/project'),
+    ).toMatchObject({
+      state: 'error',
+      targetTrusted: false,
+    });
+  });
+
   it('uses system folder trust to enable over user', async () => {
     installFiles({
       '/config/user.json': JSON.stringify({
