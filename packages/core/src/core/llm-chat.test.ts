@@ -15098,6 +15098,9 @@ describe('LlmChat', async () => {
         });
         vi.mocked(mockConfig.getHookSystem).mockReturnValue(hookSystem);
         mockConfig.hasHooksForEvent = (name: string) => name === event;
+        vi.mocked(fsPromises.stat).mockResolvedValue(
+          undefined as unknown as Stats,
+        );
         const invalidateReadCache = vi.fn();
         mockConfig.getExecutionEnvironment = () =>
           ({ invalidateReadCache }) as unknown as ReturnType<
@@ -15107,6 +15110,7 @@ describe('LlmChat', async () => {
         const clear = vi.fn();
         vi.mocked(mockConfig.getFileReadCache).mockReturnValue({
           clear,
+          markReadEvictedFromHistory: vi.fn(),
           markAllReadsEvictedFromHistory,
         } as unknown as ReturnType<Config['getFileReadCache']>);
         mockStreamsOnce(

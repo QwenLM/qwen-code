@@ -5,10 +5,7 @@
  */
 
 import { convertToFunctionResponse } from '../core/coreToolScheduler.js';
-import {
-  enforceFunctionResponseBudget,
-  finalizeToolResponses,
-} from './tool-response-finalizer.js';
+import { finalizeToolResponses } from './tool-response-finalizer.js';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
