@@ -6,6 +6,7 @@ import { I18nProvider } from '../../i18n';
 import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
 import { dp } from './dialogStyles';
 import { DaemonAvailabilityContext } from '../../daemon/availability-context.js';
+import { DaemonUnavailableError } from '../../daemon/availability.js';
 import { offlineDaemon } from '../../daemon/availability.test-fixtures.js';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
@@ -42,6 +43,7 @@ const deleteSessionMock = vi.fn();
 const deleteSessionsMock = vi.fn();
 let scopedSessionsOptions: unknown;
 let scopedSessionsError: Error | undefined;
+let scopedSessionsLoading = false;
 const initialSessions = sessions.slice();
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
@@ -53,7 +55,7 @@ vi.mock('../../hooks/useScopedSessions', () => ({
     scopedSessionsOptions = options;
     return {
       sessions,
-      loading: false,
+      loading: scopedSessionsLoading,
       error: scopedSessionsError,
       deleteSession: deleteSessionMock,
       deleteSessions: deleteSessionsMock,
@@ -159,6 +161,7 @@ beforeEach(() => {
   deleteSessionMock.mockReset();
   deleteSessionsMock.mockReset();
   scopedSessionsError = undefined;
+  scopedSessionsLoading = false;
 });
 
 afterEach(() => {
@@ -366,6 +369,48 @@ describe('DeleteSessionDialog selection', () => {
 
     expect(hint()).toContain('Failed to delete 1 session(s): locked');
     expect(hint()).not.toContain('boom');
+  });
+
+  it('keeps the loading placeholder above a stale load error', () => {
+    scopedSessionsLoading = true;
+    scopedSessionsError = new Error('boom');
+    mount();
+
+    const list = container!.querySelector('[role="listbox"]')!;
+    expect(list.textContent).toContain('Loading...');
+    expect(list.textContent).not.toContain('boom');
+  });
+
+  it('keeps the outage copy visible while the catalog reports loading', async () => {
+    scopedSessionsLoading = true;
+    const { availability } = offlineDaemon();
+    mount({ availability });
+    await act(async () => {
+      await availability.check(true);
+    });
+
+    const list = container!.querySelector('[role="listbox"]')!;
+    expect(list.textContent).toContain('Cannot reach the service.');
+    availability.dispose();
+  });
+
+  it('reports an outage during delete as the localized service message', async () => {
+    const { availability } = offlineDaemon();
+    deleteSessionsMock.mockRejectedValue(new DaemonUnavailableError());
+    mount({ availability });
+    await act(async () => {
+      await availability.check(true);
+    });
+    clickRow(0);
+    await act(async () => {
+      dangerButton().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect((onError.mock.calls[0][0] as Error).message).toBe(
+      'Cannot reach the service.',
+    );
+    availability.dispose();
   });
 
   it('keeps the outage copy ahead of a delete outcome', async () => {

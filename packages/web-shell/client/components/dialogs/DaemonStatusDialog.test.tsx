@@ -598,10 +598,8 @@ describe('DaemonStatusDialog', () => {
           expect.anything(),
         );
         expect(
-          new Headers(vi.mocked(fetch).mock.calls[0]?.[1]?.headers).get(
-            'Authorization',
-          ),
-        ).toBe('Bearer bad-token');
+          new Headers(vi.mocked(fetch).mock.calls[0]?.[1]?.headers),
+        ).toEqual(new Headers({ Authorization: 'Bearer bad-token' }));
         expect(onChangeTarget).not.toHaveBeenCalled();
         expect(getDaemonToken('http://localhost:4170')).toBe('working-token');
         expect(

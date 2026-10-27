@@ -11,6 +11,7 @@ import { useFilterInput } from '../../hooks/useFilterInput';
 import { SessionRow } from './SessionRow';
 import { useScopedSessions } from '../../hooks/useScopedSessions';
 import { useDaemonAvailability } from '../../daemon/availability-context.js';
+import { isDaemonUnavailableError } from '../../daemon/availability.js';
 
 interface DeleteSessionDialogProps {
   /**
@@ -215,7 +216,11 @@ export function DeleteSessionDialog({
           onClose();
         })
         .catch((error: unknown) => {
-          onError(error);
+          onError(
+            isDaemonUnavailableError(error)
+              ? new Error(outageMessage ?? t('daemon.connection.unavailable'))
+              : error,
+          );
           setDeleting(false);
         });
       return;
@@ -239,7 +244,11 @@ export function DeleteSessionDialog({
         onClose();
       })
       .catch((error: unknown) => {
-        onError(error);
+        onError(
+          isDaemonUnavailableError(error)
+            ? new Error(outageMessage ?? t('daemon.connection.unavailable'))
+            : error,
+        );
         setDeleting(false);
       });
   }, [
@@ -252,6 +261,7 @@ export function DeleteSessionDialog({
     onClose,
     onDeleted,
     onError,
+    outageMessage,
     selectedIdx,
     selectedIds,
     t,
@@ -309,10 +319,10 @@ export function DeleteSessionDialog({
         )}
         ref={listRef}
       >
-        {loading && !sessionErrorMessage && (
+        {loading && !outageMessage && (
           <div className={dp('picker-empty')}>{t('common.loading')}</div>
         )}
-        {sessionErrorMessage && (
+        {(outageMessage || (!loading && sessionErrorMessage)) && (
           <div className={dp('picker-empty')}>{sessionErrorMessage}</div>
         )}
         {!loading && !sessionErrorMessage && filtered.length === 0 && (

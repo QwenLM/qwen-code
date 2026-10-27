@@ -65,9 +65,13 @@ export async function fetchRemotePathSuggestions(
   prefix: string,
 ): Promise<RemotePathSuggestions> {
   const query = new URLSearchParams({ daemon: daemonOrigin, prefix });
+  // The proxy answers for a remote target, so its failures must not be
+  // attributed to the local daemon's availability.
   const res = await createDaemonRestRequest(
     '',
     getDaemonToken(window.location.origin),
+    undefined,
+    true,
   )(`/remote-workspace-path-suggestions?${query.toString()}`, {
     headers: remoteProxyHeaders(daemonOrigin),
   });
@@ -98,6 +102,8 @@ export async function addWorkspaceToDaemon(
   const res = await createDaemonRestRequest(
     '',
     getDaemonToken(window.location.origin),
+    undefined,
+    true,
   )('/remote-workspaces', {
     method: 'POST',
     headers: remoteProxyHeaders(daemonOrigin, {

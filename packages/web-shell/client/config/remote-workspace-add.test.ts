@@ -18,6 +18,11 @@ const getAllowedDaemonOrigin = vi.hoisted(() =>
   }),
 );
 
+import {
+  DaemonAvailability,
+  registerDaemonAvailability,
+} from '../daemon/availability.js';
+
 vi.mock('./daemon', () => ({
   confirmDaemonTarget,
   getAllowedDaemonOrigin,
@@ -261,6 +266,50 @@ describe('remote daemon proxy calls', () => {
         'X-Daemon-Token': 'target-secret',
       }),
     );
+  });
+
+  it('attributes a failed remote proxy call to the target, not the local daemon', async () => {
+    setLocation(`${testOrigin}/?daemon=${encodeURIComponent(REMOTE)}`);
+    stubTokens();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/remote-workspace-path-suggestions')) {
+        return {
+          ok: false,
+          status: 502,
+          json: async () => ({}),
+          text: async () => '',
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ status: 'ok', features: [] }),
+        text: async () => '',
+      };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const availability = new DaemonAvailability(
+      testOrigin,
+      'serving-secret',
+      fetchMock as typeof fetch,
+    );
+    const unregister = registerDaemonAvailability(
+      testOrigin,
+      'serving-secret',
+      availability,
+    );
+    try {
+      await expect(fetchRemotePathSuggestions(REMOTE, '/srv/')).rejects.toThrow(
+        'Failed to fetch directory suggestions',
+      );
+      await Promise.resolve();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(availability.getSnapshot()).toBe('available');
+    } finally {
+      unregister();
+      availability.dispose();
+    }
   });
 
   it('authenticates the workspace-registration proxy to the daemon serving it', async () => {

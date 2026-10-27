@@ -12200,6 +12200,8 @@ beforeEach(() => {
   testState.turnLocations.clear();
   testState.provisionalTurns = [];
   testState.promptStatus = 'idle';
+  testState.notices = [];
+  testState.dismissNotice.mockReset();
   // Split persistence uses sessionStorage; clear it so one test's split doesn't
   // auto-restore into the next test's App mount.
   try {
@@ -33461,6 +33463,33 @@ describe('App session callbacks', () => {
     } finally {
       warn.mockRestore();
       availability.dispose();
+    }
+  });
+
+  it('keeps stream notices for a healthy daemon', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      testState.notices = [
+        {
+          id: 'stream',
+          severity: 'error',
+          category: 'connection',
+          operation: 'stream',
+          code: 'daemon.session_died',
+          message: 'Session died.',
+          createdAt: 0,
+        },
+      ];
+      testState.dismissNotice.mockClear();
+      renderApp();
+      await flush();
+      expect(warn).toHaveBeenCalledWith(
+        '[web-shell] daemon notice',
+        expect.objectContaining({ id: 'stream' }),
+      );
+      expect(testState.dismissNotice).toHaveBeenCalledWith('stream');
+    } finally {
+      warn.mockRestore();
     }
   });
 

@@ -171,9 +171,12 @@ describe('detachDaemonClient', () => {
         keepalive: true,
       }),
     );
-    const headers = new Headers(vi.mocked(fetch).mock.calls[0]?.[1]?.headers);
-    expect(headers.get('X-Qwen-Client-Id')).toBe('client-1');
-    expect(headers.get('Authorization')).toBe('Bearer tok');
+    expect(new Headers(vi.mocked(fetch).mock.calls[0]?.[1]?.headers)).toEqual(
+      new Headers({
+        'X-Qwen-Client-Id': 'client-1',
+        Authorization: 'Bearer tok',
+      }),
+    );
   });
 
   it('strips trailing slashes from baseUrl', async () => {

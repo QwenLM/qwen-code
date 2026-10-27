@@ -34,11 +34,9 @@ describe('pairing bootstrap', () => {
         redirect: 'error',
       }),
     );
-    expect(
-      new Headers(vi.mocked(fetch).mock.calls[0]?.[1]?.headers).get(
-        'Authorization',
-      ),
-    ).toBe('Bearer one-time');
+    expect(new Headers(vi.mocked(fetch).mock.calls[0]?.[1]?.headers)).toEqual(
+      new Headers({ Authorization: 'Bearer one-time' }),
+    );
     expect(persistDaemonToken).toHaveBeenCalledWith(
       'device-token',
       window.location.origin,
