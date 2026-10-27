@@ -1047,7 +1047,10 @@ export class SessionCatalogStore {
       entry.invalidated = false;
       entry.retryAt = undefined;
       entry.snapshot = {
-        page: stagedPage.page,
+        page: this.applyPendingSessionTitlesToPage(
+          staged.workspaceCwd,
+          stagedPage.page,
+        ),
         loading: false,
         stale: false,
         updatedAt: Date.now(),
@@ -1055,7 +1058,7 @@ export class SessionCatalogStore {
     }
     for (const { entry, stagedPage } of entries) {
       for (const subscriber of entry.subscribers) subscriber.listener();
-      this.resolveWaiters(entry, stagedPage.page);
+      this.resolveWaiters(entry, entry.snapshot.page ?? stagedPage.page);
     }
     return true;
   }
@@ -1465,10 +1468,20 @@ export class SessionCatalogStore {
     workspaceCwd: string,
     snapshot: SessionCatalogSnapshot,
   ): SessionCatalogSnapshot {
-    const pending = this.pendingSessionTitles.get(workspaceCwd);
-    if (!pending || pending.size === 0) return snapshot;
     const page = snapshot.page;
-    if (!page || page.sessions.length === 0) return snapshot;
+    if (!page) return snapshot;
+    const nextPage = this.applyPendingSessionTitlesToPage(workspaceCwd, page);
+    return nextPage === page ? snapshot : { ...snapshot, page: nextPage };
+  }
+
+  private applyPendingSessionTitlesToPage(
+    workspaceCwd: string,
+    page: DaemonSessionListPage,
+  ): DaemonSessionListPage {
+    const pending = this.pendingSessionTitles.get(workspaceCwd);
+    if (!pending || pending.size === 0 || page.sessions.length === 0) {
+      return page;
+    }
     let changed = false;
     const sessions = page.sessions.map((session) => {
       const pendingTitle = pending.get(session.sessionId);
@@ -1485,8 +1498,7 @@ export class SessionCatalogStore {
       changed = true;
       return { ...session, displayName: pendingTitle };
     });
-    if (!changed) return snapshot;
-    return { ...snapshot, page: { ...page, sessions } };
+    return changed ? { ...page, sessions } : page;
   }
 
   private resetPollSchedule(entry: CatalogEntry): void {

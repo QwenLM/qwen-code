@@ -1311,6 +1311,23 @@ describe('SessionCatalogStore', () => {
     unsubscribe();
   });
 
+  it('applies a pending title when a staged workspace refresh commits', async () => {
+    const active = query('/work');
+    legacy.mockResolvedValueOnce(page('cached'));
+    await store.loadOnce(active, { fresh: true });
+    const unsubscribe = store.subscribe(active, vi.fn());
+    store.setPendingSessionTitle('/work', 'fresh', 'Fix login');
+    legacy.mockResolvedValueOnce(page('fresh'));
+
+    const staged = await store.stageWorkspaceRefresh('/work');
+
+    expect(store.commitWorkspaceRefresh(staged)).toBe(true);
+    expect(store.getSnapshot(active).page?.sessions[0]?.displayName).toBe(
+      'Fix login',
+    );
+    unsubscribe();
+  });
+
   it('routes live workspace invalidations and new queries through reconciliation', async () => {
     legacy.mockResolvedValue(page('cached'));
     const active = query('/work');
