@@ -362,6 +362,10 @@ import {
   ManagedSessionUncommittedTailError,
 } from '../managed-runtime/managed-session-authority.js';
 import { LocalJsonlManagedSessionJournalStore } from '../managed-runtime/local-jsonl-managed-session-journal-store.js';
+import {
+  acquireLocalManagedSessionWriter,
+  prepareLocalManagedSessionWriter,
+} from '../managed-runtime/local-managed-session-writer.js';
 import { LocalManagedSessionResourceStore } from '../managed-runtime/managed-session-resources.js';
 import {
   LocalManagedRuntimeOutcomes,
@@ -4998,10 +5002,14 @@ export class Config {
       ReturnType<typeof LocalJsonlManagedSessionJournalStore.read>
     >;
     try {
-      scan = await LocalJsonlManagedSessionJournalStore.read(
+      scan = await LocalJsonlManagedSessionJournalStore.read({
         transcriptPath,
-        localManagedSessionKey(this.storage.getProjectRoot(), this.sessionId),
-      );
+        runtimeBaseDir: this.sessionRuntimeBaseDir,
+        sessionKey: localManagedSessionKey(
+          this.storage.getProjectRoot(),
+          this.sessionId,
+        ),
+      });
     } catch {
       return;
     }
@@ -5079,7 +5087,10 @@ export class Config {
     if (!recorder) throw new SessionWriterUnavailableError();
     let lease: SessionWriterLease | undefined;
     try {
-      lease = await SessionWriterLease.acquire({
+      const acquire = managed
+        ? acquireLocalManagedSessionWriter
+        : SessionWriterLease.acquire;
+      lease = await acquire({
         runtimeBaseDir: this.sessionRuntimeBaseDir,
         sessionId: this.sessionId,
         transcriptPath: this.getTranscriptPath(),
@@ -5133,6 +5144,23 @@ export class Config {
         projection = await this.sessionRestoreProjectionSource();
         if (managed) {
           // Checked before the log is opened, which writes to it.
+          assertSessionExecutionEngine(
+            projection?.executionEngine,
+            this.sessionId,
+            'managed',
+          );
+        }
+        if (
+          managed &&
+          (await prepareLocalManagedSessionWriter(
+            lease,
+            localManagedSessionKey(
+              this.storage.getProjectRoot(),
+              this.sessionId,
+            ),
+          ))
+        ) {
+          projection = await this.sessionRestoreProjectionSource();
           assertSessionExecutionEngine(
             projection?.executionEngine,
             this.sessionId,
@@ -6409,6 +6437,8 @@ export class Config {
 
     const previousSessionId = this.sessionId;
     const nextSessionId = sessionId ?? randomUUID();
+    // #13004: skipped extraction turns are not carried across a switch.
+    this.memoryManager.discardExtractCadence(previousSessionId, nextSessionId);
     // Resuming the session the user is already in keeps the same id. That is
     // not a lifecycle transition: ending it here would record session.end for
     // a live session and pair it with a duplicate session.start.

@@ -2519,7 +2519,10 @@ describe('SessionWriterLease', () => {
         lockSchema: { schemaVersion: 3, formatVersion: 2 },
       });
       expect(replacement.takeoverCommitProof).toEqual(commitProof);
-      await replacement.release();
+      await expect(replacement.release()).rejects.toBeInstanceOf(
+        SessionWriterUnavailableError,
+      );
+      await replacement.sealForHandoff(commitProof);
     });
 
     it('rebuilds the transcript proof after discarding an uncommitted tail', async () => {
@@ -2623,7 +2626,10 @@ describe('SessionWriterLease', () => {
         ...fixture.options,
         lockSchema: { schemaVersion: 3, formatVersion: 2 },
       });
-      await newer.release();
+      await expect(newer.release()).rejects.toBeInstanceOf(
+        SessionWriterUnavailableError,
+      );
+      await newer.sealForHandoff(commitProof);
     });
 
     it('lets a newer managed format take over an older sealed lock', async () => {
@@ -2649,7 +2655,10 @@ describe('SessionWriterLease', () => {
         state: 'active',
         format_version: 2,
       });
-      await replacement.release();
+      await expect(replacement.release()).rejects.toBeInstanceOf(
+        SessionWriterUnavailableError,
+      );
+      await replacement.sealForHandoff(commitProof);
     });
   });
 
@@ -3261,6 +3270,7 @@ describe('restore checkpoint branch on confirmed real transcript bytes', () => {
         undefined,
         { displayText: 'Original title input', hookContext: '' },
         promptId,
+        'daemon-original',
       );
       recorder.recordAssistantTurn({
         model: 'test-model',
@@ -3308,7 +3318,13 @@ describe('restore checkpoint branch on confirmed real transcript bytes', () => {
         model: 'test-model',
         message: 'DISCARDED_INITIAL_ANSWER',
       });
-      recorder.recordUserMessage('DISCARDED_LATER_USER');
+      recorder.recordUserMessage(
+        'DISCARDED_LATER_USER',
+        undefined,
+        undefined,
+        undefined,
+        'daemon-discarded',
+      );
       recorder.recordAssistantTurn({
         model: 'test-model',
         message: 'DISCARDED_LATER_ANSWER',
@@ -3360,9 +3376,19 @@ describe('restore checkpoint branch on confirmed real transcript bytes', () => {
       expect(discarded).toBeDefined();
       const discardedId = getRecordRewindId(discarded!);
       expect(discardedId).toBeDefined();
+      expect(recorder.getRewindDaemonPromptId(input.promptId!)).toBe(
+        'daemon-original',
+      );
+      expect(recorder.getRewindDaemonPromptId(discardedId!)).toBe(
+        'daemon-discarded',
+      );
       expect(await recorder.restoreToolBranch(input)).toBe(true);
       expect(recorder.getRewindTurnIndex(input.promptId!)).toBe(0);
       expect(recorder.getRewindTurnIndex(discardedId!)).toBe(-1);
+      expect(recorder.getRewindDaemonPromptId(input.promptId!)).toBe(
+        'daemon-original',
+      );
+      expect(recorder.getRewindDaemonPromptId(discardedId!)).toBeUndefined();
 
       const nextPromptId = `${input.sessionId}########2`;
       recorder.recordUserMessage(
@@ -3370,6 +3396,10 @@ describe('restore checkpoint branch on confirmed real transcript bytes', () => {
         undefined,
         undefined,
         nextPromptId,
+        'daemon-after-restore',
+      );
+      expect(recorder.getRewindDaemonPromptId(nextPromptId)).toBe(
+        'daemon-after-restore',
       );
       const index = recorder.getRewindTurnIndex(nextPromptId);
       expect(index).toBe(1);
