@@ -116,10 +116,10 @@ export async function loadModSource(
     modules.length !== 1 ||
     typeof modules[0] !== 'string' ||
     path.isAbsolute(modules[0]) ||
-    !/\.(?:[cm]?js|[cm]?ts)$/.test(modules[0])
+    !/\.(?:[cm]?js|[cm]?ts|[jt]sx)$/.test(modules[0])
   ) {
     throw new Error(
-      'Mods require one relative JavaScript or TypeScript module.',
+      'Mods require one relative JavaScript, TypeScript or JSX module.',
     );
   }
   const manifest = { ...claude, ...qwen };

@@ -546,12 +546,6 @@ public final class ApiModels {
             Long compactionRevision, String outcome, String failureCode, boolean replayed) {
     }
 
-    public record ChangeCwdRequest(
-            @NotNull @JsonProperty("cwd_relative") String cwdRelative,
-            @NotNull @JsonProperty("expected_context_revision")
-                    Long expectedContextRevision) {
-    }
-
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record PublicCwdOperation(
             String id,
@@ -565,14 +559,6 @@ public final class ApiModels {
                     Long resultContextRevision,
             @JsonProperty("failure_code") String failureCode,
             boolean replayed) {
-    }
-
-    public record WebShellChangeCwdRequest(
-            @Size(max = 128) String requestId,
-            @NotBlank String sessionId,
-            @NotBlank @Size(max = 128) String idempotencyKey,
-            @NotNull String cwdRelative,
-            @NotNull Long expectedContextRevision) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)

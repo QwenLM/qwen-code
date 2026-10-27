@@ -35,6 +35,7 @@ import {
   writeState,
   type AutofixPrPaths,
 } from './state.js';
+import { assertNoFixInFlight } from './fix.js';
 
 export interface RerunOutcome {
   rerun: boolean;
@@ -67,6 +68,7 @@ function rerunLocked(
 ): RerunOutcome {
   const state = requireState(paths.statePath, prNumber);
   assertWatching(state, task);
+  assertNoFixInFlight(paths, prNumber);
   setGhHost(state.host);
   ensureAuthenticated();
   const { pr } = fetchPrData(state);
