@@ -220,7 +220,7 @@ toggle, search icon, and add workspace button). Defaults to `false` (shown).
 
 ```tsx
 sidebar={{
-  hideProjectHeader: true,  // hide the "项目 ▼ [🔍] [＋]" row
+  hideProjectHeader: true,  // hide the "工作区 ▼ [🔍] [＋]" row
 }}
 ```
 

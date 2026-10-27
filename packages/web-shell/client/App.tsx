@@ -1300,9 +1300,9 @@ export interface WebShellSidebarOptions {
   showLive?: boolean;
   /** Hide or replace the complete sidebar branding row. */
   branding?: false | WebShellSidebarBranding;
-  /** Customize the primary navigation area (new task button, custom entries). */
+  /** Customize the primary navigation area (new session button, custom entries). */
   primaryNav?: WebShellSidebarPrimaryNavOptions;
-  /** Whether to hide the "Projects" header row (with search and add workspace). Defaults to false (shown). */
+  /** Whether to hide the "Workspaces" header row (with search and add workspace). Defaults to false (shown). */
   hideProjectHeader?: boolean;
   /** Customize which action buttons appear on session rows. */
   sessionActions?: WebShellSidebarSessionActionsOptions;
