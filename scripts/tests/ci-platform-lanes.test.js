@@ -1032,7 +1032,7 @@ describe('post-merge push lane', () => {
       );
       expect(checkout, job).toBeDefined();
       expect(String(checkout.with?.ref ?? ''), job).toBe(
-        "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || (github.event_name == 'push' && github.sha) || github.ref }}",
+        "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || (github.event_name == 'push' && github.sha) || github.ref }}",
       );
     }
   });
