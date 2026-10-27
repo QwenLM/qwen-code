@@ -106,13 +106,16 @@ export const McpAppGeneratedUiOwnerContext = createContext<
 
 export const McpAppVisibilityContext = createContext(true);
 
+export const BUNDLED_GENERATED_UI_RESOURCE =
+  'ui://qwen-code-generated-ui/view-v1.html';
+
 export function isBuiltInGeneratedUi(display?: {
   resourceUri: string;
   requiredFeature?: 'generated-ui';
 }): boolean {
   return (
     display?.requiredFeature === 'generated-ui' ||
-    display?.resourceUri === 'ui://qwen-code-generated-ui/view-v1.html'
+    display?.resourceUri === BUNDLED_GENERATED_UI_RESOURCE
   );
 }
 

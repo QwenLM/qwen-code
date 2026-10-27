@@ -20,6 +20,7 @@ const appBridgeMocks = vi.hoisted(() => ({
   last: null as {
     onsandboxready?: () => void;
     oninitialized?: () => void;
+    onsizechange?: (params: { height?: number; width?: number }) => void;
     onmessage?: (
       params: { role: string; content: Array<Record<string, unknown>> },
       extra: { signal: AbortSignal },
@@ -639,6 +640,47 @@ describe('McpApp host lifetime', () => {
       }),
     );
     tokens.remove();
+  });
+
+  it('ignores a size reported while the App had no width', async () => {
+    const { container } = renderApp(appDisplay({ html: '<main>Ready</main>' }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const iframe = container.querySelector('iframe')!;
+    await act(async () => {
+      appBridgeMocks.last?.onsizechange?.({ height: 300, width: 600 });
+    });
+    expect(iframe.style.height).toBe('300px');
+    await act(async () => {
+      appBridgeMocks.last?.onsizechange?.({ height: 3656, width: 0 });
+    });
+    expect(iframe.style.height).toBe('300px');
+    await act(async () => {
+      appBridgeMocks.last?.onsizechange?.({ height: 3000, width: 600 });
+    });
+    // Other MCP Apps keep the generic cap.
+    expect(iframe.style.height).toBe('960px');
+  });
+
+  it('keeps the frame out of sight until the App initializes', async () => {
+    const { container } = renderApp(appDisplay({ html: '<main>Ready</main>' }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const iframe = container.querySelector('iframe')!;
+    // A sandbox origin that is not reachable yet must not show its error page.
+    expect(iframe.style.visibility).toBe('hidden');
+    expect(container.querySelector('[role="status"]')?.textContent).toBe(
+      'mcpApp.loading',
+    );
+    await act(async () => {
+      appBridgeMocks.last?.onsandboxready?.();
+      appBridgeMocks.last?.oninitialized?.();
+      await Promise.resolve();
+    });
+    expect(iframe.style.visibility).toBe('');
+    expect(container.querySelector('[role="status"]')).toBeNull();
   });
 
   it('sends the sandbox resource after AppBridge reports ready', async () => {
@@ -1285,6 +1327,61 @@ describe('built-in Generated UI admission', () => {
       expect(appBridgeMocks.constructed).toBe(0);
     },
   );
+
+  it('shows the saved title and summary instead of the structured result text', () => {
+    const { container } = renderApp({
+      ...display,
+      fallbackText:
+        '{"schemaVersion":1,"documentId":"g1_abc","title":"Bill","summary":"Each pays 154."}\nBill\nEach pays 154.',
+      toolResult: {
+        content: [{ type: 'text', text: 'Bill\nEach pays 154.' }],
+        structuredContent: {
+          schemaVersion: 1,
+          documentId: 'g1_abc',
+          title: 'Bill',
+          summary: 'Each pays 154.',
+        },
+      },
+    });
+    expect(container.textContent).toContain('Bill');
+    expect(container.textContent).toContain('Each pays 154.');
+    expect(container.textContent).not.toContain('schemaVersion');
+    expect(container.textContent).toContain('mcpApp.generatedUi.unavailable');
+  });
+
+  it('lets the built-in card grow past the generic App height cap', async () => {
+    const { rerender } = renderApp(display);
+    rerender(
+      <McpAppGeneratedUiContext.Provider
+        value={{ sessionId: 'owner', status: { version: 1, enabled: true } }}
+      >
+        <McpAppSessionContext.Provider value="owner">
+          <McpApp display={display} />
+        </McpAppSessionContext.Provider>
+      </McpAppGeneratedUiContext.Provider>,
+    );
+    expect(appBridgeMocks.lastOptions).toMatchObject({
+      hostContext: { containerDimensions: { maxHeight: 4000 } },
+    });
+  });
+
+  it('labels the built-in card as an interactive view without MCP plumbing', () => {
+    const { container, rerender } = renderApp(display);
+    rerender(
+      <McpAppGeneratedUiContext.Provider
+        value={{ sessionId: 'owner', status: { version: 1, enabled: true } }}
+      >
+        <McpAppSessionContext.Provider value="owner">
+          <McpApp display={display} />
+        </McpAppSessionContext.Provider>
+      </McpAppGeneratedUiContext.Provider>,
+    );
+    // This suite renders without an I18nProvider, so keys stand in for text.
+    expect(container.querySelector('iframe')?.title).toBe(
+      'mcpApp.generatedUi.title',
+    );
+    expect(container.textContent).not.toContain('MCP App');
+  });
 
   it('retains manually installed legacy Generated UI behavior', () => {
     const { container } = renderApp(

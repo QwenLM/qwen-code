@@ -8,6 +8,7 @@ import { WebShellPortalRootContext } from '../portalRoot';
 import type { McpAppMessages } from '../mcpAppHostContext';
 import { PromptDispatchCancelledError } from '../utils/promptAdmission';
 import {
+  readGeneratedUiParameters,
   useMcpAppMessages,
   type McpAppPromptSubmission,
 } from './useMcpAppMessages';
@@ -73,13 +74,16 @@ function setup() {
   const render = (props = {}) => act(() => root.render(<Harness {...props} />));
   render();
   mounted.push({ root, container });
-  const request = (signal = new AbortController().signal) => {
+  const request = (
+    signal = new AbortController().signal,
+    message: { resourceUri?: string; text?: string } = {},
+  ) => {
     let result!: ReturnType<McpAppMessages['requestMessage']>;
     act(() => {
       result = context!.requestMessage({
         serverName: 'trusted-host-server',
-        resourceUri: 'ui://host/resource',
-        text: '<script>untrusted text</script>\nFull message',
+        resourceUri: message.resourceUri ?? 'ui://host/resource',
+        text: message.text ?? '<script>untrusted text</script>\nFull message',
         signal,
       });
     });
@@ -107,6 +111,80 @@ function setup() {
 const notSent = (phase: 'cancelled' | 'expired' | 'failed') => ({
   isError: true,
   _meta: { 'qwen-code/message-review': phase },
+});
+
+const parameterText =
+  'Continue the analysis using the captured view parameters below.\n\n' +
+  JSON.stringify(
+    {
+      kind: 'qwen.generated-ui.parameters',
+      title: 'Bill splitter',
+      snapshot: {
+        schemaVersion: 1,
+        inputs: {
+          people: { value: '7', checked: false },
+          annual: { value: 'on', checked: true },
+        },
+      },
+      rejectedEvents: 0,
+    },
+    null,
+    2,
+  );
+
+describe('Generated UI parameter review', () => {
+  it('reads only the built-in parameter message', () => {
+    expect(
+      readGeneratedUiParameters({
+        resourceUri: 'ui://qwen-code-generated-ui/view-v1.html',
+        text: parameterText,
+      }),
+    ).toEqual({
+      title: 'Bill splitter',
+      inputs: [
+        { id: 'people', value: '7', checked: false },
+        { id: 'annual', value: 'on', checked: true },
+      ],
+    });
+    expect(
+      readGeneratedUiParameters({
+        resourceUri: 'ui://other/app',
+        text: parameterText,
+      }),
+    ).toBeUndefined();
+    expect(
+      readGeneratedUiParameters({
+        resourceUri: 'ui://qwen-code-generated-ui/view-v1.html',
+        text: 'Fix the view.\n{not json',
+      }),
+    ).toBeUndefined();
+  });
+
+  it('shows parameters first and keeps the full message one step away', async () => {
+    const h = setup();
+    h.submit.mockImplementation(async (_text, submission) => {
+      submission.onDispatched();
+      submission.onAdmitted({ promptId: 'p' });
+    });
+    const result = h.request(undefined, {
+      resourceUri: 'ui://qwen-code-generated-ui/view-v1.html',
+      text: parameterText,
+    });
+    const dialog = h.container.querySelector('[role="dialog"]')!;
+    expect(dialog.textContent).toContain('Continue with these parameters');
+    expect(dialog.textContent).toContain('Bill splitter');
+    const rows = Array.from(dialog.querySelectorAll('tbody tr')).map(
+      (row) => row.textContent,
+    );
+    expect(rows).toEqual(['people7', 'annual✓ on']);
+    expect(dialog.querySelector('details')?.open).toBe(false);
+    expect(dialog.querySelector('details pre')?.textContent).toBe(
+      parameterText,
+    );
+    await act(async () => h.button('Continue analysis').click());
+    expect(h.submit).toHaveBeenCalledWith(parameterText, expect.anything());
+    expect(await result).toEqual({});
+  });
 });
 
 describe('MCP App host message review', () => {
