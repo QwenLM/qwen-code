@@ -62,11 +62,30 @@ execution, prompt recovery, or delivery after a crash. Use a host for those need
 
 ## Hosted mode
 
-Construct `TeamsChannel` with `TeamsChannelOptions.host` and a
-`TeamsReferenceStore`. `connect()` then opens no port. The application's existing
-POST route passes parsed `headers` and `body` to `handleWebhook()` and writes the
-returned status, headers, and optional body. Never pass a trusted request identity:
-the plugin constructs a fresh SDK request and authenticates it itself.
+For an HTTP gateway that only accepts messages, use
+`createTeamsIngress(name, credentials, acceptInbound)` from this package. Pass
+`appId`, `appPassword` and `tenantId` as credentials; the async callback receives
+the authenticated, immutable `TeamsInboundEvent`. The returned object's
+`handleWebhook(input)` accepts parsed `headers` and `body` and returns status,
+headers and an optional body for the application's POST route to write unchanged.
+It needs no channel configuration, approval mode, bridge, router, reference store
+or connect/disconnect calls. The host owns the object's lifetime and recreates it
+when the channel name or credentials change. The plugin constructs a fresh SDK
+request and authenticates it itself, ignoring caller-supplied identities.
+
+Acceptance is awaited before the response. A rejected callback returns 503;
+authentication failure returns 401 and normalization rejections return 400.
+SDK processing failures return 503. Ignored activities do not invoke the callback;
+SDK invoke responses retain
+their status, headers and body. The ingress does not queue, deduplicate, execute
+or send messages. Persist or consume an event before resolving the callback and
+schedule execution separately. Retries and concurrent duplicate callbacks remain
+the host's responsibility.
+
+For hosted execution, construct `TeamsChannel` with `TeamsChannelOptions.host`
+and a `TeamsReferenceStore`. `connect()` opens no port. Its `handleWebhook()`
+uses the same SDK authentication and normalization path as the independent
+ingress; gateways need not construct a channel merely to accept messages.
 
 The host contract deliberately has five operations:
 
@@ -129,7 +148,10 @@ is safe and never advances past an uncertain send. This option does not add an
 automatic retry or deduplicate messages by itself.
 
 Replies are capped at 64 KiB and split into at most 12 KiB plain-text chunks.
-Larger replies fail before sending. Ingress JSON is capped at 1 MiB and normalized
+Blank or oversized completed prompt results become a short completion notice
+through the normal response path, so cancellation and send guards still apply.
+`onPromptSettled` receives the original result text. Direct `sendEventText` calls
+with oversized replies fail before sending. Ingress JSON is capped at 1 MiB and normalized
 message text at 64 KiB. Configure database retention, encryption, capacity, and
 rate limits in the host. Do not log input text, secrets, or conversation references.
 

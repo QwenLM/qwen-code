@@ -5,10 +5,13 @@ import type {
   Envelope,
 } from '@qwen-code/channel-base';
 
-export interface TeamsConfig extends ChannelConfig {
+export interface TeamsCredentials {
   appId: string;
   appPassword: string;
   tenantId: string;
+}
+
+export interface TeamsConfig extends ChannelConfig, TeamsCredentials {
   webhookPort?: number;
   webhookPath?: string;
 }
@@ -86,4 +89,8 @@ export interface TeamsWebhookResponse {
   status: number;
   headers: Record<string, string>;
   body?: unknown;
+}
+
+export interface TeamsIngress {
+  handleWebhook(input: TeamsWebhookRequest): Promise<TeamsWebhookResponse>;
 }

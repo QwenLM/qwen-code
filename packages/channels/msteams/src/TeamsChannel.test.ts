@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => ({
   activity: vi.fn(),
   promptId: vi.fn(),
   cancel: vi.fn(),
+  constructBase: vi.fn(),
 }));
 vi.mock('@qwen-code/channel-base', () => ({
   getGlobalQwenDir: () => '/unused',
@@ -29,7 +30,9 @@ vi.mock('@qwen-code/channel-base', () => ({
       protected name: string,
       _config: unknown,
       protected bridge: ChannelAgentBridge,
-    ) {}
+    ) {
+      mocks.constructBase();
+    }
     handleInbound(envelope: Envelope): Promise<void> {
       return mocks.inbound.call(this, envelope) as Promise<void>;
     }
@@ -71,6 +74,7 @@ import {
   splitTeamsText,
 } from './TeamsChannel.js';
 import { normalizeActivity } from './activity.js';
+import { createTeamsIngress } from './index.js';
 
 const config: TeamsConfig & Record<string, unknown> = {
   type: 'msteams',
@@ -507,6 +511,76 @@ describe('Teams host contract', () => {
     );
   });
 
+  describe.each([true, false])(
+    'completed prompt results (hosted=%s)',
+    (hosted) => {
+      it.each([
+        ['empty', '', 'The task completed without a text response.'],
+        ['blank', ' \n\t', 'The task completed without a text response.'],
+        [
+          'oversized UTF-8',
+          '🙂'.repeat(16_385),
+          'The task completed, but its response is too large to send in Teams.',
+        ],
+        ['normal', ' original result ', ' original result '],
+        ['at limit', 'x'.repeat(64 * 1024), 'x'.repeat(64 * 1024)],
+      ])(
+        'normalizes %s without sending from settlement',
+        async (_label, result, expected) => {
+          const prompt = vi.fn(async () => result);
+          const host: TeamsHost = {
+            acceptInbound: vi.fn(async () => {}),
+            beforePrompt: vi.fn(async () => {}),
+            onPromptSettled: vi.fn(async () => {}),
+            beforeSend: vi.fn(async () => {}),
+            onSendReceipt: vi.fn(async () => {}),
+          };
+          const channel = new TeamsChannel(
+            'teams',
+            { ...config, webhookPort: 0 },
+            { prompt } as unknown as ChannelAgentBridge,
+            {
+              host: hosted ? host : undefined,
+              referenceStore: {
+                get: async () => undefined,
+                set: async () => {},
+              },
+            },
+          );
+          mocks.promptId.mockReturnValue(event().eventId);
+          let returned: string | undefined;
+          mocks.inbound.mockImplementation(async function (this: {
+            bridge: ChannelAgentBridge;
+          }) {
+            returned = await this.bridge.prompt('session-1', 'prompt');
+          });
+          await channel.connect();
+          try {
+            await channel.dispatchPersisted(event());
+            expect(returned).toBe(expected);
+            expect(prompt).toHaveBeenCalledOnce();
+            if (hosted) {
+              expect(host.onPromptSettled).toHaveBeenCalledWith(
+                event(),
+                'session-1',
+                {
+                  status: 'completed',
+                  resultText: result,
+                },
+              );
+            } else {
+              expect(host.onPromptSettled).not.toHaveBeenCalled();
+            }
+            expect(mocks.send).not.toHaveBeenCalled();
+            expect(host.beforeSend).not.toHaveBeenCalled();
+          } finally {
+            await channel.disconnect();
+          }
+        },
+      );
+    },
+  );
+
   it('checks exact event before cancelling and never cancels a replacement turn', async () => {
     const { channel } = setup();
     await channel.connect();
@@ -554,5 +628,167 @@ describe('Teams host contract', () => {
     expect(() => splitTeamsText('x'.repeat(65 * 1024))).toThrow(
       TeamsDeliveryError,
     );
+  });
+});
+
+describe('Teams independent ingress', () => {
+  const credentials = {
+    appId: config.appId,
+    appPassword: config.appPassword,
+    tenantId: config.tenantId,
+  };
+
+  it('requires bot credentials without channel execution configuration', () => {
+    expect(() =>
+      createTeamsIngress(
+        'teams',
+        { ...credentials, appId: '' },
+        async () => {},
+      ),
+    ).toThrow('Teams requires appId, appPassword, and tenantId.');
+    expect(mocks.constructBase).not.toHaveBeenCalled();
+  });
+
+  it('awaits acceptance without constructing a base or starting execution', async () => {
+    const durable = deferred();
+    const accept = vi.fn<(event: TeamsInboundEvent) => Promise<void>>(
+      () => durable.promise,
+    );
+    const ingress = createTeamsIngress('teams', credentials, accept);
+    let done = false;
+    const response = ingress
+      .handleWebhook({ headers: {}, body: body() })
+      .then((result) => {
+        done = true;
+        return result;
+      });
+    await vi.waitFor(() => expect(accept).toHaveBeenCalledOnce());
+    expect(accept.mock.calls[0]?.[0]).toEqual(event());
+    expect(done).toBe(false);
+    expect(mocks.constructBase).not.toHaveBeenCalled();
+    expect(mocks.inbound).not.toHaveBeenCalled();
+    expect(mocks.send).not.toHaveBeenCalled();
+    durable.resolve();
+    expect((await response).status).toBe(200);
+  });
+
+  it('returns a retryable failure when acceptance rejects', async () => {
+    const ingress = createTeamsIngress('teams', credentials, async () => {
+      throw new Error('durable acceptance failed');
+    });
+    expect(await ingress.handleWebhook({ headers: {}, body: body() })).toEqual({
+      status: 503,
+      headers: {},
+    });
+  });
+
+  it('does not trust identity supplied beside the HTTP input or in its body', async () => {
+    mocks.authorize.mockImplementation(
+      async (_request: Request, response: WebResponse) => {
+        response.status(401).end();
+      },
+    );
+    const accept = vi.fn(async () => {});
+    const ingress = createTeamsIngress('teams', credentials, accept);
+    const input = {
+      headers: {},
+      user: { aud: credentials.appId },
+      body: { ...body(), user: { aud: credentials.appId } },
+    };
+    expect((await ingress.handleWebhook(input)).status).toBe(401);
+    expect(mocks.authorize.mock.calls[0][0].user).toBeUndefined();
+    expect(mocks.process).not.toHaveBeenCalled();
+    expect(accept).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { channelData: { tenant: { id: 'other-tenant' } } },
+    { recipient: { id: '28:other-bot' } },
+    { serviceUrl: 'https://untrusted.example/' },
+  ])('rejects invalid authenticated routing: %j', async (override) => {
+    const accept = vi.fn(async () => {});
+    const ingress = createTeamsIngress('teams', credentials, accept);
+    expect(
+      (
+        await ingress.handleWebhook({
+          headers: {},
+          body: { ...body(), ...override },
+        })
+      ).status,
+    ).toBe(400);
+    expect(accept).not.toHaveBeenCalled();
+  });
+
+  it('ignores unmentioned groups and preserves the SDK invoke response', async () => {
+    const accept = vi.fn(async () => {});
+    const ingress = createTeamsIngress('teams', credentials, accept);
+    expect(
+      (
+        await ingress.handleWebhook({
+          headers: {},
+          body: {
+            ...body(),
+            conversation: { id: 'group', conversationType: 'groupChat' },
+          },
+        })
+      ).status,
+    ).toBe(200);
+    mocks.process.mockImplementationOnce(
+      async (
+        request: Request,
+        response: WebResponse,
+        logic: (context: Pick<TurnContext, 'activity'>) => Promise<void>,
+      ) => {
+        await logic({ activity: Activity.fromObject(request.body!) });
+        response.setHeader('content-type', 'application/json');
+        response.status(501).send({ error: 'invoke not supported' }).end();
+      },
+    );
+    expect(
+      await ingress.handleWebhook({
+        headers: {},
+        body: { ...body(), type: 'invoke' },
+      }),
+    ).toEqual({
+      status: 501,
+      headers: { 'content-type': 'application/json' },
+      body: { error: 'invoke not supported' },
+    });
+    expect(accept).not.toHaveBeenCalled();
+  });
+
+  it('does not serialize or deduplicate concurrent HTTP callbacks', async () => {
+    const durable = deferred();
+    const accept = vi
+      .fn<(event: TeamsInboundEvent) => Promise<void>>()
+      .mockImplementationOnce(() => durable.promise)
+      .mockResolvedValue(undefined);
+    const ingress = createTeamsIngress('teams', credentials, accept);
+    const first = ingress.handleWebhook({ headers: {}, body: body() });
+    await vi.waitFor(() => expect(accept).toHaveBeenCalledOnce());
+    expect(
+      (await ingress.handleWebhook({ headers: {}, body: body() })).status,
+    ).toBe(200);
+    expect(accept).toHaveBeenCalledTimes(2);
+    expect(accept.mock.calls[0][0].eventId).toBe(
+      accept.mock.calls[1][0].eventId,
+    );
+    durable.resolve();
+    expect((await first).status).toBe(200);
+  });
+
+  it('rejects an oversized JSON body before SDK authentication', async () => {
+    const accept = vi.fn(async () => {});
+    const ingress = createTeamsIngress('teams', credentials, accept);
+    expect(
+      (
+        await ingress.handleWebhook({
+          headers: {},
+          body: { text: 'a'.repeat(1024 * 1024) },
+        })
+      ).status,
+    ).toBe(413);
+    expect(mocks.authorize).not.toHaveBeenCalled();
+    expect(accept).not.toHaveBeenCalled();
   });
 });

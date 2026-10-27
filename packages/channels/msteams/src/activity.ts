@@ -1,7 +1,11 @@
 import { createHash } from 'node:crypto';
 import type { Activity } from '@microsoft/agents-activity';
 import { OutboundHostValidator } from '@microsoft/agents-hosting';
-import type { TeamsConfig, TeamsInboundEvent, TeamsTarget } from './types.js';
+import type {
+  TeamsCredentials,
+  TeamsInboundEvent,
+  TeamsTarget,
+} from './types.js';
 
 const serviceHosts = new OutboundHostValidator({
   enabled: true,
@@ -60,7 +64,7 @@ function botId(id: string): string {
 /** Called only after the Microsoft SDK has authenticated the request. */
 export function normalizeActivity(
   name: string,
-  config: Pick<TeamsConfig, 'appId' | 'tenantId'>,
+  config: Pick<TeamsCredentials, 'appId' | 'tenantId'>,
   activity: Activity,
 ): TeamsInboundEvent | undefined {
   if (activity.type !== 'message' || activity.channelId !== 'msteams') return;
@@ -181,7 +185,7 @@ export function normalizeActivity(
 }
 
 export function validateTarget(
-  config: Pick<TeamsConfig, 'appId' | 'tenantId'>,
+  config: Pick<TeamsCredentials, 'appId' | 'tenantId'>,
   target: TeamsTarget,
 ): void {
   if (

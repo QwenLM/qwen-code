@@ -4,12 +4,15 @@ import type { TeamsConfig } from './types.js';
 
 export { TeamsChannel, TeamsDeliveryError } from './TeamsChannel.js';
 export { FileTeamsReferenceStore } from './reference-store.js';
+export { createTeamsIngress } from './ingress.js';
 export type {
   TeamsChannelOptions,
   TeamsConfig,
+  TeamsCredentials,
   TeamsHost,
   TeamsPromptOutcome,
   TeamsInboundEvent,
+  TeamsIngress,
   TeamsReferenceStore,
   TeamsSendContext,
   TeamsSendReceipt,

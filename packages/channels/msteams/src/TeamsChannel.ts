@@ -3,9 +3,8 @@ import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { Server } from 'node:http';
 import { join } from 'node:path';
-import { CloudAdapter } from '@microsoft/agents-hosting';
+import type { CloudAdapter } from '@microsoft/agents-hosting';
 import { Activity } from '@microsoft/agents-activity';
-import type { Request, WebResponse } from '@microsoft/agents-hosting';
 import { ChannelBase, getGlobalQwenDir } from '@qwen-code/channel-base';
 import type {
   ChannelAgentBridge,
@@ -13,14 +12,12 @@ import type {
   ChannelTaskLifecycleEvent,
   Envelope,
 } from '@qwen-code/channel-base';
+import { freeze, referenceKey, validateTarget } from './activity.js';
 import {
-  freeze,
-  normalizeActivity,
-  referenceKey,
-  teamsServiceUrls,
-  TeamsActivityError,
-  validateTarget,
-} from './activity.js';
+  createTeamsAdapter,
+  handleTeamsWebhook,
+  MAX_BODY_BYTES,
+} from './ingress.js';
 import { FileTeamsReferenceStore } from './reference-store.js';
 import type {
   TeamsChannelOptions,
@@ -34,7 +31,6 @@ import type {
   TeamsWebhookResponse,
 } from './types.js';
 
-const MAX_BODY_BYTES = 1024 * 1024;
 const MAX_REPLY_BYTES = 64 * 1024;
 const CHUNK_BYTES = 12 * 1024;
 
@@ -73,12 +69,16 @@ function wrapPromptBridge(
   lookup: (sessionId: string) => TeamsInboundEvent | undefined,
   host?: TeamsHost,
 ): ChannelAgentBridge {
-  if (!host) return bridge;
   const prompt: ChannelAgentBridge['prompt'] = async (
     sessionId,
     text,
     options,
   ) => {
+    if (!host) {
+      return normalizePromptResult(
+        await bridge.prompt(sessionId, text, options),
+      );
+    }
     const event = lookup(sessionId);
     if (!event)
       throw new Error('Teams prompt has no accepted originating event.');
@@ -97,7 +97,7 @@ function wrapPromptBridge(
       status: 'completed',
       resultText: result,
     });
-    return result;
+    return normalizePromptResult(result);
   };
   return new Proxy(bridge, {
     get(target, property) {
@@ -108,27 +108,12 @@ function wrapPromptBridge(
   });
 }
 
-class ResponseBuffer implements WebResponse {
-  result: TeamsWebhookResponse = { status: 200, headers: {} };
-  headersSent = false;
-  writableEnded = false;
-  status(code: number): this {
-    this.result.status = code;
-    return this;
+function normalizePromptResult(text: string): string {
+  if (!text.trim()) return 'The task completed without a text response.';
+  if (Buffer.byteLength(text, 'utf8') > MAX_REPLY_BYTES) {
+    return 'The task completed, but its response is too large to send in Teams.';
   }
-  setHeader(name: string, value: string): this {
-    this.result.headers[name] = value;
-    return this;
-  }
-  send(body?: unknown): this {
-    this.result.body = body;
-    this.headersSent = true;
-    return this;
-  }
-  end(): this {
-    this.writableEnded = true;
-    return this;
-  }
+  return text;
 }
 
 export class TeamsChannel extends ChannelBase {
@@ -209,22 +194,7 @@ export class TeamsChannel extends ChannelBase {
           'teams-references',
         ),
       );
-    this.adapter = new CloudAdapter(
-      {
-        clientId: config.appId,
-        clientSecret: config.appPassword,
-        tenantId: config.tenantId,
-        validateIssuer: true,
-      },
-      undefined,
-      undefined,
-      { validateServiceUrl: true },
-      teamsServiceUrls,
-    );
-    // The SDK default logs and swallows turn errors, which would acknowledge a failed durable acceptance.
-    this.adapter.onTurnError = async (_context, error) => {
-      throw error;
-    };
+    this.adapter = createTeamsAdapter(this.teamsConfig);
   }
 
   private eventForSession(sessionId: string): TeamsInboundEvent | undefined {
@@ -345,42 +315,13 @@ export class TeamsChannel extends ChannelBase {
     input: TeamsWebhookRequest,
   ): Promise<TeamsWebhookResponse> {
     if (!this.connected) return { status: 503, headers: {} };
-    if (Buffer.byteLength(JSON.stringify(input.body), 'utf8') > MAX_BODY_BYTES)
-      return { status: 413, headers: {} };
-    const request: Request = {
-      method: 'POST',
-      headers: input.headers,
-      body: input.body,
-    };
-    const response = new ResponseBuffer();
-    let authorized = false;
-    try {
-      await this.adapter.authorizeRequest(
-        request,
-        response,
-        (error?: unknown) => {
-          if (error) throw error;
-          authorized = true;
-        },
-      );
-      if (!authorized || !request.user)
-        return { ...response.result, status: 401 };
-      await this.adapter.process(request, response, async (context) => {
-        const event = normalizeActivity(
-          this.name,
-          this.teamsConfig,
-          context.activity,
-        );
-        if (event) await this.accept(event);
-      });
-      return response.result;
-    } catch (error) {
-      return {
-        status:
-          error instanceof TeamsActivityError ? 400 : authorized ? 503 : 401,
-        headers: {},
-      };
-    }
+    return handleTeamsWebhook(
+      this.adapter,
+      this.name,
+      this.teamsConfig,
+      (event) => this.accept(event),
+      input,
+    );
   }
 
   private async accept(event: TeamsInboundEvent): Promise<void> {
