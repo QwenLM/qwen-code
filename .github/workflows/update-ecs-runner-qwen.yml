@@ -81,9 +81,23 @@ jobs:
             'ecs-update-hk-3',
             'ecs-update-hk-4',
             'ecs-update-hk-5',
+            'ecs-update-hz-1',
+            'ecs-update-hz-2',
+            'ecs-update-hz-3',
+            'ecs-update-hz-4',
+            'ecs-update-hz-5',
+            'ecs-update-hz-6',
           ]
       fail-fast: false
-    runs-on: ['self-hosted', 'linux', 'x64', '${{ matrix.runner }}']
+    # The arch label follows the pool: Hangzhou is the ARM64 fleet, so a
+    # hard-coded 'x64' leg would queue forever on ecs-update-hz-*.
+    runs-on:
+      [
+        'self-hosted',
+        'linux',
+        "${{ startsWith(matrix.runner, 'ecs-update-hz') && 'arm64' || 'x64' }}",
+        '${{ matrix.runner }}',
+      ]
     concurrency:
       group: 'update-ecs-runner-qwen-${{ matrix.runner }}'
       cancel-in-progress: false
