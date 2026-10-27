@@ -50,6 +50,11 @@ them rather than at the end of the document.
   documentation-only round has no capture and a checker cannot know whether a
   harness ran.
 
+Each prepared artifact directory keeps `context.json` containing only its
+`headRefOid`. The checker prefers that round's snapshot and names the source it
+uses. Older directories fall back to the shared per-PR snapshot; an unreadable
+or invalid round snapshot warns instead of using a later round's shared head.
+
 ## Design decisions
 
 1. **`--repo` is mandatory.** A script cannot distinguish a maintainer's clone
@@ -110,6 +115,9 @@ them rather than at the end of the document.
   triple, and an unknown verdict word; it accepts `findings` with the same
   counts.
 - Neither script executes PR code.
+- A report with its own round snapshot keeps the same checked head after a
+  later preparation into a different artifact directory. Publishable round
+  snapshots contain no PR title or body.
 
 ## Open questions
 
