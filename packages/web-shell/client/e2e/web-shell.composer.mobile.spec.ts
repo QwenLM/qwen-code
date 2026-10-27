@@ -296,6 +296,71 @@ test('simple mobile composer switches directly to advanced mode without losing i
   await expect(attachments).toHaveCount(0);
 });
 
+test('switching to simple mode exits Shell before sending the retained draft @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  const shellRequests: string[] = [];
+  await page.route(/\/shell\/?(?:\?|$)/, async (route) => {
+    shellRequests.push(route.request().url());
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        exitCode: 0,
+        output: 'Fixture only',
+        aborted: false,
+      }),
+    });
+  });
+  await page.goto(
+    `/e2e/composer-layout-harness.html?composerVariant=simple&tags=false&sessionId=${scenario.sessionId}`,
+  );
+  await completeReplay(page, daemon, scenario.sessionId);
+  const composer = page.locator('[data-web-shell-composer]');
+  const textarea = composer.locator(COMPOSER_TEXTAREA);
+  const shellPrefix = textarea.locator('..').getByText('!', { exact: true });
+  await expect(textarea).toBeVisible();
+  const original = await textarea.elementHandle();
+  const placeholder = await textarea.getAttribute('placeholder');
+  const draft = '保留普通聊天草稿';
+  await textarea.fill(draft);
+  await composer.locator('[data-web-shell-composer-expand]').tap();
+  await expect(composer).toHaveAttribute(
+    'data-web-shell-composer-variant',
+    'default',
+  );
+  await composer.getByRole('button', { name: 'Shell mode', exact: true }).tap();
+  await expect(textarea).toHaveAttribute(
+    'placeholder',
+    'Enter terminal command',
+  );
+  await expect(shellPrefix).toBeVisible();
+  await composer.locator('[data-web-shell-composer-collapse]').tap();
+  await expect(composer).toHaveAttribute(
+    'data-web-shell-composer-variant',
+    'simple',
+  );
+  await expect(textarea).toHaveValue(draft);
+  expect(
+    await textarea.evaluate((node, before) => node === before, original),
+  ).toBe(true);
+  expect.soft(await textarea.getAttribute('placeholder')).toBe(placeholder);
+  expect.soft(await shellPrefix.count()).toBe(0);
+  await composer.locator('[data-web-shell-composer-submit]').tap();
+  await expect
+    .poll(() => daemon.promptRequests().length + shellRequests.length)
+    .toBe(1);
+  expect(shellRequests).toEqual([]);
+  expect(daemon.promptRequests()).toHaveLength(1);
+  expectPromptBodyToContainText(
+    firstRequestBody(daemon.promptRequests()),
+    draft,
+  );
+  await expect(textarea).toHaveValue('');
+});
+
 test('renders the textarea backend instead of CodeMirror on touch devices', async ({
   page,
 }, testInfo) => {

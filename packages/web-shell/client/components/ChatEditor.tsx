@@ -3502,6 +3502,7 @@ export const ChatEditor = memo(
         onMouseDown={(event) => event.preventDefault()}
         onClick={(event) => {
           event.stopPropagation();
+          if (!isSimple) core.setShellMode(false);
           setAdvancedMode((current) => !current);
           core.focus();
         }}
@@ -3584,7 +3585,9 @@ export const ChatEditor = memo(
                 <span
                   data-web-shell-simple-voice={isSimple ? '' : undefined}
                   hidden={
-                    isSimple && (core.hasContent || isRunning) && !voiceActive
+                    isSimple &&
+                    (core.hasContent || isRunning || composerPreparing) &&
+                    !voiceActive
                   }
                   style={{
                     // Inline display must not override [hidden] in simple mode.

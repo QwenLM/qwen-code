@@ -91,7 +91,9 @@ return → microphone → send. Its existing layout, controls, action behavior,
 and icon sizing remain unchanged. Their labels are “Switch to advanced mode”
 and “Switch to simple mode.” Neither action opens a menu or fullscreen editor
 dialog, and no action changes the iOS native editing menu. Keep the text,
-attachments, and editor DOM node through both transitions. The `advancedMode`
+attachments, and editor DOM node through both transitions. Returning to simple
+mode exits Shell mode, so the retained draft uses normal chat submission without
+requiring the hidden Shell controls. The `advancedMode`
 flag is local presentation state, without persisting a setting or changing
 `composerVariant`. Default-mode and desktop composers do not gain this toggle.
 
@@ -104,6 +106,8 @@ the simple layout is shown.
 Advanced mode restores the original voice and send visibility, sizing, and
 behavior, including their coexistence where the original composer provides it.
 Preserve existing preparing, disabled, running, queued-input, and stop semantics.
+While preparing a session or images, hide the idle microphone and keep the
+disabled loading action; an ongoing recording or transcription remains visible.
 
 During recording or transcription in simple mode, the existing voice control
 occupies the whole capsule row. Temporarily hide the editor, add button, mode
@@ -133,7 +137,9 @@ Reuse `AddMenu` with a simple presentation limited to these eight action kinds:
 7. MCP.
 8. Skills.
 
-Respect the existing platform and capability checks for each entry. Do not place
+Respect the existing platform and capability checks for each entry. When no
+simple action is available, show the existing localized empty-state explanation.
+Do not place
 commands, history, shell mode, Plan, live voice, or secondary toolbar controls in
 the simple add menu. No internal toolbar-content slot is needed. Workspace,
 approval-mode, model, context, and host toolbar controls remain part of the

@@ -667,6 +667,44 @@ describe('ChatEditor simple composer', () => {
     );
   });
 
+  it.each(['session', 'images'] as const)(
+    'keeps the idle microphone hidden while preparing %s without hiding active capture',
+    (source) => {
+      composerCoreState.hasContent = false;
+      composerCoreState.pendingImageBatchCount = source === 'images' ? 1 : 0;
+      const props = {
+        customization: simple,
+        visibleToolbarActions: ['voice'] as const,
+        isPreparing: source === 'session',
+      };
+      const container = renderChatEditor(props);
+      const voice = container.querySelector<HTMLElement>(
+        '[data-web-shell-simple-voice]',
+      )!;
+      expect(voice.hidden).toBe(true);
+      expect(
+        container.querySelector('[data-web-shell-simple-idle]'),
+      ).toBeNull();
+      const submit = container.querySelector<HTMLButtonElement>(
+        '[data-web-shell-composer-submit]',
+      )!;
+      expect(submit.disabled).toBe(true);
+      expect(submit.getAttribute('aria-label')).toBe('Loading...');
+
+      act(() => voiceButtonState.onActiveChange?.(true));
+      expect(voice.hidden).toBe(false);
+      act(() => voiceButtonState.onActiveChange?.(false));
+      expect(voice.hidden).toBe(true);
+
+      composerCoreState.pendingImageBatchCount = 0;
+      rerenderChatEditor(container, { ...props, isPreparing: false });
+      expect(voice.hidden).toBe(false);
+      expect(
+        container.querySelector('[data-web-shell-simple-idle]'),
+      ).not.toBeNull();
+    },
+  );
+
   it('keeps advanced and host controls out of the simple menu', async () => {
     const props: ChatEditorRenderProps = {
       customization: {

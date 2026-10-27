@@ -599,6 +599,14 @@ export function AddMenu({
             <div className="min-h-0 overflow-y-auto px-3" data-vaul-no-drag>
               {page === 'root' && (
                 <div className="flex flex-col gap-1">
+                  {simpleMode && !anyAvailable && (
+                    <div
+                      className="p-3 text-muted-foreground"
+                      data-testid="composer-add-menu-empty"
+                    >
+                      {t('composerAdd.emptyState')}
+                    </div>
+                  )}
                   {addFileAvailable && (
                     <>
                       <Button
