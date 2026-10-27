@@ -15091,7 +15091,7 @@ describe('LlmChat', async () => {
           ...mockConfig,
           getAllowedHttpHookUrls: () => [],
           getAllowPrivateNetworkHooks: () => false,
-        } as Config);
+        } as unknown as Config);
         hookSystem.addSessionHook(mockConfig.getSessionId(), event, matcher, {
           type: HookType.Command,
           command: 'true',
