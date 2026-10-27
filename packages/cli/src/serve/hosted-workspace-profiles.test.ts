@@ -5,6 +5,7 @@
  */
 import { expect, it } from 'vitest';
 import {
+  HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
   HOSTED_WORKSPACE_FILE_PROFILE,
   HOSTED_WORKSPACE_FILE_PROFILE_V2,
   HOSTED_WORKSPACE_FILE_PROFILE_V3,
@@ -47,6 +48,27 @@ it('pre-approves glob only on the search profiles and the read profile', () => {
   ])
     expect(isHostedWorkspaceGlobProfile(profile)).toBe(false);
   expect(isHostedWorkspaceSearchProfile(HOSTED_WORKSPACE_READ_PROFILE)).toBe(
+    false,
+  );
+});
+
+it('recognizes external files without enabling search or Shell', () => {
+  expect(HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE).toBe(
+    'hosted-workspace-external-files/1',
+  );
+  expect(
+    isHostedWorkspaceProfile(HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE),
+  ).toBe(true);
+  expect(
+    isHostedWorkspaceGlobProfile(HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE),
+  ).toBe(true);
+  expect(
+    isHostedWorkspaceSearchProfile(HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE),
+  ).toBe(false);
+  expect(
+    isHostedWorkspaceShellProfile(HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE),
+  ).toBe(false);
+  expect(isHostedWorkspaceProfile('hosted-workspace-external-files/2')).toBe(
     false,
   );
 });

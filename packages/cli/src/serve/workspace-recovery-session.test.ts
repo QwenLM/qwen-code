@@ -1834,6 +1834,7 @@ describe('verifyRecoverySession', () => {
     { toolProfile: 'hosted-workspace-files/1' },
     { toolProfile: 'hosted-workspace-files/2' },
     { toolProfile: 'hosted-workspace-files/3' },
+    { toolProfile: 'hosted-workspace-external-files/1' },
     { toolProfile: 'hosted-workspace-shell/1', captureBytes: 1024 },
     { toolProfile: 'hosted-workspace-team-lead/1', captureBytes: 1024 },
     { toolProfile: 'hosted-workspace-read/1' },
@@ -1856,6 +1857,31 @@ describe('verifyRecoverySession', () => {
     await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
       /unsupported Hosted profile|invalid frozen Hosted definition/u,
     );
+  });
+
+  it.each([
+    { hookCatalog: {} },
+    { agentDefinition: {} },
+    { sessionSkillsRef: {} },
+    { initialSelection: {} },
+    { lineage: {} },
+    { childWorkspaces: true },
+    { planMode: true },
+  ])('refuses excluded external file recovery options: %j', async (extra) => {
+    const f = fixture({
+      toolProfile: 'hosted-workspace-external-files/1',
+      ...extra,
+    });
+    await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+      'unsupported Hosted profile',
+    );
+  });
+
+  it('does not admit external files into migration', async () => {
+    const f = fixture({ toolProfile: 'hosted-workspace-external-files/1' });
+    await expect(
+      verifyRecoverySession(f.source, f.io, 'migration'),
+    ).rejects.toThrow('unsupported migration profile');
   });
 
   it('rejects changed bytes even when the stored transaction metadata was not changed', async () => {

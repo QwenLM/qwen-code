@@ -122,6 +122,11 @@ public final class RoutingRuntimeProvisioner implements RuntimeProvisioner {
     }
 
     @Override
+    public boolean supportsDrainedStopKind(String kind) {
+        return kind != null && supportsKind(kind) && provider(kind).supportsDrainedStopKind(kind);
+    }
+
+    @Override
     public boolean supportsDrainedStop(RuntimeBindingRecord binding) {
         return binding != null && supportsKind(binding.getRequest().getProvisionerKind())
                 && provider(binding.getRequest()).supportsDrainedStop(binding);

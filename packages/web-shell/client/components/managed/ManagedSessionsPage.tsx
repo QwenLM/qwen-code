@@ -1790,24 +1790,28 @@ function ManagedSessionsContent({
           {summary?.failure && (
             <p className="text-sm text-destructive">{failureMessage}</p>
           )}
-          {recovery.value && (
-            <ManagedRecoveryPanel
-              recovery={recovery.value}
-              busy={!interactive || recovery.busy || turnCancel.busy}
-              error={recovery.error}
-              onRecheck={() => void recovery.recheck()}
-              onCancel={
-                cancellationEnabled && summary?.capabilities.canCancel
-                  ? () => void cancel()
-                  : undefined
-              }
-              onHandoff={
-                provider.workspaceBinding?.createSession
-                  ? prepareHandoff
-                  : undefined
-              }
-            />
-          )}
+          {recovery.value &&
+            !(
+              summary?.lifecycleStatus === 'closed' &&
+              recovery.value.reasonCode === 'session_not_active'
+            ) && (
+              <ManagedRecoveryPanel
+                recovery={recovery.value}
+                busy={!interactive || recovery.busy || turnCancel.busy}
+                error={recovery.error}
+                onRecheck={() => void recovery.recheck()}
+                onCancel={
+                  cancellationEnabled && summary?.capabilities.canCancel
+                    ? () => void cancel()
+                    : undefined
+                }
+                onHandoff={
+                  provider.workspaceBinding?.createSession
+                    ? prepareHandoff
+                    : undefined
+                }
+              />
+            )}
           {turnCancel.status && (
             <div role="status" className="flex items-center gap-2 text-sm">
               <span>
