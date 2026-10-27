@@ -109,6 +109,7 @@ describe.skipIf(process.platform === 'win32').each([false, true])(
             'trustedFolders.json',
           ),
           QWEN_CODE_DISABLE_WORKFLOWS: '0',
+          QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP: '0',
           QWEN_CODE_DISABLE_CRON: '1',
           OPENAI_API_KEY: 'fake-key',
           OPENAI_BASE_URL: server.baseUrl,

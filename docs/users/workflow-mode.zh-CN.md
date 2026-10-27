@@ -6,10 +6,16 @@ Workflow 模式保存当前会话的偏好：对普通新输入考虑使用 Work
 模型仍决定任务是否适合工作流；权限、信任、预算与工具限制保持生效。
 开启模式不会启动工作流、修改推理 effort 或修改默认设置。
 
+Workflow 工具默认关闭。开启模式前，先在设置中启用 `tools.workflowsEnabled`，
+或设置 `QWEN_CODE_ENABLE_WORKFLOWS=1`：
+
 ```sh
-qwen --workflow-mode on
+QWEN_CODE_ENABLE_WORKFLOWS=1 qwen --workflow-mode on
 qwen --resume <session-id> --workflow-mode off
 ```
+
+工具不可用时使用 `--workflow-mode on` 启动会导致初始化失败。
+`QWEN_CODE_DISABLE_WORKFLOWS=1` 的优先级高于开启工具的设置。
 
 两套终端界面均支持 `/workflows mode` 或 `/workflows mode status` 查询状态，
 通过 `/workflows mode on` 和 `/workflows mode off` 修改。
@@ -45,7 +51,8 @@ Managed、SSH、派生/子代理、session-agent 及关闭聊天录制的会话�
 
 恢复会话读取所选 transcript 分支上最后一个合法 Boolean 记录，并对已保存的开启或
 关闭状态重申一次。显式 CLI 或 SDK 初始值在会话就绪后覆盖恢复值一次。
-冲突的初始值会导致初始化失败。新建或清空会话默认关闭。Fork 独立继承所选检查点值；
+初始值冲突，或工具不可用时指定初始开启值，都会导致初始化失败。
+新建或清空会话默认关闭。Fork 独立继承所选检查点值；
 rewind 保留当前偏好并将其锚定到恢复后的分支。成功压缩后，下次符合条件的新输入重新
 声明状态。
 
@@ -61,7 +68,8 @@ await session.setWorkflowMode(false);
 ```
 
 `workflowMode` 可省略：省略保留恢复值，`false` 显式保存关闭。初始化会协商并暂存初始值；
-`Query.initialized` 表示控制握手完成。Get/set 等待会话就绪。旧版 CLI 在首个 prompt 前
+`Query.initialized` 表示控制握手完成。Get/set 等待会话就绪；会话初始化尚未完成时，
+重复的 initialize 请求会被拒绝。旧版 CLI 在首个 prompt 前
 拒绝显式模式请求，不会静默忽略。自定义 Transport 使用相同控制协议。
 
 ACP 广告标准 `workflow_mode` 配置选项，值为 `on` 和 `off`。`currentValue` 对应

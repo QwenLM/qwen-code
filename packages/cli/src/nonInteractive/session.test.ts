@@ -447,6 +447,59 @@ describe('runNonInteractiveStreamJson', () => {
     expect(mockOutputAdapter.emitResult).toHaveBeenCalled();
   });
 
+  it('rejects a pending duplicate initialize without executing it after cancellation', async () => {
+    let release!: () => void;
+    const initialization = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    config = createConfig({ initialize: vi.fn(() => initialization) });
+    const first = createControlRequest();
+    const duplicate: CLIControlRequest = {
+      type: 'control_request',
+      request_id: 'pending-duplicate',
+      request: { subtype: 'initialize', effort: 'low' },
+    };
+    let responseBeforeReady: unknown;
+    mockInputReader.read = async function* () {
+      try {
+        yield first;
+        await vi.waitFor(() =>
+          expect(config.initialize).toHaveBeenCalledOnce(),
+        );
+        yield duplicate;
+        await Promise.resolve();
+        responseBeforeReady = mockOutputAdapter.send.mock.calls.find(
+          ([frame]) => frame.response?.request_id === duplicate.request_id,
+        )?.[0];
+        yield {
+          type: 'control_cancel_request',
+          request_id: duplicate.request_id,
+        } as ControlCancelRequest;
+      } finally {
+        release();
+      }
+    };
+
+    await runNonInteractiveStreamJson(config, '');
+
+    expect(responseBeforeReady).toEqual({
+      type: 'control_response',
+      response: {
+        subtype: 'error',
+        request_id: duplicate.request_id,
+        error: 'Session initialization is in progress. Try again when ready.',
+      },
+    });
+    expect(mockDispatcher.dispatch).toHaveBeenCalledExactlyOnceWith(
+      first,
+      true,
+    );
+    expect(mockDispatcher.handleCancel).toHaveBeenCalledWith(
+      duplicate.request_id,
+    );
+    expect(config.initialize).toHaveBeenCalledOnce();
+  });
+
   it('rejects another initialize after payload validation fails', async () => {
     const initialRequest = createControlRequest();
     const retryRequest = {
@@ -517,7 +570,7 @@ describe('runNonInteractiveStreamJson', () => {
   });
 
   it.each([true, false])(
-    'waits for the initial config outcome before handling another initialize (success=%s)',
+    'rejects a pending initialize and preserves the settled config outcome (success=%s)',
     async (succeeds) => {
       let resolveInitialization!: () => void;
       let rejectInitialization!: (error: Error) => void;
@@ -539,6 +592,10 @@ describe('runNonInteractiveStreamJson', () => {
       const retryRequest = {
         ...createControlRequest(),
         request_id: 'initialize-retry',
+      };
+      const settledRequest = {
+        ...createControlRequest(),
+        request_id: 'initialize-settled',
       };
       const error = new Error('bad credentials');
       mockDispatcher.dispatch.mockImplementation(
@@ -565,6 +622,11 @@ describe('runNonInteractiveStreamJson', () => {
         dispatchesWhileInitializing = mockDispatcher.dispatch.mock.calls.length;
         yield createControlResponse('mcp-initialize');
         yield createUserMessage('run only after successful initialization');
+        await vi.waitFor(() => {
+          if (succeeds) expect(runNonInteractiveMock).toHaveBeenCalledOnce();
+          else expect(mockOutputAdapter.emitResult).toHaveBeenCalledOnce();
+        });
+        yield settledRequest;
       };
 
       await runNonInteractiveStreamJson(config, '');
@@ -576,18 +638,26 @@ describe('runNonInteractiveStreamJson', () => {
         createControlResponse('mcp-initialize'),
       );
       expect(config.initialize).toHaveBeenCalledOnce();
-      expect(mockOutputAdapter.send).toHaveBeenCalledTimes(2);
+      expect(mockOutputAdapter.send).toHaveBeenCalledTimes(3);
+      expect(mockOutputAdapter.send).toHaveBeenNthCalledWith(2, {
+        type: 'control_response',
+        response: {
+          subtype: 'error',
+          request_id: retryRequest.request_id,
+          error: 'Session initialization is in progress. Try again when ready.',
+        },
+      });
       expect(mockOutputAdapter.send).toHaveBeenLastCalledWith({
         type: 'control_response',
         response: succeeds
           ? {
               subtype: 'success',
-              request_id: retryRequest.request_id,
+              request_id: settledRequest.request_id,
               response: { subtype: 'initialize' },
             }
           : {
               subtype: 'error',
-              request_id: retryRequest.request_id,
+              request_id: settledRequest.request_id,
               error: `Session initialization failed: ${error.message}`,
             },
       });

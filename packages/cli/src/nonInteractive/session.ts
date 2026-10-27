@@ -478,6 +478,21 @@ class Session {
       return;
     }
 
+    if (
+      request.request.subtype === 'initialize' &&
+      this.initializationResolve !== null
+    ) {
+      this.outputAdapter.send({
+        type: 'control_response',
+        response: {
+          subtype: 'error',
+          request_id: request.request_id,
+          error: 'Session initialization is in progress. Try again when ready.',
+        },
+      });
+      return;
+    }
+
     // Fire-and-forget: dispatch runs concurrently
     // The dispatcher's pendingIncomingRequests tracks completion
     void (async () => {

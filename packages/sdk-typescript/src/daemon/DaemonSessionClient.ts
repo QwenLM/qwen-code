@@ -997,7 +997,7 @@ export class DaemonSessionClient {
     configId: 'workflow_mode',
     value: 'on' | 'off',
   ): Promise<DaemonSessionConfigOptionResult>;
-  setConfigOption(
+  async setConfigOption(
     configId: 'reasoning_effort' | 'workflow_mode',
     value: ReasoningSelection | 'on' | 'off',
     opts?: { persist?: boolean },
