@@ -125,9 +125,11 @@ vi.mock('node:http', () => ({
   createServer: vi.fn(() => mockHttpServer),
 }));
 
-const jsonResponse = (body: unknown) =>
+// JSON token endpoint response; passing a status makes it a failure.
+const jsonResponse = (body: unknown, status?: number) =>
   createMockResponse({
-    ok: true,
+    ok: status === undefined,
+    status,
     contentType: 'application/json',
     text: JSON.stringify(body),
     json: body,
@@ -810,6 +812,19 @@ describe('MCPOAuthProvider', () => {
       );
     });
 
+    it('should read the error code from a JSON error response', async () => {
+      mockFetch.mockResolvedValueOnce(
+        jsonResponse(
+          { error: 'invalid_grant', error_description: 'Token revoked' },
+          400,
+        ),
+      );
+
+      await expect(refresh('revoked_refresh_token')).rejects.toThrow(
+        'Token refresh failed: invalid_grant - Token revoked',
+      );
+    });
+
     it('should reject malformed form-urlencoded expires_in values', async () => {
       mockFetch.mockResolvedValueOnce(
         formResponse(
@@ -897,7 +912,7 @@ describe('MCPOAuthProvider', () => {
       vi.mocked(tokenStorage.deleteCredentials).mockResolvedValue(undefined);
       mockFetch.mockResolvedValueOnce(
         formResponse(
-          'error=invalid_request&error_description=Invalid refresh token',
+          'error=invalid_grant&error_description=Invalid refresh token',
           400,
         ),
       );
@@ -1121,7 +1136,10 @@ describe('MCPOAuthProvider', () => {
 
     it.each([
       ['400 invalid_grant', () => formResponse('error=invalid_grant', 400)],
-      ['401 invalid_client', () => formResponse('error=invalid_client', 401)],
+      [
+        '400 invalid_grant as JSON',
+        () => jsonResponse({ error: 'invalid_grant' }, 400),
+      ],
     ])(
       'should remove credentials when the server answers %s',
       async (_n, respond) => {
@@ -1144,6 +1162,20 @@ describe('MCPOAuthProvider', () => {
         'a timeout',
         () => Promise.reject(new DOMException('timed out', 'TimeoutError')),
       ],
+      [
+        '400 invalid_client as JSON',
+        () => jsonResponse({ error: 'invalid_client' }, 400),
+      ],
+      ['401 invalid_client', () => formResponse('error=invalid_client', 401)],
+      [
+        '400 invalid_request',
+        () => jsonResponse({ error: 'invalid_request' }, 400),
+      ],
+      [
+        '400 invalid_scope',
+        () => jsonResponse({ error: 'invalid_scope' }, 400),
+      ],
+      ['a 400 without an error code', () => formResponse('Bad Request', 400)],
     ])('should keep credentials after %s', async (_n, respond) => {
       const tokenStorage = mockStoredToken(expiredToken(), true);
       mockFetch.mockImplementationOnce(respond);

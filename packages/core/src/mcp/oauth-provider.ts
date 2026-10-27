@@ -156,24 +156,54 @@ const TOKEN_REFRESH_TIMEOUT_MS = 10_000;
 /** The token endpoint answered a refresh request with an HTTP error status. */
 class TokenEndpointError extends Error {
   readonly status: number;
+  /** The RFC 6749 §5.2 `error` code, when the response carried one. */
+  readonly oauthError: string | undefined;
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, oauthError?: string) {
     super(message);
     this.name = 'TokenEndpointError';
     this.status = status;
+    this.oauthError = oauthError;
   }
 }
 
 /**
- * Whether the authorization server explicitly refused the refresh token
- * (invalid_grant and the like). RFC 6749 §5.2 token errors are 400 or 401;
- * network errors, timeouts, 5xx, throttling and a gateway's 403/404 say
- * nothing about the token itself.
+ * Reads `error` and `error_description` from a token endpoint error body,
+ * which RFC 6749 §5.2 sends as JSON; form-encoded bodies are accepted too.
+ */
+function parseTokenErrorBody(body: string): {
+  error?: string;
+  errorDescription?: string;
+} {
+  try {
+    const json: unknown = JSON.parse(body);
+    if (json && typeof json === 'object') {
+      const { error, error_description } = json as Record<string, unknown>;
+      return {
+        error: typeof error === 'string' ? error : undefined,
+        errorDescription:
+          typeof error_description === 'string' ? error_description : undefined,
+      };
+    }
+  } catch {
+    // Not JSON: try form-urlencoded below.
+  }
+  const params = new URLSearchParams(body);
+  return {
+    error: params.get('error') ?? undefined,
+    errorDescription: params.get('error_description') ?? undefined,
+  };
+}
+
+/**
+ * Whether the authorization server refused the refresh token itself. Only
+ * invalid_grant says so (RFC 6749 §5.2); invalid_client, invalid_request,
+ * invalid_scope, a status without a code, network errors, timeouts, 5xx and
+ * throttling say nothing about the stored token.
  */
 function isRefreshTokenRejected(error: unknown): boolean {
   return (
-    error instanceof TokenEndpointError &&
-    (error.status === 400 || error.status === 401)
+    error instanceof TokenEndpointError && error.oauthError === 'invalid_grant'
   );
 }
 
@@ -657,22 +687,13 @@ export class MCPOAuthProvider {
     const contentType = response.headers.get('content-type') || '';
 
     if (!response.ok) {
-      // Try to parse error from form-urlencoded response
-      let errorMessage: string | null = null;
-      try {
-        const errorParams = new URLSearchParams(responseText);
-        const error = errorParams.get('error');
-        const errorDescription = errorParams.get('error_description');
-        if (error) {
-          errorMessage = `Token refresh failed: ${error} - ${errorDescription || 'No description'}`;
-        }
-      } catch {
-        // Fall back to raw error
-      }
+      const { error, errorDescription } = parseTokenErrorBody(responseText);
       throw new TokenEndpointError(
-        errorMessage ||
-          `Token refresh failed: ${response.status} - ${responseText}`,
+        error
+          ? `Token refresh failed: ${error} - ${errorDescription || 'No description'}`
+          : `Token refresh failed: ${response.status} - ${responseText}`,
         response.status,
+        error,
       );
     }
 
