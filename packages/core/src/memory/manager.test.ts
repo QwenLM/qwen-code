@@ -2190,6 +2190,28 @@ describe('MemoryManager', () => {
       expect((await turn(mgr, 6)).skippedReason).toBe('cadence');
     });
 
+    it('records the cadence skip in telemetry with its own reason', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      const config = makeMockConfig();
+      const turnWithConfig = (length: number) =>
+        mgr.scheduleExtract({
+          ...extractParams(tmp.projectRoot, 'sess', turns(length), config),
+          belowCompactionWarn: true,
+        });
+
+      await turnWithConfig(2);
+      telemetryMocks.logMemoryExtract.mockClear();
+      expect((await turnWithConfig(4)).skippedReason).toBe('cadence');
+      expect(telemetryMocks.logMemoryExtract).toHaveBeenCalledWith(
+        config,
+        expect.objectContaining({
+          status: 'skipped',
+          skipped_reason: 'cadence',
+        }),
+      );
+    });
+
     it('does not arm after a run that saved memory or used no tool', async () => {
       vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
       const mgr = new MemoryManager();
