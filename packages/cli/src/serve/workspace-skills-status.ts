@@ -84,7 +84,7 @@ const VALID_SKILL_LEVELS: ReadonlySet<string> = new Set<SkillLevel>([
  * endpoint's snapshot TTL so both views converge on the same bounded
  * staleness when a Skill is created on disk outside the config APIs.
  */
-const SKILLS_DISCOVERY_REFRESH_MS = 5_000;
+export const SKILLS_DISCOVERY_REFRESH_MS = 5_000;
 
 /**
  * The `Config` surface `SkillManager.listSkills()` actually reads. Declaring it
@@ -109,6 +109,8 @@ interface WorkspaceSkillManagers {
   extensionManager?: ExtensionManager;
   extensionSkillStates: Map<Extension, Map<string, boolean>>;
   discoveredAt: number;
+  /** In-flight forced discovery shared by concurrent stale readers. */
+  refreshing?: ReturnType<SkillManager['listSkills']>;
 }
 
 export function createWorkspaceSkillsStatusProvider(
@@ -305,10 +307,9 @@ async function buildWorkspaceSkillsStatus(
     const extensions = extensionManager?.getLoadedExtensions() ?? [];
     const discoveryStale =
       Date.now() - cached.discoveredAt >= SKILLS_DISCOVERY_REFRESH_MS;
-    const skills = await skillManager.listSkills(
-      discoveryStale ? { force: true } : {},
-    );
-    if (discoveryStale) cached.discoveredAt = Date.now();
+    const skills = discoveryStale
+      ? await refreshStaleSkills(cached)
+      : await skillManager.listSkills({});
     const statuses = skills.map((skill) => {
       const extension =
         skill.level === 'extension'
@@ -383,4 +384,22 @@ async function buildWorkspaceSkillsStatus(
       ],
     };
   }
+}
+
+/**
+ * Forces one discovery for a stale workspace. Concurrent readers share the
+ * in-flight scan, so a burst at the window edge costs one discovery instead of
+ * one per request, and the window restarts only when that scan settles.
+ */
+function refreshStaleSkills(cached: WorkspaceSkillManagers) {
+  cached.refreshing ??= cached.skillManager
+    .listSkills({ force: true })
+    .then((skills) => {
+      cached.discoveredAt = Date.now();
+      return skills;
+    })
+    .finally(() => {
+      cached.refreshing = undefined;
+    });
+  return cached.refreshing;
 }

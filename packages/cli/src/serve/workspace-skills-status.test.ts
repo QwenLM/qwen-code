@@ -24,7 +24,10 @@ import {
   ENV_WAS_RECOVERED,
   getUserSettingsPath,
 } from '../config/settings.js';
-import { createWorkspaceSkillsStatusProvider } from './workspace-skills-status.js';
+import {
+  SKILLS_DISCOVERY_REFRESH_MS,
+  createWorkspaceSkillsStatusProvider,
+} from './workspace-skills-status.js';
 import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 describe('createWorkspaceSkillsStatusProvider', () => {
@@ -746,6 +749,58 @@ describe('createWorkspaceSkillsStatusProvider', () => {
 
       clock.mockReturnValue(startedAt + 60_000);
       expect(await skillNames()).toContain('external-skill');
+    } finally {
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('re-scans exactly at the discovery window and restarts it after each scan', async () => {
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-window-'),
+    );
+    try {
+      const startedAt = 1_000_000;
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(startedAt);
+      const provider = createWorkspaceSkillsStatusProvider();
+      await provider(workspace);
+      const listSpy = vi.spyOn(SkillManager.prototype, 'listSkills');
+      const forcedScans = () =>
+        listSpy.mock.calls.filter(([options]) => options?.force).length;
+
+      clock.mockReturnValue(startedAt + SKILLS_DISCOVERY_REFRESH_MS - 1);
+      await provider(workspace);
+      expect(forcedScans()).toBe(0);
+
+      clock.mockReturnValue(startedAt + SKILLS_DISCOVERY_REFRESH_MS);
+      await provider(workspace);
+      expect(forcedScans()).toBe(1);
+
+      // The scan restarts the window, so the next read reuses its result.
+      clock.mockReturnValue(startedAt + SKILLS_DISCOVERY_REFRESH_MS + 1);
+      await provider(workspace);
+      expect(forcedScans()).toBe(1);
+    } finally {
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('shares one forced scan between concurrent readers at the window edge', async () => {
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-burst-'),
+    );
+    try {
+      const startedAt = 1_000_000;
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(startedAt);
+      const provider = createWorkspaceSkillsStatusProvider();
+      await provider(workspace);
+      const listSpy = vi.spyOn(SkillManager.prototype, 'listSkills');
+      clock.mockReturnValue(startedAt + SKILLS_DISCOVERY_REFRESH_MS);
+
+      await Promise.all(Array.from({ length: 10 }, () => provider(workspace)));
+
+      expect(
+        listSpy.mock.calls.filter(([options]) => options?.force),
+      ).toHaveLength(1);
     } finally {
       await fsp.rm(workspace, { recursive: true, force: true });
     }
