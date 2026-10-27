@@ -277,9 +277,11 @@ publishes an immutable prerelease. See
 [Managed Agent reference deployment](../../docs/users/managed-agent-reference-deployment.md)
 and the [distribution design](../../docs/design/2026-10-14-managed-agent-reference-distribution.md).
 The bundled launcher also supports `--check`, a read-only preflight for
-configuration, Harness reachability, ports and database grants. When the
-database check succeeds, the output includes a `capacity` line with grouped
-counts from `ma_runtime_binding`, `ma_runtime_session` and `ma_operation`.
+configuration, the compatibility of a single configured Harness, ports,
+leftover Runtime workers and database grants; add `--online` while the server
+runs. When the database check succeeds, the output includes a `capacity` line
+with grouped counts from `ma_runtime_binding`, `ma_runtime_session` and
+`ma_operation`.
 These are durable logical records for capacity triage; they are not a count of
 physical worker processes or memory usage. The line explicitly reports
 physical processes and memory as unknown, and does not infer idle work or
