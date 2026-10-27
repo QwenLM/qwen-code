@@ -220,7 +220,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'auth_provider_install', 'workspace_memory',
  'workspace_agents', 'workspace_agent_generate', 'workspace_env',
  'workspace_preflight', 'session_context', 'session_context_usage',
- 'session_supported_commands', 'session_tasks', 'scheduled_task_gate', 'session_monitor_tool_correlation', 'session_stats',
+ 'session_supported_commands', 'session_tasks', 'scheduled_task_gate', 'autofix_pr_watches', 'session_monitor_tool_correlation', 'session_stats',
  'session_lsp', 'session_resources', 'session_status',
  'session_close', 'session_metadata', 'session_organization',
  'session_archive', 'mcp_guardrails',
@@ -627,6 +627,23 @@ starts failing, not at every fire.
   `blocked`.
 - Clients must not send `gate` to a daemon without this tag: such a daemon
   drops it on `POST` and answers a gate-only `PATCH` with 400 `empty_patch`.
+
+`autofix_pr_watches` advertises `GET /autofix-pr/watches` (the primary
+workspace) and `GET /workspaces/:workspace/autofix-pr/watches` (a registered,
+trusted one). Each answers the `/autofix-pr` watches of the workspace's clone
+as `qwen autofix-pr status` lists them, read from the watches' files under
+the clone's main worktree (`.qwen/tmp`), each opened without following a link
+and without blocking. No lock is taken, GitHub is not asked, and no git
+command runs but `git worktree list`, which finds the clone. The answer is
+`{ v: 1, available, root?, now?, watches, unreadable? }`: `available` is false,
+with no watches, when no git repository is found for the workspace (or git
+cannot run there), and `root` is the clone's main worktree, the same for two
+workspaces of one clone. A watch carries the fields of `status` (Section 6.10
+of the `/autofix-pr` design) but `thisSession`, `worktreePath`, `pushTarget`,
+`gitTrusted` and `worktreeWork`; its `session` is the session that owns it,
+which may be no session of this daemon. Stopping a watch is the skill's
+(`/autofix-pr stop <n>` in the session that owns it); these routes change
+nothing.
 
 **Conditional tags.** These feature tags are advertised only when their deployment toggle, runtime wiring, or availability condition is active. Tag presence means the documented behavior is available; absence means either an older daemon predating the tag or a current daemon where that condition is false. Currently:
 

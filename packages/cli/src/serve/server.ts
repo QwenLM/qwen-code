@@ -339,6 +339,10 @@ import {
 } from './routes/workspace-git-branches.js';
 import { registerWorkspaceQualifiedGitRemotesRoutes } from './routes/workspace-git-remotes.js';
 import { registerWorkspaceQualifiedGitHubPrsRoutes } from './routes/workspace-github-prs.js';
+import {
+  registerAutofixPrWatchesRoutes,
+  registerWorkspaceQualifiedAutofixPrWatchesRoutes,
+} from './routes/autofix-pr-watches.js';
 import { registerWorkspaceQualifiedGitWorktreeRoutes } from './routes/workspace-git-worktrees.js';
 import { registerWorkspaceLocalOpenRoutes } from './routes/workspace-local-open.js';
 import { WorkspaceGitState } from './workspace-git-state.js';
@@ -3026,6 +3030,9 @@ export function createServeApp(
     sendBridgeError,
     mutate,
   });
+  // The /autofix-pr watches of a registered workspace's clone (the Web
+  // Shell's "PR watches" page and scheduled-task cards). Read-only.
+  registerWorkspaceQualifiedAutofixPrWatchesRoutes(app, { workspaceRegistry });
   registerWorkspaceQualifiedGitWorktreeRoutes(app, {
     workspaceRegistry,
     sendBridgeError,
@@ -3800,6 +3807,14 @@ export function createServeApp(
   registerGoalsRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
     bridge: primaryBridge,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
+  });
+
+  // The primary workspace's /autofix-pr watches, read from the clone's files
+  // (as `qwen autofix-pr status` lists them). Read-only.
+  registerAutofixPrWatchesRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
     isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
     captureGenerationAssertion: capturePrimaryGenerationAssertion,
   });
