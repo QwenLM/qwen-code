@@ -14,9 +14,10 @@ import {
   parseManagedConfigInstallRecord,
   type ManagedConfigBinding,
 } from './managed-config-install.js';
-import { SessionWriterLease } from '../services/session-writer-lease.js';
+import type { SessionWriterLease } from '../services/session-writer-lease.js';
 import { managedToolDigest } from '../tools/managed-tool-protocol.js';
 import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-session-journal-store.js';
+import { acquireLocalManagedSessionWriter } from './local-managed-session-writer.js';
 import {
   isDefinitionPinConsistent,
   isTerminalRunState,
@@ -790,16 +791,7 @@ export class LocalManagedSessionAuthority {
     sessionId: string;
     transcriptPath: string;
   }): Promise<SessionWriterLease> {
-    return SessionWriterLease.acquire({
-      runtimeBaseDir: options.runtimeBaseDir,
-      sessionId: options.sessionId,
-      transcriptPath: options.transcriptPath,
-      takeoverPolicy: 'certified',
-      lockSchema: {
-        schemaVersion: 3,
-        formatVersion: MANAGED_SESSION_FORMAT_VERSION,
-      },
-    });
+    return acquireLocalManagedSessionWriter(options);
   }
 
   /** The commit position the current log stands at, for sealing or proofs. */
@@ -4434,10 +4426,11 @@ function actionDecisionsMatch(
  * a byte length has to keep answering from it, or a page it serves would mix in
  * records appended after the cursor was issued.
  */
-export async function readManagedSessionLog(
-  path: string,
-  sessionKey: ManagedSessionKey,
-  maxBytes?: number,
-): Promise<ManagedSessionJournalScan> {
-  return LocalJsonlManagedSessionJournalStore.read(path, sessionKey, maxBytes);
+export async function readManagedSessionLog(options: {
+  readonly transcriptPath: string;
+  readonly runtimeBaseDir: string;
+  readonly sessionKey: ManagedSessionKey;
+  readonly maxBytes?: number;
+}): Promise<ManagedSessionJournalScan> {
+  return LocalJsonlManagedSessionJournalStore.read(options);
 }

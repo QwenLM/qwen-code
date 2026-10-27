@@ -24,9 +24,10 @@ case "${machine}" in
     ;;
 esac
 
-# Pinned architecture-specific coordinates. Keep this table and the tool-cache
-# directory names in step with what setup-java materialises, so a host that
-# already ran setup-java hits the same entry.
+# Pinned archive and cache coordinates. `dir` is exactly the version setup-java
+# keys its own tool-cache entry by: getToolcacheVersionName() rewrites the first
+# '+' of Adoptium's semver to '-' before tc.cacheDir() runs semver.clean(), and
+# clean() keeps a prerelease, so the build suffix stays in the directory name.
 case "${spec}/${arch}" in
   11/arm64) dir='11.0.32-101'; file='OpenJDK11U-jdk_aarch64_linux_hotspot_11.0.32.1_1.tar.gz'; sha='f27033e6f7523c1b0b2565a78e9c0e0abe5596a854ce00ca04ec1b06ece7a935' ;;
   11/x64)   dir='11.0.32-101'; file='OpenJDK11U-jdk_x64_linux_hotspot_11.0.32.1_1.tar.gz';     sha='5c3f68887c325d36d852ba534303e1f5f1f5cae7d6cc1e951d73e0d8e98a058d' ;;
@@ -41,24 +42,24 @@ case "${spec}/${arch}" in
     ;;
 esac
 
-url="https://mirrors.tuna.tsinghua.edu.cn/Adoptium/${spec}/jdk/${arch}/linux/${file}"
-tool="${RUNNER_TOOL_CACHE:?}/Java_Temurin-Hotspot_jdk/${dir}/${arch}"
-
+url="https://mirrors.tuna.tsinghua.edu.cn/Adoptium/${spec}/jdk/${arch/arm64/aarch64}/linux/${file}"
+# Read setup-java entries, but never publish into its namespace: setup-java
+# does not take our lock and can still be installing when this fallback runs.
+shared_tool="${RUNNER_TOOL_CACHE:?}/Java_Temurin-Hotspot_jdk/${dir}/${arch}"
+tool="${RUNNER_TOOL_CACHE:?}/qwen-pool-jdk/${dir}/${arch}"
 tool_dir="$(dirname -- "${tool}")"
-mkdir -p -- "${tool_dir}" || { echo "::error::cannot create ${tool_dir}"; exit 1; }
 
-# Every runner on the host shares RUNNER_TOOL_CACHE, and the stall this
-# fallback exists for is common-mode: one host's egress fails, so every
-# concurrent job reaches this script at once. Serialise the install and only
-# ever replace an entry that carries no .complete marker — a job that is
-# building with a JDK has already seen that marker, so nothing in use is
-# removed.
+# Pool fallbacks share this lock. A completed entry is immutable; only an
+# incomplete entry in our own namespace can be replaced.
 exec 9>"${RUNNER_TOOL_CACHE:?}/.jdk-toolcache.lock"
 if ! flock --wait 900 9; then
   echo "::error::timed out waiting for the tool-cache lock"
   exit 1
 fi
-if [[ ! -f "${tool}/.complete" ]]; then
+if [[ -d "${shared_tool}" && -f "${shared_tool}.complete" ]]; then
+  tool="${shared_tool}"
+elif [[ ! -d "${tool}" || ! -f "${tool}.complete" ]]; then
+  mkdir -p -- "${tool_dir}" || { echo "::error::cannot create ${tool_dir}"; exit 1; }
   work="$(mktemp -d "${tool_dir}/install.XXXXXX")" || { echo "::error::cannot stage the download"; exit 1; }
   echo "downloading Temurin ${spec} (${arch}) from the mirror"
   if ! curl -fsSL --retry 3 --retry-delay 5 --retry-max-time 300 --max-time 600 "${url}" -o "${work}/jdk.tgz"; then
@@ -80,7 +81,7 @@ if [[ ! -f "${tool}/.complete" ]]; then
     rm -rf "${work}"
     exit 1
   fi
-  if ! touch "${tool}/.complete"; then
+  if ! touch "${tool}.complete"; then
     echo "::error::cannot mark ${tool} complete"
     rm -rf "${work}"
     exit 1
