@@ -60,6 +60,10 @@
   padding: 10px;
 }
 
+.inputRow {
+  display: contents;
+}
+
 .editorShell[data-web-shell-composer-variant='simple'] .container {
   border-radius: 28px;
   --chat-editor-min-height: 54px;
@@ -68,25 +72,36 @@
 }
 
 .editorShell[data-web-shell-composer-variant='simple'] .content {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: end;
-  column-gap: 6px;
   padding: 4px 8px;
 }
 
-.editorShell[data-web-shell-composer-variant='simple'] .content > * {
-  grid-column: 1 / -1;
+.editorShell[data-web-shell-composer-variant='simple'] .inputRow {
+  display: grid;
+  flex: 1 1 auto;
+  min-height: 44px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-rows: minmax(0, 1fr);
+  align-items: end;
+  column-gap: 6px;
 }
 
-.editorShell[data-web-shell-composer-variant='simple'] .content > button {
+.editorShell[data-web-shell-composer-variant='simple'] .inputRow > button {
   grid-column: 1;
 }
 
 .editorShell[data-web-shell-composer-variant='simple'] .editorArea {
   grid-column: 2;
+  align-self: stretch;
   min-width: 0;
+  min-height: 0;
   padding: 9px 0;
+}
+
+.editorShell[data-web-shell-composer-variant='simple']
+  .editorArea
+  > :last-child {
+  min-height: 0;
+  max-height: min(100%, var(--chat-editor-input-max-height, 300px));
 }
 
 .editorShell[data-web-shell-composer-variant='simple']
@@ -115,7 +130,7 @@
   margin: 0;
 }
 
-.editorShell[data-web-shell-composer-variant='simple'] .content > button,
+.editorShell[data-web-shell-composer-variant='simple'] .inputRow > button,
 .editorShell[data-web-shell-composer-variant='simple'] .toolbarRight > button,
 .editorShell[data-web-shell-composer-variant='simple']
   [data-web-shell-simple-voice]
@@ -126,7 +141,7 @@
   border-radius: 50%;
 }
 
-.editorShell[data-web-shell-composer-variant='simple'] .content > button svg {
+.editorShell[data-web-shell-composer-variant='simple'] .inputRow > button svg {
   width: 28px;
   height: 28px;
   flex-shrink: 0;
@@ -145,12 +160,12 @@
   display: none;
 }
 
-.editorShell[data-web-shell-simple-voice-active] .content {
+.editorShell[data-web-shell-simple-voice-active] .inputRow {
   grid-template-columns: minmax(0, 1fr);
 }
 
 .editorShell[data-web-shell-simple-voice-active] .editorArea,
-.editorShell[data-web-shell-simple-voice-active] .content > button,
+.editorShell[data-web-shell-simple-voice-active] .inputRow > button,
 .editorShell[data-web-shell-simple-voice-active]
   [data-web-shell-composer-submit],
 .editorShell[data-web-shell-simple-voice-active]
@@ -1567,7 +1582,7 @@
 }
 
 .editorShell[data-web-shell-composer-variant='simple']
-  .content
+  .inputRow
   > button:not(:disabled):hover {
   background: radial-gradient(closest-side, var(--muted) 99%, transparent)
     center / 32px 32px no-repeat;

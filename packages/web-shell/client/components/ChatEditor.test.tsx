@@ -1815,9 +1815,11 @@ describe('ChatEditor attachment reporting', () => {
       '[data-web-shell-composer-images]',
     );
     const editor = container.querySelector('[data-web-shell-composer-editor]');
-    expect(imageStrip?.parentElement).toBe(
-      editor?.parentElement?.parentElement,
+    const content = container.querySelector(
+      '[data-web-shell-composer-content]',
     );
+    expect(imageStrip?.parentElement).toBe(content);
+    expect(editor?.closest('[data-web-shell-composer-content]')).toBe(content);
     act(() => img!.click());
     expect(onImagePreview).toHaveBeenCalledWith('data:image/png;base64,abc');
   });

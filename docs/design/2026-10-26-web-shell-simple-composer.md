@@ -77,6 +77,11 @@ The simple row's add and microphone icons share the same larger visual size;
 the add icon uses a neutral gray. Advanced mode keeps their original sizes and
 colors.
 
+Keep attachments in the existing flex stack and constrain the simple input row
+separately. In short viewports, the editor scrolls within the remaining height
+while the add and primary action stay inside the capsule. The row wrapper uses
+`display: contents` in default and advanced mode to preserve their layout.
+
 On touch devices configured with `'simple'`, a `Settings2Icon` button directly
 switches the same composer to advanced mode, using the existing full mobile
 presentation inline. In the simple row, the settings button sits to the left of
@@ -105,8 +110,10 @@ occupies the whole capsule row. Temporarily hide the editor, add button, mode
 toggle, and submit controls without unmounting the editor. Let the recording
 control fit its waveform, elapsed time, and stop action without the idle
 microphone's fixed 44px width. Restore the normal simple row when voice activity
-finishes. Advanced and default recording/transcription presentations remain
-unchanged.
+finishes. Insert the final transcript only after the editor is visible again,
+so focus and textarea auto-grow run against a visible element. CSS applies the
+height cap even when the textarea sizing fallback is used. Advanced and default
+recording/transcription presentations remain unchanged.
 
 The existing CodeMirror and touch textarea paths retain their keyboard behavior,
 Chinese IME composition handling, and multiline editing. Do not remount the
@@ -139,7 +146,7 @@ Web Shell's existing portal-root integration.
 
 ## Constraints and risks
 
-- Keep default-mode markup and styling behavior unchanged. Advanced mode adds
+- Keep default-mode layout and styling behavior unchanged. Advanced mode adds
   only the return button before the existing voice controls; simple layout,
   recording, and icon overrides must not affect its existing controls.
 - Preserve public `data-web-shell-*` hooks, theme variables, and portal scoping.
@@ -159,7 +166,9 @@ Web Shell's existing portal-root integration.
 3. Empty simple input is a slim capsule with an add button, editor, and available
    primary action. Secondary controls do not occupy the resting input row.
 4. Long text and attachments expand within the available space without horizontal
-   overflow, overlapping buttons, or clipped previews.
+   overflow, overlapping buttons, or clipped previews. Short viewports with many
+   tags keep both action buttons inside the capsule and the last draft line
+   reachable by scrolling.
 5. Text input, Chinese IME composition, multiline editing, sending, and attachments
    work through the existing editor and submission paths.
 6. Preparing, disabled, running, queued-input, and stop behavior remain correct.
@@ -188,8 +197,9 @@ Web Shell's existing portal-root integration.
 11. During simple recording/transcription, the voice control spans the capsule
     row without clipping the waveform, timer, or recording stop action. The
     editor remains mounted while the editor, add, mode, and submit controls are
-    hidden; finishing voice activity restores them. Advanced/default recording
-    and transcription remain unchanged.
+    hidden; finishing voice activity restores them. The transcript receives
+    editor focus and grows correctly with native and fallback textarea sizing.
+    Advanced/default recording and transcription remain unchanged.
 
 These are verification requirements, not claims that validation has already
 passed. Record actual results in the E2E report and change summary.

@@ -1839,6 +1839,8 @@ export const ChatEditor = memo(
     const addComposerTags = core.addTags;
     const clearImageDragState = core.clearImageDragState;
     const focusComposer = core.focus;
+    const getComposerText = core.getText;
+    const insertComposerText = core.insertText;
     const ingestFiles = core.ingestFiles;
     const insertUploadReference = useCallback(
       (path: string) => {
@@ -2284,6 +2286,46 @@ export const ChatEditor = memo(
     const toolbarMeasurementsRef = useRef<HTMLDivElement>(null);
     const [widthToggleFits, setWidthToggleFits] = useState(false);
     const [voiceActive, setVoiceActive] = useState(false);
+    const pendingVoiceInsertRef = useRef<{
+      text: string;
+      sessionId: string | undefined;
+      workspaceCwd: string | undefined;
+    } | null>(null);
+    const insertVoiceText = useCallback(
+      (text: string) => {
+        const existing = getComposerText();
+        const sep = existing && !/\s$/.test(existing) ? ' ' : '';
+        insertComposerText(`${sep}${text} `);
+        focusComposer();
+      },
+      [getComposerText, insertComposerText, focusComposer],
+    );
+    const insertVoiceTextRef = useRef(insertVoiceText);
+    // Capture snapshots onInsert; use current state and reveal the editor
+    // before insertion triggers focus and textarea sizing.
+    insertVoiceTextRef.current = (text) => {
+      if (isSimple && voiceActive) {
+        pendingVoiceInsertRef.current = {
+          text,
+          sessionId,
+          workspaceCwd: atWorkspaceCwd,
+        };
+        setVoiceActive(false);
+      } else {
+        insertVoiceText(text);
+      }
+    };
+    useLayoutEffect(() => {
+      const pending = pendingVoiceInsertRef.current;
+      if (voiceActive || !pending) return;
+      pendingVoiceInsertRef.current = null;
+      if (
+        pending.sessionId === sessionId &&
+        pending.workspaceCwd === atWorkspaceCwd
+      ) {
+        insertVoiceText(pending.text);
+      }
+    }, [voiceActive, sessionId, atWorkspaceCwd, insertVoiceText]);
     const [toolbarLabelVisibility, setToolbarLabelVisibility] = useState({
       workspaceSelect: false,
       workspace: false,
@@ -3554,12 +3596,7 @@ export const ChatEditor = memo(
                     onActiveChange={setVoiceActive}
                     target={voiceTarget}
                     statusRevision={voiceStatusRevision}
-                    onInsert={(text) => {
-                      const existing = core.getText();
-                      const sep = existing && !/\s$/.test(existing) ? ' ' : '';
-                      core.insertText(`${sep}${text} `);
-                      core.focus();
-                    }}
+                    onInsert={(text) => insertVoiceTextRef.current(text)}
                   />
                 </span>
               </>
@@ -4226,8 +4263,10 @@ export const ChatEditor = memo(
                 </button>
               </div>
             )}
-            {isSimple && renderAddMenu()}
-            {primaryInput}
+            <div className={styles.inputRow}>
+              {isSimple && renderAddMenu()}
+              {primaryInput}
+            </div>
             <div
               ref={toolbarMeasurementsRef}
               className={styles.toolbarMeasurements}
