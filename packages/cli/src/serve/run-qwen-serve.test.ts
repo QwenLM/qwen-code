@@ -1677,6 +1677,46 @@ describe('workspace skill settings persistence', () => {
     ).toEqual({ disabled: ['locked'], enabled: ['pdf', 'rust:pdf'] });
   });
 
+  it('does not report a default block a batch grant cancels in another scope', async () => {
+    writeSkillSettings([], []);
+    const systemSettings = path.join(qwenHome, 'system-settings.json');
+    fs.writeFileSync(
+      systemSettings,
+      JSON.stringify({ skills: { defaultDisabled: ['pdf'] } }),
+    );
+    const previousSystemPath = process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'];
+    process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'] = systemSettings;
+    try {
+      const { persistUserSkillActivation } = await captureSkillPersistence([
+        skillStatus('pdf', 'project'),
+        skillStatus('rust:pdf', 'extension', 'rust'),
+      ]);
+
+      await expect(
+        persistUserSkillActivation!(
+          workspace,
+          ['pdf', 'rust:pdf'],
+          true,
+          'hard',
+        ),
+      ).resolves.toEqual({
+        outcomes: [
+          { skillName: 'pdf', changed: true },
+          { skillName: 'rust:pdf', changed: true },
+        ],
+        settingsChanges: [
+          { key: 'skills.enabled', value: ['pdf', 'rust:pdf'] },
+        ],
+      });
+    } finally {
+      if (previousSystemPath === undefined) {
+        delete process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'];
+      } else {
+        process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'] = previousSystemPath;
+      }
+    }
+  });
+
   it('resolves a bare authored name to the extension registry spelling on a user enable', async () => {
     writeSkillSettings([], ['rust:pdf']);
     const { persistUserSkillActivation } = await captureSkillPersistence([

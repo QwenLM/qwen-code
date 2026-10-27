@@ -6259,15 +6259,24 @@ async function runQwenServeImpl(
           }));
         // A grant a standing entry still forbids is not a write: the merged
         // config would keep the skill disabled while the route reported an
-        // enable. A User entry another name in this batch already removed
-        // no longer forbids it, so refused names are rechecked until the
-        // batch converges and the result does not depend on request order.
+        // enable. A `defaultDisabled` entry a grant the batch records cancels,
+        // or a User entry another name already removed, no longer forbids it,
+        // so refused names are rechecked until the batch converges and the
+        // result does not depend on request order.
         const stillBlocked = (index: number) => {
           const block = skillToggleBlockForName(
             fresh,
             blockSkillIdentity(skillIdentities[index]!, writtenName(index)),
             USER_SETTING_SCOPE,
           );
+          if (
+            block?.reason === 'default' &&
+            next.enabled.some(
+              (name) => name.trim().toLowerCase() === block.entry,
+            )
+          ) {
+            return null;
+          }
           if (!block || block.scope !== 'User') return block;
           const removed = !next[block.list].some(
             (name) => name.trim().toLowerCase() === block.entry,
