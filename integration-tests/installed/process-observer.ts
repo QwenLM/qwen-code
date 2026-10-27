@@ -110,7 +110,9 @@ export function descriptors(row: Captured) {
 export function observe(pidFile: string) {
   const captured = new Map<number, Captured>();
   let error: string | undefined;
+  const timing = { polls: 0, totalMs: 0, maxMs: 0 };
   const poll = () => {
+    const started = performance.now();
     try {
       if (!fs.existsSync(pidFile)) return;
       const pid = Number(fs.readFileSync(pidFile, 'utf8').trim());
@@ -120,12 +122,18 @@ export function observe(pidFile: string) {
       for (const row of descendants(pid)) captured.set(row.pid, row);
     } catch (caught) {
       error = String(caught);
+    } finally {
+      const elapsed = performance.now() - started;
+      timing.polls++;
+      timing.totalMs += elapsed;
+      timing.maxMs = Math.max(timing.maxMs, elapsed);
     }
   };
   const timer = setInterval(poll, 100);
   timer.unref();
   return {
     poll,
+    timing: () => ({ ...timing }),
     snapshot: () => {
       poll();
       return [...captured.values()];
