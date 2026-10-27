@@ -412,7 +412,7 @@ class SessionRowLockOrderTest {
                 "beginOperation",
                 "beginWorkspaceClose", "beginWorkspaceLifecycle",
                 "beginContextCompression", "markContextCompressionSubmitted",
-                "unarchiveWorkspaceSession", "beginCwdChangeOperation",
+                "unarchiveWorkspaceSession",
                 "completeCwdChangeOperation", "completeOperation",
                 "advanceReplayFloor", "materializeNextBatch", "bindHarness",
                 "bindRecoveredHarness", "recordAdmission",
@@ -458,7 +458,7 @@ class SessionRowLockOrderTest {
         // check — is what fails loudly when one appears.
         assertThat(audit.turnRowAccessors())
                 .containsExactlyInAnyOrder("advanceReplayFloor",
-                        "beginChildClose", "beginContextCompression", "beginCwdChangeOperation",
+                        "beginChildClose", "beginContextCompression",
                         "beginLifecycle", "beginOperation",
                         "beginWorkspaceClose", "beginWorkspaceLifecycle",
                         "bindHarness", "bindRecoveredHarness",
