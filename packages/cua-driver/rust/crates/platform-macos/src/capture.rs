@@ -369,7 +369,7 @@ const WINDOW_PLAN_CACHE_CAPACITY: usize = 32;
 /// walk's own 20-second bound. The shell fallback retains its prior behavior.
 const WINDOW_CAPTURE_NATIVE_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Permit at most one native window-capture worker. If an Apple completion callback
+/// Each capture lane permits at most one native worker. If an Apple completion callback
 /// never fires, the timed-out worker keeps this permit, and every later request
 /// goes straight to the compatibility fallback instead of leaking more
 /// blocked threads.
@@ -403,6 +403,12 @@ impl Drop for NativeCapturePermit {
 }
 
 fn native_capture_gate() -> &'static NativeCaptureGate {
+    static GATE: NativeCaptureGate = NativeCaptureGate::new();
+    &GATE
+}
+
+fn preview_capture_gate() -> &'static NativeCaptureGate {
+    // Sampling cannot occupy the worker needed by an explicit observation.
     static GATE: NativeCaptureGate = NativeCaptureGate::new();
     &GATE
 }
@@ -922,7 +928,7 @@ pub(crate) fn screenshot_window_bytes_native(
         off_space,
         |wid| {
             run_native_capture_worker(
-                native_capture_gate(),
+                preview_capture_gate(),
                 deadline.saturating_duration_since(Instant::now()),
                 move || {
                     screenshot_window_bytes_sck_inner(wid).map(|capture| (capture, sck_lifetime))
@@ -932,7 +938,7 @@ pub(crate) fn screenshot_window_bytes_native(
         },
         |wid| {
             run_native_capture_worker(
-                native_capture_gate(),
+                preview_capture_gate(),
                 deadline.saturating_duration_since(Instant::now()),
                 move || screenshot_window_bytes_skylight(wid).map(|capture| (capture, lifetime)),
             )
@@ -1526,6 +1532,17 @@ mod tests {
             GATE.try_acquire().is_some(),
             "gate reopens only when the worker-owned permit drops"
         );
+    }
+
+    #[test]
+    fn active_preview_does_not_block_an_explicit_observation() {
+        let preview = preview_capture_gate().try_acquire().unwrap();
+        let result =
+            run_native_capture_worker(native_capture_gate(), Duration::from_secs(1), || Ok(42));
+        assert_eq!(result.unwrap(), 42);
+        assert!(preview_capture_gate().try_acquire().is_none());
+        drop(preview);
+        assert!(preview_capture_gate().try_acquire().is_some());
     }
 
     #[test]

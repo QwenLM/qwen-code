@@ -22,6 +22,8 @@
 
 macOS controller仅在预览可见且owner有效时以约3fps采样，工作队列有界且只保留最新结果，丢弃旧generation回调。每次捕获验证source bounds、像素尺寸、身份与可用状态。保持宽高比，用相同源图到预览的几何变换投影权威session cursor。最近窗口是分别的presentation，不从Codex符号猜测原生归属算法。
 
+显式观察与持续预览各有一个有界原生捕获 worker，后台采样不能占用显式观察的 worker。两者都保留现有捕获时限、精确窗口范围和清理回执，包括 Apple 回调尚未返回的情况。
+
 一个进程拥有AppKit设施；预览数据与清理属于runtime/session。各session使用独立预览，其他owner不能覆盖其内容。close隐藏并停止该预览采样；session结束、撤权、runtime shutdown与reset只清对应数据。使用nonactivating panel，明确拖动区与关闭区、被动图像内容，不向目标转发输入。标签只显示app名称，不显示输入文本或原始参数。
 
 ## 原生浮动卡片展示
@@ -31,6 +33,8 @@ macOS controller仅在预览可见且owner有效时以约3fps采样，工作队�
 每个已授权来源保留独立原生卡片view、精确window身份、图像及宽高比。选择统一宽度，使所有卡片都适配配置的最大宽高及可用屏幕区域。前卡位于右下slot，另一卡向左上错开。原生窗口为两个slot保留稳定透明包络，换层不移动用户选定的窗口位置。默认卡片最大尺寸为400×300 points。各图像分别准备，sampler不再把两张卡片合成一张PNG。
 
 鼠标移动到后卡露出区域时，该卡以前后层切换及短促临界阻尼位移动画来到前面。打断后从当前的位置和速度继续。hover只改变原生展示，不改变授权target集合、generation或idle寿命。周期图像更新保留用户选择的前卡，除非已观察来源的顺序改变。鼠标进入和离开时，浮动close与Move preview控件淡入淡出；close在视觉隐藏时仍须可通过AX访问。Move手柄明确用于拖动：不把参考素材中语义未确认的第二图标解释为向来源透传输入或激活来源应用。卡片内容也只拖动本地panel，不操作来源应用。透明间隙仍属于本地浮窗，不新增点击穿透或全局输入监听器。
+
+悬停使用目标位置矩形，每次进入后卡区域只换层一次。卡片交换过程中，鼠标轻微移动不能再次提升新露出的另一张卡片。移到前卡目标区域或离开卡片后，才允许下次提升；有意反向切换仍从当前运动状态继续。
 
 复用现有AppKit主线程pump与原生view。原生动画timer仅在位置或控件透明度变化时运行，close时失效；减弱动态效果设置跳过位移动画。主线程handle寿命须覆盖原生拖动的嵌套事件循环；可能重入回调的AppKit调用前释放registry/state借用。owner shutdown仍在现有主队列flush回执之前同步关闭panel。原生验收须覆盖来源不同比例、owned backdrop上的透明间隙、控件显隐、快速反向hover、拖动后持续刷新与换层、控件隐藏时AX close、后台输入不变及owner/reset清理。
 
@@ -47,6 +51,10 @@ macOS controller仅在预览可见且owner有效时以约3fps采样，工作队�
 不新增daemon HTTP route。后续远程预览必须属于live-session-owner并保持runtime trust/failure语义；content-free activity observer不承载帧。
 
 ## 验证与验收
+
+回归验收包含 Keynote 保存 Sheet：其控件报告的内部原生窗口号与外层 AXSheet 不同。刷新后的元素操作必须解析最近的 AX 窗口或 Sheet 父级，保留精确 owner 检查，并且只保存全新的测试文稿。大尺寸桌面截图须满足 Node REPL 的 4 MiB 图片限制，同时不改变截图尺寸和桌面坐标映射；过大的 PNG 在交付前改用 JPEG 编码。
+
+模态面板快捷键使用现有精确窗口键盘门控，不经过已禁用的应用菜单。普通后台菜单快捷键在重新解析菜单项时保留字符和修饰键匹配，避免名称相同的替代菜单项造成歧义或选中不同命令。
 
 先由test-engineer对全局qwen CLI dry-run并记录实际安装产物，再构建本地Rust/SDK/CLI，执行定向测试并按顺序build、typecheck、bundle。真实验收需独立桌面录屏、应用事件/AX/落盘readback、系统鼠标/焦点readback。覆盖默认首次动作、drag、idle fade、两个窗口、无动作实时更新、cursor缩放、PiP控件与owner独立清理。反复create/close不能留下旧窗口、采样或Node timer。
 

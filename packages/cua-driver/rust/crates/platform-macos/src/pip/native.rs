@@ -30,9 +30,39 @@ struct Presentation {
     opacity_target: f64,
     last_tick: Instant,
     last_pointer: (f64, f64),
+    hover_armed: bool,
 }
 
 impl Presentation {
+    fn hover_rear(&mut self, point: (f64, f64)) -> bool {
+        if self
+            .targets
+            .get(self.front)
+            .is_some_and(|frame| contains(*frame, point))
+            || !self.targets.iter().any(|frame| contains(*frame, point))
+        {
+            self.hover_armed = true;
+        }
+        let rear = (0..self.ids.len()).find(|&index| {
+            index != self.front
+                && self.hover_armed
+                && !contains(self.controls_target, point)
+                && !contains(self.targets[self.front], point)
+                && contains(self.targets[index], point)
+        });
+        if let Some(front) = rear {
+            // One promotion per entry into the rear slot, even while cards move.
+            self.hover_armed = false;
+            self.front = front;
+            let layout = state::layout(&self.sizes, front, self.bounds);
+            self.targets = layout.frames;
+            self.controls_target = layout.controls;
+            true
+        } else {
+            false
+        }
+    }
+
     fn retarget<R>(&mut self, now: Instant, change: impl FnOnce(&mut Self) -> R) -> R {
         // Elapsed time belongs to the old targets, including an interrupted motion's velocity.
         self.step_at(now, false);
@@ -337,6 +367,7 @@ mod tests {
             opacity_target: 0.0,
             last_tick: now,
             last_pointer: (0.0, 0.0),
+            hover_armed: true,
         }
     }
 
@@ -344,6 +375,28 @@ mod tests {
         for (actual, expected) in actual.into_iter().zip(expected) {
             assert!((actual - expected).abs() < 1e-8, "{actual} != {expected}");
         }
+    }
+
+    #[test]
+    fn hovering_the_rear_slot_swaps_once_until_the_pointer_leaves() {
+        let start = Instant::now();
+        let mut state = presentation(start);
+        state.ids = vec![1, 2];
+        state.sizes = vec![(1600, 900), (1600, 800)];
+        state.targets = state::layout(&state.sizes, state.front, state.bounds).frames;
+        state.motions = state.targets.iter().copied().map(Motion::new).collect();
+        let mut swaps = 0;
+        for tick in 1..=240 {
+            let point = (30.0 + (tick % 3) as f64, 180.0);
+            swaps += usize::from(
+                state.retarget(start + Duration::from_millis(tick * 8), |state| {
+                    state.hover_rear(point)
+                }),
+            );
+        }
+        assert_eq!(swaps, 1, "small pointer moves must not retrigger the swap");
+        assert!(!state.hover_rear((420.0, 100.0)));
+        assert!(state.hover_rear((30.0, 180.0)));
     }
 
     #[test]
@@ -624,21 +677,7 @@ extern "C" fn pointer_moved(this: &AnyObject, _selector: Sel, _event: *mut AnyOb
                     } else {
                         0.0
                     };
-                let rear = (0..state.ids.len()).find(|&index| {
-                    index != state.front
-                        && !contains(state.controls.value, point_local)
-                        && !contains(state.motions[state.front].value, point_local)
-                        && contains(state.motions[index].value, point_local)
-                });
-                if let Some(front) = rear {
-                    state.front = front;
-                    let layout = state::layout(&state.sizes, front, state.bounds);
-                    state.targets = layout.frames;
-                    state.controls_target = layout.controls;
-                    true
-                } else {
-                    false
-                }
+                state.hover_rear(point_local)
             })
         };
         if changed {
@@ -945,6 +984,7 @@ unsafe fn create(
             opacity_target: 0.0,
             last_tick: Instant::now(),
             last_pointer: (point.x, point.y),
+            hover_armed: true,
         }),
     }))
 }

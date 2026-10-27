@@ -22,6 +22,8 @@ Replace synchronous post-action screenshot pushes with an internal preview-targe
 
 The macOS controller samples only visible, live previews at approximately 3 fps. It keeps bounded/latest-only work and discards stale generation callbacks. Each capture validates source bounds, pixel dimensions, identity and availability. Preserve aspect ratio and transform the authoritative session cursor through the same source-to-preview geometry. Recent windows are separate presentations; do not infer native ownership algorithms from Codex symbols.
 
+Explicit observations and continuous previews each have one bounded native capture worker, so a sample cannot consume the observation worker. Both retain the existing capture deadlines, exact-window scope and cleanup receipts, including when an Apple callback has not returned.
+
 One process owns AppKit infrastructure. Preview data and cleanup are runtime/session scoped. Each session's preview is separate, so another owner cannot replace its content. Close hides and stops sampling that preview; session end, revocation, runtime shutdown and reset clear only the owning data. UI controls use a nonactivating panel: explicit drag and close regions, passive image content, no target input forwarding. Labels contain app names, never typed input or raw arguments.
 
 ## Native floating-card presentation
@@ -31,6 +33,8 @@ The preview is one independent, borderless, nonactivating NSPanel per private se
 Each authorized source keeps its own native card view, exact window identity, image and aspect ratio. A shared width is chosen to fit all cards within the configured maximum card width/height and the available screen area. The front card occupies the lower-right slot; the second card is offset toward the upper-left. The native panel reserves a stable transparent envelope for both slots, so switching cards does not move the user's chosen window position. The default maximum card size is 400×300 points. Images are prepared separately; the sampler no longer flattens the two cards into one PNG.
 
 Pointer movement onto a rear card's exposed region brings it to the front with a short, critically damped position transition. Retargeting starts from current positions and velocities. Hover selection changes only native presentation, never the authorized target set, generation or idle lifetime. Recurring image updates preserve the user's selected front card unless the observed source order changes. Pointer entry/exit fades the floating close and Move preview controls; the close button remains accessible to AX even while visually hidden. The move handle is explicitly a drag affordance: the unidentified second icon in the reference is not assumed to forward input or activate a source application. Card contents also drag the local panel and never interact with source apps. Transparent gaps remain part of this local floating surface; no new click-through or global input monitor is introduced.
+
+Hover uses the destination rectangles and promotes once per entry into the rear slot. Small pointer movements while cards exchange places cannot promote the newly exposed card again. Moving over the front destination or leaving the cards rearms the next promotion; deliberate reversals still continue from the current motion.
 
 Use the existing AppKit/main-thread pump and native views. A native animation timer runs only while position or control-opacity values are changing and is invalidated on close; reduced-motion settings skip positional motion. Main-thread handle ownership survives nested native dragging, and registry/state borrows end before AppKit calls that can reenter callbacks. Owner shutdown still closes the panel synchronously before the existing main-queue flush receipt. Native acceptance must cover unequal source ratios, transparent gaps over an owned backdrop, hidden/visible controls, rapid hover reversals, drag followed by live refresh/reordering, AX close while controls are hidden, background input invariants and owner/reset cleanup.
 
@@ -47,6 +51,10 @@ Use the existing AppKit/main-thread pump and native views. A native animation ti
 No new daemon HTTP route is planned. A later remote preview must be live-session-owner scoped and preserve runtime trust/failure semantics; the content-free activity observer is not a frame channel.
 
 ## Validation and acceptance
+
+Regression acceptance includes a Keynote save sheet whose controls report an internal native window distinct from their enclosing AXSheet. Fresh element actions must resolve the nearest AX window/sheet ancestor, preserve exact owner checks, and save only a new test document. Large desktop screenshots must fit the Node REPL's 4 MiB image limit without changing screenshot dimensions or desktop coordinate mapping; oversized PNGs use JPEG encoding before delivery.
+
+Modal panel shortcuts use the existing exact-window keyboard gate rather than the disabled application menu. Normal background menu shortcuts retain their character/modifier match when resolving a menu item again, so alternate items with identical labels cannot make the requested command ambiguous or select a different command.
 
 First dry-run the global qwen CLI and record exact installed artifacts, with a test-engineer agent. Then build the local Rust/SDK/CLI artifacts and run focused unit checks, build, typecheck and bundle in order. Real acceptance requires independent desktop recording, application event/AX/file readback, and system pointer/focus readback. Verify default first action, drag, idle fade, two windows, no-action live updates, cursor scaling, PiP controls and independent owner cleanup. Repeated create/close must not leave stale windows, samplers or Node timers.
 
