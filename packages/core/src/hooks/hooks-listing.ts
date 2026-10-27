@@ -12,9 +12,9 @@ import { HookEventName, HookType, HooksConfigSource } from './types.js';
 /**
  * Where a listed hook lives. `registry` rows come from settings files and
  * extensions, plus the hooks a subagent attaches while it runs; `session`
- * rows are hooks registered for the current session by skills, `/goal` or
- * the SDK. `source` alone cannot tell the two apart, because a subagent's
- * hooks sit in the registry with the source `session`.
+ * rows are hooks registered for the current session by skills or the SDK.
+ * `source` alone cannot tell the two apart, because a subagent's hooks sit in
+ * the registry with the source `session`.
  */
 export type HooksListingOrigin = 'registry' | 'session';
 

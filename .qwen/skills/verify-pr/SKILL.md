@@ -12,6 +12,25 @@ surface with mock-free harnesses, and report scripted pass/fail assertions —
 never impressions. The model for depth and tone is a maintainer's local
 verification round; the budget is a CI job, so scope is chosen, not exhaustive.
 
+## Start here
+
+Two entry paths share the contract below.
+
+- **Sandboxed lane** — comment `@qwen-code /verify` on the PR. The workflow
+  supplies `$QWEN_VERIFY_CONTEXT`, an already-built tree and the time budget,
+  and publishes the report. There is nothing to prepare.
+- **Maintainer round on a workstation** — `/verify-pr <n>`, starting with
+  `node scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo>` (the
+  preflight requires the repository explicitly; `origin` is not a fallback).
+  This round executes untrusted PR code, so it needs an isolation boundary
+  (see _Local invocation_).
+
+`/verify-pr <n>` proves the change and posts nothing. `--publish` adds the
+report comment and its image evidence; `--watch` installs a standing trigger.
+Before publishing a local round, run
+`node scripts/verify-pr-check.mjs <artifact dir>`; it applies the consistency
+rules the publisher enforces in CI.
+
 ## Environment contract (CI verify job)
 
 The workflow (`qwen-triage.yml` `verify` job) guarantees:
@@ -118,6 +137,21 @@ credential-free container or VM with no access to the host's SSH keys, cloud
 profiles, or `gh` token. Do not run it in an ordinary working copy on a
 maintainer's machine; if that isolation is unavailable, ask the maintainer to
 trigger the sandboxed `@qwen-code /verify` lane instead.
+
+Run `node scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo>` on the host
+before anything else: it fetches the metadata snapshot, resolves and verifies
+both OIDs against this clone, creates `tmp/pr<n>-verify-<ts>/`, and reports the
+isolation signals it can see. It does not gate on them — resolving metadata
+needs `gh`, which the boundary excludes, so this path always runs on the host.
+The boundary check belongs inside: run
+`node scripts/verify-pr-prepare.mjs --require-isolation` as the round's first
+command there, and treat exit 4 as "this is not a boundary". A container
+marker alone does not pass: the CLI's own Docker/Podman launcher mounts
+`~/.config/gcloud`, the ADC file and every model API key it can see, so the
+check also requires `QWEN_VERIFY_CREDENTIAL_FREE=1` — set it only after
+confirming the boundary mounts nothing — and refuses when a known credential
+signal is visible. The built-in macOS sandbox (`SANDBOX=sandbox-exec`) never
+counts, because its default profile still reads host files.
 
 ⚠️ That isolation and `gh` are mutually exclusive: `gh` refuses even
 public-repository queries without authentication, so the metadata **cannot
@@ -297,8 +331,9 @@ JSON payload — `-f content="$(base64 …)"` blows past ARG_MAX around 100 KB.
 Keep the report.md contract in the comment body: verdict line first,
 collapsed `<details>` Chinese summary immediately after, images referenced
 by the same kebab-case names the files carry. The local path has no
-publisher enforcing the fail/mismatch rule, so state the verdict word from
-`verdict.txt` verbatim and keep the counts honest yourself. A published
+publisher enforcing the fail/mismatch rule, so run
+`node scripts/verify-pr-check.mjs <artifact dir>` and clear its errors before
+publishing, then state the verdict word from `verdict.txt` verbatim. A published
 filename is spent: raw.githubusercontent serves a URL from cache, so
 overwriting `02-matrix.png` leaves every earlier link showing the old image.
 Republish as `02-matrix-v2.png`, update the body and every comment that quotes
