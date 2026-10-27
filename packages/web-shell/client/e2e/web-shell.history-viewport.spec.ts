@@ -50,7 +50,7 @@ async function historyScenario(
   baseURL: string | undefined,
   pageRecords: number,
 ) {
-  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.setViewportSize({ width: 1600, height: 900 });
   const count = pageRecords * 12;
   const sessionId = `history-navigation-${pageRecords}`;
   const live = Array.from({ length: 40 }, (_, index) =>

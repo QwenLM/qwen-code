@@ -259,7 +259,21 @@ public class ManagedActionStore {
                 require(text(option.path("label")));
             }
             if (options.has("inputRef")) {
-                resource(options.path("inputRef"), "managed-tool-input", resources);
+                String inputKind = options.path("inputRef").path("kind").asText();
+                boolean command = options.path("v").asLong() == 3 && "managed-extension-command-input".equals(inputKind);
+                resource(options.path("inputRef"), command ? inputKind : "managed-tool-input", resources);
+                if (command) {
+                    JsonNode continuation = read(new String(resource(options.path("continuationRef"),
+                            "hosted-approval-continuation", resources).bytes(), StandardCharsets.UTF_8));
+                    JsonNode step = continuation.path("commandStep");
+                    String toolName = "shell".equals(step.path("toolName").asText()) ? "run_shell_command" : "read_file";
+                    int ordinal = continuation.path("approvalOrdinal").asInt(-1);
+                    require(ordinal >= 0 && ordinal < continuation.path("calls").size()
+                            && options.path("inputRef").equals(step.path("inputRef"))
+                            && toolName.equals(options.path("toolName").asText())
+                            && id.equals(continuation.path("actionId").asText())
+                            && options.path("functionCallId").equals(continuation.path("calls").get(ordinal).path("call").path("callId")));
+                }
             }
             if (options.path("v").asLong() == 3) {
                 ManagedHostedRecoveryRecords.reference(options.path("continuationRef"), "hosted-approval-continuation", tenantId, workspaceId, sessionId, resources, hostedReferences);

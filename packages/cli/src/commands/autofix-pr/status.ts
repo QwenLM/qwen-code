@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import type { CommandModule } from 'yargs';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { unsavedWork } from './cleanup.js';
+import { untrustedGitfile, untrustedSubmodules } from './worktree.js';
 import { DEFAULT_EVERY } from './schedule.js';
 import {
   assertPositiveInteger,
@@ -28,6 +29,7 @@ import {
   type AutofixPrWatchOptions,
   type NeedsHumanItem,
 } from './state.js';
+import { fixInFlight, fixSnapshotPath, readFixMarker } from './fix.js';
 
 export interface WatchStatus {
   pr: number;
@@ -41,6 +43,8 @@ export interface WatchStatus {
   maxPushes: number;
   /** The session that owns the watch; '' when prepared outside one. */
   session: string;
+  /** When `prepare` made the watch, or null for one from before it said. */
+  preparedAt: string | null;
   thisSession: boolean;
   /** The last run of the watch's own gate (one with its session) that read
    * the PR, or null before the first. */
@@ -60,10 +64,23 @@ export interface WatchStatus {
   needsHuman: NeedsHumanItem[];
   worktreePath: string;
   worktreeExists: boolean;
+  /** Every git directory a command in the worktree reads — its own and
+   * each checked-out submodule's — is one the clone keeps, outside the
+   * worktree; read from the files (Section 6.12 of the design). */
+  gitTrusted: boolean;
   /** What the worktree (or its branch) holds that the PR does not, as
    * `cleanup` judges it without asking the remote, or null. A round that
    * starts on it discards it. */
   worktreeWork: string | null;
+  /** The attempt of a fix agent run in the background, or null: while
+   * `fresh` it has not ended — its agent works in the worktree, or has
+   * ended (finished or stopped) and the round may still claim it — and the
+   * round's helpers refuse; otherwise its session left it behind (Section 6.14). */
+  fix: {
+    attempt: string | null;
+    startedAt: string | null;
+    fresh: boolean;
+  } | null;
 }
 
 export interface StatusOutcome {
@@ -101,6 +118,24 @@ function cursorOf(
   }
 }
 
+function latest(a: string | null, b: string | null): string | null {
+  if (a === null || b === null) return a ?? b;
+  return Date.parse(a) >= Date.parse(b) ? a : b;
+}
+
+function fixOf(
+  paths: ReturnType<typeof autofixPrPaths>,
+  now: number,
+): WatchStatus['fix'] {
+  const marker = readFixMarker(paths);
+  if (!marker) return null;
+  return {
+    attempt: marker.attempt?.attempt ?? null,
+    startedAt: marker.attempt?.startedAt ?? null,
+    fresh: fixInFlight(paths, now) !== null,
+  };
+}
+
 function modifiedAt(path: string): string | null {
   try {
     return statSync(path).mtime.toISOString();
@@ -109,9 +144,23 @@ function modifiedAt(path: string): string | null {
   }
 }
 
-export function runStatus(args: { pr?: number }): StatusOutcome {
+export function runStatus(args: {
+  pr?: number;
+  /** false skips `worktreeWork` (null), a git scan of the worktree. */
+  work?: boolean;
+  /** false runs no git command at all: `worktreeWork` is null and
+   * `gitTrusted` false, unchecked. The daemon's listing runs on its own
+   * thread, where a git command that hangs would hold every request. */
+  git?: boolean;
+  /** The clone's main worktree: by default, the one the working directory
+   * is in. The daemon names it, as its own directory is not the clone's. */
+  root?: string;
+  /** Whose watches are `thisSession`: by default, the session this runs in
+   * (`QWEN_CODE_SESSION_ID`); null for none. */
+  session?: string | null;
+}): StatusOutcome {
   if (args.pr !== undefined) assertPositiveInteger(args.pr, 'PR number');
-  const root = repoRoot();
+  const root = args.root ?? repoRoot();
   const tmp = join(root, '.qwen', 'tmp');
   const numbers = (existsSync(tmp) ? readdirSync(tmp) : [])
     .map((name) => STATE_FILE_RE.exec(name)?.[1])
@@ -120,7 +169,8 @@ export function runStatus(args: { pr?: number }): StatusOutcome {
     .filter((n) => Number.isSafeInteger(n) && n > 0)
     .filter((n) => args.pr === undefined || n === args.pr)
     .sort((a, b) => a - b);
-  const session = currentSessionId();
+  const session =
+    args.session === undefined ? currentSessionId() : args.session;
   const now = Date.now();
   const outcome: StatusOutcome = {
     now: new Date(now).toISOString(),
@@ -156,12 +206,17 @@ export function runStatus(args: { pr?: number }): StatusOutcome {
         pushes: state.pushCount ?? 0,
         maxPushes: MAX_PUSHES,
         session: state.sessionId,
+        preparedAt: state.preparedAt ?? null,
         thisSession: state.sessionId === session,
         lastCheck,
         checkedRecently:
           lastCheck !== null &&
           now - Date.parse(lastCheck) < 2 * every * 60_000,
-        lastRound: modifiedAt(paths.snapshotPath),
+        // A claimed attempt took its round's snapshot.
+        lastRound: latest(
+          modifiedAt(paths.snapshotPath),
+          modifiedAt(fixSnapshotPath(paths, pr)),
+        ),
         stopped: cursor?.stopped ?? null,
         watch: state.watch ?? null,
         ended: state.ended ?? null,
@@ -169,10 +224,16 @@ export function runStatus(args: { pr?: number }): StatusOutcome {
         // The recorded path goes stale when the clone moves; this one does not.
         worktreePath: paths.worktreePath,
         worktreeExists: existsSync(paths.worktreePath),
-        worktreeWork: unsavedWork(paths, [
-          state.lastKnownHeadSha,
-          ...state.pushedShas,
-        ]),
+        gitTrusted:
+          args.git !== false &&
+          existsSync(paths.worktreePath) &&
+          (untrustedGitfile(paths.worktreePath, root) ??
+            untrustedSubmodules(paths.worktreePath, root)) === null,
+        worktreeWork:
+          args.work === false || args.git === false
+            ? null
+            : unsavedWork(paths, [state.lastKnownHeadSha, ...state.pushedShas]),
+        fix: fixOf(paths, now),
       });
     } catch (err) {
       const message = (err as Error).message;
@@ -193,15 +254,23 @@ export const statusCommand: CommandModule = {
   describe:
     "List this clone's watches from their files: head, pushes, owning session, last check and round, and what needs a human",
   builder: (yargs) =>
-    yargs.positional('pr', {
-      type: 'number',
-      describe: 'Only this PR',
-    }),
+    yargs
+      .positional('pr', {
+        type: 'number',
+        describe: 'Only this PR',
+      })
+      .option('work', {
+        type: 'boolean',
+        default: true,
+        describe:
+          'Say what each worktree holds that the PR does not (--no-work skips that git scan, for a quick ownership check)',
+      }),
   handler: (argv) => {
     writeStdoutLine(
       JSON.stringify(
         runStatus({
           pr: argv['pr'] === undefined ? undefined : Number(argv['pr']),
+          work: argv['work'] !== false,
         }),
       ),
     );
