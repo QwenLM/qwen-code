@@ -122,14 +122,11 @@ public class ManagedAgentService {
     private org.springframework.beans.factory.ObjectProvider<SessionRecoveryService> recoveryServices;
     private ManagedAgentProperties.Dispatch renameDispatch = new ManagedAgentProperties.Dispatch();
     private Clock renameClock = Clock.systemUTC();
-    private boolean externalFilesConfiguration;
 
     @Autowired
     void configureRenameDelivery(ManagedAgentProperties properties, Clock clock) {
         renameDispatch = properties.getDispatch();
         renameClock = clock;
-        externalFilesConfiguration = com.alibaba.qwen.code.runtimebroker.provisioning.ExternalWorkspaceProvisioner.KIND
-                .equals(properties.getRuntimeBroker().getProvisioner());
     }
 
     @Autowired(required = false)
@@ -147,8 +144,7 @@ public class ManagedAgentService {
             return false;
         }
         return session.workspace() == null || RuntimeWarmer.supportsClose(runtimeWarmer, session.workspace())
-                && (WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())
-                        ? harness.supportsSavedLifecycle(session.toolProfile()) : harness.supportsLifecycle(session.toolProfile()));
+                && harness.supportsLifecycle(session.toolProfile());
     }
 
     private boolean hasActions(SessionRecord session) {
@@ -249,11 +245,6 @@ public class ManagedAgentService {
             String tenantId, String actorId, String agentId) {
         requireModelActor(actorId);
         var options = store.workspaceSessionOptions(tenantId, agentId);
-        if (externalFilesConfiguration) {
-            return new WebShellSessionOptions(options.approvalMode(), options.availableApprovalModes(),
-                    false, false, false, "qwen-code".equals(agentId) && workspaces.externalFilesAvailable()
-                            && !store.modelOptions().isEmpty() && harness.supportsModelSelection());
-        }
         if ("qwen-code".equals(agentId) && store.workspaceShellEnabled() && harness.supportsApprovalSelection()) {
             return new WebShellSessionOptions(options.approvalMode(), List.of("default", "auto-edit", "yolo"),
                     harness.supportsPlanMode(), harness.supportsInputAttachments(), harness.supportsSessionSkills(),
@@ -430,9 +421,6 @@ public class ManagedAgentService {
         if (recorded.isPresent()) {
             dispatch(tenantId, recorded.get(), true);
             return response(recorded.get());
-        }
-        if (externalFilesConfiguration && !workspaces.externalFilesAvailable()) {
-            throw new ManagedAgentException(HttpStatus.CONFLICT, "workspace_unavailable", "External Workspace creation is unavailable.");
         }
         if (modelId != null && (!"qwen-code".equals(agentId) || !harness.supportsModelSelection())) {
             throw new ManagedAgentException(HttpStatus.CONFLICT, "unsupported_feature",
@@ -1444,7 +1432,7 @@ public class ManagedAgentService {
                         false, foregroundShell(session),
                         visible && modelSelectionSupported && mayChangeContext,
                         visible && approvalSupported && mayChangeContext && !Boolean.FALSE.equals(foregroundShell(session)),
-                        visible && maySubmit && !WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile()) && harness.supportsInputAttachments(),
+                        visible && maySubmit && harness.supportsInputAttachments(),
                         visible && "ACTIVE".equals(session.status()) && renameSupported
                                 && (session.workspace() == null || maySubmit),
                         visible && approvalExecutable && compressionSupported && compression.available(),
@@ -1465,8 +1453,7 @@ public class ManagedAgentService {
         }
         return retention || session.workspace() != null
                 && RuntimeWarmer.supportsClose(runtimeWarmer, session.workspace())
-                && (WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())
-                        ? harness.supportsSavedLifecycle(session.toolProfile()) : harness.supportsLifecycle(session.toolProfile()));
+                && harness.supportsLifecycle(session.toolProfile());
     }
 
     private Boolean childAgentsCapability(SessionRecord session) {
@@ -1853,9 +1840,7 @@ public class ManagedAgentService {
     private boolean mayChangeContextShape(SessionRecord session) {
         return session.workspace() != null && "ACTIVE".equals(session.status())
                 && session.deletedAt() == null && store.workspaceFilesEnabled()
-                && (WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())
-                        ? workspaces.externalFilesAllowed(session.workspace())
-                        : runtimeWarmer == null || runtimeWarmer.supportsWorkspaceContextChange(session.workspace()));
+                && (runtimeWarmer == null || runtimeWarmer.supportsWorkspaceContextChange(session.workspace()));
     }
 
     void requireLegacyWorkspace(String tenantId, String actorId,

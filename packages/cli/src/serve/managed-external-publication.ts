@@ -420,7 +420,7 @@ export class ManagedExternalPublication
   register(app: Application, executor: ManagedToolExecutor): void {
     for (const route of EXTERNAL_PUBLICATION_ROUTES) {
       app.post(
-        route.path.replace(':', '\\:'),
+        route.path,
         managedRuntimeNoStore,
         authorizeManagedRuntime(this.boot),
         managedRuntimeJsonBody(route.requestBodyLimitBytes),

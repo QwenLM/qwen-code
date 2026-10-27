@@ -1013,7 +1013,6 @@ describe('Hosted real-process gates', () => {
       'HostedConcurrentTurnBurstMySqlIT',
       'HostedEventStreamLivenessIT',
       'HostedExtensionsIT',
-      'HostedExternalPublicFilesIT',
       'HostedHarnessMySqlIT',
       'HostedHarnessPoolMySqlIT',
       'HostedHookCancelFaultGatesIT',

@@ -158,9 +158,10 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
             throw registrationMismatch();
         }
         Map<String, Object> row = rows.get(0);
-        RegisteredExternalStorage registration;
+        ExternalStorageRegistration registration;
         try {
-            registration = ExternalStorageRegistry.decodeRegistration((String) row.get("registration_json"));
+            registration = decode(String.valueOf(row.get("registration_json")),
+                    ExternalStorageRegistration.class);
         } catch (RuntimeException failure) {
             // A record this build cannot decode is indistinguishable from an
             // unreadable one; refusing it permanently would pin the placement.
@@ -171,13 +172,21 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
         // catch a row that drifted away from its own persisted record.
         if (registration == null || !(revision instanceof Number number)
                 || !tenantWorkspaceId.equals(
-                        registration.tenantWorkspaceId())
-                || !registration.ownerKey().equals(row.get("physical_key"))
-                || registration.registrationRevision() != number.longValue()
-                || !registration.mountRoot().equals(row.get("mount_root"))) {
+                        registration.alias().tenantWorkspaceId())
+                || !registration.identity().ownerKey()
+                        .equals(String.valueOf(row.get("physical_key")))
+                || registration.identity().registrationRevision() != number.longValue()
+                || !registration.alias().mountRoot()
+                        .equals(String.valueOf(row.get("mount_root")))) {
             throw registrationMismatch();
         }
-        return Optional.of(registration);
+        return Optional.of(new RegisteredExternalStorage(
+                registration.identity().providerId(),
+                registration.identity().physicalKey(),
+                registration.identity().registrationRevision(),
+                registration.alias().tenantWorkspaceId(),
+                registration.alias().aliasPath(),
+                registration.alias().mountRoot()));
     }
 
     private static RuntimeBrokerException registrationMismatch() {

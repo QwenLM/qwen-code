@@ -62,8 +62,7 @@ class ExternalStorageRegistrationTest {
         properties.getRuntimeBroker().setToken("operator-secret");
         server = new ServerProperties();
         server.setAddress(InetAddress.getByName("127.0.0.1"));
-        mvc = MockMvcBuilders.standaloneSetup(new ExternalStorageRegistrationController(store,
-                new ExternalWorkspaceMaterializationStore(jdbc, manager), properties, server))
+        mvc = MockMvcBuilders.standaloneSetup(new ExternalStorageRegistrationController(store, properties, server))
                 .setControllerAdvice(new ApiExceptionHandler())
                 .addFilters(new RequestIdFilter(), new TenantContextFilter(json)).build();
     }

@@ -389,6 +389,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     'no Managed stateless generation route',
   ),
   session_btw: NO_MANAGED_EQUIVALENT('no Managed side-question route'),
+  session_btw_stream: NO_MANAGED_EQUIVALENT(
+    'no Managed streaming side-question route',
+  ),
   session_shell_command: {
     standing: 'managed',
     evidence: 'tool:run_shell_command',
@@ -595,7 +598,6 @@ export const MANAGED_ONLY_NOT_A_GAP = new Set([
   'RUNTIME_NODE_LIST',
   // Loopback operator registration has no client capability.
   'EXTERNAL_STORAGE_REGISTER',
-  'EXTERNAL_WORKSPACE_MATERIALIZE',
   // Internal writer and publication routes: between the control plane and its
   // own stores, behind writer credentials, never a client capability.
   'PUB_ADMISSION_PREPARE',

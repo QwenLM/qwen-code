@@ -72,9 +72,6 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
     private final RuntimeProvisioner localProvisioner;
     private final RuntimeBindingRepository extensionBindings;
     private final HttpRuntimeTransport extensionTransport;
-    private final ManagedAgentProperties.RuntimeBroker brokerSettings;
-    private final ExternalStorageRegistrationStore externalRegistrations;
-    private final org.springframework.jdbc.core.JdbcTemplate jdbc;
 
     public EmbeddedRuntimeBroker(AgentStateStore store,
             ManagedAgentProperties properties,
@@ -190,15 +187,14 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         HttpRuntimeTransport http = remote ? new HttpRuntimeTransport(ssh.connections()::resolveEndpoint) : new HttpRuntimeTransport();
         this.extensionBindings = bindingRepository;
         this.extensionTransport = http;
-        this.jdbc = jdbc;
-        this.brokerSettings = broker;
-        this.externalRegistrations = jdbc == null || manager == null ? null
-                : new ExternalStorageRegistrationStore(jdbc, manager);
         this.workspaces = workspaceExecutionStore == null ? null
-                : new WorkspaceRuntimeResolver(store, workspaceExecutionStore, properties, ssh, externalRegistrations);
+                : new WorkspaceRuntimeResolver(store, workspaceExecutionStore, properties, ssh);
         WorkspaceRuntimeResolver workspaces = this.workspaces;
         this.childWorkspaces = broker.isChildWorkspacesEnabled()
                 ? childWorkspaces(workspaces, broker) : null;
+        RuntimeTransport transport = workspaces == null ? http
+                : new WorkspaceRuntimeTransport(http, workspaces, workspaceExecutionStore,
+                        bindingRepository, sessionRepository);
         RuntimeProvisioner baseProvisioner;
         if (resident) {
             if (!(bindingRepository instanceof com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository original)
@@ -220,18 +216,14 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
             if (!broker.getResidentWorkspaces().isEmpty()) {
                 throw new IllegalStateException("Resident mappings require kubernetes-workspace provisioner");
             }
-            baseProvisioner = provisioner(broker, remote ? new HttpRuntimeTransport() : http, externalRegistrations);
+            baseProvisioner = provisioner(broker, remote ? new HttpRuntimeTransport() : http,
+                    jdbc == null || manager == null ? null
+                            : new ExternalStorageRegistrationStore(jdbc, manager));
         }
         if (properties.getManagedExtensions().isEnabled() && baseProvisioner instanceof LocalProcessRuntimeProvisioner local) {
             local.withManagedExtensionCacheDirectory(properties.getManagedExtensions().getCacheDirectory(), properties.getManagedExtensions().getCgroupRoot());
         }
         this.localProvisioner = baseProvisioner;
-        java.util.function.Function<com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord, CompletionStage<Void>> verifyExternal =
-                baseProvisioner instanceof ExternalWorkspaceProvisioner external ? external::verifyAcquisition
-                        : ignored -> CompletableFuture.failedFuture(WorkspaceExecutionStore.unavailable());
-        RuntimeTransport transport = workspaces == null ? http
-                : new WorkspaceRuntimeTransport(http, workspaces, workspaceExecutionStore,
-                        bindingRepository, sessionRepository, verifyExternal);
         if (remote) {
             RuntimeProvisioner local = baseProvisioner;
             var remoteProvisioner = new com.alibaba.qwen.code.runtimebroker.provisioning.SshRuntimeProvisioner(
@@ -249,7 +241,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                     }, ssh.connections()::forget);
         }
         RuntimeProvisioner provisioner = workspaces == null || resident ? baseProvisioner
-                : new WorkspaceRuntimeProvisioner(baseProvisioner, workspaces, workspaceExecutionStore, bindingRepository);
+                : new WorkspaceRuntimeProvisioner(baseProvisioner, workspaces, workspaceExecutionStore);
         HarnessSessionResolver resolver = new HarnessSessionResolver() {
             @Override
             public CompletionStage<RuntimeScope> resolve(String sessionId) {
@@ -299,9 +291,6 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                 }
                 if (session.workspace() != null) {
                     if (workspaces != null) {
-                        if (admission && authority == null) {
-                            workspaceExecutionStore.requireExternalExecution(session.workspace());
-                        }
                         return CompletableFuture.completedFuture(workspaces.resolve(sessionId, authority).scope());
                     }
                     return CompletableFuture.failedFuture(
@@ -508,32 +497,12 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
     }
 
     @Override
-    public boolean supportsWorkspaceClose(String profile) {
-        return com.alibaba.qwen.code.managedagent.workspace.WorkspaceToolProfiles.EXTERNAL_FILES.equals(profile)
-                ? ExternalWorkspaceProvisioner.KIND.equals(brokerSettings.getProvisioner())
-                        && externalRegistrations != null && service.supportsDrainedStopKind(ExternalWorkspaceProvisioner.KIND)
-                : supportsWorkspaceClose();
-    }
-
-    @Override
     public boolean supportsWorkspaceContextChange(ContextBinding binding) {
         return residents.find(binding) == null;
     }
 
     @Override
     public boolean supportsWorkspaceClose(com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding binding) {
-        if (ExternalWorkspaceProvisioner.KIND.equals(brokerSettings.getProvisioner())) {
-            if (binding == null || externalRegistrations == null || jdbc == null
-                    || !service.supportsDrainedStopKind(ExternalWorkspaceProvisioner.KIND)) {
-                return false;
-            }
-            var registered = externalRegistrations.find(binding.getTenantId(), binding.getStorageId()).orElse(null);
-            return registered != null && binding.getWorkspaceId().equals(registered.tenantWorkspaceId())
-                    && brokerSettings.getExternalProviderId().equals(registered.providerId())
-                    && !jdbc.queryForList("SELECT 1 FROM ma_workspace WHERE tenant_id = ? AND workspace_id = ?"
-                            + " AND workspace_generation = ? AND storage_id = ? AND workspace_kind = 'ROOT'",
-                            Integer.class, binding.getTenantId(), binding.getWorkspaceId(), binding.getWorkspaceGeneration(), binding.getStorageId()).isEmpty();
-        }
         if (resident && residents.find(binding) != null) {
             return true;
         }

@@ -48,7 +48,6 @@ final class RuntimeAdmission {
         if (!binding.sameIdentity(claim) || !binding.getRequest().isManagedContext()
                 || !LocalProcessRuntimeProvisioner.KIND.equals(binding.getRequest().getProvisionerKind())
                         && !SshRuntimeProvisioner.KIND.equals(binding.getRequest().getProvisionerKind())
-                        && !com.alibaba.qwen.code.runtimebroker.provisioning.ExternalWorkspaceProvisioner.isWorkspaceRequest(binding.getRequest())
                 || !(HarnessOwnership.sharesRuntimeSessions(binding.getRequest())
                         || WorkspaceExecutionProfile.admitsIsolationClass(binding.getRequest().getScope().getIsolationClass())
                                 && binding.getRequest().getIsolationKey().equals(session.getSession().getHarnessSessionId()))
@@ -57,10 +56,6 @@ final class RuntimeAdmission {
                 || binding.getDrainReceipt() == null || !binding.getDrainReceipt().matches(binding)
                 || !binding.getDrainReceipt().equals(claim.getDrainReceipt())
                 || !java.util.Objects.equals(binding.getResourceHandle(), claim.getResourceHandle())
-                || com.alibaba.qwen.code.runtimebroker.provisioning.ExternalWorkspaceProvisioner.isWorkspaceRequest(binding.getRequest())
-                        && (binding.getResourceHandle() == null || binding.getProvisionSeed() == null
-                                || !binding.getProvisionSeed().equals(claim.getProvisionSeed())
-                                || !binding.getProvisionSeed().matches(binding.getLease()))
                 || binding.getLease() == null || claim.getLease() == null
                 || !binding.getLease().getRuntimeInstanceId().equals(claim.getLease().getRuntimeInstanceId())
                 || !binding.getLease().getEndpoint().equals(claim.getLease().getEndpoint())

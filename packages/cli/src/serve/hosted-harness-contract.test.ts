@@ -73,7 +73,6 @@ describe('Hosted Harness private contract', () => {
         'targeted-cancel/1',
         'event-keepalive/1',
         'web-fetch/1',
-        'hosted-workspace-external-files/1',
       ],
     });
     expect(Object.isFrozen(contract)).toBe(true);

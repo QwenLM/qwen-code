@@ -33,6 +33,8 @@ import { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
 import { AppEvent } from '../../utils/events.js';
 import {
   addWorkspaceDirectory,
+  applyExtensionUpdate,
+  applyExtensionUpdateCheck,
   applyModelSelection,
   applyMcpServerAction,
   applyThemeSelection,
@@ -152,8 +154,8 @@ vi.mock('./dialog-data.js', () => ({
   applyExtensionFavorite: () => {},
   applyExtensionUninstall: async () => {},
   applyExtensionScopeChange: async () => {},
-  applyExtensionUpdate: async () => {},
-  applyExtensionUpdateCheck: async () => null,
+  applyExtensionUpdate: vi.fn(async () => {}),
+  applyExtensionUpdateCheck: vi.fn(async () => null),
   buildModelEntries: () => [],
   computeModelDialogInitialKey: () => undefined,
   applyModelSelection: vi.fn(async () => ({ ok: true as const })),
@@ -320,6 +322,66 @@ describe('OpenTuiDialogMount routing', () => {
     vi.clearAllMocks();
     mockGetHookSystem.mockReset();
   });
+
+  it.each([
+    'update-available',
+    'up-to-date',
+    'not-updatable',
+    'error',
+  ] as const)('returns the extension update check state: %s', async (state) => {
+    const message = `Update check result: ${state}`;
+    vi.mocked(applyExtensionUpdateCheck).mockResolvedValueOnce({
+      message,
+      state,
+    });
+    mount({ dialog: 'extensions_manage' });
+    let result: unknown;
+    await act(async () => {
+      result = await dialogProp('extensions_manage', 'onDetailAction')(
+        { key: 'owned-extension' },
+        'mark-update',
+      );
+    });
+    expect(applyExtensionUpdateCheck).toHaveBeenCalledWith(
+      CONFIG,
+      'owned-extension',
+    );
+    expect(result).toBe(state);
+    expect(mocks.state.dialogProps['extensions_manage']['status']).toEqual({
+      type: state === 'error' ? 'error' : 'info',
+      text: message,
+    });
+    expect(mocks.state.dialogProps['extensions_manage']['busy']).toBe(false);
+  });
+
+  it.each([true, false])(
+    'settles an extension update with changed=%s',
+    async (changed) => {
+      vi.mocked(applyExtensionUpdate).mockResolvedValueOnce({
+        message: 'Update result',
+        changed,
+        level: changed ? 'success' : 'error',
+      });
+      mount({ dialog: 'extensions_manage' });
+      let state: unknown;
+      await act(async () => {
+        state = await dialogProp('extensions_manage', 'onDetailAction')(
+          { key: 'owned-extension' },
+          'update',
+        );
+      });
+      expect(applyExtensionUpdate).toHaveBeenCalledWith(
+        CONFIG,
+        'owned-extension',
+      );
+      expect(state).toBe(changed ? 'up-to-date' : undefined);
+      expect(mocks.state.dialogProps['extensions_manage']['busy']).toBe(false);
+      expect(mocks.state.dialogProps['extensions_manage']['status']).toEqual({
+        type: changed ? 'success' : 'error',
+        text: 'Update result',
+      });
+    },
+  );
 
   it('routes every dialog request to its own component', () => {
     expect(REQUESTS).toHaveLength(25);
