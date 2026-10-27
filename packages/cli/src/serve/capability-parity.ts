@@ -392,6 +392,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     'no Managed stateless generation route',
   ),
   session_btw: NO_MANAGED_EQUIVALENT('no Managed side-question route'),
+  session_btw_stream: NO_MANAGED_EQUIVALENT(
+    'no Managed streaming side-question route',
+  ),
   session_shell_command: {
     standing: 'managed',
     evidence: 'tool:run_shell_command',
