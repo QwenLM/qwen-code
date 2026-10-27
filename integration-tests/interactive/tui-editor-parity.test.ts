@@ -701,9 +701,7 @@ it('ctrl-c-clear-then-exit', () =>
         () => session.exitResult() !== undefined,
         'second Ctrl+C must exit',
       );
-      expect(session.exitResult()?.exitCode).toBe(
-        renderer === 'opentui' ? 130 : 0,
-      );
+      expect(session.exitResult()?.exitCode).toBe(0);
       expect(server.requests).toHaveLength(0);
     },
   ));
@@ -755,9 +753,7 @@ for (const key of ['c', 'd'] as const) {
           () => session.exitResult() !== undefined,
           'second exit key must exit',
         );
-        expect(session.exitResult()?.exitCode).toBe(
-          renderer === 'opentui' ? 130 : 0,
-        );
+        expect(session.exitResult()?.exitCode).toBe(0);
         expect(server.requests).toHaveLength(1);
       },
       100,
@@ -803,9 +799,7 @@ for (const key of ['c', 'd'] as const) {
           () => session.exitResult() !== undefined,
           'confirmation second key must exit',
         );
-        expect(session.exitResult()?.exitCode).toBe(
-          renderer === 'opentui' ? 130 : 0,
-        );
+        expect(session.exitResult()?.exitCode).toBe(0);
         expect(existsSync(sentinel)).toBe(false);
       },
       100,
