@@ -17896,12 +17896,33 @@ describe('createAcpSessionBridge', () => {
 
     it('keeps media-only Channel display unchanged when a declaration is supplied', async () => {
       const promptGate = deferred<PromptResponse>();
-      const handle = makeChannel({ promptImpl: () => promptGate.promise });
+      // The first, worker-classified turn settles immediately and attests the
+      // session; the media prompt stays gated so the pending surface can be
+      // sampled while it is in flight.
+      let firstTurn = true;
+      const handle = makeChannel({
+        promptImpl: () => {
+          if (firstTurn) {
+            firstTurn = false;
+            return { stopReason: 'end_turn' };
+          }
+          return promptGate.promise;
+        },
+      });
       const bridge = makeBridge({ channelFactory: async () => handle.channel });
       const session = await bridge.spawnOrAttach({
         workspaceCwd: WS_A,
         sourceType: 'channel',
       });
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'worker relay' }],
+        },
+        undefined,
+        { channelPrompt: true },
+      );
       const abort = new AbortController();
       const userChunks: unknown[] = [];
       const events = bridge.subscribeEvents(session.sessionId, {
@@ -17934,19 +17955,19 @@ describe('createAcpSessionBridge', () => {
 
       try {
         await vi.waitFor(() =>
-          expect(handle.agent.promptCalls).toHaveLength(1),
+          expect(handle.agent.promptCalls).toHaveLength(2),
         );
         expect(bridge.getPendingPrompts(session.sessionId)).toMatchObject([
           { text: IMAGE_ONLY_PROMPT_TEXT, state: 'running' },
         ]);
-        expect(handle.agent.promptCalls[0]).toMatchObject({
+        expect(handle.agent.promptCalls[1]).toMatchObject({
           prompt: [image],
           _meta: { 'qwen.daemon.submittedPrompt': 'describe this image' },
         });
-        expect(handle.agent.promptCalls[0]?._meta).not.toHaveProperty(
+        expect(handle.agent.promptCalls[1]?._meta).not.toHaveProperty(
           'qwen.daemon.promptDisplayText',
         );
-        expect(handle.agent.promptCalls[0]?._meta).not.toHaveProperty(
+        expect(handle.agent.promptCalls[1]?._meta).not.toHaveProperty(
           'qwen.channel.prompt',
         );
       } finally {
@@ -17981,8 +18002,12 @@ describe('createAcpSessionBridge', () => {
         context: { submittedPrompt: '\u200d\ufe0f' },
       },
       {
+        // A String object carries `.length` and `.replace`, so only the
+        // primitive-type guard stops it from projecting.
         name: 'invalid',
-        context: { submittedPrompt: 42 as unknown as string },
+        context: {
+          submittedPrompt: new String('visible') as unknown as string,
+        },
       },
       {
         name: 'worker-classified',
@@ -17997,6 +18022,17 @@ describe('createAcpSessionBridge', () => {
         workspaceCwd: WS_A,
         sourceType: 'channel',
       });
+      // Attest the session first, or every arm is ineligible on the
+      // attestation latch rather than on the gate it names.
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'worker relay' }],
+        },
+        undefined,
+        { channelPrompt: true },
+      );
       const abort = new AbortController();
       const events = bridge.subscribeEvents(session.sessionId, {
         signal: abort.signal,
@@ -18040,12 +18076,85 @@ describe('createAcpSessionBridge', () => {
       await expect(userChunk).resolves.toMatchObject({
         content: { type: 'text', text: 'machine wrapper' },
       });
-      expect(handle.agent.promptCalls[0]?._meta).not.toHaveProperty(
+      expect(handle.agent.promptCalls[1]?._meta).not.toHaveProperty(
         'qwen.daemon.promptDisplayText',
       );
-      expect(handle.agent.promptCalls[0]?._meta?.['qwen.channel.prompt']).toBe(
+      expect(handle.agent.promptCalls[1]?._meta?.['qwen.channel.prompt']).toBe(
         'channelPrompt' in context ? context.channelPrompt : undefined,
       );
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('keeps content-derived display for display projections on a worker-attested non-channel session', async () => {
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      // A worker-classified turn sets the attestation latch on ANY session;
+      // only the Channel source gate keeps a declaration from projecting
+      // here. Without an attested ordinary-session case, dropping that gate
+      // leaves the suite green.
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'worker relay' }],
+        },
+        undefined,
+        { channelPrompt: true },
+      );
+      const abort = new AbortController();
+      const events = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+      const userChunk = (async () => {
+        for await (const event of events) {
+          if (event.type !== 'session_update') continue;
+          const update = (
+            event.data as {
+              update?: { sessionUpdate?: string; content?: unknown };
+            }
+          ).update;
+          if (update?.sessionUpdate === 'user_message_chunk') return update;
+        }
+        throw new Error('no user_message_chunk observed');
+      })();
+      const promptPromise = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'ordinary text' }],
+        },
+        undefined,
+        { submittedPrompt: 'declared ordinary text' },
+      );
+      expect(bridge.getPendingPrompts(session.sessionId)).toMatchObject([
+        { text: 'ordinary text', state: 'running' },
+      ]);
+      await promptPromise;
+      await expect(userChunk).resolves.toMatchObject({
+        content: { type: 'text', text: 'ordinary text' },
+      });
+      expect(
+        handle.agent.promptCalls[1]?._meta?.['qwen.daemon.submittedPrompt'],
+      ).toBe('declared ordinary text');
+      // The same source gate scopes an authenticated worker's display
+      // projection, not just a submission declaration.
+      const workerDisplayPromise = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'second ordinary text' }],
+        },
+        undefined,
+        { promptDisplayText: 'worker display projection' },
+      );
+      expect(bridge.getPendingPrompts(session.sessionId)).toMatchObject([
+        { text: 'second ordinary text', state: 'running' },
+      ]);
+      await workerDisplayPromise;
       abort.abort();
       await bridge.shutdown();
     });
@@ -18056,6 +18165,18 @@ describe('createAcpSessionBridge', () => {
       });
       const bridge = makeBridge({ channelFactory: async () => handle.channel });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      // Attest the ordinary session first: the attestation latch is not
+      // channel-specific, so this pins the Channel source term rather than
+      // the attestation term.
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'worker relay' }],
+        },
+        undefined,
+        { channelPrompt: true },
+      );
 
       // An all-invisible in-cap declaration is the neutralization scan's
       // worst case below the cap. The eligibility pre-gate runs first, so a
