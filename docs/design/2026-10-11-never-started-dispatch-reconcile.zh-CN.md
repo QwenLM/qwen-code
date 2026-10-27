@@ -149,6 +149,16 @@ Broker。任何明确状态都是反证，不得被后备查询覆盖。因此 p
 行存在、unknown、身份不匹配或查询被拒绝时，记录继续未结算；publication
 报错本身永远不是未启动证明。
 
+当一个失败回合包含多个后台 Shell binding 时，每个 grant owner 返回的
+`NOT_STARTED` 都会立即结算对应记录；剩余 grant owner 判定全部完成后，再并发
+启动所有允许执行的进程账本探测。因此 Broker 静默无响应只消耗
+一个 30 秒探测窗口，而不是每个 binding 各消耗一个窗口。reload 扫描器和
+回合内恢复分支共用同一探测判定：只有账本行缺失才能证明 never-started；
+账本行存在时报告 `ambiguous_state (<state>)`；查询被拒绝时报告
+`probe_rejected (<safe detail>)`。诊断包含 execution id，可在不插入
+rejection message 的前提下区分两个已知 Broker 契约错误与传输错误类型，
+并记录每个由进程账本证明后成功结算的记录。
+
 此后备取证仅适用于后台 Shell 请求。Monitor 派发会创建自己的 `:process`
 行，但 `request.background` 会有意排除它们；其结算继续由 Monitor 专属的
 grant 与远程证据路径负责。不增加 acquire、release、派发或协议字段。记录

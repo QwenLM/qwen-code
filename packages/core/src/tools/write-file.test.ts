@@ -14,11 +14,11 @@ import {
   type Mocked,
 } from 'vitest';
 import type { WriteFileToolParams } from './write-file.js';
+import { WriteFileTool } from './write-file.js';
 import {
-  WriteFileTool,
   buildRecordArtifactReminder,
   buildWorkspaceArtifactMetadata,
-} from './write-file.js';
+} from './artifact/workspace-auto-record.js';
 import { ToolErrorType } from './tool-error.js';
 import type {
   FileDiff,
@@ -39,6 +39,15 @@ import { FileReadCache } from '../services/fileReadCache.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
 import type { TextFileIo } from '../services/fileSystemService.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
+import {
+  canonicalWorktreePath,
+  grantUnattendedFixes,
+  openBackgroundFix,
+  recordConfirmedWatch,
+  recordWatchTask,
+  resetUnattendedFixGrantsForTests,
+} from './autofix-pr-grants.js';
+import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 
 // A unique per-run root: a fixed path under os.tmpdir() breaks whenever a
 // previous run by another user (e.g. a sandboxed root run on a shared CI
@@ -371,6 +380,50 @@ describe('WriteFileTool', () => {
       return confirmation;
     }
 
+    it("asks the user for a write into a background fix's worktree, but for its own agent", async () => {
+      const worktree = fs.mkdtempSync(path.join(os.tmpdir(), 'autofix-pr-wt-'));
+      try {
+        await openFixAt(worktree, 'fix-agent');
+        const file = path.join(worktree, 'src', 'a.ts');
+        expect(
+          tool
+            .build({ file_path: file, content: 'x' })
+            .requiresUserInteraction?.(),
+        ).toBe(true);
+        expect(
+          await runWithAgentContext('fix-agent', async () =>
+            tool
+              .build({ file_path: file, content: 'x' })
+              .requiresUserInteraction?.(),
+          ),
+        ).toBe(false);
+        // An agent the fix agent started is its own; another agent is not.
+        expect(
+          await runWithAgentContext('fix-agent-child', async () =>
+            tool
+              .build({ file_path: file, content: 'x' })
+              .requiresUserInteraction?.(),
+          ),
+        ).toBe(false);
+        expect(
+          await runWithAgentContext('session-agent', async () =>
+            tool
+              .build({ file_path: file, content: 'x' })
+              .requiresUserInteraction?.(),
+          ),
+        ).toBe(true);
+        const outside = path.join(path.dirname(worktree), 'elsewhere.ts');
+        expect(
+          tool
+            .build({ file_path: outside, content: 'x' })
+            .requiresUserInteraction?.(),
+        ).toBe(false);
+      } finally {
+        resetUnattendedFixGrantsForTests();
+        fs.rmSync(worktree, { recursive: true, force: true });
+      }
+    });
+
     it('should always return ask from getDefaultPermission', async () => {
       const params = {
         file_path: p('confirm_permission_file.txt'),
@@ -496,6 +549,17 @@ describe('WriteFileTool', () => {
       expect(result.artifacts).toBeUndefined();
     }
 
+    function expectUpdateOnly(result: ToolResult, workspacePath: string) {
+      expect(result.llmContent).not.toContain('automatically recorded');
+      expect(result.artifacts).toEqual([
+        expect.objectContaining({
+          storage: 'workspace',
+          workspacePath,
+          updateOnly: true,
+        }),
+      ]);
+    }
+
     it('should return error if _getCorrectedFileContent returns an error during execute', async () => {
       const filePath = p('execute_error_file.txt');
       fs.writeFileSync(filePath, 'original', { mode: 0o000 });
@@ -580,6 +644,10 @@ describe('WriteFileTool', () => {
       ['diagram.svg', 'image'],
       ['photo.webp', 'image'],
       ['table.csv', 'file'],
+      ['query.sql', 'file'],
+      ['analysis.py', 'file'],
+      ['notes.md', 'file'],
+      ['data.json', 'file'],
       ['table.xlsx', 'document'],
       ['brief.docx', 'document'],
       ['deck.pptx', 'document'],
@@ -609,11 +677,12 @@ describe('WriteFileTool', () => {
       });
     });
 
-    it('does not record intermediate files when record_as_artifact is false', async () => {
+    it('only refreshes intermediate files when record_as_artifact is false', async () => {
       const result = await writeArtifact(p('alibaba.html'), html('Alibaba'), {
         record_as_artifact: false,
       });
-      expectNotRecorded(result, true);
+      expect(result.llmContent).toMatch(CREATED);
+      expectUpdateOnly(result, 'alibaba.html');
     });
 
     it('does not record intermediate files written under .qwen/tmp', async () => {
@@ -655,12 +724,12 @@ describe('WriteFileTool', () => {
       expectNotRecorded(result, true);
     });
 
-    it('does not record ordinary source files as artifacts', async () => {
+    it('only refreshes ordinary source files that are already artifacts', async () => {
       const result = await writeArtifact(
         p('src', 'index.ts'),
         'export const value = 1;\n',
       );
-      expectNotRecorded(result, false);
+      expectUpdateOnly(result, 'src/index.ts');
     });
 
     it('does not record files outside the workspace as artifacts', async () => {
@@ -1369,3 +1438,35 @@ describe('workspace artifact metadata guard', () => {
     expect(buildWorkspaceArtifactMetadata(mockConfig, filePath)).toBeNull();
   });
 });
+
+async function openFixAt(worktree: string, agentId: string) {
+  grantUnattendedFixes('s-write', {
+    pr: 3,
+    worktree: canonicalWorktreePath(worktree),
+    check: async () => true,
+    open: async () => ({ task: 't' }),
+    close: async () => {},
+  });
+  recordConfirmedWatch('s-write', {
+    pr: 3,
+    repo: 'o/r',
+    host: null,
+    targetDir: path.dirname(worktree),
+    preparedAt: null,
+    worktree: canonicalWorktreePath(worktree),
+    authorCanPush: true,
+  });
+  recordWatchTask('s-write', 3, { task: 't', reply: true, instructions: '' });
+  const fix = await openBackgroundFix(
+    's-write',
+    worktree,
+    new AbortController().signal,
+  );
+  // The fix agent started `${agentId}-child`.
+  fix.attach(
+    agentId,
+    () => {},
+    (id) => id === `${agentId}-child`,
+  );
+  return fix;
+}

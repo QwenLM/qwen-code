@@ -69,7 +69,10 @@ function fakeChild(unitName: string): ChildProcess & {
   return child;
 }
 
-function fakeProcess(unitName: string): ManagedChildRunProcess {
+function fakeProcess(
+  unitName: string,
+  options?: { readonly proveTerminate?: boolean },
+): ManagedChildRunProcess {
   const child = fakeChild(unitName);
   let evidence: ChildRunExitEvidence | null = null;
   child.on('exit', (code, signal) => {
@@ -88,7 +91,10 @@ function fakeProcess(unitName: string): ManagedChildRunProcess {
       return evidence;
     },
     async terminate(_graceMs: number): Promise<ChildRunExitEvidence | null> {
-      if (evidence === null) child.emitExit(null, 'SIGTERM');
+      if (evidence === null) {
+        if (options?.proveTerminate === false) return null;
+        child.emitExit(null, 'SIGTERM');
+      }
       return evidence;
     },
     async settleOnEmpty(): Promise<ChildRunExitEvidence | null> {
@@ -104,6 +110,7 @@ interface FakeSink extends ManagedShellCaptureSink {
   pid: number;
   started: boolean;
   failed: boolean;
+  stopRequested: boolean;
 }
 
 function fakeSink(): FakeSink {
@@ -115,6 +122,7 @@ function fakeSink(): FakeSink {
     pid: 0,
     started: false,
     failed: false,
+    stopRequested: false,
     async write(id: 'stdout' | 'stderr', chunk: Buffer) {
       writes.push([id, chunk.toString()]);
     },
@@ -123,7 +131,9 @@ function fakeSink(): FakeSink {
       sink.pid = pid;
     },
     setProcessResult(_result: unknown) {},
-    setStopRequested() {},
+    setStopRequested() {
+      sink.stopRequested = true;
+    },
     failCapture() {
       sink.failed = true;
     },
@@ -837,6 +847,126 @@ describe('managed v3 background Shell', () => {
     });
     expect(ctx.publisher.finished).toHaveLength(1);
     expect(ctx.executor.hasActiveSession('rs-1')).toBe(false);
+    // The proven platform stop marks the capture before it finalizes
+    // (#13930 R1-15): deleting the terminate-side mark turns this red.
+    expect(ctx.sink.stopRequested).toBe(true);
+  });
+
+  it('unmarks the stop request when the stop proves nothing (#13930 R1-42)', async () => {
+    // The supervisor's terminate can answer without proof — a run whose
+    // unit the grace never empties survives the stop. The caller keeps
+    // the hold, and when the run later ends on its own the record must
+    // carry its real exit, not a requested stop nobody observed: without
+    // the unmark the sink below ends up marked.
+    const process = fakeProcess('qwen-bg-survivor', {
+      proveTerminate: false,
+    });
+    const sink = fakeSink();
+    const publisher = {
+      finished: [] as ToolResultEnvelope[],
+      async finish(_identity: unknown, envelope: ToolResultEnvelope) {
+        publisher.finished.push(envelope);
+      },
+    };
+    const registry = new ManagedBackgroundShellRegistry(25);
+    const receipt = registry.register({
+      unitName: 'qwen-bg-survivor',
+      sessionId: 'rs-1',
+      process,
+      sink,
+      publisher: publisher as unknown as ManagedShellCapturePublisher,
+      identity: IDENTITY,
+    });
+    expect(await registry.terminate('qwen-bg-survivor', 5_000)).toEqual({
+      unitName: 'qwen-bg-survivor',
+      evidence: null,
+      captureError: null,
+    });
+    expect(registry.hasHolds('rs-1')).toBe(true);
+    (
+      process.child as unknown as ChildProcess & {
+        emitExit: (code: number | null, signal: string | null) => void;
+      }
+    ).emitExit(0, null);
+    expect((await receipt).evidence).toEqual({
+      exitCode: 0,
+      exitSignal: null,
+    });
+    expect(sink.stopRequested).toBe(false);
+    expect(publisher.finished).toHaveLength(1);
+    expect(publisher.finished[0].executionStatus).toBe('success');
+  });
+
+  it('merges a concurrent stop into the unit\u2019s shared supervisor attempt (#14464 P2)', async () => {
+    // Two callers stop the same unit at once. Under a per-call stop each
+    // caller owns an independent supervisor attempt, and the unproven
+    // one's unmark erases the marker the proven one needs to keep: with
+    // the merge present there is exactly one shared attempt per unit, so
+    // every caller settles on the same answer. Reverting this case to a
+    // per-call terminate turns the supervisor-call count below red.
+    const child = fakeChild('qwen-bg-paired');
+    let evidence: ChildRunExitEvidence | null = null;
+    child.on('exit', (code, signal) => {
+      evidence = {
+        exitCode: typeof code === 'number' ? code : null,
+        exitSignal: typeof signal === 'string' ? signal : null,
+      };
+    });
+    let terminateCalls = 0;
+    let releaseStop!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseStop = () => resolve();
+    });
+    const process = {
+      unitName: 'qwen-bg-paired',
+      child,
+      get exited() {
+        return evidence !== null;
+      },
+      get evidence() {
+        return evidence;
+      },
+      async terminate(): Promise<ChildRunExitEvidence | null> {
+        terminateCalls += 1;
+        await gate;
+        if (evidence === null) child.emitExit(null, 'SIGTERM');
+        return evidence;
+      },
+      async settleOnEmpty(): Promise<ChildRunExitEvidence | null> {
+        return evidence;
+      },
+    } as unknown as ManagedChildRunProcess;
+    const sink = fakeSink();
+    const publisher = {
+      finished: [] as ToolResultEnvelope[],
+      async finish(_identity: unknown, envelope: ToolResultEnvelope) {
+        publisher.finished.push(envelope);
+      },
+    };
+    const registry = new ManagedBackgroundShellRegistry(25);
+    const registered = registry.register({
+      unitName: 'qwen-bg-paired',
+      sessionId: 'rs-1',
+      process,
+      sink,
+      publisher: publisher as unknown as ManagedShellCapturePublisher,
+      identity: IDENTITY,
+    });
+    const first = registry.terminate('qwen-bg-paired', 5_000);
+    const second = registry.terminate('qwen-bg-paired', 5_000);
+    // One shared supervisor attempt, not two.
+    expect(terminateCalls).toBe(1);
+    releaseStop();
+    const [firstReceipt, secondReceipt] = await Promise.all([first, second]);
+    expect(firstReceipt).toBe(secondReceipt);
+    expect(firstReceipt).toBe(await registered);
+    expect(secondReceipt?.evidence).toEqual({
+      exitCode: null,
+      exitSignal: 'SIGTERM',
+    });
+    // The proven stop keeps its marker.
+    expect(sink.stopRequested).toBe(true);
+    expect(publisher.finished).toHaveLength(1);
   });
 
   it('caps a pipe that a surviving descendant keeps open', async () => {
@@ -866,5 +996,8 @@ describe('managed v3 background Shell', () => {
     ]);
     expect(publisher.finished).toHaveLength(1);
     expect(registry.hasHolds('rs-1')).toBe(false);
+    // A run that ends on its own is never marked — the reverse arm of the
+    // drain-case marking (#13930 R1-15).
+    expect(sink.stopRequested).toBe(false);
   });
 });

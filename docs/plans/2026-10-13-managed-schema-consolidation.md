@@ -12,7 +12,7 @@ The corresponding design records the complete 63 responsibility mapping. Closed 
 
 Use Java 21 and the pinned pnpm version. Install dependencies with `corepack pnpm install --frozen-lockfile`; its prepare step builds the workspace. Run `npm run typecheck`. Build/install Runtime Broker before Server because Server consumes its schema classes/resource and shared test contract jar. Serialize Maven jobs that share a checkout; do not clean their shared targets concurrently.
 
-In `packages/sdk-java/runtime-broker`, run `mvn clean verify install`. In `packages/sdk-java/managed-agent-server`, run `mvn clean verify`. Inspect the final application jar: it must contain canonical V1 through the Broker dependency and no old `db/migration` resources/classes or independent `schema.sql`.
+In `packages/managed-agent-server`, run `mvn clean verify install`. In `packages/managed-agent-server`, run `mvn clean verify`. Inspect the final application jar: it must contain canonical V1 through the Broker dependency and no old `db/migration` resources/classes or independent `schema.sql`.
 
 Real MySQL 8.4 tests use the `mysql-integration` profile and a dedicated empty database on a task-owned server. Some cases create additional random databases through that URL; other cases initialize the supplied database directly. Create a unique database for each suite invocation, and drop only that database and the case-owned children afterward. Never use the system mysql catalog as the application test database. Never aim the harness at an application database. JVM timezone variants must use the same real server and native database-time lease predicates.
 

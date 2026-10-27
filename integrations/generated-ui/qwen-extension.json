@@ -1,0 +1,11 @@
+{
+  "name": "generated-ui",
+  "version": "1.0.0",
+  "mcpServers": {
+    "generated-ui": {
+      "command": "node",
+      "args": ["${extensionPath}${/}dist${/}main.js"],
+      "includeTools": ["generated_ui_show"]
+    }
+  }
+}

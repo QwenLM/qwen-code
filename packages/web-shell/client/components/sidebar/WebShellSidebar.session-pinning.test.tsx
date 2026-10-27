@@ -215,7 +215,12 @@ let root: Root;
 let container: HTMLDivElement;
 
 function renderSidebar(
-  props: { onError?: (error: unknown, message?: string) => void } = {},
+  props: {
+    onError?: (error: unknown, message?: string) => void;
+    sessionActions?: React.ComponentProps<
+      typeof WebShellSidebar
+    >['sessionActions'];
+  } = {},
 ): void {
   const onError = props.onError ?? (() => {});
   act(() => {
@@ -233,6 +238,7 @@ function renderSidebar(
           onNewSession={() => false}
           onLoadSession={loadSession}
           onError={onError}
+          sessionActions={props.sessionActions}
         />
       </I18nProvider>,
     );
@@ -1765,5 +1771,70 @@ describe('WebShellSidebar content-search ghosts', () => {
     ).toBe(1);
 
     workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
+  });
+});
+
+describe('WebShellSidebar PR badge rows', () => {
+  function metaSlotFor(displayName: string): HTMLElement {
+    const title = Array.from(
+      container.querySelectorAll('[data-web-shell-session-title]'),
+    ).find((node) => node.textContent === displayName);
+    const slot = title
+      ?.closest('[role="button"]')
+      ?.querySelector<HTMLElement>('[class*="sessionMetaSlot"]');
+    if (!slot) throw new Error(`No meta slot found for ${displayName}`);
+    return slot;
+  }
+
+  it('keeps the hover actions width reserved on rows that show a PR badge', async () => {
+    active.sessions = [
+      makeSession('with-pr', {
+        displayName: 'With PR',
+        prs: [{ number: 14990, url: 'https://github.com/o/r/pull/14990' }],
+      }),
+      makeSession('unsafe-pr', {
+        displayName: 'Unsafe PR',
+        prs: [{ number: 1, url: 'javascript:alert(1)' }],
+      }),
+      makeSession('plain', { displayName: 'Plain session' }),
+    ];
+    active.data = active.sessions;
+
+    renderSidebar();
+    await flushSidebar();
+
+    // Revealing Pin + More on hover must not slide the badge under the
+    // pointer, so the slot already holds both buttons' width at rest.
+    const withPr = metaSlotFor('With PR');
+    expect(withPr.className).toMatch(/sessionMetaSlotReserved/);
+    expect(withPr.style.getPropertyValue('--session-actions-width')).toBe(
+      '52px',
+    );
+    // A filtered binding renders no badge, so there is nothing to hold still.
+    expect(metaSlotFor('Unsafe PR').className).not.toMatch(
+      /sessionMetaSlotReserved/,
+    );
+    expect(metaSlotFor('Plain session').className).not.toMatch(
+      /sessionMetaSlotReserved/,
+    );
+  });
+
+  it('reserves nothing on a row without actions', async () => {
+    active.sessions = [
+      makeSession('with-pr', {
+        displayName: 'With PR',
+        prs: [{ number: 14990, url: 'https://github.com/o/r/pull/14990' }],
+      }),
+    ];
+    active.data = active.sessions;
+
+    renderSidebar({ sessionActions: { items: [] } });
+    await flushSidebar();
+
+    // Unset, the variable falls back to the stylesheet's 78px and the row
+    // grows on hover for buttons it never shows.
+    expect(
+      metaSlotFor('With PR').style.getPropertyValue('--session-actions-width'),
+    ).toBe('0px');
   });
 });
