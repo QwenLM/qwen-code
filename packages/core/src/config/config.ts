@@ -4020,7 +4020,8 @@ export class Config {
    * Must only be called once, throws if called again after the first call
    * settled. Callers arriving while the first call is still in flight join
    * that flight instead of throwing; a joining caller's options are ignored
-   * — the first caller's options win.
+   * — the first caller's options win. Later callers retain a failed flight's
+   * original rejection.
    * @param options Optional initialization options including sendSdkMcpMessage callback
    */
   async initialize(options?: ConfigInitializeOptions): Promise<void> {
@@ -4055,6 +4056,7 @@ export class Config {
         await this.initializationPromise;
         return;
       }
+      await this.initializationPromise;
       throw Error('Config was already initialized');
     }
     if (this.shutdownRequested) {
