@@ -87,10 +87,17 @@ export interface ShellOperation {
  *
  * The input should be a single simple command (already split from compound
  * commands via `splitCompoundCommand`).
+ *
+ * Quote removal hides whether a `&` was typed bare: `>&1` duplicates a file
+ * descriptor, but `>"&1"` and `>\&1` write a file named `&1`. When
+ * `fdRedirects` is given, it receives the index of each token that starts
+ * with `>&`, `1>&`, `2>&` or `<&` whose `>`/`<` and `&` were both unquoted.
  */
-function tokenize(command: string): string[] {
+function tokenize(command: string, fdRedirects?: Set<number>): string[] {
   const tokens: string[] = [];
   let current = '';
+  // One char per char of `current`: '1' if typed unquoted and unescaped.
+  let bare = '';
   let inSingle = false;
   let inDouble = false;
   let escaped = false;
@@ -100,6 +107,7 @@ function tokenize(command: string): string[] {
 
     if (escaped) {
       current += ch;
+      bare += '0';
       escaped = false;
       continue;
     }
@@ -117,24 +125,38 @@ function tokenize(command: string): string[] {
     }
     if (!inSingle && !inDouble && (ch === ' ' || ch === '\t')) {
       if (current) {
-        pushToken(tokens, current);
+        pushToken(tokens, current, bare, fdRedirects);
         current = '';
+        bare = '';
       }
       continue;
     }
     current += ch;
+    bare += inSingle || inDouble ? '0' : '1';
   }
-  if (current) pushToken(tokens, current);
+  if (current) pushToken(tokens, current, bare, fdRedirects);
   return tokens;
 }
 
-function pushToken(tokens: string[], token: string): void {
+function pushToken(
+  tokens: string[],
+  token: string,
+  bare: string,
+  fdRedirects: Set<number> | undefined,
+): void {
   if (token === '{' || token === '}') return;
-  const normalized = trimShellSyntax(token);
-  if (normalized) tokens.push(normalized);
+  const normalized = trimShellSyntax(token, bare);
+  if (!normalized) return;
+  const op = /^[12]?>&|^<&/.exec(normalized)?.[0];
+  if (op && fdRedirects) {
+    const start = /^\(*/.exec(token)![0].length;
+    const opEnd = start + op.length;
+    if (bare.slice(opEnd - 2, opEnd) === '11') fdRedirects.add(tokens.length);
+  }
+  tokens.push(normalized);
 }
 
-function trimShellSyntax(token: string): string {
+function trimShellSyntax(token: string, bare: string): string {
   let start = 0;
   let end = token.length;
 
@@ -143,7 +165,8 @@ function trimShellSyntax(token: string): string {
   }
   while (end > start) {
     const ch = token[end - 1];
-    if (ch !== ')' && ch !== '&') break;
+    // A quoted or escaped `&` is part of the word: `>"x&"` writes `x&`.
+    if (ch !== ')' && !(ch === '&' && bare[end - 1] === '1')) break;
     end--;
   }
 
@@ -235,8 +258,15 @@ function isNetworkPseudoDevice(target: string): boolean {
  *   `> file`   `>> file`  `< file`   (with or without space)
  *   `2> file`  `2>> file` `&> file`  `&>> file`
  *   Combined forms: `>file`, `>>file`, `1>file`, `2>/dev/null`
+ *
+ * `fdRedirects` holds the indices that `tokenize` found to start with an
+ * unquoted `>&`, `N>&` or `<&`.
  */
-function extractRedirects(tokens: string[], cwd: string): RedirectResult {
+function extractRedirects(
+  tokens: string[],
+  cwd: string,
+  fdRedirects: ReadonlySet<number>,
+): RedirectResult {
   const readFiles: string[] = [];
   const writeFiles: string[] = [];
   const toRemove = new Set<number>();
@@ -308,10 +338,7 @@ function extractRedirects(tokens: string[], cwd: string): RedirectResult {
           continue;
         }
         // `>&`, `N>&` and `<&` take a file descriptor, not a file name.
-        if (
-          target.startsWith('&') &&
-          (op === '>' || op === '1>' || op === '2>' || op === '<')
-        ) {
+        if (fdRedirects.has(i)) {
           const word = target.slice(1);
           // `2>&1`, `>&2`, `<&0`, `2>&-`: duplicate or close a descriptor.
           // Bash opens no file, so there is no file operation to check.
@@ -322,7 +349,9 @@ function extractRedirects(tokens: string[], cwd: string): RedirectResult {
           // `>&file` and `1>&file` write `file` (stdout and stderr). Check
           // that path, not `&file`. (`2>&file` and `<&file` are errors in
           // bash; treating them as file operations keeps the check strict.)
-          target = word;
+          // A `$`/backtick word may expand to a descriptor or a file, so it
+          // keeps the literal `&word` write.
+          if (!isDynamicShellPath(word)) target = word;
         }
         if (
           target !== '/dev/null' &&
@@ -1947,13 +1976,14 @@ export function extractShellOperations(
 ): ShellOperation[] {
   if (!simpleCommand.trim()) return [];
 
-  const tokens = tokenize(simpleCommand);
+  const fdRedirects = new Set<number>();
+  const tokens = tokenize(simpleCommand, fdRedirects);
   if (tokens.length === 0) return [];
 
   // Extract I/O redirections before dispatching to the command handler.
   // This mutates `tokens` in-place by removing redirect tokens.
   const { readFiles: redirectReads, writeFiles: redirectWrites } =
-    extractRedirects(tokens, cwd);
+    extractRedirects(tokens, cwd, fdRedirects);
 
   while (tokens[0] && isEnvAssignmentToken(tokens[0])) {
     tokens.shift();
@@ -2080,8 +2110,9 @@ function resolveCdTargetCwd(
   cwd: string,
   cwdUnknown: boolean,
 ): CdResolution {
-  const words = tokenize(command);
-  extractRedirects(words, cwd);
+  const fdRedirects = new Set<number>();
+  const words = tokenize(command, fdRedirects);
+  extractRedirects(words, cwd, fdRedirects);
 
   if (words[0] === 'popd') return { kind: 'dynamic' };
   if (words[0] !== 'cd' && words[0] !== 'pushd') return { kind: 'not-cd' };

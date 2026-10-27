@@ -3354,6 +3354,29 @@ describe('PermissionManager — compound shell write attribution', () => {
     expect(await pm.evaluate(sh(command, '/repo'))).toBe(expected);
   });
 
+  // A quoted or escaped `&` is part of the file name (`>"&1"` writes `&1`),
+  // so it must stay a write that the deny rule sees.
+  it.each<[command: string, deny: string, expected: 'allow' | 'deny']>([
+    ['printf TXT >"&1"', 'Edit', 'deny'],
+    ["printf TXT >'&1'", 'Edit', 'deny'],
+    ['printf TXT >\\&1', 'Edit', 'deny'],
+    ['printf TXT 2>"&1"', 'Edit', 'deny'],
+    ['printf TXT >"&"', 'Edit', 'deny'],
+    ['df -hT / 2>&1', 'Edit', 'allow'],
+    ['printf TXT >"&protected.txt"', 'WriteFileTool(&protected.txt)', 'deny'],
+    ['printf TXT >\\&protected.txt', 'WriteFileTool(&protected.txt)', 'deny'],
+    ['printf TXT >&protected.txt', 'WriteFileTool(&protected.txt)', 'allow'],
+  ])(
+    'Bash(*) allow, %s with %s denied → %s',
+    async (command, deny, expected) => {
+      const pm = repoPm({
+        permissionsAllow: ['Bash(*)'],
+        permissionsDeny: [deny],
+      });
+      expect(await pm.evaluate(sh(command, '/repo'))).toBe(expected);
+    },
+  );
+
   // #11865: a redirect target of non-separator characters (one NBSP here) is a
   // real filename to bash and must survive into the virtual op; deleting it
   // with `String.prototype.trim` dropped the write from a `deny` verdict.

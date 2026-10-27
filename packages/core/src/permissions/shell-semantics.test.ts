@@ -441,6 +441,7 @@ describe('extractShellOperations', () => {
     ['df -hT / >&-', []],
     ['cat <&0', []],
     ['df -hT / 2>&1 | head -5', []],
+    ['df -hT / >&"1"', []],
     ['cat /etc/hosts 2>&1', [read('/etc/hosts')]],
     ['echo hi > out.txt 2>&1', [write(`${CWD}/out.txt`)]],
     ['echo hi 2>&1 >out.txt', [write(`${CWD}/out.txt`)]],
@@ -451,6 +452,26 @@ describe('extractShellOperations', () => {
   it('>&file and 1>&file write the named file, not "&file"', () => {
     expect(ops('echo hi >&.qwen/settings.json')).toEqual([write(SETTINGS)]);
     expect(ops('echo hi 1>&.qwen/settings.json')).toEqual([write(SETTINGS)]);
+  });
+
+  // Bash writes a file named `&1` when the `&` is quoted or escaped.
+  it.each<[command: string, file: string]>([
+    ['printf TXT >"&1"', '&1'],
+    ["printf TXT >'&1'", '&1'],
+    ['printf TXT >\\&1', '&1'],
+    ['printf TXT 2>"&1"', '&1'],
+    ['printf TXT >"&"1', '&1'],
+    ['printf TXT >"&protected.txt"', '&protected.txt'],
+    ['printf TXT >\\&protected.txt', '&protected.txt'],
+    ['printf TXT >"x&"', 'x&'],
+    ['printf TXT >"&"', '&'],
+    ['printf TXT >\\&', '&'],
+  ])('quoted or escaped & is part of the file name: %s', (command, file) => {
+    expect(ops(command)).toEqual([write(`${CWD}/${file}`)]);
+  });
+
+  it('>&$VAR keeps the literal write: it may name a file', () => {
+    expect(ops('printf TXT >&$OUT')).toEqual([write(`${CWD}/&$OUT`)]);
   });
 
   it('regression: ordinary file redirects still tracked', () => {
