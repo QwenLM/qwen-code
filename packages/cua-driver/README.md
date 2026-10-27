@@ -162,8 +162,8 @@ through `qwen-cua-driver call`.
 
 The native agent cursor is enabled by default. On macOS, a local PiP also
 updates the two most recently observed, authorized windows in each session,
-including while the agent is idle. Drag its header to move it, or close it to
-stop that preview. It does not forward input to the target app. Use
+including while the agent is idle. Drag a card or its Move preview handle to move the borderless window.
+Hover to reveal its floating controls, or close it to stop that preview. It does not forward input to the target app. Use
 `--no-overlay` and `--no-pip` when starting the owning host to disable them;
 `experimental_pip: false` in `~/.cua-driver/config.json` also disables PiP.
 Windows and X11 retain cursor support; PiP is macOS-only.

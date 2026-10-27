@@ -172,8 +172,8 @@ application from that observation. The global `cua` is already loaded.
 
 The native agent cursor is enabled by default. macOS also shows a live local
 PiP for the session's two most recently observed, authorized windows. It
-refreshes while JavaScript is idle. Drag the header to move it, or close it to
-stop the preview. `js_reset` clears the owning cursor and preview. Start the
+refreshes while JavaScript is idle. Drag a card or its Move preview handle to move the borderless window.
+Hover to reveal its floating controls, or close it to stop the preview. `js_reset` clears the owning cursor and preview. Start the
 server with `--no-overlay` or `--no-pip` to disable either surface.
 
 On macOS, grant Accessibility and Screen Recording to the responsible host

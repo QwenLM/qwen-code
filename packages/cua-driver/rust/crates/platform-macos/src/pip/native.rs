@@ -1,25 +1,95 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ffi::c_void;
+use std::rc::Rc;
+use std::time::Instant;
 
 use objc2::declare::ClassBuilder;
 use objc2::runtime::{AnyClass, AnyObject, Bool, Sel};
 use objc2::{class, msg_send, sel};
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 
-use super::{PipSink, CONTROLLER};
+use super::state::{self, Motion};
+use super::{PipSink, Scene, CONTROLLER};
 
-pub(super) const HEADER_HEIGHT: u32 = 28;
+struct CardViews {
+    shell: *mut AnyObject,
+    image: *mut AnyObject,
+}
+
+struct Presentation {
+    ids: Vec<u32>,
+    sizes: Vec<(u32, u32)>,
+    front: usize,
+    bounds: (f64, f64),
+    motions: Vec<Motion>,
+    targets: Vec<[f64; 4]>,
+    controls: Motion,
+    controls_target: [f64; 4],
+    opacity: f64,
+    opacity_target: f64,
+    last_tick: Instant,
+    last_pointer: (f64, f64),
+}
+
+impl Presentation {
+    fn retarget<R>(&mut self, now: Instant, change: impl FnOnce(&mut Self) -> R) -> R {
+        // Elapsed time belongs to the old targets, including an interrupted motion's velocity.
+        self.step_at(now, false);
+        change(self)
+    }
+
+    fn step_at(&mut self, now: Instant, reduced: bool) -> bool {
+        let dt = now.duration_since(self.last_tick).as_secs_f64().min(0.05);
+        self.last_tick = now;
+        let mut moving = false;
+        for (motion, target) in self.motions.iter_mut().zip(&self.targets) {
+            if reduced {
+                *motion = Motion::new(*target);
+            } else {
+                moving |= motion.step(*target, dt);
+            }
+        }
+        if reduced {
+            self.controls = Motion::new(self.controls_target);
+        } else {
+            moving |= self.controls.step(self.controls_target, dt);
+        }
+        self.opacity += (self.opacity_target - self.opacity) * (1.0 - (-dt / 0.07).exp());
+        if (self.opacity - self.opacity_target).abs() < 0.003 {
+            self.opacity = self.opacity_target;
+        } else {
+            moving = true;
+        }
+        moving
+    }
+}
 
 struct Handles {
+    session: String,
     panel: *mut AnyObject,
-    image: *mut AnyObject,
-    label: *mut AnyObject,
+    root: *mut AnyObject,
+    cards: [CardViews; 2],
+    controls: *mut AnyObject,
     button: *mut AnyObject,
+    mover: *mut AnyObject,
+    timer: Cell<*mut AnyObject>,
+    closed: Cell<bool>,
+    dragging: Cell<bool>,
+    presentation: RefCell<Presentation>,
+}
+
+impl Drop for Handles {
+    fn drop(&mut self) {
+        // Executing callbacks retain their Rc through nested native dragging.
+        unsafe {
+            let _: () = msg_send![self.panel, release];
+        }
+    }
 }
 
 thread_local! {
-    static WINDOWS: RefCell<HashMap<String, Handles>> = RefCell::new(HashMap::new());
+    static WINDOWS: RefCell<HashMap<String, Rc<Handles>>> = RefCell::new(HashMap::new());
 }
 
 #[link(name = "dispatch", kind = "dylib")]
@@ -45,9 +115,28 @@ fn dispatch(value: String, callback: unsafe extern "C" fn(*mut c_void)) {
 pub(super) fn draw(session: String) {
     dispatch(session, draw_callback);
 }
-
 pub(super) fn close(session: String) {
     dispatch(session, close_callback);
+}
+
+fn lookup(object: *const AnyObject) -> Option<Rc<Handles>> {
+    WINDOWS.with(|windows| {
+        windows
+            .borrow()
+            .values()
+            .find(|handles| {
+                [handles.panel, handles.root, handles.button, handles.mover]
+                    .into_iter()
+                    .chain(
+                        handles
+                            .cards
+                            .iter()
+                            .flat_map(|card| [card.shell, card.image]),
+                    )
+                    .any(|candidate| std::ptr::eq(candidate, object))
+            })
+            .cloned()
+    })
 }
 
 unsafe extern "C" fn draw_callback(context: *mut c_void) {
@@ -57,15 +146,12 @@ unsafe extern "C" fn draw_callback(context: *mut c_void) {
             return;
         };
         let current = controller.sessions.lock().unwrap().take_frame(&session);
-        let Some((generation, scene)) = current else {
+        let Some((generation, Some(scene))) = current else {
             close_now(&session);
             return;
         };
-        let Some(scene) = scene else {
-            close_now(&session);
-            return;
-        };
-        if !crate::permissions::status::screen_recording_granted()
+        if scene.cards.is_empty()
+            || !crate::permissions::status::screen_recording_granted()
             || scene
                 .targets
                 .iter()
@@ -83,24 +169,44 @@ unsafe extern "C" fn draw_callback(context: *mut c_void) {
         {
             return;
         }
-        WINDOWS.with(|windows| {
-            let mut windows = windows.borrow_mut();
-            let slot = windows.len();
-            if !windows.contains_key(&session) {
-                let Some(handles) = create(&controller.config, slot) else { return; };
-                windows.insert(session.clone(), handles);
+        let existing = WINDOWS.with(|windows| windows.borrow().get(&session).cloned());
+        let handles = match existing {
+            Some(handles) => handles,
+            None => {
+                let Some(handles) = create(&session, &controller.config, &scene) else {
+                    return;
+                };
+                if !controller
+                    .sessions
+                    .lock()
+                    .unwrap()
+                    .matches(&session, generation)
+                {
+                    shut(&handles);
+                    return;
+                }
+                let current = WINDOWS.with(|windows| {
+                    windows
+                        .borrow_mut()
+                        .entry(session.clone())
+                        .or_insert_with(|| handles.clone())
+                        .clone()
+                });
+                if !Rc::ptr_eq(&current, &handles) {
+                    shut(&handles);
+                }
+                current
             }
-            let handles = &windows[&session];
-            let data: *mut AnyObject = msg_send![class!(NSData), dataWithBytes: scene.png.as_ptr() as *const c_void length: scene.png.len()];
-            let image: *mut AnyObject = msg_send![class!(NSImage), alloc];
-            let image: *mut AnyObject = msg_send![image, initWithData: data];
-            if !image.is_null() {
-                let _: () = msg_send![handles.image, setImage: image];
-                let _: () = msg_send![image, release];
-            }
-            let _: () = msg_send![handles.label, setStringValue: string(&scene.label)];
+        };
+        update(&handles, &scene, &controller.config);
+        let current = controller
+            .sessions
+            .lock()
+            .unwrap()
+            .matches(&session, generation);
+        if !handles.closed.get() && current {
             let _: () = msg_send![handles.panel, orderFrontRegardless];
-        });
+        }
     });
 }
 
@@ -110,20 +216,499 @@ unsafe extern "C" fn close_callback(context: *mut c_void) {
 }
 
 unsafe fn close_now(session: &str) {
-    WINDOWS.with(|windows| {
-        if let Some(handles) = windows.borrow_mut().remove(session) {
-            let _: () = msg_send![handles.panel, orderOut: std::ptr::null_mut::<AnyObject>()];
-            let _: () = msg_send![handles.panel, close];
-            let _: () = msg_send![handles.panel, release];
-        }
-    });
+    let handles = WINDOWS.with(|windows| windows.borrow_mut().remove(session));
+    if let Some(handles) = handles {
+        shut(&handles);
+    }
+}
+
+unsafe fn shut(handles: &Handles) {
+    if handles.closed.replace(true) {
+        return;
+    }
+    stop_timer(handles);
+    let _: () = msg_send![handles.panel, orderOut: std::ptr::null_mut::<AnyObject>()];
+    let _: () = msg_send![handles.panel, close];
 }
 
 unsafe fn string(value: &str) -> *mut AnyObject {
     let bytes = value.as_bytes();
-    let string: *mut AnyObject = msg_send![class!(NSString), alloc];
-    let string: *mut AnyObject = msg_send![string, initWithBytes: bytes.as_ptr() as *const c_void length: bytes.len() encoding: 4usize];
-    msg_send![string, autorelease]
+    let value: *mut AnyObject = msg_send![class!(NSString), alloc];
+    let value: *mut AnyObject = msg_send![value, initWithBytes: bytes.as_ptr() as *const c_void length: bytes.len() encoding: 4usize];
+    msg_send![value, autorelease]
+}
+
+fn rect(value: [f64; 4]) -> NSRect {
+    NSRect::new(
+        NSPoint::new(value[0], value[1]),
+        NSSize::new(value[2], value[3]),
+    )
+}
+
+fn contains(frame: [f64; 4], point: (f64, f64)) -> bool {
+    point.0 >= frame[0]
+        && point.1 >= frame[1]
+        && point.0 < frame[0] + frame[2]
+        && point.1 < frame[1] + frame[3]
+}
+
+fn initial_origin(
+    config: &pip_preview::PipConfig,
+    screen: NSRect,
+    size: (f64, f64),
+    slot: usize,
+) -> (f64, f64) {
+    match (config.geometry.x, config.geometry.y) {
+        (Some(x), Some(y)) => (
+            f64::from(x),
+            screen.origin.y + screen.size.height - f64::from(y) - size.1,
+        ),
+        _ => (
+            screen.origin.x + screen.size.width - size.0 - 24.0 - (slot % 5) as f64 * 18.0,
+            screen.origin.y + 24.0 + (slot % 5) as f64 * 36.0,
+        ),
+    }
+}
+
+unsafe fn available(panel: *mut AnyObject) -> Option<NSRect> {
+    let mut screen: *mut AnyObject = if panel.is_null() {
+        std::ptr::null_mut()
+    } else {
+        msg_send![panel, screen]
+    };
+    if screen.is_null() {
+        screen = msg_send![class!(NSScreen), mainScreen];
+    }
+    if screen.is_null() {
+        None
+    } else {
+        Some(msg_send![screen, visibleFrame])
+    }
+}
+
+fn card_bounds(
+    config: &pip_preview::PipConfig,
+    sizes: &[(u32, u32)],
+    screen: NSRect,
+) -> (f64, f64) {
+    let room = (
+        (screen.size.width - 48.0).max(1.0),
+        (screen.size.height - 48.0).max(1.0),
+    );
+    let bounds = (
+        f64::from(config.geometry.width).min(room.0),
+        f64::from(config.geometry.height).min(room.1),
+    );
+    let fits = |scale| {
+        let layout = state::layout(sizes, 0, (bounds.0 * scale, bounds.1 * scale));
+        layout.size.0 <= room.0 && layout.size.1 <= room.1
+    };
+    if fits(1.0) {
+        return bounds;
+    }
+    let (mut low, mut high) = (0.0, 1.0);
+    for _ in 0..20 {
+        let middle = (low + high) / 2.0;
+        if fits(middle) {
+            low = middle;
+        } else {
+            high = middle;
+        }
+    }
+    (bounds.0 * low, bounds.1 * low)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn presentation(now: Instant) -> Presentation {
+        Presentation {
+            ids: vec![1],
+            sizes: vec![(400, 300)],
+            front: 0,
+            bounds: (400.0, 300.0),
+            motions: vec![Motion::new([0.0; 4])],
+            targets: vec![[0.0; 4]],
+            controls: Motion::new([0.0; 4]),
+            controls_target: [0.0; 4],
+            opacity: 0.0,
+            opacity_target: 0.0,
+            last_tick: now,
+            last_pointer: (0.0, 0.0),
+        }
+    }
+
+    fn assert_frame(actual: [f64; 4], expected: [f64; 4]) {
+        for (actual, expected) in actual.into_iter().zip(expected) {
+            assert!((actual - expected).abs() < 1e-8, "{actual} != {expected}");
+        }
+    }
+
+    #[test]
+    fn default_owners_are_staggered_but_explicit_positions_are_unchanged() {
+        let mut config = pip_preview::PipConfig::default();
+        let screen = rect([-1000.0, -200.0, 1800.0, 1000.0]);
+        let size = (480.0, 388.0);
+        let first = initial_origin(&config, screen, size, 0);
+        let second = initial_origin(&config, screen, size, 1);
+        assert_eq!(second, (first.0 - 18.0, first.1 + 36.0));
+        assert_eq!(initial_origin(&config, screen, size, 5), first);
+        config.geometry.x = Some(-400);
+        config.geometry.y = Some(90);
+        let explicit = initial_origin(&config, screen, size, 0);
+        assert_eq!(explicit, (-400.0, 322.0));
+        assert_eq!(initial_origin(&config, screen, size, 1), explicit);
+    }
+
+    #[test]
+    fn idle_time_is_not_consumed_by_new_motion_or_fade_targets() {
+        let start = Instant::now();
+        let mut state = presentation(start);
+        let event = start + Duration::from_millis(250);
+        state.retarget(event, |state| {
+            state.targets[0] = [56.0, 44.0, 0.0, 0.0];
+            state.controls_target = state.targets[0];
+            state.opacity_target = 1.0;
+        });
+        state.step_at(event, false);
+        assert_frame(state.motions[0].value, [0.0; 4]);
+        assert_frame(state.controls.value, [0.0; 4]);
+        assert_eq!(state.opacity, 0.0);
+        state.step_at(event + Duration::from_secs_f64(1.0 / 60.0), false);
+        assert!(state.motions[0].value[0] > 0.0 && state.motions[0].value[0] < 56.0);
+        assert!(state.opacity > 0.0 && state.opacity < 1.0);
+    }
+
+    #[test]
+    fn a_mid_motion_reversal_keeps_the_old_interval_and_velocity() {
+        let start = Instant::now();
+        let mut state = presentation(start);
+        let target = [56.0, 44.0, 0.0, 0.0];
+        state.targets[0] = target;
+        let mut expected = Motion::new([0.0; 4]);
+        state.step_at(start + Duration::from_millis(16), false);
+        expected.step(target, 0.016);
+        let event = start + Duration::from_millis(32);
+        expected.step(target, 0.016);
+        state.retarget(event, |state| state.targets[0] = [0.0; 4]);
+        state.step_at(event, false);
+        assert_frame(state.motions[0].value, expected.value);
+        let next = event + Duration::from_millis(16);
+        state.step_at(next, false);
+        expected.step([0.0; 4], 0.016);
+        assert_frame(state.motions[0].value, expected.value);
+    }
+
+    #[test]
+    fn card_envelope_fits_available_screen_without_assuming_stack_offsets() {
+        let mut config = pip_preview::PipConfig::default();
+        config.geometry.width = 2048;
+        config.geometry.height = 2048;
+        let screen = rect([-1000.0, -200.0, 900.0, 650.0]);
+        for sizes in [
+            vec![(1600, 1200), (1600, 900)],
+            vec![(500, 2000), (1600, 900)],
+        ] {
+            let bounds = card_bounds(&config, &sizes, screen);
+            let layout = state::layout(&sizes, 0, bounds);
+            assert!(layout.size.0 <= screen.size.width - 48.0);
+            assert!(layout.size.1 <= screen.size.height - 48.0);
+        }
+    }
+}
+
+unsafe fn update(handles: &Rc<Handles>, scene: &Scene, config: &pip_preview::PipConfig) {
+    if handles.closed.get() {
+        return;
+    }
+    let Some(screen) = available(handles.panel) else {
+        return;
+    };
+    let sizes: Vec<_> = scene.cards.iter().take(2).map(|card| card.size).collect();
+    let ids: Vec<_> = scene
+        .cards
+        .iter()
+        .take(2)
+        .map(|card| card.window_id)
+        .collect();
+    let bounds = card_bounds(config, &sizes, screen);
+    let (size, changed) = {
+        let mut state = handles.presentation.borrow_mut();
+        state.retarget(Instant::now(), |state| {
+            let changed = state.ids != ids;
+            if changed {
+                state.front = ids.len() - 1;
+            }
+            let layout = state::layout(&sizes, state.front, bounds);
+            if changed {
+                let old_ids = state.ids.clone();
+                let mut old: Vec<_> = std::mem::take(&mut state.motions)
+                    .into_iter()
+                    .map(Some)
+                    .collect();
+                state.motions = ids
+                    .iter()
+                    .enumerate()
+                    .map(|(index, id)| {
+                        old_ids
+                            .iter()
+                            .position(|old| old == id)
+                            .and_then(|slot| old[slot].take())
+                            .unwrap_or_else(|| Motion::new(layout.frames[index]))
+                    })
+                    .collect();
+            }
+            state.ids = ids;
+            state.sizes = sizes;
+            state.bounds = bounds;
+            state.targets = layout.frames;
+            state.controls_target = layout.controls;
+            (layout.size, changed)
+        })
+    };
+    let frame: NSRect = msg_send![handles.panel, frame];
+    if (frame.size.width - size.0).abs() > 0.01 || (frame.size.height - size.1).abs() > 0.01 {
+        let frame = rect([
+            frame.origin.x + frame.size.width - size.0,
+            frame.origin.y,
+            size.0,
+            size.1,
+        ]);
+        let _: () = msg_send![handles.panel, setFrame: frame display: true];
+        let _: () = msg_send![handles.root, setFrame: rect([0.0, 0.0, size.0, size.1])];
+    }
+    for (index, views) in handles.cards.iter().enumerate() {
+        if handles.closed.get() {
+            return;
+        }
+        let card = scene.cards.get(index);
+        let _: () = msg_send![views.shell, setHidden: card.is_none()];
+        let Some(card) = card else {
+            continue;
+        };
+        let mut image: *mut AnyObject = std::ptr::null_mut();
+        if let Some(png) = &card.png {
+            let data: *mut AnyObject = msg_send![class!(NSData), dataWithBytes: png.as_ptr() as *const c_void length: png.len()];
+            image = msg_send![class!(NSImage), alloc];
+            image = msg_send![image, initWithData: data];
+        }
+        // A missing/invalid capture clears the old source image immediately.
+        let _: () = msg_send![views.image, setImage: image];
+        if !image.is_null() {
+            let _: () = msg_send![image, release];
+        }
+        let label = if card.png.is_some() {
+            card.label.clone()
+        } else {
+            format!("{} — Window unavailable", card.label)
+        };
+        let _: () = msg_send![views.image, setAccessibilityLabel: string(&label)];
+        let _: () = msg_send![views.image, setToolTip: string(&label)];
+    }
+    if changed {
+        reorder(handles);
+    }
+    advance(handles);
+}
+
+unsafe fn reorder(handles: &Handles) {
+    if handles.closed.get() {
+        return;
+    }
+    let (front, count) = {
+        let state = handles.presentation.borrow();
+        (state.front, state.ids.len())
+    };
+    for index in (0..count)
+        .filter(|&index| index != front)
+        .chain(std::iter::once(front))
+    {
+        let _: () = msg_send![handles.root, addSubview: handles.cards[index].shell positioned: 1isize relativeTo: std::ptr::null_mut::<AnyObject>()];
+    }
+    let _: () = msg_send![handles.root, addSubview: handles.controls positioned: 1isize relativeTo: std::ptr::null_mut::<AnyObject>()];
+}
+
+unsafe fn advance(handles: &Rc<Handles>) {
+    if handles.closed.get() {
+        return;
+    }
+    let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+    let reduced: Bool = msg_send![workspace, accessibilityDisplayShouldReduceMotion];
+    let (frames, controls, opacity, moving) = {
+        let mut state = handles.presentation.borrow_mut();
+        let moving = state.step_at(Instant::now(), reduced.as_bool());
+        (
+            state
+                .motions
+                .iter()
+                .map(|motion| motion.value)
+                .collect::<Vec<_>>(),
+            state.controls.value,
+            state.opacity,
+            moving,
+        )
+    };
+    let _: () = msg_send![class!(CATransaction), begin];
+    let _: () = msg_send![class!(CATransaction), setDisableActions: true];
+    for (views, frame) in handles.cards.iter().zip(frames) {
+        let _: () = msg_send![views.shell, setFrame: rect(frame)];
+        let _: () = msg_send![views.image, setFrame: rect([0.0, 0.0, frame[2], frame[3]])];
+    }
+    let _: () = msg_send![handles.controls, setFrame: rect(controls)];
+    let _: () = msg_send![handles.button, setFrame: rect([0.0, 0.0, 28.0, controls[3]])];
+    let _: () =
+        msg_send![handles.mover, setFrame: rect([28.0, 0.0, controls[2] - 28.0, controls[3]])];
+    let layer: *mut AnyObject = msg_send![handles.controls, layer];
+    // Hide pixels at the layer, keeping the native AX close button available.
+    let _: () = msg_send![layer, setOpacity: opacity as f32];
+    let _: () = msg_send![class!(CATransaction), commit];
+    if !handles.closed.get() && moving {
+        start_timer(handles);
+    } else {
+        stop_timer(handles);
+    }
+}
+
+unsafe fn start_timer(handles: &Handles) {
+    if handles.closed.get() || !handles.timer.get().is_null() {
+        return;
+    }
+    let timer: *mut AnyObject = msg_send![class!(NSTimer), timerWithTimeInterval: (1.0 / 60.0) target: handles.panel selector: sel!(previewTick:) userInfo: std::ptr::null_mut::<AnyObject>() repeats: true];
+    let _: *mut AnyObject = msg_send![timer, retain];
+    handles.timer.set(timer);
+    let run_loop: *mut AnyObject = msg_send![class!(NSRunLoop), mainRunLoop];
+    let _: () =
+        msg_send![run_loop, addTimer: timer forMode: objc2_foundation::NSRunLoopCommonModes];
+}
+
+unsafe fn stop_timer(handles: &Handles) {
+    let timer = handles.timer.replace(std::ptr::null_mut());
+    if !timer.is_null() {
+        let _: () = msg_send![timer, invalidate];
+        let _: () = msg_send![timer, release];
+    }
+}
+
+extern "C" fn timer_tick(this: &AnyObject, _selector: Sel, _timer: *mut AnyObject) {
+    let Some(handles) = lookup(this) else {
+        return;
+    };
+    objc2::rc::autoreleasepool(|_| unsafe {
+        advance(&handles);
+    });
+}
+
+extern "C" fn pointer_moved(this: &AnyObject, _selector: Sel, _event: *mut AnyObject) {
+    let Some(handles) = lookup(this) else {
+        return;
+    };
+    if handles.closed.get() || handles.dragging.get() {
+        return;
+    }
+    unsafe {
+        let point: NSPoint = msg_send![class!(NSEvent), mouseLocation];
+        let frame: NSRect = msg_send![handles.panel, frame];
+        let point_local = (point.x - frame.origin.x, point.y - frame.origin.y);
+        let changed = {
+            let mut state = handles.presentation.borrow_mut();
+            if state.last_pointer == (point.x, point.y) {
+                return;
+            }
+            state.retarget(Instant::now(), |state| {
+                state.last_pointer = (point.x, point.y);
+                state.opacity_target =
+                    if contains([0.0, 0.0, frame.size.width, frame.size.height], point_local) {
+                        1.0
+                    } else {
+                        0.0
+                    };
+                let rear = (0..state.ids.len()).find(|&index| {
+                    index != state.front
+                        && !contains(state.controls.value, point_local)
+                        && !contains(state.motions[state.front].value, point_local)
+                        && contains(state.motions[index].value, point_local)
+                });
+                if let Some(front) = rear {
+                    state.front = front;
+                    let layout = state::layout(&state.sizes, front, state.bounds);
+                    state.targets = layout.frames;
+                    state.controls_target = layout.controls;
+                    true
+                } else {
+                    false
+                }
+            })
+        };
+        if changed {
+            reorder(&handles);
+        }
+        advance(&handles);
+    }
+}
+
+extern "C" fn drag_preview(this: &AnyObject, _selector: Sel, event: *mut AnyObject) {
+    let Some(handles) = lookup(this) else {
+        return;
+    };
+    if handles.closed.get() {
+        return;
+    }
+    handles.dragging.set(true);
+    handles
+        .presentation
+        .borrow_mut()
+        .retarget(Instant::now(), |state| state.opacity_target = 1.0);
+    unsafe {
+        advance(&handles);
+        let _: () = msg_send![handles.panel, performWindowDragWithEvent: event];
+        handles.dragging.set(false);
+        if handles.closed.get() {
+            return;
+        }
+        let point: NSPoint = msg_send![class!(NSEvent), mouseLocation];
+        handles.presentation.borrow_mut().last_pointer = (point.x, point.y);
+    }
+}
+
+fn request_close(handles: &Rc<Handles>) {
+    if handles.closed.get() {
+        return;
+    }
+    if let Some(controller) = CONTROLLER.get() {
+        controller.remove_session(&handles.session);
+    }
+    unsafe {
+        close_now(&handles.session);
+    }
+}
+
+extern "C" fn close_clicked(this: &AnyObject, _selector: Sel, _sender: *mut AnyObject) {
+    if let Some(handles) = lookup(this) {
+        request_close(&handles);
+    }
+}
+
+extern "C" fn close_accessible(this: &AnyObject, _selector: Sel) -> Bool {
+    let Some(handles) = lookup(this) else {
+        return Bool::NO;
+    };
+    request_close(&handles);
+    Bool::YES
+}
+
+extern "C" fn close_button(this: &AnyObject, _selector: Sel) -> *mut AnyObject {
+    lookup(this)
+        .filter(|handles| !handles.closed.get())
+        .map_or(std::ptr::null_mut(), |handles| handles.button)
+}
+
+extern "C" fn never_key(_this: &AnyObject, _selector: Sel) -> Bool {
+    Bool::NO
+}
+extern "C" fn accepts_mouse(_this: &AnyObject, _selector: Sel, _event: *mut AnyObject) -> Bool {
+    Bool::YES
 }
 
 fn panel_class() -> &'static AnyClass {
@@ -140,150 +725,226 @@ fn panel_class() -> &'static AnyClass {
                 never_key as extern "C" fn(_, _) -> _,
             );
             builder.add_method(sel!(closePreview:), close_clicked as extern "C" fn(_, _, _));
+            builder.add_method(
+                sel!(accessibilityCloseButton),
+                close_button as extern "C" fn(_, _) -> _,
+            );
+            builder.add_method(sel!(previewTick:), timer_tick as extern "C" fn(_, _, _));
         }
         builder.register()
     })
 }
 
-extern "C" fn never_key(_this: &AnyObject, _selector: Sel) -> Bool {
-    Bool::NO
-}
-
-extern "C" fn close_clicked(_this: &AnyObject, _selector: Sel, sender: *mut AnyObject) {
-    let session = WINDOWS.with(|windows| {
-        windows
-            .borrow()
-            .iter()
-            .find(|(_, handles)| handles.button == sender)
-            .map(|(key, _)| key.clone())
-    });
-    if let (Some(controller), Some(session)) = (CONTROLLER.get(), session) {
-        controller.remove_session(&session);
-    }
-}
-
-fn header_class() -> &'static AnyClass {
-    static CLASS: std::sync::OnceLock<&AnyClass> = std::sync::OnceLock::new();
-    CLASS.get_or_init(|| {
-        let mut builder = ClassBuilder::new("QwenCuPreviewDragHeader", class!(NSView)).unwrap();
+fn surface_class(image: bool) -> &'static AnyClass {
+    static ROOT: std::sync::OnceLock<&AnyClass> = std::sync::OnceLock::new();
+    static IMAGE: std::sync::OnceLock<&AnyClass> = std::sync::OnceLock::new();
+    let slot = if image { &IMAGE } else { &ROOT };
+    slot.get_or_init(|| {
+        let mut builder = ClassBuilder::new(
+            if image {
+                "QwenCuPreviewImage"
+            } else {
+                "QwenCuPreviewSurface"
+            },
+            if image {
+                class!(NSImageView)
+            } else {
+                class!(NSView)
+            },
+        )
+        .unwrap();
         unsafe {
-            builder.add_method(sel!(mouseDown:), drag_header as extern "C" fn(_, _, _));
+            builder.add_method(sel!(mouseDown:), drag_preview as extern "C" fn(_, _, _));
             builder.add_method(
                 sel!(acceptsFirstMouse:),
                 accepts_mouse as extern "C" fn(_, _, _) -> _,
             );
+            if !image {
+                for selector in [sel!(mouseMoved:), sel!(mouseEntered:), sel!(mouseExited:)] {
+                    builder.add_method(selector, pointer_moved as extern "C" fn(_, _, _));
+                }
+            }
         }
         builder.register()
     })
 }
 
-extern "C" fn accepts_mouse(_this: &AnyObject, _selector: Sel, _event: *mut AnyObject) -> Bool {
-    Bool::YES
-}
-
-extern "C" fn drag_header(this: &AnyObject, _selector: Sel, event: *mut AnyObject) {
-    unsafe {
-        let window: *mut AnyObject = msg_send![this, window];
-        let _: () = msg_send![window, performWindowDragWithEvent: event];
-    }
-}
-
-fn label_class() -> &'static AnyClass {
-    static CLASS: std::sync::OnceLock<&AnyClass> = std::sync::OnceLock::new();
-    CLASS.get_or_init(|| {
-        let mut builder = ClassBuilder::new("QwenCuPreviewLabel", class!(NSTextField)).unwrap();
+fn button_class(mover: bool) -> &'static AnyClass {
+    static CLOSE: std::sync::OnceLock<&AnyClass> = std::sync::OnceLock::new();
+    static MOVE: std::sync::OnceLock<&AnyClass> = std::sync::OnceLock::new();
+    let slot = if mover { &MOVE } else { &CLOSE };
+    slot.get_or_init(|| {
+        let mut builder = ClassBuilder::new(
+            if mover {
+                "QwenCuPreviewMove"
+            } else {
+                "QwenCuPreviewClose"
+            },
+            class!(NSButton),
+        )
+        .unwrap();
         unsafe {
-            builder.add_method(sel!(hitTest:), passive_label as extern "C" fn(_, _, _) -> _);
+            builder.add_method(
+                sel!(acceptsFirstMouse:),
+                accepts_mouse as extern "C" fn(_, _, _) -> _,
+            );
+            if mover {
+                builder.add_method(sel!(mouseDown:), drag_preview as extern "C" fn(_, _, _));
+            } else {
+                builder.add_method(
+                    sel!(accessibilityPerformPress),
+                    close_accessible as extern "C" fn(_, _) -> _,
+                );
+            }
         }
         builder.register()
     })
 }
 
-extern "C" fn passive_label(_this: &AnyObject, _selector: Sel, _point: NSPoint) -> *mut AnyObject {
-    std::ptr::null_mut()
+unsafe fn rounded(view: *mut AnyObject, radius: f64, clips: bool) {
+    let _: () = msg_send![view, setWantsLayer: true];
+    let layer: *mut AnyObject = msg_send![view, layer];
+    let _: () = msg_send![layer, setCornerRadius: radius];
+    let _: () = msg_send![layer, setMasksToBounds: clips];
 }
 
-unsafe fn create(config: &pip_preview::PipConfig, slot: usize) -> Option<Handles> {
-    let screen: *mut AnyObject = msg_send![class!(NSScreen), mainScreen];
-    if screen.is_null() {
-        return None;
-    }
-    let screen_frame: NSRect = msg_send![screen, visibleFrame];
-    let width = config.geometry.width as f64;
-    let height = config.geometry.height as f64;
-    let (x, y) = match (config.geometry.x, config.geometry.y) {
-        (Some(x), Some(y)) => (
-            x as f64,
-            screen_frame.origin.y + screen_frame.size.height - y as f64 - height,
-        ),
-        _ => (
-            screen_frame.origin.x + screen_frame.size.width
-                - width
-                - 24.0
-                - (slot % 5) as f64 * 18.0,
-            screen_frame.origin.y + screen_frame.size.height
-                - height
-                - 24.0
-                - (slot % 5) as f64 * 36.0,
-        ),
-    };
-    let rect = NSRect::new(NSPoint::new(x, y), NSSize::new(width, height));
+unsafe fn background(view: *mut AnyObject, white: f64, alpha: f64, radius: f64) {
+    let color: *mut AnyObject =
+        msg_send![class!(NSColor), colorWithCalibratedWhite: white alpha: alpha];
+    let _: () = msg_send![view, setBoxType: 4usize];
+    let _: () = msg_send![view, setTitlePosition: 0usize];
+    let _: () = msg_send![view, setContentViewMargins: NSSize::new(0.0, 0.0)];
+    let _: () = msg_send![view, setBorderWidth: 0.0f64];
+    let _: () = msg_send![view, setCornerRadius: radius];
+    let _: () = msg_send![view, setFillColor: color];
+}
+
+unsafe fn create(
+    session: &str,
+    config: &pip_preview::PipConfig,
+    scene: &Scene,
+) -> Option<Rc<Handles>> {
+    let screen = available(std::ptr::null_mut())?;
+    let sizes: Vec<_> = scene.cards.iter().take(2).map(|card| card.size).collect();
+    let bounds = card_bounds(config, &sizes, screen);
+    let layout = state::layout(&sizes, sizes.len() - 1, bounds);
+    let (width, height) = layout.size;
+    let slot = WINDOWS.with(|windows| windows.borrow().len());
+    let (x, y) = initial_origin(config, screen, layout.size, slot);
     let panel: *mut AnyObject = msg_send![panel_class(), alloc];
-    let panel: *mut AnyObject =
-        msg_send![panel, initWithContentRect: rect styleMask: 128u64 backing: 2u64 defer: false];
+    let panel: *mut AnyObject = msg_send![panel, initWithContentRect: rect([x, y, width, height]) styleMask: 128u64 backing: 2u64 defer: false];
     if panel.is_null() {
         return None;
     }
     let _: () = msg_send![panel, setReleasedWhenClosed: false];
-    // NSWindowAnimationBehaviorNone keeps shutdown's UI acknowledgment synchronous.
     let _: () = msg_send![panel, setAnimationBehavior: 2isize];
     let _: () = msg_send![panel, setTitle: string(&config.title)];
     let _: () = msg_send![panel, setFloatingPanel: true];
     let _: () = msg_send![panel, setBecomesKeyOnlyIfNeeded: true];
     let _: () = msg_send![panel, setHidesOnDeactivate: false];
     let _: () = msg_send![panel, setMovableByWindowBackground: false];
+    let _: () = msg_send![panel, setAcceptsMouseMovedEvents: true];
+    let _: () = msg_send![panel, setOpaque: false];
+    let _: () = msg_send![panel, setHasShadow: false];
+    // Keep a nonzero backing alpha so WindowServer can hit-test transparent gaps.
+    let backing: *mut AnyObject =
+        msg_send![class!(NSColor), colorWithCalibratedWhite: 0.0f64 alpha: (1.0f64 / 255.0)];
+    let _: () = msg_send![panel, setBackgroundColor: backing];
     let _: () = msg_send![panel, setLevel: 3i64];
     let _: () = msg_send![panel, setCollectionBehavior: ((1 << 0) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 8)) as u64];
-    let color: *mut AnyObject =
-        msg_send![class!(NSColor), colorWithCalibratedWhite: 0.1f64 alpha: 1.0f64];
-    let _: () = msg_send![panel, setBackgroundColor: color];
-    let view: *mut AnyObject = msg_send![panel, contentView];
-    let body_height = height - HEADER_HEIGHT as f64;
-    let image: *mut AnyObject = msg_send![class!(NSImageView), alloc];
-    let image: *mut AnyObject = msg_send![image, initWithFrame: NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(width, body_height))];
-    let _: () = msg_send![image, setImageScaling: 3u64];
-    let _: () = msg_send![view, addSubview: image];
-    let _: () = msg_send![image, release];
-    let header: *mut AnyObject = msg_send![header_class(), alloc];
-    let header: *mut AnyObject = msg_send![header, initWithFrame: NSRect::new(NSPoint::new(0.0, body_height), NSSize::new(width, HEADER_HEIGHT as f64))];
-    let label: *mut AnyObject = msg_send![label_class(), alloc];
-    let label: *mut AnyObject = msg_send![label, initWithFrame: NSRect::new(NSPoint::new(10.0, 5.0), NSSize::new(width - 46.0, 18.0))];
-    let _: () = msg_send![label, setBezeled: false];
-    let _: () = msg_send![label, setDrawsBackground: false];
-    let _: () = msg_send![label, setEditable: false];
-    let _: () = msg_send![label, setSelectable: false];
-    let text_color: *mut AnyObject = msg_send![class!(NSColor), whiteColor];
-    let _: () = msg_send![label, setTextColor: text_color];
-    let font: *mut AnyObject = msg_send![class!(NSFont), systemFontOfSize: 11.0f64];
-    let _: () = msg_send![label, setFont: font];
-    let _: () = msg_send![header, addSubview: label];
-    let _: () = msg_send![label, release];
-    let button: *mut AnyObject = msg_send![class!(NSButton), alloc];
-    let button: *mut AnyObject = msg_send![button, initWithFrame: NSRect::new(NSPoint::new(width - 28.0, 2.0), NSSize::new(24.0, 24.0))];
-    let _: () = msg_send![button, setTitle: string("×")];
-    let _: () = msg_send![button, setToolTip: string("Close preview")];
-    let _: () = msg_send![button, setAccessibilityLabel: string("Close preview")];
-    let _: () = msg_send![button, setBezelStyle: 2u64];
-    let _: () = msg_send![button, setTarget: panel];
-    let _: () = msg_send![button, setAction: sel!(closePreview:)];
-    let _: () = msg_send![header, addSubview: button];
-    let _: () = msg_send![button, release];
-    let _: () = msg_send![view, addSubview: header];
-    let _: () = msg_send![header, release];
-    Some(Handles {
+    let root: *mut AnyObject = msg_send![surface_class(false), alloc];
+    let root: *mut AnyObject = msg_send![root, initWithFrame: rect([0.0, 0.0, width, height])];
+    let _: () = msg_send![panel, setContentView: root];
+    let _: () = msg_send![root, release];
+    let tracking: *mut AnyObject = msg_send![class!(NSTrackingArea), alloc];
+    let tracking: *mut AnyObject = msg_send![tracking, initWithRect: rect([0.0; 4]) options: (1usize | 2 | 0x80 | 0x200 | 0x400) owner: root userInfo: std::ptr::null_mut::<AnyObject>()];
+    let _: () = msg_send![root, addTrackingArea: tracking];
+    let _: () = msg_send![tracking, release];
+    let cards = std::array::from_fn(|_| {
+        let shell: *mut AnyObject = msg_send![class!(NSBox), alloc];
+        let shell: *mut AnyObject = msg_send![shell, initWithFrame: rect([0.0; 4])];
+        rounded(shell, 12.0, false);
+        background(shell, 0.18, 1.0, 12.0);
+        let shadow: *mut AnyObject = msg_send![class!(NSShadow), alloc];
+        let shadow: *mut AnyObject = msg_send![shadow, init];
+        let color: *mut AnyObject =
+            msg_send![class!(NSColor), colorWithCalibratedWhite: 0.0f64 alpha: 0.24f64];
+        let _: () = msg_send![shadow, setShadowColor: color];
+        let _: () = msg_send![shadow, setShadowBlurRadius: 7.0f64];
+        let _: () = msg_send![shadow, setShadowOffset: NSSize::new(0.0, -2.0)];
+        let _: () = msg_send![shell, setShadow: shadow];
+        let _: () = msg_send![shadow, release];
+        let image: *mut AnyObject = msg_send![surface_class(true), alloc];
+        let image: *mut AnyObject = msg_send![image, initWithFrame: rect([0.0; 4])];
+        rounded(image, 12.0, true);
+        let _: () = msg_send![image, setImageScaling: 3u64];
+        let _: () = msg_send![image, setAccessibilityElement: true];
+        let _: () = msg_send![image, setAccessibilityRole: string("AXImage")];
+        let _: () = msg_send![shell, addSubview: image];
+        let _: () = msg_send![image, release];
+        let _: () = msg_send![root, addSubview: shell];
+        let _: () = msg_send![shell, release];
+        CardViews { shell, image }
+    });
+    let controls: *mut AnyObject = msg_send![class!(NSBox), alloc];
+    let controls: *mut AnyObject = msg_send![controls, initWithFrame: rect(layout.controls)];
+    rounded(controls, 15.0, true);
+    background(controls, 0.12, 0.92, 15.0);
+    let make_button = |mover: bool| {
+        let button: *mut AnyObject = msg_send![button_class(mover), alloc];
+        let button: *mut AnyObject = msg_send![button, initWithFrame: rect([0.0; 4])];
+        let title = if mover { "Move" } else { "×" };
+        let label = if mover {
+            "Move preview"
+        } else {
+            "Close preview"
+        };
+        let _: () = msg_send![button, setTitle: string(title)];
+        let _: () = msg_send![button, setToolTip: string(label)];
+        let _: () = msg_send![button, setAccessibilityLabel: string(label)];
+        let _: () = msg_send![button, setAccessibilityHidden: false];
+        let _: () = msg_send![button, setAccessibilityElement: true];
+        let _: () = msg_send![button, setAccessibilityRole: string("AXButton")];
+        let _: () = msg_send![button, setBordered: false];
+        let white: *mut AnyObject = msg_send![class!(NSColor), whiteColor];
+        let _: () = msg_send![button, setContentTintColor: white];
+        let _: () = msg_send![button, setTarget: panel];
+        if !mover {
+            let _: () = msg_send![button, setAction: sel!(closePreview:)];
+        }
+        let _: () = msg_send![controls, addSubview: button];
+        let _: () = msg_send![button, release];
+        button
+    };
+    let button = make_button(false);
+    let mover = make_button(true);
+    let _: () = msg_send![root, addSubview: controls];
+    let _: () = msg_send![controls, release];
+    let point: NSPoint = msg_send![class!(NSEvent), mouseLocation];
+    Some(Rc::new(Handles {
+        session: session.to_owned(),
         panel,
-        image,
-        label,
+        root,
+        cards,
+        controls,
         button,
-    })
+        mover,
+        timer: Cell::new(std::ptr::null_mut()),
+        closed: Cell::new(false),
+        dragging: Cell::new(false),
+        presentation: RefCell::new(Presentation {
+            ids: Vec::new(),
+            sizes: Vec::new(),
+            front: 0,
+            bounds,
+            motions: Vec::new(),
+            targets: Vec::new(),
+            controls: Motion::new(layout.controls),
+            controls_target: layout.controls,
+            opacity: 0.0,
+            opacity_target: 0.0,
+            last_tick: Instant::now(),
+            last_pointer: (point.x, point.y),
+        }),
+    }))
 }

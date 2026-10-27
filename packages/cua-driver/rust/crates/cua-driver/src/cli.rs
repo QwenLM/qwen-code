@@ -623,7 +623,7 @@ pub fn parse_command() -> Command {
             "  --experimental-pip-geometry WxH[+X+Y]   Preview size and optional top-left origin."
         );
         println!(
-            "                                          Defaults to 320x200, near the top-right."
+            "                                          Maximum card size; defaults to 400x300, near the lower-right."
         );
         std::process::exit(0);
     }

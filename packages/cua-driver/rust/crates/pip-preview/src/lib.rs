@@ -78,9 +78,8 @@ pub fn read_pip_keys_from_file() -> (bool, Option<String>) {
 /// Geometry of the PiP window, in screen points (top-left origin).
 ///
 /// Parsed from `--experimental-pip-geometry WxH+X+Y`. `x` / `y` are
-/// optional; when `None` the platform backend picks a sensible
-/// "top-right corner with a small inset" default so a user enabling
-/// the feature without any geometry flags still sees a window.
+/// optional; when `None` the floating window starts near the lower-right.
+/// Width/height bound each card; the window also reserves its stack and controls.
 #[derive(Debug, Clone, Copy)]
 pub struct PipGeometry {
     pub width: u32,
@@ -92,8 +91,8 @@ pub struct PipGeometry {
 impl Default for PipGeometry {
     fn default() -> Self {
         Self {
-            width: 320,
-            height: 200,
+            width: 400,
+            height: 300,
             x: None,
             y: None,
         }
@@ -231,6 +230,13 @@ impl PipConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_cards_use_a_four_hundred_by_three_hundred_bound() {
+        let geometry = PipGeometry::default();
+        assert_eq!((geometry.width, geometry.height), (400, 300));
+        assert_eq!((geometry.x, geometry.y), (None, None));
+    }
 
     #[test]
     fn explicit_disabled_configuration_survives_empty_arguments() {

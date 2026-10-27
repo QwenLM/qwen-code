@@ -41,6 +41,11 @@ disable either surface. PiP also respects `experimental_pip: false` in
 `~/.cua-driver/config.json`. Raw Rust/Python embedding must supply its own
 main-thread UI host and remains UI-disabled by default on macOS.
 
+The preview is a transparent, borderless floating window, initially near the
+lower-right. Each source keeps its aspect ratio in an independent card. Hover
+a rear card to bring it forward; drag a card or the Move preview handle to
+reposition the whole window. Floating controls appear on hover.
+
 ```ts
 import {
   CuaDriver,

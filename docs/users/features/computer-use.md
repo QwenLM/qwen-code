@@ -69,7 +69,7 @@ The server executes JavaScript with ordinary Node.js permissions and follows the
 
 `js` completes in one call and defaults to a 30-second timeout. A timeout can leave external effects; observe before retrying. `js_reset` discards bindings and gracefully closes the owning native/browser session. After context compaction call `cua.rewriteDocumentation()` before continuing.
 
-The native agent cursor is enabled by default. On macOS, a local PiP refreshes the session's two most recently observed, authorized windows even between actions. Drag its header to move it or close it to stop the preview; the image does not forward input to the target. Reset closes the owning cursor and preview. Add `--no-overlay` or `--no-pip` to the server arguments to disable either surface. PiP is macOS-only.
+The native agent cursor is enabled by default. On macOS, a local PiP refreshes the session's two most recently observed, authorized windows even between actions. The borderless window starts near the lower-right; drag a card or its Move preview handle to reposition it. Hover reveals floating controls and brings a rear card forward. Close it to stop the preview; the image does not forward input to the target. Reset closes the owning cursor and preview. Add `--no-overlay` or `--no-pip` to the server arguments to disable either surface. PiP is macOS-only.
 
 ## Remote desktop relay
 

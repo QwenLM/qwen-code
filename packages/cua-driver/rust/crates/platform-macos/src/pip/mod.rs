@@ -13,9 +13,15 @@ use image::{ImageFormat, Pixel, Rgba, RgbaImage};
 use pip_preview::PipConfig;
 
 struct Scene {
-    png: Vec<u8>,
-    label: String,
+    cards: Vec<Card>,
     targets: Vec<PipTarget>,
+}
+
+struct Card {
+    window_id: u32,
+    png: Option<Vec<u8>>,
+    size: (u32, u32),
+    label: String,
 }
 
 struct Controller {
@@ -243,57 +249,56 @@ impl Controller {
     }
 
     fn capture(&self, targets: Vec<PipTarget>, lifetime: Arc<dyn Send + Sync>) -> Option<Scene> {
-        let width = self.config.geometry.width * 2;
-        let height = (self.config.geometry.height - native::HEADER_HEIGHT) * 2;
-        let mut canvas = RgbaImage::from_pixel(width, height, Rgba([24, 26, 30, 255]));
-        let mut labels = Vec::new();
-        for (index, target) in targets.iter().enumerate() {
-            let layer = capture_target(target, lifetime.clone());
-            let offset = if targets.len() == 2 {
-                index as u32 * 32
-            } else {
-                0
-            };
-            let (box_width, box_height) = if targets.len() == 2 {
-                (width - 32, height - 32)
-            } else {
-                (width, height)
-            };
-            match layer {
-                Some((image, app)) => {
-                    labels.push(app);
-                    let (x, y, w, h) = state::fit(image.dimensions(), (box_width, box_height));
-                    let scaled = image::imageops::resize(
+        let bounds = (
+            self.config.geometry.width * 2,
+            self.config.geometry.height * 2,
+        );
+        let cards = targets
+            .iter()
+            .map(|target| {
+                if let Some((image, label)) = capture_target(target, lifetime.clone()) {
+                    let size = image.dimensions();
+                    let (_, _, width, height) = state::fit(size, bounds);
+                    let image = image::imageops::resize(
                         &image,
-                        w,
-                        h,
+                        width,
+                        height,
                         image::imageops::FilterType::Triangle,
                     );
-                    image::imageops::overlay(
-                        &mut canvas,
-                        &scaled,
-                        (offset + x) as i64,
-                        (offset + y) as i64,
-                    );
+                    let mut png = Cursor::new(Vec::new());
+                    let png = image
+                        .write_to(&mut png, ImageFormat::Png)
+                        .ok()
+                        .map(|()| png.into_inner());
+                    Card {
+                        window_id: target.window_id,
+                        png,
+                        size,
+                        label,
+                    }
+                } else {
+                    let size = crate::windows::window_info_by_id(target.window_id)
+                        .filter(|window| window.pid == target.pid)
+                        .map(|window| {
+                            (
+                                window.bounds.width.max(1.0) as u32,
+                                window.bounds.height.max(1.0) as u32,
+                            )
+                        })
+                        .unwrap_or((bounds.0, bounds.1));
+                    Card {
+                        window_id: target.window_id,
+                        png: None,
+                        size,
+                        label: "Window unavailable".into(),
+                    }
                 }
-                None => {
-                    labels.push("Window unavailable".into());
-                    let empty =
-                        RgbaImage::from_pixel(box_width, box_height, Rgba([48, 50, 56, 255]));
-                    image::imageops::overlay(&mut canvas, &empty, offset as i64, offset as i64);
-                }
-            }
-        }
+            })
+            .collect();
         if targets.iter().any(|target| !(target.is_live)()) {
             return None;
         }
-        let mut png = Cursor::new(Vec::new());
-        canvas.write_to(&mut png, ImageFormat::Png).ok()?;
-        Some(Scene {
-            png: png.into_inner(),
-            label: labels.join(" · "),
-            targets,
-        })
+        Some(Scene { cards, targets })
     }
 }
 
