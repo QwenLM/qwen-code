@@ -4616,7 +4616,8 @@ impl Tool for TypeTextTool {
                 first. Native ConsoleHost on Windows ARM64 is hard-refused because it can \
                 accept synthesized Unicode events without delivering them; use a process \
                 or PTY setup channel instead. Legacy Win32 apps still use the PostMessage \
-                path, preserving the no-focus-steal property.\n\n\
+                path, preserving the no-focus-steal property. Without `element_index`, \
+                delivery remains unverified; inspect a fresh snapshot before retrying.\n\n\
                 `delay_ms` (0–200, default 30) spaces successive characters on the \
                 PostMessage path so autocomplete and IME can keep up. Ignored on the \
                 UIA path (SetValue is atomic).".into(),
@@ -5078,25 +5079,15 @@ impl Tool for TypeTextTool {
 
         // 3. Legacy Win32 / GDI / Chromium-IME — PostMessage WM_CHAR, no focus steal.
         //
-        // Read-back verification (mirrors macOS type_text): WM_CHAR is silently
-        // dropped by some focused targets (notably a VCL/LibreOffice Calc grid
-        // not in cell-edit mode), and PostMessage reports success regardless. So
-        // snapshot the focused element's UIA value before and after; if it did
-        // not change we can't confirm the text landed and report "Sent
-        // (unverified)" with the foreground-escalation hint, instead of a blind
-        // success. If the focused element exposes no ValuePattern we likewise
-        // can't confirm (conservative: under-claim rather than false-succeed).
+        // Read back only an exact cached element. A system-focused UIA probe
+        // can block for minutes and does not bind the target window's recipient.
         let text_for_post = text.clone();
         let verify_pid = pid;
         let verify_idx = elem_idx.map(|i| i as usize);
         let result = tokio::task::spawn_blocking(move || {
-            // Prefer a focus-independent read of the *specific* cached element
-            // when we have its index; only fall back to the (flaky, focus-
-            // dependent) system focused element when typing into "whatever is
-            // focused" with no element_index.
             let read = |idx: Option<usize>| match idx {
                 Some(i) => read_cached_element_value(&element_cache, verify_pid, hwnd, i),
-                None => read_focused_value_uia(verify_pid),
+                None => None,
             };
             let before = read(verify_idx);
             let post_res = crate::input::post_type_text(hwnd, &text_for_post);
@@ -5109,17 +5100,17 @@ impl Tool for TypeTextTool {
         .await;
         match result {
             Ok((Ok(()), before, after, observed)) => {
-                // Three-way verdict. Crucially, "couldn't read the field" is NOT
-                // the same as "the text didn't land": on Windows, UIA's
-                // GetFocusedElement is system-wide (unlike macOS's per-app
-                // AXFocusedUIElement), so when the target isn't the foreground
-                // app we cannot read it back even though a PostMessage WM_CHAR
-                // may have landed fine. Treating unreadable as failure would
-                // spuriously push agents to foreground and break the
-                // background-first contract. A changed value containing the
-                // requested text is useful evidence, but the insertion point is
-                // unknowable on WM_CHAR. Keep the action unverifiable so callers
-                // prove final state from a fresh snapshot before any retry.
+                if verify_idx.is_none() {
+                    return ToolResult::text(format!(
+                        "📨 Sent {text_len} char(s) to pid {raw_pid} via PostMessage. \
+                         No exact element was addressed, so delivery is not verified. \
+                         Take a fresh snapshot to verify the intended final value \
+                         before deciding whether to retry."
+                    ))
+                    .with_structured(unbound_post_message_result(text_len));
+                }
+                // A changed value does not prove the insertion point. Even an
+                // exact-element read-back must not trigger an automatic replay.
                 match (&before, &after) {
                     (Some(_), Some(_)) if observed => ToolResult::text(format!(
                         "📨 Sent {text_len} char(s) to pid {raw_pid} via PostMessage \
@@ -5172,6 +5163,14 @@ impl Tool for TypeTextTool {
     }
 }
 
+fn unbound_post_message_result(characters: usize) -> Value {
+    json!({
+        "path": "key_events", "characters": characters,
+        "verified": false, "verify": "unbound",
+        "effect": "unverifiable",
+    })
+}
+
 fn post_message_readback_observed(
     before: Option<&str>,
     after: Option<&str>,
@@ -5210,7 +5209,30 @@ fn changed_contains_post_message_result(text_len: usize) -> serde_json::Value {
 
 #[cfg(test)]
 mod post_message_readback_tests {
-    use super::{changed_contains_post_message_result, post_message_readback_observed};
+    use super::{
+        changed_contains_post_message_result, post_message_readback_observed,
+        unbound_post_message_result,
+    };
+
+    #[test]
+    fn unbound_input_stays_unverifiable_without_retry_escalation() {
+        let result = unbound_post_message_result(39);
+        assert_eq!(result["characters"], 39);
+        assert_eq!(result["verify"], "unbound");
+        assert_eq!(result["verified"], false);
+        assert!(result.get("escalation").is_none());
+        let record = cua_driver_core::action_record::ActionExecutionRecord::from_legacy(
+            "type_text",
+            &serde_json::json!({"delivery_mode": "background"}),
+            &result,
+        )
+        .expect("unbound PostMessage result should normalize");
+        let public = record.public_result().expect("valid ActionResult");
+        let value = serde_json::to_value(public).expect("serialize ActionResult");
+        assert_eq!(value["effect"], "unverifiable");
+        assert!(value.get("escalation").is_none());
+        assert!(value.get("evidence").is_none());
+    }
 
     #[test]
     fn observes_only_a_changed_value_containing_the_requested_text() {
@@ -5275,9 +5297,8 @@ fn classify_value_write_readback(
 
 /// Read a **specific cached element's** text value by its `element_index`,
 /// for type_text read-back verification. Tries `ValuePattern.CurrentValue`
-/// then falls back to `TextPattern` document text. Unlike
-/// [`read_focused_value_uia`] this is **focus-independent**: it reads the exact
-/// element the caller typed into (by handle, from the per-(pid,window) cache),
+/// then falls back to `TextPattern` document text. This reads the exact element
+/// the caller typed into (by handle, from the per-(pid,window) cache),
 /// so it works whether or not the target is the foreground window. Returns
 /// `None` if the index isn't cached or the element exposes no readable text
 /// pattern. Mirrors the cache-retain + `mem::forget` discipline of the
@@ -5314,48 +5335,6 @@ fn read_cached_element_value(
     // The cache guard owns the ref; don't let `elem`'s Drop release it.
     std::mem::forget(elem);
     val
-}
-
-/// Read the currently-focused UIA element's `ValuePattern` value **iff it
-/// belongs to `expect_pid`**, for type_text read-back verification.
-/// Self-contained COM (STA) init/teardown so it can be called from a
-/// `spawn_blocking` worker. Returns `None` if UIA is unreachable, nothing is
-/// focused, the focused element is owned by a different process (e.g. the
-/// target is backgrounded and system focus is on the user's foreground app —
-/// we must NOT read that element's value), or the focused element exposes no
-/// `ValuePattern` (most rich-text/document surfaces). Callers treat `None` as
-/// "could not confirm" rather than failure. Mirrors the focused-element read in
-/// the `debug_window_info` tool.
-fn read_focused_value_uia(expect_pid: u32) -> Option<String> {
-    use windows::core::Interface;
-    use windows::Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
-        COINIT_APARTMENTTHREADED,
-    };
-    use windows::Win32::UI::Accessibility::{
-        CUIAutomation, IUIAutomation, IUIAutomationValuePattern, UIA_ValuePatternId,
-    };
-
-    let coinit_ok = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok() };
-    let value = (|| -> Option<String> {
-        let uia: IUIAutomation =
-            unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }.ok()?;
-        let focused = unsafe { uia.GetFocusedElement() }.ok()?;
-        // Scope to the target: system focus may be on a different app when the
-        // target is backgrounded; reading that element would give a bogus verdict.
-        if unsafe { focused.CurrentProcessId() }.ok()? as u32 != expect_pid {
-            return None;
-        }
-        let pattern = unsafe { focused.GetCurrentPattern(UIA_ValuePatternId) }.ok()?;
-        let vp: IUIAutomationValuePattern = pattern.cast().ok()?;
-        Some(unsafe { vp.CurrentValue() }.ok()?.to_string())
-    })();
-    if coinit_ok {
-        unsafe {
-            CoUninitialize();
-        }
-    }
-    value
 }
 
 // ── press_key ─────────────────────────────────────────────────────────────────
