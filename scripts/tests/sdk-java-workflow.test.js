@@ -3079,10 +3079,10 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     // warning arms keep a copy failure from reddening the gate after mvn
     // has already passed.
     expect(step.run).toContain('mkdir -p "${HOME}/.m2/repository"');
-    // This lane's Maven runs fail inline, so only a green run reaches the
-    // copy. Growing the test lane's deferred status here without its exit
-    // would turn a red suite green and publish it, so the premise the two
-    // lanes' asymmetry rests on stays pinned.
+    // This lane defers its own gate status under `result_status` and never
+    // grows the test job's named-stage reporter; a red gate must still exit
+    // red through the write-back instead of turning green with the copy.
+    expect(step.run).toContain('exit "${result_status}"');
     expect(step.run).not.toContain('mvn_status');
     // Run 39563394993 spent 60 minutes streaming the whole seeded tree and
     // was cancelled at the job ceiling. Only the nlink == 1 delta Maven
