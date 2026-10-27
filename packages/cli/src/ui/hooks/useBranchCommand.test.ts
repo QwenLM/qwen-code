@@ -163,6 +163,44 @@ describe('useBranchCommand', () => {
     };
   });
 
+  it('waits for the mode snapshot under the swap latch before forking', async () => {
+    const client = makeSwapSlotClient();
+    client.initialize.mockRejectedValueOnce(new Error('destination failed'));
+    const snapshot = {
+      requested: true,
+      recorded: true,
+      pending: true,
+      turns: 0,
+    };
+    let finish!: () => void;
+    const held = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const restore = vi.fn();
+    Object.assign(config, {
+      getLlmClient: () => client,
+      captureWorkflowModeState: async () => {
+        expect(client.isTelemetrySwapInProgress()).toBe(true);
+        await held;
+        return snapshot;
+      },
+      restoreWorkflowModeState: restore,
+    });
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    let pending!: Promise<void>;
+    await act(async () => {
+      pending = result.current.handleBranch();
+    });
+    const forksBeforeSnapshot = forkSession.mock.calls.length;
+    await act(async () => {
+      finish();
+      await pending;
+    });
+    expect(forksBeforeSnapshot).toBe(0);
+    expect(restore).toHaveBeenCalledExactlyOnceWith(snapshot);
+    expect(client.isTelemetrySwapInProgress()).toBe(false);
+  });
+
   it.each([
     'rollback-init',
     'forward-old',
