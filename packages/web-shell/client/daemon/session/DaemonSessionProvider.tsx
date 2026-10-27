@@ -1042,14 +1042,26 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   detail.blockCount ?? preTrim.blocks.length;
                 const postTrimRetainedBytes =
                   detail.retainedBytes ?? preTrim.retainedBytes;
-                history.rejectedPage = {
-                  blocks:
-                    history.rejectedPage.blocks +
-                    Math.max(0, preTrim.blocks.length - postTrimBlockCount),
-                  bytes:
-                    history.rejectedPage.bytes +
-                    Math.max(0, preTrim.retainedBytes - postTrimRetainedBytes),
-                };
+                const oldestRecordId = detail.oldestRetainedRecordId;
+                const restoredOlderAnchor =
+                  detail.replacedReplay === true &&
+                  oldestRecordId !== undefined &&
+                  !preTrim.blocks.some((block) =>
+                    block.sourceRecordIds?.includes(oldestRecordId),
+                  );
+                history.rejectedPage = restoredOlderAnchor
+                  ? undefined
+                  : {
+                      blocks:
+                        history.rejectedPage.blocks +
+                        Math.max(0, preTrim.blocks.length - postTrimBlockCount),
+                      bytes:
+                        history.rejectedPage.bytes +
+                        Math.max(
+                          0,
+                          preTrim.retainedBytes - postTrimRetainedBytes,
+                        ),
+                    };
               }
               // A live trim evicts oldest blocks that stay persisted
               // daemon-side, so there is now fetchable content older than the
@@ -5096,7 +5108,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 ...snapshot,
                 retainedBytes: undefined,
                 blocks: snapshot.blocks.map((block) =>
-                  block.id === admission.blockId && block.kind === 'user'
+                  block.id === admission.blockId &&
+                  block.kind === 'user' &&
+                  (block.promptId === undefined ||
+                    block.promptId === admission.promptId)
                     ? { ...block, promptId: admission.promptId }
                     : block,
                 ),

@@ -371,6 +371,8 @@ describe('no-AK integration CI wiring', () => {
       'interactive/submitted-prompt-provenance.test.ts': 'Runtime budget',
       'interactive/tui-checkpoint-restore.test.ts': 'Dedicated TUI parity gate',
       'interactive/tui-clipboard-source.test.ts': 'Dedicated TUI parity gate',
+      'interactive/tui-extension-acquisition.test.ts':
+        'Dedicated TUI parity gate',
       'interactive/tui-foreground-shell.test.ts': 'Dedicated TUI parity gate',
       'interactive/tui-dual-output.test.ts': 'Dedicated TUI parity gate',
       'interactive/tui-migration.test.ts': 'Runtime budget',
