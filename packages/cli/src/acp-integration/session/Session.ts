@@ -25,7 +25,21 @@ import {
   TRUNCATION_RETRY_LOOP_DIRECTIVE,
 } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import { FinishReason } from '@qwen-code/qwen-code-core/core/genai-compat.js';
+import {
+  runModelRound,
+  type AgentLoopStopReason,
+} from '@qwen-code/qwen-code-core/core/agent-loop.js';
+import {
+  SendMessageType,
+  type UserPromptAdmission,
+} from '@qwen-code/qwen-code-core/core/client.js';
+import {
+  getStructuredErrorCause,
+  LlmEventType,
+  type StructuredError,
+} from '@qwen-code/qwen-code-core/core/turn.js';
 import { toolCallArgumentsWereIncomplete } from '@qwen-code/qwen-code-core/core/incomplete-tool-call-args.js';
+import { buildSyntheticToolResponseParts } from '@qwen-code/qwen-code-core/core/turn-interruption.js';
 import { codeModeToolResultStamp } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
 import { collectText } from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
 import {
@@ -512,6 +526,7 @@ import {
   unrestorableGoalStatus,
 } from './recovered-goal-update.js';
 import { SubAgentTracker } from './SubAgentTracker.js';
+import { runAcpToolBatch, type AcpToolBatchHost } from './acp-tool-batch.js';
 import {
   buildPermissionRequestContent,
   interactionMetaFields,
@@ -535,6 +550,7 @@ import {
   REPEATED_TOOL_FAILURE_STOP_MESSAGE,
   parseRepeatedToolFailureGuardMode,
   type RepeatedToolFailureBatch,
+  type RepeatedToolFailureObservation,
   type RepeatedToolFailureGuardMode,
   type RepeatedToolFailureGuardDecision,
   type RepeatedToolFailureGuardState,
@@ -923,6 +939,15 @@ type ModelResponseFacts = {
   refusedPartialEdits: Set<string>;
 };
 
+/** The facts of a response that has not streamed yet. */
+const newModelResponseFacts = (): ModelResponseFacts => ({
+  outputTruncated: false,
+  refusedPartialEdits: new Set(),
+});
+
+const userPromptBlockedNotice = (reason: string | undefined) =>
+  `✗ **UserPromptSubmit blocked**: ${reason || 'No reason provided'}`;
+
 const DAEMON_INVALID_TOOL_PARAMS_THRESHOLD = 3;
 
 const PERMISSION_CANCEL_SKIP_MESSAGE =
@@ -936,6 +961,8 @@ export const LOOP_DETECTED_TURN_ERROR_MESSAGE =
 const TOOL_EXECUTION_CANCELLED_MESSAGE = 'Tool execution was cancelled.';
 const TOOL_POST_EXECUTION_CANCELLED_MESSAGE =
   'The tool had already completed; its output was discarded.';
+const USER_PROMPT_BLOCKED_TOOL_RESULT =
+  'A UserPromptSubmit hook blocked this tool result from reaching the model. Do not rerun the tool to get it.';
 
 type ManagedConversationBinding = {
   expectation: BridgeConversationDirectoryExpectation;
@@ -1127,8 +1154,42 @@ function managedOutcomeUnknownError(error: Error): RequestError {
   );
 }
 
+/** The notice shown when compaction ran before a model request. */
+function formatCompressionDiagnostic(
+  info: ChatCompressionInfo,
+  model: string,
+): string {
+  const reasonClause =
+    info.triggerReason === 'image_overflow'
+      ? `accumulated enough tool screenshots to trigger compaction for ${model}`
+      : `approached the input token limit for ${model}`;
+  const warningSuffix = info.warning ? `\n⚠️ ${info.warning}` : '';
+  // Estimated counts (#9309) get a '~' prefix so the notice doesn't read as an
+  // API-reported figure on a different scale than a later banner.
+  const formatCount = (count?: number, isEstimated?: boolean) =>
+    count === undefined ? 'unknown' : isEstimated ? `~${count}` : String(count);
+  return (
+    `IMPORTANT: This conversation ${reasonClause}. ` +
+    `A compressed context will be sent for future messages (compressed from: ` +
+    `${formatCount(info.originalTokenCount, info.originalTokenCountIsEstimated)} to ` +
+    `${formatCount(info.newTokenCount, info.newTokenCountIsEstimated)} tokens).` +
+    warningSuffix
+  );
+}
+
+/** The error a model stream reported, thrown as a failed send throws it. */
+function modelStreamError(error: StructuredError): unknown {
+  return (
+    getStructuredErrorCause(error) ??
+    Object.assign(new Error(error.message), {
+      status: error.status,
+      ...(error.requestId ? { requestId: error.requestId } : {}),
+    })
+  );
+}
+
 function createLoopDetectedTurnError(
-  loopState: DaemonToolLoopState,
+  loopState: Pick<DaemonToolLoopState, 'loopType' | 'loopDetail'>,
 ): RequestError {
   const detail = loopState.loopDetail;
   return new RequestError(-32603, LOOP_DETECTED_TURN_ERROR_MESSAGE, {
@@ -7183,7 +7244,64 @@ export class Session implements SessionContext {
             // that class excluded until its producers distinguish them; see
             // docs/design/daemon-user-prompt-submit-provenance.md.
             const isUserSubmissionTurn = isFreshUserTurn && !channelTurn;
-            if (
+            // `experimental.unifiedAgentLoop`: a fresh user prompt outside a
+            // Goal or channel sends its model rounds through `LlmClient` on
+            // the shared agent loop's round. `LlmClient` then does the steps
+            // the current path does here itself: UserPromptSubmit on the
+            // admitted verdict, memory recall, system reminders and workflow
+            // intent. ACP keeps the user turn with its file-history snapshot,
+            // the interaction span, its tool step with the tool-call guards,
+            // and the Stop hook in its Stop loop, which also runs ACP's own
+            // continuations.
+            const sharedModelRound =
+              this.config.isUnifiedAgentLoopEnabled?.() === true &&
+              isFreshUserTurn &&
+              !goalTurn &&
+              !channelTurn &&
+              !responseCapture.goalProposalTurn;
+            // Its tool batches run on the shared loop's batch, and the
+            // client then runs its own tool-call guards.
+            const sharedToolBatch =
+              sharedModelRound && this.#runsToolsOnSharedBatch();
+            let promptAdmission: UserPromptAdmission | undefined;
+            if (sharedModelRound) {
+              promptAdmission = await this.config
+                .getLlmClient()
+                .admitUserPrompt(promptText, promptId, {
+                  submittedPrompt:
+                    submittedPrompt.trim().length > 0
+                      ? submittedPrompt
+                      : undefined,
+                  signal: pendingSend.signal,
+                });
+              if (promptAdmission.blocked) {
+                // The first round reports the block without sending anything.
+                await runModelRound(
+                  this.config.getLlmClient(),
+                  {
+                    parts,
+                    promptId,
+                    options: {
+                      type: SendMessageType.UserQuery,
+                      promptAdmission,
+                      userTurnRecordedByHost: true,
+                      interactionSpanByHost: true,
+                    },
+                  },
+                  pendingSend.signal,
+                  {
+                    onModelEvent: async (event) => {
+                      if (event.type === LlmEventType.UserPromptSubmitBlocked) {
+                        await this.messageEmitter.emitAgentMessage(
+                          userPromptBlockedNotice(event.value.reason),
+                        );
+                      }
+                    },
+                  },
+                );
+                return { stopReason: 'end_turn' };
+              }
+            } else if (
               !isContinue &&
               !isRestoreAskUserQuestion &&
               !isRuntimeContinuation &&
@@ -7219,10 +7337,8 @@ export class Session implements SessionContext {
                 hookOutput?.shouldStopExecution()
               ) {
                 // Hook blocked the prompt - send notification to UI and return
-                const blockReason =
-                  hookOutput?.getEffectiveReason() || 'No reason provided';
                 await this.messageEmitter.emitAgentMessage(
-                  `✗ **UserPromptSubmit blocked**: ${blockReason}`,
+                  userPromptBlockedNotice(hookOutput?.getEffectiveReason()),
                 );
                 return { stopReason: 'end_turn' };
               }
@@ -7257,8 +7373,9 @@ export class Session implements SessionContext {
               }
             }
 
-            if (isFreshUserTurn) {
-              managedMemoryRecallStarted = true;
+            // On the shared round `LlmClient` starts the recall itself.
+            managedMemoryRecallStarted = isFreshUserTurn;
+            if (isFreshUserTurn && !sharedModelRound) {
               // Mirror LlmClient.sendMessageStream: commit a prepared
               // legacy->structured recall transition before the per-turn
               // reset, so ACP sessions leave legacy mode once migration
@@ -7307,7 +7424,9 @@ export class Session implements SessionContext {
             // slash-command and hook early-returns so locally handled commands
             // don't create phantom snapshots that desync the snapshot index.
             // Restore continuations record no user message; rewindToTurn()
-            // indexes snapshots by user-turn position, so skip them.
+            // indexes snapshots by user-turn position, so skip them. Taken
+            // here on the shared round too: a prompt cancelled before its
+            // first send still keeps its user turn.
             if (!isRestoreAskUserQuestion) {
               try {
                 const fileHistoryService = this.config.getFileHistoryService();
@@ -7334,7 +7453,9 @@ export class Session implements SessionContext {
             // `LlmClient.sendMessageStream` in the CLI/TUI path. Without this,
             // plan mode in ACP has no effect because the model never learns it
             // should avoid edits.
-            const systemReminders = await this.#buildInitialSystemReminders();
+            const systemReminders = sharedModelRound
+              ? []
+              : await this.#buildInitialSystemReminders();
             const workflowHumanInput =
               isUserSubmissionTurn &&
               !isSlashInput &&
@@ -7367,10 +7488,9 @@ export class Session implements SessionContext {
             }
             // ACP sends through LlmChat, bypassing LlmClient's injection.
             // Resolve here before the interrupted-prompt reminder deduplication.
-            const workflowIntent = resolveWorkflowIntent(
-              this.config,
-              workflowHumanInput,
-            );
+            const workflowIntent = sharedModelRound
+              ? undefined
+              : resolveWorkflowIntent(this.config, workflowHumanInput);
             if (workflowIntent) {
               systemReminders.push({ text: workflowIntent.reminder });
               logWorkflowKeyword(this.config, new WorkflowKeywordEvent());
@@ -7626,21 +7746,27 @@ export class Session implements SessionContext {
                 }
 
                 const functionCalls: FunctionCall[] = [];
+                const toolRequests: ToolCallRequestInfo[] = [];
                 const preparationTracker = new ToolCallPreparationTracker(
                   this.toolCallEmitter,
                 );
+                // The shared round's request reaches history inside the
+                // client; until then a cut would drop the message it carries.
+                let requestUnsent = () => false;
                 const responseInterrupt = this.#openResponseInterrupt(
                   pendingSend.signal,
                   () =>
-                    functionCalls.length > 0 || preparationTracker.hasToolCall,
+                    functionCalls.length > 0 ||
+                    preparationTracker.hasToolCall ||
+                    requestUnsent(),
                   !channelTurn,
                 );
                 let usageMetadata: GenerateContentResponseUsageMetadata | null =
                   null;
-                const streamStartTime = Date.now();
-                const messageDisplay = this.#createMessageDisplayDispatcher(
-                  pendingSend.signal,
-                );
+                let streamStartTime = Date.now();
+                const messageDisplay = sharedModelRound
+                  ? null
+                  : this.#createMessageDisplayDispatcher(pendingSend.signal);
                 let channelDeliveryResponseBlock:
                   | ChannelDeliveryResponseBlock
                   | undefined;
@@ -7650,258 +7776,571 @@ export class Session implements SessionContext {
                 // computation here would only be discarded.
                 let requestRouteKey = '';
 
-                try {
-                  // Set where the model request is actually issued, not at
-                  // the top of the turn. `modelStarted` is what
-                  // `#settleGoalTurn` reads to decide between `releaseTurn`
-                  // (nothing happened, hand the permit back) and `finishTurn`
-                  // (an iteration completed, count it). Between the top of
-                  // the turn and here sit the abort check and the whole
-                  // prompt-assembly path, so flagging early let a turn that
-                  // was preempted before it ever reached the model settle as
-                  // a completed iteration — a phantom turn on the goal's
-                  // count and a checkpoint recording work that never ran.
-                  // Re-assigning on later loop laps is harmless.
-                  if (goalTurn) {
-                    goalTurn.modelStarted = true;
-                    if (goalTurn.origin === 'runtime') {
-                      this.#markGoalTurnDelivered(goalTurn.turnKey);
-                    }
-                  }
-                  const sendResult =
-                    await this.#sendMessageStreamWithAutoCompression(
-                      promptId,
-                      nextMessage?.parts ?? [],
-                      responseInterrupt.signal,
-                      {
-                        modelOverride: fullTurnModelOverride,
-                        suppressedHookContext,
-                        historyPromptId:
-                          turnCount === 1 &&
-                          goalTurn?.origin !== 'runtime' &&
-                          !nextMessage?.parts?.some(
-                            (part) => part.functionResponse,
-                          )
-                            ? continuesCurrentWorkChain
-                              ? continuedPromptId
-                              : promptId
-                            : undefined,
-                        consumeInitialMemory:
-                          isFreshUserTurn && turnCount === 1,
-                      },
-                    );
-                  if (!sendResult.responseStream) {
-                    this.todoStopGuard.suspend();
-                    // Preserve the full message (not just functionResponse
-                    // parts) for a continuation: its content was stripped from
-                    // history before the send, so dropping it here on a
-                    // non-cancelled failure would lose the orphaned turn the
-                    // user never got an answer to.
-                    const preserveFullMessage =
-                      isContinue || sendResult.stopReason === 'cancelled';
-                    if (preserveFullMessage && nextMessage) {
-                      markApiHistoryPrompt(nextMessage, responseCapture.turnId);
-                    }
-                    this.#preserveUnsentMessageHistory(
-                      nextMessage,
-                      preserveFullMessage,
-                    );
-                    if (
-                      preserveFullMessage &&
-                      restorePostAnswerNoticesAttached
-                    ) {
-                      this.#clearPendingRestoreNotices();
-                    }
-                    return { stopReason: sendResult.stopReason };
-                  }
-                  if (restorePostAnswerNoticesAttached) {
-                    this.#clearPendingRestoreNotices();
-                  }
-                  requestRouteKey = sendResult.requestRouteKey;
-                  const responseStream = responseInterrupt.watch(
-                    sendResult.responseStream,
-                  );
+                if (sharedModelRound) {
+                  const message = nextMessage;
                   nextMessage = null;
+                  requestRouteKey = await this.#requestRouteKeyForModel(
+                    fullTurnModelOverride ?? this.config.getModel(),
+                  );
+                  this.#syncPromptTokenCountWithCurrentChat(requestRouteKey);
                   channelDeliveryResponseBlock =
                     beginChannelDeliveryResponseBlock(responseCapture);
                   channelDeliveryCheckpoint =
                     channelDeliveryResponseBlock?.parts.length ?? 0;
-
+                  const pushCountBefore =
+                    this.#getCurrentChat().getUserContentPushCount?.() ?? 0;
+                  requestUnsent = () => {
+                    const pushCount =
+                      this.#getCurrentChat().getUserContentPushCount?.();
+                    return (
+                      pushCount !== undefined && pushCount <= pushCountBefore
+                    );
+                  };
+                  let attempt: ModelResponseFacts = newModelResponseFacts();
+                  // The user-content push a response answers. A next-speaker
+                  // continuation sends another request within the round, and
+                  // its response starts its own facts and usage, as a new send
+                  // does on the current path.
+                  let responsePushCount: number | undefined;
+                  let loopStop:
+                    | ({ loopType: LoopType } & LoopStopDetail)
+                    | undefined;
+                  let roundStop: AgentLoopStopReason | undefined;
                   let streamFailed = false;
+                  let responseOpened = false;
+                  // A response cut short for queued input is given up, as
+                  // `responseInterrupt.watch` gives it up on the current path.
+                  const cutForInput = () =>
+                    responseInterrupt.signal.aborted &&
+                    !pendingSend.signal.aborted;
+                  // Input taken while a response streamed is user text at a
+                  // model boundary.
+                  const roundType =
+                    turnCount === 1
+                      ? SendMessageType.UserQuery
+                      : message.parts?.some((part) => part.functionResponse)
+                        ? SendMessageType.ToolResult
+                        : SendMessageType.Steer;
+                  // The error a response reported, thrown once the client has
+                  // finished the round.
+                  let streamError: StructuredError | undefined;
+                  // Open from the send, as `watch` is open once the request is
+                  // out: input sent before the model answers cuts the wait.
+                  responseInterrupt.begin();
                   try {
-                    for await (const resp of responseStream) {
-                      if (pendingSend.signal.aborted) {
-                        this.todoStopGuard.suspend();
-                        return { stopReason: 'cancelled' };
-                      }
-
-                      if (
-                        resp.type === StreamEventType.CHUNK &&
-                        resp.value.candidates &&
-                        resp.value.candidates.length > 0
-                      ) {
-                        const candidate = resp.value.candidates[0];
-                        for (const part of candidate.content?.parts ?? []) {
-                          if (!part.text) {
-                            continue;
+                    ({ stop: roundStop } = await runModelRound(
+                      this.config.getLlmClient(),
+                      {
+                        parts: message.parts ?? [],
+                        promptId,
+                        options: {
+                          type: roundType,
+                          modelOverride: fullTurnModelOverride,
+                          stopHookRunByHost: true,
+                          interactionSpanByHost: true,
+                          ...(!sharedToolBatch && {
+                            toolLoopGuardsByHost: true,
+                          }),
+                          toolCallPreparations: true,
+                          ...(roundType === SendMessageType.UserQuery && {
+                            userTurnRecordedByHost: true,
+                            promptAdmission,
+                            // Recall searches the user's words, as the
+                            // current path does, not the resolved files and
+                            // notices `parts` carries.
+                            memoryRecallQuery: promptText,
+                            ...(workflowHumanInput && {
+                              humanInput: workflowHumanInput,
+                            }),
+                            ...(submittedPrompt.trim().length > 0 && {
+                              submittedPrompt,
+                            }),
+                          }),
+                        },
+                      },
+                      responseInterrupt.signal,
+                      {
+                        onModelEvent: async (event) => {
+                          if (pendingSend.signal.aborted) return;
+                          const pushCount =
+                            this.#getCurrentChat().getUserContentPushCount?.();
+                          if (pushCount !== responsePushCount) {
+                            if (responsePushCount !== undefined) {
+                              attempt = newModelResponseFacts();
+                              if (usageMetadata) {
+                                this.#recordPromptTokenCount(
+                                  usageMetadata,
+                                  requestRouteKey,
+                                );
+                                await this.messageEmitter.emitUsageMetadata(
+                                  usageMetadata,
+                                  '',
+                                  Date.now() - streamStartTime,
+                                );
+                                usageMetadata = null;
+                              }
+                              streamStartTime = Date.now();
+                            }
+                            responsePushCount = pushCount;
                           }
-
-                          this.messageEmitter.emitMessage(
-                            part.text,
-                            'assistant',
-                            part.thought,
-                          );
-                          if (!part.thought) {
-                            responseCapture.agentOutput.appendText(part.text);
-                            appendChannelDeliveryResponseText(
-                              channelDeliveryResponseBlock,
-                              part.text,
-                            );
-                            messageDisplay?.addChunk(part.text);
+                          // Closed when a response finishes and opened by the
+                          // next one, such as a next-speaker continuation. The
+                          // first event also takes input that arrived before
+                          // the request went out.
+                          if (event.type === LlmEventType.Finished) {
+                            responseOpened = false;
+                            responseInterrupt.end();
+                          } else if (!responseOpened) {
+                            responseOpened = true;
+                            responseInterrupt.begin();
                           }
-                        }
-                        responseCapture.agentOutput.observeFinishReason(
-                          candidate.finishReason,
-                        );
-                      }
-
-                      if (
-                        resp.type === StreamEventType.CHUNK &&
-                        resp.value.usageMetadata
-                      ) {
-                        usageMetadata = resp.value.usageMetadata;
-                      }
-
-                      if (resp.type === StreamEventType.CHUNK) {
-                        await preparationTracker.observe(resp.value);
-                        if (resp.value.functionCalls) {
-                          preparationTracker.resolve(resp.value.functionCalls);
-                          functionCalls.push(...resp.value.functionCalls);
-                        }
-                      }
-                      if (
-                        resp.type === StreamEventType.RETRY ||
-                        resp.type === StreamEventType.MODEL_FALLBACK
-                      ) {
-                        responseCapture.agentOutput.restartAttempt(
-                          resp.type === StreamEventType.RETRY &&
-                            resp.isContinuation === true,
-                        );
-                        if (
-                          resp.type === StreamEventType.MODEL_FALLBACK ||
-                          !resp.isContinuation
-                        ) {
-                          rewindChannelDeliveryResponseBlock(
-                            channelDeliveryResponseBlock,
-                            channelDeliveryCheckpoint,
-                          );
-                        }
-                        await finalizeToolCallPreparations(
-                          preparationTracker,
-                          true,
-                          `main prompt ${resp.type}`,
-                        );
-                        functionCalls.length = 0;
-                      }
-                      if (resp.type === StreamEventType.COMPRESSED) {
-                        // In-send compression rewrote the shared history;
-                        // invalidate every retained route count (the
-                        // pre-send hook never sees this path).
-                        this.#recordCompressionTokenCount(
-                          resp.info,
-                          requestRouteKey,
-                        );
-                      }
-                    }
+                          switch (event.type) {
+                            case LlmEventType.Content:
+                              if (!event.value) break;
+                              void this.messageEmitter.emitMessage(
+                                event.value,
+                                'assistant',
+                                false,
+                              );
+                              responseCapture.agentOutput.appendText(
+                                event.value,
+                              );
+                              appendChannelDeliveryResponseText(
+                                channelDeliveryResponseBlock,
+                                event.value,
+                              );
+                              break;
+                            case LlmEventType.Thought:
+                              if (event.text) {
+                                void this.messageEmitter.emitMessage(
+                                  event.text,
+                                  'assistant',
+                                  true,
+                                );
+                              }
+                              break;
+                            case LlmEventType.ToolCallPreparation:
+                              await preparationTracker.prepare(event.value);
+                              break;
+                            case LlmEventType.ToolCallRequest:
+                              if (event.functionCall) {
+                                this.#callResponses.set(
+                                  event.functionCall,
+                                  attempt,
+                                );
+                                preparationTracker.resolve([
+                                  event.functionCall,
+                                ]);
+                                functionCalls.push(event.functionCall);
+                                toolRequests.push(event.value);
+                              }
+                              break;
+                            case LlmEventType.Finished:
+                              usageMetadata =
+                                event.value.usageMetadata ?? usageMetadata;
+                              responseCapture.agentOutput.observeFinishReason(
+                                event.value.reason,
+                              );
+                              if (
+                                event.value.reason === FinishReason.MAX_TOKENS
+                              ) {
+                                attempt.outputTruncated = true;
+                              }
+                              break;
+                            case LlmEventType.Retry:
+                            case LlmEventType.ModelFallback: {
+                              const continuation =
+                                event.type === LlmEventType.Retry &&
+                                event.isContinuation === true;
+                              responseCapture.agentOutput.restartAttempt(
+                                continuation,
+                              );
+                              if (!continuation) {
+                                rewindChannelDeliveryResponseBlock(
+                                  channelDeliveryResponseBlock,
+                                  channelDeliveryCheckpoint,
+                                );
+                              }
+                              await finalizeToolCallPreparations(
+                                preparationTracker,
+                                true,
+                                `main prompt ${event.type}`,
+                              );
+                              functionCalls.length = 0;
+                              toolRequests.length = 0;
+                              attempt = newModelResponseFacts();
+                              break;
+                            }
+                            case LlmEventType.ChatCompressed:
+                              if (!event.value) break;
+                              this.loopTickResolver?.resetCache();
+                              this.#recordCompressionTokenCount(
+                                event.value,
+                                requestRouteKey,
+                              );
+                              await this.#emitAgentDiagnosticMessageSafely(
+                                formatCompressionDiagnostic(
+                                  event.value,
+                                  this.config.getModel(),
+                                ),
+                                `Failed to emit compression notification for prompt ${promptId}`,
+                              );
+                              break;
+                            case LlmEventType.SessionTokenLimitExceeded:
+                              await this.#emitAgentDiagnosticMessageSafely(
+                                `Session token limit exceeded: ${event.value.currentTokens} tokens > ${event.value.limit} limit. ` +
+                                  'Please start a new session or increase the sessionTokenLimit in your settings.json.',
+                                `Failed to emit token limit diagnostic for prompt ${promptId}`,
+                              );
+                              break;
+                            case LlmEventType.LoopDetected:
+                              loopStop = event.value;
+                              break;
+                            case LlmEventType.UserPromptSubmitBlocked:
+                              // A tool-result round runs UserPromptSubmit too.
+                              await this.messageEmitter.emitAgentMessage(
+                                userPromptBlockedNotice(event.value.reason),
+                              );
+                              break;
+                            case LlmEventType.Error:
+                              streamError = event.value.error;
+                              break;
+                            default:
+                              break;
+                          }
+                        },
+                      },
+                    ));
+                    if (streamError) throw modelStreamError(streamError);
                   } catch (error) {
                     streamFailed = true;
-                    throw error;
-                  } finally {
-                    await finalizeToolCallPreparations(
-                      preparationTracker,
-                      streamFailed || pendingSend.signal.aborted,
-                      'main prompt',
-                    );
-                  }
-                } catch (error) {
-                  // Restore the stripped orphan if the send threw before
-                  // re-pushing it (the null-stream path above already preserves;
-                  // an exception bypasses it). Gate on the push counter — like
-                  // the core Retry restore in client.ts — so we only restore
-                  // when the content never landed (a later tool-loop send
-                  // throwing leaves the counter advanced → no double-restore).
-                  if (
-                    strippedOrphanEntries &&
-                    (this.#getCurrentChat().getUserContentPushCount?.() ?? 0) <=
-                      orphanPushCountSnapshot
-                  ) {
-                    for (const entry of strippedOrphanEntries) {
-                      this.#getCurrentChat().addHistory(entry);
+                    if (!cutForInput()) {
+                      // A round that threw before its request pushed the
+                      // message, such as on a tool-result round whose
+                      // UserPromptSubmit hook timed out, keeps it as the stops
+                      // below do.
+                      if (requestUnsent()) {
+                        if (pendingSend.signal.aborted) {
+                          markApiHistoryPrompt(message, responseCapture.turnId);
+                        }
+                        this.#preserveUnsentMessageHistory(
+                          message,
+                          pendingSend.signal.aborted,
+                        );
+                      }
+                      return this.#endFailedModelRound(
+                        error,
+                        pendingSend.signal,
+                      );
                     }
-                    strippedOrphanEntries = null;
+                  } finally {
+                    responseInterrupt.end();
+                    // A round that stopped, such as on the client's loop
+                    // guard, runs none of the calls it already yielded. The
+                    // loop guard's calls are skipped, as ACP's guard skips
+                    // them.
+                    if (
+                      roundStop === 'loop_detected' &&
+                      !streamFailed &&
+                      !pendingSend.signal.aborted
+                    ) {
+                      await this.#emitLoopSkippedToolCalls(
+                        preparationTracker
+                          .takePending()
+                          .map(({ callId, toolName }) => ({
+                            callId,
+                            name: toolName,
+                          })),
+                      );
+                    } else {
+                      await finalizeToolCallPreparations(
+                        preparationTracker,
+                        streamFailed ||
+                          pendingSend.signal.aborted ||
+                          roundStop !== undefined,
+                        'main prompt',
+                      );
+                    }
                   }
-
-                  // Explicit user cancellation and session disposal are
-                  // controlled aborts, and so is the bridge's forwarded
-                  // interruption token. Other AbortErrors still surface so
-                  // infrastructure failures are not hidden as cancellations.
-                  // A response cut short by queued input gets here only when
-                  // the turn itself is stopped meanwhile, and the turn's
-                  // abort reason then decides; otherwise `watch` absorbs
-                  // whatever it throws once cut.
-                  const isControlledCancellation =
-                    pendingSend.signal.aborted &&
-                    (pendingSend.signal.reason === USER_CANCEL_ABORT_REASON ||
-                      pendingSend.signal.reason ===
-                        SESSION_DISPOSE_ABORT_REASON ||
-                      pendingSend.signal.reason ===
-                        INTERRUPTED_PROMPT_ABORT_REASON);
-                  if (isControlledCancellation) {
+                  // A round that stopped before its request pushed the message
+                  // keeps it in history, as a send the current path drops does.
+                  const pushed =
+                    (this.#getCurrentChat().getUserContentPushCount?.() ?? 0) >
+                    pushCountBefore;
+                  if (pendingSend.signal.aborted) {
                     this.todoStopGuard.suspend();
+                    if (!pushed) {
+                      markApiHistoryPrompt(message, responseCapture.turnId);
+                      this.#preserveUnsentMessageHistory(message, true);
+                    }
                     return { stopReason: 'cancelled' };
                   }
-
-                  this.todoStopGuard.pauseForTrustedRetry();
-
-                  // Fire StopFailure hook (fire-and-forget, replaces Stop event for API errors)
-                  // Aligned with use-llm-stream.ts handleFinishedWithErrorEvent
-                  const errorStatus = getErrorStatus(error);
-                  const errorMessage =
-                    error instanceof Error ? error.message : String(error);
-                  const errorType = classifyApiError({
-                    message: errorMessage,
-                    status: errorStatus,
-                  });
-
-                  const hookSystem = this.config.getHookSystem?.();
-                  const hooksEnabledForStopFailure =
-                    !this.config.getDisableAllHooks?.();
-                  if (
-                    hooksEnabledForStopFailure &&
-                    hookSystem &&
-                    this.config.hasHooksForEvent?.('StopFailure')
-                  ) {
-                    // Fire-and-forget: don't wait for hook to complete
-                    hookSystem
-                      .fireStopFailureEvent(errorType, errorMessage)
-                      .catch((err) => {
-                        debugLogger.warn(`StopFailure hook failed: ${err}`);
-                      });
-                  }
-
-                  if (errorStatus === 429) {
-                    throw new RequestError(
-                      429,
-                      'Rate limit exceeded. Try again later.',
+                  if (roundStop === 'user_prompt_blocked') {
+                    this.todoStopGuard.suspend();
+                    // A tool-result round the hook blocked closes its calls
+                    // with the block, not with the results it withheld from
+                    // the model, nor with the repair's "retry if needed".
+                    const blockedCalls = (message.parts ?? []).flatMap(
+                      ({ functionResponse }) =>
+                        functionResponse?.id
+                          ? [
+                              {
+                                callId: functionResponse.id,
+                                name: functionResponse.name ?? '',
+                              },
+                            ]
+                          : [],
                     );
+                    // Input taken with the results, already shown as
+                    // delivered, stays in history with the closed calls, as a
+                    // stopped tool run keeps it.
+                    if (!pushed && blockedCalls.length > 0) {
+                      this.#getCurrentChat().addHistory({
+                        role: 'user',
+                        parts: [
+                          ...buildSyntheticToolResponseParts(
+                            blockedCalls,
+                            USER_PROMPT_BLOCKED_TOOL_RESULT,
+                          ),
+                          ...(message.parts ?? []).filter(
+                            (part) => !part.functionResponse,
+                          ),
+                        ],
+                      });
+                    }
+                    return { stopReason: 'end_turn' };
                   }
+                  if (
+                    roundStop === 'session_token_limit' ||
+                    roundStop === 'max_session_turns' ||
+                    roundStop === 'loop_detected'
+                  ) {
+                    this.todoStopGuard.suspend();
+                    if (!pushed) {
+                      this.#preserveUnsentMessageHistory(message, false);
+                    }
+                    if (roundStop === 'session_token_limit') {
+                      return { stopReason: 'max_tokens' };
+                    }
+                    if (roundStop === 'max_session_turns') {
+                      return { stopReason: 'max_turn_requests' };
+                    }
+                    if (rejectOnLoopDetected) {
+                      throw createLoopDetectedTurnError({
+                        loopType: loopStop?.loopType,
+                        loopDetail: loopStop,
+                      });
+                    }
+                    return { stopReason: 'end_turn' };
+                  }
+                } else {
+                  try {
+                    // Set where the model request is actually issued, not at
+                    // the top of the turn. `modelStarted` is what
+                    // `#settleGoalTurn` reads to decide between `releaseTurn`
+                    // (nothing happened, hand the permit back) and `finishTurn`
+                    // (an iteration completed, count it). Between the top of
+                    // the turn and here sit the abort check and the whole
+                    // prompt-assembly path, so flagging early let a turn that
+                    // was preempted before it ever reached the model settle as
+                    // a completed iteration — a phantom turn on the goal's
+                    // count and a checkpoint recording work that never ran.
+                    // Re-assigning on later loop laps is harmless.
+                    if (goalTurn) {
+                      goalTurn.modelStarted = true;
+                      if (goalTurn.origin === 'runtime') {
+                        this.#markGoalTurnDelivered(goalTurn.turnKey);
+                      }
+                    }
+                    const sendResult =
+                      await this.#sendMessageStreamWithAutoCompression(
+                        promptId,
+                        nextMessage?.parts ?? [],
+                        responseInterrupt.signal,
+                        {
+                          modelOverride: fullTurnModelOverride,
+                          suppressedHookContext,
+                          historyPromptId:
+                            turnCount === 1 &&
+                            goalTurn?.origin !== 'runtime' &&
+                            !nextMessage?.parts?.some(
+                              (part) => part.functionResponse,
+                            )
+                              ? continuesCurrentWorkChain
+                                ? continuedPromptId
+                                : promptId
+                              : undefined,
+                          consumeInitialMemory:
+                            isFreshUserTurn && turnCount === 1,
+                        },
+                      );
+                    if (!sendResult.responseStream) {
+                      this.todoStopGuard.suspend();
+                      // Preserve the full message (not just functionResponse
+                      // parts) for a continuation: its content was stripped from
+                      // history before the send, so dropping it here on a
+                      // non-cancelled failure would lose the orphaned turn the
+                      // user never got an answer to.
+                      const preserveFullMessage =
+                        isContinue || sendResult.stopReason === 'cancelled';
+                      if (preserveFullMessage && nextMessage) {
+                        markApiHistoryPrompt(
+                          nextMessage,
+                          responseCapture.turnId,
+                        );
+                      }
+                      this.#preserveUnsentMessageHistory(
+                        nextMessage,
+                        preserveFullMessage,
+                      );
+                      if (
+                        preserveFullMessage &&
+                        restorePostAnswerNoticesAttached
+                      ) {
+                        this.#clearPendingRestoreNotices();
+                      }
+                      return { stopReason: sendResult.stopReason };
+                    }
+                    if (restorePostAnswerNoticesAttached) {
+                      this.#clearPendingRestoreNotices();
+                    }
+                    requestRouteKey = sendResult.requestRouteKey;
+                    const responseStream = responseInterrupt.watch(
+                      sendResult.responseStream,
+                    );
+                    nextMessage = null;
+                    channelDeliveryResponseBlock =
+                      beginChannelDeliveryResponseBlock(responseCapture);
+                    channelDeliveryCheckpoint =
+                      channelDeliveryResponseBlock?.parts.length ?? 0;
 
-                  throw error;
-                } finally {
-                  // Deliver is_final (skipped on abort) and drain before the
-                  // turn proceeds, on every exit: normal end-of-stream,
-                  // cancellation returns, and thrown stream errors alike.
-                  await messageDisplay?.finish();
+                    let streamFailed = false;
+                    try {
+                      for await (const resp of responseStream) {
+                        if (pendingSend.signal.aborted) {
+                          this.todoStopGuard.suspend();
+                          return { stopReason: 'cancelled' };
+                        }
+
+                        if (
+                          resp.type === StreamEventType.CHUNK &&
+                          resp.value.candidates &&
+                          resp.value.candidates.length > 0
+                        ) {
+                          const candidate = resp.value.candidates[0];
+                          for (const part of candidate.content?.parts ?? []) {
+                            if (!part.text) {
+                              continue;
+                            }
+
+                            this.messageEmitter.emitMessage(
+                              part.text,
+                              'assistant',
+                              part.thought,
+                            );
+                            if (!part.thought) {
+                              responseCapture.agentOutput.appendText(part.text);
+                              appendChannelDeliveryResponseText(
+                                channelDeliveryResponseBlock,
+                                part.text,
+                              );
+                              messageDisplay?.addChunk(part.text);
+                            }
+                          }
+                          responseCapture.agentOutput.observeFinishReason(
+                            candidate.finishReason,
+                          );
+                        }
+
+                        if (
+                          resp.type === StreamEventType.CHUNK &&
+                          resp.value.usageMetadata
+                        ) {
+                          usageMetadata = resp.value.usageMetadata;
+                        }
+
+                        if (resp.type === StreamEventType.CHUNK) {
+                          await preparationTracker.observe(resp.value);
+                          if (resp.value.functionCalls) {
+                            preparationTracker.resolve(
+                              resp.value.functionCalls,
+                            );
+                            functionCalls.push(...resp.value.functionCalls);
+                          }
+                        }
+                        if (
+                          resp.type === StreamEventType.RETRY ||
+                          resp.type === StreamEventType.MODEL_FALLBACK
+                        ) {
+                          responseCapture.agentOutput.restartAttempt(
+                            resp.type === StreamEventType.RETRY &&
+                              resp.isContinuation === true,
+                          );
+                          if (
+                            resp.type === StreamEventType.MODEL_FALLBACK ||
+                            !resp.isContinuation
+                          ) {
+                            rewindChannelDeliveryResponseBlock(
+                              channelDeliveryResponseBlock,
+                              channelDeliveryCheckpoint,
+                            );
+                          }
+                          await finalizeToolCallPreparations(
+                            preparationTracker,
+                            true,
+                            `main prompt ${resp.type}`,
+                          );
+                          functionCalls.length = 0;
+                        }
+                        if (resp.type === StreamEventType.COMPRESSED) {
+                          // In-send compression rewrote the shared history;
+                          // invalidate every retained route count (the
+                          // pre-send hook never sees this path).
+                          this.#recordCompressionTokenCount(
+                            resp.info,
+                            requestRouteKey,
+                          );
+                        }
+                      }
+                    } catch (error) {
+                      streamFailed = true;
+                      throw error;
+                    } finally {
+                      await finalizeToolCallPreparations(
+                        preparationTracker,
+                        streamFailed || pendingSend.signal.aborted,
+                        'main prompt',
+                      );
+                    }
+                  } catch (error) {
+                    // Restore the stripped orphan if the send threw before
+                    // re-pushing it (the null-stream path above already preserves;
+                    // an exception bypasses it). Gate on the push counter — like
+                    // the core Retry restore in client.ts — so we only restore
+                    // when the content never landed (a later tool-loop send
+                    // throwing leaves the counter advanced → no double-restore).
+                    if (
+                      strippedOrphanEntries &&
+                      (this.#getCurrentChat().getUserContentPushCount?.() ??
+                        0) <= orphanPushCountSnapshot
+                    ) {
+                      for (const entry of strippedOrphanEntries) {
+                        this.#getCurrentChat().addHistory(entry);
+                      }
+                      strippedOrphanEntries = null;
+                    }
+
+                    // A response cut short by queued input gets here only when
+                    // the turn itself is stopped meanwhile, and the turn's
+                    // abort reason then decides; otherwise `watch` absorbs
+                    // whatever it throws once cut.
+                    return this.#endFailedModelRound(error, pendingSend.signal);
+                  } finally {
+                    // Deliver is_final (skipped on abort) and drain before the
+                    // turn proceeds, on every exit: normal end-of-stream,
+                    // cancellation returns, and thrown stream errors alike.
+                    await messageDisplay?.finish();
+                  }
                 }
 
                 commitChannelDeliveryResponseBlock(
@@ -7936,13 +8375,21 @@ export class Session implements SessionContext {
                   const toolRun = await this.#runWithFullTurnModel(
                     fullTurnModelOverride,
                     () =>
-                      this.runToolCalls(
-                        pendingSend.signal,
-                        promptId,
-                        functionCalls,
-                        toolLoopState,
-                        onFullTurnModel,
-                      ),
+                      sharedToolBatch
+                        ? this.#runSharedToolBatch(
+                            pendingSend.signal,
+                            promptId,
+                            toolRequests,
+                            toolLoopState,
+                            onFullTurnModel,
+                          )
+                        : this.runToolCalls(
+                            pendingSend.signal,
+                            promptId,
+                            functionCalls,
+                            toolLoopState,
+                            onFullTurnModel,
+                          ),
                   );
                   if (
                     toolRun.stopAfterPermissionCancel ||
@@ -7976,6 +8423,7 @@ export class Session implements SessionContext {
                       result,
                       responseCapture,
                       isFreshUserTurn,
+                      sharedModelRound,
                     );
                     return result;
                   }
@@ -7987,6 +8435,7 @@ export class Session implements SessionContext {
                       toolLoopState,
                       onFullTurnModel,
                       rejectOnLoopDetected,
+                      sharedToolBatch,
                     );
                   nextMessage = nextAfterTools.message;
                   if (nextAfterTools.stoppedByRepeatedToolFailure) {
@@ -8040,6 +8489,7 @@ export class Session implements SessionContext {
                 result,
                 responseCapture,
                 isFreshUserTurn,
+                sharedModelRound,
               );
               return { stopReason: result.stopReason };
             } finally {
@@ -8074,6 +8524,55 @@ export class Session implements SessionContext {
         this.config.getLlmClient().finishManagedAutoMemoryRecall();
       }
     });
+  }
+
+  /**
+   * Ends a turn whose model round threw. Explicit user cancellation and
+   * session disposal are controlled aborts, and so is the bridge's forwarded
+   * interruption token; other AbortErrors still surface so infrastructure
+   * failures are not hidden as cancellations. A failure fires StopFailure
+   * (fire-and-forget, in place of Stop, as `use-llm-stream.ts`
+   * handleFinishedWithErrorEvent does) and is thrown.
+   */
+  #endFailedModelRound(
+    error: unknown,
+    turnSignal: AbortSignal,
+  ): { stopReason: 'cancelled' } {
+    if (
+      turnSignal.aborted &&
+      (turnSignal.reason === USER_CANCEL_ABORT_REASON ||
+        turnSignal.reason === SESSION_DISPOSE_ABORT_REASON ||
+        turnSignal.reason === INTERRUPTED_PROMPT_ABORT_REASON)
+    ) {
+      this.todoStopGuard.suspend();
+      return { stopReason: 'cancelled' };
+    }
+
+    this.todoStopGuard.pauseForTrustedRetry();
+
+    const errorStatus = getErrorStatus(error);
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const hookSystem = this.config.getHookSystem?.();
+    if (
+      !this.config.getDisableAllHooks?.() &&
+      hookSystem &&
+      this.config.hasHooksForEvent?.('StopFailure')
+    ) {
+      hookSystem
+        .fireStopFailureEvent(
+          classifyApiError({ message: errorMessage, status: errorStatus }),
+          errorMessage,
+        )
+        .catch((err) => {
+          debugLogger.warn(`StopFailure hook failed: ${err}`);
+        });
+    }
+
+    if (errorStatus === 429) {
+      throw new RequestError(429, 'Rate limit exceeded. Try again later.');
+    }
+
+    throw error;
   }
 
   async #handleStopHookLoop(
@@ -9702,28 +10201,10 @@ export class Session implements SessionContext {
               createUserPromptSubmitContextPart(options.suppressedHookContext),
             ];
           }
-          const reasonClause =
-            compressed.triggerReason === 'image_overflow'
-              ? `accumulated enough tool screenshots to trigger compaction for ${this.config.getModel()}`
-              : `approached the input token limit for ${this.config.getModel()}`;
-          const warningSuffix = compressed.warning
-            ? `\n⚠️ ${compressed.warning}`
-            : '';
-          // Estimated counts (#9309) get a '~' prefix so the notice doesn't
-          // read as an API-reported figure on a different scale than a later
-          // banner.
-          const formatCount = (count?: number, isEstimated?: boolean) =>
-            count === undefined
-              ? 'unknown'
-              : isEstimated
-                ? `~${count}`
-                : String(count);
-          compressionDiagnostic =
-            `IMPORTANT: This conversation ${reasonClause}. ` +
-            `A compressed context will be sent for future messages (compressed from: ` +
-            `${formatCount(compressed.originalTokenCount, compressed.originalTokenCountIsEstimated)} to ` +
-            `${formatCount(compressed.newTokenCount, compressed.newTokenCountIsEstimated)} tokens).` +
-            warningSuffix;
+          compressionDiagnostic = formatCompressionDiagnostic(
+            compressed,
+            this.config.getModel(),
+          );
         }
       } catch (compressionError) {
         if (abortSignal.aborted) {
@@ -9872,10 +10353,7 @@ export class Session implements SessionContext {
       let memoryDeliveryStateInvalidated = false;
       // As in `turn.ts`: a max-tokens finish marks the calls of the current
       // attempt, and a retry or fallback starts a new attempt.
-      let attempt: ModelResponseFacts = {
-        outputTruncated: false,
-        refusedPartialEdits: new Set(),
-      };
+      let attempt: ModelResponseFacts = newModelResponseFacts();
       const commitMemoryDelivery = () => {
         llmClient.commitManagedAutoMemoryRecallDelivery(memoryDelivery);
         if (memoryDeliveryStateInvalidated) {
@@ -9904,10 +10382,7 @@ export class Session implements SessionContext {
             event.type === StreamEventType.MODEL_FALLBACK
           ) {
             receivedChunk = false;
-            attempt = {
-              outputTruncated: false,
-              refusedPartialEdits: new Set(),
-            };
+            attempt = newModelResponseFacts();
           }
           yield event;
         }
@@ -10058,6 +10533,9 @@ export class Session implements SessionContext {
     },
     responseCapture: AgentResponseCapture,
     isFreshUserTurn: boolean,
+    // The turn's model rounds went through `LlmClient`, which leaves the
+    // memory tasks to the host that ends the turn.
+    sharedModelRound = false,
   ): void {
     if (result.stopReason !== 'cancelled') {
       responseCapture.agentOutput.writeToSpan(getActiveInteractionSpan());
@@ -10065,9 +10543,20 @@ export class Session implements SessionContext {
     if (
       !isFreshUserTurn ||
       result.stopReason !== 'end_turn' ||
-      result.loopProtectionStopped ||
-      !this.config.getManagedAutoMemoryEnabled()
+      result.loopProtectionStopped
     ) {
+      return;
+    }
+    if (sharedModelRound) {
+      const llmClient = this.config.getLlmClient();
+      llmClient.captureCacheSafeParams();
+      llmClient.runManagedAutoMemoryBackgroundTasks(SendMessageType.UserQuery);
+      // ACP reports no memory updates, so take the tasks the client queued for
+      // that report instead of leaving them to pile up over the session.
+      void llmClient.consumePendingMemoryTaskPromises();
+      return;
+    }
+    if (!this.config.getManagedAutoMemoryEnabled()) {
       return;
     }
     this.config.getLlmClient().captureCacheSafeParams();
@@ -10122,6 +10611,8 @@ export class Session implements SessionContext {
     toolLoopState: DaemonToolLoopState,
     onFullTurnModel?: (model: string) => boolean,
     rejectOnLoopDetected = false,
+    // The client adds the todo and exploration reminders to the request.
+    clientToolGuards = false,
   ): Promise<NextMessageAfterToolRun> {
     if (toolRun.loopDetected) {
       debugLogger.debug('Stopping ACP turn after daemon loop detection.');
@@ -10154,9 +10645,11 @@ export class Session implements SessionContext {
           canonicalToolName(observation.policyToolName ?? '') ===
             ToolNames.AGENT && observation.executionStatus !== 'not_started',
       );
-    const activeTodoReminder = carriesAgentToolResult
-      ? this.config.takeActiveTodoReminder(promptId, true)
-      : this.config.takeActiveTodoReminder(promptId);
+    const activeTodoReminder = clientToolGuards
+      ? undefined
+      : carriesAgentToolResult
+        ? this.config.takeActiveTodoReminder(promptId, true)
+        : this.config.takeActiveTodoReminder(promptId);
     if (abortSignal.aborted) {
       return {
         message: {
@@ -10209,7 +10702,8 @@ export class Session implements SessionContext {
     const parts = [
       ...toolRun.parts,
       ...(activeTodoReminder ? [{ text: activeTodoReminder }] : []),
-      ...(toolLoopState.explorationBudget?.takeReminder(
+      ...(!clientToolGuards &&
+      toolLoopState.explorationBudget?.takeReminder(
         this.config.getMaxToolCallsPerTurn(),
       )
         ? [{ text: TOOL_EXPLORATION_REMINDER }]
@@ -10673,6 +11167,9 @@ export class Session implements SessionContext {
   ): {
     signal: AbortSignal;
     watch: (stream: AsyncGenerator<StreamEvent>) => AsyncGenerator<StreamEvent>;
+    /** Opens and closes the window `watch` keeps around a stream. */
+    begin: () => void;
+    end: () => void;
     takeInput: (
       onFullTurnModel?: (model: string) => boolean,
     ) => Promise<Content | null>;
@@ -10681,6 +11178,8 @@ export class Session implements SessionContext {
       return {
         signal: turnSignal,
         watch: (stream) => stream,
+        begin: () => {},
+        end: () => {},
         takeInput: async () => null,
       };
     }
@@ -10757,6 +11256,8 @@ export class Session implements SessionContext {
     const interrupted = () => controller.signal.aborted && !turnSignal.aborted;
     return {
       signal: AbortSignal.any([turnSignal, controller.signal]),
+      begin,
+      end,
       async *watch(stream) {
         begin();
         try {
@@ -13924,6 +14425,338 @@ export class Session implements SessionContext {
    * sequential batch to preserve the implicit ordering the model may rely
    * on. Response-part ordering matches the original `functionCalls` order.
    */
+  /**
+   * Whether a fresh prompt's tool batches run on the shared loop's batch.
+   * Live tools, which ACP trusts without the permission flow, and a
+   * read-only Agent Host session, which refuses approvals, keep ACP's own
+   * tool step.
+   */
+  #runsToolsOnSharedBatch(): boolean {
+    return (
+      !this.liveScreenContextTool &&
+      this.liveTaskTools.length === 0 &&
+      !this.liveSpeakToUserTool &&
+      this.config.getSessionSourceType?.() !== 'agent-host'
+    );
+  }
+
+  /** The calls a loop stop left unrun, shown as skipped. */
+  async #emitLoopSkippedToolCalls(
+    requests: ReadonlyArray<{ callId: string; name: string }>,
+  ): Promise<void> {
+    for (const { callId, name } of requests) {
+      try {
+        const lifecycle =
+          name === ToolNames.TODO_WRITE
+            ? undefined
+            : createToolLifecycle(this.config, callId, name).finish(
+                'error',
+                'not_started',
+              );
+        if (lifecycle) await this.toolCallEmitter.emitLifecycle(lifecycle);
+        await this.toolCallEmitter.emitError(
+          callId,
+          name,
+          new Error(LOOP_DETECTED_SKIP_MESSAGE),
+        );
+      } catch (error) {
+        debugLogger.debug('Failed to emit skipped tool call', error);
+      }
+    }
+  }
+
+  #toolBatchHost(): AcpToolBatchHost {
+    return {
+      ctx: this,
+      client: this.client,
+      toolCallEmitter: this.toolCallEmitter,
+      messageEmitter: this.messageEmitter,
+      sendUpdate: (update) => this.sendUpdate(update),
+      requestPermission: (params, signal) =>
+        this.#requestPermissionQueued(params, signal),
+      permissionPersistencePolicy: this.requiresManagedConversationBinding
+        ? STANDALONE_PERMISSION_PERSISTENCE_POLICY
+        : undefined,
+      sendModeUpdate: () => this.sendCurrentModeUpdateNotification(),
+      onPlanModeEntered: () => {
+        this.clearActiveTodoPlanRevision();
+        this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
+      },
+      todoPlanApproval: () => {
+        const workflowPlanRevision =
+          this.config.getSessionWorkflowPlanRevision?.();
+        const revision = this.activeTodoPlanRevision;
+        return revision &&
+          workflowPlanRevision?.planId === revision.planId &&
+          workflowPlanRevision.sourceCallId === revision.sourceCallId
+          ? { revision, generation: this.todoPlanRevisionGeneration }
+          : undefined;
+      },
+      isTodoPlanApprovalStale: ({ revision, generation }) => {
+        const configRevision = this.config.getSessionWorkflowPlanRevision?.();
+        return !(
+          generation === this.todoPlanRevisionGeneration &&
+          this.activeTodoPlanRevision?.planId === revision.planId &&
+          this.activeTodoPlanRevision?.sourceCallId === revision.sourceCallId &&
+          configRevision?.planId === revision.planId &&
+          configRevision?.sourceCallId === revision.sourceCallId
+        );
+      },
+      onTodoWriteSettled: (status, resultDisplay) => {
+        const tool = this.config
+          .getToolRegistry()
+          .getTool(ToolNames.TODO_WRITE);
+        const trusted =
+          tool?.kind === Kind.Think &&
+          tool.constructor.name === 'TodoWriteTool';
+        if (trusted && status === 'success') {
+          this.todoStopGuard.observeTodoWrite(
+            resultDisplay as ToolResultDisplay,
+            this.config.getApprovalMode() !== ApprovalMode.PLAN,
+          );
+        } else if (trusted && status === 'cancelled') {
+          this.todoStopGuard.suspend();
+        }
+      },
+      continueRelatedAgent: (args) => {
+        const agentId =
+          typeof args['task_id'] === 'string' && args['task_id'].length > 0
+            ? args['task_id']
+            : undefined;
+        if (!agentId || this.relatedAgentIds.has(agentId)) return undefined;
+        this.provisionalRelatedAgentCounts.set(
+          agentId,
+          (this.provisionalRelatedAgentCounts.get(agentId) ?? 0) + 1,
+        );
+        return (succeeded) => {
+          const remaining =
+            (this.provisionalRelatedAgentCounts.get(agentId) ?? 1) - 1;
+          if (remaining > 0) {
+            this.provisionalRelatedAgentCounts.set(agentId, remaining);
+          } else {
+            this.provisionalRelatedAgentCounts.delete(agentId);
+          }
+          if (succeeded) this.relatedAgentIds.add(agentId);
+        };
+      },
+      sendTerminalSequence: (terminalSequence) => {
+        void this.client
+          .extNotification('qwen/notify/session/terminal-sequence', {
+            v: 1,
+            sessionId: this.sessionId,
+            terminalSequence,
+          })
+          .catch((error: unknown) =>
+            debugLogger.debug(
+              `ACP terminalSequence notification dropped (session=${this.sessionId}): ${this.#formatError(error)}`,
+            ),
+          );
+      },
+      refuseToolCall: (request) => {
+        const name = canonicalToolName(request.name);
+        if (
+          name === ToolNames.PROPOSE_GOAL &&
+          (this.activeGoalProposalTurn?.turnKey !== request.prompt_id ||
+            this.activeGoalProposalTurn.controller.signal.aborted)
+        ) {
+          return 'The Goal was not set: this turn cannot own a Goal approval. Hand the user a `/goal set <objective>` line instead.';
+        }
+        const requestsAgentWorkingDirectory =
+          name === ToolNames.AGENT &&
+          (request.args['isolation'] === 'worktree' ||
+            (typeof request.args['working_dir'] === 'string' &&
+              request.args['working_dir'].trim().length > 0));
+        if (
+          this.requiresManagedConversationBinding &&
+          (requestsAgentWorkingDirectory ||
+            name === ToolNames.ENTER_WORKTREE ||
+            name === ToolNames.EXIT_WORKTREE)
+        ) {
+          return STANDALONE_WORKTREE_ACTION_ERROR;
+        }
+        return undefined;
+      },
+    };
+  }
+
+  /**
+   * A fresh prompt's tool batch on the shared loop's batch. The client checks
+   * the tool-call patterns, the per-turn cap and the exploration budget; ACP
+   * keeps its repeated parameter-error and partial-edit stops, per turn.
+   */
+  async #runSharedToolBatch(
+    abortSignal: AbortSignal,
+    promptId: string,
+    requests: ToolCallRequestInfo[],
+    toolLoopState: DaemonToolLoopState,
+    onFullTurnModel?: (model: string) => boolean,
+  ): Promise<RunToolResult> {
+    promptIdContext.enterWith(promptId);
+    todoWorkChainContext.enterWith(
+      this.config.getActiveTodoWorkChainOwner(promptId),
+    );
+    const batch = await runAcpToolBatch(this.#toolBatchHost(), {
+      requests,
+      signal: abortSignal,
+      onFullTurnModel,
+      duplicates: {
+        handled: new Map(
+          this.#getCurrentChat().getHistoryToolCallFingerprints(),
+        ),
+        responded: this.duplicateProviderToolCallResponseIds,
+      },
+    });
+    if (batch.stop === 'duplicate_provider_call') {
+      recordDaemonLoopDetected(
+        this.config,
+        promptId,
+        LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+        'Stopping ACP turn after a repeated duplicate provider tool-call id.',
+        toolLoopState,
+        { loopDetail: { loopReason: LoopReason.PROVIDER_DUPLICATE_ID } },
+      );
+      await this.#emitLoopSkippedToolCalls(requests);
+      return {
+        parts: [],
+        stopAfterPermissionCancel: false,
+        loopDetected: true,
+      };
+    }
+
+    const registry = this.config.getToolRegistry();
+    const refusedPartialEdits = new Set<string>();
+    const memoryWriteCandidates: MemoryWriteCandidate[] = [];
+    const observations: RepeatedToolFailureObservation[] = [];
+    for (const {
+      origin,
+      executionRequest,
+      response,
+      status,
+    } of batch.results) {
+      const tool = registry.getTool(executionRequest.name);
+      const toolName = executionRequest.name;
+      observations.push({
+        callId: response.callId,
+        policyToolName: tool?.name,
+        toolType: tool
+          ? tool instanceof DiscoveredMCPTool
+            ? 'mcp'
+            : 'native'
+          : undefined,
+        terminalStatus: status,
+        executionStatus: response.executionStatus ?? 'not_started',
+        executionErrorType: response.errorType,
+        providerDuplicate: origin === 'replayed' || origin === 'duplicate',
+      });
+      if (origin !== 'executed') continue;
+      if (status === 'success') {
+        memoryWriteCandidates.push({
+          toolName,
+          args: executionRequest.args,
+          status,
+        });
+      }
+      if (abortSignal.aborted) continue;
+      const ran = response.executionStatus !== 'not_started';
+      const partialEdit =
+        !ran &&
+        tool?.kind === Kind.Edit &&
+        (executionRequest.wasOutputTruncated === true ||
+          executionRequest.hadIncompleteArguments === true) &&
+        (response.errorType === ToolErrorType.OUTPUT_TRUNCATED ||
+          response.errorType === ToolErrorType.INVALID_TOOL_PARAMS);
+      if (partialEdit) {
+        const count = recordDaemonPartialEditRefusal(
+          toolLoopState,
+          toolName,
+          executionRequest.wasOutputTruncated === true
+            ? TRUNCATION_EDIT_REJECTION
+            : INCOMPLETE_ARGS_EDIT_REJECTION,
+          { outputTruncated: false, refusedPartialEdits },
+        );
+        if (
+          this.config.getLoopProtection() !== 'warn' &&
+          count >= DAEMON_INVALID_TOOL_PARAMS_THRESHOLD
+        ) {
+          onDaemonLoopStopPoint(
+            this.config,
+            promptId,
+            toolLoopState,
+            `partial-edit:${toolName}`,
+            {
+              loopType: LoopType.INVALID_TOOL_PARAMS_STAGNATION,
+              toolName,
+              count,
+            },
+            {},
+            `Stopping ACP turn after repeated refused partial edits from ${toolName}`,
+          );
+        }
+        continue;
+      }
+      if (
+        response.errorType === ToolErrorType.INVALID_TOOL_PARAMS ||
+        response.errorType === ToolErrorType.TOOL_NOT_REGISTERED
+      ) {
+        recordDaemonInvalidToolParams(
+          this.config,
+          promptId,
+          toolLoopState,
+          toolName,
+          response.error ?? new Error(`Invalid parameters for ${toolName}.`),
+        );
+        continue;
+      }
+      if (ran) toolLoopState.partialEditRefusals?.delete(toolName);
+    }
+
+    // A Managed session's batch closes once its results are recorded.
+    const outcomes = this.config.getManagedRuntimeOutcomes?.();
+    if (outcomes !== undefined && batch.results.length > 0) {
+      try {
+        await this.config.getChatRecordingService()?.flush();
+        await outcomes.finalizeBatch();
+      } catch (error) {
+        debugLogger.warn(
+          `Failed to flush Managed tool batch: ${this.#formatError(error)}`,
+        );
+      }
+    }
+    await this.#refreshMemoryAfterToolBatch(memoryWriteCandidates);
+
+    return {
+      parts: batch.parts,
+      stopAfterPermissionCancel: batch.stopAfterPermissionCancel,
+      ...(toolLoopState.loopDetected ? { loopDetected: true } : {}),
+      ...(batch.stop === 'tool_ended_turn' ? { terminateTurn: true } : {}),
+      repeatedToolFailureBatch: {
+        complete: batch.results.length === requests.length,
+        observations,
+      },
+      memoryWriteCandidates,
+    };
+  }
+
+  async #refreshMemoryAfterToolBatch(
+    memoryWriteCandidates: MemoryWriteCandidate[],
+  ): Promise<void> {
+    await refreshMemoryAfterManagedWrite(this.config, memoryWriteCandidates, {
+      logContext: `ACP session ${this.sessionId} memory tool batch`,
+    });
+    if (
+      !this.refreshContextFilesOnWrite ||
+      !didWriteProjectContextFile(
+        memoryWriteCandidates,
+        this.config.getProjectRoot(),
+      )
+    ) {
+      return;
+    }
+    await refreshMemoryInstruction(this.config, {
+      logContext: `ACP session ${this.sessionId} context-file memory tool batch`,
+    });
+  }
+
   private async runToolCalls(
     abortSignal: AbortSignal,
     promptId: string,

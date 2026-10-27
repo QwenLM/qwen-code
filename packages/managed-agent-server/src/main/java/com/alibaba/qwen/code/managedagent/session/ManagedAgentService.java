@@ -1323,11 +1323,11 @@ public class ManagedAgentService {
         Set<String> shaped = sessions.stream().filter(this::maySubmitShape)
                 .map(SessionRecord::sessionId)
                 .collect(java.util.stream.Collectors.toSet());
-        Set<String> cwdShaped = sessions.stream().filter(this::mayChangeCwdShape)
+        Set<String> contextShaped = sessions.stream().filter(this::mayChangeContextShape)
                 .map(SessionRecord::sessionId)
                 .collect(java.util.stream.Collectors.toSet());
         Set<String> candidateIds = new java.util.HashSet<>(shaped);
-        candidateIds.addAll(cwdShaped);
+        candidateIds.addAll(contextShaped);
         sessions.stream().filter(this::mayCompressShape).map(SessionRecord::sessionId).forEach(candidateIds::add);
         Set<String> grantWorkspaces = candidateIds.isEmpty() ? Set.of()
                 : sessions.stream()
@@ -1358,7 +1358,7 @@ public class ManagedAgentService {
                         session.workspace() == null || lifecycleOwners.contains(session.sessionId()),
                         lifecycleOperations.get(session.sessionId()),
                         maySubmitWorkspaceTurn(session, grants, executable),
-                        mayChangeCwd(session, grants, executable),
+                        mayChangeContext(session, grants, executable),
                         modelContexts.get(session.sessionId()),
                         modelSelections.get(session.sessionId()), modelSelectionSupported, renameSupported,
                         compressionSupported && mayCompressContext(session, grants, executable),
@@ -1391,7 +1391,7 @@ public class ManagedAgentService {
     private WebShellSession webShellSession(SessionRecord session,
             TurnSummary latestTurn, EventRecord environmentEvent,
             boolean retention, boolean lifecycleOwner, WebShellLifecycleOperation lifecycleOperation,
-            boolean maySubmit, boolean mayChangeCwd,
+            boolean maySubmit, boolean mayChangeContext,
             WebShellModelContext modelContext, WebShellModelSelection modelSelection,
             boolean modelSelectionSupported, boolean renameSupported,
             boolean compressionSupported, AgentStateStore.ContextCompressionState compression,
@@ -1400,7 +1400,7 @@ public class ManagedAgentService {
         boolean publicChild = session.publicChildAgentsVersion() == 1
                 && store.findChildLineage(session.tenantId(), session.sessionId()) != null;
         maySubmit = maySubmit && !publicChild;
-        mayChangeCwd = mayChangeCwd && !publicChild;
+        mayChangeContext = mayChangeContext && !publicChild;
         boolean close = visible && lifecycleOwner && supportsClose(session);
         boolean keep = visible && lifecycleOwner && retention;
         boolean approvalExecutable = approvalSelection == null || approvalSelection.revision() == 0
@@ -1429,9 +1429,9 @@ public class ManagedAgentService {
                         hasArtifacts(session),
                         hasActions(session), maySubmit && approvalExecutable, close, keep, keep,
                         visible && lifecycleOwner && supportsDelete(session, retention),
-                        mayChangeCwd && approvalExecutable, foregroundShell(session),
-                        visible && modelSelectionSupported && mayChangeCwd,
-                        visible && approvalSupported && mayChangeCwd && !Boolean.FALSE.equals(foregroundShell(session)),
+                        false, foregroundShell(session),
+                        visible && modelSelectionSupported && mayChangeContext,
+                        visible && approvalSupported && mayChangeContext && !Boolean.FALSE.equals(foregroundShell(session)),
                         visible && maySubmit && harness.supportsInputAttachments(),
                         visible && "ACTIVE".equals(session.status()) && renameSupported
                                 && (session.workspace() == null || maySubmit),
@@ -1442,7 +1442,7 @@ public class ManagedAgentService {
                 modelContext, modelSelection, approvalSelection == null ? null : approvalSelection.revision(),
                 session.workspace() != null || session.agentDefinitionDigest() != null ? session.approvalMode() : null,
                 approvalSelection != null && approvalSelection.planMode(), visible && approvalSupported
-                        && mayChangeCwd && harness.supportsPlanMode() && store.supportsPlanMode(session),
+                        && mayChangeContext && harness.supportsPlanMode() && store.supportsPlanMode(session),
                 compression.available() ? compression.compactionRevision() : null, compression.operationId(),
                 lifecycleOperation);
     }
@@ -1794,14 +1794,12 @@ public class ManagedAgentService {
                 && executable.contains(session.sessionId());
     }
 
-    // The cwd twin of the submit predicate above, mirroring admitCwdChange:
-    // the caller's OPERATOR-or-above role (canCreateSession) and the same
-    // creator-keyed executable facts admission re-checks — a capability
-    // must not certify what admission would refuse.
-    private boolean mayChangeCwd(SessionRecord session,
+    // Model, approval and plan changes share the caller and execution
+    // authority checks for changing an existing Session context.
+    private boolean mayChangeContext(SessionRecord session,
             Map<String, ManagedWorkspaceRegistry.ReadableGrant> grants,
             java.util.Set<String> executable) {
-        if (!mayChangeCwdShape(session)) {
+        if (!mayChangeContextShape(session)) {
             return false;
         }
         var grant = grants.get(session.workspace().getWorkspaceId());
@@ -1839,10 +1837,10 @@ public class ManagedAgentService {
         return grant != null && grant.canCreateSession() && executable.contains(session.sessionId());
     }
 
-    private boolean mayChangeCwdShape(SessionRecord session) {
+    private boolean mayChangeContextShape(SessionRecord session) {
         return session.workspace() != null && "ACTIVE".equals(session.status())
                 && session.deletedAt() == null && store.workspaceFilesEnabled()
-                && (runtimeWarmer == null || runtimeWarmer.supportsWorkspaceCwdChange(session.workspace()));
+                && (runtimeWarmer == null || runtimeWarmer.supportsWorkspaceContextChange(session.workspace()));
     }
 
     void requireLegacyWorkspace(String tenantId, String actorId,
