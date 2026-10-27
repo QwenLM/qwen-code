@@ -539,6 +539,34 @@ describe('Skill snapshot correctness regressions', () => {
     });
   });
 
+  it('does not delete from a retained catalog when fresh sources fail', async () => {
+    const idle: ServeWorkspaceSkillsStatus = {
+      ...inventory([]),
+      initialized: false,
+    };
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce(inventory(['foo']))
+      .mockResolvedValue(idle);
+    const local = vi.fn().mockRejectedValue(new Error('unavailable'));
+    const svc = service({
+      queryWorkspaceStatus: query,
+      workspaceSkillsStatusProvider: local,
+    });
+
+    await expect(svc.getWorkspaceSkillsStatus(ctx)).resolves.toMatchObject({
+      initialized: true,
+      skills: [{ name: 'foo' }],
+    });
+
+    await expect(
+      svc.deleteWorkspaceSkill(ctx, 'bar', 'workspace'),
+    ).rejects.toMatchObject({
+      code: 'skills_config_unavailable',
+      statusCode: 503,
+    });
+  });
+
   it('deletes different skills concurrently after both inventory reads succeed', async () => {
     await withInstalledSkills(['review', 'plan'], async (status) => {
       const workspace = status.workspaceCwd;

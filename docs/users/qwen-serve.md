@@ -287,9 +287,13 @@ snapshot. Once a session is alive it switches to `initialized: true` and
 surfaces the real state.
 
 `GET /workspace/providers` is answered daemon-locally from workspace settings
-and environment: it returns `initialized: true` whether or not an ACP child is
-live, and `acpChannelLive` is the liveness signal. The route falls back to the
-live ACP snapshot only when no daemon-local provider is configured.
+and environment, so it does not depend on an ACP child being live, and
+`acpChannelLive` is the liveness signal. If the workspace settings or model
+configuration cannot be resolved, the response has `initialized: false`, an
+empty `providers` array, and an `errors` entry. The route falls back to the
+live ACP snapshot only when a daemon is constructed without a daemon-local
+provider status builder; the daemon-local answer never includes
+runtime-registered models.
 
 `GET /workspace/skills` returns a retained daemon observation immediately and
 revalidates it in the background, so a warm read does not wait for the ACP

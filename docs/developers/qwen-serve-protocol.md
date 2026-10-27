@@ -1552,16 +1552,22 @@ These routes report daemon-side runtime snapshots. They are additive v1 routes,
 do not mutate state, and do not change the serve protocol version. Workspace
 status routes intentionally do **not** start the ACP child process just because
 a client polls a GET route. `GET /workspace/mcp` returns `initialized: false`
-with an empty snapshot when the daemon is idle. `GET /workspace/skills` instead
-serves a retained daemon observation or daemon-local enumeration, and reports
-`initialized: false` **with an `errors` entry** (retryable unavailability, not
-an empty catalog) only when no retained observation exists and both sources are
-unavailable (or a cold read is throttled) — see
-[`GET /workspace/skills`](#get-workspaceskills).
-`GET /workspace/providers` is answered daemon-locally and reports
-`initialized: true` regardless of ACP state, with `acpChannelLive` as the
-liveness signal. Session status routes require a live session and return
-`404 { code: "session_not_found", ... }` for unknown ids.
+with an empty snapshot when the daemon is idle and holds no retained MCP
+observation; if a live child answered earlier, the idle read replays that
+observation with `source: "cache"` and its original `initialized` value.
+`GET /workspace/skills` instead serves a retained daemon observation or
+daemon-local enumeration, and reports `initialized: false` **with an `errors`
+entry** (retryable unavailability, not an empty catalog) only when no retained
+observation exists and both sources are unavailable (or a cold read is
+throttled) — see [`GET /workspace/skills`](#get-workspaceskills).
+`GET /workspace/providers` is answered daemon-locally from workspace settings
+and environment, so it does not depend on a live ACP child, and
+`acpChannelLive` reports liveness. Its `initialized` is `true` on the success
+path and `false` with an `errors` entry when workspace settings or model
+configuration cannot be resolved; daemons constructed without a daemon-local
+provider builder fall back to the live ACP snapshot, and the daemon-local
+answer omits runtime-registered models. Session status routes require a live
+session and return `404 { code: "session_not_found", ... }` for unknown ids.
 
 Capability tags:
 
@@ -1695,6 +1701,14 @@ vars only; proxy URLs are stripped of credentials and reduced to
 `transport` is one of `stdio`, `sse`, `http`, `websocket`, `sdk`, or
 `unknown`. `errors` is omitted when discovery succeeds.
 
+`source` is `"live"` while the child that produced the observation is live.
+When the daemon is idle and a live child answered earlier, the response replays
+that observation with `source: "cache"` and the child's original values,
+including `initialized: true` and its server list. The cached observation is
+cleared only when a new MCP discovery begins; reaping the child does not
+discard it, so an idle `GET /workspace/mcp` can report a catalog that no live
+child currently serves.
+
 **MCP client guardrails (issue [#4175](https://github.com/QwenLM/qwen-code/issues/4175)).** Current daemons extend the payload with four additive fields and a capability-scoped budget cell:
 
 ```jsonc
@@ -1791,9 +1805,11 @@ subsequent read sees the child. A preheat that times out and then finds the
 channel live also reports `ready: true` — ready always equals `channelLive` —
 but keeps the retained inventory because startup may still be incomplete; the
 next read returns that retained data, and background revalidation replaces it
-once the one-second start throttle allows. Skill deletion and enablement
-identity reads bypass the snapshot and throttle, awaiting a new observation
-with local fallback and then the retained snapshot when both sources fail.
+once the one-second start throttle allows. Skill deletion bypasses the snapshot
+and throttle but requires a freshly enumerated catalog: it uses local fallback
+and never answers from a retained snapshot. Enablement identity reads bypass
+the snapshot and throttle, awaiting a new observation with local fallback and
+then the retained snapshot when both sources fail.
 
 Inventory responses carrying a retained daemon observation additionally include
 optional snapshot metadata. Direct config/runtime status reads, session resource
@@ -4139,7 +4155,7 @@ Capability tag: `workspace_skills_config_runtime`.
 
 Global installation and deletion use `POST /workspace/config/skills/install` and `DELETE /workspace/config/skills/:name?scope=global`. Workspace installation, deletion, and enablement use `POST /workspaces/:workspace/config/skills/install`, `DELETE /workspaces/:workspace/config/skills/:name?scope=workspace`, and `POST /workspaces/:workspace/config/skills/:name/enable`. Config writes commit durable state before scheduling runtime reconciliation. Their `activation` is `deferred` when no current runtime can be updated and `reconciling` when an update has been queued; a no-op toggle preserves the facade's activation instead of claiming that a runtime refresh occurred.
 
-Config deletion returns `503 skills_config_unavailable` instead of a definitive not-found response when the daemon-local Skill inventory cannot be enumerated. Runtime deletion (`DELETE /workspace/skills/:name` and its workspace-qualified form) returns the same `503 skills_config_unavailable` when neither the runtime catalog nor daemon-local enumeration yields an initialized catalog; `404 skill_not_found` means the catalog was enumerated and the name is not in it.
+Config deletion returns `503 skills_config_unavailable` instead of a definitive not-found response when the daemon-local Skill inventory cannot be enumerated. Runtime deletion (`DELETE /workspace/skills/:name` and its workspace-qualified form) requires a freshly enumerated catalog: it returns the same `503 skills_config_unavailable` when neither the runtime catalog nor daemon-local enumeration yields an initialized catalog, even if a retained observation exists. `404 skill_not_found` means the catalog was enumerated and the name is not in it.
 
 The singular mutation owner rejects workspace scope with `400 workspace_scope_requires_qualified_workspace`; qualified mutations reject global scope with `400 global_scope_requires_singular_owner`. Qualified writes require a trusted workspace. A legacy injected bridge returns `501 workspace_runtime_not_supported` for qualified config writes that require runtime coordination. Unknown, removed, transitioning, and draining workspaces follow the standard qualified-workspace errors and never fall back to primary.
 

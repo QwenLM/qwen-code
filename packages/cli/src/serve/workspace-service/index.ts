@@ -364,6 +364,7 @@ export function createDaemonWorkspaceService(
 
   const readWorkspaceSkillsStatus = async (
     allowRetainedSnapshot = true,
+    requireEnumerated = false,
   ): Promise<ServeWorkspaceSkillsStatus> => {
     let status: ServeWorkspaceSkillsStatus;
     try {
@@ -421,14 +422,14 @@ export function createDaemonWorkspaceService(
       }
     }
     if (!status.initialized || status.errors?.length) {
-      // Fresh sources failed. A valid retained observation still answers, and
-      // the degraded read must not publish itself over it.
-      return (
-        skillsSnapshot() ??
-        (status.errors?.length
-          ? { ...status, initialized: false }
-          : unavailableWorkspaceSkillsStatus())
-      );
+      const unavailable = status.errors?.length
+        ? { ...status, initialized: false }
+        : unavailableWorkspaceSkillsStatus();
+      // Fresh sources failed. A valid retained observation still answers an
+      // ordinary read, but a mutation must decide from an enumerated catalog.
+      return requireEnumerated
+        ? unavailable
+        : (skillsSnapshot() ?? unavailable);
     }
     return status;
   };
@@ -1245,10 +1246,12 @@ export function createDaemonWorkspaceService(
       const normalizedName = requestedSkillName.trim().toLowerCase();
       const exactName = requestedSkillName.trim();
       if (opts?.refreshRuntime === false) invalidateWorkspaceSkillsInventory();
+      // Deletion must not decide from retained data: a skill installed
+      // out-of-band after the observation would be reported missing.
       const status =
         opts?.refreshRuntime === false
           ? await getWorkspaceSkillsConfigStatus()
-          : await readWorkspaceSkillsStatus(false);
+          : await readWorkspaceSkillsStatus(false, true);
       assertActiveGeneration();
       if (!status.initialized || status.errors?.length) {
         throw new WorkspaceSkillManagementError(
