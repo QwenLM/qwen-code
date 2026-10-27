@@ -32,3 +32,4 @@ jobs:
           echo "qwen:   $(qwen --version 2>/dev/null || echo missing)"
           echo "load:   $(cut -d' ' -f1-3 /proc/loadavg)"
           sleep 5
+# pilot round 1
