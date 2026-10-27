@@ -3752,7 +3752,7 @@ describe('qwen-autofix workflow', () => {
       /(BUDGET_FLOOR="\$\(jq[\s\S]*?\n {12}fi)/,
     )?.[1];
     expect(budgetRead).toBeTruthy();
-    const budget = (comments, key, hasLabel = 'true') => {
+    const budget = (comments, key, hasLabel = 'true', cap = '100') => {
       const dir = mkdtempSync(join(tmpdir(), 'autofix-budget-read-'));
       try {
         writeFileSync(join(dir, 'ic.json'), JSON.stringify(comments));
@@ -3760,7 +3760,7 @@ describe('qwen-autofix workflow', () => {
           'bash',
           [
             '-c',
-            `AUTOFIX_BOT='qwen-code-dev-bot'\nREARM_KEY='${key}'\nWORKDIR='${dir}'\nHAS_TAKEOVER='${hasLabel}'\nEFF_MAX_ROUNDS='100'\n${budgetRead.replace(/\n {12}/g, '\n')}\nprintf '%s' "$EFF_MAX_ROUNDS"`,
+            `AUTOFIX_BOT='qwen-code-dev-bot'\nREARM_KEY='${key}'\nWORKDIR='${dir}'\nHAS_TAKEOVER='${hasLabel}'\nEFF_MAX_ROUNDS='${cap}'\n${budgetRead.replace(/\n {12}/g, '\n')}\nprintf '%s' "$EFF_MAX_ROUNDS"`,
           ],
           { encoding: 'utf8' },
         ).trim();
@@ -3835,6 +3835,19 @@ describe('qwen-autofix workflow', () => {
         'false',
       ),
     ).toBe('100');
+    // The budget only ever LOWERS the cap. Replay an incoming cap below the
+    // marker — the state the takeover label would restore after a release, and
+    // the shape a future cap change could reach — so the `-lt` half of the
+    // clamp is exercised: without it a stale marker would RAISE a strict 10 to
+    // 20, the inverse of the documented invariant.
+    expect(
+      budget(
+        [anchor('2026-07-18T10:00:00Z', '<!-- autofix-round-budget 20 -->')],
+        '2026-07-18T10:00:00Z',
+        'true',
+        '10',
+      ),
+    ).toBe('10');
 
     // The boundary behavior: a spent budget RELEASES a human-authored PR
     // (note + label DELETE, no escalation) and never promotes the PR to
@@ -3956,17 +3969,21 @@ describe('qwen-autofix workflow', () => {
       /(BUDGET_USED="\$\(jq[\s\S]*?BUDGET_SPENT=true)/,
     )?.[1];
     expect(used).toBeTruthy();
-    const spent = (markers, budget) =>
+    const census = (markers, budget, floor = '') =>
       execFileSync(
         'bash',
         [
           '-c',
-          `REARM_KEY='K1'\nROUND_BUDGET='${budget}'\nBUDGET_FLOOR=''\nMARKERS='${JSON.stringify(markers)}'\n${used.replace(/\n {12}/g, '\n')}\nprintf '%s %s' "$BUDGET_USED" "$BUDGET_SPENT"`,
+          `REARM_KEY='K1'\nROUND_BUDGET='${budget}'\nBUDGET_FLOOR='${floor}'\nMARKERS='${JSON.stringify(markers)}'\n${used.replace(/\n {12}/g, '\n')}\nprintf '%s|%s' "$BUDGET_USED" "$BUDGET_SPENT"`,
         ],
         { encoding: 'utf8' },
       ).trim();
-    const mk = (win, round) => ({
-      ts: '2026-07-18T10:00:00Z',
+    const spent = (markers, budget, floor = '') => {
+      const [count, isSpent] = census(markers, budget, floor).split('|');
+      return `${count} ${isSpent}`;
+    };
+    const mk = (win, round, ts = '2026-07-18T10:00:00Z') => ({
+      ts,
       round,
       win,
       at: '',
@@ -3989,6 +4006,26 @@ describe('qwen-autofix workflow', () => {
     expect(spent([mk('K1', 1), mk('K1', 1), mk('K1', 2)], '5')).toBe('2 false');
     // A PR without a budget never spends one.
     expect(spent([mk('K1', 1)], '0')).toBe('1 false');
+    // Both census filters are load-bearing, and jq compares window keys as
+    // STRINGS — where "none" sorts ABOVE every ISO timestamp. So a round from
+    // before the first takeover must be excluded by the `win != "none"` clause,
+    // not by the floor: without it a PR with prior autofix rounds would spend
+    // a fresh `for 2` before running a round of it.
+    const FLOOR = '2026-07-18T09:00:00Z';
+    expect(census([mk('none', 1), mk('none', 2)], '2', FLOOR)).toBe('0|false');
+    // …and an older engagement's marker must be excluded by the floor.
+    expect(census([mk('2026-07-18T08:00:00Z', 1)], '1', FLOOR)).toBe('0|false');
+    // A marker inside the engagement counts once, whatever its timestamp form.
+    expect(
+      census(
+        [
+          mk('2026-07-18T09:30:00Z', 1),
+          mk('2026-07-18T09:40:00Z', 2, '9999-12-31T23:59:59Z'),
+        ],
+        '2',
+        FLOOR,
+      ),
+    ).toBe('2|true');
   });
 
   it('discards a queued conflict round when the live window carries a budget', () => {
