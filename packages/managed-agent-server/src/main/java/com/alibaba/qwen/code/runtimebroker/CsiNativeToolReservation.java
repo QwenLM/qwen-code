@@ -145,6 +145,10 @@ final class CsiNativeToolReservation {
             this.locations = locations;
         }
 
+        int size() {
+            return locations.size();
+        }
+
         boolean containsKey(String id) {
             return locations.containsKey(id);
         }
