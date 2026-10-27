@@ -765,6 +765,192 @@ describe('OpenTuiApp shell wiring', () => {
     expect(mocks.state.dispatcherConstructions).toBe(1);
   });
 
+  it('switches foreground PTY input without losing the composer and consumes focus keys', async () => {
+    const owner = { callId: 'shell', pid: 4300, turn: 1 };
+    const control = {
+      foregroundShell: owner,
+      promoteShellToBackground: vi.fn(() => false),
+      writeShellInput: vi.fn((_owner: typeof owner, _input: string) => true),
+      resizeShell: vi.fn(() => true),
+      scrollShell: vi.fn(() => true),
+    };
+    const config = {
+      ...CONFIG,
+      getShellExecutionConfig: () => ({}),
+      setShellExecutionConfig: vi.fn(),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      setApprovalMode: vi.fn(),
+    } as unknown as Config;
+    const renderMain = vi.fn<NonNullable<AppProps['renderMain']>>(() => null);
+    let draft = '';
+    const composerHandle = {
+      current: {
+        getText: () => draft,
+        setText: (text: string) => {
+          draft = text;
+        },
+      },
+    };
+    const view = renderApp({
+      config,
+      foregroundShellControl: control,
+      composerHandle,
+      renderMain,
+    });
+    await settle();
+    const event = (
+      name: string,
+      sequence: string,
+      ctrl = false,
+      shift = false,
+    ) => ({
+      name,
+      sequence,
+      ctrl,
+      shift,
+      preventDefault: vi.fn(),
+      stopPropagation: vi.fn(),
+    });
+    expect(mocks.state.inputProps?.['focus']).toBe(true);
+    const focus = event('f', '\x06', true);
+    act(() =>
+      expect(
+        (mocks.state.inputProps!['onShellKey'] as (key: unknown) => boolean)(
+          focus,
+        ),
+      ).toBe(true),
+    );
+    expect(mocks.state.inputProps?.['focus']).toBe(false);
+    expect(renderMain.mock.calls.at(-1)?.[0]).toEqual({ owner, focused: true });
+    expect(control.writeShellInput).not.toHaveBeenCalled();
+    for (const key of [
+      event('a', 'a'),
+      event('left', '\x1b[D'),
+      event('return', '\r'),
+    ]) {
+      act(() => mocks.state.keyboardHandlers.at(-1)!(key));
+      expect(key.preventDefault).toHaveBeenCalledOnce();
+      expect(key.stopPropagation).toHaveBeenCalledOnce();
+    }
+    expect(
+      control.writeShellInput.mock.calls.map(([, bytes]) => bytes),
+    ).toEqual(['a', '\x1b[D', '\r']);
+    const paste = mocks.state.inputProps!['onShellPaste'] as (
+      text: string,
+    ) => boolean;
+    act(() => expect(paste('hello\n世界')).toBe(true));
+    expect(control.writeShellInput).toHaveBeenLastCalledWith(
+      owner,
+      'hello\n世界',
+    );
+    act(() =>
+      mocks.state.keyboardHandlers.at(-1)!(event('up', '\x1b[A', true, true)),
+    );
+    expect(control.scrollShell).toHaveBeenCalledExactlyOnceWith(owner, -1);
+    act(() => mocks.state.keyboardHandlers.at(-1)!(focus));
+    expect(mocks.state.inputProps?.['focus']).toBe(true);
+    expect(control.writeShellInput).toHaveBeenCalledTimes(4);
+    act(() =>
+      (mocks.state.inputProps!['onShellKey'] as (key: unknown) => boolean)(
+        focus,
+      ),
+    );
+    for (const exitKey of [
+      event('c', '\x03', true),
+      event('d', '\x04', true),
+    ]) {
+      act(() => mocks.state.keyboardHandlers.at(-1)!(exitKey));
+      expect(control.writeShellInput).toHaveBeenCalledTimes(4);
+      expect(exitKey.preventDefault).not.toHaveBeenCalled();
+      expect(exitKey.stopPropagation).not.toHaveBeenCalled();
+    }
+    const approval = event('tab', '\x1b[Z', false, true);
+    act(() => mocks.state.keyboardHandlers.at(-1)!(approval));
+    expect(config.setApprovalMode).toHaveBeenCalledExactlyOnceWith(
+      ApprovalMode.AUTO_EDIT,
+    );
+    expect(control.writeShellInput).toHaveBeenLastCalledWith(owner, '\t');
+    expect(approval.stopPropagation).not.toHaveBeenCalled();
+    for (const thinking of [
+      event('o', '\x0f', true),
+      { ...event('t', 't'), meta: true },
+    ]) {
+      act(() => mocks.state.keyboardHandlers.at(-1)!(thinking));
+      expect(thinking.stopPropagation).not.toHaveBeenCalled();
+      expect(thinking.preventDefault).not.toHaveBeenCalled();
+    }
+    expect(control.writeShellInput).toHaveBeenLastCalledWith(owner, '\x0f');
+    draft = 'DRAFT';
+    const eof = event('d', '\x04', true);
+    act(() => mocks.state.keyboardHandlers.at(-1)!(eof));
+    expect(control.writeShellInput).toHaveBeenCalledTimes(7);
+    expect(control.writeShellInput).toHaveBeenLastCalledWith(owner, '\x04');
+    expect(eof.preventDefault).not.toHaveBeenCalled();
+    expect(eof.stopPropagation).not.toHaveBeenCalled();
+    expect(config.setShellExecutionConfig).toHaveBeenCalledWith(
+      expect.objectContaining({ terminalWidth: 106 }),
+    );
+    view.unmount();
+  });
+
+  it('keeps a foreground shell behind a dialog and does not transfer focus to a replacement owner', async () => {
+    const config = {
+      ...CONFIG,
+      getShellExecutionConfig: () => ({}),
+      setShellExecutionConfig: vi.fn(),
+    } as unknown as Config;
+    const owner = { callId: 'shell', pid: 4300, turn: 1 };
+    const control = {
+      foregroundShell: owner,
+      promoteShellToBackground: vi.fn(() => true),
+      writeShellInput: vi.fn(() => true),
+      resizeShell: vi.fn(() => true),
+      scrollShell: vi.fn(() => true),
+    };
+    const props = {
+      config,
+      settings: SETTINGS,
+      logger: null,
+      commands: [],
+      getSessionStats,
+      foregroundShellControl: control,
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+    const key = {
+      name: 'f',
+      sequence: '\x06',
+      ctrl: true,
+      preventDefault: vi.fn(),
+      stopPropagation: vi.fn(),
+    };
+    act(() =>
+      (mocks.state.inputProps!['onShellKey'] as (key: unknown) => boolean)(key),
+    );
+    expect(mocks.state.inputProps?.['focus']).toBe(false);
+    view.rerender(
+      <OpenTuiApp
+        {...props}
+        foregroundShellControl={{
+          ...control,
+          foregroundShell: { ...owner, turn: 2 },
+        }}
+      />,
+    );
+    expect(mocks.state.inputProps?.['focus']).toBe(true);
+    mocks.state.handleResult = {
+      kind: 'open_dialog',
+      request: { dialog: 'help' },
+    };
+    await submit('/help');
+    expect(mocks.state.dialogProps).not.toBeNull();
+    const promote = { ...key, name: 'b', sequence: '\x02' };
+    act(() => mocks.state.keyboardHandlers.at(-1)!(promote));
+    expect(control.promoteShellToBackground).not.toHaveBeenCalled();
+    expect(control.writeShellInput).not.toHaveBeenCalled();
+    view.unmount();
+  });
+
   it('routes composer cancellation to the running command without interrupting the model', async () => {
     const onInterrupt = vi.fn();
     renderApp({ onInterrupt });

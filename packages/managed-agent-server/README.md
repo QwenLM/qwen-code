@@ -846,6 +846,12 @@ packaged-stack E2E, which have no ingress,
 then trusted as the actor for the request's tenant. It is disabled by default;
 never enable it where untrusted clients can reach the server.
 
+### Upload files into a Workspace
+
+With Workspace file access enabled and compatible Server, CLI and WebShell artifacts, select a persisted LOCAL or SSH_LOCAL Workspace and choose **Add file → Upload to workspace**. Uploads accept binary and empty files up to 8 MiB each, use an existing destination directory, and reject occupied paths without overwriting them. The composer inserts a scoped path reference for tools to use; binary bytes are not converted into a small-text snapshot or message attachment. Old CLIs leave upload disabled. CSI, folder uploads and automatic directory creation are unsupported.
+
+Uploads require an authenticated actor with OPERATOR or OWNER access and verified storage. An execution-storage member, including a retained MCP Runtime, keeps the Workspace busy. A durable physical-storage hold excludes new execution and retirement until the original upload has a definite result. If the response is uncertain, query the original upload ID; recovery does not replay the write on another Runtime. Cancelling the browser request does not delete a file already committed. See the [English design](../../docs/design/2026-10-26-managed-workspace-upload.md) and [Chinese design](../../docs/design/2026-10-26-managed-workspace-upload.zh-CN.md) for the protocol, recovery and acceptance boundaries.
+
 ### Create empty Workspaces from WebShell
 
 Set `QWEN_MANAGED_AGENT_WORKSPACE_CREATION_ROOT` to an existing canonical, server-owned directory to enable **New workspace → Start from scratch** in the Managed composer. The default is disabled. The root must be separate from static Workspace mounts, the default Workspace cwd, and private Runtime state. Enable Workspace files, the Session Store, the durable Session-isolated local-process Broker and verified local Workspace recovery first. Enabling this setting authorizes authenticated tenant actors to allocate independent empty roots and receive OWNER access; only enable it for tenants allowed to consume this host's storage.
@@ -1016,51 +1022,11 @@ model-generated commands) should configure a binding key even on loopback.
 Design: [English](../../docs/design/managed-agent-broker-auth.md)
 | [简体中文](../../docs/design/managed-agent-broker-auth.zh-CN.md).
 
-### Controlled cwd change (W2)
+### Session working directory
 
-Under the same `QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED` opt-in, any caller
-holding OPERATOR on a bound Session's Workspace moves its relative directory
-within the same Workspace:
+Select the Workspace-relative working directory when creating the Session. Directory-change submission and the WebShell Change directory action have been retired. Previously admitted `CWD_CHANGE` operations still settle through their original coordinator and remain readable through operation queries; their records, fences and `session.context.changed` events are retained. Daemon/ACP relocation and tool-level directories are separate capabilities.
 
-```bash
-curl -sS -X POST \
-  http://127.0.0.1:8080/v1/agents/sessions/$SESSION_ID/cwd \
-  -H 'Content-Type: application/json' \
-  -H 'X-Qwen-Tenant-Id: demo' \
-  -H 'Idempotency-Key: cwd-1' \
-  -d '{"cwd_relative":"services/api","expected_context_revision":1}'
-```
-
-`202` admits a durable `cwd_change` operation; it does not activate the
-directory. The change is same-Workspace only and requires the caller's OPERATOR
-role plus the Session's creator-keyed execution facts (the registry still backs
-the binding and stays `ACTIVE`, and the recorded create actor keeps OPERATOR or
-above; the V56-persisted initiator is re-checked at settlement the same way, so
-demoting either actor fails the operation with `workspace_unavailable`), an idle
-Session (`409 session_context_busy` while a Turn or another operation is open)
-and a matching `expected_context_revision` (`409 context_revision_conflict`
-otherwise); a retry with the same key returns the original operation even after
-it completes. A background worker verifies the target against the deployment
-mounts and commits one transaction that bumps `cwd_relative` and
-`context_revision`, marks the operation completed and appends
-`session.context.changed`; poll the operation through the existing query route
-or await the event. A target the mount cannot verify fails the operation with
-`failure_code` and leaves the Session's binding untouched; refused changes
-never retry, while a mount fault the probe cannot reach (a stale export)
-retries internally up to an 8-attempt budget and then fails the same type,
-releasing the Session back to turns and lifecycle operations. Legacy Sessions answer `400 unsupported_feature`, an unreadable
-actor `404 session_not_found` and a readable actor below OPERATOR `403
-session_operation_forbidden`, matching the sibling lifecycle refusals; a
-probe refusal the turn layer would share also uses `409
-workspace_unavailable`, and so does an admitted OPERATOR once the
-creator-keyed facts moved. The WebShell adapter offers the same flow as
-`/api/agent/web-shell/v1/sessions/cwd/change` plus `/operations/query`.
-Subsequent turns acquire a fresh Runtime Session and install the new context
-before tools run, so an unverifiable change can never redirect tool execution.
-
-Design:
-[English](../../docs/design/2026-10-02-managed-workspace-w2-cwd-change.md) |
-[简体中文](../../docs/design/2026-10-02-managed-workspace-w2-cwd-change.zh-CN.md).
+Design: [English](../../docs/design/2026-10-26-retire-managed-cwd-change.md) | [简体中文](../../docs/design/2026-10-26-retire-managed-cwd-change.zh-CN.md).
 
 ### Broker deployment
 
@@ -1585,6 +1551,55 @@ still stop all contexts and child processes. State is preserved between methods,
 nested classes, and context restarts inside one class. See the
 [isolation design](../../docs/design/2026-10-20-hosted-it-database-isolation.md)
 ([简体中文](../../docs/design/2026-10-20-hosted-it-database-isolation.zh-CN.md)).
+
+## Managed extension packages
+
+Complete package distribution and the seven-component Managed profile are opt-in.
+Set `QWEN_MANAGED_AGENT_EXTENSION_PACKAGES_ENABLED=true`,
+`QWEN_MANAGED_AGENT_EXTENSION_ARTIFACT_DIRECTORY` to a durable private directory,
+and `QWEN_MANAGED_AGENT_EXTENSION_ALLOWED_ACTORS` to the permitted operator actor
+keys. The configured Workspace OPERATOR grant is also required. See the
+[configuration example](distribution/config/application.example.yml) for the
+separate Runtime execution profile: Linux LOCAL and SSH require delegated cgroup
+v2; native macOS requires the explicit `developer-process-group` mode. Existing
+Runtime bindings do not acquire the new execution contract automatically.
+Replicas must share the authoritative artifact directory. A Runtime cache is
+reconstructible and cannot replace that directory. Published versions and encrypted
+settings revisions are retained; this increment does not implement garbage
+collection.
+
+In WebShell, select the Managed Workspace and Session, open Extensions, prepare an
+original Git/npm/directory/archive source for its target platform, then publish it.
+An update explicitly selects the catalog extension ID. Select package versions and
+an exact saved settings revision before applying to an idle Session. Saving settings
+creates a complete immutable revision; values never appear in read responses.
+Upgrading a package preserves its selected settings revision. An unfinished apply
+has separate Continue original operation and Restore previous version controls;
+unknown outcomes continue to block inference until the original owner reconciles.
+
+Public clients use `/v1/agents/workspaces/{workspaceId}/extensions` for bounded
+binary publication and catalog queries and `/v1/agents/sessions/{sessionId}/extensions`
+for configuration queries and application. The OpenAPI contract documents the
+settings and operation subresources. The Java SDK exposes `ManagedExtensionsClient`;
+the TypeScript daemon SDK can prepare and stream an original package. Creation's
+optional `extensionPins` freezes the initial selection before the first model call.
+Omitting it retains the existing Session path.
+
+Package assets use an explicit read-only extension source. Model tool schemas list
+the selected public pins; `read_file` and `glob` accept package-relative paths or
+`extension://<extensionId>/<path>`. Shell selects `extension_context` and receives
+`QWEN_EXTENSION_ROOT`, while its working directory remains the Session directory.
+Ordinary Workspace tools retain their existing containment rules. Executable
+preflight checks target interpreters and directly resolvable commands without
+running Hooks or connecting MCP; complex authored Shell expressions are checked
+when their approved invocation executes. Argument placeholders inside nested Shell
+substitution, backticks or heredocs are rejected explicitly.
+
+See the linked [English design](../../docs/design/2026-10-24-managed-extension-packages.md)
+and [Chinese design](../../docs/design/2026-10-24-managed-extension-packages.zh-CN.md).
+Local focused tests, macOS developer receipts and the existing Linux static-extension
+gate below establish different boundaries. Complete package Linux/SSH cleanup,
+fault injection and real-provider qualification remain separate acceptance gates.
 
 ## Linux extension process acceptance
 

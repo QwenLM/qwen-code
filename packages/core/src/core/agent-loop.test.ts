@@ -16,6 +16,7 @@ import { Kind } from '../tools/tools.js';
 import {
   createSchedulerExecutor,
   runAgentLoop,
+  runToolBatch,
   type AgentLoopDuplicateState,
   type AgentLoopHost,
   type AgentLoopSettledCall,
@@ -764,6 +765,50 @@ describe('runAgentLoop', () => {
 
     expect(sends.map((s) => s.signal)).toEqual([signal, signal]);
     expect(signals).toEqual([toolSignal]);
+  });
+});
+
+describe('runToolBatch', () => {
+  const duplicates = (): AgentLoopDuplicateState => ({
+    handled: new Map(),
+    responded: new Set(),
+  });
+
+  it('finishes and records a cancelled batch for a surface that keeps it', async () => {
+    const controller = new AbortController();
+    const { client } = fakeClient([]);
+    const { config, recordToolResult } = fakeConfig();
+
+    const result = await runToolBatch([toolRequest('c1')], {
+      config,
+      client,
+      signal: controller.signal,
+      duplicates: duplicates(),
+      executor: fakeExecutor(undefined, () => controller.abort()).executor,
+      keepCancelledResults: true,
+    });
+
+    expect(result.stop).toBe('cancelled');
+    expect(ids(result.parts)).toEqual(['c1']);
+    expect(recordToolResult).toHaveBeenCalledTimes(1);
+  });
+
+  it('runs one batch with the scheduler executor a surface passes', async () => {
+    const { client } = fakeClient([]);
+    const { config } = fakeConfig();
+    const { executor, batches } = fakeExecutor();
+
+    const result = await runToolBatch([toolRequest('c1'), toolRequest('c2')], {
+      config,
+      client,
+      signal: new AbortController().signal,
+      duplicates: duplicates(),
+      executor,
+    });
+
+    expect(result.stop).toBeUndefined();
+    expect(batches).toHaveLength(1);
+    expect(ids(result.parts)).toEqual(['c1', 'c2']);
   });
 });
 
