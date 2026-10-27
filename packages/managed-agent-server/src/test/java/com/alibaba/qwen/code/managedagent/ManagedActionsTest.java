@@ -34,6 +34,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.stubbing.Answer;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
@@ -85,7 +86,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 class ManagedActionsTest {
     @Autowired private MockMvc mvc;
     @Autowired private ObjectMapper json;
-    @Autowired private JdbcTemplate jdbc;
+    @Autowired private @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc;
     @Autowired private ManagedSessionStore journals;
     @Autowired private ManagedActionStore actions;
     @Autowired private AgentStateStore sessions;
@@ -114,8 +115,9 @@ class ManagedActionsTest {
     @TestConfiguration
     static class Configuration {
         @Bean @Primary
-        ManagedAgentStore actionStore(JdbcTemplate jdbc, ObjectMapper mapper, ManagedWorkspaceRegistry registry,
-                Clock clock, com.alibaba.qwen.code.managedagent.event.CommittedEventPublisher publisher) {
+        ManagedAgentStore actionStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, ObjectMapper mapper,
+                ManagedWorkspaceRegistry registry, @Qualifier("managedAgentClock") Clock clock,
+                com.alibaba.qwen.code.managedagent.event.CommittedEventPublisher publisher) {
             var properties = new ManagedAgentProperties();
             properties.getHarness().setWorkspaceFilesEnabled(true);
             return new ManagedAgentStore(jdbc, mapper, clock, publisher, registry, properties);
