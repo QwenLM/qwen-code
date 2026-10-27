@@ -4441,6 +4441,47 @@ describe('backfillWorkspaceSessionPrs', () => {
     ).toMatchObject({ number: 77, url: 'https://github.com/o/r/pull/77' });
   });
 
+  it('declines a quoted -R value', async () => {
+    // The quotes are how a shell spells the same qualifier; losing it would
+    // bind this workspace's same-numbered PR.
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/verify-pr 77 -R "other/repo"');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'f77')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 0, written: 0 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+  });
+
+  it('declines a -R value spelled as a URL', async () => {
+    await seedSession(SESSION_A);
+    await appendUserText(
+      SESSION_A,
+      '/verify-pr 77 -R https://github.com/other/repo',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'f77')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 0, written: 0 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+  });
+
   it('declines a /review url form the sidecar reader would reject', async () => {
     // The capture is unbounded user text; an over-long or control-
     // character url passes the repo gate (only the first two path
