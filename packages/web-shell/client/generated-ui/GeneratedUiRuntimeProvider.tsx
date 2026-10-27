@@ -3,6 +3,7 @@ import {
   useCallback,
   useContext,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   useSyncExternalStore,
@@ -146,14 +147,23 @@ export function GeneratedUiSlot({
     resourceKey: string;
   }>();
   useSyncExternalStore(store.subscribe, store.getVersion, store.getVersion);
-  const key =
-    source && source.sessionId === sessionId
-      ? instanceKey(source, toolId, display)
-      : '';
-  const resource = resourceKey(display, source?.eventEpoch, {
-    tools: !!sessionId && tools?.sessionId === sessionId,
-    messages: !!sessionId && messages?.sessionId === sessionId,
-  });
+  const key = useMemo(
+    () =>
+      source && source.sessionId === sessionId
+        ? instanceKey(source, toolId, display)
+        : '',
+    [source, sessionId, toolId, display],
+  );
+  const toolsMatch = !!sessionId && tools?.sessionId === sessionId;
+  const messagesMatch = !!sessionId && messages?.sessionId === sessionId;
+  const resource = useMemo(
+    () =>
+      resourceKey(display, source?.eventEpoch, {
+        tools: toolsMatch,
+        messages: messagesMatch,
+      }),
+    [display, source?.eventEpoch, toolsMatch, messagesMatch],
+  );
   const ordinaryActive =
     visible && ordinary?.key === key && ordinary.resourceKey === resource;
   useLayoutEffect(() => {

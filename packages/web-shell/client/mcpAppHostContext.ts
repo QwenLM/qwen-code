@@ -68,6 +68,7 @@ export interface McpAppGeneratedUiInvalidation {
     | 'cleared'
     | 'deleted'
     | 'rewound'
+    | 'auth-failed'
     | 'scope-changed';
 }
 
@@ -90,15 +91,22 @@ export const McpAppGeneratedUiOwnerContext = createContext<
 
 export const McpAppVisibilityContext = createContext(true);
 
-export function useMcpAppAdmission(display?: {
+export function isBuiltInGeneratedUi(display?: {
   resourceUri: string;
   requiredFeature?: 'generated-ui';
 }): boolean {
+  return (
+    display?.requiredFeature === 'generated-ui' ||
+    display?.resourceUri === 'ui://qwen-code-generated-ui/view-v1.html'
+  );
+}
+
+export function useMcpAppAdmission(
+  display?: Parameters<typeof isBuiltInGeneratedUi>[0],
+): boolean {
   const sessionId = useContext(McpAppSessionContext);
   const capability = useContext(McpAppGeneratedUiContext);
-  const builtIn =
-    display?.requiredFeature === 'generated-ui' ||
-    display?.resourceUri === 'ui://qwen-code-generated-ui/view-v1.html';
+  const builtIn = isBuiltInGeneratedUi(display);
   return (
     !builtIn ||
     ((import.meta as ImportMeta & { env?: { MODE?: string } }).env?.MODE !==

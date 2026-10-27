@@ -405,6 +405,10 @@ export class GeneratedUiInstanceStore {
         record.scopeId === event.scopeId &&
         (!event.sessionId || event.sessionId === record.sessionId)
       ) {
+        if (event.reason === 'cleared') {
+          if (record.entry?.token) this.release(key, record.entry.token);
+          continue;
+        }
         this.dispose(key, event.reason);
         if (event.reason === 'scope-changed') this.records.delete(key);
       }

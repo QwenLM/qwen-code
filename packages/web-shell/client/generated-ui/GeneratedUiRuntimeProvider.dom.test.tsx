@@ -32,6 +32,7 @@ interface BridgeMock {
   capabilities?: unknown;
   onsandboxready?: () => void;
   oninitialized?: () => void;
+  onsizechange?: (size: { height: number }) => void;
   onmessage?: (
     params: { role: string; content: Array<{ type: 'text'; text: string }> },
     extra: { signal: AbortSignal },
@@ -361,7 +362,7 @@ describe('GeneratedUiRuntimeProvider lifecycle', () => {
     expect(h.requestMessage).toHaveBeenCalledTimes(2);
   });
 
-  it('initializes a card first added under StrictMode without native move support', async () => {
+  it('initializes without native moves but releases a populated runtime on relocation', async () => {
     Reflect.deleteProperty(HTMLElement.prototype, 'moveBefore');
     const h = setup(true);
     await h.render({ cards: [] });
@@ -375,6 +376,13 @@ describe('GeneratedUiRuntimeProvider lifecycle', () => {
     await initialize(bridge);
     expect(await message(bridge)).toEqual({});
     expect(h.requestMessage).toHaveBeenCalledTimes(1);
+    await h.render({ viewportKey: 'history-slice' });
+    expect(h.surface().querySelector('iframe')).toBeNull();
+    expect(h.surface().querySelector('button')?.textContent).toBe(
+      'Reopen interactive view',
+    );
+    expect(bridge.close).toHaveBeenCalledTimes(1);
+    expect(activeBridges()).toEqual([]);
   });
 
   it('leaves one live bridge after StrictMode replay and tears down on close', async () => {
@@ -519,6 +527,7 @@ describe('GeneratedUiRuntimeProvider lifecycle', () => {
     await h.render({ cards: [main, duplicate] });
     const bridge = activeBridges()[0];
     await initialize(bridge);
+    const parkedFrame = h.surface().querySelector('iframe');
     expect(h.surface().querySelectorAll('iframe')).toHaveLength(1);
     expect(h.surface('duplicate').querySelector('iframe')).toBeNull();
     expect(h.surface('duplicate').querySelector('button')).toBeNull();
@@ -532,6 +541,13 @@ describe('GeneratedUiRuntimeProvider lifecycle', () => {
     await act(async () => reopen!.click());
 
     expect(h.surface('duplicate').querySelectorAll('iframe')).toHaveLength(1);
+    expect(bridge.close).toHaveBeenCalledTimes(1);
+    expect(h.surface('duplicate').querySelector('iframe')).not.toBe(
+      parkedFrame,
+    );
+    expect(h.surface('duplicate').textContent).toContain(
+      'Reopening starts from the original content',
+    );
     expect(activeBridges()).toHaveLength(1);
     expect(await message(activeBridges()[0])).toEqual({});
     expect(h.requestMessage).toHaveBeenCalledTimes(1);
@@ -589,6 +605,48 @@ describe('GeneratedUiRuntimeProvider lifecycle', () => {
     expect(h.requestMessage).toHaveBeenCalledTimes(1);
   });
 
+  it.each(['html', 'csp', 'permissions', 'arguments', 'result', 'epoch'])(
+    'invalidates a memoized resource when %s changes',
+    async (change) => {
+      const h = setup();
+      await h.render();
+      const bridge = activeBridges()[0];
+      const frame = h.surface().querySelector('iframe');
+      await initialize(bridge);
+      const updates: Record<string, Partial<McpAppDisplay>> = {
+        html: { html: '<main>Changed</main>' },
+        csp: { csp: { connectDomains: ['https://example.test'] } },
+        permissions: {
+          permissions: { clipboardWrite: {} } as McpAppDisplay['permissions'],
+        },
+        arguments: { toolArguments: { workers: 9 } },
+        result: {
+          toolResult: { content: [{ type: 'text', text: 'Changed' }] },
+        },
+      };
+      await h.render({
+        source:
+          change === 'epoch'
+            ? { ...h.source, eventEpoch: 'epoch-b' }
+            : h.source,
+        cards: [
+          {
+            surface: 'main',
+            toolId: 'call-a',
+            display:
+              change === 'epoch' ? h.display : appDisplay(updates[change]),
+          },
+        ],
+      });
+      expect(bridge.close).toHaveBeenCalledTimes(1);
+      expect(frame!.isConnected).toBe(false);
+      expect(h.surface().querySelector('iframe')).toBeNull();
+      expect(h.surface().querySelector('button')?.textContent).toBe(
+        'Reopen interactive view',
+      );
+    },
+  );
+
   it('cleans both an attached and a parked runtime when the provider closes', async () => {
     const h = setup();
     await h.render({
@@ -617,6 +675,50 @@ describe('GeneratedUiRuntimeProvider lifecycle', () => {
 });
 
 describe('GeneratedUiRuntimeProvider eligibility and authority', () => {
+  it('keeps an ordinary MCP App outside retention and closes it on removal', async () => {
+    const h = setup();
+    await h.render({
+      cards: [
+        {
+          surface: 'main',
+          toolId: 'foreign-call',
+          display: appDisplay({
+            requiredFeature: undefined,
+            serverName: 'foreign-server',
+            resourceUri: 'ui://foreign/view.html',
+          }),
+        },
+      ],
+    });
+    const bridge = activeBridges()[0];
+    await initialize(bridge);
+    expect(h.surface().querySelector('iframe')).not.toBeNull();
+    expect(h.surface().querySelector('[data-generated-ui-slot]')).toBeNull();
+    expect(h.store().getEntries()).toEqual([]);
+    await h.render({ cards: [] });
+    expect(bridge.close).toHaveBeenCalledTimes(1);
+    expect(h.parking().querySelector('iframe')).toBeNull();
+    expect(activeBridges()).toEqual([]);
+  });
+
+  it('ignores size changes while parked and keeps the previous height on return', async () => {
+    const h = setup();
+    await h.render();
+    const bridge = activeBridges()[0];
+    const frame = h.surface().querySelector('iframe')!;
+    await initialize(bridge);
+    await act(async () => bridge.onsizechange!({ height: 400 }));
+    expect(frame.style.height).toBe('400px');
+    await h.render({ cards: [] });
+    for (const height of [0, 500]) {
+      await act(async () => bridge.onsizechange!({ height }));
+      expect(frame.style.height).toBe('400px');
+    }
+    await h.render();
+    expect(h.surface().querySelector('iframe')).toBe(frame);
+    expect(frame.style.height).toBe('400px');
+  });
+
   it.each(['missing', 'foreign'] as const)(
     'does not advertise message or tool capabilities for a %s host',
     async (hostKind) => {
@@ -726,7 +828,7 @@ describe('GeneratedUiRuntimeProvider eligibility and authority', () => {
     },
   );
 
-  it('keeps a parked card when another session temporarily has no matching host capabilities', async () => {
+  it('parks a mounted card during an owner-session mismatch and restores it on return', async () => {
     const h = setup();
     await h.render();
     const bridge = activeBridges()[0];
@@ -734,7 +836,6 @@ describe('GeneratedUiRuntimeProvider eligibility and authority', () => {
     await initialize(bridge);
     expect(await message(bridge)).toEqual({});
     await h.render({
-      cards: [],
       source: { ...h.source, sessionId: 'session-b', clientId: 'client-b' },
       messages: null,
     });
@@ -742,7 +843,12 @@ describe('GeneratedUiRuntimeProvider eligibility and authority', () => {
     expect(h.parking().contains(frame)).toBe(true);
     expect(bridge.close).not.toHaveBeenCalled();
     expect(await message(bridge)).toEqual({ isError: true });
+    expect(activeBridges()).toHaveLength(2);
+    const ordinary = activeBridges().find((other) => other !== bridge)!;
+    expect(h.surface().querySelector('[data-generated-ui-slot]')).toBeNull();
+    expect(h.surface().querySelector('iframe')).not.toBeNull();
     await h.render();
+    expect(ordinary.close).toHaveBeenCalledTimes(1);
     expect(h.surface().querySelector('iframe')).toBe(frame);
     expect(activeBridges()).toEqual([bridge]);
     expect(await message(bridge)).toEqual({});
@@ -969,7 +1075,7 @@ describe('GeneratedUiRuntimeProvider eligibility and authority', () => {
     const oldSignal = h.requestMessage.mock.calls[0][0].signal;
 
     h.recover();
-    await h.render({ source: { ...h.source, clientId: 'client-b' } });
+    await h.render({ source: { ...h.source } });
 
     expect(oldSignal.aborted).toBe(true);
     resolveRequest({});

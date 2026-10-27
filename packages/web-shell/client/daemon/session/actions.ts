@@ -2525,8 +2525,8 @@ export function createDaemonSessionActions({
 
     async clearSession(options?: { dropSessionContext?: boolean }) {
       const session = sessionRef.current;
-      if (session) onGeneratedUiInvalidated?.(session, 'cleared');
       manualSessionClearRef.current = true;
+      if (session) onGeneratedUiInvalidated?.(session, 'cleared');
       if (pendingPersistedReasoningAction) {
         await pendingPersistedReasoningAction.catch(() => undefined);
       }

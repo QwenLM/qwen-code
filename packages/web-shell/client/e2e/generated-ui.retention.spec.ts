@@ -4,12 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { createRequire } from 'node:module';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
-import { build } from 'esbuild';
+import { startGeneratedUiSandbox } from './utils/generatedUiSandbox';
 import {
   expect,
   test,
@@ -28,7 +23,6 @@ import {
   userTextEvent,
 } from './utils/mockDaemon';
 
-const root = new URL('../../../../', import.meta.url);
 const resourceUri = 'ui://qwen-code-generated-ui/view-v1.html';
 const frameSelector = 'iframe[title="generated-ui MCP App"]';
 const input = {
@@ -68,66 +62,33 @@ interface LifecycleEvent {
 type ProbeWindow = Window & {
   __pr03Realm: RealmProbe;
   __pr03Record(event: LifecycleEvent): Promise<void>;
-  __pr03ReplyGate: { hold: boolean; waiting: number; release(): void };
+  __pr03QueueParking?: Promise<{
+    waiting: number;
+    expired: boolean;
+    status: string | null | undefined;
+    notice: string | null | undefined;
+  }>;
+  __pr03ReplyGate: {
+    hold: boolean;
+    waiting: number;
+    expired: boolean;
+    holdFor(): void;
+    release(): void;
+  };
 };
 
 let appHtml: string;
 let toolResult: Record<string, unknown>;
-let sandbox: { url: string; close(): Promise<void> };
-let fixtureDirectory: string;
+let sandbox: Awaited<ReturnType<typeof startGeneratedUiSandbox>>;
 
 test.beforeAll(async () => {
-  appHtml = await readFile(
-    new URL('integrations/generated-ui/dist/app.html', root),
-    'utf8',
-  );
-  const require = createRequire(new URL('packages/cli/package.json', root));
-  const fixture = await build({
-    stdin: {
-      resolveDir: fileURLToPath(root),
-      contents: `
-        import express from ${JSON.stringify(require.resolve('express'))};
-        import { mountMcpAppSandbox } from './packages/cli/src/serve/mcp-app-sandbox.ts';
-        export { createShowResult } from './integrations/generated-ui/src/contracts.ts';
-        export async function startSandbox() {
-          const app = express();
-          const dispose = mountMcpAppSandbox(app);
-          const server = await new Promise((resolve) => {
-            const listener = app.listen(0, '127.0.0.1', () => resolve(listener));
-          });
-          return {
-            url: 'http://127.0.0.1:' + server.address().port,
-            async close() {
-              dispose();
-              server.closeAllConnections();
-              await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
-            },
-          };
-        }
-      `,
-    },
-    bundle: true,
-    platform: 'node',
-    format: 'esm',
-    write: false,
-    banner: {
-      js: `import { createRequire } from 'node:module'; const require = createRequire(${JSON.stringify(fileURLToPath(new URL('packages/cli/package.json', root)))});`,
-    },
-  });
-  fixtureDirectory = await mkdtemp(join(tmpdir(), 'generated-ui-retention-'));
-  const fixturePath = join(fixtureDirectory, 'sandbox.mjs');
-  await writeFile(fixturePath, fixture.outputFiles[0].text);
-  const helpers = (await import(pathToFileURL(fixturePath).href)) as {
-    createShowResult(document: typeof input): Record<string, unknown>;
-    startSandbox(): Promise<typeof sandbox>;
-  };
-  toolResult = helpers.createShowResult(input);
-  sandbox = await helpers.startSandbox();
+  sandbox = await startGeneratedUiSandbox();
+  appHtml = sandbox.appHtml;
+  toolResult = sandbox.createShowResult(input);
 });
 
 test.afterAll(async () => {
   await sandbox?.close();
-  if (fixtureDirectory) await rm(fixtureDirectory, { recursive: true });
 });
 
 async function observeRuntime(page: Page, holdInit = false) {
@@ -144,10 +105,21 @@ async function observeRuntime(page: Page, holdInit = false) {
         inits: 0,
       };
       const held: Array<() => void> = [];
+      let holdMilliseconds = holdInit ? 3_500 : 750;
+      let timer: ReturnType<typeof setTimeout> | undefined;
       target.__pr03ReplyGate = {
         hold: holdInit,
         waiting: 0,
+        expired: false,
+        holdFor() {
+          this.release();
+          this.expired = false;
+          this.hold = true;
+          holdMilliseconds = 750;
+        },
         release() {
+          clearTimeout(timer);
+          timer = undefined;
           this.hold = false;
           this.waiting = 0;
           for (const deliver of held.splice(0)) deliver();
@@ -172,6 +144,11 @@ async function observeRuntime(page: Page, holdInit = false) {
             listener &&
               ((event: MessageEvent) => {
                 if (target.__pr03ReplyGate.hold) {
+                  if (!held.length)
+                    timer = setTimeout(() => {
+                      target.__pr03ReplyGate.expired = true;
+                      target.__pr03ReplyGate.release();
+                    }, holdMilliseconds);
                   held.push(() => listener.call(this, event));
                   target.__pr03ReplyGate.waiting = held.length;
                 } else listener.call(this, event);
@@ -198,15 +175,20 @@ async function observeRuntime(page: Page, holdInit = false) {
   );
   page.on('worker', (worker) => {
     const record = {
-      nonce: worker.evaluate(() => {
-        const target = globalThis as typeof globalThis & {
-          __pr03Worker?: string;
-        };
-        target.__pr03Worker ??= Array.from(
-          crypto.getRandomValues(new Uint32Array(4)),
-        ).join('-');
-        return target.__pr03Worker;
-      }),
+      nonce: worker
+        .evaluate(() => {
+          const target = globalThis as typeof globalThis & {
+            __pr03Worker?: string;
+          };
+          target.__pr03Worker ??= Array.from(
+            crypto.getRandomValues(new Uint32Array(4)),
+          ).join('-');
+          return target.__pr03Worker;
+        })
+        .catch(() => {
+          record.closed = true;
+          return '';
+        }),
       closed: false,
     };
     worker.on('close', () => {
@@ -214,9 +196,18 @@ async function observeRuntime(page: Page, holdInit = false) {
     });
     workers.push(record);
   });
+  const liveWorkerNonces = async () => {
+    const values = await Promise.all(
+      workers.map(async (record) => ({ record, nonce: await record.nonce })),
+    );
+    return values
+      .filter(({ record, nonce }) => !record.closed && nonce !== '')
+      .map(({ nonce }) => nonce);
+  };
   return {
     lifecycle,
     workers,
+    liveWorkerNonces,
     async snapshot(app: FrameLocator | Frame) {
       const realm = await app.locator('body').evaluate(() => {
         const target = window as ProbeWindow;
@@ -224,9 +215,7 @@ async function observeRuntime(page: Page, holdInit = false) {
       });
       return {
         realm,
-        workerNonces: await Promise.all(
-          workers.filter((worker) => !worker.closed).map(({ nonce }) => nonce),
-        ),
+        workerNonces: await liveWorkerNonces(),
         workersCreated: workers.length,
         workersClosed: workers.filter((worker) => worker.closed).length,
         pagehides: lifecycle.filter((event) => event.kind === 'pagehide'),
@@ -248,6 +237,9 @@ async function openCards(
   } = {},
 ) {
   await page.setViewportSize({ width: history ? 1600 : 1280, height: 900 });
+  await page.route('**/workspace/models', (route) =>
+    route.fulfill({ json: { models: [] } }),
+  );
   const probe = await observeRuntime(page, holdInit);
   if (!moveBefore) {
     await page.addInitScript(() => {
@@ -625,16 +617,18 @@ test('retains the actual App and Worker across virtual row unmounts @smoke', asy
   expect(daemon.promptRequests()).toHaveLength(0);
 });
 
-for (const status of [404, 401, 503]) {
-  test(`handles retained App and Worker lifetime after load returns ${status} @smoke`, async ({
+for (const { status, stopped } of [
+  { status: 404, stopped: false },
+  { status: 401, stopped: false },
+  { status: 401, stopped: true },
+  { status: 503, stopped: false },
+]) {
+  test(`handles retained ${stopped ? 'stopped ' : ''}App and Worker lifetime after load returns ${status} @smoke`, async ({
     page,
   }, testInfo) => {
     const { app, cards, probe, daemon, scenario } = await openCards(
       page,
       testInfo,
-    );
-    await page.route('**/workspace/models', (route) =>
-      route.fulfill({ json: { models: [] } }),
     );
     const view = app().frameLocator('#view');
     await view.locator('#rate').fill('7');
@@ -645,6 +639,16 @@ for (const status of [404, 401, 503]) {
       'data-state',
       'dirty',
     );
+    if (stopped) {
+      await app().locator('#stop').click();
+      await expect(app().locator('#status')).toHaveAttribute(
+        'data-state',
+        'stopped',
+      );
+      await expect
+        .poll(() => probe.workers.filter(({ closed }) => closed).length)
+        .toBe(1);
+    }
     const before = await probe.snapshot(app());
     const mainRealm = await page.evaluate(
       () => (window as ProbeWindow).__pr03Realm.id,
@@ -703,6 +707,58 @@ for (const status of [404, 401, 503]) {
         .poll(() => probe.workers.every(({ closed }) => closed))
         .toBe(true);
     }
+    await page.unroute(`**${failurePath}`);
+    await sidebar.getByText('Previous Session', { exact: true }).click();
+    await daemon.sse.waitForConnection('previous-session');
+    const priorConnections = await daemon.sse.connections();
+    await sidebar.getByText(scenario.displayName, { exact: true }).click();
+    await expect
+      .poll(async () =>
+        (await daemon.sse.connections()).some(
+          (connection) =>
+            connection.sessionId === scenario.sessionId &&
+            !priorConnections.some(
+              (prior) =>
+                prior.url === connection.url &&
+                prior.connectedAt === connection.connectedAt,
+            ),
+        ),
+      )
+      .toBe(true);
+    await daemon.sendEvent(
+      replayCompleteEvent({
+        sessionId: scenario.sessionId,
+        replayedCount: scenario.events.length,
+      }),
+    );
+    await expect(
+      page.locator('[data-web-shell-composer-surface] .cm-content'),
+    ).toBeEditable();
+    if (status === 503) {
+      await expect(cards).toBeVisible();
+      expect(await probe.snapshot(app())).toEqual(before);
+      await expect(view.locator('#rate')).toHaveValue('9');
+      await expect(view.locator('#answer')).toHaveText('1:7');
+    } else {
+      const reopen = page.getByRole('button', {
+        name: 'Reopen interactive view',
+        exact: true,
+      });
+      await expect(reopen).toBeVisible();
+      await expect(cards).toHaveCount(0);
+      await reopen.click();
+      await expect(app().locator('#status')).toHaveAttribute(
+        'data-state',
+        'ready',
+      );
+      await expect(app().frameLocator('#view').locator('#rate')).toHaveValue(
+        '2',
+      );
+      await expect(
+        page.getByText(/Reopening starts from the original content/).first(),
+      ).toBeVisible();
+      expect((await probe.snapshot(app())).realm.id).not.toBe(before.realm.id);
+    }
     expect(
       await page.evaluate(() => (window as ProbeWindow).__pr03Realm.id),
     ).toBe(mainRealm);
@@ -747,6 +803,159 @@ test('folding preserves state and returns keyboard focus at narrow width @smoke'
   await expect
     .poll(() => probe.workers.every(({ closed }) => closed))
     .toBe(true);
+});
+
+test('New task parks the same App and Worker and revokes host authority @smoke', async ({
+  page,
+}, testInfo) => {
+  const { app, cards, probe, daemon, scenario } = await openCards(
+    page,
+    testInfo,
+  );
+  const view = app().frameLocator('#view');
+  await view.locator('#rate').fill('7');
+  await view.getByRole('button', { name: 'Apply', exact: true }).click();
+  await expect(view.locator('#answer')).toHaveText('1:7');
+  await view.locator('#rate').fill('9');
+  const before = await probe.snapshot(app());
+  await page
+    .getByRole('button', { name: 'New task', exact: true })
+    .first()
+    .click();
+  await expect(cards).toBeHidden();
+  expect(
+    (await appRpc(app(), 'ui/message', hiddenMessage)).result?.isError,
+  ).toBe(true);
+  expect(await probe.snapshot(app())).toEqual(before);
+  await page
+    .locator('[data-sidebar-shell]')
+    .getByText(scenario.displayName, { exact: true })
+    .click();
+  await daemon.sse.waitForConnection(scenario.sessionId);
+  await expect(cards).toBeVisible();
+  expect(await probe.snapshot(app())).toEqual(before);
+  await expect(view.locator('#rate')).toHaveValue('9');
+  await expect(view.locator('#answer')).toHaveText('1:7');
+  expect(daemon.promptRequests()).toHaveLength(0);
+});
+
+test('a missing session leaves the previous App parked without host authority @smoke', async ({
+  page,
+}, testInfo) => {
+  const { app, cards, probe, daemon } = await openCards(page, testInfo);
+  await app().frameLocator('#view').locator('#rate').fill('9');
+  const before = await probe.snapshot(app());
+  const calls: string[] = [];
+  await page.route('**/session/*/mcp-app/tools/call', (route) => {
+    calls.push(route.request().url());
+    return route.fulfill({ json: { content: [] } });
+  });
+  await page.route('**/session/previous-session/load', (route) =>
+    route.fulfill({ status: 404, json: { error: 'Session not found' } }),
+  );
+  await page
+    .locator('[data-sidebar-shell]')
+    .getByText('Previous Session', { exact: true })
+    .click();
+  await expect(page.locator('[class*="missingSessionState"]')).toBeVisible();
+  await expect(cards).toBeHidden();
+  expect(
+    (
+      await appRpc(app(), 'tools/call', {
+        name: 'generated_ui_show',
+        arguments: input,
+      })
+    ).error,
+  ).toBeDefined();
+  expect(
+    (await appRpc(app(), 'ui/message', hiddenMessage)).result?.isError,
+  ).toBe(true);
+  expect(calls).toEqual([]);
+  expect(daemon.promptRequests()).toHaveLength(0);
+  expect(await probe.snapshot(app())).toEqual(before);
+});
+
+test('a fullscreen artifact panel revokes split-card authority without rebuilding it @smoke', async ({
+  page,
+}, testInfo) => {
+  const { app, cards, probe, daemon, scenario } = await openCards(
+    page,
+    testInfo,
+  );
+  const calls: string[] = [];
+  await page.route('**/session/*/mcp-app/tools/call', (route) => {
+    calls.push(route.request().url());
+    return route.fulfill({
+      json: { content: [{ type: 'text', text: 'visible tool' }] },
+    });
+  });
+  await page
+    .getByRole('button', { name: 'Toggle right panel', exact: true })
+    .click();
+  await openNavigationPage(page, 'Split View');
+  const pane = page
+    .getByTestId('split-view')
+    .locator(`[data-pane-session-id="${scenario.sessionId}"]`);
+  await expect(pane.locator(frameSelector)).toBeVisible();
+  await app().frameLocator('#view').locator('#rate').fill('9');
+  const before = await probe.snapshot(app());
+  const tool = { name: 'generated_ui_show', arguments: input };
+  expect(
+    (await appRpc(app(), 'tools/call', tool)).result?.content?.[0]?.text,
+  ).toBe('visible tool');
+  await page.getByRole('button', { name: 'Fullscreen', exact: true }).click();
+  await expect(
+    page.getByRole('button', { name: 'Exit fullscreen', exact: true }),
+  ).toBeVisible();
+  await expect(cards).toBeHidden();
+  expect((await appRpc(app(), 'tools/call', tool)).error).toBeDefined();
+  expect(
+    (await appRpc(app(), 'ui/message', hiddenMessage)).result?.isError,
+  ).toBe(true);
+  expect(calls).toHaveLength(1);
+  expect(daemon.promptRequests()).toHaveLength(0);
+  expect(await probe.snapshot(app())).toEqual(before);
+  await page
+    .getByRole('button', { name: 'Exit fullscreen', exact: true })
+    .click();
+  await expect(pane.locator(frameSelector)).toBeVisible();
+  expect(await probe.snapshot(app())).toEqual(before);
+  await expect(app().frameLocator('#view').locator('#rate')).toHaveValue('9');
+});
+
+test('the reply gate automatically releases before the event watchdog', async ({
+  page,
+}, testInfo) => {
+  const { app, probe } = await openCards(page, testInfo);
+  const before = await probe.snapshot(app());
+  await app()
+    .locator('body')
+    .evaluate(() => (window as ProbeWindow).__pr03ReplyGate.holdFor());
+  await app()
+    .frameLocator('#view')
+    .getByRole('button', { name: 'Apply', exact: true })
+    .click();
+  await expect
+    .poll(() =>
+      app()
+        .locator('body')
+        .evaluate(() => {
+          const gate = (window as ProbeWindow).__pr03ReplyGate;
+          return {
+            hold: gate.hold,
+            waiting: gate.waiting,
+            expired: gate.expired,
+          };
+        }),
+    )
+    .toEqual({ hold: false, waiting: 0, expired: true });
+  await expect(app().locator('#status')).toHaveAttribute('data-state', 'ready');
+  expect(
+    await app()
+      .locator('body')
+      .evaluate(() => (window as ProbeWindow).__pr03ReplyGate.expired),
+  ).toBe(true);
+  expect(await probe.snapshot(app())).toEqual(before);
 });
 
 test('history navigation rebuilds MessageList without rebuilding the live card @smoke', async ({
@@ -800,9 +1009,19 @@ test('a real initialization reply can finish while its frame is parked', async (
   expect(before.realm.inits).toBe(1);
   await fixture.park();
   await expect(cards).toHaveCount(1);
-  await app()
+  const heldAtParking = await app()
     .locator('body')
-    .evaluate(() => (window as ProbeWindow).__pr03ReplyGate.release());
+    .evaluate(() => {
+      const gate = (window as ProbeWindow).__pr03ReplyGate;
+      const result = { waiting: gate.waiting, expired: gate.expired };
+      gate.release();
+      return result;
+    });
+  expect(
+    heldAtParking.expired,
+    'Initialization gate expired before parking',
+  ).toBe(false);
+  expect(heldAtParking.waiting).toBe(1);
   await expect(app().locator('#status')).toHaveAttribute('data-state', 'ready');
   await fixture.returnToCard();
   expect(await probe.snapshot(app())).toEqual(before);
@@ -820,7 +1039,7 @@ test('parking with a full queue preserves admitted work and rejected-event count
   page,
 }, testInfo) => {
   const fixture = await openCards(page, testInfo, { virtualized: true });
-  const { app, cards, probe, daemon } = fixture;
+  const { app, cards, probe, daemon, visibleCards } = fixture;
   await cards.first().scrollIntoViewIfNeeded();
   const before = await probe.snapshot(app());
   await app()
@@ -836,14 +1055,62 @@ test('parking with a full queue preserves admitted work and rejected-event count
         if (
           event.isTrusted &&
           (event.target as Element | null)?.closest('#apply')
-        )
+        ) {
           target.__pr03ApplyClicks++;
+          if (target.__pr03ApplyClicks === 18)
+            window.top!.postMessage({ type: 'pr03-park-queue' }, '*');
+        }
       });
     });
+  // Keep cross-origin parking and reply delivery within the browser's budget.
+  await page.evaluate((selector) => {
+    const frame = document.querySelector(selector)!;
+    const park = (event: MessageEvent) => {
+      if (event.data?.type !== 'pr03-park-queue') return;
+      window.removeEventListener('message', park);
+      const observer = new MutationObserver(() => {
+        if (frame.closest('[data-generated-ui-parking]')) {
+          observer.disconnect();
+          (event.source as Window).postMessage(
+            { type: 'pr03-queue-parked' },
+            '*',
+          );
+        }
+      });
+      observer.observe(document, { childList: true, subtree: true });
+      document.querySelector<HTMLElement>(
+        '[data-web-shell-message-list]',
+      )!.scrollTop = 0;
+    };
+    window.addEventListener('message', park);
+  }, frameSelector);
   await app()
     .locator('body')
     .evaluate(() => {
-      (window as ProbeWindow).__pr03ReplyGate.hold = true;
+      const target = window as ProbeWindow;
+      target.__pr03QueueParking = new Promise((resolve) => {
+        const parked = (event: MessageEvent) => {
+          if (
+            event.source !== window.top ||
+            event.data?.type !== 'pr03-queue-parked'
+          )
+            return;
+          window.removeEventListener('message', parked);
+          const gate = target.__pr03ReplyGate;
+          const result = {
+            waiting: gate.waiting,
+            expired: gate.expired,
+            status: document
+              .querySelector('#status')
+              ?.getAttribute('data-state'),
+            notice: document.querySelector('#notice')?.textContent,
+          };
+          gate.release();
+          resolve(result);
+        };
+        window.addEventListener('message', parked);
+      });
+      target.__pr03ReplyGate.holdFor();
     });
   // Delay delivery only: the real Worker computes its unchanged response.
   // Native clicks fill the existing one-in-flight + 16 waiting queue.
@@ -851,11 +1118,17 @@ test('parking with a full queue preserves admitted work and rejected-event count
     .frameLocator('#view')
     .getByRole('button', { name: 'Apply', exact: true })
     .click({ clickCount: 20 });
-  await expect(app().locator('#status')).toHaveAttribute(
-    'data-state',
-    'running',
-  );
-  await expect(app().locator('#notice')).toContainText('queue was full');
+  const heldAtParking = await app()
+    .locator('body')
+    .evaluate(() => (window as ProbeWindow).__pr03QueueParking!);
+  expect(heldAtParking.status).toBe('running');
+  expect(heldAtParking.notice).toContain('queue was full');
+  expect(
+    heldAtParking.expired,
+    'Reply gate expired before parking completed',
+  ).toBe(false);
+  expect(heldAtParking.waiting).toBeGreaterThan(0);
+  await expect(visibleCards).toHaveCount(0);
   const deliveredClicks = await app()
     .locator('body')
     .evaluate(() => {
@@ -869,10 +1142,6 @@ test('parking with a full queue preserves admitted work and rejected-event count
   // The queue notice changes the frame's layout mid-burst. Count actual
   // trusted clicks reaching Apply instead of assuming every mouse-up hits it.
   expect(deliveredClicks).toBeGreaterThan(17);
-  await fixture.park();
-  await app()
-    .locator('body')
-    .evaluate(() => (window as ProbeWindow).__pr03ReplyGate.release());
   await expect(app().locator('#status')).toHaveAttribute('data-state', 'ready');
   await fixture.returnToCard();
   expect(await probe.snapshot(app())).toEqual(before);
@@ -930,12 +1199,14 @@ test('parking a fifth card evicts only the oldest runtime and requires reopening
     virtualized: true,
   });
   const { app, cards, probe, daemon, scroll, visibleCards } = fixture;
+  const siblingRealms: RealmProbe[] = [];
   for (let index = 0; index < 5; index++) {
     await cards.nth(index).scrollIntoViewIfNeeded();
     await app(index)
       .frameLocator('#view')
       .locator('#rate')
       .fill(String(index + 3));
+    if (index > 0) siblingRealms.push((await probe.snapshot(app(index))).realm);
   }
   await fixture.park();
   await expect(cards).toHaveCount(4);
@@ -959,6 +1230,17 @@ test('parking a fifth card evicts only the oldest runtime and requires reopening
   await expect(app().locator('#status')).toHaveAttribute('data-state', 'ready');
   await expect(app().frameLocator('#view').locator('#rate')).toHaveValue('2');
   await expect.poll(() => probe.workers.length).toBe(6);
+  for (let index = 0; index < 4; index++) {
+    expect((await probe.snapshot(app(index + 1))).realm).toEqual(
+      siblingRealms[index],
+    );
+    await expect(
+      app(index + 1)
+        .frameLocator('#view')
+        .locator('#rate'),
+    ).toHaveValue(String(index + 4));
+  }
+  expect(probe.workers).toHaveLength(6);
   expect(daemon.promptRequests()).toHaveLength(0);
 });
 
@@ -1031,9 +1313,7 @@ test('identical content from different tool calls has separate activations and s
   expect(first.documentId).toBe(second.documentId);
   expect(first.activationId).not.toBe(second.activationId);
   expect(firstRealm.id).not.toBe(secondRealm.id);
-  expect(
-    new Set(await Promise.all(probe.workers.map(({ nonce }) => nonce))).size,
-  ).toBe(2);
+  expect(new Set(await probe.liveWorkerNonces()).size).toBe(2);
   await expect(app(1).frameLocator('#view').locator('#rate')).toHaveValue('2');
   await cards.nth(0).scrollIntoViewIfNeeded();
   await expect(app(0).frameLocator('#view').locator('#rate')).toHaveValue('11');
@@ -1273,7 +1553,7 @@ test('entering and leaving Split View hands the same card to the visible surface
 test('maximizing another split pane revokes hidden tool RPCs without recreating the App', async ({
   page,
 }, testInfo) => {
-  const { scenario, daemon, probe } = await openCards(page, testInfo);
+  const { scenario, daemon, probe, cards } = await openCards(page, testInfo);
   await page.setViewportSize({ width: 1600, height: 1000 });
   // Only the HTTP daemon is a fixture. Each real split provider receives its
   // requested session/client and epoch, so its attached owner can be verified.
@@ -1325,6 +1605,8 @@ test('maximizing another split pane revokes hidden tool RPCs without recreating 
   );
   const otherPane = split.locator('[data-pane-session-id="previous-session"]');
   const card = otherPane.locator(frameSelector);
+  await expect(cards).toHaveCount(2);
+  await expect(mainPane.locator(frameSelector)).toBeVisible();
   await expect(card).toBeVisible();
   await expect(
     card.contentFrame().frameLocator('iframe').locator('#status'),
@@ -1368,6 +1650,8 @@ test('maximizing another split pane revokes hidden tool RPCs without recreating 
     .getByRole('button', { name: 'Restore pane', exact: true })
     .click();
   await expect(card).toBeVisible();
+  await expect(mainPane.locator(frameSelector)).toBeVisible();
+  await expect(cards).toHaveCount(2);
   expect(await probe.snapshot(app)).toEqual(before);
   await expect(app.frameLocator('#view').locator('#rate')).toHaveValue('31');
   const restoredReply = await appRpc(app, 'tools/call', tool);
@@ -1409,9 +1693,6 @@ for (const shadowPortals of [false, true]) {
       });
     });
     const fixture = await openCards(page, testInfo);
-    await page.route('**/workspace/models', (route) =>
-      route.fulfill({ json: { models: [] } }),
-    );
     expect(injected).toBe(1);
     await page.setViewportSize({ width: 900, height: 900 });
     const childId = 'retained-child';
@@ -1529,13 +1810,7 @@ for (const shadowPortals of [false, true]) {
         element.closest('[data-generated-ui-parking]')?.hasAttribute('inert'),
       ),
     ).toBe(true);
-    expect(
-      await Promise.all(
-        fixture.probe.workers
-          .filter((worker) => !worker.closed)
-          .map(({ nonce }) => nonce),
-      ),
-    ).toEqual(before.workerNonces);
+    expect(await fixture.probe.liveWorkerNonces()).toEqual(before.workerNonces);
     const previousLoads = childLoads;
     await trigger.click();
     await expect(panel).toBeVisible();

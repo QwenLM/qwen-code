@@ -799,6 +799,21 @@ interface GeneratedUiScope {
   workspaceCwd?: string;
 }
 
+function findGeneratedUiScope(
+  candidates: Array<GeneratedUiScope | undefined>,
+  baseUrl: string | undefined,
+  token: string | undefined,
+  workspaceCwd: string | undefined,
+) {
+  return candidates.find(
+    (scope) =>
+      scope &&
+      scope.baseUrl === baseUrl &&
+      scope.token === token &&
+      scope.workspaceCwd === workspaceCwd,
+  );
+}
+
 let nextGeneratedUiScopeId = 0;
 
 const GeneratedUiScopeContext = createContext<
@@ -1401,12 +1416,37 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   }, []);
   const generatedUiLifecycle =
     inheritedGeneratedUi?.lifecycle ?? ownGeneratedUiLifecycle;
+  const generatedUiProvider = useMemo(
+    () => ({ resolvedBaseUrl, resolvedToken, resolvedWorkspaceCwd }),
+    [resolvedBaseUrl, resolvedToken, resolvedWorkspaceCwd],
+  );
+  const generatedUiProviderRef = useRef(generatedUiProvider);
+  generatedUiProviderRef.current = generatedUiProvider;
+  const confirmedGeneratedUiWorkspace = useRef<
+    | {
+        provider: typeof generatedUiProvider;
+        requestedCwd?: string;
+        cwd: string;
+      }
+    | undefined
+  >(undefined);
+  const getConfirmedGeneratedUiWorkspace = useCallback(() => {
+    const confirmed = confirmedGeneratedUiWorkspace.current;
+    const provider = generatedUiProviderRef.current;
+    return confirmed &&
+      confirmed.provider.resolvedBaseUrl === provider.resolvedBaseUrl &&
+      confirmed.provider.resolvedToken === provider.resolvedToken &&
+      [
+        confirmed.provider.resolvedWorkspaceCwd,
+        confirmed.requestedCwd,
+        confirmed.cwd,
+      ].includes(provider.resolvedWorkspaceCwd)
+      ? confirmed
+      : undefined;
+  }, []);
+  const confirmedWorkspace = getConfirmedGeneratedUiWorkspace();
   const generatedUiWorkspaceCwd =
-    sessionRef.current !== undefined &&
-    connection.status === 'connected' &&
-    sessionRef.current?.sessionId === connection.sessionId
-      ? sessionRef.current?.workspaceCwd
-      : (resolvedWorkspaceCwd ?? connection.workspaceCwd);
+    confirmedWorkspace?.cwd ?? resolvedWorkspaceCwd ?? connection.workspaceCwd;
   const ownGeneratedUiScope = useMemo<GeneratedUiScope>(
     () => ({
       id: String(++nextGeneratedUiScopeId),
@@ -1419,15 +1459,31 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const inheritedScope = inheritedGeneratedUi?.scope;
   const inheritedGeneratedUiScopeRef = useRef(inheritedScope);
   inheritedGeneratedUiScopeRef.current = inheritedScope;
-  const generatedUiScope =
-    inheritedScope &&
-    inheritedScope.baseUrl === resolvedBaseUrl &&
-    inheritedScope.token === resolvedToken &&
-    inheritedScope.workspaceCwd === generatedUiWorkspaceCwd
-      ? inheritedScope
-      : ownGeneratedUiScope;
+  const generatedUiScope = findGeneratedUiScope(
+    [inheritedScope, ownGeneratedUiScope],
+    resolvedBaseUrl,
+    resolvedToken,
+    generatedUiWorkspaceCwd,
+  )!;
   const generatedUiScopeRef = useRef(generatedUiScope);
   generatedUiScopeRef.current = generatedUiScope;
+  const resolveGeneratedUiScope = useCallback(
+    (cwd: string | undefined) => {
+      const confirmed = getConfirmedGeneratedUiWorkspace();
+      const provider = generatedUiProviderRef.current;
+      return findGeneratedUiScope(
+        [inheritedGeneratedUiScopeRef.current, generatedUiScopeRef.current],
+        resolvedBaseUrl,
+        resolvedToken,
+        confirmed &&
+          (confirmed.requestedCwd === cwd ||
+            provider.resolvedWorkspaceCwd === cwd)
+          ? confirmed.cwd
+          : cwd,
+      );
+    },
+    [getConfirmedGeneratedUiWorkspace, resolvedBaseUrl, resolvedToken],
+  );
   const generatedUiSessionScopes = useRef(
     new WeakMap<DaemonSessionClient, string>(),
   );
@@ -2386,16 +2442,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             };
             let nextSession: DaemonSessionClient;
             if (targetSessionId && effectSessionContext?.kind === 'workspace') {
-              const scope = [
-                inheritedGeneratedUiScopeRef.current,
-                generatedUiScopeRef.current,
-              ].find(
-                (candidate) =>
-                  candidate &&
-                  candidate.baseUrl === resolvedBaseUrl &&
-                  candidate.token === resolvedToken &&
-                  candidate.workspaceCwd === effectWorkspaceCwd,
-              );
+              const scope = resolveGeneratedUiScope(effectWorkspaceCwd);
               if (scope) {
                 generatedUiRestoreTarget = {
                   scopeId: scope.id,
@@ -2689,22 +2736,20 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           turnNotifications.activate(activeSession);
           const activeWorkspaceScoped =
             activeProductSessionContext.kind === 'workspace';
+          if (activeWorkspaceScoped) {
+            confirmedGeneratedUiWorkspace.current = {
+              provider: generatedUiProviderRef.current,
+              requestedCwd: activeWorkspaceCwdRef.current,
+              cwd: activeSession.workspaceCwd,
+            };
+          }
           // Buffered SSE events can arrive before the connected render binds
           // this session. Never assign a different workspace's current scope.
           if (
             activeWorkspaceScoped &&
             !generatedUiSessionScopes.current.has(activeSession)
           ) {
-            const scope = [
-              inheritedGeneratedUiScopeRef.current,
-              generatedUiScopeRef.current,
-            ].find(
-              (candidate) =>
-                candidate &&
-                candidate.baseUrl === resolvedBaseUrl &&
-                candidate.token === resolvedToken &&
-                candidate.workspaceCwd === activeSession.workspaceCwd,
-            );
+            const scope = resolveGeneratedUiScope(activeSession.workspaceCwd);
             if (scope) {
               generatedUiSessionScopes.current.set(activeSession, scope.id);
             }
@@ -4669,7 +4714,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             if (session) {
               invalidateGeneratedUi(
                 session,
-                isAuthFailure ? 'scope-changed' : 'deleted',
+                isAuthFailure ? 'auth-failed' : 'deleted',
                 isAuthFailure ? null : session.sessionId,
               );
             } else if (generatedUiRestoreTarget) {
@@ -4678,7 +4723,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 ...(isAuthFailure
                   ? {}
                   : { sessionId: generatedUiRestoreTarget.sessionId }),
-                reason: isAuthFailure ? 'scope-changed' : 'deleted',
+                reason: isAuthFailure ? 'auth-failed' : 'deleted',
               });
             }
             // Auth failures (401/403) and terminal session errors (404/410)
@@ -4935,6 +4980,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     turnNotifications,
     resolvedBaseUrl,
     resolvedToken,
+    resolveGeneratedUiScope,
     sessionEffectContext,
     sessionContextResolutionError,
     modelServiceId,
@@ -5048,7 +5094,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           if (authFailure || missingSession) {
             invalidateGeneratedUi(
               session,
-              authFailure ? 'scope-changed' : 'deleted',
+              authFailure ? 'auth-failed' : 'deleted',
               authFailure ? null : session.sessionId,
             );
             trajectoryLiveStore.invalidate(
@@ -5749,6 +5795,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         return {
           isCurrent: () =>
             owner.isCurrent() &&
+            !manualSessionClearRef.current &&
             sessionRecoveryGenerationRef.current.get(appSession) ===
               generatedUiRecoveryGeneration &&
             generatedUiScopeRef.current === generatedUiScope &&
@@ -5790,6 +5837,16 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     }),
     [generatedUiLifecycle, generatedUiOwnerSource, generatedUiScope],
   );
+  useLayoutEffect(() => {
+    if (
+      appSession &&
+      generatedUiOwnerSource &&
+      generatedUi?.version === 1 &&
+      generatedUi.enabled === false
+    ) {
+      invalidateGeneratedUi(appSession, 'policy', null);
+    }
+  }, [appSession, generatedUi, generatedUiOwnerSource, invalidateGeneratedUi]);
   const generatedUiScopeContext = useMemo(
     () => ({ scope: generatedUiScope, lifecycle: generatedUiLifecycle }),
     [generatedUiLifecycle, generatedUiScope],

@@ -409,6 +409,27 @@ describe('Generated UI active leases', () => {
       expect(host.requestMessage).not.toHaveBeenCalled();
     },
   );
+
+  it.each(['stale-owner', 'disabled', 'foreign-receipt'])(
+    'releases an existing activation when admission becomes %s',
+    (reason) => {
+      const { store } = setup();
+      const host = slot();
+      const entry = store.attach(host.value)!;
+      const signal = entry.runtime.getSignal();
+      if (reason === 'stale-owner')
+        host.value.source.captureOwner = () => ({ isCurrent: () => false });
+      if (reason === 'disabled') host.value.receipt.status.enabled = false;
+      if (reason === 'foreign-receipt') host.value.receipt.sessionId = 'other';
+
+      expect(store.attach(host.value)).toBeUndefined();
+      expect(store.getRecord(host.value.key)?.entry).toBeUndefined();
+      expect(store.getRecord(host.value.key)?.reason).toBe('unavailable');
+      expect(entry.container.isConnected).toBe(false);
+      expect(signal.aborted).toBe(true);
+      expect(store.getEntries()).toEqual([]);
+    },
+  );
 });
 
 describe('Generated UI shadow parking', () => {
@@ -629,6 +650,58 @@ describe('Generated UI retention budgets', () => {
 });
 
 describe('Generated UI invalidation and cleanup', () => {
+  it('parks cleared attachments without losing parked or released records', async () => {
+    const { store, parking } = setup();
+    const attached = slot('attached');
+    const parked = slot('parked');
+    const released = slot('released');
+    const attachedEntry = store.attach(attached.value)!;
+    attachedEntry.container.appendChild(document.createElement('iframe'));
+    const parkedEntry = store.attach(parked.value)!;
+    store.release(parked.value.key, parked.value.token);
+    const parkedAt = parkedEntry.parkedAt;
+    store.attach(released.value);
+    store.dispose(released.value.key, 'reset');
+    const signal = attachedEntry.runtime.getSignal();
+
+    store.invalidate({
+      scopeId: 'daemon-a',
+      sessionId: 'session-a',
+      reason: 'cleared',
+    });
+
+    expect(signal.aborted).toBe(true);
+    expect(attachedEntry.container.parentElement).toBe(parking);
+    expect(store.getRecord(attached.value.key)?.entry).toBe(attachedEntry);
+    expect(parkedEntry.parkedAt).toBe(parkedAt);
+    expect(store.getRecord(released.value.key)?.reason).toBe('reset');
+    expect(
+      await attachedEntry.messages.requestMessage(messageRequest()),
+    ).toEqual({ isError: true });
+    expect(store.attach(attached.value)).toBe(attachedEntry);
+    expect(attachedEntry.runtime.getSignal().aborted).toBe(false);
+    expect(store.attach(released.value)).toBeUndefined();
+  });
+
+  it('keeps explicit-reopen records after scope-wide authentication failure', () => {
+    const { store } = setup();
+    const host = slot();
+    const stopped = slot('stopped');
+    const entry = store.attach(host.value)!;
+    store.attach(stopped.value);
+    store.release(stopped.value.key, stopped.value.token);
+
+    store.invalidate({ scopeId: 'daemon-a', reason: 'auth-failed' });
+
+    expect(entry.container.isConnected).toBe(false);
+    expect(store.getEntries()).toEqual([]);
+    for (const card of [host, stopped]) {
+      expect(store.getRecord(card.value.key)?.reason).toBe('auth-failed');
+      expect(store.attach(card.value)).toBeUndefined();
+      expect(store.attach(card.value, true)?.runtime.reopened).toBe(true);
+    }
+  });
+
   it('invalidates only the requested owner and drops released payload references', async () => {
     const { store } = setup();
     const target = slot();

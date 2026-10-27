@@ -6,6 +6,7 @@ import {
 import {
   McpAppHostContext,
   useMcpAppAdmission,
+  isBuiltInGeneratedUi,
   McpAppMessagesContext,
   McpAppSessionContext,
   McpAppToolsContext,
@@ -194,15 +195,12 @@ export function McpApp({
   const owner = useContext(McpAppGeneratedUiOwnerContext)?.source;
   const sessionId = useContext(McpAppSessionContext);
   const surfaceVisible = useContext(McpAppVisibilityContext);
-  const builtIn =
-    display.requiredFeature === 'generated-ui' ||
-    display.resourceUri === 'ui://qwen-code-generated-ui/view-v1.html';
   if (
     import.meta.env.MODE !== 'transcript' &&
     allowed &&
     retention &&
     toolId &&
-    builtIn &&
+    isBuiltInGeneratedUi(display) &&
     owner?.eventEpoch &&
     owner.sessionId === sessionId
   )
