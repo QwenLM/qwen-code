@@ -14,8 +14,8 @@ Web Shell 的 PR 徽标来自会话 PR sidecar。用户可以在 Web Shell 会�
 [会话 PR 绑定设计](2026-08-20-webshell-session-pr-binding.md)。
 
 按需回填（`POST /sessions/backfill-prs`）可以从用户输入的命令推导绑定。结果里的
-`repoDeclined` 会为每个被 `--repo` 闸门拒绝的号码计数，因此策略性拒绝与空运行可
-以区分。它读取
+`repoDeclined` 按「被拒绝的声明」计数——号码或 URL 形态——因此即使另一个来源仍然
+绑定了该号码，策略性拒绝与空运行也可以区分。它读取
 transcript。这个设计有两个缺口：
 
 1. 正常的 Web Shell 流程不会触发回填。

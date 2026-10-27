@@ -15,8 +15,9 @@ command runs, but the session gets no PR binding at that moment. See
 for the binding model and the sidecar format.
 
 The on-demand sweep (`POST /sessions/backfill-prs`) can derive the binding from
-the typed command. It reports `repoDeclined` for every number the `--repo` gate
-declined, so a policy decline is distinguishable from an empty run. It reads the transcript. That design has two gaps:
+the typed command. It reports `repoDeclined` per declined claim — a number or a
+url form the `--repo` gate refused — so a policy decline is distinguishable
+from an empty run even when another source still binds that number. It reads the transcript. That design has two gaps:
 
 1. The normal Web Shell flow does not trigger the sweep.
 2. A new session can bind before its transcript file exists. A sweep cannot
