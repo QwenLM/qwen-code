@@ -480,6 +480,7 @@ export type {
   DaemonRewindResult,
   DaemonRewindSnapshotInfo,
   DaemonSessionBtwResult,
+  DaemonSessionBtwStreamEvent,
   DaemonSessionGenerationEvent,
   DaemonMidTurnMessageResult,
   DaemonMidTurnMessageSummary,
