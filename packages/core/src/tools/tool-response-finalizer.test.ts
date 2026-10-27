@@ -16,6 +16,7 @@ import {
   toolResponseTextLength,
   type ToolResponseBudgetEntry,
 } from './tool-response-finalizer.js';
+import { logToolResultSize } from '../telemetry/loggers.js';
 import { persistAndTruncateToolResult } from './truncation.js';
 import { convertToFunctionResponse } from '../core/coreToolScheduler.js';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -44,6 +45,11 @@ vi.mock('./tool-result-boundary-diagnostics.js', async (importOriginal) => ({
     typeof import('./tool-result-boundary-diagnostics.js')
   >()),
   observeToolResultBoundary: boundaryObserveMock,
+}));
+
+vi.mock('../telemetry/loggers.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../telemetry/loggers.js')>()),
+  logToolResultSize: vi.fn(),
 }));
 
 vi.mock('./truncation.js', async (importOriginal) => {
@@ -85,6 +91,43 @@ describe('tool response finalization', () => {
       bytesWritten: Buffer.byteLength(content),
     }));
   });
+
+  it.each(['send_guard', 'batch'] as const)(
+    'preserves %s attribution and suppresses only send-boundary size telemetry',
+    async (source) => {
+      const parts = attachToolOutputProvenance(
+        [fnResponse('shell', { output: 'x'.repeat(4000) }, 'real-call')],
+        {
+          callId: 'real-call',
+          toolName: 'shell',
+          toolType: 'native',
+          promptId: 'prompt',
+        },
+      );
+      const entries = [entry('real-call', parts)];
+      const finalized =
+        source === 'batch'
+          ? await finalizeToolResponses(config(1000), entries, undefined, false)
+          : await finalizeToolResponses(
+              config(1000),
+              entries,
+              undefined,
+              false,
+              false,
+              1000,
+              false,
+              'send_guard',
+              false,
+            );
+      expect(
+        getToolOutputProvenance(finalized[0].responseParts[0])?.budgetSource,
+      ).toBe(source);
+      expect(logToolResultSize).toHaveBeenCalledTimes(
+        source === 'batch' ? 1 : 0,
+      );
+      expect(boundaryObserveMock).not.toHaveBeenCalled();
+    },
+  );
 
   it('fits exec output to a batch budget without persisting known-empty artifacts', async () => {
     const result = await finalizeToolResponses(config(1000), [

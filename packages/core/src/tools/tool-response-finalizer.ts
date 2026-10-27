@@ -8,6 +8,7 @@ import {
   measureToolOutput,
   getToolOutputProvenance,
   updateToolOutputBudget,
+  type ToolOutputBudgetSource,
 } from './tool-output-size.js';
 import { logToolResultSize } from '../telemetry/loggers.js';
 import { ToolResultSizeEvent } from '../telemetry/types.js';
@@ -499,6 +500,8 @@ export async function finalizeToolResponses(
   associateBoundary = false,
   budgetOverride?: number,
   includeTopLevelText = true,
+  budgetSource: ToolOutputBudgetSource = 'batch',
+  logResultSize = true,
 ): Promise<ToolResponseBudgetEntry[]> {
   const shouldAssociateBoundary = observeBoundary && associateBoundary;
   const associatedEntryIndexes = observeBoundary
@@ -685,8 +688,9 @@ export async function finalizeToolResponses(
     ) {
       const part = entry.responseParts[partIndex];
       if (part !== entries[index].responseParts[partIndex])
-        updateToolOutputBudget([part], budget, 'batch');
+        updateToolOutputBudget([part], budget, budgetSource);
     }
+    if (!logResultSize) continue;
     try {
       // Measurement is part of the observation: an estimator throw must not
       // fail the finalizer it only observes.
@@ -708,7 +712,7 @@ export async function finalizeToolResponses(
           after.estimatedTokens,
           true,
           budget,
-          'batch',
+          budgetSource,
           entry.callId,
           promptIds?.get(entry.callId),
         ),

@@ -3710,12 +3710,21 @@ export class LlmChat {
           // A PreToolUse or PermissionRequest `updatedInput` replaces the executed
           // args while history keeps the model-authored ones, so a hook can
           // retarget a read off every path derivable here.
-          const hookRetargetPossible =
-            this.config.hasHooksForEvent?.('PreToolUse') ||
-            this.config.hasHooksForEvent?.('PermissionRequest');
-          const cutRead = cutResults.some((result) => {
+          const hookRetargetPossible = cutResults.some((result) => {
             const name = canonicalToolName(result.name ?? '');
-            return name === ToolNames.TOOL_CALL || FILE_PATH_TOOLS.has(name);
+            return (
+              (name === ToolNames.TOOL_CALL || FILE_PATH_TOOLS.has(name)) &&
+              !this.config.getDisableAllHooks?.() &&
+              ['PreToolUse', 'PermissionRequest'].some((event) =>
+                this.config
+                  .getHookSystem?.()
+                  ?.hasHooksMatchingTool(
+                    event,
+                    name,
+                    this.config.getSessionId(),
+                  ),
+              )
+            );
           });
           // Keep unresolvable reads resident by preserving their actual text;
           // normal compaction owns this batch before any recovery artifact is
@@ -3723,7 +3732,7 @@ export class LlmChat {
           // identify cannot be disarmed without a cache-global operation on
           // the shared cache, so it must not cut that entry either.
           const guarded =
-            unresolvedRead || (hookRetargetPossible && cutRead)
+            unresolvedRead || hookRetargetPossible
               ? entries
               : await finalizeToolResponses(
                   this.config,
@@ -3732,6 +3741,8 @@ export class LlmChat {
                   false,
                   false,
                   toolOutputBudget,
+                  false,
+                  'send_guard',
                   false,
                 );
           if (guarded !== entries) {

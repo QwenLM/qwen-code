@@ -5,7 +5,10 @@
  */
 
 import { convertToFunctionResponse } from '../core/coreToolScheduler.js';
-import { enforceFunctionResponseBudget } from './tool-response-finalizer.js';
+import {
+  enforceFunctionResponseBudget,
+  finalizeToolResponses,
+} from './tool-response-finalizer.js';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -504,21 +507,25 @@ describe('WebFetchTool', () => {
     });
 
     it.each([false, true])(
-      'retains the real extracted-text artifact through finalization (processing failure: %s)',
+      'advertises the artifact for the text actually cut (processing failure: %s)',
       async (processingFailure) => {
         const body = 'word '.repeat(30_000);
+        const summary = 'summary '.repeat(1000);
         stubFetch({ contentType: 'text/plain', body: Buffer.from(body) });
         if (processingFailure)
           mockGenerateContent.mockRejectedValue(new Error('API error'));
-        else
-          mockGenerateContent.mockResolvedValue({
-            text: 'summary '.repeat(1000),
-          });
+        else mockGenerateContent.mockResolvedValue({ text: summary });
         const result = await run('https://example.com/large');
-        expect(result.persistedOutputFiles).toHaveLength(1);
-        const artifact = result.persistedOutputFiles![0];
-        expect(fs.readFileSync(artifact, 'utf8')).toBe(body);
-        const [finalized] = enforceFunctionResponseBudget(
+        if (processingFailure) {
+          expect(result.persistedOutputFiles).toHaveLength(1);
+          expect(fs.readFileSync(result.persistedOutputFiles![0], 'utf8')).toBe(
+            body,
+          );
+        } else {
+          expect(result.persistedOutputFiles).toBeUndefined();
+        }
+        const [finalized] = await finalizeToolResponses(
+          { ...mockConfig, getToolOutputBatchBudget: () => 500 } as Config,
           [
             {
               callId: 'web',
@@ -531,8 +538,11 @@ describe('WebFetchTool', () => {
               ),
             },
           ],
-          500,
         );
+        const artifact = finalized.persistedOutputFiles![0];
+        const saved = fs.readFileSync(artifact, 'utf8');
+        expect(saved).toBe(processingFailure ? body : result.llmContent);
+        if (!processingFailure) expect(saved).toContain(summary.trim());
         const output = finalized.responseParts[0].functionResponse!.response![
           'output'
         ] as string;

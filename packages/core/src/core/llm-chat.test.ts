@@ -14,6 +14,8 @@ import {
   getToolOutputProvenance,
   measureToolOutput,
 } from '../tools/tool-output-size.js';
+import { HookSystem } from '../hooks/hookSystem.js';
+import { HookEventName, HookType } from '../hooks/types.js';
 import { logToolResultSize } from '../telemetry/loggers.js';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type OpenAI from 'openai';
@@ -14496,9 +14498,28 @@ describe('LlmChat', async () => {
 
     it('shrinks results to the headroom left before auto-compaction', async () => {
       await reportUsage(NEAR_AUTO);
-      await sendDrain([result()], 'second');
+      await sendDrain(
+        attachToolOutputProvenance([result()], {
+          callId: 'anonymous-result',
+          toolName: 'shell',
+          promptId: 'second',
+          toolType: 'native',
+        }),
+        'second',
+      );
       expect(resultChars(1)).toBeLessThan(20_000);
       expect(resultChars(1)).toBeLessThan(12_000);
+      const sent = (requestAt(1).contents as Content[])
+        .flatMap((content) => content.parts ?? [])
+        .find((part) => part.functionResponse?.id === 'anonymous-result')!;
+      expect(getToolOutputProvenance(sent)?.budgetSource).toBe('send_guard');
+      expect(
+        vi
+          .mocked(logToolResultSize)
+          .mock.calls.some(([, event]) =>
+            event.call_id?.startsWith('send-boundary-'),
+          ),
+      ).toBe(false);
       expect(
         vi.mocked(chat.tryCompress).mock.calls.at(-1)?.[3]
           ?.precomputedEffectiveTokens,
@@ -15058,9 +15079,25 @@ describe('LlmChat', async () => {
     // the model-authored path, and a worker-executed read's residency lives in
     // the worker's own FileReadCache, unreachable from this process. Preserve
     // the batch for normal compaction instead of cutting it.
-    it.each(['PreToolUse', 'PermissionRequest'])(
-      'preserves a cut read batch when a %s hook could have retargeted it',
-      async (event) => {
+    it.each([
+      [HookEventName.PreToolUse, 'Bash', false],
+      [HookEventName.PermissionRequest, 'Bash', false],
+      [HookEventName.PreToolUse, 'read_file', true],
+      [HookEventName.PermissionRequest, '*', true],
+    ] as const)(
+      'only preserves a read for a matching %s hook (%s)',
+      async (event, matcher, retargetPossible) => {
+        const hookSystem = new HookSystem({
+          ...mockConfig,
+          getAllowedHttpHookUrls: () => [],
+          getAllowPrivateNetworkHooks: () => false,
+        } as Config);
+        hookSystem.addSessionHook(mockConfig.getSessionId(), event, matcher, {
+          type: HookType.Command,
+          command: 'true',
+        });
+        vi.mocked(mockConfig.getHookSystem).mockReturnValue(hookSystem);
+        mockConfig.hasHooksForEvent = (name: string) => name === event;
         const invalidateReadCache = vi.fn();
         mockConfig.getExecutionEnvironment = () =>
           ({ invalidateReadCache }) as unknown as ReturnType<
@@ -15072,11 +15109,10 @@ describe('LlmChat', async () => {
           clear,
           markAllReadsEvictedFromHistory,
         } as unknown as ReturnType<Config['getFileReadCache']>);
-        mockConfig.hasHooksForEvent = (name: string) => name === event;
         mockStreamsOnce(
           streamOf(
             modelChunk(
-              [fnCall('read_file', { file_path: 'a.txt' }, 'retargeted-read')],
+              [fnCall('read_file', { file_path: 'a.txt' }, 'matched-read')],
               undefined,
               { promptTokenCount: NEAR_AUTO, totalTokenCount: NEAR_AUTO + 10 },
             ),
@@ -15089,15 +15125,21 @@ describe('LlmChat', async () => {
             fnResponse(
               'read_file',
               { output: 'x'.repeat(20_000) },
-              'retargeted-read',
+              'matched-read',
             ),
           ],
           'second',
         );
-        expect(resultChars(1)).toBe(20_000);
-        expect(invalidateReadCache).not.toHaveBeenCalled();
-        expect(markAllReadsEvictedFromHistory).not.toHaveBeenCalled();
-        expect(clear).not.toHaveBeenCalled();
+        if (retargetPossible) {
+          expect(resultChars(1)).toBe(20_000);
+          expect(invalidateReadCache).not.toHaveBeenCalled();
+          expect(markAllReadsEvictedFromHistory).not.toHaveBeenCalled();
+          expect(clear).not.toHaveBeenCalled();
+        } else {
+          expect(resultChars(1)).toBeLessThan(12_000);
+          expect(invalidateReadCache).toHaveBeenCalled();
+          expect(markAllReadsEvictedFromHistory).toHaveBeenCalled();
+        }
       },
     );
 

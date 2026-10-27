@@ -764,7 +764,6 @@ ${entry.content}
         llmContent: `${header}\n\n${resultText}${binaryNote}`,
         returnDisplay: `${displaySummary}${elapsedSuffix()}`,
         rawOutputSize: entry.rawOutputSize,
-        persistedOutputFiles,
         ...(entry.persistedPath
           ? { resultFilePaths: [entry.persistedPath] }
           : {}),
