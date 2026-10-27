@@ -345,6 +345,7 @@ class Session {
       getActiveTurnAbortSignal: () => this.activeTurnAbortController?.signal,
       settings: this.settings,
       permissionMode: this.config.getApprovalMode(),
+      waitForInitialization: () => this.waitForInitialization(),
       onInterrupt: () => this.handleInterrupt(),
       onContinueLastTurn: () => this.requestContinueLastTurn(),
     });
@@ -416,7 +417,7 @@ class Session {
     try {
       // Dispatch the initialize request first
       // This registers SDK MCP servers in the control context
-      await this.dispatcher?.dispatch(request);
+      await this.dispatcher?.dispatch(request, true);
 
       // Get sendSdkMcpMessage callback from SdkMcpController
       // This callback is used by McpClientManager to send MCP messages
@@ -468,7 +469,7 @@ class Session {
 
   /**
    * Handle control request asynchronously (fire-and-forget from main loop).
-   * Errors are handled internally and responses sent by dispatcher.
+   * Errors are handled internally.
    */
   private handleControlRequestAsync(request: CLIControlRequest): void {
     const dispatcher = this.getDispatcher();
@@ -477,9 +478,43 @@ class Session {
       return;
     }
 
+    if (
+      request.request.subtype === 'initialize' &&
+      this.initializationResolve !== null
+    ) {
+      this.outputAdapter.send({
+        type: 'control_response',
+        response: {
+          subtype: 'error',
+          request_id: request.request_id,
+          error: 'Session initialization is in progress. Try again when ready.',
+        },
+      });
+      return;
+    }
+
     // Fire-and-forget: dispatch runs concurrently
     // The dispatcher's pendingIncomingRequests tracks completion
-    void dispatcher.dispatch(request).catch((error) => {
+    void (async () => {
+      if (request.request.subtype === 'initialize') {
+        try {
+          await this.waitForInitialization();
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          this.outputAdapter.send({
+            type: 'control_response',
+            response: {
+              subtype: 'error',
+              request_id: request.request_id,
+              error: `Session initialization failed: ${message}`,
+            },
+          });
+          return;
+        }
+      }
+      await dispatcher.dispatch(request);
+    })().catch((error) => {
       debugLogger.error('[Session] Control request dispatch error:', error);
       // Error response is already sent by dispatcher.dispatch()
     });
