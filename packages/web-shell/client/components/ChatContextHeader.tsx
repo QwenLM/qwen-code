@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import type { ReactNode } from 'react';
 import {
   FolderClosedIcon,
   GaugeIcon,
@@ -6,13 +6,8 @@ import {
   LayersIcon,
   PanelRightIcon,
 } from 'lucide-react';
-import {
-  useActions,
-  useConnection,
-  useWorkspace,
-} from '@qwen-code/web-shell/daemon-react-sdk';
+import { useInlineSessionRename } from '../hooks/useInlineSessionRename';
 import { useI18n } from '../i18n';
-import { useSessionCatalogController } from '../session-catalog/session-catalog-hooks';
 import { LocalControlQrButton } from './LocalControlQrButton';
 import styles from './ChatContextHeader.module.css';
 import {
@@ -56,6 +51,16 @@ interface ChatContextHeaderProps {
   onOpenContextUsage?: () => void;
   /** Shows the Local Control QR entry; hidden when omitted. */
   onOpenLocalControlSettings?: () => void;
+  /**
+   * Makes a string `content` title renamable in place: a single click (or
+   * Enter/Space on the focused title) opens an inline editor. Supplied only
+   * by a caller whose title names `sessionId`; `rename` persists the name and
+   * reports its own errors. Omitted, the title stays plain text.
+   */
+  titleRename?: {
+    sessionId: string;
+    rename: (displayName: string) => Promise<unknown>;
+  };
 }
 
 export function ChatContextHeader({
@@ -75,119 +80,21 @@ export function ChatContextHeader({
   onOpenTokenUsage,
   onOpenContextUsage,
   onOpenLocalControlSettings,
+  titleRename,
 }: ChatContextHeaderProps) {
   const { t } = useI18n();
-  const connection = useConnection();
-  const actions = useActions();
-  const workspace = useWorkspace();
-  const sessionCatalogController = useSessionCatalogController(
-    workspace.client,
-  );
   const workspaceLabel = workspaceName ?? t('sidebar.noWorkspace');
   const WorkspaceIcon = onOpenFiles ? 'button' : 'span';
   const workspaceAriaLabel = workspaceName
     ? t('workspace.paneLabel', { name: workspaceName })
     : workspaceLabel;
 
-  // Single-click inline rename of the session title: the input stands in for
-  // the title text, Enter saves through the same session-scoped API the pane
-  // title and the sidebar's double-click rename use, and Escape/blur cancel.
-  // The title click is not stopped on its way to document: open Radix
-  // surfaces rely on the native click for deferred outside-press dismissal.
-  const titleText = typeof content === 'string' ? content : null;
-  const [sessionRenaming, setSessionRenaming] = useState(false);
-  const [sessionRenameValue, setSessionRenameValue] = useState('');
-  const [sessionRenameSaving, setSessionRenameSaving] = useState(false);
-  const cancelSessionRename = useCallback(() => {
-    setSessionRenaming(false);
-    setSessionRenameValue('');
-    setSessionRenameSaving(false);
-  }, []);
-  useEffect(() => {
-    // A session swap out from under the header must not keep a stale draft
-    // (the pane title resets its rename state the same way).
-    cancelSessionRename();
-  }, [connection.sessionId, cancelSessionRename]);
-  const beginSessionRename = useCallback(() => {
-    if (
-      !connection.sessionId ||
-      !titleText ||
-      sessionRenaming ||
-      sessionRenameSaving
-    ) {
-      return;
-    }
-    // A drag that ends on the title leaves a live text selection; the same
-    // guard the pane title click uses keeps that click out of rename.
-    if (window.getSelection()?.isCollapsed === false) return;
-    setSessionRenameValue(titleText);
-    setSessionRenaming(true);
-  }, [connection.sessionId, sessionRenaming, sessionRenameSaving, titleText]);
-  const saveSessionRename = useCallback(() => {
-    const nextName = sessionRenameValue.trim();
-    const sessionId = connection.sessionId;
-    if (!nextName || !sessionId || sessionRenameSaving) {
-      cancelSessionRename();
-      return;
-    }
-    // Enter without editing re-sends the current label: skip the daemon
-    // write and close the form (the pane title bails the same way).
-    if (nextName === titleText) {
-      cancelSessionRename();
-      return;
-    }
-    setSessionRenameSaving(true);
-    const rename =
-      connection.sessionContext?.kind === 'standalone'
-        ? workspace.client.renameStandaloneSession(sessionId, nextName)
-        : actions.renameSession(nextName);
-    void rename
-      .then((result: { displayName?: unknown } | undefined) => {
-        // The daemon clamps displayName to 256 chars and reports the stored
-        // value; propagate that instead of the locally typed string.
-        const effectiveName =
-          typeof result?.displayName === 'string' && result.displayName
-            ? result.displayName
-            : nextName;
-        if (connection.workspaceCwd) {
-          sessionCatalogController.renamed(
-            connection.workspaceCwd,
-            sessionId,
-            effectiveName,
-          );
-          sessionCatalogController.refreshWorkspace(connection.workspaceCwd);
-        }
-      })
-      .catch((error: unknown) => {
-        console.error('Failed to rename session', error);
-      })
-      .finally(() => {
-        cancelSessionRename();
-      });
-  }, [
-    actions,
-    cancelSessionRename,
-    connection.sessionContext?.kind,
-    connection.sessionId,
-    connection.workspaceCwd,
-    sessionCatalogController,
-    sessionRenameSaving,
-    sessionRenameValue,
-    titleText,
-    workspace.client,
-  ]);
-  const sessionTitleRenameProps =
-    titleText && connection.sessionId
-      ? {
-          role: 'button' as const,
-          tabIndex: 0,
-          'data-web-shell-pane-title': '',
-          onClick: beginSessionRename,
-          onKeyDown: (event: { key: string }) => {
-            if (event.key === 'Enter') beginSessionRename();
-          },
-        }
-      : {};
+  const titleText = typeof content === 'string' ? content : '';
+  const sessionRename = useInlineSessionRename({
+    label: titleText,
+    sessionKey: titleRename?.sessionId,
+    onSave: titleRename?.rename,
+  });
 
   return (
     <header className={styles.header} data-testid="chat-context-header">
@@ -226,33 +133,17 @@ export function ChatContextHeader({
         </TooltipProvider>
       )}
       <div className={styles.content}>
-        {sessionRenaming ? (
+        {sessionRename.editing ? (
           <input
             className={styles.titleRenameInput}
-            aria-label={`${t('sessionTitle.rename')}: ${titleText ?? ''}`}
+            aria-label={`${t('sessionTitle.rename')}: ${titleText}`}
             data-web-shell-pane-title-input
             autoFocus
-            value={sessionRenameValue}
             maxLength={256}
-            onChange={(event) => setSessionRenameValue(event.target.value)}
-            onFocus={(event) => event.currentTarget.select()}
-            onBlur={cancelSessionRename}
-            onKeyDown={(event) => {
-              // The editor owns the keys: pane-level Escape (maximize) and
-              // approval shortcuts must not see them, the same as the pane
-              // title rename form.
-              event.stopPropagation();
-              if (event.key === 'Enter') {
-                event.preventDefault();
-                saveSessionRename();
-              } else if (event.key === 'Escape') {
-                event.preventDefault();
-                cancelSessionRename();
-              }
-            }}
+            {...sessionRename.inputProps}
           />
-        ) : titleText && connection.sessionId ? (
-          <span title={titleText} {...sessionTitleRenameProps}>
+        ) : sessionRename.titleProps ? (
+          <span title={titleText} {...sessionRename.titleProps}>
             {titleText}
           </span>
         ) : (

@@ -42954,6 +42954,88 @@ describe('App session callbacks', () => {
     );
   });
 
+  async function renameFromHeaderTitle(
+    container: HTMLElement,
+    name: string,
+  ): Promise<void> {
+    const title = container.querySelector<HTMLElement>(
+      '[data-testid="chat-context-header"] [data-web-shell-pane-title]',
+    );
+    expect(title).not.toBeNull();
+    await act(async () => {
+      title!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, detail: 1 }),
+      );
+    });
+    const input = container.querySelector<HTMLInputElement>(
+      '[data-web-shell-pane-title-input]',
+    );
+    expect(input).not.toBeNull();
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, name);
+      input!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      input!.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    await flush();
+  }
+
+  it('reconciles a header title rename once, like a confirmed /rename', async () => {
+    const onSessionChange = vi.fn();
+    const { container, rerender } = renderApp({ onSessionChange });
+    await flush();
+
+    await renameFromHeaderTitle(container, 'Header title');
+
+    expect(mockSessionActions.renameSession).toHaveBeenCalledWith(
+      'Header title',
+    );
+    expect(sessionCatalogController.renamed).toHaveBeenCalledWith(
+      '/tmp/project',
+      'session-1',
+      'Header title',
+    );
+    act(() => {
+      mockConnection.displayName = 'Header title';
+      rerender({ onSessionChange });
+    });
+    expect(sessionCatalogController.renamed).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows a standalone header title rename in the session name', async () => {
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.workspaceCwd = '';
+    mockConnection.displayName = 'Old standalone title';
+    mockWorkspace.capabilities = {
+      features: ['standalone_sessions_v1'],
+      workspaces: [{ id: 'primary', cwd: '/workspace', primary: true }],
+    } as typeof mockWorkspace.capabilities;
+    const { container } = renderApp();
+    await flush();
+
+    await renameFromHeaderTitle(container, 'Standalone title');
+
+    expect(mockWorkspace.client.renameStandaloneSession).toHaveBeenCalledWith(
+      'session-1',
+      'Standalone title',
+    );
+    expect(mockSessionActions.renameSession).not.toHaveBeenCalled();
+    expect(sessionCatalogController.renamed).not.toHaveBeenCalled();
+    expect(testState.latestChatEditorProps?.sessionName).toBe(
+      'Standalone title',
+    );
+  });
+
   it('rejects programmatic attachments in a standalone chat', async () => {
     mockConnection.sessionContext = { kind: 'standalone' };
     mockConnection.workspaceCwd = '';

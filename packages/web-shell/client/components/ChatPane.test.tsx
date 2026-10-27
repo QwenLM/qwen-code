@@ -38,7 +38,6 @@ const catalogController = vi.hoisted(() => ({
   promptAdmitted: vi.fn(),
   promptAdmissionUncertain: vi.fn(),
   renamed: vi.fn(),
-  refreshWorkspace: vi.fn(),
   turnCompleted: vi.fn(),
 }));
 
@@ -521,7 +520,6 @@ beforeEach(() => {
   catalogController.promptAdmissionUncertain.mockClear();
   catalogController.turnCompleted.mockClear();
   catalogController.renamed.mockClear();
-  catalogController.refreshWorkspace.mockClear();
   renameSession.mockReset();
   renameSession.mockResolvedValue({});
   workspaceClientMock.renameStandaloneSession.mockReset();
@@ -4236,7 +4234,9 @@ describe('ChatPane pane title single-click rename', () => {
 
   async function openRename(): Promise<void> {
     await act(async () => {
-      findTitle().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      findTitle().dispatchEvent(
+        new MouseEvent('click', { bubbles: true, detail: 1 }),
+      );
     });
   }
 
@@ -4282,13 +4282,33 @@ describe('ChatPane pane title single-click rename', () => {
     });
     expect(renameSession).toHaveBeenCalledTimes(1);
     expect(renameSession).toHaveBeenCalledWith('Pane renamed');
+    expect(catalogController.renamed).toHaveBeenCalledTimes(1);
     expect(catalogController.renamed).toHaveBeenCalledWith(
       '/w',
       'sess-1',
       'Pane renamed',
     );
-    expect(catalogController.refreshWorkspace).toHaveBeenCalledWith('/w');
     expect(findRenameInput()).toBeNull();
+  });
+
+  it('reconciles through the host callback with the daemon-stored name', async () => {
+    renameSession.mockResolvedValueOnce({ displayName: 'Stored name' });
+    const onSessionRenameConfirmed = vi.fn();
+    render({ onSessionRenameConfirmed });
+    await openRename();
+    setRenameValue('Typed name');
+    await act(async () => {
+      pressRenameKey('Enter');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(renameSession).toHaveBeenCalledWith('Typed name');
+    expect(onSessionRenameConfirmed).toHaveBeenCalledTimes(1);
+    expect(onSessionRenameConfirmed).toHaveBeenCalledWith(
+      '/w',
+      'sess-1',
+      'Stored name',
+    );
+    expect(catalogController.renamed).not.toHaveBeenCalled();
   });
 
   it('bails on Enter without editing: no daemon write, form closes', async () => {
@@ -4345,11 +4365,30 @@ describe('ChatPane pane title single-click rename', () => {
       'Standalone name',
     );
     expect(renameSession).not.toHaveBeenCalled();
-    expect(catalogController.renamed).toHaveBeenCalledWith(
-      '/w',
+    // A standalone session has no workspace-catalog row: the host is told
+    // with no workspace, and the pane does not patch the catalog itself.
+    expect(catalogController.renamed).not.toHaveBeenCalled();
+  });
+
+  it('reconciles a standalone rename through the host callback without a workspace', async () => {
+    connectionState = {
+      ...connectionState,
+      sessionContext: { kind: 'standalone' },
+    };
+    const onSessionRenameConfirmed = vi.fn();
+    render({ onSessionRenameConfirmed });
+    await openRename();
+    setRenameValue('Standalone name');
+    await act(async () => {
+      pressRenameKey('Enter');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(onSessionRenameConfirmed).toHaveBeenCalledWith(
+      undefined,
       'sess-1',
       'Standalone name',
     );
+    expect(catalogController.renamed).not.toHaveBeenCalled();
   });
 
   it('cancels on Escape without saving', async () => {
@@ -4394,7 +4433,9 @@ describe('ChatPane pane title single-click rename', () => {
     window.getSelection()?.removeAllRanges();
     window.getSelection()?.addRange(range);
     await act(async () => {
-      title.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      title.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, detail: 1 }),
+      );
     });
     expect(findRenameInput()).toBeNull();
     expect(renameSession).not.toHaveBeenCalled();
@@ -4429,7 +4470,89 @@ describe('ChatPane pane title single-click rename', () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     expect(onError).toHaveBeenCalledWith(boom, 'Failed to rename session');
+    expect(catalogController.invalidateWorkspace).toHaveBeenCalledWith('/w');
     expect(findRenameInput()).toBeNull();
+  });
+
+  it('opens from the keyboard with Enter or Space on the focused title', async () => {
+    render();
+    const enter = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    });
+    await act(async () => {
+      findTitle().dispatchEvent(enter);
+    });
+    expect(enter.defaultPrevented).toBe(true);
+    expect(findRenameInput()?.value).toBe('Refactor core');
+    await act(async () => {
+      pressRenameKey('Escape');
+    });
+    expect(document.activeElement).toBe(findTitle());
+    const space = new KeyboardEvent('keydown', {
+      key: ' ',
+      bubbles: true,
+      cancelable: true,
+    });
+    await act(async () => {
+      findTitle().dispatchEvent(space);
+    });
+    expect(space.defaultPrevented).toBe(true);
+    expect(findRenameInput()).not.toBeNull();
+  });
+
+  it('ignores the Enter that commits an IME composition', async () => {
+    render();
+    await openRename();
+    setRenameValue('huiyijilu');
+    await act(async () => {
+      (findRenameInput() as HTMLInputElement).dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          keyCode: 229,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(renameSession).not.toHaveBeenCalled();
+    expect(findRenameInput()?.value).toBe('huiyijilu');
+  });
+
+  it('does not write the id-prefix prefill when the real name arrives under an open editor', async () => {
+    connectionState = {
+      ...connectionState,
+      sessionId: 'a1b2c3d4-e5f6-7890-abcd',
+      displayName: undefined,
+    };
+    render();
+    await openRename();
+    expect(findRenameInput()?.value).toBe('a1b2c3d4');
+    connectionState = { ...connectionState, displayName: 'Real title' };
+    rerender();
+    await act(async () => {
+      pressRenameKey('Enter');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(renameSession).not.toHaveBeenCalled();
+    expect(catalogController.renamed).not.toHaveBeenCalled();
+  });
+
+  it('does not write a stale draft to the session swapped in under the editor', async () => {
+    render();
+    await openRename();
+    setRenameValue('Stale draft');
+    connectionState = {
+      ...connectionState,
+      sessionId: 'sess-2',
+      displayName: 'Other session',
+    };
+    rerender();
+    expect(findRenameInput()).toBeNull();
+    expect(renameSession).not.toHaveBeenCalled();
+    expect(catalogController.renamed).not.toHaveBeenCalled();
   });
 
   it('dismisses an already-open Radix popover when a title click starts the rename', async () => {

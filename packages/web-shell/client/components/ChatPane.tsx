@@ -52,6 +52,7 @@ import {
 import { useAnimationFrameTranscriptSnapshot } from '../hooks/useAnimationFrameTranscriptBlocks';
 import { useMessagesFromBlocks } from '../hooks/useMessages';
 import { useSessionArtifacts } from '../hooks/useSessionArtifacts';
+import { useInlineSessionRename } from '../hooks/useInlineSessionRename';
 import { useBackgroundTasks } from '../hooks/useBackgroundTasks';
 import { extractPendingPermission } from '../adapters/transcriptAdapter';
 import type { PromptFile, PromptImage } from '../adapters/promptTypes';
@@ -234,6 +235,17 @@ export interface ChatPaneProps {
   /** Whether this pane is currently the maximized (solo) one. */
   isMaximized?: boolean;
   onError?: (error: unknown, fallback: string) => void;
+  /**
+   * Reconciles a rename made from the pane title, the same callback the
+   * sidebar receives as `onSessionRenameConfirmed`: `workspaceCwd` is
+   * undefined for a session outside the workspace catalog. Omitted, the pane
+   * patches the workspace catalog itself.
+   */
+  onSessionRenameConfirmed?: (
+    workspaceCwd: string | undefined,
+    sessionId: string,
+    displayName: string,
+  ) => void;
   onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
   /** Host slash-command callback shared with the main chat composer. */
   onSlashCommand?: WebShellSlashCommandHandler;
@@ -291,6 +303,7 @@ export function ChatPane({
   onToggleMaximize,
   isMaximized = false,
   onError,
+  onSessionRenameConfirmed,
   onImageIngestionNotice,
   onSlashCommand,
   modelManagement,
@@ -1560,100 +1573,53 @@ export function ChatPane({
     title || connection.displayName || connection.sessionId?.slice(0, 8) || '';
   const sessionStamp = sessionSummary?.updatedAt || sessionSummary?.createdAt;
 
-  // Single-click inline rename of the pane title: the input replaces the
-  // title text in place, Enter saves through the same session-scoped API the
-  // sidebar's double-click rename uses, and Escape/blur cancel — the sidebar
-  // rename form's semantics. The title click is not stopped on its way to
-  // document: open Radix surfaces rely on the native click for deferred
-  // outside-press dismissal.
-  const [sessionRenaming, setSessionRenaming] = useState(false);
-  const [sessionRenameValue, setSessionRenameValue] = useState('');
-  const [sessionRenameSaving, setSessionRenameSaving] = useState(false);
-  const cancelSessionRename = useCallback(() => {
-    setSessionRenaming(false);
-    setSessionRenameValue('');
-    setSessionRenameSaving(false);
-  }, []);
-  useEffect(() => {
-    // A session swap out from under the open editor must not keep a stale
-    // draft (the sidebar resets its rename state the same way).
-    cancelSessionRename();
-  }, [connection.sessionId, cancelSessionRename]);
-  const beginSessionRename = useCallback(() => {
-    if (!connection.sessionId || sessionRenaming || sessionRenameSaving) return;
-    // A drag that ends on the title leaves a live text selection; the same
-    // guard the sidebar row click uses keeps that click out of rename.
-    if (window.getSelection()?.isCollapsed === false) return;
-    setSessionRenameValue(headerLabel);
-    setSessionRenaming(true);
-  }, [connection.sessionId, headerLabel, sessionRenaming, sessionRenameSaving]);
-  const saveSessionRename = useCallback(() => {
-    const nextName = sessionRenameValue.trim();
-    const sessionId = connection.sessionId;
-    if (!nextName || !sessionId || sessionRenameSaving) {
-      cancelSessionRename();
-      return;
-    }
-    // Enter without editing re-sends the current label: the write would be
-    // a no-op, and for a session without a displayName it would persist the
-    // id-prefix placeholder. Close the form without touching the daemon.
-    if (nextName === headerLabel) {
-      cancelSessionRename();
-      return;
-    }
-    setSessionRenameSaving(true);
-    const rename =
-      connection.sessionContext?.kind === 'standalone'
-        ? workspace.client.renameStandaloneSession(sessionId, nextName)
-        : actions.renameSession(nextName);
-    void rename
-      .then((result: { displayName?: unknown } | undefined) => {
-        // The daemon clamps displayName to 256 chars and reports the stored
-        // value; propagate that instead of the locally typed string.
-        const effectiveName =
-          typeof result?.displayName === 'string' && result.displayName
-            ? result.displayName
-            : nextName;
-        if (paneWorkspaceCwd) {
-          sessionCatalogController.renamed(
-            paneWorkspaceCwd,
-            sessionId,
-            effectiveName,
-          );
-          sessionCatalogController.refreshWorkspace(paneWorkspaceCwd);
-        }
-      })
-      .catch((error: unknown) => {
-        reportError(error, 'Failed to rename session');
-      })
-      .finally(() => {
-        cancelSessionRename();
-      });
-  }, [
-    actions,
-    cancelSessionRename,
-    connection.sessionContext?.kind,
-    connection.sessionId,
-    headerLabel,
-    paneWorkspaceCwd,
-    reportError,
-    sessionCatalogController,
-    sessionRenameSaving,
-    sessionRenameValue,
-    workspace.client,
-  ]);
-  const sessionRenameAvailable = Boolean(connection.sessionId);
-  const sessionTitleRenameProps = sessionRenameAvailable
-    ? {
-        role: 'button' as const,
-        tabIndex: 0,
-        'data-web-shell-pane-title': '',
-        onClick: beginSessionRename,
-        onKeyDown: (event: { key: string }) => {
-          if (event.key === 'Enter') beginSessionRename();
-        },
-      }
-    : {};
+  // Single-click inline rename of the pane title. The write mirrors /rename:
+  // standalone sessions go through the workspace client, and the rename is
+  // reconciled through the host's callback (catalog patch, status line)
+  // with the daemon's stored, possibly clamped, name.
+  const renamePaneSession = useCallback(
+    (displayName: string): Promise<void> => {
+      const sessionId = connection.sessionId;
+      if (!sessionId) return Promise.resolve();
+      const standalone = connection.sessionContext?.kind === 'standalone';
+      const catalogCwd = standalone ? undefined : paneWorkspaceCwd;
+      const owner = sessionOwnerGuard.capture();
+      const write = standalone
+        ? workspace.client.renameStandaloneSession(sessionId, displayName)
+        : actions.renameSession(displayName);
+      return write
+        .then((result) => {
+          const storedName = result?.displayName || displayName;
+          if (onSessionRenameConfirmed) {
+            onSessionRenameConfirmed(catalogCwd, sessionId, storedName);
+          } else if (catalogCwd) {
+            sessionCatalogController.renamed(catalogCwd, sessionId, storedName);
+          }
+        })
+        .catch((error: unknown) => {
+          if (catalogCwd)
+            sessionCatalogController.invalidateWorkspace(catalogCwd);
+          if (!owner.isCurrent()) return;
+          reportError(error, 'Failed to rename session');
+        });
+    },
+    [
+      actions,
+      connection.sessionContext?.kind,
+      connection.sessionId,
+      onSessionRenameConfirmed,
+      paneWorkspaceCwd,
+      reportError,
+      sessionCatalogController,
+      sessionOwnerGuard,
+      workspace.client,
+    ],
+  );
+  const sessionRename = useInlineSessionRename({
+    label: headerLabel,
+    sessionKey: connection.sessionId ?? undefined,
+    onSave: renamePaneSession,
+  });
 
   // Multi-workspace-ness comes from the shared workspace provider (the
   // pane's own session connection may not carry it).
@@ -1759,30 +1725,14 @@ export function ChatPane({
               <span className={styles.workspaceTagText}>{workspaceLabel}</span>
             </span>
           )}
-          {sessionRenaming ? (
+          {sessionRename.editing ? (
             <input
               className={styles.titleRenameInput}
               aria-label={`${t('sessionTitle.rename')}: ${headerLabel}`}
               data-web-shell-pane-title-input
               autoFocus
-              value={sessionRenameValue}
               maxLength={256}
-              onChange={(event) => setSessionRenameValue(event.target.value)}
-              onFocus={(event) => event.currentTarget.select()}
-              onBlur={cancelSessionRename}
-              onKeyDown={(event) => {
-                // The editor owns the keys: the pane-level Escape
-                // (maximize) and approval shortcuts must not see them, the
-                // same as the sidebar rename form.
-                event.stopPropagation();
-                if (event.key === 'Enter') {
-                  event.preventDefault();
-                  saveSessionRename();
-                } else if (event.key === 'Escape') {
-                  event.preventDefault();
-                  cancelSessionRename();
-                }
-              }}
+              {...sessionRename.inputProps}
             />
           ) : sessionSummary && !hidden ? (
             <SessionDetailsTooltip
@@ -1796,7 +1746,7 @@ export function ChatPane({
               workspaceLabel={workspaceLabel}
               side="bottom"
             >
-              <span className={styles.title} {...sessionTitleRenameProps}>
+              <span className={styles.title} {...sessionRename.titleProps}>
                 {headerLabel}
               </span>
             </SessionDetailsTooltip>
@@ -1804,7 +1754,7 @@ export function ChatPane({
             <span
               className={styles.title}
               title={headerLabel}
-              {...sessionTitleRenameProps}
+              {...sessionRename.titleProps}
             >
               {headerLabel}
             </span>

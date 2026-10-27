@@ -28,8 +28,6 @@ import {
 
 const mocks = vi.hoisted(() => ({
   useWorkspace: vi.fn(),
-  useConnection: vi.fn(),
-  useActions: vi.fn(),
   restoreEditorDraft: vi.fn<() => string>(),
   commitAccepted: vi.fn(),
   loadToolDetails: undefined as ToolDetailsLoader | undefined,
@@ -51,10 +49,6 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useWorkspace: mocks.useWorkspace,
-  // ChatContextHeader reads the connection and the rename action for its
-  // inline session-title rename.
-  useConnection: mocks.useConnection,
-  useActions: mocks.useActions,
   // The shared approval card asks whether a tool is an agent launch.
   isAgentTool: () => false,
 }));
@@ -231,12 +225,6 @@ describe('ManagedSessionsPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.restoreEditorDraft.mockReturnValue('');
-    // ChatContextHeader reads the SDK hooks for its inline session-title
-    // rename; the managed page has no session of its own, so the header
-    // renders the plain title (rename UI stays disabled).
-    mocks.useConnection.mockReturnValue({ sessionId: undefined });
-    mocks.useActions.mockReturnValue({ renameSession: vi.fn() });
-    mocks.useWorkspace.mockReturnValue({ client: mocks.client });
     provider = {
       storageKey: 'http://managed-test',
       canCancel: true,
@@ -3659,6 +3647,38 @@ describe('ManagedSessionsPage', () => {
       await render('bound', 'en', provider, target);
       expect(
         container.querySelector('[data-managed-workspace-binding]'),
+      ).toBeNull();
+    } finally {
+      target.remove();
+    }
+  });
+
+  it('does not turn the home header title into the daemon session rename', async () => {
+    // The chat header's inline title rename targets the daemon session; the
+    // managed home renders the same header for a managed Session, so its
+    // title must stay outside that rename.
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', { title: 'Managed task' }),
+    );
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    try {
+      await render('s1', 'en', provider, target);
+      expect(
+        container.querySelector('[data-testid="chat-context-header"]'),
+      ).not.toBeNull();
+      expect(container.querySelector('[data-web-shell-pane-title]')).toBeNull();
+      const title = [...container.querySelectorAll('span')].find(
+        (span) => span.textContent === 'Managed task',
+      );
+      expect(title).toBeDefined();
+      await act(async () => {
+        title!.dispatchEvent(
+          new MouseEvent('click', { bubbles: true, detail: 1 }),
+        );
+      });
+      expect(
+        container.querySelector('[data-web-shell-pane-title-input]'),
       ).toBeNull();
     } finally {
       target.remove();

@@ -14723,6 +14723,51 @@ export function App({
     },
     [sessionCatalogController],
   );
+  // The chat header title's inline rename: the same write and
+  // reconciliation as /rename, so the catalog, the status line and the host's
+  // session info all see the daemon's stored (possibly clamped) name.
+  const renameSessionFromHeader = useCallback(
+    (displayName: string): Promise<void> => {
+      const renamedSessionId = connectionRef.current.sessionId;
+      if (!renamedSessionId) return Promise.resolve();
+      const renamedWorkspaceCwd = workspaceContextActive
+        ? connectionRef.current.workspaceCwd
+        : undefined;
+      const owner = sessionOwnerGuard.capture();
+      const write =
+        effectiveSessionContext?.kind === 'standalone'
+          ? workspace.client.renameStandaloneSession(
+              renamedSessionId,
+              displayName,
+            )
+          : sessionActions.renameSession(displayName);
+      return write
+        .then((result) => {
+          reconcileCatalogRename(
+            renamedWorkspaceCwd,
+            renamedSessionId,
+            result?.displayName || displayName,
+          );
+        })
+        .catch((error: unknown) => {
+          if (renamedWorkspaceCwd) {
+            sessionCatalogController.invalidateWorkspace(renamedWorkspaceCwd);
+          }
+          if (!owner.isCurrent()) return;
+          reportError(error, 'Failed to rename session');
+        });
+    },
+    [
+      effectiveSessionContext?.kind,
+      reconcileCatalogRename,
+      reportError,
+      sessionActions,
+      sessionCatalogController,
+      sessionOwnerGuard,
+      workspace.client,
+      workspaceContextActive,
+    ],
+  );
   useEffect(() => {
     const sessionId = connection.sessionId;
     const displayName = connection.displayName;
@@ -22472,6 +22517,14 @@ export function App({
                           ? handleOpenLocalControlSettings
                           : undefined
                       }
+                      titleRename={
+                        connection.sessionId
+                          ? {
+                              sessionId: connection.sessionId,
+                              rename: renameSessionFromHeader,
+                            }
+                          : undefined
+                      }
                     />
                   )}
                   {sessionWorkflowEnabled &&
@@ -23334,6 +23387,7 @@ export function App({
                         // is launched from), not the single-session chat.
                         onExit={handleSplitExit}
                         onError={reportError}
+                        onSessionRenameConfirmed={reconcileCatalogRename}
                         onImageIngestionNotice={pushToast}
                         onSlashCommand={onSlashCommand}
                         onOpenGoals={openGoals}
