@@ -20276,6 +20276,43 @@ describe('createServeApp', () => {
       );
     });
 
+    it('warns when a live bind was declined by the repository qualifier', async () => {
+      // A policy decline leaves no visible side effect on the session, so the
+      // hook's warning is the only place an operator can see it happen.
+      bindSessionPrsFromPromptCommandMock.mockClear();
+      bindSessionPrsFromPromptCommandMock.mockResolvedValueOnce({
+        workspaceCwd: '/workspace',
+        scanned: 1,
+        bound: 0,
+        written: 0,
+        alreadyBound: 0,
+        overLimit: 0,
+        unresolved: 0,
+        repoDeclined: 1,
+      });
+      const daemonLog = fakeDaemonLog();
+      const bridge = fakeBridge({
+        promptImpl: async () => ({ stopReason: 'end_turn' }),
+      });
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        primaryWorkspaceTrusted: true,
+        daemonLog,
+      });
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [{ type: 'text', text: '/verify-pr 42 --repo other/x' }],
+        });
+      expect(res.status).toBe(202);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(daemonLog.warn).toHaveBeenCalledWith(
+        'session PR bind incomplete',
+        expect.objectContaining({ repoDeclined: 1 }),
+      );
+    });
+
     it('does not hand a /review line from a later text block to the binder', async () => {
       // @-imported file content and other later blocks can quote `/review N`
       // without requesting one; only the first text block is the user prompt.
