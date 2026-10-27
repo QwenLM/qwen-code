@@ -5059,11 +5059,33 @@ class QwenAgent implements Agent {
       // session (and its cache-safe params) goes away, within what remains of
       // the close budget. No-op unless pending.
       const flushBudgetMs = closeDeadline - Date.now();
-      if (!opts?.skipMemoryFlush && flushBudgetMs > 0) {
+      if (!opts?.skipMemoryFlush) {
         const closingConfig = session.getConfig();
-        await closingConfig
-          .getMemoryManager?.()
-          ?.flushPendingExtract?.(closingConfig.getSessionId(), flushBudgetMs);
+        const closingSessionId = closingConfig.getSessionId();
+        const memoryManager = closingConfig.getMemoryManager?.();
+        if (flushBudgetMs > 0) {
+          await memoryManager?.flushPendingExtract?.(
+            closingSessionId,
+            flushBudgetMs,
+          );
+        } else {
+          // A close has no later boundary to retry at, so parked turns are
+          // lost here. Report the drop with its owed count instead of letting
+          // it vanish behind an exhausted budget.
+          const owedTurns =
+            memoryManager?.pendingExtractTurns?.(closingSessionId) ?? 0;
+          if (owedTurns > 0) {
+            debugLogger.warn(
+              `#13004: dropped the close auto-memory flush because the close budget was exhausted; ${owedTurns} skipped turn(s) are lost at this boundary.`,
+              {
+                sessionId: closingSessionId,
+                reason: 'close_budget_exhausted',
+                owedTurns,
+                flushBudgetMs,
+              },
+            );
+          }
+        }
       }
 
       const blockedByHolds = await this.runExclusiveHistoryMutation(

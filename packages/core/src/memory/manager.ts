@@ -1552,6 +1552,17 @@ export class MemoryManager {
   }
 
   /**
+   * Turns a parked #13004 skip still owes the next extraction, in raw history
+   * entries; 0 when nothing is parked. Callers use it to report a boundary that
+   * is about to drop those turns rather than flush them.
+   */
+  pendingExtractTurns(sessionId: string): number {
+    return (
+      this.extractCadence.get(sessionId)?.pending?.skippedHistory?.length ?? 0
+    );
+  }
+
+  /**
    * Runs one extraction for turns the cadence skipped, before an ACP session
    * close discards them. Other boundaries (compaction, `/clear`, `/resume`,
    * `/branch`, process exit) do not flush: the experiment accepts losing up to
@@ -1722,7 +1733,20 @@ export class MemoryManager {
       // its boundary must not fork an extraction the close path has already
       // torn the Config down under. Leave the snapshot pending so a later
       // boundary can retry the turns.
-      if (Date.now() >= deadline) return false;
+      if (Date.now() >= deadline) {
+        // The loss is real at a close, where no later boundary comes: say so
+        // rather than returning false silently.
+        const owedTurns = pending.skippedHistory?.length ?? 0;
+        debugLogger.warn(
+          `#13004: the auto-memory flush expired before it could run; ${owedTurns} skipped turn(s) stay owed.`,
+          {
+            sessionId,
+            reason: 'flush_deadline_expired',
+            owedTurns,
+          },
+        );
+        return false;
+      }
       // The entry no longer holds this snapshot: a newer run for the session
       // completed while the slot was held (leaving its own coverage, or a
       // dropped snapshot behind) or a newer skip replaced it. Either way the
