@@ -15,11 +15,15 @@
  * whenever the module registry is shared (`vitest --no-isolate`).
  *
  * Register the returned function in `afterAll` so the pin is back when the file
- * finishes. That stops the state from outliving the file, which is one half of
- * #15267; it does not close the issue, because the reporter traced the
- * destructive write to the un-pinned window inside that same file. Idempotent,
- * and restoring a variable that was absent leaves it absent rather than defined
- * as an empty string.
+ * finishes. A file that is imported but then skipped (Vitest imports every
+ * dispatched file before applying `-t`, and a skipped file never reaches
+ * `afterAll`), or that throws at module scope before the hook is registered,
+ * restores nothing — the guarantee covers a normal run, not those two shapes.
+ * That stops the state from outliving the file, which is one half of #15267; it
+ * does not close the issue, because the reporter traced the destructive write
+ * to the un-pinned window inside that same file. Idempotent, and restoring a
+ * variable that was absent leaves it absent rather than defined as an empty
+ * string.
  */
 export function clearQwenHomePin(): () => void {
   const previous = process.env['QWEN_HOME'];
