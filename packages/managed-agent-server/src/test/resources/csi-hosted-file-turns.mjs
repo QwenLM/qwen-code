@@ -15,6 +15,8 @@ export async function runHostedFileTurn({
   index,
   mutation,
   files,
+  recover,
+  recoveryCut = 'receipt_complete',
 }) {
   const failures = [];
   let requests = 0;
@@ -146,11 +148,109 @@ export async function runHostedFileTurn({
       )
     );
     const before = session.authority.committedSequence;
+    let resume;
+    let recoveredFinalOutput;
+    if (recover) {
+      const write = session.sink.write.bind(session.sink);
+      const publish = session.resources.publish.bind(session.resources);
+      const checkpoint = session.authority.commitCheckpoint.bind(
+        session.authority,
+      );
+      if (recoveryCut === 'missing_receipt') {
+        session.resources.publish = async (kind, bytes, ...options) => {
+          if (
+            kind === 'managed-tool-outcome' &&
+            JSON.parse(bytes.toString()).history.parts[0].functionResponse
+              .id === `owned-function-${index}-2`
+          ) {
+            interrupted = true;
+            throw new Error(
+              'Owned missing-receipt cut after original execution settlement',
+            );
+          }
+          return publish(kind, bytes, ...options);
+        };
+      }
+      if (recoveryCut === 'final_output') {
+        session.authority.commitCheckpoint = async (
+          command,
+          request,
+          actor,
+        ) => {
+          const state = request.state;
+          if (
+            state.continuation.phase === 'results_ready' &&
+            state.tools?.items.length &&
+            state.tools.items.every((item) => item.consumed)
+          ) {
+            const tail = await session.sink.project();
+            assert.equal(tail.at(-1).type, 'assistant');
+            assert.ok(
+              tail
+                .at(-1)
+                .message.parts.some(
+                  (part) => part.text === 'owned file answer 1 ✓',
+                ),
+            );
+            interrupted = true;
+            throw new Error(
+              'Owned complete-output cut before result consumption',
+            );
+          }
+          return checkpoint(command, request, actor);
+        };
+      }
+      let interrupted = false;
+      session.sink.write = async (record) => {
+        if (
+          recoveryCut === 'receipt_complete' &&
+          record.type === 'tool_result' &&
+          record.message.parts[0].functionResponse.id ===
+            `owned-function-${index}-2`
+        ) {
+          interrupted = true;
+          throw new Error(
+            'Owned receipt-complete cut before the last result message',
+          );
+        }
+        return write(record);
+      };
+      try {
+        await assert.rejects(
+          runHostedCsiTextTurn(
+            { managed: session, cwd: '/workspace', files },
+            promptId,
+            prompt,
+            new AbortController(),
+          ),
+          (error) => {
+            if (!interrupted) throw error;
+            return /recovery|receipt|complete-output/i.test(String(error));
+          },
+        );
+      } finally {
+        session.sink.write = write;
+        session.resources.publish = publish;
+        session.authority.commitCheckpoint = checkpoint;
+      }
+      assert.equal(interrupted, true);
+      assert.equal(requests, recoveryCut === 'final_output' ? 2 : 1);
+      const recovered = await recover();
+      session = recovered.session;
+      resume = recovered.parts;
+      recoveredFinalOutput = recovered.finalOutput;
+      assert.deepEqual(
+        resume.map((part) => part.functionResponse.id),
+        functions.map((_, ordinal) => `owned-function-${index}-${ordinal}`),
+      );
+    }
     const terminal = await runHostedCsiTextTurn(
       { managed: session, cwd: '/workspace', files },
       promptId,
       prompt,
       new AbortController(),
+      resume,
+      recoveredFinalOutput,
     );
     assert.deepEqual(failures, []);
     assert.equal(requests, 2);

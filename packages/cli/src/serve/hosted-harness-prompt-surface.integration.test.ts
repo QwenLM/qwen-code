@@ -192,3 +192,80 @@ it('omits tool-specific guidance and worked calls from a no-tool request', async
     .soft(/\[tool_call:/.test(system), 'tool examples with no declarations')
     .toBe(false);
 });
+
+it('includes queued text and pinned files in the actual provider request in FIFO order', async () => {
+  const file = { text: 'QUEUED_FILE_BODY' };
+  const commit = vi.fn().mockResolvedValue(undefined);
+  const claim = vi
+    .fn()
+    .mockResolvedValueOnce([
+      {
+        id: 'umsg_first:1',
+        text: 'QUEUED_FIRST',
+        parts: [{ text: 'QUEUED_FIRST' }, file],
+        attachments: [file],
+      },
+      {
+        id: 'umsg_second:1',
+        text: 'QUEUED_SECOND',
+        parts: [{ text: 'QUEUED_SECOND' }],
+      },
+    ])
+    .mockResolvedValue([]);
+  await runHostedHarnessTextTurn({
+    sessionId: randomUUID(),
+    cwd: root,
+    history: [],
+    prompt: 'QUEUED_ORIGINAL',
+    promptId: randomUUID(),
+    signal: AbortSignal.timeout(15_000),
+    userMessages: { claim, commit, commitAssistant: vi.fn() },
+  });
+  expect(requests).toHaveLength(1);
+  const wire = JSON.stringify(requests[0].messages);
+  expect(wire.indexOf('QUEUED_ORIGINAL')).toBeGreaterThan(-1);
+  expect(wire.indexOf('QUEUED_FIRST')).toBeGreaterThan(
+    wire.indexOf('QUEUED_ORIGINAL'),
+  );
+  expect(wire.indexOf('QUEUED_FILE_BODY')).toBeGreaterThan(
+    wire.indexOf('QUEUED_FIRST'),
+  );
+  expect(wire.indexOf('QUEUED_SECOND')).toBeGreaterThan(
+    wire.indexOf('QUEUED_FILE_BODY'),
+  );
+  expect(commit.mock.calls.map(([id]) => id)).toEqual([
+    'umsg_first:1',
+    'umsg_second:1',
+  ]);
+});
+
+it('continues the real model loop when guidance arrives during the final response', async () => {
+  let delivered = false;
+  const claim = vi.fn(async () => {
+    if (requests.length !== 1 || delivered) return [];
+    delivered = true;
+    return [
+      {
+        id: 'umsg_late:1',
+        text: 'QUEUED_LATE',
+        parts: [{ text: 'QUEUED_LATE' }],
+      },
+    ];
+  });
+  const commitAssistant = vi.fn().mockResolvedValue(undefined);
+  await runHostedHarnessTextTurn({
+    sessionId: randomUUID(),
+    cwd: root,
+    history: [],
+    prompt: 'original',
+    promptId: randomUUID(),
+    signal: AbortSignal.timeout(15_000),
+    userMessages: { claim, commit: vi.fn(), commitAssistant },
+  });
+  expect(requests).toHaveLength(2);
+  const messages = JSON.stringify(requests[1].messages);
+  expect(messages.indexOf('QUEUED_LATE')).toBeGreaterThan(
+    messages.indexOf('HOSTED_PROMPT_OK'),
+  );
+  expect(commitAssistant).toHaveBeenCalledOnce();
+});

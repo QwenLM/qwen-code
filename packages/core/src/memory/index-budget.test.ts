@@ -9,6 +9,7 @@ import {
   MAX_INDEX_CHARS,
   MAX_INDEX_LINES,
   trimIndexToBudget,
+  trimIndexToBudgetDetailed,
 } from './index-budget.js';
 
 describe('trimIndexToBudget', () => {
@@ -61,5 +62,57 @@ describe('trimIndexToBudget', () => {
     const entry = '😀'.repeat(MAX_INDEX_CHARS / 2);
     expect(trimIndexToBudget([entry])).toBe(entry);
     expect(trimIndexToBudget([`${entry}😀`])).toBe('');
+  });
+});
+
+describe('trimIndexToBudgetDetailed', () => {
+  it('reports nothing dropped when the index fits the budget', () => {
+    const lines = ['- [One](notes/one.md)', '- [Two](notes/two.md)'];
+    expect(trimIndexToBudgetDetailed(lines)).toEqual({
+      content: lines.join('\n'),
+      dropped: [],
+    });
+  });
+
+  it('reports the entries removed by the line cap, in index order', () => {
+    const lines = Array.from(
+      { length: MAX_INDEX_LINES + 3 },
+      (_, i) => `- [Note ${i}](notes/${i}.md)`,
+    );
+    const result = trimIndexToBudgetDetailed(lines);
+    expect(result.content).toBe(lines.slice(0, MAX_INDEX_LINES).join('\n'));
+    expect(result.dropped).toEqual(lines.slice(MAX_INDEX_LINES));
+  });
+
+  // The backfill pass keeps later short entries after an earlier long one is
+  // refused, so a caller must not infer the drop set from the tail.
+  it('reports a non-tail drop when backfill keeps a later short entry', () => {
+    const long = 'a'.repeat(24_600);
+    const middle = 'b'.repeat(300);
+    const short = 'c'.repeat(150);
+    const result = trimIndexToBudgetDetailed([long, middle, short]);
+    expect(result.content).toBe(`${long}\n${short}`);
+    expect(result.dropped).toEqual([middle]);
+  });
+
+  it('preserves native entries ahead of imports and reports the dropped imports', () => {
+    const native = 'n'.repeat(24_600);
+    const imports = ['a', 'b', 'c', 'd'].map((value) => value.repeat(150));
+    const lines = [native, ...imports];
+    const result = trimIndexToBudgetDetailed(lines, 1);
+
+    expect(result.content).toBe([native, ...imports.slice(0, 2)].join('\n'));
+    expect(result.dropped).toEqual(imports.slice(2));
+    expect(trimIndexToBudget(lines, 1)).toBe(result.content);
+  });
+
+  it('leaves trimIndexToBudget as the content-only projection', () => {
+    const lines = Array.from(
+      { length: MAX_INDEX_LINES + 1 },
+      (_, i) => `- [Note ${i}](notes/${i}.md)`,
+    );
+    expect(trimIndexToBudget(lines)).toBe(
+      trimIndexToBudgetDetailed(lines).content,
+    );
   });
 });

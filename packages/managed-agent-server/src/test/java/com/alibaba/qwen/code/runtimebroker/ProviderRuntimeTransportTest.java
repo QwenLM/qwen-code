@@ -1,21 +1,24 @@
 package com.alibaba.qwen.code.runtimebroker;
 
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-
+import com.alibaba.qwen.code.runtimebroker.provisioning.ProviderRuntimeProtocol;
+import com.alibaba.qwen.code.runtimebroker.transport.HttpRuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.transport.ManagedRuntimeAttestationConformanceTest;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpServer;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.math.BigDecimal;
 import java.net.InetSocketAddress;
 import java.net.URI;
-import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.Base64;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -27,9 +30,13 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ProviderRuntimeTransportTest {
     private static final String HARNESS = "550e8400-e29b-41d4-a716-446655440301";
@@ -49,6 +56,7 @@ class ProviderRuntimeTransportTest {
     private volatile Object acquireAnswer = true;
     private volatile UnaryOperator<Map<String, Object>> response = body -> body;
     private volatile byte[] rawBody;
+    private volatile boolean chunked;
     /** A result spelled out as JSON text, for number forms a map cannot carry. */
     private volatile String rawResult;
 
@@ -80,13 +88,58 @@ class ProviderRuntimeTransportTest {
             if (contentEncoding != null) {
                 exchange.getResponseHeaders().set("Content-Encoding", contentEncoding);
             }
-            exchange.sendResponseHeaders(status, encoded.length);
-            exchange.getResponseBody().write(encoded);
+            exchange.sendResponseHeaders(status, chunked ? 0 : encoded.length);
+            int split = chunked ? encoded.length / 2 : encoded.length;
+            exchange.getResponseBody().write(encoded, 0, split);
+            if (chunked) {
+                exchange.getResponseBody().flush();
+                exchange.getResponseBody().write(encoded, split, encoded.length - split);
+            }
             exchange.close();
         });
         server.start();
         lease = new RuntimeLease("instance", URI.create("http://127.0.0.1:"
                 + server.getAddress().getPort()), "secret", "lease", 3);
+    }
+
+    @Test
+    void preservesBoundedInlineMediaAcrossChunkedExecuteStatusAndCancel() throws Exception {
+        chunked = true;
+        String data = Base64.getEncoder().encodeToString(new byte[576 * 1024]);
+        assertEquals(768 * 1024, data.length());
+        for (String mime : List.of("image/png", "application/pdf")) {
+            Map<String, Object> tool = Map.of("llmContent", List.of(Map.of("inlineData",
+                    Map.of("mimeType", mime, "data", data))), "returnDisplay", "media proof");
+            Map<String, Object> execution = Map.of("executionStatus", "success", "result", tool);
+            result = execution;
+            Map<String, Object> received = transport.execute(lease, session, reference()).toCompletableFuture().join();
+            assertMediaResult(execution, received, "execute");
+            result = Map.of("state", "settled", "result", execution, "cancelRequested", false,
+                    "lastSeq", 1, "firstAvailableSeq", 0, "progressGap", false, "progress", List.of());
+            Map<String, Object> observed = transport.status(lease, session, reference(), 0).toCompletableFuture().join();
+            assertEquals("settled", observed.get("state"));
+            assertMediaResult(execution, observed.get("result"), "status");
+            Map<String, Object> cancelled = transport.cancel(lease, session, reference()).toCompletableFuture().join();
+            assertEquals("settled", cancelled.get("state"));
+            assertMediaResult(execution, cancelled.get("result"), "cancel");
+        }
+        assertEquals(List.of("execute", "status", "cancel", "execute", "status", "cancel"),
+                requests.stream().map(request -> ProviderRuntimeProtocol.object(request.get("operation")).get("kind")).toList());
+        for (Map<String, Object> request : requests) {
+            Map<String, Object> operation = ProviderRuntimeProtocol.object(request.get("operation"));
+            if (!operation.get("kind").equals("acquire")) {
+                assertTrue(reference().equals(operation.get("reference")), "original seven-field provider reference");
+            }
+        }
+    }
+
+    private static void assertMediaResult(Object expected, Object actual, String label) throws Exception {
+        byte[] expectedBytes = JsonCodec.encode(expected);
+        byte[] actualBytes = JsonCodec.encode(actual);
+        assertEquals(expectedBytes.length, actualBytes.length, label + " result byte length");
+        MessageDigest sha = MessageDigest.getInstance("SHA-256");
+        assertEquals(HexFormat.of().formatHex(sha.digest(expectedBytes)),
+                HexFormat.of().formatHex(sha.digest(actualBytes)), label + " result SHA256");
     }
 
     @Test

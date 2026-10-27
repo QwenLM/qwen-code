@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+export type {
+  ManagedPackageManifest,
+  ManagedPackagePreparationRequest,
+  ManagedPackagePreparation,
+} from './managed-extension-package-types.js';
 export { DaemonAttachmentUploadError } from './DaemonAttachmentUploadError.js';
 export {
   DaemonClient,
@@ -182,6 +187,7 @@ export type {
   RunConformanceOptions,
 } from './ui/index.js';
 export type {
+  DaemonLoopStop,
   DaemonShellTranscriptBlock,
   DaemonUserShellTranscriptBlock,
   DaemonPermissionTranscriptBlock,
@@ -295,6 +301,8 @@ export type {
   DaemonSettingsReloadedEvent,
   DaemonSettingsChangedData,
   DaemonSettingsChangedEvent,
+  DaemonSessionMessagesDeletedData,
+  DaemonSessionMessagesDeletedEvent,
   DaemonSessionRewoundData,
   DaemonSessionRewoundEvent,
   DaemonSessionBranchedData,
@@ -465,6 +473,8 @@ export type {
   DaemonChannelManagementOptions,
   DaemonChannelWorkerGroupSnapshot,
   DaemonChannelWorkerSnapshot,
+  DaemonMessageGroupsSnapshot,
+  DaemonDeleteMessageGroupsResult,
   DaemonRewindResult,
   DaemonRewindSnapshotInfo,
   DaemonSessionBtwResult,
@@ -537,6 +547,8 @@ export type {
   DaemonWorkspaceTrustStatusResponse,
   DaemonWorkspaceTrustStatusV2,
   DaemonWorkspaceTrustReconciliationState,
+  DaemonGitCloneJob,
+  DaemonGitCloneJobStatus,
   DaemonWorkspaceCapability,
   DaemonWorkspaceUpdate,
   DaemonWorkspaceGitStatus,
@@ -611,6 +623,7 @@ export type {
   SideTaskSessionRequest,
   DaemonRestoredSession,
   DaemonSession,
+  DaemonGeneratedUiStatus,
   DaemonSessionArchiveState,
   DaemonWorktreeInfo,
   DaemonBranchInfo,
@@ -691,9 +704,11 @@ export type {
   DaemonPendingUserQuestionInteraction,
   DaemonSessionState,
   DaemonSessionSummary,
+  DaemonSessionShellTaskRuntime,
   DaemonSessionShellTaskStatus,
   DaemonSessionSupportedCommandsStatus,
   DaemonSessionTaskLifecycleStatus,
+  DaemonSessionTaskRuntimeStatus,
   DaemonSessionTaskStatus,
   DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionTasksStatus,
@@ -746,6 +761,8 @@ export type {
   DaemonWorkspaceFileWriteRequest,
   DaemonWorkspaceFileWriteResult,
   DaemonWorkspaceMcpServerStatus,
+  DaemonWorkspaceDirectories,
+  DaemonWorkspaceDirectoriesMutation,
   DaemonWorkspaceMcpStatus,
   DaemonWorkspaceMcpConfigStatus,
   DaemonMcpConfigMutationResult,
@@ -784,6 +801,7 @@ export type {
   DaemonWorkspaceProvidersStatus,
   DaemonWorkspaceSkillStatus,
   DaemonWorkspaceSkillsStatus,
+  DaemonWorkspaceSkillsSnapshot,
   DaemonWorkspaceToolStatus,
   DaemonWorkspaceToolsStatus,
   DaemonWriteMemoryRequest,

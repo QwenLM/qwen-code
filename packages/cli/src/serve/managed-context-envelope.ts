@@ -5,6 +5,11 @@
  */
 
 import {
+  MANAGED_EXTENSION_LINUX_CAPABILITY_DIGEST,
+  MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST,
+  parseManagedExtensionRuntimeConfiguration,
+} from './managed-extension-profile.js';
+import {
   computeManagedContextDigest,
   isCanonicalDecimalText,
   isManagedIdentifier,
@@ -139,6 +144,7 @@ export type ManagedContextIsolationClass = 'session' | 'workspace';
 
 export interface ManagedContextBoot {
   readonly type: 'boot';
+  readonly managedExtensions?: import('./managed-extension-profile.js').ManagedExtensionRuntimeConfiguration;
   readonly version: typeof MANAGED_CONTEXT_BOOT_VERSION;
   readonly managedContext: typeof MANAGED_CONTEXT_PROTOCOL;
   readonly runtimeInstanceId: string;
@@ -170,6 +176,7 @@ export interface ManagedContextReady {
 }
 
 export interface ManagedContextAttestationResponse {
+  readonly managedExtensions?: import('./managed-extension-profile.js').ManagedExtensionRuntimeConfiguration;
   readonly protocolVersion: typeof PROTOCOL_VERSION;
   readonly managedContext: typeof MANAGED_CONTEXT_PROTOCOL;
   readonly runtimeInstanceId: string;
@@ -237,22 +244,42 @@ const CONTEXT_UNAVAILABLE: ManagedContextRefusal = Object.freeze({
  * without echoing the input, which carries the bearer token.
  */
 export function parseManagedContextBoot(value: unknown): ManagedContextBoot {
-  const boot = readClosed(value, BOOT_KEYS);
+  const hasExtensions =
+    !!value &&
+    typeof value === 'object' &&
+    Object.hasOwn(value, 'managedExtensions');
+  const boot = readClosed(
+    value,
+    hasExtensions ? [...BOOT_KEYS, 'managedExtensions'].sort() : BOOT_KEYS,
+  );
   if (
     !boot ||
-    boot.type !== 'boot' ||
-    boot.version !== MANAGED_CONTEXT_BOOT_VERSION ||
-    boot.managedContext !== MANAGED_CONTEXT_PROTOCOL ||
-    !isBearerToken(boot.token) ||
-    !isManagedIdentifier(boot.runtimeInstanceId) ||
-    !isManagedIdentifier(boot.runtimeIncarnation) ||
-    !isManagedIdentifier(boot.leaseId) ||
-    !isEpoch(boot.epoch) ||
+    boot['type'] !== 'boot' ||
+    boot['version'] !== MANAGED_CONTEXT_BOOT_VERSION ||
+    boot['managedContext'] !== MANAGED_CONTEXT_PROTOCOL ||
+    !isBearerToken(boot['token']) ||
+    !isManagedIdentifier(boot['runtimeInstanceId']) ||
+    !isManagedIdentifier(boot['runtimeIncarnation']) ||
+    !isManagedIdentifier(boot['leaseId']) ||
+    !isEpoch(boot['epoch']) ||
     !hasValidAttestedFields(boot)
   ) {
     throw new Error(INVALID_BOOT_MESSAGE);
   }
-  return Object.freeze(boot) as ManagedContextBoot;
+  if (
+    [
+      MANAGED_EXTENSION_LINUX_CAPABILITY_DIGEST,
+      MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST,
+    ].includes(boot['capabilityDigest'] as string) !== hasExtensions
+  )
+    throw new Error(INVALID_BOOT_MESSAGE);
+  if (hasExtensions) {
+    boot['managedExtensions'] = parseManagedExtensionRuntimeConfiguration(
+      boot['managedExtensions'],
+      boot['capabilityDigest'] as string,
+    );
+  }
+  return Object.freeze(boot) as unknown as ManagedContextBoot;
 }
 
 /** The ready v2 record for a worker listening on the loopback `port`. */
@@ -316,16 +343,36 @@ export function checkManagedContextAttestation(
   boot: ManagedContextBoot,
 ): ManagedContextOutcome<ManagedContextAttestationResponse> {
   const identity = parseManagedContextBoot(boot);
-  const request = readClosed(body, ATTESTATION_KEYS);
+  const request = readClosed(
+    body,
+    identity.managedExtensions
+      ? [...ATTESTATION_KEYS, 'managedExtensions'].sort()
+      : ATTESTATION_KEYS,
+  );
   if (
     !request ||
-    request.protocolVersion !== PROTOCOL_VERSION ||
-    request.managedContext !== MANAGED_CONTEXT_PROTOCOL ||
+    request['protocolVersion'] !== PROTOCOL_VERSION ||
+    request['managedContext'] !== MANAGED_CONTEXT_PROTOCOL ||
     !hasValidAttestedFields(request)
   ) {
     return INVALID;
   }
-  if (ATTESTED_KEYS.some((key) => request[key] !== identity[key])) {
+  let managedExtensions;
+  if (identity.managedExtensions) {
+    try {
+      managedExtensions = parseManagedExtensionRuntimeConfiguration(
+        request['managedExtensions'],
+        request['capabilityDigest'] as string,
+      );
+    } catch {
+      return INVALID;
+    }
+  }
+  if (
+    ATTESTED_KEYS.some((key) => request[key] !== identity[key]) ||
+    JSON.stringify(managedExtensions) !==
+      JSON.stringify(identity.managedExtensions)
+  ) {
     return IDENTITY_CONFLICT;
   }
   return { status: 200, body: attestationResponse(identity) };
@@ -509,6 +556,9 @@ function attestationResponse(
     mountRoot: identity.mountRoot,
     capabilityDigest: identity.capabilityDigest,
     isolationClass: identity.isolationClass,
+    ...(identity.managedExtensions
+      ? { managedExtensions: identity.managedExtensions }
+      : {}),
   });
 }
 

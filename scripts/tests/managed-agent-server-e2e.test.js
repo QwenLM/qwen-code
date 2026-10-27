@@ -5,6 +5,7 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process';
+import { createServer, request as httpRequest } from 'node:http';
 import {
   existsSync,
   mkdtempSync,
@@ -203,6 +204,181 @@ describe('managed-agent-server e2e runner', () => {
     expect(new Set(ports).size).toBe(9);
   });
 
+  // #14481 step 2: a lost reply is a reply the server already committed and
+  // answered, so the helper must wait for `response` before destroying it.
+  // Destroying on `request` would send nothing and let every retry assertion
+  // pass on a request the control plane never saw.
+  it('drops a committed reply without skipping the request', async () => {
+    const { postAndDropReply } = load(
+      ['postAndDropReply'],
+      'postAndDropReply',
+      'httpRequest',
+    )(httpRequest);
+    let received = '';
+    const server = createServer((request, response) => {
+      request.setEncoding('utf8');
+      request.on('data', (chunk) => {
+        received += chunk;
+      });
+      request.on('end', () => {
+        response.writeHead(202, { 'content-type': 'application/json' });
+        response.end('{"id":"operation-1"}');
+      });
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address();
+    try {
+      await postAndDropReply(
+        `http://127.0.0.1:${port}/v1/agents/sessions/s/events`,
+        '{"type":"x"}',
+        {
+          'content-type': 'application/json',
+          'idempotency-key': 'retry-key',
+        },
+      );
+      expect(received).toBe('{"type":"x"}');
+    } finally {
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  // A 4xx means the control plane committed nothing, so dropping that reply
+  // would let the retry assertions pass over a request the server rejected.
+  it('refuses to drop a reply the control plane did not accept', async () => {
+    const { postAndDropReply } = load(
+      ['postAndDropReply'],
+      'postAndDropReply',
+      'httpRequest',
+    )(httpRequest);
+    const server = createServer((request, response) => {
+      request.resume();
+      request.on('end', () => {
+        response.writeHead(409, { 'content-type': 'application/json' });
+        response.end('{"error":"turn_active"}');
+      });
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address();
+    try {
+      await expect(
+        postAndDropReply(
+          `http://127.0.0.1:${port}/v1/agents/sessions/s/events`,
+          '{"type":"x"}',
+          { 'content-type': 'application/json' },
+        ),
+      ).rejects.toThrow(/expected 202/);
+    } finally {
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  // The reviewer's probe: a 202 only admits the response operation, so the
+  // Action row is still `requested` with a null receipt. The after-decision
+  // barrier must reject that answer, or a crash proves delivery, not commit.
+  it('refuses an admitted but undelivered decision as the after-decision barrier', () => {
+    const { approvalDecisionCommitted } = load(
+      ['approvalDecisionCommitted'],
+      'approvalDecisionCommitted',
+    )();
+    expect(approvalDecisionCommitted('requested\t0\t0')).toBe(false);
+    expect(approvalDecisionCommitted('decided\t0\t0')).toBe(false);
+    expect(approvalDecisionCommitted('decided\t1\t0')).toBe(false);
+    expect(approvalDecisionCommitted('decided\t1\t1')).toBe(true);
+  });
+
+  it('pins the #14481 approval fault arms to durable barriers', () => {
+    const source = read('scripts/run-managed-agent-server-e2e.ts');
+    const workflow = read('.github/workflows/sdk-java.yml');
+    const manifest = read('package.json');
+    const scripts = [
+      'test:e2e:managed-harness-restart-approval-after-decision',
+      'test:e2e:managed-harness-restart-approval-after-prepare',
+      'test:e2e:managed-harness-restart-approval-after-result',
+      'test:e2e:managed-harness-restart-approval-decision-reply-lost',
+      'test:e2e:managed-harness-restart-approval-admission-reply-lost',
+    ];
+    for (const script of scripts) {
+      expect(manifest, `${script} must be an npm script`).toContain(
+        `"${script}"`,
+      );
+      expect(workflow, `${script} must be a CI step`).toContain(script);
+    }
+    // Deny, Cancel and expiry have no approved execution, so layering a
+    // crash there would silently assert a weaker path.
+    expect(source).toMatch(
+      /if \(approvalFault && verificationMode !== 'allow'\)/,
+    );
+    // The lost decision must retry the same key and land on one operation.
+    expect(source).toContain("operation_kind='ACTION_RESPONSE'");
+    // The crash arms scrap the crashed home and require a third generation,
+    // rather than reusing the killed owner's disk.
+    const recovery = source.indexOf("'Post-fault recovery Harness'");
+    const scrap = source.indexOf(
+      'rmSync(replacementHarnessHome, { recursive: true, force: true })',
+    );
+    expect(recovery).toBeGreaterThan(-1);
+    expect(scrap).toBeGreaterThan(-1);
+    expect(
+      scrap,
+      'the crashed home must be scrapped before recovery',
+    ).toBeLessThan(recovery);
+    expect(source).toContain(
+      "await waitUntil(\n          'Post-fault recovery Harness adopted the Session'",
+    );
+    // The partial-prepare crash needs the held :start and a PREPARED row
+    // with no dispatch, or it degrades into the after-decision barrier.
+    expect(source).toContain("execution === 'PREPARED\\t0'");
+    expect(source).toContain(
+      'replacementBrokerProxy?.heldPath() !== undefined',
+    );
+    // The after-decision crash must read the durable decision row, not the
+    // 202: hold :start so it cannot reach dispatch, and require the state,
+    // receipt and digest together.
+    expect(source).toContain('Approval decision durably committed');
+    expect(source).toMatch(/approvalDecisionCommitted\(\s*runMysql\(/);
+    expect(source).toContain(
+      'IF(decision_receipt_id IS NULL, 0, 1), IF(decision_digest IS NULL, 0, 1)',
+    );
+    const proxy = source.indexOf(
+      'replacementBrokerProxy = await startHeldExecutionStartProxy',
+    );
+    expect(proxy).toBeGreaterThan(-1);
+    expect(source.slice(proxy - 500, proxy)).toContain(
+      "approvalFault === 'after-decision'",
+    );
+    // The result-commit crash waits for the settled result and the held
+    // model round, then releases the hold; its reissue must reuse the same
+    // saved request or the proof is about a rewritten one.
+    expect(source).toContain(
+      'Approved result committed and its prefix published',
+    );
+    expect(source).toContain('SETTLED\\t1');
+    expect(source).toContain('releaseApprovalResultHold()');
+    expect(source).toContain(
+      'Result-commit recovery changed the saved model request',
+    );
+    expect(source).toContain('publishedPrefixSequences');
+    expect(source).toContain("approvalFault === 'after-result'");
+    expect(source).toContain('expectedModelsAfterResults');
+    expect(source).toContain('? 2');
+    // R1-3: the retraction assertion must be pinned, or deleting it keeps
+    // every script suite green while the arm stops proving the prefix left.
+    expect(source).toContain('Result-commit recovery left');
+    // R1-2: the structured half (stream.reconciled ordering) must be
+    // asserted, not only written to the evidence file.
+    expect(source).toContain(
+      'Result-commit recovery did not reconcile the published prefix',
+    );
+    // R1-6: a parity failure must retain the two request bodies for diffing.
+    expect(source).toContain('model-request-parity.json');
+    // R1-5: the pre-dispatch proxy must never hold after-result's :start.
+    expect(source.slice(proxy - 500, proxy)).not.toContain(
+      "approvalFault === 'after-result'",
+    );
+  });
+
   // #12941: the Stage A acceptance criterion names a 15-second Runtime delay,
   // but the ordering assertion was gated at 20 s, so a --runtime-delay-ms 15000
   // run silently skipped it. Pin the threshold to the criterion's delay and
@@ -385,7 +561,7 @@ describe('managed-agent-server e2e runner', () => {
     expect(source).toContain(`'${refusal}'`);
     expect(
       read(
-        'packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/store/ManagedSessionStore.java',
+        'packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/persistence/ManagedSessionStore.java',
       ),
     ).toContain(`"${refusal}."`);
     const writerBefore = source.indexOf(
@@ -618,23 +794,42 @@ describe('managed-agent-server e2e runner', () => {
     expect(slice.replace(/\s+/g, ' ')).toMatch(
       /read once at JVM startup|restart it with the override/i,
     );
-    // The by-hand recipe re-anchors Spring to the Prerequisites environment,
-    // which never names the Session Store, and application.yml defaults the
-    // store off — a reader who follows that path wires Spring without a
-    // store descriptor and the Harness answers every attach with
-    // 400 invalid_managed_session_store, so the slice must name the switch.
-    expect(slice).toContain('QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED');
-    // The store switch is read once at JVM startup exactly like the base
-    // URL: exported below the restart cue it never reaches the reader's
-    // JVM, and every attach fails with 400 invalid_managed_session_store
-    // while the recipe reads complete — so the exports must land before the
-    // single restart. The cue is hard-wrapped, so compare on the collapsed
-    // slice; a missing cue fails closed through the -1.
-    const flat = slice.replace(/\s+/g, ' ');
+    // The by-hand recipe re-anchors Spring to the Prerequisites environment.
+    // Without a store descriptor the Harness answers every attach with
+    // 400 invalid_managed_session_store, so the store must come on with the
+    // Harness and find its workspace ID there: application.yml derives the
+    // switch from the Harness, and Prerequisites exports the ID.
     expect(
-      flat.indexOf('QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED'),
-      'the Session Store exports must precede the Spring restart cue',
-    ).toBeLessThan(flat.indexOf('restart it with the override'));
+      read('packages/managed-agent-server/src/main/resources/application.yml'),
+      'the Session Store switch must follow the Harness by default',
+    ).toContain(
+      "enabled: '${QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED:${qwen.managed-agent.harness.enabled:false}}'",
+    );
+    const prerequisites = readme.slice(
+      readme.indexOf('## Prerequisites'),
+      readme.indexOf('## Public Session lifecycle'),
+    );
+    expect(
+      prerequisites,
+      'Prerequisites must export the workspace ID that scopes the store',
+    ).toMatch(/^export QWEN_MANAGED_AGENT_WORKSPACE_ID='[^']+'$/m);
+    // The base URL is read once at JVM startup: exported below the restart
+    // cue it never reaches the reader's JVM, and every Turn fails while the
+    // recipe reads complete. The cue is hard-wrapped, so compare on the
+    // collapsed slice, and require both positions so neither can pass as -1.
+    const flat = slice.replace(/\s+/g, ' ');
+    const cue = flat.indexOf('restart it with the override');
+    const baseUrlExport = flat.indexOf(
+      `QWEN_MANAGED_AGENT_HARNESS_BASE_URL='http://127.0.0.1:${port}'`,
+    );
+    expect(cue, 'the slice must keep the Spring restart cue').toBeGreaterThan(
+      -1,
+    );
+    expect(baseUrlExport).toBeGreaterThan(-1);
+    expect(
+      baseUrlExport,
+      'the Harness base-url export must precede the Spring restart cue',
+    ).toBeLessThan(cue);
   });
 
   it('keeps the review-corrections merge gates behind the CI-gated Hosted proofs', () => {
@@ -1132,10 +1327,11 @@ describe('managed-agent-server e2e runner', () => {
 
   // spawnSync blocks the event loop, so waitUntil's race cannot bound a
   // synchronous probe: the mysqladmin readiness probe carries its own
-  // timeout, and the lease polls (writer and dispatch lease expiry, and the
-  // model-round arm's second writer lease) derive each call's timeout from
-  // the remaining waitUntil budget rather than a site-local constant that
-  // can overshoot the declared budget several-fold.
+  // timeout, and the lease polls (writer and dispatch lease expiry, the
+  // model-round arm's second writer lease, and the approval fault arms'
+  // post-crash writer lease) derive each call's timeout from the remaining
+  // waitUntil budget rather than a site-local constant that can overshoot
+  // the declared budget several-fold.
   it('bounds every synchronous MySQL probe by the poll budget', () => {
     const source = read('scripts/run-managed-agent-server-e2e.ts');
     expect(source).toMatch(/spawnSync\(\s*mysqladmin,[\s\S]*?timeout: 10_000/);
@@ -1145,7 +1341,7 @@ describe('managed-agent-server e2e runner', () => {
     expect(
       source.match(/\(remainingMs\) =>\s*runMysql\([\s\S]*?remainingMs,/g),
       'every lease poll must derive the probe timeout from the waitUntil budget',
-    ).toHaveLength(3);
+    ).toHaveLength(4);
     // The frozen arm's snapshot fans one budget out over several
     // synchronous probes; each takes its share, not the whole budget.
     const fenced = source.slice(

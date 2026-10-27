@@ -1,10 +1,11 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection;
-import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecords;
-import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecords.InvalidRecordException;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionProjection;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecords;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecords.InvalidRecordException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -26,18 +27,19 @@ class ManagedAutomationRecordContractTest {
         assertEquals("managed-automation-record/1",
                 fixtures.required("contract").textValue());
         assertEquals(List.of("catchUp", "catchUpLimit", "cron",
-                "definitionDigest", "definitionRevision", "enabled", "goal",
-                "kind", "overlap", "ownerScopeId", "promptRef", "run",
+                "definitionDigest", "definitionRevision", "enabled", "gate",
+                "goal", "kind", "overlap", "ownerScopeId", "promptRef", "run",
                 "scheduleId", "sessionMode", "targetSessionId", "timezone"),
                 jsonList(fixtures.required("keys").required("schedule")));
-        assertEquals(List.of("automationRunId", "definitionRevision", "kind",
-                "occurrenceKey", "run", "scheduleId", "sessionMode",
-                "targetSessionId"),
+        assertEquals(List.of("automationRunId", "definitionRevision",
+                "gateOutputRef", "kind", "occurrenceKey", "run", "scheduleId",
+                "sessionMode", "targetSessionId"),
                 jsonList(fixtures.required("keys").required("automation_run")));
         assertEquals(List.of("kind", "ownerScopeId", "scheduleId"),
                 jsonList(fixtures.required("fixedKeys").required("schedule")));
-        assertEquals(List.of("automationRunId", "definitionRevision", "kind",
-                "occurrenceKey", "scheduleId", "sessionMode", "targetSessionId"),
+        assertEquals(List.of("automationRunId", "definitionRevision",
+                "gateOutputRef", "kind", "occurrenceKey", "scheduleId",
+                "sessionMode", "targetSessionId"),
                 jsonList(fixtures.required("fixedKeys").required("automation_run")));
         assertEquals(ManagedExtensionRecords.SCHEDULE_OVERLAP_POLICIES,
                 jsonList(fixtures.required("overlapPolicies")));
@@ -86,9 +88,9 @@ class ManagedAutomationRecordContractTest {
             String domain = fixture.get("domain").textValue();
             String id = fixture.get("id").textValue();
             var body = ManagedExtensionProjection.RECORD_BODIES.get(domain);
-            JsonNode record = ManagedChildRunRecordContractTest
+            JsonNode record = omit(ManagedChildRunRecordContractTest
                     .merge(fixtures.get("templates").get(domain),
-                            fixture.get("patch"));
+                            fixture.get("patch")), fixture.get("omit"));
             if (fixture.get("valid").booleanValue()) {
                 body.require().accept(record);
             } else {
@@ -115,6 +117,14 @@ class ManagedAutomationRecordContractTest {
                             ManagedChildRunRecordContractTest.merge(template, fixture.get("after"))),
                     fixture.get("id").textValue());
         }
+    }
+
+    /** Drops {@code keys}' top-level fields: a record missing a required key. */
+    static JsonNode omit(JsonNode record, JsonNode keys) {
+        if (keys != null) {
+            keys.forEach(key -> ((ObjectNode) record).remove(key.textValue()));
+        }
+        return record;
     }
 
     static JsonNode fixtures() throws IOException {

@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import com.alibaba.fastjson2.JSON;
+
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.net.URI;
@@ -11,7 +12,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.regex.Pattern;
 
-final class BrokerValues {
+public final class BrokerValues {
     private static final int MAXIMUM_ID_LENGTH = 512;
     private static final Pattern PATH_SAFE_ID = Pattern.compile(
             "[A-Za-z0-9._-]{1," + MAXIMUM_ID_LENGTH + "}");
@@ -25,7 +26,7 @@ final class BrokerValues {
     private BrokerValues() {
     }
 
-    static String requireId(String value, String name) {
+    public static String requireId(String value, String name) {
         if (value == null || value.isEmpty()
                 || value.length() > MAXIMUM_ID_LENGTH
                 || value.indexOf('\0') >= 0) {
@@ -56,7 +57,7 @@ final class BrokerValues {
      * Text without an unpaired surrogate: the JSON writer turns one into
      * '?', so two identifiers could reach the Runtime as one.
      */
-    static String requireWellFormed(String value, String name) {
+    public static String requireWellFormed(String value, String name) {
         if (!isWellFormed(value)) {
             throw new IllegalArgumentException(name
                     + " must be well-formed text");
@@ -72,7 +73,7 @@ final class BrokerValues {
      * surrogate. Anything else, such as an array or a set the writer would
      * also serialize, answers false.
      */
-    static boolean isWellFormedJson(Object value) {
+    public static boolean isWellFormedJson(Object value) {
         if (value instanceof String text) {
             return isWellFormed(text);
         }
@@ -104,7 +105,7 @@ final class BrokerValues {
                         && point <= Character.MAX_SURROGATE);
     }
 
-    static URI requireOrigin(URI value, String name) {
+    public static URI requireOrigin(URI value, String name) {
         if (value == null
                 || (!("http".equalsIgnoreCase(value.getScheme()))
                         && !("https".equalsIgnoreCase(value.getScheme())))
@@ -128,7 +129,7 @@ final class BrokerValues {
      * such as 40e-1, can arrive as a Double and is then rejected too. A
      * cursor is validated exactly but never narrowed to a long.
      */
-    static BigDecimal exactInteger(Object value) {
+    public static BigDecimal exactInteger(Object value) {
         if (value instanceof Integer || value instanceof Long) {
             return BigDecimal.valueOf(((Number) value).longValue());
         }
@@ -146,7 +147,7 @@ final class BrokerValues {
      * The exact long a parsed JSON integer denotes, or null: an
      * {@link #exactInteger(Object) exact integer} that fits in a long.
      */
-    static Long exactLong(Object value) {
+    public static Long exactLong(Object value) {
         BigDecimal integer = exactInteger(value);
         if (integer == null) {
             return null;
@@ -159,7 +160,7 @@ final class BrokerValues {
         }
     }
 
-    static Map<String, Object> immutableMap(Map<String, ?> source) {
+    public static Map<String, Object> immutableMap(Map<String, ?> source) {
         Map<String, Object> copy = new LinkedHashMap<>();
         for (Map.Entry<?, ?> entry : source.entrySet()) {
             if (!(entry.getKey() instanceof String key)) {
@@ -237,7 +238,7 @@ final class BrokerValues {
     // numeric subtypes by magnitude (a written 1L can read back as Integer).
     // Identity comparison therefore canonicalizes numbers by value so a
     // round-tripped payload still matches the caller's own map.
-    static boolean sameJsonMap(Map<String, Object> first,
+    public static boolean sameJsonMap(Map<String, Object> first,
             Map<String, Object> second) {
         if (first == second) {
             return true;

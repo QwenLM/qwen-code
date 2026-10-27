@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type {
+  ManagedPackagePreparationRequest,
+  ManagedPackagePreparation,
+} from './managed-extension-package-types.js';
 import {
   validateStartupConfigRequest,
   assertStartupConfigApplied,
@@ -97,6 +101,7 @@ import type {
   DaemonStatusReport,
   DaemonUpdateStatus,
   DaemonStatusReportDetail,
+  DaemonSessionTaskRuntimeStatus,
   DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionTasksStatus,
   DaemonSessionWorkflowTaskStatus,
@@ -133,6 +138,8 @@ import type {
   DaemonGitHubPullRequestList,
   DaemonGitHubPullRequestCreateResult,
   DaemonWorkspaceMcpStatus,
+  DaemonWorkspaceDirectories,
+  DaemonWorkspaceDirectoriesMutation,
   DaemonWorkspaceMcpConfigStatus,
   DaemonMcpConfigMutationResult,
   DaemonWorkspaceMcpInitializeResult,
@@ -150,6 +157,7 @@ import type {
   DaemonRuntimeStopOptions,
   DaemonWorkspaceRuntimeStopResult,
   DaemonWorkspaceSkillsStatus,
+  DaemonWorkspaceSkillsSnapshot,
   DaemonWorkspaceToolsStatus,
   DaemonWriteMemoryRequest,
   DaemonWriteMemoryResult,
@@ -162,6 +170,7 @@ import type {
   DaemonWorkspaceCapability,
   DaemonWorkspaceRemovalResult,
   DaemonWorkspaceUpdate,
+  DaemonGitCloneJob,
   HeartbeatResult,
   GoalControlRequest,
   GoalStateResponse,
@@ -232,6 +241,8 @@ import type {
   SessionSourceUpsertResult,
   SessionSourceRemoveResult,
   DaemonRewindSnapshotInfo,
+  DaemonMessageGroupsSnapshot,
+  DaemonDeleteMessageGroupsResult,
   DaemonRewindResult,
   ForkSessionRequest,
   DaemonSessionHooksStatus,
@@ -263,6 +274,7 @@ import type {
   DaemonWorkspacePermissionsStatus,
   DaemonSettingUpdateResult,
   DaemonModelConfiguration,
+  DaemonModelProviderRuntimeSyncResult,
   DaemonModelConfigurationUpdateResult,
   DaemonModelDeleteRequest,
   DaemonModelDeleteResult,
@@ -731,6 +743,8 @@ export interface ResumeSessionRequest {
    * timer and relies on the daemon's own restore deadline.
    */
   timeoutMs?: number;
+  /** Aborts the restore and, for load, replay attachment hydration. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -1890,6 +1904,67 @@ export class DaemonClient {
       `/session/${urlEncode(sessionId)}/resources`,
       'GET /session/:id/resources',
       { clientId, mode: 'rest' },
+    );
+  }
+
+  async prepareManagedPackage(
+    request: ManagedPackagePreparationRequest,
+    options?: { clientId?: string; signal?: AbortSignal },
+  ): Promise<ManagedPackagePreparation> {
+    return this.jsonRequest(
+      '/workspace/extensions/managed-packages/prepare',
+      'Prepare Managed extension package',
+      {
+        method: 'POST',
+        body: request,
+        clientId: options?.clientId,
+        signal: options?.signal,
+        timeoutMs: 10 * 60_000,
+        mode: 'rest',
+      },
+    );
+  }
+
+  async readPreparedManagedPackage(
+    archiveUrl: string,
+    signal?: AbortSignal,
+  ): Promise<Blob> {
+    if (
+      !/^\/workspace\/extensions\/managed-packages\/[0-9a-f-]{36}\/archive$/.test(
+        archiveUrl,
+      )
+    )
+      throw new Error('Invalid Managed package preparation reference');
+    return this.fetchWithTimeout(
+      `${this.baseUrl}${archiveUrl}`,
+      { method: 'GET', headers: this.headers({}), signal },
+      async (response) => {
+        if (!response.ok)
+          throw await this.failOnError(
+            response,
+            'Read prepared Managed package',
+          );
+        const limit = 100 * 1024 * 1024;
+        const reader = response.body?.getReader();
+        if (!reader) throw new Error('Managed package stream is missing');
+        const chunks: Array<Uint8Array<ArrayBuffer>> = [];
+        let length = 0;
+        try {
+          for (;;) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            length += value.length;
+            if (length > limit)
+              throw new Error('Managed package exceeds 100 MiB');
+            chunks.push(new Uint8Array(value));
+          }
+        } finally {
+          await reader.cancel();
+        }
+        return new Blob(chunks, { type: 'application/octet-stream' });
+      },
+      undefined,
+      'rest',
     );
   }
 
@@ -3932,6 +4007,26 @@ export class DaemonClient {
     );
   }
 
+  async sessionTaskRuntime(
+    sessionId: string,
+    taskId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionTaskRuntimeStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/tasks/${urlEncode(taskId)}/runtime`,
+      { headers: this.headers({}, clientId) },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'GET /session/:id/tasks/:taskId/runtime',
+          );
+        }
+        return (await res.json()) as DaemonSessionTaskRuntimeStatus;
+      },
+    );
+  }
+
   async sessionAgents(
     sessionId: string,
     clientId?: string,
@@ -4212,6 +4307,7 @@ export class DaemonClient {
           ...(sourceType !== undefined ? { sourceType } : {}),
           ...(sourceId !== undefined ? { sourceId } : {}),
         }),
+        signal: req.signal,
       },
       async (res) => {
         if (!res.ok) {
@@ -4318,6 +4414,48 @@ export class DaemonClient {
         }
         return (await res.json()) as DaemonApprovalModeResult;
       },
+    );
+  }
+
+  async getMessageGroups(
+    sessionId: string,
+  ): Promise<DaemonMessageGroupsSnapshot> {
+    return this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/message-groups`,
+      { method: 'GET', headers: this.headers() },
+      async (res) => {
+        if (!res.ok)
+          throw await this.failOnError(res, 'GET /session/:id/message-groups');
+        return (await res.json()) as DaemonMessageGroupsSnapshot;
+      },
+      undefined,
+      'rest',
+    );
+  }
+
+  async deleteMessageGroups(
+    sessionId: string,
+    snapshot: string,
+    groupIds: string[],
+    clientId?: string,
+  ): Promise<DaemonDeleteMessageGroupsResult> {
+    return this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/messages/delete`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({ snapshot, groupIds }),
+      },
+      async (res) => {
+        if (!res.ok)
+          throw await this.failOnError(
+            res,
+            'POST /session/:id/messages/delete',
+          );
+        return (await res.json()) as DaemonDeleteMessageGroupsResult;
+      },
+      undefined,
+      'rest',
     );
   }
 
@@ -7003,6 +7141,59 @@ export class DaemonClient {
     );
   }
 
+  /** Starts an asynchronous clone of `url` into a new `target` directory. */
+  async startGitWorkspaceClone(input: {
+    url: string;
+    target: string;
+  }): Promise<{ jobId: string }> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspaces`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ kind: 'git', ...input }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /workspaces { kind: "git" }');
+        }
+        return (await res.json()) as { jobId: string };
+      },
+    );
+  }
+
+  async getGitWorkspaceCloneJob(jobId: string): Promise<DaemonGitCloneJob> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace-git-clone-jobs/${urlEncode(jobId)}`,
+      { method: 'GET', headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'GET /workspace-git-clone-jobs/:jobId',
+          );
+        }
+        return (await res.json()) as DaemonGitCloneJob;
+      },
+    );
+  }
+
+  async cancelGitWorkspaceClone(jobId: string): Promise<DaemonGitCloneJob> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace-git-clone-jobs/${urlEncode(jobId)}`,
+      { method: 'DELETE', headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'DELETE /workspace-git-clone-jobs/:jobId',
+          );
+        }
+        return (await res.json()) as DaemonGitCloneJob;
+      },
+    );
+  }
+
   // -- Lifecycle / disposal ------------------------------------------------
 
   /**
@@ -7179,6 +7370,28 @@ export class WorkspaceDaemonClient {
 
   workspaceMcp(): Promise<DaemonWorkspaceMcpStatus> {
     return this.get('/mcp', 'GET /workspaces/:workspace/mcp');
+  }
+
+  directories(): Promise<DaemonWorkspaceDirectories> {
+    return this.get('/directories', 'GET /workspaces/:workspace/directories');
+  }
+
+  addDirectory(path: string): Promise<DaemonWorkspaceDirectoriesMutation> {
+    return this.post(
+      '/directories',
+      'POST /workspaces/:workspace/directories',
+      { path },
+    );
+  }
+
+  removeDirectory(path: string): Promise<DaemonWorkspaceDirectoriesMutation> {
+    const query = new URLSearchParams({ path });
+    return this.client.workspaceJsonRequest<DaemonWorkspaceDirectoriesMutation>(
+      this.workspaceSelector,
+      `/directories?${query.toString()}`,
+      'DELETE /workspaces/:workspace/directories',
+      { method: 'DELETE', mode: 'rest' },
+    );
   }
 
   mcpConfig(): Promise<DaemonWorkspaceMcpConfigStatus> {
@@ -8020,6 +8233,17 @@ export class WorkspaceDaemonClient {
     );
   }
 
+  workspaceSkillsSnapshot(
+    signal?: AbortSignal,
+  ): Promise<DaemonWorkspaceSkillsSnapshot> {
+    return this.client.workspaceJsonRequest(
+      this.workspaceSelector,
+      '/config/skills/snapshot',
+      'GET /workspaces/:workspace/config/skills/snapshot',
+      { mode: 'rest', signal },
+    );
+  }
+
   workspaceConfigSkills(): Promise<DaemonWorkspaceSkillsStatus> {
     return this.client.workspaceJsonRequest(
       this.workspaceSelector,
@@ -8772,6 +8996,18 @@ export class WorkspaceDaemonClient {
       {},
       opts?.clientId,
       opts?.timeoutMs ?? MCP_RESTART_DEFAULT_TIMEOUT_MS,
+    );
+  }
+
+  reloadModelProviders(opts?: {
+    clientId?: string;
+  }): Promise<DaemonModelProviderRuntimeSyncResult> {
+    return this.post(
+      '/models/reload',
+      'POST /workspaces/:workspace/models/reload',
+      {},
+      opts?.clientId,
+      35_000,
     );
   }
 

@@ -41,6 +41,7 @@ import {
   bindHostedCsiHistory,
   commitInitialHostedCsiHistory,
 } from './hosted-csi-file-history.js';
+import { recoverHostedCsiReceipts } from './hosted-csi-cold-recovery.js';
 
 const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
@@ -70,9 +71,18 @@ interface Owner {
   stopped: boolean;
   admission?: Admission;
   stores?: HttpManagedSessionStores;
+  recovering?: boolean;
   session?: HostedCsiTextSession;
   timer?: NodeJS.Timeout;
   renewing?: Promise<void>;
+  activationRenewing?: ReturnType<
+    LocalManagedSessionAuthority['renewActivation']
+  >;
+  failures: unknown[];
+  retirementId?: string;
+  retirementResult?: Promise<unknown>;
+  retirementPrepared?: boolean;
+
   active?: { promptId: string; abort: AbortController };
   tasks: Set<Promise<unknown>>;
   turns: Map<string, { text: string; result: Promise<ChatRecord> }>;
@@ -117,6 +127,11 @@ function blockOwner(
   );
 }
 
+function admit(owner: Owner): void {
+  active(owner);
+  if (owner.retirementId) throw new Refusal('csi_retirement_admission_closed');
+}
+
 function respond(res: Response, pending: Promise<unknown>): void {
   void pending.then(
     (result) => res.json(result),
@@ -135,9 +150,13 @@ function respond(res: Response, pending: Promise<unknown>): void {
 
 function track<T>(owner: Owner, pending: Promise<T>): Promise<T> {
   owner.tasks.add(pending);
-  void pending
-    .finally(() => owner.tasks.delete(pending))
-    .catch(() => undefined);
+  void pending.then(
+    () => owner.tasks.delete(pending),
+    (cause: unknown) => {
+      owner.failures.push(cause);
+      owner.tasks.delete(pending);
+    },
+  );
   return pending;
 }
 
@@ -206,7 +225,7 @@ async function current(
   owner: Owner,
   broker: HostedWorkspaceBrokerOptions,
 ): Promise<void> {
-  active(owner);
+  admit(owner);
   if (!isDeepStrictEqual(await acquire(broker, owner.key), owner.admission))
     throw new Refusal('csi_runtime_identity_conflict');
   await owner.stores!.assertWritable();
@@ -232,23 +251,26 @@ async function initialize(
     });
     owner.stores = stores;
     const journal = await stores.journalStore.open({ sessionKey: owner.key });
-    if ((await stores.publication.owner()).writerGeneration !== 1)
-      throw new Refusal('csi_writer_generation_conflict');
+    owner.recovering = (await stores.publication.owner()).writerGeneration > 1;
     active(owner);
-    const definitionRef = await stores.resourceStore.publish(
-      'managed-definition',
-      Buffer.from(
-        JSON.stringify({
-          engine: 'managed',
-          sessionId: owner.key.sessionId,
-          toolProfile: 'csi-files-retirement/1',
-        }),
-      ),
-    );
-    const rootSnapshotRef = await stores.resourceStore.publish(
-      'managed-root',
-      Buffer.from(JSON.stringify({ cwd: owner.admission.cwd })),
-    );
+    const definitionRef = owner.recovering
+      ? undefined
+      : await stores.resourceStore.publish(
+          'managed-definition',
+          Buffer.from(
+            JSON.stringify({
+              engine: 'managed',
+              sessionId: owner.key.sessionId,
+              toolProfile: 'csi-files-retirement/1',
+            }),
+          ),
+        );
+    const rootSnapshotRef = owner.recovering
+      ? undefined
+      : await stores.resourceStore.publish(
+          'managed-root',
+          Buffer.from(JSON.stringify({ cwd: owner.admission.cwd })),
+        );
     active(owner);
     const authority = await LocalManagedSessionAuthority.open({
       journal,
@@ -256,16 +278,25 @@ async function initialize(
       sessionKey: owner.key,
       cwd: owner.admission.cwd,
       version: 'hosted-harness/1',
-      requireNew: true,
-      create: { definitionRef, rootSnapshotRef, createdBy: 'hosted-harness' },
+      requireNew: !owner.recovering,
+      ...(definitionRef && rootSnapshotRef
+        ? {
+            create: {
+              definitionRef,
+              rootSnapshotRef,
+              createdBy: 'hosted-harness',
+            },
+          }
+        : {}),
     });
     active(owner);
+    const previousEpoch = authority.currentActivation?.epoch ?? 0;
     const activation = await authority.installActivation({
       activationId: randomUUID(),
       workerId: contract.bootId,
       leaseDurationMs: LEASE_MS,
     });
-    if (activation.epoch !== 1)
+    if (activation.epoch !== previousEpoch + 1)
       throw new Refusal('csi_activation_epoch_conflict');
     active(owner);
     const deny = async () => {
@@ -282,12 +313,31 @@ async function initialize(
       activation,
       releaseActivation: deny,
       replaceActivation: deny,
+      prepareOwnershipRelease: deny,
       close: deny,
     };
     owner.timer = setInterval(() => {
-      if (owner.stopped || owner.blocked || owner.renewing) return;
-      const pending = authority
-        .renewActivation({ leaseDurationMs: LEASE_MS })
+      if (
+        owner.stopped ||
+        owner.blocked ||
+        owner.renewing ||
+        owner.retirementId
+      )
+        return;
+      const activationRenewal = authority.renewActivation({
+        leaseDurationMs: LEASE_MS,
+      });
+      owner.activationRenewing = activationRenewal;
+      void activationRenewal.then(
+        (outcome) => {
+          if (!outcome)
+            owner.failures.push(
+              new Refusal('csi_retirement_renewal_unresolved'),
+            );
+        },
+        (cause: unknown) => owner.failures.push(cause),
+      );
+      const pending = activationRenewal
         .then((renewed) => {
           if (!renewed) throw new Refusal('csi_activation_renewal_unavailable');
         })
@@ -301,13 +351,17 @@ async function initialize(
       void pending
         .finally(() => {
           owner.renewing = undefined;
+          if (owner.activationRenewing === activationRenewal)
+            owner.activationRenewing = undefined;
         })
         .catch(() => undefined);
     }, LEASE_MS / 3);
     owner.timer.unref();
-    const observation = await bindHostedCsiHistory(broker, owner.key);
-    active(owner);
-    await commitInitialHostedCsiHistory(managed, observation);
+    if (!owner.recovering) {
+      const observation = await bindHostedCsiHistory(broker, owner.key);
+      active(owner);
+      await commitInitialHostedCsiHistory(managed, observation);
+    }
     active(owner);
     owner.session = {
       managed,
@@ -387,7 +441,7 @@ export function registerHostedCsiSessionRoutes(
       if (owner) {
         if (owner.fingerprint !== fingerprint)
           throw new Refusal('csi_session_owner_conflict');
-        active(owner);
+        admit(owner);
       } else {
         owner = {
           key,
@@ -397,6 +451,7 @@ export function registerHostedCsiSessionRoutes(
           stopped: false,
           tasks: new Set(),
           turns: new Map(),
+          failures: [],
         };
         owners.set(id, owner);
         owner.initialization = initialize(
@@ -427,7 +482,7 @@ export function registerHostedCsiSessionRoutes(
     try {
       const owner = owners.get(req.params['id']!);
       if (!owner?.session) throw new Refusal('csi_attachment_unavailable');
-      active(owner);
+      admit(owner);
       const body = closed(req.body, ['promptId', 'text']);
       const promptId = body['promptId'];
       const text = body['text'];
@@ -462,37 +517,51 @@ export function registerHostedCsiSessionRoutes(
           const prompt = [{ type: 'text', text }];
           const digest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
           const managed = owner.session!.managed;
-          const contentRef = await managed.resources.publish(
-            'managed-input',
-            Buffer.from(JSON.stringify(prompt)),
-          );
-          const admissionRef = await managed.resources.publish(
-            'managed-admission',
-            Buffer.from(JSON.stringify({ promptId, digest })),
-          );
-          active(owner);
-          await managed.authority.submitInput(
-            {
-              operation: 'submitInput',
-              commandId: promptId,
-              sessionKey: owner.key,
-              contentDigest: digest.slice(7),
-            },
-            {
-              inputId: promptId,
-              turnId: promptId,
-              source: 'hosted-harness',
-              contentRef,
-              admissionRef,
-              deadline: null,
-              wakeReason: 'input',
-            },
-          );
+          const resumed = owner.recovering
+            ? await recoverHostedCsiReceipts(managed, broker, promptId, text, {
+                bindingId: owner.admission!.bindingId,
+                generation: owner.admission!.generation,
+                ...(await owner.stores!.publication.owner()),
+                activationId: managed.activation.activationId,
+                activationEpoch: managed.activation.epoch,
+              })
+            : undefined;
+          if (resumed === undefined) {
+            const contentRef = await managed.resources.publish(
+              'managed-input',
+              Buffer.from(JSON.stringify(prompt)),
+            );
+            const admissionRef = await managed.resources.publish(
+              'managed-admission',
+              Buffer.from(JSON.stringify({ promptId, digest })),
+            );
+            active(owner);
+            await managed.authority.submitInput(
+              {
+                operation: 'submitInput',
+                commandId: promptId,
+                sessionKey: owner.key,
+                contentDigest: digest.slice(7),
+              },
+              {
+                inputId: promptId,
+                turnId: promptId,
+                source: 'hosted-harness',
+                contentRef,
+                admissionRef,
+                deadline: null,
+                wakeReason: 'input',
+              },
+            );
+          }
+          owner.recovering = false;
           return await runHostedCsiTextTurn(
             owner.session!,
             promptId,
             text,
             abort,
+            resumed?.parts,
+            resumed?.finalOutput,
           );
         } catch (cause) {
           blockOwner(owner, contract.bootId, 'text turn', cause);
@@ -515,6 +584,12 @@ export function registerHostedCsiSessionRoutes(
       respond(res, Promise.reject(new Refusal('csi_attachment_unavailable')));
       return;
     }
+    try {
+      admit(owner);
+    } catch (cause) {
+      respond(res, Promise.reject(cause));
+      return;
+    }
     respond(
       res,
       track(
@@ -524,6 +599,77 @@ export function registerHostedCsiSessionRoutes(
         ),
       ),
     );
+  });
+  app.post('/session/:id/internal-csi/retire', (req, res) => {
+    try {
+      const body = closed(req.body, [
+        'tenantId',
+        'workspaceId',
+        'bindingId',
+        'retirementId',
+      ]);
+      const owner = owners.get(req.params['id']!);
+      if (!owner?.session || !owner.admission || !owner.stores)
+        throw new Refusal('csi_attachment_unavailable');
+      const retirementId = body['retirementId'];
+      if (
+        typeof retirementId !== 'string' ||
+        !UUID.test(retirementId) ||
+        body['tenantId'] !== owner.key.tenantId ||
+        body['workspaceId'] !== owner.key.workspaceId ||
+        body['bindingId'] !== owner.admission.bindingId
+      )
+        throw new Refusal('csi_request_invalid', 400);
+      if (owner.retirementId && owner.retirementId !== retirementId)
+        throw new Refusal('csi_retirement_conflict');
+      if (!owner.retirementId) {
+        active(owner);
+        owner.retirementId = retirementId;
+        clearInterval(owner.timer);
+      }
+      if (!owner.retirementResult) {
+        const rawRenewal = owner.activationRenewing;
+        const admitted = [...owner.tasks];
+        const result = (async () => {
+          if (!owner.retirementPrepared) {
+            const results = await Promise.allSettled(admitted);
+            if (rawRenewal) {
+              const outcome = await rawRenewal;
+              if (
+                !outcome ||
+                outcome.phase !== 'active' ||
+                outcome.epoch !== 1 ||
+                outcome.workerId !== contract.bootId
+              )
+                throw new Refusal('csi_retirement_renewal_unresolved');
+            }
+            if (
+              owner.failures.length ||
+              results.some((item) => item.status === 'rejected')
+            )
+              throw new Refusal('csi_retirement_task_failed');
+            active(owner);
+            await owner.stores!.csiRetirement.joinWriter();
+            const records =
+              await owner.session!.managed.authority.prepareOriginalCsiRelease();
+            await owner.stores!.csiRetirement.prepare(records);
+            owner.retirementPrepared = true;
+          }
+          const status =
+            await owner.stores!.csiRetirement.complete(retirementId);
+          await owner.stores!.stopLocal();
+          return status;
+        })();
+        owner.retirementResult = result;
+        void result.catch(() => {
+          if (owner.retirementResult === result)
+            owner.retirementResult = undefined;
+        });
+      }
+      respond(res, owner.retirementResult);
+    } catch (cause) {
+      respond(res, Promise.reject(cause));
+    }
   });
   app.use('/session/:id', (req, res, next) => {
     if (
@@ -561,6 +707,9 @@ export function registerHostedCsiSessionRoutes(
         );
         await Promise.allSettled(
           [...owners.values()].flatMap((owner) => [...owner.tasks]),
+        );
+        await Promise.allSettled(
+          [...owners.values()].map((owner) => owner.retirementResult),
         );
         await Promise.all(
           [...owners.values()].map((owner) => owner.stores?.stopLocal()),

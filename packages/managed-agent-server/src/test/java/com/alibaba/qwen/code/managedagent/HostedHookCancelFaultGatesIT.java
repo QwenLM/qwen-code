@@ -2,8 +2,8 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.WorkspaceStorageGuard;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -22,7 +22,6 @@ import org.springframework.boot.web.servlet.context.ServletWebServerApplicationC
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.io.IOException;
-import java.lang.reflect.Field;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
@@ -48,6 +47,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.attachment;
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.quote;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertAll;
@@ -194,7 +195,10 @@ class HostedHookCancelFaultGatesIT {
     @Test
     @Timeout(300)
     void fg13dCancelWithDroppedReplySettlesThroughStatusOnMySql() throws Exception {
-        boot("60000", "-1", "hook-ignore-term");
+        // A dropped cancel reply keeps the route waiting on the Broker's
+        // request timeout; give the command enough life that only the
+        // delivered cancellation, never its own timeout, can settle it.
+        boot("180000", "-1", "hook-ignore-term");
         proxy.arm(HostedSessionRelayForwardingProxy.Rule.drop(
                 (method, path, body) -> path.contains("/control") && body.contains("\"kind\":\"hook-cancel\""),
                 "hook-cancel-reply"));
@@ -214,7 +218,8 @@ class HostedHookCancelFaultGatesIT {
         cancelHook(session, executionId);
         // The cancel reply is gone, but the poll through the record's owner
         // resolves the same cancellation, and the gate drains exactly once.
-        awaitTerminalDrained(session, "cancelled", child);
+        awaitTerminalDrained(session, "cancelled", child,
+                Duration.ofSeconds(120));
         assertThat(events("hook.call")).hasSize(1);
         assertThat(events("hook.allow")).isEmpty();
         assertThat(hookResult(session).path("outcome").asText()).isEqualTo("cancelled");
@@ -222,11 +227,77 @@ class HostedHookCancelFaultGatesIT {
         assertThat(modelFailure.get()).isNull();
     }
 
+    @Test
+    @Timeout(600)
+    void fg13dDeleteDrainsHeldAsyncHookThenRunsSessionEndAndSessionDeleteOnceOnMySql() throws Exception {
+        boot("60000", "-1", "hook-ignore-term", true);
+        JsonNode definition = api("POST", "/v1/agents", definition(), "definition", 202);
+        String session = createSession(definition.path("id").asText(), "initial");
+        String turn = submit(session, "FG13_DELETE_DRAIN");
+        waitFor(() -> {
+            assertThat(events("hook.call")).hasSize(1);
+            assertThat(events("hook.child")).hasSize(1);
+        });
+        JsonNode hook = events("hook.call").getFirst();
+        JsonNode child = events("hook.child").getFirst();
+        assertThat(running(hook)).isTrue();
+        assertThat(Files.readString(cgroup(hook).resolve("cgroup.events"))).contains("populated 1");
+
+        // The async Hook outlives its admission; DELETE refuses an ACTIVE
+        // Session with a live turn (409 turn_active), so wait for the turn to
+        // finish and confirm the held command survived it. The public Turn
+        // status is lowercased by publicTurn().
+        waitFor(() -> assertThat(api("GET", "/v1/agents/sessions/" + session + "/turns/" + turn,
+                null, null, 200).path("status").asText()).isIn("completed", "failed", "cancelled"));
+        assertThat(running(hook)).as("held command must outlive the turn").isTrue();
+
+        String operation = api("DELETE", "/v1/agents/sessions/" + session, null, "delete-" + session, 202)
+                .path("id").asText();
+        // The unit must already be empty when the first lifecycle Hook starts:
+        // sampling after the operation settles cannot tell a drain that ran
+        // before the lifecycle Hooks from one that ran after them. SessionEnd
+        // holds for three seconds, so a reordered drain keeps the unit
+        // populated inside this window.
+        waitFor(() -> assertThat(events("hook.call").stream()
+                .anyMatch(event -> "SessionEnd".equals(event.path("eventName").asText()))).isTrue());
+        assertThat(running(hook)).as("async command alive when SessionEnd started").isFalse();
+        assertThat(running(child)).as("descendant alive when SessionEnd started").isFalse();
+        // The drain's own cleanup removes the empty unit before the lifecycle
+        // Hooks start; an absent unit is the drained state, not a failure.
+        // cgroup() asserts containment through AssertJ's toRealPath(), which
+        // refuses a path that no longer exists, so derive the path directly.
+        Path unit = unitPath(hook);
+        if (Files.exists(unit)) {
+            assertThat(unit).startsWith(hookRoot);
+            assertThat(Files.readString(unit.resolve("cgroup.events")))
+                    .as("PreToolUse unit when SessionEnd started").contains("populated 0");
+        }
+        waitFor(() -> assertThat(api("GET", "/v1/agents/sessions/" + session + "/operations/" + operation,
+                null, null, 200).path("status").asText()).isEqualTo("completed"));
+
+        // The evidence file is append-ordered, so the call order is itself the
+        // ordering witness the design doc promises. Each lifecycle event runs
+        // exactly once.
+        assertThat(events("hook.call").stream().map(event -> event.path("eventName").asText()).toList())
+                .containsExactly("PreToolUse", "SessionEnd", "SessionDelete");
+        assertThat(events("hook.done").stream()
+                .filter(event -> "SessionEnd".equals(event.path("eventName").asText())).count()).isEqualTo(1);
+        assertThat(events("hook.done").stream()
+                .filter(event -> "SessionDelete".equals(event.path("eventName").asText())).count()).isEqualTo(1);
+        assertHookUnitsEmpty();
+        assertThat(modelFailure.get()).isNull();
+    }
+
     // The record may report a terminal state only once the unit is empty:
     // inspect the first observation, not a later poll, so a regression that
     // settles early while the drain continues still fails the cell.
     private void awaitTerminalDrained(String session, String state, JsonNode child) throws Exception {
-        long deadline = System.nanoTime() + Duration.ofSeconds(60).toNanos();
+        awaitTerminalDrained(session, state, child, Duration.ofSeconds(60));
+    }
+
+    private void awaitTerminalDrained(String session, String state, JsonNode child,
+            Duration timeout) throws Exception {
+        long deadline = System.nanoTime() + timeout.toNanos();
         while (System.nanoTime() < deadline) {
             JsonNode execution = hookExecution(session);
             if (state.equals(execution.at("/run/state").asText())) {
@@ -242,6 +313,10 @@ class HostedHookCancelFaultGatesIT {
     }
 
     private void boot(String timeoutMs, String holdMs, String signalMode) throws Exception {
+        boot(timeoutMs, holdMs, signalMode, false);
+    }
+
+    private void boot(String timeoutMs, String holdMs, String signalMode, boolean lifecycle) throws Exception {
         assertThat(System.getProperty("mysql.url")).as("Hook fault gates require disposable MySQL 8.4")
                 .startsWith("jdbc:mysql:");
         node = System.getProperty("node.executable");
@@ -265,14 +340,17 @@ class HostedHookCancelFaultGatesIT {
             Files.copy(resource, program);
         }
         hookDigest = DigestUtils.sha256Hex("hook:" + Files.readString(program));
-        Map<String, Object> hook = new java.util.LinkedHashMap<>(Map.of("hookId", "pre", "eventName", "PreToolUse",
-                "sequential", false, "failClosed", true, "async", false, "config", Map.of("type", "command", "command",
-                        quote(node) + " " + quote(program.toString()) + " hook " + quote(evidence.toString())
-                                + " " + quote(holdMs) + " " + quote(signalMode), "timeout", Integer.parseInt(timeoutMs))));
-        hook.put("onceKey", null);
+        List<Map<String, Object>> hooks = new ArrayList<>();
+        hooks.add(hook("pre", "PreToolUse", lifecycle, program, timeoutMs, holdMs, signalMode));
+        if (lifecycle) {
+            // SessionEnd holds long enough to observe whether the async unit is
+            // already empty when the first lifecycle Hook starts.
+            hooks.add(hook("session-end", "SessionEnd", false, program, timeoutMs, "3000", "hook-solo"));
+            hooks.add(hook("session-delete", "SessionDelete", false, program, timeoutMs, "0", "hook-solo"));
+        }
         json.writeValue(temporary.resolve("hooks.json").toFile(), Map.of("version", 1, "catalogs", List.of(
                 Map.of("tenantId", tenant, "workspaceId", "workspace", "catalogId", "fg13-hooks",
-                        "catalogRevision", 1, "definitionDigest", catalogDigest(), "hooks", List.of(hook)))));
+                        "catalogRevision", 1, "definitionDigest", catalogDigest(), "hooks", hooks))));
         Path worker = temporary.resolve("worker.mjs");
         Files.writeString(worker, "process.env.QWEN_MANAGED_HOOK_CONFIG="
                 + json.writeValueAsString(temporary.resolve("hooks.json").toString())
@@ -335,6 +413,16 @@ class HostedHookCancelFaultGatesIT {
         startHarness();
     }
 
+    private Map<String, Object> hook(String id, String event, boolean async, Path program,
+            String timeoutMs, String holdMs, String signalMode) {
+        Map<String, Object> hook = new java.util.LinkedHashMap<>(Map.of("hookId", id, "eventName", event,
+                "sequential", false, "failClosed", true, "async", async, "config", Map.of("type", "command", "command",
+                        quote(node) + " " + quote(program.toString()) + " hook " + quote(evidence.toString())
+                                + " " + quote(holdMs) + " " + quote(signalMode), "timeout", Integer.parseInt(timeoutMs))));
+        hook.put("onceKey", null);
+        return hook;
+    }
+
     private String catalogDigest() {
         return DigestUtils.sha256Hex(hookDigest + 1);
     }
@@ -377,31 +465,15 @@ class HostedHookCancelFaultGatesIT {
         return json.readTree(body);
     }
 
-    // The Harness status route identifies the caller by the client id its
-    // attach minted and the process generation it attached to; the connector
-    // keeps both on the private attachment ref.
-    private record HarnessAttach(String clientId, String bootId) {}
-
-    private HarnessAttach attachment(HarnessConnector connector, String session) throws Exception {
-        Field field = connector.getClass().getDeclaredField("attachments");
-        field.setAccessible(true);
-        for (Object value : ((Map<?, ?>) field.get(connector)).values()) {
-            if (value instanceof HarnessSessionRef ref && session.equals(ref.getHarnessSessionId())) {
-                return new HarnessAttach(ref.getHarnessClientId(), ref.getHarnessBootId());
-            }
-        }
-        return null;
-    }
-
     private JsonNode cancelHook(String session, String executionId) throws Exception {
-        HarnessAttach attach = attachment(spring.getBean(HarnessConnector.class), session);
+        HarnessSessionRef attach = attachment(spring.getBean(HarnessConnector.class), session);
         assertThat(attach).as("Session attachment before cancel").isNotNull();
         var request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + harnessPort
                         + "/session/" + session + "/hooks/operations/" + executionId + "/cancel"))
                 .timeout(Duration.ofSeconds(90)).header("Authorization", "Bearer " + TOKEN)
-                .header("X-Qwen-Client-Id", attach.clientId())
+                .header("X-Qwen-Client-Id", attach.getHarnessClientId())
                 .header("X-Qwen-Harness-Protocol-Version", "1")
-                .header("X-Qwen-Harness-Boot-Id", attach.bootId())
+                .header("X-Qwen-Harness-Boot-Id", attach.getHarnessBootId())
                 .POST(HttpRequest.BodyPublishers.noBody()).build();
         var response = http.send(request, HttpResponse.BodyHandlers.ofString());
         assertThat(response.statusCode()).as("hook cancel: %s", response.body()).isEqualTo(200);
@@ -480,7 +552,8 @@ class HostedHookCancelFaultGatesIT {
             request.path("tools").forEach(tool -> names.add(tool.at("/function/name").asText()));
             assertThat(names).contains("read_file");
             boolean call = results.isEmpty()
-                    && List.of("FG13_CANCEL", "FG13_CANCEL_DROP", "FG13_CANCEL_STOP", "FG13_TIMEOUT").contains(prompt);
+                    && List.of("FG13_CANCEL", "FG13_CANCEL_DROP", "FG13_CANCEL_STOP", "FG13_TIMEOUT",
+                            "FG13_DELETE_DRAIN").contains(prompt);
             var chunk = json.createObjectNode().put("id", "hook-fault").put("object", "chat.completion.chunk")
                     .put("created", 0).put("model", "hook-fault-fixture");
             var choice = chunk.putArray("choices").addObject().put("index", 0);
@@ -523,8 +596,12 @@ class HostedHookCancelFaultGatesIT {
         return !"Z".equals(fields[0]) && fields[19].equals(process.path("startTicks").asText());
     }
 
+    private Path unitPath(JsonNode process) {
+        return Path.of("/sys/fs/cgroup" + process.path("cgroup").asText().substring(3));
+    }
+
     private Path cgroup(JsonNode process) {
-        Path path = Path.of("/sys/fs/cgroup" + process.path("cgroup").asText().substring(3));
+        Path path = unitPath(process);
         assertThat(path).startsWith(hookRoot);
         return path;
     }
@@ -570,10 +647,6 @@ class HostedHookCancelFaultGatesIT {
                 throw new AssertionError("Model fixture: " + temporary, modelFailure.get());
             }
         }).untilAsserted(assertion::execute);
-    }
-
-    private static String quote(String text) {
-        return "'" + text.replace("'", "'\"'\"'") + "'";
     }
 
     @AfterEach
