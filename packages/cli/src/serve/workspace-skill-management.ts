@@ -150,12 +150,18 @@ const STAGING_DISK_ERRNOS = new Set([
   'EMFILE',
   'ENFILE',
   'EBUSY',
+  'EACCES',
+  'EPERM',
 ]);
 
 // Errnos a read cannot produce, so a copyFile failure carrying one of these
-// is the destination write. Node reports both `path` (source) and `dest`
-// (target) for every copyFile error, so the other errnos stay source-side.
+// is the destination write.
 const COPY_STAGING_ERRNOS = new Set(['ENOSPC', 'EDQUOT', 'EROFS']);
+
+// Node reports both `path` (source) and `dest` (target) for every copyFile
+// failure, so a permission error is the staging write only while the source
+// is still readable.
+const COPY_AMBIGUOUS_ERRNOS = new Set(['EACCES', 'EPERM']);
 
 function stagingWriteError(
   error: unknown,
@@ -185,8 +191,16 @@ async function copyIntoStaging(source: string, target: string): Promise<void> {
     await fs.copyFile(source, target);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    if (code && COPY_STAGING_ERRNOS.has(code)) {
+    if (!code) throw error;
+    if (COPY_STAGING_ERRNOS.has(code)) {
       throw stagingWriteError(error) ?? error;
+    }
+    if (COPY_AMBIGUOUS_ERRNOS.has(code)) {
+      const sourceReadable = await fs.access(source, fs.constants.R_OK).then(
+        () => true,
+        () => false,
+      );
+      if (sourceReadable) throw stagingWriteError(error) ?? error;
     }
     throw error;
   }

@@ -446,13 +446,15 @@ the allowed size`.
   `Skill package has too many files (max 2000)` and `Skill ZIP contains
 too many files (max 2000)`.
 - A staging write fault (an errno in `ENOSPC`, `EDQUOT`, `EROFS`, `EIO`,
-  `EMFILE`, `ENFILE`, `EBUSY`) raised by a write into the staging
-  directory: `500 skill_staging_failed`. The folder copy is the
-  exception: Node reports both the source `path` and the target `dest`
-  for every `copyFile` failure, so only the write-only errnos `ENOSPC`,
-  `EDQUOT`, and `EROFS` map to 500; `EIO` and the other read-or-write
-  errnos keep the per-source 400/502 mapping. A staged file that
-  disappeared before finalize is also `500 skill_staging_failed`.
+  `EMFILE`, `ENFILE`, `EBUSY`, `EACCES`, `EPERM`) raised by a write into
+  the staging directory: `500 skill_staging_failed`. The folder copy
+  keeps the ambiguous errnos honest: Node reports both the source `path`
+  and the target `dest` for every `copyFile` failure, so `EACCES` and
+  `EPERM` map to 500 only while the source is still readable; `EIO` and
+  the other read-or-write errnos keep the per-source 400/502 mapping.
+  Direct staging writes (`open`, `write`, `mkdir`) map `EACCES` and
+  `EPERM` unconditionally. A staged file that disappeared before
+  finalize is also `500 skill_staging_failed`.
 - Empty package, bad paths, duplicates, and excess depth: unchanged
   `invalid_skill_package` messages and status 400.
 - A folder or ZIP whose expanded size is over 6 MiB and within the new

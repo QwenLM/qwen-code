@@ -374,11 +374,13 @@ closes` 在第三次 `assertGenerationOpen` 时抛出，并期望不存在 `.qwe
   `Skill package has too many files (max 2000)` 和
   `Skill ZIP contains too many files (max 2000)`。
 - 写入暂存目录时抛出写入故障（errno 为 `ENOSPC`、`EDQUOT`、`EROFS`、
-  `EIO`、`EMFILE`、`ENFILE`、`EBUSY`）：`500 skill_staging_failed`。
-  文件夹复制是例外：Node 对每次 `copyFile` 失败都会同时报告来源 `path`
-  与目标 `dest`，因此只有只可能来自写入的 `ENOSPC`、`EDQUOT`、`EROFS`
-  映射为 500；`EIO` 等读写皆可能的 errno 保持按来源映射为 400/502。
-  暂存文件在 finalize 前消失同样为 `500 skill_staging_failed`。
+  `EIO`、`EMFILE`、`ENFILE`、`EBUSY`、`EACCES`、`EPERM`）：
+  `500 skill_staging_failed`。文件夹复制需区分歧义 errno：Node 对每次
+  `copyFile` 失败都会同时报告来源 `path` 与目标 `dest`，因此 `EACCES`
+  和 `EPERM` 只在来源仍可读时映射为 500；`EIO` 等读写皆可能的 errno
+  保持按来源映射为 400/502。直接的暂存写入（`open`、`write`、`mkdir`）
+  无条件把 `EACCES` 和 `EPERM` 映射为 500。暂存文件在 finalize 前消失
+  同样为 `500 skill_staging_failed`。
 - 空包、非法路径、重复路径和过深目录：`invalid_skill_package` 的文案和
   HTTP 400 不变。
 - 展开后超过 6 MiB、但仍在新上限内的文件夹或 ZIP 可以安装。2 MiB 再加
