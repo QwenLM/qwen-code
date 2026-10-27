@@ -4482,6 +4482,29 @@ describe('backfillWorkspaceSessionPrs', () => {
     ).toBeNull();
   });
 
+  it('declines a quoted -R URL value', async () => {
+    // A shell-quoted URL is the same qualifier as the bare spelling, so it
+    // must keep the decline instead of vanishing into a local number.
+    await seedSession(SESSION_A);
+    await appendUserText(
+      SESSION_A,
+      '/verify-pr 77 -R "https://github.com/other/repo"',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'f77')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 0, written: 0 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+  });
+
   it('declines a /review url form the sidecar reader would reject', async () => {
     // The capture is unbounded user text; an over-long or control-
     // character url passes the repo gate (only the first two path

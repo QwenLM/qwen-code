@@ -201,7 +201,7 @@ const PR_COMMAND_PATTERN =
 // stray occurrence in its prompt reads as a qualifier too — the safer
 // reading, and never a binding this workspace's number.
 const REPO_FLAG_PATTERN =
-  /(?:^|[^-\w])--repo(?![\w-])|(?:^|[\s])-R[ \t\r\n]*=?[ \t\r\n]*(?:["'][A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)?["']|[a-z][a-z0-9+.-]*:\/\/[^\s"']+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)?(?![\w./-]))/g;
+  /(?:^|[^-\w])--repo(?![\w-])|(?:^|[\s])-R[ \t\r\n]*=?[ \t\r\n]*["']?(?:[a-z][a-z0-9+.-]*:\/\/[^\s"']+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)?(?![\w./-]))["']?/g;
 const REPO_VALUE_PATTERN = /--repo(?:[ \t]*=[ \t]*|[ \t]+)["']?[^\s"']+/g;
 const REPO_FORM_PATTERN = /--repo(?:[ \t]*=[ \t]*|[ \t]+)["']?([^\s"']+)/;
 
