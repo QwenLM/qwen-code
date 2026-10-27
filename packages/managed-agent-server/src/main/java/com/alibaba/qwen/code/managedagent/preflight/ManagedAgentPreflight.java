@@ -592,12 +592,11 @@ public final class ManagedAgentPreflight {
         // A URL the probe cannot use fails on its setting alone: the parser's
         // own message quotes the value, credentials included. The server parses
         // this property untrimmed, so a padded value has to fail here too.
-        String base = baseUrl;
-        URI origin = harnessOrigin(base);
+        URI origin = harnessOrigin(baseUrl);
         if (origin == null) {
             return unusableHarnessUrl();
         }
-        String url = trimTrailingSlash(base) + "/capabilities";
+        String url = trimTrailingSlash(baseUrl) + "/capabilities";
         try {
             HttpClient client = HttpClient.newBuilder()
                     .connectTimeout(Duration.ofMillis(TIMEOUT_MILLIS))

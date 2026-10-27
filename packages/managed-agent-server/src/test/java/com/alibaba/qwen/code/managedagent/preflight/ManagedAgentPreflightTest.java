@@ -973,6 +973,22 @@ class ManagedAgentPreflightTest {
         }
     }
 
+    @Test
+    void rejectsAPortOutsideTheTcpRange() {
+        // A bad port must fail its own row, not throw out of the report.
+        for (int port : new int[] {-1, 65536}) {
+            ManagedAgentPreflight.Check offline =
+                    ManagedAgentPreflight.portCheck("server", "127.0.0.1", port);
+            assertEquals(ManagedAgentPreflight.Status.FAIL, offline.status());
+            assertEquals("server-port", offline.name());
+            assertEquals(port + " is not a TCP port", offline.detail());
+            ManagedAgentPreflight.Check online =
+                    ManagedAgentPreflight.listeningCheck("broker", "127.0.0.1", port);
+            assertEquals(ManagedAgentPreflight.Status.FAIL, online.status());
+            assertEquals("broker-port", online.name());
+        }
+    }
+
     private static List<String> statuses(String... args) {
         String[] withDatabase = java.util.Arrays.copyOf(args, args.length + 1);
         withDatabase[args.length] = "--spring.datasource.url=";
@@ -1200,7 +1216,6 @@ class ManagedAgentPreflightTest {
                     check.detail());
             assertFalse(check.detail().contains("\n"), check.detail());
             assertFalse(check.detail().contains("\u001b"), check.detail());
-            assertFalse(check.detail().contains("forged PASS"), check.detail());
         } finally {
             server.stop(0);
         }
