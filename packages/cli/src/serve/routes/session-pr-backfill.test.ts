@@ -4585,6 +4585,28 @@ describe('backfillWorkspaceSessionPrs', () => {
     });
   });
 
+  it('declines a dotted first segment rather than guessing a group', async () => {
+    // `a.b/c` cannot be told apart from `host/owner`: the host reading wins,
+    // which leaves one path segment, so the qualifier declines. Pinned as a
+    // decision — the alternative (reading it as a dotted nested group) would
+    // bind a repository the user may not have named.
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/verify-pr 77 --repo a.b/c');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'f77')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 0, written: 0, repoDeclined: 1 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+  });
+
   it('declines a quoted -R URL value', async () => {
     // A shell-quoted URL is the same qualifier as the bare spelling, so it
     // must keep the decline instead of vanishing into a local number.
