@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { hostedSessionRecords } from './hosted-session-records.js';
+import { hostedMessageRecords } from './hosted-session-records.js';
 import {
   parsePublicChildModelRoute,
   type PublicChildModelRoute,
@@ -399,7 +399,7 @@ export async function findHostedApprovalContinuation(
     1,
     session.authority.committedSequence,
   );
-  const projected = hostedSessionRecords(session);
+  const projected = hostedMessageRecords(session);
   const latestAssistant = await projected.findLast(
     (item) => item.type === 'assistant' && item.daemonPromptId === promptId,
   );

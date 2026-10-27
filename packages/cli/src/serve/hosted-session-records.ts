@@ -21,6 +21,22 @@ export function hostedSessionRecords(
   );
 }
 
+export function hostedMessageRecords(
+  session: {
+    readonly authority: { readonly committedSequence: number };
+    readonly sink: {
+      iterateMessageRecords(
+        throughSequence?: number,
+      ): AsyncIterable<ChatRecord>;
+    };
+  },
+  throughSequence = session.authority.committedSequence,
+) {
+  return new ManagedHistoryQuery(() =>
+    session.sink.iterateMessageRecords(throughSequence),
+  );
+}
+
 export function hostedRecordsAfter(
   records: ManagedHistoryQuery<ChatRecord>,
   recordId: string,

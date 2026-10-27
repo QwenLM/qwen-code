@@ -2755,6 +2755,13 @@ describe('managed session checkpoints', () => {
     await expect(harness.authority.harnessRunAuthorization()).resolves.toEqual({
       status: 'runnable',
       checkpoint,
+      history: expect.objectContaining({
+        checkpoint,
+        toolCount: 0,
+        bindingCount: 0,
+        allToolsSettled: true,
+        allToolsConsumed: true,
+      }),
     });
     await expect(harness.authority.restoreBundle()).resolves.toMatchObject({
       restoreBasis: 'checkpoint',

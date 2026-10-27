@@ -130,7 +130,10 @@ export class ManagedSessionMessageProjection {
    * (`ChatRecordingService.readActiveTranscriptChain`).
    */
   async project(throughSequence?: number): Promise<ChatRecord[]> {
-    return this.projectRecords(throughSequence, false);
+    const records: ChatRecord[] = [];
+    for await (const record of this.iterateMessageRecords(throughSequence))
+      records.push(record);
+    return records;
   }
 
   async projectModelRecords(throughSequence?: number): Promise<ChatRecord[]> {
@@ -183,12 +186,12 @@ export class ManagedSessionMessageProjection {
       let length = 0;
       let id: string | null | undefined = leaf;
       while (id) {
+        const identity = await identities.get(id);
+        if (!identity) break;
         if (length >= identities.size)
           throw new ManagedSessionRecordError(
             'Active transcript contains a parent cycle.',
           );
-        const identity = await identities.get(id);
-        if (!identity) break;
         await order.set(length++, identity.first);
         id = identity.parentUuid;
       }
@@ -266,22 +269,16 @@ export class ManagedSessionMessageProjection {
     );
   }
 
-  private async projectRecords(
-    throughSequence: number | undefined,
-    includeCompactions: boolean,
-  ): Promise<ChatRecord[]> {
-    const records: ChatRecord[] = [];
+  async *iterateMessageRecords(
+    throughSequence = this.authority.committedSequence,
+  ): AsyncGenerator<ChatRecord> {
     for await (const { event, record } of this.projectedEvents(
       1,
-      throughSequence ?? this.authority.committedSequence,
+      throughSequence,
     )) {
-      if (
-        this.isProjectionEvent(event) &&
-        (includeCompactions || event.kind !== 'context.compacted')
-      )
-        records.push(record);
+      if (this.isProjectionEvent(event) && event.kind !== 'context.compacted')
+        yield record;
     }
-    return records;
   }
 
   private isProjectionEvent(event: ManagedSessionEvent): boolean {

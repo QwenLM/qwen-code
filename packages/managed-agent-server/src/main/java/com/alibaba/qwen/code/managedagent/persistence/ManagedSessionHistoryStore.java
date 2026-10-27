@@ -36,16 +36,17 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.BiPredicate;
 import java.util.function.Function;
 
 /** A rebuildable index of committed native facts, never a second journal. */
 @Repository
 public class ManagedSessionHistoryStore {
     private static final String DIGEST_PATTERN = "[0-9a-f]{64}";
-    private static final int BUCKETS = 256;
+    static final int BUCKETS = 256;
     private static final int MAX_METADATA_BYTES = 64 * 1024;
     private static final int MAX_PAGE_BYTES = 8 * 1024 * 1024;
-    private static final Set<String> FAMILIES = Set.of("event", "event-id", "command", "command-id", "receipt", "checkpoint",
+    static final Set<String> FAMILIES = Set.of("event", "event-id", "command", "command-id", "receipt", "checkpoint",
             "hook-activation", "domain-event", "extension-event", "extension", "opening-operation",
             "hook-once", "hook-occurrence", "hook-ordinal", "hook-definition", "child-continuation",
             "action", "domain", "event-kind", "event-correlation", "extension-domain");
@@ -187,7 +188,7 @@ public class ManagedSessionHistoryStore {
         require(transaction.journalRevision() == fact.journalRevision() && transaction.recordDigest().equals(fact.recordDigest())
                 && fact.eventOrdinal() >= 0 && fact.eventOrdinal() < transaction.eventCount()
                 && fact.sequence() == transaction.firstSequence() + fact.eventOrdinal(), "managed_session_history_corrupt");
-        require(extract(scope, session, transaction, records, resources, state, false, true).stream()
+        require(extract(session, transaction, records, resources, (recordKey, sequence) -> true).stream()
                 .anyMatch(source -> source.family().equals(fact.family()) && source.identity().equals(fact.identity())
                         && source.sequence() == fact.sequence() && source.eventOrdinal() == fact.eventOrdinal()
                         && encode(source.metadata()).equals(encode(fact.metadata()))), "managed_session_history_corrupt");
@@ -208,7 +209,8 @@ public class ManagedSessionHistoryStore {
         }
         jdbc.update("DELETE FROM ma_session_history_fact WHERE session_scope_key = ? AND index_generation = ? AND source_revision = ?",
                 scope, state.generation(), transaction.journalRevision());
-        List<Fact> facts = extract(scope, session, transaction, records, resources, state, contiguous, false);
+        List<Fact> facts = extract(session, transaction, records, resources,
+                (recordKey, sequence) -> contiguous && firstExtension(scope, recordKey, sequence, state));
         var keys = new HashSet<String>();
         for (Fact fact : facts) {
             String identityHash = key(fact.family(), fact.identity());
@@ -422,8 +424,8 @@ public class ManagedSessionHistoryStore {
         }
     }
 
-    private List<Fact> extract(String scope, String session, StoredTransaction transaction,
-            List<JsonNode> records, Function<String, StoredResource> resources, State basis, boolean contiguous, boolean verifySource) {
+    static List<Fact> extract(String session, StoredTransaction transaction,
+            List<JsonNode> records, Function<String, StoredResource> resources, BiPredicate<String, Long> firstExtension) {
         var result = new ArrayList<Fact>();
         if (transaction.eventCount() == 0) {
             require(transaction.journalRevision() == 1 && transaction.firstSequence() == 0
@@ -431,7 +433,7 @@ public class ManagedSessionHistoryStore {
                     && transaction.commitDigest() == null, "managed_session_journal_corrupt");
             return result;
         }
-        ObjectNode command = json.createObjectNode().put("transactionId", transaction.transactionId())
+        ObjectNode command = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode().put("transactionId", transaction.transactionId())
                 .put("operation", transaction.operation()).put("commandId", transaction.commandId())
                 .put("contentDigest", transaction.contentDigest()).put("firstSequence", transaction.firstSequence())
                 .put("lastSequence", transaction.lastSequence());
@@ -450,7 +452,7 @@ public class ManagedSessionHistoryStore {
                     && event.path("sequence").asLong(-1) == sequence, "managed_session_journal_corrupt");
             JsonNode payload = event.path("payload");
             String kind = event.path("kind").asText();
-            ObjectNode metadata = json.createObjectNode().put("kind", kind);
+            ObjectNode metadata = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode().put("kind", kind);
             result.add(fact("event", Long.toString(sequence), transaction, sequence, ordinal, metadata));
             result.add(fact("event-id", event.path("eventId").asText(), transaction, sequence, ordinal, metadata));
             result.add(fact("event-kind", kind, transaction, sequence, ordinal, metadata));
@@ -459,7 +461,7 @@ public class ManagedSessionHistoryStore {
                         : correlation.equals("target.turnId") ? payload.path("target").path("turnId") : payload.path(correlation);
                 if (value.isValueNode() && !value.isNull()) {
                     String scalar = value.isNumber() ? CsiNativeActivationProof.canonical(value) : value.asText();
-                    result.add(fact("event-correlation", correlationIdentity(kind, correlation, scalar), transaction, sequence, ordinal, metadata));
+                    result.add(fact("event-correlation", correlationKey(kind, correlation, scalar), transaction, sequence, ordinal, metadata));
                 }
             }
             String family = switch (kind) {
@@ -484,7 +486,7 @@ public class ManagedSessionHistoryStore {
                 continue;
             }
             String domain = payload.path("domain").asText();
-            ObjectNode committed = json.createObjectNode().put("domain", domain);
+            ObjectNode committed = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode().put("domain", domain);
             committed.set("recordRef", payload.path("recordRef"));
             result.add(fact("domain", domain, transaction, sequence, ordinal, committed));
             result.add(fact("domain-event", Long.toString(sequence), transaction, sequence, ordinal, committed));
@@ -515,7 +517,7 @@ public class ManagedSessionHistoryStore {
             if (bodyParser.taskKindOf().apply(body) != null) {
                 extension.put("taskId", ManagedExtensionProjection.taskId(recordKey));
             }
-            boolean first = verifySource || contiguous && firstExtension(scope, recordKey, sequence, basis);
+            boolean first = firstExtension.test(recordKey, sequence);
             result.add(fact("extension", recordKey, transaction, sequence, ordinal, extension));
             result.add(fact("extension-event", Long.toString(sequence), transaction, sequence, ordinal, extension));
             if (!first) {
@@ -527,7 +529,7 @@ public class ManagedSessionHistoryStore {
                 if (!body.path("onceKey").isNull()) {
                     result.add(fact("hook-once", body.path("onceKey").asText(), transaction, sequence, ordinal, extension));
                 }
-                ObjectNode occurrence = json.createObjectNode().put("registrationId", body.path("registrationId").asText())
+                ObjectNode occurrence = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode().put("registrationId", body.path("registrationId").asText())
                         .put("eventName", body.path("eventName").asText());
                 occurrence.set("planRef", body.path("planRef"));
                 result.add(fact("hook-occurrence", body.path("occurrenceId").asText(), transaction, sequence, ordinal, occurrence));
@@ -536,11 +538,11 @@ public class ManagedSessionHistoryStore {
             if (domain.equals("hook_registration")) {
                 JsonNode pin = body.path("run").path("definition");
                 result.add(fact("hook-definition", pin.path("definitionId").asText() + "\u0000" + pin.path("definitionRevision").asLong(),
-                        transaction, sequence, ordinal, json.createObjectNode().put("definitionDigest", pin.path("definitionDigest").asText())));
+                        transaction, sequence, ordinal, com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode().put("definitionDigest", pin.path("definitionDigest").asText())));
             }
             if (domain.equals("child_run") && body.path("predecessorChildRunId").isTextual()) {
                 result.add(fact("child-continuation", body.path("predecessorChildRunId").asText(), transaction, sequence, ordinal,
-                        json.createObjectNode().put("childRunId", body.path("childRunId").asText())));
+                        com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode().put("childRunId", body.path("childRunId").asText())));
             }
         }
         return result;
@@ -568,7 +570,9 @@ public class ManagedSessionHistoryStore {
                         + " AND index_generation = ? AND family = ? AND identity_hash = ?"
                         + " AND source_revision <= ? AND source_sequence <= ?", Long.class,
                 scope, state.generation(), family, hash, fact.journalRevision(), fact.sequence());
-        require(revision != null && revision > 0, "managed_session_history_corrupt");
+        if (revision == null || revision <= 0) {
+            throw failure("managed_session_history_corrupt");
+        }
         ObjectNode metadata = ((ObjectNode) fact.metadata()).deepCopy().put("revision", revision.longValue());
         if (extension) {
             List<Fact> first = jdbc.query("SELECT family, identity_value, source_revision, source_sequence,"
@@ -624,8 +628,13 @@ public class ManagedSessionHistoryStore {
     }
 
     private long[] counts(String value) {
-        JsonNode values = parse(value);
-        require(values.isArray() && values.size() == BUCKETS, "managed_session_history_corrupt");
+        return counts(parse(value));
+    }
+
+    static long[] counts(JsonNode values) {
+        if (values == null || !values.isArray() || values.size() != BUCKETS) {
+            throw failure("managed_session_history_corrupt");
+        }
         long[] counts = new long[BUCKETS];
         for (int index = 0; index < BUCKETS; index++) {
             require(values.get(index).isIntegralNumber() && values.get(index).canConvertToLong()
@@ -635,7 +644,7 @@ public class ManagedSessionHistoryStore {
         return counts;
     }
 
-    private Fact fact(String family, String identity, StoredTransaction transaction, long sequence, int ordinal, JsonNode metadata) {
+    private static Fact fact(String family, String identity, StoredTransaction transaction, long sequence, int ordinal, JsonNode metadata) {
         return new Fact(family, identity, transaction.journalRevision(), sequence, ordinal, transaction.recordDigest(), metadata);
     }
 
@@ -662,15 +671,20 @@ public class ManagedSessionHistoryStore {
                 "managed_session_history_invalid");
     }
 
-    private static String key(String family, String identity) {
+    static String key(String family, String identity) {
         return ManagedSchemaKeys.key(family, identity);
     }
 
     public String correlationIdentity(String kind, String field, String value) {
-        return CsiNativeActivationProof.canonical(json.createArrayNode().add(kind).add(field).add(value));
+        return correlationKey(kind, field, value);
     }
 
-    private static int bucket(String hash) {
+    private static String correlationKey(String kind, String field, String value) {
+        return CsiNativeActivationProof.canonical(com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.arrayNode()
+                .add(kind).add(field).add(value));
+    }
+
+    static int bucket(String hash) {
         return Integer.parseInt(hash.substring(0, 2), 16);
     }
 

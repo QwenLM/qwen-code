@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { hostedSessionRecords } from './hosted-session-records.js';
+import { hostedMessageRecords } from './hosted-session-records.js';
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { Part } from '@google/genai';
@@ -67,7 +67,7 @@ export async function runHostedCsiTextTurn(
     promptId,
     async (modelScope) =>
       harness.run(async () => {
-        const lastRecord = await hostedSessionRecords(managed).at(-1);
+        const lastRecord = await hostedMessageRecords(managed).at(-1);
         const history: ChatRecord[] = [];
         const throughSequence = authority.committedSequence;
         for (const entry of await managed.sink.projectModelRecords()) {

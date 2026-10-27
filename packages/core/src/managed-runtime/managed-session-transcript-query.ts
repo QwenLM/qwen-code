@@ -421,7 +421,8 @@ export class ManagedSessionTranscriptQuery {
     let owner = false;
     for (let count = 0; count < 3; count++) {
       const end = bytes.indexOf(10, start);
-      if (end < 0 || end >= offset) return owner;
+      if (end < 0 || end >= offset)
+        return owner && start < this.options.snapshotSize;
       let value: unknown;
       try {
         value = JSON.parse(bytes.subarray(start, end).toString('utf8'));

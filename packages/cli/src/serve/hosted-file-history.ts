@@ -5,7 +5,7 @@
  */
 
 import {
-  hostedSessionRecords,
+  hostedMessageRecords,
   hostedRecordsAfter,
 } from './hosted-session-records.js';
 import { createHash, randomUUID } from 'node:crypto';
@@ -69,7 +69,7 @@ async function fileHistoryContent(
   session: ManagedSession,
   record: HostedFileHistoryRecord,
 ) {
-  const previous = await hostedSessionRecords(session).at(-1);
+  const previous = await hostedMessageRecords(session).at(-1);
   if (!previous)
     throw new Error('Hosted file history has no owning conversation.');
   return {
@@ -189,7 +189,7 @@ export async function canSettleHostedFileHistory(
   // state arm alone decides for every checkpoint that can reach here.
   if (!authorization.history.allToolsSettled)
     return { blocker: 'tool_item_unsettled' };
-  const current = hostedSessionRecords(session).filter(
+  const current = hostedMessageRecords(session).filter(
     (item) => item.daemonPromptId === record.pendingTurn,
   );
   const assistant = await current.findLast((item) => item.type === 'assistant');

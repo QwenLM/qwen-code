@@ -45,7 +45,7 @@ it('answers a parked command sibling once using canonical records beyond the mod
     sink: {
       write,
       projectContextRecords,
-      async *iterateRecords(through: number) {
+      async *iterateMessageRecords(through: number) {
         for (let index = 0; index < through; index++) yield records[index]!;
       },
     },

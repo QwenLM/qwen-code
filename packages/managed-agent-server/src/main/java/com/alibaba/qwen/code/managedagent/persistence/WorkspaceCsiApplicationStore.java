@@ -169,7 +169,7 @@ public final class WorkspaceCsiApplicationStore {
             require(frozen.length <= WorkspaceCsiApplicationInventory.MAX_BYTES);
             var expected = WorkspaceCsiApplicationImage.expected(locked.inventory(), Stage.FROZEN, frozen, null, null);
             // Reserve space for the terminal rows, cut and bounded cleanup receipt before irreversible freezing.
-            require(expected.rowCount() <= WorkspaceCsiApplicationInventory.MAX_ROWS - 3
+            require(expected.rowCount() <= WorkspaceCsiApplicationInventory.MAX_ROWS - 9
                     && expected.bytes().length + body.length * 2L + 256 * 1024 < WorkspaceCsiApplicationInventory.MAX_BYTES);
             locked.authority().requireCurrentTime(target);
             require(jdbc.update("UPDATE ma_operation SET progress_stage = 'FROZEN', progress_version = 2,"

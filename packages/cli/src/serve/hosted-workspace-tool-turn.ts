@@ -12,7 +12,7 @@ import {
 import { ManagedHistoryQuery } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-history.js';
 
 import {
-  hostedSessionRecords,
+  hostedMessageRecords,
   hostedRecordsAfter,
 } from './hosted-session-records.js';
 import {
@@ -1690,7 +1690,7 @@ export async function journaledToolResultIds(
         ? new ManagedHistoryQuery(async function* () {
             yield* projected;
           })
-        : hostedSessionRecords(session);
+        : hostedMessageRecords(session);
   return {
     has: (id) =>
       records.some(
@@ -1703,7 +1703,7 @@ export async function journaledToolResultIds(
           ),
       ),
     refresh: () => {
-      records = hostedSessionRecords(session);
+      records = hostedMessageRecords(session);
     },
   };
 }
@@ -2542,7 +2542,7 @@ export class HostedWorkspaceToolTurn {
   async resumeCommittedResults(signal?: AbortSignal): Promise<void> {
     if (this.acquired) return;
     if (this.skills && !this.hooks && !this.mcp) {
-      const history = hostedSessionRecords(this.session).filter(
+      const history = hostedMessageRecords(this.session).filter(
         (entry) => entry.daemonPromptId === this.promptId,
       );
       const answered = await journaledToolResultIds(
@@ -2922,7 +2922,7 @@ export class HostedWorkspaceToolTurn {
   ): Promise<Part[]> {
     if (!this.hooks) return responses;
     const contextParts: Part[] = [];
-    const history = hostedSessionRecords(this.session);
+    const history = hostedMessageRecords(this.session);
     const assistant = await history.findLast(
       (entry) =>
         entry.type === 'assistant' &&
@@ -3439,7 +3439,7 @@ export class HostedWorkspaceToolTurn {
     signal: AbortSignal,
   ): Promise<Part[]> {
     if (!this.hooks) return [...responses];
-    const history = hostedSessionRecords(this.session);
+    const history = hostedMessageRecords(this.session);
     const assistant = await history.findLast(
       (entry) =>
         entry.type === 'assistant' &&

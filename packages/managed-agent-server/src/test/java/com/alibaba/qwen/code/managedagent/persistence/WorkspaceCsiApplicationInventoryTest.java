@@ -773,7 +773,7 @@ class WorkspaceCsiApplicationInventoryTest {
     void inventoriesEveryDeclaredTableAndPreservesRealPrivateCreationFacts() throws Exception {
         var snapshot = inspect();
         assertThat(snapshot.tables()).hasSize(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.TABLES.size());
-        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(807);
+        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(827);
         assertThat(snapshot.blockers()).noneMatch(blocker -> blocker.code().equals("schema_drift")
                 || blocker.code().equals("query_unavailable"));
         for (String table : new String[] {"ma_session", "ma_public_event", "ma_event_stream", "ma_storage", "ma_operation",
@@ -1327,6 +1327,17 @@ class WorkspaceCsiApplicationInventoryTest {
                 .put("preparedCommitSha256", sha(body)).put("writtenAt", writtenAt);
         var image = WorkspaceCsiApplicationImage.expected(baseline,
                 com.alibaba.qwen.code.runtimebroker.JdbcCsiApplicationRetirement.Stage.CUT, frozen, json.writeValueAsBytes(delta), null);
+        assertThat(baseline.table("ma_session_history_state").rows()).isEmpty();
+        assertThat(image.table("ma_session_history_fact").rows()).hasSize(5);
+        assertThat(image.table("ma_session_history_fact").rows().stream().map(row -> row.text("family")))
+                .containsExactlyInAnyOrder("command", "event", "event-id", "event-kind", "event-correlation");
+        var historyState = WorkspaceCsiApplicationImage.sole(image, "ma_session_history_state");
+        assertThat(historyState.number("index_generation")).isEqualTo(1);
+        assertThat(historyState.number("indexed_revision")).isZero();
+        assertThat(historyState.number("indexed_sequence")).isZero();
+        assertThat(historyState.text("last_commit_digest")).isNull();
+        assertThat(ManagedSessionHistoryStore.counts(WorkspaceCsiApplicationInventory.parse(historyState.text("bucket_counts_json"))))
+                .containsOnly(0L);
         long millis = Instant.parse(writtenAt).toEpochMilli();
         assertThat(image.table("ma_session_head").rows().getFirst().number("gmt_modified")).isEqualTo(millis);
         for (String table : List.of("ma_resource", "ma_resource_ref", "ma_session_journal_tx")) {
@@ -1459,6 +1470,27 @@ class WorkspaceCsiApplicationInventoryTest {
         assertThat(queries).noneMatch(sql -> sql.contains("physical_key = ?"));
         assertThat(result.table("ma_request_receipt").rows().getFirst().binary("actor_id"))
                 .isEqualTo(expected.table("ma_request_receipt").rows().getFirst().binary("actor_id"));
+    }
+
+    @Test
+    void derivedHistoryDoesNotBecomeAForeignAuthorityCarrier() throws Exception {
+        var expected = historicalKeys();
+        String foreignScope = ManagedSessionStore.sessionScopeKey("foreign", "foreign-session");
+        String identity = ManagedSessionHistoryStore.key("event", "1");
+        String metadata = new ObjectMapper().createObjectNode().put("sessionId", session).toString();
+        jdbc.update("INSERT INTO ma_session_history_fact (session_scope_key, index_generation, family, identity_hash,"
+                        + " identity_bucket, identity_value, source_revision, source_sequence, event_ordinal, record_digest, metadata_json)"
+                        + " VALUES (?, 1, 'event', ?, ?, '1', 2, 1, 0, ?, ?)",
+                foreignScope, identity, ManagedSessionHistoryStore.bucket(identity), "a".repeat(64), metadata);
+        var queries = new java.util.ArrayList<String>();
+        var foreign = readHistory(expected, queries, true);
+        assertThat(foreign.blockers()).isEmpty();
+        assertThat(foreign.bytes()).isEqualTo(expected.bytes());
+        assertThat(queries).noneMatch(sql -> sql.startsWith("SELECT t.* FROM ma_session_history_") && sql.contains("IS NOT NULL"));
+        jdbc.update("UPDATE ma_session_history_fact SET session_scope_key = ? WHERE session_scope_key = ?",
+                ManagedSessionStore.sessionScopeKey("tenant", session), foreignScope);
+        assertThat(readHistory(expected, new java.util.ArrayList<>(), true).blockers()).anyMatch(blocker ->
+                blocker.table().equals("ma_session_history_fact") && blocker.code().equals("extra_historical_reference"));
     }
 
     @Test

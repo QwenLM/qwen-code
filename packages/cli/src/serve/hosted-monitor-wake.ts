@@ -367,7 +367,7 @@ export async function settlePendingMonitorInputs(params: {
   }
   const throughSequence = authority.committedSequence;
   const attempted = new ManagedHistoryQuery(() =>
-    params.sink.iterateRecords(throughSequence),
+    params.sink.iterateMessageRecords(throughSequence),
   );
   const pending = [];
   for (const input of queued)

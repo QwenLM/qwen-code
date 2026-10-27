@@ -216,6 +216,36 @@ const branchRecord: ChatRecord = {
 };
 
 describe('managed session message projection', () => {
+  it('accepts an external owner parent while rejecting an actual active-chain cycle', async () => {
+    const harness = await createHarness();
+    const sink = new ManagedSessionRecordSink(
+      harness.authority,
+      harness.store,
+      () => HOLDS,
+    );
+    const active = async () => {
+      const chain: ChatRecord[] = [];
+      for await (const record of sink.iterateActiveRecords())
+        chain.push(record);
+      return chain;
+    };
+    try {
+      const first = { ...records[0], parentUuid: 'external-owner' };
+      await sink.write(first);
+      await expect(active()).resolves.toEqual([first]);
+      const left = { ...records[1], parentUuid: 'cycle-peer' };
+      await sink.write(left);
+      await sink.write({
+        ...records[0],
+        uuid: 'cycle-peer',
+        parentUuid: left.uuid,
+      });
+      await expect(active()).rejects.toThrow('parent cycle');
+    } finally {
+      await harness.close();
+    }
+  });
+
   it('projects a fixed committed cut without reading later missing messages', async () => {
     const harness = await createHarness();
     try {
@@ -761,6 +791,13 @@ describe('managed session message projection', () => {
       // them for a reader. The width distinction is documented at both
       // projection sites.
       await expect(sink.project()).resolves.toEqual([user]);
+      const messages: ChatRecord[] = [];
+      for await (const record of sink.iterateMessageRecords())
+        messages.push(record);
+      expect(messages).toEqual([user]);
+      const history: ChatRecord[] = [];
+      for await (const record of sink.iterateRecords()) history.push(record);
+      expect(history).toEqual([user, turnResult, fileHistory]);
     } finally {
       await harness.close();
     }

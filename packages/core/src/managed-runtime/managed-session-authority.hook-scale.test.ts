@@ -438,6 +438,7 @@ it('still refuses a reopen when a shared or late resource is missing or corrupt'
         .record as HookExecution;
     const plan = (await record('execution-5')).planRef;
     const result = (await record('execution-11')).resultRef!;
+    const slowInput = (await record('execution-4')).inputRef;
     await session.release();
     // A plan that every revision of four executions names, and a result
     // that only the last revision of the last execution names.
@@ -455,7 +456,7 @@ it('still refuses a reopen when a shared or late resource is missing or corrupt'
     session.io.delayMs = 0;
     // Only the failing revision's other reference is slow.
     session.failing.add(plan.resourceId);
-    session.io.slow.set((await record('execution-4')).inputRef.resourceId, 100);
+    session.io.slow.set(slowInput.resourceId, 100);
     await expect(session.reopen()).rejects.toThrow('is unavailable');
     expect(session.io.inFlight).toBe(0);
     session.failing.delete(plan.resourceId);

@@ -3,7 +3,7 @@
  * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
-import { hostedSessionRecords } from './hosted-session-records.js';
+import { hostedMessageRecords } from './hosted-session-records.js';
 import type { ManagedHistoryQuery } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-history.js';
 
 import { createHash, randomUUID } from 'node:crypto';
@@ -107,7 +107,7 @@ export interface HostedChannelStore {
     read(ref: ManagedSessionDurableRef): Promise<Buffer>;
   };
   readonly sink: {
-    iterateRecords(throughSequence?: number): AsyncGenerator<ChatRecord>;
+    iterateMessageRecords(throughSequence?: number): AsyncGenerator<ChatRecord>;
     write(record: ChatRecord): Promise<unknown>;
   };
 }
@@ -485,7 +485,7 @@ export class HostedChannelSession {
     let characters = 0;
     let meaningfulEnd = 0;
     const capacity = MANAGED_CHANNEL_LIMITS.maxSegmentBytes + 1;
-    for await (const entry of hostedSessionRecords(this.store).filter(
+    for await (const entry of hostedMessageRecords(this.store).filter(
       (entry) => entry.type === 'assistant' && entry.daemonPromptId === turnId,
     )) {
       for (const part of entry.message?.parts ?? []) {

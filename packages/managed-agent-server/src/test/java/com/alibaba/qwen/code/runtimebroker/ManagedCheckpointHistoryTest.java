@@ -85,7 +85,13 @@ class ManagedCheckpointHistoryTest {
             } else {
                 resources.get("page-0")[0] ^= 1;
             }
-            assertThatThrownBy(() -> view.tool("absent")).isInstanceOf(IllegalArgumentException.class);
+            if (missing) {
+                assertThatThrownBy(() -> view.tool("absent")).isInstanceOf(IllegalArgumentException.class);
+            } else {
+                assertThatThrownBy(() -> view.tool("absent"))
+                        .isInstanceOfSatisfying(RuntimeBrokerException.class,
+                                error -> assertThat(error.getCode()).isEqualTo("csi_original_activation_unavailable"));
+            }
         }
     }
 

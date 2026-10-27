@@ -3,7 +3,10 @@
  * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
-import { hostedSessionRecords } from './hosted-session-records.js';
+import {
+  hostedMessageRecords,
+  hostedSessionRecords,
+} from './hosted-session-records.js';
 import type { ManagedHistoryQuery } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-history.js';
 
 import { createHash } from 'node:crypto';
@@ -137,6 +140,7 @@ export interface HostedAutomationStore {
   };
   readonly sink: {
     iterateRecords(throughSequence?: number): AsyncGenerator<ChatRecord>;
+    iterateMessageRecords(throughSequence?: number): AsyncGenerator<ChatRecord>;
   };
 }
 
@@ -994,7 +998,7 @@ export class HostedAutomationSession {
             ? 'cancelled'
             : 'failed';
     if (outcome === undefined) return undefined;
-    const started = await hostedSessionRecords(
+    const started = await hostedMessageRecords(
       this.store,
       throughSequence,
     ).some((entry) => entry.daemonPromptId === turnId);

@@ -1628,6 +1628,11 @@ public class ManagedSessionStore {
         }
     }
 
+    static StoredTransaction terminalHistoryTransaction(byte[] body, long revision) {
+        var request = csiTerminalRequest(body);
+        return historyTransaction(request, revision, validateCommit(request));
+    }
+
     private static StoredTransaction historyTransaction(CommitTransactionRequest request, long revision, ValidatedCommit validated) {
         return new StoredTransaction(revision, request.transactionId(), request.operation(), request.commandId(),
                 request.contentDigest(), request.firstSequence(), request.lastSequence(), request.eventCount(),

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { hostedSessionRecords } from './hosted-session-records.js';
+import { hostedMessageRecords } from './hosted-session-records.js';
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { Part } from '@google/genai';
@@ -95,7 +95,7 @@ export async function recoverHostedCsiReceipts(
   items.sort((left, right) => left.ordinal - right.ordinal);
   if (items.length === 0)
     throw new Error('Original CSI receipt batch is unavailable.');
-  const canonical = hostedSessionRecords(session);
+  const canonical = hostedMessageRecords(session);
   const batchId = items[0].modelMessageId;
   const batch = await canonical.find((record) => record.uuid === batchId);
   if (

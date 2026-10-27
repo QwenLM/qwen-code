@@ -68,7 +68,11 @@ vi.mock('node:fs/promises', async (importOriginal) => {
       return handle;
     },
     link: async (...args: Parameters<typeof original.link>) => {
-      if (fault.phase === 'link') throw new Error('terminal link failed');
+      if (
+        fault.phase === 'link' &&
+        path.dirname(String(args[1])).endsWith('.terminal-identities')
+      )
+        throw new Error('terminal link failed');
       return original.link(...args);
     },
   };

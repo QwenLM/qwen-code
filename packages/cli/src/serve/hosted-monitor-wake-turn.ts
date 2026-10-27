@@ -55,7 +55,7 @@ export interface MonitorWakeTurnSession {
     blocked: boolean;
     managed: {
       readonly authority: { readonly committedSequence: number };
-      sink: Pick<ManagedSessionRecordSink, 'iterateRecords' | 'write'>;
+      sink: Pick<ManagedSessionRecordSink, 'iterateMessageRecords' | 'write'>;
     };
   };
 }
@@ -108,7 +108,7 @@ export function createMonitorWakeRunTurn(params: {
     if (params.busy() || session.blocked) return 'busy';
     const throughSequence = session.managed.authority.committedSequence;
     const attempted = new ManagedHistoryQuery(() =>
-      session.managed.sink.iterateRecords(throughSequence),
+      session.managed.sink.iterateMessageRecords(throughSequence),
     );
     if (
       await attempted.some((record) => record.daemonPromptId === turn.turnId)

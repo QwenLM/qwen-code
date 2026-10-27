@@ -29,7 +29,7 @@ function world() {
     managed: {
       authority: { committedSequence: 1 },
       sink: {
-        async *iterateRecords() {
+        async *iterateMessageRecords() {
           yield* await readRecords();
         },
         write: vi.fn(async () => undefined),

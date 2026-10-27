@@ -317,7 +317,8 @@ try {
               payload:
                 scale && (number === 2 || number === eventCount - 1)
                   ? {
-                      executionCallId: 'original-execution',
+                      executionCallId:
+                        number === 2 ? 'original-execution' : 'later-execution',
                       toolOutcomeRef: outcome,
                       resultRef: outcome,
                       resources: [outcome],
@@ -435,6 +436,10 @@ try {
       assert.deepEqual(
         await authority.committedReceipt('original-execution'),
         originalExecutionReceipt,
+      );
+      assert.equal(
+        (await authority.committedReceipt('later-execution')).sequence,
+        eventCount - 1,
       );
       assert.equal(authority.committedSequence, eventCount);
     }

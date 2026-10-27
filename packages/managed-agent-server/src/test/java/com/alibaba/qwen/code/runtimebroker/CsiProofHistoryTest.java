@@ -178,7 +178,8 @@ class CsiProofHistoryTest {
         }
         assertThatThrownBy(() -> CsiNativeActivationProof.readObject(
                 "{\"file_path\":Infinity}".getBytes(java.nio.charset.StandardCharsets.UTF_8)))
-                .isInstanceOf(IllegalArgumentException.class);
+                .isInstanceOfSatisfying(RuntimeBrokerException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("csi_original_activation_unavailable"));
     }
 
     @Test
@@ -194,7 +195,8 @@ class CsiProofHistoryTest {
         assertThat(CsiNativeActivationProof.JSON.getFactory().streamReadConstraints().getMaxNestingDepth()).isEqualTo(64);
         String tooDeep = "{\"child\":" + source + "}";
         assertThatThrownBy(() -> CsiNativeActivationProof.readObject(tooDeep.getBytes(java.nio.charset.StandardCharsets.UTF_8)))
-                .isInstanceOf(IllegalArgumentException.class);
+                .isInstanceOfSatisfying(RuntimeBrokerException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("csi_original_activation_unavailable"));
     }
 
     @Test

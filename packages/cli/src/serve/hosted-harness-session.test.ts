@@ -5,6 +5,8 @@
  */
 
 import { ManagedHistoryQuery } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-history.js';
+import { ManagedHarnessCheckpointView } from '@qwen-code/qwen-code-core/managed-runtime/managed-checkpoint-history.js';
+import type { HarnessCheckpointV1 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   mkdir,
@@ -958,7 +960,7 @@ describe('settleCancelledHookTurn', () => {
         },
         resources: { read },
         sink: {
-          async *iterateRecords() {
+          async *iterateMessageRecords() {
             yield* [
               {
                 daemonPromptId: 'prompt',
@@ -1309,7 +1311,7 @@ describe('settleCancelledHookTurn', () => {
         },
         resources: { read },
         sink: {
-          async *iterateRecords() {
+          async *iterateMessageRecords() {
             yield* [];
           },
         },
@@ -1358,7 +1360,7 @@ describe('settleCancelledHookTurn', () => {
         },
         resources: { read: async () => Buffer.from('{}') },
         sink: {
-          async *iterateRecords() {
+          async *iterateMessageRecords() {
             yield* [];
           },
         },
@@ -1419,7 +1421,7 @@ describe('settleCancelledHookTurn', () => {
         },
         resources: { read: async () => Buffer.from('{}') },
         sink: {
-          async *iterateRecords() {
+          async *iterateMessageRecords() {
             yield* [];
           },
         },
@@ -1465,7 +1467,7 @@ describe('settleCancelledHookTurn', () => {
         },
         resources: { read: async () => Buffer.from('{}') },
         sink: {
-          async *iterateRecords() {
+          async *iterateMessageRecords() {
             yield* [];
           },
         },
@@ -1506,7 +1508,7 @@ describe('settleCancelledHookTurn', () => {
         },
         resources: { read: async () => Buffer.from('{}') },
         sink: {
-          async *iterateRecords() {
+          async *iterateMessageRecords() {
             yield* [{ daemonPromptId: 'monitor:1:notify:1' }];
           },
         },
@@ -31226,20 +31228,22 @@ describe('Hosted Harness Runtime turn takeover', () => {
     ).mockImplementation(async function (this: LocalManagedSessionAuthority) {
       const result = await authorize.call(this);
       if (result.status !== 'runnable') return result;
+      const checkpoint = {
+        ...result.checkpoint,
+        approval: null,
+        tools: {
+          ...result.checkpoint.tools!,
+          items: result.checkpoint.tools!.items.map((item) => ({
+            ...item,
+            state: 'settled' as const,
+            consumed: true,
+          })),
+        },
+      };
       return {
         ...result,
-        checkpoint: {
-          ...result.checkpoint,
-          approval: null,
-          tools: {
-            ...result.checkpoint.tools,
-            items: result.checkpoint.tools!.items.map((item) => ({
-              ...item,
-              state: 'settled',
-              consumed: true,
-            })),
-          },
-        },
+        checkpoint,
+        history: inlineAuthorizationHistory(this, checkpoint),
       } as never;
     });
     let started!: () => void;
@@ -31812,20 +31816,38 @@ describe('Hosted Harness Runtime turn takeover', () => {
     ).mockImplementation(async function (this: LocalManagedSessionAuthority) {
       const authorization = await original.call(this);
       if (authorization.status !== 'runnable') return authorization;
+      const checkpoint = {
+        ...authorization.checkpoint,
+        continuation: {
+          ...authorization.checkpoint.continuation,
+          phase: 'await_action',
+        },
+        approval: { state: 'requested', requestId: 'request-1' },
+        tools: null,
+        runtime: null,
+      } as HarnessCheckpointV1;
       return {
         ...authorization,
-        checkpoint: {
-          ...authorization.checkpoint,
-          continuation: {
-            ...authorization.checkpoint.continuation,
-            phase: 'await_action',
-          },
-          approval: { state: 'requested', requestId: 'request-1' },
-          tools: null,
-          runtime: null,
-        },
+        checkpoint,
+        history: inlineAuthorizationHistory(this, checkpoint),
       } as never;
     });
+  }
+
+  function inlineAuthorizationHistory(
+    authority: LocalManagedSessionAuthority,
+    checkpoint: HarnessCheckpointV1,
+  ) {
+    return new ManagedHarnessCheckpointView(
+      checkpoint,
+      {
+        read: async () => {
+          throw new Error('The inline authorization fixture has no archive.');
+        },
+      },
+      authority.createQueryHistory(),
+      undefined,
+    );
   }
 
   it.each(['allow', 'deny'])(

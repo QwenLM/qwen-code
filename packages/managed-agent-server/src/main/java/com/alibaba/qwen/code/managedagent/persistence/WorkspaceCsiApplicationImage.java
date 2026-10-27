@@ -43,7 +43,7 @@ final class WorkspaceCsiApplicationImage {
         payload(progressDelta, "finalize_receipt", receipt);
         Map<String, Map<String, byte[]>> changes = new LinkedHashMap<>();
         changes.put("ma_operation", progressDelta);
-        Map<String, Row> additions = new LinkedHashMap<>();
+        Map<String, List<Row>> additions = new LinkedHashMap<>();
         if (cut != null) {
             JsonNode envelope = WorkspaceCsiApplicationJson.object(frozen, WorkspaceCsiApplicationInventory.MAX_BYTES);
             byte[] body = WorkspaceCsiApplicationJson.base64(envelope.path("commitBodyBase64"), 128 * 1024);
@@ -105,7 +105,7 @@ final class WorkspaceCsiApplicationImage {
             put(values, "state", "REFERENCED");
             put(values, "gmt_create", writtenAtMillis);
             put(values, "last_verified_at", writtenAtMillis);
-            additions.put("ma_resource", row("ma_resource", values));
+            additions.put("ma_resource", List.of(row("ma_resource", values)));
             values = empty(baseline, "ma_resource_ref");
             scope(values, head);
             put(values, "owner_kind", "JOURNAL");
@@ -116,7 +116,7 @@ final class WorkspaceCsiApplicationImage {
             put(values, "journal_revision", revision);
             put(values, "resource_id", text(resource, "resourceId"));
             put(values, "gmt_create", writtenAtMillis);
-            additions.put("ma_resource_ref", row("ma_resource_ref", values));
+            additions.put("ma_resource_ref", List.of(row("ma_resource_ref", values)));
             values = empty(baseline, "ma_session_journal_tx");
             scope(values, head);
             put(values, "journal_revision", revision);
@@ -140,7 +140,8 @@ final class WorkspaceCsiApplicationImage {
             put(values, "byte_length", records.length);
             put(values, "record_digest", hash(records));
             put(values, "gmt_create", writtenAtMillis);
-            additions.put("ma_session_journal_tx", row("ma_session_journal_tx", values));
+            additions.put("ma_session_journal_tx", List.of(row("ma_session_journal_tx", values)));
+            terminalHistory(baseline, head, body, revision, changes, additions);
         }
         if (stage == Stage.DRAINED) {
             Row session = sole(baseline, "ma_runtime_session");
@@ -161,15 +162,76 @@ final class WorkspaceCsiApplicationImage {
                 values.putAll(changes.get(table.name()));
                 rows.set(index, WorkspaceCsiApplicationInventory.expectedRow(table.name(), values, original.membership()));
             }
-            if (additions.containsKey(table.name())) {
-                Row added = additions.get(table.name());
+            for (Row added : additions.getOrDefault(table.name(), List.of())) {
                 require(rows.stream().noneMatch(existing -> WorkspaceCsiApplicationInventory.compareKeys(existing, added) == 0));
                 rows.add(added);
-                rows.sort(WorkspaceCsiApplicationInventory::compareKeys);
             }
+            rows.sort(WorkspaceCsiApplicationInventory::compareKeys);
             tables.add(new Table(table.name(), table.columns(), table.primaryKey(), rows));
         }
         return WorkspaceCsiApplicationInventory.expectedImage(tables);
+    }
+
+    private static void terminalHistory(Snapshot baseline, Row head, byte[] body, long revision,
+            Map<String, Map<String, byte[]>> changes, Map<String, List<Row>> additions) {
+        String tenant = head.text("tenant_id");
+        String session = head.text("session_id");
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
+        var transaction = ManagedSessionStore.terminalHistoryTransaction(body, revision);
+        var records = ManagedSessionHistoryStore.records(transaction, scope, head.text("workspace_id"), session);
+        require(transaction.eventCount() == 1 && "activation.changed".equals(records.getFirst().path("managedSession").path("kind").asText())
+                && "released".equals(records.getFirst().path("managedSession").path("payload").path("phase").asText()));
+        var facts = ManagedSessionHistoryStore.extract(session, transaction, records,
+                resource -> { throw new IllegalArgumentException("Terminal history cannot read a domain resource"); },
+                (recordKey, sequence) -> { throw new IllegalArgumentException("Terminal history cannot create an extension"); });
+        require(facts.size() == 5);
+        var states = baseline.table("ma_session_history_state").rows().stream()
+                .filter(row -> row.membership() == Membership.ORIGINAL).toList();
+        require(states.size() <= 1);
+        Row state = states.isEmpty() ? null : states.getFirst();
+        long generation = state == null ? Math.addExact(baseline.table("ma_session_history_fact").rows().stream()
+                .filter(row -> row.membership() == Membership.ORIGINAL).mapToLong(row -> row.number("index_generation")).max().orElse(0), 1)
+                : state.number("index_generation");
+        require(generation > 0 && generation <= ManagedSessionStoreModels.MAX_SAFE_COUNTER);
+        long indexedRevision = state == null ? 0 : state.number("indexed_revision");
+        long[] counts = state == null ? new long[ManagedSessionHistoryStore.BUCKETS]
+                : ManagedSessionHistoryStore.counts(WorkspaceCsiApplicationInventory.parse(state.text("bucket_counts_json")));
+        List<Row> added = new ArrayList<>();
+        for (var fact : facts) {
+            Map<String, byte[]> values = empty(baseline, "ma_session_history_fact");
+            String identityHash = ManagedSessionHistoryStore.key(fact.family(), fact.identity());
+            int bucket = ManagedSessionHistoryStore.bucket(identityHash);
+            put(values, "session_scope_key", scope);
+            put(values, "index_generation", generation);
+            put(values, "family", fact.family());
+            put(values, "identity_hash", identityHash);
+            put(values, "identity_bucket", bucket);
+            put(values, "identity_value", fact.identity());
+            put(values, "source_revision", fact.journalRevision());
+            put(values, "source_sequence", fact.sequence());
+            put(values, "event_ordinal", fact.eventOrdinal());
+            put(values, "record_digest", fact.recordDigest());
+            put(values, "metadata_json", fact.metadata());
+            added.add(row("ma_session_history_fact", values));
+            if (revision == indexedRevision + 1) {
+                counts[bucket] = Math.addExact(counts[bucket], 1);
+            }
+        }
+        additions.put("ma_session_history_fact", added);
+        Map<String, byte[]> values = empty(baseline, "ma_session_history_state");
+        put(values, "session_scope_key", scope);
+        scope(values, head);
+        put(values, "index_generation", generation);
+        boolean contiguous = revision == indexedRevision + 1;
+        put(values, "indexed_revision", contiguous ? revision : indexedRevision);
+        put(values, "indexed_sequence", contiguous ? transaction.lastSequence() : state == null ? 0 : state.number("indexed_sequence"));
+        put(values, "last_commit_digest", contiguous ? transaction.commitDigest() : state == null ? null : state.text("last_commit_digest"));
+        put(values, "bucket_counts_json", Arrays.toString(counts));
+        if (state == null) {
+            additions.put("ma_session_history_state", List.of(row("ma_session_history_state", values)));
+        } else if (contiguous) {
+            changes.put("ma_session_history_state", values);
+        }
     }
 
     static void verify(Snapshot current, Snapshot expected) {

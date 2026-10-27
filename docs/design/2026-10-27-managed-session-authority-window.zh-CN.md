@@ -34,6 +34,8 @@ canonical native journal 继续作为权威。Hosted 通过 Java/JDBC 使用现�
 
 Core 使用 native 身份及事件范围查询。领域身份枚举目前使用独立重建的 canonical 文件目录；SQL 的 `extension-domain` 类型可供服务调用方使用，但并非 Core 的目录读取器。来源校验重新计算 canonical 事件/marker 摘要，核对序列、数量、范围及跨事务物理 parent；仅刷新原始字节 checksum 不能使篡改后的 canonical 内容有效。
 
+CSI application inventory 包含两张历史表的完整类型定义，共 40 张 managed 表、827 列。派生元数据不能发现 authority 关联，也不能参与全局 JSON-carrier 扫描；按范围和已捕获主键读取时仍核对准确行。覆盖前缀内的事实必须匹配 canonical 事务、条数及 bucket 清单。终态 cut 通过正常 append 的提取器生成准确的五个历史事实，只跨连续前缀推进覆盖。缺失 state 时新建 generation，覆盖从零开始。freeze 在既有资格上限内预留九行，包含可能新增的 state 行。
+
 ## 文件查询视图
 
 采用内容寻址的分页 hash-trie，叶页最多 64 KiB，按 key digest 后续 nibble 分裂。键包含封闭事实类型与完整身份；digest 命中仍核对身份。值仅含有界元数据和来源定位，不保存全部历史正文。可变事实保留小型版本链。已校验空分支/叶证明不存在；被引用页面缺失或损坏不能证明不存在。
@@ -60,6 +62,10 @@ Core 使用 native 身份及事件范围查询。领域身份枚举目前使用�
 
 当前上下文只含有效压缩之后、选定分支上的模型材料。非模型 UI/attribution/attempt 元数据仍在 canonical 历史中，按需流式读取。重复 memory catalog 与本地命令对沿用既有 API 历史语义。取消、工具结果身份及原始 CSI 相邻性等恢复事实查询固定 canonical 前缀，不能根据上下文投影判断不存在。团队任务页默认 100 条、最多 256 条；cursor 绑定团队与前缀，依赖和 roster/plan 不混入较新修订。Hook 安装、有效 schedule/team 定义、活跃输入/任务清理和未决 Action 按生命周期保留必要状态。
 
+消息 parent 与 CSI 相邻性消费者使用 `iterateMessageRecords()`，保留既有消息/分支投影通道；`iterateRecords()` 另外包含终态和 domain 记录。不能仅因某个终态 UUID 是完整历史最后一条，就将其作为消息 parent。显式活跃 transcript 链 API 包含链上的元数据记录，与有界模型上下文投影独立。外部 canonical owner parent 正常结束选定链，链内实际重复身份则视为损坏。
+
+Hook 是否有未完成工作的判断需要读取持久化 execution/occurrence 事实，因此 await `hasPendingOperations()`。模型边界、恢复状态检查和 Hook 准入调用方同步使用这一必需方法。测试替身必须提供它；把缺失方法静默视为 false，可能在 Hook 工作尚未结算时准入模型工作。同步回答需要另外常驻一份随历史增长的 pending/历史投影。
+
 Managed recorder 仅保留 tail、记录 ordinal、用户轮次数、未完成工具身份与一个压缩摘要，不保留完整分支记录或逐轮 rewind 数组。完成轮次的 checkpoint 流式读取固定 canonical 活跃链，发布前核对 cursor 到 tail 的条数。取消与 Goal 证据也跨压缩读取该链；Goal 候选及 proof 查询落在共享 owner 缓存的磁盘视图。Legacy recorder/rewind 保持原契约。CSI turn Map 只保留正在执行的工作；终态重试查询 canonical 前缀并返回原结果，不再次调用模型。
 
 当前 Harness checkpoint 只包含活跃工具（包括 settled 但结果尚未 consumed 的工具）以及既有的固定 inline tail。已完成且已消费的 tool/binding 页继续保留在 canonical 资源中。authorization 必须携带不可变历史视图，提供惰性 tool/binding 枚举、execution ID 点查，以及经过校验的条数、最大 ordinal、结算/消费摘要。execution ID 不能作为 function-call ID 的别名。视图固定 state ref、Session/Turn/prompt 和 archive 条数，后续 head 不能改变旧视图。冷验证将 page locator、身份/ordinal 唯一性和首次提交顺序落盘；热提交复用经过认证的 page proof，仅索引新页。prepared fork 只能在 canonical commit 已确定后发布。派生页缺失或损坏时从捕获的 root 重建，canonical 损坏则拒绝恢复。缓存 compact 当前视图，不缓存完整历史数组或另存 raw root。
@@ -77,7 +83,7 @@ Java checkpoint proof 使用同样的 compact root 与逐页模型。execution/f
 | 同步事件数组与冷身份 getter                               | `readEvents()` 返回有界 Promise 页；`iterateEvents()` 是可重开的固定前缀异步查询。冷命令、receipt、checkpoint、Action 和 extension 查询返回 Promise。查询 predicate 和终结操作均须 await。                                               |
 | 所有 extension 记录常驻数组                               | `extensionRecordsInDomain(domain, { throughSequence })` 惰性读取固定版本视图；旧修订和长期唯一性事实留在磁盘。                                                                                                                           |
 | 用 journal `read()` 打开 authority                        | 每个 journal reader 实现 `scan(consume)`，交付带准确源偏移/字节的完整已验证事务。authority open 不调用 bulk reader。                                                                                                                     |
-| 用完整投影 transcript 做运行决策                          | `iterateRecords(prefix)` 保留 canonical 记录顺序。`projectModelRecords()`/`projectContextRecords()` 仅包含当前模型上下文，后者还保留 branch checkpoint 并重接派生 parent。历史事实使用身份查询。                                         |
+| 用完整投影 transcript 做运行决策                          | `iterateMessageRecords(prefix)` 保留消息/分支语义；`iterateRecords(prefix)` 还包含终态/domain 记录。`projectModelRecords()`/`projectContextRecords()` 包含当前模型上下文，后者保留 branch checkpoint。历史事实使用身份查询。             |
 | recorder 分支数组与取消/Goal 扫描                         | `readActiveTranscriptHistory()` 返回可重开的固定活跃链，包括压缩前的事实。`createTranscriptQueryHistory()` 共享 authority 缓存。恢复提供有界 pending-call/压缩摘要及用户轮次数标量。                                                     |
 | 完整展开的 checkpoint tool/binding 数组                   | authorization 提供 compact checkpoint 和 `ManagedHarnessCheckpointView`：惰性 `tools`/`bindings`、异步 `tool(executionCallId)`/`binding(executionCallId)`，以及经过校验的条数/ordinal/结算摘要。历史 pin 和 receipt 必须使用该固定视图。 |
 | Managed 恢复的 `replay.records`、telemetry 和通知 ID 数组 | Managed 完整重放提供可重开的 `recordHistory`；telemetry 提供 `uiTelemetryHistory`；有界正缓存 miss 时，`hasBackgroundNotification` 执行新的 canonical 查询。有界 recent 页和 Legacy 格式保留数组形状。                                   |
@@ -106,6 +112,8 @@ CSI 资格快照保留既有总计 128 MiB/4,096 引用上限，逐事务验证�
 
 解析器采用固定版本 `0.0.26` 的 [`@streamparser/json`](https://github.com/juanjoDiaz/streamparser-json)，支持纯 JavaScript 增量解析，不需要 native module 或提高 Node 要求。已消费的 state 容器立即释放。编码流式生成相同语义的 JSON，保留既有 v2 checksum 契约。
 
+依赖隔离在终态快照 codec 后，并由 lockfile 固定版本。上游停更不会改变该版本，也不会启用完整解析的回退。替换或升级必须在支持的 Node 版本上保留语义 checksum、chunk 边界、非法输入及已消费容器测试；解码失败拒绝快照，不能丢弃身份。
+
 ## 兼容与验收
 
 服务端未提供历史查询能力时，新客户端可将现有事务流式构建为文件视图；已选快照损坏不能回退到其它历史。Managed Core 异步接口需同步迁移全部 workspace 消费者及导出文档，不提供重新加载完整历史的同步兼容层。
@@ -115,6 +123,8 @@ CSI 资格快照保留既有总计 128 MiB/4,096 引用上限，逐事务验证�
 运行真实 Core→Java→MySQL 快照恢复和 H2/文件路径；TCP fixture 与普通 daemon smoke 不能代替最终集成路径。保留资源损坏拒绝，包括超容量转换叠加旧资源缺失。前序 PR4 完整 CI 有未解决的 Automation/Monitor 故障门禁，需要在最终版本复核，不能因已合入就宣称资格通过。本地 Java 准备/构建/测试/重试共享 600 秒；完整 profiles、数据库/平台/故障矩阵由 CI 承担。构建、类型检查、打包及受影响 TypeScript 测试仍须完成，记录精确版本、失败、跳过和待验门禁。
 
 完整 SDK Java workflow 为 H2 与 MySQL 分别增加独立的 `managed-history-scale` 资格 job。其 opt-in Maven profile 以一个 scale Gate 运行 10,000 和 100,000 事件，每个规模使用独立、固定堆预算的 Node 进程，经过真实 Core HTTP 客户端与 Spring 服务。该长用例不进入普通 600 秒单测 fork，不替换正常 profiles，也不缩小其报告门禁。必须完成两个规模并比较常驻内存，成功与失败均保留逐阶段指标和报告，拒绝被过滤或跳过的资格报告。H2 使用文件存储，MySQL 使用任务私有数据库。该 CI 入口是验收机制，不代表最终源码已经通过测试。
+
+首轮双引擎运行 `3c92f28d` 在内存比较前失败：夹具为同一执行结果身份提交了不同 canonical 来源，被既有工具发布契约拒绝。夹具现使用不同 execution，仍在恢复后核对窗口外的原回执和旧命令重试。原失败继续保留，修复后源码等待 CI 资格验证；该夹具修正和此前文件测量都不能证明 native 规模验收通过。
 
 ## 待决问题
 

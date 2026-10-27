@@ -6,7 +6,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { parseManagedConfigInstallRecord } from '@qwen-code/qwen-code-core/managed-runtime/managed-config-install.js';
-import { hostedSessionRecords } from './hosted-session-records.js';
+import { hostedMessageRecords } from './hosted-session-records.js';
 import { expandHostedExtensionCommand } from './hosted-extension-command.js';
 import { isDeepStrictEqual } from 'node:util';
 import type { Part } from '@google/genai';
@@ -514,7 +514,7 @@ export async function settleParkedTurnCancelled(input: {
   // journal the checkpoint points at.
   const journaled = new Map<string, Part[]>();
   const pendingIds = new Set(pending.map((item) => item.functionCallId));
-  for await (const entry of hostedSessionRecords(input.session)) {
+  for await (const entry of hostedMessageRecords(input.session)) {
     if (entry.daemonPromptId !== input.promptId || entry.type !== 'tool_result')
       continue;
     for (const part of entry.message?.parts ?? []) {
@@ -733,11 +733,11 @@ async function answerAbandonedTurnCalls(input: {
   skills?: HostedSkillCatalog;
   hooks?: HostedHookSession;
   /** The same fixed committed prefix as the caller's classification. */
-  projected?: ReturnType<typeof hostedSessionRecords>;
+  projected?: ReturnType<typeof hostedMessageRecords>;
 }): Promise<number> {
   const uncommitted = input.uncommitted ?? 'all';
   const records = (
-    input.projected ?? hostedSessionRecords(input.session)
+    input.projected ?? hostedMessageRecords(input.session)
   ).filter((entry) => entry.daemonPromptId === input.promptId);
   // One authority for the exactly-once predicate: the same helper every
   // replayed fold rides, fed the projection already in hand.
@@ -1042,7 +1042,7 @@ async function hostedSkillBatchResponses(
   catalog: HostedSkillCatalog,
   promptId: string,
   assistant: ChatRecord,
-  records: ReturnType<typeof hostedSessionRecords>,
+  records: ReturnType<typeof hostedMessageRecords>,
   cwd: string,
   hooks?: HostedHookSession,
 ): Promise<Map<string, Part[]>> {
@@ -1409,7 +1409,7 @@ export async function fillParkedRoundAgentGaps(input: {
   // and an admitted-but-unsettled wait run polled here would hang the
   // fill forever.
   const waitedCalls = new Set(waitRuns.map((run) => run.functionCallId));
-  const projected = hostedSessionRecords(input.managed);
+  const projected = hostedMessageRecords(input.managed);
   const assistant = await projected
     .filter(
       (entry) =>
@@ -1754,7 +1754,7 @@ export async function fillParkedRoundCommandGaps(input: {
       : [];
   const namedRounds = new Set(waitRuns.map((run) => run.modelMessageId));
   const waitedCalls = new Set(waitRuns.map((run) => run.functionCallId));
-  const projected = hostedSessionRecords(input.managed);
+  const projected = hostedMessageRecords(input.managed);
   const assistant = await projected
     .filter(
       (entry) =>
@@ -1892,7 +1892,7 @@ async function settleJournalOnlyInterruptedTurn(input: {
   }
   if (settled) return inapplicable();
   if (!accepted) return undefined;
-  const projected = hostedSessionRecords(input.session, throughSequence);
+  const projected = hostedMessageRecords(input.session, throughSequence);
   const records = projected.filter(
     (entry) => entry.daemonPromptId === input.promptId,
   );

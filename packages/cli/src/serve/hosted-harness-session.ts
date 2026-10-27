@@ -5,6 +5,7 @@
  */
 
 import {
+  hostedMessageRecords,
   hostedSessionRecords,
   hostedRecordsAfter,
 } from './hosted-session-records.js';
@@ -1500,7 +1501,7 @@ export async function settleCrashedWakeTurnAftermath(params: {
     // attempt: a queued input owes no recovery, and settling it now
     // would kill work that never ran.
     if (
-      !(await hostedSessionRecords(session.managed).some(
+      !(await hostedMessageRecords(session.managed).some(
         (record) => record.daemonPromptId === turnId,
       ))
     ) {
@@ -1954,7 +1955,7 @@ async function recoverCancelledPreToolHook(
     return false;
   const history = await readHostedFileHistory(session.managed);
   if (history?.pendingTurn || history?.pendingUndo) return false;
-  const current = hostedSessionRecords(session.managed, throughSequence).filter(
+  const current = hostedMessageRecords(session.managed, throughSequence).filter(
     (item) => item.daemonPromptId === promptId && item.type !== 'user',
   );
   const assistant = await current.at(0);
@@ -2299,7 +2300,7 @@ export async function settleCancelledHookTurn(
     const { authority } = session.managed;
     const throughSequence = authority.committedSequence;
     const events = authority.iterateEvents(1, throughSequence);
-    const projected = hostedSessionRecords(session.managed, throughSequence);
+    const projected = hostedMessageRecords(session.managed, throughSequence);
     const pending = new Map<string, number>();
     for (const event of await authority.pendingInputsAt(throughSequence)) {
       // A monitor notification that never ran is nobody's parked turn —
@@ -2447,7 +2448,7 @@ async function settleProjectablePromptId(
     (phase !== 'turn_settled' && !authorization.history.allToolsConsumed)
   )
     return null;
-  const current = hostedSessionRecords(managed).filter(
+  const current = hostedMessageRecords(managed).filter(
     (item) => item.daemonPromptId === promptId,
   );
   const assistant = await current.findLast((item) => item.type === 'assistant');
@@ -3157,7 +3158,7 @@ async function recoverShellReceipts(
     pending.size === 1 ? (pending.values().next().value ?? null) : null;
   const harness = createManagedHarnessHandle(session.managed);
   let parentUuid =
-    (await hostedSessionRecords(session.managed, throughSequence).at(-1))
+    (await hostedMessageRecords(session.managed, throughSequence).at(-1))
       ?.uuid ?? null;
   let currentPrompt: string | null = null;
   let recoveredCurrent = false;
@@ -3813,7 +3814,7 @@ async function executeHostedTurn(
     promptId,
     async (modelScope) =>
       harness.run(async () => {
-        const projected = hostedSessionRecords(session.managed);
+        const projected = hostedMessageRecords(session.managed);
         const modelRecords = await session.managed.sink.projectModelRecords();
         const unanswered = await unansweredPrompts(session, modelRecords);
         const history: ChatRecord[] = [];
@@ -4427,7 +4428,7 @@ export function registerHostedHarnessSessionRoutes(
     try {
       release.result ??= (async () => {
         if (!release.proof) {
-          const projected = hostedSessionRecords(session.managed);
+          const projected = hostedMessageRecords(session.managed);
           const pending = pendingSessionInputs(
             session.managed.authority.pendingInputEvents,
           );
@@ -5503,7 +5504,7 @@ export function registerHostedHarnessSessionRoutes(
               ? await findHostedApprovalContinuation(resident.managed, parked)
               : undefined;
           if (model || approval) {
-            const user = await hostedSessionRecords(resident.managed).find(
+            const user = await hostedMessageRecords(resident.managed).find(
               (item) => item.type === 'user' && item.daemonPromptId === parked,
             );
             const text = user?.message?.parts
@@ -6679,7 +6680,7 @@ export function registerHostedHarnessSessionRoutes(
             );
             if (channelInput !== undefined) {
               if (
-                !(await hostedSessionRecords(session.managed).some(
+                !(await hostedMessageRecords(session.managed).some(
                   (record) => record.daemonPromptId === turnId,
                 ))
               ) {
@@ -7188,7 +7189,7 @@ export function registerHostedHarnessSessionRoutes(
         if (!committedModelOutput)
           resumeModel = await findHostedModelRequest(managed, unsettled);
         if (resumeModel) {
-          const user = await hostedSessionRecords(managed).find(
+          const user = await hostedMessageRecords(managed).find(
             (item) => item.type === 'user' && item.daemonPromptId === unsettled,
           );
           const text = user?.message?.parts
@@ -7223,7 +7224,7 @@ export function registerHostedHarnessSessionRoutes(
             unsettled,
           );
           if (resumeApproval) {
-            const user = await hostedSessionRecords(managed).find(
+            const user = await hostedMessageRecords(managed).find(
               (item) =>
                 item.type === 'user' && item.daemonPromptId === unsettled,
             );
@@ -7250,7 +7251,7 @@ export function registerHostedHarnessSessionRoutes(
         body?.['cancellationTakeover'] !== true &&
         (await parkNeedsNoRuntimeSettlement(managed))
       ) {
-        const current = hostedSessionRecords(managed).filter(
+        const current = hostedMessageRecords(managed).filter(
           (record) => record.daemonPromptId === unsettled,
         );
         const assistant = await current.findLast(
@@ -7268,7 +7269,7 @@ export function registerHostedHarnessSessionRoutes(
             skills: session.skills,
             hooks: session.hooks,
           });
-          const projected = hostedSessionRecords(managed).filter(
+          const projected = hostedMessageRecords(managed).filter(
             (record) => record.daemonPromptId === unsettled,
           );
           const user = await projected.find((record) => record.type === 'user');
@@ -7541,7 +7542,7 @@ export function registerHostedHarnessSessionRoutes(
             messages: session.messages,
             commands: session.commands,
           });
-        const projected = hostedSessionRecords(managed);
+        const projected = hostedMessageRecords(managed);
         const current = projected.filter(
           (item) => item.daemonPromptId === promptId,
         );
@@ -10904,7 +10905,7 @@ export function registerHostedHarnessSessionRoutes(
         });
       try {
         const harness = createManagedHarnessHandle(session.managed);
-        let projected = hostedSessionRecords(session.managed);
+        let projected = hostedMessageRecords(session.managed);
         let modelRecords = await session.managed.sink.projectModelRecords();
         // Split at the last assistant message carrying function calls: earlier
         // tool rounds stay in history, and only the parked round's results
@@ -11113,7 +11114,7 @@ export function registerHostedHarnessSessionRoutes(
               consume: (childRunId) => session.childConsumption.add(childRunId),
             });
             if (outstanding.length > 0 || filled > 0) {
-              projected = hostedSessionRecords(session.managed);
+              projected = hostedMessageRecords(session.managed);
               modelRecords = await session.managed.sink.projectModelRecords();
               ({ history, resumeParts } = await deriveRound());
             }
@@ -11167,7 +11168,7 @@ export function registerHostedHarnessSessionRoutes(
               messages: session.messages,
             });
             if (outstanding.length > 0 || filled > 0) {
-              projected = hostedSessionRecords(session.managed);
+              projected = hostedMessageRecords(session.managed);
               modelRecords = await session.managed.sink.projectModelRecords();
               ({ history, resumeParts } = await deriveRound());
             }
@@ -11191,7 +11192,7 @@ export function registerHostedHarnessSessionRoutes(
             commands: session.commands,
           });
           if (answered > 0) {
-            projected = hostedSessionRecords(session.managed);
+            projected = hostedMessageRecords(session.managed);
             modelRecords = await session.managed.sink.projectModelRecords();
             ({ history, resumeParts } = await deriveRound());
           }

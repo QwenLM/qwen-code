@@ -527,6 +527,10 @@ export class ManagedSessionRecordSink {
     return this.projection.iterateRecords(throughSequence);
   }
 
+  iterateMessageRecords(throughSequence?: number): AsyncGenerator<ChatRecord> {
+    return this.projection.iterateMessageRecords(throughSequence);
+  }
+
   iterateActiveRecords(throughSequence?: number): AsyncGenerator<ChatRecord> {
     return this.projection.iterateActiveRecords(throughSequence);
   }

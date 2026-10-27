@@ -117,7 +117,7 @@ async function withSession<T>(
         authority,
         resources: harness.store,
         sink: {
-          async *iterateRecords() {
+          async *iterateMessageRecords() {
             yield* harness.records;
           },
           write: async (record: ChatRecord) => {

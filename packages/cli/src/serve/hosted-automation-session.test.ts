@@ -149,6 +149,9 @@ async function withSession<T>(
         authority,
         resources: harness.store,
         sink: {
+          async *iterateMessageRecords() {
+            yield* harness.records;
+          },
           async *iterateRecords() {
             yield* harness.records;
           },
@@ -1272,7 +1275,7 @@ describe('hosted automation runs', () => {
       const sink = {
         project: async () => [...harness.records],
         projectContextRecords: async () => [...harness.records],
-        async *iterateRecords() {
+        async *iterateMessageRecords() {
           yield* harness.records;
         },
         write: async (record: ChatRecord) => {

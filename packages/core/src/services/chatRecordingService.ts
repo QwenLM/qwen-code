@@ -2258,6 +2258,12 @@ export class ChatRecordingService {
   async readActiveTranscriptChain(): Promise<readonly ChatRecord[]> {
     await this.flush();
     if (this.managedSink) {
+      if (this.managedSink.iterate) {
+        const records: ChatRecord[] = [];
+        for await (const record of this.managedSink.iterate())
+          records.push(record);
+        return records;
+      }
       // A Managed log holds wrapper records; the records a reader sees come
       // from its projection, and the active chain is rebuilt from them the
       // same way as from a transcript.

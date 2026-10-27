@@ -413,7 +413,7 @@ function approvalSelectionFixture(
       action: (id: string) => actions.get(id),
     },
     sink: {
-      async *iterateRecords() {
+      async *iterateMessageRecords() {
         yield* [
           {
             uuid: 'current-batch',
