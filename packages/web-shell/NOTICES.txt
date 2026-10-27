@@ -2184,6 +2184,10 @@ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
+Qwen Code modifications to @pierre/trees 1.0.0-beta.6: adds formatItemName for display-only labels and formatter-aware search; original path identity is preserved.
+
+Modified files: dist/model/publicTypes.d.ts, dist/model/internalTypes.d.ts, dist/model/FileTreeController.js, dist/render/FileTree.js, dist/render/FileTreeView.js, dist/render/FileTreeView.d.ts.
+
 ============================================================
 preact@11.0.0-beta.0
 (https://github.com/preactjs/preact)
