@@ -50,7 +50,7 @@ describe('binding semantics through the real kernel', () => {
           .status,
       ).toBe('ok');
       const result = await manager.exec({ code, timeoutMs: 30_000 });
-      expect(result.status, result.error?.message).toBe('ok');
+      expect(result.status).toBe('ok');
       expect(textOf(result.events).trim()).toBe(expected);
     },
   );
