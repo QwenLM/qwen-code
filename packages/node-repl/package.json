@@ -1,7 +1,7 @@
 {
   "name": "@qwen-code/node-repl-mcp",
-  "version": "0.1.7",
-  "description": "Standalone MCP server exposing a session-persistent Node.js REPL (node_repl) — independent of qwen-code core.",
+  "version": "0.26.0",
+  "description": "Standalone MCP server exposing persistent JavaScript (js/js_reset) with the Computer Use runtime.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/QwenLM/qwen-code.git",
@@ -45,7 +45,8 @@
     "tree-sitter-wasms": "^0.1.13",
     "web-tree-sitter": "^0.24.7",
     "ws": "^8.18.0",
-    "zod": "^3.25.76"
+    "zod": "^3.25.76",
+    "@qwen-code/cua-sdk": "0.26.0"
   },
   "devDependencies": {
     "@types/node": "^22.13.10",

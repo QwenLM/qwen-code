@@ -11,9 +11,9 @@ import {
 } from 'quickjs-emscripten-core';
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { createShowResult } from '../contracts.js';
-import { ViewController } from './controller.js';
+import { ViewController, type ViewState } from './controller.js';
 import { UiRuntime } from './runtime.js';
-import type { UiWorkerRequest } from './runtime-contract.js';
+import type { UiWorkerRequest, UiWorkerResponse } from './runtime-contract.js';
 import { ViewSurface } from './surface.js';
 
 let module: QuickJSWASMModule;
@@ -21,19 +21,21 @@ const controllers: ViewController[] = [];
 beforeAll(async () => {
   module = await newQuickJSWASMModuleFromVariant(variant);
 });
-afterEach(() =>
-  controllers.splice(0).forEach((controller) => controller.stop()),
-);
+afterEach(() => {
+  controllers.splice(0).forEach((controller) => controller.stop());
+  document.body.replaceChildren();
+});
 
 async function harness(
   javascript: string,
   html = '<input id="rate" type="number" value="20"><button id="resetButton">Reset</button><button id="calculate">Calculate</button><output id="answer"></output><output id="eventValue"></output>',
 ) {
   const frame = document.createElement('iframe');
-  document.body.replaceChildren(frame);
+  document.body.append(frame);
   const content = frame.contentDocument!;
   const runtime = new UiRuntime(module);
   const requests: UiWorkerRequest[] = [];
+  const states: ViewState[] = [];
   const worker = {
     onmessage: null as Worker['onmessage'],
     onerror: null as Worker['onerror'],
@@ -53,7 +55,7 @@ async function harness(
     surface,
     async () => worker,
     () => {},
-    () => {},
+    (state) => states.push(state),
   );
   controllers.push(controller);
   await controller.receive(
@@ -67,13 +69,25 @@ async function harness(
   );
   const deliver = () => {
     const request = requests.shift()!;
-    const patches =
-      request.type === 'init'
-        ? runtime.initialize(request.javascript, request.inputs)
-        : runtime.dispatch(request.event, request.inputs);
-    Reflect.apply(worker.onmessage!, worker, [
-      { data: { sequence: request.sequence, patches } },
-    ]);
+    let response: UiWorkerResponse;
+    if (request.type === 'init') {
+      response = {
+        sequence: request.sequence,
+        patches: runtime.initialize(request.javascript, request.inputs),
+        execution: 'initialized',
+      };
+    } else {
+      const { patches, handled } = runtime.dispatch(
+        request.event,
+        request.inputs,
+      );
+      response = {
+        sequence: request.sequence,
+        patches,
+        execution: handled ? 'handled' : 'unhandled',
+      };
+    }
+    Reflect.apply(worker.onmessage!, worker, [{ data: response }]);
   };
   deliver();
   const input = content.getElementById('rate') as HTMLInputElement;
@@ -85,7 +99,16 @@ async function harness(
     input.value = value;
     input.dispatchEvent(new Event('input', { bubbles: true }));
   };
-  return { content, input, click, enter, deliver };
+  return {
+    content,
+    input,
+    click,
+    enter,
+    deliver,
+    controller,
+    states,
+    requests,
+  };
 }
 
 describe('interactions while a worker response is pending', () => {
@@ -188,8 +211,20 @@ describe('interactions while a worker response is pending', () => {
     expect(h.content.querySelector('#answer strong')?.textContent).toBe(
       'Updated',
     );
+    expect(h.states.at(-1)).toMatchObject({
+      phase: 'running',
+      lastUpdate: 'outdated',
+    });
+    expect(h.controller.captureSnapshot()).toEqual({
+      ok: false,
+      reason: 'busy',
+    });
     h.deliver();
     expect(h.content.getElementById('eventValue')!.textContent).toBe('2');
+    expect(h.controller.captureSnapshot()).toMatchObject({
+      ok: true,
+      snapshot: { inputs: { rate: { value: '2' } } },
+    });
   });
 
   it('still discards stale explicit value writes even if they match the newer value', async () => {
@@ -329,13 +364,63 @@ describe('interactions while a worker response is pending', () => {
     `);
     h.click('resetButton');
     h.enter('7');
+    h.states.length = 0;
     h.deliver();
     h.deliver();
     expect(h.input.value).toBe('7');
     expect(h.content.getElementById('answer')!.textContent).toBe('40');
     expect(h.content.getElementById('eventValue')!.textContent).toBe('');
+    expect(h.states.map((state) => state.phase)).toEqual(['running', 'dirty']);
+    expect(h.states.at(-1)?.lastUpdate).toBe('superseded');
+    expect(h.controller.captureSnapshot()).toEqual({
+      ok: false,
+      reason: 'dirty',
+    });
     h.click('calculate');
     h.deliver();
     expect(h.content.getElementById('answer')!.textContent).toBe('14');
+    expect(h.controller.captureSnapshot()).toMatchObject({
+      ok: true,
+      snapshot: {
+        appliedSequence: 4,
+        baseInputRevision: 1,
+        inputRevision: 1,
+        inputs: { rate: { value: '7' } },
+      },
+    });
+  });
+
+  it('keeps two simultaneous copies of a document independent', async () => {
+    const javascript = `
+      function calculate() { ui.text('answer', String(Number(ui.input('rate').value) * 2)); }
+      ui.on('calculate', 'click', calculate);
+      calculate();
+    `;
+    const first = await harness(javascript);
+    const second = await harness(javascript);
+    first.enter('7');
+    first.deliver();
+    expect(first.controller.captureSnapshot()).toEqual({
+      ok: false,
+      reason: 'dirty',
+    });
+    expect(second.controller.captureSnapshot()).toMatchObject({
+      ok: true,
+      snapshot: { inputs: { rate: { value: '20' } } },
+    });
+    first.controller.stop();
+    second.enter('9');
+    second.deliver();
+    second.click('calculate');
+    second.deliver();
+    expect(second.content.getElementById('answer')!.textContent).toBe('18');
+    expect(second.controller.captureSnapshot()).toMatchObject({
+      ok: true,
+      snapshot: { inputs: { rate: { value: '9' } } },
+    });
+    expect(first.controller.captureSnapshot()).toEqual({
+      ok: false,
+      reason: 'stopped',
+    });
   });
 });

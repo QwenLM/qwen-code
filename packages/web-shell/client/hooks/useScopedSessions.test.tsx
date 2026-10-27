@@ -3,6 +3,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
+import { McpAppGeneratedUiOwnerContext } from '../mcpAppHostContext';
 
 const primarySessions = [
   { sessionId: 'primary', workspaceCwd: '/primary' },
@@ -90,6 +91,52 @@ afterEach(() => {
 });
 
 describe('useScopedSessions', () => {
+  it.each(['/retained-deletion', '/another-workspace'])(
+    'captures confirmed deletions in the requested workspace from owner %s',
+    async (ownerWorkspace) => {
+      listWorkspaceSessionsPage.mockResolvedValue({ sessions: [] });
+      deleteSessionsData.mockResolvedValue({
+        removed: ['secondary'],
+        notFound: ['missing'],
+        errors: [{ sessionId: 'failed', error: 'busy' }],
+      });
+      const invalidateDeleted = vi.fn();
+      const captureSessionDeletion = vi.fn(() => invalidateDeleted);
+      let sessions: ReturnType<typeof useScopedSessions> | undefined;
+      function Harness() {
+        sessions = useScopedSessions('/retained-deletion');
+        return null;
+      }
+      act(() => {
+        root!.render(
+          <McpAppGeneratedUiOwnerContext.Provider
+            value={{
+              scopeId: 'retained-scope',
+              workspaceCwd: ownerWorkspace,
+              invalidate: vi.fn(),
+              captureSessionDeletion,
+              subscribeInvalidation: () => () => undefined,
+            }}
+          >
+            <Harness />
+          </McpAppGeneratedUiOwnerContext.Provider>,
+        );
+      });
+      expect(invalidateDeleted).not.toHaveBeenCalled();
+      await act(async () => {
+        await sessions!.deleteSessions(['secondary', 'missing', 'failed']);
+      });
+      expect(captureSessionDeletion).toHaveBeenCalledWith('/retained-deletion');
+      expect(captureSessionDeletion.mock.invocationCallOrder[0]).toBeLessThan(
+        deleteSessionsData.mock.invocationCallOrder[0]!,
+      );
+      expect(invalidateDeleted).toHaveBeenCalledExactlyOnceWith([
+        'secondary',
+        'missing',
+      ]);
+    },
+  );
+
   it('loads and mutates sessions through the requested workspace', async () => {
     listWorkspaceSessionsPage.mockResolvedValue({
       sessions: [

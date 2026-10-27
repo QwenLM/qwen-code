@@ -29,6 +29,41 @@ class SignatureAuthFilterTest {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     @Test
+    void authenticatesExtensionArchivesFromADiskSpoolAndSignsTheirManifestQuery() throws Exception {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getAuth().setMode("signed");
+        properties.getAuth().setSigningKey(KEY);
+        properties.getAuth().setMaxSignedBodyBytes(1);
+        ServerProperties server = new ServerProperties();
+        server.setAddress(InetAddress.getByName("127.0.0.1"));
+        SignatureAuthFilter filter = filter(new BrokerSecurity(properties, server, new WebMvcProperties()));
+        byte[] archive = "a binary archive larger than the JSON body limit".getBytes(StandardCharsets.UTF_8);
+        String path = "/v1/agents/workspaces/workspace/extensions";
+        String query = "packageDigest=" + sha256Hex(archive) + "&manifest=eyJzY2hlbWFWZXJzaW9uIjoxfQ";
+        String timestamp = now();
+        String signature = sign("POST", path, query, "tenant-a", "actor-a", timestamp, archive, "publish");
+        for (boolean tamper : new boolean[] {false, true}) {
+            MockHttpServletRequest request = request("POST", path);
+            request.setContentType("application/octet-stream");
+            request.setContent(archive);
+            request.setQueryString(tamper ? query + "changed" : query);
+            request.addHeader(SignatureAuthFilter.ACTOR_HEADER, "actor-a");
+            request.addHeader(SignatureAuthFilter.TIMESTAMP_HEADER, timestamp);
+            request.addHeader(SignatureAuthFilter.SIGNATURE_HEADER, signature);
+            request.addHeader("Idempotency-Key", "publish");
+            MockHttpServletResponse response = new MockHttpServletResponse();
+            java.util.concurrent.atomic.AtomicBoolean accepted = new java.util.concurrent.atomic.AtomicBoolean();
+            filter.doFilter(request, response, (wrapped, result) -> {
+                assertThat(wrapped.getInputStream().readAllBytes()).isEqualTo(archive);
+                assertThat(((HttpServletRequest) wrapped).getUserPrincipal()).isInstanceOf(AuthenticatedTenantActor.class);
+                accepted.set(true);
+            });
+            assertThat(accepted.get()).isEqualTo(!tamper);
+            assertThat(response.getStatus()).isEqualTo(tamper ? 401 : 200);
+        }
+    }
+
+    @Test
     void staysOutOfOpenModeAndRunsBeforeTheHeaderStandIn() throws Exception {
         SignatureAuthFilter filter = filter(open());
         MockHttpServletRequest request = request("GET",
@@ -101,6 +136,52 @@ class SignatureAuthFilterTest {
         filter.doFilter(old, stale, new MockFilterChain());
         assertThat(stale.getStatus()).isEqualTo(401);
         assertThat(stale.getContentAsString()).contains("invalid_signature");
+    }
+
+    @Test
+    void localDirectoryImportStillRequiresSignedTenantAndActor() throws Exception {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getAuth().setMode("signed");
+        properties.getAuth().setSigningKey(KEY);
+        properties.getRuntimeBroker().setLocalDirectoryImportEnabled(true);
+        ServerProperties server = new ServerProperties();
+        server.setAddress(InetAddress.getByName("127.0.0.1"));
+        SignatureAuthFilter filter = filter(new BrokerSecurity(properties, server, new WebMvcProperties()));
+        byte[] body = "{\"localPath\":\"/projects/example\"}".getBytes(StandardCharsets.UTF_8);
+        for (String path : new String[] {"/api/agent/web-shell/v1/workspaces/directories/query",
+                "/api/agent/web-shell/v1/workspaces/create"}) {
+            String timestamp = now();
+            String signature = sign("POST", path, "tenant-a", "actor-a", timestamp, body, null);
+            MockHttpServletRequest valid = request("POST", path);
+            valid.setContent(body);
+            valid.addHeader(SignatureAuthFilter.ACTOR_HEADER, "actor-a");
+            valid.addHeader(SignatureAuthFilter.TIMESTAMP_HEADER, timestamp);
+            valid.addHeader(SignatureAuthFilter.SIGNATURE_HEADER, signature);
+            MockFilterChain accepted = new MockFilterChain();
+            filter.doFilter(valid, new MockHttpServletResponse(), accepted);
+            assertThat(((HttpServletRequest) accepted.getRequest()).getUserPrincipal())
+                    .isInstanceOfSatisfying(AuthenticatedTenantActor.class, actor -> {
+                        assertThat(actor.tenantId()).isEqualTo("tenant-a");
+                        assertThat(actor.actorId()).isEqualTo("actor-a");
+                    });
+
+            MockHttpServletRequest unsigned = request("POST", path);
+            unsigned.setContent(body);
+            unsigned.addHeader(SignatureAuthFilter.ACTOR_HEADER, "actor-a");
+            MockHttpServletResponse missing = new MockHttpServletResponse();
+            filter.doFilter(unsigned, missing, new MockFilterChain());
+            assertThat(missing.getStatus()).isEqualTo(401);
+
+            MockHttpServletRequest forged = request("POST", path);
+            forged.setContent(body);
+            forged.addHeader(SignatureAuthFilter.ACTOR_HEADER, "other-actor");
+            forged.addHeader(SignatureAuthFilter.TIMESTAMP_HEADER, timestamp);
+            forged.addHeader(SignatureAuthFilter.SIGNATURE_HEADER, signature);
+            MockHttpServletResponse denied = new MockHttpServletResponse();
+            filter.doFilter(forged, denied, new MockFilterChain());
+            assertThat(denied.getStatus()).isEqualTo(401);
+            assertThat(denied.getContentAsString()).contains("invalid_signature");
+        }
     }
 
     @Test

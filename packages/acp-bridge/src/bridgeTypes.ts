@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { BundledGeneratedUiStatus } from '@qwen-code/qwen-code-core/config/generated-ui.js';
 import type {
   ApprovalMode,
   McpAppToolResult,
@@ -83,6 +84,7 @@ import type {
 
 export interface RewindSnapshotInfo {
   promptId: string;
+  daemonPromptId?: string;
   turnIndex: number;
   timestamp: string;
   diffStats: { filesChanged: number; insertions: number; deletions: number };
@@ -477,6 +479,7 @@ export function parseBackgroundNotificationTurn(
 }
 
 export interface BridgeSession {
+  generatedUi?: BundledGeneratedUiStatus;
   startupConfigApplied?: SessionStartupConfigApplied;
   sessionId: string;
   /**
@@ -2377,6 +2380,15 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   ): Promise<SessionArtifactMutationResult>;
 
   /**
+   * Only for management routes with strict mutation and workspace ownership
+   * checks; clients cannot grant themselves this authority.
+   */
+  removeSessionArtifactForWorkspaceOwner(
+    sessionId: string,
+    artifactId: string,
+  ): Promise<SessionArtifactMutationResult>;
+
+  /**
    * Remove an artifact from the session. Missing artifact ids are idempotent
    * no-ops; unknown session ids still throw `SessionNotFoundError`.
    */
@@ -2752,6 +2764,8 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   setSessionConfigOption(
     sessionId: string,
     req: SetSessionConfigOptionRequest,
+    context?: BridgeClientRequestContext,
+    assertCanCommit?: () => void,
   ): Promise<SetSessionConfigOptionResponse>;
 
   /**
@@ -2852,6 +2866,14 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   generateSessionContent?(
     sessionId: string,
     prompt: string,
+    signal: AbortSignal,
+    context?: BridgeClientRequestContext,
+  ): AsyncIterable<BridgeGenerationStreamEvent>;
+
+  /** Stream a tool-free side answer using the session's conversation context. */
+  generateSessionBtwStream?(
+    sessionId: string,
+    question: string,
     signal: AbortSignal,
     context?: BridgeClientRequestContext,
   ): AsyncIterable<BridgeGenerationStreamEvent>;

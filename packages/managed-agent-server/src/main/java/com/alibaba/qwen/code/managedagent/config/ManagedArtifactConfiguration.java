@@ -9,6 +9,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.task.ThreadPoolTaskSchedulerBuilder;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 
 import java.util.concurrent.ScheduledFuture;
@@ -35,6 +36,35 @@ public class ManagedArtifactConfiguration {
     @Bean
     public ThreadPoolTaskScheduler managedAutomationScheduler(ThreadPoolTaskSchedulerBuilder builder) {
         return builder.poolSize(1).threadNamePrefix("managed-automation-").build();
+    }
+
+    /**
+     * The automation scanner's row pool (#15418): a scan tick submits one
+     * task per candidate row and joins them before returning, so the tick
+     * holds the scheduler's thread for the whole pass. That is why this is
+     * a second bean — scanning on its own `managedAutomationScheduler`
+     * would deadlock the tick on the pool's only thread, and a bigger
+     * scheduler pool would park a thread per pending join. Pool shutdown
+     * never interrupts row tasks, but does not wait for their completion or
+     * guarantee it before JVM exit. Claims are durable and later ticks
+     * re-drive a lost answer. A tick caught mid-join is still bounded by the
+     * application's shutdown phase.
+     */
+    @Bean
+    public ThreadPoolTaskExecutor automationScannerExecutor(
+            ManagedAgentProperties properties) {
+        // With automation off the positive-count validation stays out, so a
+        // dormant value must still boot: the JDK refuses a 0-size pool, and
+        // the pool goes unused while the scanner is off.
+        int threads = Math.max(1, properties.getAutomation()
+                .getScannerThreads());
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(threads);
+        executor.setMaxPoolSize(threads);
+        executor.setThreadNamePrefix("automation-scan-");
+        executor.setWaitForTasksToCompleteOnShutdown(true);
+        executor.setAwaitTerminationSeconds(0);
+        return executor;
     }
 
     /**

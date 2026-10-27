@@ -18,7 +18,7 @@
 
 ## 非目标
 
-- 开启 public Shell、v2 capability advertisement、Automation、Channels 或留存默认值。
+- 开启 public Shell 执行、Automation、Channels 或留存默认值。统一 Shell v2 能力声明遵循 [Shell 生命周期设计](2026-10-23-managed-shell-lifecycle.zh-CN.md)。
 - 发布容器镜像或决定长期使用的容器仓库。
 - 支持两个存活 Java 控制面、跨主机接管、公开 CSI 或稳定支持等级。
 - 把 npm CLI 或 Hosted Harness 打入 Java 压缩包。
@@ -68,7 +68,7 @@ LICENSE
 - 同一源码树中的精确 Qwen Code 版本与 Hosted Harness profile；
 - 从同一源码树读取的 Serve 协议、Runtime Broker 协议、公开 API、Java、Node.js 和 Flyway migration 兼容范围；
 - 已接受的单控制面、可信 Linux、嵌入式 Broker 拓扑；
-- public Shell 和 v2 advertisement 默认关闭的明确 `false` 值；
+- 明确的默认值：public Shell 执行为 `false`，统一 Shell v2 能力声明为 `true`，MCP 生命周期仍须显式启用；
 - bundle 内的部署与恢复文档路径。
 
 必需产物或兼容性来源缺失、存在歧义时，打包直接失败，不猜测数值，也不发布描述不完整的产物。
@@ -112,7 +112,7 @@ LICENSE
 - Bundle 中的 server 与 operator-recovery 启动脚本只引用 bundle 内相对文件。
 - 精确解压得到的 server 能启动并完成参考 smoke path。
 - 生产流程只从 `main` 发布不可覆盖的实验性 prerelease。
-- Public Shell 与 v2 advertisement 默认保持关闭。
+- Public Shell 执行默认保持关闭；统一 Shell v2 能力声明默认开启，MCP 生命周期须显式启用。
 
 ## 后续工作
 

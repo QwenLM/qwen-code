@@ -104,7 +104,8 @@ final class ManagedSchemaCatalog {
                 || actual.values().stream()
                         .anyMatch(type -> type.toUpperCase(Locale.ROOT).contains("VIEW"))) {
             throw new SQLException(
-                    "Managed schema must contain exactly the 32 target tables: " + actual.keySet());
+                    "Managed schema must contain exactly the " + ManagedSchemaContract.TABLES.size()
+                            + " target tables: " + actual.keySet());
         }
         if ("MySQL".equals(connection.getMetaData().getDatabaseProductName())
                 || isMariaDb(connection)) {
@@ -493,7 +494,8 @@ final class ManagedSchemaCatalog {
         List<String> tokens = new ArrayList<>();
         while (matcher.find()) {
             String token = matcher.group();
-            tokens.add(token.startsWith("'") ? token : lower(token));
+            String normalized = token.startsWith("'") ? token : lower(token);
+            tokens.add("octet_length".equals(normalized) ? "length" : normalized);
         }
         return booleanShape(numericBooleans(tokens));
     }
