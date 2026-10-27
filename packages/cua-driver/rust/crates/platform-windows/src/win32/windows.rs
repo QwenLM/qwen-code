@@ -174,6 +174,7 @@ pub(crate) struct PendingActionWindows {
     pid: u32,
     before: HashSet<u64>,
     allow_unowned: bool,
+    target_was_visible: bool,
 }
 
 impl PendingActionWindows {
@@ -190,12 +191,16 @@ impl PendingActionWindows {
             allow_unowned: unsafe { IsWindowEnabled(HWND(target as *mut _)) }.as_bool()
                 && !crate::input::is_xaml_host_hwnd(target)
                 && !crate::input::is_chromium_target_window(target),
+            target_was_visible: unsafe { IsWindowVisible(HWND(target as *mut _)) }.as_bool(),
         }
     }
 
     pub(crate) fn change(&self) -> Option<PendingActionChange> {
         use windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
-        if window_owner_pid(self.target) != Some(self.pid) {
+        if window_owner_pid(self.target) != Some(self.pid)
+            || (self.target_was_visible
+                && !unsafe { IsWindowVisible(HWND(self.target as *mut _)) }.as_bool())
+        {
             return Some(PendingActionChange::TargetUnavailable);
         }
         let disabled = self.allow_unowned
@@ -505,8 +510,8 @@ mod exact_window_tests {
         use windows::core::w;
         use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
         use windows::Win32::UI::WindowsAndMessaging::{
-            CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WS_EX_NOACTIVATE, WS_OVERLAPPEDWINDOW,
-            WS_VISIBLE,
+            CreateWindowExW, DestroyWindow, ShowWindow, SW_HIDE, SW_SHOWNOACTIVATE,
+            WINDOW_EX_STYLE, WS_EX_NOACTIVATE, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
         };
         struct Window(windows::Win32::Foundation::HWND);
         impl Drop for Window {
@@ -565,6 +570,20 @@ mod exact_window_tests {
         unsafe {
             let _ = EnableWindow(target.0, true);
         }
+        let hiding_popup = PendingActionWindows::new(target_hwnd, pid);
+        unsafe {
+            let _ = ShowWindow(target.0, SW_HIDE);
+        }
+        assert!(matches!(
+            hiding_popup.change(),
+            Some(PendingActionChange::TargetUnavailable)
+        ));
+        let initially_hidden = PendingActionWindows::new(target_hwnd, pid);
+        assert!(initially_hidden.change().is_none());
+        unsafe {
+            let _ = ShowWindow(target.0, SW_SHOWNOACTIVATE);
+        }
+        assert!(hiding_popup.change().is_none());
         let closing_popup = PendingActionWindows::new(target_hwnd, pid);
         drop(target);
         assert!(matches!(
