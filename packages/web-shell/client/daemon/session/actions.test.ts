@@ -1454,6 +1454,30 @@ describe('createDaemonSessionActions', () => {
     expect(onPromptRemoved).toHaveBeenCalledWith(session, 'prompt-1');
   });
 
+  it('binds admission to a caller-supplied block when no optimistic message is appended', async () => {
+    const session = createMockSession('session-a');
+    const onPromptAdmitted = vi.fn();
+    const { actions, store } = createActionsHarness({
+      session,
+      onPromptAdmitted,
+    });
+
+    const prompt = actions.sendPrompt('retried text', {
+      optimisticUserMessage: false,
+      bindBlockId: 'block-failed',
+    });
+
+    await vi.waitFor(() => expect(onPromptAdmitted).toHaveBeenCalledOnce());
+    expect(store.appendLocalUserMessage).not.toHaveBeenCalled();
+    expect(onPromptAdmitted).toHaveBeenCalledWith(session, {
+      promptId: 'prompt-1',
+      label: 'retried text',
+      blockId: 'block-failed',
+    });
+    await actions.cancel();
+    await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+  });
+
   it('notifies prompt removal on the stale-session branch with the foreign session id', async () => {
     const session = createMockSession('session-current');
     const clientRemovePendingPrompt = vi.fn(async () => ({ removed: true }));
