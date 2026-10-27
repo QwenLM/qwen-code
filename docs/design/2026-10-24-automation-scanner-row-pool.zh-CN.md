@@ -38,12 +38,17 @@ NULL OR lease_until < ?`）下逐行上租约，账本写入全部带 fence 校�
    `managedAutomationScheduler`。tick 在 join 期间占着调度器的线程，因此用
    同一个调度器跑扫描会在池大小为 1 时把 tick 锁死在自己唯一的线程上，调大
    也只会为每个 pending 的 join 空占一条线程。
-5. 关闭时让进行中的工作收尾；绝不中断它，也不把上下文关闭卡在中继超时后面。
-   认领是落库的：丢失的应答会由后续 tick 重新驱动。
+5. 关闭时让进行中的工作收尾；绝不中断它。线程池的 `destroy()` 立即返回
+   （`awaitTerminationSeconds(0)`），本身不引入任何关闭等待。卡在 join 里的
+   tick 仍受调用它的调度器约束（`managedAutomationScheduler`，本身是
+   `SmartLifecycle`）：生命周期处理器把该 Bean 的 stop 上限设为
+   `spring.lifecycle.timeout-per-shutdown-phase`（此处 30 秒）。这是关闭的上界，
+   而不是必然等满；该上界在本次改动之前就存在。认领是落库的：丢失的应答会由
+   后续 tick 重新驱动。
 
 本次改动拒绝 fire 的异步作答：今天的 `firing` 意味着「应答在本次调用内挂起」，
 落库一个挂起态需要协议变更（目前没有任何事件信封把闸门裁定送回控制面）、新的
-结算语义，还要挪动手动运行的契约。如果探针时长继续打满 `SCAN_LIMIT ×
+结算语义，还要挪动手动运行的契约。如果探针时长继续打满 `2 × SCAN_LIMIT ×
 scanner-threads`，它仍是正确的后续方向。
 
 ## 配置
@@ -69,7 +74,8 @@ scanner-threads`，它仍是正确的后续方向。
   fence 会拒绝旧持有者的写入，occurrence 保持 `firing`，后续 tick 用派生 run id
   幂等地重新驱动它。本次改动不增加续期运行。
 - 同一行内，时间槽、重驱动和 reconcile 调用保持串行；线程池只并行行之间。
-  `SCAN_LIMIT`（100）仍是每次 tick 的行数上限。
+  `SCAN_LIMIT`（100）是 tick 两次行查询各自的上限，因此单次 tick 最多提交
+  2 × `SCAN_LIMIT`（200）个任务；两次查询都返回的行只提交一次。
 - 上下文关闭时，线程池除了进行中的行，还会在非 daemon 线程上把**排队中**的行
   也运行完：`destroy()` 仍然立即返回，但进程退出会等待排队的工作。每个排队的
   行都在同一 fence 下认领与触发，丢失的应答会由后续 tick 重新驱动（#15442 验证
@@ -86,7 +92,9 @@ scanner-threads`，它仍是正确的后续方向。
   `theScannerWorksRowsOnItsOwnBoundedPool`、
   `theScannerRowPoolFinishesInFlightWorkInsteadOfInterruptingIt`、
   `theScannerRowPoolStillBootsWithAnUnvalidatedSizeWhileAutomationIsOff`、
-  `twoDefinitionsSharingOneSessionBothFireWhenDueTogether`，以及新属性的
+  `twoDefinitionsSharingOneSessionBothFireWhenDueTogether`、
+  `aRowBothQueriesReturnIsSubmittedOnce`、
+  `anInterruptedJoinReportsTheInterruptAndLeavesTheRowItsClaim`，以及新属性的
   绑定/启动校验。既有的租约与 fence 回归套件经由直接执行器原样运行，钉住
   同一套分发与 join 的串行形态。`aTickJoinsEveryRowBeforeItReportsOneFailure`
   在真实的单线程池上运行，第一个认领抛出时第二个行的认领仍在飞行中：直接执行器

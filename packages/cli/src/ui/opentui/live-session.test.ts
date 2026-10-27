@@ -128,7 +128,26 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
       async schedule(
         calls: Array<{ callId: string; name?: string; args?: unknown }>,
       ): Promise<void> {
-        if (checkpointControl.held) {
+        if (
+          calls.some(
+            (call) => (call.args as { __foreground?: boolean })?.__foreground,
+          )
+        ) {
+          await this.opts.onToolCallsUpdate?.(
+            calls.map((request) => ({ status: 'scheduled', request })),
+          );
+          await this.opts.onToolCallsUpdate?.(
+            calls.map((request, index) => ({
+              status: 'executing',
+              request,
+              pid: 4300 + index,
+              promoteAbortController: new AbortController(),
+            })),
+          );
+          await this.opts.onToolCallsUpdate?.(
+            calls.map((request) => ({ status: 'success', request })),
+          );
+        } else if (checkpointControl.held) {
           const waiting = () =>
             calls.map((request) => ({
               status: 'awaiting_approval',
@@ -376,6 +395,19 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
             };
           }),
         );
+        if (
+          calls.some(
+            (call) => (call.args as { __foreground?: boolean })?.__foreground,
+          )
+        ) {
+          await this.opts.onToolCallsUpdate?.(
+            calls.map((request) => ({
+              status: 'executing',
+              request,
+              pid: 9999,
+            })),
+          );
+        }
       }
     },
   };
@@ -829,6 +861,33 @@ describe('livePromptEvents', () => {
     expect(prompt).toBe('hello');
     expect(passedSignal).toBe(signal);
     expect(options).toEqual({ type: SendMessageType.UserQuery });
+  });
+
+  it('hands the turn hooks the admission and every event of its streams', async () => {
+    const events = [
+      { type: 'content', value: 'hi' },
+      {
+        type: 'finished',
+        value: { reason: undefined, usageMetadata: undefined },
+      },
+    ];
+    const sendMessageStream = vi.fn(function* (...args: unknown[]) {
+      (args[3] as { onPromptAdmitted?: () => void }).onPromptAdmitted?.();
+      yield* events;
+    });
+    const config = createFakeConfig(sendMessageStream);
+    const onPromptAdmitted = vi.fn();
+    const onStreamEvent = vi.fn();
+
+    await drain(
+      livePromptEvents(config, 'hello', new AbortController().signal, {
+        onPromptAdmitted,
+        onStreamEvent,
+      }),
+    );
+
+    expect(onPromptAdmitted).toHaveBeenCalledOnce();
+    expect(onStreamEvent.mock.calls.map(([event]) => event)).toEqual(events);
   });
 
   it('shares one initialization promise across callers', async () => {
@@ -3142,6 +3201,49 @@ describe('livePromptEvents', () => {
     expect(secondEcho).toBeGreaterThan(warn);
   });
 
+  it('publishes actual executing shell PID/controllers, excluding queued and non-shell calls, then clears the owner', async () => {
+    let requests = 0;
+    const send = vi.fn(function* (): Generator<{
+      type: string;
+      value?: unknown;
+    }> {
+      if (++requests === 1) {
+        yield {
+          type: 'tool_call_request',
+          value: {
+            callId: 'shell-owner',
+            name: 'run_shell_command',
+            args: { __foreground: true },
+          },
+        };
+        yield {
+          type: 'tool_call_request',
+          value: { callId: 'not-shell', name: 'read_file', args: {} },
+        };
+      } else yield { type: 'finished', value: {} };
+    });
+    const onExecutingShells = vi.fn();
+    await drain(
+      livePromptEvents(createFakeConfig(send), 'q', undefined, {
+        onExecutingShells,
+      }),
+    );
+    const snapshots = onExecutingShells.mock.calls.map(([calls]) => calls);
+    expect(snapshots[0]).toEqual([]);
+    expect(snapshots).toContainEqual([
+      {
+        callId: 'shell-owner',
+        pid: 4300,
+        promoteAbortController: expect.any(AbortController),
+      },
+    ]);
+    expect(snapshots.at(-1)).toEqual([]);
+    expect(snapshots.flat().some((call) => call.pid === 9999)).toBe(false);
+    expect(snapshots.flat().some((call) => call.callId === 'not-shell')).toBe(
+      false,
+    );
+  });
+
   it('forwards awaiting_approval calls to onWaitingCall exactly once per callId', async () => {
     let calls = 0;
     const sendMessageStream = vi.fn(function* (): Generator<{
@@ -3292,6 +3394,38 @@ describe('livePromptEvents', () => {
       { type: 'tool-queued', id: 'q1', queued: true },
       { type: 'tool-queued', id: 'q1', queued: false },
     ]);
+  });
+
+  it('tells the turn when every tool of a round was declined', async () => {
+    const sendMessageStream = vi.fn(function* (): Generator<{
+      type: string;
+      value?: unknown;
+    }> {
+      yield {
+        type: 'tool_call_request',
+        value: {
+          callId: 'c9',
+          name: 'run_shell_command',
+          args: { __cancelApproval: true },
+        },
+      };
+      yield { type: 'finished', value: {} };
+    });
+    const config = {
+      ...createFakeConfig(sendMessageStream),
+      getGeminiClient: () => ({
+        sendMessageStream,
+        addHistory: vi.fn(),
+        isInitialized: () => true,
+        getChat: () => ({ getGenerationConfig: () => ({ tools: [] }) }),
+      }),
+    } as unknown as Config;
+    const onToolsCancelled = vi.fn();
+
+    await drain(livePromptEvents(config, 'q', undefined, { onToolsCancelled }));
+
+    expect(onToolsCancelled).toHaveBeenCalledOnce();
+    expect(sendMessageStream).toHaveBeenCalledOnce();
   });
 
   it('records the No/Esc cancellation as a rejected resolution (R1-18)', async () => {

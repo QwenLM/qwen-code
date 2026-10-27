@@ -89,6 +89,7 @@ describe('runStatus', () => {
       text: 'IC_9: a design call',
     };
     const seven = write(7, {
+      preparedAt: '2026-10-01T00:00:00.000Z',
       pushCount: 3,
       watch: { every: 5, reply: false, instructions: 'keep the API' },
       needsHuman: [item],
@@ -133,6 +134,7 @@ describe('runStatus', () => {
         pushes: 3,
         maxPushes: 10,
         session: 'session-a',
+        preparedAt: '2026-10-01T00:00:00.000Z',
         thisSession: true,
         lastCheck: checked.toISOString(),
         checkedRecently: false,
@@ -143,12 +145,16 @@ describe('runStatus', () => {
         needsHuman: [item],
         worktreePath: seven.worktreePath,
         worktreeExists: true,
+        // A plain directory, with no gitfile: not a git directory to trust.
+        gitTrusted: false,
         // A plain directory: git cannot tell what it holds.
         worktreeWork: expect.stringMatching(/not a git worktree/),
+        fix: null,
       },
       expect.objectContaining({
         pr: 12,
         session: 'session-b',
+        preparedAt: null,
         thisSession: false,
         pushes: 0,
         lastCheck: null,
@@ -160,6 +166,66 @@ describe('runStatus', () => {
       }),
     ]);
     expect(runStatus({ pr: 12 }).watches.map(({ pr }) => pr)).toEqual([12]);
+    // A quick ownership check skips the one git scan.
+    expect(runStatus({ pr: 7, work: false }).watches[0]!.worktreeWork).toBe(
+      null,
+    );
+  });
+
+  it("shows a background fix's attempt, and whether its session still refreshes it", () => {
+    const paths = write(7, {
+      watch: { every: 2, reply: true, instructions: '', task: 'feedc0ffee12' },
+    });
+    expect(runStatus({ work: false }).watches[0]!.fix).toBeNull();
+    const startedAt = new Date().toISOString();
+    writeFileSync(
+      paths.fixPath,
+      JSON.stringify({
+        version: 1,
+        attempt: '0123456789ab',
+        task: 'feedc0ffee12',
+        head: HEAD,
+        startedAt,
+      }),
+    );
+    expect(runStatus({ work: false }).watches[0]!.fix).toEqual({
+      attempt: '0123456789ab',
+      startedAt,
+      fresh: true,
+    });
+    const old = new Date(Date.now() - 5 * 60_000);
+    utimesSync(paths.fixPath, old, old);
+    expect(runStatus({ work: false }).watches[0]!.fix).toEqual({
+      attempt: '0123456789ab',
+      startedAt,
+      fresh: false,
+    });
+    writeFileSync(paths.fixPath, 'not json');
+    expect(runStatus({ work: false }).watches[0]!.fix).toEqual({
+      attempt: null,
+      startedAt: null,
+      fresh: false,
+    });
+  });
+
+  it('dates the last round by the snapshot a claimed attempt took, when it is the latest', () => {
+    const paths = write(7);
+    const round = new Date('2026-10-01T01:30:00.000Z');
+    const claimed = join(
+      dirname(paths.statePath),
+      'autofix-pr-7-fix-snapshot.json',
+    );
+    writeFileSync(claimed, '{}\n');
+    utimesSync(claimed, round, round);
+    expect(runStatus({ work: false }).watches[0]!.lastRound).toBe(
+      round.toISOString(),
+    );
+    const later = new Date('2026-10-01T02:30:00.000Z');
+    writeFileSync(paths.snapshotPath, '{}\n');
+    utimesSync(paths.snapshotPath, later, later);
+    expect(runStatus({ work: false }).watches[0]!.lastRound).toBe(
+      later.toISOString(),
+    );
   });
 
   it("says whether a gate checked within two of the watch's intervals", () => {
