@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Transport } from '@modelcontextprotocol/client';
 import type { MCPServerConfig } from '../config/config.js';
 import type { OAuthCredentials } from '../mcp/token-storage/types.js';
+import { clearInflightTokenReadsForTest } from '../mcp/oauth-provider.js';
 import { _setMcpFetchForTest, createTransport } from './mcp-client.js';
 
 const storage = vi.hoisted(() => ({
@@ -116,6 +117,16 @@ async function transportFor(config: MCPServerConfig) {
   return transport;
 }
 
+/** Whether `promise` has settled yet, readable without awaiting it. */
+function track(promise: Promise<unknown>) {
+  const state = { done: false };
+  const markDone = () => {
+    state.done = true;
+  };
+  promise.then(markDone, markDone);
+  return state;
+}
+
 // Streamable HTTP: a real SDK POST, so the headers are assembled as in prod.
 const send = (transport: TransportInternals) =>
   transport.send({
@@ -129,6 +140,7 @@ const sendRaw = (transport: TransportInternals, headers?: HeadersInit) =>
 
 describe('createTransport OAuth bearer token per request', () => {
   beforeEach(() => {
+    clearInflightTokenReadsForTest();
     vi.useFakeTimers({ toFake: ['Date'] });
     storage.getCredentials.mockImplementation(async () => storage.creds);
     storage.saveToken.mockImplementation(
@@ -156,6 +168,7 @@ describe('createTransport OAuth bearer token per request', () => {
     _setMcpFetchForTest(undefined);
     storage.creds = null;
     vi.clearAllMocks();
+    vi.restoreAllMocks();
   });
 
   it('sends the refreshed token once a stored token passes its expiry buffer', async () => {
@@ -298,6 +311,7 @@ describe('createTransport OAuth bearer token per request', () => {
     await send(transport);
     expect(sent.at(-1)?.authorization).toBeNull();
     expect(handler).not.toHaveBeenCalled();
+    expect(storage.deleteCredentials).not.toHaveBeenCalled();
   });
 
   it('sends no stale bearer on SSE once no token can be obtained', async () => {
@@ -454,6 +468,174 @@ describe('createTransport OAuth bearer token per request', () => {
     await sendRaw(transport);
 
     expect(sent).toEqual(['Bearer access-0', null]);
+    expect(storage.deleteCredentials).not.toHaveBeenCalled();
+  });
+
+  it('does not ask again for a due token while a refresh attempt is backing off', async () => {
+    stubAuthorizationServer();
+    const sent = stubMcpNetwork();
+    seedCredentials();
+    storage.creds!.token.refreshToken = undefined;
+    const transport = await transportFor({
+      httpUrl: 'https://mcp.example/mcp',
+    });
+
+    vi.setSystemTime(Date.now() + 56 * 60 * 1000);
+    await send(transport);
+    const reads = storage.getCredentials.mock.calls.length;
+    await send(transport);
+    await send(transport);
+    expect(storage.getCredentials).toHaveBeenCalledTimes(reads);
+    expect(sent.at(-1)?.authorization).toBe('Bearer access-0');
+
+    // The back-off is short: once it is over the next request asks again.
+    vi.setSystemTime(Date.now() + 60 * 1000);
+    await send(transport);
+    expect(storage.getCredentials).toHaveBeenCalledTimes(reads + 1);
+    expect(sent.at(-1)?.authorization).toBe('Bearer access-0');
+
+    // It never carries the token past its real expiry (3 minutes from now).
+    vi.setSystemTime(Date.now() + 2 * 60 * 1000 + 50 * 1000);
+    await send(transport);
+    expect(sent.at(-1)?.authorization).toBe('Bearer access-0');
+    vi.setSystemTime(Date.now() + 15 * 1000);
+    await send(transport);
+    expect(sent.at(-1)?.authorization).toBeNull();
+  });
+
+  it('uses the cached token while a due refresh hangs, then refreshes on the next attempt', async () => {
+    vi.useRealTimers();
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    // AbortSignal.timeout runs on an internal timer these fake timers don't
+    // drive: hand out signals the test aborts itself.
+    const timeouts: AbortController[] = [];
+    vi.spyOn(AbortSignal, 'timeout').mockImplementation(() => {
+      const controller = new AbortController();
+      timeouts.push(controller);
+      return controller.signal;
+    });
+    const authServer =
+      stubAuthorizationServer().handler.getMockImplementation()!;
+    let hung = true;
+    const tokenRequest = vi.fn((url: string, init?: RequestInit) =>
+      hung
+        ? new Promise<Response>((_, reject) =>
+            init?.signal?.addEventListener('abort', () =>
+              reject(init.signal!.reason),
+            ),
+          )
+        : authServer(url, init),
+    );
+    vi.stubGlobal('fetch', tokenRequest);
+    const sent = stubMcpNetwork();
+    const transport = await transportFor({
+      httpUrl: 'https://mcp.example/mcp',
+    });
+
+    // Due, but the token endpoint doesn't answer: the request goes out with
+    // the cached token after the wait bound, which is not past its expiry.
+    vi.setSystemTime(Date.now() + 56 * 60 * 1000);
+    const dueRequest = send(transport);
+    const due = track(dueRequest);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(due.done).toBe(true);
+    await dueRequest;
+    expect(sent.at(-1)?.authorization).toBe('Bearer access-0');
+    expect(tokenRequest).toHaveBeenCalledOnce();
+    // The refresh request itself is bounded.
+    expect(timeouts).toHaveLength(1);
+
+    // Backing off: neither storage nor the token endpoint is asked again.
+    const reads = storage.getCredentials.mock.calls.length;
+    const backingOff = send(transport);
+    const backOff = track(backingOff);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(backOff.done).toBe(true);
+    await backingOff;
+    expect(storage.getCredentials).toHaveBeenCalledTimes(reads);
+    expect(tokenRequest).toHaveBeenCalledOnce();
+
+    // The hung request times out; that says nothing about the credentials.
+    timeouts[0].abort(new DOMException('timed out', 'TimeoutError'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(storage.deleteCredentials).not.toHaveBeenCalled();
+
+    // The next attempt starts a new request and, the endpoint being back,
+    // the rotated token is sent.
+    hung = false;
+    vi.setSystemTime(Date.now() + 31 * 1000);
+    const retry = send(transport);
+    await vi.advanceTimersByTimeAsync(20);
+    await retry;
+    expect(tokenRequest).toHaveBeenCalledTimes(2);
+    expect(sent.at(-1)?.authorization).toBe('Bearer access-1');
+    expect(storage.deleteCredentials).not.toHaveBeenCalled();
+  });
+
+  it('never asks again for a token without an expiry', async () => {
+    const { handler } = stubAuthorizationServer();
+    const sent = stubMcpNetwork();
+    storage.creds!.token.expiresAt = undefined;
+    const transport = await transportFor({
+      httpUrl: 'https://mcp.example/mcp',
+    });
+
+    const reads = storage.getCredentials.mock.calls.length;
+    vi.setSystemTime(Date.now() + 1000 * HOUR_MS);
+    await send(transport);
+    await send(transport);
+
+    expect(sent.map((r) => r.authorization)).toEqual(
+      Array(2).fill('Bearer access-0'),
+    );
+    expect(storage.getCredentials).toHaveBeenCalledTimes(reads);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('sends the current token on the SSE stream-open request, also after a reconnect', async () => {
+    const { handler } = stubAuthorizationServer();
+    const authServer = handler.getMockImplementation()!;
+    const transport = await transportFor({ url: 'https://mcp.example/sse' });
+    const streamOpens: Array<string | null> = [];
+    const streams: Array<ReadableStreamDefaultController<Uint8Array>> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (url === TOKEN_URL) {
+          return authServer(url, init);
+        }
+        streamOpens.push(new Headers(init?.headers).get('authorization'));
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            streams.push(controller);
+            controller.enqueue(
+              new TextEncoder().encode(
+                'retry: 10\n\nevent: endpoint\ndata: /messages\n\n',
+              ),
+            );
+          },
+        });
+        return new Response(body, {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream' },
+        });
+      }),
+    );
+
+    try {
+      await transport.start();
+      expect(streamOpens).toEqual(['Bearer access-0']);
+
+      // The stream drops after the token went past its buffer.
+      vi.setSystemTime(Date.now() + 56 * 60 * 1000);
+      streams[0].close();
+      await vi.waitFor(() => expect(streamOpens).toHaveLength(2), {
+        timeout: 3000,
+      });
+      expect(streamOpens[1]).toBe('Bearer access-1');
+    } finally {
+      await transport.close();
+    }
   });
 
   it('keeps the headers of a Request passed as the fetch input', async () => {

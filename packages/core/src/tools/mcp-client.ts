@@ -403,6 +403,13 @@ type BearerTokenGetter = () => Promise<string | null>;
 // Mirrors MCPOAuthTokenStorage.isTokenExpired's clock-skew buffer.
 const OAUTH_REFRESH_BUFFER_MS = 5 * 60 * 1000;
 
+// How long a request waits on a due refresh before using the cached token.
+// Well below the SDK's 60s request timeout, which would otherwise fire first.
+const OAUTH_REFRESH_WAIT_MS = 5000;
+
+// After a due refresh yields nothing, how long until requests try it again.
+const OAUTH_REFRESH_RETRY_MS = 30 * 1000;
+
 /**
  * When a token obtained now should be asked for again: the storage buffer
  * before expiry, but never earlier than half of its remaining lifetime.
@@ -424,8 +431,9 @@ function refreshAfter(token: OAuthToken | null): number {
  * Returns a getter for the server's current OAuth access token, starting from
  * the token obtained at connect time. The token is cached here and only
  * re-read (and refreshed if due) through the provider once it is due, so
- * ordinary requests never touch token storage. Returns null when no usable
- * token exists.
+ * ordinary requests never touch token storage. A due refresh is waited on for
+ * at most OAUTH_REFRESH_WAIT_MS; if it yields nothing, the cached token keeps
+ * being used until it expires. Returns null when no usable token exists.
  */
 function createBearerTokenGetter(
   mcpServerName: string,
@@ -437,11 +445,19 @@ function createBearerTokenGetter(
   let dueAt = refreshAfter(cached);
   return async () => {
     if (Date.now() >= dueAt) {
+      let timer: NodeJS.Timeout | undefined;
       try {
-        const fresh = await authProvider.getValidOAuthToken(
-          mcpServerName,
-          oauthConfig,
-        );
+        // The token endpoint fetch has no timeout of its own; the shared read
+        // keeps running after we stop waiting for it.
+        const fresh = await Promise.race([
+          authProvider.getValidOAuthToken(mcpServerName, oauthConfig),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(
+              () => reject(new Error('token refresh timed out')),
+              OAUTH_REFRESH_WAIT_MS,
+            );
+          }),
+        ]);
         if (fresh) {
           cached = fresh;
           dueAt = refreshAfter(fresh);
@@ -451,12 +467,20 @@ function createBearerTokenGetter(
         debugLogger.warn(
           `Failed to get OAuth token for MCP server '${mcpServerName}': ${getErrorMessage(error)}`,
         );
+      } finally {
+        clearTimeout(timer);
       }
-      // No new token (no refresh token, refresh failed, storage unreadable):
-      // keep using the cached one while the server would still accept it.
-      const stillValid =
-        cached && (!cached.expiresAt || Date.now() < cached.expiresAt);
-      return stillValid ? cached!.accessToken : null;
+      // No new token (no refresh token, refresh failed or timed out, storage
+      // unreadable): keep using the cached one while the server would still
+      // accept it, and don't retry on every request meanwhile.
+      if (cached && (!cached.expiresAt || Date.now() < cached.expiresAt)) {
+        dueAt = Math.min(
+          Date.now() + OAUTH_REFRESH_RETRY_MS,
+          cached.expiresAt ?? Infinity,
+        );
+        return cached.accessToken;
+      }
+      return null;
     }
     return cached?.accessToken ?? null;
   };
