@@ -5,6 +5,8 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { parseManagedConfigInstallRecord } from '@qwen-code/qwen-code-core/managed-runtime/managed-config-install.js';
+import { expandHostedExtensionCommand } from './hosted-extension-command.js';
 import { isDeepStrictEqual } from 'node:util';
 import type { Part } from '@google/genai';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
@@ -31,6 +33,8 @@ import {
   type ManagedSessionDurableRef,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
+import { enforceFunctionResponseBudget } from '@qwen-code/qwen-code-core/tools/tool-response-finalizer.js';
+import { hostedToolOutputBudget } from './hosted-harness-model.js';
 import {
   convertToFunctionErrorResponse,
   convertToFunctionResponse,
@@ -115,6 +119,9 @@ import {
 
 /** The parked turn is not one this recovery can drive; the caller 409s. */
 export class RecoveryDeclined extends Error {}
+
+/** A temporary pool wait, distinct from a deterministic takeover decline. */
+export class HostedRecoveryQuiescingError extends Error {}
 
 /** The states a recovery report may advertise: exactly the vocabulary the
  * hosted client's validator accepts (HostedHarnessClient's
@@ -740,23 +747,35 @@ async function answerAbandonedTurnCalls(input: {
     input.promptId,
     records,
   );
-  const owed = new Map<
-    string,
-    { name: string; messageId: string; args: unknown; mixedSkillBatch: boolean }
-  >();
+  const owed = new Map<string, { name: string; messageId: string }>();
+  const skillResponses = new Map<string, Part[]>();
   for (const record of records.filter((entry) => entry.type === 'assistant')) {
     const parts = record.message?.parts ?? [];
-    const mixedSkillBatch = parts.some(
-      (part) => part.functionCall && part.functionCall.name !== 'skill',
-    );
+    if (
+      uncommitted === 'hosted' &&
+      input.skills &&
+      parts.some(
+        (part) =>
+          part.functionCall?.name === 'skill' &&
+          !answered.has(part.functionCall.id ?? ''),
+      )
+    )
+      for (const [id, response] of await hostedSkillBatchResponses(
+        input.session,
+        input.skills,
+        input.promptId,
+        record,
+        records,
+        input.cwd,
+        input.hooks,
+      ))
+        skillResponses.set(id, response);
     for (const part of parts) {
       const call = part.functionCall;
       if (call?.id && call.name && !answered.has(call.id) && !owed.has(call.id))
         owed.set(call.id, {
           name: call.name,
           messageId: record.uuid,
-          args: call.args ?? {},
-          mixedSkillBatch,
         });
     }
   }
@@ -793,15 +812,7 @@ async function answerAbandonedTurnCalls(input: {
           });
     let parts: Part[];
     if (uncommitted === 'hosted' && call.name === 'skill' && input.skills) {
-      parts = await hostedSkillResponse(
-        input.session,
-        input.skills,
-        input.promptId,
-        functionCallId,
-        call.args,
-        call.mixedSkillBatch,
-        input.hooks,
-      );
+      parts = skillResponses.get(functionCallId)!;
     } else if (planDecision !== undefined) {
       parts = convertToFunctionResponse(call.name, functionCallId, [
         { text: planDecision },
@@ -1017,19 +1028,75 @@ function sentMessageText(
 /** The interruption every settle or resume route below names. */
 const INTERRUPTED_HARNESS = 'the Harness that asked was interrupted';
 
+async function hostedSkillBatchResponses(
+  session: ManagedSession,
+  catalog: HostedSkillCatalog,
+  promptId: string,
+  assistant: ChatRecord,
+  records: readonly ChatRecord[],
+  cwd: string,
+  hooks?: HostedHookSession,
+): Promise<Map<string, Part[]>> {
+  const calls = (assistant.message?.parts ?? []).flatMap((part) =>
+    part.functionCall?.id ? [part.functionCall] : [],
+  );
+  const mixed = calls.some((call) => call.name !== 'skill');
+  const origin = assistant.clientInitiatedSkills === true ? 'user' : 'model';
+  const problems = calls.map((call) =>
+    mixed
+      ? HOSTED_SKILL_BATCH_REFUSAL
+      : catalog.validationError(call.args, origin),
+  );
+  const entries = [];
+  for (const [index, call] of calls.entries()) {
+    if (call.name !== 'skill') continue;
+    const saved = records
+      .filter(
+        (record) =>
+          record.type === 'tool_result' && record.daemonPromptId === promptId,
+      )
+      .flatMap((record) => record.message?.parts ?? [])
+      .filter((part) => part.functionResponse?.id === call.id);
+    const responseParts = saved.length
+      ? saved
+      : problems.some((problem) => problem !== undefined)
+        ? convertToFunctionErrorResponse(
+            'skill',
+            call.id!,
+            [],
+            problems[index] ??
+              'This tool was not executed because another call in the batch has invalid arguments. Retry the batch with corrected arguments.',
+          )
+        : await hostedSkillResponse(
+            session,
+            catalog,
+            promptId,
+            call.id!,
+            call.args ?? {},
+            origin,
+            hooks,
+          );
+    entries.push({ callId: call.id!, toolName: 'skill', responseParts });
+  }
+  return new Map(
+    enforceFunctionResponseBudget(entries, hostedToolOutputBudget(cwd)).map(
+      (entry) => [entry.callId, entry.responseParts],
+    ),
+  );
+}
+
 async function hostedSkillResponse(
   session: ManagedSession,
   catalog: HostedSkillCatalog,
   promptId: string,
   callId: string,
   args: unknown,
-  mixedSkillBatch: boolean,
+  origin: 'user' | 'model',
   hooks?: HostedHookSession,
 ): Promise<Part[]> {
   const refused = (reason: string) =>
     convertToFunctionErrorResponse('skill', callId, [], reason);
-  if (mixedSkillBatch) return refused(HOSTED_SKILL_BATCH_REFUSAL);
-  const initialProblem = catalog.validationError(args);
+  const initialProblem = catalog.validationError(args, origin);
   if (initialProblem) return refused(initialProblem);
   if (hooks) {
     const marker = session.authority.extensionRecord(
@@ -1130,7 +1197,51 @@ async function hostedSkillResponse(
     if (updated && typeof updated === 'object' && !Array.isArray(updated))
       args = updated;
   }
-  const problem = catalog.validationError(args);
+  const problem = catalog.validationError(args, origin);
+  const command = catalog.command(args);
+  if (!problem && command) {
+    const head = session.authority.domainRecord('config_install');
+    if (!head) throw new HostedHookRecoveryRequiredError();
+    const record = parseManagedConfigInstallRecord(
+      JSON.parse(
+        (await session.resources.read(head.recordRef)).toString('utf8'),
+      ),
+    );
+    if (record.phase !== 'active') throw new HostedHookRecoveryRequiredError();
+    try {
+      const text = await expandHostedExtensionCommand({
+        session,
+        broker: {} as HostedWorkspaceBroker,
+        promptId,
+        callId,
+        revision: record.configRevision,
+        command,
+        args: String((args as Record<string, unknown>)['args'] ?? ''),
+        signal: new AbortController().signal,
+        definitionDigest: () => {
+          throw new HostedHookRecoveryRequiredError();
+        },
+        decide: async () => {
+          throw new HostedHookRecoveryRequiredError();
+        },
+        completed: async (id, _name, _input, result) => {
+          if (
+            hooks &&
+            !hooks.hasCompletedOccurrence(
+              result['executionStatus'] === 'success'
+                ? HookEventName.PostToolUse
+                : HookEventName.PostToolUseFailure,
+              id,
+            )
+          )
+            throw new HostedHookRecoveryRequiredError();
+        },
+      });
+      return convertToFunctionResponse('skill', callId, [{ text }]);
+    } catch {
+      throw new HostedHookRecoveryRequiredError();
+    }
+  }
   return problem
     ? convertToFunctionErrorResponse('skill', callId, [], problem)
     : convertToFunctionResponse('skill', callId, [
@@ -1341,9 +1452,17 @@ export async function fillParkedRoundAgentGaps(input: {
   const fits = (parts: Part[]): boolean =>
     templateRecord(parts).byteLength <=
     HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes;
-  const mixedSkillBatch = (assistant.message?.parts ?? []).some(
-    (part) => part.functionCall && part.functionCall.name !== 'skill',
-  );
+  const skillResponses = input.skills
+    ? await hostedSkillBatchResponses(
+        input.managed,
+        input.skills,
+        input.promptId,
+        assistant,
+        projected,
+        input.cwd,
+        input.hooks,
+      )
+    : new Map<string, Part[]>();
   let filled = 0;
   for (const part of assistant.message?.parts ?? []) {
     const callId = part.functionCall?.id;
@@ -1355,17 +1474,7 @@ export async function fillParkedRoundAgentGaps(input: {
     const foldOwed = !journaled.has(callId);
     if (name === 'skill' && input.skills) {
       if (foldOwed) {
-        await writeFold(
-          await hostedSkillResponse(
-            input.managed,
-            input.skills,
-            input.promptId,
-            callId,
-            part.functionCall?.args ?? {},
-            mixedSkillBatch,
-            input.hooks,
-          ),
-        );
+        await writeFold(skillResponses.get(callId)!);
         filled += 1;
       }
       continue;
@@ -2194,6 +2303,7 @@ export async function recoverHostedRuntimeTurn(input: {
   promptId: string;
   brokerOptions: HostedWorkspaceBrokerOptions;
   passive: boolean;
+  canStart?: () => boolean;
   /** The evidence funnels of the interrupted-Turn settlement (#13847): a
    * model-start park whose open round holds only journal-only calls
    * answers them by what committed through these — the same shapes the
@@ -2527,6 +2637,8 @@ export async function recoverHostedRuntimeTurn(input: {
           ) as { payloadJson?: unknown };
           if (typeof stored.payloadJson !== 'string')
             throw new RecoveryDeclined();
+          if (input.canStart?.() === false)
+            throw new HostedRecoveryQuiescingError('The Harness is quiescing.');
           const result = await broker
             .execute(
               item.executionCallId,

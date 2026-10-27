@@ -354,6 +354,19 @@ export function gitProbe(...args: string[]): {
   }
 }
 
+/**
+ * Absolute path of the repository's main worktree, whichever worktree the
+ * command runs in. The watch probes keep their cursors and the autofix
+ * helpers their state under it, so every worktree of the clone shares them.
+ */
+export function repoRoot(): string {
+  const first = git('worktree', 'list', '--porcelain').split('\n')[0] ?? '';
+  if (!first.startsWith('worktree ')) {
+    throw new Error(`cannot find the main worktree in: ${first}`);
+  }
+  return first.slice('worktree '.length);
+}
+
 /** True iff a ref (branch / tag / commit) exists locally. */
 export function refExists(ref: string): boolean {
   return gitOpt('rev-parse', '--verify', '--quiet', ref) !== null;

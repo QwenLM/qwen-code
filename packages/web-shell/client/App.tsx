@@ -14,6 +14,10 @@ import {
   resolveModelManagement,
   type WebShellModelManagementOptions,
 } from './modelManagement';
+import type {
+  WebShellUnavailableModel,
+  WebShellUnavailableModelTooltipMount,
+} from './unavailableModels';
 import './styles/globals.css';
 import {
   useMessageNavigation,
@@ -224,7 +228,12 @@ import {
 } from './components/dialogs/ModelDialog';
 import { ModelFallbacksDialog } from './components/dialogs/ModelFallbacksDialog';
 import { ManagedSessionsPage } from './components/managed/ManagedSessionsPage';
-import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
+import type {
+  ManagedAgentProvider,
+  ManagedAgentWorkspace,
+} from './components/managed/managed-agent-provider';
+import type { WorkspaceSelectorOption } from './components/WorkspaceSelector';
+import { DropdownMenuItem } from './components/ui/dropdown-menu';
 import {
   managedSelectionFromUrl,
   saveManagedSelection,
@@ -313,6 +322,7 @@ import {
 } from './utils/splitUrl';
 import { ScheduledTasksDialog } from './components/dialogs/ScheduledTasksDialog';
 import { GoalsDialog } from './components/dialogs/GoalsDialog';
+import { AutofixPrWatchesDialog } from './components/dialogs/AutofixPrWatchesDialog';
 import { WorkflowRunsPage } from './components/workflows/WorkflowRunsPage';
 import { parseWebShellGoalCommand } from './utils/goalCondition';
 import { buildGoalControlRequest } from './utils/goalControlRequest';
@@ -331,6 +341,7 @@ import {
   type WebShellSettingsOptions,
 } from './settings';
 import { SettingsMessage } from './components/messages/SettingsMessage';
+import { WorkspaceDirectoriesSection } from './components/workspaces/WorkspaceDirectoriesSection';
 import { isAskUserPermission } from './utils/askUserPermission';
 import { ToolApproval } from './components/messages/ToolApproval';
 import { AskUserQuestion } from './components/messages/AskUserQuestion';
@@ -340,6 +351,7 @@ import { DeleteSessionDialog } from './components/dialogs/DeleteSessionDialog';
 import { ReleaseSessionDialog } from './components/dialogs/ReleaseSessionDialog';
 import { RewindDialog } from './components/dialogs/RewindDialog';
 import { AddWorkspaceDialog } from './components/dialogs/AddWorkspaceDialog';
+import { WorkspaceExecutionSelect } from './components/workspaces/WorkspaceExecutionSelect';
 import { WorkspaceAddStatusDialog } from './components/dialogs/WorkspaceAddStatusDialog';
 import { StandaloneContext } from './config/standalone';
 import {
@@ -367,7 +379,6 @@ import {
   navigateToDaemon,
 } from './config/daemon';
 import { Button } from './components/ui/button';
-import { Tabs, TabsList, TabsTrigger } from './components/ui/tabs';
 import { isDesktopShell } from './utils/externalOpen';
 import {
   isPluginShadowPanel,
@@ -471,6 +482,7 @@ import {
 } from './components/messages/StatusMessage';
 import type { SerializedMcpStatusMessage } from './components/messages/McpStatusMessage';
 import { McpManagerPage } from './components/mcp/McpManagerPage';
+import { ManagedMcpManagerPage } from './components/managed/ManagedMcpManagerPage';
 import { BtwMessage } from './components/messages/BtwMessage';
 import {
   createAndAttachSessionForPrompt,
@@ -1361,6 +1373,10 @@ export interface WebShellProps {
   settings?: WebShellSettingsOptions;
   /** Model add/delete interactions across WebShell. Not a backend permission policy. */
   modelManagement?: WebShellModelManagementOptions;
+  /** Extra catalog models shown disabled in the composer picker. */
+  unavailableModels?: readonly WebShellUnavailableModel[];
+  /** Host-owned hint for a disabled model. DOM/Solid hosts mount into the container. */
+  mountUnavailableModelTooltip?: WebShellUnavailableModelTooltipMount;
   /** Host-specific label for the Ask User Question free-text choice. */
   askUserFreeTextLabel?: string;
   /** Called whenever the attached daemon session or workspace changes. */
@@ -1656,6 +1672,7 @@ export interface WebShellProps {
    * Override the witty phrases cycled while a prompt is streaming. Receives the
    * resolved UI language; return phrases to replace the built-in defaults, an
    * empty array to hide the phrase, or `undefined`/`null` to keep the defaults.
+   * `ui.accessibility.enableLoadingPhrases: false` hides even custom phrases.
    */
   loadingPhrases?: LoadingPhrasesResolver;
   /** When provided, all toast notifications are forwarded to this callback and the built-in ToastHost is hidden. */
@@ -1875,6 +1892,7 @@ type MainView =
   | 'chat'
   | 'cockpit'
   | 'scheduledTasks'
+  | 'prWatches'
   | 'workflows'
   | 'goals'
   | 'split';
@@ -3443,6 +3461,8 @@ export function App({
   sidebar,
   settings: settingsPresentation,
   modelManagement,
+  unavailableModels,
+  mountUnavailableModelTooltip,
   header,
   rightPanel,
   showToolCalls = false,
@@ -3515,6 +3535,35 @@ export function App({
   managedModeRef.current = managedMode;
   const [managedNavigationTarget, setManagedNavigationTarget] =
     useState<HTMLDivElement | null>(null);
+  const [managedArchivedNavigationTarget, setManagedArchivedNavigationTarget] =
+    useState<HTMLDivElement | null>(null);
+  const [managedArchivedStatus, setManagedArchivedStatus] = useState({
+    count: 0,
+    loading: false,
+    error: false,
+  });
+  const [managedNavigationSearch, setManagedNavigationSearch] = useState('');
+  const [managedWorkspaceId, setManagedWorkspaceId] = useState<string | null>();
+  const [managedWorkspaceCreationOpen, setManagedWorkspaceCreationOpen] =
+    useState(false);
+  const managedWorkspaceCreationOpenRef = useRef(managedWorkspaceCreationOpen);
+  managedWorkspaceCreationOpenRef.current = managedWorkspaceCreationOpen;
+  const managedProviderKey = managedAgentProvider?.storageKey;
+  const [managedWorkspaceCatalog, setManagedWorkspaceCatalog] = useState<{
+    providerKey: string;
+    workspaces: ManagedAgentWorkspace[];
+  }>();
+  const handleManagedWorkspacesChange = useCallback(
+    (workspaces: ManagedAgentWorkspace[]) => {
+      if (managedProviderKey) {
+        setManagedWorkspaceCatalog({
+          providerKey: managedProviderKey,
+          workspaces,
+        });
+      }
+    },
+    [managedProviderKey],
+  );
   useAssistantTurnSettlementProjection(onAssistantTurnSettled);
   const [chatWidthMode, setChatWidthMode] =
     useState<ChatWidthMode>(readChatWidthMode);
@@ -3892,6 +3941,58 @@ export function App({
   const sessionOwnerGuard = useDaemonSessionOwnerGuard();
   const transcriptHistory = useTranscriptHistory();
   const workspace = useWorkspace();
+  const [skillsSource, setSkillsSource] = useState<{
+    client: typeof workspace.client;
+    cwd: string;
+  }>();
+  const [pluginInitialTab, setPluginInitialTab] = useState<
+    'extensions' | 'skills'
+  >('extensions');
+  const skillsSourceCwd =
+    skillsSource?.client === workspace.client
+      ? skillsSource.cwd
+      : workspace.workspaceCwd;
+  const selectSkillsWorkspace = useCallback(
+    (cwd: string) => {
+      setSkillsSource((current) =>
+        current?.client === workspace.client && current.cwd === cwd
+          ? current
+          : { client: workspace.client, cwd },
+      );
+    },
+    [workspace.client],
+  );
+  const managedCreationSkills = useMemo(() => {
+    if (!managedAgentProvider || !skillsSourceCwd) return undefined;
+    const sourceCwd = skillsSourceCwd;
+    return {
+      workspaceCwd: sourceCwd,
+      async list(signal: AbortSignal) {
+        const status = await workspace.client
+          .workspaceByCwd(sourceCwd)
+          .workspaceConfigSkills();
+        signal.throwIfAborted();
+        if (status.workspaceCwd !== sourceCwd)
+          throw new Error('Skills source Workspace identity changed.');
+        if (!status.initialized || status.errors?.length)
+          throw new Error('Skills source Workspace is unavailable.');
+        return status.skills
+          .filter(
+            (skill) => skill.status === 'ok' && skill.userInvocable !== false,
+          )
+          .map(({ name, description }) => ({ name, description }));
+      },
+      async load(signal: AbortSignal) {
+        const snapshot = await workspace.client
+          .workspaceByCwd(sourceCwd)
+          .workspaceSkillsSnapshot(signal);
+        if (snapshot.workspaceCwd !== sourceCwd)
+          throw new Error('Skills source Workspace identity changed.');
+        return snapshot.skills;
+      },
+    };
+  }, [managedAgentProvider, skillsSourceCwd, workspace.client]);
+
   // Multi-daemon (#13727): saved hosts stay connected read-only alongside
   // the provider that owns this App subtree; the picker and sidebar consume
   // their live workspaces/sessions; embedded shells have no controller and
@@ -4022,7 +4123,9 @@ export function App({
         ...ordinaryWorkspaces.map((entry) => ({
           id: entry.id,
           cwd: entry.cwd,
-          label: workspaceLabel(entry),
+          label: managedAgentProvider
+            ? `${workspaceLabel(entry)} · ${t('managed.localMode')}`
+            : workspaceLabel(entry),
           primary: entry.primary,
           trusted: entry.trusted,
           hostOrigin: focusedHostOrigin,
@@ -4037,7 +4140,9 @@ export function App({
             .map((entry) => ({
               id: `${origin}${entry.id}`,
               cwd: entry.cwd,
-              label: workspaceLabel(entry),
+              label: managedAgentProvider
+                ? `${workspaceLabel(entry)} · ${t('managed.localMode')}`
+                : workspaceLabel(entry),
               primary: entry.primary,
               trusted: entry.trusted,
               hostOrigin: origin,
@@ -4132,6 +4237,18 @@ export function App({
     workspace.capabilities?.features?.includes(
       'scratch_workspace_registration',
     ) === true;
+  // SSH workspaces validate paths on the remote host; the daemon route
+  // refuses them, so do not offer the section at all. Registration rewrites an
+  // `ssh://` URL to a local mirror directory, so the cwd never carries that
+  // scheme: the selected workspace entry's SSH marker is the signal.
+  const workspaceDirectoriesSupported =
+    workspace.capabilities?.features?.includes('workspace_directories') ===
+      true &&
+    workspace.workspaceCwd !== undefined &&
+    workspaces.find((entry) => entry.cwd === workspace.workspaceCwd)?.ssh ===
+      undefined;
+  const gitWorkspaceCloneSupported =
+    workspace.capabilities?.features?.includes('git_workspace_clone') === true;
   const workspaceDisplayNameSupported =
     workspace.capabilities?.features?.includes('workspace_display_name') ===
     true;
@@ -4202,6 +4319,9 @@ export function App({
     (workspace.capabilities?.workspaces === undefined &&
       Boolean(workspace.capabilities?.workspaceCwd));
   const externalManagedAgentAvailable = managedAgentProvider !== undefined;
+  // The daemon lists the `/autofix-pr` watches of its workspaces' clones.
+  const prWatchesAvailable =
+    workspace.capabilities?.features?.includes('autofix_pr_watches') === true;
   const [pendingSessionContext, setPendingSessionContextState] = useState<
     DaemonProductSessionContext | undefined
   >(undefined);
@@ -4240,6 +4360,7 @@ export function App({
     () => pendingSessionContext ?? settledSessionContext,
     [pendingSessionContext, settledSessionContext],
   );
+  const sessionIsStandalone = effectiveSessionContext?.kind === 'standalone';
   const workspaceContextActive = effectiveSessionContext?.kind === 'workspace';
   // The composer picker chooses the target of the next session, so a
   // projectless draft keeps it enabled: that is where "no workspace" is
@@ -4346,6 +4467,14 @@ export function App({
   // a mismatch means connection.sessionId moved on (reconnect cycling or a
   // user-initiated switch) and the stale response is dropped.
   const worktreeSessionKeyRef = useRef<string | undefined>(undefined);
+  const sidebarStandaloneTitleRef = useRef<
+    | {
+        sessionId: string;
+        displayName?: string;
+        client: typeof workspace.client;
+      }
+    | undefined
+  >(undefined);
   const sessionStatusRequestRef = useRef(0);
   useLayoutEffect(() => {
     setSessionWorktree(undefined);
@@ -4364,17 +4493,22 @@ export function App({
     // session switch still starts from an empty title.
     setSessionStatusDisplayName(
       (prev) =>
-        peekSessionCatalogDisplayName(
-          workspace.client,
-          connection.sessionId,
-          connection.workspaceCwd,
-        ) ?? prev,
+        (connection.sessionContext?.kind === 'standalone' &&
+        sidebarStandaloneTitleRef.current?.client === workspace.client &&
+        sidebarStandaloneTitleRef.current.sessionId === connection.sessionId
+          ? sidebarStandaloneTitleRef.current.displayName
+          : peekSessionCatalogDisplayName(
+              workspace.client,
+              connection.sessionId,
+              connection.workspaceCwd,
+            )) ?? prev,
     );
   }, [
     logicalSessionKey,
     workspace.client,
     connection.sessionId,
     connection.workspaceCwd,
+    connection.sessionContext?.kind,
   ]);
   // Restore worktree info from the server when switching to an existing
   // session. The effect intentionally does NOT cancel in-flight fetches on
@@ -9879,6 +10013,9 @@ export function App({
         navigation?.route.page !== 'chat' || !navigation.route.sessionId,
       );
       setManagedHome(selection.open);
+      if (managedSessionId !== selection.sessionId) {
+        setManagedWorkspaceId(undefined);
+      }
       setManagedSessionId(selection.sessionId);
     }
   }
@@ -9919,6 +10056,7 @@ export function App({
     if (activePanel !== 'settings') {
       setSettingsInitialCategory(undefined);
     }
+    if (activePanel !== 'plugins') setPluginInitialTab('extensions');
   }, [activePanel]);
   const closePanel = useCallback(() => {
     splitClassificationGenerationRef.current += 1;
@@ -9959,6 +10097,7 @@ export function App({
       mainView === 'cockpit' ||
       (!projectFeaturesAvailable &&
         (mainView === 'scheduledTasks' ||
+          mainView === 'prWatches' ||
           mainView === 'goals' ||
           mainView === 'split'))
     ) {
@@ -10046,6 +10185,24 @@ export function App({
     setMainView('goals');
     navigationRef.current?.openPage('goals');
   }, [showChat]);
+  const openPrWatches = useCallback(() => {
+    splitClassificationGenerationRef.current += 1;
+    setActivePanel(null);
+    // See openScheduledTasks: leaving the cockpit must strip its deep link.
+    if (!navigationRef.current) showChat();
+    setMainView('prWatches');
+    navigationRef.current?.openPage('pr-watches');
+  }, [showChat]);
+  // A daemon that stops listing watches (another daemon behind the same
+  // origin) leaves no page to show.
+  useEffect(() => {
+    if (
+      mainView === 'prWatches' &&
+      (!projectFeaturesAvailable || !prWatchesAvailable)
+    ) {
+      showChat();
+    }
+  }, [mainView, prWatchesAvailable, projectFeaturesAvailable, showChat]);
   const returnToChat = useCallback(() => {
     if (navigationRef.current && navigationRef.current.route.page !== 'chat') {
       navigationRef.current.returnToChat();
@@ -10063,6 +10220,7 @@ export function App({
         if (!projectFeaturesAvailable) return false;
         if (item === 'live') return sidebarOptions.showLive;
         if (item === 'workflows') return workflowsEnabled;
+        if (item === 'prWatches') return prWatchesAvailable;
         return true;
       }) ||
         (sidebarOptions.footer !== false &&
@@ -10254,9 +10412,11 @@ export function App({
       ? activePanel
       : mainView === 'scheduledTasks'
         ? 'scheduled-tasks'
-        : mainView === 'goals'
-          ? 'goals'
-          : undefined;
+        : mainView === 'prWatches'
+          ? 'pr-watches'
+          : mainView === 'goals'
+            ? 'goals'
+            : undefined;
   useEffect(() => {
     if (!navigation || !workspaceCapabilitiesReady) return;
     const page = navigation.route.page;
@@ -10265,11 +10425,17 @@ export function App({
       navigationSettledRef.current = true;
       return;
     }
-    const primaryItem = page === 'scheduled-tasks' ? 'scheduledTasks' : page;
+    const primaryItem =
+      page === 'scheduled-tasks'
+        ? 'scheduledTasks'
+        : page === 'pr-watches'
+          ? 'prWatches'
+          : page;
     const allowed =
       page === 'chat' ||
       (projectFeaturesAvailable &&
         (page !== 'live' || liveSidebarEnabled) &&
+        (page !== 'pr-watches' || prWatchesAvailable) &&
         (page === 'settings'
           ? hostSidebar?.footer !== false &&
             (hostSidebar?.footer?.items?.includes('settings') ?? true)
@@ -10293,9 +10459,11 @@ export function App({
     setMainView(
       nextPage === 'scheduled-tasks'
         ? 'scheduledTasks'
-        : nextPage === 'goals'
-          ? 'goals'
-          : 'chat',
+        : nextPage === 'pr-watches'
+          ? 'prWatches'
+          : nextPage === 'goals'
+            ? 'goals'
+            : 'chat',
     );
     if (nextPage === 'settings') setSettingsInitialCategory(undefined);
     if (!allowed) navigation.reconcilePage(undefined);
@@ -10305,6 +10473,7 @@ export function App({
     hostSidebar?.footer,
     hostSidebar?.primaryNav?.items,
     liveSidebarEnabled,
+    prWatchesAvailable,
     workspaceCapabilitiesReady,
   ]);
   useEffect(() => {
@@ -10806,6 +10975,7 @@ export function App({
     if (
       mainView === 'cockpit' ||
       mainView === 'scheduledTasks' ||
+      mainView === 'prWatches' ||
       mainView === 'workflows' ||
       mainView === 'goals'
     ) {
@@ -11065,6 +11235,28 @@ export function App({
   );
   const refreshActiveSessionDisplayName = useCallback(async () => {
     const activeConnection = connectionRef.current;
+    if (
+      activeConnection.sessionId &&
+      activeConnection.sessionContext?.kind === 'standalone'
+    ) {
+      const owner = sessionOwnerGuard.capture();
+      try {
+        const summary = await workspace.client.getStandaloneSession(
+          activeConnection.sessionId,
+        );
+        if (
+          owner.isCurrent() &&
+          connectionRef.current.sessionId === activeConnection.sessionId &&
+          !('state' in summary) &&
+          summary.displayName?.trim()
+        ) {
+          setSessionStatusDisplayName(summary.displayName);
+        }
+      } catch {
+        // A title refresh must not disrupt the completed conversation.
+      }
+      return;
+    }
     if (
       !activeConnection.sessionId ||
       !activeConnection.workspaceCwd ||
@@ -12309,6 +12501,7 @@ export function App({
     showMemoryDialog ||
     (modelManagementPolicy.allowAdd && showAuthDialog) ||
     showAddWorkspaceDialog ||
+    managedWorkspaceCreationOpen ||
     scratchOutcomeUnknown !== 'clear' ||
     externalInteractionBlockCount > 0 ||
     // The Settings / Daemon Status panel replaces the chat surface, so — like a
@@ -12633,6 +12826,7 @@ export function App({
           isGoalGateBlocked() ||
           mcpAppQueueBusyRef.current ||
           queuedShellCommandsRef.current.length > 0 ||
+          isDrainingRef.current ||
           shellSubmitInFlightRef.current
         ) {
           throw new Error(t('mcpApp.message.busy'));
@@ -13241,6 +13435,10 @@ export function App({
     workspaceSettings.find(
       (setting) => setting.key === 'ui.showResponseTokensPerSecond',
     )?.values.effective === true;
+  const enableLoadingPhrases =
+    workspaceSettings.find(
+      (setting) => setting.key === 'ui.accessibility.enableLoadingPhrases',
+    )?.values.effective !== false;
   const liveSetup = useLiveVoiceSetup(
     workspaceSettings.some(
       (setting) => setting.key === 'experimental.liveVoice.enabled',
@@ -13845,12 +14043,18 @@ export function App({
       if (sessionWriteBlocked) return;
       const owner = { current: sessionOwnerGuard.capture() };
       const previousLanguage = selectedLanguage;
+      // A standalone session refuses every workspace write, so its only
+      // writable language scope is the user one. The settings panel hides the
+      // row on the Workspace tab there; keep this guard for a scope that was
+      // picked before the session context settled.
+      const effectiveScope = sessionIsStandalone ? 'user' : scope;
       // Forward the settings tab's scope to the command so a Workspace-tab edit
       // persists to workspace settings instead of always writing user scope
       // (the /language command otherwise defaults to user). The command still
       // switches the daemon's live locale so command descriptions re-localize —
       // which a plain scoped settings write wouldn't do.
-      const scopeFlag = scope === 'workspace' ? ' --project' : ' --global';
+      const scopeFlag =
+        effectiveScope === 'workspace' ? ' --project' : ' --global';
       const command = `/language ui ${nextLanguage}${scopeFlag}`;
       const refreshSettings = async () => {
         if (!owner.current.isCurrent()) return;
@@ -13880,7 +14084,7 @@ export function App({
       sendPrompt(command, undefined, undefined, { ownerRef: owner })
         .then(() => {
           if (!owner.current.isCurrent()) return;
-          if (scope === 'user') {
+          if (effectiveScope === 'user') {
             // A user-scoped choice becomes the host's persisted opinion. A
             // workspace choice remains settings-owned for that workspace.
             handleLanguageChange(nextLanguage);
@@ -13909,6 +14113,54 @@ export function App({
       sendPrompt,
       selectedLanguage,
       sessionActions,
+      sessionOwnerGuard,
+      sessionIsStandalone,
+      isGoalGateBlocked,
+    ],
+  );
+
+  const handleSettingsOutputLanguageChange = useCallback(
+    async (language: string): Promise<boolean> => {
+      if (sessionWriteBlocked) return false;
+      const owner = { current: sessionOwnerGuard.capture() };
+      if (
+        streamingStateRef.current !== 'idle' ||
+        sessionHasActivePromptRef.current ||
+        isGoalGateBlocked()
+      ) {
+        blockCommand();
+        return false;
+      }
+      // Only the language command rewrites output-language.md and refreshes
+      // running sessions; a plain settings write would leave both stale.
+      const command = `/language output ${language.trim() || 'auto'}`;
+      try {
+        await sendPrompt(command, undefined, undefined, { ownerRef: owner });
+      } catch (error) {
+        if (owner.current.isCurrent()) {
+          reportError(error, 'Failed to sync /language output command');
+        }
+        return false;
+      }
+      if (!owner.current.isCurrent()) return true;
+      try {
+        await reloadWorkspaceSettings();
+      } catch (error) {
+        if (owner.current.isCurrent()) {
+          reportError(
+            error,
+            'Failed to refresh settings after /language output',
+          );
+        }
+      }
+      return true;
+    },
+    [
+      blockCommand,
+      reloadWorkspaceSettings,
+      reportError,
+      sessionWriteBlocked,
+      sendPrompt,
       sessionOwnerGuard,
       isGoalGateBlocked,
     ],
@@ -14300,6 +14552,9 @@ export function App({
             void refreshActiveSessionDisplayNameRef.current();
           }
         }
+      }
+      if (productContext?.kind === 'standalone' && !sessionDisplayName) {
+        void refreshActiveSessionDisplayNameRef.current();
       }
       dispatchSessionChangeRef.current?.({
         type: 'turn_complete',
@@ -15329,6 +15584,7 @@ export function App({
         if (!reconciled) {
           throw new Error(t('sidebar.addWorkspaceRefreshError'));
         }
+        setManagedHome(false);
       } finally {
         if (workspaceMutationTokenRef.current === token) {
           workspaceMutationTokenRef.current = null;
@@ -15406,6 +15662,24 @@ export function App({
     hasRemoteWorkspaceLocation,
     workspaceAddSelectedLocation,
     workspace.baseUrl,
+    workspaceActions,
+  ]);
+
+  const gitCloneControls = useMemo(() => {
+    if (!gitWorkspaceCloneSupported || !workspaceAddLocationIsConnected) {
+      return undefined;
+    }
+    return {
+      start: (input: { url: string; target: string }) =>
+        workspaceActions.startGitWorkspaceClone(input),
+      poll: (jobId: string) => workspaceActions.getGitWorkspaceCloneJob(jobId),
+      cancel: async (jobId: string) => {
+        await workspaceActions.cancelGitWorkspaceClone(jobId);
+      },
+    };
+  }, [
+    gitWorkspaceCloneSupported,
+    workspaceAddLocationIsConnected,
     workspaceActions,
   ]);
 
@@ -15586,6 +15860,47 @@ export function App({
     },
     [daemonTarget, focusedHostOrigin, handleSelectComposerWorkspace],
   );
+  const handleSelectDaemonWorkspace = useCallback(
+    (workspace: WorkspaceSelectorOption) => {
+      const target = composerWorkspaces?.find(
+        (item) =>
+          item.id === workspace.id &&
+          item.cwd === workspace.cwd &&
+          item.hostOrigin === workspace.hostOrigin,
+      );
+      if (!target?.trusted) return;
+      if (target.hostOrigin && target.hostOrigin !== focusedHostOrigin) {
+        if (!daemonTarget) return;
+        setManagedHome(false);
+        handleSelectHostedWorkspace(target.hostOrigin, target.cwd);
+      } else if (connectionRef.current.sessionId) {
+        void createNewSession({ kind: 'workspace', cwd: target.cwd });
+      } else {
+        setManagedHome(false);
+        void switchWorkspace(target.cwd);
+        returnToChat();
+      }
+    },
+    [
+      composerWorkspaces,
+      createNewSession,
+      daemonTarget,
+      focusedHostOrigin,
+      handleSelectHostedWorkspace,
+      returnToChat,
+      switchWorkspace,
+    ],
+  );
+  const handleSelectManagedWorkspace = useCallback(
+    (workspaceId: string) => {
+      setManagedWorkspaceId(workspaceId);
+      setManagedSessionId(undefined);
+      setManagedHome(true);
+      closeMobileDrawer();
+      returnToChat();
+    },
+    [closeMobileDrawer, returnToChat],
+  );
   const handleSelectComposerStandalone = useCallback(() => {
     if (connectionRef.current.sessionId) {
       void createNewSession({ kind: 'global' });
@@ -15605,10 +15920,42 @@ export function App({
   const handleCreateComposerScratchWorkspace = useCallback(() => {
     void handleCreateScratchWorkspace();
   }, [handleCreateScratchWorkspace]);
-  const handleOpenExistingWorkspace = useCallback(() => {
+  const handleOpenLocalWorkspace = useCallback(() => {
     workspaceBrowseActiveRef.current = standalone;
     setShowAddWorkspaceDialog(true);
   }, [standalone]);
+  const handleOpenManagedWorkspace = useCallback(() => {
+    setShowAddWorkspaceDialog(false);
+    setWorkspaceAddLocation(undefined);
+    workspaceBrowseActiveRef.current = false;
+    completeRemoteWorkspaceAdd();
+    setManagedWorkspaceCreationOpen(true);
+    closeMobileDrawer();
+  }, [closeMobileDrawer]);
+  const handleOpenExistingWorkspace = useCallback(() => {
+    if (
+      managedMode &&
+      managedAgentProvider?.workspaceBinding?.createWorkspace
+    ) {
+      handleOpenManagedWorkspace();
+    } else {
+      handleOpenLocalWorkspace();
+    }
+  }, [
+    managedMode,
+    managedAgentProvider,
+    handleOpenManagedWorkspace,
+    handleOpenLocalWorkspace,
+  ]);
+  const workspaceExecutionField = managedAgentProvider?.workspaceBinding
+    ?.createWorkspace ? (
+    <WorkspaceExecutionSelect
+      value="daemon"
+      onValueChange={(mode) => {
+        if (mode === 'managed') handleOpenManagedWorkspace();
+      }}
+    />
+  ) : undefined;
 
   const handleComposerAttachmentsChange = useCallback(
     (hasAttachments: boolean) => {
@@ -16606,7 +16953,13 @@ export function App({
     );
   }, [clearPendingBoundRun, enqueueManualRun]);
   const runTaskManually = useCallback(
-    (prompt: string, sessionId: string | null): Promise<void> => {
+    (
+      prompt: string,
+      sessionId: string | null,
+      // The workspace the bound session lives in: restoring it from another
+      // workspace's conversation would name the wrong one.
+      workspaceCwd?: string,
+    ): Promise<void> => {
       showChat();
       if (!sessionId) {
         // Unbound: runs in the current session — resolves at admission.
@@ -16628,7 +16981,7 @@ export function App({
           reject,
         };
         pendingBoundRunRef.current = pending;
-        loadSidebarSession(sessionId)
+        loadSidebarSession(sessionId, workspaceCwd)
           // Fire immediately when the session was already active (no dep change
           // to trigger the effect); a no-op if the load is still settling, in
           // which case the effect picks it up.
@@ -21053,6 +21406,8 @@ export function App({
     onError: reportError,
     sessionWorkflowEnabled,
     modelManagement,
+    unavailableModels,
+    mountUnavailableModelTooltip,
     workflow: sessionWorkflowEnabled
       ? {
           todos: sessionWorkflowTodos,
@@ -21498,7 +21853,9 @@ export function App({
                 tone={workspace.status === 'error' ? 'alert' : 'status'}
                 subtitle={workspaceAddLocationSubtitle}
                 onClose={closeAddWorkspaceDialog}
-              />
+              >
+                {workspaceExecutionField}
+              </WorkspaceAddStatusDialog>
             ) : workspaceBrowseActiveRef.current &&
               workspaceAddLocationIsConnected &&
               !dynamicWorkspaceRegistrationSupported ? (
@@ -21507,9 +21864,19 @@ export function App({
                 tone="alert"
                 subtitle={workspaceAddLocationSubtitle}
                 onClose={closeAddWorkspaceDialog}
-              />
+              >
+                {workspaceExecutionField}
+              </WorkspaceAddStatusDialog>
             ) : (
               <AddWorkspaceDialog
+                executionMode={
+                  managedAgentProvider?.workspaceBinding?.createWorkspace
+                    ? 'daemon'
+                    : undefined
+                }
+                onExecutionModeChange={(mode) => {
+                  if (mode === 'managed') handleOpenManagedWorkspace();
+                }}
                 browseDirectories={workspaceBrowseActiveRef.current}
                 initialPath={
                   !workspaceBrowseActiveRef.current
@@ -21537,6 +21904,7 @@ export function App({
                     : handleAddWorkspace
                 }
                 onSuggest={suggestWorkspacePathsForLocation}
+                gitClone={gitCloneControls}
                 onPick={
                   workspaceAddLocationIsConnected &&
                   nativeDirectoryPickerSupported &&
@@ -21680,6 +22048,7 @@ export function App({
                       : undefined
                   }
                   onOpenPlugins={() => {
+                    setPluginInitialTab('extensions');
                     closeMobileDrawer();
                     openPanel('plugins');
                   }}
@@ -21720,6 +22089,14 @@ export function App({
                     closeMobileDrawer();
                     openGoals();
                   }}
+                  {...(prWatchesAvailable
+                    ? {
+                        onOpenPrWatches: () => {
+                          closeMobileDrawer();
+                          openPrWatches();
+                        },
+                      }
+                    : {})}
                   onOpenSessions={() => {
                     closeMobileDrawer();
                     openPanel('sessions');
@@ -21748,7 +22125,14 @@ export function App({
                   // chat it opens an ordinary task; a fresh voice conversation
                   // comes from the Live controls.
                   onNewSession={(workspaceCwd) => {
-                    if (managedMode) {
+                    if (managedMode && typeof workspaceCwd !== 'string') {
+                      if (
+                        managedSessionId &&
+                        managedAgentProvider?.workspaceBinding &&
+                        managedWorkspaceId === undefined
+                      ) {
+                        return false;
+                      }
                       setManagedSessionId(undefined);
                       closeMobileDrawer();
                       returnToChat();
@@ -21760,32 +22144,23 @@ export function App({
                         : { kind: 'inherit', leaveLive: true },
                     );
                   }}
-                  sessionContent={
-                    managedMode ? (
+                  managedWorkspaces={
+                    managedAgentProvider ? (
                       <div ref={setManagedNavigationTarget} />
                     ) : undefined
                   }
-                  sessionHeader={managedAgentProvider ? (
-                    <Tabs
-                      className="px-2 pb-2"
-                      value={managedMode ? 'managed' : 'local'}
-                      onValueChange={(value) =>
-                        setManagedHome(value === 'managed')
-                      }
-                    >
-                      <TabsList
-                        aria-label={t('managed.executionMode')}
-                        className="w-full"
-                      >
-                        <TabsTrigger value="local" className="flex-1">
-                          {t('managed.localMode')}
-                        </TabsTrigger>
-                        <TabsTrigger value="managed" className="flex-1">
-                          {t('managed.managedMode')}
-                        </TabsTrigger>
-                      </TabsList>
-                    </Tabs>
-                  ) : undefined}
+                  managedArchivedSessions={
+                    managedAgentProvider?.lifecycle
+                      ? {
+                          ...managedArchivedStatus,
+                          content: <div ref={setManagedArchivedNavigationTarget} />,
+                        }
+                      : undefined
+                  }
+                  onSearchQueryChange={
+                    managedAgentProvider ? setManagedNavigationSearch : undefined
+                  }
+                  currentSessionActive={!managedMode}
                   onNewStandaloneSession={() =>
                     createNewSession({ kind: 'global' })
                   }
@@ -21794,7 +22169,8 @@ export function App({
                     return loadSidebarSession(sessionId, workspaceCwd);
                   }}
                   onOpenHostSession={handleOpenHostSession}
-                  onLoadStandaloneSession={(sessionId) => {
+                  onLoadStandaloneSession={(sessionId, displayName) => {
+                    sidebarStandaloneTitleRef.current = { sessionId, displayName, client: workspace.client };
                     setMainView('chat');
                     return loadSidebarSession(
                       sessionId,
@@ -21807,6 +22183,7 @@ export function App({
                   }
                   projectFeaturesEnabled={projectFeaturesAvailable}
                   onSelectCurrentSession={() => {
+                    setManagedHome(false);
                     closeMobileDrawer();
                     splitFoldedByShrinkRef.current = false;
                     returnToChat();
@@ -21895,7 +22272,8 @@ export function App({
                   }
                   onOpenAddWorkspace={
                     dynamicWorkspaceRegistrationSupported ||
-                    hasRemoteWorkspaceLocation
+                    hasRemoteWorkspaceLocation ||
+                    Boolean(managedAgentProvider?.workspaceBinding?.createWorkspace)
                       ? handleOpenExistingWorkspace
                       : undefined
                   }
@@ -22332,11 +22710,20 @@ export function App({
                         embedded
                         initialCategory={settingsInitialCategory}
                         onLanguageChange={handleSettingsLanguageChange}
+                        onOutputLanguageChange={
+                          handleSettingsOutputLanguageChange
+                        }
+                        workspaceSettingsWritable={!sessionIsStandalone}
                         onThemeChange={handleThemeChange}
                         chatWidthMode={chatWidthMode}
                         onChatWidthModeChange={handleChatWidthModeChange}
                         connections={
                           standalone ? <DaemonConnectionsSettings /> : undefined
+                        }
+                        workspaceDirectoriesSection={
+                          workspaceDirectoriesSupported ? (
+                            <WorkspaceDirectoriesSection />
+                          ) : undefined
                         }
                         modelManagementSectionProps={{
                           ...modelManagementPolicy,
@@ -22402,8 +22789,16 @@ export function App({
                       <DaemonStatusDialog />
                     ) : activePanel === 'extensions' ? (
                       <ExtensionsManagerPage
+                        managed={managedMode && managedAgentProvider ? { provider: managedAgentProvider, workspaceId: managedWorkspaceId ?? undefined, sessionId: managedSessionId } : undefined}
                         onClose={closePanel}
                         initialFocusRef={panelHeadingRef}
+                      />
+                    ) : activePanel === 'mcp' && managedMode && managedAgentProvider ? (
+                      <ManagedMcpManagerPage
+                        provider={managedAgentProvider}
+                        sessionId={managedSessionId}
+                        workspaceId={managedWorkspaceId ?? undefined}
+                        onClose={closePanel}
                       />
                     ) : activePanel === 'mcp' && mcpDialogMessage ? (
                       <McpManagerPage
@@ -22444,6 +22839,20 @@ export function App({
                         onClose={returnToChat}
                         onUseSkill={handleUseSkill}
                         initialFocusRef={pluginTabRef}
+                        initialTab={pluginInitialTab}
+                        skillsWorkspaceCwd={skillsSourceCwd}
+                        onSkillsWorkspaceChange={selectSkillsWorkspace}
+                        managedSkills={managedAgentProvider !== undefined}
+                        managedExtensions={managedMode && managedAgentProvider ? {
+                          provider: managedAgentProvider,
+                          sessionId: managedSessionId,
+                          workspaceId: managedWorkspaceId ?? undefined,
+                        } : undefined}
+                        managedMcp={managedMode && managedAgentProvider ? {
+                          provider: managedAgentProvider,
+                          sessionId: managedSessionId,
+                          workspaceId: managedWorkspaceId ?? undefined,
+                        } : undefined}
                       />
                     ) : activePanel === 'channels' ? (
                       <ChannelsManagerPage
@@ -22580,6 +22989,10 @@ export function App({
                       currentSessionSchedulingAvailable={workspace.capabilities?.features?.includes(
                         'scheduled_task_session_reuse',
                       )}
+                      gateAvailable={workspace.capabilities?.features?.includes(
+                        'scheduled_task_gate',
+                      )}
+                      autofixPrWatchesAvailable={prWatchesAvailable}
                       onCreateViaChat={() => {
                         // Start a FRESH session and jump to it so the task-
                         // creation chat doesn't pile onto the current
@@ -22609,11 +23022,12 @@ export function App({
                           }, 0);
                         });
                       }}
-                      onOpenSession={(sessionId) => {
+                      onOpenSession={(sessionId, workspaceCwd) => {
                         // The task's bound session IS its run history — switch
-                        // to the chat view and load that session's transcript.
+                        // to the chat view and load that session's transcript,
+                        // in the task's own workspace.
                         showChat();
-                        loadSidebarSession(sessionId).catch(
+                        loadSidebarSession(sessionId, workspaceCwd).catch(
                           (error: unknown) => {
                             reportError(error, 'Failed to open session');
                           },
@@ -22686,6 +23100,62 @@ export function App({
                   </div>
                 </div>
               )}
+              {projectFeaturesAvailable &&
+                prWatchesAvailable &&
+                mainView === 'prWatches' && (
+                  <div className={styles.fullPage} data-testid="pr-watches-page">
+                    <div className={styles.fullPageHeader}>
+                      {!navigationRailVisible && (
+                        <button
+                          type="button"
+                          className={styles.fullPageBack}
+                          onClick={returnToChat}
+                          aria-label={t('common.back')}
+                          title={t('common.back')}
+                        >
+                          <svg
+                            viewBox="0 0 24 24"
+                            width="18"
+                            height="18"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            aria-hidden="true"
+                          >
+                            <path d="M15 18l-6-6 6-6" />
+                          </svg>
+                        </button>
+                      )}
+                      <div className={styles.fullPageTitle}>
+                        {t('autofixPrWatches.title')}
+                      </div>
+                    </div>
+                    <div className={styles.fullPageBody}>
+                      <AutofixPrWatchesDialog
+                        // Stopping runs the skill in the watch's own session,
+                        // as a scheduled task's manual run does.
+                        onRunPrompt={runTaskManually}
+                        workspaces={
+                          lockedWorkspaceCwd
+                            ? visibleWorkspaces
+                            : ordinaryWorkspaces
+                        }
+                        lockedWorkspace={lockedWorkspaceCapability}
+                        onOpenSession={(sessionId, workspaceCwd) => {
+                          showChat();
+                          loadSidebarSession(sessionId, workspaceCwd).catch(
+                            (error: unknown) => {
+                              reportError(error, 'Failed to open session');
+                            },
+                          );
+                        }}
+                        onError={reportError}
+                      />
+                    </div>
+                  </div>
+                )}
               {projectFeaturesAvailable && mainView === 'goals' && (
                 <div className={styles.fullPage} data-testid="goals-page">
                   <div className={styles.fullPageHeader}>
@@ -22850,6 +23320,10 @@ export function App({
                       <SplitView
                         showResponseTokensPerSecond={showResponseTokensPerSecond}
                         modelManagement={modelManagement}
+                        unavailableModels={unavailableModels}
+                        mountUnavailableModelTooltip={
+                          mountUnavailableModelTooltip
+                        }
                         planControlVisible={visibleComposerToolbarActions.includes('plan')}
                         sessionIds={splitSessionIds}
                         onAssistantTurnSettled={onAssistantTurnSettled}
@@ -22905,21 +23379,64 @@ export function App({
                     <ManagedSessionsPage
                       key={managedAgentProvider.storageKey}
                       sessionId={managedSessionId}
-                      onSelectSession={(id) => {
+                      workspaceCreationOpen={managedWorkspaceCreationOpen}
+                      onWorkspaceCreationOpenChange={setManagedWorkspaceCreationOpen}
+                      onWorkspaceCreated={(workspaceId) => {
+                        if (!managedWorkspaceCreationOpenRef.current) return;
+                        setManagedWorkspaceId(workspaceId);
+                        setManagedSessionId(undefined);
+                        setManagedHome(true);
+                        returnToChat();
+                      }}
+                      onOpenLocalWorkspace={
+                        !lockedWorkspaceCwd &&
+                        (dynamicWorkspaceRegistrationSupported || hasRemoteWorkspaceLocation)
+                          ? handleOpenLocalWorkspace
+                          : undefined
+                      }
+                      workspaceId={managedWorkspaceId ?? undefined}
+                      onSessionWorkspaceChange={setManagedWorkspaceId}
+                      onSelectWorkspace={handleSelectManagedWorkspace}
+                      daemonWorkspaces={composerWorkspaces}
+                      onSelectDaemonWorkspace={handleSelectDaemonWorkspace}
+                      onWorkspacesChange={handleManagedWorkspacesChange}
+                      navigationActive={managedMode}
+                      navigationSearch={managedNavigationSearch}
+                      onOpenSession={(id, workspaceId) => {
+                        if (
+                          id !== managedSessionId ||
+                          workspaceId !== undefined
+                        ) {
+                          setManagedWorkspaceId(workspaceId);
+                        }
+                        setManagedSessionId(id);
+                        setManagedHome(true);
+                        closeMobileDrawer();
+                        returnToChat();
+                      }}
+                      onSelectSession={(id, workspaceId) => {
+                        if (
+                          id !== managedSessionId ||
+                          workspaceId !== undefined
+                        ) {
+                          setManagedWorkspaceId(workspaceId);
+                        }
                         setManagedSessionId(id);
                         if (managedModeRef.current) {
                           closeMobileDrawer();
                           returnToChat();
                         }
                       }}
-                      workspaceCwd={lockedWorkspaceCwd}
                       managedAgentProvider={managedAgentProvider}
+                      creationSkills={managedCreationSkills}
                       interactive={managedChatVisible}
                       navigationTarget={
                         sidebarOptions.enabled
                           ? managedNavigationTarget
                           : undefined
                       }
+                      archivedNavigationTarget={managedArchivedNavigationTarget}
+                      onArchivedSessionsStatusChange={setManagedArchivedStatus}
                     />
                   </WebShellCustomizationProvider>
                 </div>
@@ -23492,6 +24009,7 @@ export function App({
                         sessionHasActivePrompt ? (
                           suppressFailedPromptRetryStreaming ? null : (
                             <StreamingStatus
+                              showPhrase={enableLoadingPhrases}
                               showResponseTokensPerSecond={showResponseTokensPerSecond && !approvalOverlayActive}
                               startedAt={
                                 failedPromptRetry?.startedAt ??
@@ -23822,6 +24340,10 @@ export function App({
                           }
                           modelRefresh={modelRefresh}
                           availableModels={availableModels}
+                          unavailableModels={unavailableModels}
+                          mountUnavailableModelTooltip={
+                            mountUnavailableModelTooltip
+                          }
                           onSelectMode={handleSetMode}
                           onSelectModel={handleModelSelect}
                           reasoning={displayedReasoning}
@@ -23836,6 +24358,22 @@ export function App({
                             composerWorkspaceSelectEnabled
                               ? composerWorkspaces
                               : undefined
+                          }
+                          workspaceSelectorAlwaysVisible={Boolean(managedAgentProvider) && composerWorkspaceSelectEnabled}
+                          workspaceMenuItems={
+                            composerWorkspaceSelectEnabled && !lockedWorkspaceCwd &&
+                            managedAgentProvider &&
+                            managedWorkspaceCatalog &&
+                            managedWorkspaceCatalog.providerKey === managedProviderKey &&
+                            managedWorkspaceCatalog.workspaces.map((item) => (
+                              <DropdownMenuItem
+                                key={item.workspaceId}
+                                disabled={!item.canCreateSession}
+                                onSelect={() => handleSelectManagedWorkspace(item.workspaceId)}
+                              >
+                                {item.displayName} · {t('managed.managedMode')}
+                              </DropdownMenuItem>
+                            ))
                           }
                           selectedWorkspaceCwd={
                             workspaceContextActive

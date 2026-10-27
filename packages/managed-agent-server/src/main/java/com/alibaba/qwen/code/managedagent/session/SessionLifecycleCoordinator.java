@@ -234,16 +234,30 @@ public class SessionLifecycleCoordinator {
         }
         var valid = new java.util.concurrent.atomic.AtomicBoolean(true);
         long period = Math.max(1, leaseDuration.toMillis() / 3);
-        var renewal = renewals.scheduleWithFixedDelay(() -> {
-            try {
-                if (!store.renewLifecycleOperation(tenantId, sessionId, operationId, owner,
-                        claimed.claimGeneration(), leaseDuration)) {
+        java.util.concurrent.ScheduledFuture<?> renewal;
+        try {
+            renewal = renewals.scheduleWithFixedDelay(() -> {
+                try {
+                    if (!store.renewLifecycleOperation(tenantId, sessionId, operationId, owner,
+                            claimed.claimGeneration(), leaseDuration)) {
+                        valid.set(false);
+                    }
+                } catch (RuntimeException error) {
                     valid.set(false);
                 }
-            } catch (RuntimeException error) {
-                valid.set(false);
-            }
-        }, period, period, java.util.concurrent.TimeUnit.MILLISECONDS);
+            }, period, period, java.util.concurrent.TimeUnit.MILLISECONDS);
+        } catch (java.util.concurrent.RejectedExecutionException stopped) {
+            // The coordinator is shutting down; the claim's lease lets the
+            // recovery scan re-drive this operation after restart, once a
+            // scan tick has room under its page limit.
+            LOG.warn("Managed Session operation abandoned at shutdown;"
+                            + " the lease re-drives it when a recovery scan"
+                            + " tick has room under its page limit"
+                            + " tenant={} session={} operation={} leaseMs={}",
+                    tenantId, sessionId, operationId,
+                    leaseDuration.toMillis());
+            return;
+        }
         Boolean harnessConfirmed = null;
         // settle() reports its irreversible Harness-facing step out of band:
         // a settle that asked the Harness to stop but threw later must not
@@ -316,6 +330,12 @@ public class SessionLifecycleCoordinator {
                                     || "runtime_admission_closed".equals(httpError.getErrorCode()))
                             ? httpError.getErrorCode() : "workspace_lifecycle_hooks_unsettled";
                 }
+            }
+            if (claimed.kind() != OperationKind.CWD_CHANGE && cause instanceof RuntimeException wait
+                    && HarnessCoordinator.isPoolWait(wait)) {
+                blocked = null;
+                daemonWaitCode = wait instanceof com.alibaba.qwen.code.managedagent.exception.ManagedAgentException apiError
+                        ? apiError.getCode() : ((DaemonHttpException) wait).getErrorCode();
             }
             if (blocked != null) {
                 failureCode = blocked;
@@ -750,9 +770,14 @@ public class SessionLifecycleCoordinator {
                 try {
                     harness.prepareLifecycleResources(operation);
                     if (com.alibaba.qwen.code.managedagent.workspace.WorkspaceToolProfiles.SHELL.equals(profile)) {
-                        runtimeWarmer.drainWorkspaceResources(operation.tenantId(), operation.sessionId(),
-                                com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore.authority(operation))
-                                .toCompletableFuture().join();
+                        var authority = com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore.authority(operation);
+                        if (store.hasMcpServers(session)) {
+                            runtimeWarmer.prepareWorkspaceResources(operation.tenantId(), operation.sessionId(), authority)
+                                    .toCompletableFuture().join();
+                        } else {
+                            runtimeWarmer.drainWorkspaceResources(operation.tenantId(), operation.sessionId(), authority)
+                                    .toCompletableFuture().join();
+                        }
                     }
                     harness.settleLifecycleResources(operation);
                     runtimeWarmer.drainWorkspaceResources(operation.tenantId(), operation.sessionId(),
@@ -803,8 +828,7 @@ public class SessionLifecycleCoordinator {
             String holder = store.requireSession(operation.tenantId(),
                     operation.sessionId()).harnessBootId();
             if (harness.isAvailable()) {
-                String answered = harness.closeSession(operation.tenantId(),
-                        operation.sessionId());
+                String answered = harness.closeSession(operation);
                 // The Harness was asked and answered: even when another
                 // server's Harness replied (confirming nothing about the
                 // Session), the close was delivered — a later failure of
@@ -1261,8 +1285,11 @@ public class SessionLifecycleCoordinator {
                     "kind", parent.kind() == OperationKind.CLOSE
                             ? "close" : "delete"));
         }
-        harness.runChildOperation(parent.tenantId(), parent.sessionId(),
-                childBody);
+        if (operationIsLifecycle(parent)) {
+            harness.runLifecycleChildOperation(parent, childBody);
+        } else {
+            harness.runChildOperation(parent.tenantId(), parent.sessionId(), childBody);
+        }
     }
 
     /** The newest binding row proving a child's dispatch identity, in

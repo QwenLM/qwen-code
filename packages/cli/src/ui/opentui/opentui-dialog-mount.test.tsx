@@ -183,6 +183,8 @@ vi.mock('./dialogs-arena.js', () => ({
 }));
 vi.mock('./dialogs-memory-status.js', () => ({
   OpenTuiMemoryDialog: mocks.stub('memory'),
+}));
+vi.mock('./dialogs-statusline.js', () => ({
   OpenTuiStatusLineDialog: mocks.stub('statusline'),
 }));
 vi.mock('./dialogs-modes.js', () => ({
@@ -197,12 +199,14 @@ vi.mock('./dialogs-stats-skills.js', () => ({
 vi.mock('./dialogs-hooks.js', () => ({
   OpenTuiHooksDialog: mocks.stub('hooks'),
 }));
+vi.mock('./session-rewind.js', () => ({
+  OpentuiRewindSelector: mocks.stub('rewind'),
+}));
 vi.mock('./dialogs-misc.js', () => ({
   OpenTuiDeleteDialog: mocks.stub('delete'),
   OpenTuiDiffDialog: mocks.stub('diff'),
   OpenTuiEditorDialog: mocks.stub('editor'),
   OpenTuiResumeDialog: mocks.stub('resume'),
-  OpenTuiRewindDialog: mocks.stub('rewind'),
   OpenTuiSubagentCreateDialog: mocks.stub('subagent_create'),
   OpenTuiSubagentListDialog: mocks.stub('subagent_list'),
   OpenTuiTrustDialog: mocks.stub('trust'),
@@ -212,6 +216,7 @@ const mockGetHookSystem = vi.fn<Config['getHookSystem']>();
 const recordSlashCommand = vi.fn();
 const CONFIG = {
   getModel: () => 'fake-model',
+  getFileCheckpointingEnabled: () => true,
   getHookSystem: mockGetHookSystem,
   getChatRecordingService: () => ({ recordSlashCommand }),
 } as unknown as Config;

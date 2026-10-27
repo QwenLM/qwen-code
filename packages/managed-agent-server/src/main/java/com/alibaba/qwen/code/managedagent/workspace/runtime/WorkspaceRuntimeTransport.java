@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.workspace.runtime;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.HarnessOwnership;
 import com.alibaba.qwen.code.runtimebroker.JdbcCsiFilesRetirementGuard;
+import com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.ResidentWorkspaceProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeAttestation;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -22,6 +23,8 @@ import com.alibaba.qwen.code.runtimebroker.provisioning.LocalProcessRuntimeProvi
 import com.alibaba.qwen.code.runtimebroker.provisioning.SshRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.transport.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedCsiProtocol;
+import com.alibaba.qwen.code.runtimebroker.transport.ManagedExtensionCommandProtocol;
+import com.alibaba.qwen.code.runtimebroker.transport.ManagedExtensionProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedHookProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedMcpProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedMonitorProtocol;
@@ -74,6 +77,47 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
     public CompletionStage<RuntimeAttestation> attest(RuntimeLease lease,
             RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
         return delegate.attest(lease, request, seed);
+    }
+
+    @Override
+    public CompletionStage<List<Map<String, Object>>> mcpDefinitions(RuntimeBindingRecord runtime) {
+        RuntimeBindingRecord current = bindings.findById(runtime.getBindingId());
+        if (current == null || current.getGeneration() != runtime.getGeneration()
+                || !current.getRequest().equals(runtime.getRequest())
+                || !java.util.Objects.equals(current.getProvisionSeed(), runtime.getProvisionSeed())
+                || current.getState() != RuntimeBindingRecord.State.READY
+                || current.isDrainRequested() || current.getLease() == null
+                || !sameLease(current.getLease(), runtime.getLease())
+                || !LocalProcessRuntimeProvisioner.KIND.equals(current.getRequest().getProvisionerKind())
+                && !(SshRuntimeProvisioner.KIND.equals(current.getRequest().getProvisionerKind())
+                        && ManagedExtensionExecutionProfile.admits(current.getRequest().getScope().getCapabilityDigest()))
+                || !WorkspaceExecutionProfile.admitsCapabilityDigest(current.getRequest().getScope().getCapabilityDigest())) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        return delegate.mcpDefinitions(current);
+    }
+
+    @Override
+    public CompletionStage<Map<String, Object>> extensionControl(RuntimeBindingRecord runtime,
+            String harnessSessionId, Map<String, Object> operation) {
+        RuntimeBindingRecord current = bindings.findById(runtime.getBindingId());
+        ContextBinding saved = savedBindings.apply(harnessSessionId);
+        boolean recovery = ManagedExtensionProtocol.isRecovery(operation);
+        if (current == null || current.getGeneration() != runtime.getGeneration()
+                || !current.getRequest().equals(runtime.getRequest())
+                || !java.util.Objects.equals(current.getProvisionSeed(), runtime.getProvisionSeed())
+                || current.getLease() == null || !sameLease(current.getLease(), runtime.getLease())
+                || current.getState() != RuntimeBindingRecord.State.READY
+                && !(recovery && current.getState() == RuntimeBindingRecord.State.DRAINING)
+                || !recovery && current.isDrainRequested() || saved == null
+                || !saved.getTenantId().equals(current.getRequest().getScope().getTenantId())
+                || !saved.getWorkspaceId().equals(current.getRequest().getScope().getWorkspaceId())
+                || !Long.toString(saved.getWorkspaceGeneration()).equals(current.getRequest().getScope().getWorkspaceGeneration())
+                || !saved.getStorageId().equals(current.getRequest().getStorageId())
+                || !harnessSessionId.equals(current.getRequest().getIsolationKey())) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        return delegate.extensionControl(current, harnessSessionId, saved, operation);
     }
 
     @Override
@@ -355,9 +399,17 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
     @Override
     public CompletionStage<Object> control(RuntimeLease lease, RuntimeSession session,
             Map<String, Object> operation) {
+        if (ManagedExtensionProtocol.isOperation(operation)) {
+            throw new RuntimeBrokerException(400, "runtime_control_operation_invalid",
+                    "Extensions require the metadata control route.", false);
+        }
         if (managed(session)) {
             Context selected = context(lease, session, false);
+            boolean extensionControl = ManagedExtensionExecutionProfile.admits(session.getScope().getCapabilityDigest())
+                    && (ManagedMcpProtocol.isOperation(operation) || ManagedHookProtocol.isOperation(operation)
+                            || ManagedExtensionCommandProtocol.isOperation(operation));
             if (com.alibaba.qwen.code.runtimebroker.provisioning.SshRuntimeProvisioner.KIND.equals(selected.runtime().getRequest().getProvisionerKind())
+                    && !extensionControl
                     && !java.util.Set.of("history", "raw-file-history", "workspace-context").contains(operation.get("kind"))) {
                 throw new RuntimeBrokerException(501, "ssh_runtime_control_unsupported",
                         "SSH Runtime supports files and foreground Shell only.", false);
@@ -368,12 +420,15 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
                     "Generic CSI runtime controls are not qualified.", false);
         }
         if (ManagedMcpProtocol.isOperation(operation) || ManagedHookProtocol.isOperation(operation)
+                || ManagedExtensionCommandProtocol.isOperation(operation)
                 || ManagedShellProtocol.isOperation(operation)
                 || ManagedMonitorProtocol.isOperation(operation)) {
             if (!managed(session)) {
                 throw WorkspaceExecutionStore.unavailable();
             }
-            if (ManagedHookProtocol.isOperation(operation)) {
+            if (ManagedExtensionCommandProtocol.isOperation(operation)) {
+                ManagedExtensionCommandProtocol.validateSession(session, operation);
+            } else if (ManagedHookProtocol.isOperation(operation)) {
                 ManagedHookProtocol.validateSession(session, operation);
             } else if (ManagedShellProtocol.isOperation(operation)) {
                 ManagedShellProtocol.validateSession(session, operation);
@@ -383,6 +438,7 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
                 ManagedMcpProtocol.validateSession(session, operation);
             }
             boolean recovery = ManagedMcpProtocol.isRecovery(operation) || ManagedHookProtocol.isRecovery(operation)
+                    || ManagedExtensionCommandProtocol.isRecovery(operation)
                     || ManagedShellProtocol.isRecovery(operation)
                     || ManagedMonitorProtocol.isRecovery(operation);
             Context context = context(lease, session, !recovery, ManagedHookProtocol.isOperation(operation));
@@ -401,6 +457,18 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
         } else if (managed(session) && !"history".equals(operation.get("kind"))) {
             Context context = context(lease, session, true);
             ownership.assertHeld(context.binding(), context.session());
+            if (!ResidentWorkspaceProfile.selects(session.getScope())
+                    && "raw-file-history".equals(operation.get("kind")) && "rewind".equals(operation.get("action"))) {
+                if (!ownership.beginRewind(context.binding(), context.session())) {
+                    return delegate.control(lease, session, Map.of("kind", "raw-file-history", "action", "snapshot"))
+                            .thenApply(state -> Map.of("state", state, "filesChanged", List.of(),
+                                    "filesFailed", List.of(), "conflict", true));
+                }
+                return delegate.control(lease, session, operation).thenApply(result -> {
+                    ownership.endRewind(context.binding(), context.session());
+                    return result;
+                });
+            }
         }
         return delegate.control(lease, session, operation);
     }
@@ -474,6 +542,10 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
         // worker), so it owes the same detach; one with no holder never
         // installed anything and keeps the shortcut.
         Context context = context(lease, session, false);
+        if (ownership.hasExclusiveClaim(context.session())) {
+            throw new RuntimeBrokerException(409, "workspace_writer_unproven",
+                    "A Workspace rewind must settle before its mount can be handed back.", false);
+        }
         if (context.session().getState() == RuntimeSessionRecord.State.READY
                 || ownership.isHeld(context.binding(), context.session())) {
             detachOwed.add(detachKey(context));
@@ -544,7 +616,7 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
     }
 
     private static boolean managed(RuntimeSession session) {
-        return WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(session.getScope().getCapabilityDigest())
+        return WorkspaceExecutionProfile.admitsCapabilityDigest(session.getScope().getCapabilityDigest())
                 || ResidentWorkspaceProfile.selects(session.getScope());
     }
 

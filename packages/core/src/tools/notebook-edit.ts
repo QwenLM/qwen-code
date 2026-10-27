@@ -62,6 +62,8 @@ import {
   buildWorkspaceArtifactCandidate,
   formatRecordArtifactReminder,
 } from './artifact/workspace-auto-record.js';
+import { backgroundFixHolding } from './autofix-pr-grants.js';
+import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 
 const debugLogger = createDebugLogger('NOTEBOOK_EDIT');
 
@@ -457,6 +459,19 @@ class NotebookEditInvocation extends BaseToolInvocation<
 
   override async getDefaultPermission(): Promise<PermissionDecision> {
     return 'ask';
+  }
+
+  /**
+   * A write into the worktree of a fix of /autofix-pr running in the
+   * background, by anyone but its own agent, is the user's to approve: that
+   * agent builds and runs what is there without asking.
+   */
+  override requiresUserInteraction(): boolean {
+    return (
+      // As written: resolved as the kernel will.
+      backgroundFixHolding(this.params.notebook_path, getCurrentAgentId()) !==
+      undefined
+    );
   }
 
   override async getConfirmationDetails(

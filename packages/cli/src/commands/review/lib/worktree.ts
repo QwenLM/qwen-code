@@ -1001,6 +1001,12 @@ export function sanitizedGitEnv(): NodeJS.ProcessEnv {
   // resolves the object. Nothing here wants a replacement object, and the
   // reader the pipeline points at `git show HEAD:` does not either.
   env['GIT_NO_REPLACE_OBJECTS'] = '1';
+  // `info/grafts` lies about PARENTS the same way, and git reads it
+  // unasked: a line `<commit> <any>` makes `merge-base --is-ancestor`
+  // answer yes for a commit that does not build on the other. A path that
+  // cannot exist is no grafts at all — and, unlike an empty file such as
+  // `/dev/null`, no deprecation hint on stderr either.
+  env['GIT_GRAFT_FILE'] = '/dev/null/grafts';
   return env;
 }
 
