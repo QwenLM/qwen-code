@@ -4536,7 +4536,6 @@ describe('Session', () => {
       expect(send.mock.calls[0][3]).toMatchObject({
         type: core.SendMessageType.UserQuery,
         userTurnRecordedByHost: true,
-        stopHookRunByHost: true,
         interactionSpanByHost: true,
         promptAdmission: { blocked: false },
         // Recall searches the prompt text, not the resolved request.
@@ -4547,21 +4546,14 @@ describe('Session', () => {
       expect(agentText()).toContain('Hello');
       // The session snapshots its user turn; the option keeps the client's off.
       expect(mockFileHistoryService.makeSnapshot).toHaveBeenCalledOnce();
-      // The session runs the client's memory tasks once its turn ends.
+      // The client ran the memory tasks when the response stopped; ACP
+      // reports no memory updates, so the queued tasks are taken at once.
       expect(
         mockLlmClient.runManagedAutoMemoryBackgroundTasks,
-      ).toHaveBeenCalledExactlyOnceWith(core.SendMessageType.UserQuery);
-      // ACP reports no memory updates, so the queued tasks are taken at once.
+      ).not.toHaveBeenCalled();
       expect(
         mockLlmClient.consumePendingMemoryTaskPromises,
       ).toHaveBeenCalledOnce();
-      expect(
-        mockLlmClient.consumePendingMemoryTaskPromises.mock
-          .invocationCallOrder[0],
-      ).toBeGreaterThan(
-        mockLlmClient.runManagedAutoMemoryBackgroundTasks.mock
-          .invocationCallOrder[0]!,
-      );
       expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
     });
 
@@ -4931,43 +4923,190 @@ describe('Session', () => {
     const stopRequests = (request: ReturnType<typeof vi.fn>) =>
       request.mock.calls.filter(([message]) => message.eventName === 'Stop');
 
-    it("fires the Stop hook in the session's Stop loop, not in the client", async () => {
+    it('leaves the Stop hook to the client, with the Todo Stop Guard as its stop policy', async () => {
       const send = useSharedRounds([text('done'), finished()]);
       const request = useStopHook([]);
 
       await prompt();
 
-      expect(send.mock.calls[0][3]).toMatchObject({ stopHookRunByHost: true });
-      expect(stopRequests(request)).toHaveLength(1);
-      expect(stopRequests(request)[0][0].input).toMatchObject({
-        stop_hook_active: false,
-      });
+      const options = send.mock.calls[0][3];
+      expect(options).not.toHaveProperty('stopHookRunByHost');
+      expect(options.stopPolicies).toHaveLength(1);
+      // The client fires the Stop hook; the session fires none of its own.
+      expect(stopRequests(request)).toHaveLength(0);
     });
 
-    it("judges the session's own continuation with the Stop hook again", async () => {
-      useSharedRounds([text('first'), finished()]);
-      const request = useStopHook([
-        { decision: 'block', reason: 'run the tests' },
+    it("reports the client's Stop hook messages, the loop from its second block on", async () => {
+      useSharedRounds([
+        text('first'),
+        finished(),
+        { type: core.LlmEventType.HookSystemMessage, value: 'hook says hi' },
+        {
+          type: core.LlmEventType.StopHookLoop,
+          value: { iterationCount: 1, reasons: ['a'], stopHookCount: 1 },
+        },
+        text('second'),
+        finished(),
+        {
+          type: core.LlmEventType.StopHookLoop,
+          value: { iterationCount: 2, reasons: ['a', 'b'], stopHookCount: 1 },
+        },
+        text('third'),
+        finished(),
       ]);
-      const continuation = vi.fn().mockResolvedValue(createEmptyStream());
-      mockChat.sendMessageStream = continuation;
 
       await prompt();
 
-      expect(continuation).toHaveBeenCalledOnce();
-      expect(continuation.mock.calls[0][2]).toBe(
-        'test-session-id########1_stop_hook_1',
+      expect(agentText()).toContain('hook says hi');
+      const loops = updates().filter(
+        (update) =>
+          (update as { _meta?: Record<string, unknown> })._meta?.[
+            'stopHookLoop'
+          ] !== undefined,
       );
-      expect(stopRequests(request)).toHaveLength(2);
-      expect(stopRequests(request)[1][0].input).toMatchObject({
-        stop_hook_active: true,
+      expect(loops).toEqual([
+        expect.objectContaining({
+          _meta: {
+            stopHookLoop: {
+              iterationCount: 2,
+              reasons: ['a', 'b'],
+              stopHookCount: 1,
+            },
+          },
+        }),
+      ]);
+    });
+
+    it("leaves the turn's background results that arrive after its response to a notification turn", async () => {
+      const send = useSharedRounds();
+      send.mockImplementationOnce(() =>
+        (async function* () {
+          yield text('started the worker');
+          (
+            mockBackgroundTaskRegistry.setNotificationCallback.mock
+              .calls[0][0] as (
+              display: string,
+              model: string,
+              meta: { agentId: string; status: string; sourceTurnId?: string },
+            ) => void
+          )('worker complete', 'WORKER_RESULT', {
+            agentId: 'worker',
+            status: 'completed',
+            sourceTurnId: 'test-session-id########1',
+          });
+          yield finished();
+        })(),
+      );
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockImplementation(async () => createEmptyStream());
+
+      const result = await prompt();
+
+      expect(result.stopReason).toBe('end_turn');
+      // The prompt ends with its response, as the client's stop point does.
+      expect(send).toHaveBeenCalledOnce();
+      await vi.waitFor(() =>
+        expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.objectContaining({
+            message: expect.arrayContaining([{ text: 'WORKER_RESULT' }]),
+          }),
+          expect.stringContaining('notification'),
+        ),
+      );
+    });
+
+    describe('the Todo Stop Guard as a stop policy', () => {
+      const pendingTodos = {
+        type: 'todo_list',
+        todos: [{ id: 'task-1', content: 'finish task', status: 'pending' }],
+      };
+
+      /** A session whose guard is on, with a way to arm it. */
+      function useGuardSession() {
+        session.dispose();
+        (
+          mockSettings as unknown as { merged: Record<string, unknown> }
+        ).merged = {
+          experimental: { todoStopGuard: true },
+          tools: { todoWrite: { enabled: true } },
+        };
+        mockConfig.getBareMode = vi.fn().mockReturnValue(false);
+        mockConfig.isSafeMode = vi.fn().mockReturnValue(false);
+        session = new Session(
+          'test-session-id',
+          mockConfig,
+          mockClient,
+          mockSettings,
+        );
+        const send = useSharedRounds([text('done'), finished()]);
+        const guard = (
+          session as unknown as {
+            todoStopGuard: {
+              observeTodoWrite(display: unknown, allowArm: boolean): boolean;
+            };
+          }
+        ).todoStopGuard;
+        return { send, arm: () => guard.observeTodoWrite(pendingTodos, true) };
+      }
+
+      /** The policy the round handed the client. */
+      const policyOf = (send: ReturnType<typeof vi.fn>) =>
+        send.mock.calls[0][3].stopPolicies[0] as core.StopPolicy;
+      const stop = () => ({
+        promptId: 'test-session-id########1',
+        signal: new AbortController().signal,
       });
-      // The memory tasks wait for the turn the Stop hook continued.
-      const memoryTasks = mockLlmClient.runManagedAutoMemoryBackgroundTasks;
-      expect(memoryTasks).toHaveBeenCalledOnce();
-      expect(memoryTasks.mock.invocationCallOrder[0]).toBeGreaterThan(
-        continuation.mock.invocationCallOrder[0]!,
-      );
+
+      it('continues while todos remain, then stops once its attempts are spent', async () => {
+        const { send, arm } = useGuardSession();
+        await prompt();
+        const policy = policyOf(send);
+        arm();
+
+        const first = await policy.continueAt(stop());
+        const second = await policy.continueAt(stop());
+        const third = await policy.continueAt(stop());
+
+        expect(first?.[0]?.text).toContain('[Todo Stop Guard] 1 todo item(s)');
+        expect(second?.[0]?.text).toContain('final automatic continuation');
+        expect(third).toBeUndefined();
+        expect(agentText()).toEqual(
+          expect.arrayContaining([
+            expect.stringContaining('Automatic continuation 1/2 started'),
+            expect.stringContaining('Automatic continuation stopped after 2'),
+          ]),
+        );
+      });
+
+      it('yields to a prompt the host has queued', async () => {
+        const { send, arm } = useGuardSession();
+        await prompt();
+        const policy = policyOf(send);
+        arm();
+        mockClient.extMethod = vi.fn().mockResolvedValue({
+          claimed: false,
+          hasQueuedPrompt: true,
+        });
+
+        expect(await policy.continueAt(stop())).toBeUndefined();
+        expect(mockClient.extMethod).toHaveBeenCalledWith(
+          TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
+          expect.anything(),
+        );
+      });
+
+      it('stops for good when the Stop hook cap ends the turn', async () => {
+        const { send, arm } = useGuardSession();
+        await prompt();
+        const policy = policyOf(send);
+        arm();
+
+        policy.onStopHookCap?.();
+
+        expect(await policy.continueAt(stop())).toBeUndefined();
+      });
     });
 
     it('shows the calls of a round the loop guard stopped as skipped', async () => {
