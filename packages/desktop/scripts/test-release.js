@@ -116,6 +116,10 @@ async function testBootstrapWorkspaceVisibility() {
   );
   const startBody =
     runtimeSource.match(/pub fn start\([\s\S]*?\n {4}\}\n/)?.[0] ?? '';
+  assert.ok(
+    !startBody.includes('/*'),
+    'DesktopRuntime::start must not hide the spawn_runtime_group call inside a block comment.',
+  );
   assert.match(
     startBody,
     /let mut child = spawn_runtime_group\(&mut command\)/,
