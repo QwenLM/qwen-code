@@ -4,7 +4,7 @@
 
 ## Status and baseline
 
-PR5 of #13184 was researched against `0539160f35f983ba4a6d4d369c0ae18941b2fdb2`, including PR1 #15566, PR2/PR3 #15569/#15599 and PR4 #15626, and integrated with main `35dc8ee518d9936c1e8c916a1197732306b99639`. Bounded residency is the new implementation's normal path; it has no opt-in switch or synchronous whole-history fallback. Validation is in progress: implementation, focused acceptance and final CI qualification are separate states. The execution report records exact source hashes, failures and pending gates.
+PR5 of #13184 was researched against `0539160f35f983ba4a6d4d369c0ae18941b2fdb2`, including PR1 #15566, PR2/PR3 #15569/#15599 and PR4 #15626, and integrated with main `beeb4851b8431aa893305d6ad0bb4cb9bb70fa01`. Bounded residency is the new implementation's normal path; it has no opt-in switch or synchronous whole-history fallback. Validation is in progress: implementation, focused acceptance and final CI qualification are separate states. The execution report records exact source hashes, failures and pending gates.
 
 ## Problem and goal
 
