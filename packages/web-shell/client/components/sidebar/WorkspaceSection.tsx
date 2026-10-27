@@ -223,6 +223,13 @@ interface WorkspaceSectionProps {
   excludePinned?: boolean;
   limitSessions?: boolean;
   /**
+   * The session currently being renamed in the sidebar, when this section owns
+   * it. A catalog refresh can reorder rows while the editor is open; revealing
+   * only the list that would truncate the edited row keeps it mounted. The
+   * sidebar leaves this undefined when the Pinned section hosts the editor.
+   */
+  editingSessionId?: string;
+  /**
    * Whether the sidebar-level Pinned section renders this session. Pinned
    * rows have one owner: a pinned content-search ghost is kept in this
    * list only when the Pinned section does not carry it.
@@ -294,6 +301,7 @@ export function WorkspaceSection({
   groupActionsDisabled,
   excludePinned = false,
   limitSessions = true,
+  editingSessionId,
   isPinnedSectionMember,
   onOpenPathLocally,
   onOpenTerminalLocally,
@@ -749,6 +757,15 @@ export function WorkspaceSection({
     searchedSessions,
     sessions,
   ]);
+  // Same rule the sidebar applies to its own catalog: an open rename keeps
+  // its row mounted when a refresh reorders other sessions ahead of it.
+  const revealsEditingSession = (
+    items: readonly DaemonSessionSummary[],
+  ): boolean =>
+    editingSessionId !== undefined &&
+    items.findIndex((session) => session.sessionId === editingSessionId) >=
+      SIDEBAR_SESSION_PREVIEW_LIMIT;
+
   const sessionTree = useSessionTree(storageId, searchedSessions, searchActive);
   const buildSessionTreeRows = (
     treeSessions: readonly DaemonSessionSummary[],
@@ -807,7 +824,10 @@ export function WorkspaceSection({
       }))
     : sessionTree.buildRows(visibleSessions);
   const directSessions =
-    searchActive || showAllSessions || !limitSessions
+    searchActive ||
+    showAllSessions ||
+    !limitSessions ||
+    revealsEditingSession(visibleSessions)
       ? directTreeRows
       : directTreeRows.slice(0, SIDEBAR_SESSION_PREVIEW_LIMIT);
 
@@ -1047,7 +1067,11 @@ export function WorkspaceSection({
                       key={group.id}
                       label={group.label}
                       count={tree.rows.length}
-                      limitSessions={limitSessions && !searchActive}
+                      limitSessions={
+                        limitSessions &&
+                        !searchActive &&
+                        !revealsEditingSession(group.sessions)
+                      }
                       expanded={!collapsedGroupIds.has(group.id)}
                       onToggle={() => {
                         setCollapsedGroupIds((current) => {
@@ -1073,7 +1097,11 @@ export function WorkspaceSection({
                       key={`${group.id}:${sourceType ?? ''}`}
                       label={group.name}
                       count={tree.rows.length}
-                      limitSessions={limitSessions && !searchActive}
+                      limitSessions={
+                        limitSessions &&
+                        !searchActive &&
+                        !revealsEditingSession(sessions)
+                      }
                       color={group.color}
                       expanded={!collapsedGroupIds.has(group.id)}
                       onToggle={() => {
@@ -1108,7 +1136,11 @@ export function WorkspaceSection({
                     key={`${section.id}:${sourceType ?? ''}`}
                     label={section.label}
                     count={section.sessions.length}
-                    limitSessions={limitSessions && !searchActive}
+                    limitSessions={
+                      limitSessions &&
+                      !searchActive &&
+                      !revealsEditingSession(section.sessions)
+                    }
                     icon={
                       <CalendarClockIcon data-web-shell-scheduled-task-group />
                     }
@@ -1131,7 +1163,11 @@ export function WorkspaceSection({
                     id="ungrouped"
                     label={ungroupedLabel}
                     count={ungroupedTree.rows.length}
-                    limitSessions={limitSessions && !searchActive}
+                    limitSessions={
+                      limitSessions &&
+                      !searchActive &&
+                      !revealsEditingSession(groupedSessions.ungrouped)
+                    }
                     expanded={!collapsedGroupIds.has('ungrouped')}
                     onToggle={() => {
                       setCollapsedGroupIds((current) => {
@@ -1162,6 +1198,7 @@ export function WorkspaceSection({
                 {limitSessions &&
                   !searchActive &&
                   !showAllSessions &&
+                  !revealsEditingSession(visibleSessions) &&
                   directTreeRows.length > SIDEBAR_SESSION_PREVIEW_LIMIT && (
                     <button
                       type="button"
