@@ -13,7 +13,7 @@ permissions:
 jobs:
   smoke:
     name: 'Pilot smoke ${{ matrix.n }}'
-    runs-on: ['self-hosted', 'linux', 'arm64', 'arm64-pilot']
+    runs-on: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40]
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -34,3 +34,4 @@ jobs:
           sleep 5
 # pilot round 1
 # pilot round 2
+# scale round 1
