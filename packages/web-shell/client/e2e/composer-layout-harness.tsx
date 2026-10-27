@@ -10,11 +10,16 @@ const emptyMobileWelcome = params.get('emptyMobileWelcome') === 'true';
 const includeWelcomeFooter = params.get('welcomeFooter') !== 'false';
 const includeCustomFooter = params.get('customFooter') === 'true';
 const sessionId = params.get('sessionId') ?? 'composer-layout-e2e';
-const tags = Array.from({ length: 18 }, (_, index) => ({
-  id: `table-${index + 1}`,
-  label: 'Table',
-  value: `analytics_table_${index + 1}`,
-}));
+const composerVariant =
+  params.get('composerVariant') === 'simple' ? 'simple' : undefined;
+const tags = Array.from(
+  { length: params.get('tags') === 'false' ? 0 : 18 },
+  (_, index) => ({
+    id: `table-${index + 1}`,
+    label: 'Table',
+    value: `analytics_table_${index + 1}`,
+  }),
+);
 const sessionProps = emptyMobileWelcome
   ? {
       mobileWelcomeFooterMiddle: true,
@@ -44,6 +49,14 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     <WebShellWithProviders
       baseUrl={window.location.origin}
       sidebar={false}
+      composerVariant={composerVariant}
+      theme={
+        params.get('theme') === 'light'
+          ? 'light'
+          : params.get('theme') === 'dark'
+            ? 'dark'
+            : undefined
+      }
       composerInput={{ tags, tagPlacement: 'top' }}
       composerInputVersion={1}
       renderComposerTagTooltip={({ tag }) => `Details for ${tag.value}`}
