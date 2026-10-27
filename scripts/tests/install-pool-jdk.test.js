@@ -23,11 +23,11 @@ afterEach(() => {
 });
 
 // The directory actions/setup-java actually keys its tool-cache entry by:
-// getToolcacheVersionName() rewrites the first '+' of Adoptium's semver to '-'
-// BEFORE tc.cacheDir() applies semver.clean(), and clean() keeps a prerelease.
-// semver.clean(semver) alone would drop the build suffix and never match.
+// tc.cacheDir() applies semver.clean(), which drops the build metadata of
+// Adoptium's semver (11.0.32+101 -> 11.0.32) and keeps a prerelease. Keying the
+// entry as 11.0.32-101 instead would never satisfy a major-version lookup.
 function toolcacheVersionName(version) {
-  return semver.clean(version.replace('+', '-')) || version;
+  return semver.clean(version) || version;
 }
 
 function fixture(mode = 'ok') {
@@ -227,7 +227,7 @@ describe.skipIf(process.platform === 'win32')(
 
     it('reinstalls a private JDK when only its completion marker remains', () => {
       const f = fixture();
-      const toolDir = join(f.cache, 'qwen-pool-jdk/11.0.32-101');
+      const toolDir = join(f.cache, 'qwen-pool-jdk/11.0.32');
       mkdirSync(toolDir, { recursive: true });
       writeFileSync(join(toolDir, 'x64.complete'), '');
       const env = f.prepare('job');
@@ -242,7 +242,7 @@ describe.skipIf(process.platform === 'win32')(
       const first = f.prepare('first');
       success(f.run(first));
       const home = f.home(first);
-      expect(home).toBe(join(f.cache, 'qwen-pool-jdk/11.0.32-101/x64'));
+      expect(home).toBe(join(f.cache, 'qwen-pool-jdk/11.0.32/x64'));
       expect(home.startsWith(`${f.cache}${sep}`)).toBe(true);
       expect(home.startsWith(join(f.cache, 'Java_Temurin-Hotspot_jdk'))).toBe(
         false,

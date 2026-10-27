@@ -25,17 +25,20 @@ case "${machine}" in
 esac
 
 # Pinned archive and cache coordinates. `dir` is exactly the version setup-java
-# keys its own tool-cache entry by: getToolcacheVersionName() rewrites the first
-# '+' of Adoptium's semver to '-' before tc.cacheDir() runs semver.clean(), and
-# clean() keeps a prerelease, so the build suffix stays in the directory name.
+# keys its own tool-cache entry by. It resolves an Adoptium semver such as
+# 11.0.32+101 and tc.cacheDir() runs semver.clean(), which drops the build
+# metadata ("+101") but keeps a prerelease. Keying the entry as 11.0.32-101
+# would therefore never match: a lane asks for the major version ("11"), and
+# semver.maxSatisfying rejects the prerelease, so the lookup misses and this
+# fallback re-downloads a JDK that is already on the host.
 case "${spec}/${arch}" in
-  11/arm64) dir='11.0.32-101'; file='OpenJDK11U-jdk_aarch64_linux_hotspot_11.0.32.1_1.tar.gz'; sha='f27033e6f7523c1b0b2565a78e9c0e0abe5596a854ce00ca04ec1b06ece7a935' ;;
-  11/x64)   dir='11.0.32-101'; file='OpenJDK11U-jdk_x64_linux_hotspot_11.0.32.1_1.tar.gz';     sha='5c3f68887c325d36d852ba534303e1f5f1f5cae7d6cc1e951d73e0d8e98a058d' ;;
-  17/arm64) dir='17.0.20-101'; file='OpenJDK17U-jdk_aarch64_linux_hotspot_17.0.20.1_1.tar.gz'; sha='457b57af8f9c93ec39080bb8c764f559dc8c89a6da1a39d718a400b7890d3e41' ;;
-  17/x64)   dir='17.0.21-9';   file='OpenJDK17U-jdk_x64_linux_hotspot_17.0.21_9.tar.gz';       sha='8b9b611d917e3dfd8419d3566b5949226f69b052fed7e109c1368add1dfe8711' ;;
-  21/arm64) dir='21.0.13-9.0.LTS'; file='OpenJDK21U-jdk_aarch64_linux_hotspot_21.0.13_9.tar.gz'; sha='e3522e707fc7dbe2a72c30746b1e7068301a0213ecd213d4491f35a14eb55578' ;;
-  21/x64)   dir='21.0.13-9.0.LTS'; file='OpenJDK21U-jdk_x64_linux_hotspot_21.0.13_9.tar.gz';     sha='d7f5d5cf865a2902b70ff549b97586a7d3f234e016f041ab447ea740c7d66d1c' ;;
-  25/arm64) dir='25.0.5-8.0.LTS'; file='OpenJDK25U-jdk_aarch64_linux_hotspot_25.0.5_8.tar.gz';   sha='bb5b2ded252f21c6090cf780b0a408ad0d83bbb557e702955643557f13231880' ;;
+  11/arm64) dir='11.0.32'; file='OpenJDK11U-jdk_aarch64_linux_hotspot_11.0.32.1_1.tar.gz'; sha='f27033e6f7523c1b0b2565a78e9c0e0abe5596a854ce00ca04ec1b06ece7a935' ;;
+  11/x64)   dir='11.0.32'; file='OpenJDK11U-jdk_x64_linux_hotspot_11.0.32.1_1.tar.gz';     sha='5c3f68887c325d36d852ba534303e1f5f1f5cae7d6cc1e951d73e0d8e98a058d' ;;
+  17/arm64) dir='17.0.20'; file='OpenJDK17U-jdk_aarch64_linux_hotspot_17.0.20.1_1.tar.gz'; sha='457b57af8f9c93ec39080bb8c764f559dc8c89a6da1a39d718a400b7890d3e41' ;;
+  17/x64)   dir='17.0.21';   file='OpenJDK17U-jdk_x64_linux_hotspot_17.0.21_9.tar.gz';       sha='8b9b611d917e3dfd8419d3566b5949226f69b052fed7e109c1368add1dfe8711' ;;
+  21/arm64) dir='21.0.13'; file='OpenJDK21U-jdk_aarch64_linux_hotspot_21.0.13_9.tar.gz'; sha='e3522e707fc7dbe2a72c30746b1e7068301a0213ecd213d4491f35a14eb55578' ;;
+  21/x64)   dir='21.0.13'; file='OpenJDK21U-jdk_x64_linux_hotspot_21.0.13_9.tar.gz';     sha='d7f5d5cf865a2902b70ff549b97586a7d3f234e016f041ab447ea740c7d66d1c' ;;
+  25/arm64) dir='25.0.5'; file='OpenJDK25U-jdk_aarch64_linux_hotspot_25.0.5_8.tar.gz';   sha='bb5b2ded252f21c6090cf780b0a408ad0d83bbb557e702955643557f13231880' ;;
   *)
     echo "::error::no pinned JDK for spec ${spec} on ${arch}"
     exit 1
