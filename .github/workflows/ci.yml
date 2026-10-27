@@ -1859,8 +1859,8 @@ jobs:
     permissions:
       contents: 'read'
     steps:
-      # See the Ubuntu gate's checkout: PRs use the immutable refs/pull/N/head
-      # and merge queue uses the event head SHA.
+      # merge_group/schedule/dispatch only: this lane keeps
+      # refs/pull/N/head; the PR lanes pin the event head SHA.
       - name: 'Checkout'
         id: 'checkout'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
