@@ -110,8 +110,12 @@ export function PluginManagerPage({
     setPageRevision((revision) => revision + 1);
   }, []);
   const embedded = useMemo<EmbeddedManagerPage>(
-    () => ({ onRoot: resetToRoot, onDetailChange: setDetailOpen }),
-    [resetToRoot],
+    () => ({
+      onRoot: resetToRoot,
+      onDetailChange: setDetailOpen,
+      onBack: showBackButton ? onClose : undefined,
+    }),
+    [onClose, resetToRoot, showBackButton],
   );
 
   const handleTabChange = (value: string) => {
@@ -157,14 +161,14 @@ export function PluginManagerPage({
   return (
     <Tabs value={activeTab} onValueChange={handleTabChange} className="w-full">
       {!detailOpen ? (
-        <div className="sticky -top-4 z-10 -mx-5 -mt-4 flex items-center justify-between gap-3 border-b bg-background px-5 py-3">
-          <div className="flex min-w-0 items-center gap-2">
+        <div className="sticky -top-4 z-10 -mx-5 -mt-4 flex flex-wrap items-center justify-between gap-3 border-b bg-background px-5 py-3">
+          <div className="flex items-center gap-2">
             {showBackButton ? (
               <Button
                 variant="ghost"
                 size="icon"
                 onClick={onClose}
-                aria-label={t('common.back')}
+                aria-label={t('plugins.backToChat')}
               >
                 <ArrowLeftIcon />
               </Button>

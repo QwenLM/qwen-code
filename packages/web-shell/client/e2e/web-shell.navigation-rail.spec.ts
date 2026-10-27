@@ -84,7 +84,7 @@ test('click opens Home and functional pages while collapse retains the draft @sm
   );
   await expect(
     page.getByTestId('inline-panel').getByRole('button', {
-      name: 'back',
+      name: 'Back to conversation',
       exact: true,
     }),
   ).toHaveCount(0);
@@ -408,10 +408,70 @@ test('narrow Plugins page keeps a visible back control to the conversation', asy
 
   const panel = page.getByTestId('inline-panel');
   await expect(panel).toHaveAttribute('aria-label', 'Plugins');
-  const back = panel.getByRole('button', { name: 'back', exact: true });
+  const back = panel.getByRole('button', {
+    name: 'Back to conversation',
+    exact: true,
+  });
   await expect(back).toBeVisible();
   await back.click();
   await expect(panel).toHaveCount(0);
+});
+
+test('narrow Plugins header keeps the workspace picker clear of the tabs', async ({
+  page,
+  baseURL,
+}) => {
+  await page.setViewportSize({ width: 1400, height: 900 });
+  const scenario = createWebShellDaemonScenario();
+  scenario.capabilities.workspaces = [
+    {
+      id: 'primary',
+      cwd: scenario.workspaceCwd,
+      displayName: 'Primary',
+      primary: true,
+      trusted: true,
+    },
+    {
+      id: 'secondary',
+      cwd: '/tmp/qwen-web-shell-e2e-secondary',
+      displayName: 'Secondary',
+      primary: false,
+      trusted: true,
+    },
+  ];
+  await installMockDaemon(page, scenario, { baseURL });
+  await page.goto('/e2e/navigation-rail-harness.html?narrow');
+  await page.getByRole('button', { name: 'Toggle menu' }).click();
+  await page
+    .getByRole('dialog', { name: 'Workspace sidebar' })
+    .getByRole('button', { name: 'Plugins', exact: true })
+    .click();
+
+  const panel = page.getByTestId('inline-panel');
+  await panel.getByRole('tab', { name: 'MCP', exact: true }).click();
+  const select = panel.getByRole('combobox', {
+    name: 'Workspace',
+    exact: true,
+  });
+  await expect(select).toBeVisible();
+  const host = page.getByTestId('host-shell');
+  const lastTab = panel.getByRole('tab').last();
+
+  for (const width of [500, 390]) {
+    await host.evaluate((element, next) => {
+      element.style.width = `${next}px`;
+    }, width);
+    await page.waitForTimeout(50);
+    const tabBox = (await lastTab.boundingBox())!;
+    const selectBox = (await select.boundingBox())!;
+    expect(selectBox.width).toBeGreaterThan(0);
+    const overlaps =
+      tabBox.x < selectBox.x + selectBox.width &&
+      selectBox.x < tabBox.x + tabBox.width &&
+      tabBox.y < selectBox.y + selectBox.height &&
+      selectBox.y < tabBox.y + tabBox.height;
+    expect(overlaps).toBe(false);
+  }
 });
 
 test('a very narrow host still contains the compact drawer', async ({

@@ -391,6 +391,18 @@ export function SkillsManagerPage({
       <div className="sticky -top-4 z-10 -mx-5 -mt-4 flex items-center gap-3 border-b bg-background px-5 py-3">
         <Breadcrumb className="min-w-0 flex-1">
           <BreadcrumbList className="h-8 text-sm">
+            {embedded.onBack ? (
+              <BreadcrumbItem>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={embedded.onBack}
+                  aria-label={t('common.back')}
+                >
+                  <ArrowLeftIcon />
+                </Button>
+              </BreadcrumbItem>
+            ) : null}
             <BreadcrumbItem>
               <BreadcrumbLink asChild>
                 <button
