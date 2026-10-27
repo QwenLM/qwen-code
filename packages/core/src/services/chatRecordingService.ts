@@ -1311,6 +1311,13 @@ export class ChatRecordingService {
    */
   private displayProjectionForTitle = false;
   /**
+   * Whether `turnTitleStates` is index-aligned with `turnParentUuids` for
+   * the whole session. A legacy restore state carries only the ring and the
+   * flag; with no per-turn provenance the current window cannot be bounded,
+   * so `hasDisplayProjectionForTitle` keeps the session-level answer.
+   */
+  private titleWindowBounded = true;
+  /**
    * How many auto-title attempts have been made this process.
    *
    * We don't commit to "one attempt per session" because the first assistant
@@ -1505,6 +1512,9 @@ export class ChatRecordingService {
     this.turnTitleStates.length = 0;
     this.displayProjectionForTitle = false;
     this.lastProjectionTextForTitle = undefined;
+    // This path rebuilds both arrays from the record list below, so the
+    // window is bounded even when it ends up empty.
+    this.titleWindowBounded = true;
     if (!sessionData) return;
     this.rebuildTurnBoundaries(sessionData.conversation.messages);
     for (const record of sessionData.conversation.messages) {
@@ -1594,6 +1604,7 @@ export class ChatRecordingService {
     // A re-bound recorder must never inherit the previous session's marker.
     this.userDisplayTextsForTitle.length = 0;
     this.turnTitleStates.length = 0;
+    this.titleWindowBounded = false;
     if (
       state.turnTitleStates !== undefined &&
       state.turnTitleStates.length === state.turnParentUuids.length
@@ -1601,6 +1612,7 @@ export class ChatRecordingService {
       for (const turn of state.turnTitleStates) {
         this.turnTitleStates.push({ ...turn });
       }
+      this.titleWindowBounded = true;
     }
     this.displayProjectionForTitle = false;
     this.lastProjectionTextForTitle = undefined;
@@ -2631,7 +2643,7 @@ export class ChatRecordingService {
 
   getUserDisplayTextsForTitle(): ReadonlyArray<string | undefined> {
     if (
-      this.displayProjectionForTitle &&
+      this.hasDisplayProjectionForTitle() &&
       this.userDisplayTextsForTitle.every((text) => !text) &&
       this.lastProjectionTextForTitle !== undefined
     ) {
@@ -2640,8 +2652,28 @@ export class ChatRecordingService {
     return this.userDisplayTextsForTitle;
   }
 
+  /**
+   * Whether the *current* title window is a client display projection.
+   *
+   * The session-level marker is establish-only, so it survives the 20-slot
+   * ring evicting the projected turn's text. Answering from it alone would
+   * title a session from one stale rescued sentence — or report
+   * `empty_history` when there is no rescued text — after the window moved
+   * on. The per-turn array is index-aligned with the turn boundaries, so
+   * the window can answer for itself: once it holds no projection, its raw
+   * turns are exactly what the model saw and the history is safe to title
+   * from. A recorder restored without per-turn state cannot bound the
+   * window, so it keeps the session-level answer rather than risk the
+   * history the client projected away.
+   */
   hasDisplayProjectionForTitle(): boolean {
-    return this.displayProjectionForTitle;
+    if (!this.displayProjectionForTitle) return false;
+    if (!this.titleWindowBounded) {
+      return true;
+    }
+    return this.turnTitleStates
+      .slice(-MAX_TITLE_USER_DISPLAY_TEXTS)
+      .some((turn) => turn.projection);
   }
 
   /** User turns in the active transcript: the boundaries `/rewind` uses. */
@@ -3157,20 +3189,19 @@ export class ChatRecordingService {
 
     void (async () => {
       try {
+        // Outside projection mode the recorded texts must not stand in for
+        // the conversation: a raw-text record's displayText is the request
+        // text, and projecting only payload-carrying turns would drop every
+        // payload-less turn from the title input. The recorder's window-aware
+        // flag is authoritative: a projected turn that has left the ring no
+        // longer hides anything in the recent history, so the consumer must
+        // not re-derive the mode from the surviving texts.
+        const projectionMode = this.hasDisplayProjectionForTitle();
         const outcome = await tryGenerateSessionTitle(
           this.config,
           controller.signal,
-          // Outside projection mode the recorded texts must not stand in for
-          // the conversation: a raw-text record's displayText is the request
-          // text, and projecting only payload-carrying turns would drop every
-          // payload-less turn from the title input. The flag itself is passed
-          // through: the ring can shift every recorded entry out of a session
-          // that is still projected, so the consumer must not re-derive the
-          // mode from the surviving texts.
-          this.displayProjectionForTitle
-            ? this.getUserDisplayTextsForTitle()
-            : [],
-          this.displayProjectionForTitle,
+          projectionMode ? this.getUserDisplayTextsForTitle() : [],
+          projectionMode,
         );
         if (!outcome.ok) return;
         if (controller.signal.aborted) return;
@@ -3455,6 +3486,7 @@ export class ChatRecordingService {
       this.turnTitleStates.length = 0;
       this.displayProjectionForTitle = false;
       this.lastProjectionTextForTitle = undefined;
+      this.titleWindowBounded = true;
       for (const record of records) {
         if (
           record.type === 'user' &&
@@ -3861,6 +3893,7 @@ export class ChatRecordingService {
     this.turnTitleStates.length = 0;
     this.displayProjectionForTitle = false;
     this.lastProjectionTextForTitle = undefined;
+    this.titleWindowBounded = true;
 
     for (let i = 0; i < messages.length; i++) {
       const record = messages[i];

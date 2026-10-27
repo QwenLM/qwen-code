@@ -816,22 +816,14 @@ describe('ChatRecordingService - auto-title trigger', () => {
     );
   });
 
-  it('keeps projection mode authoritative after the ring shifts every entry out', async () => {
-    // R12-1: the 20-slot ring keeps only the last 20 turns. A session whose
-    // first turn hid instructions behind an empty client projection and
-    // whose next 20 turns carry no payload shifts the recorded '' out
-    // entirely — but the session is still in projection mode. The title
-    // pipeline must receive the authoritative flag beside the (now
-    // all-undefined) texts; re-deriving the mode from the surviving entries
-    // reads as "no projection" and titles from the raw history — the hidden
-    // channel instructions the client projected away. The generation mock
-    // answers the way the real pipeline does for an all-undefined
-    // projection-mode array (empty_history, pinned in sessionTitle.test.ts),
-    // so no title is written.
-    tryGenerateSessionTitleMock.mockResolvedValue({
-      ok: false,
-      reason: 'empty_history',
-    });
+  it('returns to history title input after the ring shifts every projection out', async () => {
+    // R21-77: the 20-slot ring keeps only the last 20 turns. A session whose
+    // only projection was an empty display text shifts out of the window
+    // entirely. The sticky session-level marker must not keep the session in
+    // projection mode with an all-undefined ring — that reports
+    // `empty_history` over a full visible conversation, an error the
+    // pre-projection-marker pipeline could not produce.
+    mockOk('Recent Conversation');
     chatRecordingService.recordUserMessage(
       [{ text: 'hidden channel instructions' }],
       undefined,
@@ -841,7 +833,7 @@ describe('ChatRecordingService - auto-title trigger', () => {
       chatRecordingService.recordUserMessage([{ text: `bare ${index}` }]);
     }
 
-    expect(chatRecordingService.hasDisplayProjectionForTitle()).toBe(true);
+    expect(chatRecordingService.hasDisplayProjectionForTitle()).toBe(false);
     expect(chatRecordingService.getUserDisplayTextsForTitle()).toEqual(
       Array.from({ length: 20 }, () => undefined),
     );
@@ -851,22 +843,21 @@ describe('ChatRecordingService - auto-title trigger', () => {
     expect(tryGenerateSessionTitleMock).toHaveBeenCalledWith(
       mockConfig,
       expect.any(AbortSignal),
-      Array.from({ length: 20 }, () => undefined),
-      true,
+      [],
+      false,
     );
-    expect(findCustomTitleRecord()).toBeUndefined();
+    expect(findCustomTitleRecord()?.systemPayload).toEqual({
+      customTitle: 'Recent Conversation',
+      titleSource: 'auto',
+    });
   });
 
-  it('titles a projected session after the ring shifts its newest text out', async () => {
-    // R8-1: one marker-less hook-context payload flips the session into
-    // projection mode; 20 payload-less turns then evict every ring entry.
-    // The recorder must keep the newest projected text beside the flag, or
-    // the session reports empty_history over a full visible conversation.
-    tryGenerateSessionTitleMock.mockResolvedValue({
-      ok: true,
-      title: 'Retained Prompt',
-      modelUsed: 'qwen-turbo',
-    });
+  it('titles from the recent window after the projecting turn leaves the ring', async () => {
+    // R21-76: the newest projected text is retained past ring eviction, but
+    // once the projected turn leaves the window one stale rescued sentence
+    // must not stand in for the conversation. With no projection left in the
+    // window, the recent raw turns are exactly what the model saw.
+    mockOk('Recent Conversation');
     chatRecordingService.recordUserMessage(
       [{ text: 'hidden model context' }],
       undefined,
@@ -876,15 +867,23 @@ describe('ChatRecordingService - auto-title trigger', () => {
       chatRecordingService.recordUserMessage([{ text: `bare ${index}` }]);
     }
 
-    expect(chatRecordingService.hasDisplayProjectionForTitle()).toBe(true);
+    expect(chatRecordingService.hasDisplayProjectionForTitle()).toBe(false);
+    expect(chatRecordingService.getUserDisplayTextsForTitle()).toEqual(
+      Array.from({ length: 20 }, () => undefined),
+    );
+
     await assistantTurn();
 
     expect(tryGenerateSessionTitleMock).toHaveBeenCalledWith(
       mockConfig,
       expect.any(AbortSignal),
-      ['visible prompt'],
-      true,
+      [],
+      false,
     );
+    expect(findCustomTitleRecord()?.systemPayload).toEqual({
+      customTitle: 'Recent Conversation',
+      titleSource: 'auto',
+    });
   });
 
   it('titles a projected session whose ring holds only empty projections', async () => {
