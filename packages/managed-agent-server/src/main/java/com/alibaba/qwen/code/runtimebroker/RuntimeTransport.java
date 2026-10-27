@@ -18,6 +18,12 @@ import java.util.concurrent.CompletionStage;
  * completion only with {@code true}.
  */
 public interface RuntimeTransport {
+    default CompletionStage<Map<String, Object>> extensionControl(RuntimeBindingRecord runtime,
+            String harnessSessionId, Map<String, Object> operation) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "managed_extension_unavailable", "Extension metadata controls are unavailable.", false));
+    }
+
     default CompletionStage<List<Map<String, Object>>> mcpDefinitions(RuntimeBindingRecord runtime) {
         return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
                 "managed_mcp_management_unavailable", "Runtime MCP definitions are unavailable.", false));

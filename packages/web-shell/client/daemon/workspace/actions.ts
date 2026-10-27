@@ -14,6 +14,7 @@ import {
 import { withActionTimeout } from '../timing.js';
 import { createDaemonRestRequest } from '../rest-request.js';
 import type {
+  DaemonAutofixPrWatchList,
   DaemonDirectoryListing,
   DaemonFileStat,
   DaemonGoal,
@@ -886,7 +887,39 @@ export function createDaemonWorkspaceActions({
       }
     },
 
-    // Goals require native REST. Clear retains the existing session route.
+    // `/autofix-pr` watches: REST-only and read-only, routed like the
+    // scheduled tasks (primary unqualified, others by workspace id).
+    async listAutofixPrWatches(workspaceId) {
+      requireClient(getClient, 'List autofix-pr watches failed');
+      const path = workspaceId
+        ? `/workspaces/${encodeURIComponent(workspaceId)}/autofix-pr/watches`
+        : '/autofix-pr/watches';
+      const url = createDaemonRequestUrl(baseUrl, path);
+      const res = await withActionTimeout(
+        requestRest(url, {
+          headers: createDaemonHeaders(token),
+        }),
+        'List autofix-pr watches timed out',
+      );
+      if (!res.ok) {
+        throw new Error(await readDaemonError(res, `GET ${path}`));
+      }
+      const data = (await res.json()) as Partial<DaemonAutofixPrWatchList>;
+      return {
+        available: data.available === true,
+        ...(typeof data.root === 'string' ? { root: data.root } : {}),
+        ...(typeof data.now === 'string' ? { now: data.now } : {}),
+        watches: Array.isArray(data.watches) ? data.watches : [],
+        ...(Array.isArray(data.unreadable)
+          ? { unreadable: data.unreadable }
+          : {}),
+      };
+    },
+
+    // Goals. `GET /goals` is REST-only (like /scheduled-tasks) and not on the
+    // DaemonClient transport; the clear path reuses the existing per-session
+    // route so a page-level clear and a `/goal clear` in chat take the same
+    // code path in the daemon.
     async listGoals() {
       requireClient(getClient, 'List goals failed');
       const url = createDaemonRequestUrl(baseUrl, '/goals');
@@ -1209,6 +1242,36 @@ export function createDaemonWorkspaceActions({
         320_000,
       );
       return result as DaemonWorkspaceDirectoryPickerResult;
+    },
+
+    async listWorkspaceDirectories(workspaceSelector) {
+      const client = requireClient(
+        getClient,
+        'List workspace directories failed',
+      );
+      return withActionTimeout(
+        client.workspaceByCwd(workspaceSelector).directories(),
+        'List workspace directories timed out',
+      );
+    },
+
+    async addWorkspaceDirectory(workspaceSelector, path) {
+      const client = requireClient(getClient, 'Add workspace directory failed');
+      return withActionTimeout(
+        client.workspaceByCwd(workspaceSelector).addDirectory(path),
+        'Add workspace directory timed out',
+      );
+    },
+
+    async removeWorkspaceDirectory(workspaceSelector, path) {
+      const client = requireClient(
+        getClient,
+        'Remove workspace directory failed',
+      );
+      return withActionTimeout(
+        client.workspaceByCwd(workspaceSelector).removeDirectory(path),
+        'Remove workspace directory timed out',
+      );
     },
 
     async updateWorkspace(workspaceSelector, update) {

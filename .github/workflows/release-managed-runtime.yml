@@ -28,7 +28,8 @@ env:
 jobs:
   prepare:
     if: "${{ github.repository == 'QwenLM/qwen-code' && (github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'v')) }}"
-    runs-on: 'ubuntu-latest'
+    # Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 10
     outputs:
       eligible: '${{ steps.gate.outputs.eligible }}'
@@ -145,7 +146,7 @@ jobs:
 
       - name: 'Verify the executable JAR and publication profile'
         run: |-
-          mvn --batch-mode --no-transfer-progress -f packages/managed-agent-server/pom.xml clean verify -Pcentral-release -Dgpg.skip=true -Dproject.build.outputTimestamp="${BUILD_TIMESTAMP}"
+          mvn --batch-mode --no-transfer-progress -f packages/managed-agent-server/pom.xml clean verify -Pcentral-release -Dgpg.skip=true -DforkCount=1 -DreuseForks=false -Dproject.build.outputTimestamp="${BUILD_TIMESTAMP}"
           node .qwen/managed-release-tools/scripts/managed-runtime-release.js --jar "packages/managed-agent-server/target/qwen-managed-agent-server-${CLI_VERSION}.jar" --version "${CLI_VERSION}" --out-dir dist/managed-runtime
 
       - name: 'Retain verified JAR and checksum'
