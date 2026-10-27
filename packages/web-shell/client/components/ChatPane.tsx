@@ -77,7 +77,7 @@ import { isVisibleComposerModel } from '../utils/composerModels';
 import { shouldBlockComposerSubmit } from '../utils/composerInputState';
 import { base64ToBlob } from '../utils/base64';
 import { QuoteToComposerContext } from './messages/quoteToComposerContext';
-import { buildQuoteReferenceTag } from '../utils/quoteReference';
+import { insertQuoteIntoComposer } from '../utils/quoteReference';
 import { isDefinitelyRejectedPromptAdmission } from '../utils/promptAdmission';
 import {
   getActiveTodosForPlanRevision,
@@ -598,11 +598,7 @@ export function ChatPane({
     ) === true;
   const editorRef = useRef<EditorHandle | null>(null);
   const handleQuoteSelection = useCallback((text: string) => {
-    const tag = buildQuoteReferenceTag(text);
-    const editor = editorRef.current;
-    if (!tag || !editor) return;
-    editor.focus();
-    editor.addTags([tag], { placement: 'inline', position: 'end' });
+    insertQuoteIntoComposer(editorRef.current, text);
   }, []);
   const transcriptViewportRef = useRef<MessageListHandle>(null);
   const {
@@ -1762,7 +1758,11 @@ export function ChatPane({
         </div>
       )}
 
-      <QuoteToComposerContext.Provider value={handleQuoteSelection}>
+      <QuoteToComposerContext.Provider
+        value={
+          approvalActive || admissionPayloadLocked ? null : handleQuoteSelection
+        }
+      >
         <div className={styles.body}>
           <OptionalMonitorDetailsProvider
             enabled={monitorDetailsSupported}

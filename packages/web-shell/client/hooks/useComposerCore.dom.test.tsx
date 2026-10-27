@@ -2875,6 +2875,96 @@ describe('useComposerCore tags', () => {
     outside.remove();
   });
 
+  describe('insertQuote', () => {
+    const quoteTag = {
+      id: 'quote:test-1',
+      kind: 'quote',
+      value: 'fragment',
+      serialized: '> fragment',
+    };
+
+    it('puts the quote where the next keystroke follows it', async () => {
+      await mount();
+      const view = latest!.viewRef.current!;
+      const dispatch = vi.spyOn(view, 'dispatch');
+
+      let inserted = false;
+      act(() => {
+        inserted = latest!.handle.insertQuote!(quoteTag);
+      });
+
+      expect(inserted).toBe(true);
+      expect(view.state.doc.toString()).toBe('> fragment ');
+      expect(view.state.selection.main.from).toBe(view.state.doc.length);
+      expect(dispatch).toHaveBeenCalledWith(
+        expect.objectContaining({ scrollIntoView: true }),
+      );
+      expect(latest!.hasAttachments).toBe(true);
+      act(() => {
+        view.dispatch(view.state.replaceSelection('explain this'));
+      });
+      expect(view.state.doc.toString()).toBe('> fragment explain this');
+    });
+
+    it('starts the quote on its own line after an existing draft', async () => {
+      await mount();
+      act(() => {
+        latest!.insertText('What does this mean?');
+      });
+      const view = latest!.viewRef.current!;
+      act(() => {
+        view.dispatch({ selection: { anchor: 4 } });
+      });
+
+      act(() => {
+        latest!.handle.insertQuote!(quoteTag);
+      });
+
+      expect(view.state.doc.toString()).toBe(
+        'What does this mean?\n> fragment ',
+      );
+      expect(view.state.selection.main.from).toBe(view.state.doc.length);
+    });
+
+    it('declines in shell mode and says why', async () => {
+      const onImageIngestionNotice = vi.fn();
+      await mount({ onImageIngestionNotice });
+      act(() => {
+        latest!.insertText('git status');
+      });
+      act(() => latest!.toggleShellMode());
+      expect(latest!.shellMode).toBe(true);
+      const view = latest!.viewRef.current!;
+      const before = view.state.doc.toString();
+
+      let inserted = true;
+      act(() => {
+        inserted = latest!.handle.insertQuote!(quoteTag);
+      });
+
+      expect(inserted).toBe(false);
+      expect(view.state.doc.toString()).toBe(before);
+      expect(view.state.doc.toString()).not.toContain('>');
+      expect(onImageIngestionNotice).toHaveBeenCalledWith(
+        'warning',
+        'Leave shell mode to quote into the composer',
+      );
+    });
+
+    it('declines while the composer is disabled', async () => {
+      await mount({ disabled: true });
+      const view = latest!.viewRef.current!;
+
+      let inserted = true;
+      act(() => {
+        inserted = latest!.handle.insertQuote!(quoteTag);
+      });
+
+      expect(inserted).toBe(false);
+      expect(view.state.doc.toString()).toBe('');
+    });
+  });
+
   it('updates inline tag state when a document change removes the last tag', async () => {
     await mount();
 

@@ -18,6 +18,7 @@ import {
   getReplySelectionRange,
   getSelectedReplyContent,
 } from '../../utils/selectionClipboard';
+import { isQuotableText } from '../../utils/quoteReference';
 import { QuoteToComposerContext } from './quoteToComposerContext';
 
 export interface SelectionCopyMenuProps {
@@ -206,7 +207,7 @@ export function SelectionCopyMenu({
               <Button
                 variant="ghost"
                 className="justify-start font-normal"
-                disabled={!selected.text.trim()}
+                disabled={!isQuotableText(selected.text)}
                 onClick={(event) => {
                   event.preventDefault();
                   quoteToComposer(selected.text);

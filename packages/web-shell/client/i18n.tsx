@@ -990,6 +990,7 @@ const EN: Messages = {
   'assistant.copyMarkdown': 'Copy Markdown',
   'assistant.copyMarkdownSource': 'Copy Markdown source',
   'assistant.quoteToComposer': 'Quote to composer',
+  'composer.quote.shellMode': 'Leave shell mode to quote into the composer',
   'assistant.dissatisfied': 'Not satisfied',
   'assistant.satisfied': 'Satisfied',
   // A workspace agent's reply in a chat session. These render in exported
@@ -5564,6 +5565,7 @@ const ZH: Messages = {
   'assistant.copyMarkdown': '复制 Markdown',
   'assistant.copyMarkdownSource': '复制 Markdown 源文',
   'assistant.quoteToComposer': '引用到输入框',
+  'composer.quote.shellMode': '请先退出 Shell 模式再引用到输入框',
   'assistant.dissatisfied': '不满意',
   'assistant.satisfied': '满意',
   'agentMessage.status.failed': '失败',

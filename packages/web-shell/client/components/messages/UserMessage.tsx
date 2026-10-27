@@ -736,7 +736,13 @@ export function ReadonlyComposerTag({
         </>
       )}
       {tooltip !== undefined && tooltip !== null && (
-        <span className={styles.messageTagTooltip} role="tooltip">
+        <span
+          className={styles.messageTagTooltip}
+          role="tooltip"
+          // Mounted but visually hidden: never part of a copied or quoted
+          // selection.
+          data-selection-copy-ignore
+        >
           {tooltip}
         </span>
       )}
