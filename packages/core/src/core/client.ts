@@ -3316,9 +3316,11 @@ export class LlmClient {
         history,
         config: this.config,
         ...(getExtractNoopSkipTurns() > 0 && {
+          // The next prompt's known base; see isBelowCompactionWarn.
           belowCompactionWarn: isBelowCompactionWarn(
             this.config,
-            this.getChat().getLastPromptTokenCount(),
+            this.getChat().getLastPromptTokenCount() +
+              this.getChat().getLastOutputTokenCount(),
           ),
         }),
       })

@@ -2173,6 +2173,23 @@ describe('MemoryManager', () => {
       ).toHaveLength(8);
     });
 
+    it('records a pressured turn as memory_pressure without spending cadence budget', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+
+      const pressured = await mgr.scheduleExtract({
+        ...extractParams(tmp.projectRoot, 'sess', turns(4)),
+        config: pressureConfig('hard'),
+        belowCompactionWarn: true,
+      });
+      expect(pressured.skippedReason).toBe('memory_pressure');
+
+      // The arm and the budget survive: a run that could never fork must not be
+      // recorded as a cadence skip, and it must not disarm the experiment.
+      expect((await turn(mgr, 6)).skippedReason).toBe('cadence');
+    });
+
     it('does not arm after a run that saved memory or used no tool', async () => {
       vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
       const mgr = new MemoryManager();

@@ -38,7 +38,10 @@ import {
 import { MESSAGE_DISPLAY_DEBOUNCE_MS } from './message-display-buffer.js';
 import { detectTurnInterruption } from './turn-interruption.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
-import { ChatCompressionService } from '../services/chatCompressionService.js';
+import {
+  ChatCompressionService,
+  computeThresholds,
+} from '../services/chatCompressionService.js';
 import {
   AuthType,
   createContentGenerator,
@@ -9565,6 +9568,45 @@ Other open files:
         type: LlmEventType.HookSystemMessage,
         value: 'Managed auto-memory updated: user.md',
       });
+    });
+
+    it('passes the compaction-warning gate the cadence experiment arms on', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      mockConfig.getAutoCompactThreshold = vi.fn().mockReturnValue(undefined);
+      try {
+        const { warn } = computeThresholds(200_000);
+        mockTurnRunFn.mockReturnValue(textTurn('Done'));
+
+        const runTurn = async (
+          outputTokens: number,
+          belowCompactionWarn: boolean,
+          promptId: string,
+        ) => {
+          mockMemoryManager.scheduleExtract.mockClear();
+          installChat({
+            getHistory: vi
+              .fn()
+              .mockReturnValue([
+                userText('Please answer tersely'),
+                modelText('Done'),
+              ]),
+            getLastPromptTokenCount: vi.fn().mockReturnValue(warn - 1),
+            getLastOutputTokenCount: vi.fn().mockReturnValue(outputTokens),
+          });
+          await run([{ text: 'Please answer tersely' }], promptId);
+          expect(mockMemoryManager.scheduleExtract).toHaveBeenCalledWith(
+            expect.objectContaining({ belowCompactionWarn }),
+          );
+        };
+
+        // warn - 1 on the prompt alone is below the tier; adding the two
+        // retained output tokens puts the sum at the tier.
+        await runTurn(0, true, 'prompt-id-warn-below');
+        await runTurn(2, false, 'prompt-id-warn-at-tier');
+      } finally {
+        vi.unstubAllEnvs();
+        delete (mockConfig as Partial<Config>).getAutoCompactThreshold;
+      }
     });
 
     it('does not wait for metadata migration before completing the user turn', async () => {

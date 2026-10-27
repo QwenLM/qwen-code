@@ -251,13 +251,22 @@ export function computeThresholds(
  * for this config's window. Memory extraction cadence (#13004) only *arms* a
  * skip below this tier: a skip armed on an earlier turn can still be pending
  * when compaction fires, and compaction does not flush it.
+ *
+ * Callers pass the next prompt's known base — the chat's last API-reported
+ * prompt count plus its retained output tokens — because both compaction gates
+ * measure at least that much, and comparing the bare prompt count would report
+ * "below warn" for a turn whose own output budget already reaches the auto
+ * tier. What remains between this tier and `auto` is {@link WARN_BUFFER}, the
+ * reserve for the next user message and the estimate's error.
  */
 export function isBelowCompactionWarn(
   config: Config,
   promptTokens: number,
 ): boolean {
-  // A count of 0 means the chat has no report for this route yet (or the read
-  // crossed routes), not an empty prompt: fail closed so no turn is skipped.
+  // A count of 0 means this chat has no API report yet — an un-keyed read
+  // adopts the active route, so a zero is this chat's own last report rather
+  // than a value borrowed from another route — not an empty prompt: fail
+  // closed so no turn is skipped.
   if (promptTokens <= 0) return false;
   const window =
     config.getContentGeneratorConfig()?.contextWindowSize ??

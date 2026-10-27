@@ -1414,6 +1414,11 @@ export class MemoryManager {
     const budget = getExtractNoopSkipTurns();
     const state = this.extractCadence.get(params.sessionId);
     if (budget === 0 || !state?.armed || state.skips >= budget) return false;
+    // The pressure gate lives in `runExtract`, so a pressured turn can never
+    // fork. Recording it as a cadence skip would spend the experiment's budget
+    // and park a snapshot on a turn that was never eligible to extract; let the
+    // request through so `runExtract` records `memory_pressure` instead.
+    if (this.isUnderMemoryPressure(params.config)) return false;
     // `/cd` and the daemon's `session/cd` relocate the project root without a
     // session switch, so no discard fires and this entry outlives the project
     // that earned it. An arm measured against one project's memory says
@@ -1481,6 +1486,11 @@ export class MemoryManager {
       this.extractCadence.delete(params.sessionId);
       return;
     }
+    // A run that never forked because the runtime was under memory pressure
+    // says nothing about the cadence: keep the arm and its remaining budget for
+    // the next unpressured turn instead of taking the failed/unconsumed branch
+    // below, which would disarm it.
+    if (result?.skippedReason === 'memory_pressure') return;
     // `/cd` relocates the live Config in place and fires no discard, so a run
     // still in flight for the old root lands here afterwards. It describes
     // another project's memory and must not re-key the entry or drop the
