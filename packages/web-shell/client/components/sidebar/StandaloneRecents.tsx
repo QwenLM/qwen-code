@@ -482,6 +482,7 @@ export function StandaloneRecents({
             type="button"
             className={workspaceStyles.header}
             aria-expanded={expanded}
+            disabled={Boolean(query)}
             onClick={(event) => {
               const nextExpanded = !expanded;
               writeWorkspaceExpanded(expansionId, nextExpanded);

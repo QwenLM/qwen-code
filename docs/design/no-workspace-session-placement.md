@@ -23,8 +23,9 @@ In `StandaloneRecents.tsx`, reuse `workspaceExpansion.ts` to read and write the
 existing expanded state, with distinct `standalone:active` and
 `standalone:archived` preference ids. Missing preferences default to expanded.
 Search continues to show matching rows even if the saved group state is
-collapsed, without overwriting that preference. Pagination resets on collapse
-as before. Archived sessions stay inside Archived.
+collapsed, without overwriting that preference. While searching, the group
+header toggle is disabled; clearing the query restores it and the saved state.
+Pagination resets on collapse as before. Archived sessions stay inside Archived.
 
 An explicit collapse remains authoritative when opening a session from Recent,
 a deep link, or the group's New task action. These actions do not automatically
