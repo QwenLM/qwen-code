@@ -17891,6 +17891,34 @@ describe('createAcpSessionBridge', () => {
         workspaceCwd: WS_A,
         sourceType: 'channel',
       });
+      // Attest the session first: without a worker-classified turn the
+      // declaration is ineligible on attestation grounds alone, so raising
+      // the cap would keep this test green and the cap would go unwitnessed.
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'worker relay' }],
+        },
+        undefined,
+        { channelPrompt: true },
+      );
+      // Positive control on the same attested session: a cap-sized
+      // declaration projects, so the over-cap discard below is attributable
+      // to the cap rather than to ineligibility.
+      const atCap = 'c'.repeat(MAX_SUBMITTED_PROMPT_CHARS);
+      const atCapPromise = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'machine wrapper' }],
+        },
+        undefined,
+        { submittedPrompt: atCap },
+      );
+      expect(bridge.getPendingPrompts(session.sessionId)[0]?.text).toBe(atCap);
+      await atCapPromise;
+
       const abort = new AbortController();
       const userChunks: unknown[] = [];
       const events = bridge.subscribeEvents(session.sessionId, {
