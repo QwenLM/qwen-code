@@ -152,23 +152,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/agent/web-shell/v1/sessions/cwd/change": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** @description W2, implemented: the camelCase twin of the public changeSessionCwd with the matched refusal order: 400 invalid_request for a missing or malformed field; 401 actor_required without a trusted actor; 400 invalid_idempotency_key for a malformed idempotencyKey — with two documented divergences: a key over 128 characters is refused during request validation with 400 invalid_request before the service's check, and a blank idempotencyKey is refused there too, while the public header answers 400 invalid_idempotency_key for both shapes; 400 invalid_cwd for a lexical violation and 400 invalid_request for an expectedContextRevision below 1; 404 session_not_found for an unknown Session id; 400 unsupported_feature for an unbound Session; 404 session_not_found for an unreadable Session; 409 idempotency_conflict when one key carries different content, and a completed change under the same key always replays instead, before the role refusal; 403 session_operation_forbidden when a readable actor's Workspace role is below OPERATOR; 409 workspace_unavailable when execution is disabled; 404 session_not_found for a deleted Session; then 409 session_state_conflict, 409 workspace_unavailable from moved Registry facts (the recorded create-command actor's grant included, and the settlement re-checks the V56-persisted initiator the same way, so demoting either actor fails the operation, exactly like the public surface), 409 context_revision_conflict and 409 session_context_busy. Poll the operation or await session.context.changed; do not treat 202 as activation. */
-        post: operations["webShellChangeCwd"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/agent/web-shell/v1/operations/query": {
         parameters: {
             query?: never;
@@ -1312,7 +1295,8 @@ export interface components {
         };
         WebShellSessionCapabilities: {
             /**
-             * @description True when Workspace files are enabled, the bound Session is active and undeleted, the caller holds OPERATOR or above on the Workspace and the exact ACTIVE Registry generation/storage and create-command-actor OPERATOR/OWNER grant still hold, matching cwd admission. This does not promise an idle Session and is independent of workspaceTurns execution-profile gates. Missing means false. Existing operations remain queryable under read authorization even when this capability is false.
+             * @deprecated
+             * @description Retired: Session directory-change submission has been removed; always false.
              * @default false
              */
             cwdChange?: boolean;
@@ -1525,15 +1509,6 @@ export interface components {
                 /** @constant */
                 canCreateSession?: true;
             }) | null;
-        };
-        WebShellChangeCwdRequest: {
-            /** Format: uuid */
-            sessionId: string;
-            idempotencyKey: string;
-            cwdRelative: components["schemas"]["WorkspaceRelativePath"];
-            /** Format: int64 */
-            expectedContextRevision: number;
-            requestId?: string | null;
         };
         WebShellOperationRequest: {
             /** Format: uuid */
@@ -2915,36 +2890,6 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
-            413: components["responses"]["PayloadTooLarge"];
-        };
-    };
-    webShellChangeCwd: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["WebShellChangeCwdRequest"];
-            };
-        };
-        responses: {
-            /** @description Durable cwd operation; acceptance does not mean the new cwd is active. */
-            202: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["WebShellCwdOperation"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-            409: components["responses"]["Conflict"];
             413: components["responses"]["PayloadTooLarge"];
         };
     };

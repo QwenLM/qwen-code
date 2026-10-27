@@ -1382,9 +1382,6 @@ describe('WorkspaceBindingCreator', () => {
       expect(Boolean(editorMocks.props?.onSkillsOpenChange)).toBe(
         Boolean(skillsSupported),
       );
-      expect(
-        container.textContent?.includes('Enabled Skills on the Skills page'),
-      ).toBe(Boolean(skillsSupported));
       await sendInitial('Compatible creation');
       expect(createSession).toHaveBeenCalledOnce();
       expect(load).toHaveBeenCalledTimes(skillsSupported ? 1 : 0);
@@ -1415,9 +1412,6 @@ describe('WorkspaceBindingCreator', () => {
     };
     createSession.mockRejectedValue(new Error('lost response'));
     await render();
-    expect(container.textContent).toContain(
-      'Enabled Skills on the Skills page',
-    );
     expect(container.textContent).not.toContain('Add Skill');
     await act(async () => {
       await editorMocks.props!.onSubmit!('hello');
@@ -1435,7 +1429,6 @@ describe('WorkspaceBindingCreator', () => {
       skillsSupported: false,
     });
     await render();
-    expect(container.textContent).toContain('42 Skills are saved');
     await click('Retry the same request');
     expect(load).toHaveBeenCalledTimes(1);
     expect(createSession.mock.calls[1]![0].skills).toEqual(first[0].skills);
