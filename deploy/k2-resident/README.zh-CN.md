@@ -12,6 +12,8 @@ Read、Write 和 Edit。Session 关闭会结算并撤销原上下文，下一个
 可选的显式空闲退役由 #14765 实现，使用方式见下文。本配置不需要 Go 工具链、
 定制 containerd/shim、节点 collector 或冷启动安装。
 
+[2026-10-24 范围决定](../../docs/design/2026-10-23-csi-evidence-source.zh-CN.md)明确完整 CSI 审计不再是首版前置条件。Session 交接保留原 Pod/PVC，显式空闲退役保留存储归属。平台托管回收和跨 Workspace 卷复用仍是后续工作。
+
 ## 可信平台与支持的存储
 
 信任管理员、Kubernetes 控制面、宿主机和已完成资格验证的 CSI 驱动，保留既有

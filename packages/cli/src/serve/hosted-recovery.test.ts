@@ -501,6 +501,10 @@ it.each([
         'capabilityDigest',
         'get',
       ).mockReturnValue(WORKSPACE_CAPABILITY_DIGEST);
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'resolveCapabilities',
+      ).mockResolvedValue();
       vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockImplementation(
         async function (this: HostedWorkspaceBroker) {
           this.runtime = runtime;

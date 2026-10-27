@@ -230,12 +230,44 @@ jobs:
             sleep $((attempt * 15))
           done
 
+      - name: 'Point Maven at the pool mirror'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/configure-maven-mirror.sh'
+
       - name: 'Set up Maven (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
         run: |-
           archive="${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
-          curl -fsSL "https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "${archive}"
-          echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status
+          # Maven Central rate-limits the pool's shared egress for minutes at a
+          # time: 429 killed a lane before any test (run 40191430799), and a 2 s
+          # retry and then a 15 s one, 2.5 minutes in all, answered 429 on every
+          # attempt here. So a host keeps one copy and a cold fetch falls back
+          # to the mirror that serves the same bytes -- the pinned SHA-512 below
+          # still decides what gets extracted, so a bad mirror only fails.
+          cached="${HOME}/.cache/qwen-code-ci/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+          if ! { [ -f "${cached}" ] && cp -- "${cached}" "${archive}" &&
+            echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status; }; then
+            for base in \
+              'https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven' \
+              'https://maven.aliyun.com/repository/public/org/apache/maven/apache-maven'; do
+              if curl -fsSL --retry 2 --retry-delay 5 --retry-connrefused --retry-max-time 30 --max-time 300 \
+                "${base}/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "${archive}"; then
+                break
+              fi
+            done
+            if ! echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status; then
+              echo "::error::no checksum-verified Maven ${MAVEN_VERSION} from Maven Central or its mirror"
+              exit 1
+            fi
+            # Best-effort: the archive is already verified job-locally, so an
+            # unwritable shared cache must not abort the step before tar.
+            if ! { mkdir -p -- "$(dirname -- "${cached}")" &&
+              cp -- "${archive}" "${cached}.$$" &&
+              mv -- "${cached}.$$" "${cached}"; }; then
+              rm -f -- "${cached}.$$"
+              echo "::warning::Maven cache write-back skipped: the shared cache is not writable; the verified job-local archive is used instead"
+            fi
+          fi
           tar -xzf "${archive}" -C "${RUNNER_TEMP}"
           echo "${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}/bin" >> "${GITHUB_PATH}"
 
@@ -729,12 +761,44 @@ jobs:
             packages/managed-agent-server/pom.xml
           settings-path: '${{ runner.temp }}/setup-java-m2'
 
+      - name: 'Point Maven at the pool mirror'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/configure-maven-mirror.sh'
+
       - name: 'Set up Maven (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
         run: |-
           archive="${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
-          curl -fsSL "https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "${archive}"
-          echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status
+          # Maven Central rate-limits the pool's shared egress for minutes at a
+          # time: 429 killed a lane before any test (run 40191430799), and a 2 s
+          # retry and then a 15 s one, 2.5 minutes in all, answered 429 on every
+          # attempt here. So a host keeps one copy and a cold fetch falls back
+          # to the mirror that serves the same bytes -- the pinned SHA-512 below
+          # still decides what gets extracted, so a bad mirror only fails.
+          cached="${HOME}/.cache/qwen-code-ci/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+          if ! { [ -f "${cached}" ] && cp -- "${cached}" "${archive}" &&
+            echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status; }; then
+            for base in \
+              'https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven' \
+              'https://maven.aliyun.com/repository/public/org/apache/maven/apache-maven'; do
+              if curl -fsSL --retry 2 --retry-delay 5 --retry-connrefused --retry-max-time 30 --max-time 300 \
+                "${base}/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "${archive}"; then
+                break
+              fi
+            done
+            if ! echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status; then
+              echo "::error::no checksum-verified Maven ${MAVEN_VERSION} from Maven Central or its mirror"
+              exit 1
+            fi
+            # Best-effort: the archive is already verified job-locally, so an
+            # unwritable shared cache must not abort the step before tar.
+            if ! { mkdir -p -- "$(dirname -- "${cached}")" &&
+              cp -- "${archive}" "${cached}.$$" &&
+              mv -- "${cached}.$$" "${cached}"; }; then
+              rm -f -- "${cached}.$$"
+              echo "::warning::Maven cache write-back skipped: the shared cache is not writable; the verified job-local archive is used instead"
+            fi
+          fi
           tar -xzf "${archive}" -C "${RUNNER_TEMP}"
           echo "${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}/bin" >> "${GITHUB_PATH}"
 
@@ -1613,12 +1677,44 @@ jobs:
             packages/sdk-java/**/pom.xml
             packages/managed-agent-server/pom.xml
           settings-path: '${{ runner.temp }}/setup-java-m2'
+      - name: 'Point Maven at the pool mirror'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/configure-maven-mirror.sh'
+
       - name: 'Set up Maven (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
         run: |-
           archive="${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
-          curl -fsSL "https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "${archive}"
-          echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status
+          # Maven Central rate-limits the pool's shared egress for minutes at a
+          # time: 429 killed a lane before any test (run 40191430799), and a 2 s
+          # retry and then a 15 s one, 2.5 minutes in all, answered 429 on every
+          # attempt here. So a host keeps one copy and a cold fetch falls back
+          # to the mirror that serves the same bytes -- the pinned SHA-512 below
+          # still decides what gets extracted, so a bad mirror only fails.
+          cached="${HOME}/.cache/qwen-code-ci/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+          if ! { [ -f "${cached}" ] && cp -- "${cached}" "${archive}" &&
+            echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status; }; then
+            for base in \
+              'https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven' \
+              'https://maven.aliyun.com/repository/public/org/apache/maven/apache-maven'; do
+              if curl -fsSL --retry 2 --retry-delay 5 --retry-connrefused --retry-max-time 30 --max-time 300 \
+                "${base}/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "${archive}"; then
+                break
+              fi
+            done
+            if ! echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status; then
+              echo "::error::no checksum-verified Maven ${MAVEN_VERSION} from Maven Central or its mirror"
+              exit 1
+            fi
+            # Best-effort: the archive is already verified job-locally, so an
+            # unwritable shared cache must not abort the step before tar.
+            if ! { mkdir -p -- "$(dirname -- "${cached}")" &&
+              cp -- "${archive}" "${cached}.$$" &&
+              mv -- "${cached}.$$" "${cached}"; }; then
+              rm -f -- "${cached}.$$"
+              echo "::warning::Maven cache write-back skipped: the shared cache is not writable; the verified job-local archive is used instead"
+            fi
+          fi
           tar -xzf "${archive}" -C "${RUNNER_TEMP}"
           echo "${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}/bin" >> "${GITHUB_PATH}"
       - name: 'Install Managed Agent dependencies'
@@ -1841,12 +1937,44 @@ jobs:
             packages/sdk-java/**/pom.xml
             packages/managed-agent-server/pom.xml
           settings-path: '${{ runner.temp }}/setup-java-m2'
+      - name: 'Point Maven at the pool mirror'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/configure-maven-mirror.sh'
+
       - name: 'Set up Maven (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
         run: |-
           archive="${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
-          curl -fsSL "https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "${archive}"
-          echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status
+          # Maven Central rate-limits the pool's shared egress for minutes at a
+          # time: 429 killed a lane before any test (run 40191430799), and a 2 s
+          # retry and then a 15 s one, 2.5 minutes in all, answered 429 on every
+          # attempt here. So a host keeps one copy and a cold fetch falls back
+          # to the mirror that serves the same bytes -- the pinned SHA-512 below
+          # still decides what gets extracted, so a bad mirror only fails.
+          cached="${HOME}/.cache/qwen-code-ci/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+          if ! { [ -f "${cached}" ] && cp -- "${cached}" "${archive}" &&
+            echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status; }; then
+            for base in \
+              'https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven' \
+              'https://maven.aliyun.com/repository/public/org/apache/maven/apache-maven'; do
+              if curl -fsSL --retry 2 --retry-delay 5 --retry-connrefused --retry-max-time 30 --max-time 300 \
+                "${base}/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "${archive}"; then
+                break
+              fi
+            done
+            if ! echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status; then
+              echo "::error::no checksum-verified Maven ${MAVEN_VERSION} from Maven Central or its mirror"
+              exit 1
+            fi
+            # Best-effort: the archive is already verified job-locally, so an
+            # unwritable shared cache must not abort the step before tar.
+            if ! { mkdir -p -- "$(dirname -- "${cached}")" &&
+              cp -- "${archive}" "${cached}.$$" &&
+              mv -- "${cached}.$$" "${cached}"; }; then
+              rm -f -- "${cached}.$$"
+              echo "::warning::Maven cache write-back skipped: the shared cache is not writable; the verified job-local archive is used instead"
+            fi
+          fi
           tar -xzf "${archive}" -C "${RUNNER_TEMP}"
           echo "${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}/bin" >> "${GITHUB_PATH}"
       - name: 'Set up Node.js (hosted)'
@@ -1897,13 +2025,22 @@ jobs:
       - name: 'Install libfaketime'
         # The clock-skew row moves one node's whole wall clock. A pool host
         # keeps the package between jobs, so install only when it is missing;
-        # sudo -n fails fast instead of prompting.
+        # sudo -n fails fast instead of prompting. The multiarch directory is
+        # resolved rather than assumed: the aarch64 pool hosts run this lane
+        # too, and libfaketime lands under aarch64-linux-gnu there.
         run: |-
-          if ! test -f /usr/lib/x86_64-linux-gnu/faketime/libfaketimeMT.so.1; then
+          set -uo pipefail
+          lib="$(find /usr/lib -maxdepth 3 -name libfaketimeMT.so.1 -print -quit 2>/dev/null || true)"
+          if [[ -z "${lib}" ]]; then
             sudo -n apt-get -o DPkg::Lock::Timeout=300 update -q
             sudo -n apt-get -o DPkg::Lock::Timeout=300 install -y -q faketime
+            lib="$(find /usr/lib -maxdepth 3 -name libfaketimeMT.so.1 -print -quit 2>/dev/null || true)"
           fi
-          test -f /usr/lib/x86_64-linux-gnu/faketime/libfaketimeMT.so.1
+          if [[ -z "${lib}" ]]; then
+            echo "::error::libfaketime is not installed for this architecture"
+            exit 1
+          fi
+          echo "FAKETIME_LIB=${lib}" >> "${GITHUB_ENV}"
       # Pool hosts share one host-wide fs.aio-nr budget across concurrent
       # jobs, and a mysqld that reserves native AIO contexts can exhaust it
       # and fail to boot with `io_setup() failed with EAGAIN` (#14416).
@@ -1971,7 +2108,7 @@ jobs:
             -Dqwen.gate.rocketmq.endpoints=127.0.0.1:${RMQ_PROXY_GRPC_PORT} \
             -Dqwen.gate.rocketmq.topic=qwen-managed-events \
             -Dqwen.gate.rocketmq.work-dir="${RUNNER_TEMP}/rocketmq" \
-            -Dqwen.gate.faketime.library=/usr/lib/x86_64-linux-gnu/faketime/libfaketimeMT.so.1 \
+            -Dqwen.gate.faketime.library="${FAKETIME_LIB}" \
             clean verify && \
             node scripts/check-failsafe-reports.js event-transport-multi-node packages/managed-agent-server
       - name: 'Upload multi-node gate reports'
@@ -2165,7 +2302,15 @@ jobs:
             echo "::warning::Expected Node 22.x but found $(node -v); daemon E2E will run against the runner's Node."
           fi
 
+      # setup-java resolves the requested version through api.adoptium.net on
+      # every run, even when the tool cache already holds that JDK, and the
+      # lookup has no timeout: on the Hangzhou hosts it stalled and held this
+      # step for close to two hours (run 40262799523). Bound the attempt and
+      # fall back to the pool's own cache or mirror when it does not finish.
       - name: 'Set up Java'
+        id: 'setup_java'
+        timeout-minutes: 3
+        continue-on-error: true
         uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
         with:
           distribution: 'temurin'
@@ -2174,12 +2319,54 @@ jobs:
           cache-dependency-path: 'packages/sdk-java/qwencode/pom.xml'
           settings-path: '${{ runner.temp }}/setup-java-m2'
 
+      - name: 'Set up Java (pool fallback)'
+        if: "${{ steps.setup_java.outcome != 'success' }}"
+        # Bounded like the attempt it replaces: a host that reaches neither
+        # Adoptium nor the mirror must not hold a runner for the download
+        # budget.
+        timeout-minutes: 10
+        env:
+          JAVA_SPEC: '11'
+        run: 'bash .github/scripts/install-pool-jdk.sh'
+
+      - name: 'Point Maven at the pool mirror'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/configure-maven-mirror.sh'
+
       - name: 'Set up Maven (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
         run: |-
           archive="${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
-          curl -fsSL "https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "${archive}"
-          echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status
+          # Maven Central rate-limits the pool's shared egress for minutes at a
+          # time: 429 killed a lane before any test (run 40191430799), and a 2 s
+          # retry and then a 15 s one, 2.5 minutes in all, answered 429 on every
+          # attempt here. So a host keeps one copy and a cold fetch falls back
+          # to the mirror that serves the same bytes -- the pinned SHA-512 below
+          # still decides what gets extracted, so a bad mirror only fails.
+          cached="${HOME}/.cache/qwen-code-ci/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+          if ! { [ -f "${cached}" ] && cp -- "${cached}" "${archive}" &&
+            echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status; }; then
+            for base in \
+              'https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven' \
+              'https://maven.aliyun.com/repository/public/org/apache/maven/apache-maven'; do
+              if curl -fsSL --retry 2 --retry-delay 5 --retry-connrefused --retry-max-time 30 --max-time 300 \
+                "${base}/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "${archive}"; then
+                break
+              fi
+            done
+            if ! echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status; then
+              echo "::error::no checksum-verified Maven ${MAVEN_VERSION} from Maven Central or its mirror"
+              exit 1
+            fi
+            # Best-effort: the archive is already verified job-locally, so an
+            # unwritable shared cache must not abort the step before tar.
+            if ! { mkdir -p -- "$(dirname -- "${cached}")" &&
+              cp -- "${archive}" "${cached}.$$" &&
+              mv -- "${cached}.$$" "${cached}"; }; then
+              rm -f -- "${cached}.$$"
+              echo "::warning::Maven cache write-back skipped: the shared cache is not writable; the verified job-local archive is used instead"
+            fi
+          fi
           tar -xzf "${archive}" -C "${RUNNER_TEMP}"
           echo "${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}/bin" >> "${GITHUB_PATH}"
 

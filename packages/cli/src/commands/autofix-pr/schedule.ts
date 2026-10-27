@@ -26,6 +26,7 @@ import {
   type AutofixPrState,
   type AutofixPrWatchOptions,
 } from './state.js';
+import { assertNoFixInFlight } from './fix.js';
 
 /** The interval a watch uses when the user gives none (Section 10). */
 export const DEFAULT_EVERY = 2;
@@ -39,15 +40,32 @@ export interface ScheduledTask {
   recurring: true;
   gate: string;
   prompt: string;
+  /** A daemon session's watch must outlive the idle reclaim of its session:
+   * see `scheduledTask`'s `daemon` argument. */
+  durable?: true;
+  sessionMode?: 'current';
+}
+
+/** `qwen serve` marks every child it spawns, and reclaims an idle session. */
+function inDaemonSession(): boolean {
+  return process.env['QWEN_CODE_SERVE'] === '1';
 }
 
 /**
  * The task a watch runs: the gate names the session that owns the watch, so
  * a task left behind by another session stops at its next fire.
+ *
+ * `daemon` makes it durable and bound to this conversation. A daemon reclaims
+ * a session nobody watches after the idle timeout, taking the in-memory
+ * scheduler of a session-only task with it and stopping the watch with no
+ * report; a bound durable one keeps the session resident and the Web Shell's
+ * scheduled-tasks page lists it. A terminal session has nothing to survive,
+ * so it keeps the session-only task.
  */
 export function scheduledTask(
   state: AutofixPrState,
   watch: AutofixPrWatchOptions,
+  daemon = false,
 ): ScheduledTask {
   if (!SESSION_ID_RE.test(state.sessionId)) {
     throw new Error(
@@ -71,6 +89,9 @@ export function scheduledTask(
       (watch.task ? ` --task ${watch.task}` : '') +
       (watch.reply ? '' : ' --no-reply') +
       (watch.instructions ? ` -- ${watch.instructions}` : ''),
+    ...(daemon
+      ? { durable: true as const, sessionMode: 'current' as const }
+      : {}),
   };
 }
 
@@ -134,6 +155,7 @@ export function runSchedule(
     const state = requireState(paths.statePath, args.pr);
     // A watch `cleanup` ended is started again by a start, not here.
     assertWatching(state);
+    assertNoFixInFlight(paths, args.pr);
     // Running someone else's code with the user's credentials in reach is
     // confirmed for one round at a time (`--once`), never for a watch; a
     // state that does not say the author can push is no permission either.
@@ -170,9 +192,9 @@ export function runSchedule(
     };
     // Checked before anything is recorded: a task that cannot be made is
     // not one to start again.
-    const { cron, recurring, gate, prompt } = scheduledTask(state, watch);
+    const task = scheduledTask(state, watch, inDaemonSession());
     writeState(paths.statePath, { ...state, watch });
-    return { cron, recurring, gate, prompt, ...watch };
+    return { ...task, ...watch };
   });
 }
 
