@@ -55,12 +55,6 @@ import { isGitIgnored } from '@qwen-code/qwen-code-core';
 import { GIT_TIMEOUT_MS } from './lib/git.js';
 import { diffHashOf } from './script-lint.js';
 import {
-  dirName,
-  foundNoTests,
-  relatedTestDir,
-  suiteCommandOf,
-} from './lib/npm-toolchain.js';
-import {
   hasUnmodeledWorkspaceGlob,
   readWorkspaceGlobs,
   readWorkspacePackages,
@@ -441,18 +435,10 @@ export function extractClaims(section: string): Array<{
   return claims;
 }
 
-/** A test count a runner printed, beside the command that printed it. */
-export interface ObservedTestCount {
-  command: string;
-  count: number;
-}
-
-/** Every test count the runners actually printed, per command. */
-export function observedTestCountsByCommand(
-  report: BuildTestReport | null,
-): ObservedTestCount[] {
+/** Every test count the runners actually printed, summed per command. */
+export function observedTestCounts(report: BuildTestReport | null): number[] {
   if (!report) return [];
-  const counts: ObservedTestCount[] = [];
+  const counts: number[] = [];
   for (const cmd of report.test ?? []) {
     // vitest: `Tests  472 passed (472)`. jest: `Tests:  12 passed, 12 total`.
     let total = 0;
@@ -477,14 +463,9 @@ export function observedTestCountsByCommand(
       total += Number(m[1].replace(/,/g, ''));
       saw = true;
     }
-    if (saw) counts.push({ command: cmd.command, count: total });
+    if (saw) counts.push(total);
   }
   return counts;
-}
-
-/** Every test count the runners printed, as bare numbers. */
-export function observedTestCounts(report: BuildTestReport | null): number[] {
-  return observedTestCountsByCommand(report).map((c) => c.count);
 }
 
 /** A path claim's own text reduced to a repo-relative path. */
@@ -614,65 +595,43 @@ function ruleCommand(
 ): TestPlanClaim {
   // A command this review actually ran is settled by its exit code — the
   // strongest evidence available, and it needs no manifest lookup.
-  const claimed = text.trim();
-  // A workspace-scoped run (`npm run build --workspace=...`) still settles
-  // the plan's bare command, so match it plus any extra flags — not only an
-  // exact string. The space guard keeps `build` from matching `build:all`.
-  const settles = (command: string): boolean =>
-    command === claimed ||
-    (command.startsWith(claimed) && command[claimed.length] === ' ');
   const matches = [
     ...(buildTest?.build ?? []),
     ...(buildTest?.test ?? []),
-  ].filter((c) => settles(c.command.trim()));
-  // A related run (`vitest related`) is this review's run of a suite's `test`
-  // script narrowed to the diff, read as the whole-suite command it stands
-  // in for. It settles a claim by its exit code too, and the note says it
-  // was narrowed: a pass is not the whole suite passing.
-  const related = (buildTest?.test ?? []).filter((c) => {
-    const suite = suiteCommandOf(c.command);
+  ].filter((c) => {
+    const command = c.command.trim();
+    const claimed = text.trim();
+    // A workspace-scoped run (`npm run build --workspace=...`) still settles
+    // the plan's bare command, so match it plus any extra flags — not only an
+    // exact string. The space guard keeps `build` from matching `build:all`.
     return (
-      suite !== undefined &&
-      settles(suite) &&
-      // A related run that collected nothing exits 0 having executed zero
-      // tests; its exit code says nothing about the claimed suite.
-      !(c.exitCode === 0 && foundNoTests(c.output))
+      command === claimed ||
+      (command.startsWith(claimed) && command[claimed.length] === ' ')
     );
   });
-  const runs = [...matches, ...related];
   // build-test records one scoped command per package and does not stop on
   // failure, so a bare claim can match several runs. Prefer a failure: if ANY
   // scoped run failed, the phase failed, and the bare claim must read
   // `contradicted` — the first match could be a green package that merely
   // sorted first, stating the opposite of the authoritative `ok: false`.
   const ran =
-    runs.find((c) => !c.timedOut && c.exitCode !== 0) ??
-    runs.find((c) => !c.timedOut);
+    matches.find((c) => !c.timedOut && c.exitCode !== 0) ??
+    matches.find((c) => !c.timedOut);
   if (ran) {
-    // The qualifier belongs to the run that settled the claim: a whole-suite
-    // run beside another suite's narrowed run settled it whole.
-    const ranDir = relatedTestDir(ran.command);
     return ran.exitCode === 0
       ? {
           kind: 'command',
           text,
           verdict: 'reproduces',
           observed: 'exit 0',
-          note:
-            ranDir === undefined
-              ? 'this review ran it'
-              : `this review ran only its tests related to the diff ` +
-                `(vitest related), in ${dirName(ranDir)}, and they passed`,
+          note: 'this review ran it',
         }
       : {
           kind: 'command',
           text,
           verdict: 'contradicted',
           observed: `exit ${ran.exitCode}`,
-          note: related.includes(ran)
-            ? 'this review ran the tests related to the diff (vitest ' +
-              'related) and they failed'
-            : 'this review ran it and it failed',
+          note: 'this review ran it and it failed',
         };
   }
 
@@ -773,11 +732,7 @@ function ruleCommand(
   };
 }
 
-function ruleCount(
-  text: string,
-  observed: number[],
-  narrowed: readonly string[] = [],
-): TestPlanClaim {
+function ruleCount(text: string, observed: number[]): TestPlanClaim {
   const claimed = Number(
     /(\d{1,3}(?:,\d{3})+|\d+)/.exec(text)?.[1]?.replace(/,/g, ''),
   );
@@ -789,18 +744,13 @@ function ruleCount(
       note: 'no suite in this review reported a pass count to compare against',
     };
   }
-  // Only a narrowed run that PRINTED one of the compared counts can explain
-  // them; a killed related run contributed nothing to the comparison.
-  const qualifier = narrowed.length
-    ? ` (in ${narrowed.map(dirName).join(', ')}, this review ran only the tests related to the diff, so its count covers part of the suite)`
-    : '';
   if (observed.includes(claimed)) {
     return {
       kind: 'count',
       text,
       verdict: 'reproduces',
       observed: `${claimed} passed`,
-      note: `a suite this review ran reported the same count${qualifier}`,
+      note: 'a suite this review ran reported the same count',
     };
   }
   return {
@@ -810,9 +760,7 @@ function ruleCount(
     observed: `${observed.join(', ')} passed`,
     // The header's reason, restated where the reader meets the verdict: this is
     // not a contradiction, because the two numbers may be about different suites.
-    note:
-      'the suites this review ran reported a different count — they may not be the suite the Test Plan means' +
-      qualifier,
+    note: 'the suites this review ran reported a different count — they may not be the suite the Test Plan means',
   };
 }
 
@@ -938,23 +886,12 @@ export function runTestPlan(
       buildTest = null;
     }
   }
-  const counted = observedTestCountsByCommand(buildTest);
-  const counts = counted.map((c) => c.count);
-  // Only a narrowed run that PRINTED a count contributed to the comparison;
-  // naming one that printed nothing (killed, crashed) would attribute the
-  // difference to a run the claim was never measured against.
-  const narrowedCounted = [
-    ...new Set(
-      counted
-        .map((c) => relatedTestDir(c.command))
-        .filter((d): d is string => d !== undefined),
-    ),
-  ];
+  const counts = observedTestCounts(buildTest);
 
   const claims = extractClaims(section.content).map((c) => {
     if (c.kind === 'path') return rulePath(c.text, worktree, changed);
     if (c.kind === 'command') return ruleCommand(c.text, worktree, buildTest);
-    return ruleCount(c.text, counts, narrowedCounted);
+    return ruleCount(c.text, counts);
   });
 
   const contradicted = claims.filter(

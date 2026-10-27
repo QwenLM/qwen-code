@@ -49,13 +49,12 @@ class ManagedArtifactConfigurationTest {
     }
 
     @Test
-    void theScannerRowPoolNeverInterruptsRowTasksAndClosesWithoutWaiting()
+    void theScannerRowPoolFinishesInFlightWorkInsteadOfInterruptingIt()
             throws Exception {
-        // The scan tick's shutdown contract (#15418): a context close must
-        // neither interrupt a row task nor park the close behind the relay's
-        // timeouts. It does not promise an in-flight row finishes: nothing
-        // awaits (`awaitTerminationSeconds(0)`), so `finished` below holds
-        // only because this test awaits termination itself.
+        // The scan tick's shutdown contract (#15418): a context close lets
+        // an in-flight row finish — its claim is durable and awaits the
+        // answer or the re-drive — and must neither interrupt the row nor
+        // park the close behind the relay's timeouts.
         var properties = new ManagedAgentProperties();
         properties.getAutomation().setScannerThreads(3);
         var executor = new ManagedArtifactConfiguration()

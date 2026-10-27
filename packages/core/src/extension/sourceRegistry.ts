@@ -10,10 +10,7 @@ import { atomicWriteFileSync } from '../utils/atomicFileWrite.js';
 import { stripAnsiAndControl } from '../utils/textUtils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { redactUrlCredentials } from './redaction.js';
-import {
-  loadMarketplaceConfigFromSource,
-  resolveExistingLocalExtensionSource,
-} from './marketplace.js';
+import { loadMarketplaceConfigFromSource } from './marketplace.js';
 import { quarantineCorruptFile } from './corruptFile.js';
 import type { ExtensionInstallMetadata } from '../config/config.js';
 import type {
@@ -31,7 +28,7 @@ export type ExtensionSourceType = 'github' | 'git' | 'http' | 'local';
 export interface ExtensionSource {
   /** Display name (from the marketplace config `name`, or derived). */
   name: string;
-  /** Source input; explicit-cwd local additions persist an absolute path. */
+  /** Original input string used to add the source. */
   source: string;
   type: ExtensionSourceType;
   /** ISO timestamp recorded when the source was added. */
@@ -329,19 +326,14 @@ export async function discoverPlugins(
   sources: readonly ExtensionSource[],
   installedNames: ReadonlySet<string>,
   networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
-  cwd?: string,
 ): Promise<DiscoveredPlugin[]> {
   const results = await Promise.all(
     sources.map(async (marketplace) => {
       try {
-        const source = await resolveExistingLocalExtensionSource(
+        const config = await loadMarketplaceConfigFromSource(
           marketplace.source,
-          cwd,
+          networkPolicy,
         );
-        const config =
-          cwd === undefined
-            ? await loadMarketplaceConfigFromSource(source, networkPolicy)
-            : await loadMarketplaceConfigFromSource(source, networkPolicy, cwd);
         if (!config) {
           debugLogger.debug(
             `No marketplace config resolved for ${redactUrlCredentials(
@@ -350,11 +342,7 @@ export async function discoverPlugins(
           );
           return [];
         }
-        return pluginsFromConfig(
-          { ...marketplace, source },
-          config,
-          installedNames,
-        );
+        return pluginsFromConfig(marketplace, config, installedNames);
       } catch (error) {
         debugLogger.error(
           `Failed to discover plugins from ${redactUrlCredentials(

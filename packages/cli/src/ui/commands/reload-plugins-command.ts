@@ -80,13 +80,13 @@ export const reloadPluginsCommand: SlashCommand = {
     const extensionRefreshState =
       context.services.extensionRefreshState ?? new ExtensionRefreshState();
 
-    const revision = extensionRefreshState.notifyExtensionsReloadStarted();
     try {
+      extensionRefreshState.notifyExtensionsReloadStarted();
       const summary = await reloadPluginsRuntime({
         config,
         reloadCommands: context.ui.reloadCommands,
       });
-      extensionRefreshState.clearExtensionsChanged(revision);
+      extensionRefreshState.clearExtensionsChanged();
       return {
         type: 'message',
         messageType: 'info',
@@ -95,7 +95,7 @@ export const reloadPluginsCommand: SlashCommand = {
         }),
       };
     } catch (error) {
-      extensionRefreshState.markExtensionsReloadFailed(undefined, revision);
+      extensionRefreshState.markExtensionsReloadFailed();
       return {
         type: 'message',
         messageType: 'error',

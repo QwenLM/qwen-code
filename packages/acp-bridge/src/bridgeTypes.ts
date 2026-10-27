@@ -2867,14 +2867,6 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     context?: BridgeClientRequestContext,
   ): AsyncIterable<BridgeGenerationStreamEvent>;
 
-  /** Stream a tool-free side answer using the session's conversation context. */
-  generateSessionBtwStream?(
-    sessionId: string,
-    question: string,
-    signal: AbortSignal,
-    context?: BridgeClientRequestContext,
-  ): AsyncIterable<BridgeGenerationStreamEvent>;
-
   /**
    * Run a side question (/btw) against the session's conversation context.
    * Uses runForkedAgent (cache path) for a single-turn, tool-free LLM call.

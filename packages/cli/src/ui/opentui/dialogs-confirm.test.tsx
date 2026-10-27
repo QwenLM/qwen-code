@@ -86,9 +86,6 @@ vi.mock('@opentui/react', async () => {
     }, [handlers]);
   };
   return {
-    useAppContext: (
-      await import('../../test-utils/opentui-catalog.js')
-    ).catalogAppContext(mocks.state.keyboardHandlers),
     useKeyboard: (handler: (key: unknown) => void) =>
       useStableHandler(mocks.state.keyboardHandlers, handler),
     usePaste: (handler: (event: unknown) => void) =>
@@ -303,7 +300,7 @@ describe('OpenTuiToolConfirmation', () => {
   }
 
   beforeEach(() => {
-    mocks.state.keyboardHandlers.length = 0;
+    mocks.state.keyboardHandlers = [];
     mocks.state.pasteHandlers = [];
     mocks.state.dimensions = { width: 110, height: 40 };
   });

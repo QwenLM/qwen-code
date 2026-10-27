@@ -373,22 +373,11 @@ export class OpenTuiSlashDispatcher {
 
   /** Rebuilds the registry through the original loader stack. */
   async loadCommands(signal?: AbortSignal): Promise<void> {
-    const config = this.services.config;
-    const session = config?.getSessionId();
-    const target = config?.getTargetDir();
-    const commands = await loadInteractiveCommands(
-      config,
+    this.commandList = await loadInteractiveCommands(
+      this.services.config,
       signal,
       this.services.settings,
     );
-    if (
-      config !== this.services.config ||
-      config?.getSessionId() !== session ||
-      config?.getTargetDir() !== target ||
-      signal?.aborted
-    )
-      return;
-    this.commandList = commands;
   }
 
   /**
@@ -554,28 +543,12 @@ export class OpenTuiSlashDispatcher {
       args,
       canonicalPath: resolvedCommandPath,
     } = parseSlashCommand(trimmed, this.commandList);
-    if (!commandToExecute) {
-      const config = this.services.config;
-      const session = config?.getSessionId();
-      const target = config?.getTargetDir();
-      const loaded = await this.ensureCommandsLoaded();
-      if (
-        abortController.signal.aborted ||
-        this.activeCommand !== activeCommand ||
-        config !== this.services.config ||
-        config?.getSessionId() !== session ||
-        config?.getTargetDir() !== target
-      ) {
-        releaseOwnership();
-        return { kind: 'handled' };
-      }
-      if (loaded) {
-        ({
-          commandToExecute,
-          args,
-          canonicalPath: resolvedCommandPath,
-        } = parseSlashCommand(trimmed, this.commandList));
-      }
+    if (!commandToExecute && (await this.ensureCommandsLoaded())) {
+      ({
+        commandToExecute,
+        args,
+        canonicalPath: resolvedCommandPath,
+      } = parseSlashCommand(trimmed, this.commandList));
     }
     let hideInvocation =
       isBtwCommand(trimmed) ||

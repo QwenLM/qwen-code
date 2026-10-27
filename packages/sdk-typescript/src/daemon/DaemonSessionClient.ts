@@ -29,7 +29,6 @@ import type {
   DaemonRewindResult,
   DaemonRewindSnapshotInfo,
   DaemonSessionBtwResult,
-  DaemonSessionBtwStreamEvent,
   DaemonSessionAgentsStatus,
   DaemonAgentTrace,
   DaemonSessionAttachmentData,
@@ -1063,16 +1062,6 @@ export class DaemonSessionClient {
   ): AsyncGenerator<DaemonSessionGenerationEvent> {
     return this.client.generateSessionContent(this.sessionId, prompt, {
       ...(opts?.signal ? { signal: opts.signal } : {}),
-      ...(this.clientId ? { clientId: this.clientId } : {}),
-    });
-  }
-
-  btwStream(
-    question: string,
-    opts?: { signal?: AbortSignal },
-  ): AsyncGenerator<DaemonSessionBtwStreamEvent> {
-    return this.client.streamSessionBtw(this.sessionId, question, {
-      ...opts,
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
   }

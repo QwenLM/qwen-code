@@ -27,10 +27,7 @@ import type { LoadedSettings } from '../../config/settings.js';
 import { getCachedStringWidth } from '../utils/textUtils.js';
 
 const frameState = vi.hoisted(() => ({ width: 100 }));
-vi.mock('@opentui/react', async () => ({
-  useAppContext: (
-    await import('../../test-utils/opentui-catalog.js')
-  ).catalogAppContext([]),
+vi.mock('@opentui/react', () => ({
   useRenderer: () => ({
     addInputHandler: vi.fn(),
     removeInputHandler: vi.fn(),

@@ -67,7 +67,6 @@ import {
 import {
   InsecureArchiveUrlError,
   loadMarketplaceConfigFromSource,
-  resolveExistingLocalExtensionSource,
   parseInstallSource,
 } from './marketplace.js';
 import { convertCompatibleExtension } from './extension-converter.js';
@@ -516,7 +515,6 @@ export class ExtensionManager {
   private readonly networkPolicy?: ExtensionInstallMetadata['networkPolicy'];
   private readonly preparedMutations = new WeakSet<PreparedExtensionMutation>();
   private discoverCache: DiscoveredPlugin[] | null = null;
-  private discoverCacheCwd: string | undefined;
   /** See `sourceFingerprint`. `undefined` until the first refresh commits. */
   private lastSourceFingerprint: string | undefined;
   private inFlightSourceRevalidation: Promise<boolean> | undefined;
@@ -1280,39 +1278,20 @@ export class ExtensionManager {
     return this.sourceRegistryStore.read();
   }
 
-  parseInstallSource(
-    source: string,
-    cwd?: string,
-  ): Promise<ExtensionInstallMetadata> {
-    return parseInstallSource(source, {
-      networkPolicy: this.networkPolicy,
-      ...(cwd === undefined ? {} : { cwd }),
-    });
-  }
-
   /**
    * Adds a marketplace source. Loads the marketplace config to resolve a
    * human-readable name (falling back to the raw source). Throws if no
    * marketplace config can be resolved from the source.
    */
-  async addSource(
-    source: string,
-    options?: { cwd?: string },
-  ): Promise<ExtensionSource> {
+  async addSource(source: string): Promise<ExtensionSource> {
     const trimmed = source.trim();
     if (!trimmed) {
       throw new Error('Marketplace source cannot be empty.');
     }
-    const cwd = options?.cwd;
-    const normalized = await resolveExistingLocalExtensionSource(trimmed, cwd);
-    const config =
-      cwd === undefined
-        ? await loadMarketplaceConfigFromSource(normalized, this.networkPolicy)
-        : await loadMarketplaceConfigFromSource(
-            normalized,
-            this.networkPolicy,
-            cwd,
-          );
+    const config = await loadMarketplaceConfigFromSource(
+      trimmed,
+      this.networkPolicy,
+    );
     if (!config) {
       // A "marketplace" is a Claude-format collection (.claude-plugin/
       // marketplace.json). A single extension repo (Gemini/Claude/git/npm) is
@@ -1320,7 +1299,9 @@ export class ExtensionManager {
       let isInstallableExtension = false;
       let probeError: unknown;
       try {
-        await this.parseInstallSource(trimmed, cwd);
+        await parseInstallSource(trimmed, {
+          networkPolicy: this.networkPolicy,
+        });
         isInstallableExtension = true;
       } catch (error) {
         // Not a recognizable install source either; remember why so a
@@ -1355,8 +1336,8 @@ export class ExtensionManager {
       const now = new Date().toISOString();
       const entry: ExtensionSource = {
         name: config.name || trimmed,
-        source: normalized,
-        type: parseExtensionSourceType(normalized),
+        source: trimmed,
+        type: parseExtensionSourceType(trimmed),
         addedAt: now,
         lastUpdatedAt: now,
       };
@@ -1399,17 +1380,8 @@ export class ExtensionManager {
     return updated;
   }
 
-  loadSource(
-    source: string,
-    options?: { cwd?: string },
-  ): Promise<ClaudeMarketplaceConfig | null> {
-    return options?.cwd === undefined
-      ? loadMarketplaceConfigFromSource(source, this.networkPolicy)
-      : loadMarketplaceConfigFromSource(
-          source,
-          this.networkPolicy,
-          options.cwd,
-        );
+  loadSource(source: string): Promise<ClaudeMarketplaceConfig | null> {
+    return loadMarketplaceConfigFromSource(source, this.networkPolicy);
   }
 
   /**
@@ -1420,35 +1392,22 @@ export class ExtensionManager {
    */
   async discoverPlugins(options?: {
     refresh?: boolean;
-    cwd?: string;
   }): Promise<DiscoveredPlugin[]> {
     const installedNames = new Set(
       this.getLoadedExtensions().map((ext) => ext.name),
     );
-    const cwd =
-      options?.cwd === undefined ? undefined : path.resolve(options.cwd);
-    if (
-      this.discoverCache &&
-      this.discoverCacheCwd === cwd &&
-      !options?.refresh
-    ) {
+    if (this.discoverCache && !options?.refresh) {
       return this.discoverCache.map((plugin) => ({
         ...plugin,
         installed: installedNames.has(plugin.name),
       }));
     }
-    const sources = this.getSources();
-    const result =
-      cwd === undefined
-        ? await discoverPlugins(sources, installedNames, this.networkPolicy)
-        : await discoverPlugins(
-            sources,
-            installedNames,
-            this.networkPolicy,
-            cwd,
-          );
+    const result = await discoverPlugins(
+      this.getSources(),
+      installedNames,
+      this.networkPolicy,
+    );
     this.discoverCache = result;
-    this.discoverCacheCwd = cwd;
     return result;
   }
 

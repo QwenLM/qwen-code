@@ -18,10 +18,7 @@ const handlers = vi.hoisted(
   () => [] as Array<(key: { name: string; sequence?: string }) => void>,
 );
 
-vi.mock('@opentui/react', async () => ({
-  useAppContext: (
-    await import('../../test-utils/opentui-catalog.js')
-  ).catalogAppContext(handlers),
+vi.mock('@opentui/react', () => ({
   useKeyboard: (
     handler: (key: { name: string; sequence?: string }) => void,
   ) => {

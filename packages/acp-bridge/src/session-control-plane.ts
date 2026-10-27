@@ -2366,7 +2366,6 @@ const DAEMON_CONFIRM_CANCELLATION_META_KEY = 'qwen.daemon.confirmCancellation';
  */
 const SESSION_RECAP_TIMEOUT_MS = 60_000;
 const SESSION_GENERATION_TIMEOUT_MS = 65_000;
-const SESSION_BTW_STREAM_TIMEOUT_MS = 310_000;
 const GENERATION_STREAM_QUEUE_CAPACITY = 128;
 const SESSION_BTW_TIMEOUT_MS = 60_000;
 const SESSION_TRANSCRIPT_TIMEOUT_MS = 60_000;
@@ -2947,7 +2946,7 @@ export function createSessionControlPlane(
 
   /**
    * Daemon-owned facts only: prompts this daemon accepted (queued *or*
-   * dispatched), side requests and notifications in flight to the child.
+   * dispatched) and notifications it is currently pushing into the child.
    * These never depend on the child reporting anything, which is why they
    * stay authoritative for a channel that never negotiated.
    */
@@ -2956,7 +2955,6 @@ export function createSessionControlPlane(
       (entry.mcpAppCalls?.size ?? 0) > 0 ||
       entry.pendingPromptCount > 0 ||
       entry.pendingAgentNotificationCount > 0 ||
-      entry.sideRequestCount > 0 ||
       !!entry.backgroundTurn
     );
   }
@@ -3903,6 +3901,7 @@ export function createSessionControlPlane(
       !entryHasLocalWork(entry) &&
       !entry.promptActive &&
       !entry.goalTurnActive &&
+      entry.sideRequestCount === 0 &&
       entry.hasRunningBackgroundTasks !== true &&
       !childReportsHeldWork(entry)
     );
@@ -3944,7 +3943,7 @@ export function createSessionControlPlane(
   /**
    * Admit a request for a Session that is not a turn but still starts work in
    * the child, the way a prompt is admitted, and count it until it answers so
-   * idle cleanup and quarantine drains do not close the Session under it.
+   * a quarantine drain does not close the Session under it.
    */
   function beginSideRequest(entry: SessionEntry): () => void {
     assertChannelAdmitsPrompts(entry);
@@ -3955,7 +3954,6 @@ export function createSessionControlPlane(
       ended = true;
       entry.sideRequestCount = Math.max(0, entry.sideRequestCount - 1);
       drainQuarantinedChannelFor(entry);
-      void maybeCloseIdleSession(entry, 'side_request_settled');
     };
   }
 
@@ -10425,109 +10423,6 @@ export function createSessionControlPlane(
   // runtime's configuration.
   const runtimeMcpServerNames = new Set<string>();
   let runtimeMcpServerChannelId: string | undefined;
-  function startSessionGeneration(
-    sessionId: string,
-    prompt: string,
-    signal: AbortSignal,
-    context?: BridgeClientRequestContext,
-    purpose?: 'btw',
-  ): AsyncIterable<BridgeGenerationStreamEvent> {
-    const entry = byId.get(sessionId);
-    if (!entry) throw new SessionNotFoundError(sessionId);
-    const info = channelInfoForEntry(entry);
-    if (!info || info.harness.isDying)
-      throw new SessionNotFoundError(sessionId);
-    resolveTrustedClientId(entry, context?.clientId);
-    const endSideRequest = beginSideRequest(entry);
-
-    const requestId = randomUUID();
-    const queue = new GenerationStreamQueue<BridgeGenerationStreamEvent>(
-      GENERATION_STREAM_QUEUE_CAPACITY,
-    );
-    const request = {
-      sessionId,
-      connection: entry.connection,
-      queue,
-      settled: false,
-    };
-    generationRequests.set(requestId, request);
-
-    const cancel = () => {
-      if (request.settled) return;
-      request.settled = true;
-      generationRequests.delete(requestId);
-      queue.close();
-      void entry.connection
-        .extMethod(SERVE_CONTROL_EXT_METHODS.sessionGenerationCancel, {
-          sessionId,
-          requestId,
-        })
-        .catch(() => undefined);
-    };
-    signal.addEventListener('abort', cancel, { once: true });
-
-    if (signal.aborted) {
-      cancel();
-      endSideRequest();
-      return queue;
-    }
-
-    void Promise.race([
-      withTimeout(
-        entry.connection.extMethod(
-          SERVE_CONTROL_EXT_METHODS.sessionGenerationStart,
-          { sessionId, requestId, prompt, ...(purpose ? { purpose } : {}) },
-        ),
-        purpose === 'btw'
-          ? SESSION_BTW_STREAM_TIMEOUT_MS
-          : SESSION_GENERATION_TIMEOUT_MS,
-        SERVE_CONTROL_EXT_METHODS.sessionGenerationStart,
-      ),
-      getTransportClosedReject(entry),
-    ])
-      .then((raw) => {
-        if (request.settled) return;
-        const response = raw as Record<string, unknown>;
-        const model = response['model'];
-        const modelSource = response['modelSource'];
-        if (
-          typeof model !== 'string' ||
-          (modelSource !== 'fast' && modelSource !== 'main')
-        ) {
-          throw new Error('Malformed generation completion');
-        }
-        const accepted = queue.push({
-          type: 'done',
-          requestId,
-          model,
-          modelSource,
-          ...(typeof response['inputTokens'] === 'number'
-            ? { inputTokens: response['inputTokens'] }
-            : {}),
-          ...(typeof response['outputTokens'] === 'number'
-            ? { outputTokens: response['outputTokens'] }
-            : {}),
-        });
-        if (accepted) queue.close();
-        else queue.fail(new Error('Generation stream consumer too slow'));
-      })
-      .catch((error: unknown) => {
-        if (!request.settled) {
-          queue.fail(error);
-          if (purpose === 'btw' && error instanceof BridgeTimeoutError)
-            cancel();
-        }
-      })
-      .finally(() => {
-        request.settled = true;
-        signal.removeEventListener('abort', cancel);
-        generationRequests.delete(requestId);
-        endSideRequest();
-      });
-
-    return queue;
-  }
-
   const bridgeApi: AcpSessionBridge = {
     // Derived once from the frozen overrides and the configured channel
     // factory; immutable for the bridge's lifetime.
@@ -14994,17 +14889,94 @@ export function createSessionControlPlane(
     },
 
     generateSessionContent(sessionId, prompt, signal, context) {
-      return startSessionGeneration(sessionId, prompt, signal, context);
-    },
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const info = channelInfoForEntry(entry);
+      if (!info || info.harness.isDying)
+        throw new SessionNotFoundError(sessionId);
+      resolveTrustedClientId(entry, context?.clientId);
+      const endSideRequest = beginSideRequest(entry);
 
-    generateSessionBtwStream(sessionId, question, signal, context) {
-      return startSessionGeneration(
-        sessionId,
-        question,
-        signal,
-        context,
-        'btw',
+      const requestId = randomUUID();
+      const queue = new GenerationStreamQueue<BridgeGenerationStreamEvent>(
+        GENERATION_STREAM_QUEUE_CAPACITY,
       );
+      const request = {
+        sessionId,
+        connection: entry.connection,
+        queue,
+        settled: false,
+      };
+      generationRequests.set(requestId, request);
+
+      const cancel = () => {
+        if (request.settled) return;
+        request.settled = true;
+        generationRequests.delete(requestId);
+        queue.close();
+        void entry.connection
+          .extMethod(SERVE_CONTROL_EXT_METHODS.sessionGenerationCancel, {
+            sessionId,
+            requestId,
+          })
+          .catch(() => undefined);
+      };
+      signal.addEventListener('abort', cancel, { once: true });
+
+      if (signal.aborted) {
+        cancel();
+        endSideRequest();
+        return queue;
+      }
+
+      void Promise.race([
+        withTimeout(
+          entry.connection.extMethod(
+            SERVE_CONTROL_EXT_METHODS.sessionGenerationStart,
+            { sessionId, requestId, prompt },
+          ),
+          SESSION_GENERATION_TIMEOUT_MS,
+          SERVE_CONTROL_EXT_METHODS.sessionGenerationStart,
+        ),
+        getTransportClosedReject(entry),
+      ])
+        .then((raw) => {
+          if (request.settled) return;
+          const response = raw as Record<string, unknown>;
+          const model = response['model'];
+          const modelSource = response['modelSource'];
+          if (
+            typeof model !== 'string' ||
+            (modelSource !== 'fast' && modelSource !== 'main')
+          ) {
+            throw new Error('Malformed generation completion');
+          }
+          const accepted = queue.push({
+            type: 'done',
+            requestId,
+            model,
+            modelSource,
+            ...(typeof response['inputTokens'] === 'number'
+              ? { inputTokens: response['inputTokens'] }
+              : {}),
+            ...(typeof response['outputTokens'] === 'number'
+              ? { outputTokens: response['outputTokens'] }
+              : {}),
+          });
+          if (accepted) queue.close();
+          else queue.fail(new Error('Generation stream consumer too slow'));
+        })
+        .catch((error: unknown) => {
+          if (!request.settled) queue.fail(error);
+        })
+        .finally(() => {
+          request.settled = true;
+          signal.removeEventListener('abort', cancel);
+          generationRequests.delete(requestId);
+          endSideRequest();
+        });
+
+      return queue;
     },
 
     getPendingPrompts(sessionId, context) {

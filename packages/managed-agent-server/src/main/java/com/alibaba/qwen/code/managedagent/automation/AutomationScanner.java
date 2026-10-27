@@ -24,9 +24,12 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.AbstractExecutorService;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Executor;
-import java.util.concurrent.FutureTask;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
 /**
@@ -76,7 +79,7 @@ public class AutomationScanner {
     private final ManagedAgentProperties.Automation settings;
     private final Supplier<Long> clock;
     private final String owner;
-    private final Executor executor;
+    private final ExecutorService pool;
 
     @Autowired
     public AutomationScanner(AutomationLedgerStore store,
@@ -91,19 +94,56 @@ public class AutomationScanner {
     AutomationScanner(AutomationLedgerStore store, HarnessConnector harness,
             ManagedAgentProperties.Automation settings,
             Supplier<Long> clock, String owner) {
-        this(store, harness, settings, clock, owner, Runnable::run);
+        this(store, harness, settings, clock, owner, DIRECT);
     }
 
     AutomationScanner(AutomationLedgerStore store, HarnessConnector harness,
             ManagedAgentProperties.Automation settings,
-            Supplier<Long> clock, String owner, Executor executor) {
+            Supplier<Long> clock, String owner, ExecutorService pool) {
         this.store = store;
         this.harness = harness;
         this.settings = settings;
         this.clock = clock;
         this.owner = owner;
-        this.executor = executor;
+        this.pool = pool;
     }
+
+    /**
+     * Runs every submitted task on the submitting thread, in submit order.
+     * Unit tests pin the serial shape of the tick through the same fan-out
+     * and join the production pool takes. It owns no threads, so its
+     * lifecycle surface is inert and never stopped.
+     */
+    private static final ExecutorService DIRECT = new AbstractExecutorService() {
+        @Override
+        public void shutdown() {
+        }
+
+        @Override
+        public List<Runnable> shutdownNow() {
+            return List.of();
+        }
+
+        @Override
+        public boolean isShutdown() {
+            return false;
+        }
+
+        @Override
+        public boolean isTerminated() {
+            return false;
+        }
+
+        @Override
+        public boolean awaitTermination(long timeout, TimeUnit unit) {
+            return true;
+        }
+
+        @Override
+        public void execute(Runnable task) {
+            task.run();
+        }
+    };
 
     @Scheduled(scheduler = "managedAutomationScheduler", fixedDelayString =
             "${qwen.managed-agent.automation.scan-delay:10s}")
@@ -129,10 +169,10 @@ public class AutomationScanner {
         // queued task never holds an expiring lease, and two tasks racing
         // one row meet the same atomic claim guard two nodes do. The tick
         // joins before returning, so fixedDelay still never overlaps ticks.
-        Map<FutureTask<Integer>, ScheduleRow> pending = new LinkedHashMap<>();
+        List<Callable<Integer>> tasks = new ArrayList<>();
         Set<String> submitted = new HashSet<>();
         for (ScheduleRow row : store.findArmed(now, SCAN_LIMIT)) {
-            pending.put(new FutureTask<>(() -> claimed(row, now, true)), row);
+            tasks.add(() -> claimed(row, now, true));
             // The same NUL separator the store's composite keys use: no
             // tenant or schedule id character set has to keep this safe.
             submitted.add(row.tenantId() + '\0' + row.scheduleId());
@@ -143,23 +183,22 @@ public class AutomationScanner {
         // the same task, so it appears in this loop once.
         for (ScheduleRow row : store.findFiringSchedules(now, SCAN_LIMIT)) {
             if (submitted.add(row.tenantId() + '\0' + row.scheduleId())) {
-                pending.put(new FutureTask<>(() -> claimed(row, now, false)), row);
+                tasks.add(() -> claimed(row, now, false));
             }
         }
-        for (FutureTask<Integer> task : pending.keySet()) {
-            executor.execute(task);
+        List<Future<Integer>> pending = new ArrayList<>();
+        for (Callable<Integer> task : tasks) {
+            pending.add(pool.submit(task));
         }
         int fired = 0;
         Throwable failure = null;
-        int additionalFailures = 0;
-        List<String> failureSample = new ArrayList<>();
-        for (Map.Entry<FutureTask<Integer>, ScheduleRow> task : pending.entrySet()) {
+        for (Future<Integer> task : pending) {
             try {
-                fired += task.getKey().get();
+                fired += task.get();
             } catch (InterruptedException error) {
-                // Context close interrupted the join: any acquired claims
-                // remain durable. Stop joining instead of parking the
-                // shutdown behind the relay's timeouts.
+                // Context close interrupted the join: the in-flight tasks
+                // still finish under their own leases. Stop joining instead
+                // of parking the shutdown behind the relay's timeouts.
                 Thread.currentThread().interrupt();
                 if (failure == null) {
                     failure = error;
@@ -171,23 +210,8 @@ public class AutomationScanner {
                 // still owed to the caller's lease accounting.
                 if (failure == null) {
                     failure = error.getCause();
-                } else {
-                    additionalFailures++;
-                }
-                if (failureSample.size() < 3) {
-                    ScheduleRow row = task.getValue();
-                    failureSample.add("tenant=" + row.tenantId()
-                            + " schedule=" + row.scheduleId()
-                            + " failure=" + error.getCause().getMessage());
                 }
             }
-        }
-        if (additionalFailures > 0) {
-            LOG.warn("automation scan had additionalObservedTaskFailures={}"
-                    + " submitted={} sample={} (an interrupted join stops early;"
-                    + " the count excludes the rethrown first failure,"
-                    + " the sample includes it)",
-                    additionalFailures, pending.size(), failureSample);
         }
         if (failure instanceof Error error) {
             throw error;

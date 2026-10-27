@@ -645,11 +645,6 @@ export interface DaemonSessionActions {
       silent?: boolean;
     },
   ): Promise<DaemonRewindResult>;
-  btwSessionStream(
-    question: string,
-    opts?: { signal?: AbortSignal },
-  ): AsyncGenerator<{ type: 'answer' | 'done'; answer: string }>;
-  /** Legacy JSON action retained for existing daemon-react-sdk consumers. */
   btwSession(
     question: string,
     opts?: { signal?: AbortSignal },

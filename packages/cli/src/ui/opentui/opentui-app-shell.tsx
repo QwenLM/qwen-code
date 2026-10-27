@@ -1080,7 +1080,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     );
     reloadRef.current = async () => {
       await dispatcher.loadCommands();
-      if (!disposed) setCommandList(dispatcher.commands);
+      setCommandList(dispatcher.commands);
     };
     let disposed = false;
     (async () => {
@@ -1614,7 +1614,6 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
               overflow="hidden"
             >
               <OpenTuiDialogMount
-                extensionRefreshState={extensionRefreshState}
                 key={dialog.dialog}
                 request={dialog}
                 host={host}

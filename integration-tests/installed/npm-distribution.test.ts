@@ -50,19 +50,8 @@ const npm = fs.realpathSync(
   process.env['QWEN_DISTRIBUTION_NPM'] ?? 'MATCHING_NPM_REQUIRED',
 );
 const expectedNode = process.env['QWEN_DISTRIBUTION_NODE_VERSION'];
-const runnerGitPath = execFileSync('/bin/sh', ['-c', 'command -v git'], {
-  encoding: 'utf8',
-  timeout: 10_000,
-}).trim();
-assert.ok(path.isAbsolute(runnerGitPath));
-const runnerGit = fs.realpathSync(runnerGitPath);
 const initialSource = checkout(root);
 const tools = {
-  git: {
-    path: runnerGit,
-    sha256: sha(runnerGit),
-    mode: fs.statSync(runnerGit).mode & 0o777,
-  },
   node: { path: node, sha256: sha(node), mode: fs.statSync(node).mode & 0o777 },
   npm: { path: npm, sha256: sha(npm), mode: fs.statSync(npm).mode & 0o777 },
 };
@@ -114,8 +103,6 @@ let published: Record<string, Entry>;
 let distBefore: Record<string, Entry>;
 function frozenInputs() {
   assert.deepEqual(checkout(root), initialSource);
-  assert.equal(sha(runnerGit), tools.git.sha256);
-  assert.equal(fs.statSync(runnerGit).mode & 0o777, tools.git.mode);
   assert.equal(sha(node), tools.node.sha256);
   assert.equal(sha(npm), tools.npm.sha256);
   assert.equal(fs.statSync(node).mode & 0o777, tools.node.mode);
@@ -310,35 +297,6 @@ beforeAll(async () => {
           decoy,
           'decoy must actually be discoverable on PATH',
         );
-        const priorCleanGit = execFileSync(
-          '/bin/sh',
-          ['-c', 'command -v git'],
-          {
-            cwd,
-            env,
-            encoding: 'utf8',
-            timeout: 10_000,
-          },
-        ).trim();
-        const gitLink = path.join(cwd, 'git');
-        fs.symlinkSync(runnerGit, gitLink);
-        assert.equal(
-          execFileSync('/bin/sh', ['-c', 'command -v git'], {
-            cwd,
-            env,
-            encoding: 'utf8',
-            timeout: 10_000,
-          }).trim(),
-          gitLink,
-        );
-        assert.equal(fs.realpathSync(gitLink), runnerGit);
-        save(path.join(out, 'git-selection.json'), {
-          runnerGitPath,
-          runnerGit: tools.git,
-          priorCleanGit,
-          gitLink,
-          selected: gitLink,
-        });
         let packageRoot: string;
         let installRoot: string;
         let bin: string;

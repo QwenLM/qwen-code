@@ -13,7 +13,6 @@ export const EXTENSION_RELOAD_FAILED_REASON = 'extension reload failed';
 export class ExtensionRefreshState {
   private extensionRefreshNeeded = false;
   private reloadInProgress = false;
-  private reloadRevision = 0;
   private changedDuringReload = false;
   private contentChangedDuringReload = false;
   private suppressionDepth = 0;
@@ -60,8 +59,7 @@ export class ExtensionRefreshState {
     return true;
   }
 
-  clearExtensionsChanged(revision?: number): void {
-    if (revision !== undefined && revision !== this.reloadRevision) return;
+  clearExtensionsChanged(): void {
     const changedDuringReload = this.changedDuringReload;
     const contentChangedDuringReload = this.contentChangedDuringReload;
     this.extensionRefreshNeeded = changedDuringReload;
@@ -83,20 +81,14 @@ export class ExtensionRefreshState {
     }
   }
 
-  notifyExtensionsReloadStarted(): number {
-    const revision = ++this.reloadRevision;
+  notifyExtensionsReloadStarted(): void {
     this.reloadInProgress = true;
     this.changedDuringReload = false;
     this.contentChangedDuringReload = false;
     this.events.emit(AppEvent.ExtensionsReloadStarted);
-    return revision;
   }
 
-  markExtensionsReloadFailed(
-    reason = EXTENSION_RELOAD_FAILED_REASON,
-    revision?: number,
-  ): void {
-    if (revision !== undefined && revision !== this.reloadRevision) return;
+  markExtensionsReloadFailed(reason = EXTENSION_RELOAD_FAILED_REASON): void {
     const changedDuringReload = this.changedDuringReload;
     const contentChangedDuringReload = this.contentChangedDuringReload;
     this.extensionRefreshNeeded = true;

@@ -543,10 +543,6 @@ import {
   GENERATION_TIMEOUT_MS,
   type GenerationEvent,
 } from './generation.js';
-import {
-  executeBtwGeneration,
-  BTW_STREAM_TIMEOUT_MS,
-} from './btw-generation.js';
 
 type SessionOwnedWorkflowTool = {
   buildSessionOwnedBackground(
@@ -9937,15 +9933,10 @@ class QwenAgent implements Agent {
       typeof sessionId === 'string'
         ? this.sessions.get(sessionId)?.getConfig()
         : undefined;
-    const guardedMethod =
-      method === SERVE_CONTROL_EXT_METHODS.sessionGenerationStart &&
-      params['purpose'] === 'btw'
-        ? SERVE_CONTROL_EXT_METHODS.sessionBtw
-        : method;
     if (
       (this.config.getExecutionEnvironment?.() ||
         sessionConfig?.getExecutionEnvironment?.()) &&
-      !isSshWorkspaceExtMethodAllowed(guardedMethod)
+      !isSshWorkspaceExtMethodAllowed(method)
     ) {
       throw RequestError.invalidParams(
         { errorKind: 'unsupported_operation' },
@@ -13328,15 +13319,12 @@ class QwenAgent implements Agent {
         const sessionId = params['sessionId'];
         const requestId = params['requestId'];
         const prompt = params['prompt'];
-        const purpose = params['purpose'];
         if (
           typeof sessionId !== 'string' ||
           typeof requestId !== 'string' ||
           typeof prompt !== 'string' ||
           prompt.trim().length === 0 ||
-          Buffer.byteLength(prompt, 'utf8') > GENERATION_MAX_PROMPT_BYTES ||
-          (purpose !== undefined && purpose !== 'btw') ||
-          (purpose === 'btw' && prompt.length > BTW_MAX_INPUT_LENGTH)
+          Buffer.byteLength(prompt, 'utf8') > GENERATION_MAX_PROMPT_BYTES
         ) {
           throw RequestError.invalidParams(
             undefined,
@@ -13355,32 +13343,21 @@ class QwenAgent implements Agent {
         this.generationControllers.set(requestId, { sessionId, controller });
         const signal = AbortSignal.any([
           controller.signal,
-          AbortSignal.timeout(
-            purpose === 'btw' ? BTW_STREAM_TIMEOUT_MS : GENERATION_TIMEOUT_MS,
-          ),
+          AbortSignal.timeout(GENERATION_TIMEOUT_MS),
         ]);
         try {
-          const emit = async (event: GenerationEvent) => {
-            await this.connection.extNotification(
-              'qwen/notify/session/generation/event',
-              { v: 1, sessionId, requestId, event },
-            );
-          };
-          const result =
-            purpose === 'btw'
-              ? await executeBtwGeneration(
-                  session.getConfig(),
-                  prompt,
-                  signal,
-                  emit,
-                )
-              : await executeGeneration(
-                  session.getConfig(),
-                  requestId,
-                  prompt,
-                  signal,
-                  emit,
-                );
+          const result = await executeGeneration(
+            session.getConfig(),
+            requestId,
+            prompt,
+            signal,
+            async (event) => {
+              await this.connection.extNotification(
+                'qwen/notify/session/generation/event',
+                { v: 1, sessionId, requestId, event },
+              );
+            },
+          );
           return { sessionId, requestId, ...result };
         } finally {
           this.generationControllers.delete(requestId);

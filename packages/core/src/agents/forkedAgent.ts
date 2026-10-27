@@ -405,8 +405,6 @@ export interface CachePathParams {
   abortSignal?: AbortSignal;
   /** Do not route the query through configured model fallbacks. */
   disableModelFallbacks?: boolean;
-  /** Receives answer text as it arrives, excluding thoughts and tool calls. */
-  onText?: (text: string) => void | Promise<void>;
   /**
    * When true, keep the parent's tools in the per-request config so the
    * Anthropic prompt-cache key (system + tools) matches the main agent's.
@@ -646,10 +644,7 @@ export async function runForkedAgent(
           .filter((p) => !(p as Record<string, unknown>)['functionCall'])
           .map((p) => p.text ?? '')
           .join('');
-        if (text) {
-          fullText += text;
-          if (params.onText) await params.onText(text);
-        }
+        if (text) fullText += text;
         if (response.usageMetadata)
           usage = extractQueryUsage(response.usageMetadata);
       }
