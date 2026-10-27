@@ -120,8 +120,7 @@ jobs:
             code=$(curl -sS -o "${out}" -w '%{http_code}' -m 60 \
               -u "${CENTRAL_USERNAME}:${CENTRAL_PASSWORD}" "${url}") || code='curl-error'
             echo "--- ${label}: http=${code}"
-            jq -c '{deploymentId,deploymentName,status,publishingType,errors}' "${out}" 2>/dev/null \
-              || head -c 300 "${out}"
+            head -c 1500 "${out}"
             echo
             rm -f "${out}"
           }
