@@ -6,6 +6,7 @@ import { PassThrough, Readable } from 'node:stream';
 import archiver from 'archiver';
 import { Storage } from '@qwen-code/qwen-code-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 import {
   deleteWorkspaceSkill,
   installWorkspaceSkill,
@@ -830,32 +831,37 @@ describe('workspace Skill management', () => {
     ).rejects.toMatchObject({ code: 'invalid_skill_folder', statusCode: 400 });
   });
 
-  it('reports a staging permission fault as a server error', async () => {
-    const workspace = await temporaryDirectory('qwen-skill-workspace-');
-    const source = await temporaryDirectory('qwen-skill-source-');
-    await fs.writeFile(
-      path.join(source, 'SKILL.md'),
-      skillMarkdown('staging-permission'),
-    );
-    vi.spyOn(fs, 'copyFile').mockImplementationOnce(async (_source, target) => {
-      throw Object.assign(new Error('permission denied'), {
-        code: 'EACCES',
-        path: String(_source),
-        dest: String(target),
-      });
-    });
+  it.each(['EACCES', 'EPERM'])(
+    'reports a staging permission fault (%s) as a server error',
+    async (code) => {
+      const workspace = await temporaryDirectory('qwen-skill-workspace-');
+      const source = await temporaryDirectory('qwen-skill-source-');
+      await fs.writeFile(
+        path.join(source, 'SKILL.md'),
+        skillMarkdown('staging-permission'),
+      );
+      vi.spyOn(fs, 'copyFile').mockImplementationOnce(
+        async (_source, target) => {
+          throw Object.assign(new Error('permission denied'), {
+            code,
+            path: String(_source),
+            dest: String(target),
+          });
+        },
+      );
 
-    await expect(
-      installWorkspaceSkill(workspace, {
-        name: 'staging-permission',
-        scope: 'workspace',
-        source: { type: 'folder', path: source },
-      }),
-    ).rejects.toMatchObject({
-      code: 'skill_staging_failed',
-      statusCode: 500,
-    });
-  });
+      await expect(
+        installWorkspaceSkill(workspace, {
+          name: 'staging-permission',
+          scope: 'workspace',
+          source: { type: 'folder', path: source },
+        }),
+      ).rejects.toMatchObject({
+        code: 'skill_staging_failed',
+        statusCode: 500,
+      });
+    },
+  );
 
   it('keeps a source-side permission errno on the invalid-input path', async () => {
     const workspace = await temporaryDirectory('qwen-skill-workspace-');
@@ -882,33 +888,58 @@ describe('workspace Skill management', () => {
     ).rejects.toMatchObject({ code: 'invalid_skill_folder', statusCode: 400 });
   });
 
-  it('reports a staging open permission fault on the GitHub path', async () => {
-    const workspace = await temporaryDirectory('qwen-skill-workspace-');
-    vi.stubGlobal(
-      'fetch',
-      vi
-        .fn()
-        .mockResolvedValueOnce(githubSkillListing())
-        .mockResolvedValueOnce(new Response('data', { status: 200 })),
-    );
-    vi.spyOn(fs, 'open').mockRejectedValueOnce(
-      Object.assign(new Error('permission denied'), { code: 'EACCES' }),
-    );
+  it.skipIf(!arePermissionBitsEnforced())(
+    'keeps an existing but unreadable source file on the invalid-input path',
+    async () => {
+      const workspace = await temporaryDirectory('qwen-skill-workspace-');
+      const source = await temporaryDirectory('qwen-skill-source-');
+      const sourceFile = path.join(source, 'SKILL.md');
+      await fs.writeFile(sourceFile, skillMarkdown('unreadable-source'));
+      await fs.chmod(sourceFile, 0o000);
 
-    await expect(
-      installWorkspaceSkill(workspace, {
-        name: 'open-permission',
-        scope: 'workspace',
-        source: {
-          type: 'github',
-          url: 'https://github.com/owner/repo/blob/main/SKILL.md',
-        },
-      }),
-    ).rejects.toMatchObject({
-      code: 'skill_staging_failed',
-      statusCode: 500,
-    });
-  });
+      await expect(
+        installWorkspaceSkill(workspace, {
+          name: 'unreadable-source',
+          scope: 'workspace',
+          source: { type: 'folder', path: source },
+        }),
+      ).rejects.toMatchObject({
+        code: 'invalid_skill_folder',
+        statusCode: 400,
+      });
+    },
+  );
+
+  it.each(['EACCES', 'EPERM'])(
+    'reports a staging open permission fault (%s) on the GitHub path',
+    async (code) => {
+      const workspace = await temporaryDirectory('qwen-skill-workspace-');
+      vi.stubGlobal(
+        'fetch',
+        vi
+          .fn()
+          .mockResolvedValueOnce(githubSkillListing())
+          .mockResolvedValueOnce(new Response('data', { status: 200 })),
+      );
+      vi.spyOn(fs, 'open').mockRejectedValueOnce(
+        Object.assign(new Error('permission denied'), { code }),
+      );
+
+      await expect(
+        installWorkspaceSkill(workspace, {
+          name: 'open-permission',
+          scope: 'workspace',
+          source: {
+            type: 'github',
+            url: 'https://github.com/owner/repo/blob/main/SKILL.md',
+          },
+        }),
+      ).rejects.toMatchObject({
+        code: 'skill_staging_failed',
+        statusCode: 500,
+      });
+    },
+  );
 
   it('reports a path-less staging write fault on the GitHub path', async () => {
     const workspace = await temporaryDirectory('qwen-skill-workspace-');
