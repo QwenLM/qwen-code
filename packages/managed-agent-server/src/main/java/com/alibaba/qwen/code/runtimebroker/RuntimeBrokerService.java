@@ -6249,16 +6249,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
         private final AtomicReference<RuntimeBindingRecord> current;
         private final AtomicBoolean valid = new AtomicBoolean(true);
         private final AtomicBoolean stopped = new AtomicBoolean();
-        // A drain claimed from a LOST binding stays LOST until its stop proof
-        // commits, so that state is this claim's legitimate resting point —
-        // not a rival's. The stop proof, not a DRAINING transition, is what
-        // licenses the close.
-        private final boolean lostClaim;
         private ScheduledFuture<?> task;
 
         BindingRenewal(RuntimeBindingRecord claimed) {
             current = new AtomicReference<>(claimed);
-            lostClaim = claimed.getState() == RuntimeBindingRecord.State.LOST;
         }
 
         void start() {
@@ -6354,7 +6348,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
             if (closed.get() || stopped.get() || !valid.get()
                     || !brokerOwnerId.equals(binding.getOperationOwner())
                     || !binding.isDrainRequested() || !(binding.getState() == RuntimeBindingRecord.State.DRAINING
-                            || (stoppedRecovery || lostClaim) && binding.getState() == RuntimeBindingRecord.State.LOST)
+                            || stoppedRecovery && binding.getState() == RuntimeBindingRecord.State.LOST)
                     || binding.getOperationLeaseUntil() == null
                     || !binding.getOperationLeaseUntil().isAfter(clock.instant())) {
                 throw unavailable("runtime_close_claim_pending", "Original drain claim expired");
