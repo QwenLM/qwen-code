@@ -788,6 +788,10 @@ jobs:
           # work runs 5x apart depending on placement (#10490). Skip those
           # assertions here — they still run locally and on the hosted lanes.
           QWEN_SKIP_LATENCY_BUDGETS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
+          # The lane script's side-lane log, outside the TMPDIR this step
+          # removes. The script deletes it once replayed, so it is left only
+          # when this step is killed first; the next step prints it.
+          SIDE_LANE_LOG: '${{ runner.temp }}/side-lane-tests.log'
         run: |-
           node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
           test_runner=()
@@ -837,6 +841,17 @@ jobs:
           kill "$SAMPLER_PID" 2>/dev/null || true
           if [ "$RC" -ne 0 ]; then df -hT 2>/dev/null || df -h 2>/dev/null || true; df -i 2>/dev/null || true; grep -E 'MemTotal|MemAvailable|SwapTotal|SwapFree' /proc/meminfo 2>/dev/null || true; fi
           exit "$RC"
+
+      # A timeout or a cancel kills the test step before the lane script
+      # replays its side lane, which runs every suite but the CLI and core
+      # ones. Print what the side lane got through.
+      - name: 'Print the side lane of a killed test step'
+        if: '${{ failure() || cancelled() }}'
+        run: |-
+          side_log="${RUNNER_TEMP}/side-lane-tests.log"
+          if [ -f "${side_log}" ]; then
+            cat "${side_log}"
+          fi
 
       # The host looks healthy after cleanup, so persist the disk-pressure
       # timeline from a failed run (#10035): the artifact keeps the samples
@@ -2091,7 +2106,7 @@ jobs:
           if [ "$SCRIPTS_RC" -ne 0 ]; then
             echo '::warning::The complete Windows script suite has known baseline failures; its full result remains visible above.'
           fi
-          npx vitest run scripts/tests/install-script.test.js --config scripts/tests/vitest.config.ts
+          npx vitest run scripts/tests/install-script.test.js scripts/tests/opentui-preview-install.test.js --config scripts/tests/vitest.config.ts --retry=0 --bail=1 --maxWorkers=1 --minWorkers=1 --dangerouslyIgnoreUnhandledErrors=false
           INSTALLER_RC=$?
           set -e
           pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true
