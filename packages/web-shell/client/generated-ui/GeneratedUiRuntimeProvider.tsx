@@ -1,5 +1,6 @@
 import {
   createContext,
+  useCallback,
   useContext,
   useLayoutEffect,
   useRef,
@@ -22,6 +23,7 @@ import {
 } from '../components/messages/McpApp';
 import { Button } from '../components/ui/button';
 import { useI18n } from '../i18n';
+import { useWebShellPortalRoot } from '../portalRoot';
 import {
   GeneratedUiInstanceStore,
   instanceKey,
@@ -39,6 +41,26 @@ export function GeneratedUiRuntimeProvider({
   children: ReactNode;
 }) {
   const [store] = useState(() => new GeneratedUiInstanceStore());
+  const portalRoot = useWebShellPortalRoot();
+  const portalParkingCleanup = useRef<(() => void) | undefined>(undefined);
+  const setParking = useCallback(
+    (element: HTMLDivElement | null) => {
+      element?.setAttribute('inert', '');
+      store.parking = element ?? undefined;
+    },
+    [store],
+  );
+  const setPortalParking = useCallback(
+    (element: HTMLDivElement | null) => {
+      portalParkingCleanup.current?.();
+      portalParkingCleanup.current = undefined;
+      if (element) {
+        element.setAttribute('inert', '');
+        portalParkingCleanup.current = store.registerParking(element);
+      }
+    },
+    [store],
+  );
   const owner = useContext(McpAppGeneratedUiOwnerContext);
   const subscribeInvalidation = owner?.subscribeInvalidation;
   const entries = useSyncExternalStore(
@@ -58,11 +80,18 @@ export function GeneratedUiRuntimeProvider({
         hidden
         aria-hidden="true"
         data-generated-ui-parking
-        ref={(element) => {
-          element?.setAttribute('inert', '');
-          store.parking = element ?? undefined;
-        }}
+        ref={setParking}
       />
+      {portalRoot &&
+        createPortal(
+          <div
+            hidden
+            aria-hidden="true"
+            data-generated-ui-parking
+            ref={setPortalParking}
+          />,
+          portalRoot,
+        )}
       {entries.map((entry) =>
         createPortal(
           <McpAppHostContext.Provider value={entry.baseUrl}>

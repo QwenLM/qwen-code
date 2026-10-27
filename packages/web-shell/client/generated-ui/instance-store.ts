@@ -149,7 +149,22 @@ export class GeneratedUiInstanceStore {
   private generation = 0;
   private snapshot: GeneratedUiInstance[] = [];
   private revoked = AbortSignal.abort();
+  private parkingHosts = new Set<HTMLElement>();
   parking?: HTMLElement;
+
+  registerParking(element: HTMLElement) {
+    this.parkingHosts.add(element);
+    return () => {
+      this.parkingHosts.delete(element);
+      for (const [key, { entry }] of this.records) {
+        if (
+          entry?.parkedAt !== undefined &&
+          entry.container.parentElement === element
+        )
+          this.dispose(key, 'parking-removed');
+      }
+    };
+  }
 
   subscribe = (listener: () => void) => {
     this.listeners.add(listener);
@@ -348,7 +363,11 @@ export class GeneratedUiInstanceStore {
     const focused = entry.container.ownerDocument.activeElement;
     if (focused && entry.container.contains(focused))
       (focused as HTMLElement).blur();
-    if (!this.parking || !move(entry.container, this.parking)) {
+    const root = entry.container.getRootNode();
+    const parking = [this.parking, ...this.parkingHosts].find(
+      (element) => element?.isConnected && element.getRootNode() === root,
+    );
+    if (!parking || !move(entry.container, parking)) {
       this.dispose(key, 'move-failed');
       return;
     }

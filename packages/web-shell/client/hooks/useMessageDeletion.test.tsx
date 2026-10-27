@@ -66,7 +66,12 @@ afterEach(() => {
 });
 
 describe('Generated UI message deletion invalidation', () => {
-  it.each(['success', 'persisted-context-failure', 'refused'] as const)(
+  it.each([
+    'success',
+    'persisted-context-failure',
+    'not-persisted-context-failure',
+    'refused',
+  ] as const)(
     'uses the real deletion result before invalidating: %s',
     async (outcome) => {
       if (outcome !== 'success') {
@@ -74,10 +79,9 @@ describe('Generated UI message deletion invalidation', () => {
           new DaemonHttpError(
             409,
             {
-              code:
-                outcome === 'persisted-context-failure'
-                  ? 'message_deletion_context_unavailable'
-                  : 'session_busy',
+              code: outcome.endsWith('context-failure')
+                ? 'message_deletion_context_unavailable'
+                : 'session_busy',
               persisted: outcome === 'persisted-context-failure',
             },
             'deletion failed',
@@ -112,8 +116,13 @@ describe('Generated UI message deletion invalidation', () => {
       await act(async () => {
         await controls!.submit();
       });
-      if (outcome === 'refused') {
+      expect(mocks.client.deleteMessageGroups).toHaveBeenCalledOnce();
+      if (
+        outcome === 'refused' ||
+        outcome === 'not-persisted-context-failure'
+      ) {
         expect(invalidate).not.toHaveBeenCalled();
+        expect(mocks.actions.reloadSession).not.toHaveBeenCalled();
       } else {
         expect(invalidate).toHaveBeenCalledWith({
           scopeId: 'original-scope',
@@ -124,4 +133,78 @@ describe('Generated UI message deletion invalidation', () => {
       }
     },
   );
+
+  it('deletes only local command output without invalidating Generated UI', async () => {
+    mocks.client.getMessageGroups.mockResolvedValue({
+      snapshot: '',
+      groups: [],
+    });
+    mocks.store = createDaemonTranscriptStore({
+      blocks: [
+        {
+          id: 'local-output',
+          kind: 'user',
+          text: '/stats',
+          promptId: 'local-command:stats',
+          meta: { localCommandId: 'local-1' },
+          clientReceivedAt: 0,
+          createdAt: 0,
+          updatedAt: 0,
+        },
+        {
+          id: 'persisted-output',
+          kind: 'user',
+          text: 'Keep this message',
+          promptId: 'persisted-prompt',
+          clientReceivedAt: 0,
+          createdAt: 0,
+          updatedAt: 0,
+        },
+      ],
+    });
+    const localMessage: Message = {
+      id: 'local-message',
+      role: 'user',
+      content: '/stats',
+      localCommandId: 'local-1',
+      sourceBlockIds: ['local-output'],
+    };
+    const invalidate = vi.fn();
+    let controls: ReturnType<typeof useMessageDeletion>;
+    function Harness() {
+      controls = useMessageDeletion([localMessage], false);
+      return null;
+    }
+    await act(async () =>
+      root.render(
+        <McpAppGeneratedUiOwnerContext.Provider
+          value={{
+            scopeId: 'original-scope',
+            workspaceCwd: '/workspace',
+            subscribeInvalidation: () => () => undefined,
+            captureSessionDeletion: () => () => undefined,
+            invalidate,
+          }}
+        >
+          <Harness />
+        </McpAppGeneratedUiOwnerContext.Provider>,
+      ),
+    );
+    await act(async () => {
+      await controls!.start(localMessage);
+    });
+    expect(controls!.active).toBe(true);
+    expect(controls!.selected.size).toBe(1);
+    await act(async () => {
+      await controls!.submit();
+    });
+    expect(mocks.store.getSnapshot().blocks.map((block) => block.id)).toEqual([
+      'persisted-output',
+    ]);
+    expect(controls!.active).toBe(false);
+    expect(controls!.error).toBeUndefined();
+    expect(mocks.client.deleteMessageGroups).not.toHaveBeenCalled();
+    expect(mocks.actions.reloadSession).not.toHaveBeenCalled();
+    expect(invalidate).not.toHaveBeenCalled();
+  });
 });

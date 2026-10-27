@@ -1388,3 +1388,180 @@ test('maximizing another split pane revokes hidden tool RPCs without recreating 
     contentType: 'application/json',
   });
 });
+
+for (const shadowPortals of [false, true]) {
+  test(`retains the subagent App and Worker after panel close with shadow portals ${shadowPortals} @smoke`, async ({
+    page,
+  }, testInfo) => {
+    let injected = 0;
+    await page.route('**/main.tsx', async (route) => {
+      const response = await route.fetch();
+      const body = await response.text();
+      const marker = /webShellProps:\s*\{/g;
+      expect(body.match(marker)).toHaveLength(1);
+      injected++;
+      await route.fulfill({
+        response,
+        body: body.replace(
+          marker,
+          `webShellProps: { shadowDom: { portals: ${shadowPortals} },`,
+        ),
+      });
+    });
+    const fixture = await openCards(page, testInfo);
+    await page.route('**/workspace/models', (route) =>
+      route.fulfill({ json: { models: [] } }),
+    );
+    expect(injected).toBe(1);
+    await page.setViewportSize({ width: 900, height: 900 });
+    const childId = 'retained-child';
+    let childLoads = 0;
+    const childReplay = [
+      userTextEvent('Render the child view', { id: 1, sessionId: childId }),
+      toolCallEvent(
+        'child-card',
+        'mcp__generated-ui__generated_ui_show',
+        input,
+        {
+          id: 2,
+          rawOutput: {
+            type: 'mcp_app',
+            requiredFeature: 'generated-ui',
+            serverName: 'generated-ui',
+            resourceUri,
+            html: appHtml,
+            toolResult,
+            toolArguments: input,
+            fallbackText: input.summary,
+          },
+        },
+      ),
+      turnCompleteEvent('child-turn', { id: 3, sessionId: childId }),
+    ];
+    await page.route('**/session/**/subagents/retained-agent', (route) =>
+      route.fulfill({ json: { sessionId: childId, status: 'completed' } }),
+    );
+    await page.route(`**/session/${childId}/load`, (route) => {
+      childLoads++;
+      return route.fulfill({
+        json: {
+          sessionId: childId,
+          clientId:
+            route.request().headers()['x-qwen-client-id'] ?? 'child-client',
+          workspaceCwd: fixture.scenario.workspaceCwd,
+          eventEpoch: 'child-epoch-1',
+          attached: true,
+          createdAt: '2026-10-27T00:00:00.000Z',
+          hasActivePrompt: false,
+          state: fixture.scenario.state,
+          generatedUi: fixture.scenario.state._meta?.['generatedUi'],
+          compactedReplay: childReplay,
+          liveJournal: [],
+          lastEventId: 3,
+        },
+      });
+    });
+    await fixture.daemon.sendEvent(
+      userTextEvent('Open child details', { id: 100 }),
+    );
+    await fixture.daemon.sendEvent(
+      toolCallEvent(
+        'retained-agent',
+        'agent',
+        {
+          description: 'Retained child',
+          prompt: 'Render the child view',
+          subagent_type: 'general-purpose',
+        },
+        {
+          id: 101,
+          rawOutput: {
+            task_id: 'retained-task',
+            subagentName: 'Retained child',
+            status: 'completed',
+          },
+        },
+      ),
+    );
+    await fixture.daemon.sendEvent(
+      turnCompleteEvent('parent-agent-turn', { id: 102 }),
+    );
+    const trigger = page
+      .getByRole('button', { name: /Retained child/ })
+      .first();
+    await trigger.click();
+    const panel = page.locator('aside[aria-label="Right panel"]');
+    await expect(panel).toBeVisible();
+    await fixture.daemon.sse.waitForConnection(childId);
+    await fixture.daemon.sendEvent(
+      replayCompleteEvent({
+        sessionId: childId,
+        replayedCount: childReplay.length,
+      }),
+    );
+    const card = panel.locator(frameSelector);
+    await expect(card).toHaveCount(1);
+    expect(
+      await card.evaluate(
+        (element) => element.getRootNode() instanceof ShadowRoot,
+      ),
+    ).toBe(shadowPortals);
+    const app = card.contentFrame().frameLocator('iframe');
+    await expect(app.locator('#status')).toHaveAttribute('data-state', 'ready');
+    const view = app.frameLocator('#view');
+    await view.locator('#rate').fill('7');
+    await view.getByRole('button', { name: 'Apply', exact: true }).click();
+    await expect(view.locator('#answer')).toHaveText('1:7');
+    await view.locator('#rate').fill('9');
+    await expect(app.locator('#status')).toHaveAttribute('data-state', 'dirty');
+    const before = await fixture.probe.snapshot(app);
+    const frame = await card.elementHandle();
+    const mainRealm = await page.evaluate(
+      () => (window as ProbeWindow).__pr03Realm.id,
+    );
+    await panel
+      .getByRole('button', { name: 'Toggle right panel', exact: true })
+      .click();
+    await expect(panel).toHaveCount(0);
+    expect(await frame!.evaluate((element) => element.isConnected)).toBe(true);
+    expect(
+      await frame!.evaluate((element) =>
+        element.closest('[data-generated-ui-parking]')?.hasAttribute('inert'),
+      ),
+    ).toBe(true);
+    expect(
+      await Promise.all(
+        fixture.probe.workers
+          .filter((worker) => !worker.closed)
+          .map(({ nonce }) => nonce),
+      ),
+    ).toEqual(before.workerNonces);
+    const previousLoads = childLoads;
+    await trigger.click();
+    await expect(panel).toBeVisible();
+    await expect.poll(() => childLoads).toBeGreaterThan(previousLoads);
+    await fixture.daemon.sse.waitForConnection(childId);
+    await fixture.daemon.sendEvent(
+      replayCompleteEvent({
+        sessionId: childId,
+        replayedCount: childReplay.length,
+      }),
+    );
+    await expect(card).toHaveCount(1);
+    expect(await fixture.probe.snapshot(app)).toEqual(before);
+    await expect(view.locator('#rate')).toHaveValue('9');
+    await expect(view.locator('#answer')).toHaveText('1:7');
+    expect(
+      await page.evaluate(() => (window as ProbeWindow).__pr03Realm.id),
+    ).toBe(mainRealm);
+    expect(fixture.daemon.promptRequests()).toHaveLength(0);
+    await testInfo.attach('subagent-portal-retention', {
+      body: JSON.stringify({
+        shadowPortals,
+        before,
+        after: await fixture.probe.snapshot(app),
+      }),
+      contentType: 'application/json',
+    });
+  });
+}

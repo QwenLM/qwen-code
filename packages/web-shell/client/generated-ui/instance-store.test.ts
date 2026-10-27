@@ -132,6 +132,15 @@ function setup() {
   return { store, parking };
 }
 
+function shadowParking(store: GeneratedUiInstanceStore) {
+  const host = document.createElement('div');
+  document.body.appendChild(host);
+  const root = host.attachShadow({ mode: 'open' });
+  const parking = document.createElement('div');
+  root.appendChild(parking);
+  return { root, parking, unregister: store.registerParking(parking) };
+}
+
 function toolRequest() {
   return {
     serverName: 'qwen-code-generated-ui',
@@ -400,6 +409,118 @@ describe('Generated UI active leases', () => {
       expect(host.requestMessage).not.toHaveBeenCalled();
     },
   );
+});
+
+describe('Generated UI shadow parking', () => {
+  it('parks a populated shadow instance and reattaches the same entry within its root', () => {
+    const { store, parking } = setup();
+    const shadow = shadowParking(store);
+    const host = slot();
+    shadow.root.appendChild(host.value.element);
+    const entry = store.attach(host.value)!;
+    const frame = document.createElement('iframe');
+    entry.container.appendChild(frame);
+    const signal = entry.runtime.getSignal();
+    const nativeMove = vi.spyOn(
+      HTMLElement.prototype as HTMLElement & {
+        moveBefore(node: Node, before: Node | null): void;
+      },
+      'moveBefore',
+    );
+
+    store.release(host.value.key, host.value.token);
+
+    expect(entry.container.parentElement).toBe(shadow.parking);
+    expect(entry.container.getRootNode()).toBe(shadow.root);
+    expect(entry.parkedAt).toBe(Date.now());
+    expect(frame.isConnected).toBe(true);
+    expect(parking.childElementCount).toBe(0);
+    expect(signal.aborted).toBe(true);
+    expect(store.getRecord(host.value.key)?.entry).toBe(entry);
+    expect(store.attach(host.value)).toBe(entry);
+    expect(entry.container.parentElement).toBe(host.value.element);
+    expect(entry.container.firstChild).toBe(frame);
+    expect(entry.runtime.getSignal().aborted).toBe(false);
+    expect(nativeMove.mock.contexts).toEqual([
+      shadow.parking,
+      host.value.element,
+    ]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('shares one four-card budget and expiry timers across main and shadow parking', () => {
+    const { store, parking } = setup();
+    const shadow = shadowParking(store);
+    const cards = Array.from(
+      { length: MAX_PARKED_INSTANCES + 1 },
+      (_, index) => {
+        const host = slot(`mixed-${index}`);
+        if (index % 2 === 0) shadow.root.appendChild(host.value.element);
+        const entry = store.attach(host.value)!;
+        entry.container.appendChild(document.createElement('iframe'));
+        store.release(host.value.key, host.value.token);
+        vi.advanceTimersByTime(1);
+        return { host, entry };
+      },
+    );
+
+    expect(store.getRecord(cards[0].host.value.key)?.reason).toBe('evicted');
+    expect(cards[0].entry.container.isConnected).toBe(false);
+    expect(store.getEntries()).toEqual(
+      cards.slice(1).map(({ entry }) => entry),
+    );
+    expect(parking.childElementCount).toBe(2);
+    expect(shadow.parking.childElementCount).toBe(2);
+    expect(vi.getTimerCount()).toBe(MAX_PARKED_INSTANCES);
+    const restored = cards[2];
+    expect(store.attach(restored.host.value)).toBe(restored.entry);
+
+    vi.advanceTimersByTime(PARKED_INSTANCE_TTL);
+
+    expect(store.getEntries()).toEqual([restored.entry]);
+    expect(restored.entry.container.parentElement).toBe(
+      restored.host.value.element,
+    );
+    expect(restored.entry.runtime.isVisible()).toBe(true);
+    for (const index of [1, 3, 4]) {
+      expect(store.getRecord(cards[index].host.value.key)?.reason).toBe(
+        'expired',
+      );
+      expect(cards[index].entry.container.isConnected).toBe(false);
+    }
+    expect(parking.childElementCount).toBe(0);
+    expect(shadow.parking.childElementCount).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('unregisters only its parked shadow entries and refuses later moves without a matching host', () => {
+    const { store, parking } = setup();
+    const shadow = shadowParking(store);
+    const main = slot('main');
+    const parked = slot('shadow-parked');
+    const attached = slot('shadow-attached');
+    shadow.root.append(parked.value.element, attached.value.element);
+    const mainEntry = store.attach(main.value)!;
+    const parkedEntry = store.attach(parked.value)!;
+    const attachedEntry = store.attach(attached.value)!;
+    for (const entry of [mainEntry, parkedEntry, attachedEntry])
+      entry.container.appendChild(document.createElement('iframe'));
+    store.release(main.value.key, main.value.token);
+    store.release(parked.value.key, parked.value.token);
+
+    shadow.unregister();
+
+    expect(store.getRecord(parked.value.key)?.reason).toBe('parking-removed');
+    expect(parkedEntry.container.isConnected).toBe(false);
+    expect(store.getEntries()).toEqual([mainEntry, attachedEntry]);
+    expect(mainEntry.container.parentElement).toBe(parking);
+    expect(attachedEntry.runtime.isVisible()).toBe(true);
+    expect(vi.getTimerCount()).toBe(1);
+    store.release(attached.value.key, attached.value.token);
+    expect(store.getRecord(attached.value.key)?.reason).toBe('move-failed');
+    expect(attachedEntry.container.isConnected).toBe(false);
+    expect(store.getEntries()).toEqual([mainEntry]);
+  });
 });
 
 describe('Generated UI retention budgets', () => {

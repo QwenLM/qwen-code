@@ -218,7 +218,7 @@ export function useMessageDeletion(
         }
       }
       deleted = true;
-      if (generatedUiOwner && connection.sessionId) {
+      if (generatedUiOwner && connection.sessionId && persisted.length > 0) {
         generatedUiOwner.invalidate({
           scopeId: generatedUiOwner.scopeId,
           sessionId: connection.sessionId,

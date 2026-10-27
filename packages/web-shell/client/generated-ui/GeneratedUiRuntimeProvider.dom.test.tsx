@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { act, StrictMode, type ContextType } from 'react';
+import { createPortal } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
@@ -19,6 +20,7 @@ import {
   McpAppVisibilityContext,
 } from '../mcpAppHostContext';
 import { I18nProvider } from '../i18n';
+import { WebShellPortalRootContext } from '../portalRoot';
 import { McpApp, type McpAppDisplay } from '../components/messages/McpApp';
 import {
   GeneratedUiRuntimeProvider,
@@ -119,6 +121,7 @@ interface Card {
   display?: McpAppDisplay;
   visible?: boolean;
   surfaceVisible?: boolean;
+  portal?: boolean;
 }
 
 interface HarnessProps {
@@ -129,6 +132,7 @@ interface HarnessProps {
   tools?: ContextType<typeof McpAppToolsContext>;
   viewportKey?: string;
   surfaceVisible?: boolean;
+  portalRoot?: HTMLElement | null;
 }
 
 function setup(strict = false) {
@@ -210,24 +214,33 @@ function setup(strict = false) {
                     <GeneratedUiRuntimeProvider>
                       <StoreObserver />
                       <section key={props.viewportKey ?? 'viewport'}>
-                        {(props.cards ?? defaultCards).map((card) => (
-                          <McpAppVisibilityContext.Provider
-                            key={card.surface}
-                            value={
-                              card.surfaceVisible ??
-                              props.surfaceVisible ??
-                              true
-                            }
-                          >
-                            <article data-surface={card.surface}>
-                              <McpApp
-                                display={card.display ?? display}
-                                toolId={card.toolId}
-                                visible={card.visible ?? true}
-                              />
-                            </article>
-                          </McpAppVisibilityContext.Provider>
-                        ))}
+                        {(props.cards ?? defaultCards).map((card) => {
+                          const content = (
+                            <McpAppVisibilityContext.Provider
+                              key={card.surface}
+                              value={
+                                card.surfaceVisible ??
+                                props.surfaceVisible ??
+                                true
+                              }
+                            >
+                              <article data-surface={card.surface}>
+                                <McpApp
+                                  display={card.display ?? display}
+                                  toolId={card.toolId}
+                                  visible={card.visible ?? true}
+                                />
+                              </article>
+                            </McpAppVisibilityContext.Provider>
+                          );
+                          return card.portal && props.portalRoot
+                            ? createPortal(
+                                content,
+                                props.portalRoot,
+                                card.surface,
+                              )
+                            : content;
+                        })}
                       </section>
                     </GeneratedUiRuntimeProvider>
                   </McpAppMessagesContext.Provider>
@@ -238,8 +251,13 @@ function setup(strict = false) {
         </McpAppHostContext.Provider>
       </I18nProvider>
     );
+    const content = (
+      <WebShellPortalRootContext.Provider value={props.portalRoot ?? null}>
+        {tree}
+      </WebShellPortalRootContext.Provider>
+    );
     await act(async () =>
-      root.render(strict ? <StrictMode>{tree}</StrictMode> : tree),
+      root.render(strict ? <StrictMode>{content}</StrictMode> : content),
     );
   };
   const close = async () => {
@@ -305,6 +323,16 @@ function message(bridge: BridgeMock) {
     },
     { signal: new AbortController().signal },
   );
+}
+
+function createShadowPortal() {
+  const host = document.createElement('div');
+  document.body.appendChild(host);
+  const shadow = host.attachShadow({ mode: 'open' });
+  const portalRoot = document.createElement('div');
+  shadow.appendChild(portalRoot);
+  closeHarnesses.push(async () => host.remove());
+  return { shadow, portalRoot };
 }
 
 describe('GeneratedUiRuntimeProvider lifecycle', () => {
@@ -398,6 +426,90 @@ describe('GeneratedUiRuntimeProvider lifecycle', () => {
     expect(bridge.sendToolResult).toHaveBeenCalledTimes(1);
     expect(await message(bridge)).toEqual({});
     expect(h.requestMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it('retains a populated shadow portal across parked rerenders and StrictMode remounts', async () => {
+    const h = setup(true);
+    const { shadow, portalRoot } = createShadowPortal();
+    const card = { surface: 'shadow', toolId: 'call-a', portal: true };
+    await h.render({ portalRoot, cards: [] });
+    await h.render({ portalRoot, cards: [card] });
+    const bridge = activeBridges()[0];
+    const frame = portalRoot.querySelector('iframe')!;
+    const entry = h.store().getEntries()[0];
+    await initialize(bridge);
+    expect(frame.getRootNode()).toBe(shadow);
+    expect(entry.container.contains(frame)).toBe(true);
+    expect(await message(bridge)).toEqual({});
+    const previousSignal = h.requestMessage.mock.calls[0][0].signal;
+
+    await h.render({ portalRoot, cards: [] });
+
+    const parking = portalRoot.querySelector<HTMLElement>(
+      '[data-generated-ui-parking]',
+    )!;
+    expect(parking.hidden).toBe(true);
+    expect(parking.hasAttribute('inert')).toBe(true);
+    expect(parking.getAttribute('aria-hidden')).toBe('true');
+    expect(parking.contains(frame)).toBe(true);
+    expect(entry.parkedAt).toBeDefined();
+    expect(h.parking().contains(frame)).toBe(false);
+    expect(previousSignal.aborted).toBe(true);
+    expect(await message(bridge)).toEqual({ isError: true });
+    expect(h.requestMessage).toHaveBeenCalledTimes(1);
+    await h.render({ portalRoot, cards: [], viewportKey: 'history-slice' });
+    expect(h.store().getEntries()).toEqual([entry]);
+    expect(parking.contains(frame)).toBe(true);
+    expect(bridge.close).not.toHaveBeenCalled();
+
+    await h.render({ portalRoot, cards: [card], viewportKey: 'returned' });
+
+    expect(portalRoot.querySelector('[data-surface="shadow"] iframe')).toBe(
+      frame,
+    );
+    expect(h.store().getEntries()).toEqual([entry]);
+    expect(entry.parkedAt).toBeUndefined();
+    expect(activeBridges()).toEqual([bridge]);
+    expect(await message(bridge)).toEqual({});
+    expect(h.requestMessage.mock.calls[1][0].signal.aborted).toBe(false);
+    expect(bridge.sendToolInput).toHaveBeenCalledTimes(1);
+    expect(bridge.sendToolResult).toHaveBeenCalledTimes(1);
+  });
+
+  it('removes only the parked shadow runtime when its portal parking host disappears', async () => {
+    const h = setup();
+    const { portalRoot } = createShadowPortal();
+    const main = { surface: 'main', toolId: 'main' };
+    const shadow = { surface: 'shadow', toolId: 'shadow', portal: true };
+    await h.render({ portalRoot, cards: [main, shadow] });
+    const [mainBridge, shadowBridge] = activeBridges();
+    await initialize(mainBridge);
+    await initialize(shadowBridge);
+    const mainFrame = h.surface().querySelector('iframe');
+    const shadowFrame = portalRoot.querySelector('iframe')!;
+    const [mainEntry, shadowEntry] = h.store().getEntries();
+    await h.render({ portalRoot, cards: [] });
+
+    await h.render({ portalRoot: null, cards: [] });
+
+    expect(h.store().getRecord(shadowEntry.key)?.reason).toBe(
+      'parking-removed',
+    );
+    expect(shadowFrame.isConnected).toBe(false);
+    expect(shadowBridge.close).toHaveBeenCalledTimes(1);
+    expect(h.store().getEntries()).toEqual([mainEntry]);
+    expect(h.parking().contains(mainFrame)).toBe(true);
+    expect(mainBridge.close).not.toHaveBeenCalled();
+    expect(portalRoot.querySelector('[data-generated-ui-parking]')).toBeNull();
+    await h.render({ portalRoot, cards: [main, shadow] });
+    expect(h.surface().querySelector('iframe')).toBe(mainFrame);
+    expect(
+      portalRoot.querySelector('[data-surface="shadow"] iframe'),
+    ).toBeNull();
+    expect(
+      portalRoot.querySelector('[data-surface="shadow"] button'),
+    ).not.toBeNull();
+    expect(activeBridges()).toEqual([mainBridge]);
   });
 
   it('keeps an active key in one surface and allows reopening after its owner leaves', async () => {
