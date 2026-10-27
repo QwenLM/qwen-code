@@ -4399,6 +4399,89 @@ describe('Gemini Client (client.ts)', () => {
       expect(client['lastDeliveredMemoryTreeRevision']).toBe('still-valid');
     });
 
+    describe.each([false, true])(
+      'Workflow notice removal with cancellation rearming %s',
+      (rearm) => {
+        it.each(['enabled', 'refresh', 'off', 'unavailable'] as const)(
+          'reannounces a discarded %s notice only for cancellation',
+          (kind) => {
+            const mode = new WorkflowModeContext();
+            const context = {
+              surface: 'pointer' as const,
+              bridgeWorkflowTool: false,
+              nameOnly: false,
+            };
+            const history = [userText('earlier prompt'), modelText('response')];
+            mode.setRequested(true);
+            if (kind !== 'enabled') {
+              const enabled = mode.prepare(context, null);
+              enabled.onModelRequestDispatched?.();
+              history[0].parts!.unshift({ text: enabled.reminder });
+            }
+            if (kind === 'refresh') {
+              for (let turn = 0; turn < 9; turn++) {
+                mode.prepare(context, null).onModelRequestDispatched?.();
+              }
+            }
+            if (kind === 'off') mode.setRequested(false);
+            const currentContext = kind === 'unavailable' ? null : context;
+            const cancelled = mode.prepare(currentContext, null);
+            expect(cancelled.reminder).toBeDefined();
+            cancelled.onModelRequestDispatched?.();
+            const snapshot = mode.snapshot();
+            const orphan = content(
+              'user',
+              { text: cancelled.reminder },
+              { text: 'cancelled prompt' },
+            );
+            client['chat'] = new LlmChat(mockConfig, {}, [...history, orphan]);
+            vi.mocked(mockConfig.resetWorkflowModeContext).mockImplementation(
+              () => mode.resetContext(),
+            );
+
+            const stripped = rearm
+              ? client.stripOrphanedUserEntriesFromHistory(true)
+              : client.stripOrphanedUserEntriesFromHistory();
+            expect(stripped).toEqual([orphan]);
+            expect(client.getHistory()).toEqual(history);
+            const next = mode.prepare(currentContext, null);
+            if (rearm) {
+              const expected =
+                kind === 'off'
+                  ? 'is off'
+                  : kind === 'unavailable'
+                    ? 'is temporarily unavailable'
+                    : 'is enabled';
+              expect(next.reminder).toContain(`Workflow mode ${expected}`);
+              next.onModelRequestDispatched?.();
+              expect(
+                mode.prepare(currentContext, null).reminder,
+              ).toBeUndefined();
+            } else {
+              expect(next.reminder).toBeUndefined();
+              expect(mode.snapshot()).toEqual(snapshot);
+              expect(
+                mockConfig.resetWorkflowModeContext,
+              ).not.toHaveBeenCalled();
+            }
+          },
+        );
+      },
+    );
+
+    it.each([false, true])(
+      'preserves Workflow cadence when cancellation removes no notice (orphan: %s)',
+      (hasOrphan) => {
+        const history = [userText('earlier prompt'), modelText('response')];
+        if (hasOrphan) history.push(userText('cancelled prompt'));
+        client['chat'] = new LlmChat(mockConfig, {}, history);
+
+        client.stripOrphanedUserEntriesFromHistory(true);
+
+        expect(mockConfig.resetWorkflowModeContext).not.toHaveBeenCalled();
+      },
+    );
+
     it('truncateHistory clears the cache when entries are actually removed', () => {
       const cacheClear = mockFileReadCacheClear();
       client['chat'] = mockChatWithLengths(3, 2);

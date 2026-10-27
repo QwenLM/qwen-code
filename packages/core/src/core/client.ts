@@ -1225,7 +1225,7 @@ export class LlmClient {
    *     one and the new one — and the model would see context the user
    *     thought had been undone.
    */
-  stripOrphanedUserEntriesFromHistory(): Content[] {
+  stripOrphanedUserEntriesFromHistory(rearmWorkflowMode = false): Content[] {
     const chat = this.getChat();
     const before = chat.getHistoryLength();
     const strippedEntries = chat.stripOrphanedUserEntriesFromHistory();
@@ -1235,6 +1235,17 @@ export class LlmClient {
       return strippedEntries;
     }
     this.trustedUserAnswers.clear();
+    // Retry replays removed notices; cancellation discards them.
+    if (
+      rearmWorkflowMode &&
+      strippedEntries.some((entry) =>
+        entry.parts?.some((part) =>
+          part.text?.startsWith('<system-reminder>\nWorkflow mode '),
+        ),
+      )
+    ) {
+      this.config.resetWorkflowModeContext();
+    }
     // Stripped trailing user entries can include read_file
     // functionResponses from a failed-then-retried request. The
     // FileReadCache would still record those reads, so the retry's

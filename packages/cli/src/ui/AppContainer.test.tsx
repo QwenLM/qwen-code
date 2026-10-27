@@ -5199,7 +5199,7 @@ describe('AppContainer State Management', () => {
       // Third cleanup leg: in-memory chat history is stripped so the
       // cancelled prompt doesn't ride along on the next request as an
       // orphan user turn.
-      expect(mockStripOrphans).toHaveBeenCalled();
+      expect(mockStripOrphans).toHaveBeenCalledWith(true);
       // Fourth cleanup leg: Ink's static-rendered transcript region
       // is append-only — shrinking the underlying array doesn't unprint
       // already-flushed lines. `refreshStatic` writes the clear-terminal
@@ -5350,7 +5350,7 @@ describe('AppContainer State Management', () => {
         wasGoalTurn: true,
       });
 
-      expect(mockStripOrphans).toHaveBeenCalled();
+      expect(mockStripOrphans).toHaveBeenCalledWith(true);
       // Auto-restore itself bailed: there was no user item to rewind.
       expect(mockTruncateToItem).not.toHaveBeenCalled();
     });

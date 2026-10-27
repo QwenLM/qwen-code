@@ -3726,7 +3726,7 @@ export const AppContainer = (props: AppContainerProps) => {
       // the strip only pops trailing user entries, and a responded prompt is
       // not trailing.
       if (info?.wasGoalTurn) {
-        llmClient?.stripOrphanedUserEntriesFromHistory?.();
+        llmClient?.stripOrphanedUserEntriesFromHistory?.(true);
       }
 
       // Restore-on-cancel: pull the just-submitted prompt back into the input
@@ -3892,7 +3892,7 @@ export const AppContainer = (props: AppContainerProps) => {
       // contradict what the UI told the user was rewound. Mirrors the
       // existing strip in the Retry submit path
       // (LlmClient.sendMessageStream).
-      llmClient?.stripOrphanedUserEntriesFromHistory?.();
+      llmClient?.stripOrphanedUserEntriesFromHistory?.(true);
       // Also undo the cross-session ↑-history disk entry written by
       // useLlmStream's `logger.logMessage` — otherwise
       // getPreviousUserMessages would resurrect the cancelled prompt next

@@ -700,7 +700,9 @@ export function useOpenTuiLiveTurn(
               ) {
                 itemsRef.current = history.slice(0, index);
                 setItems(itemsRef.current);
-                config.getLlmClient()?.stripOrphanedUserEntriesFromHistory();
+                config
+                  .getLlmClient()
+                  ?.stripOrphanedUserEntriesFromHistory(true);
                 if (active.canUndoLog)
                   void logger
                     ?.removeLastUserMessage()

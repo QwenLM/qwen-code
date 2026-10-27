@@ -47,7 +47,9 @@ changes, sparse reminders follow on submissions 11 and 21, then every ten
 eligible submissions. Turning off or losing capability sends one exit notice
 on the next eligible submission. Only an actual model dispatch consumes a
 reminder or advances the count; cancellation or rejection before dispatch
-does not. Retries and fallback attempts share the same delivery token.
+does not. Retries and fallback attempts share the same delivery token. If
+cancellation removes a dispatched mode reminder from model history, the next
+eligible submission announces the current state again.
 
 Ordinary CLI, SDK and ACP submissions can use this explicit mode without a
 human-origin declaration. Tool continuations, retries, hooks, slash-generated

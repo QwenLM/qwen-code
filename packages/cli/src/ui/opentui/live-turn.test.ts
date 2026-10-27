@@ -781,6 +781,9 @@ describe('useOpenTuiLiveTurn submit paths', () => {
       expect(stripOrphanedUserEntriesFromHistory).toHaveBeenCalledTimes(
         restored ? 1 : 0,
       );
+      if (restored) {
+        expect(stripOrphanedUserEntriesFromHistory).toHaveBeenCalledWith(true);
+      }
       expect(removeLastUserMessage).toHaveBeenCalledTimes(restored ? 1 : 0);
     },
   );
