@@ -26000,7 +26000,7 @@ describe('App session callbacks', () => {
     );
     expect(
       sessionCatalogController.setPendingSessionTitle,
-    ).not.toHaveBeenCalled();
+    ).toHaveBeenCalledWith(expect.any(String), 'session-1', 'Bug hunt');
     expect(
       mockSessionActions.renameSession.mock.invocationCallOrder[0],
     ).toBeLessThan(

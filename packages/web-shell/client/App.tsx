@@ -11622,7 +11622,16 @@ export function App({
                   sessionId,
                   workspaceCwd: catalogWorkspaceCwd,
                 };
-                if (initialTitle && !carryWillApply) {
+                if (carryWillApply && pendingManualTitle) {
+                  // The carry title is authoritative for this successor; use
+                  // it as the provisional name too so no read can publish the
+                  // id before the rename lands.
+                  sessionCatalogController.setPendingSessionTitle(
+                    catalogWorkspaceCwd,
+                    sessionId,
+                    pendingManualTitle.displayName,
+                  );
+                } else if (initialTitle) {
                   // Register the title before notify() so a render triggered
                   // by the callback cannot publish the row first.
                   sessionCatalogController.setPendingSessionTitle(
