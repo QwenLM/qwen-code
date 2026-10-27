@@ -6730,9 +6730,14 @@ describe('runQwenServe deployment profiles', () => {
     }
   });
 
-  it.each([false, true])(
-    'scopes local session recovery to ordinary profiles (Hosted: %s)',
-    async (hosted) => {
+  it.each([
+    { hosted: false, deferred: false },
+    { hosted: true, deferred: false },
+    { hosted: false, deferred: true },
+    { hosted: true, deferred: true },
+  ])(
+    'scopes local session recovery to ordinary profiles (Hosted: $hosted, deferred: $deferred)',
+    async ({ hosted, deferred }) => {
       const workspace = fs.realpathSync(
         fs.mkdtempSync(path.join(os.tmpdir(), 'qws-hosted-local-state-')),
       );
@@ -6741,34 +6746,48 @@ describe('runQwenServe deployment profiles', () => {
         'getWorktreeSessionPath',
       );
       let handle: RunHandle | undefined;
+      let restoreBridge: (() => void) | undefined;
       try {
-        handle = await runQwenServe(
-          {
-            port: 0,
-            hostname: '127.0.0.1',
-            mode: 'http-bridge',
-            workspace,
-            serveWebShell: false,
-            ...(hosted
-              ? {
-                  profile: 'hosted-harness' as const,
-                  token: 'hosted-secret',
-                  hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
-                  managedRuntimeBrokerUrl: 'https://broker.internal',
-                  managedRuntimeBrokerToken: 'broker-secret',
-                }
-              : {}),
-          },
-          {
+        const options = {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace,
+          serveWebShell: false,
+          ...(hosted
+            ? {
+                profile: 'hosted-harness' as const,
+                token: 'hosted-secret',
+                hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+                managedRuntimeBrokerUrl: 'https://broker.internal',
+                managedRuntimeBrokerToken: 'broker-secret',
+              }
+            : {}),
+        } satisfies Parameters<typeof runQwenServe>[0];
+        const deps = {
+          trustedWorkspace: true,
+          daemonLogBaseDir: path.join(workspace, 'debug'),
+        };
+        if (deferred) {
+          const started = await startDeferredDaemon(workspace, {
+            serveOptions: options,
+            deps,
+          });
+          handle = started.handle;
+          restoreBridge = () => started.createBridge.mockRestore();
+          await fetch(`${handle.url}/health`);
+          await handle.runtimeReady;
+        } else {
+          handle = await runQwenServe(options, {
+            ...deps,
             bridge: makeRuntimeBridge(),
-            trustedWorkspace: true,
-            daemonLogBaseDir: path.join(workspace, 'debug'),
-          },
-        );
+          });
+        }
         if (hosted) expect(chats).not.toHaveBeenCalled();
         else expect(chats).toHaveBeenCalled();
       } finally {
         await handle?.close();
+        restoreBridge?.();
         chats.mockRestore();
         fs.rmSync(workspace, { recursive: true, force: true });
       }
