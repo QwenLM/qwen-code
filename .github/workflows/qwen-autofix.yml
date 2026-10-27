@@ -1771,8 +1771,8 @@ jobs:
           FOR_NOTE_ZH=''
           if [[ -n "${CMD_FOR}" && "${CMD_FOR}" =~ ^[0-9]{1,2}$ && "${CMD_FOR}" != '0' ]]; then
             FOR_MARKER="$(printf '\n<!-- autofix-round-budget %s -->' "${CMD_FOR}")"
-            FOR_NOTE="$(printf ' Budget: %s round(s). After round %s — pushed, no-op or failed — the loop removes the `%s` label.' "${CMD_FOR}" "${CMD_FOR}" "${TAKEOVER_LABEL}")"
-            FOR_NOTE_ZH="$(printf '本次托管预算 %s 轮：第 %s 轮结束（推送、无改动或失败）后自动移除 `%s` 标签。' "${CMD_FOR}" "${CMD_FOR}" "${TAKEOVER_LABEL}")"
+            FOR_NOTE="$(printf ' Budget: %s round(s). After round %s — pushed, no-op or failed — the loop removes the `%s` label (a bot-authored PR keeps it and pauses for a human instead).' "${CMD_FOR}" "${CMD_FOR}" "${TAKEOVER_LABEL}")"
+            FOR_NOTE_ZH="$(printf '本次托管预算 %s 轮：第 %s 轮结束（推送、无改动或失败）后自动移除 `%s` 标签（bot 创建的 PR 保留标签并转为人工作业）。' "${CMD_FOR}" "${CMD_FOR}" "${TAKEOVER_LABEL}")"
           fi
           if [[ "${CMD}" == 'add' ]]; then
             if [[ "${HAS}" == 'true' ]]; then
