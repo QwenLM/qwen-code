@@ -13,6 +13,7 @@ import {
 } from '@qwen-code/sdk/daemon';
 import { withActionTimeout } from '../timing.js';
 import type {
+  DaemonAutofixPrWatchList,
   DaemonDirectoryListing,
   DaemonFileStat,
   DaemonGoal,
@@ -887,6 +888,35 @@ export function createDaemonWorkspaceActions({
       if (!res.ok) {
         throw new Error(await readDaemonError(res, `DELETE ${path}`));
       }
+    },
+
+    // `/autofix-pr` watches: REST-only and read-only, routed like the
+    // scheduled tasks (primary unqualified, others by workspace id).
+    async listAutofixPrWatches(workspaceId) {
+      requireClient(getClient, 'List autofix-pr watches failed');
+      const path = workspaceId
+        ? `/workspaces/${encodeURIComponent(workspaceId)}/autofix-pr/watches`
+        : '/autofix-pr/watches';
+      const url = createDaemonRequestUrl(baseUrl, path);
+      const res = await withActionTimeout(
+        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+          headers: createDaemonHeaders(token),
+        }),
+        'List autofix-pr watches timed out',
+      );
+      if (!res.ok) {
+        throw new Error(await readDaemonError(res, `GET ${path}`));
+      }
+      const data = (await res.json()) as Partial<DaemonAutofixPrWatchList>;
+      return {
+        available: data.available === true,
+        ...(typeof data.root === 'string' ? { root: data.root } : {}),
+        ...(typeof data.now === 'string' ? { now: data.now } : {}),
+        watches: Array.isArray(data.watches) ? data.watches : [],
+        ...(Array.isArray(data.unreadable)
+          ? { unreadable: data.unreadable }
+          : {}),
+      };
     },
 
     // Goals. `GET /goals` is REST-only (like /scheduled-tasks) and not on the
