@@ -23,12 +23,15 @@ vi.mock('@opentui/core', () => ({
 
 import {
   describePermissionRule,
+  formatScopeRow,
   getPermissionsTabs,
   getPermissionScopeItems,
   permissionScopeLabel,
   validateWorkspaceDirectory,
 } from './dialogs-permissions.js';
 import { SettingScope } from '../../config/settings.js';
+import { setLanguageAsync } from '../../i18n/index.js';
+import { getCachedStringWidth } from '../utils/textUtils.js';
 
 describe('getPermissionsTabs', () => {
   it('keeps the original four tabs, order, and copy', () => {
@@ -131,6 +134,69 @@ describe('getPermissionScopeItems', () => {
     expect(description.endsWith(`${nodePath.sep}settings.json`)).toBe(true);
     // 50 is the description column this row gets at an 80-column terminal.
     expect(description.length).toBeLessThanOrEqual(50);
+  });
+});
+
+describe('getPermissionScopeItems row width', () => {
+  const originalQwenHome = process.env['QWEN_HOME'];
+  const deepQwenHome = nodePath.join(
+    nodePath.parse(os.tmpdir()).root,
+    'qwen-home-scope-intl',
+    'srv',
+    'qwen-runtime',
+    'shared',
+    'fixtures',
+  );
+  // label + 4-space gap + description, the row budget at an 80-column terminal.
+  const ROW_COLUMNS = 67;
+
+  afterEach(async () => {
+    await setLanguageAsync('en');
+    if (originalQwenHome === undefined) {
+      delete process.env['QWEN_HOME'];
+    } else {
+      process.env['QWEN_HOME'] = originalQwenHome;
+    }
+  });
+
+  it.each(['ca', 'de', 'fr', 'ja', 'pt', 'ru', 'zh', 'zh-TW'])(
+    'keeps the settings file name inside the row budget in %s',
+    async (language) => {
+      process.env['QWEN_HOME'] = deepQwenHome;
+      await setLanguageAsync(language);
+      const item = getPermissionScopeItems()[1]!;
+
+      expect(item.description).toContain('settings.json');
+      expect(
+        getCachedStringWidth(item.label) +
+          4 +
+          getCachedStringWidth(item.description),
+      ).toBeLessThanOrEqual(ROW_COLUMNS);
+    },
+  );
+});
+
+describe('formatScopeRow', () => {
+  it('keeps a row that fits untouched', () => {
+    expect(
+      formatScopeRow(
+        {
+          label: 'User settings',
+          description: 'Saved in ~/.qwen/settings.json',
+        },
+        67,
+      ),
+    ).toBe('User settings    Saved in ~/.qwen/settings.json');
+  });
+
+  it('clips an overlong row with an ellipsis, not a silent cut', () => {
+    const row = formatScopeRow(
+      { label: 'User settings', description: 'x'.repeat(120) },
+      40,
+    );
+
+    expect(getCachedStringWidth(row)).toBeLessThanOrEqual(40);
+    expect(row.endsWith('…')).toBe(true);
   });
 });
 

@@ -125,6 +125,7 @@ export function getPermissionScopeItems(): Array<{
   value: SettingScope;
   key: string;
 }> {
+  const userLabel = t('User settings');
   return [
     {
       label: t('Project settings'),
@@ -133,16 +134,50 @@ export function getPermissionScopeItems(): Array<{
       key: 'project',
     },
     {
-      label: t('User settings'),
-      description: t('Saved in {{path}}', {
-        // Bounded so the file name survives the row's right-edge clip: 41 is
-        // the path column this row gets at an 80-column terminal.
-        path: shortenPath(tildeifyPath(Storage.getGlobalSettingsPath()), 41),
+      label: userLabel,
+      description: t(SAVED_IN_TEMPLATE, {
+        path: savedSettingsPath(userLabel),
       }),
       value: SettingScope.User,
       key: 'user',
     },
   ];
+}
+
+/**
+ * An 80-column terminal leaves this row 67 columns for
+ * `label + gap + description`. Budgeting the path from the localized label and
+ * the rest of the template keeps the file name visible in every locale; a fixed
+ * character budget sized for English let longer translations clip the name away.
+ */
+const SCOPE_ROW_COLUMNS = 67;
+const SCOPE_LABEL_GAP = 4;
+const SAVED_IN_TEMPLATE = 'Saved in {{path}}';
+
+function savedSettingsPath(label: string): string {
+  const nonPathWidth = getCachedStringWidth(t(SAVED_IN_TEMPLATE, { path: '' }));
+  const budget =
+    SCOPE_ROW_COLUMNS -
+    getCachedStringWidth(label) -
+    SCOPE_LABEL_GAP -
+    nonPathWidth;
+  const settingsPath = tildeifyPath(Storage.getGlobalSettingsPath());
+  const shortened = shortenPath(settingsPath, Math.max(10, budget));
+  const name = settingsPath.slice(settingsPath.lastIndexOf(nodePath.sep) + 1);
+  // shortenPath always keeps the first segment, which can crowd out the file
+  // name this row exists to show; keep the name alone when that happens.
+  return shortened.includes(name) ? shortened : `...${nodePath.sep}${name}`;
+}
+
+/** One scope row, clipped with an ellipsis when it cannot fit the column budget. */
+export function formatScopeRow(
+  item: { label: string; description: string },
+  width: number,
+): string {
+  return truncateToWidth(
+    `${item.label}${' '.repeat(SCOPE_LABEL_GAP)}${item.description}`,
+    width,
+  );
 }
 
 export interface PermissionRuleEntry {
@@ -781,8 +816,8 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
             onSelectIndex={scopeList.selectIndex}
             renderLabel={(item, { titleColor }) => (
               <text fg={titleColor}>
-                {truncateToWidth(
-                  `${item.label}    ${item.description}`,
+                {formatScopeRow(
+                  item,
                   rowLabelWidth(areaWidth - 4, scopeItems.length),
                 )}
               </text>
