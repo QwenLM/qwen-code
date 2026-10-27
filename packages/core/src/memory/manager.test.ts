@@ -2436,6 +2436,36 @@ describe('MemoryManager', () => {
       expect(runAutoMemoryExtract).toHaveBeenCalledTimes(3);
     });
 
+    it('accepts a superseded trailing run whose epoch refreshed after a switch', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      // Hold the project slot so the following turns queue behind it.
+      let finish!: (value: ReturnType<typeof engagedNoop>) => void;
+      vi.mocked(runAutoMemoryExtract).mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve;
+          }),
+      );
+      const held = turn(mgr, 2);
+      await vi.waitFor(() =>
+        expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1),
+      );
+      expect((await turn(mgr, 4)).skippedReason).toBe('queued');
+
+      // The switch bumps the epoch and drops the session's entry; the request
+      // that supersedes the queued one is re-keyed to the new epoch, so its
+      // outcome still counts when it finally runs.
+      mgr.discardExtractCadence('sess', 'next');
+      expect((await turn(mgr, 6)).skippedReason).toBe('queued');
+
+      finish(engagedNoop());
+      await held;
+      await mgr.drain();
+
+      expect((await turn(mgr, 8)).skippedReason).toBe('cadence');
+    });
+
     it('flushes the latest skipped turn once and then forgets it', async () => {
       vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
       const mgr = new MemoryManager();
