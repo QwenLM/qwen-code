@@ -201,7 +201,7 @@ const PR_COMMAND_PATTERN =
 // stray occurrence in its prompt reads as a qualifier too — the safer
 // reading, and never a binding this workspace's number.
 const REPO_FLAG_PATTERN =
-  /(?:^|[^-\w])--repo(?![\w-])|(?:^|[\s])-R(?:[ \t]*=?[ \t]*)?[^\s=][^\s]*\//g;
+  /(?:^|[^-\w])--repo(?![\w-])|(?:^|[\s])-R[ \t\r\n]*=?[ \t\r\n]*[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)?(?![\w./-])/g;
 const REPO_VALUE_PATTERN = /--repo(?:[ \t]*=[ \t]*|[ \t]+)["']?[^\s"']+/g;
 const REPO_FORM_PATTERN = /--repo(?:[ \t]*=[ \t]*|[ \t]+)["']?([^\s"']+)/;
 
@@ -714,16 +714,20 @@ export async function backfillWorkspaceSessionPrs(
   ): { host: string; path: string[] } | undefined => {
     try {
       const parsed = new URL(prUrl);
-      const parts = parsed.pathname.split('/').filter(Boolean);
-      const marker = parts.findIndex(
-        (segment) =>
-          segment === 'pull' ||
-          segment === 'merge_requests' ||
-          segment === 'codereview',
+      // Strip the PR/MR route from the END: a repository may legitimately be
+      // named `pull` (`/o/pull/pull/77`), so the first matching segment is not
+      // the marker.
+      const route = /\/(?:pull|merge_requests|codereview)\/[^/]+\/?$/.exec(
+        parsed.pathname,
       );
-      const repoPath = (marker >= 2 ? parts.slice(0, marker) : parts).map(
-        normalizeSegment,
-      );
+      const repoPath = (
+        route
+          ? parsed.pathname.slice(0, route.index).replace(/\/-$/, '')
+          : parsed.pathname
+      )
+        .split('/')
+        .filter(Boolean)
+        .map(normalizeSegment);
       return repoPath.length >= 2
         ? { host: parsed.host, path: repoPath }
         : undefined;

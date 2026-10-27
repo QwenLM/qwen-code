@@ -4365,6 +4365,82 @@ describe('backfillWorkspaceSessionPrs', () => {
     ).toBeNull();
   });
 
+  it('binds a qualified number in a repository named pull', async () => {
+    // The first `pull` is the repository; only the trailing `/pull/<n>` is the
+    // route, so the identity must be stripped from the end.
+    fetchRemoteWebUrlMock.mockResolvedValue('https://github.com/o/pull');
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/verify-pr 77 --repo o/pull');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [
+        {
+          ...pr(77, 'f77'),
+          url: 'https://github.com/o/pull/pull/77',
+        },
+      ],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 1 });
+    expect(
+      (
+        await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+        )
+      )?.[0],
+    ).toMatchObject({
+      number: 77,
+      url: 'https://github.com/o/pull/pull/77',
+    });
+  });
+
+  it('declines a -R whose value is on the next line', async () => {
+    // The qualifier is unreadable there, which must decline rather than read
+    // as an unqualified number.
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/verify-pr 77 -R\nother/repo');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'f77')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 0, written: 0 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+  });
+
+  it('does not read a shell copy as the qualifier', async () => {
+    // `cp -R src/ backup/` carries no repository-shaped value, so the review's
+    // binding survives.
+    await seedSession(SESSION_A);
+    await appendUserText(
+      SESSION_A,
+      '/review 77\nCheck cp -R src/ backup/ before merging.',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'f77')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 1 });
+    expect(
+      (
+        await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+        )
+      )?.[0],
+    ).toMatchObject({ number: 77, url: 'https://github.com/o/r/pull/77' });
+  });
+
   it('declines a /review url form the sidecar reader would reject', async () => {
     // The capture is unbounded user text; an over-long or control-
     // character url passes the repo gate (only the first two path
