@@ -1295,6 +1295,36 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     expect(archivedRow!.tabIndex).toBe(-1);
   });
 
+  it('renders archived settings while the sidebar is collapsed', async () => {
+    connection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_organization', 'session_archive'],
+    };
+    archived.sessions = [
+      makeSession('collapsed-archive', {
+        displayName: 'Collapsed archive',
+        isArchived: true,
+      }),
+    ];
+    archived.data = archived.sessions;
+    renderSidebar(true, { archivedSessionsTarget });
+    await flushSidebar();
+    expect(archivedSessionsTarget.textContent).toContain('Collapsed archive');
+    expect(container.querySelector('aside')?.textContent).not.toContain(
+      'Collapsed archive',
+    );
+  });
+
+  it('does not refresh workspace archives without the archive capability', async () => {
+    connection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_organization'],
+    };
+    renderSidebar(false, { archivedSessionsTarget });
+    await flushSidebar();
+    expect(refreshSessionCatalogQueries).not.toHaveBeenCalled();
+  });
+
   it('loads archived sessions only in settings and refreshes on re-entry', async () => {
     connection.capabilities = {
       qwenCodeVersion: '1.2.3',

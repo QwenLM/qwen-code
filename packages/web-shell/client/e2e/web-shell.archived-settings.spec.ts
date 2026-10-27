@@ -25,6 +25,9 @@ for (const variant of [
           'session_events',
           'workspace_settings',
           'session_archive',
+          ...(variant.width === 1440 && variant.language === 'en'
+            ? ['session_source_metadata']
+            : []),
           'workspace_qualified_rest_core',
         ],
         workspaces: [
@@ -37,12 +40,14 @@ for (const variant of [
       baseURL: String(testInfo.project.use.baseURL),
     });
     const archiveReads: string[] = [];
+    const activeSourceReads: Array<string | null> = [];
     let fail = false;
     await page.route(
       /\/workspaces?\/[^/]+\/sessions(?:\?|$)/,
       async (route) => {
         const url = new URL(route.request().url());
         if (url.searchParams.get('archiveState') !== 'archived') {
+          activeSourceReads.push(url.searchParams.get('sourceType'));
           await route.fulfill({ json: { sessions: [] } });
           return;
         }
@@ -61,10 +66,13 @@ for (const variant of [
               {
                 sessionId: `archived-${cwd === primary ? 'primary' : 'secondary'}`,
                 workspaceCwd: cwd,
+                sourceType: url.searchParams.get('sourceType') ?? 'default',
                 displayName:
-                  cwd === primary
-                    ? 'Primary archived conversation'
-                    : 'Secondary archived conversation',
+                  url.searchParams.get('sourceType') === 'channel'
+                    ? `Channel archive ${cwd === primary ? 'primary' : 'secondary'}`
+                    : cwd === primary
+                      ? 'Primary archived conversation'
+                      : 'Secondary archived conversation',
                 isArchived: true,
                 updatedAt: '2026-10-25T00:00:00Z',
               },
@@ -110,11 +118,13 @@ for (const variant of [
     await page.screenshot({
       path: `/tmp/qwen-15549-${variant.theme}-${variant.language}-${variant.width}.png`,
     });
+    expect(archiveReads.filter((cwd) => cwd === primary)).toHaveLength(1);
+    expect(archiveReads.filter((cwd) => cwd === secondary)).toHaveLength(1);
     const count = archiveReads.length;
     await nav.getByRole('button', { name: /^(UI|界面)/ }).click();
     await expect(archive).toHaveCount(0);
     await category.click();
-    await expect.poll(() => archiveReads.length).toBeGreaterThan(count);
+    await expect.poll(() => archiveReads.length).toBe(count + 2);
     await expect(
       archive.getByText('Secondary archived conversation', { exact: true }),
     ).toBeVisible();
@@ -130,6 +140,17 @@ for (const variant of [
       await expect(
         archive.getByText('Secondary archived conversation', { exact: true }),
       ).toBeVisible();
+      await archive.getByRole('tab', { name: 'Channels', exact: true }).click();
+      await expect(
+        archive.getByText('Channel archive primary', { exact: true }),
+      ).toBeVisible();
+      await expect(
+        archive.getByText('Channel archive secondary', { exact: true }),
+      ).toBeVisible();
+      await expect(
+        archive.getByText('Primary archived conversation', { exact: true }),
+      ).toHaveCount(0);
+      expect(activeSourceReads).not.toContain('channel');
     }
   });
 }
@@ -162,6 +183,7 @@ test('archive management remains reachable without a local workspace @smoke', as
   await page.getByRole('button', { name: 'More', exact: true }).click();
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   const nav = page.getByRole('navigation', { name: 'Settings', exact: true });
+  await expect(nav.getByRole('button', { name: /^Model/ })).toHaveCount(0);
   await nav
     .getByRole('button', { name: 'Archived conversations', exact: true })
     .click();
@@ -176,4 +198,29 @@ test('archive management remains reachable without a local workspace @smoke', as
   await expect(
     page.locator('[data-web-shell-archived-sessions]'),
   ).toContainText('Archived without a project');
+});
+
+test('hides archive management when the daemon has no archive capability @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario({
+    capabilities: {
+      features: ['session_events', 'workspace_qualified_rest_core'],
+    },
+  });
+  const daemon = await installMockDaemon(page, scenario, {
+    baseURL: String(testInfo.project.use.baseURL),
+  });
+  await page.goto(`/session/${scenario.sessionId}?language=en`);
+  await completeReplay(page, daemon, scenario.sessionId);
+  await submitLocalCommand(page, '/settings');
+  await expect(
+    page.getByRole('navigation', { name: 'Settings', exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: 'Archived conversations', exact: true }),
+  ).toHaveCount(0);
+  await expect(page.locator('[data-web-shell-archived-sessions]')).toHaveCount(
+    0,
+  );
 });

@@ -450,6 +450,26 @@ describe('SettingsMessage initialCategory', () => {
     expect(container.querySelectorAll('[role="tab"]')).toHaveLength(0);
   });
 
+  it('keeps a pending restart visible when archive management hides the scope tabs', async () => {
+    const setValue = vi.fn().mockResolvedValue({ requiresRestart: true });
+    const container = renderPanel(
+      makeState([{ ...boolSetting(), requiresRestart: true }], setValue),
+      { archivedSessions: <div>Archive list</div> },
+    );
+    await act(async () => switchButton(container).click());
+    expect(container.textContent).toContain(
+      'This change requires a restart to take effect.',
+    );
+    const category = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('nav button'),
+    ).find((button) => button.textContent === 'Archived conversations')!;
+    act(() => category.click());
+    expect(container.textContent).toContain(
+      'This change requires a restart to take effect.',
+    );
+    expect(container.querySelectorAll('[role="tab"]')).toHaveLength(0);
+  });
+
   it('honors archive host presentation and keeps an empty management slot available', () => {
     const archivedSessions = <div data-testid="archive-management" />;
     const excluded = renderPanel(makeState([], vi.fn()), {

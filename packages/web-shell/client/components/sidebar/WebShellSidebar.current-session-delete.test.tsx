@@ -161,6 +161,32 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => ({
   useSessionCatalogQueries,
 }));
 
+const standaloneArchiveFailure = vi.hoisted(() => ({ current: false }));
+vi.mock('./StandaloneRecents', () => ({
+  StandaloneRecents: ({
+    archiveState,
+    onStatusChange,
+  }: {
+    archiveState?: string;
+    onStatusChange?: (status: {
+      count: number;
+      loading: boolean;
+      error: boolean;
+    }) => void;
+  }) => {
+    React.useEffect(() => {
+      onStatusChange?.({
+        count: 0,
+        loading: false,
+        error: archiveState === 'archived' && standaloneArchiveFailure.current,
+      });
+    }, [archiveState, onStatusChange]);
+    return archiveState === 'archived' ? (
+      <span data-testid="standalone-archive">Standalone archive</span>
+    ) : null;
+  },
+}));
+
 const { I18nProvider } = await import('../../i18n');
 const { WebShellSidebar } = await import('./WebShellSidebar');
 
@@ -181,35 +207,42 @@ function renderSidebar(
     >['managedArchivedSessions'];
     archivedSessionsTarget?: HTMLElement | null;
     onSearchQueryChange?: (query: string) => void;
+    onLoadStandaloneSession?: (sessionId: string) => void;
+    onStandaloneNotice?: (message: string) => void;
+    onCommit?: () => void;
   } = {},
 ): void {
   const onError = props.onError ?? (() => {});
   act(() => {
     root.render(
-      <I18nProvider language="en">
-        <WebShellSidebar
-          archivedSessionsTarget={props.archivedSessionsTarget}
-          collapsed={false}
-          onCollapsedChange={() => {}}
-          onOpenSettings={() => {}}
-          onOpenDaemonStatus={() => {}}
-          onOpenScheduledTasks={() => {}}
-          onOpenGoals={() => {}}
-          onOpenSessions={() => {}}
-          onOpenSplitView={() => {}}
-          onNewSession={() => false}
-          onLoadSession={loadSession}
-          onError={onError}
-          onSessionsDeleted={props.onSessionsDeleted}
-          currentSessionActive={props.currentSessionActive}
-          managedWorkspaces={props.managedWorkspaces}
-          managedArchivedSessions={props.managedArchivedSessions}
-          onSearchQueryChange={props.onSearchQueryChange}
-          // Surface delete as an inline hover button so the row's disabled
-          // state is directly assertable without opening the dropdown.
-          sessionActions={{ inlineItems: ['delete'] }}
-        />
-      </I18nProvider>,
+      <React.Profiler id="sidebar" onRender={() => props.onCommit?.()}>
+        <I18nProvider language="en">
+          <WebShellSidebar
+            archivedSessionsTarget={props.archivedSessionsTarget}
+            collapsed={false}
+            onCollapsedChange={() => {}}
+            onOpenSettings={() => {}}
+            onOpenDaemonStatus={() => {}}
+            onOpenScheduledTasks={() => {}}
+            onOpenGoals={() => {}}
+            onOpenSessions={() => {}}
+            onOpenSplitView={() => {}}
+            onNewSession={() => false}
+            onLoadSession={loadSession}
+            onError={onError}
+            onSessionsDeleted={props.onSessionsDeleted}
+            currentSessionActive={props.currentSessionActive}
+            managedWorkspaces={props.managedWorkspaces}
+            managedArchivedSessions={props.managedArchivedSessions}
+            onSearchQueryChange={props.onSearchQueryChange}
+            onLoadStandaloneSession={props.onLoadStandaloneSession}
+            onStandaloneNotice={props.onStandaloneNotice}
+            // Surface delete as an inline hover button so the row's disabled
+            // state is directly assertable without opening the dropdown.
+            sessionActions={{ inlineItems: ['delete'] }}
+          />
+        </I18nProvider>
+      </React.Profiler>,
     );
   });
 }
@@ -268,6 +301,82 @@ afterEach(() => {
   act(() => root.unmount());
   container.remove();
   window.localStorage.clear();
+});
+
+it('excludes standalone archives and their errors from the Channels archive filter', async () => {
+  connection.capabilities = {
+    qwenCodeVersion: '1.2.3',
+    features: ['session_source_metadata'],
+  };
+  workspace.capabilities = {
+    qwenCodeVersion: '1.2.3',
+    features: ['standalone_sessions_v1'],
+  };
+  standaloneArchiveFailure.current = true;
+  renderSidebar({
+    archivedSessionsTarget,
+    onLoadStandaloneSession: vi.fn(),
+    onStandaloneNotice: vi.fn(),
+  });
+  await flushSidebar();
+  expect(
+    archivedSessionsTarget.querySelector('[data-testid="standalone-archive"]'),
+  ).not.toBeNull();
+  expect(archivedSessionsTarget.textContent).toContain('Failed to load');
+  const channels = Array.from(
+    archivedSessionsTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+  ).find((tab) => tab.textContent?.trim() === 'Channels')!;
+  await act(async () => {
+    channels.focus();
+    channels.click();
+  });
+  expect(
+    archivedSessionsTarget.querySelector('[data-testid="standalone-archive"]'),
+  ).toBeNull();
+  expect(archivedSessionsTarget.textContent).not.toContain('Failed to load');
+  expect(archivedSessionsTarget.textContent).toContain('No archived sessions.');
+  standaloneArchiveFailure.current = false;
+  const commits: string[] = [];
+  renderSidebar({
+    archivedSessionsTarget,
+    onLoadStandaloneSession: vi.fn(),
+    onStandaloneNotice: vi.fn(),
+    onCommit: () => commits.push(archivedSessionsTarget.textContent ?? ''),
+  });
+  commits.length = 0;
+  const tasks = Array.from(
+    archivedSessionsTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+  ).find((tab) => tab.textContent?.trim() === 'Tasks')!;
+  await act(async () => {
+    tasks.focus();
+    tasks.click();
+  });
+  expect(commits[0]).not.toContain('Failed to load');
+});
+
+it('clears a previous standalone archive error before the next visit commits', async () => {
+  workspace.capabilities = {
+    qwenCodeVersion: '1.2.3',
+    features: ['standalone_sessions_v1'],
+  };
+  const standaloneProps = {
+    onLoadStandaloneSession: vi.fn(),
+    onStandaloneNotice: vi.fn(),
+  };
+  standaloneArchiveFailure.current = true;
+  renderSidebar({ ...standaloneProps, archivedSessionsTarget });
+  await flushSidebar();
+  expect(archivedSessionsTarget.textContent).toContain('Failed to load');
+  renderSidebar(standaloneProps);
+  standaloneArchiveFailure.current = false;
+  const commits: string[] = [];
+  renderSidebar({
+    ...standaloneProps,
+    archivedSessionsTarget,
+    onCommit: () => commits.push(archivedSessionsTarget.textContent ?? ''),
+  });
+  expect(commits.length).toBeGreaterThan(0);
+  expect(commits[0]).not.toContain('Failed to load');
 });
 
 describe('WebShellSidebar current-session delete (issue #12619)', () => {

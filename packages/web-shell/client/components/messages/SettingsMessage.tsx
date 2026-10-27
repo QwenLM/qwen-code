@@ -1152,6 +1152,12 @@ export function SettingsMessage({
           setScope(next as Scope);
         }}
       >
+        {restartPending &&
+          (activeGroup?.id === 'Connections' || showArchivedSessions) && (
+            <div className="border-b border-border px-3 py-2">
+              <Badge variant="secondary">{t('settings.requiresRestart')}</Badge>
+            </div>
+          )}
         {activeGroup?.id !== 'Connections' && !showArchivedSessions && (
           <div className="flex items-center justify-between gap-4 border-b border-border px-3 py-2">
             <TabsList className="p-0">
