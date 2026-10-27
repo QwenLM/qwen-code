@@ -45,7 +45,7 @@ describe('SharedTokenManager lock ownership (real filesystem)', () => {
       resolveRefresh = resolve;
     });
     const credentials: QwenCredentials = {
-      access_token: 'expired-access-token',
+      access_token: 'expired-token',
       refresh_token: 'refresh-token',
       token_type: 'Bearer',
       expiry_date: Date.now() - 1000,
