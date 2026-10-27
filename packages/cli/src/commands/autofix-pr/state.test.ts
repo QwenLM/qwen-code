@@ -5,6 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -27,6 +28,7 @@ import {
   isBranchName,
   keepHistory,
   readHistory,
+  readRegularFile,
   readState,
   stateDefect,
   writeState,
@@ -463,6 +465,40 @@ describe('history', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+});
+
+describe('readRegularFile', () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'autofix-read-'));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('reads a regular file, and nothing at all as null', () => {
+    writeFileSync(join(dir, 'f'), 'text');
+    expect(readRegularFile(join(dir, 'f'))).toBe('text');
+    expect(readRegularFile(join(dir, 'none'))).toBeNull();
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'neither follows a link nor waits on a FIFO',
+    () => {
+      writeFileSync(join(dir, 'target'), 'text');
+      symlinkSync(join(dir, 'target'), join(dir, 'link'));
+      expect(() => readRegularFile(join(dir, 'link'))).toThrow();
+      execFileSync('mkfifo', [join(dir, 'fifo')]);
+      // No writer ever opens it: a blocking open would never return.
+      expect(() => readRegularFile(join(dir, 'fifo'))).toThrow(
+        /is not a regular file/,
+      );
+      mkdirSync(join(dir, 'sub'));
+      expect(() => readRegularFile(join(dir, 'sub'))).toThrow(
+        /is not a regular file/,
+      );
+    },
+  );
 });
 
 describe('ghNotFound', () => {
