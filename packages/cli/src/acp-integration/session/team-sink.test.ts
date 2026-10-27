@@ -521,5 +521,4 @@ describe('attachTeamSink', () => {
     detach();
     expect(emitter.listenerCount('teammate_approval_request')).toBe(0);
   });
-
 });
