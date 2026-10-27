@@ -190,7 +190,7 @@ A new option that turns off part of the client's work for one host needs a row h
 
 When a response ends without tool calls, `LlmClient` decides whether the turn continues: steering, the Stop hook and the next-speaker check. Ink, OpenTUI and headless rely on that chain as it is. Before PR 2c-1, ACP continued at the same point for more reasons, in a Stop loop of its own that also fired the Stop hook: the Todo Stop Guard, the background results of the current turn, and input that arrived mid-turn.
 
-The stop point follows Claude Code, where it is a step of the one loop: the Stop hook runs first, and checks that only some sessions have (a teammate's TaskCompleted and TeammateIdle hooks) run in order after it, only once it lets the response stop. Each can continue the turn with a message or let it end. Queued input and background task notifications are taken in after a tool batch; at a stop point they do not continue the turn, and the next turn picks them up.
+The stop point is one step of the loop: the Stop hook runs first, and checks that only some surfaces have run in order after it, only once it lets the response stop. Each can continue the turn with a message or let it end. Queued input and background task notifications are taken in after a tool batch; at a stop point they do not continue the turn, and the next turn picks them up. One owner then decides whether a turn continues, and a surface adds its own reasons without a second loop around the client.
 
 So the client's chain takes ordered surface stop policies (`SendMessageOptions.stopPolicies`):
 

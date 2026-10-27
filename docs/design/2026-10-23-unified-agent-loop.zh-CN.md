@@ -190,7 +190,7 @@ headless 的主循环以 `maxRounds: 1` 运行。因此它为每一轮做的准�
 
 回复结束且没有工具调用时，由 `LlmClient` 决定这一轮是否继续，依据是 steering、Stop hook 和 next-speaker 检查。Ink、OpenTUI 和 headless 原样依赖这条链。PR 2c-1 之前，ACP 在同一个点上还有更多继续的理由，由它自己的 Stop 循环处理，Stop hook 也在这个循环里触发：Todo Stop Guard、当前轮次的后台结果，以及轮次中途到达的输入。
 
-stop 点参照 Claude Code 的做法：它是唯一那个 loop 的一步。先运行 Stop hook；只有部分会话才有的检查（队友的 TaskCompleted 和 TeammateIdle hook）在 Stop hook 允许回复停下之后才按顺序运行。每一项都可以用一条消息继续这一轮，或者让它结束。排队的输入和后台任务通知在一批工具之后才被吸收；到了 stop 点，它们不会让这一轮继续，而是由下一轮接手。
+stop 点是 loop 的一步：先运行 Stop hook；只有部分入口才有的检查，在 Stop hook 允许回复停下之后才按顺序运行。每一项都可以用一条消息继续这一轮，或者让它结束。排队的输入和后台任务通知在一批工具之后才被吸收；到了 stop 点，它们不会让这一轮继续，而是由下一轮接手。这样由唯一一处决定一轮是否继续，入口加入自己的理由时，也不需要在 client 外面再套一层循环。
 
 因此 client 的这条链接受按顺序排列的入口 stop 策略（`SendMessageOptions.stopPolicies`）：
 
