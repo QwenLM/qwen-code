@@ -8824,7 +8824,10 @@ export function languageLabel(language: WebShellLanguage): string {
 }
 
 export function getTranslator(language: WebShellLanguage) {
-  const messages = MESSAGES[language];
+  // I18nProvider takes its language verbatim and embedding hosts may pass an
+  // out-of-catalog value (e.g. 'ru-RU') via cast. Fall back to English instead
+  // of crashing on undefined[key] during render (#15445).
+  const messages = MESSAGES[language] ?? EN;
   return (key: string, vars?: Record<string, string | number>) => {
     const message = messages[key] ?? EN[key] ?? key;
     return typeof message === 'function' ? message(vars) : message;

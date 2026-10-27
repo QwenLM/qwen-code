@@ -72,7 +72,7 @@ const button = (label: string) =>
   );
 
 describe('DesktopRelayPanel', () => {
-  it('falls back to English for unsupported browser locales (issue #15445)', () => {
+  it('falls back to English for out-of-catalog language values (issue #15445)', () => {
     mount({ phase: 'idle' }, 'ru-RU' as WebShellLanguage);
     expect(button('Connect this computer')).toBeDefined();
   });
