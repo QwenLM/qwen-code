@@ -232,6 +232,7 @@ function isTruncatedSessionDiff(raw: Record<string, unknown>): boolean {
 const DESCRIPTION_EXPAND_THRESHOLD = 60;
 const MAX_MARKDOWN_READ_CHARS = 200_000;
 const MAX_MARKDOWN_READ_LINES = 1000;
+const MAX_DOCUMENT_JSON_PAYLOAD_LENGTH = 100_000;
 const READ_LANGUAGE_ALIASES: Record<string, string> = {
   cjs: 'javascript',
   cts: 'typescript',
@@ -407,21 +408,36 @@ function toolResultText(tool: ACPToolCall): string {
 }
 
 function GenericToolDetails({
-  argumentsText,
-  resultText,
+  tool,
   pending,
   cancelled,
 }: {
-  argumentsText: string;
-  resultText: string;
+  tool: ACPToolCall;
   pending: boolean;
   cancelled: boolean;
 }) {
   const { t } = useI18n();
+  const argumentsText = useMemo(
+    () =>
+      tool.args && Object.keys(tool.args).length > 0
+        ? stringifyValue(tool.args)
+        : '',
+    [tool],
+  );
+  const resultText = useMemo(
+    () =>
+      tool.wasCancelled
+        ? ''
+        : toolResultText(tool) || stringifyValue(tool.rawOutput) || '',
+    [tool],
+  );
   const renderMode = useTranscriptRenderMode();
   const documentMode = renderMode === 'document';
   const formatLimit = documentMode
-    ? Number.POSITIVE_INFINITY
+    ? MAX_DOCUMENT_JSON_PAYLOAD_LENGTH
+    : EXPANDED_TOOL_PAYLOAD_LENGTH;
+  const formatInputLimit = documentMode
+    ? MAX_DOCUMENT_JSON_PAYLOAD_LENGTH
     : EXPANDED_TOOL_PAYLOAD_LENGTH;
   const [expanded, setExpanded] = useState(false);
   const limit = documentMode
@@ -433,12 +449,12 @@ function GenericToolDetails({
   // Pretty-printing grows a compact payload, and the blocks truncate what they
   // render, so the "Show more" decision has to use the formatted lengths.
   const argumentsPayload = useMemo(
-    () => formatJsonPayload(argumentsText, formatLimit),
-    [argumentsText, formatLimit],
+    () => formatJsonPayload(argumentsText, formatLimit, formatInputLimit),
+    [argumentsText, formatLimit, formatInputLimit],
   );
   const resultPayload = useMemo(
-    () => formatJsonPayload(resultText, formatLimit),
-    [resultText, formatLimit],
+    () => formatJsonPayload(resultText, formatLimit, formatInputLimit),
+    [resultText, formatLimit, formatInputLimit],
   );
   const canExpand =
     !documentMode &&
@@ -1573,16 +1589,27 @@ export const ToolLine = memo(function ToolLine({
   // A card outside the built-in detail renderers shows the call itself rather
   // than repeating the header summary. The values are already redacted at the
   // daemon boundary and carried by the ACP tool call; no extra read is needed.
-  const genericArguments =
-    showGenericDetails && tool.args && Object.keys(tool.args).length > 0
-      ? stringifyValue(tool.args)
-      : '';
-  const genericResult =
-    showGenericDetails && !tool.wasCancelled
-      ? toolResultText(tool) || stringifyValue(tool.rawOutput) || ''
-      : '';
+  const hasGenericArguments =
+    showGenericDetails &&
+    Boolean(tool.args && Object.keys(tool.args).length > 0);
+  const hasContentText =
+    tool.content?.some(
+      (block) =>
+        block.type === 'content' &&
+        typeof block.content?.text === 'string' &&
+        block.content.text.length > 0,
+    ) ?? false;
+  const hasRawOutput =
+    tool.rawOutput !== undefined &&
+    tool.rawOutput !== null &&
+    (typeof tool.rawOutput !== 'string' || tool.rawOutput.length > 0);
+  const hasGenericResult =
+    showGenericDetails &&
+    !tool.wasCancelled &&
+    (hasContentText || hasRawOutput);
   const hasGenericPayload =
-    Boolean(genericArguments || genericResult) ||
+    hasGenericArguments ||
+    hasGenericResult ||
     (showGenericDetails &&
       (isActiveToolStatus(tool.status) || tool.wasCancelled === true));
 
@@ -1720,8 +1747,7 @@ export const ToolLine = memo(function ToolLine({
         >
           {hasGenericPayload ? (
             <GenericToolDetails
-              argumentsText={genericArguments}
-              resultText={genericResult}
+              tool={tool}
               pending={isActiveToolStatus(tool.status)}
               cancelled={tool.wasCancelled === true}
             />

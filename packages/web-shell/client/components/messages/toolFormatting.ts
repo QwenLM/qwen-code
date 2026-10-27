@@ -237,6 +237,7 @@ function safeJson(value: unknown): string {
 export function formatJsonPayload(
   text: string,
   maxFormattedLength = EXPANDED_TOOL_PAYLOAD_LENGTH,
+  maxInputLength = EXPANDED_TOOL_PAYLOAD_LENGTH,
 ): {
   text: string;
   json: boolean;
@@ -244,7 +245,7 @@ export function formatJsonPayload(
   // Pretty-printing can expand a compact payload well past the render cap, and
   // parsing a multi-megabyte string is not worth it for output the card will
   // never show in full.
-  if (text.length > EXPANDED_TOOL_PAYLOAD_LENGTH) {
+  if (text.length > maxInputLength) {
     return { text, json: false };
   }
   const trimmed = text.trim();
