@@ -3499,6 +3499,55 @@ describe('generic tool card details', () => {
     expect(container.textContent).toContain('Result');
   });
 
+  it('sanitizes control characters in generic payloads', () => {
+    const raw = 'a\u202eb\x1bc';
+    const container = renderToolLine(
+      makeTool({ toolName: 'mcp__demo__unsafe', rawOutput: raw }),
+      { forceExpanded: true },
+    );
+
+    const text = container.textContent ?? '';
+    expect(text).toContain('\\u202e');
+    expect(text).toContain('\\u001b');
+    expect(text).not.toContain('\u202e');
+    expect(text).not.toContain('\x1b');
+  });
+
+  it('sanitizes control characters in generic JSON payloads', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__unsafe-json',
+        rawOutput: '{"n":"a\u202eb"}',
+      }),
+      { forceExpanded: true },
+    );
+
+    const text = container.textContent ?? '';
+    expect(text).toContain('\\u202e');
+    expect(text).not.toContain('\u202e');
+  });
+
+  it('does not repeat a cancelled call input as the result', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__ping',
+        status: 'completed',
+        wasCancelled: true,
+        args: { method: 'ping' },
+        rawOutput: {
+          status: 'cancelled',
+          reason: '{"method":"ping"}',
+          text: 'partial',
+        },
+      }),
+      { forceExpanded: true },
+    );
+
+    const text = container.textContent ?? '';
+    expect(text).toContain('Cancelled');
+    expect(text.split('"method": "ping"').length - 1).toBe(1);
+  });
+
   it('shows the full payload without Show more in document mode', () => {
     const tail = 'DOCUMENT-TAIL';
     const container = renderToolGroup(

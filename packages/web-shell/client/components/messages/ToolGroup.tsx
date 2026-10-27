@@ -56,6 +56,7 @@ import {
   formatJsonPayload,
   formatTokenCount,
   MAX_TOOL_PAYLOAD_LENGTH,
+  sanitizeControlChars,
   stringifyValue,
   getAgentCancellationReason,
   getAgentCurrentToolHint,
@@ -370,6 +371,7 @@ function ToolPayloadBlock({
   const renderMode = useTranscriptRenderMode();
   const truncated = payload.text.length > limit;
   const displayed = truncateText(payload.text, limit);
+  const shown = sanitizeControlChars(displayed);
   const renderAsMarkdown =
     payload.json &&
     displayed.length <= MAX_MARKDOWN_READ_CHARS &&
@@ -378,13 +380,11 @@ function ToolPayloadBlock({
     <>
       {renderAsMarkdown ? (
         <div className={styles.payloadJson}>
-          <Markdown content={fencedCodeBlock('json', displayed)} />
+          <Markdown content={fencedCodeBlock('json', shown)} />
         </div>
       ) : (
         <pre className={styles.payloadText}>
-          {payload.json
-            ? displayed
-            : renderWithSessionLinks(displayed, renderMode)}
+          {payload.json ? shown : renderWithSessionLinks(shown, renderMode)}
         </pre>
       )}
       {truncated && (
@@ -410,10 +410,12 @@ function GenericToolDetails({
   argumentsText,
   resultText,
   pending,
+  cancelled,
 }: {
   argumentsText: string;
   resultText: string;
   pending: boolean;
+  cancelled: boolean;
 }) {
   const { t } = useI18n();
   const renderMode = useTranscriptRenderMode();
@@ -447,11 +449,13 @@ function GenericToolDetails({
           <ToolPayloadBlock payload={argumentsPayload} limit={limit} />
         </section>
       )}
-      {(resultText || pending) && (
+      {(resultText || pending || cancelled) && (
         <section className={styles.payloadSection}>
           <div className={styles.payloadLabel}>{t('turnCalls.result')}</div>
           {resultText ? (
             <ToolPayloadBlock payload={resultPayload} limit={limit} />
+          ) : cancelled ? (
+            <p className={styles.payloadEmpty}>{t('shell.result.cancelled')}</p>
           ) : (
             <p className={styles.payloadEmpty}>{t('shell.result.waiting')}</p>
           )}
@@ -1569,12 +1573,14 @@ export const ToolLine = memo(function ToolLine({
     showGenericDetails && tool.args && Object.keys(tool.args).length > 0
       ? stringifyValue(tool.args)
       : '';
-  const genericResult = showGenericDetails
-    ? toolResultText(tool) || stringifyValue(tool.rawOutput) || ''
-    : '';
+  const genericResult =
+    showGenericDetails && !tool.wasCancelled
+      ? toolResultText(tool) || stringifyValue(tool.rawOutput) || ''
+      : '';
   const hasGenericPayload =
     Boolean(genericArguments || genericResult) ||
-    (showGenericDetails && isActiveToolStatus(tool.status));
+    (showGenericDetails &&
+      (isActiveToolStatus(tool.status) || tool.wasCancelled === true));
 
   return (
     <div className={styles.line} data-transcript-tool-call-id={tool.callId}>
@@ -1713,6 +1719,7 @@ export const ToolLine = memo(function ToolLine({
               argumentsText={genericArguments}
               resultText={genericResult}
               pending={isActiveToolStatus(tool.status)}
+              cancelled={tool.wasCancelled === true}
             />
           ) : null}
         </ToolExpandedCard>
