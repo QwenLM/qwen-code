@@ -96,6 +96,7 @@ describe('ModRuntime root budget protocol', () => {
           tools: true,
           turnStart: false,
           turnComplete: [],
+          render: [],
           commands: [{ plugin: 'mod', name: 'hello', description: 'Hello' }],
         }),
       },
