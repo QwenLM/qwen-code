@@ -30,6 +30,9 @@ function makeCase({
   repairFamily = false,
   rootFamily,
   sudoStatus = '0',
+  aptStatus = '0',
+  extractStatus = '0',
+  customDataHome = false,
 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'qwen-font-baseline-test-'));
   const bin = join(dir, 'bin');
@@ -43,11 +46,31 @@ function makeCase({
   );
   write(
     'fc-cache',
-    '#!/usr/bin/env bash\nprintf "fc-cache %s\\n" "$*" >> "$CASE_DIR/calls"\n',
+    '#!/usr/bin/env bash\nprintf "fc-cache %s\\n" "$*" >> "$CASE_DIR/calls"\nif [ "$CASE_REPAIR_FAMILY" = 1 ] && [ -f "${XDG_DATA_HOME:-$HOME/.local/share}/fonts/qwen-ci/truetype/dejavu/DejaVuSans.ttf" ]; then touch "$CASE_DIR/repaired"; fi\n',
   );
   write(
     'apt-get',
-    '#!/usr/bin/env bash\nprintf "apt-get %s\\n" "$*" >> "$CASE_DIR/calls"\nif [ "$1" = install ] && [ "$CASE_REPAIR_FAMILY" = 1 ]; then touch "$CASE_DIR/repaired"; fi\n',
+    [
+      '#!/usr/bin/env bash',
+      'printf "apt-get %s\\n" "$*" >> "$CASE_DIR/calls"',
+      '[ "$CASE_APT_STATUS" = 0 ] || exit "$CASE_APT_STATUS"',
+      'if [ "$1" = -o ]; then shift 2; fi',
+      'if [ "$1" = download ]; then touch fonts-dejavu-core_1_all.deb fonts-dejavu-mono_1_all.deb; fi',
+      'if [ "$1" = install ] && [ "$CASE_REPAIR_FAMILY" = 1 ]; then touch "$CASE_DIR/repaired"; fi',
+      '',
+    ].join('\n'),
+  );
+  write(
+    'dpkg-deb',
+    [
+      '#!/usr/bin/env bash',
+      'printf "dpkg-deb %s\\n" "$*" >> "$CASE_DIR/calls"',
+      '[ "$CASE_EXTRACT_STATUS" = 0 ] || exit "$CASE_EXTRACT_STATUS"',
+      '[ "$1" = --extract ] || exit 2',
+      'mkdir -p "$3/usr/share/fonts/truetype/dejavu"',
+      'printf fixture-font > "$3/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"',
+      '',
+    ].join('\n'),
   );
   write(
     'id',
@@ -83,10 +106,14 @@ function makeCase({
     CASE_REPAIR_FAMILY: repairFamily ? '1' : '0',
     CASE_ROOT_FAMILY: rootFamily ?? '',
     CASE_SUDO_STATUS: sudoStatus,
+    CASE_APT_STATUS: aptStatus,
+    CASE_EXTRACT_STATUS: extractStatus,
     CASE_METRICS: JSON.stringify(metrics),
     GITHUB_ACTIONS: '',
     HOME: join(dir, 'home'),
     TMPDIR: join(dir, 'tmp'),
+    RUNNER_TEMP: join(dir, 'tmp'),
+    XDG_DATA_HOME: customDataHome ? join(dir, 'xdg-data') : '',
     CHROMIUM_BIN: browser
       ? join(bin, 'chromium')
       : join(dir, 'no-such-browser'),
@@ -95,10 +122,10 @@ function makeCase({
   return { dir, env };
 }
 
-function run(script, args, env) {
+function run(script, args, env, cwd = join(scriptDir, '../../..')) {
   const result = spawnSync('bash', [script, ...args], {
     env,
-    cwd: join(scriptDir, '../../..'),
+    cwd,
     encoding: 'utf8',
     timeout: 60_000,
   });
@@ -237,7 +264,7 @@ test('installer fails when the host still resolves the wrong family', () => {
   });
 });
 
-function runCiFontStep(env) {
+function runCiFontStep(env, { installer, checker } = {}) {
   const workflow = readFileSync(
     join(scriptDir, '../../workflows/ci.yml'),
     'utf8',
@@ -246,9 +273,20 @@ function runCiFontStep(env) {
     /- name: 'Check host font baseline \(self-hosted\)'[\s\S]*?run: \|-\n([\s\S]*?)(?=\n {6}- name:)/,
   );
   assert.ok(step, 'the actual CI font step must be present');
+  const checkout = join(env.CASE_DIR, 'checkout');
+  const fontScripts = join(checkout, '.github/scripts/ecs-runner');
+  mkdirSync(fontScripts, { recursive: true });
+  writeFileSync(
+    join(fontScripts, 'install-qwen-font-baseline.sh'),
+    installer ?? readFileSync(installScript),
+  );
+  writeFileSync(
+    join(fontScripts, 'check-font-baseline.sh'),
+    checker ?? readFileSync(checkScript),
+  );
   const script = join(env.CASE_DIR, 'ci-font-step.sh');
   writeFileSync(script, `set -eo pipefail\n${step[1].replace(/^ {10}/gm, '')}`);
-  return run(script, [], { ...env, GITHUB_ACTIONS: 'true' });
+  return run(script, [], { ...env, GITHUB_ACTIONS: 'true' }, checkout);
 }
 
 test('CI leaves a healthy runner unmodified', () => {
@@ -261,7 +299,7 @@ test('CI leaves a healthy runner unmodified', () => {
 });
 
 for (const uid of ['0', '1000']) {
-  test(`CI repairs missing fonts for runner uid ${uid}`, () => {
+  test(`CI prepares user fonts without elevation for runner uid ${uid}`, () => {
     withCase(
       {
         uid,
@@ -272,33 +310,95 @@ for (const uid of ['0', '1000']) {
       (env) => {
         const result = runCiFontStep(env);
         assert.equal(result.status, 0, result.stderr);
-        assert.match(result.calls, /apt-get install .*fonts-dejavu-core/);
+        assert.match(
+          result.calls,
+          /apt-get .* download fonts-dejavu-core fonts-dejavu-mono/,
+        );
+        assert.match(
+          result.calls,
+          /Dir::State::lists=.*\/qwen-fonts\.[^/]+\/lists/,
+        );
+        assert.match(result.calls, /dpkg-deb --extract/);
+        assert.equal(
+          readFileSync(
+            join(
+              env.HOME,
+              '.local/share/fonts/qwen-ci/truetype/dejavu/DejaVuSans.ttf',
+            ),
+            'utf8',
+          ),
+          'fixture-font',
+        );
         assert.match(result.stdout, /default sans-serif = DejaVu Sans/);
         assert.doesNotMatch(result.stdout, /::error::/);
-        if (uid === '0') assert.doesNotMatch(result.calls, /sudo/);
-        else assert.match(result.calls, /sudo -n bash/);
+        assert.doesNotMatch(result.calls, /sudo|apt-get install/);
       },
     );
   });
 }
 
-test('CI rejects runner font drift after successful root verification', () => {
+test('CI rejects runner font drift after extracting user fonts', () => {
   withCase(
     { family: 'WenQuanYi Zen Hei', rootFamily: 'DejaVu Sans' },
     (env) => {
       const result = runCiFontStep(env);
       assert.equal(result.status, 1);
-      assert.match(result.stdout, /default sans-serif = DejaVu Sans/);
+      assert.match(result.calls, /dpkg-deb --extract/);
+      assert.doesNotMatch(result.calls, /sudo/);
       assert.match(result.stdout, /::error::default sans-serif is 'WenQuanYi/);
     },
   );
 });
 
-test('CI fails when non-interactive elevation is unavailable', () => {
-  withCase({ family: 'WenQuanYi Zen Hei', sudoStatus: '1' }, (env) => {
-    const result = runCiFontStep(env);
-    assert.equal(result.status, 1);
-    assert.match(result.calls, /sudo -n bash/);
-    assert.doesNotMatch(result.calls, /apt-get/);
+for (const failure of ['aptStatus', 'extractStatus']) {
+  test(`CI fails closed when ${failure} fails`, () => {
+    withCase({ family: 'WenQuanYi Zen Hei', [failure]: '1' }, (env) => {
+      const result = runCiFontStep(env);
+      assert.equal(result.status, 1);
+      assert.doesNotMatch(result.calls, /sudo|apt-get install/);
+      assert.doesNotMatch(result.stdout, /default sans-serif = DejaVu Sans/);
+    });
+  });
+}
+
+test('CI keeps fonts in the configured XDG data directory', () => {
+  withCase(
+    { family: 'WenQuanYi Zen Hei', repairFamily: true, customDataHome: true },
+    (env) => {
+      const result = runCiFontStep(env);
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(
+        readFileSync(
+          join(
+            env.XDG_DATA_HOME,
+            'fonts/qwen-ci/truetype/dejavu/DejaVuSans.ttf',
+          ),
+          'utf8',
+        ),
+        'fixture-font',
+      );
+    },
+  );
+});
+
+test('CI never executes a PR-provided installer', () => {
+  withCase({ family: 'WenQuanYi Zen Hei', repairFamily: true }, (env) => {
+    const result = runCiFontStep(env, {
+      installer: 'printf "head-installer\\n" >> "$CASE_DIR/calls"\nexit 0\n',
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(result.calls, /head-installer|sudo/);
+  });
+});
+
+test('CI never elevates a PR-provided checker', () => {
+  withCase({ family: 'WenQuanYi Zen Hei', repairFamily: true }, (env) => {
+    const result = runCiFontStep(env, {
+      checker:
+        'if [ "${CASE_AS_ROOT:-0}" = 1 ]; then printf "privileged-checker\\n" >> "$CASE_DIR/calls"; fi\n' +
+        readFileSync(checkScript, 'utf8'),
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(result.calls, /privileged-checker|sudo/);
   });
 });

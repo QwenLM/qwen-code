@@ -147,10 +147,13 @@ bash .github/scripts/ecs-runner/check-font-baseline.sh --with-metrics
 ```
 
 The web-shell smoke lane runs the L0 half as `Check host font baseline
-(self-hosted)` before installing dependencies. When L0 fails, the lane runs the installer
-above as root, using non-interactive sudo when necessary, then verifies L0
-again as the runner user. Healthy hosts require no installation or sudo;
-installation failures and remaining runner-user drift still fail the gate.
+(self-hosted)` before installing dependencies. When L0 fails, the lane downloads
+the two DejaVu packages using private APT lists, extracts only their font data
+into `${XDG_DATA_HOME:-$HOME/.local/share}/fonts/qwen-ci`, refreshes the runner's
+font cache, and verifies L0 again. This runs at the runner's existing privilege
+level: CI does not elevate or execute the host-provisioning installer. Healthy
+hosts require no download or extraction; acquisition failures and remaining
+runner-user drift still fail the gate.
 This reports an actionable setup error before the layout assertions run.
 L1 stays a manual/host-provisioning check because it needs a Chromium that the
 lane has not installed yet at that point.
