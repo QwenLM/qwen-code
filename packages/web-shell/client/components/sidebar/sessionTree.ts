@@ -36,7 +36,8 @@ export interface SessionTreeRenderOptions {
  * Orders a page of sessions so derived sessions render under their spawner.
  * The daemon caps nesting at one level, so the result never has a depth above
  * one. A child is emitted right after its parent and only when the parent is
- * expanded; roots keep the page's activity order.
+ * expanded; roots keep the page's activity order. A child whose parent is not
+ * in the page keeps its own row (depth 0) so it stays reachable.
  */
 export function buildSessionTree(
   sessions: readonly DaemonSessionSummary[],

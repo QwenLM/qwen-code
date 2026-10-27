@@ -2684,6 +2684,38 @@ describe('WorkspaceSection session tree', () => {
     ).toBe('1');
   });
 
+  it('keeps a derived session of a pinned-away parent visible', async () => {
+    const pinnedParent = {
+      ...parent,
+      sessionId: 'pinned-parent',
+      displayName: 'Pinned parent',
+      isPinned: true,
+    } as DaemonSessionSummary;
+    const pinnedChild = {
+      ...child,
+      sessionId: 'pinned-child',
+      displayName: 'Pinned parent child',
+      parentSessionId: 'pinned-parent',
+    } as DaemonSessionSummary;
+    renderSection({
+      client: treeClient([pinnedParent, pinnedChild]),
+      expanded: true,
+      sourceType: 'default',
+      excludePinned: true,
+      renderSession: treeRow,
+    });
+    await flush();
+
+    // The project list lifts the pinned parent out, so the child keeps a flat
+    // row instead of being stranded behind a row this list does not render.
+    expect(container.textContent).toContain('Pinned parent child');
+    expect(
+      container
+        .querySelector('[data-session-id="pinned-child"]')
+        ?.getAttribute('data-tree-depth'),
+    ).toBe('0');
+  });
+
   it('counts a collapsed parent as one preview row', async () => {
     const others = Array.from({ length: 4 }, (_, index) => ({
       sessionId: `other-${index}`,
