@@ -179,14 +179,14 @@ function canCompileSedPattern(sedInfo: SedEditInfo): boolean {
   try {
     const jsPattern = toJavascriptPattern(sedInfo);
     if (
-      hasPosixBracketExpression(jsPattern) ||
+      hasPosixBracketExpression(sedInfo.pattern) ||
       hasLeadingBracketLiteral(jsPattern) ||
       hasSedJavascriptDivergentEscape(jsPattern) ||
       hasBracketCharacterEscape(sedInfo.pattern)
     ) {
       return false;
     }
-    new RegExp(jsPattern);
+    new RegExp(jsPattern, 'su');
     if (
       hasReplacementBackrefBeyondCaptures(
         sedInfo.replacement,
@@ -512,7 +512,7 @@ export function applySedSubstitution(
   const replaceAll = sedInfo.flags.includes('g');
 
   try {
-    const globalRegex = new RegExp(jsPattern, 'g');
+    const globalRegex = new RegExp(jsPattern, 'gsu');
     const parts = content.split(/(\n)/);
     const processableParts = content.endsWith('\n')
       ? parts.slice(0, -1)
@@ -557,6 +557,11 @@ function toJavascriptPattern(sedInfo: SedEditInfo): string {
     if (char === '[') {
       inCharacterClass = true;
       jsPattern += char;
+      continue;
+    }
+
+    if (char === ']') {
+      jsPattern += '\\]';
       continue;
     }
 
