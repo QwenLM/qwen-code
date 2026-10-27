@@ -116,7 +116,7 @@ describe('useManagedSessionRename', () => {
     expect(renameSession.mock.calls[1][2].idempotencyKey).toBe(
       renameSession.mock.calls[0][2].idempotencyKey,
     );
-    expect(onRenamed).toHaveBeenCalledWith('Stored name');
+    expect(onRenamed).toHaveBeenCalledWith('A', 'Stored name');
     expect(latest.editor).toBeUndefined();
   });
 
@@ -133,6 +133,49 @@ describe('useManagedSessionRename', () => {
     await act(async () => {
       await latest.submit('Second');
     });
+    expect(renameSession.mock.calls[1][2].idempotencyKey).not.toBe(
+      renameSession.mock.calls[0][2].idempotencyKey,
+    );
+  });
+
+  it('renames the sidebar target independently of the selected Session permission', async () => {
+    const renameSession = vi
+      .fn()
+      .mockResolvedValue({ displayName: 'Stored B' });
+    await render(
+      { renameSession } as unknown as ManagedAgentProvider,
+      'A',
+      false,
+    );
+    expect(latest.supported).toBe(false);
+    act(() => latest.open(summary('B')));
+    expect(latest.editor?.value).toBe('Title B');
+    await act(async () => {
+      await latest.submit('Requested B');
+    });
+    expect(renameSession).toHaveBeenCalledWith(
+      'B',
+      'Requested B',
+      expect.objectContaining({ idempotencyKey: expect.any(String) }),
+    );
+    expect(onRenamed).toHaveBeenCalledWith('B', 'Stored B');
+  });
+
+  it('uses a separate intent when the sidebar target changes after an unknown result', async () => {
+    const renameSession = vi.fn().mockRejectedValue(new Error('Lost response'));
+    await render({ renameSession } as unknown as ManagedAgentProvider);
+    act(() => latest.open(summary('B')));
+    await act(async () => {
+      await latest.submit('Same name');
+    });
+    act(() => {
+      latest.close();
+      latest.open(summary('C'));
+    });
+    await act(async () => {
+      await latest.submit('Same name');
+    });
+    expect(renameSession.mock.calls.map(([id]) => id)).toEqual(['B', 'C']);
     expect(renameSession.mock.calls[1][2].idempotencyKey).not.toBe(
       renameSession.mock.calls[0][2].idempotencyKey,
     );

@@ -33,10 +33,20 @@ management:
 
 qwen:
   managed-agent:
+    extensions:
+      enabled: '${QWEN_MANAGED_AGENT_EXTENSION_PACKAGES_ENABLED:false}'
+      artifact-directory: '${QWEN_MANAGED_AGENT_EXTENSION_ARTIFACT_DIRECTORY:}'
+      allowed-actors: '${QWEN_MANAGED_AGENT_EXTENSION_ALLOWED_ACTORS:}'
+    managed-extensions:
+      enabled: '${QWEN_MANAGED_AGENT_EXTENSION_EXECUTION_ENABLED:false}'
+      mode: '${QWEN_MANAGED_AGENT_EXTENSION_EXECUTION_MODE:linux-cgroup}'
+      cache-directory: '${QWEN_MANAGED_AGENT_EXTENSION_CACHE_DIRECTORY:}'
+      cgroup-root: '${QWEN_MANAGED_AGENT_EXTENSION_CGROUP_ROOT:}'
     agent-revision: '${QWEN_MANAGED_AGENT_REVISION:1}'
     definition-models: '${QWEN_MANAGED_AGENT_DEFINITION_MODELS:}'
     definition-tool-profiles: '${QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES:hosted-workspace-files/1}'
     trusted-actor-header: '${QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER:}'
+    service-user: '${QWEN_MANAGED_AGENT_SERVICE_USER:}'
     auth:
       mode: '${QWEN_MANAGED_AGENT_AUTH_MODE:auto}'
       signing-key: '${QWEN_MANAGED_AGENT_AUTH_SIGNING_KEY:}'

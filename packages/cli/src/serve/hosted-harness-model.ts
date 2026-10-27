@@ -303,6 +303,7 @@ export async function runHostedHarnessTextTurn(input: {
         | 'setToolOutputBudget'
         | 'capturesChildModelRoute'
         | 'setChildModelRoute'
+        | 'setChildModelResolver'
         | 'planModeInstructions'
         | 'todoInstructions'
       >
@@ -312,6 +313,7 @@ export async function runHostedHarnessTextTurn(input: {
   modelSelection?: HostedModelSelection;
   publicChildModelRoute?: PublicChildModelRoute;
   agentInstructions?: string;
+  extensionInstructions?: string;
   skills?: HostedSkillCatalog;
   textDeltas?: HostedHarnessTextDeltas;
   completeFinalOutput?: (
@@ -331,6 +333,8 @@ export async function runHostedHarnessTextTurn(input: {
     safeMode: true,
     chatRecording: false,
     sessionId: input.sessionId,
+    // The Hosted store owns this ID, independently of local transcripts.
+    sessionIdGenerated: true,
   } as CliArgs;
   const config = await loadCliConfig(
     settings.merged,
@@ -381,6 +385,7 @@ async function runPreparedHostedHarnessTextTurn(
       input.agentInstructions
         ? `# Agent instructions\n\n${input.agentInstructions}`
         : undefined,
+      input.extensionInstructions,
       input.skills?.instructions(),
       input.toolTurn?.planModeInstructions?.(),
       todoContext,
@@ -500,7 +505,7 @@ async function runPreparedHostedHarnessTextTurn(
     await input.hooks?.ensureReady(input.signal);
     // Seed instructions when memory reload is skipped; restore them after
     // initialize() when its hierarchical memory refresh replaces user memory.
-    if (input.agentInstructions || input.skills)
+    if (input.agentInstructions || input.extensionInstructions || input.skills)
       config.setUserMemory(
         contextWithInstructions(input.workspaceContext?.read()),
       );
@@ -517,7 +522,11 @@ async function runPreparedHostedHarnessTextTurn(
     const authType = config.getModelsConfig().getCurrentAuthType();
     if (!authType)
       throw new Error('Hosted Harness model authentication is unavailable.');
-    if (input.agentInstructions || input.skills) {
+    if (
+      input.agentInstructions ||
+      input.extensionInstructions ||
+      input.skills
+    ) {
       config.setUserMemory(
         contextWithInstructions(input.workspaceContext?.read()),
       );
@@ -625,6 +634,31 @@ async function runPreparedHostedHarnessTextTurn(
             }
           : {}),
       });
+      input.toolTurn.setChildModelResolver?.(async (selector) => {
+        const resolved = await config
+          .getBaseLlmClient()
+          .resolveForModel(selector, { failClosed: true });
+        const selected = resolved.contentGeneratorConfig;
+        if (!selected.authType) throw new HostedModelUnavailableError();
+        return {
+          modelId: resolved.model,
+          route: {
+            authType: selected.authType,
+            endpointDigest: createHash('sha256')
+              .update(selected.baseUrl ?? '')
+              .digest('hex'),
+            providerPin: llmPreparedProviderPin(selected),
+            origin: {
+              modelId: config.getModel(),
+              authType: active.authType!,
+              endpointDigest: createHash('sha256')
+                .update(active.baseUrl ?? '')
+                .digest('hex'),
+              providerPin: llmPreparedProviderPin(active),
+            },
+          },
+        };
+      });
     };
     if (
       [...initialMessages, ...(input.resumeModel?.prepared.history ?? [])].some(
@@ -636,7 +670,7 @@ async function runPreparedHostedHarnessTextTurn(
       config.getEffectiveInputModalities().image !== true
     )
       throw new HostedImageInputUnsupportedError();
-    if (input.agentInstructions || input.skills)
+    if (input.agentInstructions || input.extensionInstructions || input.skills)
       await config.getLlmClient().refreshSystemInstruction();
     await input.modelScope?.bindBudget(config.getTurnBudget(), input.prompt);
     runPromptHook = input.modelScope
@@ -871,7 +905,7 @@ async function runPreparedHostedHarnessTextTurn(
       const calls: ToolCallRequestInfo[] = selectedSkills.map((skill) => ({
         callId: randomUUID(),
         name: 'skill',
-        args: { skill },
+        args: { skill, ...input.skills?.userArguments(skill, effectivePrompt) },
         isClientInitiated: true,
         origin: { kind: 'client' },
         prompt_id: input.promptId,

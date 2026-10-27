@@ -2474,6 +2474,7 @@ function currentServeFeaturesForRunQwenServe(
     channelManagementAvailable: true,
     persistentWorkspaceRegistrationAvailable: true,
     workspaceRuntimeRemovalAvailable: true,
+    workspaceDirectoriesAvailable: opts.experimentalPairedEngines !== true,
     // Advertise the same host-conditional and WS feature flags as the runtime
     // path (serve-features.ts) so the bootstrap `/capabilities` window doesn't
     // briefly under-report them.
@@ -3494,16 +3495,6 @@ async function runQwenServeImpl(
   const hostedCsiSessionStoreUrl =
     optsIn.hostedCsiSessionStoreUrl ??
     process.env[HOSTED_CSI_SESSION_STORE_URL_ENV];
-  const managedRuntimeBrokerUrl =
-    optsIn.managedRuntimeBrokerUrl ??
-    (optsIn.profile === 'hosted-harness'
-      ? process.env['QWEN_HOSTED_HARNESS_BROKER_URL']
-      : undefined);
-  const managedRuntimeBrokerToken =
-    optsIn.managedRuntimeBrokerToken ??
-    (optsIn.profile === 'hosted-harness'
-      ? process.env['QWEN_HOSTED_HARNESS_BROKER_TOKEN']
-      : undefined);
   validateHostedHarnessProfile({
     ...optsIn,
     token,
@@ -3511,8 +3502,6 @@ async function runQwenServeImpl(
       optsIn.profile === 'hosted-harness' ? true : optsIn.requireAuth,
     hostedHarnessCapabilityDigest,
     hostedCsiSessionStoreUrl,
-    managedRuntimeBrokerUrl,
-    managedRuntimeBrokerToken,
   });
   const baseEnv: NodeJS.ProcessEnv = { ...process.env };
   const launchMemoryProjectScopeValue =
@@ -3650,8 +3639,6 @@ async function runQwenServeImpl(
     token,
     hostedHarnessCapabilityDigest,
     hostedCsiSessionStoreUrl,
-    managedRuntimeBrokerUrl,
-    managedRuntimeBrokerToken,
     promptDeadlineMs,
     writerIdleTimeoutMs,
     workspace: rawWorkspace,
@@ -4833,8 +4820,8 @@ async function runQwenServeImpl(
         env: daemonRuntimeBaseEnv,
         token,
         externalToolGuardToken: optsIn.externalToolGuard?.token,
-        managedRuntimeBrokerUrl,
-        managedRuntimeBrokerToken,
+        managedRuntimeBrokerUrl: opts.managedRuntimeBrokerUrl,
+        managedRuntimeBrokerToken: opts.managedRuntimeBrokerToken,
         getPort: () => actualPort,
         close: () => serveAppLifecycle.close(),
       })
@@ -6608,7 +6595,7 @@ async function runQwenServeImpl(
         trustMaterialization: primaryTrustMaterialization,
       },
     ];
-    if (trustedWorkspace) {
+    if (trustedWorkspace && opts.profile !== 'hosted-harness') {
       await recoverBranchWorktreePreparations({
         workspaceCwd: boundWorkspace,
         sessionService: await createBranchRecoverySessionService(
@@ -7474,35 +7461,37 @@ async function runQwenServeImpl(
     // closure check forbids in this pre-listen root's static closure.
     sessionPrRefreshTimer?.dispose();
     const refreshGeneration = ++sessionPrRefreshGeneration;
-    void import('./server/session-pr-refresh.js')
-      .then((mod) => {
-        if (refreshGeneration !== sessionPrRefreshGeneration) return;
-        sessionPrRefreshTimer = mod.startSessionPrRefreshTimer({
-          workspaceRegistry,
-          // The coordinator lives on the serve app (createServeApp below),
-          // which is built after this timer starts; read it per tick like
-          // the metrics sampler reads `acpHandle`.
-          getArchiveCoordinator: () =>
-            (
-              app.locals as {
-                sessionArchiveCoordinator?: SessionArchiveCoordinator;
-              }
-            ).sessionArchiveCoordinator,
+    if (opts.profile !== 'hosted-harness') {
+      void import('./server/session-pr-refresh.js')
+        .then((mod) => {
+          if (refreshGeneration !== sessionPrRefreshGeneration) return;
+          sessionPrRefreshTimer = mod.startSessionPrRefreshTimer({
+            workspaceRegistry,
+            // The coordinator lives on the serve app (createServeApp below),
+            // which is built after this timer starts; read it per tick like
+            // the metrics sampler reads `acpHandle`.
+            getArchiveCoordinator: () =>
+              (
+                app.locals as {
+                  sessionArchiveCoordinator?: SessionArchiveCoordinator;
+                }
+              ).sessionArchiveCoordinator,
+          });
+        })
+        .catch((error) => {
+          // Degrade to "no PR-state sweep" instead of leaking an unhandled
+          // rejection: the serve fast path installs no process-level
+          // unhandledRejection handler before this runs, and Node's default
+          // for one is to exit — a failed chunk load (e.g. an in-place
+          // upgrade replacing dist/ under the running daemon) would take
+          // down every runtime, session, and connection the daemon serves.
+          daemonLog.warn(
+            `session-pr-refresh load failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
         });
-      })
-      .catch((error) => {
-        // Degrade to "no PR-state sweep" instead of leaking an unhandled
-        // rejection: the serve fast path installs no process-level
-        // unhandledRejection handler before this runs, and Node's default
-        // for one is to exit — a failed chunk load (e.g. an in-place
-        // upgrade replacing dist/ under the running daemon) would take
-        // down every runtime, session, and connection the daemon serves.
-        daemonLog.warn(
-          `session-pr-refresh load failed: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      });
+    }
 
     // Factory for dynamically creating workspace runtimes (POST /workspaces).
     interface WorkspaceRuntimeBuildOptions {
@@ -8085,7 +8074,11 @@ async function runQwenServeImpl(
           });
         }
       }
-      if (wsRuntime.primary && wsRuntime.trusted) {
+      if (
+        wsRuntime.primary &&
+        wsRuntime.trusted &&
+        opts.profile !== 'hosted-harness'
+      ) {
         await recoverBranchWorktreePreparations({
           workspaceCwd: cwd,
           sessionService: await createBranchRecoverySessionService(wsRuntime),

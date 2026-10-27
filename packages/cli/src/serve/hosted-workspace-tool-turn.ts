@@ -1,3 +1,8 @@
+import {
+  extensionToolDeclaration,
+  extensionToolInput,
+  type HostedExtensionToolConfig,
+} from './hosted-extension-tool-context.js';
 /**
  * @license
  * Copyright 2026 Qwen Team
@@ -11,6 +16,10 @@ import {
 } from './hosted-turn-cleanup.js';
 import { probeNeverStarted } from './hosted-never-started-reconcile.js';
 import { RESIDENT_WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
+import {
+  MANAGED_EXTENSION_LINUX_CAPABILITY_DIGEST,
+  MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST,
+} from './managed-extension-profile.js';
 
 import {
   readHostedFileHistory,
@@ -136,6 +145,7 @@ import type { HostedChildRunSession } from './hosted-child-run-session.js';
 import type {
   PublicChildLaunchSnapshot,
   PublicChildModelRoute,
+  PublicChildExtensionAgent,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
 import type { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import {
@@ -231,12 +241,18 @@ import {
   type HostedSkillCatalog,
 } from './hosted-skill-catalog.js';
 import {
+  expandHostedExtensionCommand,
+  HostedCommandExpansionRefusedError,
+  type HostedCommandPermission,
+} from './hosted-extension-command.js';
+import {
   endHostedAction,
   HOSTED_APPROVAL_OPTIONS,
   HOSTED_TOOL_APPROVAL_POLICY,
   hostedActionAllowed,
   hostedApprovalAsks,
   hostedLiveApprovalPoll,
+  readHostedActionOptions,
   type HostedActionOptions,
   type HostedApprovalSettings,
   type HostedApprovalWaiters,
@@ -1852,7 +1868,19 @@ export class HostedWorkspaceToolTurn {
     promptId: string,
     model: string,
     route: PublicChildModelRoute,
+    extensionAgent?: PublicChildExtensionAgent,
   ) => Promise<PublicChildLaunchSnapshot>;
+  private childModelResolver?: (
+    model: string,
+  ) => Promise<{ modelId: string; route: PublicChildModelRoute }>;
+  private readonly extensionAgents: ReadonlyArray<{
+    name: string;
+    model?: string;
+    tools?: readonly string[];
+    disallowedTools?: readonly string[];
+    descriptor: PublicChildExtensionAgent;
+  }>;
+  private readonly allowedToolNames?: readonly string[];
   private readonly childDepth: number;
   private readonly childWorkspaces: boolean;
   private readonly childSnapshots: boolean;
@@ -1862,6 +1890,7 @@ export class HostedWorkspaceToolTurn {
   /** H4e-b3: the member's command funnel to its parent, beside its messages. */
   private readonly commands?: HostedSessionCommandSession;
   private readonly skills?: HostedSkillCatalog;
+  private readonly extensionConfig?: HostedExtensionToolConfig;
   private toolOutputBudget = DEFAULT_TOOL_OUTPUT_BATCH_BUDGET;
   /** b3b: whether this Session's run carries a member preamble (once read). */
   private memberPreamble?: boolean;
@@ -1922,6 +1951,7 @@ export class HostedWorkspaceToolTurn {
           promptId: string,
           model: string,
           route: PublicChildModelRoute,
+          extensionAgent?: PublicChildExtensionAgent,
         ) => Promise<PublicChildLaunchSnapshot>;
         readonly depth: number;
         /** #13753 I2: the host serves child Workspaces. */
@@ -1934,6 +1964,15 @@ export class HostedWorkspaceToolTurn {
       teams?: HostedTeamSession;
       commands?: HostedSessionCommandSession;
       skills?: HostedSkillCatalog;
+      extensionConfig?: HostedExtensionToolConfig;
+      extensionAgents?: ReadonlyArray<{
+        name: string;
+        model?: string;
+        tools?: readonly string[];
+        disallowedTools?: readonly string[];
+        descriptor: PublicChildExtensionAgent;
+      }>;
+      allowedToolNames?: readonly string[];
       /**
        * H4e-b3 decisions 5/9: this run's first input carried an unescaped
        * `plan-mode="required"` preamble; its calls admit reads only.
@@ -1942,6 +1981,7 @@ export class HostedWorkspaceToolTurn {
       publicPlanMode?: boolean;
     },
   ) {
+    this.extensionConfig = extras?.extensionConfig;
     this.foregroundOnly = extras?.foregroundOnly === true;
     this.mcp = this.foregroundOnly ? undefined : extras?.mcp;
     this.hooks = this.foregroundOnly ? undefined : extras?.hooks;
@@ -1972,6 +2012,8 @@ export class HostedWorkspaceToolTurn {
     this.teams = this.foregroundOnly ? undefined : extras?.teams;
     this.commands = this.foregroundOnly ? undefined : extras?.commands;
     this.skills = extras?.skills;
+    this.extensionAgents = extras?.extensionAgents ?? [];
+    this.allowedToolNames = extras?.allowedToolNames;
     this.memberPlanMode = extras?.memberPlanMode === true;
     this.publicPlanMode = extras?.publicPlanMode === true;
     this.planning = this.publicPlanMode;
@@ -2036,6 +2078,13 @@ export class HostedWorkspaceToolTurn {
 
   setChildModelRoute(modelId: string, route: PublicChildModelRoute): void {
     this.childModelRoute = { modelId, route };
+  }
+  setChildModelResolver(
+    resolve: (
+      model: string,
+    ) => Promise<{ modelId: string; route: PublicChildModelRoute }>,
+  ): void {
+    this.childModelResolver = resolve;
   }
 
   private agentsAdmitted(): boolean {
@@ -2138,7 +2187,8 @@ export class HostedWorkspaceToolTurn {
         ...(todoTool ? [HOSTED_TODO_WRITE_TOOL] : []),
       ]
         .filter((tool) => tool.name !== 'monitor' || this.monitorsAdmitted())
-        .map((tool) => {
+        .map((declaration) => {
+          let tool = declaration;
           if (
             tool.name === 'run_shell_command' &&
             !this.backgroundShellAdmitted()
@@ -2147,17 +2197,17 @@ export class HostedWorkspaceToolTurn {
               properties?: Record<string, unknown>;
             };
             delete schema.properties?.['is_background'];
-            return {
+            tool = {
               ...tool,
               description:
                 'Run one foreground shell command in the saved Session working directory. Timeout is 1..600000 ms. Shell file mutations are not backed up. Changing tracked file content or permissions can cause subsequent Write/Edit and undo conflicts.',
               parametersJsonSchema: schema,
             };
           }
-          return hostedWorkspaceDeclarations(
-            [tool],
-            !this.fileBackupsEnabled,
-          )[0];
+          return extensionToolDeclaration(
+            hostedWorkspaceDeclarations([tool], !this.fileBackupsEnabled)[0],
+            this.extensionConfig,
+          );
         }),
       ...(this.mcp?.tools() ?? []),
       ...(skill ? [skill] : []),
@@ -2250,6 +2300,31 @@ export class HostedWorkspaceToolTurn {
       );
     }
     if (this.publicPlanMode) this.advertised.push(HOSTED_PUBLIC_PLAN_TOOL);
+    if (this.publicChildren && this.extensionAgents.length)
+      this.advertised = this.advertised.map((tool) =>
+        tool.name !== 'agent'
+          ? tool
+          : {
+              ...tool,
+              parametersJsonSchema: {
+                ...(tool.parametersJsonSchema as Record<string, unknown>),
+                properties: {
+                  ...((tool.parametersJsonSchema as Record<string, unknown>)[
+                    'properties'
+                  ] as Record<string, unknown>),
+                  subagent_type: {
+                    type: 'string',
+                    enum: this.extensionAgents.map((agent) => agent.name),
+                    description: 'Run a pinned extension agent.',
+                  },
+                },
+              },
+            },
+      );
+    if (this.allowedToolNames)
+      this.advertised = this.advertised.filter((tool) =>
+        this.allowedToolNames!.includes(tool.name ?? ''),
+      );
     return this.planning
       ? this.advertised.filter(
           (tool) =>
@@ -2412,6 +2487,25 @@ export class HostedWorkspaceToolTurn {
       (this.mcp?.mountHeld ?? false) ||
       (this.hooks?.mountHeld ?? false) ||
       (this.hooks?.hasMountableToolResultHooks ?? false)
+    );
+  }
+
+  private extensionChildCanShareWorkspace(call: ToolCallRequestInfo): boolean {
+    const selected = this.extensionAgents.find(
+      (agent) => agent.name === call.args['subagent_type'],
+    );
+    return (
+      this.publicChildren &&
+      selected !== undefined &&
+      this.extensionConfig !== undefined &&
+      selected.descriptor.configRevision === this.extensionConfig.revision &&
+      this.extensionConfig.packages.some((entry) =>
+        isDeepStrictEqual(entry.pin, selected.descriptor.pin),
+      ) &&
+      [
+        MANAGED_EXTENSION_LINUX_CAPABILITY_DIGEST,
+        MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST,
+      ].includes(this.broker.capabilityDigest ?? '')
     );
   }
 
@@ -3403,8 +3497,9 @@ export class HostedWorkspaceToolTurn {
         this.session.authority.action(item.actionId)?.state === 'expired',
     );
     if (
-      this.hooks ||
-      this.mcp ||
+      (!plan.commandStep && (this.hooks || this.mcp)) ||
+      (plan.commandStep &&
+        plan.commandStep.configRevision !== this.extensionConfig?.revision) ||
       this.promptId !== plan.promptId ||
       this.broker.runtimeSessionId !== plan.runtime.runtimeSessionId
     )
@@ -3423,8 +3518,10 @@ export class HostedWorkspaceToolTurn {
         (item) => item.call.name !== 'agent',
       );
       if (needsRuntime) {
-        await oweHostedTurnCleanup(this.session, this.promptId, this.broker);
-        this.cleanupOwed = true;
+        if (!this.hooks && !this.mcp) {
+          await oweHostedTurnCleanup(this.session, this.promptId, this.broker);
+          this.cleanupOwed = true;
+        }
         await this.broker.acquire({
           runtimeBindingId: plan.runtime.bindingId,
           generation: plan.runtime.generation,
@@ -3515,6 +3612,7 @@ export class HostedWorkspaceToolTurn {
     stage: 'approval' | 'final',
     actionId: string | null,
     approvalOrdinal: number,
+    commandStep?: HostedApprovalContinuation['commandStep'],
   ): Promise<ManagedSessionDurableRef | undefined> {
     const batch = this.nativeBatch;
     const runtime = this.broker.runtime;
@@ -3527,15 +3625,16 @@ export class HostedWorkspaceToolTurn {
       batch.uncaptured ||
       batch.requests.some((request) => request.todo) ||
       !runtime ||
-      (isHostedWorkspaceShellProfile(this.profile) &&
+      (!commandStep &&
+        isHostedWorkspaceShellProfile(this.profile) &&
         !singlePlanExit &&
         !this.publicChildren) ||
-      this.hooks ||
-      this.mcp ||
+      (!commandStep && (this.hooks || this.mcp)) ||
       batch.requests.some(
         (request) =>
           !(
             singlePlanExit ||
+            (commandStep && request.call.name === 'skill') ||
             (this.publicChildren &&
               ['agent', 'run_shell_command'].includes(request.call.name)) ||
             [
@@ -3632,6 +3731,7 @@ export class HostedWorkspaceToolTurn {
       stage,
       approvalOrdinal,
       actionId,
+      ...(commandStep ? { commandStep } : {}),
       calls,
     };
     const planBytes = Buffer.from(JSON.stringify(plan));
@@ -3693,7 +3793,13 @@ export class HostedWorkspaceToolTurn {
     },
   ): Promise<Part[]> {
     signal.throwIfAborted();
-    if (this.mcp) await waitForTurn(this.warmed, signal);
+    if (
+      this.mcp ||
+      (this.publicChildren &&
+        this.extensionAgents.length > 0 &&
+        calls.some((call) => call.name === 'agent'))
+    )
+      await waitForTurn(this.warmed, signal);
     const declarations = this.advertised ?? (await this.declarations(signal));
     this.hookAllowed.clear();
     this.agentDispatched.clear();
@@ -3717,6 +3823,8 @@ export class HostedWorkspaceToolTurn {
           call.name === 'skill' &&
           this.skills !== undefined;
         if (
+          (this.allowedToolNames !== undefined &&
+            !this.allowedToolNames.includes(call.name)) ||
           (!declarations.some((tool) => tool.name === call.name) &&
             !(skill && call.isClientInitiated)) ||
           ids.has(call.callId) ||
@@ -3807,9 +3915,13 @@ export class HostedWorkspaceToolTurn {
           const args = call.args;
           const unsupportedKey = Object.keys(args).find(
             (key) =>
-              !['command', 'timeout', 'description', 'is_background'].includes(
-                key,
-              ),
+              ![
+                'command',
+                'timeout',
+                'description',
+                'is_background',
+                'extension_context',
+              ].includes(key),
           );
           // H3: a background request is admitted exactly when this Session
           // owns its child_run orchestrator and the domain is enabled — the
@@ -3840,8 +3952,9 @@ export class HostedWorkspaceToolTurn {
             backgroundIllFormed ||
             (backgroundRequested && !backgroundAdmitted)
           ) {
-            validationError =
-              'Hosted Shell requires a foreground command in the saved directory. Background jobs and Monitor are unavailable; correct the arguments before retrying.';
+            validationError = this.backgroundShellAdmitted()
+              ? 'Hosted Shell is_background must be a boolean; correct the arguments before retrying.'
+              : 'Hosted Shell requires a foreground command in the saved directory. Background jobs and Monitor are unavailable; correct the arguments before retrying.';
           } else if (
             args['description'] !== undefined &&
             typeof args['description'] !== 'string'
@@ -3857,7 +3970,7 @@ export class HostedWorkspaceToolTurn {
               'Hosted Shell timeout must be an integer from 1 to 600000 ms.';
           }
           if (
-            !backgroundAdmitted &&
+            !this.backgroundShellAdmitted() &&
             this.publication &&
             args['is_background'] !== undefined
           ) {
@@ -3867,7 +3980,7 @@ export class HostedWorkspaceToolTurn {
             hostedShellInputError(call.name, args) ?? validationError;
           input = backgroundAdmitted
             ? { ...args, is_background: true }
-            : this.publication
+            : this.publication && args['is_background'] === undefined
               ? { ...args }
               : { ...args, is_background: false };
         } else if (call.name === 'web_fetch') {
@@ -3938,9 +4051,11 @@ export class HostedWorkspaceToolTurn {
               validationError = globError;
             } else {
               try {
-                input['path'] = normalizeWorkspaceRelativePath(
-                  directory.trim(),
-                );
+                input['path'] =
+                  directory.trim().startsWith('extension://') &&
+                  call.args['extension_source'] !== undefined
+                    ? directory.trim()
+                    : normalizeWorkspaceRelativePath(directory.trim());
               } catch (cause) {
                 if (!(cause instanceof InvalidWorkspaceRelativePathError))
                   throw cause;
@@ -4000,6 +4115,8 @@ export class HostedWorkspaceToolTurn {
           input = { ...args, is_monitor: true };
         } else if (call.name === 'agent') {
           const args = call.args;
+          const sharedExtensionWorkspace =
+            this.extensionChildCanShareWorkspace(call);
           // The deliberate refusals below keep their texts whenever the
           // Agent call is not admitted.
           agentAdmitted = this.agentsAdmitted();
@@ -4016,6 +4133,9 @@ export class HostedWorkspaceToolTurn {
                   ? ['plan_mode_required']
                   : []),
                 'isolation',
+                ...(this.publicChildren && this.extensionAgents.length
+                  ? ['subagent_type']
+                  : []),
               ].includes(key),
           );
           const backgroundValue = args['run_in_background'];
@@ -4040,6 +4160,14 @@ export class HostedWorkspaceToolTurn {
               'Public child agents share this Workspace; isolation is unavailable.';
           } else if (unsupportedKey !== undefined) {
             validationError = `Hosted child agent received unsupported argument ${JSON.stringify(unsupportedKey)}. This profile runs only the Session's own definition, without nesting: fork_*, working_dir, ${teamsOn ? '' : 'name, '}model and subagent_type belong to the legacy Agent tool.`;
+          } else if (
+            args['subagent_type'] !== undefined &&
+            !this.extensionAgents.some(
+              (agent) => agent.name === args['subagent_type'],
+            )
+          ) {
+            validationError =
+              'Hosted extension agent is not in the active pinned configuration.';
           } else if (
             args['isolation'] !== undefined &&
             args['isolation'] !== 'worktree' &&
@@ -4068,9 +4196,16 @@ export class HostedWorkspaceToolTurn {
           } else if (named && !agentBackground) {
             validationError =
               'Hosted team member always runs in the background; omit run_in_background or set it to true.';
-          } else if (this.sessionOwnerMayHoldMount()) {
+          } else if (
+            !sharedExtensionWorkspace &&
+            this.sessionOwnerMayHoldMount()
+          ) {
             validationError = `Hosted child agent is unavailable while ${HOSTED_CHILD_MOUNT_REFUSALS.sessionOwner}; a Session-owned hold releases only when the Session closes, so read the work through ordinary tools instead.`;
-          } else if (!agentBackground && this.acquired) {
+          } else if (
+            !sharedExtensionWorkspace &&
+            !agentBackground &&
+            this.acquired
+          ) {
             // A foreground child cannot borrow its waiting parent's mount.
             // Ordered after the Session-owner arm: a Session-scoped mount
             // outlives this Turn, so the background and fresh-turn advice
@@ -4078,6 +4213,7 @@ export class HostedWorkspaceToolTurn {
             // Session-owned hold advice that cannot act on it.
             validationError = `Hosted child agent run_in_background=false is unavailable while ${HOSTED_CHILD_MOUNT_REFUSALS.turn}; run it in the background or let the current tool work finish first in a fresh turn.`;
           } else if (
+            !sharedExtensionWorkspace &&
             !agentBackground &&
             calls.some(
               (other) => other.name !== 'agent' && other.name !== 'workflow',
@@ -4352,13 +4488,30 @@ export class HostedWorkspaceToolTurn {
             validationError = filePathError;
           } else {
             try {
-              input['file_path'] = normalizeWorkspaceRelativePath(file.trim());
+              input['file_path'] =
+                file.trim().startsWith('extension://') &&
+                call.args['extension_source'] !== undefined
+                  ? file.trim()
+                  : normalizeWorkspaceRelativePath(file.trim());
             } catch (cause) {
               if (!(cause instanceof InvalidWorkspaceRelativePathError))
                 throw cause;
               validationError = filePathError;
             }
           }
+        }
+        try {
+          input = extensionToolInput(
+            this.session.authority.sessionHeader.sessionKey.sessionId,
+            this.extensionConfig,
+            call.name,
+            input,
+          );
+        } catch (cause) {
+          validationError ??=
+            cause instanceof Error
+              ? cause.message
+              : 'Extension tool context was refused.';
         }
         // The inline Session Store limit keeps rejecting exactly as main
         // does for the ordinary tools. A call that already carries its own
@@ -5205,21 +5358,18 @@ export class HostedWorkspaceToolTurn {
               ]
             : [],
       );
-      const skillBatch = requests.every((request) => request.skill)
-        ? enforceFunctionResponseBudget(
-            requests.map((request, index) => ({
-              callId: request.call.callId,
-              toolName: request.call.name,
-              responseParts:
-                refusal(index) ??
-                convertToFunctionResponse(
-                  request.call.name,
-                  request.call.callId,
-                  [{ text: this.skills!.response(request.call.args) }],
-                ),
-            })),
-            this.toolOutputBudget,
-          )
+      const skillResponses = [];
+      if (requests.every((request) => request.skill))
+        for (const [index, request] of requests.entries())
+          skillResponses.push({
+            callId: request.call.callId,
+            toolName: request.call.name,
+            responseParts:
+              refusal(index) ??
+              (await this.skillResponse(request.call, signal)),
+          });
+      const skillBatch = skillResponses.length
+        ? enforceFunctionResponseBudget(skillResponses, this.toolOutputBudget)
         : undefined;
       executing = true;
       for (const [index, request] of requests.entries()) {
@@ -6545,14 +6695,49 @@ export class HostedWorkspaceToolTurn {
     // can ever answer. Translate the throw into the same refusal: an
     // over-size prompt is a model-correctable argument error, never a
     // recovery-blocked Turn.
+    const extensionAgent =
+      request.call.args['subagent_type'] === undefined
+        ? undefined
+        : this.extensionAgents.find(
+            (agent) => agent.name === request.call.args['subagent_type'],
+          );
+    const childModel = extensionAgent?.model
+      ? await this.childModelResolver?.(extensionAgent.model)
+      : this.childModelRoute;
+    if (extensionAgent?.model && !childModel)
+      throw new Error('Extension agent model is unavailable.');
+    const allowed = (this.advertised ?? [])
+      .map((tool) => tool.name!)
+      .filter(
+        (name) =>
+          (HOSTED_WORKSPACE_SHELL_TOOLS.some((tool) => tool.name === name) ||
+            name === 'glob' ||
+            name === 'skill' ||
+            name === 'todo_write' ||
+            this.mcp?.tools().some((tool) => tool.name === name)) &&
+          (!extensionAgent?.tools || extensionAgent.tools.includes(name)) &&
+          !extensionAgent?.disallowedTools?.includes(name),
+      );
+    const descriptor = extensionAgent
+      ? { ...extensionAgent.descriptor, toolNames: allowed }
+      : undefined;
     const publicLaunch = this.publicChildren
       ? ((await children.publicLaunchSnapshot(childRunId)) ??
         (await this.childSnapshot!(
           this.promptId,
-          this.childModelRoute?.modelId ?? model,
-          this.childModelRoute!.route,
+          childModel?.modelId ?? model,
+          childModel!.route,
+          descriptor,
         )))
       : undefined;
+    if (
+      extensionAgent &&
+      (publicLaunch?.version !== 2 ||
+        !isDeepStrictEqual(publicLaunch.extensionAgent, descriptor))
+    )
+      throw new Error(
+        'Extension child requires its pinned v2 launch snapshot.',
+      );
     let envelopeBytes: number;
     try {
       envelopeBytes = encodeChildLaunchEnvelope({
@@ -8314,6 +8499,336 @@ export class HostedWorkspaceToolTurn {
     return asked && signal.aborted
       ? refusals.map((reason) => reason ?? APPROVAL_REFUSALS.cancelled)
       : refusals;
+  }
+
+  private async skillResponse(
+    call: ToolCallRequestInfo,
+    signal: AbortSignal,
+  ): Promise<Part[]> {
+    const command = this.skills!.command(call.args);
+    if (!command)
+      return convertToFunctionResponse(call.name, call.callId, [
+        { text: this.skills!.response(call.args) },
+      ]);
+    if (!this.extensionConfig)
+      throw new Error('The command has no pinned extension configuration.');
+    try {
+      const expanded = await expandHostedExtensionCommand({
+        session: this.session,
+        broker: this.broker,
+        promptId: this.promptId,
+        callId: call.callId,
+        revision: this.extensionConfig.revision,
+        command,
+        args: String(call.args['args'] ?? ''),
+        signal,
+        definitionDigest: (toolName) =>
+          createHash('sha256')
+            .update(
+              JSON.stringify(
+                (this.advertised ?? []).find(
+                  (tool) =>
+                    tool.name ===
+                    (toolName === 'shell' ? 'run_shell_command' : toolName),
+                ) ??
+                  HOSTED_WORKSPACE_SHELL_TOOLS.find(
+                    (tool) =>
+                      tool.name ===
+                      (toolName === 'shell' ? 'run_shell_command' : toolName),
+                  ),
+              ),
+            )
+            .digest('hex'),
+        decide: async (id, name, input) => {
+          await waitForTurn(this.warmed, signal);
+          if (!this.acquired) await this.acquire(false, signal);
+          return this.commandPermission(id, name, input, signal, call.callId);
+        },
+        completed: async (id, name, input, result) => {
+          const failed = result['executionStatus'] !== 'success';
+          const event = failed
+            ? HookEventName.PostToolUseFailure
+            : HookEventName.PostToolUse;
+          const fields = {
+            tool_name: name === 'shell' ? 'run_shell_command' : name,
+            tool_input: input,
+            tool_use_id: id,
+            prompt_id: this.promptId,
+            permission_mode: this.approval?.settings.mode ?? 'yolo',
+            ...(failed
+              ? {
+                  error: String(
+                    result['error'] ?? 'Command preprocessing failed',
+                  ),
+                  is_interrupt: result['executionStatus'] === 'cancelled',
+                }
+              : { tool_response: result }),
+          };
+          const output = await this.hooks?.fire(
+            event,
+            id,
+            await this.toolHookFields(event, id, fields),
+            signal,
+            this.promptHookRunner,
+          );
+          if (
+            output &&
+            createHookOutput(
+              failed
+                ? HookEventName.PostToolUseFailure
+                : HookEventName.PostToolUse,
+              output,
+            ).shouldStopExecution()
+          ) {
+            this.hookStopReason ??=
+              'Command preprocessing was stopped by a Hook.';
+            throw new HostedCommandExpansionRefusedError(
+              'Command preprocessing was stopped by a Hook.',
+            );
+          }
+        },
+      });
+      return convertToFunctionResponse(call.name, call.callId, [
+        { text: expanded },
+      ]);
+    } catch (cause) {
+      if (cause instanceof HostedCommandExpansionRefusedError)
+        return convertToFunctionErrorResponse(
+          call.name,
+          call.callId,
+          [],
+          cause.message,
+        );
+      throw new HostedToolRecoveryRequiredError(cause);
+    }
+  }
+
+  private async commandPermission(
+    id: string,
+    toolName: 'read_file' | 'shell',
+    initial: Record<string, unknown>,
+    signal: AbortSignal,
+    outerCallId: string,
+  ): Promise<HostedCommandPermission> {
+    const name = toolName === 'shell' ? 'run_shell_command' : toolName;
+    const settings = await this.readApprovalSettings();
+    const result: HostedCommandPermission = {
+      allowed: false,
+      toolName,
+      input: initial,
+      approvalMode: settings.mode,
+      preHookOccurrence: this.hooks ? id : null,
+      permissionHookOccurrence: null,
+      actionRequestId: null,
+    };
+    if (
+      !this.advertised?.some((tool) => tool.name === name) ||
+      ((this.memberPlanMode || this.planning) && toolName === 'shell')
+    )
+      return result;
+    let call: ToolCallRequestInfo = {
+      name,
+      callId: id,
+      args: initial,
+      prompt_id: this.promptId,
+      isClientInitiated: false,
+    };
+    const pre = await this.hooks?.fire(
+      HookEventName.PreToolUse,
+      id,
+      await this.toolHookFields(
+        HookEventName.PreToolUse,
+        id,
+        this.preToolUseFields(call),
+      ),
+      signal,
+      this.promptHookRunner,
+      undefined,
+      HOSTED_TOOL_INPUT_ORDER,
+    );
+    if (preToolUseRefusal(pre, false)) return result;
+    call = { ...call, args: preToolUseReplacement(pre, false) ?? call.args };
+    if (hostedShellInputError(name, call.args))
+      return { ...result, input: call.args };
+    const mustAsk = pre !== undefined && new PreToolUseHookOutput(pre).isAsk();
+    let policy = await evaluateHostedPermissionRules(
+      settings.permissionRules,
+      call,
+    );
+    if (policy === 'deny') return { ...result, input: call.args };
+    let hookAllowed =
+      pre !== undefined &&
+      new PreToolUseHookOutput(pre).getPermissionDecision() === 'allow';
+    let permissionHookOccurrence: string | null = null;
+    if (
+      this.hooks &&
+      policy === 'default' &&
+      hostedApprovalAsks(settings, name, this.globProfile)
+    ) {
+      permissionHookOccurrence = id;
+      const permission = await this.hooks.fire(
+        HookEventName.PermissionRequest,
+        id,
+        this.permissionRequestFields(call),
+        signal,
+        this.promptHookRunner,
+        undefined,
+        HOSTED_TOOL_INPUT_ORDER,
+      );
+      const decision = permissionRequestDecision(permission);
+      if (decision.refusal)
+        return { ...result, input: call.args, permissionHookOccurrence };
+      hookAllowed ||= decision.allowed === true;
+      call = { ...call, args: decision.input ?? call.args };
+    }
+    if (hostedShellInputError(name, call.args))
+      return { ...result, input: call.args, permissionHookOccurrence };
+    policy = await evaluateHostedPermissionRules(
+      settings.permissionRules,
+      call,
+    );
+    if (policy === 'deny')
+      return { ...result, input: call.args, permissionHookOccurrence };
+    let actionRequestId: string | null = null;
+    let approvedInputRef: ManagedSessionDurableRef | undefined;
+    let allowed = true;
+    if (
+      mustAsk ||
+      policy === 'ask' ||
+      (policy !== 'allow' &&
+        !hookAllowed &&
+        hostedApprovalAsks(settings, name, this.globProfile))
+    ) {
+      if (!this.approval) allowed = false;
+      else {
+        actionRequestId = `command_approval_${createHash('sha256').update(id).digest('hex').slice(0, 48)}`;
+        const authority = this.session.authority;
+        const existing = authority.action(actionRequestId);
+        let options: HostedActionOptions;
+        if (existing) {
+          options = await readHostedActionOptions(this.session, existing);
+          if (
+            options.toolName !== name ||
+            !('inputRef' in options) ||
+            !options.inputRef ||
+            !isDeepStrictEqual(
+              JSON.parse(
+                (await this.session.resources.read(options.inputRef)).toString(
+                  'utf8',
+                ),
+              ),
+              call.args,
+            )
+          )
+            throw new HostedToolRecoveryRequiredError(
+              'Command step approval input changed.',
+            );
+        } else {
+          const inputRef = await this.session.resources.publish(
+            'managed-extension-command-input',
+            Buffer.from(JSON.stringify(call.args)),
+          );
+          const createdAt = Date.now();
+          const ordinal =
+            this.nativeBatch?.requests.findIndex(
+              (request) => request.call.callId === outerCallId,
+            ) ?? -1;
+          if (ordinal < 0)
+            throw new HostedToolRecoveryRequiredError(
+              'Command outer batch is unavailable.',
+            );
+          this.nativeBatch!.actionIds.set(ordinal, actionRequestId);
+          const continuationRef = await this.captureNativeBatch(
+            'approval',
+            actionRequestId,
+            ordinal,
+            {
+              toolStageId: id,
+              toolName,
+              inputRef,
+              configRevision: this.extensionConfig!.revision,
+            },
+          );
+          if (!continuationRef)
+            throw new HostedToolRecoveryRequiredError(
+              'Command approval continuation is unavailable.',
+            );
+          options = {
+            v: 3,
+            continuationRef,
+            inputRef,
+            requestId: actionRequestId,
+            turnId: this.promptId,
+            functionCallId: outerCallId,
+            toolName: name,
+            policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
+            inputRevision: 1,
+            createdAt,
+            expiresAt: createdAt + settings.timeoutMs,
+            options: HOSTED_APPROVAL_OPTIONS,
+            ...(mustAsk || policy === 'ask'
+              ? { requiresHumanDecision: true as const }
+              : {}),
+          };
+          const optionsRef = await this.session.resources.publish(
+            'managed-action-options',
+            Buffer.from(JSON.stringify(options)),
+          );
+          await this.harness.commitDurableWait(
+            {
+              requestId: actionRequestId,
+              kind: 'permission',
+              source: 'tool_call',
+              optionsRef,
+              inputRevision: '1',
+              invocationRef: inputRef,
+              attemptId: id,
+              routeRef: inputRef,
+            },
+            { turnId: this.promptId, promptId: this.promptId },
+          );
+        }
+        await this.approval.waiters.wait(
+          actionRequestId,
+          options.expiresAt,
+          signal,
+          () =>
+            authority.action(actionRequestId!)?.state !== 'requested' ||
+            authority.writesStopped,
+          this.approval.readSettings
+            ? hostedLiveApprovalPoll(
+                this.session,
+                this.approval.waiters,
+                options,
+                () => this.readApprovalSettings(),
+                signal,
+                this.globProfile,
+                this.approval.isBlocked,
+              )
+            : undefined,
+        );
+        if (authority.action(actionRequestId)?.state === 'requested')
+          await endHostedAction(
+            this.session,
+            actionRequestId,
+            signal.aborted ? 'cancelled' : 'expired',
+          );
+        await this.harness.resolveDurableWait();
+        approvedInputRef = 'inputRef' in options ? options.inputRef : undefined;
+        allowed = hostedActionAllowed(
+          authority.action(actionRequestId)!,
+          options.policyRevision,
+        );
+      }
+    }
+    return {
+      ...result,
+      allowed: allowed && !signal.aborted,
+      input: call.args,
+      permissionHookOccurrence,
+      actionRequestId,
+      ...(approvedInputRef ? { inputRef: approvedInputRef } : {}),
+    };
   }
 
   private async ask(

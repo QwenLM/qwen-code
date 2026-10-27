@@ -59,6 +59,13 @@ const mocks = vi.hoisted(() => {
       callId: string;
       confirmationDetails?: { onConfirm: () => Promise<void> };
     }>,
+    foregroundShellControl: {
+      foregroundShell: { callId: 'live-shell', pid: 4300, turn: 7 },
+      promoteShellToBackground: vi.fn(),
+      writeShellInput: vi.fn(),
+      resizeShell: vi.fn(),
+      scrollShell: vi.fn(),
+    },
     streaming: false,
     interrupt: vi.fn(),
     keyboard: [] as Array<
@@ -185,6 +192,7 @@ vi.mock('./live-turn.js', async (importOriginal) => ({
   useOpenTuiLiveTurn: (options: unknown) => {
     mocks.state.liveOptions = options;
     return {
+      ...mocks.state.foregroundShellControl,
       items: mocks.state.items,
       isCurrentHistory: mocks.state.isCurrentHistory,
       streaming: mocks.state.streaming,
@@ -362,6 +370,14 @@ describe('startOpenTuiUI fallback contract', () => {
       write.mockRestore();
     }
   }
+
+  it('passes the actual live-turn shell owner and every control action to the app', async () => {
+    await withEntryApp(() => {
+      expect(mocks.state.appProps).toMatchObject({
+        foregroundShellControl: mocks.state.foregroundShellControl,
+      });
+    });
+  });
 
   it('starts a fresh command history without a replay reset', async () => {
     await withEntryApp(() => {
