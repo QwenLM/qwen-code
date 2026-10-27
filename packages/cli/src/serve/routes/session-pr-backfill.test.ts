@@ -4482,6 +4482,109 @@ describe('backfillWorkspaceSessionPrs', () => {
     ).toBeNull();
   });
 
+  it('binds a qualifier spelled with a scheme', async () => {
+    // `https://host/owner/repo` names the same repository as the bare form.
+    await seedSession(SESSION_A);
+    await appendUserText(
+      SESSION_A,
+      '/verify-pr 11 --repo https://github.com/o/r',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(11, 'f11')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 1 });
+  });
+
+  it('binds a qualifier spelled in scp form', async () => {
+    // `git@host:owner/repo` normalizes to a host plus a two-segment path.
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/verify-pr 12 --repo git@github.com:o/r');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(12, 'f12')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 1 });
+  });
+
+  it('declines a qualified number when the origin is unresolvable', async () => {
+    // No workspace identity means no qualifier can be confirmed: the number
+    // declines rather than binding on an unverifiable match.
+    fetchRemoteWebUrlMock.mockResolvedValue(undefined);
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/verify-pr 77 --repo o/r');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'f77')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 0, written: 0 });
+  });
+
+  it('binds a form-named number even when the bare claim is foreign', async () => {
+    // The url form names this workspace's PR 9 explicitly; that exemption keeps
+    // a foreign bare claim from overriding the URL the user typed.
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/review https://github.com/o/r/pull/9');
+    await appendUserText(SESSION_A, '/verify-pr 9 --repo other/x');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(9, 'f9')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 1 });
+    expect(
+      (
+        await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+        )
+      )?.[0],
+    ).toMatchObject({ number: 9, url: 'https://github.com/o/r/pull/9' });
+  });
+
+  it('reads the merge_requests route shape for the qualified identity', async () => {
+    // GitLab spells the route `/-/merge_requests/<i>`; the identity must strip
+    // it, including the trailing `/-`, or a correct qualifier declines.
+    fetchRemoteWebUrlMock.mockResolvedValue(
+      'https://gitlab.corp.com/group/sub/cli',
+    );
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/verify-pr 21 --repo group/sub/cli');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [
+        {
+          ...pr(21, 'f21'),
+          url: 'https://gitlab.corp.com/group/sub/cli/-/merge_requests/21',
+        },
+      ],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 1 });
+    expect(
+      (
+        await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+        )
+      )?.[0],
+    ).toMatchObject({
+      number: 21,
+      url: 'https://gitlab.corp.com/group/sub/cli/-/merge_requests/21',
+    });
+  });
+
   it('declines a quoted -R URL value', async () => {
     // A shell-quoted URL is the same qualifier as the bare spelling, so it
     // must keep the decline instead of vanishing into a local number.

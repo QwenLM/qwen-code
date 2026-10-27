@@ -15,7 +15,8 @@ command runs, but the session gets no PR binding at that moment. See
 for the binding model and the sidecar format.
 
 The on-demand sweep (`POST /sessions/backfill-prs`) can derive the binding from
-the typed command. It reads the transcript. That design has two gaps:
+the typed command. It reports `repoDeclined` for every number the `--repo` gate
+declined, so a policy decline is distinguishable from an empty run. It reads the transcript. That design has two gaps:
 
 1. The normal Web Shell flow does not trigger the sweep.
 2. A new session can bind before its transcript file exists. A sweep cannot
@@ -103,8 +104,9 @@ Bind the PR when the daemon admits a `/review` or `/verify-pr` prompt.
   prompts, binder rejection/hang, and the coordinator hand-off.
 - `/verify-pr` coverage: the live accept/decline pair (a `--repo` naming this
   workspace binds; one naming another repository declines and reports
-  `repoDeclined`), quoted and `-R` spellings of a qualifier the value grammar
-  cannot read, the `--repo=` form, `--assets-repo` left alone, a later
+  `repoDeclined`), the `-R` spellings — bare, attached, quoted, URL-shaped, or
+  with the value on the next line — whose value this grammar cannot read, the
+  `--repo=` form, `--assets-repo` left alone, a later
   qualified claim on this workspace's repo winning over an earlier foreign one,
   an unqualified `/review` claim clearing the qualifier, the divergent-page
   binding to the repo the number was qualified to, the transcript
@@ -118,6 +120,9 @@ Bind the PR when the daemon admits a `/review` or `/verify-pr` prompt.
   and search after the normal catalog refresh.
 - `/verify-pr 15172` binds PR #15172 exactly as `/review 15172` does, live and
   from the transcript sweep.
+- A `/verify-pr <N>` carrying no qualifier, or one naming this workspace's
+  repository (or the page's confirmed fork parent), binds PR `<N>`; a number
+  whose qualifiers all name another repository binds nothing.
 - A `/verify-pr` number qualified to another repository binds nothing, writes
   no sidecar and marks no catalog change; the decline is counted in
   `repoDeclined` and reaches the live hook's warning.
