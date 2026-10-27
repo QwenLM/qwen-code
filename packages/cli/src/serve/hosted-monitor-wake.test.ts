@@ -756,7 +756,7 @@ describe('createMonitorWakeRunTurn', () => {
         },
       );
       const project = vi
-        .spyOn(session.sink, 'iterateRecords')
+        .spyOn(session.sink, 'iterateMessageRecords')
         .mockImplementation(async function* () {
           yield* (await gate) as ChatRecord[];
         });
@@ -1223,7 +1223,7 @@ describe('settlePendingMonitorInputs', () => {
           wakeReason: 'input',
         },
       );
-      const projected = vi.spyOn(session.sink, 'iterateRecords');
+      const projected = vi.spyOn(session.sink, 'iterateMessageRecords');
       // Nothing under the named sources: the close pays no projection.
       expect(
         await settlePendingMonitorInputs({

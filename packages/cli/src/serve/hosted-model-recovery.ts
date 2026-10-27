@@ -5,9 +5,10 @@
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { hostedMessageRecords } from './hosted-session-records.js';
+import { hostedSessionRecords } from './hosted-session-records.js';
 import type { LlmPreparedRequest } from '@qwen-code/qwen-code-core/core/llm-chat.js';
 import { hasImagePayloadReferences } from '@qwen-code/qwen-code-core/services/image-payload-references.js';
+import type { TurnResultRecordPayload } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import {
   HOSTED_MODEL_REQUEST_BYTES,
@@ -257,8 +258,13 @@ export async function findHostedCommittedModelOutput(
     ? await readHostedModelRequest(session, promptId, true, throughSequence)
     : undefined;
   if (latestAttempt.payload['recoveryRef'] && !saved) return;
-  const current = hostedMessageRecords(session, throughSequence).filter(
-    (item) => item.daemonPromptId === promptId,
+  const current = hostedSessionRecords(session, throughSequence).filter(
+    (item) =>
+      item.daemonPromptId === promptId ||
+      (item.type === 'system' &&
+        item.subtype === 'turn_result' &&
+        (item.systemPayload as TurnResultRecordPayload | undefined)
+          ?.promptId === promptId),
   );
   const last = await current.at(-1);
   if (

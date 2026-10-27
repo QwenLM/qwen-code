@@ -1062,7 +1062,7 @@ describe('settleCancelledHookTurn', () => {
       ],
     );
     const find = vi.spyOn(session.managed.authority, 'findEvent');
-    const records = vi.spyOn(session.managed.sink, 'iterateRecords');
+    const records = vi.spyOn(session.managed.sink, 'iterateMessageRecords');
     await settleCancelledHookTurn(session);
     expect(find).toHaveBeenCalledTimes(2);
     expect(find).toHaveBeenCalledWith(
@@ -1087,7 +1087,7 @@ describe('settleCancelledHookTurn', () => {
         { sequence: 7, state: 'started' },
       ],
     );
-    const records = vi.spyOn(session.managed.sink, 'iterateRecords');
+    const records = vi.spyOn(session.managed.sink, 'iterateMessageRecords');
     await settleCancelledHookTurn(session);
     expect(records).not.toHaveBeenCalled();
     expect(session.blocked).toBe(true);
@@ -6059,10 +6059,11 @@ describe('Hosted Harness no-tool session', () => {
         return read.call(this, ref);
       });
     } else {
-      const iterateRecords = ManagedSessionRecordSink.prototype.iterateRecords;
+      const iterateRecords =
+        ManagedSessionRecordSink.prototype.iterateMessageRecords;
       vi.spyOn(
         ManagedSessionRecordSink.prototype,
-        'iterateRecords',
+        'iterateMessageRecords',
       ).mockImplementation(async function* (
         this: ManagedSessionRecordSink,
         through?: number,
@@ -6533,7 +6534,8 @@ describe('Hosted Harness no-tool session', () => {
     // hangs until the test lets go: only the prompt route's own
     // checkpoint probe may answer this refusal, never the pump's later
     // classification (which would also refuse, from a shadowing cause).
-    const originalRecords = ManagedSessionRecordSink.prototype.iterateRecords;
+    const originalRecords =
+      ManagedSessionRecordSink.prototype.iterateMessageRecords;
     let afterLoad = false;
     let hanging = false;
     let releaseClassify!: () => void;
@@ -6542,7 +6544,7 @@ describe('Hosted Harness no-tool session', () => {
     });
     vi.spyOn(
       ManagedSessionRecordSink.prototype,
-      'iterateRecords',
+      'iterateMessageRecords',
     ).mockImplementation(async function* (
       this: ManagedSessionRecordSink,
       through?: number,
@@ -39750,7 +39752,7 @@ describe('Hosted Harness stored definitions', () => {
 
 function failNextCanonicalRead() {
   return vi
-    .spyOn(ManagedSessionRecordSink.prototype, 'iterateRecords')
+    .spyOn(ManagedSessionRecordSink.prototype, 'iterateMessageRecords')
     .mockImplementationOnce(async function* () {
       yield await Promise.reject(new Error('canonical history read lost'));
     });

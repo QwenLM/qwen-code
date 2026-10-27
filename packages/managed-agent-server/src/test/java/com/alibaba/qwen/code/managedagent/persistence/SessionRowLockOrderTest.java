@@ -292,7 +292,7 @@ class SessionRowLockOrderTest {
                     Map.entry("WorkspaceCsiApplicationInventory.java",
                             Set.of("Cell.bytes/0|Row.bytes/0|Snapshot.bytes/0",
                                     "Cell.equals/1", "Cell.hashCode/0",
-                                    "Cell.isNull/0", "Cell.kind/0", "Cell.text/0",
+                                    "Cell.identity/0", "Cell.isNull/0", "Cell.kind/0", "Cell.text/0",
                                     "Encoder.write/1",
                                     "FrozenOwnerReader.read/2|Inspection.read/2",
                                     "Inspection.context/2", "Inspection.snapshot/0",

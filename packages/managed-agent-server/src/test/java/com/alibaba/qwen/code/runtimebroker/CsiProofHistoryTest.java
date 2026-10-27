@@ -16,6 +16,25 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class CsiProofHistoryTest {
     @Test
+    void spilledFrozenBatchPreservesAbsentAndPreparedReferences() {
+        try (var history = CsiProofHistory.temporary()) {
+            Map<String, CsiNativeActivationProof.FrozenBatch> facts = history.map(1, CsiNativeActivationProof.FrozenBatch.class);
+            var intent = new CsiNativeActivationProof.FrozenBatch(value(0), null, java.util.List.of(value(2)), 17, 0);
+            facts.put("batch", intent);
+            var original = CsiProofHistory.freeze(facts);
+            assertThat(original.get("batch")).isEqualTo(intent);
+            assertThat(original.get("batch").preparedRef()).isNull();
+            var next = CsiProofHistory.mutable(original);
+            var prepared = new CsiNativeActivationProof.FrozenBatch(value(0), value(1), java.util.List.of(value(2)), 17, 18);
+            next.put("batch", prepared);
+            assertThat(next.get("batch")).isEqualTo(prepared);
+            assertThat(original.get("batch").preparedRef()).isNull();
+            ((ObjectNode) next.get("batch").preparedRef()).put("ordinal", -1);
+            assertThat(next.get("batch").preparedRef()).isEqualTo(value(1));
+        }
+    }
+
+    @Test
     void oldPrefixAndFirstInsertionOrderSurviveTenThousandCompletedFacts() {
         try (var history = CsiProofHistory.create()) {
             Map<String, JsonNode> facts = history.map(1, JsonNode.class);

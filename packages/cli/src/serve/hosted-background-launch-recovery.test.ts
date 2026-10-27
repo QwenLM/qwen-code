@@ -631,7 +631,7 @@ describe('hosted background launch recovery (#13847)', () => {
     const replacement = await open('boot-2', false);
     try {
       const throughSequence = replacement.authority.committedSequence;
-      const projectSpy = vi.spyOn(replacement.sink, 'iterateRecords');
+      const projectSpy = vi.spyOn(replacement.sink, 'iterateMessageRecords');
       const outcome = await takeover(replacement);
       expect(outcome).toEqual({ kind: 'inapplicable' });
       // Classification and answer may reopen the canonical stream, but

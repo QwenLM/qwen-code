@@ -9794,8 +9794,8 @@ it.each([
   if (failure === 'missing-message-id') delete saved.pendingMessageId;
   if (failure === 'stranger-turn') saved.pendingTurn = 'stranger';
   if (failure === 'incomplete-results') {
-    const iterate = session.sink.iterateRecords.bind(session.sink);
-    vi.spyOn(session.sink, 'iterateRecords').mockImplementation(
+    const iterate = session.sink.iterateMessageRecords.bind(session.sink);
+    vi.spyOn(session.sink, 'iterateMessageRecords').mockImplementation(
       async function* (...args) {
         const records: ChatRecord[] = [];
         for await (const record of iterate(...args)) records.push(record);

@@ -208,7 +208,7 @@ it.each(['missing_receipt', 'changed_parts', 'foreign_tail'] as const)(
         return Buffer.from(JSON.stringify(outcome));
       });
     } else {
-      vi.spyOn(successor.sink, 'iterateRecords').mockImplementation(
+      vi.spyOn(successor.sink, 'iterateMessageRecords').mockImplementation(
         async function* () {
           yield* [
             ...before,

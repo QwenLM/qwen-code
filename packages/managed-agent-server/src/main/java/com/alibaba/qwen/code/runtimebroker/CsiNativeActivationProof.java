@@ -166,6 +166,7 @@ public final class CsiNativeActivationProof {
 
     public record FrozenBatch(JsonNode intentRef, JsonNode preparedRef, List<JsonNode> invocations, long intentSequence, long preparedSequence) {
         public FrozenBatch {
+            preparedRef = preparedRef == null || preparedRef.isNull() ? null : preparedRef;
             invocations = List.copyOf(invocations);
         }
     }

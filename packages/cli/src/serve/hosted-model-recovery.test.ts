@@ -11,7 +11,11 @@ import type { ManagedSessionEvent } from '@qwen-code/qwen-code-core/managed-runt
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import { findHostedCommittedModelOutput } from './hosted-model-recovery.js';
 
-function fixture(withTerminal: boolean, advanceHead = false) {
+function fixture(
+  withTerminal: boolean,
+  advanceHead = false,
+  terminalPromptId = 'prompt',
+) {
   const promptId = 'prompt';
   let committedSequence = withTerminal ? 12 : 11;
   const assistant = {
@@ -24,7 +28,12 @@ function fixture(withTerminal: boolean, advanceHead = false) {
     uuid: 'terminal',
     type: 'system',
     subtype: 'turn_result',
-    daemonPromptId: promptId,
+    systemPayload: {
+      promptId: terminalPromptId,
+      state: 'completed',
+      stopReason: 'end_turn',
+      endedAt: 0,
+    },
   } as ChatRecord;
   const envelope = {
     v: 1 as const,
@@ -101,6 +110,16 @@ describe('Hosted committed model output history', () => {
       await findHostedCommittedModelOutput(f.session, f.promptId),
     ).toBeUndefined();
     expect(f.projectContextRecords).not.toHaveBeenCalled();
+    expect(f.iterateRecords).toHaveBeenCalledWith(12);
+  });
+
+  it('ignores terminal metadata for another prompt', async () => {
+    const f = fixture(true, false, 'other-prompt');
+    expect(await findHostedCommittedModelOutput(f.session, f.promptId)).toEqual(
+      {
+        promptId: f.promptId,
+      },
+    );
     expect(f.iterateRecords).toHaveBeenCalledWith(12);
   });
 

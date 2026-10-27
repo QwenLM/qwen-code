@@ -64,6 +64,8 @@ CSI application inventory 包含两张历史表的完整类型定义，共 40 �
 
 消息 parent 与 CSI 相邻性消费者使用 `iterateMessageRecords()`，保留既有消息/分支投影通道；`iterateRecords()` 另外包含终态和 domain 记录。不能仅因某个终态 UUID 是完整历史最后一条，就将其作为消息 parent。显式活跃 transcript 链 API 包含链上的元数据记录，与有界模型上下文投影独立。外部 canonical owner parent 正常结束选定链，链内实际重复身份则视为损坏。
 
+已提交模型输出的恢复判断读取固定前缀的完整尾部：后续终态记录必须阻止再次恢复已结算输出。终态身份来自 payload 中的 prompt ID，即使记录没有 daemon prompt ID；其他 prompt 的终态不能阻止本次恢复。该判断与选择对话 parent 不同，不能使用仅消息的流。
+
 Hook 是否有未完成工作的判断需要读取持久化 execution/occurrence 事实，因此 await `hasPendingOperations()`。模型边界、恢复状态检查和 Hook 准入调用方同步使用这一必需方法。测试替身必须提供它；把缺失方法静默视为 false，可能在 Hook 工作尚未结算时准入模型工作。同步回答需要另外常驻一份随历史增长的 pending/历史投影。
 
 Managed recorder 仅保留 tail、记录 ordinal、用户轮次数、未完成工具身份与一个压缩摘要，不保留完整分支记录或逐轮 rewind 数组。完成轮次的 checkpoint 流式读取固定 canonical 活跃链，发布前核对 cursor 到 tail 的条数。取消与 Goal 证据也跨压缩读取该链；Goal 候选及 proof 查询落在共享 owner 缓存的磁盘视图。Legacy recorder/rewind 保持原契约。CSI turn Map 只保留正在执行的工作；终态重试查询 canonical 前缀并返回原结果，不再次调用模型。
@@ -73,6 +75,8 @@ Managed recorder 仅保留 tail、记录 ordinal、用户轮次数、未完成�
 保留既有 `managed-checkpoint-paged/1` 字节格式、48 KiB/32 项页、4,096 页/64 MiB 资格限制和格式下界。新 Turn 的 `before_model` 清除当前 archive 引用，canonical 历史仍完整保留。CLI runtime owner 和 definition pin 检查流式读取完整固定视图，涵盖 inline tail 之外的 pin；pending-message 和原始回执按历史身份查询。生产消费者不通过兼容路径重构完整 tool/binding 数组。
 
 Java checkpoint proof 使用同样的 compact root 与逐页模型。execution/function ID、ordinal 唯一性及 binding 到 tool 的外键通过请求私有的磁盘事实校验；按时间枚举使用经过校验的逆序页 spool。普通 JDBC CSI proof 同时将历史 ID、batch、intent、receipt、frozen batch、资源 inventory 元数据及 execution snapshot 落盘。每个 proof owner 只有固定 640 KiB bucket 目录，记录摘要链连接到受信 bucket head，只有验证完整链后才能回答键不存在。数字前缀游标冻结旧查询，无须复制目录。私有 scratch value 上限为 32 MiB：已经合法的 8 MiB 消息在规范化数值拼写时最多使用三倍字节，另加不足 512 KiB 的有界 batch/refusal 元数据。该上界依据当前 Jackson writer 与 [Java 21 十进制格式](<https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/Double.html#toString(double)>)。私有 codec 保留数值节点类型，包括仍待语义校验拒绝的溢出值。其读取深度 72 容纳经过深度 64 校验的资源外层固定 DTO。execution snapshot 保存 SQL reference/result 原始 JSON，并使用原 ledger parser 恢复，保留小数精度及其来源深度。公共 parser、canonical 消息及通用资源上限保持不变。正文逐条读取，手动 JDBC transaction scope、Spring completion 或显式 offline proof close 释放 scratch owner。这些改动不取消既有 CSI 资格限制，也不能单独证明最终 Java/平台验收通过。
+
+冻结 CSI batch 在 scratch 类型化解码后，将缺失的可选 prepared 引用归一回 Java null。Jackson 的 JSON null node 不能被未修改的准入检查视为已完成 preparation。prepared 对象引用和旧冻结前缀仍保留原值；该归一化不改变 canonical 线上字节。
 
 ## Core API 迁移
 
