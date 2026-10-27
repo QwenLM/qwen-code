@@ -2,6 +2,10 @@
 
 [English](2026-10-19-managed-session-bounded-retention.md) | [简体中文](2026-10-19-managed-session-bounded-retention.zh-CN.md)
 
+## Follow-up status
+
+This document records the slice-1 baseline and its acceptance boundary. [PR5's authority-window design](2026-10-27-managed-session-authority-window.md) now implements historical queries, streamed restoration and terminal-state eviction together. Its execution report and final CI determine qualification. Native snapshots and local sealed conversion were delivered by the intervening PR2/PR3/PR4 slices; the baseline statements below describe slice 1, not the current combined implementation. PR5 retains complete canonical history and does not advance native replay floors or finish #13184.
+
 ## Problem and scope
 
 Issue #13184 tracks growth in managed-agent journals and resident state. This
@@ -168,6 +172,8 @@ The [local terminal-identity lookup slice](2026-10-26-managed-terminal-identity-
 adds a derived per-key query used by terminal duplicate admission. It keeps the
 journal authoritative and retains resident maps; an independently authoritative
 archive and its completeness boundary remain prerequisites for eviction.
+
+PR5 satisfies this dependency with a fresh query generation rebuilt from every verified canonical identity, including terminal results and cold Session epochs. The query view is derived, not a second authority: authenticated pages plus complete prefix coverage prove negative answers, and a missing/corrupt view refuses an answer. Active-only maps and streaming v2 snapshot encoding/decoding replace the full resident terminal maps. This supersedes the proposed independently authoritative archive; it does not introduce identity expiration or delete canonical terminal facts.
 
 ## Validation plan
 

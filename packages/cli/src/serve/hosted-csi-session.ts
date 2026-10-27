@@ -18,6 +18,7 @@ import { LocalManagedSessionAuthority } from '@qwen-code/qwen-code-core/managed-
 import { ManagedSessionRecordSink } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-record-sink.js';
 import {
   assertManagedSessionKey,
+  assertManagedSessionDurableRef,
   ManagedSessionRecordError,
   type ManagedSessionKey,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
@@ -42,6 +43,7 @@ import {
   commitInitialHostedCsiHistory,
 } from './hosted-csi-file-history.js';
 import { recoverHostedCsiReceipts } from './hosted-csi-cold-recovery.js';
+import { hostedSessionRecords } from './hosted-session-records.js';
 
 const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
@@ -54,6 +56,69 @@ class Refusal extends Error {
   ) {
     super(code);
   }
+}
+
+export class HostedCsiHistoryLimitError extends Refusal {
+  readonly limitBytes = 64 * 1024 * 1024;
+  constructor() {
+    super('csi_history_requires_pagination', 413);
+    this.name = 'HostedCsiHistoryLimitError';
+    this.message =
+      'CSI bulk history exceeds 64 MiB. Use paged transcript history.';
+  }
+}
+
+export async function collectHostedCsiHistory(
+  records: AsyncIterable<ChatRecord>,
+): Promise<ChatRecord[]> {
+  const result: ChatRecord[] = [];
+  let bytes = 2;
+  for await (const record of records) {
+    bytes +=
+      (result.length ? 1 : 0) + Buffer.byteLength(JSON.stringify(record));
+    if (bytes > 64 * 1024 * 1024) throw new HostedCsiHistoryLimitError();
+    result.push(record);
+  }
+  return result;
+}
+
+export async function readCommittedHostedCsiTurn(
+  managed: ManagedSession,
+  promptId: string,
+  text: string,
+): Promise<ChatRecord | undefined> {
+  const throughSequence = managed.authority.committedSequence;
+  const input = await managed.authority.findEvent(
+    'input.accepted',
+    'inputId',
+    promptId,
+    { throughSequence },
+  );
+  if (!input) return undefined;
+  const contentRef = assertManagedSessionDurableRef(
+    input.payload['contentRef'],
+    'CSI retry input',
+  );
+  const requested = Buffer.from(JSON.stringify([{ type: 'text', text }]));
+  if (!(await managed.resources.read(contentRef)).equals(requested))
+    throw new Refusal('csi_prompt_conflict');
+  const settlement = await managed.authority.findEvent(
+    'turn.settled',
+    'turnId',
+    promptId,
+    { throughSequence },
+  );
+  if (!settlement) return undefined;
+  const result = await hostedSessionRecords(managed, throughSequence).find(
+    (record) =>
+      record.type === 'system' &&
+      record.subtype === 'turn_result' &&
+      record.systemPayload !== undefined &&
+      'promptId' in record.systemPayload &&
+      record.systemPayload.promptId === promptId,
+  );
+  if (!result) throw new Refusal('csi_prompt_recovery_required');
+  return result;
 }
 
 interface Admission {
@@ -141,9 +206,13 @@ function respond(res: Response, pending: Promise<unknown>): void {
           ? cause
           : new Refusal('csi_operation_unavailable', 503);
       markAccessLogError(res, failure.code);
-      res
-        .status(failure.status)
-        .json({ error: failure.code, code: failure.code });
+      res.status(failure.status).json({
+        error: failure.code,
+        code: failure.code,
+        ...(failure instanceof HostedCsiHistoryLimitError
+          ? { message: failure.message, limitBytes: failure.limitBytes }
+          : {}),
+      });
     },
   );
 }
@@ -517,6 +586,12 @@ export function registerHostedCsiSessionRoutes(
           const prompt = [{ type: 'text', text }];
           const digest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
           const managed = owner.session!.managed;
+          const committed = await readCommittedHostedCsiTurn(
+            managed,
+            promptId,
+            text,
+          );
+          if (committed) return committed;
           const resumed = owner.recovering
             ? await recoverHostedCsiReceipts(managed, broker, promptId, text, {
                 bindingId: owner.admission!.bindingId,
@@ -564,12 +639,15 @@ export function registerHostedCsiSessionRoutes(
             resumed?.finalOutput,
           );
         } catch (cause) {
+          if (cause instanceof Refusal && cause.code === 'csi_prompt_conflict')
+            throw cause;
           blockOwner(owner, contract.bootId, 'text turn', cause);
           clearInterval(owner.timer);
           await owner.stores!.stopLocal();
           throw cause;
         } finally {
           owner.active = undefined;
+          owner.turns.delete(promptId);
         }
       })();
       owner.turns.set(promptId, { text, result });
@@ -595,7 +673,7 @@ export function registerHostedCsiSessionRoutes(
       track(
         owner,
         current(owner, broker).then(() =>
-          owner.session!.managed.sink.project(),
+          collectHostedCsiHistory(owner.session!.managed.sink.iterateRecords()),
         ),
       ),
     );

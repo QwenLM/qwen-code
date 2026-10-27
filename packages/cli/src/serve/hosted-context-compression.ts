@@ -32,7 +32,10 @@ import {
   publishManagedMessageBody,
   readManagedMessageBody,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-message-chunks.js';
-import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import {
+  MANAGED_SESSION_LIMITS,
+  type ManagedSessionDurableRef,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import {
   createHookOutput,
   HookEventName,
@@ -74,8 +77,8 @@ interface CompressionOptions {
   cwd: string;
   agentDefinition?: HostedAgentDefinition;
   instructions: () => Promise<string>;
-  busy: () => boolean;
-  hasPendingHooks: () => boolean;
+  busy: () => boolean | Promise<boolean>;
+  hasPendingHooks: () => boolean | Promise<boolean>;
   fireHook?: (
     event: HookEventName,
     operationId: string,
@@ -116,23 +119,23 @@ export class HostedContextCompression {
 
   get revision(): number {
     const authority = this.options.session.authority;
-    return (
-      authority
-        .eventsInSequenceRange(1, authority.committedSequence)
-        .findLast((event) => event.kind === 'context.compacted')?.sequence ?? 0
-    );
+    return authority.lastEventOfKind('context.compacted')?.sequence ?? 0;
   }
 
-  private record(operationId: string): HistoryMaintenance | undefined {
-    const saved = this.options.session.authority.extensionRecord(
+  private async record(
+    operationId: string,
+  ): Promise<HistoryMaintenance | undefined> {
+    const saved = await this.options.session.authority.extensionRecord(
       'history_maintenance',
       operationId,
     );
     return saved ? parseHistoryMaintenance(saved.record) : undefined;
   }
 
-  status(operationId: string): HostedCompressionStatus | undefined {
-    const record = this.record(operationId);
+  async status(
+    operationId: string,
+  ): Promise<HostedCompressionStatus | undefined> {
+    const record = await this.record(operationId);
     if (!record) return undefined;
     return {
       operationId,
@@ -176,7 +179,7 @@ export class HostedContextCompression {
   async admit(
     intent: HostedCompressionIntent,
   ): Promise<HostedCompressionStatus> {
-    const previous = this.record(intent.operationId);
+    const previous = await this.record(intent.operationId);
     if (previous) {
       const saved = await this.read<CompressionRequest>(previous.requestRef);
       if (
@@ -187,9 +190,9 @@ export class HostedContextCompression {
       )
         throw new HostedCompressionRefusal('idempotency_conflict');
       this.resume();
-      return this.status(intent.operationId)!;
+      return (await this.status(intent.operationId))!;
     }
-    if (this.busy || this.options.busy())
+    if (this.busy || (await this.options.busy()))
       throw new HostedCompressionRefusal('session_context_busy');
     if (this.revision !== intent.expectedCompactionRevision)
       throw new HostedCompressionRefusal('compaction_revision_conflict');
@@ -198,33 +201,51 @@ export class HostedContextCompression {
     try {
       const session = this.options.session;
       const historyCutSequence = session.authority.committedSequence;
-      const settled = new Set(
-        session.authority
-          .eventsInSequenceRange(1, historyCutSequence)
-          .filter((event) => event.kind === 'turn.settled')
-          .map((event) => event.payload['turnId']),
-      );
-      const unanswered = new Set(
-        session.authority
-          .eventsInSequenceRange(1, historyCutSequence)
-          .filter(
-            (event) =>
-              event.kind === 'turn.settled' &&
-              ['error', 'cancelled'].includes(String(event.payload['outcome'])),
-          )
-          .map((event) => event.payload['turnId']),
-      );
-      const history = await session.sink.projectModelHistory({
+      const history = await await session.sink.projectModelHistory({
         throughSequence: historyCutSequence,
-        includeRecord: (entry) =>
-          (entry.type === 'system' || settled.has(entry.daemonPromptId)) &&
-          !(entry.type === 'user' && unanswered.has(entry.daemonPromptId)),
+        includeRecord: async (entry) => {
+          const settlement =
+            entry.daemonPromptId === undefined
+              ? undefined
+              : await session.authority.findEvent(
+                  'turn.settled',
+                  'turnId',
+                  entry.daemonPromptId,
+                  { throughSequence: historyCutSequence },
+                );
+          return (
+            (entry.type === 'system' || settlement !== undefined) &&
+            !(
+              entry.type === 'user' &&
+              settlement &&
+              ['error', 'cancelled'].includes(
+                String(settlement.payload['outcome']),
+              )
+            )
+          );
+        },
       });
-      history.apiHistory = history.apiHistory.filter(
-        (entry) =>
-          entry.role !== 'user' ||
-          !unanswered.has(getApiHistoryPromptId(entry)),
-      );
+      const apiHistory = [];
+      for (const entry of history.apiHistory) {
+        const promptId = getApiHistoryPromptId(entry);
+        const settlement =
+          entry.role !== 'user' || promptId === undefined
+            ? undefined
+            : await session.authority.findEvent(
+                'turn.settled',
+                'turnId',
+                promptId,
+                { throughSequence: historyCutSequence },
+              );
+        if (
+          !settlement ||
+          !['error', 'cancelled'].includes(
+            String(settlement.payload['outcome']),
+          )
+        )
+          apiHistory.push(entry);
+      }
+      history.apiHistory = apiHistory;
       const instructions = await this.options.instructions();
       const config = await this.createConfig(intent, instructions).catch(() => {
         throw new HostedCompressionRefusal(
@@ -257,7 +278,7 @@ export class HostedContextCompression {
           strictResourceCleanup: true,
         });
       }
-      if (this.options.busy())
+      if (await this.options.busy())
         throw new HostedCompressionRefusal('session_context_busy');
       const record: HistoryMaintenance = {
         schemaVersion: 1,
@@ -288,7 +309,7 @@ export class HostedContextCompression {
       committing = true;
       await this.commit(record);
       this.resume();
-      return this.status(intent.operationId)!;
+      return (await this.status(intent.operationId))!;
     } catch (cause) {
       if (!committing && !(cause instanceof HostedCompressionRefusal))
         throw new HostedCompressionRefusal(
@@ -428,9 +449,11 @@ export class HostedContextCompression {
   ): Promise<void> {
     const session = this.options.session;
     const revision =
-      session.authority.extensionRecord(
-        'history_maintenance',
-        record.operationId,
+      (
+        await session.authority.extensionRecord(
+          'history_maintenance',
+          record.operationId,
+        )
       )?.revision ?? 0;
     await session.authority.commitHistoryMaintenance(
       {
@@ -546,6 +569,19 @@ export class HostedContextCompression {
           contextPrefixLength: candidate.contextPrefixLength,
         },
       };
+      const replacedMessageIds: string[] = [];
+      let replacedBytes = 2;
+      for await (const event of session.authority.iterateEvents(
+        session.authority.compactedThroughSequence + 1,
+        current.historyCutSequence,
+      )) {
+        if (event.kind !== 'message.committed') continue;
+        const messageId = event.payload['messageId'] as string;
+        replacedBytes += Buffer.byteLength(JSON.stringify(messageId)) + 1;
+        if (replacedBytes > MANAGED_SESSION_LIMITS.maxTransactionBytes)
+          throw new HostedCompressionRefusal('context_compression_capacity');
+        replacedMessageIds.push(messageId);
+      }
       const summaryRef = await this.publish(record);
       await this.commit(
         {
@@ -561,22 +597,16 @@ export class HostedContextCompression {
           compactionId: current.operationId,
           fromSequence: session.authority.compactedThroughSequence + 1,
           toSequence: current.historyCutSequence,
-          replacedMessageIds: session.authority
-            .eventsInSequenceRange(
-              session.authority.compactedThroughSequence + 1,
-              current.historyCutSequence,
-            )
-            .filter((event) => event.kind === 'message.committed')
-            .map((event) => event.payload['messageId'] as string),
+          replacedMessageIds,
         },
       );
     } catch (cause) {
       if (this.options.session.authority.writesStopped) throw cause;
-      const actual = this.record(current.operationId);
+      const actual = await this.record(current.operationId);
       if (actual?.phase === 'settled') return;
       current = actual ?? current;
       const blocked =
-        this.options.hasPendingHooks() || current.candidateRef !== null;
+        (await this.options.hasPendingHooks()) || current.candidateRef !== null;
       await this.commit({
         ...current,
         phase: blocked ? current.phase : 'settled',

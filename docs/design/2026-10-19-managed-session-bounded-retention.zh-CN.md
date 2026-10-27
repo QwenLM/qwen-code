@@ -2,6 +2,10 @@
 
 [English](2026-10-19-managed-session-bounded-retention.md) | [简体中文](2026-10-19-managed-session-bounded-retention.zh-CN.md)
 
+## 后续状态
+
+本文记录第 1 片的基线与验收边界。[PR5 authority 窗口设计](2026-10-27-managed-session-authority-window.zh-CN.md) 将历史查询、流式恢复和终态淘汰一起实现，其执行报告与最终 CI 决定资格。其间 PR2/PR3/PR4 已交付 native 快照和本地 sealed 转换；下文基线描述第 1 片，而非当前组合实现。PR5 保留完整 canonical 历史，不推进 native replay floor，也不完成整个 #13184。
+
 ## 问题与范围
 
 Issue #13184 跟踪 Managed Agent journal 与驻留状态的增长。本次变更是
@@ -134,6 +138,8 @@ PR3 [#15599](https://github.com/QwenLM/qwen-code/pull/15599) 已合入 PR2 分�
 [本地终态身份查询切片](2026-10-26-managed-terminal-identity-lookup.zh-CN.md)
 增加派生的按 key 查询，并用于终态重复准入。它保留 journal 权威与驻留 Map；
 独立权威的归档及完整性边界仍是淘汰前置条件。
+
+PR5 通过每次从完整已验证 canonical 身份重建新的查询 generation 满足此前置依赖，包含终态结果和冷 Session epoch。查询视图是派生数据，不是第二个 authority：已认证页面与完整前缀覆盖共同证明不存在；视图缺失或损坏则拒绝回答。仅含活跃项的 Map 和流式 v2 快照编解码替代完整终态驻留 Map。这取代此前设想的独立权威归档，不引入身份过期，也不删除 canonical 终态事实。
 
 ## 验证计划
 

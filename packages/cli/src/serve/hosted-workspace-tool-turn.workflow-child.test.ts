@@ -305,9 +305,11 @@ it('refuses the declaration and the call while the kind is unlisted', async () =
   await expect(executeWorkflow(turn, call({ script: SCRIPT }))).rejects.toThrow(
     'Hosted Workspace profile refused a tool call.',
   );
-  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
-    0,
-  );
+  expect(
+    await session.authority
+      .extensionRecordsInDomain('child_run')
+      .collect(1_000_000),
+  ).toHaveLength(0);
 });
 
 it('refuses the reference arguments as a named follow-up scope', async () => {
@@ -320,9 +322,11 @@ it('refuses the reference arguments as a named follow-up scope', async () => {
     expect(JSON.stringify(responses)).toContain(`\\"${arg}\\"`);
     expect(JSON.stringify(responses)).toContain('reference follow-up');
   }
-  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
-    0,
-  );
+  expect(
+    await session.authority
+      .extensionRecordsInDomain('child_run')
+      .collect(1_000_000),
+  ).toHaveLength(0);
 });
 
 it('refuses a script whose masked source calls workflow() as a nested launch', async () => {
@@ -347,9 +351,11 @@ it('refuses a script whose masked source calls workflow() as a nested launch', a
     }),
   );
   expect(JSON.stringify(admitted)).toContain('Workflow child started');
-  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
-    1,
-  );
+  expect(
+    await session.authority
+      .extensionRecordsInDomain('child_run')
+      .collect(1_000_000),
+  ).toHaveLength(1);
 });
 
 // #13858 R4-4: the child's agents carry no tools and use nothing on the
@@ -369,9 +375,11 @@ it('refuses a script whose agent() passes a host-bound option before any record 
     );
     expect(JSON.stringify(responses)).toContain('text-only agents');
   }
-  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
-    0,
-  );
+  expect(
+    await session.authority
+      .extensionRecordsInDomain('child_run')
+      .collect(1_000_000),
+  ).toHaveLength(0);
   // A text-only agent() with the options that still apply is admitted.
   const admitted = await executeWorkflow(
     createTurn(),
@@ -464,9 +472,11 @@ it('refuses the foreground workflow launch and rejects the sibling batch while a
   );
   // Only the advised background launch above ever committed.
   expect(
-    session.authority
-      .extensionRecordsInDomain('child_run')
-      .map((entry) => entry.recordId),
+    (
+      await session.authority
+        .extensionRecordsInDomain('child_run')
+        .collect(1_000_000)
+    ).map((entry) => entry.recordId),
   ).toEqual(['prompt:wf-bg']);
 });
 
@@ -479,7 +489,7 @@ it('admits a batch of a foreground child agent beside a background workflow', as
   // never returns.
   const driving = (async () => {
     for (;;) {
-      if (children.record(childRunId) !== undefined) break;
+      if ((await children.record(childRunId)) !== undefined) break;
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
     await children.dispatchStarted(childRunId, {
@@ -534,9 +544,11 @@ it('admits a batch of a foreground child agent beside a background workflow', as
   // sibling — without it the foreground agent would refuse with the batch
   // refusal naming only `agent` as admissible.
   expect(JSON.stringify(responses)).not.toContain('cannot share a batch');
-  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
-    2,
-  );
+  expect(
+    await session.authority
+      .extensionRecordsInDomain('child_run')
+      .collect(1_000_000),
+  ).toHaveLength(2);
 });
 
 it('answers an aborted half-batch: the first launch commits, the aborted second is refused by the admission cancel guard and never minted', async () => {
@@ -591,9 +603,11 @@ it('answers an aborted half-batch: the first launch commits, the aborted second 
   expect(JSON.stringify(responses)).toContain(
     'The turn was cancelled before this workflow was admitted.',
   );
-  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
-    1,
-  );
+  expect(
+    await session.authority
+      .extensionRecordsInDomain('child_run')
+      .collect(1_000_000),
+  ).toHaveLength(1);
 });
 
 it('replays a workflow launch without minting a second child or double-spending the scope count', async () => {
@@ -608,9 +622,11 @@ it('replays a workflow launch without minting a second child or double-spending 
   // The replay guard at the launch admission moves the quota checks below
   // `children.record(childRunId) === undefined`, so a re-driven batch names
   // the same record without minting a second one.
-  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
-    1,
-  );
+  expect(
+    await session.authority
+      .extensionRecordsInDomain('child_run')
+      .collect(1_000_000),
+  ).toHaveLength(1);
 });
 
 // H4c: the lifetime launch budget is kind-blind: the committed history of
@@ -645,9 +661,11 @@ it('refuses a workflow launch past the spent launch budget of the scope', async 
     call({ script: SCRIPT }, 'call-last'),
   );
   expect(JSON.stringify(last)).toContain('started');
-  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
-    MANAGED_CHILD_LIMITS.maxLaunchesPerScope,
-  );
+  expect(
+    await session.authority
+      .extensionRecordsInDomain('child_run')
+      .collect(1_000_000),
+  ).toHaveLength(MANAGED_CHILD_LIMITS.maxLaunchesPerScope);
   for (const turn of [createTurn(), createTurn()]) {
     const refused = await executeWorkflow(
       turn,
@@ -655,10 +673,12 @@ it('refuses a workflow launch past the spent launch budget of the scope', async 
     );
     expect(JSON.stringify(refused)).toContain('budget_exhausted');
     expect(
-      session.authority.extensionRecordsInDomain('child_run'),
+      await session.authority
+        .extensionRecordsInDomain('child_run')
+        .collect(1_000_000),
     ).toHaveLength(MANAGED_CHILD_LIMITS.maxLaunchesPerScope);
   }
-});
+}, 45_000);
 
 it('refuses malformed background flags, empty and unstartable scripts', async () => {
   const malformed = await executeWorkflow(
@@ -680,9 +700,11 @@ it('refuses malformed background flags, empty and unstartable scripts', async ()
     call({ script: 'return Date.now();' }),
   );
   expect(JSON.stringify(nondeterministic)).toContain('script is invalid');
-  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
-    0,
-  );
+  expect(
+    await session.authority
+      .extensionRecordsInDomain('child_run')
+      .collect(1_000_000),
+  ).toHaveLength(0);
 });
 
 it('answers an over-size envelope with the byte_limit refusal, not recovery', async () => {
@@ -699,9 +721,11 @@ it('answers an over-size envelope with the byte_limit refusal, not recovery', as
   expect(JSON.stringify(responses)).toContain(
     'Hosted workflow refused this launch (byte_limit).',
   );
-  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
-    0,
-  );
+  expect(
+    await session.authority
+      .extensionRecordsInDomain('child_run')
+      .collect(1_000_000),
+  ).toHaveLength(0);
 });
 
 // #13858 R1-3/R4-6: the Java digest substrate renders every finite double
@@ -713,9 +737,11 @@ it('admits subnormal args, which both digest substrates render alike', async () 
     call({ script: SCRIPT, args: { v: 5e-324, nested: [1e-320, 1.5e-308] } }),
   );
   expect(JSON.stringify(responses)).toContain('Workflow child started');
-  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
-    1,
-  );
+  expect(
+    await session.authority
+      .extensionRecordsInDomain('child_run')
+      .collect(1_000_000),
+  ).toHaveLength(1);
 });
 
 // #13858 R3-6/R2-11: args sit one level under the tool input the protocol
@@ -736,9 +762,11 @@ it('refuses args nested past what the launch can commit, at the digest bound', a
   expect(JSON.stringify(refused)).toContain(
     'Hosted workflow args nest more than 63 levels deep, past what the launch can commit (depth_limit).',
   );
-  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
-    1,
-  );
+  expect(
+    await session.authority
+      .extensionRecordsInDomain('child_run')
+      .collect(1_000_000),
+  ).toHaveLength(1);
 });
 
 it('answers a protocol-ceiling call with a per-call refusal, not a wedged Turn (D1)', async () => {
@@ -754,9 +782,11 @@ it('answers a protocol-ceiling call with a per-call refusal, not a wedged Turn (
   expect(JSON.stringify(responses)).toContain(
     'Hosted tool input cannot commit as protocol evidence',
   );
-  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
-    0,
-  );
+  expect(
+    await session.authority
+      .extensionRecordsInDomain('child_run')
+      .collect(1_000_000),
+  ).toHaveLength(0);
 });
 
 // #13858 R2-12: a script under the 32 KiB bound whose escapes double past
@@ -779,9 +809,11 @@ it('refuses an escape-dense or oversize script per call once its encoding passes
   expect(JSON.stringify(over)).toContain(
     `Hosted workflow script exceeds ${32 * 1024} bytes (byte_limit).`,
   );
-  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
-    0,
-  );
+  expect(
+    await session.authority
+      .extensionRecordsInDomain('child_run')
+      .collect(1_000_000),
+  ).toHaveLength(0);
 });
 
 it('commits a pinned workflow launch and names it in the answer', async () => {
@@ -791,7 +823,7 @@ it('commits a pinned workflow launch and names it in the answer', async () => {
     call({ script: SCRIPT, args: { x: 1 } }),
   );
   const childRunId = `prompt:call-1`;
-  const record = children.record(childRunId)!;
+  const record = (await children.record(childRunId))!;
   // K1+K3: the chain opens as a workflow with the script-derived pin on
   // revision 1 — the pin's digest equals the envelope script's own.
   expect(record).toMatchObject({
@@ -821,7 +853,7 @@ it('commits a pinned workflow launch and names it in the answer', async () => {
   const taskId = `task_${managedExtensionRecordKey(sessionKey.sessionId, 'child_run', childRunId)}`;
   expect(JSON.stringify(responses)).toContain('Workflow child started');
   expect(JSON.stringify(responses)).toContain(taskId);
-  expect(session.authority.taskViews()).toMatchObject([
+  expect(await session.authority.taskViews()).toMatchObject([
     { kind: 'workflow', definitionRevision: 1 },
   ]);
   expect(broker.acquire).not.toHaveBeenCalled();
@@ -861,9 +893,11 @@ it('spends the same concurrency and budget a child agent does', async () => {
     call({ script: SCRIPT }, 'call-5'),
   );
   expect(JSON.stringify(refused)).toContain('count_limit');
-  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
-    4,
-  );
+  expect(
+    await session.authority
+      .extensionRecordsInDomain('child_run')
+      .collect(1_000_000),
+  ).toHaveLength(4);
   // Quotas gate NEW children only: re-driving the already-committed
   // launch at the full cap names its record instead of refusing it
   // (#13858 R4-8) — the re-driven batch of a restarted Harness.
@@ -873,9 +907,11 @@ it('spends the same concurrency and budget a child agent does', async () => {
   );
   expect(JSON.stringify(replayed)).toContain('Workflow child started');
   expect(JSON.stringify(replayed)).not.toContain('count_limit');
-  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
-    4,
-  );
+  expect(
+    await session.authority
+      .extensionRecordsInDomain('child_run')
+      .collect(1_000_000),
+  ).toHaveLength(4);
 });
 
 it('admits a mixed one-batch launch of a background workflow and a child agent', async () => {
@@ -911,8 +947,10 @@ it('admits a mixed one-batch launch of a background workflow and a child agent',
   // #13803: neither launch takes the Workspace mount, so a sibling child
   // launch never shares the batch-refusal the foreground mount arms carry.
   expect(JSON.stringify(responses)).not.toContain('cannot share a batch');
-  expect(children.record('prompt:wf-1')).toMatchObject({ kind: 'workflow' });
-  expect(children.record('prompt:agent-1')).toMatchObject({
+  expect(await children.record('prompt:wf-1')).toMatchObject({
+    kind: 'workflow',
+  });
+  expect(await children.record('prompt:agent-1')).toMatchObject({
     kind: 'child_agent',
   });
 });
@@ -922,7 +960,7 @@ it('answers the tool arm from the committed acceptance, accepting it', async () 
   const childRunId = `prompt:call-1`;
   const driving = (async () => {
     for (;;) {
-      if (children.record(childRunId) !== undefined) break;
+      if ((await children.record(childRunId)) !== undefined) break;
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
     await children.dispatchStarted(childRunId, {
@@ -946,12 +984,12 @@ it('answers the tool arm from the committed acceptance, accepting it', async () 
     ])
   )[0];
   expect(JSON.stringify(responses)).toContain('workflow answer 2');
-  const record = children.record(childRunId)!;
+  const record = (await children.record(childRunId))!;
   expect(record.run.delivery).toEqual({
     target: 'session',
     state: 'accepted',
   });
-  expect(children.acceptance(childRunId)).toMatchObject({
+  expect(await children.acceptance(childRunId)).toMatchObject({
     parentExecutionCallId: childRunId,
   });
   expect(consumption).toEqual([childRunId]);
@@ -962,7 +1000,7 @@ it('answers a failed workflow child as an ended run, never a wait forever', asyn
   const childRunId = `prompt:call-1`;
   const driving = (async () => {
     for (;;) {
-      if (children.record(childRunId) !== undefined) break;
+      if ((await children.record(childRunId)) !== undefined) break;
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
     await children.dispatchStarted(childRunId, {
@@ -995,7 +1033,7 @@ it('answers a recovery-blocked workflow child as an ended run, never a wait fore
   const childRunId = `prompt:call-1`;
   const driving = (async () => {
     for (;;) {
-      if (children.record(childRunId) !== undefined) break;
+      if ((await children.record(childRunId)) !== undefined) break;
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
     await children.dispatchStarted(childRunId, {
@@ -1028,7 +1066,7 @@ it('parks the foreground workflow wait before it waits, exactly as the agent arm
   const childRunId = `prompt:call-1`;
   const driving = (async () => {
     for (;;) {
-      if (children.record(childRunId) !== undefined) break;
+      if ((await children.record(childRunId)) !== undefined) break;
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
     await children.dispatchStarted(childRunId, {

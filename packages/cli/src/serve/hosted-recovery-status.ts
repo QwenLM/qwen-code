@@ -35,8 +35,8 @@ export interface HostedRecoverySession {
   mcpRecovering: number;
   mcpClosing?: boolean;
   hooksBusy?: boolean;
-  mcp?: { readonly recoveryBlocked: boolean };
-  hooks?: { readonly hasPendingOperations: boolean };
+  mcp?: { recoveryBlocked(): Promise<boolean> };
+  hooks?: { hasPendingOperations(): Promise<boolean> };
 }
 
 /** Reads committed evidence only; a moving or unreadable view cannot admit work. */
@@ -46,24 +46,28 @@ export async function inspectHostedRecovery(
 ): Promise<HostedRecoveryStatus> {
   const authority = session.managed.authority;
   const sequence = authority.committedSequence;
-  const events = authority.eventsInSequenceRange(1, sequence);
-  const pending = new Set<string>();
-  const accepted = new Set<string>();
-  const settled = new Map<string, number>();
-  for (const event of events) {
-    const turnId = event.payload['turnId'];
-    if (typeof turnId !== 'string') continue;
-    if (event.kind === 'input.accepted') {
-      accepted.add(turnId);
-      pending.add(turnId);
-    } else if (event.kind === 'turn.settled') {
-      pending.delete(turnId);
-      settled.set(turnId, event.sequence);
-    }
-  }
-  const promptId = requestedPromptId ?? [...accepted].at(-1) ?? null;
+  const pending = await authority.pendingInputsAt(sequence);
+  const input = requestedPromptId
+    ? await authority.findEvent('input.accepted', 'turnId', requestedPromptId, {
+        throughSequence: sequence,
+      })
+    : await authority.findEvent('input.accepted', 'kind', 'input.accepted', {
+        last: true,
+        throughSequence: sequence,
+      });
+  const promptId =
+    requestedPromptId ??
+    (typeof input?.payload['turnId'] === 'string'
+      ? input.payload['turnId']
+      : null);
+  const settled =
+    promptId === null
+      ? undefined
+      : await authority.findEvent('turn.settled', 'turnId', promptId, {
+          throughSequence: sequence,
+        });
   const inputSettled =
-    promptId === null || (accepted.has(promptId) && !pending.has(promptId));
+    promptId === null || (input !== undefined && settled !== undefined);
   let continuationReady = false;
   const status = (
     state: HostedRecoveryStatus['state'],
@@ -76,7 +80,7 @@ export async function inspectHostedRecovery(
     continuationReady,
     nextTurnAllowed: state === 'ready',
   });
-  if (requestedPromptId && !accepted.has(requestedPromptId))
+  if (requestedPromptId && input === undefined)
     return status('operator_required', 'original_input_missing');
   try {
     const authorization = await authority.harnessRunAuthorization();
@@ -84,15 +88,15 @@ export async function inspectHostedRecovery(
     if (authority.committedSequence !== sequence)
       return status('awaiting_evidence', 'evidence_changed');
     if (authorization.status === 'initial') {
-      continuationReady = inputSettled && pending.size === 0;
+      continuationReady = inputSettled && pending.length === 0;
     } else if (authorization.status === 'runnable') {
       const checkpoint = authorization.checkpoint;
       continuationReady =
         inputSettled &&
-        pending.size === 0 &&
+        pending.length === 0 &&
         (promptId === null ||
           checkpoint.identity.coveredSequence >=
-            (settled.get(promptId) ?? Infinity) - 1) &&
+            (settled?.sequence ?? Infinity) - 1) &&
         checkpoint.continuation.phase === 'before_model' &&
         checkpoint.continuation.pendingEventIds.length === 0 &&
         checkpoint.attempt === null &&
@@ -121,7 +125,7 @@ export async function inspectHostedRecovery(
           : 'awaiting_evidence',
         `checkpoint_${authorization.reason}`,
       );
-    if (pending.size > 0)
+    if (pending.length > 0)
       return status(
         session.hooks || session.mcp
           ? 'operator_required'
@@ -137,12 +141,15 @@ export async function inspectHostedRecovery(
     if (history?.pendingTurn || session.fileHistoryOwed)
       return status('cleanup_pending', 'file_history_pending');
     if (
-      hasHostedCleanupDebt(session.managed) ||
+      (await hasHostedCleanupDebt(session.managed)) ||
       session.runtimeLeaseOwedByTerminalRoute ||
       session.cleanupBlocked
     )
       return status('cleanup_pending', 'runtime_cleanup_pending');
-    if (session.hooks?.hasPendingOperations || session.mcp?.recoveryBlocked)
+    if (
+      (await session.hooks?.hasPendingOperations()) ||
+      (await session.mcp?.recoveryBlocked())
+    )
       return status('operator_required', 'unsupported_extension_recovery');
     if (session.blocked || authority.writesStopped)
       return status(

@@ -215,8 +215,8 @@ export class EmbeddedHarnessScheduler {
     );
   }
 
-  dispose(): void {
-    if (this.disposed) return;
+  dispose(): Promise<void> {
+    if (this.disposed) return this.store.waitForIdle();
     this.disposed = true;
     if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
     this.recoveryTimer = undefined;
@@ -228,6 +228,7 @@ export class EmbeddedHarnessScheduler {
       if (run.renewalTimer) clearTimeout(run.renewalTimer);
       run.controller.abort(error);
     }
+    return this.store.waitForIdle();
   }
 
   private requestPump(options?: {

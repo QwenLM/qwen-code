@@ -7,10 +7,12 @@
 import { randomUUID } from 'node:crypto';
 import {
   buildGoalVerifierEvidenceWindow,
+  buildGoalVerifierEvidenceWindowFromHistory,
   VERIFIER_EVIDENCE_WINDOW_MIN_BYTES,
   type GoalEvidenceRecord,
   type GoalVerifierEvidenceWindow,
 } from './goal-evidence.js';
+import type { FileManagedSessionHistory } from '../managed-runtime/managed-session-history.js';
 import {
   GOAL_DEFAULT_TOKEN_BUDGET,
   GOAL_INFEASIBLE_NEXT_STEP,
@@ -122,6 +124,8 @@ export interface GoalTurnLedger {
 export interface GoalEvidenceSource {
   flush(): Promise<void>;
   readActiveTranscriptChain(): Promise<readonly GoalEvidenceRecord[]>;
+  readActiveTranscriptHistory?(): Promise<AsyncIterable<GoalEvidenceRecord>>;
+  createTranscriptQueryHistory?(): FileManagedSessionHistory | undefined;
 }
 
 export class GoalPersistenceUnavailableError extends Error {
@@ -967,35 +971,64 @@ export function createGoalRuntime(
     try {
       await evidenceSource.flush();
       if (attempt.controller.signal.aborted) return;
-      const records = await evidenceSource.readActiveTranscriptChain();
-      if (attempt.controller.signal.aborted) return;
-      // The window gets whatever the request has left once the objective,
-      // the reason and the policy are in it, measured on the real payload
-      // with the largest omitted count standing in for the real one. The
-      // window counts its own turn-id list against the budget.
-      const budgetBytes =
-        GOAL_VERIFIER_REQUEST_BYTE_LIMIT -
-        measureGoalVerifierEnvelopeBytes(
-          verifierInput(attempt, {
-            evidence: [],
-            turnIds: [],
-            omitted: Number.MAX_SAFE_INTEGER,
-          }),
-        );
-      if (budgetBytes < VERIFIER_EVIDENCE_WINDOW_MIN_BYTES) {
-        // Not a verifier failure a resume could get past: the objective or
-        // the reason leaves no room for even one full record, so every
-        // proposal would be rejected for what the window left out.
-        await recordVerificationOutcome(attempt, {
-          kind: 'paused',
-          reason: GOAL_VERIFIER_ENVELOPE_TOO_LARGE_REASON,
-        });
-        return;
+      const scratch = evidenceSource.readActiveTranscriptHistory
+        ? evidenceSource.createTranscriptQueryHistory?.()
+        : undefined;
+      let window: GoalVerifierEvidenceWindow;
+      try {
+        const history = scratch
+          ? await evidenceSource.readActiveTranscriptHistory!()
+          : undefined;
+        const records = history
+          ? undefined
+          : await evidenceSource.readActiveTranscriptChain();
+        if (attempt.controller.signal.aborted) return;
+        // The window gets whatever the request has left once the objective,
+        // the reason and the policy are in it, measured on the real payload
+        // with the largest omitted count standing in for the real one. The
+        // window counts its own turn-id list against the budget.
+        const budgetBytes =
+          GOAL_VERIFIER_REQUEST_BYTE_LIMIT -
+          measureGoalVerifierEnvelopeBytes(
+            verifierInput(attempt, {
+              evidence: [],
+              turnIds: [],
+              omitted: Number.MAX_SAFE_INTEGER,
+            }),
+          );
+        if (budgetBytes < VERIFIER_EVIDENCE_WINDOW_MIN_BYTES) {
+          // Not a verifier failure a resume could get past: the objective or
+          // the reason leaves no room for even one full record, so every
+          // proposal would be rejected for what the window left out.
+          await recordVerificationOutcome(attempt, {
+            kind: 'paused',
+            reason: GOAL_VERIFIER_ENVELOPE_TOO_LARGE_REASON,
+          });
+          return;
+        }
+        window =
+          history && scratch
+            ? await buildGoalVerifierEvidenceWindowFromHistory(
+                {
+                  records: history,
+                  history: scratch,
+                  goal: attempt.goal,
+                  permit: attempt.permit,
+                },
+                { budgetBytes },
+              )
+            : buildGoalVerifierEvidenceWindow(
+                {
+                  records: records!,
+                  goal: attempt.goal,
+                  permit: attempt.permit,
+                },
+                { budgetBytes },
+              );
+      } finally {
+        await scratch?.close();
       }
-      const window = buildGoalVerifierEvidenceWindow(
-        { records, goal: attempt.goal, permit: attempt.permit },
-        { budgetBytes },
-      );
+      if (attempt.controller.signal.aborted) return;
       verifierCalled = true;
       const result = await verifier(
         verifierInput(attempt, window),

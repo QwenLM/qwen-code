@@ -173,11 +173,11 @@ function admitCall(orchestrator: HostedMonitorSession, maxEvents = 100) {
   });
 }
 
-function committed(authority: LocalManagedSessionAuthority): {
+async function committed(authority: LocalManagedSessionAuthority): Promise<{
   revision: number;
   body: ReturnType<typeof parseMonitorRun>;
-} {
-  const existing = authority.extensionRecord('monitor_run', 'monitor-1');
+}> {
+  const existing = await authority.extensionRecord('monitor_run', 'monitor-1');
   if (!existing) throw new Error('No monitor_run record for monitor-1.');
   return {
     revision: existing.revision,
@@ -194,8 +194,8 @@ describe('HostedMonitorSession', () => {
       expect(
         JSON.parse((await harness.store.read(commandRef)).toString()),
       ).toEqual(ARGS);
-      expect(committed(authority).revision).toBe(1);
-      expect(authority.taskViews()).toEqual([
+      expect((await committed(authority)).revision).toBe(1);
+      expect(await authority.taskViews()).toEqual([
         {
           taskId: TASK_ID,
           sessionId,
@@ -211,7 +211,7 @@ describe('HostedMonitorSession', () => {
 
       harness.now = 2_000;
       await orchestrator.dispatchStarted('monitor-1', BINDING);
-      expect(committed(authority).body.run).toMatchObject({
+      expect((await committed(authority)).body.run).toMatchObject({
         state: 'admitted',
         execution: 'dispatch_started',
         runtime: BINDING,
@@ -219,7 +219,7 @@ describe('HostedMonitorSession', () => {
 
       harness.now = 3_000;
       await orchestrator.attach('monitor-1', BINDING, { watch: 'started' });
-      const attached = committed(authority);
+      const attached = await committed(authority);
       expect(attached.revision).toBe(3);
       expect(attached.body.startReceiptRef?.kind).toBe(
         'managed-runtime-receipt',
@@ -231,7 +231,7 @@ describe('HostedMonitorSession', () => {
 
       harness.now = 4_000;
       await orchestrator.observe('monitor-1', { size: 1024 });
-      const observed = committed(authority);
+      const observed = await committed(authority);
       expect(observed.revision).toBe(4);
       expect(observed.body.observationSequence).toBe(1);
       expect(
@@ -244,7 +244,7 @@ describe('HostedMonitorSession', () => {
 
       harness.now = 5_000;
       await orchestrator.observe('monitor-1', { size: 2048 });
-      expect(committed(authority).body.observationSequence).toBe(2);
+      expect((await committed(authority)).body.observationSequence).toBe(2);
 
       harness.now = 6_000;
       const manifest = await harness.store.publish(
@@ -252,35 +252,35 @@ describe('HostedMonitorSession', () => {
         manifestBody({ revision: 1 }),
       );
       await orchestrator.advanceOutput('monitor-1', manifest);
-      expect(committed(authority).body.outputRef).toEqual(manifest);
+      expect((await committed(authority)).body.outputRef).toEqual(manifest);
       const manifestTwo = await harness.store.publish(
         'managed-tool-result-manifest',
         manifestBody({ revision: 2 }),
       );
       await orchestrator.advanceOutput('monitor-1', manifestTwo);
-      expect(committed(authority).body.outputRef).toEqual(manifestTwo);
+      expect((await committed(authority)).body.outputRef).toEqual(manifestTwo);
       // Output only ever advances forward: back to the older revision
       // refuses exactly, leaving nothing committed behind.
       await expect(
         orchestrator.advanceOutput('monitor-1', manifest),
       ).rejects.toThrow('lineage');
-      expect(committed(authority).body.outputRef).toEqual(manifestTwo);
+      expect((await committed(authority)).body.outputRef).toEqual(manifestTwo);
       // A replay of the very same reference is a no-op, not a refusal: a
       // redelivered advance must never wedge the watch's exit leg.
-      const revisionBeforeReplay = committed(authority).revision;
+      const revisionBeforeReplay = (await committed(authority)).revision;
       await orchestrator.advanceOutput('monitor-1', manifestTwo);
-      expect(committed(authority).revision).toBe(revisionBeforeReplay);
-      expect(committed(authority).body.outputRef).toEqual(manifestTwo);
+      expect((await committed(authority)).revision).toBe(revisionBeforeReplay);
+      expect((await committed(authority)).body.outputRef).toEqual(manifestTwo);
 
       harness.now = 7_000;
       await orchestrator.settleQuiet('monitor-1', 'exited');
-      const settled = committed(authority);
+      const settled = await committed(authority);
       expect(settled.body.run).toMatchObject({
         state: 'settled',
         execution: 'settled',
       });
       expect(settled.body.stopReason).toBe('exited');
-      expect(authority.taskViews()).toEqual([
+      expect(await authority.taskViews()).toEqual([
         {
           taskId: TASK_ID,
           sessionId,
@@ -319,7 +319,7 @@ describe('HostedMonitorSession', () => {
       // already carries every skipped revision forward.
       const leapt = await publish(manifestBody({ revision: 3 }));
       await orchestrator.advanceOutput('monitor-1', leapt);
-      expect(committed(authority).body.outputRef).toEqual(leapt);
+      expect((await committed(authority)).body.outputRef).toEqual(leapt);
       const backward = await publish(manifestBody({ revision: 2 }));
       await expect(
         orchestrator.advanceOutput('monitor-1', backward),
@@ -353,7 +353,7 @@ describe('HostedMonitorSession', () => {
       ).rejects.toThrow(ManagedSessionRecordError);
       await orchestrator.observe('monitor-1', { size: 2 });
       await orchestrator.settleQuiet('monitor-1', 'max_events');
-      expect(committed(authority).body).toMatchObject({
+      expect((await committed(authority)).body).toMatchObject({
         observationSequence: 2,
         stopReason: 'max_events',
         run: { state: 'settled', execution: 'settled' },
@@ -366,7 +366,7 @@ describe('HostedMonitorSession', () => {
       await orchestrator.dispatchStarted('monitor-1', BINDING);
       await orchestrator.attach('monitor-1', BINDING, { watch: 'started' });
       await orchestrator.settleQuiet('monitor-1', 'idle_timeout');
-      expect(committed(authority).body).toMatchObject({
+      expect((await committed(authority)).body).toMatchObject({
         stopReason: 'idle_timeout',
         run: { state: 'settled', execution: 'settled' },
       });
@@ -395,19 +395,16 @@ describe('HostedMonitorSession', () => {
         wakeReason: 'input',
       };
       await orchestrator.observe('monitor-1', { size: 1 }, { input });
-      expect(committed(authority).body).toMatchObject({
+      expect((await committed(authority)).body).toMatchObject({
         observationSequence: 1,
         notifiedThrough: 1,
       });
       expect(
-        authority
-          .readEvents()
-          .slice(-3)
-          .map((event) => event.kind),
+        (await authority.readEvents()).slice(-3).map((event) => event.kind),
       ).toEqual(['domain.committed', 'input.accepted', 'wake.requested']);
 
       await orchestrator.observe('monitor-1', { size: 2 });
-      expect(committed(authority).body).toMatchObject({
+      expect((await committed(authority)).body).toMatchObject({
         observationSequence: 2,
         notifiedThrough: 1,
       });
@@ -423,7 +420,7 @@ describe('HostedMonitorSession', () => {
         stopReason: 'start_failed',
         started: false,
       });
-      expect(committed(authority).body).toMatchObject({
+      expect((await committed(authority)).body).toMatchObject({
         startReceiptRef: null,
         stopReason: 'start_failed',
         run: { state: 'failed', execution: 'not_started_proven' },
@@ -439,7 +436,7 @@ describe('HostedMonitorSession', () => {
         stopReason: 'watch_failed',
         started: true,
       });
-      expect(committed(authority).body).toMatchObject({
+      expect((await committed(authority)).body).toMatchObject({
         stopReason: 'watch_failed',
         run: { state: 'failed', execution: 'settled' },
       });
@@ -456,7 +453,7 @@ describe('HostedMonitorSession', () => {
         orchestrator.attach('monitor-1', BINDING, { watch: 'again' }),
       ).rejects.toThrow(ManagedSessionRecordError);
       await orchestrator.settleStopRequested('monitor-1');
-      expect(committed(authority).body).toMatchObject({
+      expect((await committed(authority)).body).toMatchObject({
         stopReason: 'stop_requested',
         run: { state: 'cancelled', execution: 'settled' },
       });
@@ -470,10 +467,10 @@ describe('HostedMonitorSession', () => {
       await orchestrator.dispatchStarted('monitor-1', BINDING);
       await orchestrator.attach('monitor-1', BINDING, { watch: 'started' });
       await orchestrator.observe('monitor-1', { size: 1024 });
-      const attached = committed(authority).body;
+      const attached = (await committed(authority)).body;
 
       await orchestrator.blockedRuntimeLost('monitor-1');
-      const blocked = committed(authority).body;
+      const blocked = (await committed(authority)).body;
       expect(blocked).toMatchObject({
         run: {
           state: 'recovery_blocked',
@@ -487,7 +484,7 @@ describe('HostedMonitorSession', () => {
       await orchestrator.rebuildFromRuntimeLost('monitor-1', rebuildBinding, {
         watch: 'restarted',
       });
-      const rebuilt = committed(authority).body;
+      const rebuilt = (await committed(authority)).body;
       expect(rebuilt.run).toMatchObject({
         state: 'running',
         reason: 'runtime_lost',

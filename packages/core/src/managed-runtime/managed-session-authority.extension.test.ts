@@ -471,7 +471,7 @@ describe('managed-extension-projection/1 monitor chains', () => {
             },
             TRUSTED,
           );
-          const [view] = authority.taskViews();
+          const [view] = await authority.taskViews();
           expect(view).toEqual({
             taskId: `task_${managedExtensionRecordKey(sessionId, 'monitor_run', revision.monitorRun.monitorId)}`,
             sessionId,
@@ -541,7 +541,7 @@ describe('managed session authority Stage H records', () => {
       expect(
         JSON.parse((await harness.store.read(first.recordRef)).toString()),
       ).toEqual(life[0]);
-      expect(authority.taskViews()).toEqual([
+      expect(await authority.taskViews()).toEqual([
         {
           taskId: TASK_ID,
           sessionId,
@@ -563,26 +563,26 @@ describe('managed session authority Stage H records', () => {
           TRUSTED,
         );
         if (index === 4) {
-          expect(authority.taskViews()[0]).toMatchObject({
+          expect((await authority.taskViews())[0]).toMatchObject({
             state: 'recovery_blocked',
             runtimeState: 'lost',
           });
         }
         if (index === 5) {
-          expect(authority.taskViews()[0]).toMatchObject({
+          expect((await authority.taskViews())[0]).toMatchObject({
             state: 'degraded',
             runtimeState: 'ready',
           });
         }
       }
       expect(
-        authority.extensionRecord('monitor_run', 'monitor-1'),
+        await authority.extensionRecord('monitor_run', 'monitor-1'),
       ).toMatchObject({
         revision: life.length,
         operationId: 'monitor-1:1',
         record: life.at(-1),
       });
-      expect(authority.taskViews()).toEqual([
+      expect(await authority.taskViews()).toEqual([
         {
           taskId: TASK_ID,
           sessionId,
@@ -627,7 +627,7 @@ describe('managed session authority Stage H records', () => {
       );
       // Created at the same time, the two newest order by task ID.
       const tied = [second.taskId, third.taskId].sort().reverse();
-      expect(authority.taskViews().map((view) => view.taskId)).toEqual([
+      expect((await authority.taskViews()).map((view) => view.taskId)).toEqual([
         ...tied,
         TASK_ID,
       ]);
@@ -647,7 +647,7 @@ describe('managed session authority Stage H records', () => {
         ),
       ).rejects.toThrow(ManagedSessionConflictError);
       expect(authority.committedSequence).toBe(before);
-      expect(authority.taskViews()).toEqual([]);
+      expect(await authority.taskViews()).toEqual([]);
     });
   });
 
@@ -678,7 +678,7 @@ describe('managed session authority Stage H records', () => {
         ),
       ).rejects.toThrow(/cannot follow its revision 4/);
       expect(
-        authority.extensionRecord('monitor_run', 'monitor-1')?.revision,
+        (await authority.extensionRecord('monitor_run', 'monitor-1'))?.revision,
       ).toBe(4);
     });
   });
@@ -939,7 +939,7 @@ describe('managed session authority Stage H records', () => {
         async (authority) => {
           // The envelope is skipped as a pre-registration record; nothing
           // materializes from it.
-          expect(authority.taskViews()).toEqual([]);
+          expect(await authority.taskViews()).toEqual([]);
           expect(reads).toHaveBeenCalledTimes(1);
         },
         { create: false },
@@ -953,17 +953,20 @@ describe('managed session authority Stage H records', () => {
     const before = await withAuthority(harness, async (authority) => {
       await commitLife(harness, authority, 3);
       return {
-        views: authority.taskViews(),
-        extensionRecord: authority.extensionRecord('monitor_run', 'monitor-1'),
+        views: await authority.taskViews(),
+        extensionRecord: await authority.extensionRecord(
+          'monitor_run',
+          'monitor-1',
+        ),
       };
     });
     const reads = vi.spyOn(harness.store, 'read');
     await withAuthority(
       harness,
       async (authority) => {
-        expect(authority.taskViews()).toEqual(before.views);
+        expect(await authority.taskViews()).toEqual(before.views);
         expect(
-          authority.extensionRecord('monitor_run', 'monitor-1'),
+          await authority.extensionRecord('monitor_run', 'monitor-1'),
         ).toMatchObject({
           recordId: before.extensionRecord!.recordId,
           revision: before.extensionRecord!.revision,
@@ -1041,10 +1044,9 @@ describe('managed session authority Stage H records', () => {
       );
       const { firstSequence, lastSequence } = committed.receipt;
       expect(lastSequence - firstSequence).toBe(2);
-      const events = authority.eventsInSequenceRange(
-        firstSequence,
-        lastSequence,
-      );
+      const events = await authority
+        .iterateEvents(firstSequence, lastSequence)
+        .collect(1_000_000);
       expect(events.map((event) => event.kind)).toEqual([
         'domain.committed',
         'input.accepted',
@@ -1080,11 +1082,11 @@ describe('managed session authority Stage H records', () => {
         receipt: { replayed: true },
       });
       expect(replay.recordRef).toEqual(
-        authority
-          .eventsInSequenceRange(1, sequence)
-          .find((event) => event.kind === 'domain.committed')?.payload[
-          'recordRef'
-        ],
+        (
+          await (
+            await authority.iterateEvents(1, sequence).collect(1_000_000)
+          ).find((event) => event.kind === 'domain.committed')
+        )?.payload['recordRef'],
       );
       expect(authority.committedSequence).toBe(sequence);
       expect((await fs.readdir(bodies)).length).toBe(published);
@@ -1191,14 +1193,14 @@ describe('managed session authority Stage H records', () => {
     const life = await monitorLife(harness);
     const before = await withAuthority(harness, async (authority) => {
       await commitLife(harness, authority, 5);
-      return authority.taskViews();
+      return await authority.taskViews();
     });
     await withAuthority(
       harness,
       async (authority) => {
-        expect(authority.taskViews()).toEqual(before);
+        expect(await authority.taskViews()).toEqual(before);
         expect(
-          authority.extensionRecord('monitor_run', 'monitor-1'),
+          await authority.extensionRecord('monitor_run', 'monitor-1'),
         ).toMatchObject({ revision: 5, operationId: 'monitor-1:1' });
         await expect(
           authority.commitExtensionRecord(
@@ -1214,7 +1216,7 @@ describe('managed session authority Stage H records', () => {
           TRUSTED,
         );
         expect(next.revision).toBe(6);
-        expect(authority.taskViews()[0]).toMatchObject({
+        expect((await authority.taskViews())[0]).toMatchObject({
           state: 'degraded',
           startedAt: 3_000,
         });
@@ -1227,7 +1229,8 @@ describe('managed session authority Stage H records', () => {
     const harness = await createHarness();
     const recordRef = await withAuthority(harness, async (authority) => {
       await commitLife(harness, authority, 1);
-      return authority.extensionRecord('monitor_run', 'monitor-1')!.recordRef;
+      return (await authority.extensionRecord('monitor_run', 'monitor-1'))!
+        .recordRef;
     });
     await fs.rm(
       path.join(
@@ -1276,15 +1279,16 @@ describe('managed session authority Stage H records', () => {
         phases: ['rebuild_watch'],
         leaseDurationMs: 30_000,
       };
-      const grant = authority.issueOperationGrant(request);
+      const grant = await authority.issueOperationGrant(request);
       expect(grant).toMatchObject({
         sessionKey,
         operationId: 'monitor-1:1',
         domain: 'monitor_run',
         operationRevision: 5,
         resourceScope: {
-          recordRef: authority.extensionRecord('monitor_run', 'monitor-1')
-            ?.recordRef,
+          recordRef: (
+            await authority.extensionRecord('monitor_run', 'monitor-1')
+          )?.recordRef,
           phases: ['rebuild_watch'],
         },
         expiresAt: harness.now + 30_000,
@@ -1297,12 +1301,12 @@ describe('managed session authority Stage H records', () => {
       ).toBe(true);
 
       harness.now += 1_000;
-      expect(gate.install(authority.issueOperationGrant(request))).toBe(
+      expect(gate.install(await authority.issueOperationGrant(request))).toBe(
         'installed',
       );
       // The authority issues another owner's grant under the same revision,
       // and the gate refuses it until the record has a new revision.
-      const otherOwner = authority.issueOperationGrant({
+      const otherOwner = await authority.issueOperationGrant({
         ...request,
         ownerId: 'other-owner',
       });
@@ -1319,7 +1323,10 @@ describe('managed session authority Stage H records', () => {
       );
       expect(
         gate.install(
-          authority.issueOperationGrant({ ...request, ownerId: 'other-owner' }),
+          await authority.issueOperationGrant({
+            ...request,
+            ownerId: 'other-owner',
+          }),
         ),
       ).toBe('installed');
     });
@@ -1328,7 +1335,7 @@ describe('managed session authority Stage H records', () => {
   it('refuses a grant for a record that was never committed', async () => {
     const harness = await createHarness();
     await withAuthority(harness, async (authority) => {
-      expect(() =>
+      await expect(
         authority.issueOperationGrant({
           domain: 'monitor_run',
           recordId: 'monitor-1',
@@ -1337,7 +1344,7 @@ describe('managed session authority Stage H records', () => {
           phases: ['rebuild_watch'],
           leaseDurationMs: 30_000,
         }),
-      ).toThrow(/is committed/);
+      ).rejects.toThrow(/is committed/);
     });
   });
 
@@ -1360,7 +1367,7 @@ describe('managed session authority Stage H records', () => {
           TRUSTED,
         ),
       ).rejects.toThrow(/already opened monitor_run record monitor-1/);
-      expect(authority.taskViews()).toHaveLength(1);
+      expect(await authority.taskViews()).toHaveLength(1);
     });
   });
 
@@ -1394,8 +1401,8 @@ describe('managed session authority Stage H records', () => {
       ).rejects.toThrow(/committed without a Stage H record/);
       expect(await publishedBodies(harness)).toBe(0);
       expect(authority.committedSequence).toBe(sequence);
-      expect(authority.taskViews()).toEqual([]);
-      expect(authority.extensionRecord('monitor_run', 'monitor-1')).toBe(
+      expect(await authority.taskViews()).toEqual([]);
+      expect(await authority.extensionRecord('monitor_run', 'monitor-1')).toBe(
         undefined,
       );
     });
@@ -1417,14 +1424,14 @@ describe('managed session authority Stage H records', () => {
       vi.spyOn(journal, 'appendTransaction').mockImplementation(
         async (records) => {
           await append(records);
-          const observe = (turns: number): void => {
+          const observe = async (turns: number): Promise<void> => {
             seen.push([
               authority.committedSequence,
-              authority.taskViews().length,
+              (await authority.taskViews()).length,
             ]);
-            if (turns > 0) queueMicrotask(() => observe(turns - 1));
+            if (turns > 0) queueMicrotask(async () => await observe(turns - 1));
           };
-          queueMicrotask(() => observe(10));
+          queueMicrotask(async () => await observe(10));
         },
       );
       await authority.commitExtensionRecord(
@@ -1497,7 +1504,7 @@ describe('reader compatibility for the H3 domains', () => {
         TRUSTED,
       );
       expect(
-        authority.extensionRecord('monitor_run', 'monitor-1')?.revision,
+        (await authority.extensionRecord('monitor_run', 'monitor-1'))?.revision,
       ).toBe(1);
     });
   });

@@ -34,12 +34,19 @@ vi.mock('node:fs/promises', async (importOriginal) => {
       const handle = await original.open(...args);
       const pending = String(args[0]).endsWith('.snapshot.pending');
       return {
-        writeFile: async (bytes: Buffer) => {
+        writeFile: async (bytes: Buffer | AsyncIterable<Buffer>) => {
           if (pending && fault.phase === 'write') {
-            await handle.writeFile(bytes.subarray(0, 10));
+            if (Buffer.isBuffer(bytes))
+              await handle.writeFile(bytes.subarray(0, 10));
+            else
+              for await (const piece of bytes) {
+                await handle.writeFile(piece.subarray(0, 10));
+                break;
+              }
             throw new Error('snapshot write failed');
           }
-          await handle.writeFile(bytes);
+          if (Buffer.isBuffer(bytes)) await handle.writeFile(bytes);
+          else for await (const piece of bytes) await handle.writeFile(piece);
         },
         sync: async () => {
           if (fault.phase === (pending ? 'file-sync' : 'directory-sync')) {
@@ -75,18 +82,18 @@ const adapters = [
       };
       const store = await FileManagedActivationStore.open(file);
       await store.enqueue(input, activationLimits);
-      const expected = store.get(input);
+      const expected = await store.get(input);
       return {
         halted: () => store.haltedError,
         mutate: () => store.claim(input, 'worker', 300_000),
         async retry() {
           const reopened = await FileManagedActivationStore.open(file);
-          expect(reopened.get(input)).toEqual(expected);
+          expect(await reopened.get(input)).toEqual(expected);
           const lease = (await reopened.claim(input, 'worker', 300_000))!;
           expect(lease.epoch).toBe(1);
           expect(
-            (await FileManagedActivationStore.open(file)).get(input),
-          ).toEqual(reopened.get(input));
+            await (await FileManagedActivationStore.open(file)).get(input),
+          ).toEqual(await reopened.get(input));
         },
       };
     },
@@ -124,17 +131,17 @@ const adapters = [
       };
       const store = await FileManagedSessionInbox.open(file);
       await store.admit(input, inboxLimits);
-      const expected = store.get(input);
+      const expected = await store.get(input);
       return {
         halted: () => store.haltedError,
         mutate: () => store.markActivationReady(input),
         async retry() {
           const reopened = await FileManagedSessionInbox.open(file);
-          expect(reopened.get(input)).toEqual(expected);
+          expect(await reopened.get(input)).toEqual(expected);
           await reopened.markActivationReady(input);
-          expect((await FileManagedSessionInbox.open(file)).get(input)).toEqual(
-            reopened.get(input),
-          );
+          expect(
+            await (await FileManagedSessionInbox.open(file)).get(input),
+          ).toEqual(await reopened.get(input));
         },
       };
     },

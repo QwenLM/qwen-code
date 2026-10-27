@@ -28,6 +28,7 @@ import {
 import { detectTurnInterruption } from '@qwen-code/qwen-code-core/core/turn-interruption.js';
 import { FinishReason } from '@qwen-code/qwen-code-core/core/genai-compat.js';
 import { markToolCallArgumentsIncomplete } from '@qwen-code/qwen-code-core/core/incomplete-tool-call-args.js';
+import { SessionTranscriptReader } from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
 import { ManagedRuntimeOutcomeUnknownError } from '@qwen-code/qwen-code-core/services/execution-environment.js';
 import type { DaemonToolLoopState } from './Session.js';
 import type {
@@ -63,6 +64,7 @@ import * as core from '@qwen-code/qwen-code-core';
 import { createUserPromptSubmitContextPart } from '@qwen-code/qwen-code-core/hooks/user-prompt-submit-context.js';
 import {
   getApiHistoryPromptId,
+  getLastApiPromptCancellation,
   markApiHistoryPrompt,
 } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
@@ -607,6 +609,7 @@ describe('Session', () => {
     supportsMessageGroupDeletion: ReturnType<typeof vi.fn>;
     deleteMessageGroups: ReturnType<typeof vi.fn>;
     readActiveTranscriptChain: ReturnType<typeof vi.fn>;
+    readLastApiPromptCancellation: ReturnType<typeof vi.fn>;
     recordTurnAttempt: ReturnType<typeof vi.fn>;
     recordTurnResult: ReturnType<typeof vi.fn>;
     recordUserMessage: ReturnType<typeof vi.fn>;
@@ -825,6 +828,10 @@ describe('Session', () => {
   }
 
   beforeEach(() => {
+    vi.spyOn(
+      SessionTranscriptReader.prototype,
+      'hasBackgroundNotification',
+    ).mockResolvedValue(false);
     // Self-hosted CI runners export QWEN_RUNTIME_DIR; it outranks
     // Storage.setRuntimeBaseDir, breaking the runtime-pinning assertions.
     vi.stubEnv('QWEN_RUNTIME_DIR', '');
@@ -1009,6 +1016,14 @@ describe('Session', () => {
       supportsMessageGroupDeletion: vi.fn().mockReturnValue(true),
       deleteMessageGroups: vi.fn(),
       readActiveTranscriptChain: vi.fn().mockResolvedValue([] as ChatRecord[]),
+      readLastApiPromptCancellation: vi.fn(
+        async (history: readonly Content[], trailing?: number) =>
+          getLastApiPromptCancellation(
+            history,
+            await mockChatRecordingService.readActiveTranscriptChain(),
+            trailing,
+          ),
+      ),
       recordTurnAttempt: vi.fn().mockResolvedValue(undefined),
       recordTurnResult: vi.fn(),
       recordUserMessage: vi.fn(),
@@ -1091,6 +1106,7 @@ describe('Session', () => {
 
     mockConfig = {
       storage: {
+        getProjectRoot: vi.fn().mockReturnValue('/repo'),
         getRuntimeBaseDir: vi.fn(() => core.Storage.getRuntimeBaseDir()),
       },
       setApprovalMode: vi.fn(),
@@ -19232,6 +19248,66 @@ describe('Session', () => {
       expect(
         queued.filter((item) => item.taskId === completion.taskId),
       ).toHaveLength(0);
+    });
+
+    it('queries canonical notification history after the positive cache has evicted an old task', async () => {
+      const completion = {
+        displayText: 'done',
+        modelText: '<task-notification />',
+        taskId: 'old-completion',
+        status: 'completed',
+        kind: 'agent' as const,
+      };
+      session.primeTurnState(0, [
+        completion.taskId,
+        ...Array.from({ length: 2200 }, (_, index) => `completion-${index}`),
+      ]);
+      vi.mocked(
+        SessionTranscriptReader.prototype.hasBackgroundNotification,
+      ).mockResolvedValueOnce(true);
+      await expect(
+        session.enqueueBackgroundNotification(completion),
+      ).resolves.toEqual({ accepted: true });
+      expect(
+        SessionTranscriptReader.prototype.hasBackgroundNotification,
+      ).toHaveBeenCalledWith('test-session-id', completion.taskId);
+      expect(
+        mockChatRecordingService.recordNotificationStrict,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('uses the fixed restore proof and refuses an unavailable fresh canonical notification lookup', async () => {
+      const completion = {
+        displayText: 'done',
+        modelText: '<task-notification />',
+        taskId: 'restored-completion',
+        status: 'completed',
+        kind: 'agent' as const,
+      };
+      const restored = vi
+        .fn()
+        .mockResolvedValueOnce(true)
+        .mockResolvedValue(false);
+      session.primeTurnState(0, [], restored);
+      await expect(
+        session.enqueueBackgroundNotification(completion),
+      ).resolves.toEqual({ accepted: true });
+      expect(
+        SessionTranscriptReader.prototype.hasBackgroundNotification,
+      ).not.toHaveBeenCalled();
+      const failure = new Error('canonical lookup unavailable');
+      vi.mocked(
+        SessionTranscriptReader.prototype.hasBackgroundNotification,
+      ).mockRejectedValueOnce(failure);
+      await expect(
+        session.enqueueBackgroundNotification({
+          ...completion,
+          taskId: 'unproven-completion',
+        }),
+      ).rejects.toBe(failure);
+      expect(
+        mockChatRecordingService.recordNotificationStrict,
+      ).not.toHaveBeenCalled();
     });
 
     it('coalesces concurrent retries while daemon completion persistence is in flight', async () => {

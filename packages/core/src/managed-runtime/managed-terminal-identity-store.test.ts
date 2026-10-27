@@ -122,7 +122,7 @@ describe('durable terminal identity lookup', () => {
 
   it('materializes an original terminal and reads it after reopening', async () => {
     const store = await released();
-    const original = store.get(activation);
+    const original = await store.get(activation);
     const journal = await readFile(activationPath);
     const result = await store.readTerminal(activation);
     expect(result).toEqual(original);
@@ -217,7 +217,7 @@ describe('durable terminal identity lookup', () => {
       expect(store.listRunnable()).toEqual([]);
       await writeFile(file, original);
       expect(await store.readTerminal(activation)).toEqual(
-        store.get(activation),
+        await store.get(activation),
       );
     },
   );
@@ -231,7 +231,7 @@ describe('durable terminal identity lookup', () => {
     async (phase) => {
       fault.phase = phase;
       const store = await released();
-      const original = store.get(activation);
+      const original = await store.get(activation);
       const journal = await readFile(activationPath);
       await expect(store.readTerminal(activation)).rejects.toThrow(
         /terminal .* failed/,
@@ -259,12 +259,12 @@ describe('durable terminal identity lookup', () => {
     await expect(store.readTerminal(activation)).rejects.toThrow(
       /real directory/,
     );
-    expect(store.get(activation)).toMatchObject({
+    expect(await store.get(activation)).toMatchObject({
       status: 'released',
       outcome: 'completed',
     });
     const reopened = await FileManagedActivationStore.open(activationPath);
-    expect(reopened.get(activation)).toEqual(store.get(activation));
+    expect(await reopened.get(activation)).toEqual(await store.get(activation));
 
     await writeFile(`${inboxPath}.terminal-identities`, 'not a directory');
     const inbox = await FileManagedSessionInbox.open(inboxPath);
@@ -314,7 +314,7 @@ describe('durable terminal identity lookup', () => {
     expect(await controller.reconcile()).toEqual({ inspected: 1, readied: 0 });
     expect(reopened.listRunnable()).toEqual([]);
     expect(await reopened.readTerminal(activation)).toEqual(
-      store.get(activation),
+      await store.get(activation),
     );
     expect(inbox.listPending()).toHaveLength(1);
     await recordPath(activationPath);
@@ -339,7 +339,7 @@ describe('durable terminal identity lookup', () => {
       /Terminal identity/,
     );
     expect(await readFile(inboxPath)).toEqual(journal);
-    expect(inbox.get(input)).toEqual(original);
+    expect(await inbox.get(input)).toEqual(original);
     expect(inbox.listPending()).toEqual([]);
   });
 
@@ -351,7 +351,7 @@ describe('durable terminal identity lookup', () => {
     const lookup = store.readTerminal(identity);
     identity.activationId = 'different';
     await cancelling;
-    expect(await lookup).toEqual(store.get(activation));
+    expect(await lookup).toEqual(await store.get(activation));
 
     const inbox = await FileManagedSessionInbox.open(inboxPath);
     await inbox.admit({ ...input, payload: {} }, inboxLimits);

@@ -77,10 +77,12 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
   };
 }
 
-async function waitUntil(predicate: () => boolean): Promise<void> {
+async function waitUntil(
+  predicate: () => boolean | Promise<boolean>,
+): Promise<void> {
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
-    if (predicate()) return;
+    if (await predicate()) return;
     await new Promise<void>((resolve) => setImmediate(resolve));
   }
   throw new Error('Timed out waiting for scheduler state.');
@@ -95,12 +97,12 @@ async function waitUntil(predicate: () => boolean): Promise<void> {
  * fsync-backed write resolves under coverage).
  */
 async function advanceTimersUntil(
-  predicate: () => boolean,
+  predicate: () => boolean | Promise<boolean>,
   stepMs: number,
 ): Promise<void> {
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
-    if (predicate()) return;
+    if (await predicate()) return;
     await vi.advanceTimersByTimeAsync(stepMs);
     await new Promise<void>((resolve) => setImmediate(resolve));
   }
@@ -118,7 +120,7 @@ describe('EmbeddedHarnessScheduler', () => {
   });
 
   afterEach(async () => {
-    for (const scheduler of schedulers) scheduler.dispose();
+    for (const scheduler of schedulers) await scheduler.dispose();
     schedulers.length = 0;
     fsFault.failAppends = 0;
     fsFault.failTruncates = 0;
@@ -167,7 +169,11 @@ describe('EmbeddedHarnessScheduler', () => {
     gates.get('a3')!.resolve();
     await waitUntil(() => scheduler.activeSlotCount === 0);
     expect(
-      ['a1', 'a2', 'a3'].map((id) => store.get(activation(id))?.outcome),
+      await Promise.all(
+        ['a1', 'a2', 'a3'].map(
+          async (id) => (await store.get(activation(id)))?.outcome,
+        ),
+      ),
     ).toEqual(['completed', 'completed', 'completed']);
   });
 
@@ -231,11 +237,11 @@ describe('EmbeddedHarnessScheduler', () => {
     await waitUntil(() => scheduler.isMemoryBlocked);
     expect(scheduler.isMemoryBlocked).toBe(true);
     expect(scheduler.activeSlotCount).toBe(0);
-    expect(store.get(item)).toMatchObject({ status: 'queued' });
+    expect(await store.get(item)).toMatchObject({ status: 'queued' });
 
     hasMemory = true;
     scheduler.notifyCapacityChanged();
-    await waitUntil(() => store.get(item)?.status === 'released');
+    await waitUntil(async () => (await store.get(item))?.status === 'released');
     expect(handled).toHaveBeenCalledOnce();
   });
 
@@ -282,8 +288,10 @@ describe('EmbeddedHarnessScheduler', () => {
     ).rejects.toBeInstanceOf(ManagedActivationStaleLeaseError);
     now = 12;
     gate.resolve();
-    await waitUntil(() => recovered.get(item)?.status === 'released');
-    expect(recovered.get(item)?.outcome).toBe('completed');
+    await waitUntil(
+      async () => (await recovered.get(item))?.status === 'released',
+    );
+    expect((await recovered.get(item))?.outcome).toBe('completed');
   });
 
   it('keeps the recovery wake armed when the pump exits memory-blocked', async () => {
@@ -688,11 +696,11 @@ describe('EmbeddedHarnessScheduler', () => {
     now = 130;
     await vi.advanceTimersByTimeAsync(30);
     await renewed.promise;
-    expect(store.get(item)?.lease?.expiresAt).toBe(220);
+    expect((await store.get(item))?.lease?.expiresAt).toBe(220);
 
     now = 131;
     gate.resolve();
-    await waitUntil(() => store.get(item)?.status === 'released');
+    await waitUntil(async () => (await store.get(item))?.status === 'released');
   });
 
   it('durably records handler failure without halting the Worker', async () => {
@@ -715,9 +723,9 @@ describe('EmbeddedHarnessScheduler', () => {
     schedulers.push(scheduler);
     await scheduler.submit(item);
     await scheduler.start();
-    await waitUntil(() => store.get(item)?.status === 'released');
+    await waitUntil(async () => (await store.get(item))?.status === 'released');
 
-    expect(store.get(item)?.outcome).toBe('failed');
+    expect((await store.get(item))?.outcome).toBe('failed');
     expect(onActivationError).toHaveBeenCalledWith(
       expect.objectContaining({ activationId: 'a1' }),
       expect.objectContaining({ message: 'handler failed' }),
@@ -750,7 +758,7 @@ describe('EmbeddedHarnessScheduler', () => {
     await scheduler.submit(item);
     await scheduler.start();
     await waitUntil(() => scheduler.isMemoryBlocked);
-    expect(store.get(item)?.status).toBe('queued');
+    expect((await store.get(item))?.status).toBe('queued');
 
     // Memory pressure relieves, but the capacity notification is missed:
     // the embedder's monitor fired on pressure and not on relief, or it was
@@ -761,10 +769,10 @@ describe('EmbeddedHarnessScheduler', () => {
     // Nothing may run while the block still holds.
     await new Promise<void>((resolve) => setTimeout(resolve, 500));
     expect(handled).not.toHaveBeenCalled();
-    expect(store.get(item)?.status).toBe('queued');
+    expect((await store.get(item))?.status).toBe('queued');
 
     await waitUntil(() => handled.mock.calls.length > 0);
-    await waitUntil(() => store.get(item)?.status === 'released');
+    await waitUntil(async () => (await store.get(item))?.status === 'released');
   });
 
   // Issue #13182 finding 5, hardened ahead of the scheduler's first
@@ -822,7 +830,7 @@ describe('EmbeddedHarnessScheduler', () => {
     // fake timers do not drain.
     await vi.advanceTimersByTimeAsync(30);
     await waitUntil(
-      () => store.get(activation('a1'))?.lease?.expiresAt === 220,
+      async () => (await store.get(activation('a1')))?.lease?.expiresAt === 220,
     );
     expect(renewalCalls.get('a1')).toBe(2);
     expect(signals.get('a1')?.aborted).toBe(false);
@@ -832,8 +840,8 @@ describe('EmbeddedHarnessScheduler', () => {
 
     gate.resolve();
     await waitUntil(() => scheduler.activeSlotCount === 0);
-    expect(store.get(activation('a1'))?.outcome).toBe('completed');
-    expect(store.get(activation('a2'))?.outcome).toBe('completed');
+    expect((await store.get(activation('a1')))?.outcome).toBe('completed');
+    expect((await store.get(activation('a2')))?.outcome).toBe('completed');
     await expect(scheduler.submit(activation('a3'))).resolves.toMatchObject({
       created: true,
     });
@@ -889,8 +897,8 @@ describe('EmbeddedHarnessScheduler', () => {
     await new Promise<void>((resolve) => setImmediate(resolve));
     renewGate.resolve();
 
-    await waitUntil(() => store.get(item)?.status === 'released');
-    expect(store.get(item)?.outcome).toBe('completed');
+    await waitUntil(async () => (await store.get(item))?.status === 'released');
+    expect((await store.get(item))?.outcome).toBe('completed');
     expect(signals.get('a1')?.aborted).toBe(false);
     expect(scheduler.haltedError).toBeUndefined();
   });
@@ -982,9 +990,9 @@ describe('EmbeddedHarnessScheduler', () => {
     gate.resolve();
     await waitUntil(() => releaseSpy.mock.calls.length === 1);
     await advanceTimersUntil(() => releaseSpy.mock.calls.length === 2, 250);
-    await waitUntil(() => store.get(item)?.status === 'released');
+    await waitUntil(async () => (await store.get(item))?.status === 'released');
     expect(runs).toBe(1);
-    expect(store.get(item)?.outcome).toBe('completed');
+    expect((await store.get(item))?.outcome).toBe('completed');
     expect(scheduler.haltedError).toBeUndefined();
   });
 
@@ -1026,14 +1034,14 @@ describe('EmbeddedHarnessScheduler', () => {
     // finished.
     await waitUntil(() => vi.getTimerCount() === 1);
     await vi.advanceTimersByTimeAsync(100);
-    scheduler.dispose();
+    void scheduler.dispose();
     for (let i = 0; i < 3; i++) {
       await vi.advanceTimersByTimeAsync(250);
       await new Promise<void>((resolve) => setImmediate(resolve));
     }
 
     expect(releaseSpy.mock.calls.length).toBe(1);
-    expect(store.get(item)?.status).toBe('assigned');
+    expect((await store.get(item))?.status).toBe('assigned');
     expect(scheduler.haltedError).toBeUndefined();
   });
 
@@ -1080,10 +1088,13 @@ describe('EmbeddedHarnessScheduler', () => {
     // abandoned and the scheduler records the completed outcome itself. The
     // terminal write commits after a yielded turn, so the wait advances the
     // clock.
-    await advanceTimersUntil(() => store.get(item)?.status === 'released', 250);
+    await advanceTimersUntil(
+      async () => (await store.get(item))?.status === 'released',
+      250,
+    );
     expect(releaseSpy.mock.calls.length).toBe(5);
     expect(runs).toBe(1);
-    expect(store.get(item)?.outcome).toBe('completed');
+    expect((await store.get(item))?.outcome).toBe('completed');
     expect(scheduler.haltedError).toBeUndefined();
   });
 
@@ -1127,10 +1138,10 @@ describe('EmbeddedHarnessScheduler', () => {
     // The terminal outcome write (the fifth call) fires once the budget is
     // found to be spent, after a yielded commit turn.
     await advanceTimersUntil(
-      () =>
+      async () =>
         releaseSpy.mock.calls.length === 5 &&
         scheduler.activeSlotCount === 0 &&
-        store.get(item)?.status === 'assigned',
+        (await store.get(item))?.status === 'assigned',
       250,
     );
     expect(scheduler.haltedError).toBeUndefined();
@@ -1138,8 +1149,8 @@ describe('EmbeddedHarnessScheduler', () => {
     // The recovery wake at the lease's expiry re-queues and re-runs it.
     now = 250;
     await advanceTimersUntil(() => runs === 2, 160);
-    await waitUntil(() => store.get(item)?.status === 'released');
-    expect(store.get(item)?.outcome).toBe('completed');
+    await waitUntil(async () => (await store.get(item))?.status === 'released');
+    expect((await store.get(item))?.outcome).toBe('completed');
   });
 
   // The other half of the claim policy: when the store cannot repair the
@@ -1239,10 +1250,10 @@ describe('EmbeddedHarnessScheduler', () => {
     fsFault.failAppends = 1;
     await scheduler.start();
     expect(scheduler.haltedError).toBeUndefined();
-    expect(store.get(item)?.status).toBe('queued');
+    expect((await store.get(item))?.status).toBe('queued');
 
     await waitUntil(() => handled.mock.calls.length > 0);
-    await waitUntil(() => store.get(item)?.status === 'released');
+    await waitUntil(async () => (await store.get(item))?.status === 'released');
   });
 
   // The transient claim retry has its own bound: a store that keeps failing
@@ -1277,7 +1288,7 @@ describe('EmbeddedHarnessScheduler', () => {
     expect(scheduler.haltedError?.message).toContain(
       'consecutive transient store failures',
     );
-    expect(store.get(item)?.status).toBe('queued');
+    expect((await store.get(item))?.status).toBe('queued');
     await expect(scheduler.submit(activation('a2'))).rejects.toThrow(
       'consecutive transient store failures',
     );
@@ -1322,7 +1333,7 @@ describe('EmbeddedHarnessScheduler', () => {
     expect(scheduler.haltedError?.message).toContain(
       'consecutive transient store failures',
     );
-    expect(store.get(item)?.status).toBe('queued');
+    expect((await store.get(item))?.status).toBe('queued');
   });
 
   // The other half of the same guard: a created enqueue does write the
@@ -1414,7 +1425,7 @@ describe('EmbeddedHarnessScheduler', () => {
     now = 160;
     await vi.advanceTimersByTimeAsync(30);
     await waitUntil(() => scheduler.activeSlotCount === 0);
-    expect(store.get(item)?.status).toBe('assigned');
+    expect((await store.get(item))?.status).toBe('assigned');
 
     // The lease expiry re-queues the activation; its renewals keep failing,
     // the budget (3) is spent, and the scheduler records the terminal
@@ -1426,9 +1437,12 @@ describe('EmbeddedHarnessScheduler', () => {
     await vi.advanceTimersByTimeAsync(30);
     now = 260;
     await vi.advanceTimersByTimeAsync(30);
-    await advanceTimersUntil(() => store.get(item)?.status === 'released', 30);
+    await advanceTimersUntil(
+      async () => (await store.get(item))?.status === 'released',
+      30,
+    );
     expect(runs).toBe(2);
-    expect(store.get(item)?.outcome).toBe('failed');
+    expect((await store.get(item))?.outcome).toBe('failed');
     expect(scheduler.haltedError).toBeUndefined();
   });
 
@@ -1509,8 +1523,11 @@ describe('EmbeddedHarnessScheduler', () => {
     now = claimedAt + 95;
     await vi.advanceTimersToNextTimerAsync();
     await waitUntil(() => renewCalls === ++renewals);
-    await advanceTimersUntil(() => store.get(item)?.status === 'released', 30);
-    expect(store.get(item)?.outcome).toBe('failed');
+    await advanceTimersUntil(
+      async () => (await store.get(item))?.status === 'released',
+      30,
+    );
+    expect((await store.get(item))?.outcome).toBe('failed');
     expect(runs).toBe(3);
     expect(scheduler.haltedError).toBeUndefined();
   });
@@ -1613,7 +1630,7 @@ describe('EmbeddedHarnessScheduler', () => {
 
     const starting = scheduler.start();
     await claimEntered.promise;
-    scheduler.dispose();
+    void scheduler.dispose();
     allowClaim.resolve();
     await expect(starting).resolves.toBeUndefined();
 
@@ -1654,7 +1671,7 @@ describe('EmbeddedHarnessScheduler', () => {
     // disposed; every journal append then fails transiently.
     await waitUntil(() => releasesEntered.length === 10);
     fsFault.failAppends = 10;
-    scheduler.dispose();
+    void scheduler.dispose();
     allowRelease.resolve();
     await waitUntil(() => scheduler.activeSlotCount === 0);
 
@@ -1724,7 +1741,7 @@ describe('EmbeddedHarnessScheduler', () => {
 
     finishHandler.resolve();
     await waitUntil(() => releaseEntered);
-    scheduler.dispose();
+    void scheduler.dispose();
     allowRelease.resolve();
     await waitUntil(() => scheduler.activeSlotCount === 0);
 
@@ -1768,8 +1785,10 @@ describe('EmbeddedHarnessScheduler', () => {
     fsFault.failAppends = 10;
     allowRelease.resolve();
 
-    await waitUntil(() =>
-      items.every((i) => store.get(i)?.status === 'released'),
+    await waitUntil(async () =>
+      (await Promise.all(items.map((item) => store.get(item)))).every(
+        (item) => item?.status === 'released',
+      ),
     );
     expect(scheduler.haltedError).toBeUndefined();
   });
@@ -1803,13 +1822,13 @@ describe('EmbeddedHarnessScheduler', () => {
 
     const starting = scheduler.start();
     await claimEntered.promise;
-    scheduler.dispose();
+    void scheduler.dispose();
     allowClaim.resolve();
     await expect(starting).resolves.toBeUndefined();
 
     expect(handler).not.toHaveBeenCalled();
     expect(scheduler.activeSlotCount).toBe(0);
-    expect(store.get(item)?.status).toBe('assigned');
+    expect((await store.get(item))?.status).toBe('assigned');
   });
 
   // The wake helpers carry the same disposal guard everywhere: a disposal
@@ -1841,7 +1860,7 @@ describe('EmbeddedHarnessScheduler', () => {
 
     const starting = scheduler.start();
     await claimEntered.promise;
-    scheduler.dispose();
+    void scheduler.dispose();
     // The next pump pass finds no headroom and would arm the recheck wake.
     hasMemory = false;
     allowClaim.resolve();
@@ -1893,7 +1912,7 @@ describe('EmbeddedHarnessScheduler', () => {
     await vi.advanceTimersByTimeAsync(1_000);
     await waitUntil(() => handled.mock.calls.length > 0);
     expect(listSpy.mock.calls.length).toBeGreaterThan(1);
-    await waitUntil(() => store.get(item)?.status === 'released');
+    await waitUntil(async () => (await store.get(item))?.status === 'released');
   });
 
   // The onActivationError hook is the only channel that carries the
@@ -1934,9 +1953,12 @@ describe('EmbeddedHarnessScheduler', () => {
     // clears just before the scheduler's own terminal write.
     fsFault.failAppends = 4;
     gate.resolve();
-    await advanceTimersUntil(() => store.get(item)?.status === 'released', 250);
+    await advanceTimersUntil(
+      async () => (await store.get(item))?.status === 'released',
+      250,
+    );
     expect(runs).toBe(1);
-    expect(store.get(item)?.outcome).toBe('failed');
+    expect((await store.get(item))?.outcome).toBe('failed');
     expect(onActivationError).toHaveBeenCalledWith(
       expect.objectContaining({ activationId: 'a1' }),
       expect.objectContaining({ message: 'handler failed' }),
@@ -1981,11 +2003,11 @@ describe('EmbeddedHarnessScheduler', () => {
     await waitUntil(() => releaseSpy.mock.calls.length === 1);
     await advanceTimersUntil(() => releaseSpy.mock.calls.length === 4, 250);
     await waitUntil(() => vi.getTimerCount() === 1);
-    scheduler.dispose();
+    void scheduler.dispose();
     await vi.advanceTimersByTimeAsync(1_000);
 
     expect(releaseSpy.mock.calls.length).toBe(4);
-    expect(store.get(item)?.status).toBe('assigned');
+    expect((await store.get(item))?.status).toBe('assigned');
     expect(scheduler.haltedError).toBeUndefined();
   });
 
@@ -2037,7 +2059,7 @@ describe('EmbeddedHarnessScheduler', () => {
     await waitUntil(() => vi.getTimerCount() === 1);
     await vi.advanceTimersByTimeAsync(1);
     await waitUntil(() => releaseCalls === 5);
-    scheduler.dispose();
+    void scheduler.dispose();
     fsFault.failTruncates = 1;
     terminalWriteInFlight.resolve();
     await waitUntil(() => scheduler.activeSlotCount === 0);
@@ -2090,14 +2112,17 @@ describe('EmbeddedHarnessScheduler', () => {
     await scheduler.start();
     await waitUntil(() => runs === 1);
 
-    await advanceTimersUntil(() => store.get(item)?.status === 'released', 100);
+    await advanceTimersUntil(
+      async () => (await store.get(item))?.status === 'released',
+      100,
+    );
 
     // Each stale-ended run costs one budget unit; the third spends it and
     // the scheduler records the terminal outcome with a fresh claim —
     // 'failed': every run's handler returned only because the scheduler
     // aborted it, so the record must not claim the work succeeded.
     expect(runs).toBe(3);
-    expect(store.get(item)?.outcome).toBe('failed');
+    expect((await store.get(item))?.outcome).toBe('failed');
     expect(scheduler.haltedError).toBeUndefined();
   });
 
@@ -2138,7 +2163,7 @@ describe('EmbeddedHarnessScheduler', () => {
       handler: async (item, context) => {
         if (item.activationId === 'a2') {
           a2Started = true;
-          a2StartedEarly = store.get(a1)?.status !== 'released';
+          a2StartedEarly = (await store.get(a1))?.status !== 'released';
           return;
         }
         runs++;
@@ -2166,7 +2191,7 @@ describe('EmbeddedHarnessScheduler', () => {
     now = 160;
     await vi.advanceTimersByTimeAsync(30);
     await waitUntil(() => scheduler.activeSlotCount === 0);
-    expect(store.get(a1)?.status).toBe('assigned');
+    expect((await store.get(a1))?.status).toBe('assigned');
 
     // Run 2's handler settles, then the release itself keeps failing
     // transiently: the initial attempt plus all three retries spend the
@@ -2183,14 +2208,17 @@ describe('EmbeddedHarnessScheduler', () => {
     await advanceTimersUntil(() => runs === 2, 60);
     expect(inFlightDone).toBe(true);
 
-    await advanceTimersUntil(() => store.get(a1)?.status === 'released', 250);
+    await advanceTimersUntil(
+      async () => (await store.get(a1))?.status === 'released',
+      250,
+    );
     expect(releaseCalls).toBe(5);
-    expect(store.get(a1)?.outcome).toBe('completed');
+    expect((await store.get(a1))?.outcome).toBe('completed');
     expect(runs).toBe(2);
 
     // The FIFO fence held: the same-Session a2 starts only after a1's
     // terminal outcome was recorded.
-    await waitUntil(() => store.get(a2)?.status === 'released');
+    await waitUntil(async () => (await store.get(a2))?.status === 'released');
     expect(a2Started).toBe(true);
     expect(a2StartedEarly).toBe(false);
     expect(scheduler.haltedError).toBeUndefined();

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { hostedSessionRecords } from './hosted-session-records.js';
 import {
   parsePublicChildModelRoute,
   type PublicChildModelRoute,
@@ -178,8 +179,8 @@ export async function readHostedApprovalContinuation(
     plan.model,
   ])
     assertManagedSessionStableId(id, 'Hosted continuation identity');
-  const assistant = session.authority
-    .eventsInSequenceRange(1, session.authority.committedSequence)
+  const assistant = await session.authority
+    .iterateEvents(1, session.authority.committedSequence)
     .find(
       (event) =>
         event.kind === 'message.committed' &&
@@ -330,7 +331,7 @@ export async function readHostedApprovalContinuation(
     if (definition.name !== item.call.name)
       throw new Error('Saved tool definition conflicts.');
     if (item.actionId) {
-      const action = session.authority.action(item.actionId);
+      const action = await session.authority.action(item.actionId);
       if (!action) throw new Error('Original approval is missing.');
       const options = await readHostedActionOptions(session, action);
       if (
@@ -394,12 +395,12 @@ export async function findHostedApprovalContinuation(
     )
   )
     return undefined;
-  const events = session.authority.eventsInSequenceRange(
+  const events = session.authority.iterateEvents(
     1,
     session.authority.committedSequence,
   );
-  const projected = await session.sink.project();
-  const latestAssistant = projected.findLast(
+  const projected = hostedSessionRecords(session);
+  const latestAssistant = await projected.findLast(
     (item) => item.type === 'assistant' && item.daemonPromptId === promptId,
   );
   if (!latestAssistant?.message?.parts?.some((part) => part.functionCall))
@@ -407,45 +408,48 @@ export async function findHostedApprovalContinuation(
   const callIds = latestAssistant.message.parts.flatMap((part) =>
     part.functionCall?.id ? [part.functionCall.id] : [],
   );
-  const answered = new Set(
-    projected
-      .filter(
-        (item) =>
-          item.type === 'tool_result' && item.daemonPromptId === promptId,
+  if (
+    (
+      await Promise.all(
+        callIds.map((id) =>
+          projected.some(
+            (item) =>
+              item.type === 'tool_result' &&
+              item.daemonPromptId === promptId &&
+              (item.message?.parts ?? []).some(
+                (part) => part.functionResponse?.id === id,
+              ),
+          ),
+        ),
       )
-      .flatMap(
-        (item) =>
-          item.message?.parts?.flatMap((part) =>
-            part.functionResponse?.id ? [part.functionResponse.id] : [],
-          ) ?? [],
-      ),
-  );
-  if (callIds.every((id) => answered.has(id))) return undefined;
-  const assistantSequence = events.findLast(
-    (event) =>
-      event.kind === 'message.committed' &&
-      event.payload['messageId'] === latestAssistant.uuid &&
-      event.payload['role'] === 'assistant',
+    ).every(Boolean)
+  )
+    return undefined;
+  const assistantSequence = (
+    await events.findLast(
+      (event) =>
+        event.kind === 'message.committed' &&
+        event.payload['messageId'] === latestAssistant.uuid &&
+        event.payload['role'] === 'assistant',
+    )
   )?.sequence;
   if (assistantSequence === undefined) return undefined;
-  const batch = [...events]
-    .reverse()
-    .find(
-      (event) =>
-        event.sequence > assistantSequence &&
-        event.kind === 'hosted.batch.planned' &&
-        event.payload['batchId'] === latestAssistant.uuid,
-    );
+  const batch = await events.findLast(
+    (event) =>
+      event.sequence > assistantSequence &&
+      event.kind === 'hosted.batch.planned' &&
+      event.payload['batchId'] === latestAssistant.uuid,
+  );
   let approvalRef: ManagedSessionDurableRef | undefined;
-  for (const event of [...events].reverse()) {
-    if (event.sequence <= assistantSequence) break;
+  for await (const event of events) {
+    if (event.sequence <= assistantSequence) continue;
     if (
       event.kind !== 'action.changed' ||
       event.payload['source'] !== 'tool_call' ||
       event.payload['state'] !== 'requested'
     )
       continue;
-    const action = session.authority.action(
+    const action = await session.authority.action(
       event.payload['requestId'] as string,
     );
     if (!action) continue;
@@ -456,7 +460,7 @@ export async function findHostedApprovalContinuation(
     )
       continue;
     if (options.v !== 3) return undefined;
-    approvalRef ??= options.continuationRef;
+    approvalRef = options.continuationRef;
   }
   const planRef = batch
     ? (batch.payload['planRef'] as unknown as ManagedSessionDurableRef)

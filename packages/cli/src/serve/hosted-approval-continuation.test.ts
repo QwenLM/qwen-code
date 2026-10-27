@@ -368,11 +368,13 @@ it.each(
             'await_action',
           );
           requestId = authorization.checkpoint.approval!.requestId;
-          expect(first.authority.action(requestId)?.state).toBe('requested');
+          expect((await first.authority.action(requestId))?.state).toBe(
+            'requested',
+          );
         },
         { timeout: WAIT_TIMEOUT_MS },
       );
-      const action = first.authority.action(requestId)!;
+      const action = (await first.authority.action(requestId))!;
       const descriptor = JSON.parse(
         (await first.resources.read(action.optionsRef!)).toString(),
       );
@@ -385,7 +387,7 @@ it.each(
         workerId: 'baseline-replacement',
       });
       try {
-        expect(replacement.authority.action(requestId)?.state).toBe(
+        expect((await replacement.authority.action(requestId))?.state).toBe(
           'requested',
         );
         if (decision === 'allow' || decision === 'deny') {
@@ -414,13 +416,17 @@ it.each(
         expect(saved?.plan).toMatchObject({
           promptId,
           round,
-          batchId: first.authority
-            .eventsInSequenceRange(1, first.authority.committedSequence)
-            .find(
+          batchId: (
+            await (
+              await replacement.authority
+                .iterateEvents(1, replacement.authority.committedSequence)
+                .collect(1_000_000)
+            ).find(
               (event) =>
                 event.kind === 'message.committed' &&
                 event.payload['role'] === 'assistant',
-            )?.payload['messageId'],
+            )
+          )?.payload['messageId'],
           stage: 'approval',
           actionId: requestId,
           runtime: {

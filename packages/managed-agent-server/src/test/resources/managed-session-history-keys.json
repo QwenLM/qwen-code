@@ -1,0 +1,26 @@
+[
+  {
+    "kind": "tool.intent",
+    "field": "executionCallId",
+    "value": "tool\u0000调用😀",
+    "identity": "[\"tool.intent\",\"executionCallId\",\"tool\\u0000调用😀\"]"
+  },
+  {
+    "kind": "cancel.requested",
+    "field": "target.turnId",
+    "value": "回合\\\"\n",
+    "identity": "[\"cancel.requested\",\"target.turnId\",\"回合\\\\\\\"\\n\"]"
+  },
+  {
+    "kind": "message.delta",
+    "field": "messageId",
+    "value": " leading and trailing ",
+    "identity": "[\"message.delta\",\"messageId\",\" leading and trailing \"]"
+  },
+  {
+    "kind": "input.accepted",
+    "field": "kind",
+    "value": "input.accepted",
+    "identity": "[\"input.accepted\",\"kind\",\"input.accepted\"]"
+  }
+]

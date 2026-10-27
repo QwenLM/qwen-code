@@ -109,6 +109,102 @@ export function getTurnResultCancellation(
     : undefined;
 }
 
+/** The source must reopen the same fixed active-chain prefix for each pass. */
+export async function getLastApiPromptCancellationFromHistory(
+  history: readonly Content[],
+  records: AsyncIterable<ChatRecord>,
+  trailingSystemNotifications?: number,
+): Promise<ReturnType<typeof getLastApiPromptCancellation>> {
+  const promptId = getLastApiHistoryPromptId(
+    history,
+    trailingSystemNotifications,
+  );
+  const isOwner = (record: ChatRecord) =>
+    (record.type === 'user' && record.subtype === undefined) ||
+    (record.type === 'system' && record.subtype === 'turn_attempt');
+  const isResult = (record: ChatRecord) =>
+    record.type === 'system' && record.subtype === 'turn_result';
+  type Located = { record: ChatRecord; position: number };
+  let owner: Located | undefined;
+  let latest: Located | undefined;
+  let position = 0;
+  for await (const record of records) {
+    if (isOwner(record) || isResult(record)) latest = { record, position };
+    if (promptId && isOwner(record) && record.promptId === promptId)
+      owner = { record, position };
+    position++;
+  }
+  if (!owner)
+    return getLastApiPromptCancellation(
+      history,
+      latest ? [latest.record] : [],
+      trailingSystemNotifications,
+    );
+  const selected = new Map<number, ChatRecord>();
+  selected.set(owner.position, owner.record);
+  if (latest) selected.set(latest.position, latest.record);
+  let firstResult: Located | undefined;
+  let lastResult: Located | undefined;
+  let cancelled: Located | undefined;
+  let latestCancellation: Located | undefined;
+  let otherOwner: Located | undefined;
+  position = 0;
+  for await (const record of records) {
+    if (
+      isOwner(record) &&
+      position !== owner.position &&
+      record.daemonPromptId === owner.record.daemonPromptId
+    )
+      otherOwner = { record, position };
+    if (isResult(record)) {
+      const result = record.systemPayload as TurnResultRecordPayload;
+      const isCancelled =
+        result?.state === 'cancelled' &&
+        typeof result.cancelledAt === 'number' &&
+        Number.isFinite(result.cancelledAt);
+      if (isCancelled) latestCancellation = { record, position };
+      if (
+        position > owner.position &&
+        (record.promptId === promptId ||
+          (record.promptId === undefined &&
+            owner.record.daemonPromptId !== undefined &&
+            result?.promptId === owner.record.daemonPromptId))
+      ) {
+        firstResult ??= { record, position };
+        lastResult = { record, position };
+        if (isCancelled) cancelled = { record, position };
+      }
+    }
+    position++;
+  }
+  for (const located of [
+    firstResult,
+    lastResult,
+    cancelled,
+    latestCancellation,
+    otherOwner,
+  ])
+    if (located) selected.set(located.position, located.record);
+  if (cancelled) {
+    position = 0;
+    for await (const record of records) {
+      if (
+        record.uuid === cancelled.record.uuid &&
+        position !== cancelled.position
+      ) {
+        selected.set(position, record);
+        break;
+      }
+      position++;
+    }
+  }
+  return getLastApiPromptCancellation(
+    history,
+    [...selected].sort(([a], [b]) => a - b).map(([, record]) => record),
+    trailingSystemNotifications,
+  );
+}
+
 export function getLastApiPromptCancellation(
   history: readonly Content[],
   records: readonly ChatRecord[],
@@ -327,6 +423,32 @@ function isSystemNotificationRecord(record: ChatRecord): boolean {
   );
 }
 
+export function isLocalCommandTranscriptPair(
+  record: ChatRecord,
+  previous: ChatRecord | undefined,
+): boolean {
+  const payload = record.systemPayload as SlashCommandRecordPayload | undefined;
+  const parts = previous?.message?.parts;
+  return (
+    record.type === 'system' &&
+    record.subtype === 'slash_command' &&
+    payload?.phase === 'result' &&
+    payload.sentToModel !== true &&
+    Array.isArray(payload.outputHistoryItems) &&
+    payload.outputHistoryItems.length > 0 &&
+    payload.outputHistoryItems.every(
+      (item) => item?.['type'] === 'assistant',
+    ) &&
+    previous?.type === 'user' &&
+    previous.subtype === undefined &&
+    previous.message?.role === 'user' &&
+    parts?.length === 1 &&
+    typeof parts[0].text === 'string' &&
+    Object.keys(parts[0]).length === 1 &&
+    parts[0].text === payload.rawCommand
+  );
+}
+
 export class SessionApiHistoryAccumulator {
   private history: Content[] = [];
   /**
@@ -370,30 +492,11 @@ export class SessionApiHistoryAccumulator {
         return;
       }
       if (record.subtype === 'slash_command') {
-        const payload = record.systemPayload as
-          | SlashCommandRecordPayload
-          | undefined;
         const previous = this.lastMaterialRecord;
-        const parts = previous?.message?.parts;
         // ACP records local command input as user and its output as a system
         // result. Neither belongs in model history. TUI invocations fence off
         // earlier input, including custom commands submitted to the model.
-        if (
-          payload?.phase === 'result' &&
-          payload.sentToModel !== true &&
-          Array.isArray(payload.outputHistoryItems) &&
-          payload.outputHistoryItems.length > 0 &&
-          payload.outputHistoryItems.every(
-            (item) => item?.['type'] === 'assistant',
-          ) &&
-          previous?.type === 'user' &&
-          previous.subtype === undefined &&
-          previous.message?.role === 'user' &&
-          parts?.length === 1 &&
-          typeof parts[0].text === 'string' &&
-          Object.keys(parts[0]).length === 1 &&
-          parts[0].text === payload.rawCommand
-        ) {
+        if (isLocalCommandTranscriptPair(record, previous)) {
           this.history.pop();
           this.systemNotificationFlags.pop();
         }

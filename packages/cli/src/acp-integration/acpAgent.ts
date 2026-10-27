@@ -362,6 +362,7 @@ import {
 } from './session/tasksSnapshot.js';
 import {
   collectHistoryReplayUpdates,
+  streamHistoryReplayUpdates,
   copyCumulativeUsage,
   createReplayCumulativeUsage,
   degradeReplayEnvelopeAppHtml,
@@ -1306,18 +1307,31 @@ function appendGoalUpdatesWithinLimits(
   return true;
 }
 
-function replayGoalBootstrap(
+async function replayContainsRecord(
+  page:
+    | {
+        readonly records: readonly ChatRecord[];
+        readonly recordHistory?: AsyncIterable<ChatRecord>;
+      }
+    | undefined,
+  uuid: string,
+): Promise<boolean> {
+  if (!page) return false;
+  for await (const record of page.recordHistory ?? page.records)
+    if (record.uuid === uuid) return true;
+  return false;
+}
+
+async function replayGoalBootstrap(
   projection:
     | SessionRestoreProjection
     | SessionLiveRestoreProjection
     | undefined,
-): ReturnType<typeof HistoryReplayer.v2GoalBootstrap> {
+): Promise<ReturnType<typeof HistoryReplayer.v2GoalBootstrap>> {
   if (projection && !('runtime' in projection)) {
     const sourceUuid = projection.goalRecoverySourceUuid;
     if (!sourceUuid) return undefined;
-    if (
-      projection.replay?.records.some((record) => record.uuid === sourceUuid)
-    ) {
+    if (await replayContainsRecord(projection.replay, sourceUuid)) {
       return undefined;
     }
     const replay = projection.replay?.replay;
@@ -1344,7 +1358,7 @@ function replayGoalBootstrap(
   }
   const sourceUuid = projection?.replay?.goalRecoverySourceUuid;
   if (!projection?.replay || !sourceUuid) return undefined;
-  if (projection.replay.records.some((record) => record.uuid === sourceUuid)) {
+  if (await replayContainsRecord(projection.replay, sourceUuid)) {
     return undefined;
   }
   const goalBootstrapRecords = projection.replay.goalBootstrapRecords ?? [];
@@ -6107,20 +6121,68 @@ class QwenAgent implements Agent {
                 }) as LoadSessionResponse,
             );
             const replayPage = projection?.replay;
-            if (!replayPage || replayPage.records.length === 0) {
+            if (
+              !replayPage ||
+              (!replayPage.recordHistory && replayPage.records.length === 0)
+            ) {
               return withRestoreHint(liveSession, response);
             }
 
             const bulkReplay = isBulkLoadReplayRequest(params);
-            const replay = await profiler.time('history_replay', () =>
+            if (!bulkReplay) {
+              try {
+                await profiler.time('history_replay', async () =>
+                  streamHistoryReplayUpdates({
+                    sessionId,
+                    config,
+                    records: replayPage.recordHistory ?? replayPage.records,
+                    gaps: replayPage.gaps,
+                    cumulativeUsage: createReplayCumulativeUsage(),
+                    replayState: replayPage.replay,
+                    goalBootstrap: await replayGoalBootstrap(projection),
+                    suppressRestoreAskUserQuestion,
+                    finalizeDangling: true,
+                    sendUpdate: (update) => liveSession.sendUpdate(update),
+                    logger: debugLogger,
+                  }),
+                );
+              } finally {
+                liveSession.clearActiveTodoPlanRevision();
+              }
+              let goalUpdates: SessionUpdate[] = [];
+              try {
+                goalUpdates = replayPage.recordHistory
+                  ? await liveSession.renderLegacyGoalSupersessionHistory(
+                      replayPage.recordHistory,
+                    )
+                  : liveSession.renderLegacyGoalSupersession(
+                      replayPage.records,
+                    );
+              } catch (error) {
+                debugLogger.debug(
+                  `Failed to render the legacy Goal supersession: ${String(error)}`,
+                );
+              }
+              for (const update of goalUpdates) {
+                try {
+                  await liveSession.sendUpdate(update);
+                } catch (error) {
+                  debugLogger.debug(
+                    `Failed to send the legacy Goal supersession: ${String(error)}`,
+                  );
+                }
+              }
+              return withRestoreHint(liveSession, response);
+            }
+            const replay = await profiler.time('history_replay', async () =>
               collectHistoryReplayUpdates({
                 sessionId,
                 config,
-                records: replayPage.records,
+                records: replayPage.recordHistory ?? replayPage.records,
                 gaps: replayPage.gaps,
                 cumulativeUsage: createReplayCumulativeUsage(),
                 replayState: replayPage.replay,
-                goalBootstrap: replayGoalBootstrap(projection),
+                goalBootstrap: await replayGoalBootstrap(projection),
                 suppressRestoreAskUserQuestion,
                 // The restore gate already drained active turns and blocks
                 // new ones (and a drain timeout rejects before replay), so
@@ -6129,14 +6191,10 @@ class QwenAgent implements Agent {
                 // under the gate: isTurnIdle() is structurally false while
                 // the close gate is held (#9704).
                 finalizeDangling: true,
-                ...(restoreOptions.replay.kind === 'recent'
-                  ? {
-                      limits: {
-                        maxBytes: LOAD_REPLAY_MAX_BYTES,
-                        maxUpdates: LOAD_REPLAY_MAX_UPDATES,
-                      },
-                    }
-                  : {}),
+                limits: {
+                  maxBytes: LOAD_REPLAY_MAX_BYTES,
+                  maxUpdates: LOAD_REPLAY_MAX_UPDATES,
+                },
                 logger: debugLogger,
               }),
             );
@@ -6153,12 +6211,16 @@ class QwenAgent implements Agent {
             // failing to render it is logged, never a failed load. Rendered
             // once the page is delivered, so it reads the Goal as it stands
             // then, not as it stood before the replay's awaits.
-            const renderGoalUpdates = (): SessionUpdate[] => {
+            const renderGoalUpdates = async (): Promise<SessionUpdate[]> => {
               if (replay.replayError !== undefined) return [];
               try {
-                return liveSession.renderLegacyGoalSupersession(
-                  replayPage.records,
-                );
+                return replayPage.recordHistory
+                  ? await liveSession.renderLegacyGoalSupersessionHistory(
+                      replayPage.recordHistory,
+                    )
+                  : liveSession.renderLegacyGoalSupersession(
+                      replayPage.records,
+                    );
               } catch (error) {
                 debugLogger.debug(
                   `Failed to render the legacy Goal supersession: ${
@@ -6168,38 +6230,7 @@ class QwenAgent implements Agent {
                 return [];
               }
             };
-            if (!bulkReplay) {
-              try {
-                for (const update of replay.updates) {
-                  await liveSession.sendUpdate(update);
-                }
-              } finally {
-                // Replayed plan updates re-stamp the revision via sendUpdate;
-                // drop it so a replayed snapshot cannot bind a later approval
-                // (same rule Session.replayHistory applies to cold loads),
-                // even if delivery fails part-way. The bulk path keeps a live
-                // binding on purpose: it hands the updates to the client
-                // instead of replaying them through this session.
-                liveSession.clearActiveTodoPlanRevision();
-              }
-              if (replay.replayError !== undefined) {
-                throw RequestError.internalError(undefined, replay.replayError);
-              }
-              for (const update of renderGoalUpdates()) {
-                try {
-                  await liveSession.sendUpdate(update);
-                } catch (error) {
-                  debugLogger.debug(
-                    `Failed to send the legacy Goal supersession: ${
-                      error instanceof Error ? error.message : String(error)
-                    }`,
-                  );
-                }
-              }
-              return withRestoreHint(liveSession, response);
-            }
-
-            const enforceLimits = restoreOptions.replay.kind === 'recent';
+            const enforceLimits = true;
             const envelope: BridgeLoadReplayEnvelope = {
               v: LOAD_REPLAY_VERSION,
               updates: replay.updates,
@@ -6222,7 +6253,7 @@ class QwenAgent implements Agent {
             appendGoalUpdatesWithinLimits(
               sessionId,
               envelope,
-              renderGoalUpdates(),
+              await renderGoalUpdates(),
               enforceLimits,
             );
             return withRestoreHint(liveSession, {
@@ -6356,24 +6387,22 @@ class QwenAgent implements Agent {
             replayHistory: false,
             prepareBeforeSessionCreate: async () => {
               if (bulkReplay && projection?.replay) {
-                const replay = await profiler.time('history_replay', () =>
+                const replay = await profiler.time('history_replay', async () =>
                   collectHistoryReplayUpdates({
                     sessionId,
                     config,
-                    records: projection.replay!.records,
+                    records:
+                      projection.replay!.recordHistory ??
+                      projection.replay!.records,
                     gaps: projection.replay!.gaps,
                     cumulativeUsage: replayUsage,
                     replayState: projection.replay!.replay,
-                    goalBootstrap: replayGoalBootstrap(projection),
+                    goalBootstrap: await replayGoalBootstrap(projection),
                     suppressRestoreAskUserQuestion,
-                    ...(restoreOptions.replay.kind === 'recent'
-                      ? {
-                          limits: {
-                            maxBytes: LOAD_REPLAY_MAX_BYTES,
-                            maxUpdates: LOAD_REPLAY_MAX_UPDATES,
-                          },
-                        }
-                      : {}),
+                    limits: {
+                      maxBytes: LOAD_REPLAY_MAX_BYTES,
+                      maxUpdates: LOAD_REPLAY_MAX_UPDATES,
+                    },
                     logger: debugLogger,
                   }),
                 );
@@ -6401,19 +6430,17 @@ class QwenAgent implements Agent {
                     LOAD_REPLAY_MAX_BYTES,
                   );
                 }
-                validateLoadReplayEnvelope(
-                  sessionId,
-                  replayEnvelope,
-                  restoreOptions.replay.kind === 'recent',
-                );
+                validateLoadReplayEnvelope(sessionId, replayEnvelope, true);
               }
-              const goalBootstrap = replayGoalBootstrap(projection);
+              const goalBootstrap = await replayGoalBootstrap(projection);
               const rendered = await renderPreparedGoalUpdate(
                 () => config.getGoalRuntimePrepared(),
                 {
-                  ...(projection?.replay?.records
-                    ? { replayedRecords: projection.replay.records }
-                    : {}),
+                  ...(projection?.replay?.recordHistory
+                    ? { replayedHistory: projection.replay.recordHistory }
+                    : projection?.replay?.records
+                      ? { replayedRecords: projection.replay.records }
+                      : {}),
                   ...(suppressRecoveredGoalPresentation
                     ? { hideRuntimeGoal: true }
                     : {}),
@@ -6448,7 +6475,7 @@ class QwenAgent implements Agent {
                   sessionId,
                   replayEnvelope,
                   rendered.updates,
-                  restoreOptions.replay.kind === 'recent',
+                  true,
                 );
                 // What a full page cannot carry is the recovered Goal
                 // state, which the client must still get: it is sent as
@@ -6464,10 +6491,18 @@ class QwenAgent implements Agent {
             primeSession: (createdSession) => {
               profiler.timeSync('runtime_initialize', () => {
                 if (!projection) return;
-                createdSession.primeTurnState(
-                  projection.runtime.initialTurn,
-                  projection.runtime.backgroundNotificationTaskIds,
-                );
+                if (projection.runtime.hasBackgroundNotification) {
+                  createdSession.primeTurnState(
+                    projection.runtime.initialTurn,
+                    projection.runtime.backgroundNotificationTaskIds,
+                    projection.runtime.hasBackgroundNotification,
+                  );
+                } else {
+                  createdSession.primeTurnState(
+                    projection.runtime.initialTurn,
+                    projection.runtime.backgroundNotificationTaskIds,
+                  );
+                }
                 copyCumulativeUsage(
                   createdSession.cumulativeUsage,
                   replayUsage,
@@ -6481,7 +6516,7 @@ class QwenAgent implements Agent {
             beforeStartPostReplayServices: async (createdSession) => {
               if (!bulkReplay && projection?.replay) {
                 await profiler.time('history_replay', async () => {
-                  const goalBootstrap = replayGoalBootstrap(projection);
+                  const goalBootstrap = await replayGoalBootstrap(projection);
                   const initialGoalState = replayInitialGoalState(projection);
                   const hasGoalReplayState =
                     goalBootstrap !== undefined ||
@@ -6489,7 +6524,8 @@ class QwenAgent implements Agent {
                     initialGoalState.initialGoalCause !== undefined;
                   if (hasGoalReplayState) {
                     await createdSession.replayHistory(
-                      projection.replay!.records,
+                      projection.replay!.recordHistory ??
+                        projection.replay!.records,
                       projection.replay!.gaps,
                       {
                         ...(goalBootstrap ? { goalBootstrap } : {}),
@@ -6501,13 +6537,15 @@ class QwenAgent implements Agent {
                     );
                   } else if (suppressRestoreAskUserQuestion) {
                     await createdSession.replayHistory(
-                      projection.replay!.records,
+                      projection.replay!.recordHistory ??
+                        projection.replay!.records,
                       projection.replay!.gaps,
                       { skipFinalizeCallIds: undefined },
                     );
                   } else {
                     await createdSession.replayHistory(
-                      projection.replay!.records,
+                      projection.replay!.recordHistory ??
+                        projection.replay!.records,
                       projection.replay!.gaps,
                     );
                   }
@@ -6786,6 +6824,7 @@ class QwenAgent implements Agent {
                 createdSession.primeTurnState(
                   projection.runtime.initialTurn,
                   projection.runtime.backgroundNotificationTaskIds,
+                  projection.runtime.hasBackgroundNotification,
                 );
               });
             },
@@ -14650,7 +14689,10 @@ class QwenAgent implements Agent {
         const liveSession = this.sessions.get(sessionId);
         const turnIdleBeforeRead = liveSession?.isTurnIdle() ?? true;
         let replayConfig = this.config;
-        let sessionData: ResumedSessionData | undefined;
+        let projection: SessionLiveRestoreProjection | undefined;
+        const replaySelection: SelectiveSessionRestoreOptions = {
+          replay: { kind: 'all', hideInheritedHistory: false },
+        };
         if (liveSession) {
           const config = liveSession.getConfig();
           await this.assertLiveSessionScope(
@@ -14660,30 +14702,39 @@ class QwenAgent implements Agent {
           );
           const recording = config.getChatRecordingService();
           const loadAuthoritative = () =>
-            config.getSessionService().loadSession(sessionId);
-          sessionData = recording
+            config
+              .getSessionService()
+              .readLiveRestoreProjection(sessionId, replaySelection);
+          projection = recording
             ? await recording.runWithWriteBarrier(loadAuthoritative)
             : await loadAuthoritative();
           replayConfig = config;
         } else {
-          sessionData = await this.runWithPinnedRuntimeBaseDirForRequest(
+          projection = await this.runWithPinnedRuntimeBaseDirForRequest(
             cwd,
             async () => {
               const sessionService = new SessionService(cwd);
-              return sessionService.loadSession(sessionId);
+              return sessionService.readLiveRestoreProjection(
+                sessionId,
+                replaySelection,
+              );
             },
           );
         }
-        if (!sessionData?.conversation) {
+        if (!projection?.replay) {
           return { updates: [] };
         }
 
         const replay = await collectHistoryReplayUpdates({
           sessionId,
           config: replayConfig,
-          records: sessionData.conversation.messages,
-          gaps: sessionData.historyGaps,
+          records: projection.replay.recordHistory ?? projection.replay.records,
+          gaps: projection.replay.gaps,
           cumulativeUsage: createReplayCumulativeUsage(),
+          limits: {
+            maxBytes: LOAD_REPLAY_MAX_BYTES,
+            maxUpdates: LOAD_REPLAY_MAX_UPDATES,
+          },
           logger: debugLogger,
           // Read-only history dump never re-hangs the question. Skip
           // finalize only on load/resume that will actually restore.
@@ -14695,18 +14746,35 @@ class QwenAgent implements Agent {
             liveSession,
             turnIdleBeforeRead,
           ),
+        }).catch((error) => {
+          throw mapSessionRestoreRequestError(error, sessionId);
         });
 
-        return {
+        const response = {
           updates: replay.updates,
-          startTime: sessionData.conversation.startTime,
-          lastUpdated: sessionData.conversation.lastUpdated,
+          startTime: projection.startTime,
+          lastUpdated: projection.lastUpdated,
           // Signal to the client that replay aborted partway so it doesn't
           // render a truncated replay as the full conversation.
           ...(replay.replayError !== undefined
             ? { partial: true, replayError: replay.replayError }
             : {}),
         };
+        const responseBytes = Buffer.byteLength(
+          JSON.stringify(response),
+          'utf8',
+        );
+        if (responseBytes > LOAD_REPLAY_MAX_BYTES)
+          throw mapSessionRestoreRequestError(
+            new HistoryReplayLimitError(
+              sessionId,
+              'bytes',
+              responseBytes,
+              LOAD_REPLAY_MAX_BYTES,
+            ),
+            sessionId,
+          );
+        return response;
       }
       case 'restoreSessionHistory': {
         const sessionId = params['sessionId'] as string;

@@ -134,6 +134,10 @@ export interface TranscriptReplayMachineOptions {
 
 export interface TranscriptReplayMachine {
   project(record: TranscriptRecordInput): Iterable<TranscriptReplayEmission>;
+  projectAsync(
+    record: TranscriptRecordInput,
+    claimToolCallId: (candidate: string) => Promise<string>,
+  ): AsyncIterable<TranscriptReplayEmission>;
   finalize(): Iterable<TranscriptReplayEmission>;
   snapshot(): TranscriptReplayStateV1;
 }
@@ -1110,6 +1114,16 @@ export function createTranscriptReplayMachine(
   return new DefaultTranscriptReplayMachine(options);
 }
 
+interface ToolCallIdRequest {
+  readonly kind: 'claim-tool-call-id';
+  readonly candidate: string;
+}
+type ReplayProjection<T = void> = Generator<
+  TranscriptReplayEmission | ToolCallIdRequest,
+  T,
+  string
+>;
+
 class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
   private readonly pendingToolCalls = new Map<
     string,
@@ -1124,6 +1138,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     apiTimeMs: number;
   };
   private finalized = false;
+  private projectionMode?: 'sync' | 'async';
   private goalState: GoalSnapshotV2 | undefined;
   private goalCause: GoalStateCause | undefined;
 
@@ -1147,6 +1162,54 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
   }
 
   *project(record: TranscriptRecordInput): Iterable<TranscriptReplayEmission> {
+    if (this.projectionMode === 'async')
+      throw new Error(
+        'Cannot mix synchronous and asynchronous replay identity histories.',
+      );
+    this.projectionMode = 'sync';
+    const projection = this.projectRecord(record);
+    try {
+      let step = projection.next();
+      while (!step.done) {
+        if ('kind' in step.value)
+          step = projection.next(this.allocateToolCallId(step.value.candidate));
+        else {
+          yield step.value;
+          step = projection.next();
+        }
+      }
+    } finally {
+      projection.return();
+    }
+  }
+
+  async *projectAsync(
+    record: TranscriptRecordInput,
+    claimToolCallId: (candidate: string) => Promise<string>,
+  ): AsyncIterable<TranscriptReplayEmission> {
+    if (this.projectionMode === 'sync')
+      throw new Error(
+        'Cannot mix synchronous and asynchronous replay identity histories.',
+      );
+    this.projectionMode = 'async';
+    this.usedToolCallIds.clear();
+    const projection = this.projectRecord(record);
+    try {
+      let step = projection.next();
+      while (!step.done) {
+        if ('kind' in step.value)
+          step = projection.next(await claimToolCallId(step.value.candidate));
+        else {
+          yield step.value;
+          step = projection.next();
+        }
+      }
+    } finally {
+      projection.return();
+    }
+  }
+
+  private *projectRecord(record: TranscriptRecordInput): ReplayProjection {
     if (this.finalized) {
       throw new Error(
         'Cannot project records after transcript replay finalize.',
@@ -1241,6 +1304,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
   *finalize(): Iterable<TranscriptReplayEmission> {
     if (this.finalized) return;
     this.finalized = true;
+    this.usedToolCallIds.clear();
     const skip = this.options.skipFinalizeCallIds;
     let ordinal = 0;
     for (const pending of [...this.pendingToolCalls.values()]) {
@@ -1290,7 +1354,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     record: TranscriptRecordInput,
     emit: (update: SessionUpdate) => TranscriptReplayEmission,
     meta: UpdateMetaOptions,
-  ): Iterable<TranscriptReplayEmission> {
+  ): ReplayProjection {
     const payload = isObjectRecord(record.systemPayload)
       ? record.systemPayload
       : undefined;
@@ -1460,7 +1524,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     record: TranscriptRecordInput,
     emit: (update: SessionUpdate) => TranscriptReplayEmission,
     meta: UpdateMetaOptions,
-  ): Iterable<TranscriptReplayEmission> {
+  ): ReplayProjection {
     const usageMetadata = isObjectRecord(record.usageMetadata)
       ? record.usageMetadata
       : undefined;
@@ -1489,7 +1553,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     meta: UpdateMetaOptions,
     beforeToolCall?: () => SessionUpdate | undefined,
     partsOverride?: readonly unknown[],
-  ): Iterable<TranscriptReplayEmission> {
+  ): ReplayProjection {
     const parts = partsOverride ?? record.message?.parts;
     if (!parts) return;
     for (let partIndex = 0; partIndex < parts.length; partIndex += 1) {
@@ -1565,7 +1629,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
           functionCall['id'].length > 0
             ? functionCall['id']
             : undefined;
-        const callId = this.allocateToolCallId(
+        const callId = yield* this.claimToolCallId(
           explicitId ?? `qwen-replay-tool:${record.uuid}:${partIndex}`,
         );
         const update = createTranscriptToolCallStartUpdate({
@@ -1609,7 +1673,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     record: TranscriptRecordInput,
     emit: (update: SessionUpdate) => TranscriptReplayEmission,
     meta: UpdateMetaOptions,
-  ): Iterable<TranscriptReplayEmission> {
+  ): ReplayProjection {
     const result = isObjectRecord(record.toolCallResult)
       ? record.toolCallResult
       : undefined;
@@ -1624,8 +1688,8 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     }
     const explicitCallId = extractToolResultCallId(record, result);
     const callId = explicitCallId
-      ? this.allocateToolCallId(explicitCallId, true)
-      : this.correlateResultCallId(toolName, record.uuid);
+      ? yield* this.claimToolCallId(explicitCallId, true)
+      : yield* this.correlateResultCallId(toolName, record.uuid);
     this.pendingToolCalls.delete(callId);
 
     const resultDisplay = result?.['resultDisplay'];
@@ -1691,7 +1755,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     record: TranscriptRecordInput,
     emit: (update: SessionUpdate) => TranscriptReplayEmission,
     meta: UpdateMetaOptions,
-  ): Iterable<TranscriptReplayEmission> {
+  ): ReplayProjection {
     if (record.subtype === 'ui_telemetry') {
       // Emitted in place, at the telemetry record's own position, rather than
       // attached to the assistant record it describes. A backward page may
@@ -1964,7 +2028,10 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
       finiteNumber(metadata['cachedContentTokenCount']) ?? 0;
   }
 
-  private correlateResultCallId(toolName: string, recordId: string): string {
+  private *correlateResultCallId(
+    toolName: string,
+    recordId: string,
+  ): ReplayProjection<string> {
     const candidates = [...this.pendingToolCalls.values()].filter(
       (pending) => pending.toolName === toolName,
     );
@@ -1974,14 +2041,18 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
       'A tool result could not be matched to exactly one pending tool call.',
       recordId,
     );
-    return this.allocateToolCallId(`qwen-replay-tool:${recordId}:result`);
+    return yield* this.claimToolCallId(`qwen-replay-tool:${recordId}:result`);
   }
 
-  private allocateToolCallId(candidate: string, reuse = false): string {
-    if (reuse && this.pendingToolCalls.has(candidate)) {
-      this.usedToolCallIds.add(candidate);
-      return candidate;
-    }
+  private *claimToolCallId(
+    candidate: string,
+    reuse = false,
+  ): ReplayProjection<string> {
+    if (reuse && this.pendingToolCalls.has(candidate)) return candidate;
+    return yield { kind: 'claim-tool-call-id', candidate };
+  }
+
+  private allocateToolCallId(candidate: string): string {
     if (!this.usedToolCallIds.has(candidate)) {
       this.usedToolCallIds.add(candidate);
       return candidate;

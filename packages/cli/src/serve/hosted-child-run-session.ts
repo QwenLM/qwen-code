@@ -40,7 +40,9 @@ export interface HostedChildRunStore {
     extensionRecord(
       domain: 'child_run',
       recordId: string,
-    ): { readonly record: unknown; readonly revision: number } | undefined;
+    ): Promise<
+      { readonly record: unknown; readonly revision: number } | undefined
+    >;
     commitExtensionRecord(
       command: ManagedSessionCommand,
       request: { readonly domain: 'child_run'; readonly record: unknown },
@@ -74,8 +76,11 @@ export class HostedChildRunSession {
   ) {}
 
   /** The last committed body of one Shell, parsed. */
-  record(shellId: string): ChildRun | undefined {
-    const existing = this.store.authority.extensionRecord('child_run', shellId);
+  async record(shellId: string): Promise<ChildRun | undefined> {
+    const existing = await this.store.authority.extensionRecord(
+      'child_run',
+      shellId,
+    );
     return existing ? parseChildShellRun(existing.record) : undefined;
   }
 
@@ -270,7 +275,7 @@ export class HostedChildRunSession {
     record: ChildRun | ((previous: ChildRun | undefined) => Promise<ChildRun>),
   ): Promise<void> {
     const write = this.writes.then(async () => {
-      const existing = this.store.authority.extensionRecord(
+      const existing = await this.store.authority.extensionRecord(
         'child_run',
         shellId,
       );

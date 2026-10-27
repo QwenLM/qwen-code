@@ -361,9 +361,10 @@ public final class WorkspaceCsiApplicationStore {
                 && terminal.expectedJournalRevision() == head.number("journal_revision")
                 && terminal.expectedCommittedSequence() == head.number("committed_sequence")
                 && java.util.Objects.equals(terminal.previousCommitDigest(), head.text("last_commit_digest")));
-        var prepared = WorkspaceCsiApplicationHistory.preparedTerminal(baseline, binding.getRequest(), body);
-        WorkspaceCsiApplicationWorkerMatch.verify(baseline, prepared, observation, expected);
-        return value;
+        try (var prepared = WorkspaceCsiApplicationHistory.preparedTerminal(baseline, binding.getRequest(), body)) {
+            WorkspaceCsiApplicationWorkerMatch.verify(baseline, prepared, observation, expected);
+            return value;
+        }
     }
 
     private Snapshot inspect(Connection target, Locked locked) throws SQLException {

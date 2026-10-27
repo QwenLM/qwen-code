@@ -2,6 +2,12 @@
 
 [English](2026-10-26-managed-local-journal-snapshots.md) | [简体中文](2026-10-26-managed-local-journal-snapshots.zh-CN.md)
 
+## PR5 integration
+
+The original PR4 slice below established local ownership-aware snapshot conversion; it did not qualify bounded authority memory. [PR5](2026-10-27-managed-session-authority-window.md) replaces whole-source collectors with transaction streaming, a disk resource/page census, incremental replacement verification and a bounded history query view. Its final integrated evidence is required independently of the PR4 acceptance record. The complete prefix remains retained and the native replay floor remains unchanged.
+
+PR5 preflights manifest size against the existing 64 MiB resource limit before publishing any page. After the complete original prefix, sealed proof and every declared/nested old resource validate, manifest capacity alone may retain the original transcript and resume through the streaming reader. That branch publishes no pages, performs no replacement, and preserves the schema-3/format-2 ownership barrier. An existing snapshot base, missing/corrupt resources, I/O failure, or uncertain ownership cannot take this branch. In particular, an over-capacity manifest plus a missing old resource must still refuse resume. Capacity changes neither the generic resource API nor any integrity requirement below.
+
 ## Problem and boundaries
 
 Issue #13184 requires a native recovery boundary before authority eviction. The

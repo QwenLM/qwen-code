@@ -56,6 +56,8 @@ import type {
 import type { Status } from '../core/coreToolScheduler.js';
 import type { AgentResultDisplay, FileDiff } from '../tools/tools.js';
 import type { UiEvent } from '../telemetry/uiTelemetry.js';
+import type { FileManagedSessionHistory } from '../managed-runtime/managed-session-history.js';
+import { getLastApiPromptCancellationFromHistory } from './session-api-history.js';
 import type {
   FileHistorySnapshot,
   SerializedFileHistorySnapshot,
@@ -79,7 +81,10 @@ import {
 } from '../utils/api-history-metadata.js';
 import { getStartupContextLength } from '../core/environmentContext.js';
 import { getRecordRewindId } from './session-api-history.js';
-import { computeInitialTurnFromHistory } from './session-turn-state.js';
+import {
+  computeInitialTurnFromHistory,
+  getSessionTurnRecordHint,
+} from './session-turn-state.js';
 import {
   deleteTranscriptMessageGroups,
   getTranscriptMessageGroups,
@@ -103,6 +108,7 @@ import type {
 import {
   collectPendingBranchToolCalls,
   resolveCompletedTurnBranchCandidateFromRecords,
+  resolveCompletedTurnBranchCandidateFromHistory,
   updatePendingBranchToolCalls,
   type BranchCheckpointRecordPayloadV1,
   type BranchPoint,
@@ -344,8 +350,11 @@ export interface ManagedSessionRecordWriter {
   canCarry(record: ChatRecord): boolean;
   /** Commits the record to the log as a Managed transaction. */
   write(record: ChatRecord): Promise<void>;
-  /** The reader-facing records rebuilt from the log, in log order. */
+  /** Current model context with derived parent links. */
   project(): Promise<ChatRecord[]>;
+  iterate?(): AsyncIterable<ChatRecord>;
+  createQueryHistory?(): FileManagedSessionHistory;
+  dispose?(): Promise<void>;
   /** Records that this session stopped advancing the log. */
   stopAdvancing(): Promise<void>;
   /** The committed position the writer is sealed with. */
@@ -1136,6 +1145,9 @@ export interface ChatRecordingRestoreState {
   lastCompletedUuid: string;
   turnParentUuids: Array<string | null>;
   turnPromptIds?: Array<string | undefined>;
+  userTurnCount?: number;
+  pendingBranchToolCalls?: readonly BranchToolCallIdentity[];
+  lastCompression?: ChatCompressionRecordPayload;
   customTitle?: string;
   titleSource?: TitleSource;
   parentSessionId?: string;
@@ -1180,6 +1192,10 @@ export class ChatRecordingService {
   private activeBranchBaseUuid: string | null = null;
   /** Unclosed tool calls at the current active tail. */
   private pendingBranchToolCalls: BranchToolCallIdentity[] = [];
+  private managedBranchRecordCount = 0;
+  private managedBranchTail: string | null = null;
+  private managedUserTurnCount = 0;
+  private latestManagedCompression?: ChatCompressionRecordPayload;
   private readonly config: Config;
   /**
    * Tracks the `lastRecordUuid` value just before each user turn was recorded.
@@ -1511,10 +1527,24 @@ export class ChatRecordingService {
     this.lastPersistedRecordUuid = state.lastCompletedUuid;
     this.resetExternalRecordIndex();
     this.activeBranchBaseUuid = state.lastCompletedUuid;
-    this.turnParentUuids = [...state.turnParentUuids];
-    this.turnPromptIds = state.turnPromptIds
-      ? [...state.turnPromptIds]
-      : Array.from(state.turnParentUuids, () => undefined);
+    if (this.managedSink) {
+      this.activeBranchRecords = [];
+      this.turnParentUuids = [];
+      this.turnPromptIds = [];
+      this.managedBranchRecordCount = 0;
+      this.managedBranchTail = state.lastCompletedUuid;
+      this.managedUserTurnCount =
+        state.userTurnCount ?? state.turnParentUuids.length;
+      this.pendingBranchToolCalls = (state.pendingBranchToolCalls ?? []).map(
+        (call) => ({ ...call }),
+      );
+      this.latestManagedCompression = state.lastCompression;
+    } else {
+      this.turnParentUuids = [...state.turnParentUuids];
+      this.turnPromptIds = state.turnPromptIds
+        ? [...state.turnPromptIds]
+        : Array.from(state.turnParentUuids, () => undefined);
+    }
     this.currentCustomTitle = state.customTitle;
     this.currentTitleSource = state.titleSource;
     this.currentParentSessionId = state.parentSessionId;
@@ -1646,6 +1676,33 @@ export class ChatRecordingService {
   }
 
   private updateActiveBranch(record: ChatRecord): void {
+    if (this.managedSink) {
+      if (record.parentUuid !== this.managedBranchTail) {
+        this.activeBranchBaseUuid = record.parentUuid ?? null;
+        this.managedBranchRecordCount = 0;
+        this.pendingBranchToolCalls = [];
+      }
+      this.managedBranchTail = record.uuid;
+      this.managedBranchRecordCount++;
+      if (
+        getSessionTurnRecordHint(record, record.sessionId).turnParentUuid !==
+        undefined
+      )
+        this.managedUserTurnCount++;
+      if (record.subtype === 'chat_compression') {
+        this.latestManagedCompression =
+          record.systemPayload as ChatCompressionRecordPayload;
+        this.pendingBranchToolCalls = [];
+        for (const content of this.latestManagedCompression.compressedHistory)
+          updatePendingBranchToolCalls(this.pendingBranchToolCalls, {
+            uuid: record.uuid,
+            parentUuid: record.parentUuid,
+            type: content.role === 'model' ? 'assistant' : 'user',
+            message: content,
+          });
+      } else updatePendingBranchToolCalls(this.pendingBranchToolCalls, record);
+      return;
+    }
     const currentTail = this.activeBranchRecords.at(-1)?.uuid ?? null;
     if (record.parentUuid !== currentTail) {
       const parentIndex =
@@ -2219,6 +2276,32 @@ export class ChatRecordingService {
     return session.conversation.messages;
   }
 
+  async readActiveTranscriptHistory(): Promise<AsyncIterable<ChatRecord>> {
+    await this.flush();
+    if (this.managedSink?.iterate) return this.managedSink.iterate();
+    const records = await this.readActiveTranscriptChain();
+    return {
+      async *[Symbol.asyncIterator]() {
+        yield* records;
+      },
+    };
+  }
+
+  createTranscriptQueryHistory(): FileManagedSessionHistory | undefined {
+    return this.managedSink?.createQueryHistory?.();
+  }
+
+  async readLastApiPromptCancellation(
+    history: readonly Content[],
+    trailingSystemNotifications?: number,
+  ) {
+    return getLastApiPromptCancellationFromHistory(
+      history,
+      await this.readActiveTranscriptHistory(),
+      trailingSystemNotifications,
+    );
+  }
+
   async runWithWriteBarrier<T>(operation: () => Promise<T>): Promise<T> {
     if (this.writeFailure) throw this.writeFailure;
     if (!this.acceptingWrites || this.state !== 'active') {
@@ -2351,6 +2434,7 @@ export class ChatRecordingService {
       }
       this.binding = undefined;
       this.state = 'closed';
+      await managedSink?.dispose?.();
     } catch (error) {
       if (
         error instanceof SessionWriterLostError ||
@@ -2391,7 +2475,9 @@ export class ChatRecordingService {
   getBranchCheckpointCursor(): BranchCheckpointCursor {
     return {
       recordId: this.lastRecordUuid,
-      activeRecordCount: this.activeBranchRecords.length,
+      activeRecordCount: this.managedSink
+        ? this.managedBranchRecordCount
+        : this.activeBranchRecords.length,
       pendingToolCalls: this.pendingBranchToolCalls.map((call) => ({
         ...call,
       })),
@@ -2415,21 +2501,79 @@ export class ChatRecordingService {
       await this.flush();
       const endInclusiveRecordUuid = this.lastRecordUuid;
       if (endInclusiveRecordUuid === null) return undefined;
-      const cursorRecordId =
-        input.cursor.activeRecordCount === 0
-          ? this.activeBranchBaseUuid
-          : this.activeBranchRecords[input.cursor.activeRecordCount - 1]?.uuid;
-      if (
-        cursorRecordId !== input.cursor.recordId ||
-        this.activeBranchRecords.at(-1)?.uuid !== endInclusiveRecordUuid
-      ) {
-        throw new Error('Transcript changed while recording branch checkpoint');
+      let candidate: Awaited<
+        ReturnType<typeof resolveCompletedTurnBranchCandidateFromHistory>
+      >;
+      if (this.managedSink) {
+        const iterate = this.managedSink.iterate;
+        const expected =
+          this.managedBranchRecordCount - input.cursor.activeRecordCount;
+        if (
+          !iterate ||
+          expected < 0 ||
+          (input.cursor.activeRecordCount === 0 &&
+            input.cursor.recordId !== this.activeBranchBaseUuid)
+        )
+          throw new Error(
+            'Transcript changed while recording branch checkpoint',
+          );
+        let started = input.cursor.recordId === null;
+        let ended = false;
+        let records = 0;
+        const source = iterate.call(this.managedSink);
+        const interval = {
+          async *[Symbol.asyncIterator]() {
+            for await (const record of source) {
+              if (!started) {
+                if (record.uuid === input.cursor.recordId) {
+                  started = true;
+                  if (record.uuid === endInclusiveRecordUuid) {
+                    ended = true;
+                    break;
+                  }
+                }
+                continue;
+              }
+              records++;
+              yield record;
+              if (record.uuid === endInclusiveRecordUuid) {
+                ended = true;
+                break;
+              }
+            }
+          },
+        };
+        candidate = await resolveCompletedTurnBranchCandidateFromHistory({
+          records: interval,
+          startExclusiveRecordUuid: input.cursor.recordId,
+          pendingCallsAtStart: input.cursor.pendingToolCalls,
+        });
+        if (!started || !ended || records !== expected)
+          throw new Error(
+            'Transcript changed while recording branch checkpoint',
+          );
+      } else {
+        const cursorRecordId =
+          input.cursor.activeRecordCount === 0
+            ? this.activeBranchBaseUuid
+            : this.activeBranchRecords[input.cursor.activeRecordCount - 1]
+                ?.uuid;
+        if (
+          cursorRecordId !== input.cursor.recordId ||
+          this.activeBranchRecords.at(-1)?.uuid !== endInclusiveRecordUuid
+        ) {
+          throw new Error(
+            'Transcript changed while recording branch checkpoint',
+          );
+        }
+        candidate = resolveCompletedTurnBranchCandidateFromRecords({
+          records: this.activeBranchRecords.slice(
+            input.cursor.activeRecordCount,
+          ),
+          startExclusiveRecordUuid: input.cursor.recordId,
+          pendingCallsAtStart: input.cursor.pendingToolCalls,
+        });
       }
-      const candidate = resolveCompletedTurnBranchCandidateFromRecords({
-        records: this.activeBranchRecords.slice(input.cursor.activeRecordCount),
-        startExclusiveRecordUuid: input.cursor.recordId,
-        pendingCallsAtStart: input.cursor.pendingToolCalls,
-      });
       if (!candidate) return undefined;
 
       const checkpointUuid = randomUUID();
@@ -2527,8 +2671,10 @@ export class ChatRecordingService {
       // Advance rewind associations only after the record is built, so a
       // rejected message cannot skew the projection.
       this.trackUserDisplayTextForTitle(promptPayload?.displayText);
-      this.turnParentUuids.push(record.parentUuid ?? null);
-      this.turnPromptIds.push(getRecordRewindId(record));
+      if (!this.managedSink) {
+        this.turnParentUuids.push(record.parentUuid ?? null);
+        this.turnPromptIds.push(getRecordRewindId(record));
+      }
       this.appendRecord(record);
     } catch (error) {
       debugLogger.error('Error saving user message:', error);
@@ -2541,7 +2687,9 @@ export class ChatRecordingService {
 
   /** User turns in the active transcript: the boundaries `/rewind` uses. */
   getUserTurnCount(): number {
-    return this.turnParentUuids.length;
+    return this.managedSink
+      ? this.managedUserTurnCount
+      : this.turnParentUuids.length;
   }
 
   recordGoalRuntimeMessage(
@@ -3527,9 +3675,11 @@ export class ChatRecordingService {
         ...content,
         ...(content.parts ? { parts: [...content.parts] } : {}),
       }));
-      const previous = this.activeBranchRecords.findLast(
-        (record) => record.subtype === 'chat_compression',
-      )?.systemPayload as ChatCompressionRecordPayload | undefined;
+      const previous = this.managedSink
+        ? this.latestManagedCompression
+        : (this.activeBranchRecords.findLast(
+            (record) => record.subtype === 'chat_compression',
+          )?.systemPayload as ChatCompressionRecordPayload | undefined);
       const previousPrefix = previous?.summaryPrefixLength ?? 0;
       const summaryPrefixLength =
         payload.summaryPrefixLength ??
@@ -3592,6 +3742,7 @@ export class ChatRecordingService {
   }
 
   getRewindTurnIndex(promptId: string): number {
+    if (this.managedSink) return -1;
     const index = this.turnPromptIds.indexOf(promptId);
     return index === this.turnPromptIds.lastIndexOf(promptId) ? index : -1;
   }
@@ -3626,6 +3777,11 @@ export class ChatRecordingService {
     survivingFileHistorySnapshots?: FileHistorySnapshot[],
     sessionApprovalMode?: SessionApprovalModeRecordPayload,
   ): void {
+    if (this.managedSink)
+      throw new ManagedSessionRecordRefusedError({
+        type: 'system',
+        subtype: 'rewind',
+      });
     try {
       if (
         sessionApprovalMode &&
@@ -3700,6 +3856,30 @@ export class ChatRecordingService {
    */
   rebuildTurnBoundaries(messages: ChatRecord[]): void {
     this.resetExternalRecordIndex();
+    if (this.managedSink) {
+      this.activeBranchRecords = [];
+      this.turnParentUuids = [];
+      this.turnPromptIds = [];
+      this.pendingBranchToolCalls = collectPendingBranchToolCalls(messages);
+      let turns = 0;
+      for (const record of messages)
+        if (
+          getSessionTurnRecordHint(record, record.sessionId).turnParentUuid !==
+          undefined
+        )
+          turns++;
+      this.managedUserTurnCount = Math.max(this.managedUserTurnCount, turns);
+      this.latestManagedCompression =
+        (messages.findLast((record) => record.subtype === 'chat_compression')
+          ?.systemPayload as ChatCompressionRecordPayload | undefined) ??
+        this.latestManagedCompression;
+      this.managedBranchRecordCount = 0;
+      this.lastRecordUuid ??= messages.at(-1)?.uuid ?? null;
+      this.lastPersistedRecordUuid = this.lastRecordUuid;
+      this.activeBranchBaseUuid = this.lastRecordUuid;
+      this.managedBranchTail = this.lastRecordUuid;
+      return;
+    }
     this.turnParentUuids = [];
     this.turnPromptIds = [];
     this.activeBranchRecords = [...messages];

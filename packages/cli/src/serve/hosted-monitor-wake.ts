@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { ManagedHistoryQuery } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-history.js';
 import { randomUUID } from 'node:crypto';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import type { LocalManagedSessionAuthority } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
@@ -71,7 +72,7 @@ export interface HostedMonitorWakeDeps {
    */
   next(): Promise<HostedMonitorWakeTurn | undefined>;
   /** Busy Sessions queue; blocked Sessions report their remainder. */
-  state(): HostedMonitorWakeState;
+  state(): HostedMonitorWakeState | Promise<HostedMonitorWakeState>;
   /**
    * Runs the notification's text turn and settles the input's turnId, or
    * marks the owner blocked when the turn cannot settle. Returns 'busy'
@@ -141,14 +142,17 @@ export class HostedMonitorWakeScheduler {
     this.inFlight = true;
     this.holds += 1;
     void this.pump()
-      .catch((cause: unknown) => {
+      .catch(async (cause: unknown) => {
         this.deps.failed(cause);
         // A pass that dies while its owner is blocked — a crash residue's
         // settle meeting a transient fault — must not take the reminders
         // with it: the blocked cycle re-arms itself, or only a reload
         // would ever run the same settle again.
-        if (!this.closed && this.deps.state() === 'blocked') {
-          this.armRetry();
+        try {
+          if (!this.closed && (await this.deps.state()) === 'blocked')
+            this.armRetry();
+        } catch {
+          if (!this.closed) this.armRetry();
         }
       })
       .finally(() => this.release());
@@ -213,7 +217,7 @@ export class HostedMonitorWakeScheduler {
   private async pump(): Promise<void> {
     for (;;) {
       if (this.closed) return;
-      const state = this.deps.state();
+      const state = await this.deps.state();
       // A transiently blocked Session — an MCP or Hook operation in
       // flight, or an activation that has not come up yet — has no other
       // kick source, so the reminder arms its own retry here too. A
@@ -225,7 +229,7 @@ export class HostedMonitorWakeScheduler {
           return;
         }
         await this.deps.recoverBlocked();
-        if (this.deps.state() === 'blocked') {
+        if ((await this.deps.state()) === 'blocked') {
           this.armRetry();
           return;
         }
@@ -244,7 +248,7 @@ export class HostedMonitorWakeScheduler {
         throw cause;
       }
       if (next === undefined) return;
-      if (state === 'busy' || this.deps.state() === 'busy') {
+      if (state === 'busy' || (await this.deps.state()) === 'busy') {
         this.armRetry();
         return;
       }
@@ -284,7 +288,7 @@ export class HostedMonitorWakeScheduler {
         throw cause;
       }
       if (again?.turnId === next.turnId) {
-        if (this.deps.state() === 'blocked') {
+        if ((await this.deps.state()) === 'blocked') {
           this.armRetry();
           return;
         }
@@ -296,7 +300,7 @@ export class HostedMonitorWakeScheduler {
         // A pass that ended blocked over an input its read no longer
         // returns (a stopped Session's message turn) owes the same
         // reminder, or only an unrelated kick retries that settle.
-        if (this.deps.state() === 'blocked') this.armRetry();
+        if ((await this.deps.state()) === 'blocked') this.armRetry();
         return;
       }
     }
@@ -352,19 +356,27 @@ export async function settlePendingMonitorInputs(params: {
   // default page and leave the Session's owed inputs unsettled — which is
   // exactly the wedge this close-path settle exists to prevent.
   const authority = params.authority;
-  const queued = pendingSessionInputs(
-    authority.eventsInSequenceRange(1, authority.committedSequence),
-  ).filter((input) => sources.includes(input.source));
+  const queued = pendingSessionInputs(authority.pendingInputEvents).filter(
+    (input) => sources.includes(input.source),
+  );
   // A close over no such input pays no transcript projection at all: every
   // close path induced by an attached Session would otherwise page the
   // whole committed prefix.
   if (queued.length === 0) {
     return 0;
   }
-  const attempted = await params.sink.project();
-  const pending = queued.filter(
-    (input) => !wakeHasPriorAttempt(attempted, input.turnId),
+  const throughSequence = authority.committedSequence;
+  const attempted = new ManagedHistoryQuery(() =>
+    params.sink.iterateRecords(throughSequence),
   );
+  const pending = [];
+  for (const input of queued)
+    if (
+      !(await attempted.some(
+        (record) => record.daemonPromptId === input.turnId,
+      ))
+    )
+      pending.push(input);
   for (const input of pending) {
     const settle: ChatRecord = {
       uuid: randomUUID(),

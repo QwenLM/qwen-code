@@ -5,9 +5,11 @@
  */
 
 import path from 'node:path';
+import os from 'node:os';
 import { validateTodos } from '@qwen-code/qwen-code-core/tools/todoWrite.js';
 import { checkHostedTodoWriteInput } from './hosted-workspace-tool-input.js';
-import { readHarnessCheckpoint } from '@qwen-code/qwen-code-core/managed-runtime/managed-checkpoint-history.js';
+import { readHarnessCheckpointView } from '@qwen-code/qwen-code-core/managed-runtime/managed-checkpoint-history.js';
+import { FileManagedSessionHistory } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-history.js';
 import {
   HOSTED_RECOVERY_RESOURCE_KINDS,
   parseHostedRecoveryResource,
@@ -308,6 +310,20 @@ export async function verifyRecoverySession(
   source: RecoverySessionSource,
   io: RecoverySessionIO,
   purpose: 'recovery' | 'migration' = 'recovery',
+): Promise<{ fileHistory: 'captured' | 'not_captured' }> {
+  const scratch = await FileManagedSessionHistory.create(os.tmpdir());
+  try {
+    return await verifyRecoverySessionWithHistory(source, io, purpose, scratch);
+  } finally {
+    await scratch.close();
+  }
+}
+
+async function verifyRecoverySessionWithHistory(
+  source: RecoverySessionSource,
+  io: RecoverySessionIO,
+  purpose: 'recovery' | 'migration',
+  scratch: FileManagedSessionHistory,
 ): Promise<{ fileHistory: 'captured' | 'not_captured' }> {
   encodeManagedContextBinding(source.binding);
   const head = source.head;
@@ -962,32 +978,43 @@ export async function verifyRecoverySession(
         );
         for (const nested of collectNestedResourceRefs(ref, await read(ref)))
           await io.enqueue(nested);
-        const state = await readHarnessCheckpoint({ read }, ref);
-        requireValue(
-          managedSessionKeysEqual(state.identity.sessionKey, key) &&
-            state.identity.checkpointId === event.payload['checkpointId'] &&
-            state.identity.coveredSequence ===
-              event.payload['coveredSequence'] &&
-            state.identity.previousCheckpointId ===
-              event.payload['previousCheckpointId'],
-          'checkpoint identity conflicts',
-        );
-        latestCheckpoint = {
-          id: state.identity.checkpointId,
+        const checkpointView = await readHarnessCheckpointView(
+          { read },
           ref,
-          boundary: event.payload['boundary'],
-          state,
-        };
-        lastCheckpointSequence = event.sequence;
-        await enqueueRefs(state, io);
-        if (state.resume.fileHistoryRef) {
-          const history = object(json(await read(state.resume.fileHistoryRef)));
+          scratch,
+        );
+        try {
+          const state = checkpointView.checkpoint;
           requireValue(
-            history['ownerSessionId'] === source.sessionId,
-            'checkpoint file history owner conflicts',
+            managedSessionKeysEqual(state.identity.sessionKey, key) &&
+              state.identity.checkpointId === event.payload['checkpointId'] &&
+              state.identity.coveredSequence ===
+                event.payload['coveredSequence'] &&
+              state.identity.previousCheckpointId ===
+                event.payload['previousCheckpointId'],
+            'checkpoint identity conflicts',
           );
-          parseManagedToolFileHistoryState(history);
-          await backups(history['snapshots']);
+          latestCheckpoint = {
+            id: state.identity.checkpointId,
+            ref,
+            boundary: event.payload['boundary'],
+            state,
+          };
+          lastCheckpointSequence = event.sequence;
+          await enqueueRefs(state, io);
+          if (state.resume.fileHistoryRef) {
+            const history = object(
+              json(await read(state.resume.fileHistoryRef)),
+            );
+            requireValue(
+              history['ownerSessionId'] === source.sessionId,
+              'checkpoint file history owner conflicts',
+            );
+            parseManagedToolFileHistoryState(history);
+            await backups(history['snapshots']);
+          }
+        } finally {
+          await checkpointView.close();
         }
       }
       if (event.kind === 'tool.receipt') await toolReceipt(event);
@@ -1060,12 +1087,21 @@ export async function verifyRecoverySession(
     else if (ref.kind === 'managed-checkpoint') {
       for (const nested of collectNestedResourceRefs(ref, bytes))
         await io.enqueue(nested);
-      const state = await readHarnessCheckpoint({ read }, ref);
-      requireValue(
-        key && managedSessionKeysEqual(state.identity.sessionKey, key),
-        'checkpoint closure owner conflicts',
+      const checkpointView = await readHarnessCheckpointView(
+        { read },
+        ref,
+        scratch,
       );
-      await enqueueRefs(state, io);
+      try {
+        const state = checkpointView.checkpoint;
+        requireValue(
+          key && managedSessionKeysEqual(state.identity.sessionKey, key),
+          'checkpoint closure owner conflicts',
+        );
+        await enqueueRefs(state, io);
+      } finally {
+        await checkpointView.close();
+      }
     } else if (ref.kind === 'managed-checkpoint-history') {
       for (const nested of collectNestedResourceRefs(ref, bytes))
         await io.enqueue(nested);

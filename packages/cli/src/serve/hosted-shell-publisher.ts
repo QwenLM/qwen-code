@@ -414,8 +414,8 @@ export class HostedShellPublisher {
           entry.background.refusedBody = body;
           const owner =
             entry.background.recordDomain === 'monitor_run'
-              ? this.monitors?.record(String(id))
-              : this.childRuns?.record(String(id));
+              ? await this.monitors?.record(String(id))
+              : await this.childRuns?.record(String(id));
           // An attached record that missed the final forward otherwise
           // strands forever: the worker finalizes once and drops the hold.
           // The same stash re-drives itself, bounded and drain-aware, so a
@@ -676,8 +676,8 @@ export class HostedShellPublisher {
       // before a start receipt is a parse-level refusal, never a commit.
       const owner =
         background.recordDomain === 'monitor_run'
-          ? this.monitors?.record(executionCallId)
-          : this.childRuns?.record(executionCallId);
+          ? await this.monitors?.record(executionCallId)
+          : await this.childRuns?.record(executionCallId);
       if (!owner) {
         throw new Error(
           `The ${background.recordDomain} record for ${executionCallId} is missing.`,
@@ -816,7 +816,7 @@ export class HostedShellPublisher {
         // own observation revision with its own wake input, and only then
         // does the record settle. An empty end takes no observation, as
         // the Legacy emit-at-zero shape held.
-        const record = this.monitors.record(executionCallId);
+        const record = await this.monitors.record(executionCallId);
         if (record === undefined) {
           throw new Error(
             `The monitor_run record for ${executionCallId} is missing.`,

@@ -175,11 +175,11 @@ async function withOrchestrator<T>(
 const BINDING = { runtimeBindingId: 'binding-1', generation: '1' };
 const ARGS = { command: 'yes', is_background: true };
 
-function committed(
+async function committed(
   authority: LocalManagedSessionAuthority,
   shellId = 'shell-1',
-): { revision: number; body: ReturnType<typeof parseChildShellRun> } {
-  const existing = authority.extensionRecord('child_run', shellId);
+): Promise<{ revision: number; body: ReturnType<typeof parseChildShellRun> }> {
+  const existing = await authority.extensionRecord('child_run', shellId);
   if (!existing) throw new Error(`No child_run record for ${shellId}.`);
   return {
     revision: existing.revision,
@@ -201,8 +201,8 @@ describe('HostedChildRunSession', () => {
       expect(
         JSON.parse((await harness.store.read(commandRef)).toString()),
       ).toEqual(ARGS);
-      expect(committed(authority).revision).toBe(1);
-      expect(authority.taskViews()).toEqual([
+      expect((await committed(authority)).revision).toBe(1);
+      expect(await authority.taskViews()).toEqual([
         {
           taskId: TASK_ID,
           sessionId,
@@ -218,7 +218,7 @@ describe('HostedChildRunSession', () => {
 
       harness.now = 2_000;
       await orchestrator.dispatchStarted('shell-1', BINDING);
-      expect(committed(authority).body.run).toMatchObject({
+      expect((await committed(authority)).body.run).toMatchObject({
         state: 'running',
         execution: 'dispatch_started',
         runtime: BINDING,
@@ -226,7 +226,7 @@ describe('HostedChildRunSession', () => {
 
       harness.now = 3_000;
       await orchestrator.attach('shell-1', BINDING, { pid: 4242 });
-      const attached = committed(authority);
+      const attached = await committed(authority);
       expect(attached.revision).toBe(3);
       expect(attached.body.startReceiptRef?.kind).toBe(
         'managed-runtime-receipt',
@@ -252,19 +252,19 @@ describe('HostedChildRunSession', () => {
       );
       await orchestrator.advanceOutput('shell-1', manifestA);
       await orchestrator.advanceOutput('shell-1', manifestB);
-      const advanced = committed(authority);
+      const advanced = await committed(authority);
       expect(advanced.revision).toBe(5);
       expect(advanced.body.outputRef).toEqual(manifestB);
       await expect(
         orchestrator.advanceOutput('shell-1', manifestA),
       ).rejects.toThrow('lineage');
-      expect(committed(authority).body.outputRef).toEqual(manifestB);
+      expect((await committed(authority)).body.outputRef).toEqual(manifestB);
       // A replay of the very same reference is not a refusal and commits
       // nothing: a redelivered advance must never wedge the Shell's exit
       // leg, and since it changes no field, the deep-equal skip owns it.
       await orchestrator.advanceOutput('shell-1', manifestB);
-      expect(committed(authority).body.outputRef).toEqual(manifestB);
-      expect(committed(authority).revision).toBe(5);
+      expect((await committed(authority)).body.outputRef).toEqual(manifestB);
+      expect((await committed(authority)).revision).toBe(5);
       // The live run line holds its state through every advance of a
       // running process — the projection's `waiting` means paused, never
       // "the second revision".
@@ -275,7 +275,7 @@ describe('HostedChildRunSession', () => {
         exitCode: 0,
         exitSignal: null,
       });
-      const settled = committed(authority);
+      const settled = await committed(authority);
       expect(settled.revision).toBe(6);
       expect(settled.body).toMatchObject({
         stopReason: 'exited',
@@ -288,7 +288,7 @@ describe('HostedChildRunSession', () => {
         state: 'settled',
         execution: 'settled',
       });
-      expect(authority.taskViews()).toEqual([
+      expect(await authority.taskViews()).toEqual([
         {
           taskId: TASK_ID,
           sessionId,
@@ -306,7 +306,7 @@ describe('HostedChildRunSession', () => {
       // replay-after-restart shape: it may resend the same manifest, but it
       // must never step the terminal run line back to live.
       await orchestrator.advanceOutput('shell-1', manifestB);
-      const replayed = committed(authority);
+      const replayed = await committed(authority);
       expect(replayed.body.outputRef).toEqual(manifestB);
       expect(replayed.body.run).toMatchObject({
         state: 'settled',
@@ -343,7 +343,7 @@ describe('HostedChildRunSession', () => {
       // already carries every skipped revision forward.
       const leapt = await publish(manifestBody({ revision: 3 }));
       await orchestrator.advanceOutput('shell-1', leapt);
-      expect(committed(authority).body.outputRef).toEqual(leapt);
+      expect((await committed(authority)).body.outputRef).toEqual(leapt);
       const backward = await publish(manifestBody({ revision: 2 }));
       await expect(
         orchestrator.advanceOutput('shell-1', backward),
@@ -376,11 +376,11 @@ describe('HostedChildRunSession', () => {
       await orchestrator.dispatchStarted('shell-1', BINDING);
       await orchestrator.attach('shell-1', BINDING, { pid: 7 });
       await orchestrator.requestStop('shell-1');
-      const draining = committed(authority);
+      const draining = await committed(authority);
       expect(draining.body.stopRequested).toBe(true);
       expect(draining.body.run.state).toBe('running');
       await orchestrator.settleStopRequested('shell-1');
-      expect(committed(authority).body).toMatchObject({
+      expect((await committed(authority)).body).toMatchObject({
         stopReason: 'stop_requested',
         stopRequested: true,
         exitCode: null,
@@ -402,7 +402,7 @@ describe('HostedChildRunSession', () => {
         stopReason: 'start_failed',
         started: false,
       });
-      const failed = committed(authority);
+      const failed = await committed(authority);
       expect(failed.body).toMatchObject({
         stopReason: 'start_failed',
         startReceiptRef: null,
@@ -433,12 +433,12 @@ describe('HostedChildRunSession', () => {
       ];
       await Promise.all(dispatches);
       // The second dispatch is byte-identical, so the funnel skips it.
-      expect(committed(authority).revision).toBe(2);
+      expect((await committed(authority)).revision).toBe(2);
       const attach = orchestrator.attach('shell-1', BINDING, { pid: 9 });
       const stop = orchestrator.requestStop('shell-1');
       const settle = orchestrator.settleStopRequested('shell-1');
       await Promise.all([attach, stop, settle]);
-      const settled = committed(authority);
+      const settled = await committed(authority);
       expect(settled.revision).toBe(5);
       expect(settled.body.run).toMatchObject({
         state: 'cancelled',

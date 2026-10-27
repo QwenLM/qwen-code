@@ -1052,6 +1052,9 @@ importers:
       '@opentelemetry/semantic-conventions':
         specifier: ^1.36.0
         version: 1.36.0
+      '@streamparser/json':
+        specifier: 0.0.26
+        version: 0.0.26
       '@xterm/headless':
         specifier: 5.5.0
         version: 5.5.0
@@ -4689,6 +4692,9 @@ packages:
 
   '@standard-schema/spec@1.1.0':
     resolution: {integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==}
+
+  '@streamparser/json@0.0.26':
+    resolution: {integrity: sha512-46597LNFI+MFdUnzX2QJWwmdTRdq0XVD+vVNJTtGVzIrnCuhG9pFo1OAzbNBqci8UJgk/X5KJZ6LcV+y7PTuDQ==}
 
   '@stylistic/eslint-plugin@3.1.0':
     resolution: {integrity: sha512-pA6VOrOqk0+S8toJYhQGv2MWpQQR0QpeUo9AhNkC49Y26nxBQ/nH1rta9bUU1rPw2fJ1zZEMV5oCX5AazT7J2g==}
@@ -14003,6 +14009,8 @@ snapshots:
   '@sindresorhus/merge-streams@4.0.0': {}
 
   '@standard-schema/spec@1.1.0': {}
+
+  '@streamparser/json@0.0.26': {}
 
   '@stylistic/eslint-plugin@3.1.0(eslint@9.29.0(jiti@2.7.0)(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.8.2)':
     dependencies:

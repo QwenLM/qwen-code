@@ -318,7 +318,7 @@ export class HostedApprovalWaiters {
     requestId: string,
     expiresAt: number,
     signal: AbortSignal,
-    isFinal: () => boolean,
+    isFinal: () => boolean | Promise<boolean>,
     onPoll?: () => Promise<void>,
   ): Promise<void> {
     let timer: NodeJS.Timeout | undefined;
@@ -332,25 +332,25 @@ export class HostedApprovalWaiters {
         signal.addEventListener('abort', onAbort, { once: true });
         timer = setTimeout(resolve, Math.max(0, expiresAt - Date.now()));
         timer.unref();
-        poll = setInterval(() => {
-          if (isFinal()) resolve();
-          else if (
-            onPoll &&
-            !polling &&
-            !signal.aborted &&
-            Date.now() < expiresAt
-          ) {
-            polling = true;
-            void onPoll()
-              .catch(reject)
-              .finally(() => {
-                polling = false;
-              });
+        const check = async () => {
+          if (polling) return;
+          polling = true;
+          try {
+            if (await isFinal()) resolve();
+            else if (onPoll && !signal.aborted && Date.now() < expiresAt)
+              await onPoll();
+          } catch (cause) {
+            reject(cause);
+          } finally {
+            polling = false;
           }
+        };
+        poll = setInterval(() => {
+          void check();
         }, WAIT_POLL_MS);
         poll.unref();
-        // An answer may have landed before the waiter was registered.
-        if (isFinal() || signal.aborted) resolve();
+        if (signal.aborted) resolve();
+        else void check();
       });
     } finally {
       clearTimeout(timer);
@@ -390,7 +390,7 @@ export async function endHostedAction(
   } catch (cause) {
     if (
       !(cause instanceof ManagedSessionConflictError) ||
-      authority.action(requestId)?.state === 'requested'
+      (await authority.action(requestId))?.state === 'requested'
     )
       throw cause;
   }
@@ -478,7 +478,7 @@ export async function resolveHostedAction(
   isBlocked: () => boolean = () => false,
 ): Promise<HostedActionResolution> {
   const authority = session.authority;
-  const existing = authority.action(requestId);
+  const existing = await authority.action(requestId);
   if (existing === undefined) return { status: 404, code: 'action_not_found' };
   const options = await readHostedActionOptions(session, existing);
   const request =
@@ -507,8 +507,8 @@ export async function resolveHostedAction(
       ? { status: 200, body: { requestId, state: 'decided', optionId } }
       : { status: 409, code: 'action_already_resolved' };
   // What is already recorded is answered as it stands, blocked or not.
-  const recorded = (): HostedActionResolution | undefined => {
-    const action = authority.action(requestId)!;
+  const recorded = async (): Promise<HostedActionResolution | undefined> => {
+    const action = (await authority.action(requestId))!;
     if (action.state === 'expired' || action.state === 'cancelled')
       return { status: 409, code: ENDED_CODES[action.state] };
     return action.state === 'decided' ? decided(action) : undefined;
@@ -517,10 +517,10 @@ export async function resolveHostedAction(
   // can no longer write, where no retry can succeed, and wake the waiting
   // Turn so it stops now rather than at the expiry. Anything else is
   // retryable.
-  const failed = (cause: unknown): HostedActionResolution => {
-    const raced = recorded();
+  const failed = async (cause: unknown): Promise<HostedActionResolution> => {
+    const raced = await recorded();
     if (raced) {
-      if (authority.action(requestId)!.state === 'decided')
+      if ((await authority.action(requestId))!.state === 'decided')
         waiters.notify(requestId);
       return raced;
     }
@@ -529,18 +529,18 @@ export async function resolveHostedAction(
     return recoveryRequired(session);
   };
   if (
-    authority.action(requestId)!.state === 'requested' &&
+    (await authority.action(requestId))!.state === 'requested' &&
     Date.now() >= options.expiresAt
   ) {
     if (!writable()) return recoveryRequired(session);
     try {
       await endHostedAction(session, requestId, 'expired', writable);
     } catch (cause) {
-      return failed(cause);
+      return await failed(cause);
     }
     waiters.notify(requestId);
   }
-  const current = recorded();
+  const current = await recorded();
   if (current) return current;
   if (!writable()) return recoveryRequired(session);
   const decisionRef = await session.resources.publish(
@@ -548,7 +548,7 @@ export async function resolveHostedAction(
     bytes,
   );
   // Another answer, the expiry or a cancel may have landed meanwhile.
-  const landed = recorded();
+  const landed = await recorded();
   if (landed) return landed;
   if (!writable()) return recoveryRequired(session);
   try {
@@ -565,7 +565,7 @@ export async function resolveHostedAction(
       writable,
     );
   } catch (cause) {
-    return failed(cause);
+    return await failed(cause);
   }
   waiters.notify(requestId);
   return { status: 200, body: { requestId, state: 'decided', optionId } };
@@ -590,7 +590,8 @@ export function hostedLiveApprovalPoll(
       options.requiresHumanDecision === true ||
       signal.aborted ||
       session.authority.writesStopped ||
-      session.authority.action(options.requestId)?.state !== 'requested' ||
+      (await session.authority.action(options.requestId))?.state !==
+        'requested' ||
       hostedApprovalAsks(settings, options.toolName, globProfile)
     )
       return;

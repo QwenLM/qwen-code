@@ -1194,7 +1194,7 @@ public final class JdbcToolExecutionRepository
                         JSONWriter.Feature.WriteBigDecimalAsPlain);
     }
 
-    private static Map<String, Object> fromJson(String value) {
+    static Map<String, Object> fromJson(String value) {
         return value == null ? null : JSON.parseObject(value,
                 JSONReader.Feature.DisableReferenceDetect);
     }

@@ -370,9 +370,9 @@ describe('hosted background launch recovery (#13847)', () => {
     expect(checkpoint.identity.turnId).toBe(expectedTurnId);
     // The `startChildRun` journal write is durable: one child_run row at
     // revision 1 (`planned`), never dispatched, never attached, no result.
-    const childRun = authority.extensionRecord('child_run', CHILD_RUN_ID);
+    const childRun = await authority.extensionRecord('child_run', CHILD_RUN_ID);
     expect(childRun?.revision).toBe(1);
-    const parsed = new HostedChildAgentSession(
+    const parsed = await new HostedChildAgentSession(
       { authority, resources: replacement.resources },
       authority.sessionHeader.sessionKey,
     ).record(CHILD_RUN_ID);
@@ -389,10 +389,9 @@ describe('hosted background launch recovery (#13847)', () => {
     session: ManagedSession,
   ): Promise<Set<string>> {
     const unsettled = new Set<string>();
-    for (const event of session.authority.eventsInSequenceRange(
-      1,
-      session.authority.committedSequence,
-    )) {
+    for await (const event of await session.authority
+      .iterateEvents(1, session.authority.committedSequence)
+      .collect(1_000_000)) {
       if (event.kind === 'input.accepted')
         unsettled.add(event.payload['turnId'] as string);
       if (event.kind === 'turn.settled')
@@ -627,17 +626,20 @@ describe('hosted background launch recovery (#13847)', () => {
     }
   });
 
-  it('settles on one journal projection (no duplicate classify+answer walk)', async () => {
+  it('settles from one committed canonical prefix', async () => {
     await crashAfterStartChildRunModelOutput();
     const replacement = await open('boot-2', false);
     try {
-      const projectSpy = vi.spyOn(replacement.sink, 'project');
+      const throughSequence = replacement.authority.committedSequence;
+      const projectSpy = vi.spyOn(replacement.sink, 'iterateRecords');
       const outcome = await takeover(replacement);
       expect(outcome).toEqual({ kind: 'inapplicable' });
-      // The settle's classification and its answer pass share the one
-      // snapshot — a second full walk of the committed events was the
-      // duplicate the review removed.
-      expect(projectSpy).toHaveBeenCalledTimes(1);
+      // Classification and answer may reopen the canonical stream, but
+      // every pass must retain the prefix captured before settlement.
+      expect(projectSpy).toHaveBeenCalled();
+      expect(
+        projectSpy.mock.calls.every(([through]) => through === throughSequence),
+      ).toBe(true);
       projectSpy.mockRestore();
     } finally {
       await replacement.close();

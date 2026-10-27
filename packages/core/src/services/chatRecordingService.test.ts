@@ -29,6 +29,9 @@ import {
   type AtCommandRecordPayload,
   type SessionModelRecordPayload,
   type TurnResultRecordPayload,
+  type ChatRecordingRestoreState,
+  type ManagedSessionRecordWriter,
+  type ChatCompressionRecordPayload,
 } from './chatRecordingService.js';
 import { MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS } from '../utils/toolResultDisplayCompaction.js';
 import * as jsonl from '../utils/jsonl-utils.js';
@@ -1089,6 +1092,142 @@ describe('ChatRecordingService', () => {
       );
 
       await first;
+    });
+  });
+
+  describe('Managed recorder residency', () => {
+    function managedRecorder(
+      records: ChatRecord[] = [],
+      state?: ChatRecordingRestoreState,
+    ) {
+      const writer: ManagedSessionRecordWriter = {
+        canCarry: () => true,
+        write: async (record) => {
+          records.push(record);
+        },
+        project: vi.fn(async () => {
+          throw new Error('checkpoint must stream canonical records');
+        }),
+        iterate() {
+          const through = records.length;
+          return {
+            async *[Symbol.asyncIterator]() {
+              for (let index = 0; index < through; index++)
+                yield records[index];
+            },
+          };
+        },
+        stopAdvancing: async () => {},
+        commitProof: () => ({
+          last_commit_sequence: 0,
+          committed_prefix_hash: '0'.repeat(64),
+        }),
+        logSize: () => undefined,
+      };
+      const service = new ChatRecordingService(mockConfig, undefined, true);
+      service.bindManagedSink(writer);
+      service.activate(mockLease, undefined, undefined, state);
+      return { service, writer, records };
+    }
+
+    it('streams a new checkpoint after long history without retaining completed bodies or turn identities', async () => {
+      const { service, writer, records } = managedRecorder();
+      for (let index = 0; index < 1000; index++) {
+        service.recordUserMessage([{ text: `question ${index}` }]);
+        reply(`answer ${index}`, service);
+        await service.flush();
+      }
+      const cursor = service.getBranchCheckpointCursor();
+      expect(cursor.activeRecordCount).toBe(2000);
+      service.recordUserMessage([{ text: 'next' }]);
+      reply('next answer', service);
+      await service.recordCustomTitle('after the answer', 'manual');
+      const point = await checkpoint(cursor, 'end_turn', service);
+      expect(point).toMatchObject({
+        startExclusiveRecordUuid: cursor.recordId,
+      });
+      expect(records.filter((record) => record.type === 'user')).toHaveLength(
+        1001,
+      );
+      expect(service.getUserTurnCount()).toBe(1001);
+      const retained = service as unknown as {
+        activeBranchRecords: unknown[];
+        turnParentUuids: unknown[];
+        turnPromptIds: unknown[];
+        pendingBranchToolCalls: unknown[];
+      };
+      expect(retained.activeBranchRecords).toHaveLength(0);
+      expect(retained.turnParentUuids).toHaveLength(0);
+      expect(retained.turnPromptIds).toHaveLength(0);
+      expect(retained.pendingBranchToolCalls).toHaveLength(0);
+      expect(writer.project).not.toHaveBeenCalled();
+      const tail = service.getTranscriptCursor();
+      expect(() => service.rewindRecording(0, { truncatedCount: 1 })).toThrow();
+      expect(service.getTranscriptCursor()).toEqual(tail);
+    });
+
+    it('restores active tool identities and one compression summary while preserving the total turn count', async () => {
+      const previous: ChatCompressionRecordPayload = {
+        info: {
+          originalTokenCount: 10,
+          newTokenCount: 5,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+        compressedHistory: [{ role: 'user', parts: [{ text: 'summary' }] }],
+        summaryPrefixLength: 1,
+      };
+      const pending = branchTestRecord('old-call', null, 'assistant', [
+        { functionCall: { id: 'call-1', name: 'read_file', args: {} } },
+      ]);
+      const { service, records } = managedRecorder([pending], {
+        lastCompletedUuid: pending.uuid,
+        turnParentUuids: [],
+        userTurnCount: 1000,
+        pendingBranchToolCalls: [{ id: 'call-1', name: 'read_file' }],
+        lastCompression: previous,
+      });
+      const cursor = service.getBranchCheckpointCursor();
+      service.recordToolResult([
+        fnResponse('read_file', { output: 'ok' }, 'call-1'),
+      ]);
+      reply('continued answer', service);
+      expect(await checkpoint(cursor, 'end_turn', service)).toMatchObject({
+        startExclusiveRecordUuid: 'old-call',
+      });
+      service.recordChatCompression({
+        info: previous.info,
+        compressedHistory: [
+          ...previous.compressedHistory,
+          { role: 'model', parts: [{ text: 'tail' }] },
+        ],
+      });
+      await service.flush();
+      expect(
+        (records.at(-1)?.systemPayload as ChatCompressionRecordPayload)
+          .summaryPrefixLength,
+      ).toBe(1);
+      expect(service.getUserTurnCount()).toBe(1000);
+      expect(service.getBranchCheckpointCursor().pendingToolCalls).toEqual([]);
+    });
+
+    it('rejects a stale Managed cursor before committing a checkpoint', async () => {
+      const { service, records } = managedRecorder();
+      const cursor = service.getBranchCheckpointCursor();
+      service.recordUserMessage([{ text: 'question' }]);
+      reply('answer', service);
+      await service.flush();
+      const before = records.length;
+      await expect(
+        checkpoint({ ...cursor, activeRecordCount: 99 }, 'end_turn', service),
+      ).rejects.toThrow('Transcript changed');
+      await expect(
+        checkpoint(
+          { ...cursor, recordId: 'unknown-prefix' },
+          'end_turn',
+          service,
+        ),
+      ).rejects.toThrow('Transcript changed');
+      expect(records).toHaveLength(before);
     });
   });
 

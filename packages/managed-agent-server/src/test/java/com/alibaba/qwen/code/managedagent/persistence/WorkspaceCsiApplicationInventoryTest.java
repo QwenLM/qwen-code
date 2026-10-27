@@ -583,47 +583,50 @@ class WorkspaceCsiApplicationInventoryTest {
                 key.path("sessionId").textValue());
         var baseline = preparedNativeFixture(WorkspaceCsiApplicationInventory.expectedImage(inspect().tables()), fixture);
         byte[] body = json.writeValueAsBytes(fixture.path("requests").get(32));
-        var proof = WorkspaceCsiApplicationHistory.preparedTerminal(baseline, original, body);
-        var owner = new JdbcCsiFilesRetirementGuard.Original(original, "binding", 1,
-                RuntimeBindingRecord.State.DRAINING, true, 3, 2L);
-        WorkspaceCsiApplicationHistory.verifyRetainedExecutions(baseline, owner, proof, List.of(), 2, Map.of());
-        assertThatThrownBy(() -> WorkspaceCsiApplicationHistory.verifyRetainedExecutions(baseline, owner, proof,
-                List.of(), 0, Map.of())).isInstanceOf(IllegalArgumentException.class);
-        assertThat(proof.predecessorSequence()).isEqualTo(41);
-        assertThat(proof.terminalSequence()).isEqualTo(42);
-        assertThat(proof.lastRecordUuid()).isEqualTo("fc17e89d-c50c-4b55-b69d-aa58659e7242");
-        for (var fault : List.of(
-                List.of("ma_resource", "workspace_id", "other"),
-                List.of("ma_resource", "session_scope_key", "b".repeat(64)),
-                List.of("ma_resource", "sha256", "b".repeat(64)),
-                List.of("ma_resource", "storage_kind", "OBJECT_STORAGE"),
-                List.of("ma_resource_ref", "workspace_id", "other"),
-                List.of("ma_resource_ref", "journal_revision", "32"),
-                List.of("ma_session_journal_tx", "record_digest", "b".repeat(64)),
-                List.of("ma_session_head", "activation_head_revision", "2"),
-                List.of("ma_session_head", "activation_head_revision", "3"),
-                List.of("ma_session_head", "activation_head_revision", "33"),
-                List.of("ma_session_head", "activation_expires_at", "1"),
-                List.of("ma_session_head", "activation_id", "other"),
-                List.of("ma_session_head", "writer_id", UUID.randomUUID().toString()),
-                List.of("ma_session_head", "activation_phase", "released"))) {
-            var changed = nativeCellFixture(baseline, fault.get(0), fault.get(1), fault.get(2));
-            assertThatThrownBy(() -> WorkspaceCsiApplicationHistory.preparedTerminal(changed, original, body))
+        try (var proof = WorkspaceCsiApplicationHistory.preparedTerminal(baseline, original, body)) {
+            var owner = new JdbcCsiFilesRetirementGuard.Original(original, "binding", 1,
+                    RuntimeBindingRecord.State.DRAINING, true, 3, 2L);
+            WorkspaceCsiApplicationHistory.verifyRetainedExecutions(baseline, owner, proof, List.of(), 2, Map.of());
+            assertThatThrownBy(() -> WorkspaceCsiApplicationHistory.verifyRetainedExecutions(baseline, owner, proof,
+                    List.of(), 0, Map.of())).isInstanceOf(IllegalArgumentException.class);
+            assertThat(proof.predecessorSequence()).isEqualTo(41);
+            assertThat(proof.terminalSequence()).isEqualTo(42);
+            assertThat(proof.lastRecordUuid()).isEqualTo("fc17e89d-c50c-4b55-b69d-aa58659e7242");
+            for (var fault : List.of(
+                    List.of("ma_resource", "workspace_id", "other"),
+                    List.of("ma_resource", "session_scope_key", "b".repeat(64)),
+                    List.of("ma_resource", "sha256", "b".repeat(64)),
+                    List.of("ma_resource", "storage_kind", "OBJECT_STORAGE"),
+                    List.of("ma_resource_ref", "workspace_id", "other"),
+                    List.of("ma_resource_ref", "journal_revision", "32"),
+                    List.of("ma_session_journal_tx", "record_digest", "b".repeat(64)),
+                    List.of("ma_session_head", "activation_head_revision", "2"),
+                    List.of("ma_session_head", "activation_head_revision", "3"),
+                    List.of("ma_session_head", "activation_head_revision", "33"),
+                    List.of("ma_session_head", "activation_expires_at", "1"),
+                    List.of("ma_session_head", "activation_id", "other"),
+                    List.of("ma_session_head", "writer_id", UUID.randomUUID().toString()),
+                    List.of("ma_session_head", "activation_phase", "released"))) {
+                var changed = nativeCellFixture(baseline, fault.get(0), fault.get(1), fault.get(2));
+                assertThatThrownBy(() -> WorkspaceCsiApplicationHistory.preparedTerminal(changed, original, body))
+                        .isInstanceOfAny(IllegalArgumentException.class, com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException.class);
+            }
+            var tables = new java.util.ArrayList<>(baseline.tables());
+            var references = baseline.table("ma_resource_ref");
+            tables.set(tables.indexOf(references), new WorkspaceCsiApplicationInventory.Table(references.name(),
+                    references.columns(), references.primaryKey(), references.rows().subList(1, references.rows().size())));
+            var missing = WorkspaceCsiApplicationInventory.expectedImage(tables);
+            assertThatThrownBy(() -> WorkspaceCsiApplicationHistory.preparedTerminal(missing, original, body))
                     .isInstanceOfAny(IllegalArgumentException.class, com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException.class);
+            var candidate = fixture.path("requests").get(32).deepCopy();
+            ((com.fasterxml.jackson.databind.node.ObjectNode) candidate.path("resources").get(0)).put("digest", "c".repeat(64));
+            byte[] badCandidate = json.writeValueAsBytes(candidate);
+            assertThatThrownBy(() -> WorkspaceCsiApplicationHistory.preparedTerminal(baseline, original, badCandidate))
+                    .isInstanceOfAny(IllegalArgumentException.class, com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException.class);
+            try (var repeated = WorkspaceCsiApplicationHistory.preparedTerminal(baseline, original, body)) {
+                assertThat(repeated).isEqualTo(proof);
+            }
         }
-        var tables = new java.util.ArrayList<>(baseline.tables());
-        var references = baseline.table("ma_resource_ref");
-        tables.set(tables.indexOf(references), new WorkspaceCsiApplicationInventory.Table(references.name(),
-                references.columns(), references.primaryKey(), references.rows().subList(1, references.rows().size())));
-        var missing = WorkspaceCsiApplicationInventory.expectedImage(tables);
-        assertThatThrownBy(() -> WorkspaceCsiApplicationHistory.preparedTerminal(missing, original, body))
-                .isInstanceOfAny(IllegalArgumentException.class, com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException.class);
-        var candidate = fixture.path("requests").get(32).deepCopy();
-        ((com.fasterxml.jackson.databind.node.ObjectNode) candidate.path("resources").get(0)).put("digest", "c".repeat(64));
-        byte[] badCandidate = json.writeValueAsBytes(candidate);
-        assertThatThrownBy(() -> WorkspaceCsiApplicationHistory.preparedTerminal(baseline, original, badCandidate))
-                .isInstanceOfAny(IllegalArgumentException.class, com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException.class);
-        assertThat(WorkspaceCsiApplicationHistory.preparedTerminal(baseline, original, body)).isEqualTo(proof);
     }
 
     private static WorkspaceCsiApplicationInventory.Snapshot preparedNativeFixture(

@@ -265,8 +265,8 @@ it('gates plan launch declarations and propagates the named member requirement',
       member('alice', 'launch-plan', { plan_mode_required: true }),
     ]),
   ).toContain('joined');
-  expect(roster()[0]?.planModeRequired).toBe(true);
-  const run = children.record(hostedCallKey('prompt', 'launch-plan'));
+  expect((await roster())[0]?.planModeRequired).toBe(true);
+  const run = await children.record(hostedCallKey('prompt', 'launch-plan'));
   expect(run).toBeDefined();
   const envelope = await session.resources.read(run!.inputRef);
   expect(envelope.toString()).toContain('plan-mode=');
@@ -316,18 +316,20 @@ it.each([false, true])(
           'decide',
         ),
       ]);
-      const continuation = children.record(hostedCallKey('prompt', 'decide'));
+      const continuation = await children.record(
+        hostedCallKey('prompt', 'decide'),
+      );
       if (closing) {
         expect(answer).toContain('closing');
-        expect(teams.plan('submitted-plan')?.run.state).toBe('waiting');
+        expect((await teams.plan('submitted-plan'))?.run.state).toBe('waiting');
         expect(continuation).toBeUndefined();
       } else {
         expect(answer).toContain('member was continued');
-        expect(teams.plan('submitted-plan')?.decision).toBe('approved');
+        expect((await teams.plan('submitted-plan'))?.decision).toBe('approved');
         expect(continuation?.predecessorChildRunId).toBe(childRunId);
         expect(continuation).toBeDefined();
         expect(
-          session.authority.committedExtensionOperation(
+          await session.authority.committedExtensionOperation(
             'decideTeamPlan',
             hostedCallKey('prompt', 'decide'),
           ),
@@ -339,10 +341,12 @@ it.each([false, true])(
   },
 );
 
-function roster() {
-  return session.authority
-    .extensionRecordsInDomain('team_state')
-    .flatMap((entry) => parseTeamState(entry.record).members);
+async function roster() {
+  return (
+    await session.authority
+      .extensionRecordsInDomain('team_state')
+      .collect(1_000_000)
+  ).flatMap((entry) => parseTeamState(entry.record).members);
 }
 
 beforeEach(async () => {
@@ -487,14 +491,14 @@ it('composes worktree isolation with team membership', async () => {
       member('bob', 'call-bob', { isolation: 'worktree' }),
     ]),
   ).toContain('(workspace_mode)');
-  expect(children.record('prompt:call-bob')).toBeUndefined();
-  expect(roster()).toEqual([]);
+  expect(await children.record('prompt:call-bob')).toBeUndefined();
+  expect(await roster()).toEqual([]);
 
   const answer = await execute(createTurn({ childWorkspaces: true }), [
     member('alice', 'call-alice', { isolation: 'worktree' }),
   ]);
   expect(answer).toContain('joined team \\"review\\" as \\"alice\\"');
-  expect(children.record('prompt:call-alice')).toMatchObject({
+  expect(await children.record('prompt:call-alice')).toMatchObject({
     workspaceMode: 'worktree',
     completion: 'sent',
   });
@@ -528,8 +532,8 @@ it('refuses a snapshot member and admits a plain snapshot child', async () => {
   expect(refused).toContain(
     'with isolation \\"worktree\\" or without isolation, or launch the snapshot without name.',
   );
-  expect(children.record('prompt:call-bob')).toBeUndefined();
-  expect(roster()).toEqual([]);
+  expect(await children.record('prompt:call-bob')).toBeUndefined();
+  expect(await roster()).toEqual([]);
   // The remedies name only the isolation the host serves, and a refusal on
   // either host commits nothing, exactly like the capable host's refusal.
   const worktreeOnly = await execute(createTurn({ childWorkspaces: true }), [
@@ -539,15 +543,15 @@ it('refuses a snapshot member and admits a plain snapshot child', async () => {
     'Launch the member with isolation \\"worktree\\" or without isolation.',
   );
   expect(worktreeOnly).not.toContain('snapshot without name');
-  expect(children.record('prompt:call-bob-worktree')).toBeUndefined();
-  expect(roster()).toEqual([]);
+  expect(await children.record('prompt:call-bob-worktree')).toBeUndefined();
+  expect(await roster()).toEqual([]);
   expect(
     await execute(createTurn(), [
       member('bob', 'call-bob-shared', { isolation: 'snapshot' }),
     ]),
   ).toContain('Launch the member without isolation.');
-  expect(children.record('prompt:call-bob-shared')).toBeUndefined();
-  expect(roster()).toEqual([]);
+  expect(await children.record('prompt:call-bob-shared')).toBeUndefined();
+  expect(await roster()).toEqual([]);
 
   await execute(capable, [
     call(
@@ -556,17 +560,19 @@ it('refuses a snapshot member and admits a plain snapshot child', async () => {
       'call-reader',
     ),
   ]);
-  expect(children.record('prompt:call-reader')).toMatchObject({
+  expect(await children.record('prompt:call-reader')).toMatchObject({
     workspaceMode: 'snapshot',
   });
-  expect(roster()).toEqual([]);
+  expect(await roster()).toEqual([]);
   // Serving snapshots changes no default: a member naming no isolation
   // still joins, shared.
   expect(await execute(capable, [member('carol', 'call-carol')])).toContain(
     'joined team \\"review\\" as \\"carol\\"',
   );
-  expect(children.record('prompt:call-carol')?.workspaceMode).toBe('shared');
-  expect(roster()).toEqual([
+  expect((await children.record('prompt:call-carol'))?.workspaceMode).toBe(
+    'shared',
+  );
+  expect(await roster()).toEqual([
     { name: 'carol', childRunId: 'prompt:call-carol', planModeRequired: false },
   ]);
 });
@@ -608,7 +614,7 @@ it('continues a completed snapshot child through either send_message', async () 
         `more-${teamsOn}`,
       ),
     ]);
-    expect(children.record(`prompt:more-${teamsOn}`)).toMatchObject({
+    expect(await children.record(`prompt:more-${teamsOn}`)).toMatchObject({
       workspaceMode: 'snapshot',
       predecessorChildRunId: `prompt:${launch}`,
     });
@@ -623,9 +629,11 @@ it('stops listing name as legacy once the team domains are enabled', async () =>
   ]);
   expect(answer).toContain('unsupported argument \\"model\\"');
   expect(answer).toContain('working_dir, model and subagent_type');
-  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
-    0,
-  );
+  expect(
+    await session.authority
+      .extensionRecordsInDomain('child_run')
+      .collect(1_000_000),
+  ).toHaveLength(0);
 });
 
 it('keeps refusing name while the team domains are disabled', async () => {
@@ -635,9 +643,11 @@ it('keeps refusing name while the team domains are disabled', async () => {
   expect(answer).toContain('unsupported argument');
   expect(answer).toContain('\\"name\\"');
   expect(answer).toContain('working_dir, name, model');
-  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
-    0,
-  );
+  expect(
+    await session.authority
+      .extensionRecordsInDomain('child_run')
+      .collect(1_000_000),
+  ).toHaveLength(0);
 });
 
 it('creates a team and spawns a named member without the Workspace mount', async () => {
@@ -654,10 +664,10 @@ it('creates a team and spawns a named member without the Workspace mount', async
   ).toContain('Task #1 created');
   const answer = await execute(turn, [member('Alice', 'call-alice')]);
   expect(answer).toContain('joined team \\"review\\" as \\"alice\\"');
-  expect(children.record('prompt:call-alice')).toMatchObject({
+  expect(await children.record('prompt:call-alice')).toMatchObject({
     completion: 'sent',
   });
-  expect(roster()).toEqual([
+  expect(await roster()).toEqual([
     { name: 'alice', childRunId: 'prompt:call-alice', planModeRequired: false },
   ]);
   expect(await execute(turn, [call('task_list', {}, 'call-list')])).toContain(
@@ -685,15 +695,17 @@ it('keeps team tools out of a foreground child batch', async () => {
   expect(answer).toContain(
     'cannot share a batch with a tool other than agent or workflow',
   );
-  expect(children.record('prompt:call-child')).toBeUndefined();
+  expect(await children.record('prompt:call-child')).toBeUndefined();
 });
 
 it('refuses a member without a team, committing nothing', async () => {
   const answer = await execute(createTurn(), [member('alice', 'call-1')]);
   expect(answer).toContain('Create one with team_create first');
-  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
-    0,
-  );
+  expect(
+    await session.authority
+      .extensionRecordsInDomain('child_run')
+      .collect(1_000_000),
+  ).toHaveLength(0);
 });
 
 it('refuses a foreground member and the batch rules before anything runs', async () => {
@@ -725,10 +737,12 @@ it('refuses a foreground member and the batch rules before anything runs', async
       member('carol', 'call-7'),
     ]),
   ).toContain('cannot launch in the same batch as a foreground child agent');
-  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
-    0,
-  );
-  expect(teams.openTeam()?.lifecycle).toBe('active');
+  expect(
+    await session.authority
+      .extensionRecordsInDomain('child_run')
+      .collect(1_000_000),
+  ).toHaveLength(0);
+  expect((await teams.openTeam())?.lifecycle).toBe('active');
 });
 
 it('replays a named launch into its one child and one roster entry', async () => {
@@ -738,10 +752,12 @@ it('replays a named launch into its one child and one roster entry', async () =>
   await execute(createTurn(), [member('alice', 'call-alice')]);
   const replayed = await execute(createTurn(), [member('alice', 'call-alice')]);
   expect(replayed).toContain('joined team \\"review\\" as \\"alice\\"');
-  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
-    1,
-  );
-  expect(roster()).toHaveLength(1);
+  expect(
+    await session.authority
+      .extensionRecordsInDomain('child_run')
+      .collect(1_000_000),
+  ).toHaveLength(1);
+  expect(await roster()).toHaveLength(1);
 });
 
 // No production path re-runs an executed call; this pins the funnel's own
@@ -773,17 +789,19 @@ it('a re-driven named launch completes a join its first run lost', async () => {
   await expect(
     execute(createTurn({ funnel: crashing }), [member('alice', 'call-alice')]),
   ).rejects.toThrow();
-  expect(children.record('prompt:call-alice')).toBeDefined();
-  expect(roster()).toHaveLength(0);
+  expect(await children.record('prompt:call-alice')).toBeDefined();
+  expect(await roster()).toHaveLength(0);
   expect(
     await execute(createTurn(), [member('alice', 'call-alice')]),
   ).toContain('joined team');
-  expect(roster()).toEqual([
+  expect(await roster()).toEqual([
     expect.objectContaining({ name: 'alice', childRunId: 'prompt:call-alice' }),
   ]);
-  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
-    1,
-  );
+  expect(
+    await session.authority
+      .extensionRecordsInDomain('child_run')
+      .collect(1_000_000),
+  ).toHaveLength(1);
 });
 
 it.each(['failed', 'finished'] as const)(
@@ -845,7 +863,7 @@ it.each(['failed', 'finished'] as const)(
       expect(answer).toContain('arrives as an ordinary notification');
       expect(answer).not.toContain('"error":');
     }
-    expect(roster()).toHaveLength(0);
+    expect(await roster()).toHaveLength(0);
   },
 );
 
@@ -868,9 +886,11 @@ it('labels a member result notification with its name', async () => {
   await children.accept(childRunId, {
     notification: { description: 'alice task' },
   });
-  const input = session.authority
-    .eventsInSequenceRange(1, session.authority.committedSequence)
-    .findLast((event) => event.kind === 'input.accepted')!;
+  const input = (await (
+    await session.authority
+      .iterateEvents(1, session.authority.committedSequence)
+      .collect(1_000_000)
+  ).findLast((event) => event.kind === 'input.accepted'))!;
   const text = JSON.parse(
     (
       await session.resources.read(
@@ -908,9 +928,11 @@ it('keeps the label on a result accepted after its team was deleted', async () =
   await children.accept(childRunId, {
     notification: { description: 'alice task' },
   });
-  const input = session.authority
-    .eventsInSequenceRange(1, session.authority.committedSequence)
-    .findLast((event) => event.kind === 'input.accepted')!;
+  const input = (await (
+    await session.authority
+      .iterateEvents(1, session.authority.committedSequence)
+      .collect(1_000_000)
+  ).findLast((event) => event.kind === 'input.accepted'))!;
   const text = JSON.parse(
     (
       await session.resources.read(
@@ -994,9 +1016,11 @@ it('labels an isolated member with its merge outcome and waits for its settle', 
   await children.accept(childRunId, {
     notification: { description: 'alice task' },
   });
-  const input = session.authority
-    .eventsInSequenceRange(1, session.authority.committedSequence)
-    .findLast((event) => event.kind === 'input.accepted')!;
+  const input = (await (
+    await session.authority
+      .iterateEvents(1, session.authority.committedSequence)
+      .collect(1_000_000)
+  ).findLast((event) => event.kind === 'input.accepted'))!;
   const text = JSON.parse(
     (
       await session.resources.read(
@@ -1062,7 +1086,7 @@ it('messages a running member and continues a finished one as the same member', 
       ),
     ]),
   ).toContain('continued it as');
-  const continued = children.record('prompt:call-more')!;
+  const continued = (await children.record('prompt:call-more'))!;
   expect(continued.predecessorChildRunId).toBe('prompt:call-alice');
   const envelope = JSON.parse(
     (await session.resources.read(continued.inputRef)).toString('utf8'),
@@ -1104,7 +1128,7 @@ it('messages a running member and continues a finished one as the same member', 
       ),
     ]),
   ).toContain('continued it as');
-  expect(children.record('prompt:call-plain-more')).toBeDefined();
+  expect(await children.record('prompt:call-plain-more')).toBeDefined();
 });
 
 // Once its team is deleted, no new work routes through its roster, so a
@@ -1139,7 +1163,7 @@ it('continues a former member once its team is deleted', async () => {
       ),
     ]),
   ).toContain('continued it as');
-  expect(children.record('prompt:call-more')).toMatchObject({
+  expect(await children.record('prompt:call-more')).toMatchObject({
     predecessorChildRunId: 'prompt:call-alice',
   });
 });
@@ -1239,7 +1263,7 @@ it('answers an interrupted turn by what each journal-only call committed', async
   expect(
     await resolveHostedAction(session, new HostedApprovalWaiters(), requestId, {
       optionId: 'allow',
-      inputRevision: authority.action(requestId)!.inputRevision,
+      inputRevision: (await authority.action(requestId))!.inputRevision,
       policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
     }),
   ).toMatchObject({ status: 200 });
@@ -1249,7 +1273,7 @@ it('answers an interrupted turn by what each journal-only call committed', async
     { subject: 'audit', description: 'audit it' },
     'prompt:call-task',
   );
-  const admitted = teams.admitMember('alice');
+  const admitted = await teams.admitMember('alice');
   await children.admit({
     childRunId: 'prompt:call-alice',
     ownerScopeId: sessionKey.sessionId,
@@ -1328,12 +1352,14 @@ async function finish(childRunId: string, result = 'done'): Promise<void> {
   });
 }
 
-function recordCount(domain: 'child_run' | 'session_message'): number {
-  return session.authority.extensionRecordsInDomain(domain).length;
+async function recordCount(
+  domain: 'child_run' | 'session_message',
+): Promise<number> {
+  return session.authority.extensionRecordsInDomain(domain).count();
 }
 
 async function launchPromptOf(childRunId: string): Promise<string> {
-  const run = children.record(childRunId)!;
+  const run = (await children.record(childRunId))!;
   return (
     JSON.parse(
       (await session.resources.read(run.inputRef)).toString('utf8'),
@@ -1383,7 +1409,7 @@ it('admits the team form of send_message with exactly one recipient', async () =
   ).toContain(
     'Hosted team member cannot launch in the same batch as send_message to \\"*\\"',
   );
-  expect(roster()).toEqual([]);
+  expect(await roster()).toEqual([]);
 });
 
 it('encodes the input of a team send with its recipients first', async () => {
@@ -1497,7 +1523,7 @@ it('broadcasts to every member with mixed outcomes and replays without sending t
     '- carol: not reached: Member \\"carol\\" ended (failed: creation_failed) and cannot receive messages; for more work, launch a new member under a new name.',
   );
   // Each recipient has its own ids, in their own namespace.
-  const aliceMessage = session.authority.extensionRecord(
+  const aliceMessage = await session.authority.extensionRecord(
     'session_message',
     broadcastMessageId({
       senderSessionId: sessionKey.sessionId,
@@ -1507,22 +1533,26 @@ it('broadcasts to every member with mixed outcomes and replays without sending t
     }),
   );
   expect(aliceMessage).toBeDefined();
-  const continued = children.record(bobRun)!;
+  const continued = (await children.record(bobRun))!;
   expect(continued.predecessorChildRunId).toBe('prompt:call-bob');
   expect(continued.run.executionCallId).toBe('prompt:call-all');
   expect(await launchPromptOf(bobRun)).toBe(
     `${teamMemberPreamble({ name: 'bob', teamName: 'review' })}wrap up`,
   );
   // The replay finds every recipient's committed send and adds nothing.
-  const before = [recordCount('child_run'), recordCount('session_message')];
+  const before = [
+    await recordCount('child_run'),
+    await recordCount('session_message'),
+  ];
   expect(
     await execute(createTurn({ messages: true }), [
       call('send_message', { to: '*', message: 'wrap up' }, 'call-all'),
     ]),
   ).toContain('Message sent to 2 of 3 members');
-  expect([recordCount('child_run'), recordCount('session_message')]).toEqual(
-    before,
-  );
+  expect([
+    await recordCount('child_run'),
+    await recordCount('session_message'),
+  ]).toEqual(before);
 });
 
 it('keeps broadcast ids apart from a plain call whose provider id equals them', async () => {
@@ -1542,14 +1572,14 @@ it('keeps broadcast ids apart from a plain call whose provider id equals them', 
     position: 1,
   });
   const alice = children.taskIdOf('prompt:call-alice');
-  const before = recordCount('session_message');
+  const before = await recordCount('session_message');
   for (const callId of [derivedRun, derivedMessage])
     expect(
       await execute(turn, [
         call('send_message', { task_id: alice, message: 'one' }, callId),
       ]),
     ).toContain('Message queued for delivery');
-  expect(recordCount('session_message')).toBe(before + 2);
+  expect(await recordCount('session_message')).toBe(before + 2);
 });
 
 it('opens a member launch with its preamble inside the envelope bound', async () => {
@@ -1595,7 +1625,7 @@ it('opens a member launch with its preamble inside the envelope bound', async ()
       ),
     ]),
   ).toContain('byte_limit');
-  expect(children.record('prompt:call-bob')).toBeUndefined();
+  expect(await children.record('prompt:call-bob')).toBeUndefined();
 });
 
 it('answers a replayed send by name after its team was deleted', async () => {
@@ -1639,7 +1669,10 @@ it('replays a broadcast after its team was deleted or replaced without sending a
     execute(createTurn({ messages: true }), [
       call('send_message', { to: '*', message: 'wrap up' }, 'call-all'),
     ]);
-  const before = [recordCount('child_run'), recordCount('session_message')];
+  const before = [
+    await recordCount('child_run'),
+    await recordCount('session_message'),
+  ];
   expect(await replay()).toContain(
     'The message was sent to 1 member before its team changed; nothing more was sent.\\n- alice: had completed; continued as task',
   );
@@ -1648,13 +1681,17 @@ it('replays a broadcast after its team was deleted or replaced without sending a
     call('team_create', { team_name: 'review' }, 'call-team-2'),
   ]);
   await execute(turn, [member('bob', 'call-bob')]);
-  const withBob = [recordCount('child_run'), recordCount('session_message')];
+  const withBob = [
+    await recordCount('child_run'),
+    await recordCount('session_message'),
+  ];
   expect(await replay()).toContain(
     'The message was sent to 1 member before its team changed; nothing more was sent.',
   );
-  expect([recordCount('child_run'), recordCount('session_message')]).toEqual(
-    withBob,
-  );
+  expect([
+    await recordCount('child_run'),
+    await recordCount('session_message'),
+  ]).toEqual(withBob);
   expect(withBob[1]).toBe(before[1]);
 });
 
@@ -1966,7 +2003,7 @@ it('names a continuation that never started and routes its task id from the memb
   expect(byId).toContain(
     'Its previous continuation never started (creation_failed)',
   );
-  expect(children.record('prompt:call-3')?.predecessorChildRunId).toBe(
+  expect((await children.record('prompt:call-3'))?.predecessorChildRunId).toBe(
     'prompt:call-alice',
   );
   // A replay of the first send finds that its own continuation never
@@ -2054,10 +2091,10 @@ it('refuses a send by name to a stopping member and one stopped on request', asy
   ).toContain(
     'Member \\"alice\\" completed after a stop was requested and cannot receive messages; for more work, launch a new member under a new name.',
   );
-  expect(children.record('prompt:call-2')).toBeUndefined();
+  expect(await children.record('prompt:call-2')).toBeUndefined();
 });
 
-it('indexes each of ten broadcast recipients once and reports the active cap', async () => {
+it('uses point history reads for ten broadcast recipients and reports the active cap', async () => {
   const turn = createTurn({ messages: true });
   await execute(turn, [
     call('team_create', { team_name: 'review' }, 'call-team'),
@@ -2078,7 +2115,7 @@ it('indexes each of ten broadcast recipients once and reports the active cap', a
     await execute(turn, [member(name, `call-${name}`)]);
     await finish(`prompt:call-${name}`);
   }
-  const scans = vi.spyOn(session.authority, 'extensionRecordsInDomain');
+  const reads = vi.spyOn(session.authority, 'extensionRecord');
   const answer = await execute(turn, [
     call('send_message', { to: '*', message: 'status?' }, 'call-all'),
   ]);
@@ -2088,8 +2125,10 @@ it('indexes each of ten broadcast recipients once and reports the active cap', a
   );
   expect(answer).toContain('(count_limit)');
   expect(
-    scans.mock.calls.filter(([domain]) => domain === 'child_run'),
-  ).toHaveLength(10);
+    reads.mock.calls
+      .filter(([domain]) => domain === 'child_run')
+      .map(([, id]) => id),
+  ).toEqual(expect.arrayContaining(names.map((name) => `prompt:call-${name}`)));
 });
 
 it('puts the recipients of a team send first in its input', () => {
@@ -2223,7 +2262,7 @@ it('records the owner a send of a wake turn gave work', async () => {
     ]),
   ).toContain('Task #1 updated (status: in_progress, owner: alice).');
   const continued = hostedCallKey(wakePrompt, 'call-give');
-  expect(children.record(continued)?.predecessorChildRunId).toBe(
+  expect((await children.record(continued))?.predecessorChildRunId).toBe(
     'prompt:call-alice',
   );
   await finish(continued);
@@ -2261,7 +2300,10 @@ it('replays a broadcast whose recipients never started as not reached', async ()
   const bobRun = broadcastRunId('prompt', 'call-all', 2);
   await neverStarted('prompt:call-a');
   await neverStarted(bobRun);
-  const before = [recordCount('child_run'), recordCount('session_message')];
+  const before = [
+    await recordCount('child_run'),
+    await recordCount('session_message'),
+  ];
   const replayed = await execute(createTurn({ messages: true }), [
     call('send_message', { to: '*', message: 'all' }, 'call-all'),
   ]);
@@ -2274,9 +2316,10 @@ it('replays a broadcast whose recipients never started as not reached', async ()
   expect(replayed).toContain(
     `- bob: had completed; continued as task ${children.taskIdOf(bobRun)}, which never started (creation_failed), so the message did not arrive.`,
   );
-  expect([recordCount('child_run'), recordCount('session_message')]).toEqual(
-    before,
-  );
+  expect([
+    await recordCount('child_run'),
+    await recordCount('session_message'),
+  ]).toEqual(before);
 });
 
 it('recovers an interrupted broadcast whose recipient never started as not reached', async () => {
@@ -2405,7 +2448,7 @@ it('sends a broadcast to no further member once its turn is cancelled', async ()
   );
   expect(answer).toContain('- bob: not sent: the turn was cancelled.');
   expect(answer).toContain('- carol: not sent: the turn was cancelled.');
-  expect(recordCount('session_message')).toBe(1);
+  expect(await recordCount('session_message')).toBe(1);
 });
 
 it('replays committed broadcast positions before honoring an aborted signal', async () => {
@@ -2462,7 +2505,7 @@ it('replays committed broadcast positions before honoring an aborted signal', as
   expect(text).toContain('- carol: not sent: the turn was cancelled.');
   expect(
     scans.mock.calls.filter(([domain]) => domain === 'child_run'),
-  ).toHaveLength(1);
+  ).toHaveLength(0);
 });
 
 it('answers a replayed send whose continuation was cancelled before it started', async () => {

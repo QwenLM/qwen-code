@@ -4,17 +4,25 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { appendFile, mkdir, readFile, stat, truncate } from 'node:fs/promises';
+import { appendFile, mkdir, stat, truncate } from 'node:fs/promises';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { FileManagedTerminalIdentityStore } from './managed-terminal-identity-store.js';
 import {
-  encodeManagedJournalSnapshot,
   MANAGED_JOURNAL_COMPACT_BYTES,
   parseManagedJournalSnapshot,
   replaceManagedJournalWithSnapshot,
   syncManagedJournalDirectory,
 } from './managed-journal-snapshot.js';
+import {
+  FileManagedSessionHistory,
+  ManagedHistoryUnavailableError,
+  type ManagedHistoryMap,
+} from './managed-session-history.js';
+import {
+  readManagedJournalStream,
+  encodeManagedJournalSnapshotStream,
+} from './managed-journal-stream.js';
 
 export interface ManagedActivationIdentity {
   readonly tenantId: string;
@@ -282,10 +290,18 @@ function snapshot(state: ActivationState): ManagedActivationSnapshot {
   });
 }
 
+interface ActivationUpdate {
+  readonly state: ActivationState;
+  readonly epoch?: readonly [string, number];
+}
+
 /** Single-process durable adapter; the same file must have only one owner. */
 export class FileManagedActivationStore {
   private readonly activations = new Map<string, ActivationState>();
-  private readonly nextEpoch = new Map<string, number>();
+  private readonly identities: ManagedHistoryMap<ActivationState>;
+  private readonly nextEpoch: ManagedHistoryMap<number>;
+  private overlay: ActivationUpdate | undefined;
+  private viewFailure: Error | undefined;
   private nextSequence = 1;
   private tail: Promise<void> = Promise.resolve();
   private fatalError: Error | undefined;
@@ -297,7 +313,10 @@ export class FileManagedActivationStore {
   private constructor(
     readonly filePath: string,
     private readonly clock: () => number,
+    private readonly history: FileManagedSessionHistory,
   ) {
+    this.identities = history.map<ActivationState>('activation');
+    this.nextEpoch = history.map<number>('epoch');
     this.terminals = new FileManagedTerminalIdentityStore(
       filePath,
       'activation',
@@ -311,52 +330,121 @@ export class FileManagedActivationStore {
     const store = new FileManagedActivationStore(
       filePath,
       options.clock ?? Date.now,
+      await FileManagedSessionHistory.create(
+        path.join(path.dirname(filePath), '.managed-history'),
+      ),
     );
-    let contents: Buffer;
     try {
-      contents = await readFile(filePath);
+      const scan = await FileManagedActivationStore.restoreHistory(store);
+      if (scan.snapshotBytes > 0) await syncManagedJournalDirectory(filePath);
+      if (scan.totalBytes !== scan.syncedBytes)
+        await truncate(filePath, scan.syncedBytes);
+      store.snapshotBytes = scan.snapshotBytes;
+      store.syncedBytes = scan.syncedBytes;
+      store.bindHistoryRebuilder();
+      return store;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return store;
+      store.history.discard();
+      await store.history.close();
       throw error;
     }
-    const complete =
-      contents.length === 0 || contents[contents.length - 1] === 0x0a;
-    const validLength = complete
-      ? contents.length
-      : contents.lastIndexOf(0x0a) + 1;
-    if (
-      !complete &&
-      validLength === 0 &&
-      contents.subarray(0, 7).toString() !== '{"v":1,'
-    ) {
-      throw new Error('Managed activation journal has no complete record.');
-    }
-    const lines = contents
-      .subarray(0, validLength)
-      .toString('utf8')
-      .split('\n');
-    lines.pop();
-    lines.forEach((line, index) => {
-      if (!line) {
-        throw new Error(
-          `Managed activation journal line ${index + 1} is empty.`,
+  }
+
+  private bindHistoryRebuilder(): void {
+    const nextSequence = this.nextSequence;
+    const syncedBytes = this.syncedBytes;
+    const unchanged = () =>
+      this.nextSequence === nextSequence && this.syncedBytes === syncedBytes;
+    this.history.setRebuilder(async (repair) => {
+      if (!unchanged())
+        throw new ManagedHistoryUnavailableError(
+          'Managed activation canonical prefix changed before history repair.',
         );
-      }
-      const record = parseEvent(line, index + 1);
-      if (record.type === 'activation.snapshot') {
-        if (index !== 0) {
-          throw new Error('Managed activation snapshot must be first.');
-        }
-        store.restoreSnapshot(record.state);
-        store.snapshotBytes = Buffer.byteLength(line) + 1;
-      } else {
-        store.apply(record);
-      }
+      const rebuilt = new FileManagedActivationStore(
+        this.filePath,
+        this.clock,
+        repair,
+      );
+      const scan = await FileManagedActivationStore.restoreHistory(rebuilt);
+      if (
+        !unchanged() ||
+        rebuilt.nextSequence !== nextSequence ||
+        scan.syncedBytes !== syncedBytes ||
+        scan.totalBytes !== syncedBytes
+      )
+        throw new ManagedHistoryUnavailableError(
+          'Managed activation canonical prefix changed during history repair.',
+        );
     });
-    if (store.snapshotBytes > 0) await syncManagedJournalDirectory(filePath);
-    if (!complete) await truncate(filePath, validLength);
-    store.syncedBytes = validLength;
-    return store;
+  }
+
+  private static async restoreHistory(
+    store: FileManagedActivationStore,
+  ): Promise<Awaited<ReturnType<typeof readManagedJournalStream>>> {
+    let previousSequence = 0;
+    return readManagedJournalStream(
+      store.filePath,
+      'activation',
+      async (items) => {
+        store.history.begin();
+        for (const item of items) {
+          if (item.type === 'record') {
+            const event = parseEvent(JSON.stringify(item.record), item.line);
+            if (event.type === 'activation.snapshot')
+              throw new Error('Managed activation snapshot must be first.');
+            const update = await store.derive(event);
+            store.install(update);
+            await store.writeUpdate(update);
+          } else if (item.type === 'snapshot-field') {
+            if (item.field === 'nextSequence')
+              store.nextSequence = integer(
+                { nextSequence: item.value },
+                'nextSequence',
+                1,
+              );
+            else if (item.field === 'activations')
+              previousSequence = await store.restoreActivation(
+                item.value,
+                previousSequence,
+              );
+            else {
+              const scope: unknown = JSON.parse(item.key!);
+              if (
+                !Array.isArray(scope) ||
+                scope.length !== 2 ||
+                scope.some(
+                  (part) => typeof part !== 'string' || !part.trim(),
+                ) ||
+                JSON.stringify(scope) !== item.key ||
+                (await store.nextEpoch.has(item.key!))
+              )
+                throw new Error(
+                  'Activation snapshot Session identity is invalid.',
+                );
+              await store.nextEpoch.set(
+                item.key!,
+                integer({ epoch: item.value }, 'epoch', 2),
+              );
+            }
+          } else {
+            if (previousSequence >= store.nextSequence)
+              throw new Error(
+                'Activation snapshot identity or order is invalid.',
+              );
+            for (const state of store.activations.values())
+              if (
+                state.status === 'assigned' &&
+                state.lease!.epoch >=
+                  ((await store.epochFor(sessionKey(state.descriptor))) ?? 1)
+              )
+                throw new Error(
+                  'Activation snapshot lease or next epoch is invalid.',
+                );
+          }
+        }
+        await store.history.flush();
+      },
+    );
   }
 
   enqueue(
@@ -373,7 +461,7 @@ export class FileManagedActivationStore {
       if (capturedLimits.maxQueuedPerTenant > capturedLimits.maxQueued) {
         throw new Error('maxQueuedPerTenant cannot exceed maxQueued.');
       }
-      const existing = this.activations.get(activationKey(activation));
+      const existing = await this.lookup(activationKey(activation));
       if (existing) {
         if (!isDeepStrictEqual(existing.descriptor, activation)) {
           throw new Error(
@@ -468,7 +556,7 @@ export class FileManagedActivationStore {
       const assigned: ManagedActivationLease = {
         ...activation,
         workerId,
-        epoch: this.nextEpoch.get(key) ?? 1,
+        epoch: (await this.epochFor(key)) ?? 1,
         expiresAt,
       };
       await this.persist({
@@ -522,7 +610,7 @@ export class FileManagedActivationStore {
       const currentLease = lease(capturedInput);
       this.current(currentLease, at);
       const releaseOutcome = outcome(capturedResult);
-      await this.persist({
+      const committed = await this.persist({
         v: 1,
         sequence: this.nextSequence,
         at,
@@ -532,7 +620,7 @@ export class FileManagedActivationStore {
         epoch: currentLease.epoch,
         outcome: releaseOutcome,
       });
-      return snapshot(this.activations.get(activationKey(currentLease))!);
+      return snapshot(committed);
     });
   }
 
@@ -541,7 +629,7 @@ export class FileManagedActivationStore {
   ): Promise<ManagedActivationSnapshot | undefined> {
     const captured = structuredClone(input);
     return this.serial(async () => {
-      const state = this.activations.get(activationKey(identity(captured)));
+      const state = await this.lookup(activationKey(identity(captured)));
       return state?.status === 'released'
         ? this.readTerminalState(state)
         : undefined;
@@ -558,8 +646,12 @@ export class FileManagedActivationStore {
     );
   }
 
-  get(input: ManagedActivationIdentity): ManagedActivationSnapshot | undefined {
-    const state = this.activations.get(activationKey(input));
+  async get(
+    input: ManagedActivationIdentity,
+  ): Promise<ManagedActivationSnapshot | undefined> {
+    const key = activationKey(input);
+    await this.tail;
+    const state = await this.lookup(key);
     return state ? snapshot(state) : undefined;
   }
 
@@ -593,7 +685,31 @@ export class FileManagedActivationStore {
   }
 
   get haltedError(): Error | undefined {
-    return this.fatalError;
+    return this.fatalError ?? this.viewFailure;
+  }
+
+  async close(): Promise<void> {
+    await this.tail;
+    await this.history.close();
+  }
+
+  waitForIdle(): Promise<void> {
+    return this.tail;
+  }
+
+  private lookup(key: string): Promise<ActivationState | undefined> {
+    const recent = this.overlay?.state;
+    return Promise.resolve(
+      recent && activationKey(recent.descriptor) === key
+        ? recent
+        : (this.activations.get(key) ?? this.identities.get(key)),
+    );
+  }
+
+  private epochFor(key: string): Promise<number | undefined> {
+    return this.overlay?.epoch?.[0] === key
+      ? Promise.resolve(this.overlay.epoch[1])
+      : this.nextEpoch.get(key);
   }
 
   private serial<T>(operation: () => Promise<T>): Promise<T> {
@@ -608,8 +724,10 @@ export class FileManagedActivationStore {
     return result;
   }
 
-  private async persist(event: JournalEvent): Promise<void> {
+  private async persist(event: JournalEvent): Promise<ActivationState> {
+    if (this.viewFailure) throw this.viewFailure;
     await this.compactIfNeeded();
+    const update = await this.derive(event);
     const line = Buffer.from(`${JSON.stringify(event)}\n`);
     try {
       await mkdir(path.dirname(this.filePath), { recursive: true });
@@ -655,14 +773,21 @@ export class FileManagedActivationStore {
       }
       throw this.fatalError ?? failure;
     }
+    this.install(update);
+    this.overlay = update;
     try {
-      this.apply(event);
+      this.history.begin();
+      await this.writeUpdate(update);
+      await this.history.flush();
+      this.overlay = undefined;
     } catch (error) {
-      this.fatalError =
+      this.history.discard();
+      this.viewFailure =
         error instanceof Error ? error : new Error(String(error));
-      throw this.fatalError;
     }
     this.syncedBytes += line.byteLength;
+    this.bindHistoryRebuilder();
+    return update.state;
   }
 
   private async compactIfNeeded(): Promise<void> {
@@ -672,14 +797,39 @@ export class FileManagedActivationStore {
     ) {
       return;
     }
-    const bytes = encodeManagedJournalSnapshot('activation.snapshot', {
-      nextSequence: this.nextSequence,
-      activations: [...this.activations.values()].map(snapshot),
-      nextEpoch: Object.fromEntries(this.nextEpoch),
-    });
+    let byteLength = 0;
+    const state = async function* (store: FileManagedActivationStore) {
+      yield Buffer.from(
+        `{"nextSequence":${store.nextSequence},"activations":[`,
+      );
+      let first = true;
+      for await (const entry of store.identities.values()) {
+        yield Buffer.from(
+          `${first ? '' : ','}${JSON.stringify(snapshot(entry))}`,
+        );
+        first = false;
+      }
+      yield Buffer.from('],"nextEpoch":{');
+      first = true;
+      for await (const [key, epoch] of store.nextEpoch) {
+        yield Buffer.from(`${first ? '' : ','}${JSON.stringify(key)}:${epoch}`);
+        first = false;
+      }
+      yield Buffer.from('}}');
+    };
+    const bytes = async function* (store: FileManagedActivationStore) {
+      for await (const piece of encodeManagedJournalSnapshotStream(
+        'activation.snapshot',
+        state(store),
+      )) {
+        byteLength += piece.byteLength;
+        yield piece;
+      }
+    };
     try {
-      await replaceManagedJournalWithSnapshot(this.filePath, bytes);
-      this.syncedBytes = this.snapshotBytes = bytes.byteLength;
+      await replaceManagedJournalWithSnapshot(this.filePath, bytes(this));
+      this.syncedBytes = this.snapshotBytes = byteLength;
+      this.bindHistoryRebuilder();
     } catch (error) {
       this.fatalError =
         error instanceof Error ? error : new Error(String(error));
@@ -687,131 +837,127 @@ export class FileManagedActivationStore {
     }
   }
 
-  private restoreSnapshot(saved: JsonObject): void {
-    this.nextSequence = integer(saved, 'nextSequence', 1);
-    const epochs = object(saved['nextEpoch'], 'nextEpoch');
-    for (const [key, value] of Object.entries(epochs)) {
-      const scope: unknown = JSON.parse(key);
-      if (
-        !Array.isArray(scope) ||
-        scope.length !== 2 ||
-        scope.some((part) => typeof part !== 'string' || !part.trim()) ||
-        JSON.stringify(scope) !== key
-      ) {
-        throw new Error('Activation snapshot Session identity is invalid.');
-      }
-      this.nextEpoch.set(key, integer({ epoch: value }, 'epoch', 2));
+  private async restoreActivation(
+    item: unknown,
+    previousSequence: number,
+  ): Promise<number> {
+    const record = object(item, 'activation snapshot');
+    const activation = descriptor(record['descriptor']);
+    const queueSequence = integer(record, 'queueSequence', 1);
+    if (
+      queueSequence <= previousSequence ||
+      (await this.identities.has(activationKey(activation)))
+    )
+      throw new Error('Activation snapshot identity or order is invalid.');
+    const state: ActivationState = {
+      descriptor: activation,
+      queuedAt: integer(record, 'queuedAt'),
+      queueSequence,
+      status: record['status'] as ActivationState['status'],
+    };
+    if (state.status === 'assigned') {
+      state.lease = lease(record['lease']);
+      if (activationKey(state.lease) !== activationKey(activation))
+        throw new Error('Activation snapshot lease or next epoch is invalid.');
+    } else if (record['lease'] !== undefined) {
+      throw new Error('Activation snapshot has an unexpected lease.');
     }
-    if (!Array.isArray(saved['activations'])) {
-      throw new Error('Activation snapshot activations must be an array.');
+    if (state.status === 'released') {
+      state.outcome = outcome(record['outcome']);
+      state.releasedAt = integer(record, 'releasedAt');
+    } else if (
+      !['queued', 'assigned'].includes(state.status) ||
+      record['outcome'] !== undefined ||
+      record['releasedAt'] !== undefined
+    ) {
+      throw new Error('Activation snapshot terminal state is invalid.');
     }
-    let previousSequence = 0;
-    for (const item of saved['activations']) {
-      const record = object(item, 'activation snapshot');
-      const activation = descriptor(record['descriptor']);
-      const queueSequence = integer(record, 'queueSequence', 1);
-      if (
-        queueSequence <= previousSequence ||
-        queueSequence >= this.nextSequence ||
-        this.activations.has(activationKey(activation))
-      ) {
-        throw new Error('Activation snapshot identity or order is invalid.');
-      }
-      const state: ActivationState = {
-        descriptor: activation,
-        queuedAt: integer(record, 'queuedAt'),
-        queueSequence,
-        status: record['status'] as ActivationState['status'],
-      };
-      if (state.status === 'assigned') {
-        state.lease = lease(record['lease']);
-        if (
-          activationKey(state.lease) !== activationKey(activation) ||
-          state.lease.epoch >= (this.nextEpoch.get(sessionKey(activation)) ?? 1)
-        ) {
-          throw new Error(
-            'Activation snapshot lease or next epoch is invalid.',
-          );
-        }
-      } else if (record['lease'] !== undefined) {
-        throw new Error('Activation snapshot has an unexpected lease.');
-      }
-      if (state.status === 'released') {
-        state.outcome = outcome(record['outcome']);
-        state.releasedAt = integer(record, 'releasedAt');
-      } else if (
-        !['queued', 'assigned'].includes(state.status) ||
-        record['outcome'] !== undefined ||
-        record['releasedAt'] !== undefined
-      ) {
-        throw new Error('Activation snapshot terminal state is invalid.');
-      }
+    await this.identities.set(activationKey(activation), state);
+    if (state.status !== 'released')
       this.activations.set(activationKey(activation), state);
-      previousSequence = queueSequence;
-    }
+    return queueSequence;
   }
 
-  private apply(event: JournalEvent): void {
-    if (event.sequence !== this.nextSequence) {
+  private async derive(event: JournalEvent): Promise<ActivationUpdate> {
+    if (event.sequence !== this.nextSequence)
       throw new Error(
         `Expected journal sequence ${this.nextSequence}, got ${event.sequence}.`,
       );
-    }
     timestamp('event.at', event.at);
+    let state: ActivationState;
+    let epoch: readonly [string, number] | undefined;
     if (event.type === 'activation.queued') {
-      if (this.activations.has(activationKey(event.activation))) {
+      if (await this.lookup(activationKey(event.activation)))
         throw new Error('Journal queues the same activation twice.');
-      }
-      this.activations.set(activationKey(event.activation), {
+      state = {
         descriptor: structuredClone(event.activation),
         queuedAt: event.at,
         queueSequence: event.sequence,
         status: 'queued',
-      });
+      };
     } else if (event.type === 'activation.cancelled') {
-      const state = this.activations.get(activationKey(event.identity));
-      if (!state || state.status !== 'queued')
+      const existing = this.activations.get(activationKey(event.identity));
+      if (!existing || existing.status !== 'queued')
         throw new Error('Journal contains an invalid queued cancellation.');
-      state.status = 'released';
-      state.outcome = 'failed';
-      state.releasedAt = event.at;
+      state = {
+        ...structuredClone(existing),
+        status: 'released',
+        outcome: 'failed',
+        releasedAt: event.at,
+      };
     } else if (event.type === 'activation.assigned') {
-      const state = this.activations.get(activationKey(event.lease));
-      const expectedEpoch = this.nextEpoch.get(sessionKey(event.lease)) ?? 1;
+      const existing = this.activations.get(activationKey(event.lease));
+      const expectedEpoch = (await this.epochFor(sessionKey(event.lease))) ?? 1;
       if (
-        !state ||
-        state.status === 'released' ||
-        !this.isOldest(state) ||
-        (state.status === 'assigned' && state.lease!.expiresAt > event.at) ||
+        !existing ||
+        existing.status === 'released' ||
+        !this.isOldest(existing) ||
+        (existing.status === 'assigned' &&
+          existing.lease!.expiresAt > event.at) ||
         event.lease.epoch !== expectedEpoch ||
         event.lease.expiresAt <= event.at
-      ) {
+      )
         throw new Error('Journal contains an invalid activation assignment.');
-      }
-      state.status = 'assigned';
-      state.lease = structuredClone(event.lease);
-      this.nextEpoch.set(sessionKey(event.lease), expectedEpoch + 1);
+      state = {
+        ...structuredClone(existing),
+        status: 'assigned',
+        lease: structuredClone(event.lease),
+      };
+      epoch = [sessionKey(event.lease), expectedEpoch + 1];
     } else if (event.type === 'activation.renewed') {
-      const state = this.current(event.lease, event.at);
-      if (event.lease.expiresAt <= state.lease!.expiresAt) {
+      state = structuredClone(this.current(event.lease, event.at));
+      if (event.lease.expiresAt <= state.lease!.expiresAt)
         throw new Error('Journal renewal does not extend the lease.');
-      }
       state.lease = structuredClone(event.lease);
     } else {
-      const state = this.current(
-        {
-          ...event.identity,
-          workerId: event.workerId,
-          epoch: event.epoch,
-        },
-        event.at,
+      state = structuredClone(
+        this.current(
+          { ...event.identity, workerId: event.workerId, epoch: event.epoch },
+          event.at,
+        ),
       );
       state.status = 'released';
       state.outcome = event.outcome;
       state.releasedAt = event.at;
       delete state.lease;
     }
-    this.nextSequence += 1;
+    return { state, ...(epoch ? { epoch } : {}) };
+  }
+
+  private install(update: ActivationUpdate): void {
+    const key = activationKey(update.state.descriptor);
+    if (update.state.status === 'released') this.activations.delete(key);
+    else this.activations.set(key, update.state);
+    this.nextSequence++;
+  }
+
+  private async writeUpdate(update: ActivationUpdate): Promise<void> {
+    await this.identities.set(
+      activationKey(update.state.descriptor),
+      update.state,
+    );
+    if (update.epoch)
+      await this.nextEpoch.set(update.epoch[0], update.epoch[1]);
   }
 
   private current(input: ManagedActivationFence, at: number): ActivationState {

@@ -5,6 +5,10 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { FileManagedSessionHistory } from '../managed-runtime/managed-session-history.js';
 import type { GoalEvidenceRecord } from './goal-evidence.js';
 import { type GoalRecoveryRecord } from './goal-persistence.js';
 import {
@@ -580,6 +584,94 @@ async function withFakeDate(start: number, body: () => Promise<void>) {
 }
 
 describe('goal runtime', () => {
+  it('does not call the verifier after pause during streamed evidence scanning', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'goal-aborted-history-'));
+    const owner = await FileManagedSessionHistory.create(root);
+    const scratch = owner.emptyView();
+    const close = vi.spyOn(scratch, 'close');
+    const scanned = deferred<void>();
+    const release = deferred<void>();
+    const verifier = vi.fn(accepting('checked'));
+    const f = await startVerifiedGoal({ verifier, proposal: delivered() });
+    Object.assign(f.evidenceSource, {
+      createTranscriptQueryHistory: () => scratch,
+      readActiveTranscriptHistory: async () =>
+        (async function* () {
+          yield f.source.records[0];
+          scanned.resolve();
+          await release.promise;
+          yield* f.source.records.slice(1);
+        })(),
+    });
+    const finishing = f.runtime.finishTurn(f.permit);
+    try {
+      await scanned.promise;
+      await control(f.runtime, 'pause', f.permit);
+      release.resolve();
+      await finishing;
+      expect(verifier).not.toHaveBeenCalled();
+      expect(close).toHaveBeenCalledOnce();
+      expectState(f.runtime, 'idle', { status: 'paused' });
+      expectCauses(f.journal, 'create turn_finished pause');
+    } finally {
+      release.resolve();
+      await finishing.catch(() => undefined);
+      f.runtime.dispose();
+      await owner.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each([false, true])(
+    'uses streamed evidence and releases its shared query root on failure=%s',
+    async (fail) => {
+      const root = await mkdtemp(path.join(tmpdir(), 'goal-runtime-history-'));
+      const owner = await FileManagedSessionHistory.create(root);
+      const scratch = owner.emptyView();
+      const close = vi.spyOn(scratch, 'close');
+      const verifier = vi.fn(async () => {
+        expect(close).toHaveBeenCalledOnce();
+        return { decision: 'accept' as const, reason: 'checked' };
+      });
+      const f = await startVerifiedGoal({ verifier, proposal: delivered() });
+      Object.assign(f.evidenceSource, {
+        createTranscriptQueryHistory: () => scratch,
+        readActiveTranscriptHistory: async () =>
+          (async function* () {
+            yield* f.source.records;
+            if (fail) throw new Error('stream unavailable');
+          })(),
+      });
+      f.evidenceSource.readActiveTranscriptChain.mockRejectedValue(
+        new Error('array history must not be read'),
+      );
+      try {
+        await f.runtime.finishTurn(f.permit);
+        expect(
+          f.evidenceSource.readActiveTranscriptChain,
+        ).not.toHaveBeenCalled();
+        expect(close).toHaveBeenCalledOnce();
+        expect(
+          await owner.map<boolean>('event-id').get('unrelated'),
+        ).toBeUndefined();
+        if (fail) {
+          expect(verifier).not.toHaveBeenCalled();
+          expect(f.goal()).toMatchObject({
+            status: 'usage_limited',
+            lastReason: 'stream unavailable',
+          });
+        } else {
+          expect(verifier).toHaveBeenCalledOnce();
+          expect(f.goal()?.status).toBe('complete');
+        }
+      } finally {
+        f.runtime.dispose();
+        await owner.close();
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('requires evidence source and verifier dependencies as a pair', () => {
     const journal = fakeGoalJournal();
     const evidenceSource = fakeEvidenceSource(() => []);

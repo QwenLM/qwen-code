@@ -2202,6 +2202,7 @@ describe('SDK Java install-transient retry', () => {
       'event-transport-multi-node',
       'hosted-failover-e2e',
       'hosted-harness-mysql',
+      'managed-history-scale',
       'mysql-integration',
       'test',
     ]);

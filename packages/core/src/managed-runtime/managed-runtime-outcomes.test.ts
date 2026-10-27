@@ -120,10 +120,12 @@ const admission = (
   workerIncarnation: 'incarnation-a',
 });
 
-const events = (session: ManagedSession, kind: string) =>
-  session.authority
-    .eventsInSequenceRange(1, session.authority.committedSequence)
-    .filter((event) => event.kind === kind);
+const events = async (session: ManagedSession, kind: string) =>
+  (
+    await session.authority
+      .iterateEvents(1, session.authority.committedSequence)
+      .collect(1_000_000)
+  ).filter((event) => event.kind === kind);
 
 async function checkpointOf(session: ManagedSession) {
   const state = await session.authority.readCheckpointState();
@@ -173,12 +175,20 @@ describe('LocalManagedRuntimeOutcomes', () => {
       expect(authorization.status).toBe('runnable');
       if (authorization.status !== 'runnable')
         throw new Error('Missing paged checkpoint');
-      expect(authorization.checkpoint.tools?.items).toHaveLength(65);
-      expect(restored.hasCommittedReceipt('paged-call-0')).toBe(true);
+      expect(authorization.history.toolCount).toBe(65);
+      expect(authorization.checkpoint.tools!.items.length).toBeLessThanOrEqual(
+        63,
+      );
+      expect(await authorization.history.tool('paged-call-0')).toMatchObject({
+        executionCallId: 'paged-call-0',
+        consumed: true,
+      });
+      expect(authorization.history.maxOrdinal).toBe(64);
+      expect(await restored.hasCommittedReceipt('paged-call-0')).toBe(true);
       await expect(restored.admit(admission('paged-call-0'))).rejects.toThrow(
         /already/,
       );
-      expect(events(session, 'tool.receipt')).toHaveLength(65);
+      expect(await events(session, 'tool.receipt')).toHaveLength(65);
     } finally {
       await session.close();
     }
@@ -194,7 +204,7 @@ describe('LocalManagedRuntimeOutcomes', () => {
         admission('call-a', { file_path: '/workspace/a.txt' }),
       );
 
-      const intents = events(session, 'tool.intent');
+      const intents = await events(session, 'tool.intent');
       expect(intents).toHaveLength(1);
       const intent = intents[0]!;
       expect(intent.subject).toMatchObject({
@@ -257,7 +267,7 @@ describe('LocalManagedRuntimeOutcomes', () => {
       await outcomes.admit(admission('call-a'));
       await outcomes.admit(admission('call-b'));
 
-      const intents = events(session, 'tool.intent');
+      const intents = await events(session, 'tool.intent');
       expect(intents.map((intent) => intent.payload['ordinal'])).toEqual([
         0, 1,
       ]);
@@ -282,7 +292,7 @@ describe('LocalManagedRuntimeOutcomes', () => {
         toolDefinition: { name: 'write_file', parametersJsonSchema: {} },
       });
       await outcomes.admit(admission('call-d'));
-      const afterRefs = events(session, 'tool.intent').map(
+      const afterRefs = (await events(session, 'tool.intent')).map(
         (intent) =>
           (intent.payload['toolDefinitionRef'] as { resourceId: string })
             .resourceId,
@@ -326,7 +336,7 @@ describe('LocalManagedRuntimeOutcomes', () => {
         result: { executionStatus: 'success', responseParts: [] },
       });
 
-      const receipts = events(session, 'tool.receipt');
+      const receipts = await events(session, 'tool.receipt');
       expect(receipts).toHaveLength(1);
       expect(receipts[0]!.payload).toMatchObject({
         executionCallId: 'call-a',
@@ -369,7 +379,7 @@ describe('LocalManagedRuntimeOutcomes', () => {
           error: { message: 'The Runtime worker refused the tool call.' },
         },
       });
-      const receipts = events(session, 'tool.receipt');
+      const receipts = await events(session, 'tool.receipt');
       expect(receipts).toHaveLength(1);
       const checkpoint = (await checkpointOf(session))!;
       expect(checkpoint.continuation.phase).toBe('results_ready');
@@ -446,7 +456,7 @@ describe('LocalManagedRuntimeOutcomes', () => {
         outcomes.admit(admission('call-a')),
         outcomes.admit(admission('call-b')),
       ]);
-      const intents = events(session, 'tool.intent');
+      const intents = await events(session, 'tool.intent');
       expect(intents).toHaveLength(2);
       expect(intents.map((intent) => intent.payload['ordinal']).sort()).toEqual(
         [0, 1],
@@ -470,7 +480,7 @@ describe('LocalManagedRuntimeOutcomes', () => {
       const outcomes = new LocalManagedRuntimeOutcomes(session);
       await outcomes.admit(admission('call-a'));
       await outcomes.admit(admission('call-a'));
-      expect(events(session, 'tool.intent')).toHaveLength(1);
+      expect(await events(session, 'tool.intent')).toHaveLength(1);
       const checkpoint = (await checkpointOf(session))!;
       expect(checkpoint.tools?.items).toHaveLength(1);
       expect(checkpoint.runtime?.bindings).toHaveLength(1);
@@ -512,7 +522,7 @@ describe('LocalManagedRuntimeOutcomes', () => {
           }),
         ),
       ).rejects.toThrow();
-      expect(events(session, 'tool.intent')).toHaveLength(0);
+      expect(await events(session, 'tool.intent')).toHaveLength(0);
       const checkpoint = (await checkpointOf(session))!;
       expect(checkpoint.tools).toBeNull();
     } finally {
@@ -542,11 +552,11 @@ describe('admission failure recovery', () => {
       await expect(outcomes.admit(admission('call-a'))).rejects.toThrow(
         'disk pressure',
       );
-      expect(events(session, 'tool.intent')).toHaveLength(1);
+      expect(await events(session, 'tool.intent')).toHaveLength(1);
 
       await outcomes.admit(admission('call-b'));
       expect(failed).toBe(1);
-      expect(events(session, 'tool.intent')).toHaveLength(2);
+      expect(await events(session, 'tool.intent')).toHaveLength(2);
       await outcomes.admit(admission('call-c'));
       const routePublishes = vi
         .mocked(session.resources.publish)
@@ -598,7 +608,7 @@ describe('restored runtime block', () => {
           },
         }),
       ).rejects.toThrow('crashed between');
-      expect(events(session, 'tool.receipt')).toHaveLength(1);
+      expect(await events(session, 'tool.receipt')).toHaveLength(1);
       const crashed = (await checkpointOf(session))!;
       expect(crashed.continuation.phase).toBe('await_runtime');
       await seal();
@@ -617,9 +627,9 @@ describe('restored runtime block', () => {
       ).recoverCommittedReceipts();
       const checkpoint = (await checkpointOf(restored))!;
       expect(checkpoint.continuation.phase).toBe('results_ready');
-      const resultsRecorded = events(restored, 'message.committed').filter(
-        (event) => event.payload['role'] === 'tool_result',
-      );
+      const resultsRecorded = (
+        await events(restored, 'message.committed')
+      ).filter((event) => event.payload['role'] === 'tool_result');
       expect(resultsRecorded).toHaveLength(1);
       const body = await restored.resources.read(
         resultsRecorded[0]!.payload['contentRef'] as never,
@@ -674,9 +684,9 @@ describe('restored runtime block', () => {
       await new LocalManagedRuntimeOutcomes(
         restored,
       ).recoverCommittedReceipts();
-      const resultsRecorded = events(restored, 'message.committed').filter(
-        (event) => event.payload['role'] === 'tool_result',
-      );
+      const resultsRecorded = (
+        await events(restored, 'message.committed')
+      ).filter((event) => event.payload['role'] === 'tool_result');
       expect(resultsRecorded).toHaveLength(1);
       const body = await restored.resources.read(
         resultsRecorded[0]!.payload['contentRef'] as never,
@@ -751,9 +761,9 @@ describe('restored runtime block', () => {
       await expect(
         new LocalManagedRuntimeOutcomes(restored).recoverCommittedReceipts(),
       ).resolves.toBeUndefined();
-      const resultsRecorded = events(restored, 'message.committed').filter(
-        (event) => event.payload['role'] === 'tool_result',
-      );
+      const resultsRecorded = (
+        await events(restored, 'message.committed')
+      ).filter((event) => event.payload['role'] === 'tool_result');
       expect(resultsRecorded).toHaveLength(1);
       const body = await restored.resources.read(
         resultsRecorded[0]!.payload['contentRef'] as never,
@@ -835,9 +845,9 @@ describe('restored runtime block', () => {
       await new LocalManagedRuntimeOutcomes(
         restored,
       ).recoverCommittedReceipts();
-      const resultsRecorded = events(restored, 'message.committed').filter(
-        (event) => event.payload['role'] === 'tool_result',
-      );
+      const resultsRecorded = (
+        await events(restored, 'message.committed')
+      ).filter((event) => event.payload['role'] === 'tool_result');
       expect(resultsRecorded).toHaveLength(2);
       const bodies = await Promise.all(
         resultsRecorded.map(
@@ -912,9 +922,9 @@ describe('restored runtime block', () => {
       await new LocalManagedRuntimeOutcomes(
         restored,
       ).recoverCommittedReceipts();
-      const resultsRecorded = events(restored, 'message.committed').filter(
-        (event) => event.payload['role'] === 'tool_result',
-      );
+      const resultsRecorded = (
+        await events(restored, 'message.committed')
+      ).filter((event) => event.payload['role'] === 'tool_result');
       expect(resultsRecorded).toHaveLength(2);
       const records = await Promise.all(
         resultsRecorded.map(
@@ -1012,9 +1022,9 @@ describe('restored runtime block', () => {
         await expect(
           new LocalManagedRuntimeOutcomes(restored).recoverCommittedReceipts(),
         ).resolves.toBeUndefined();
-        const resultsRecorded = events(restored, 'message.committed').filter(
-          (event) => event.payload['role'] === 'tool_result',
-        );
+        const resultsRecorded = (
+          await events(restored, 'message.committed')
+        ).filter((event) => event.payload['role'] === 'tool_result');
         expect(resultsRecorded).toHaveLength(1);
         const body = await restored.resources.read(
           resultsRecorded[0]!.payload['contentRef'] as never,
@@ -1062,9 +1072,9 @@ describe('restored runtime block', () => {
       await new LocalManagedRuntimeOutcomes(
         restored,
       ).recoverCommittedReceipts();
-      const resultsRecorded = events(restored, 'message.committed').filter(
-        (event) => event.payload['role'] === 'tool_result',
-      );
+      const resultsRecorded = (
+        await events(restored, 'message.committed')
+      ).filter((event) => event.payload['role'] === 'tool_result');
       expect(resultsRecorded).toHaveLength(1);
       const body = await restored.resources.read(
         resultsRecorded[0]!.payload['contentRef'] as never,
@@ -1116,9 +1126,9 @@ describe('restored runtime block', () => {
       await new LocalManagedRuntimeOutcomes(
         restored,
       ).recoverCommittedReceipts();
-      const resultsRecorded = events(restored, 'message.committed').filter(
-        (event) => event.payload['role'] === 'tool_result',
-      );
+      const resultsRecorded = (
+        await events(restored, 'message.committed')
+      ).filter((event) => event.payload['role'] === 'tool_result');
       expect(resultsRecorded).toHaveLength(1);
       const body = await restored.resources.read(
         resultsRecorded[0]!.payload['contentRef'] as never,
@@ -1231,7 +1241,7 @@ describe('restored runtime block', () => {
         { executionCallId: 'call-b', state: 'in_progress', consumed: false },
       ]);
       const phases: string[] = [];
-      for (const event of events(session, 'checkpoint.committed')) {
+      for await (const event of await events(session, 'checkpoint.committed')) {
         phases.push(
           parseHarnessCheckpointV1(
             await session.resources.read(event.payload['stateRef'] as never),
@@ -1275,7 +1285,7 @@ describe('restored runtime block', () => {
       // not replayed, and the new prompt's batch is its own.
       const outcomes = new LocalManagedRuntimeOutcomes(restored);
       await outcomes.admit(admission('call-b', {}, 'prompt-b'));
-      const intents = events(restored, 'tool.intent');
+      const intents = await events(restored, 'tool.intent');
       expect(intents).toHaveLength(2);
       expect(intents[1]!.payload).toMatchObject({
         batchId: 'batch-call-b',
@@ -1340,7 +1350,7 @@ describe('restored runtime block', () => {
             responseParts: [{ text: output }],
           },
         } as never);
-        const recorded = events(session, 'message.committed').filter(
+        const recorded = (await events(session, 'message.committed')).filter(
           (event) => event.payload['role'] === 'tool_result',
         );
         expect(recorded).toHaveLength(1);
@@ -1357,9 +1367,9 @@ describe('restored runtime block', () => {
         const outcomes = new LocalManagedRuntimeOutcomes(restored);
         await outcomes.recoverCommittedReceipts();
         await outcomes.recoverCommittedReceipts();
-        expect(events(restored, 'tool.receipt')).toHaveLength(1);
+        expect(await events(restored, 'tool.receipt')).toHaveLength(1);
         expect(
-          events(restored, 'message.committed').filter(
+          (await events(restored, 'message.committed')).filter(
             (event) => event.payload['role'] === 'tool_result',
           ),
         ).toHaveLength(1);
@@ -1438,7 +1448,7 @@ describe('restored runtime block', () => {
       );
 
       await outcomes.admit(admission('call-b', {}, 'prompt-b'));
-      const intents = events(session, 'tool.intent');
+      const intents = await events(session, 'tool.intent');
       expect(intents).toHaveLength(2);
       expect(intents[1]!.payload).toMatchObject({
         batchId: 'batch-call-b',

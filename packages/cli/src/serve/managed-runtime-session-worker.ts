@@ -1329,7 +1329,7 @@ export function createManagedRuntimeEnvironment(
             payload: outcome,
           });
         } catch (error) {
-          if (outcomes.hasCommittedReceipt(callId)) return;
+          if (await outcomes.hasCommittedReceipt(callId)) return;
           const blocked = new ManagedRuntimeOutcomeUnknownError(
             'The durable settlement of a Runtime tool call failed.',
             { cause: error },

@@ -2,11 +2,17 @@ package com.alibaba.qwen.code.runtimebroker;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.apache.commons.codec.digest.DigestUtils;
 
-import java.util.ArrayDeque;
-import java.util.HashSet;
+import java.io.IOException;
+import java.io.RandomAccessFile;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.MessageDigest;
 import java.util.List;
 import java.util.Set;
+import java.util.function.Consumer;
 import java.util.function.Function;
 
 /** Physical checkpoint pages; logical execution state remains Harness v1. */
@@ -85,77 +91,293 @@ public final class ManagedCheckpointHistory {
         return page;
     }
 
-    public static JsonNode hydrate(JsonNode physical, Function<JsonNode, byte[]> resources) {
-        if (!paged(physical)) {
-            return physical;
+    /** A verified immutable prefix. Only the physical root and one page are resident. */
+    public static final class View {
+        private final JsonNode physical;
+        private final Function<JsonNode, byte[]> resources;
+        private final JsonNode state;
+        private long toolCount;
+        private long bindingCount;
+        private long maxOrdinal = -1;
+
+        private View(JsonNode physical, Function<JsonNode, byte[]> resources) {
+            this.physical = physical.deepCopy();
+            this.resources = resources;
+            ObjectNode compact = physical.deepCopy();
+            if (paged(physical)) {
+                compact.remove(List.of("storageProfile", "history"));
+            }
+            state = compact;
+            long archivedTools = paged(physical) ? number(physical.path("history"), "toolCount") : 0;
+            long archivedBindings = paged(physical) ? number(physical.path("history"), "bindingCount") : 0;
+            require(archivedTools <= (long) MAX_PAGES * PAGE_ITEMS
+                    && archivedBindings <= (long) MAX_PAGES * PAGE_ITEMS);
+            try (var scratch = CsiProofHistory.temporary()) {
+                Set<String> identities = scratch.identities();
+                Consumer<JsonNode> tool = item -> {
+                    require(identities.add("execution:" + CsiNativeActivationProof.id(item, "executionCallId")));
+                    require(identities.add("function:" + CsiNativeActivationProof.id(item, "functionCallId")));
+                    long ordinal = number(item, "ordinal");
+                    require(identities.add("ordinal:" + ordinal));
+                    maxOrdinal = Math.max(maxOrdinal, ordinal);
+                    toolCount++;
+                };
+                // Bindings can precede their tools in a backwards page walk. Validate the
+                // foreign keys only after the entire execution identity prefix is present.
+                archived((page, ref, revision) -> page.path("items").forEach(tool));
+                state.path("tools").path("items").forEach(tool);
+                Consumer<JsonNode> binding = value -> {
+                    String id = CsiNativeActivationProof.id(value, "executionCallId");
+                    require(identities.contains("execution:" + id));
+                    require(identities.add("binding:" + id));
+                    bindingCount++;
+                };
+                archived((page, ref, revision) -> page.path("bindings").forEach(binding));
+                state.path("runtime").path("bindings").forEach(binding);
+            }
         }
-        require(PROFILE.equals(physical.path("storageProfile").asText()));
-        JsonNode history = physical.path("history");
-        CsiNativeActivationProof.closed(history, Set.of("ref", "toolCount", "bindingCount"));
-        long tools = CsiNativeActivationProof.number(history.path("toolCount"));
-        long bindings = CsiNativeActivationProof.number(history.path("bindingCount"));
-        require(tools > 0 && physical.path("tools").path("items").isArray());
-        JsonNode next = history.path("ref");
-        pageRef(next);
-        var pages = new ArrayDeque<JsonNode>();
-        var visited = new HashSet<String>();
-        long ceiling = resources instanceof Reader reader ? reader.revision() : Long.MAX_VALUE;
-        long bytesRead = 0;
-        while (!next.isNull()) {
+
+        public JsonNode state() {
+            return state.deepCopy();
+        }
+
+        public JsonNode physical() {
+            return physical.deepCopy();
+        }
+
+        public long toolCount() {
+            return toolCount;
+        }
+
+        public long bindingCount() {
+            return bindingCount;
+        }
+
+        public long maxOrdinal() {
+            return maxOrdinal;
+        }
+
+        public JsonNode tool(String executionCallId) {
+            JsonNode[] result = {null};
+            tools(item -> {
+                if (executionCallId.equals(CsiNativeActivationProof.id(item, "executionCallId"))) {
+                    require(result[0] == null);
+                    result[0] = item.deepCopy();
+                }
+            });
+            return result[0];
+        }
+
+        public JsonNode binding(String executionCallId) {
+            JsonNode[] result = {null};
+            bindings(item -> {
+                if (executionCallId.equals(CsiNativeActivationProof.id(item, "executionCallId"))) {
+                    require(result[0] == null);
+                    result[0] = item.deepCopy();
+                }
+            });
+            return result[0];
+        }
+
+        public void tools(Consumer<JsonNode> consumer) {
+            chronological("items", item -> consumer.accept(item.deepCopy()));
+            state.path("tools").path("items").forEach(item -> consumer.accept(item.deepCopy()));
+        }
+
+        public void bindings(Consumer<JsonNode> consumer) {
+            chronological("bindings", item -> consumer.accept(item.deepCopy()));
+            state.path("runtime").path("bindings").forEach(item -> consumer.accept(item.deepCopy()));
+        }
+
+        /** Expected inline mutations retain the prior archive, regardless of repaging. */
+        public boolean matches(JsonNode expected, View prior) {
+            if (!CsiNativeActivationProof.canonical(header(state)).equals(CsiNativeActivationProof.canonical(header(expected)))) {
+                return false;
+            }
+            return matchesItems(expected, prior, true) && matchesItems(expected, prior, false);
+        }
+
+        private boolean matchesItems(JsonNode expected, View prior, boolean tools) {
+            var actual = DigestUtils.getSha256Digest();
+            var wanted = DigestUtils.getSha256Digest();
+            Consumer<JsonNode> actualItem = item -> digest(actual, item);
+            if (tools) {
+                tools(actualItem);
+            } else {
+                bindings(actualItem);
+            }
+            if (prior != null) {
+                prior.chronological(tools ? "items" : "bindings", item -> digest(wanted, item));
+            }
+            expected.path(tools ? "tools" : "runtime").path(tools ? "items" : "bindings")
+                    .forEach(item -> digest(wanted, item));
+            return MessageDigest.isEqual(actual.digest(), wanted.digest());
+        }
+
+        private void chronological(String field, Consumer<JsonNode> consumer) {
+            if (!paged(physical)) {
+                return;
+            }
+            // Each footer locates just the preceding page. No in-memory page/ref directory.
+            try (var spool = new PageSpool()) {
+                archived((page, raw, revision) -> spool.append(raw));
+                spool.reverse(page -> page.path(field).forEach(consumer));
+            } catch (IOException error) {
+                throw failure(error);
+            }
+        }
+
+        private void archived(PageConsumer consumer) {
+            if (!paged(physical)) {
+                return;
+            }
+            require(PROFILE.equals(physical.path("storageProfile").asText()));
+            JsonNode history = physical.path("history");
+            CsiNativeActivationProof.closed(history, Set.of("ref", "toolCount", "bindingCount"));
+            long tools = number(history, "toolCount");
+            long bindings = number(history, "bindingCount");
+            require(tools > 0 && physical.path("tools").path("items").isArray()
+                    && (physical.path("runtime").isObject() || bindings == 0));
+            if (physical.path("runtime").isObject()) {
+                require(physical.path("runtime").path("bindings").isArray());
+            }
+            JsonNode next = history.path("ref");
             pageRef(next);
-            require(visited.add(next.path("resourceId").asText()) && visited.size() <= MAX_PAGES);
-            PageBytes stored = resources instanceof Reader reader ? reader.historicalPage(next, ceiling)
-                    : new PageBytes(CsiNativeActivationProof.reference(next, KIND, resources), ceiling);
-            require(stored.revision() > 0 && stored.revision() <= ceiling);
-            ceiling = stored.revision();
-            JsonNode checkedRef = next;
-            byte[] raw = CsiNativeActivationProof.reference(checkedRef, KIND, ignored -> stored.bytes());
-            bytesRead += raw.length;
-            require(bytesRead <= MAX_HISTORY_BYTES);
-            JsonNode page = page(raw);
-            JsonNode identity = physical.path("identity");
-            require(page.path("sessionKey").equals(identity.path("sessionKey"))
-                    && page.path("turnId").equals(identity.path("turnId"))
-                    && page.path("promptId").equals(identity.path("promptId"))
-                    && CsiNativeActivationProof.number(page.path("toolCount")) == tools
-                    && CsiNativeActivationProof.number(page.path("bindingCount")) == bindings);
-            tools -= page.path("items").size();
-            bindings -= page.path("bindings").size();
-            require(tools >= 0 && bindings >= 0);
-            pages.addFirst(page);
-            next = page.path("previous");
+            long ceiling = resources instanceof Reader reader ? reader.revision() : Long.MAX_VALUE;
+            long bytesRead = 0;
+            int pages = 0;
+            while (!next.isNull()) {
+                pageRef(next);
+                require(++pages <= MAX_PAGES);
+                PageBytes stored = resources instanceof Reader reader ? reader.historicalPage(next, ceiling)
+                        : new PageBytes(CsiNativeActivationProof.reference(next, KIND, resources), ceiling);
+                require(stored.revision() > 0 && stored.revision() <= ceiling);
+                ceiling = stored.revision();
+                byte[] raw = CsiNativeActivationProof.reference(next, KIND, ignored -> stored.bytes());
+                bytesRead += raw.length;
+                require(bytesRead <= MAX_HISTORY_BYTES);
+                JsonNode current = page(raw);
+                JsonNode identity = physical.path("identity");
+                require(current.path("sessionKey").equals(identity.path("sessionKey"))
+                        && current.path("turnId").equals(identity.path("turnId"))
+                        && current.path("promptId").equals(identity.path("promptId"))
+                        && number(current, "toolCount") == tools && number(current, "bindingCount") == bindings);
+                tools -= current.path("items").size();
+                bindings -= current.path("bindings").size();
+                require(tools >= 0 && bindings >= 0);
+                consumer.accept(current, raw, ceiling);
+                next = current.path("previous");
+            }
+            require(tools == 0 && bindings == 0);
         }
-        require(tools == 0 && bindings == 0);
-        ObjectNode logical = physical.deepCopy();
-        logical.remove(List.of("storageProfile", "history"));
-        var items = logical.arrayNode();
-        var runtime = logical.arrayNode();
-        for (JsonNode page : pages) {
-            page.path("items").forEach(items::add);
-            page.path("bindings").forEach(runtime::add);
+    }
+
+    public static View open(JsonNode physical, Function<JsonNode, byte[]> resources) {
+        return new View(physical, resources);
+    }
+
+    private static ObjectNode header(JsonNode state) {
+        ObjectNode header = state.deepCopy();
+        if (header.path("tools").isObject()) {
+            ((ObjectNode) header.path("tools")).remove("items");
         }
-        logical.path("tools").path("items").forEach(items::add);
-        ((ObjectNode) logical.path("tools")).set("items", items);
-        require(logical.path("runtime").isObject() || history.path("bindingCount").longValue() == 0);
-        if (logical.path("runtime").isObject()) {
-            require(logical.path("runtime").path("bindings").isArray());
-            logical.path("runtime").path("bindings").forEach(runtime::add);
-            ((ObjectNode) logical.path("runtime")).set("bindings", runtime);
+        if (header.path("runtime").isObject()) {
+            ((ObjectNode) header.path("runtime")).remove("bindings");
         }
-        var executions = new HashSet<String>();
-        var calls = new HashSet<String>();
-        var ordinals = new HashSet<Long>();
-        for (JsonNode item : items) {
-            require(executions.add(CsiNativeActivationProof.id(item, "executionCallId"))
-                    && calls.add(CsiNativeActivationProof.id(item, "functionCallId"))
-                    && ordinals.add(CsiNativeActivationProof.number(item.path("ordinal"))));
+        return header;
+    }
+
+    private static long number(JsonNode node, String field) {
+        return CsiNativeActivationProof.number(node.path(field));
+    }
+
+    private static void digest(MessageDigest digest, JsonNode item) {
+        byte[] bytes = CsiNativeActivationProof.canonical(item).getBytes(StandardCharsets.UTF_8);
+        digest.update(java.nio.ByteBuffer.allocate(Integer.BYTES).putInt(bytes.length).array());
+        digest.update(bytes);
+    }
+
+    @FunctionalInterface
+    private interface PageConsumer {
+        void accept(JsonNode page, byte[] raw, long revision);
+    }
+
+    private static IllegalArgumentException failure(IOException error) {
+        return new IllegalArgumentException("Managed checkpoint history I/O failed", error);
+    }
+
+    private static final class PageSpool implements AutoCloseable {
+        private final Path path;
+        private final RandomAccessFile file;
+        private final MessageDigest digest = DigestUtils.getSha256Digest();
+        private long length;
+
+        private PageSpool() throws IOException {
+            path = Files.createTempFile("qwen-checkpoint-pages-", ".scratch");
+            RandomAccessFile opened;
+            try {
+                opened = new RandomAccessFile(path.toFile(), "rw");
+            } catch (IOException error) {
+                Files.deleteIfExists(path);
+                throw error;
+            }
+            file = opened;
         }
-        var runtimeIds = new HashSet<String>();
-        for (JsonNode binding : runtime) {
-            String id = CsiNativeActivationProof.id(binding, "executionCallId");
-            require(executions.contains(id) && runtimeIds.add(id));
+
+        private void append(byte[] raw) {
+            byte[] checksum = DigestUtils.sha256(raw);
+            try {
+                file.write(raw);
+                file.write(checksum);
+                file.writeInt(raw.length);
+                digest.update(raw);
+                digest.update(checksum);
+                digest.update(java.nio.ByteBuffer.allocate(Integer.BYTES).putInt(raw.length).array());
+                length += raw.length + checksum.length + Integer.BYTES;
+            } catch (IOException error) {
+                throw failure(error);
+            }
         }
-        return logical;
+
+        private void reverse(Consumer<JsonNode> consumer) throws IOException {
+            require(file.length() == length);
+            // Qualify the entire derived spool before exposing any item from it.
+            var actual = DigestUtils.getSha256Digest();
+            file.seek(0);
+            byte[] buffer = new byte[8192];
+            long remaining = length;
+            while (remaining > 0) {
+                int count = (int) Math.min(buffer.length, remaining);
+                file.readFully(buffer, 0, count);
+                actual.update(buffer, 0, count);
+                remaining -= count;
+            }
+            require(MessageDigest.isEqual(actual.digest(), digest.digest()));
+            long offset = length;
+            while (offset > 0) {
+                require(offset >= Integer.BYTES + 32);
+                file.seek(offset - Integer.BYTES);
+                int size = file.readInt();
+                require(size > 0 && size <= PAGE_BYTES && offset >= size + 32L + Integer.BYTES);
+                offset -= size + 32L + Integer.BYTES;
+                file.seek(offset);
+                byte[] raw = new byte[size];
+                byte[] checksum = new byte[32];
+                file.readFully(raw);
+                file.readFully(checksum);
+                require(MessageDigest.isEqual(checksum, DigestUtils.sha256(raw)));
+                consumer.accept(page(raw));
+            }
+        }
+
+        @Override
+        public void close() throws IOException {
+            try {
+                file.close();
+            } finally {
+                Files.deleteIfExists(path);
+            }
+        }
     }
 
     public static void pageRef(JsonNode ref) {

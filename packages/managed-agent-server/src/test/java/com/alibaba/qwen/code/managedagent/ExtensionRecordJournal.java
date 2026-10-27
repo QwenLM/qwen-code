@@ -297,7 +297,9 @@ public final class ExtensionRecordJournal {
         journalRevision++;
         sequence = request.lastSequence();
         lastCommitDigest = request.commitDigest();
-        domainEvents++;
+        if (request.eventCount() > 0) {
+            domainEvents++;
+        }
     }
 
     long committedSequence() {

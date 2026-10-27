@@ -112,7 +112,7 @@ describe('FileManagedActivationStore', () => {
     });
 
     const reopened = await openStore();
-    expect(reopened.get(input)).toMatchObject({
+    expect(await reopened.get(input)).toMatchObject({
       descriptor: activation('a1'),
       status: 'queued',
     });
@@ -133,7 +133,7 @@ describe('FileManagedActivationStore', () => {
     });
 
     const reopened = await openStore();
-    expect(reopened.get(activation('a1'))).toMatchObject({
+    expect(await reopened.get(activation('a1'))).toMatchObject({
       descriptor: { payloadRef: 'event:a1' },
     });
     expect(await readFile(filePath, 'utf8')).not.toContain('event:a2');
@@ -147,7 +147,7 @@ describe('FileManagedActivationStore', () => {
     await expect(pending).resolves.toMatchObject({ created: true });
 
     const reopened = await openStore();
-    expect(reopened.get(activation('a1'))).toMatchObject({
+    expect(await reopened.get(activation('a1'))).toMatchObject({
       status: 'queued',
     });
   });
@@ -165,7 +165,7 @@ describe('FileManagedActivationStore', () => {
     });
 
     const reopened = await openStore();
-    expect(reopened.get(activation('a1'))).toMatchObject({
+    expect(await reopened.get(activation('a1'))).toMatchObject({
       status: 'assigned',
       lease: { workerId: 'worker-a', expiresAt: 1100 },
     });
@@ -187,7 +187,7 @@ describe('FileManagedActivationStore', () => {
     });
 
     const reopened = await openStore();
-    expect(reopened.get(activation('a1'))).toMatchObject({
+    expect(await reopened.get(activation('a1'))).toMatchObject({
       status: 'assigned',
       lease: { workerId: 'worker-a', expiresAt: 1200 },
     });
@@ -207,7 +207,7 @@ describe('FileManagedActivationStore', () => {
     });
 
     const reopened = await openStore();
-    expect(reopened.get(activation('a1'))).toMatchObject({
+    expect(await reopened.get(activation('a1'))).toMatchObject({
       status: 'released',
       outcome: 'completed',
     });
@@ -250,7 +250,7 @@ describe('FileManagedActivationStore', () => {
     expect(lease?.epoch).toBe(1);
 
     const reopened = await openStore();
-    expect(reopened.get(activation('a1'))).toMatchObject({
+    expect(await reopened.get(activation('a1'))).toMatchObject({
       status: 'assigned',
       lease: { workerId: 'worker-a' },
     });
@@ -408,10 +408,10 @@ describe('FileManagedActivationStore', () => {
       MANAGED_JOURNAL_COMPACT_BYTES + Buffer.byteLength(lines[0]) + 512,
     );
     const reopened = await openStore();
-    expect(reopened.get(input)).toEqual(store.get(input));
-    expect(reopened.get(input)?.lease).toEqual(current);
+    expect(await reopened.get(input)).toEqual(await store.get(input));
+    expect((await reopened.get(input))?.lease).toEqual(current);
     await reopened.release(current, 'completed');
-    expect((await openStore()).get(input)?.status).toBe('released');
+    expect((await (await openStore()).get(input))?.status).toBe('released');
   }, 60_000);
 
   it('preserves all identities, FIFO, and per-Session epochs across snapshots', async () => {
@@ -446,7 +446,7 @@ describe('FileManagedActivationStore', () => {
       assigned,
       padding,
     ]) {
-      expect(reopened.get(input)).toEqual(store.get(input));
+      expect(await reopened.get(input)).toEqual(await store.get(input));
     }
     expect(reopened.listPending()).toEqual(store.listPending());
     expect(reopened.listRunnable()).toEqual(store.listRunnable());
@@ -486,7 +486,9 @@ describe('FileManagedActivationStore', () => {
     expect(reopened.haltedError).toBeUndefined();
     expect(await readFile(filePath, 'utf8')).toBe(committed);
     await reopened.renew(current, 1000);
-    expect((await openStore()).get(input)).toEqual(reopened.get(input));
+    expect(await (await openStore()).get(input)).toEqual(
+      await reopened.get(input),
+    );
   });
 
   it('enforces tenant and global queue limits for new work', async () => {
@@ -533,7 +535,7 @@ describe('FileManagedActivationStore', () => {
     expect(await readFile(filePath, 'utf8')).toBe(contents);
     expect(store.haltedError).toBeUndefined();
     const reopened = await openStore();
-    expect(reopened.get(input)?.lease).toEqual(lease);
+    expect((await reopened.get(input))?.lease).toEqual(lease);
     now = 200;
     await expect(reopened.renew(lease, 1000)).resolves.toMatchObject({
       expiresAt: 1200,

@@ -227,9 +227,11 @@ describe('managed session message projection', () => {
       await sink.write(records[0]);
       const cut = harness.authority.committedSequence;
       await sink.write(records[1]);
-      const latest = harness.authority
-        .eventsInSequenceRange(cut + 1, harness.authority.committedSequence)
-        .find((event) => event.kind === 'message.committed')!;
+      const latest = (await (
+        await harness.authority
+          .iterateEvents(cut + 1, harness.authority.committedSequence)
+          .collect(1_000_000)
+      ).find((event) => event.kind === 'message.committed'))!;
       const missing = latest.payload[
         'contentRef'
       ] as unknown as ManagedSessionDurableRef;
@@ -346,9 +348,10 @@ describe('managed session message projection', () => {
         Promise.all([checkpoint, message, release]),
       ).resolves.toHaveLength(3);
       expect(
-        harness.authority
-          .readEvents()
-          .map((event) => [event.sequence, event.kind]),
+        (await harness.authority.readEvents()).map((event) => [
+          event.sequence,
+          event.kind,
+        ]),
       ).toEqual([
         [1, 'activation.changed'],
         [2, 'checkpoint.committed'],
@@ -1254,12 +1257,12 @@ describe('managed session message projection', () => {
       HOLDS,
     );
 
-    const committed = harness.authority
-      .readEvents({
+    const committed = (
+      await harness.authority.readEvents({
         afterSequence: 0,
         limit: MANAGED_SESSION_LIMITS.maxReadEvents,
       })
-      .find((event) => event.kind === 'message.committed');
+    ).find((event) => event.kind === 'message.committed');
     const contentRef = committed?.payload['contentRef'];
     expect(contentRef).toMatchObject({ kind: 'managed-message-chunks' });
 

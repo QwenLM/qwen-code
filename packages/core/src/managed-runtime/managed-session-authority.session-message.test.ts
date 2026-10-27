@@ -345,10 +345,13 @@ async function publishedBodies(
   }
 }
 
-function inputEventsOf(authority: LocalManagedSessionAuthority): number {
+async function inputEventsOf(
+  authority: LocalManagedSessionAuthority,
+): Promise<number> {
   return authority
-    .eventsInSequenceRange(1, authority.committedSequence)
-    .filter((event) => event.kind === 'input.accepted').length;
+    .iterateEvents(1, authority.committedSequence)
+    .filter((event) => event.kind === 'input.accepted')
+    .count();
 }
 
 describe('managed session authority session_message records (H4d)', () => {
@@ -391,13 +394,13 @@ describe('managed session authority session_message records (H4d)', () => {
         });
       }
       expect(
-        authority.extensionRecord('session_message', 'message-1'),
+        await authority.extensionRecord('session_message', 'message-1'),
       ).toMatchObject({ revision: 4, task: null });
     });
     await withAuthority(
       harness,
       async (authority) => {
-        const rebuilt = authority.extensionRecord(
+        const rebuilt = await authority.extensionRecord(
           'session_message',
           'message-1',
         );
@@ -572,7 +575,8 @@ describe('managed session authority session_message records (H4d)', () => {
       harness,
       async (authority) => {
         expect(
-          authority.extensionRecord('session_message', 'message-1')?.revision,
+          (await authority.extensionRecord('session_message', 'message-1'))
+            ?.revision,
         ).toBe(2);
       },
       { create: false },
@@ -615,10 +619,12 @@ describe('managed session authority session_message records (H4d)', () => {
         },
         TRUSTED,
       );
-      const events = authority.eventsInSequenceRange(
-        accepted.receipt.firstSequence,
-        accepted.receipt.lastSequence,
-      );
+      const events = await authority
+        .iterateEvents(
+          accepted.receipt.firstSequence,
+          accepted.receipt.lastSequence,
+        )
+        .collect(1_000_000);
       expect(events.map((event) => event.kind)).toEqual([
         'domain.committed',
         'input.accepted',
@@ -632,13 +638,14 @@ describe('managed session authority session_message records (H4d)', () => {
           TRUSTED,
         ),
       ).resolves.toMatchObject({ revision: 2 });
-      expect(inputEventsOf(authority)).toBe(1);
+      expect(await inputEventsOf(authority)).toBe(1);
     });
     await withAuthority(
       harness,
       async (authority) => {
         expect(
-          authority.extensionRecord('session_message', 'message-9')?.record,
+          (await authority.extensionRecord('session_message', 'message-9'))
+            ?.record,
         ).toEqual(fromChild(refs, 'consumed'));
       },
       { create: false },
@@ -720,7 +727,7 @@ describe('managed session authority session_message records (H4d)', () => {
           TRUSTED,
         ),
       ).rejects.toThrow(refusal);
-      expect(inputEventsOf(authority)).toBe(1);
+      expect(await inputEventsOf(authority)).toBe(1);
     });
   });
 
@@ -854,7 +861,7 @@ describe('managed session authority session_message records (H4d)', () => {
       ).rejects.toThrow(
         'Inbound session message must be addressed to this Session.',
       );
-      expect(inputEventsOf(authority)).toBe(0);
+      expect(await inputEventsOf(authority)).toBe(0);
     });
   });
 
@@ -1016,7 +1023,7 @@ describe('managed session authority child continuations (H4d)', () => {
         const refs = await publishRefs(harness);
         const predecessor = childLife(refs)[3]!;
         expect(
-          authority.extensionRecord('child_run', 'run-2')?.record,
+          (await authority.extensionRecord('child_run', 'run-2'))?.record,
         ).toMatchObject({ predecessorChildRunId: 'run-1' });
         // The rebuilt index still holds the chain linear.
         await expect(
@@ -1212,7 +1219,9 @@ describe('managed session authority child continuations (H4d)', () => {
     await withAuthority(
       harness,
       async (authority) => {
-        expect(authority.extensionRecord('child_run', 'run-3')).toBeDefined();
+        expect(
+          await authority.extensionRecord('child_run', 'run-3'),
+        ).toBeDefined();
       },
       { create: false },
     );

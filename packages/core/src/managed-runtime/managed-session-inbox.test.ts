@@ -59,6 +59,12 @@ function activationFence(
   };
 }
 
+async function collect<T>(source: AsyncIterable<T>): Promise<T[]> {
+  const result: T[] = [];
+  for await (const value of source) result.push(value);
+  return result;
+}
+
 describe('FileManagedSessionInbox', () => {
   let root: string;
   let filePath: string;
@@ -132,7 +138,7 @@ describe('FileManagedSessionInbox', () => {
     });
 
     const reopened = await openInbox();
-    expect(reopened.get(input)).toEqual(admitted.message);
+    expect(await reopened.get(input)).toEqual(admitted.message);
     expect(await readFile(filePath, 'utf8')).not.toContain('ignoredTopLevel');
     if (process.platform !== 'win32') {
       expect((await stat(filePath)).mode & 0o777).toBe(0o600);
@@ -159,14 +165,16 @@ describe('FileManagedSessionInbox', () => {
     await inbox.admit(userMessage('m1'), limits);
     await inbox.admit(userMessage('m2'), limits);
 
-    const listed = inbox.listAll();
+    const listed = await collect(inbox.listAll());
     expect(listed.map((item) => item.message.messageId)).toEqual(['m1', 'm2']);
     const payload = listed[0]!.message.payload;
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
       throw new Error('expected object payload');
     }
     payload['changed'] = true;
-    expect(inbox.listAll()[0]!.message.payload).not.toHaveProperty('changed');
+    expect(
+      (await collect(inbox.listAll()))[0]!.message.payload,
+    ).not.toHaveProperty('changed');
   });
 
   it('fails closed on malformed and inconsistent committed history', async () => {
@@ -240,7 +248,9 @@ describe('FileManagedSessionInbox', () => {
       MANAGED_JOURNAL_COMPACT_BYTES + Buffer.byteLength(lines[0]) + 512,
     );
     const reopened = await openInbox();
-    expect(reopened.listAll()).toEqual(inbox.listAll());
+    expect(await collect(reopened.listAll())).toEqual(
+      await collect(inbox.listAll()),
+    );
     await expect(
       reopened.finish(
         input,
@@ -253,7 +263,7 @@ describe('FileManagedSessionInbox', () => {
       activationFence(input.messageId, 1024),
       'completed',
     );
-    expect((await openInbox()).get(input)?.state).toBe('finished');
+    expect((await (await openInbox()).get(input))?.state).toBe('finished');
   }, 60_000);
 
   it('preserves completed, cancelled, processing, and pending message replay across snapshots', async () => {
@@ -282,7 +292,9 @@ describe('FileManagedSessionInbox', () => {
     );
     await inbox.markActivationReady(admitted);
     const reopened = await openInbox();
-    expect(reopened.listAll()).toEqual(inbox.listAll());
+    expect(await collect(reopened.listAll())).toEqual(
+      await collect(inbox.listAll()),
+    );
     expect(reopened.listPending()).toEqual(inbox.listPending());
     await expect(reopened.admit(finished, limits)).resolves.toMatchObject({
       created: false,
@@ -293,12 +305,14 @@ describe('FileManagedSessionInbox', () => {
     ).rejects.toBeInstanceOf(ManagedSessionMessageConflictError);
     await expect(
       reopened.finish(finished, finishedFence, 'completed'),
-    ).resolves.toEqual(inbox.get(finished));
+    ).resolves.toEqual(await inbox.get(finished));
     await expect(reopened.requestCancel(cancelled)).resolves.toEqual(
-      inbox.get(cancelled),
+      await inbox.get(cancelled),
     );
     await reopened.finish(processing, currentFence, 'cancelled');
-    expect((await openInbox()).get(processing)?.outcome).toBe('cancelled');
+    expect((await (await openInbox()).get(processing))?.outcome).toBe(
+      'cancelled',
+    );
   });
 
   it('repairs only a torn post-snapshot tail before continuing admission', async () => {
@@ -314,7 +328,9 @@ describe('FileManagedSessionInbox', () => {
     const reopened = await openInbox();
     expect(await readFile(filePath, 'utf8')).toBe(committed);
     await reopened.admit(userMessage('next'), limits);
-    expect((await openInbox()).listAll()).toEqual(reopened.listAll());
+    expect(await collect((await openInbox()).listAll())).toEqual(
+      await collect(reopened.listAll()),
+    );
   });
 
   it('captures caller-owned payload and limits before entering the write queue', async () => {
@@ -427,7 +443,7 @@ describe('FileManagedSessionInbox', () => {
     expect(await readFile(filePath, 'utf8')).toBe(contents);
     expect(inbox.haltedError).toBeUndefined();
     const reopened = await openInbox();
-    expect(reopened.get(input)).toMatchObject({
+    expect(await reopened.get(input)).toMatchObject({
       state: 'finished',
       outcome: 'cancelled',
     });
@@ -452,14 +468,14 @@ describe('FileManagedSessionInbox', () => {
     // The latch, not the original errno, is what later operations see.
     await expect(inbox.admit(m2, limits)).rejects.toBe(inbox.haltedError);
     // A failed persist must not have applied the event to memory either.
-    expect(inbox.get(m2)).toBeUndefined();
+    expect(await inbox.get(m2)).toBeUndefined();
     expect(inbox.listPending()).toHaveLength(1);
 
     await rm(filePath, { recursive: true, force: true });
     await writeFile(filePath, contents);
     const reopened = await openInbox();
-    expect(reopened.get(userMessage('m1'))?.state).toBe('admitted');
-    expect(reopened.get(m2)).toBeUndefined();
+    expect((await reopened.get(userMessage('m1')))?.state).toBe('admitted');
+    expect(await reopened.get(m2)).toBeUndefined();
     await expect(
       reopened.admit(userMessage('m3'), limits),
     ).resolves.toMatchObject({ created: true });
@@ -470,9 +486,9 @@ describe('FileManagedSessionInbox', () => {
     const input = userMessage('m1');
     await inbox.admit(input, limits);
     expect(
-      inbox.getByPayloadRef(input, managedSessionPayloadRef(input)),
+      await inbox.getByPayloadRef(input, managedSessionPayloadRef(input)),
     ).toBeDefined();
-    expect(() => inbox.getByPayloadRef(input, 'wrong')).toThrow(
+    await expect(inbox.getByPayloadRef(input, 'wrong')).rejects.toThrow(
       'payloadRef does not match',
     );
 

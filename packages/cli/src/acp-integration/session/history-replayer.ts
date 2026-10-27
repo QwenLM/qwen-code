@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { tmpdir } from 'node:os';
+import { HistoryReplayLimitError } from './history-replay-limit.js';
+import { FileManagedSessionHistory } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-history.js';
 import type {
   ChatRecord,
   GoalSnapshotV2,
@@ -64,6 +67,10 @@ export interface HistoryReplayPageOptions {
   includeTiming?: boolean;
 }
 
+export type HistoryReplayRecords =
+  | readonly ChatRecord[]
+  | AsyncIterable<ChatRecord>;
+
 export interface HistoryReplayPageState {
   pendingToolCalls: PendingReplayToolCall[];
   replay: TranscriptReplayStateV1;
@@ -98,7 +105,7 @@ export class HistoryReplayer {
   }
 
   async replay(
-    records: ChatRecord[],
+    records: HistoryReplayRecords,
     gaps?: HistoryGap[],
     options: {
       initialGoalState?: GoalSnapshotV2;
@@ -161,57 +168,87 @@ export class HistoryReplayer {
   }
 
   async replayPage(
-    records: ChatRecord[],
+    records: HistoryReplayRecords,
     options: HistoryReplayPageOptions = {},
   ): Promise<HistoryReplayPageState> {
     this.machine = this.createMachine(options);
-    let replayError: unknown;
+    const scratch =
+      Symbol.asyncIterator in records
+        ? await FileManagedSessionHistory.create(tmpdir())
+        : undefined;
     try {
-      for (const record of records) {
-        for (const emission of this.machine.project(record)) {
+      const used = scratch?.map<boolean>('resource');
+      const suffixes = scratch?.map<number>('resource');
+      for (const pending of options.pendingToolCalls ?? [])
+        await used?.set(`used:${pending.callId}`, true);
+      const claim = async (candidate: string): Promise<string> => {
+        if (!used || !suffixes)
+          throw new Error('Streaming replay identity view is unavailable.');
+        if (!(await used.has(`used:${candidate}`))) {
+          await used.set(`used:${candidate}`, true);
+          return candidate;
+        }
+        let suffix = (await suffixes.get(`suffix:${candidate}`)) ?? 2;
+        while (await used.has(`used:${candidate}:${suffix}`)) suffix++;
+        const id = `${candidate}:${suffix}`;
+        await used.set(`used:${id}`, true);
+        await suffixes.set(`suffix:${candidate}`, suffix + 1);
+        return id;
+      };
+      let replayError: unknown;
+      try {
+        for await (const record of records) {
+          const emissions = scratch
+            ? this.machine.projectAsync(record, claim)
+            : this.machine.project(record);
+          for await (const emission of emissions) {
+            this.setActiveRecordId(
+              emission.sourceRecordId,
+              emission.sourceTimestamp,
+            );
+            await this.sendUpdate(emission.update);
+          }
+        }
+      } catch (error) {
+        if (error instanceof HistoryReplayLimitError) throw error;
+        replayError = error;
+      }
+
+      let danglingError: unknown;
+      if (options.finalizeDangling === true) {
+        for (const emission of this.machine.finalize()) {
           this.setActiveRecordId(
             emission.sourceRecordId,
             emission.sourceTimestamp,
           );
-          await this.sendUpdate(emission.update);
+          try {
+            await this.sendUpdate(emission.update);
+          } catch (error) {
+            danglingError ??= error;
+          }
         }
       }
-    } catch (error) {
-      replayError = error;
-    }
 
-    let danglingError: unknown;
-    if (options.finalizeDangling === true) {
-      for (const emission of this.machine.finalize()) {
-        this.setActiveRecordId(
-          emission.sourceRecordId,
-          emission.sourceTimestamp,
+      const replay = this.machine.snapshot();
+      this.copyCumulativeUsage(replay);
+      const state = {
+        pendingToolCalls: replay.pendingToolCalls.map(toLegacyPendingToolCall),
+        replay,
+      };
+      this.setActiveRecordId(null);
+
+      if (replayError && danglingError) {
+        throw new AggregateError(
+          [replayError, danglingError],
+          'Replay and dangling-cleanup both failed',
         );
-        try {
-          await this.sendUpdate(emission.update);
-        } catch (error) {
-          danglingError ??= error;
-        }
       }
+      if (replayError) throw replayError;
+      if (danglingError) throw danglingError;
+      return state;
+    } finally {
+      await scratch?.close();
     }
-
-    const replay = this.machine.snapshot();
-    this.copyCumulativeUsage(replay);
-    const state = {
-      pendingToolCalls: replay.pendingToolCalls.map(toLegacyPendingToolCall),
-      replay,
-    };
-    this.setActiveRecordId(null);
-
-    if (replayError && danglingError) {
-      throw new AggregateError(
-        [replayError, danglingError],
-        'Replay and dangling-cleanup both failed',
-      );
-    }
-    if (replayError) throw replayError;
-    if (danglingError) throw danglingError;
-    return state;
   }
 
   getPendingToolCalls(): PendingReplayToolCall[] {

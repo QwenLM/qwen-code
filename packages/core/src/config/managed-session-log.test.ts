@@ -63,6 +63,7 @@ import {
 } from '../utils/sessionStorageUtils.js';
 import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 import { isSlowTestHost } from '../test-utils/slow-test-host.js';
+import { CompressionStatus } from '../core/turn.js';
 
 const SESSION_ID = '3f2504e0-4f89-41d3-9a0c-0305e82c3301';
 
@@ -202,6 +203,109 @@ async function activeChatTexts(config: Config): Promise<string[]> {
 }
 
 describe('Managed Session log recording', () => {
+  it('streams recorder branch checkpoints through compaction, off-tail metadata and cold restore', async () => {
+    const created = await start(managedConfig());
+    try {
+      const recorder = created.getChatRecordingService()!;
+      recordUser(created, 'read the file');
+      recorder.recordAssistantTurn({
+        model: 'test-model',
+        message: [
+          {
+            functionCall: {
+              id: 'branch-call',
+              name: 'read_file',
+              args: { file_path: 'file.txt' },
+            },
+          },
+        ],
+      });
+      await recorder.flush();
+      const cursor = recorder.getBranchCheckpointCursor();
+      expect(cursor.pendingToolCalls).toEqual([
+        { id: 'branch-call', name: 'read_file' },
+      ]);
+      recorder.recordChatCompression({
+        info: {
+          originalTokenCount: 100,
+          newTokenCount: 50,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+        summaryPrefixLength: 1,
+        compressedHistory: [
+          { role: 'user', parts: [{ text: 'summary' }] },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'branch-call',
+                  name: 'read_file',
+                  args: { file_path: 'file.txt' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+      recorder.recordToolResult([
+        {
+          functionResponse: {
+            id: 'branch-call',
+            name: 'read_file',
+            response: { output: 'content' },
+          },
+        },
+      ]);
+      recorder.recordAssistantTurn({
+        model: 'test-model',
+        message: [{ text: 'the answer' }],
+      });
+      await recorder.recordCustomTitle('off-tail title', 'manual');
+      const first = await recorder.recordBranchCheckpointTransaction({
+        cursor,
+        stopReason: 'end_turn',
+      });
+      expect(first).toMatchObject({
+        startExclusiveRecordUuid: cursor.recordId,
+      });
+      expect(recorder.getBranchCheckpointCursor().pendingToolCalls).toEqual([]);
+      expect(recorder.getUserTurnCount()).toBe(1);
+      await created.closeSessionWriter();
+
+      const restored = await start(restoringConfig());
+      try {
+        const continued = restored.getChatRecordingService()!;
+        expect(continued.getUserTurnCount()).toBe(1);
+        const before = continued.getBranchCheckpointCursor();
+        recordUser(restored, 'continue');
+        continued.recordAssistantTurn({
+          model: 'test-model',
+          message: [{ text: 'continued answer' }],
+        });
+        expect(
+          await continued.recordBranchCheckpointTransaction({
+            cursor: before,
+            stopReason: 'end_turn',
+          }),
+        ).toMatchObject({ startExclusiveRecordUuid: before.recordId });
+        expect(continued.getUserTurnCount()).toBe(2);
+        const resident = continued as unknown as {
+          activeBranchRecords: unknown[];
+          turnParentUuids: unknown[];
+          turnPromptIds: unknown[];
+        };
+        expect(resident.activeBranchRecords).toHaveLength(0);
+        expect(resident.turnParentUuids).toHaveLength(0);
+        expect(resident.turnPromptIds).toHaveLength(0);
+      } finally {
+        await restored.closeSessionWriter();
+      }
+    } finally {
+      await created.closeSessionWriter().catch(() => undefined);
+    }
+  });
+
   it('records a new session as a Managed Session log', async () => {
     const building = managedConfig({
       model: 'definition-model',
@@ -1664,8 +1768,8 @@ describe('Managed Session log recording', () => {
     ).rejects.toThrow('crashed between');
     // The receipt the failure left behind is the durable proof the call took
     // effect — and what proves a call may never block.
-    expect(outcomes.hasCommittedReceipt('call-a')).toBe(true);
-    expect(outcomes.hasCommittedReceipt('call-b')).toBe(false);
+    expect(await outcomes.hasCommittedReceipt('call-a')).toBe(true);
+    expect(await outcomes.hasCommittedReceipt('call-b')).toBe(false);
     await created.closeSessionWriter();
 
     // The same durable bytes open unblocked: the restore repair settles the

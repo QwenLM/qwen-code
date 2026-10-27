@@ -279,10 +279,12 @@ describe('Managed configuration binding commits', () => {
       await commit(content());
       await commit(content('prepared'));
       const receipt = await commit(content('committed'), true);
-      const events = authority.eventsInSequenceRange(
-        receipt.receipt.firstSequence,
-        receipt.receipt.lastSequence,
-      );
+      const events = await authority
+        .iterateEvents(
+          receipt.receipt.firstSequence,
+          receipt.receipt.lastSequence,
+        )
+        .collect(1_000_000);
       expect(events.map((event) => event.kind)).toEqual([
         'domain.committed',
         'config.bound',

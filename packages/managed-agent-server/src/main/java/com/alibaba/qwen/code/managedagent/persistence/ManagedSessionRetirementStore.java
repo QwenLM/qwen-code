@@ -116,6 +116,8 @@ final class ManagedSessionRetirementStore {
                         session,
                         limit);
         for (long revision : revisions) {
+            jdbc.update("DELETE FROM ma_session_history_fact WHERE session_scope_key = ? AND source_revision = ?",
+                    scope, revision);
             jdbc.update(
                     "DELETE FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind ="
                             + " 'JOURNAL' AND owner_key = ? AND owner_revision = ?",
@@ -139,6 +141,17 @@ final class ManagedSessionRetirementStore {
                     session);
             return true;
         }
+        var history = jdbc.queryForList("SELECT index_generation, family, identity_hash, source_sequence FROM ma_session_history_fact"
+                + " WHERE session_scope_key = ? ORDER BY index_generation, family, identity_hash, source_sequence LIMIT ? FOR UPDATE", scope, limit);
+        for (var row : history) {
+            jdbc.update("DELETE FROM ma_session_history_fact WHERE session_scope_key = ? AND index_generation = ? AND family = ?"
+                            + " AND identity_hash = ? AND source_sequence = ?", scope, row.get("index_generation"), row.get("family"),
+                    row.get("identity_hash"), row.get("source_sequence"));
+        }
+        if (!history.isEmpty()) {
+            return true;
+        }
+        jdbc.update("DELETE FROM ma_session_history_state WHERE session_scope_key = ?", scope);
         var cleanupOwners = jdbc.queryForList("SELECT owner_key, owner_revision, resource_key"
                 + " FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind = 'HOSTED_CLEANUP'"
                 + " ORDER BY owner_key, owner_revision, resource_key LIMIT ? FOR UPDATE", scope, limit);

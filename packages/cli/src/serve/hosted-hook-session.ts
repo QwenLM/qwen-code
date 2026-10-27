@@ -5,6 +5,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { ManagedHistoryCache } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-history.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { isDeepStrictEqual } from 'node:util';
 import { HookAggregator } from '@qwen-code/qwen-code-core/hooks/hookAggregator.js';
@@ -364,7 +365,7 @@ export class HostedHookSession {
     }
   >();
   private readonly recoveredBrokers = new Map<string, HostedWorkspaceBroker>();
-  private readonly releasedOwners = new Set<string>();
+  private readonly releasedOwners = new ManagedHistoryCache<boolean>();
   private readonly fencedOwners = new Set<string>();
   private retrying?: Promise<void>;
   private readonly occurrences = new Map<
@@ -377,11 +378,9 @@ export class HostedHookSession {
   >();
   private writes: Promise<void> = Promise.resolve();
   private occurrenceQueue: Promise<void> = Promise.resolve();
-  private readonly stopPlanPrompts = new Map<string, unknown>();
-  private children?: {
-    readonly sequence: number;
-    readonly byOccurrence: Map<string, HookExecution[]>;
-  };
+  private readonly stopPlanPrompts = new ManagedHistoryCache<{
+    promptId: unknown;
+  }>();
   private messagesProvider?: () => Array<Record<string, unknown>>;
 
   /**
@@ -389,7 +388,34 @@ export class HostedHookSession {
    * load activations alone, so an owner named after a Hook operation's
    * activation or its restore would never be released by a successor.
    */
-  constructor(
+  static async create(
+    options: HostedWorkspaceBrokerOptions,
+    session: ManagedSession,
+    initialPin: ManagedHookCatalogPin,
+    broker?: HostedWorkspaceBroker,
+    lifecycleV2: () => boolean = () => false,
+    runtimeSessionId?: string,
+  ): Promise<HostedHookSession> {
+    const previous =
+      !broker && lifecycleV2()
+        ? await session.authority
+            .extensionRecordsInDomain('hook_execution')
+            .at(-1)
+        : undefined;
+    return new HostedHookSession(
+      options,
+      session,
+      initialPin,
+      broker,
+      lifecycleV2,
+      runtimeSessionId ??
+        (previous
+          ? parseHookExecution(previous.record).runtimeSessionId
+          : undefined),
+    );
+  }
+
+  private constructor(
     private readonly options: HostedWorkspaceBrokerOptions,
     private readonly session: ManagedSession,
     private readonly initialPin: ManagedHookCatalogPin,
@@ -398,18 +424,13 @@ export class HostedHookSession {
     runtimeSessionId?: string,
   ) {
     this.ownsBroker = broker === undefined;
-    const previous = lifecycleV2()
-      ? session.authority.extensionRecordsInDomain('hook_execution').at(-1)
-      : undefined;
     this.broker =
       broker ??
       new HostedWorkspaceBroker(
         options,
         this.key,
         runtimeSessionId ??
-          (previous
-            ? parseHookExecution(previous.record).runtimeSessionId
-            : `hooks-activation-${digest([session.activation.activationId, session.activation.epoch])}`),
+          `hooks-activation-${digest([session.activation.activationId, session.activation.epoch])}`,
       );
   }
 
@@ -421,15 +442,15 @@ export class HostedHookSession {
     if (this.catalog) return;
     const registrations =
       this.session.authority.extensionRecordsInDomain('hook_registration');
-    const latest = registrations.at(-1);
+    const latest = await registrations.at(-1);
     if (latest) {
       const registration = parseHookRegistration(latest.record);
       await this.settleRegistration(registration);
       this.registration = parseHookRegistration(
-        this.session.authority.extensionRecord(
+        (await this.session.authority.extensionRecord(
           'hook_registration',
           registration.registrationId,
-        )!.record,
+        ))!.record,
       );
       this.catalog = await this.read<ManagedHookCatalog>(
         registration.catalogRef,
@@ -444,8 +465,8 @@ export class HostedHookSession {
     );
   }
 
-  get selectedPin(): ManagedHookCatalogPin {
-    const latest = this.session.authority
+  async selectedPin(): Promise<ManagedHookCatalogPin> {
+    const latest = await this.session.authority
       .extensionRecordsInDomain('hook_registration')
       .filter((entry) => entry.run.state === 'settled')
       .at(-1);
@@ -471,30 +492,32 @@ export class HostedHookSession {
       try {
         if (!this.lifecycleV2()) await this.releaseEarlierOwners(false);
         if (this.lifecycleV2()) {
-          const pins = this.session.authority
-            .extensionRecordsInDomain('hook_execution')
-            .filter(
-              (entry) =>
-                parseHookExecution(entry.record).runtimeSessionId ===
-                this.broker.runtimeSessionId,
+          let expected: ExtensionRun['runtime'] = null;
+          for await (const entry of this.session.authority.extensionRecordsInDomain(
+            'hook_execution',
+          )) {
+            if (
+              parseHookExecution(entry.record).runtimeSessionId !==
+                this.broker.runtimeSessionId ||
+              !entry.run.runtime
             )
-            .flatMap((entry) => (entry.run.runtime ? [entry.run.runtime] : []));
+              continue;
+            const pin = entry.run.runtime;
+            if (
+              expected &&
+              (pin.runtimeBindingId !== expected.runtimeBindingId ||
+                pin.generation !== expected.generation)
+            )
+              throw new HostedHookRecoveryRequiredError();
+            expected = pin;
+          }
           const runtime = this.broker.runtime;
-          const expected =
-            pins[0] ??
-            (runtime && {
+          if (!expected && runtime)
+            expected = {
               runtimeBindingId: runtime.bindingId,
               generation: runtime.generation,
-            });
-          if (
-            !expected ||
-            pins.some(
-              (pin) =>
-                pin.runtimeBindingId !== expected.runtimeBindingId ||
-                pin.generation !== expected.generation,
-            )
-          )
-            throw new HostedHookRecoveryRequiredError();
+            };
+          if (!expected) throw new HostedHookRecoveryRequiredError();
           await this.broker.acquire(expected);
         } else {
           await this.broker.warm();
@@ -516,42 +539,59 @@ export class HostedHookSession {
    */
   private async releaseEarlierOwners(drain: boolean): Promise<void> {
     if (!this.ownsBroker) return;
-    const owners = new Map<string, boolean>();
-    const { authority } = this.session;
-    const restores = new Set<string>();
-    // Activation is durable before even the first catalog request acquires.
-    for (const event of authority.eventsInSequenceRange(
-      1,
-      authority.committedSequence,
-    )) {
-      if (event.kind !== 'activation.changed') continue;
-      // Only a load constructs a Hook owner. A Hook operation's activation,
-      // and the one it restores on finishing, never acquire.
-      const activationId = event.payload['activationId'] as string;
-      restores.add(managedHookRestoreActivationId(activationId));
-      if (
-        restores.has(activationId) ||
-        (event.payload['subject'] as ManagedSessionSubject).type ===
-          'hook_operation'
-      )
-        continue;
-      const id = `hooks-activation-${digest([activationId, event.payload['epoch']])}`;
-      if (id !== this.broker.runtimeSessionId && !this.releasedOwners.has(id))
-        owners.set(id, true);
-    }
-    for (const record of this.executions()) {
-      const id = record.runtimeSessionId;
-      if (id === this.broker.runtimeSessionId || this.releasedOwners.has(id))
-        continue;
-      const settled =
-        record.run.state !== 'recovery_blocked' &&
-        (record.resultRef !== null ||
-          record.run.execution === 'not_started_proven');
-      owners.set(id, (owners.get(id) ?? true) && settled);
-    }
-    for (const [id, settled] of owners) {
-      if (!settled) continue;
-      await this.releaseOwner(id, drain);
+    const scratch = this.session.authority.createQueryHistory();
+    try {
+      const owners = scratch.map<boolean>('resource');
+      const { authority } = this.session;
+      const restores = scratch.map<boolean>('resource');
+      // Activation is durable before even the first catalog request acquires.
+      for await (const event of authority.iterateEvents(
+        1,
+        authority.committedSequence,
+      )) {
+        if (event.kind !== 'activation.changed') continue;
+        // Only a load constructs a Hook owner. A Hook operation's activation,
+        // and the one it restores on finishing, never acquire.
+        const activationId = event.payload['activationId'] as string;
+        await restores.set(
+          `restore:${managedHookRestoreActivationId(activationId)}`,
+          true,
+        );
+        if (
+          (await restores.has(`restore:${activationId}`)) ||
+          (event.payload['subject'] as ManagedSessionSubject).type ===
+            'hook_operation'
+        )
+          continue;
+        const id = `hooks-activation-${digest([activationId, event.payload['epoch']])}`;
+        if (
+          id !== this.broker.runtimeSessionId &&
+          this.releasedOwners.get(id) !== true
+        )
+          await owners.set(`owner:${id}`, true);
+      }
+      for await (const record of this.executions()) {
+        const id = record.runtimeSessionId;
+        if (
+          id === this.broker.runtimeSessionId ||
+          this.releasedOwners.get(id) === true
+        )
+          continue;
+        const settled =
+          record.run.state !== 'recovery_blocked' &&
+          (record.resultRef !== null ||
+            record.run.execution === 'not_started_proven');
+        await owners.set(
+          `owner:${id}`,
+          ((await owners.get(`owner:${id}`)) ?? true) && settled,
+        );
+      }
+      for await (const [key, settled] of owners) {
+        if (!key.startsWith('owner:') || !settled) continue;
+        await this.releaseOwner(key.slice('owner:'.length), drain);
+      }
+    } finally {
+      await scratch.close();
     }
   }
 
@@ -563,7 +603,7 @@ export class HostedHookSession {
    * `drain` belongs to the close alone, as in `releaseEarlierOwners`.
    */
   private async releaseOwner(id: string, drain: boolean): Promise<void> {
-    if (this.releasedOwners.has(id)) return;
+    if (this.releasedOwners.get(id) === true) return;
     const broker =
       this.recoveredBrokers.get(id) ??
       new HostedWorkspaceBroker(this.options, this.key, id);
@@ -602,7 +642,7 @@ export class HostedHookSession {
     }
     this.recoveredBrokers.delete(id);
     this.fencedOwners.delete(id);
-    this.releasedOwners.add(id);
+    this.releasedOwners.set(id, true, Buffer.byteLength(id) + 4);
   }
 
   private async retryFencedOwners(): Promise<void> {
@@ -639,8 +679,9 @@ export class HostedHookSession {
     return this.acquired || this.broker.acquired;
   }
 
-  delegateBrokerToMcp(): void {
-    if (this.mountWorkUnproven()) throw new HostedHookRecoveryRequiredError();
+  async delegateBrokerToMcp(): Promise<void> {
+    if (await this.mountWorkUnproven())
+      throw new HostedHookRecoveryRequiredError();
     this.ownsBroker = false;
   }
 
@@ -656,7 +697,7 @@ export class HostedHookSession {
     if (!this.ownsBroker || claim === undefined) return undefined;
     return async () => {
       if (!this.ownsBroker) return;
-      if (this.mountWorkUnproven())
+      if (await this.mountWorkUnproven())
         throw new Error('Hook work on the Workspace mount is unproven.');
       await this.broker.releaseMount(claim);
       if (this.broker.mountClaim() === claim) this.acquired = false;
@@ -664,19 +705,19 @@ export class HostedHookSession {
   }
 
   /** Whether a Hook run on this owner's mount may still be running. */
-  mountWorkUnproven(): boolean {
+  async mountWorkUnproven(): Promise<boolean> {
     return (
       this.acquiring !== undefined ||
       this.pending.size > 0 ||
       this.occurrences.size > 0 ||
-      this.executions().some(
+      (await this.executions().some(
         (record) =>
           record.runtimeSessionId === this.broker.runtimeSessionId &&
           record.hookId !== '__plan__' &&
           !record.resultRef &&
           record.run.execution !== 'not_started_proven' &&
           record.run.execution !== 'intent',
-      )
+      ))
     );
   }
 
@@ -697,20 +738,11 @@ export class HostedHookSession {
    * The `null` agent id matches this path's `hooks.fire(...)` payloads, which
    * never carry `agent_id`, so an agent-scoped Hook never counts here.
    */
-  get hasMountableToolResultHooks(): boolean {
+  async hasMountableToolResultHooks(): Promise<boolean> {
     // Only settled executions are spent: an unsettled once-Hook is what
     // executeHook re-drives on a restored Session, and re-driving it takes
     // the Session-owned mount. dispatch keeps its own broader set.
-    const usedOnce = new Set(
-      this.executions()
-        .filter(
-          (entry) =>
-            entry.run.state !== 'recovery_blocked' &&
-            (entry.resultRef !== null ||
-              entry.run.execution === 'not_started_proven'),
-        )
-        .map((entry) => entry.onceKey),
-    );
+    const usedOnce = await this.usedOnceKeys(true);
     return (
       this.catalog?.hooks.some(
         (hook) =>
@@ -721,6 +753,25 @@ export class HostedHookSession {
             hook.eventName === HookEventName.PostToolBatch),
       ) ?? false
     );
+  }
+
+  private async usedOnceKeys(settledOnly = false): Promise<Set<string | null>> {
+    const result = new Set<string | null>();
+    for (const hook of this.catalog?.hooks ?? []) {
+      if (!hook.onceKey || result.has(hook.onceKey)) continue;
+      if (
+        await this.executions().some(
+          (entry) =>
+            entry.onceKey === hook.onceKey &&
+            (!settledOnly ||
+              (entry.run.state !== 'recovery_blocked' &&
+                (entry.resultRef !== null ||
+                  entry.run.execution === 'not_started_proven'))),
+        )
+      )
+        result.add(hook.onceKey);
+    }
+    return result;
   }
 
   private isHookEligible(
@@ -738,17 +789,17 @@ export class HostedHookSession {
     );
   }
 
-  get hasPendingOperations(): boolean {
-    return this.pendingRecords().length > 0;
+  async hasPendingOperations(): Promise<boolean> {
+    return this.pendingRecords().some(() => true);
   }
 
-  private pendingRecords(): HookExecution[] {
-    return this.executions().filter((record) => {
+  private pendingRecords() {
+    return this.executions().filter(async (record) => {
       if (record.run.state === 'recovery_blocked') return true;
       if (record.resultRef || record.run.execution === 'not_started_proven')
         return false;
       if (record.hookId === '__plan__') return true;
-      const marker = this.session.authority.extensionRecord(
+      const marker = await this.session.authority.extensionRecord(
         'hook_execution',
         record.occurrenceId,
       );
@@ -767,27 +818,28 @@ export class HostedHookSession {
    */
   async reconcileUnsettled(signal?: AbortSignal): Promise<void> {
     const pending = this.pendingRecords();
-    const markers = new Set(
-      pending
-        .filter((record) => record.hookId === '__plan__')
-        .map((record) => record.hookExecutionId),
-    );
-    for (const record of pending) {
+    const markers = new Set<string>();
+    for await (const record of pending)
+      if (record.hookId === '__plan__') markers.add(record.hookExecutionId);
+    for await (const record of pending) {
       if (record.hookId !== '__plan__' && markers.has(record.occurrenceId))
         continue;
       await waitForTurn(this.status(record.hookExecutionId), signal);
     }
   }
 
-  get hasUnsettledExecutions(): boolean {
+  async hasUnsettledExecutions(): Promise<boolean> {
     return this.executions().some(
       (record) =>
         !record.resultRef && record.run.execution !== 'not_started_proven',
     );
   }
 
-  hasCompletedOccurrence(event: HookEventName, occurrenceId: string): boolean {
-    const saved = this.session.authority.extensionRecord(
+  async hasCompletedOccurrence(
+    event: HookEventName,
+    occurrenceId: string,
+  ): Promise<boolean> {
+    const saved = await this.session.authority.extensionRecord(
       'hook_execution',
       hostedHookOccurrenceId(event, occurrenceId),
     );
@@ -799,22 +851,26 @@ export class HostedHookSession {
   }
 
   async wasStopBlocked(promptId: string): Promise<boolean> {
-    for (const record of this.executions()) {
+    for await (const record of this.executions()) {
       if (
         record.hookId !== '__plan__' ||
         record.eventName !== HookEventName.Stop ||
         !record.resultRef
       )
         continue;
-      // A plan never changes, so each one is read once rather than on
-      // every turn of a long Session.
       const planId = record.planRef.resourceId;
-      if (!this.stopPlanPrompts.has(planId))
+      let cached = this.stopPlanPrompts.get(planId);
+      if (!cached) {
+        cached = {
+          promptId: (await this.read<HookPlan>(record.planRef)).input.prompt_id,
+        };
         this.stopPlanPrompts.set(
           planId,
-          (await this.read<HookPlan>(record.planRef)).input.prompt_id,
+          cached,
+          Buffer.byteLength(planId) + Buffer.byteLength(JSON.stringify(cached)),
         );
-      if (this.stopPlanPrompts.get(planId) !== promptId) continue;
+      }
+      if (cached.promptId !== promptId) continue;
       const result = await this.read<{ output?: HookOutput }>(record.resultRef);
       const output =
         result.output && createHookOutput(HookEventName.Stop, result.output);
@@ -829,7 +885,7 @@ export class HostedHookSession {
     occurrenceId: string,
   ): Promise<boolean> {
     await this.ensureReady();
-    const saved = this.session.authority.extensionRecord(
+    const saved = await this.session.authority.extensionRecord(
       'hook_execution',
       hostedHookOccurrenceId(event, occurrenceId),
     );
@@ -862,7 +918,7 @@ export class HostedHookSession {
     signal?.throwIfAborted();
     const records =
       this.session.authority.extensionRecordsInDomain('hook_registration');
-    const previous = this.session.authority.extensionRecord(
+    const previous = await this.session.authority.extensionRecord(
       'hook_registration',
       operationId,
     );
@@ -871,7 +927,7 @@ export class HostedHookSession {
       if (!isDeepStrictEqual(registration.run.definition, this.definition(pin)))
         throw new Error('Hook registration identity conflict.');
       await this.settleRegistration(registration);
-      const latest = this.session.authority
+      const latest = await this.session.authority
         .extensionRecordsInDomain('hook_registration')
         .filter((entry) => entry.run.state === 'settled')
         .at(-1);
@@ -882,10 +938,10 @@ export class HostedHookSession {
       );
       return;
     }
-    if (records.length !== expectedRevision)
+    if ((await records.count()) !== expectedRevision)
       throw new Error('Hook catalog revision conflict.');
     if (
-      records.some((entry) => {
+      await records.some((entry) => {
         const registration = parseHookRegistration(entry.record);
         return (
           registration.catalogId === pin.catalogId &&
@@ -1015,7 +1071,7 @@ export class HostedHookSession {
     toolInputOrder?: HostedToolInputOrder,
   ): Promise<HookOutput | undefined> {
     await this.ensureReady(signal);
-    const previous = this.session.authority.extensionRecord(
+    const previous = await this.session.authority.extensionRecord(
       'hook_execution',
       occurrenceId,
     );
@@ -1036,7 +1092,7 @@ export class HostedHookSession {
         return (await this.read<{ output?: HookOutput }>(marker.resultRef))
           .output;
     } else {
-      if (this.hasPendingOperations) {
+      if (await this.hasPendingOperations()) {
         // A recovery fence is not terminal: once an abandoned module
         // evaluation definitively ends, the Runtime republishes its receipt,
         // so give every pending record one status poll before refusing.
@@ -1053,7 +1109,7 @@ export class HostedHookSession {
             `qwen serve: Hook reconcile before dispatch failed: ${String(cause)}`,
           );
         }
-        if (this.hasPendingOperations)
+        if (await this.hasPendingOperations())
           throw new HostedHookRecoveryRequiredError();
       }
       const { messages: suppliedMessages, ...eventFields } = fields;
@@ -1076,11 +1132,7 @@ export class HostedHookSession {
         filePath: fields['file_path'] as string | undefined,
         error: fields['error'] as string | undefined,
       });
-      const usedOnce = new Set(
-        this.executions()
-          .map((entry) => entry.onceKey)
-          .filter(Boolean),
-      );
+      const usedOnce = await this.usedOnceKeys();
       const hooks = this.catalog!.hooks.filter(
         (hook) =>
           hook.eventName === event &&
@@ -1128,7 +1180,7 @@ export class HostedHookSession {
         const messages =
           suppliedMessages ??
           this.messagesProvider?.() ??
-          (await this.session.sink.project()).flatMap((record) =>
+          (await this.session.sink.projectContextRecords()).flatMap((record) =>
             (record.type === 'user' ||
               record.type === 'assistant' ||
               record.type === 'tool_result') &&
@@ -1235,7 +1287,7 @@ export class HostedHookSession {
       }
     }
     const cancelled =
-      this.cancelRequested(marker.hookExecutionId) || signal.aborted;
+      (await this.cancelRequested(marker.hookExecutionId)) || signal.aborted;
     const output = cancelled
       ? cancelledResult().output
       : inputLimitExceeded
@@ -1270,13 +1322,13 @@ export class HostedHookSession {
     prompt?: HostedPromptHookRunner,
   ): Promise<ManagedHookResult> {
     const id = `hook-${digest([marker.occurrenceId, ordinal])}`;
-    const existing = this.session.authority.extensionRecord(
+    const existing = await this.session.authority.extensionRecord(
       'hook_execution',
       id,
     );
     if (
       !existing &&
-      (signal.aborted || this.cancelRequested(marker.hookExecutionId))
+      (signal.aborted || (await this.cancelRequested(marker.hookExecutionId)))
     )
       return cancelledResult();
     if (hook.async && hook.config.type === HookType.Prompt)
@@ -1340,8 +1392,8 @@ export class HostedHookSession {
       if (record.run.execution === 'intent') {
         if (
           executionSignal.aborted ||
-          this.cancelRequested(id) ||
-          this.cancelRequested(marker.hookExecutionId)
+          (await this.cancelRequested(id)) ||
+          (await this.cancelRequested(marker.hookExecutionId))
         )
           return cancelBeforeDispatch();
         const broker =
@@ -1350,8 +1402,8 @@ export class HostedHookSession {
             : await this.executionBroker(record);
         if (
           executionSignal.aborted ||
-          this.cancelRequested(id) ||
-          this.cancelRequested(marker.hookExecutionId)
+          (await this.cancelRequested(id)) ||
+          (await this.cancelRequested(marker.hookExecutionId))
         )
           return cancelBeforeDispatch();
         if (hook.config.type === HookType.Prompt && !prompt)
@@ -1375,8 +1427,8 @@ export class HostedHookSession {
         await this.commit('hook_execution', id, record);
         if (
           executionSignal.aborted ||
-          this.cancelRequested(id) ||
-          this.cancelRequested(marker.hookExecutionId)
+          (await this.cancelRequested(id)) ||
+          (await this.cancelRequested(marker.hookExecutionId))
         )
           return cancelBeforeDispatch();
         if (hook.config.type === HookType.Prompt) {
@@ -1426,7 +1478,7 @@ export class HostedHookSession {
               ...originalInput,
               ...(messages ? { messages } : {}),
             },
-            grant: this.session.authority.issueOperationGrant({
+            grant: await this.session.authority.issueOperationGrant({
               domain: 'hook_execution',
               recordId: id,
               ownerId: this.session.authority.currentActivation!.workerId,
@@ -1522,8 +1574,11 @@ export class HostedHookSession {
     return completed ?? this.asyncAdmission();
   }
 
-  private cancelRequested(id: string): boolean {
-    const record = this.session.authority.extensionRecord('hook_execution', id);
+  private async cancelRequested(id: string): Promise<boolean> {
+    const record = await this.session.authority.extensionRecord(
+      'hook_execution',
+      id,
+    );
     return (
       record !== undefined && parseHookExecution(record.record).cancelRequested
     );
@@ -1558,14 +1613,14 @@ export class HostedHookSession {
       );
     if (
       !broker.runtime ||
-      this.executions().some(
+      (await this.executions().some(
         (execution) =>
           execution.runtimeSessionId === record.runtimeSessionId &&
           execution.run.runtime !== null &&
           (execution.run.runtime.runtimeBindingId !==
             broker!.runtime!.bindingId ||
             execution.run.runtime.generation !== broker!.runtime!.generation),
-      )
+      ))
     )
       throw new HostedHookRecoveryRequiredError();
     if (current) this.acquired = true;
@@ -1577,10 +1632,10 @@ export class HostedHookSession {
     raw: ManagedHookResult,
   ): Promise<ManagedHookResult> {
     const saved = parseHookExecution(
-      this.session.authority.extensionRecord(
+      (await this.session.authority.extensionRecord(
         'hook_execution',
         record.hookExecutionId,
-      )!.record,
+      ))!.record,
     );
     if (saved.resultRef) return this.read<ManagedHookResult>(saved.resultRef);
     const plan = await this.read<HookPlan>(record.planRef);
@@ -1634,10 +1689,10 @@ export class HostedHookSession {
           },
     );
     const committed = parseHookExecution(
-      this.session.authority.extensionRecord(
+      (await this.session.authority.extensionRecord(
         'hook_execution',
         record.hookExecutionId,
-      )!.record,
+      ))!.record,
     );
     return this.read<ManagedHookResult>(committed.resultRef!);
   }
@@ -1687,55 +1742,48 @@ export class HostedHookSession {
     }
   }
 
-  private executions(): HookExecution[] {
+  private executions() {
     return this.session.authority
       .extensionRecordsInDomain('hook_execution')
       .map((entry) => savedExecution(entry.record));
   }
 
-  /**
-   * The child executions of an occurrence. Records change only by commit,
-   * so the grouping is rebuilt only after one, not for every occurrence a
-   * drain inspects.
-   */
-  private childrenOf(occurrenceId: string): HookExecution[] {
-    const sequence = this.session.authority.committedSequence;
-    if (this.children?.sequence !== sequence) {
-      const byOccurrence = new Map<string, HookExecution[]>();
-      for (const entry of this.executions()) {
-        if (entry.hookId === '__plan__') continue;
-        const siblings = byOccurrence.get(entry.occurrenceId);
-        if (siblings) siblings.push(entry);
-        else byOccurrence.set(entry.occurrenceId, [entry]);
-      }
-      this.children = { sequence, byOccurrence };
-    }
-    return this.children.byOccurrence.get(occurrenceId) ?? [];
+  private childrenOf(occurrenceId: string) {
+    return this.executions().filter(
+      (entry) =>
+        entry.hookId !== '__plan__' && entry.occurrenceId === occurrenceId,
+    );
   }
 
   async settleOccurrence(occurrenceId: string): Promise<void> {
     const marker = await this.status(occurrenceId);
     if (
       !marker.resultRef ||
-      this.childrenOf(occurrenceId).some(
+      (await this.childrenOf(occurrenceId).some(
         (child) =>
           child.run.state === 'recovery_blocked' ||
           (!child.resultRef && child.run.execution !== 'not_started_proven'),
-      )
+      ))
     )
       throw new HostedHookRecoveryRequiredError();
   }
 
   async status(id: string, cancel = false): Promise<HookExecution> {
-    const direct = this.session.authority.extensionRecord('hook_execution', id);
+    const direct = await this.session.authority.extensionRecord(
+      'hook_execution',
+      id,
+    );
     const matches = direct
       ? [parseHookExecution(direct.record)]
-      : this.executions().filter(
-          (entry) =>
-            entry.hookId === '__plan__' &&
-            entry.hookExecutionId ===
-              hostedHookOccurrenceId(entry.eventName as HookEventName, id),
-        );
+      : await this.executions()
+          .filter(
+            (entry) =>
+              entry.hookId === '__plan__' &&
+              entry.hookExecutionId ===
+                hostedHookOccurrenceId(entry.eventName as HookEventName, id),
+          )
+          .slice(0, 2)
+          .collect(2);
     if (matches.length !== 1)
       throw new Error('Hook execution does not exist or is ambiguous.');
     let record = matches[0];
@@ -1754,7 +1802,8 @@ export class HostedHookSession {
             : { ...latest, cancelRequested: true },
         );
         record = parseHookExecution(
-          this.session.authority.extensionRecord('hook_execution', id)!.record,
+          (await this.session.authority.extensionRecord('hook_execution', id))!
+            .record,
         );
         if (record.resultRef && record.hookId !== '__plan__') return record;
       }
@@ -1762,17 +1811,14 @@ export class HostedHookSession {
     if (record.hookId === '__plan__') {
       const children = this.childrenOf(id);
       if (cancel || record.cancelRequested) {
-        const settled = await Promise.all(
-          children.map((child) => this.status(child.hookExecutionId, true)),
-        );
-        if (
-          !terminal &&
-          !this.occurrences.has(id) &&
-          settled.every(
-            (child) =>
-              child.resultRef || child.run.execution === 'not_started_proven',
-          )
-        ) {
+        let childrenSettled = true;
+        for await (const child of children) {
+          const settled = await this.status(child.hookExecutionId, true);
+          childrenSettled &&=
+            settled.resultRef !== null ||
+            settled.run.execution === 'not_started_proven';
+        }
+        if (!terminal && !this.occurrences.has(id) && childrenSettled) {
           record = {
             ...record,
             resultRef:
@@ -1795,9 +1841,8 @@ export class HostedHookSession {
         }
       }
       if (!record.cancelRequested && !cancel && !this.occurrences.has(id)) {
-        await Promise.all(
-          children.map((child) => this.status(child.hookExecutionId)),
-        );
+        for await (const child of children)
+          await this.status(child.hookExecutionId);
         if (!terminal) return this.settleSavedMarker(record);
       }
       return record;
@@ -1855,7 +1900,8 @@ export class HostedHookSession {
       );
     }
     return parseHookExecution(
-      this.session.authority.extensionRecord('hook_execution', id)!.record,
+      (await this.session.authority.extensionRecord('hook_execution', id))!
+        .record,
     );
   }
 
@@ -1873,7 +1919,7 @@ export class HostedHookSession {
         break;
       }
       const id = `hook-${digest([record.occurrenceId, index + 1])}`;
-      const saved = this.session.authority.extensionRecord(
+      const saved = await this.session.authority.extensionRecord(
         'hook_execution',
         id,
       );
@@ -1940,10 +1986,10 @@ export class HostedHookSession {
           },
     );
     return parseHookExecution(
-      this.session.authority.extensionRecord(
+      (await this.session.authority.extensionRecord(
         'hook_execution',
         record.hookExecutionId,
-      )!.record,
+      ))!.record,
     );
   }
 
@@ -1966,7 +2012,7 @@ export class HostedHookSession {
           !excludedOccurrences.has(record.hookExecutionId) &&
           !excludedOccurrences.has(record.occurrenceId),
       );
-    for (const record of prior()) {
+    for await (const record of prior()) {
       if (!record.resultRef) await this.status(record.hookExecutionId, true);
     }
     await Promise.allSettled(
@@ -1975,7 +2021,9 @@ export class HostedHookSession {
     await Promise.allSettled(
       [...this.occurrences.values()].map((occurrence) => occurrence.result),
     );
-    for (const record of prior()) {
+    for await (const record of prior()) {
+      if (record.resultRef || record.run.execution === 'not_started_proven')
+        continue;
       const latest = await this.status(record.hookExecutionId, true);
       if (!latest.resultRef && latest.run.execution !== 'not_started_proven')
         throw new HostedHookRecoveryRequiredError();
@@ -2101,7 +2149,7 @@ export class HostedHookSession {
       | ((previous: HookExecution) => HookExecution),
   ): Promise<void> {
     const write = this.writes.then(async () => {
-      const previous = this.session.authority.extensionRecord(domain, id);
+      const previous = await this.session.authority.extensionRecord(domain, id);
       let next =
         typeof record === 'function'
           ? record(parseHookExecution(previous!.record))

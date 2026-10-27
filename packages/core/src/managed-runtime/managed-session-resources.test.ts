@@ -668,7 +668,7 @@ describe('managed session input durability', () => {
       cwd: '/workspace',
       version: 'test',
     });
-    const accepted = reopened.readEvents()[0];
+    const accepted = (await reopened.readEvents())[0];
     expect(accepted.kind).toBe('input.accepted');
 
     const recoveredRef = accepted.payload[

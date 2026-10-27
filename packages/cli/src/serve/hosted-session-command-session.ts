@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { ManagedHistoryQuery } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-history.js';
+
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
@@ -177,8 +179,8 @@ export class HostedSessionCommandSession {
   ) {}
 
   /** The last committed body of one command chain in this journal. */
-  command(commandId: string): SessionCommand | undefined {
-    const existing = this.store.authority.extensionRecord(
+  async command(commandId: string): Promise<SessionCommand | undefined> {
+    const existing = await this.store.authority.extensionRecord(
       'session_command',
       commandId,
     );
@@ -186,7 +188,7 @@ export class HostedSessionCommandSession {
   }
 
   /** Every command chain in this journal. */
-  commands(): readonly SessionCommand[] {
+  commands(): ManagedHistoryQuery<SessionCommand> {
     return this.store.authority
       .extensionRecordsInDomain('session_command')
       .map((entry) => parseSessionCommand(entry.record));
@@ -199,31 +201,17 @@ export class HostedSessionCommandSession {
    * narrowed view stops at commits; the anchor is a journal event read,
    * taken through the authority it actually is.
    */
-  outboundCommittedAt(commandId: string): number | undefined {
-    const authority = this.store.authority as unknown as {
-      eventsInSequenceRange(
-        from: number,
-        through: number,
-      ): ReadonlyArray<{
-        readonly kind: string;
-        readonly occurredAt: number;
-        readonly payload: Record<string, unknown>;
-      }>;
-      readonly committedSequence: number;
-    };
-    for (const event of authority.eventsInSequenceRange(
-      1,
-      authority.committedSequence,
-    )) {
-      if (
-        event.kind === 'domain.committed' &&
-        event.payload['domain'] === 'session_command' &&
-        event.payload['operationId'] === `${commandId}:1`
-      ) {
-        return event.occurredAt;
-      }
-    }
-    return undefined;
+  async outboundCommittedAt(commandId: string): Promise<number | undefined> {
+    const authority = this.store.authority;
+    const event = await authority
+      .iterateEvents(1, authority.committedSequence)
+      .find(
+        (event) =>
+          event.kind === 'domain.committed' &&
+          event.payload['domain'] === 'session_command' &&
+          event.payload['operationId'] === `${commandId}:1`,
+      );
+    return event?.occurredAt;
   }
 
   /**
@@ -254,7 +242,7 @@ export class HostedSessionCommandSession {
     }
     await this.children.serialized(async () => {
       await this.store.authority.settlePendingAppend();
-      const sent = this.command(params.commandId);
+      const sent = await this.command(params.commandId);
       if (sent !== undefined) {
         if (
           sent.direction !== 'outbound' ||
@@ -273,7 +261,7 @@ export class HostedSessionCommandSession {
         );
       }
       if (params.kind === 'plan_submit') {
-        for (const prior of this.commands()) {
+        for await (const prior of this.commands()) {
           if (
             prior.direction !== 'outbound' ||
             prior.kind !== 'plan_submit' ||
@@ -291,11 +279,13 @@ export class HostedSessionCommandSession {
           );
         }
       }
-      const volume = this.commands().filter(
-        (command) =>
-          command.direction === 'outbound' &&
-          command.childRunId === lineage.parentChildRunId,
-      ).length;
+      const volume = await this.commands()
+        .filter(
+          (command) =>
+            command.direction === 'outbound' &&
+            command.childRunId === lineage.parentChildRunId,
+        )
+        .count();
       if (volume >= MANAGED_SESSION_COMMAND_RUNTIME_LIMITS.maxPerRun) {
         throw new ManagedSessionRecordError(
           `This Session has issued ${MANAGED_SESSION_COMMAND_RUNTIME_LIMITS.maxPerRun} commands on this run (budget_exhausted).`,
@@ -362,7 +352,7 @@ export class HostedSessionCommandSession {
     const replyDigest = createHash('sha256').update(replyBytes).digest('hex');
     await this.children.serialized(async () => {
       await this.store.authority.settlePendingAppend();
-      const existing = this.store.authority.extensionRecord(
+      const existing = await this.store.authority.extensionRecord(
         'session_command',
         commandId,
       );
@@ -445,7 +435,7 @@ export class HostedSessionCommandSession {
    * give-up.
    */
   async readReply(commandId: string): Promise<SessionCommandReply | null> {
-    const command = this.command(commandId);
+    const command = await this.command(commandId);
     if (command === undefined || command.direction !== 'outbound') {
       return null;
     }
@@ -476,7 +466,7 @@ export class HostedSessionCommandSession {
   }): Promise<void> {
     await this.children.serialized(async () => {
       await this.store.authority.settlePendingAppend();
-      const existing = this.command(params.commandId);
+      const existing = await this.command(params.commandId);
       if (existing !== undefined) {
         if (
           existing.direction !== 'inbound' ||
@@ -520,7 +510,7 @@ export class HostedSessionCommandSession {
   async existingReply(
     commandId: string,
   ): Promise<SessionCommandReply | undefined> {
-    const receipt = this.command(commandId);
+    const receipt = await this.command(commandId);
     if (
       receipt === undefined ||
       receipt.direction !== 'inbound' ||
@@ -569,7 +559,7 @@ export class HostedSessionCommandSession {
     // else has its own bookkeeping bug, so the command is rejected, never
     // run. A run that attached and since settled still proves its sender —
     // its fresh commands fail the running gate below instead.
-    const runRecord = this.store.authority.extensionRecord(
+    const runRecord = await this.store.authority.extensionRecord(
       'child_run',
       params.childRunId,
     );
@@ -607,11 +597,11 @@ export class HostedSessionCommandSession {
     };
     if (params.kind === 'plan_submit') {
       try {
-        if (teams.plan(params.commandId) === undefined)
+        if ((await teams.plan(params.commandId)) === undefined)
           assertManagedSessionDomainEnabled('team_plan');
       } catch (cause) {
         if (!(cause instanceof ManagedSessionRecordError)) throw cause;
-        if (teams.supersededPlan(params.commandId) !== undefined)
+        if ((await teams.supersededPlan(params.commandId)) !== undefined)
           throw new SessionCommandBlockedError(
             'Plan submission partially committed; recovery awaits team_plan enablement.',
           );
@@ -648,17 +638,15 @@ export class HostedSessionCommandSession {
     if (params.kind === 'member_message') {
       return this.executeMemberMessage(params, receipt);
     }
-    const chains = new HostedChildChains(
-      this.store.authority.extensionRecordsInDomain('child_run'),
-    );
-    const membership = hostedOpenTeamChainMember(
+    const chains = new HostedChildChains(this.store.authority);
+    const membership = await hostedOpenTeamChainMember(
       this.store.authority.extensionRecordsInDomain('team_state'),
       chains,
       params.childRunId,
     );
-    const runsNow = (() => {
+    const runsNow = await (async () => {
       if (membership === undefined) return false;
-      const view = hostedMemberView(chains, membership.rootChildRunId);
+      const view = await hostedMemberView(chains, membership.rootChildRunId);
       return (
         view.head?.childRunId === params.childRunId &&
         view.state === 'running' &&
@@ -696,11 +684,16 @@ export class HostedSessionCommandSession {
         ? value.length
         : 0;
     const derivedCommitted = updating
-      ? Array.from(
-          { length: 1 + placeCount(params.args['addBlocks']) },
-          (_, index) => `${params.commandId}:${index + 1}`,
-        ).some((recordId) => teams.commandWriteCommitted(recordId))
-      : teams.commandWriteCommitted(`${params.commandId}:create`);
+      ? (
+          await Promise.all(
+            Array.from(
+              { length: 1 + placeCount(params.args['addBlocks']) },
+              (_, index) =>
+                teams.commandWriteCommitted(`${params.commandId}:${index + 1}`),
+            ),
+          )
+        ).some(Boolean)
+      : await teams.commandWriteCommitted(`${params.commandId}:create`);
     if (!derivedCommitted) {
       if (membership === undefined) {
         return receipt(
@@ -767,18 +760,16 @@ export class HostedSessionCommandSession {
       position += 1
     ) {
       if (
-        this.store.authority.extensionRecord(
+        (await this.store.authority.extensionRecord(
           'session_message',
           messageIdOf(position),
-        ) !== undefined
+        )) !== undefined
       ) {
         committed.add(position);
       }
     }
-    const chains = new HostedChildChains(
-      this.store.authority.extensionRecordsInDomain('child_run'),
-    );
-    const membership = hostedOpenTeamChainMember(
+    const chains = new HostedChildChains(this.store.authority);
+    const membership = await hostedOpenTeamChainMember(
       this.store.authority.extensionRecordsInDomain('team_state'),
       chains,
       params.childRunId,
@@ -793,7 +784,7 @@ export class HostedSessionCommandSession {
         ),
       );
     }
-    const view = hostedMemberView(chains, membership.rootChildRunId);
+    const view = await hostedMemberView(chains, membership.rootChildRunId);
     const runsNow =
       view.head?.childRunId === params.childRunId &&
       view.state === 'running' &&
@@ -930,7 +921,7 @@ export class HostedSessionCommandSession {
   ): Promise<void> {
     return this.children.serialized(async () => {
       await this.store.authority.settlePendingAppend();
-      const existing = this.store.authority.extensionRecord(
+      const existing = await this.store.authority.extensionRecord(
         'session_command',
         commandId,
       );

@@ -52,14 +52,15 @@ export async function syncManagedJournalDirectory(
 /** The caller must stop writing if any step fails, including after rename. */
 export async function replaceManagedJournalWithSnapshot(
   filePath: string,
-  bytes: Buffer,
+  bytes: Buffer | AsyncIterable<Buffer>,
 ): Promise<void> {
   const pending = `${filePath}.snapshot.pending`;
   await rm(pending, { force: true });
   try {
     const handle = await open(pending, 'wx', 0o600);
     try {
-      await handle.writeFile(bytes);
+      if (Buffer.isBuffer(bytes)) await handle.writeFile(bytes);
+      else for await (const piece of bytes) await handle.writeFile(piece);
       await handle.sync();
     } finally {
       await handle.close();

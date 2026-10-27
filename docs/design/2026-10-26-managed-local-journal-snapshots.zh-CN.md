@@ -2,6 +2,12 @@
 
 [English](2026-10-26-managed-local-journal-snapshots.md) | [简体中文](2026-10-26-managed-local-journal-snapshots.zh-CN.md)
 
+## PR5 集成
+
+下文原 PR4 切片建立带 ownership 校验的本地快照转换，不代表 authority 内存有界获得资格。[PR5](2026-10-27-managed-session-authority-window.zh-CN.md) 用事务流、磁盘资源/页面 census、增量替换验证及有界历史查询视图替代完整源收集器，需要独立于 PR4 验收记录的最终集成证据。完整前缀继续保留，native replay floor 不变。
+
+PR5 在发布任何页面前，按既有 64 MiB 资源上限预检 manifest 大小。完整原前缀、sealed proof 及所有声明/嵌套旧资源通过验证后，只有 manifest 容量不足可以保留原 transcript，并通过流式读取继续恢复。该分支不发布页面、不替换文件，保留 schema-3/format-2 ownership barrier。已有 snapshot base、资源缺失/损坏、I/O 失败或 ownership 不确定均不能走该分支。尤其是 manifest 超限叠加旧资源缺失时仍必须拒绝恢复。容量分支不修改通用资源 API，也不放宽下文完整性要求。
+
 ## 问题与边界
 
 Issue #13184 需要先建立原生恢复边界，才能淘汰 authority 状态。本地 journal 当前

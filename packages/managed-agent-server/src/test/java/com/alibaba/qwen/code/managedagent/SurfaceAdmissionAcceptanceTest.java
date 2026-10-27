@@ -1353,7 +1353,7 @@ class SurfaceAdmissionAcceptanceTest {
                     STORE_RECOVERY_BLOCK, STORE_TRANSACTION_COMMIT,
                     STORE_RESTORE, STORE_TOOL_RESULT_PUBLISH,
                     STORE_TRANSACTION_LIST, STORE_RESOURCE_GET, STORE_SNAPSHOT_PUBLISH,
-                    STORE_SNAPSHOT_GET, STORE_SNAPSHOT_PAGES, PUB_FINISHED,
+                    STORE_SNAPSHOT_GET, STORE_SNAPSHOT_PAGES, STORE_HISTORY_QUERY, STORE_HISTORY_BACKFILL, PUB_FINISHED,
                     PUB_ADMISSION_PREPARE, PUB_RECEIPT_VERIFY,
                     PUB_RANGE -> 403;
             case PUB_OPERATION_GET -> 404;
@@ -1605,6 +1605,9 @@ class SurfaceAdmissionAcceptanceTest {
         Capability capability = entry.capabilities().iterator().next();
         boolean publicSurface = entry.surface() == Surface.PUBLIC;
         return switch (capability) {
+            case STORE_HISTORY_QUERY -> "{\"workspaceId\":\"ws\",\"view\":{\"journalRevision\":1,\"committedSequence\":0},"
+                    + "\"family\":\"event-id\",\"identity\":\"history-probe\",\"mode\":\"first\",\"limit\":1}";
+            case STORE_HISTORY_BACKFILL -> "{\"workspaceId\":\"ws\",\"view\":{\"journalRevision\":1,\"committedSequence\":0},\"limit\":1}";
             case STORE_SNAPSHOT_PUBLISH -> "{\"workspaceId\":\"ws\",\"writerId\":\"writer-probe\","
                     + "\"writerGeneration\":1,\"snapshotId\":\"snapshot-probe\",\"expectedJournalRevision\":1,"
                     + "\"expectedCommittedSequence\":0}";

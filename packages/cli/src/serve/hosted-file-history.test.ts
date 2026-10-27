@@ -16,6 +16,7 @@ import {
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { LocalManagedSessionAuthority } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
+import { ManagedHistoryQuery } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-history.js';
 import {
   assertHostedFileHistoryCapacity,
   canSettleHostedFileHistory,
@@ -452,20 +453,34 @@ describe('canSettleHostedFileHistory grounds', () => {
       .spyOn(LocalManagedSessionAuthority.prototype, 'harnessRunAuthorization')
       .mockResolvedValue(authorization as never);
 
-  const runnableAuthorization = (checkpoint: Record<string, unknown> = {}) =>
-    mockAuthorization({
+  const runnableAuthorization = (
+    checkpoint: Record<string, unknown> = {},
+    historyItems?: ReadonlyArray<{
+      modelMessageId: string;
+      state: string;
+      outcomeRef: object;
+    }>,
+  ) => {
+    const state = {
+      identity: { promptId: TURN, turnId: TURN },
+      continuation: { phase: 'results_ready' },
+      tools: {
+        items: [{ modelMessageId: MESSAGE, state: 'settled', outcomeRef: {} }],
+      },
+      ...checkpoint,
+    };
+    const items = historyItems ?? state.tools.items;
+    return mockAuthorization({
       status: 'runnable',
-      checkpoint: {
-        identity: { promptId: TURN, turnId: TURN },
-        continuation: { phase: 'results_ready' },
-        tools: {
-          items: [
-            { modelMessageId: MESSAGE, state: 'settled', outcomeRef: {} },
-          ],
-        },
-        ...checkpoint,
+      checkpoint: state,
+      history: {
+        allToolsSettled: items.every((item) => item.state === 'settled'),
+        tools: new ManagedHistoryQuery(async function* () {
+          yield* items;
+        }),
       },
     });
+  };
 
   const project = async (
     type: 'assistant' | 'tool_result' | 'user',
@@ -677,6 +692,31 @@ describe('canSettleHostedFileHistory grounds', () => {
       ).resolves.toEqual(ground === null ? null : { blocker: ground, detail });
     },
   );
+
+  it('queries pending-message identity beyond the compact checkpoint tail', async () => {
+    runnableAuthorization(
+      {
+        tools: {
+          items: [
+            {
+              modelMessageId: 'recent-window',
+              state: 'settled',
+              outcomeRef: {},
+            },
+          ],
+        },
+      },
+      [
+        { modelMessageId: MESSAGE, state: 'settled', outcomeRef: {} },
+        { modelMessageId: 'recent-window', state: 'settled', outcomeRef: {} },
+      ],
+    );
+    await project('assistant', MESSAGE, [call('old-call')]);
+    await project('tool_result', randomUUID(), [result('old-call')]);
+    await expect(
+      canSettleHostedFileHistory(session, pendingRecord()),
+    ).resolves.toBeNull();
+  });
 
   it('carries no detail when the blocked authorization has no message', async () => {
     // A blocked authorization whose sub-cause is parse-shaped carries no

@@ -53,13 +53,13 @@ describe('ManagedPromptAdmissionController', () => {
     const inbox = await FileManagedSessionInbox.open(inboxPath);
     const input = userMessage('m1');
     const submit = vi.fn(async (activation: ManagedActivationDescriptor) => {
-      expect(inbox.getByPayloadRef(input, activation.payloadRef)).toMatchObject(
-        {
-          state: 'admitted',
-          activationReady: true,
-          message: { payload: input.payload },
-        },
-      );
+      expect(
+        await inbox.getByPayloadRef(input, activation.payloadRef),
+      ).toMatchObject({
+        state: 'admitted',
+        activationReady: true,
+        message: { payload: input.payload },
+      });
       return {
         created: true,
         activation: {
@@ -124,7 +124,7 @@ describe('ManagedPromptAdmissionController', () => {
         message: { sessionId: 'session-a' },
       },
     });
-    expect(inbox.get(userMessage('m1'))).toMatchObject({
+    expect(await inbox.get(userMessage('m1'))).toMatchObject({
       activationReady: true,
     });
   });
@@ -164,7 +164,7 @@ describe('ManagedPromptAdmissionController', () => {
       inspected: 1,
       readied: 0,
     });
-    expect(reopenedInbox.get(userMessage('m1'))).toMatchObject({
+    expect(await reopenedInbox.get(userMessage('m1'))).toMatchObject({
       activationReady: true,
       message: { payload: userMessage('m1').payload },
     });

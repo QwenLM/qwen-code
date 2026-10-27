@@ -421,7 +421,7 @@ describe('managed session authority child_agent records', () => {
       expect(
         JSON.parse((await harness.store.read(first.recordRef)).toString()),
       ).toEqual(chain[0]);
-      expect(authority.taskViews()).toEqual([
+      expect(await authority.taskViews()).toEqual([
         {
           taskId: TASK_ID,
           sessionId,
@@ -441,7 +441,7 @@ describe('managed session authority child_agent records', () => {
         { domain: 'child_run', record: chain[1] },
         TRUSTED,
       );
-      expect(authority.taskViews()).toEqual([
+      expect(await authority.taskViews()).toEqual([
         {
           taskId: TASK_ID,
           sessionId,
@@ -461,7 +461,7 @@ describe('managed session authority child_agent records', () => {
         { domain: 'child_run', record: chain[2] },
         TRUSTED,
       );
-      expect(authority.taskViews()[0]).toMatchObject({
+      expect((await authority.taskViews())[0]).toMatchObject({
         state: 'running',
         runtimeState: 'ready',
       });
@@ -473,7 +473,7 @@ describe('managed session authority child_agent records', () => {
         TRUSTED,
       );
       expect(settled.revision).toBe(4);
-      expect(authority.taskViews()).toEqual([
+      expect(await authority.taskViews()).toEqual([
         {
           taskId: TASK_ID,
           sessionId,
@@ -514,7 +514,7 @@ describe('managed session authority child_agent records', () => {
       );
       expect(consumed.revision).toBe(6);
       expect(await publishedBodies(harness, 'child_run')).toBe(6);
-      expect(authority.taskViews()[0]).toMatchObject({
+      expect((await authority.taskViews())[0]).toMatchObject({
         kind: 'child_agent',
         state: 'completed',
       });
@@ -552,7 +552,7 @@ describe('managed session authority child_agent records', () => {
         },
         TRUSTED,
       );
-      expect(authority.taskViews()[0]).toMatchObject({
+      expect((await authority.taskViews())[0]).toMatchObject({
         kind: 'child_agent',
         state: 'running',
         runtimeState: 'draining',
@@ -609,7 +609,7 @@ describe('managed session authority child_agent records', () => {
         receipt: { replayed: false },
       });
       // The acceptance is a receipt, not a task: the child task alone shows.
-      expect(authority.taskViews()).toHaveLength(1);
+      expect(await authority.taskViews()).toHaveLength(1);
 
       harness.now = 6_000;
       const consumed = await authority.commitExtensionRecord(
@@ -619,7 +619,7 @@ describe('managed session authority child_agent records', () => {
       );
       expect(consumed.revision).toBe(2);
       expect(
-        authority.extensionRecord('child_acceptance', 'run-1'),
+        await authority.extensionRecord('child_acceptance', 'run-1'),
       ).toMatchObject({
         revision: 2,
         operationId: 'accept-1:1',
@@ -645,7 +645,7 @@ describe('managed session authority child_agent records', () => {
     await withAuthority(
       harness,
       async (authority) => {
-        expect(authority.taskViews()).toEqual([
+        expect(await authority.taskViews()).toEqual([
           {
             taskId: TASK_ID,
             sessionId,
@@ -658,12 +658,14 @@ describe('managed session authority child_agent records', () => {
             settledAt: 4_000,
           },
         ]);
-        expect(authority.extensionRecord('child_run', 'run-1')).toMatchObject({
+        expect(
+          await authority.extensionRecord('child_run', 'run-1'),
+        ).toMatchObject({
           revision: 4,
           operationId: 'run-1:1',
         });
         expect(
-          authority.extensionRecord('child_acceptance', 'run-1'),
+          await authority.extensionRecord('child_acceptance', 'run-1'),
         ).toMatchObject({
           revision: 1,
           operationId: 'accept-1:1',
@@ -1131,7 +1133,9 @@ describe('managed session authority child_agent records', () => {
         TRUSTED,
       );
       expect(revised.revision).toBe(5);
-      expect(authority.extensionRecord('child_run', 'run-1')).toMatchObject({
+      expect(
+        await authority.extensionRecord('child_run', 'run-1'),
+      ).toMatchObject({
         revision: 5,
         record: unknown,
       });
@@ -1150,10 +1154,12 @@ describe('managed session authority workflow records (H4c, enabled by the workfl
         TRUSTED,
       );
       expect(await publishedBodies(harness, 'child_run')).toBe(1);
-      expect(authority.extensionRecord('child_run', 'run-1')).toMatchObject({
+      expect(
+        await authority.extensionRecord('child_run', 'run-1'),
+      ).toMatchObject({
         revision: 1,
       });
-      expect(authority.taskViews()).toMatchObject([{ kind: 'workflow' }]);
+      expect(await authority.taskViews()).toMatchObject([{ kind: 'workflow' }]);
     });
   });
 
@@ -1175,7 +1181,7 @@ describe('managed session authority workflow records (H4c, enabled by the workfl
     };
     await withAuthority(harness, async (authority) => {
       await settleChild(harness, authority, chain);
-      expect(authority.taskViews()).toEqual([view]);
+      expect(await authority.taskViews()).toEqual([view]);
       harness.now = 5_000;
       await authority.commitExtensionRecord(
         command('accept-1:1'),
@@ -1201,13 +1207,15 @@ describe('managed session authority workflow records (H4c, enabled by the workfl
     await withAuthority(
       harness,
       async (authority) => {
-        expect(authority.taskViews()).toEqual([view]);
-        expect(authority.extensionRecord('child_run', 'run-1')).toMatchObject({
+        expect(await authority.taskViews()).toEqual([view]);
+        expect(
+          await authority.extensionRecord('child_run', 'run-1'),
+        ).toMatchObject({
           revision: 6,
           record: chain[5],
         });
         expect(
-          authority.extensionRecord('child_acceptance', 'run-1'),
+          await authority.extensionRecord('child_acceptance', 'run-1'),
         ).toMatchObject({ revision: 2, record: acceptance(refs, 'consumed') });
       },
       { create: false },
@@ -1228,7 +1236,7 @@ describe('managed session authority workflow records (H4c, enabled by the workfl
         { domain: 'child_run', record: chain[0] },
         TRUSTED,
       );
-      expect(authority.taskViews()).toMatchObject([{ kind: 'workflow' }]);
+      expect(await authority.taskViews()).toMatchObject([{ kind: 'workflow' }]);
       // The gate narrows while the Session stays open: a new workflow
       // submission is refused on sight, and the persisted record still
       // projects its task. The refusal is this test's control that the
@@ -1244,7 +1252,9 @@ describe('managed session authority workflow records (H4c, enabled by the workfl
             TRUSTED,
           ),
         ).rejects.toThrow('not enabled for submission');
-        expect(authority.taskViews()).toMatchObject([{ kind: 'workflow' }]);
+        expect(await authority.taskViews()).toMatchObject([
+          { kind: 'workflow' },
+        ]);
       } finally {
         enablement.workflowNarrowed = false;
       }
@@ -1257,7 +1267,9 @@ describe('managed session authority workflow records (H4c, enabled by the workfl
       await withAuthority(
         harness,
         async (authority) => {
-          expect(authority.taskViews()).toMatchObject([{ kind: 'workflow' }]);
+          expect(await authority.taskViews()).toMatchObject([
+            { kind: 'workflow' },
+          ]);
         },
         { create: false },
       );

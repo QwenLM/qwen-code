@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { hostedSessionRecords } from './hosted-session-records.js';
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { Part } from '@google/genai';
@@ -66,27 +67,31 @@ export async function runHostedCsiTextTurn(
     promptId,
     async (modelScope) =>
       harness.run(async () => {
-        const projected = await managed.sink.project();
-        const settled = new Map(
-          authority
-            .eventsInSequenceRange(1, authority.committedSequence)
-            .filter((event) => event.kind === 'turn.settled')
-            .map((event) => [
-              event.payload['turnId'],
-              event.payload['outcome'],
-            ]),
-        );
-        const history = projected.filter(
-          (entry) =>
+        const lastRecord = await hostedSessionRecords(managed).at(-1);
+        const history: ChatRecord[] = [];
+        const throughSequence = authority.committedSequence;
+        for (const entry of await managed.sink.projectModelRecords()) {
+          const settlement =
+            entry.daemonPromptId === undefined
+              ? undefined
+              : await authority.findEvent(
+                  'turn.settled',
+                  'turnId',
+                  entry.daemonPromptId,
+                  { throughSequence },
+                );
+          if (
             (resumeFromToolResults !== undefined &&
               entry.daemonPromptId === promptId) ||
-            (settled.has(entry.daemonPromptId) &&
+            (settlement &&
               !(
                 entry.type === 'user' &&
-                settled.get(entry.daemonPromptId) !== 'completed'
-              )),
-        );
-        let parentUuid = projected.at(-1)?.uuid ?? null;
+                settlement.payload['outcome'] !== 'completed'
+              ))
+          )
+            history.push(entry);
+        }
+        let parentUuid = lastRecord?.uuid ?? null;
         if (resumeFromToolResults === undefined) {
           const user = record('user', parentUuid, {
             daemonPromptId: promptId,
@@ -152,7 +157,7 @@ export async function runHostedCsiTextTurn(
             if (
               resumeFromToolResults === undefined ||
               !toolTurn ||
-              !isDeepStrictEqual(projected.at(-1), recoveredFinalOutput)
+              !isDeepStrictEqual(lastRecord, recoveredFinalOutput)
             )
               throw new HostedToolRecoveryRequiredError(
                 'Final CSI output recovery is unavailable.',

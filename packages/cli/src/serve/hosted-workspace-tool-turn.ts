@@ -1,14 +1,20 @@
-import {
-  extensionToolDeclaration,
-  extensionToolInput,
-  type HostedExtensionToolConfig,
-} from './hosted-extension-tool-context.js';
 /**
  * @license
  * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  extensionToolDeclaration,
+  extensionToolInput,
+  type HostedExtensionToolConfig,
+} from './hosted-extension-tool-context.js';
+import { ManagedHistoryQuery } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-history.js';
+
+import {
+  hostedSessionRecords,
+  hostedRecordsAfter,
+} from './hosted-session-records.js';
 import {
   oweHostedTurnCleanup,
   reconcileHostedTurnCleanup,
@@ -1105,25 +1111,28 @@ export interface HostedBroadcastRecipient {
  * dispatch evidence probe all positions whatever the journaled arguments
  * say, since a hook may have rewritten the input the call executed.
  */
-export function hostedBroadcastCommitted(input: {
+export async function hostedBroadcastCommitted(input: {
   readonly authority: {
+    readonly committedSequence: number;
+    extensionRecord(
+      domain: ManagedSessionDomain,
+      id: string,
+    ): Promise<{ readonly record: unknown } | undefined>;
     extensionRecordsInDomain(
       domain: ManagedSessionDomain,
-    ): ReadonlyArray<{ readonly record: unknown }>;
+    ): ManagedHistoryQuery<{ readonly record: unknown }>;
   };
   readonly children: HostedChildAgentSession;
   readonly messages: HostedSessionMessageSession | undefined;
   readonly senderSessionId: string;
   readonly promptId: string;
   readonly callId: string;
-}): HostedBroadcastRecipient[] {
-  const chains = new HostedChildChains(
-    input.authority.extensionRecordsInDomain('child_run'),
-  );
+}): Promise<HostedBroadcastRecipient[]> {
+  const chains = new HostedChildChains(input.authority);
   const teams = input.authority.extensionRecordsInDomain('team_state');
   const found: HostedBroadcastRecipient[] = [];
   for (let position = 1; position <= HOSTED_BROADCAST_POSITIONS; position++) {
-    const message = input.messages?.message(
+    const message = await input.messages?.message(
       broadcastMessageId({
         senderSessionId: input.senderSessionId,
         turnId: input.promptId,
@@ -1131,7 +1140,7 @@ export function hostedBroadcastCommitted(input: {
         position,
       }),
     );
-    const continued = input.children.record(
+    const continued = await input.children.record(
       broadcastRunId(input.promptId, input.callId, position),
     );
     let sent:
@@ -1156,17 +1165,17 @@ export function hostedBroadcastCommitted(input: {
     else continue;
     const route = {
       ...sent,
-      ...hostedRouteDetails(
+      ...(await hostedRouteDetails(
         input.authority,
         sent,
         sent.kind === 'message' ? sent.messageId : undefined,
         chains,
-      ),
+      )),
     };
-    const rootChildRunId = chains.root(route.childRunId);
+    const rootChildRunId = await chains.root(route.childRunId);
     found.push({
       position,
-      name: hostedTeamMembership(teams, rootChildRunId)?.name,
+      name: (await hostedTeamMembership(teams, rootChildRunId))?.name,
       rootChildRunId,
       arrived: hostedRouteArrived(route),
       unconfirmed: hostedRouteUnconfirmed(route),
@@ -1181,25 +1190,29 @@ export function hostedBroadcastCommitted(input: {
  * `hostedBroadcastCommitted`, probed without indexing the lead's runs, so
  * the PostToolUse dispatch evidence stays cheap for every send.
  */
-export function hostedBroadcastAnyCommitted(input: {
+export async function hostedBroadcastAnyCommitted(input: {
   readonly children: HostedChildAgentSession;
   readonly messages: HostedSessionMessageSession | undefined;
   readonly senderSessionId: string;
   readonly promptId: string;
   readonly callId: string;
-}): boolean {
+}): Promise<boolean> {
   for (let position = 1; position <= HOSTED_BROADCAST_POSITIONS; position++) {
     if (
-      input.messages?.message(
-        broadcastMessageId({
-          senderSessionId: input.senderSessionId,
-          turnId: input.promptId,
-          callId: input.callId,
-          position,
-        }),
+      (
+        await input.messages?.message(
+          broadcastMessageId({
+            senderSessionId: input.senderSessionId,
+            turnId: input.promptId,
+            callId: input.callId,
+            position,
+          }),
+        )
       )?.direction === 'outbound' ||
-      input.children.record(
-        broadcastRunId(input.promptId, input.callId, position),
+      (
+        await input.children.record(
+          broadcastRunId(input.promptId, input.callId, position),
+        )
       )?.predecessorChildRunId
     )
       return true;
@@ -1660,22 +1673,39 @@ export const HOSTED_AGENT_CALL_NOT_REACHED_TEXT =
  * caller already holds the same journal projection: one authority for
  * the predicate, no second walk of every committed event.
  */
+export interface JournaledToolResults {
+  has(id: string): Promise<boolean>;
+  refresh(): void;
+}
+
 export async function journaledToolResultIds(
   session: ManagedSession,
   promptId: string,
-  projected?: Awaited<ReturnType<ManagedSession['sink']['project']>>,
-): Promise<Set<string>> {
-  const records = projected ?? (await session.sink.project());
-  return new Set(
-    records
-      .filter(
+  projected?: ManagedHistoryQuery<ChatRecord> | readonly ChatRecord[],
+): Promise<JournaledToolResults> {
+  let records =
+    projected instanceof ManagedHistoryQuery
+      ? projected
+      : projected
+        ? new ManagedHistoryQuery(async function* () {
+            yield* projected;
+          })
+        : hostedSessionRecords(session);
+  return {
+    has: (id) =>
+      records.some(
         (entry) =>
-          entry.daemonPromptId === promptId && entry.type === 'tool_result',
-      )
-      .flatMap((entry) => entry.message?.parts ?? [])
-      .map((part) => part.functionResponse?.id)
-      .filter((id): id is string => typeof id === 'string'),
-  );
+          entry.daemonPromptId === promptId &&
+          entry.type === 'tool_result' &&
+          (entry.message?.parts ?? []).some(
+            (part) =>
+              typeof id === 'string' && part.functionResponse?.id === id,
+          ),
+      ),
+    refresh: () => {
+      records = hostedSessionRecords(session);
+    },
+  };
 }
 
 /**
@@ -2482,11 +2512,11 @@ export class HostedWorkspaceToolTurn {
 
   // Result command Hooks can acquire after child admission and retain
   // the mount until Session close, so count their future hold as well.
-  private sessionOwnerMayHoldMount(): boolean {
+  private async sessionOwnerMayHoldMount(): Promise<boolean> {
     return (
       (this.mcp?.mountHeld ?? false) ||
       (this.hooks?.mountHeld ?? false) ||
-      (this.hooks?.hasMountableToolResultHooks ?? false)
+      ((await this.hooks?.hasMountableToolResultHooks()) ?? false)
     );
   }
 
@@ -2512,13 +2542,8 @@ export class HostedWorkspaceToolTurn {
   async resumeCommittedResults(signal?: AbortSignal): Promise<void> {
     if (this.acquired) return;
     if (this.skills && !this.hooks && !this.mcp) {
-      const history = (await this.session.sink.project()).filter(
+      const history = hostedSessionRecords(this.session).filter(
         (entry) => entry.daemonPromptId === this.promptId,
-      );
-      const calls = history.flatMap((entry) =>
-        (entry.message?.parts ?? []).flatMap((part) =>
-          part.functionCall ? [part.functionCall] : [],
-        ),
       );
       const answered = await journaledToolResultIds(
         this.session,
@@ -2526,8 +2551,20 @@ export class HostedWorkspaceToolTurn {
         history,
       );
       if (
-        calls.length &&
-        calls.every((call) => call.name === 'skill' && answered.has(call.id!))
+        (await history.some((entry) =>
+          (entry.message?.parts ?? []).some((part) => part.functionCall),
+        )) &&
+        (await history.every(async (entry) => {
+          for (const part of entry.message?.parts ?? []) {
+            const call = part.functionCall;
+            if (
+              call &&
+              (call.name !== 'skill' || !(await answered.has(call.id!)))
+            )
+              return false;
+          }
+          return true;
+        }))
       )
         return;
     }
@@ -2551,14 +2588,14 @@ export class HostedWorkspaceToolTurn {
         if (authorization.status !== 'runnable')
           throw new Error('Hosted file history requires recovery.');
         const owners = new Set<string>();
-        for (const item of authorization.checkpoint.tools?.items ?? []) {
+        for await (const item of authorization.history.tools) {
           if (
             item.modelMessageId !== saved.pendingMessageId ||
             !['write_file', 'edit'].includes(item.toolName)
           )
             continue;
-          const intent = this.session.authority
-            .eventsInSequenceRange(1, this.session.authority.committedSequence)
+          const intent = await this.session.authority
+            .iterateEvents(1, this.session.authority.committedSequence)
             .findLast(
               (event) =>
                 event.kind === 'tool.intent' &&
@@ -2656,23 +2693,23 @@ export class HostedWorkspaceToolTurn {
           await this.session.authority.harnessRunAuthorization();
         const items =
           authorization.status === 'runnable'
-            ? authorization.checkpoint.tools?.items
+            ? authorization.history.tools
             : undefined;
         if (
           authorization.status === 'runnable' &&
           authorization.checkpoint.identity.promptId === this.promptId &&
           authorization.checkpoint.continuation.phase === 'results_ready' &&
           items &&
-          items.length > 0 &&
-          items.every(
+          authorization.history.toolCount > 0 &&
+          (await items.every(
             (item) =>
               item.state === 'settled' &&
               ['read_file', 'write_file', 'edit', 'glob', 'web_fetch'].includes(
                 item.toolName,
               ),
-          ) &&
+          )) &&
           (saved ||
-            items.every((item) =>
+            (await items.every((item) =>
               [
                 'read_file',
                 'glob',
@@ -2680,14 +2717,14 @@ export class HostedWorkspaceToolTurn {
                   ? []
                   : ['web_fetch']),
               ].includes(item.toolName),
-            )) &&
+            ))) &&
           (await canSettleHostedFileHistory(this.session, {
             pendingUndo: null,
             pendingTurn: this.promptId,
-            pendingMessageId: items.at(-1)!.modelMessageId,
+            pendingMessageId: (await items.at(-1))!.modelMessageId,
           })) === null
         ) {
-          for (const item of items)
+          for await (const item of items)
             await this.session.resources.read(item.outcomeRef!);
           if (
             await confirmReplacedHostedTurnOwner(
@@ -2885,17 +2922,17 @@ export class HostedWorkspaceToolTurn {
   ): Promise<Part[]> {
     if (!this.hooks) return responses;
     const contextParts: Part[] = [];
-    const history = await this.session.sink.project();
-    const assistant = history.findLast(
+    const history = hostedSessionRecords(this.session);
+    const assistant = await history.findLast(
       (entry) =>
         entry.type === 'assistant' &&
         entry.daemonPromptId === this.promptId &&
-        entry.message?.parts?.some(
+        !!entry.message?.parts?.some(
           (part) => part.functionCall?.id === calls[0]?.callId,
         ),
     );
     const intents = this.session.authority
-      .eventsInSequenceRange(1, this.session.authority.committedSequence)
+      .iterateEvents(1, this.session.authority.committedSequence)
       .filter(
         (entry) =>
           entry.kind === 'tool.intent' &&
@@ -2912,7 +2949,7 @@ export class HostedWorkspaceToolTurn {
         const records = await Promise.all(
           [HookEventName.PermissionRequest, HookEventName.PreToolUse].map(
             async (event) => {
-              const marker = this.session.authority.extensionRecord(
+              const marker = await this.session.authority.extensionRecord(
                 'hook_execution',
                 hostedHookOccurrenceId(
                   event,
@@ -3001,12 +3038,16 @@ export class HostedWorkspaceToolTurn {
       const originalCalls = assistant?.message?.parts?.flatMap((part) =>
         part.functionCall ? [part.functionCall] : [],
       );
-      const persisted = history
-        .slice(assistant ? history.indexOf(assistant) + 1 : history.length)
-        .find((entry) => entry.type === 'tool_result')?.message?.parts;
+      const persisted = assistant
+        ? (
+            await hostedRecordsAfter(history, assistant.uuid).find(
+              (entry) => entry.type === 'tool_result',
+            )
+          )?.message?.parts
+        : undefined;
       if (
         !completeEvidence ||
-        intents.length ||
+        (await intents.count()) ||
         !isDeepStrictEqual(
           originalCalls?.map((call) => ({
             id: call.id,
@@ -3104,34 +3145,37 @@ export class HostedWorkspaceToolTurn {
         // committed (R1-62's recovery arm). The run id derives from the
         // same collapsed key the launcher wrote — a wake turn's id would
         // otherwise read as a hybrid between the two before the third hop.
-        this.childAgents?.record(this.childRunIdFor(call.callId)) !==
+        (await this.childAgents?.record(this.childRunIdFor(call.callId))) !==
           undefined ||
-        this.messages?.message(this.messageIdFor(call.callId)) !== undefined ||
+        (await this.messages?.message(this.messageIdFor(call.callId))) !==
+          undefined ||
         // H4e-b2: a broadcast's recipients commit under their own ids.
         (call.name === 'send_message' &&
           this.childAgents !== undefined &&
-          hostedBroadcastAnyCommitted({
+          (await hostedBroadcastAnyCommitted({
             children: this.childAgents,
             messages: this.messages,
             senderSessionId:
               this.session.authority.sessionHeader.sessionKey.sessionId,
             promptId: this.promptId,
             callId: call.callId,
-          })) ||
-        intents.some((entry) => entry.payload['ordinal'] === ordinal) ||
+          }))) ||
+        (await intents.some((entry) => entry.payload['ordinal'] === ordinal)) ||
         // A team tool commits only to the journal and answers a refusal as
         // its error, so its committed answer is its own dispatch evidence.
         (((call.name === 'skill' && this.skills !== undefined) ||
           (call.name === 'todo_write' && this.declaresTodoTool()) ||
           HOSTED_TEAM_TOOL_NAMES.includes(call.name) ||
           (call.name === 'exit_plan_mode' &&
-            this.commands?.command(
-              sessionCommandId({
-                senderSessionId:
-                  this.session.authority.sessionHeader.sessionKey.sessionId,
-                promptKey: hostedPromptKey(this.promptId),
-                callId: call.callId,
-              }),
+            (
+              await this.commands?.command(
+                sessionCommandId({
+                  senderSessionId:
+                    this.session.authority.sessionHeader.sessionKey.sessionId,
+                  promptKey: hostedPromptKey(this.promptId),
+                  callId: call.callId,
+                }),
+              )
             )?.kind === 'plan_submit') ||
           (call.name === 'team_plan_approval' &&
             teamPlanAdmissionsEnabled())) &&
@@ -3245,7 +3289,7 @@ export class HostedWorkspaceToolTurn {
       }
       const batchId = `${this.promptId}:${calls.map((call) => call.callId).join(':')}`;
       const uuid = shellHistoryId(`${batchId}:hook-context`);
-      if (!history.some((entry) => entry.uuid === uuid))
+      if (!(await history.some((entry) => entry.uuid === uuid)))
         await this.commit('tool_result', contextParts, model, {
           uuid,
           timestamp: assistant?.timestamp ?? new Date(0).toISOString(),
@@ -3318,7 +3362,7 @@ export class HostedWorkspaceToolTurn {
     event: HookEventName,
     occurrence: string,
   ): Promise<RecordedToolHook | undefined> {
-    const marker = this.session.authority.extensionRecord(
+    const marker = await this.session.authority.extensionRecord(
       'hook_execution',
       hostedHookOccurrenceId(event, occurrence),
     );
@@ -3395,12 +3439,12 @@ export class HostedWorkspaceToolTurn {
     signal: AbortSignal,
   ): Promise<Part[]> {
     if (!this.hooks) return [...responses];
-    const history = await this.session.sink.project();
-    const assistant = history.findLast(
+    const history = hostedSessionRecords(this.session);
+    const assistant = await history.findLast(
       (entry) =>
         entry.type === 'assistant' &&
         entry.daemonPromptId === this.promptId &&
-        entry.message?.parts?.some((part) => part.functionCall),
+        !!entry.message?.parts?.some((part) => part.functionCall),
     );
     if (!assistant?.message?.parts)
       throw new HostedToolRecoveryRequiredError(
@@ -3423,7 +3467,8 @@ export class HostedWorkspaceToolTurn {
       `${this.promptId}:${calls.map((call) => call.callId).join(':')}:hook-context`,
     );
     const savedContext =
-      history.find((entry) => entry.uuid === contextId)?.message?.parts ?? [];
+      (await history.find((entry) => entry.uuid === contextId))?.message
+        ?.parts ?? [];
     const original = savedContext.length
       ? responses.slice(0, -savedContext.length)
       : [...responses];
@@ -3491,11 +3536,15 @@ export class HostedWorkspaceToolTurn {
   ): Promise<Part[]> {
     const plan = saved.plan;
     if (plan.publicChildModel) this.childModelRoute = plan.publicChildModel;
-    this.unanswered = plan.calls.some(
-      (item) =>
-        item.actionId &&
-        this.session.authority.action(item.actionId)?.state === 'expired',
-    );
+    this.unanswered = (
+      await Promise.all(
+        plan.calls.map(async (item) =>
+          item.actionId
+            ? (await this.session.authority.action(item.actionId))?.state
+            : undefined,
+        ),
+      )
+    ).includes('expired');
     if (
       (!plan.commandStep && (this.hooks || this.mcp)) ||
       (plan.commandStep &&
@@ -3656,8 +3705,8 @@ export class HostedWorkspaceToolTurn {
       return undefined;
     const authority = this.session.authority;
     const header = authority.sessionHeader;
-    const assistant = authority
-      .eventsInSequenceRange(1, authority.committedSequence)
+    const assistant = await authority
+      .iterateEvents(1, authority.committedSequence)
       .find(
         (event) =>
           event.kind === 'message.committed' &&
@@ -3747,13 +3796,14 @@ export class HostedWorkspaceToolTurn {
     if (stage === 'final') {
       const activation = this.session.activation;
       const planRevision =
-        authority
-          .eventsInSequenceRange(1, authority.committedSequence)
+        (await authority
+          .iterateEvents(1, authority.committedSequence)
           .filter(
             (event) =>
               event.kind === 'hosted.batch.planned' &&
               event.payload['batchId'] === batch.messageId,
-          ).length + 1;
+          )
+          .count()) + 1;
       await authority.appendExecutionEvent(
         {
           operation: 'hostedBatchPlan',
@@ -3803,788 +3853,803 @@ export class HostedWorkspaceToolTurn {
     const declarations = this.advertised ?? (await this.declarations(signal));
     this.hookAllowed.clear();
     this.agentDispatched.clear();
-    const prepareRequests = (
+    const prepareRequests = async (
       source: ToolCallRequestInfo[],
       // Hook decisions are admitted after the assistant record commits, so
       // an input past the inline limit refuses its call, not the Turn.
       hookInputs = false,
-    ): HostedPreparedRequest[] => {
+    ): Promise<HostedPreparedRequest[]> => {
       const ids = new Set<string>();
-      return source.map((call) => {
-        const runtimeCallId = randomUUID();
-        const mcpInput = this.mcp?.toolInput(
-          call.name,
-          call.args,
-          runtimeCallId,
-        );
-        const isShell = call.name === 'run_shell_command';
-        const skill =
-          mcpInput === undefined &&
-          call.name === 'skill' &&
-          this.skills !== undefined;
-        if (
-          (this.allowedToolNames !== undefined &&
-            !this.allowedToolNames.includes(call.name)) ||
-          (!declarations.some((tool) => tool.name === call.name) &&
-            !(skill && call.isClientInitiated)) ||
-          ids.has(call.callId) ||
-          // Refuse a call whose arguments arrived unterminated even when the
-          // output token limit was not what cut them: this profile commits to a
-          // remote Workspace with no undo backup, so a repaired partial
-          // `content` or half-streamed command line is unrecoverable.
-          call.wasOutputTruncated === true ||
-          call.hadIncompleteArguments === true
-        )
-          throw new Error('Hosted Workspace profile refused a tool call.');
-        ids.add(call.callId);
-        let validationError: string | undefined;
-        let input: Record<string, unknown>;
-        let backgroundAdmitted = false;
-        let monitorAdmitted = false;
-        let agentAdmitted = false;
-        let workflowAdmitted = false;
-        let agentBackground = true;
-        let messageAdmitted = false;
-        // b3b: on a member Session the board vocabulary is its command
-        // channel's, never the lead funnel's — the two never meet on one
-        // profile, but a name collision must route to the command arm.
-        // b3c decision 8: a member's send_message naming a member or
-        // "*" is the same kind of command; only "parent" stays H4d-b's.
-        const memberMessageCommand =
-          mcpInput === undefined &&
-          call.name === 'send_message' &&
-          this.sendMessageRole() === 'child' &&
-          this.memberPreamble === true &&
-          typeof call.args['to'] === 'string' &&
-          sanitizeName(call.args['to']) !== 'parent';
-        const command =
-          mcpInput === undefined &&
-          (this.commandToolNames.has(call.name) || memberMessageCommand);
-        const team =
-          !command &&
-          mcpInput === undefined &&
-          (HOSTED_TEAM_TOOL_NAMES.includes(call.name) ||
-            (call.name === 'team_plan_approval' &&
-              teamPlanAdmissionsEnabled()));
-        const planExit = this.publicPlanMode && call.name === 'exit_plan_mode';
-        // H4e-b3 decision 9: a run whose first input carried an unescaped
-        // plan-mode preamble admits reads only; every other call is
-        // refused before it runs, ahead of any per-tool arm below.
-        if (
-          this.planning &&
-          !planExit &&
-          !HOSTED_PUBLIC_PLAN_READS.has(call.name)
-        ) {
-          validationError = HOSTED_PUBLIC_PLAN_REFUSAL;
-          input = { ...call.args };
-        } else if (planExit) {
-          input = { ...call.args };
-          if (!this.planning)
-            validationError = 'Plan mode already ended for this Turn.';
-          else if (
-            source.length !== 1 ||
-            Object.keys(input).length !== 1 ||
-            typeof input['plan'] !== 'string' ||
-            !input['plan'].trim() ||
-            input['plan'].length > 24000
-          )
-            validationError =
-              'Hosted exit_plan_mode requires a nonempty Markdown plan of at most 24000 characters and must be the only call in its batch.';
-        } else if (
-          this.memberPlanMode &&
-          !HOSTED_PLAN_MODE_READS.has(call.name) &&
-          !(
-            call.name === 'exit_plan_mode' &&
-            command &&
-            teamPlanAdmissionsEnabled()
-          )
-        ) {
-          validationError = hostedPlanModeRefusal();
-          input = { ...call.args };
-        } else if (mcpInput) {
-          input = { ...mcpInput.input };
-        } else if (skill) {
-          validationError = source.some((other) => other.name !== 'skill')
-            ? HOSTED_SKILL_BATCH_REFUSAL
-            : this.skills!.validationError(
-                call.args,
-                call.isClientInitiated ? 'user' : 'model',
-              );
-          input = { ...call.args };
-        } else if (isShell) {
-          const args = call.args;
-          const unsupportedKey = Object.keys(args).find(
-            (key) =>
-              ![
-                'command',
-                'timeout',
-                'description',
-                'is_background',
-                'extension_context',
-              ].includes(key),
+      return Promise.all(
+        source.map(async (call) => {
+          const runtimeCallId = randomUUID();
+          const mcpInput = await this.mcp?.toolInput(
+            call.name,
+            call.args,
+            runtimeCallId,
           );
-          // H3: a background request is admitted exactly when this Session
-          // owns its child_run orchestrator and the domain is enabled — the
-          // deliberate refusals below keep their texts otherwise.
-          const backgroundRequested =
-            args['is_background'] === true ||
-            (typeof args['is_background'] === 'string' &&
-              args['is_background'].toLowerCase() === 'true');
-          const backgroundIllFormed =
-            !backgroundRequested &&
-            args['is_background'] !== undefined &&
-            args['is_background'] !== false &&
-            !(
-              typeof args['is_background'] === 'string' &&
-              args['is_background'].toLowerCase() === 'false'
-            );
-          backgroundAdmitted =
-            backgroundRequested &&
-            // The admitted family runs v3 only: a shell-mode turn has no
-            // publication to drive it, so admitting there would only re-
-            // send the request into the background-refusing v2 path.
-            this.backgroundShellAdmitted();
-          if (typeof args['command'] !== 'string' || !args['command'].trim()) {
-            validationError = 'Hosted Shell requires a nonempty command.';
-          } else if (unsupportedKey !== undefined) {
-            validationError = `Hosted Shell received unsupported argument ${JSON.stringify(unsupportedKey)}.`;
-          } else if (
-            backgroundIllFormed ||
-            (backgroundRequested && !backgroundAdmitted)
-          ) {
-            validationError =
-              'Hosted Shell requires a foreground command in the saved directory. Background jobs and Monitor are unavailable; correct the arguments before retrying.';
-          } else if (
-            args['description'] !== undefined &&
-            typeof args['description'] !== 'string'
-          ) {
-            validationError = 'Hosted Shell description must be a string.';
-          } else if (
-            args['timeout'] !== undefined &&
-            (!Number.isSafeInteger(args['timeout']) ||
-              (args['timeout'] as number) < 1 ||
-              (args['timeout'] as number) > 600000)
-          ) {
-            validationError =
-              'Hosted Shell timeout must be an integer from 1 to 600000 ms.';
-          }
+          const isShell = call.name === 'run_shell_command';
+          const skill =
+            mcpInput === undefined &&
+            call.name === 'skill' &&
+            this.skills !== undefined;
           if (
-            !backgroundAdmitted &&
-            this.publication &&
-            args['is_background'] !== undefined
+            (this.allowedToolNames !== undefined &&
+              !this.allowedToolNames.includes(call.name)) ||
+            (!declarations.some((tool) => tool.name === call.name) &&
+              !(skill && call.isClientInitiated)) ||
+            ids.has(call.callId) ||
+            // Refuse a call whose arguments arrived unterminated even when the
+            // output token limit was not what cut them: this profile commits to a
+            // remote Workspace with no undo backup, so a repaired partial
+            // `content` or half-streamed command line is unrecoverable.
+            call.wasOutputTruncated === true ||
+            call.hadIncompleteArguments === true
+          )
+            throw new Error('Hosted Workspace profile refused a tool call.');
+          ids.add(call.callId);
+          let validationError: string | undefined;
+          let input: Record<string, unknown>;
+          let backgroundAdmitted = false;
+          let monitorAdmitted = false;
+          let agentAdmitted = false;
+          let workflowAdmitted = false;
+          let agentBackground = true;
+          let messageAdmitted = false;
+          // b3b: on a member Session the board vocabulary is its command
+          // channel's, never the lead funnel's — the two never meet on one
+          // profile, but a name collision must route to the command arm.
+          // b3c decision 8: a member's send_message naming a member or
+          // "*" is the same kind of command; only "parent" stays H4d-b's.
+          const memberMessageCommand =
+            mcpInput === undefined &&
+            call.name === 'send_message' &&
+            this.sendMessageRole() === 'child' &&
+            this.memberPreamble === true &&
+            typeof call.args['to'] === 'string' &&
+            sanitizeName(call.args['to']) !== 'parent';
+          const command =
+            mcpInput === undefined &&
+            (this.commandToolNames.has(call.name) || memberMessageCommand);
+          const team =
+            !command &&
+            mcpInput === undefined &&
+            (HOSTED_TEAM_TOOL_NAMES.includes(call.name) ||
+              (call.name === 'team_plan_approval' &&
+                teamPlanAdmissionsEnabled()));
+          const planExit =
+            this.publicPlanMode && call.name === 'exit_plan_mode';
+          // H4e-b3 decision 9: a run whose first input carried an unescaped
+          // plan-mode preamble admits reads only; every other call is
+          // refused before it runs, ahead of any per-tool arm below.
+          if (
+            this.planning &&
+            !planExit &&
+            !HOSTED_PUBLIC_PLAN_READS.has(call.name)
           ) {
-            validationError = 'Hosted Shell requires one foreground command.';
-          }
-          validationError =
-            hostedShellInputError(call.name, args) ?? validationError;
-          input = backgroundAdmitted
-            ? { ...args, is_background: true }
-            : this.publication
-              ? { ...args }
-              : { ...args, is_background: false };
-        } else if (call.name === 'web_fetch') {
-          input = { ...call.args };
-          const args = call.args;
-          try {
-            const url =
-              typeof args['url'] === 'string'
-                ? new URL(args['url'])
-                : undefined;
-            if (
-              !url ||
-              url.protocol !== 'https:' ||
-              url.username ||
-              url.password ||
-              typeof args['url'] !== 'string' ||
-              !/^https:\/\//i.test(args['url']) ||
-              typeof args['prompt'] !== 'string' ||
-              !args['prompt'].trim() ||
-              (args['format'] !== undefined &&
-                !['auto', 'markdown', 'html', 'text'].includes(
-                  args['format'] as string,
-                )) ||
-              Object.keys(args).some(
-                (key) => !['url', 'prompt', 'format'].includes(key),
-              )
+            validationError = HOSTED_PUBLIC_PLAN_REFUSAL;
+            input = { ...call.args };
+          } else if (planExit) {
+            input = { ...call.args };
+            if (!this.planning)
+              validationError = 'Plan mode already ended for this Turn.';
+            else if (
+              source.length !== 1 ||
+              Object.keys(input).length !== 1 ||
+              typeof input['plan'] !== 'string' ||
+              !input['plan'].trim() ||
+              input['plan'].length > 24000
             )
-              throw new Error('Invalid web_fetch arguments.');
-            input['url'] = rewriteGitHubBlobUrl(url.toString());
-          } catch {
-            validationError =
-              'Hosted web_fetch requires a public HTTPS URL without credentials, a nonempty prompt, and optional format auto, markdown, html or text. Correct the arguments and retry.';
-          }
-        } else if (call.name === 'glob') {
-          input = { ...call.args };
-          const globError =
-            'Hosted glob requires a nonempty pattern, and its optional path must be relative to the saved Session working directory. Absolute paths and ".." traversal are not allowed. Correct the arguments and retry.';
-          const requestedPattern = call.args['pattern'];
-          const directory = call.args['path'];
-          // A pattern is a second search root: refuse the absolute/`..` and
-          // oversized shapes here, pre-acquisition, with the identical check
-          // the worker applies after dispatch — a refusal before acquisition
-          // stays model-correctable and costs no durable Runtime work
-          // (#13030). Validate the value that gets dispatched, never the raw
-          // one: glob treats an untrimmed pattern as a literal, so it matches
-          // nothing and the false negative is persisted.
-          const pattern =
-            typeof requestedPattern === 'string' ? requestedPattern.trim() : '';
-          const check = pattern ? checkHostedGlobPattern(pattern) : 'escapes';
-          if (check === 'too-complex') {
-            validationError = HOSTED_GLOB_TOO_COMPLEX;
-          } else if (check === 'escapes') {
-            validationError = globError;
-          } else {
-            input['pattern'] = pattern;
-          }
-          if (!validationError && directory !== undefined) {
+              validationError =
+                'Hosted exit_plan_mode requires a nonempty Markdown plan of at most 24000 characters and must be the only call in its batch.';
+          } else if (
+            this.memberPlanMode &&
+            !HOSTED_PLAN_MODE_READS.has(call.name) &&
+            !(
+              call.name === 'exit_plan_mode' &&
+              command &&
+              teamPlanAdmissionsEnabled()
+            )
+          ) {
+            validationError = hostedPlanModeRefusal();
+            input = { ...call.args };
+          } else if (mcpInput) {
+            input = { ...mcpInput.input };
+          } else if (skill) {
+            validationError = source.some((other) => other.name !== 'skill')
+              ? HOSTED_SKILL_BATCH_REFUSAL
+              : this.skills!.validationError(
+                  call.args,
+                  call.isClientInitiated ? 'user' : 'model',
+                );
+            input = { ...call.args };
+          } else if (isShell) {
+            const args = call.args;
+            const unsupportedKey = Object.keys(args).find(
+              (key) =>
+                ![
+                  'command',
+                  'timeout',
+                  'description',
+                  'is_background',
+                  'extension_context',
+                ].includes(key),
+            );
+            // H3: a background request is admitted exactly when this Session
+            // owns its child_run orchestrator and the domain is enabled — the
+            // deliberate refusals below keep their texts otherwise.
+            const backgroundRequested =
+              args['is_background'] === true ||
+              (typeof args['is_background'] === 'string' &&
+                args['is_background'].toLowerCase() === 'true');
+            const backgroundIllFormed =
+              !backgroundRequested &&
+              args['is_background'] !== undefined &&
+              args['is_background'] !== false &&
+              !(
+                typeof args['is_background'] === 'string' &&
+                args['is_background'].toLowerCase() === 'false'
+              );
+            backgroundAdmitted =
+              backgroundRequested &&
+              // The admitted family runs v3 only: a shell-mode turn has no
+              // publication to drive it, so admitting there would only re-
+              // send the request into the background-refusing v2 path.
+              this.backgroundShellAdmitted();
             if (
-              directory === null ||
-              (typeof directory === 'string' && directory.trim() === '')
+              typeof args['command'] !== 'string' ||
+              !args['command'].trim()
             ) {
-              // A blank or `null` path is the omitted case: the declaration
-              // marks it optional, and the executor maps a missing key to the
-              // Session root — refusing it as traversal would also poison every
-              // valid sibling call in the batch.
-              delete input['path'];
-            } else if (typeof directory !== 'string') {
+              validationError = 'Hosted Shell requires a nonempty command.';
+            } else if (unsupportedKey !== undefined) {
+              validationError = `Hosted Shell received unsupported argument ${JSON.stringify(unsupportedKey)}.`;
+            } else if (
+              backgroundIllFormed ||
+              (backgroundRequested && !backgroundAdmitted)
+            ) {
+              validationError =
+                'Hosted Shell requires a foreground command in the saved directory. Background jobs and Monitor are unavailable; correct the arguments before retrying.';
+            } else if (
+              args['description'] !== undefined &&
+              typeof args['description'] !== 'string'
+            ) {
+              validationError = 'Hosted Shell description must be a string.';
+            } else if (
+              args['timeout'] !== undefined &&
+              (!Number.isSafeInteger(args['timeout']) ||
+                (args['timeout'] as number) < 1 ||
+                (args['timeout'] as number) > 600000)
+            ) {
+              validationError =
+                'Hosted Shell timeout must be an integer from 1 to 600000 ms.';
+            }
+            if (
+              !backgroundAdmitted &&
+              this.publication &&
+              args['is_background'] !== undefined
+            ) {
+              validationError = 'Hosted Shell requires one foreground command.';
+            }
+            validationError =
+              hostedShellInputError(call.name, args) ?? validationError;
+            input = backgroundAdmitted
+              ? { ...args, is_background: true }
+              : this.publication
+                ? { ...args }
+                : { ...args, is_background: false };
+          } else if (call.name === 'web_fetch') {
+            input = { ...call.args };
+            const args = call.args;
+            try {
+              const url =
+                typeof args['url'] === 'string'
+                  ? new URL(args['url'])
+                  : undefined;
+              if (
+                !url ||
+                url.protocol !== 'https:' ||
+                url.username ||
+                url.password ||
+                typeof args['url'] !== 'string' ||
+                !/^https:\/\//i.test(args['url']) ||
+                typeof args['prompt'] !== 'string' ||
+                !args['prompt'].trim() ||
+                (args['format'] !== undefined &&
+                  !['auto', 'markdown', 'html', 'text'].includes(
+                    args['format'] as string,
+                  )) ||
+                Object.keys(args).some(
+                  (key) => !['url', 'prompt', 'format'].includes(key),
+                )
+              )
+                throw new Error('Invalid web_fetch arguments.');
+              input['url'] = rewriteGitHubBlobUrl(url.toString());
+            } catch {
+              validationError =
+                'Hosted web_fetch requires a public HTTPS URL without credentials, a nonempty prompt, and optional format auto, markdown, html or text. Correct the arguments and retry.';
+            }
+          } else if (call.name === 'glob') {
+            input = { ...call.args };
+            const globError =
+              'Hosted glob requires a nonempty pattern, and its optional path must be relative to the saved Session working directory. Absolute paths and ".." traversal are not allowed. Correct the arguments and retry.';
+            const requestedPattern = call.args['pattern'];
+            const directory = call.args['path'];
+            // A pattern is a second search root: refuse the absolute/`..` and
+            // oversized shapes here, pre-acquisition, with the identical check
+            // the worker applies after dispatch — a refusal before acquisition
+            // stays model-correctable and costs no durable Runtime work
+            // (#13030). Validate the value that gets dispatched, never the raw
+            // one: glob treats an untrimmed pattern as a literal, so it matches
+            // nothing and the false negative is persisted.
+            const pattern =
+              typeof requestedPattern === 'string'
+                ? requestedPattern.trim()
+                : '';
+            const check = pattern ? checkHostedGlobPattern(pattern) : 'escapes';
+            if (check === 'too-complex') {
+              validationError = HOSTED_GLOB_TOO_COMPLEX;
+            } else if (check === 'escapes') {
               validationError = globError;
             } else {
-              try {
-                input['path'] =
-                  directory.trim().startsWith('extension://') &&
-                  call.args['extension_source'] !== undefined
-                    ? directory.trim()
-                    : normalizeWorkspaceRelativePath(directory.trim());
-              } catch (cause) {
-                if (!(cause instanceof InvalidWorkspaceRelativePathError))
-                  throw cause;
+              input['pattern'] = pattern;
+            }
+            if (!validationError && directory !== undefined) {
+              if (
+                directory === null ||
+                (typeof directory === 'string' && directory.trim() === '')
+              ) {
+                // A blank or `null` path is the omitted case: the declaration
+                // marks it optional, and the executor maps a missing key to the
+                // Session root — refusing it as traversal would also poison every
+                // valid sibling call in the batch.
+                delete input['path'];
+              } else if (typeof directory !== 'string') {
                 validationError = globError;
+              } else {
+                try {
+                  input['path'] =
+                    directory.trim().startsWith('extension://') &&
+                    call.args['extension_source'] !== undefined
+                      ? directory.trim()
+                      : normalizeWorkspaceRelativePath(directory.trim());
+                } catch (cause) {
+                  if (!(cause instanceof InvalidWorkspaceRelativePathError))
+                    throw cause;
+                  validationError = globError;
+                }
               }
             }
-          }
-        } else if (call.name === 'todo_write') {
-          const check = checkHostedTodoWriteInput(call.args);
-          input = check.input;
-          if (check.error) validationError = check.error;
-        } else if (call.name === 'monitor') {
-          const args = call.args;
-          const unsupportedKey = Object.keys(args).find(
-            (key) =>
-              ![
-                'command',
-                'idle_timeout_ms',
-                'max_events',
-                'description',
-              ].includes(key),
-          );
-          // H3: a Monitor request is admitted exactly when this Session
-          // owns its monitor_run orchestrator and the detached family has
-          // its v3 flow — publication — without it the request refuses at
-          // admission rather than travelling v2 and never landing.
-          monitorAdmitted = this.monitorsAdmitted();
-          if (typeof args['command'] !== 'string' || !args['command'].trim()) {
-            validationError = 'Hosted Monitor requires a nonempty command.';
-          } else if (unsupportedKey !== undefined) {
-            validationError = `Hosted Monitor received unsupported argument ${JSON.stringify(unsupportedKey)}.`;
-          } else if (!monitorAdmitted) {
-            validationError =
-              'Hosted Monitor is unavailable on this Session profile; read output through the task surface instead.';
-          } else if (
-            args['description'] !== undefined &&
-            typeof args['description'] !== 'string'
-          ) {
-            validationError = 'Hosted Monitor description must be a string.';
-          } else if (
-            args['idle_timeout_ms'] !== undefined &&
-            (!Number.isSafeInteger(args['idle_timeout_ms']) ||
-              (args['idle_timeout_ms'] as number) < 1 ||
-              (args['idle_timeout_ms'] as number) > 600000)
-          ) {
-            validationError =
-              'Hosted Monitor idle_timeout_ms must be an integer from 1 to 600000 ms.';
-          } else if (
-            args['max_events'] !== undefined &&
-            (!Number.isSafeInteger(args['max_events']) ||
-              (args['max_events'] as number) < 1 ||
-              (args['max_events'] as number) > 10000)
-          ) {
-            validationError =
-              'Hosted Monitor max_events must be an integer from 1 to 10000.';
-          }
-          input = { ...args, is_monitor: true };
-        } else if (call.name === 'agent') {
-          const args = call.args;
-          const sharedExtensionWorkspace =
-            this.extensionChildCanShareWorkspace(call);
-          // The deliberate refusals below keep their texts whenever the
-          // Agent call is not admitted.
-          agentAdmitted = this.agentsAdmitted();
-          const teamsOn = this.teamsAdmitted();
-          const named = teamsOn && args['name'] !== undefined;
-          const unsupportedKey = Object.keys(args).find(
-            (key) =>
-              ![
-                'description',
-                'prompt',
-                'run_in_background',
-                ...(named ? ['name'] : []),
-                ...(named && teamPlanAdmissionsEnabled()
-                  ? ['plan_mode_required']
-                  : []),
-                'isolation',
-                ...(this.publicChildren && this.extensionAgents.length
-                  ? ['subagent_type']
-                  : []),
-              ].includes(key),
-          );
-          const backgroundValue = args['run_in_background'];
-          agentBackground = !(
-            backgroundValue === false ||
-            (typeof backgroundValue === 'string' &&
-              backgroundValue.toLowerCase() === 'false')
-          );
-          const backgroundIllFormed =
-            backgroundValue !== undefined &&
-            backgroundValue !== true &&
-            backgroundValue !== false &&
-            !(
-              typeof backgroundValue === 'string' &&
-              ['true', 'false'].includes(backgroundValue.toLowerCase())
+          } else if (call.name === 'todo_write') {
+            const check = checkHostedTodoWriteInput(call.args);
+            input = check.input;
+            if (check.error) validationError = check.error;
+          } else if (call.name === 'monitor') {
+            const args = call.args;
+            const unsupportedKey = Object.keys(args).find(
+              (key) =>
+                ![
+                  'command',
+                  'idle_timeout_ms',
+                  'max_events',
+                  'description',
+                ].includes(key),
             );
-          if (!agentAdmitted) {
-            validationError =
-              'Hosted child agents are unavailable on this Session profile; read work through ordinary tools instead.';
-          } else if (this.publicChildren && args['isolation'] !== undefined) {
-            validationError =
-              'Public child agents share this Workspace; isolation is unavailable.';
-          } else if (unsupportedKey !== undefined) {
-            validationError = `Hosted child agent received unsupported argument ${JSON.stringify(unsupportedKey)}. This profile runs only the Session's own definition, without nesting: fork_*, working_dir, ${teamsOn ? '' : 'name, '}model and subagent_type belong to the legacy Agent tool.`;
-          } else if (
-            args['subagent_type'] !== undefined &&
-            !this.extensionAgents.some(
-              (agent) => agent.name === args['subagent_type'],
-            )
-          ) {
-            validationError =
-              'Hosted extension agent is not in the active pinned configuration.';
-          } else if (
-            args['isolation'] !== undefined &&
-            args['isolation'] !== 'worktree' &&
-            args['isolation'] !== 'snapshot'
-          ) {
-            // `snapshot` passes here on every host, as `worktree` does, so a
-            // launch committed while the host served it still replays; a
-            // host that does not serve it refuses a new one at admission.
-            validationError = this.childSnapshots
-              ? 'Hosted child agent isolation must be "worktree", "snapshot" or omitted.'
-              : 'Hosted child agent isolation must be "worktree" or omitted.';
-          } else if (named && args['isolation'] === 'snapshot') {
-            // #13753 I3: a member trades messages with its leader, which a
-            // snapshot, with no message lane, can neither send nor take.
-            // The remedies name only the isolation this host serves.
-            validationError = `Hosted team member cannot run as a snapshot: a member exchanges messages with the team leader, which a read-only snapshot cannot. Launch the member ${this.childWorkspaces ? 'with isolation "worktree" or ' : ''}without isolation${this.childSnapshots ? ', or launch the snapshot without name' : ''}.`;
-          } else if (
-            args['plan_mode_required'] !== undefined &&
-            typeof args['plan_mode_required'] !== 'boolean'
-          ) {
-            validationError =
-              'Hosted child agent plan_mode_required must be a boolean.';
-          } else if (backgroundIllFormed) {
-            validationError =
-              'Hosted child agent run_in_background must be a boolean.';
-          } else if (named && !agentBackground) {
-            validationError =
-              'Hosted team member always runs in the background; omit run_in_background or set it to true.';
-          } else if (
-            !sharedExtensionWorkspace &&
-            this.sessionOwnerMayHoldMount()
-          ) {
-            validationError = `Hosted child agent is unavailable while ${HOSTED_CHILD_MOUNT_REFUSALS.sessionOwner}; a Session-owned hold releases only when the Session closes, so read the work through ordinary tools instead.`;
-          } else if (
-            !sharedExtensionWorkspace &&
-            !agentBackground &&
-            this.acquired
-          ) {
-            // A foreground child cannot borrow its waiting parent's mount.
-            // Ordered after the Session-owner arm: a Session-scoped mount
-            // outlives this Turn, so the background and fresh-turn advice
-            // here would not release it. Swapping the two arms hands a
-            // Session-owned hold advice that cannot act on it.
-            validationError = `Hosted child agent run_in_background=false is unavailable while ${HOSTED_CHILD_MOUNT_REFUSALS.turn}; run it in the background or let the current tool work finish first in a fresh turn.`;
-          } else if (
-            !sharedExtensionWorkspace &&
-            !agentBackground &&
-            calls.some(
-              (other) => other.name !== 'agent' && other.name !== 'workflow',
-            )
-          ) {
-            // The same one-batch candidacy: a sibling outside a child
-            // launch holds the mount for exactly the wait the foreground
-            // answer needs.
-            validationError =
-              'Hosted child agent run_in_background=false cannot share a batch with a tool other than agent or workflow; the sibling would hold the Workspace mount the child needs.';
-          } else if (
-            typeof args['description'] !== 'string' ||
-            !args['description'].trim() ||
-            Buffer.byteLength(args['description'], 'utf8') >
-              MANAGED_CHILD_LIMITS.maxDescriptionBytes
-          ) {
-            validationError = `Hosted child agent requires a nonempty description of at most ${MANAGED_CHILD_LIMITS.maxDescriptionBytes} bytes.`;
-          } else if (
-            typeof args['prompt'] !== 'string' ||
-            !args['prompt'].trim()
-          ) {
-            validationError = 'Hosted child agent requires a nonempty prompt.';
-          } else if (named) {
-            validationError = this.memberBatchError(call, source);
-          }
-          input = { ...args };
-        } else if (call.name === 'workflow') {
-          const args = call.args;
-          // #13803: the Workflow call answers the same admission shape as
-          // the Agent call, behind its own kind reader.
-          workflowAdmitted =
-            !this.publicChildren &&
-            this.childAgents !== undefined &&
-            (this.shell !== undefined || this.backgroundLane !== undefined) &&
-            this.childDepth === 0 &&
-            childWorkflowAdmissionsEnabled();
-          const unsupportedKey = Object.keys(args).find(
-            (key) => !['script', 'args', 'run_in_background'].includes(key),
-          );
-          const backgroundValue = args['run_in_background'];
-          agentBackground = !(
-            backgroundValue === false ||
-            (typeof backgroundValue === 'string' &&
-              backgroundValue.toLowerCase() === 'false')
-          );
-          const backgroundIllFormed =
-            backgroundValue !== undefined &&
-            backgroundValue !== true &&
-            backgroundValue !== false &&
-            !(
-              typeof backgroundValue === 'string' &&
-              ['true', 'false'].includes(backgroundValue.toLowerCase())
-            );
-          if (!workflowAdmitted) {
-            validationError =
-              'Hosted workflow children are unavailable on this Session profile; read work through ordinary tools instead.';
-          } else if (unsupportedKey !== undefined) {
-            validationError = `Hosted workflow received unsupported argument ${JSON.stringify(unsupportedKey)}. This profile runs a complete inline script only: name, scriptPath, resumeFromRunId and sourceRef belong to the legacy Workflow tool and its reference follow-up.`;
-          } else if (backgroundIllFormed) {
-            validationError =
-              'Hosted workflow run_in_background must be a boolean.';
-          } else if (this.sessionOwnerMayHoldMount()) {
-            validationError = `Hosted workflow is unavailable while ${HOSTED_CHILD_MOUNT_REFUSALS.sessionOwner}; a Session-owned hold releases only when the Session closes, so read the work through ordinary tools instead.`;
-          } else if (!agentBackground && this.acquired) {
-            validationError = `Hosted workflow run_in_background=false is unavailable while ${HOSTED_CHILD_MOUNT_REFUSALS.turn}; run it in the background or let the current tool work finish first in a fresh turn.`;
-          } else if (
-            !agentBackground &&
-            calls.some(
-              (other) => other.name !== 'agent' && other.name !== 'workflow',
-            )
-          ) {
-            validationError =
-              'Hosted workflow run_in_background=false cannot share a batch with a tool other than agent or workflow; the sibling would hold the Workspace mount the child needs.';
-          } else if (
-            typeof args['script'] !== 'string' ||
-            !args['script'].trim()
-          ) {
-            validationError = 'Hosted workflow requires a nonempty script.';
-          } else if (
-            Buffer.byteLength(args['script'], 'utf8') >
-            MANAGED_CHILD_LIMITS.maxEnvelopeBytes
-          ) {
-            // The byte bound consulted before any V8 work: the compile
-            // and the shape scan below would throw their results away.
-            validationError = `Hosted workflow script exceeds ${MANAGED_CHILD_LIMITS.maxEnvelopeBytes} bytes (byte_limit).`;
-          } else {
-            // An unstartable script is a model-correctable argument
-            // error, so it refuses here with the runner's own texts
-            // rather than wedging the child's first Turn on its compile:
-            // a failed child Session is the answer for a run that fails,
-            // never for one that could never start. The args value walks
-            // first: nesting the launch cannot commit refuses here — the
-            // model fixes the value and retries at no quota or slot spent.
-            const argsRefusal = workflowArgsRefusal(args['args']);
-            if (argsRefusal !== undefined) {
-              validationError = argsRefusal;
+            // H3: a Monitor request is admitted exactly when this Session
+            // owns its monitor_run orchestrator and the detached family has
+            // its v3 flow — publication — without it the request refuses at
+            // admission rather than travelling v2 and never landing.
+            monitorAdmitted = this.monitorsAdmitted();
+            if (
+              typeof args['command'] !== 'string' ||
+              !args['command'].trim()
+            ) {
+              validationError = 'Hosted Monitor requires a nonempty command.';
+            } else if (unsupportedKey !== undefined) {
+              validationError = `Hosted Monitor received unsupported argument ${JSON.stringify(unsupportedKey)}.`;
+            } else if (!monitorAdmitted) {
+              validationError =
+                'Hosted Monitor is unavailable on this Session profile; read output through the task surface instead.';
+            } else if (
+              args['description'] !== undefined &&
+              typeof args['description'] !== 'string'
+            ) {
+              validationError = 'Hosted Monitor description must be a string.';
+            } else if (
+              args['idle_timeout_ms'] !== undefined &&
+              (!Number.isSafeInteger(args['idle_timeout_ms']) ||
+                (args['idle_timeout_ms'] as number) < 1 ||
+                (args['idle_timeout_ms'] as number) > 600000)
+            ) {
+              validationError =
+                'Hosted Monitor idle_timeout_ms must be an integer from 1 to 600000 ms.';
+            } else if (
+              args['max_events'] !== undefined &&
+              (!Number.isSafeInteger(args['max_events']) ||
+                (args['max_events'] as number) < 1 ||
+                (args['max_events'] as number) > 10000)
+            ) {
+              validationError =
+                'Hosted Monitor max_events must be an integer from 1 to 10000.';
             }
-            if (validationError === undefined) {
-              const gate = workflowPreLaunchGate(args['script']);
-              if (gate.refusal !== undefined) {
-                validationError = `Hosted workflow script is invalid: ${gate.refusal.detail}`;
-              } else if (gate.shape.nestedWorkflowCalls.length > 0) {
-                // A nested launch resolves script bytes the pin never
-                // examined (a saved workflow from any tier). Refuse with
-                // the same model-correctable text the reference arguments
-                // carry, so the launched bytes stay exactly the pinned
-                // ones.
-                const extra = gate.shape.nestedWorkflowCalls.length - 1;
-                validationError = `Hosted workflow script is invalid: workflow() on line ${gate.shape.nestedWorkflowCalls[0]}${extra > 0 ? ` and ${extra} more` : ''} launches a nested run whose script this launch never pinned. This profile runs a complete inline script only: name, scriptPath, resumeFromRunId and sourceRef belong to the legacy Workflow tool and its reference follow-up.`;
-              } else if (gate.shape.hostBoundAgentOptions.length > 0) {
-                // The child refuses these at dispatch and fails the whole
-                // run; refusing here keeps the model's correction free of
-                // a spent launch slot (#13858 R4-4).
-                const [first] = gate.shape.hostBoundAgentOptions;
-                validationError = `Hosted workflow script is invalid: agent() on line ${first.line} passes ${first.option}. ${HOSTED_WORKFLOW_TEXT_ONLY_AGENTS}`;
+            input = { ...args, is_monitor: true };
+          } else if (call.name === 'agent') {
+            const args = call.args;
+            const sharedExtensionWorkspace =
+              this.extensionChildCanShareWorkspace(call);
+            // The deliberate refusals below keep their texts whenever the
+            // Agent call is not admitted.
+            agentAdmitted = this.agentsAdmitted();
+            const teamsOn = this.teamsAdmitted();
+            const named = teamsOn && args['name'] !== undefined;
+            const unsupportedKey = Object.keys(args).find(
+              (key) =>
+                ![
+                  'description',
+                  'prompt',
+                  'run_in_background',
+                  ...(named ? ['name'] : []),
+                  ...(named && teamPlanAdmissionsEnabled()
+                    ? ['plan_mode_required']
+                    : []),
+                  'isolation',
+                  ...(this.publicChildren && this.extensionAgents.length
+                    ? ['subagent_type']
+                    : []),
+                ].includes(key),
+            );
+            const backgroundValue = args['run_in_background'];
+            agentBackground = !(
+              backgroundValue === false ||
+              (typeof backgroundValue === 'string' &&
+                backgroundValue.toLowerCase() === 'false')
+            );
+            const backgroundIllFormed =
+              backgroundValue !== undefined &&
+              backgroundValue !== true &&
+              backgroundValue !== false &&
+              !(
+                typeof backgroundValue === 'string' &&
+                ['true', 'false'].includes(backgroundValue.toLowerCase())
+              );
+            if (!agentAdmitted) {
+              validationError =
+                'Hosted child agents are unavailable on this Session profile; read work through ordinary tools instead.';
+            } else if (this.publicChildren && args['isolation'] !== undefined) {
+              validationError =
+                'Public child agents share this Workspace; isolation is unavailable.';
+            } else if (unsupportedKey !== undefined) {
+              validationError = `Hosted child agent received unsupported argument ${JSON.stringify(unsupportedKey)}. This profile runs only the Session's own definition, without nesting: fork_*, working_dir, ${teamsOn ? '' : 'name, '}model and subagent_type belong to the legacy Agent tool.`;
+            } else if (
+              args['subagent_type'] !== undefined &&
+              !this.extensionAgents.some(
+                (agent) => agent.name === args['subagent_type'],
+              )
+            ) {
+              validationError =
+                'Hosted extension agent is not in the active pinned configuration.';
+            } else if (
+              args['isolation'] !== undefined &&
+              args['isolation'] !== 'worktree' &&
+              args['isolation'] !== 'snapshot'
+            ) {
+              // `snapshot` passes here on every host, as `worktree` does, so a
+              // launch committed while the host served it still replays; a
+              // host that does not serve it refuses a new one at admission.
+              validationError = this.childSnapshots
+                ? 'Hosted child agent isolation must be "worktree", "snapshot" or omitted.'
+                : 'Hosted child agent isolation must be "worktree" or omitted.';
+            } else if (named && args['isolation'] === 'snapshot') {
+              // #13753 I3: a member trades messages with its leader, which a
+              // snapshot, with no message lane, can neither send nor take.
+              // The remedies name only the isolation this host serves.
+              validationError = `Hosted team member cannot run as a snapshot: a member exchanges messages with the team leader, which a read-only snapshot cannot. Launch the member ${this.childWorkspaces ? 'with isolation "worktree" or ' : ''}without isolation${this.childSnapshots ? ', or launch the snapshot without name' : ''}.`;
+            } else if (
+              args['plan_mode_required'] !== undefined &&
+              typeof args['plan_mode_required'] !== 'boolean'
+            ) {
+              validationError =
+                'Hosted child agent plan_mode_required must be a boolean.';
+            } else if (backgroundIllFormed) {
+              validationError =
+                'Hosted child agent run_in_background must be a boolean.';
+            } else if (named && !agentBackground) {
+              validationError =
+                'Hosted team member always runs in the background; omit run_in_background or set it to true.';
+            } else if (
+              !sharedExtensionWorkspace &&
+              (await this.sessionOwnerMayHoldMount())
+            ) {
+              validationError = `Hosted child agent is unavailable while ${HOSTED_CHILD_MOUNT_REFUSALS.sessionOwner}; a Session-owned hold releases only when the Session closes, so read the work through ordinary tools instead.`;
+            } else if (
+              !sharedExtensionWorkspace &&
+              !agentBackground &&
+              this.acquired
+            ) {
+              // A foreground child cannot borrow its waiting parent's mount.
+              // Ordered after the Session-owner arm: a Session-scoped mount
+              // outlives this Turn, so the background and fresh-turn advice
+              // here would not release it. Swapping the two arms hands a
+              // Session-owned hold advice that cannot act on it.
+              validationError = `Hosted child agent run_in_background=false is unavailable while ${HOSTED_CHILD_MOUNT_REFUSALS.turn}; run it in the background or let the current tool work finish first in a fresh turn.`;
+            } else if (
+              !sharedExtensionWorkspace &&
+              !agentBackground &&
+              calls.some(
+                (other) => other.name !== 'agent' && other.name !== 'workflow',
+              )
+            ) {
+              // The same one-batch candidacy: a sibling outside a child
+              // launch holds the mount for exactly the wait the foreground
+              // answer needs.
+              validationError =
+                'Hosted child agent run_in_background=false cannot share a batch with a tool other than agent or workflow; the sibling would hold the Workspace mount the child needs.';
+            } else if (
+              typeof args['description'] !== 'string' ||
+              !args['description'].trim() ||
+              Buffer.byteLength(args['description'], 'utf8') >
+                MANAGED_CHILD_LIMITS.maxDescriptionBytes
+            ) {
+              validationError = `Hosted child agent requires a nonempty description of at most ${MANAGED_CHILD_LIMITS.maxDescriptionBytes} bytes.`;
+            } else if (
+              typeof args['prompt'] !== 'string' ||
+              !args['prompt'].trim()
+            ) {
+              validationError =
+                'Hosted child agent requires a nonempty prompt.';
+            } else if (named) {
+              validationError = this.memberBatchError(call, source);
+            }
+            input = { ...args };
+          } else if (call.name === 'workflow') {
+            const args = call.args;
+            // #13803: the Workflow call answers the same admission shape as
+            // the Agent call, behind its own kind reader.
+            workflowAdmitted =
+              !this.publicChildren &&
+              this.childAgents !== undefined &&
+              (this.shell !== undefined || this.backgroundLane !== undefined) &&
+              this.childDepth === 0 &&
+              childWorkflowAdmissionsEnabled();
+            const unsupportedKey = Object.keys(args).find(
+              (key) => !['script', 'args', 'run_in_background'].includes(key),
+            );
+            const backgroundValue = args['run_in_background'];
+            agentBackground = !(
+              backgroundValue === false ||
+              (typeof backgroundValue === 'string' &&
+                backgroundValue.toLowerCase() === 'false')
+            );
+            const backgroundIllFormed =
+              backgroundValue !== undefined &&
+              backgroundValue !== true &&
+              backgroundValue !== false &&
+              !(
+                typeof backgroundValue === 'string' &&
+                ['true', 'false'].includes(backgroundValue.toLowerCase())
+              );
+            if (!workflowAdmitted) {
+              validationError =
+                'Hosted workflow children are unavailable on this Session profile; read work through ordinary tools instead.';
+            } else if (unsupportedKey !== undefined) {
+              validationError = `Hosted workflow received unsupported argument ${JSON.stringify(unsupportedKey)}. This profile runs a complete inline script only: name, scriptPath, resumeFromRunId and sourceRef belong to the legacy Workflow tool and its reference follow-up.`;
+            } else if (backgroundIllFormed) {
+              validationError =
+                'Hosted workflow run_in_background must be a boolean.';
+            } else if (await this.sessionOwnerMayHoldMount()) {
+              validationError = `Hosted workflow is unavailable while ${HOSTED_CHILD_MOUNT_REFUSALS.sessionOwner}; a Session-owned hold releases only when the Session closes, so read the work through ordinary tools instead.`;
+            } else if (!agentBackground && this.acquired) {
+              validationError = `Hosted workflow run_in_background=false is unavailable while ${HOSTED_CHILD_MOUNT_REFUSALS.turn}; run it in the background or let the current tool work finish first in a fresh turn.`;
+            } else if (
+              !agentBackground &&
+              calls.some(
+                (other) => other.name !== 'agent' && other.name !== 'workflow',
+              )
+            ) {
+              validationError =
+                'Hosted workflow run_in_background=false cannot share a batch with a tool other than agent or workflow; the sibling would hold the Workspace mount the child needs.';
+            } else if (
+              typeof args['script'] !== 'string' ||
+              !args['script'].trim()
+            ) {
+              validationError = 'Hosted workflow requires a nonempty script.';
+            } else if (
+              Buffer.byteLength(args['script'], 'utf8') >
+              MANAGED_CHILD_LIMITS.maxEnvelopeBytes
+            ) {
+              // The byte bound consulted before any V8 work: the compile
+              // and the shape scan below would throw their results away.
+              validationError = `Hosted workflow script exceeds ${MANAGED_CHILD_LIMITS.maxEnvelopeBytes} bytes (byte_limit).`;
+            } else {
+              // An unstartable script is a model-correctable argument
+              // error, so it refuses here with the runner's own texts
+              // rather than wedging the child's first Turn on its compile:
+              // a failed child Session is the answer for a run that fails,
+              // never for one that could never start. The args value walks
+              // first: nesting the launch cannot commit refuses here — the
+              // model fixes the value and retries at no quota or slot spent.
+              const argsRefusal = workflowArgsRefusal(args['args']);
+              if (argsRefusal !== undefined) {
+                validationError = argsRefusal;
+              }
+              if (validationError === undefined) {
+                const gate = workflowPreLaunchGate(args['script']);
+                if (gate.refusal !== undefined) {
+                  validationError = `Hosted workflow script is invalid: ${gate.refusal.detail}`;
+                } else if (gate.shape.nestedWorkflowCalls.length > 0) {
+                  // A nested launch resolves script bytes the pin never
+                  // examined (a saved workflow from any tier). Refuse with
+                  // the same model-correctable text the reference arguments
+                  // carry, so the launched bytes stay exactly the pinned
+                  // ones.
+                  const extra = gate.shape.nestedWorkflowCalls.length - 1;
+                  validationError = `Hosted workflow script is invalid: workflow() on line ${gate.shape.nestedWorkflowCalls[0]}${extra > 0 ? ` and ${extra} more` : ''} launches a nested run whose script this launch never pinned. This profile runs a complete inline script only: name, scriptPath, resumeFromRunId and sourceRef belong to the legacy Workflow tool and its reference follow-up.`;
+                } else if (gate.shape.hostBoundAgentOptions.length > 0) {
+                  // The child refuses these at dispatch and fails the whole
+                  // run; refusing here keeps the model's correction free of
+                  // a spent launch slot (#13858 R4-4).
+                  const [first] = gate.shape.hostBoundAgentOptions;
+                  validationError = `Hosted workflow script is invalid: agent() on line ${first.line} passes ${first.option}. ${HOSTED_WORKFLOW_TEXT_ONLY_AGENTS}`;
+                }
               }
             }
-          }
-          input = { ...args };
-        } else if (call.name === 'send_message') {
-          const args = call.args;
-          const role = this.sendMessageRole();
-          // b3c: a member message is a command to the leader, never
-          // H4d-b's plain message.
-          messageAdmitted = role !== undefined && !memberMessageCommand;
-          // H4e-b2: beside the team tools, the lead also addresses a member
-          // by name, or every member with "*".
-          const teamForm = role === 'parent' && this.teamsAdmitted();
-          const keys =
-            role === 'child'
-              ? ['to', 'message']
-              : teamForm
-                ? ['to', 'task_id', 'message']
-                : ['task_id', 'message'];
-          const unsupportedKey = Object.keys(args).find(
-            (key) => !keys.includes(key),
-          );
-          const text = args['message'];
-          if (role === undefined) {
-            validationError =
-              'Hosted session messages are unavailable on this Session profile.';
-          } else if (unsupportedKey !== undefined) {
-            validationError =
+            input = { ...args };
+          } else if (call.name === 'send_message') {
+            const args = call.args;
+            const role = this.sendMessageRole();
+            // b3c: a member message is a command to the leader, never
+            // H4d-b's plain message.
+            messageAdmitted = role !== undefined && !memberMessageCommand;
+            // H4e-b2: beside the team tools, the lead also addresses a member
+            // by name, or every member with "*".
+            const teamForm = role === 'parent' && this.teamsAdmitted();
+            const keys =
               role === 'child'
-                ? this.memberPreamble === true
-                  ? `Hosted send_message received unsupported argument ${JSON.stringify(unsupportedKey)}. A member send_message takes only a member's to: "parent", a member name, or "*" — pass to and message.`
-                  : `Hosted send_message received unsupported argument ${JSON.stringify(unsupportedKey)}. A child Session messages only its parent: pass to "parent" and message.`
+                ? ['to', 'message']
                 : teamForm
-                  ? `Hosted send_message received unsupported argument ${JSON.stringify(unsupportedKey)}. Pass to (a member name, or "*" for every member) or task_id, and message; other Sessions belong to the legacy tool.`
-                  : `Hosted send_message received unsupported argument ${JSON.stringify(unsupportedKey)}. This Session messages only the child agents it launched: pass task_id and message; teams and other Sessions belong to the legacy tool.`;
-          } else if (
-            role === 'child' &&
-            this.memberPreamble !== true &&
-            args['to'] !== 'parent'
-          ) {
-            validationError =
-              'Hosted send_message from a child Session addresses only to "parent".';
-          } else if (role === 'child' && this.memberPreamble === true) {
-            // b3c decision 8: a member names "parent", another member, or
-            // "*". Member-addressed sends are commands to the leader; the
-            // local refusals answer before anything is sent.
-            const addressed =
-              typeof args['to'] === 'string' ? args['to'].trim() : '';
-            if (addressed === '') {
+                  ? ['to', 'task_id', 'message']
+                  : ['task_id', 'message'];
+            const unsupportedKey = Object.keys(args).find(
+              (key) => !keys.includes(key),
+            );
+            const text = args['message'];
+            if (role === undefined) {
               validationError =
-                'Hosted send_message requires "to": "parent" for the team leader, a member name, or "*" for every other member.';
-            } else if (memberMessageCommand && this.memberPlanMode) {
-              validationError = hostedPlanModeRefusal();
+                'Hosted session messages are unavailable on this Session profile.';
+            } else if (unsupportedKey !== undefined) {
+              validationError =
+                role === 'child'
+                  ? this.memberPreamble === true
+                    ? `Hosted send_message received unsupported argument ${JSON.stringify(unsupportedKey)}. A member send_message takes only a member's to: "parent", a member name, or "*" — pass to and message.`
+                    : `Hosted send_message received unsupported argument ${JSON.stringify(unsupportedKey)}. A child Session messages only its parent: pass to "parent" and message.`
+                  : teamForm
+                    ? `Hosted send_message received unsupported argument ${JSON.stringify(unsupportedKey)}. Pass to (a member name, or "*" for every member) or task_id, and message; other Sessions belong to the legacy tool.`
+                    : `Hosted send_message received unsupported argument ${JSON.stringify(unsupportedKey)}. This Session messages only the child agents it launched: pass task_id and message; teams and other Sessions belong to the legacy tool.`;
             } else if (
-              memberMessageCommand &&
-              this.memberIdentity?.name !== undefined &&
-              sanitizeName(addressed) === this.memberIdentity.name
-            ) {
-              validationError = `A member cannot send a message to itself ("${this.memberIdentity.name}").`;
-            } else if (
-              memberMessageCommand &&
-              sanitizeName(addressed) === MANAGED_TEAM_LEADER
+              role === 'child' &&
+              this.memberPreamble !== true &&
+              args['to'] !== 'parent'
             ) {
               validationError =
-                'A member messages its leader with send_message with to "parent", not "leader".';
+                'Hosted send_message from a child Session addresses only to "parent".';
+            } else if (role === 'child' && this.memberPreamble === true) {
+              // b3c decision 8: a member names "parent", another member, or
+              // "*". Member-addressed sends are commands to the leader; the
+              // local refusals answer before anything is sent.
+              const addressed =
+                typeof args['to'] === 'string' ? args['to'].trim() : '';
+              if (addressed === '') {
+                validationError =
+                  'Hosted send_message requires "to": "parent" for the team leader, a member name, or "*" for every other member.';
+              } else if (memberMessageCommand && this.memberPlanMode) {
+                validationError = hostedPlanModeRefusal();
+              } else if (
+                memberMessageCommand &&
+                this.memberIdentity?.name !== undefined &&
+                sanitizeName(addressed) === this.memberIdentity.name
+              ) {
+                validationError = `A member cannot send a message to itself ("${this.memberIdentity.name}").`;
+              } else if (
+                memberMessageCommand &&
+                sanitizeName(addressed) === MANAGED_TEAM_LEADER
+              ) {
+                validationError =
+                  'A member messages its leader with send_message with to "parent", not "leader".';
+              } else if (typeof text !== 'string' || !text.trim()) {
+                validationError =
+                  'Hosted send_message requires a nonempty message.';
+              } else if (
+                !memberMessageCommand &&
+                Buffer.byteLength(text, 'utf8') >
+                  MANAGED_SESSION_MESSAGE_LIMITS.maxContentBytes
+              ) {
+                validationError = `Hosted send_message message exceeds ${MANAGED_SESSION_MESSAGE_LIMITS.maxContentBytes} bytes.`;
+              } else if (
+                memberMessageCommand &&
+                Buffer.byteLength(
+                  memberMessageContent(
+                    this.memberIdentity?.name ?? '',
+                    text as string,
+                  ),
+                  'utf8',
+                ) > MANAGED_CHILD_LIMITS.maxEnvelopeBytes
+              ) {
+                validationError = `Hosted send_message message is too long for a member message (byte_limit): with its wrapper it must fit ${MANAGED_CHILD_LIMITS.maxEnvelopeBytes} bytes.`;
+              } else if (
+                memberMessageCommand &&
+                source.some(
+                  (other) =>
+                    other !== call &&
+                    !this.commandToolNames.has(other.name) &&
+                    other.name !== 'send_message',
+                )
+              ) {
+                validationError =
+                  'Hosted send_message to a member cannot share a batch with Workspace or Runtime calls; a command parks the Turn while the leader answers, so run it in its own batch or beside the member board commands.';
+              }
+            } else if (
+              teamForm &&
+              (args['to'] === undefined) === (args['task_id'] === undefined)
+            ) {
+              validationError =
+                'Hosted send_message takes exactly one of to (a member name, or "*" for every member) and task_id.';
+            } else if (
+              teamForm &&
+              args['to'] !== undefined &&
+              (typeof args['to'] !== 'string' || !args['to'].trim())
+            ) {
+              validationError =
+                'Hosted send_message "to" must be a member name, or "*" for every member.';
+            } else if (
+              teamForm &&
+              isBroadcast(args['to']) &&
+              source.some(
+                (other) =>
+                  other !== call &&
+                  (other.name === 'team_create' ||
+                    other.name === 'team_delete' ||
+                    (other.name === 'agent' &&
+                      other.args['name'] !== undefined)),
+              )
+            ) {
+              // A re-driven batch then reads the roster the broadcast read.
+              validationError =
+                'Hosted send_message to "*" cannot share a batch with team_create, team_delete or a member launch; let the roster change land first.';
+            } else if (
+              role === 'parent' &&
+              args['to'] === undefined &&
+              (typeof args['task_id'] !== 'string' || !args['task_id'].trim())
+            ) {
+              validationError =
+                'Hosted send_message requires the task_id a child agent launch returned.';
             } else if (typeof text !== 'string' || !text.trim()) {
               validationError =
                 'Hosted send_message requires a nonempty message.';
             } else if (
-              !memberMessageCommand &&
               Buffer.byteLength(text, 'utf8') >
-                MANAGED_SESSION_MESSAGE_LIMITS.maxContentBytes
+              MANAGED_SESSION_MESSAGE_LIMITS.maxContentBytes
             ) {
               validationError = `Hosted send_message message exceeds ${MANAGED_SESSION_MESSAGE_LIMITS.maxContentBytes} bytes.`;
-            } else if (
-              memberMessageCommand &&
-              Buffer.byteLength(
-                memberMessageContent(
-                  this.memberIdentity?.name ?? '',
-                  text as string,
-                ),
-                'utf8',
-              ) > MANAGED_CHILD_LIMITS.maxEnvelopeBytes
-            ) {
-              validationError = `Hosted send_message message is too long for a member message (byte_limit): with its wrapper it must fit ${MANAGED_CHILD_LIMITS.maxEnvelopeBytes} bytes.`;
-            } else if (
-              memberMessageCommand &&
-              source.some(
-                (other) =>
-                  other !== call &&
-                  !this.commandToolNames.has(other.name) &&
-                  other.name !== 'send_message',
-              )
-            ) {
-              validationError =
-                'Hosted send_message to a member cannot share a batch with Workspace or Runtime calls; a command parks the Turn while the leader answers, so run it in its own batch or beside the member board commands.';
             }
-          } else if (
-            teamForm &&
-            (args['to'] === undefined) === (args['task_id'] === undefined)
-          ) {
-            validationError =
-              'Hosted send_message takes exactly one of to (a member name, or "*" for every member) and task_id.';
-          } else if (
-            teamForm &&
-            args['to'] !== undefined &&
-            (typeof args['to'] !== 'string' || !args['to'].trim())
-          ) {
-            validationError =
-              'Hosted send_message "to" must be a member name, or "*" for every member.';
-          } else if (
-            teamForm &&
-            isBroadcast(args['to']) &&
-            source.some(
-              (other) =>
-                other !== call &&
-                (other.name === 'team_create' ||
-                  other.name === 'team_delete' ||
-                  (other.name === 'agent' && other.args['name'] !== undefined)),
-            )
-          ) {
-            // A re-driven batch then reads the roster the broadcast read.
-            validationError =
-              'Hosted send_message to "*" cannot share a batch with team_create, team_delete or a member launch; let the roster change land first.';
-          } else if (
-            role === 'parent' &&
-            args['to'] === undefined &&
-            (typeof args['task_id'] !== 'string' || !args['task_id'].trim())
-          ) {
-            validationError =
-              'Hosted send_message requires the task_id a child agent launch returned.';
-          } else if (typeof text !== 'string' || !text.trim()) {
-            validationError =
-              'Hosted send_message requires a nonempty message.';
-          } else if (
-            Buffer.byteLength(text, 'utf8') >
-            MANAGED_SESSION_MESSAGE_LIMITS.maxContentBytes
-          ) {
-            validationError = `Hosted send_message message exceeds ${MANAGED_SESSION_MESSAGE_LIMITS.maxContentBytes} bytes.`;
-          }
-          input =
-            teamForm || memberMessageCommand
-              ? hostedTeamMessageInput(args)
-              : { ...args };
-        } else if (command) {
-          validationError = this.commandArgumentError(call, source);
-          input = { ...call.args };
-        } else if (team) {
-          validationError = hostedTeamArgumentError(call.name, call.args);
-          input = { ...call.args };
-        } else {
-          const file = call.args['file_path'];
-          input = { ...call.args };
-          const filePathError =
-            'Hosted file tools require file_path relative to the saved Session working directory. Absolute paths and ".." traversal are not allowed. Correct file_path and retry.';
-          if (typeof file !== 'string') {
-            validationError = filePathError;
+            input =
+              teamForm || memberMessageCommand
+                ? hostedTeamMessageInput(args)
+                : { ...args };
+          } else if (command) {
+            validationError = this.commandArgumentError(call, source);
+            input = { ...call.args };
+          } else if (team) {
+            validationError = hostedTeamArgumentError(call.name, call.args);
+            input = { ...call.args };
           } else {
-            try {
-              input['file_path'] =
-                file.trim().startsWith('extension://') &&
-                call.args['extension_source'] !== undefined
-                  ? file.trim()
-                  : normalizeWorkspaceRelativePath(file.trim());
-            } catch (cause) {
-              if (!(cause instanceof InvalidWorkspaceRelativePathError))
-                throw cause;
+            const file = call.args['file_path'];
+            input = { ...call.args };
+            const filePathError =
+              'Hosted file tools require file_path relative to the saved Session working directory. Absolute paths and ".." traversal are not allowed. Correct file_path and retry.';
+            if (typeof file !== 'string') {
               validationError = filePathError;
+            } else {
+              try {
+                input['file_path'] =
+                  file.trim().startsWith('extension://') &&
+                  call.args['extension_source'] !== undefined
+                    ? file.trim()
+                    : normalizeWorkspaceRelativePath(file.trim());
+              } catch (cause) {
+                if (!(cause instanceof InvalidWorkspaceRelativePathError))
+                  throw cause;
+                validationError = filePathError;
+              }
             }
           }
-        }
-        try {
-          input = extensionToolInput(
-            this.session.authority.sessionHeader.sessionKey.sessionId,
-            this.extensionConfig,
-            call.name,
+          try {
+            input = extensionToolInput(
+              this.session.authority.sessionHeader.sessionKey.sessionId,
+              this.extensionConfig,
+              call.name,
+              input,
+            );
+          } catch (cause) {
+            validationError ??=
+              cause instanceof Error
+                ? cause.message
+                : 'Extension tool context was refused.';
+          }
+          // The inline Session Store limit keeps rejecting exactly as main
+          // does for the ordinary tools. A call that already carries its own
+          // refusal never reads its encoding. Workflow launches and messages
+          // are this profile's own surfaces: the limit becomes the call's
+          // refusal, never a failure of the whole Turn (review D1/R2-12).
+          let encoded: HostedEncodedToolInput;
+          try {
+            encoded = this.encodeToolInput(
+              mcpInput ?? { toolName: call.name, input },
+            );
+          } catch (cause) {
+            if (
+              !(cause instanceof HostedToolInputInlineLimitError) ||
+              (validationError === undefined &&
+                call.name !== 'workflow' &&
+                call.name !== 'send_message' &&
+                !hookInputs)
+            )
+              throw cause;
+            validationError ??=
+              call.name === 'send_message' && memberMessageCommand
+                ? `Hosted send_message to a member exceeds the ${HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes}-byte inline Session Store limit once encoded (byte_limit) although it fits the ${MANAGED_CHILD_LIMITS.maxEnvelopeBytes}-byte member wrapper; shorten escape-dense content and retry.`
+                : call.name === 'send_message'
+                  ? `Hosted send_message exceeds the ${HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes}-byte inline Session Store limit once encoded (byte_limit); shorten the message or other arguments and retry.`
+                  : call.name === 'workflow'
+                    ? `Hosted workflow script and args exceed the ${HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes}-byte inline Session Store limit once encoded (byte_limit); shorten them and retry.`
+                    : `Hosted tool input exceeds the ${HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes}-byte inline Session Store limit once encoded (byte_limit).`;
+            encoded = UNENCODED_TOOL_INPUT;
+          }
+          // H3: the publication evidence chain pins the canonical input
+          // digest for Monitor calls exactly like Shell calls.
+          let argsDigest: string | undefined;
+          let inputDigest: string | undefined;
+          try {
+            inputDigest =
+              isShell || call.name === 'monitor'
+                ? managedToolDigest(input)
+                : undefined;
+            argsDigest = `sha256:${managedToolDigest(input)}`;
+          } catch (cause) {
+            if (!(cause instanceof ManagedToolProtocolError)) throw cause;
+            // An arm's own, more specific refusal of the same input stands.
+            validationError ??= `Hosted tool input cannot commit as protocol evidence: ${cause.message}`;
+          }
+          return {
+            call,
+            validationError,
             input,
-          );
-        } catch (cause) {
-          validationError ??=
-            cause instanceof Error
-              ? cause.message
-              : 'Extension tool context was refused.';
-        }
-        // The inline Session Store limit keeps rejecting exactly as main
-        // does for the ordinary tools. A call that already carries its own
-        // refusal never reads its encoding. Workflow launches and messages
-        // are this profile's own surfaces: the limit becomes the call's
-        // refusal, never a failure of the whole Turn (review D1/R2-12).
-        let encoded: HostedEncodedToolInput;
-        try {
-          encoded = this.encodeToolInput(
-            mcpInput ?? { toolName: call.name, input },
-          );
-        } catch (cause) {
-          if (
-            !(cause instanceof HostedToolInputInlineLimitError) ||
-            (validationError === undefined &&
-              call.name !== 'workflow' &&
-              call.name !== 'send_message' &&
-              !hookInputs)
-          )
-            throw cause;
-          validationError ??=
-            call.name === 'send_message' && memberMessageCommand
-              ? `Hosted send_message to a member exceeds the ${HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes}-byte inline Session Store limit once encoded (byte_limit) although it fits the ${MANAGED_CHILD_LIMITS.maxEnvelopeBytes}-byte member wrapper; shorten escape-dense content and retry.`
-              : call.name === 'send_message'
-                ? `Hosted send_message exceeds the ${HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes}-byte inline Session Store limit once encoded (byte_limit); shorten the message or other arguments and retry.`
-                : call.name === 'workflow'
-                  ? `Hosted workflow script and args exceed the ${HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes}-byte inline Session Store limit once encoded (byte_limit); shorten them and retry.`
-                  : `Hosted tool input exceeds the ${HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes}-byte inline Session Store limit once encoded (byte_limit).`;
-          encoded = UNENCODED_TOOL_INPUT;
-        }
-        // H3: the publication evidence chain pins the canonical input
-        // digest for Monitor calls exactly like Shell calls.
-        let argsDigest: string | undefined;
-        let inputDigest: string | undefined;
-        try {
-          inputDigest =
-            isShell || call.name === 'monitor'
-              ? managedToolDigest(input)
-              : undefined;
-          argsDigest = `sha256:${managedToolDigest(input)}`;
-        } catch (cause) {
-          if (!(cause instanceof ManagedToolProtocolError)) throw cause;
-          // An arm's own, more specific refusal of the same input stands.
-          validationError ??= `Hosted tool input cannot commit as protocol evidence: ${cause.message}`;
-        }
-        return {
-          call,
-          validationError,
-          input,
-          isShell,
-          inputDigest,
-          mcp: mcpInput !== undefined,
-          ...encoded,
-          argsDigest,
-          publicationId:
-            (isShell || (call.name === 'monitor' && monitorAdmitted)) &&
-            this.publication
-              ? randomUUID()
-              : null,
-          runtimeCallId,
-          background: mcpInput === undefined && backgroundAdmitted,
-          monitoring: mcpInput === undefined && monitorAdmitted,
-          agent: mcpInput === undefined && agentAdmitted,
-          workflow: mcpInput === undefined && workflowAdmitted,
-          agentBackground,
-          message:
-            mcpInput === undefined && messageAdmitted && !memberMessageCommand,
-          team,
-          command,
-          skill,
-          planExit,
-          todo: call.name === 'todo_write',
-        };
-      });
+            isShell,
+            inputDigest,
+            mcp: mcpInput !== undefined,
+            ...encoded,
+            argsDigest,
+            publicationId:
+              (isShell || (call.name === 'monitor' && monitorAdmitted)) &&
+              this.publication
+                ? randomUUID()
+                : null,
+            runtimeCallId,
+            background: mcpInput === undefined && backgroundAdmitted,
+            monitoring: mcpInput === undefined && monitorAdmitted,
+            agent: mcpInput === undefined && agentAdmitted,
+            workflow: mcpInput === undefined && workflowAdmitted,
+            agentBackground,
+            message:
+              mcpInput === undefined &&
+              messageAdmitted &&
+              !memberMessageCommand,
+            team,
+            command,
+            skill,
+            planExit,
+            todo: call.name === 'todo_write',
+          };
+        }),
+      );
     };
     const skillOrigin = calls.every(
       (call) => call.name === 'skill' && call.isClientInitiated,
@@ -4623,7 +4688,7 @@ export class HostedWorkspaceToolTurn {
     }
     if (unicodeErrors.some((error) => error !== undefined)) {
       // Profile, duplicate-id and truncated-input hard refusals still win.
-      const requests = prepareRequests(calls);
+      const requests = await prepareRequests(calls);
       return this.refuseBatch(
         calls,
         requests.map(
@@ -4634,7 +4699,7 @@ export class HostedWorkspaceToolTurn {
         skillOrigin,
       );
     }
-    let requests = restored?.requests ?? prepareRequests(calls);
+    let requests = restored?.requests ?? (await prepareRequests(calls));
     if (!this.messageFitsInline('assistant', parts, model))
       throw new Error(
         'Hosted assistant record exceeds the inline Session Store limit.',
@@ -4952,11 +5017,11 @@ export class HostedWorkspaceToolTurn {
         )
           continue;
         if (request.mcp) {
-          const renewed = this.mcp!.toolInput(
+          const renewed = (await this.mcp!.toolInput(
             request.call.name,
             request.call.args,
             request.runtimeCallId,
-          )!;
+          ))!;
           const payload = JSON.parse(request.payloadJson) as typeof renewed;
           Object.assign(
             request,
@@ -5033,13 +5098,13 @@ export class HostedWorkspaceToolTurn {
             : routeRef;
         const existingIntent =
           restored &&
-          authority
-            .eventsInSequenceRange(1, authority.committedSequence)
+          (await authority
+            .iterateEvents(1, authority.committedSequence)
             .find(
               (event) =>
                 event.kind === 'tool.intent' &&
                 event.payload['executionCallId'] === executionCallId,
-            );
+            ));
         if (
           existingIntent &&
           (existingIntent.payload['batchId'] !== messageId ||
@@ -6103,15 +6168,15 @@ export class HostedWorkspaceToolTurn {
       );
     }
     const authority = this.session.authority;
-    let receipt = authority
-      .eventsInSequenceRange(1, authority.committedSequence)
+    let receipt = await authority
+      .iterateEvents(1, authority.committedSequence)
       .find(
         (event) =>
           event.kind === 'tool.receipt' &&
           event.payload['executionCallId'] === executionCallId,
       );
     if (receipt === undefined) {
-      const existing = this.monitors!.record(executionCallId);
+      const existing = await this.monitors!.record(executionCallId);
       if (existing === undefined || existing.startReceiptRef === null) {
         await this.monitors!.attach(
           executionCallId,
@@ -6138,7 +6203,7 @@ export class HostedWorkspaceToolTurn {
     // fresh accept starts it, and a replay after a restart — whose
     // journal already carries the receipt — must resume it, or the
     // watch's lines, terminal conditions and settle never arrive.
-    const monitorRecord = this.monitors!.record(executionCallId);
+    const monitorRecord = await this.monitors!.record(executionCallId);
     // A parked watch has stopReason null like a live one, but its quota or
     // idle window already ended it as unproven — resuming it would commit a
     // post-quota observation the record refuses, silently. Only a live
@@ -6198,8 +6263,8 @@ export class HostedWorkspaceToolTurn {
       };
       if (!this.messageFitsInline('tool_result', converted, model))
         throw new Error('Monitor watch result cannot be recorded.');
-      const originalIntent = authority
-        .eventsInSequenceRange(1, authority.committedSequence)
+      const originalIntent = await authority
+        .iterateEvents(1, authority.committedSequence)
         .find(
           (event) =>
             event.kind === 'tool.intent' &&
@@ -6251,8 +6316,8 @@ export class HostedWorkspaceToolTurn {
         }),
         { class: 'trusted_entry' },
       );
-      receipt = authority
-        .eventsInSequenceRange(1, authority.committedSequence)
+      receipt = await authority
+        .iterateEvents(1, authority.committedSequence)
         .find(
           (event) =>
             event.kind === 'tool.receipt' &&
@@ -6439,15 +6504,15 @@ export class HostedWorkspaceToolTurn {
     if (isBroadcast(to)) {
       const senderSessionId =
         this.session.authority.sessionHeader.sessionKey.sessionId;
-      const team = teams.openTeam();
-      const committed = hostedBroadcastAnyCommitted({
+      const team = await teams.openTeam();
+      const committed = (await hostedBroadcastAnyCommitted({
         children,
         messages: this.messages,
         senderSessionId,
         promptId: this.promptId,
         callId,
-      })
-        ? hostedBroadcastCommitted({
+      }))
+        ? await hostedBroadcastCommitted({
             authority: this.session.authority,
             children,
             messages: this.messages,
@@ -6548,8 +6613,8 @@ export class HostedWorkspaceToolTurn {
     }
     const messageId = this.messageIdFor(callId);
     if (
-      this.messages!.message(messageId) !== undefined ||
-      children.record(callKey) !== undefined
+      (await this.messages!.message(messageId)) !== undefined ||
+      (await children.record(callKey)) !== undefined
     ) {
       // The replay: sendToChild answers the committed send by its ids.
       // The name and its label hold only while the member's team is open;
@@ -6559,7 +6624,7 @@ export class HostedWorkspaceToolTurn {
       this.agentDispatched.add(callId);
       return answer(hostedRouteAnswer(children, route), false);
     }
-    const team = teams.openTeam();
+    const team = await teams.openTeam();
     if (team === undefined)
       return answer(
         'No open team: create one with team_create, or address a child agent by task_id.',
@@ -6627,7 +6692,10 @@ export class HostedWorkspaceToolTurn {
     const description = (request.call.args['description'] as string).trim();
     const prompt = request.call.args['prompt'] as string;
     const childRunId = this.childRunIdFor(request.call.callId);
-    if (!this.agentsAdmitted() && children.record(childRunId) === undefined) {
+    if (
+      !this.agentsAdmitted() &&
+      (await children.record(childRunId)) === undefined
+    ) {
       const refused = convertToFunctionErrorResponse(
         request.call.name,
         request.call.callId,
@@ -6654,14 +6722,14 @@ export class HostedWorkspaceToolTurn {
     let joining = false;
     let unjoined: string | undefined;
     if (typeof rawName === 'string') {
-      member = this.teams!.membership(childRunId);
+      member = await this.teams!.membership(childRunId);
       if (member === undefined) {
         try {
-          member = this.teams!.admitMember(rawName);
+          member = await this.teams!.admitMember(rawName);
           joining = true;
         } catch (cause) {
           if (!(cause instanceof HostedTeamRefusal)) throw cause;
-          if (children.record(childRunId) === undefined) {
+          if ((await children.record(childRunId)) === undefined) {
             const refused = convertToFunctionErrorResponse(
               request.call.name,
               request.call.callId,
@@ -6687,7 +6755,7 @@ export class HostedWorkspaceToolTurn {
             member,
             joining
               ? request.call.args['plan_mode_required'] === true
-              : this.teams!.memberPlanMode(member),
+              : await this.teams!.memberPlanMode(member),
           ) + prompt;
     // The envelope bound is enforced by the admission's byte_limit
     // refusal — but the encoder throws a size error before that branch
@@ -6761,15 +6829,17 @@ export class HostedWorkspaceToolTurn {
       isolation === 'worktree' || isolation === 'snapshot'
         ? isolation
         : 'shared';
-    if (children.record(childRunId) === undefined) {
+    if ((await children.record(childRunId)) === undefined) {
       const admission = childLaunchAdmission({
         workspaceMode,
         childWorkspaces: this.childWorkspaces,
         childSnapshots: this.childSnapshots,
         sameDefinition: true,
         closing: authority.currentActivation?.phase !== 'active',
-        activeInScope: children.activeChildRunsOf(key.sessionId).length,
-        launchedInScope: children.launchedChildRunsOf(key.sessionId).length,
+        activeInScope: await children.activeChildRunsOf(key.sessionId).count(),
+        launchedInScope: await children
+          .launchedChildRunsOf(key.sessionId)
+          .count(),
         envelopeBytes,
       });
       if (!admission.admitted) {
@@ -6928,15 +6998,17 @@ export class HostedWorkspaceToolTurn {
       if (!(cause instanceof ManagedSessionRecordError)) throw cause;
       envelopeBytes = Number.POSITIVE_INFINITY;
     }
-    if (children.record(childRunId) === undefined) {
+    if ((await children.record(childRunId)) === undefined) {
       const admission = childLaunchAdmission({
         workspaceMode: 'shared',
         childWorkspaces: false,
         childSnapshots: false,
         sameDefinition: true,
         closing: authority.currentActivation?.phase !== 'active',
-        activeInScope: children.activeChildRunsOf(key.sessionId).length,
-        launchedInScope: children.launchedChildRunsOf(key.sessionId).length,
+        activeInScope: await children.activeChildRunsOf(key.sessionId).count(),
+        launchedInScope: await children
+          .launchedChildRunsOf(key.sessionId)
+          .count(),
         envelopeBytes,
       });
       if (!admission.admitted) {
@@ -7246,7 +7318,7 @@ export class HostedWorkspaceToolTurn {
       // outbound already exists is the one whose own wait timed out,
       // named again by a re-driven batch: its journal answers it.
       const parts =
-        commands.command(commandId) === undefined
+        (await commands.command(commandId)) === undefined
           ? await answer(SESSION_COMMAND_LEADER_UNANSWERING_TEXT, true)
           : await this.answerCommandByJournal(
               commands,
@@ -7285,7 +7357,8 @@ export class HostedWorkspaceToolTurn {
     }
     // The bound measures from the entry's own commit, so a resumed wait
     // keeps what is left instead of a fresh 2 minutes.
-    const anchor = commands.outboundCommittedAt(commandId) ?? Date.now();
+    const anchor =
+      (await commands.outboundCommittedAt(commandId)) ?? Date.now();
     const deadline = anchor + COMMAND_WAIT_MS;
     for (;;) {
       if (signal.aborted) {
@@ -7298,7 +7371,7 @@ export class HostedWorkspaceToolTurn {
         await this.harness.resolveAwaitCommand(commandId);
         return parts;
       }
-      const record = commands.command(commandId);
+      const record = await commands.command(commandId);
       const state = record?.run.delivery?.state;
       if (state === 'accepted' || state === 'consumed') {
         const reply = await commands.readReply(commandId);
@@ -7364,11 +7437,11 @@ export class HostedWorkspaceToolTurn {
     request: { call: Pick<ToolCallRequestInfo, 'name' | 'callId'> },
     commandId: string,
     model: string,
-    journaled?: ReadonlySet<string>,
+    journaled?: JournaledToolResults,
   ): Promise<Part[]> {
     const { name, callId } = request.call;
     for (let attempt = 0; attempt < 4; attempt += 1) {
-      const record = commands.command(commandId);
+      const record = await commands.command(commandId);
       if (record === undefined) {
         // 未发送：没有记录要结算，直接给了计划态的答案，不再走
         // settle（那只会抛 "has no record to revise"）。
@@ -7378,7 +7451,7 @@ export class HostedWorkspaceToolTurn {
           [],
           sessionCommandEvidenceText('planned'),
         );
-        if (!journaled?.has(callId))
+        if (!(await journaled?.has(callId)))
           await this.commit('tool_result', unsent, model);
         return unsent;
       }
@@ -7396,7 +7469,8 @@ export class HostedWorkspaceToolTurn {
           // A call consumes only the reply it commits now: one already
           // answered may have read the not-sent or unknown evidence before
           // the relay's reply landed, and never read this one.
-          if (!journaled?.has(callId)) await commands.commitConsumed(commandId);
+          if (!(await journaled?.has(callId)))
+            await commands.commitConsumed(commandId);
           return parts;
         }
         continue;
@@ -7424,7 +7498,7 @@ export class HostedWorkspaceToolTurn {
           record.kind,
         ),
       );
-      if (!journaled?.has(callId))
+      if (!(await journaled?.has(callId)))
         await this.commit('tool_result', parts, model);
       return parts;
     }
@@ -7437,7 +7511,7 @@ export class HostedWorkspaceToolTurn {
     text: string,
     failed: boolean,
     model: string,
-    journaled?: ReadonlySet<string>,
+    journaled?: JournaledToolResults,
   ): Promise<Part[]> {
     const { name, callId } = request.call;
     const make = (each: string): Part[] =>
@@ -7456,7 +7530,8 @@ export class HostedWorkspaceToolTurn {
           '\n… (truncated to fit the Session record; narrow task_list with its filters)',
       );
     }
-    if (!journaled?.has(callId)) await this.commit('tool_result', parts, model);
+    if (!(await journaled?.has(callId)))
+      await this.commit('tool_result', parts, model);
     return parts;
   }
 
@@ -7489,10 +7564,11 @@ export class HostedWorkspaceToolTurn {
       const request = {
         call: { name: run.toolName, callId: run.functionCallId },
       };
-      const anchor = commands.outboundCommittedAt(run.commandId) ?? Date.now();
+      const anchor =
+        (await commands.outboundCommittedAt(run.commandId)) ?? Date.now();
       const deadline = anchor + COMMAND_WAIT_MS;
       for (;;) {
-        const record = commands.command(run.commandId);
+        const record = await commands.command(run.commandId);
         if (this.commandTimedOut) {
           if (record === undefined) {
             // A call the lock refused before it sent anything: the same
@@ -7503,9 +7579,9 @@ export class HostedWorkspaceToolTurn {
               [],
               SESSION_COMMAND_LEADER_UNANSWERING_TEXT,
             );
-            if (!journaled.has(run.functionCallId))
+            if (!(await journaled.has(run.functionCallId)))
               await this.commit('tool_result', locked, model);
-          } else if (!journaled.has(run.functionCallId)) {
+          } else if (!(await journaled.has(run.functionCallId))) {
             // The call whose own wait timed out: the dead owner stamped
             // the lock at detection and may have died before settling
             // it. Its journal answers it — a planned entry cancelled as
@@ -7541,7 +7617,7 @@ export class HostedWorkspaceToolTurn {
             [],
             sessionCommandEvidenceText('planned'),
           );
-          if (!journaled.has(run.functionCallId))
+          if (!(await journaled.has(run.functionCallId)))
             await this.commit('tool_result', unsent, model);
           await this.harness.resolveAwaitCommand(run.commandId);
           break;
@@ -7570,7 +7646,7 @@ export class HostedWorkspaceToolTurn {
             );
             // The same rule as the journal arm: only the reply committed
             // now is the one the call read.
-            if (!journaled.has(run.functionCallId))
+            if (!(await journaled.has(run.functionCallId)))
               await commands.commitConsumed(run.commandId);
             await this.harness.resolveAwaitCommand(run.commandId);
             break;
@@ -7626,7 +7702,7 @@ export class HostedWorkspaceToolTurn {
     childRunId: string,
     model: string,
     signal: AbortSignal,
-    journaled?: ReadonlySet<string>,
+    journaled?: JournaledToolResults,
   ): Promise<Part[]> {
     for (;;) {
       if (signal.aborted) {
@@ -7636,12 +7712,12 @@ export class HostedWorkspaceToolTurn {
           [],
           HOSTED_AGENT_WAIT_ABANDONED_TEXT,
         );
-        if (!journaled?.has(request.call.callId))
+        if (!(await journaled?.has(request.call.callId)))
           await this.commit('tool_result', abandoned, model);
         await this.harness.resolveAwaitAgent(childRunId);
         return abandoned;
       }
-      const record = children.record(childRunId);
+      const record = await children.record(childRunId);
       if (record !== undefined) {
         // #14387: a recovery-blocked child is an ending too — its outcome
         // is unwitnessed, but the wait must not poll forever: the parent
@@ -7657,12 +7733,12 @@ export class HostedWorkspaceToolTurn {
             [],
             childRunEndedText(record),
           );
-          if (!journaled?.has(request.call.callId))
+          if (!(await journaled?.has(request.call.callId)))
             await this.commit('tool_result', ended, model);
           await this.harness.resolveAwaitAgent(childRunId);
           return ended;
         }
-        const acceptance = children.acceptance(childRunId);
+        const acceptance = await children.acceptance(childRunId);
         if (acceptance !== undefined) {
           const text = (
             await this.session.resources.read(acceptance.contentRef)
@@ -7684,7 +7760,7 @@ export class HostedWorkspaceToolTurn {
               (ref) => this.session.resources.read(ref),
             ),
           );
-          if (!journaled?.has(request.call.callId))
+          if (!(await journaled?.has(request.call.callId)))
             await this.commit('tool_result', fitted, model);
           await children.markAccepted(childRunId);
           this.childConsumption(childRunId);
@@ -7711,7 +7787,7 @@ export class HostedWorkspaceToolTurn {
     if (!lane || !this.publisher || !this.monitors) return;
     const loops = (lane.monitorLoops ??= new Map());
     if (loops.has(executionCallId)) return;
-    const record = this.monitors.record(executionCallId);
+    const record = await this.monitors.record(executionCallId);
     if (!record) return;
     const argsBody = JSON.parse(
       (await this.session.resources.read(record.commandRef)).toString('utf8'),
@@ -7797,8 +7873,8 @@ export class HostedWorkspaceToolTurn {
       );
     }
     const authority = this.session.authority;
-    let receipt = authority
-      .eventsInSequenceRange(1, authority.committedSequence)
+    let receipt = await authority
+      .iterateEvents(1, authority.committedSequence)
       .find(
         (event) =>
           event.kind === 'tool.receipt' &&
@@ -7809,7 +7885,7 @@ export class HostedWorkspaceToolTurn {
       // replay-tolerant: a retry after a crash between attach and journal
       // finds its own start receipt on this identity and must not mint a
       // rerun; any mismatched receipt stays the funnel's rerun refusal.
-      const existing = this.childRuns!.record(executionCallId);
+      const existing = await this.childRuns!.record(executionCallId);
       if (existing === undefined || existing.startReceiptRef === null) {
         await this.childRuns!.attach(
           executionCallId,
@@ -7879,8 +7955,8 @@ export class HostedWorkspaceToolTurn {
       };
       if (!this.messageFitsInline('tool_result', converted, model))
         throw new Error('Background Shell result cannot be recorded.');
-      const originalIntent = authority
-        .eventsInSequenceRange(1, authority.committedSequence)
+      const originalIntent = await authority
+        .iterateEvents(1, authority.committedSequence)
         .find(
           (event) =>
             event.kind === 'tool.intent' &&
@@ -7932,8 +8008,8 @@ export class HostedWorkspaceToolTurn {
         }),
         { class: 'trusted_entry' },
       );
-      receipt = authority
-        .eventsInSequenceRange(1, authority.committedSequence)
+      receipt = await authority
+        .iterateEvents(1, authority.committedSequence)
         .find(
           (event) =>
             event.kind === 'tool.receipt' &&
@@ -7990,8 +8066,8 @@ export class HostedWorkspaceToolTurn {
       if (closed['state'] !== 'NOT_STARTED')
         throw new Error('Original Shell was not proven unstarted.');
       const authority = this.session.authority;
-      let receipt = authority
-        .eventsInSequenceRange(1, authority.committedSequence)
+      let receipt = await authority
+        .iterateEvents(1, authority.committedSequence)
         .find(
           (event) =>
             event.kind === 'tool.receipt' &&
@@ -8048,8 +8124,8 @@ export class HostedWorkspaceToolTurn {
         };
         if (!this.messageFitsInline('tool_result', converted, model))
           throw new Error('Unstarted Shell result cannot be recorded.');
-        const originalIntent = authority
-          .eventsInSequenceRange(1, authority.committedSequence)
+        const originalIntent = await authority
+          .iterateEvents(1, authority.committedSequence)
           .find(
             (event) =>
               event.kind === 'tool.intent' &&
@@ -8101,8 +8177,8 @@ export class HostedWorkspaceToolTurn {
           }),
           { class: 'trusted_entry' },
         );
-        receipt = authority
-          .eventsInSequenceRange(1, authority.committedSequence)
+        receipt = await authority
+          .iterateEvents(1, authority.committedSequence)
           .find(
             (event) =>
               event.kind === 'tool.receipt' &&
@@ -8131,8 +8207,8 @@ export class HostedWorkspaceToolTurn {
     const decision =
       envelope.capture?.captureStatus === 'complete' ? 'committed' : 'blocked';
     const authority = this.session.authority;
-    let receipt = authority
-      .eventsInSequenceRange(1, authority.committedSequence)
+    let receipt = await authority
+      .iterateEvents(1, authority.committedSequence)
       .find(
         (event) =>
           event.kind === 'tool.receipt' &&
@@ -8218,8 +8294,8 @@ export class HostedWorkspaceToolTurn {
       }
       if (!this.messageFitsInline('tool_result', converted, model))
         throw new Error('Original Shell history exceeds the Session limit.');
-      const originalIntent = authority
-        .eventsInSequenceRange(1, authority.committedSequence)
+      const originalIntent = await authority
+        .iterateEvents(1, authority.committedSequence)
         .find(
           (event) =>
             event.kind === 'tool.intent' &&
@@ -8278,8 +8354,8 @@ export class HostedWorkspaceToolTurn {
         }),
         { class: 'trusted_entry' },
       );
-      receipt = authority
-        .eventsInSequenceRange(1, authority.committedSequence)
+      receipt = await authority
+        .iterateEvents(1, authority.committedSequence)
         .find(
           (event) =>
             event.kind === 'tool.receipt' &&
@@ -8321,7 +8397,9 @@ export class HostedWorkspaceToolTurn {
    */
   private async decideHookInputs(
     requests: HostedPreparedRequest[],
-    prepare: (calls: ToolCallRequestInfo[]) => HostedPreparedRequest[],
+    prepare: (
+      calls: ToolCallRequestInfo[],
+    ) => HostedPreparedRequest[] | Promise<HostedPreparedRequest[]>,
     refusals: Array<string | undefined>,
     asks: Set<number>,
     signal: AbortSignal,
@@ -8358,13 +8436,13 @@ export class HostedWorkspaceToolTurn {
       if (replacement) inputs[index] = { ...request.call, args: replacement };
       if (output && new PreToolUseHookOutput(output).isAsk()) asks.add(index);
     }
-    const admit = () => {
-      const admitted = prepare(inputs);
+    const admit = async () => {
+      const admitted = await prepare(inputs);
       for (const [index, request] of admitted.entries())
         refusals[index] ??= request.validationError;
       return admitted;
     };
-    requests = admit();
+    requests = await admit();
     let permissionRan = false;
     for (const [index, request] of requests.entries()) {
       if (
@@ -8403,7 +8481,7 @@ export class HostedWorkspaceToolTurn {
       if (decision.input)
         inputs[index] = { ...request.call, args: decision.input };
     }
-    if (permissionRan) requests = admit();
+    if (permissionRan) requests = await admit();
     if (!this.approval)
       for (const index of asks)
         refusals[index] ??=
@@ -8702,7 +8780,7 @@ export class HostedWorkspaceToolTurn {
       else {
         actionRequestId = `command_approval_${createHash('sha256').update(id).digest('hex').slice(0, 48)}`;
         const authority = this.session.authority;
-        const existing = authority.action(actionRequestId);
+        const existing = await authority.action(actionRequestId);
         let options: HostedActionOptions;
         if (existing) {
           options = await readHostedActionOptions(this.session, existing);
@@ -8791,8 +8869,8 @@ export class HostedWorkspaceToolTurn {
           actionRequestId,
           options.expiresAt,
           signal,
-          () =>
-            authority.action(actionRequestId!)?.state !== 'requested' ||
+          async () =>
+            (await authority.action(actionRequestId!))?.state !== 'requested' ||
             authority.writesStopped,
           this.approval.readSettings
             ? hostedLiveApprovalPoll(
@@ -8806,7 +8884,7 @@ export class HostedWorkspaceToolTurn {
               )
             : undefined,
         );
-        if (authority.action(actionRequestId)?.state === 'requested')
+        if ((await authority.action(actionRequestId))?.state === 'requested')
           await endHostedAction(
             this.session,
             actionRequestId,
@@ -8815,7 +8893,7 @@ export class HostedWorkspaceToolTurn {
         await this.harness.resolveDurableWait();
         approvedInputRef = 'inputRef' in options ? options.inputRef : undefined;
         allowed = hostedActionAllowed(
-          authority.action(actionRequestId)!,
+          (await authority.action(actionRequestId))!,
           options.policyRevision,
         );
       }
@@ -8899,8 +8977,8 @@ export class HostedWorkspaceToolTurn {
       requestId,
       options.expiresAt,
       signal,
-      () =>
-        authority.action(requestId)?.state !== 'requested' ||
+      async () =>
+        (await authority.action(requestId))?.state !== 'requested' ||
         authority.writesStopped,
       liveApproval && approval.readSettings
         ? hostedLiveApprovalPoll(
@@ -8914,14 +8992,14 @@ export class HostedWorkspaceToolTurn {
           )
         : undefined,
     );
-    if (authority.action(requestId)?.state === 'requested')
+    if ((await authority.action(requestId))?.state === 'requested')
       await endHostedAction(
         this.session,
         requestId,
         signal.aborted ? 'cancelled' : 'expired',
       );
     await this.harness.resolveDurableWait();
-    const action = authority.action(requestId)!;
+    const action = (await authority.action(requestId))!;
     if (action.state === 'decided')
       return hostedActionAllowed(action, options.policyRevision)
         ? undefined
@@ -9109,7 +9187,7 @@ export class HostedWorkspaceToolTurn {
   private mountHandbackAttempt(): (() => Promise<void>) | undefined {
     if (this.mcp)
       return this.mcp.mountHandback(
-        () => this.hooks?.mountWorkUnproven() ?? false,
+        async () => (await this.hooks?.mountWorkUnproven()) ?? false,
       );
     if (this.hooks) return this.hooks.mountHandback();
     const owner = this.mountOwner ?? this.broker;

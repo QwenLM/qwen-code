@@ -39,6 +39,10 @@ import {
   type ManagedSessionDurableRef,
 } from './managed-session-records.js';
 import type { ManagedSessionJournalHandle } from './managed-session-storage.js';
+import {
+  FileManagedSessionHistory,
+  ManagedHistoryMap,
+} from './managed-session-history.js';
 
 const DIGEST = 'b'.repeat(64);
 const temporaryDirectories = new Set<string>();
@@ -157,6 +161,84 @@ const inputRequest = {
   admissionRef: ref(),
   wakeReason: 'input',
 };
+
+describe('history publication failures', () => {
+  it('returns a known committed receipt and pauses new writes until its overlay flushes', async () => {
+    const fixture = await createFixture();
+    const opened = await openAuthority(fixture);
+    const flush = vi
+      .spyOn(FileManagedSessionHistory.prototype, 'flush')
+      .mockRejectedValue(new Error('derived view disk unavailable'));
+    try {
+      const original = await opened.authority.submitInput(
+        inputCommand(fixture),
+        inputRequest,
+      );
+      expect(original.lastSequence).toBe(2);
+      expect(opened.authority.writesStopped).toBe(true);
+      const replay = await opened.authority.submitInput(
+        inputCommand(fixture),
+        inputRequest,
+      );
+      expect(replay).toEqual({ ...original, replayed: true });
+      const second = inputCommand(fixture, { commandId: 'later' });
+      await expect(
+        opened.authority.submitInput(second, {
+          ...inputRequest,
+          inputId: 'later',
+        }),
+      ).rejects.toThrow(/disk unavailable/);
+      const canonical = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: fixture.transcriptPath,
+        runtimeBaseDir: fixture.runtimeBaseDir,
+        sessionKey: sessionKeyFor(fixture),
+      });
+      expect(canonical.committed).toBe(2);
+      expect(canonical.transactions.size).toBe(1);
+      flush.mockRestore();
+      await opened.authority.submitInput(second, {
+        ...inputRequest,
+        inputId: 'later',
+      });
+      expect(opened.authority.writesStopped).toBe(false);
+      expect(
+        await opened.authority.submitInput(inputCommand(fixture), inputRequest),
+      ).toEqual({
+        ...original,
+        committedSequence: 4,
+        replayed: true,
+      });
+    } finally {
+      flush.mockRestore();
+      await opened.release();
+    }
+  });
+
+  it('does not append or publish provisional state when deriving an index fails', async () => {
+    const fixture = await createFixture();
+    const opened = await openAuthority(fixture);
+    const write = vi
+      .spyOn(ManagedHistoryMap.prototype, 'set')
+      .mockRejectedValueOnce(new Error('index preflight failed'));
+    try {
+      await expect(
+        opened.authority.submitInput(inputCommand(fixture), inputRequest),
+      ).rejects.toThrow(/preflight failed/);
+      expect(opened.authority.committedSequence).toBe(0);
+      expect(opened.authority.pendingInputEvents).toEqual([]);
+      write.mockRestore();
+      const receipt = await opened.authority.submitInput(
+        inputCommand(fixture),
+        inputRequest,
+      );
+      expect(receipt.replayed).toBe(false);
+      expect(receipt.firstSequence).toBe(1);
+    } finally {
+      write.mockRestore();
+      await opened.release();
+    }
+  });
+});
 
 async function readLines(fixture: Fixture): Promise<string[]> {
   const text = await fs.readFile(fixture.transcriptPath, 'utf8');
@@ -288,10 +370,9 @@ describe('managed session authority', () => {
 
     const second = await openAuthority(fixture, { create: false });
     expect(second.authority.committedSequence).toBe(2);
-    expect(second.authority.readEvents().map((event) => event.kind)).toEqual([
-      'input.accepted',
-      'wake.requested',
-    ]);
+    expect(
+      (await second.authority.readEvents()).map((event) => event.kind),
+    ).toEqual(['input.accepted', 'wake.requested']);
     await second.release();
 
     const records = await readRecords(fixture);
@@ -412,15 +493,15 @@ describe('managed session authority', () => {
       { ...inputRequest, inputId: 'in-2' },
     );
 
-    const firstPage = opened.authority.readEvents({ limit: 3 });
+    const firstPage = await opened.authority.readEvents({ limit: 3 });
     expect(firstPage.map((event) => event.sequence)).toEqual([1, 2, 3]);
-    const secondPage = opened.authority.readEvents({
+    const secondPage = await opened.authority.readEvents({
       afterSequence: firstPage[firstPage.length - 1].sequence,
       limit: 3,
     });
     expect(secondPage.map((event) => event.sequence)).toEqual([4]);
-    expect(() => opened.authority.readEvents({ limit: 0 })).toThrow(
-      /limit must be positive/,
+    await expect(opened.authority.readEvents({ limit: 0 })).rejects.toThrow(
+      /outside their bounds/,
     );
     await opened.release();
   });
@@ -1297,9 +1378,9 @@ describe('managed session authority activation fences', () => {
         ),
       );
       expect(
-        opened.authority
-          .readEvents()
-          .filter((event) => event.kind === 'activation.changed'),
+        (await opened.authority.readEvents()).filter(
+          (event) => event.kind === 'activation.changed',
+        ),
       ).toHaveLength(1);
       await opened.release();
     });
@@ -1408,7 +1489,7 @@ describe('managed session authority activation fences', () => {
         () => false,
       ),
     ).rejects.toThrow(/was not admitted/);
-    expect(opened.authority.action('req-1')?.state).toBe('requested');
+    expect((await opened.authority.action('req-1'))?.state).toBe('requested');
     expect(opened.authority.committedSequence).toBe(sequence);
 
     const decided = await opened.authority.resolveAction(
@@ -1464,11 +1545,13 @@ describe('managed session authority activation fences', () => {
     await opened.release();
 
     const reopened = await openAuthority(fixture, { create: false });
-    expect(reopened.authority.action('req-1')).toMatchObject({
+    expect(await reopened.authority.action('req-1')).toMatchObject({
       requestId: 'req-1',
       state: 'decided',
     });
-    expect(reopened.authority.action('req-1')?.decisionRef).toEqual(ref());
+    expect((await reopened.authority.action('req-1'))?.decisionRef).toEqual(
+      ref(),
+    );
     await reopened.release();
   });
 });
@@ -1856,7 +1939,7 @@ describe('managed session uncommitted tail recovery', () => {
       version: 'test',
     });
     expect(authority.committedSequence).toBe(2);
-    expect(authority.readEvents().map((event) => event.kind)).toEqual([
+    expect((await authority.readEvents()).map((event) => event.kind)).toEqual([
       'input.accepted',
       'wake.requested',
     ]);
@@ -2909,7 +2992,7 @@ describe('managed session checkpoints', () => {
     expect(committed.checkpoint.previousCheckpointId).toBe('ckpt-4');
     expect(committed.checkpoint.boundary).toBe(HARNESS_TURN_COMPLETE_BOUNDARY);
 
-    const events = harness.authority.readEvents();
+    const events = await harness.authority.readEvents();
     expect(events[4]?.kind).toBe('turn.settled');
     expect(events[5]?.kind).toBe('checkpoint.committed');
     expect(
@@ -3538,9 +3621,9 @@ describe('managed session checkpoints', () => {
     expect(harness.authority.committedSequence).toBe(before);
     expect(harness.authority.latestCheckpoint?.checkpointId).toBe('ckpt-4');
     expect(
-      harness.authority
-        .readEvents()
-        .some((event) => event.kind === 'turn.settled'),
+      (await harness.authority.readEvents()).some(
+        (event) => event.kind === 'turn.settled',
+      ),
     ).toBe(false);
     await expect(harness.authority.harnessRunAuthorization()).resolves.toEqual({
       status: 'blocked',
@@ -3590,9 +3673,9 @@ describe('managed session checkpoints', () => {
     expect(harness.authority.committedSequence).toBe(before);
     expect(harness.authority.latestCheckpoint?.checkpointId).toBe('ckpt-4');
     expect(
-      harness.authority
-        .readEvents()
-        .some((event) => event.kind === 'turn.settled'),
+      (await harness.authority.readEvents()).some(
+        (event) => event.kind === 'turn.settled',
+      ),
     ).toBe(false);
     await harness.close();
   });

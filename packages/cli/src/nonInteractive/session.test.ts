@@ -11,6 +11,7 @@ import {
   type Config,
 } from '@qwen-code/qwen-code-core';
 import type { Content } from '@google/genai';
+import { getLastApiPromptCancellation } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import { runNonInteractiveStreamJson } from './session.js';
 import type {
   CLIUserMessage,
@@ -368,6 +369,12 @@ describe('runNonInteractiveStreamJson', () => {
       getLlmClient: vi.fn().mockReturnValue(llmClient),
       getChatRecordingService: vi.fn().mockReturnValue({
         readActiveTranscriptChain: vi.fn().mockResolvedValue([]),
+        async readLastApiPromptCancellation(history: readonly Content[]) {
+          return getLastApiPromptCancellation(
+            history,
+            await this.readActiveTranscriptChain(),
+          );
+        },
         flush: vi.fn().mockResolvedValue(undefined),
         finalize: vi.fn(),
       }),
@@ -968,6 +975,12 @@ describe('runNonInteractiveStreamJson', () => {
       },
       getChatRecordingService: () => ({
         readActiveTranscriptChain: vi.fn().mockResolvedValue([]),
+        async readLastApiPromptCancellation(history: readonly Content[]) {
+          return getLastApiPromptCancellation(
+            history,
+            await this.readActiveTranscriptChain(),
+          );
+        },
         finalize: () => order.push('finalize'),
         flush: async () => {
           order.push('flush');
