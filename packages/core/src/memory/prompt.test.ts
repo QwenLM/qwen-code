@@ -193,8 +193,11 @@ describe('managed auto-memory prompt helpers', () => {
       expect(result).not.toContain('- [Oversized](');
       expect(result).toContain(retainedEntry);
       expect(result).toContain('Only part of it was loaded.');
-      expect(result).toContain(
+      expect(result).not.toContain(
         `one line at most ${MAX_INDEX_LINE_CHARS} UTF-16 code units`,
+      );
+      expect(result).toContain(
+        'Prune or merge entries to fit the character budget.',
       );
     },
   );
@@ -431,6 +434,55 @@ describe('managed auto-memory prompt helpers', () => {
     return Array.from({ length: count }, (_, i) => entry(i));
   };
 
+  it.each(['project', 'user'])(
+    'directs %s character-budget edits to durable topic frontmatter',
+    (scope) => {
+      const index = uniformOverBudgetIndex().join('\n');
+      const result =
+        scope === 'project'
+          ? buildManagedAutoMemoryPrompt('/tmp/memory', index)
+          : buildManagedAutoMemoryPrompt('/tmp/memory', null, {
+              memoryDir: '/tmp/user',
+              indexContent: index,
+            });
+      expect(result).toContain('Only part of it was loaded.');
+      expect(result).toContain('`description` frontmatter in the topic files');
+      expect(result).not.toContain('shorten index descriptions');
+    },
+  );
+
+  it.each([160, 1])(
+    'does not prescribe cutting links when %i link-dominated entries overflow',
+    (count) => {
+      const lineChars = count === 1 ? MAX_INDEX_CHARS + 1 : 200;
+      const lines = Array.from({ length: count }, (_, i) => {
+        const start = `- [Long ${i}](reference/`;
+        const end = '.md)';
+        return `${start}${'x'.repeat(lineChars - start.length - end.length)}${end}`;
+      });
+      const index = lines.join('\n');
+      expect(index.length).toBeGreaterThan(MAX_INDEX_CHARS);
+      const result = buildManagedAutoMemoryPrompt('/tmp/memory', index);
+      expect(result).not.toContain('Keep index entries to one line at most');
+      expect(result).toContain(
+        'Prune or merge entries to fit the character budget.',
+      );
+    },
+  );
+
+  it('does not apply the per-line limit to a protected link among removable descriptions', () => {
+    const link = `- [Long](reference/${'x'.repeat(200)}.md)`;
+    const lines = [link, ...uniformOverBudgetIndex(159, 200)];
+    expect(lines.join('\n').length).toBeGreaterThan(MAX_INDEX_CHARS);
+    const result = buildManagedAutoMemoryPrompt(
+      '/tmp/memory',
+      lines.join('\n'),
+    );
+    expect(result).not.toContain('Keep index entries to one line at most');
+    expect(result).toContain('`description` frontmatter in the topic files');
+    expect(result).toContain(link);
+  });
+
   it.each([
     [170, MAX_INDEX_LINE_CHARS],
     [200, 200],
@@ -456,11 +508,11 @@ describe('managed auto-memory prompt helpers', () => {
       );
       expect(result).not.toContain('index entries are too long');
       expect(result).not.toContain('Keep index entries to one line at most');
-      expect(result).toMatch(/shorten index descriptions/i);
+      expect(result).toMatch(/shorten `description` frontmatter/i);
       expect(result).toContain(
         `bring the total within ${MAX_INDEX_CHARS} UTF-16 code units`,
       );
-      expect(result).toMatch(/prune or merge entries/i);
+      expect(result).toMatch(/prune or merge memory files/i);
       // The budget is a hardcoded constant with no settings surface, so the
       // advice must not send the reader after a lever they cannot pull.
       expect(result).not.toContain('raise the budget');
@@ -486,7 +538,7 @@ describe('managed auto-memory prompt helpers', () => {
     expect(result).toContain('Shortening entries cannot reduce the line count');
     expect(result).toContain('prune or merge entries');
     expect(result).not.toContain('also exceed the character budget');
-    expect(result).not.toMatch(/shorten (index )?descriptions/i);
+    expect(result).not.toMatch(/shorten `description` frontmatter/i);
 
     const shortened = buildManagedAutoMemoryPrompt(
       '/tmp/memory',
@@ -513,7 +565,7 @@ describe('managed auto-memory prompt helpers', () => {
     expect(result).toContain('Shortening entries cannot reduce the line count');
     expect(result).not.toContain('Keep index entries to one line at most');
     expect(result).not.toContain('also exceed the character budget');
-    expect(result).not.toMatch(/shorten (index )?descriptions/i);
+    expect(result).not.toMatch(/shorten `description` frontmatter/i);
     expect(result.match(/^- \[Topic \d+\]/gm)).toHaveLength(200);
   });
 
@@ -530,8 +582,8 @@ describe('managed auto-memory prompt helpers', () => {
     expect(result).not.toContain('- [Topic 165](');
   });
 
-  it('keeps blaming entry length when an entry really does exceed the line limit', () => {
-    const index = `- [Oversized](reference/${'%28'.repeat(9_000)}.md)\n- [Kept](reference/kept.md)`;
+  it('keeps length advice when a removable description causes the overflow', () => {
+    const index = `- [Oversized](reference/long.md) — ${'h'.repeat(27_000)}\n- [Kept](reference/kept.md)`;
     const result = buildManagedAutoMemoryPrompt('/tmp/memory', index);
 
     expect(result).toContain('index entries are too long');
@@ -558,7 +610,7 @@ describe('managed auto-memory prompt helpers', () => {
       expect(result).toContain(
         'Prune or merge entries to fit the character budget.',
       );
-      expect(result).not.toMatch(/shorten (index )?descriptions/i);
+      expect(result).not.toMatch(/shorten `description` frontmatter/i);
     }
     const pruned = buildManagedAutoMemoryPrompt(
       '/tmp/memory',
@@ -609,7 +661,7 @@ describe('managed auto-memory prompt helpers', () => {
       'The first 200 entries also exceed the character budget',
     );
     expect(result).toContain(
-      `shorten descriptions enough to fit ${MAX_INDEX_CHARS} UTF-16 code units`,
+      `shorten \`description\` frontmatter in the topic files enough to fit ${MAX_INDEX_CHARS} UTF-16 code units`,
     );
 
     const capped = lines.slice(0, 200);
@@ -634,7 +686,7 @@ describe('managed auto-memory prompt helpers', () => {
     );
     expect(result).toContain('Dropped 34 of 199 entries');
     expect(result).toContain('too many index entries (199)');
-    expect(result).toMatch(/shorten index descriptions/i);
+    expect(result).toMatch(/shorten `description` frontmatter/i);
     expect(result).not.toContain(
       'Shortening entries cannot reduce the line count',
     );
@@ -654,7 +706,7 @@ describe('managed auto-memory prompt helpers', () => {
         '/tmp/memory',
         lines.join('\n'),
       );
-      expect(result).toMatch(/shorten (index )?descriptions/i);
+      expect(result).toMatch(/shorten `description` frontmatter/i);
       expect(result).toContain('bring the total within');
       expect(lines.every((line) => line.length <= MAX_INDEX_LINE_CHARS)).toBe(
         true,
@@ -672,7 +724,7 @@ describe('managed auto-memory prompt helpers', () => {
       '/tmp/memory',
       lines.join('\n'),
     );
-    expect(result).not.toMatch(/shorten (index )?descriptions/i);
+    expect(result).not.toMatch(/shorten `description` frontmatter/i);
     expect(result).toContain(
       'Prune or merge entries to fit the character budget.',
     );
@@ -693,7 +745,7 @@ describe('managed auto-memory prompt helpers', () => {
         '/tmp/memory',
         lines.join('\n'),
       );
-      expect(result).toMatch(/shorten (index )?descriptions/i);
+      expect(result).toMatch(/shorten `description` frontmatter/i);
       expect(result).not.toContain(
         'Prune or merge entries to fit the character budget.',
       );
@@ -710,9 +762,9 @@ describe('managed auto-memory prompt helpers', () => {
       '/tmp/memory',
       lines.join('\n'),
     );
-    expect(result).toMatch(/shorten (index )?descriptions/i);
+    expect(result).toMatch(/shorten `description` frontmatter/i);
     expect(result).toContain(
-      'Check whether you can shorten index descriptions',
+      'Check whether you can shorten `description` frontmatter in the topic files',
     );
     expect(result).not.toContain('bring the total within');
   });
@@ -731,7 +783,7 @@ describe('managed auto-memory prompt helpers', () => {
     for (const index of [lines.join('\n'), groupsWithoutHooks.join('\n')]) {
       const result = buildManagedAutoMemoryPrompt('/tmp/memory', index);
       expect(result).toContain(
-        'Check whether you can shorten index descriptions',
+        'Check whether you can shorten `description` frontmatter in the topic files',
       );
       expect(result).not.toContain('bring the total within');
       expect(result).not.toContain(
@@ -755,7 +807,7 @@ describe('managed auto-memory prompt helpers', () => {
       expect(result).toContain(
         'Prune or merge entries to fit the character budget.',
       );
-      expect(result).not.toMatch(/shorten (index )?descriptions/i);
+      expect(result).not.toMatch(/shorten `description` frontmatter/i);
     },
   );
 
@@ -770,7 +822,7 @@ describe('managed auto-memory prompt helpers', () => {
       lines.join('\n'),
     );
     expect(result).toContain(
-      'Check whether you can shorten index descriptions',
+      'Check whether you can shorten `description` frontmatter in the topic files',
     );
     expect(result).not.toContain('bring the total within');
   });
@@ -810,7 +862,7 @@ describe('managed auto-memory prompt helpers', () => {
       lines.join('\n'),
     );
     expect(result).toContain(
-      'Check whether you can shorten index descriptions',
+      'Check whether you can shorten `description` frontmatter in the topic files',
     );
     expect(result).not.toContain('bring the total within');
     expect(result).not.toContain(
@@ -834,7 +886,7 @@ describe('managed auto-memory prompt helpers', () => {
       'The first 200 entries also exceed the character budget',
     );
     expect(result).toContain('prune or merge more entries.');
-    expect(result).not.toMatch(/shorten (index )?descriptions/i);
+    expect(result).not.toMatch(/shorten `description` frontmatter/i);
   });
 
   it('does not let a writer notice withhold a feasible shortening lever', () => {
@@ -855,7 +907,7 @@ describe('managed auto-memory prompt helpers', () => {
       lines.join('\n') + INDEX_TRUNCATION_NOTICE,
     );
     expect(result).toContain(
-      'shorten descriptions enough to fit 25000 UTF-16 code units',
+      'shorten `description` frontmatter in the topic files enough to fit 25000 UTF-16 code units',
     );
   });
 
@@ -907,7 +959,7 @@ describe('managed auto-memory prompt helpers', () => {
       },
     );
     expect(result).toContain('`description` frontmatter in the topic files');
-    expect(result).toContain('regenerate and check the index');
+    expect(result).toContain('check the regenerated index');
     expect(result).not.toContain('shorten index descriptions');
   });
 
@@ -939,7 +991,7 @@ describe('managed auto-memory prompt helpers', () => {
     expect(generated).toContain(INDEX_TRUNCATION_WARNING);
     const result = buildManagedAutoMemoryPrompt('/tmp/memory', generated);
     expect(result).toContain(INDEX_TRUNCATION_WARNING);
-    expect(result).not.toMatch(/shorten (index )?descriptions/i);
+    expect(result).not.toMatch(/shorten `description` frontmatter/i);
     expect(result).not.toContain('Only part of it was loaded.');
   });
 

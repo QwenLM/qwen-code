@@ -216,10 +216,7 @@ function describeDroppedEntries(
   }.`;
 }
 
-function truncateManagedAutoMemoryIndex(
-  indexContent: string,
-  indexIsGenerated: boolean,
-): string {
+function truncateManagedAutoMemoryIndex(indexContent: string): string {
   const trimmed = normalizeContent(indexContent).trim();
   // Writer notices describe omissions before saving, not during prompt loading.
   const hasWriterNotice = trimmed.endsWith(INDEX_TRUNCATION_NOTICE);
@@ -239,8 +236,21 @@ function truncateManagedAutoMemoryIndex(
   const { content, dropped } = trimIndexToBudgetDetailed(entries);
   const candidates = entries.slice(0, MAX_MANAGED_AUTO_MEMORY_INDEX_LINES);
   const candidateCharCount = candidates.join('\n').length;
+  let allOverlongEntriesShortenable = true;
   const ordinaryCharCount = candidates
-    .map((line) => line.slice(0, MAX_INDEX_LINE_CHARS))
+    .map((line) => {
+      const entry = parseIndexEntry(line);
+      if (
+        !entry ||
+        entry.link.length + entry.suffix.length > MAX_INDEX_LINE_CHARS
+      ) {
+        if (line.length > MAX_INDEX_LINE_CHARS) {
+          allOverlongEntriesShortenable = false;
+        }
+        return line;
+      }
+      return line.slice(0, MAX_INDEX_LINE_CHARS);
+    })
     .join('\n').length;
   let minimumCharCount = candidates.length - 1;
   let maximumCharCount = minimumCharCount;
@@ -263,6 +273,7 @@ function truncateManagedAutoMemoryIndex(
         : undefined;
   // Blame long candidates only when the ordinary-entry bound clears overflow.
   const overlongEntriesCauseOverflow =
+    allOverlongEntriesShortenable &&
     candidateCharCount > MAX_INDEX_CHARS &&
     ordinaryCharCount <= MAX_INDEX_CHARS;
 
@@ -277,20 +288,19 @@ function truncateManagedAutoMemoryIndex(
         ? `${lineCount} lines (limit: ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES})`
         : `${lineCount} lines and ${charCount} UTF-16 code units`;
 
-  const shorteningAdvice = indexIsGenerated
-    ? 'Shorten nonempty `description` frontmatter in the topic files, then regenerate and check the index; prune or merge memory files if necessary.'
-    : canFitWithoutDescriptions === undefined
-      ? 'Check whether you can shorten index descriptions, or prune or merge entries to fit the character budget.'
-      : `Prune or merge entries, or shorten index descriptions to bring the total within ${MAX_INDEX_CHARS} UTF-16 code units.`;
+  const shorteningAdvice =
+    canFitWithoutDescriptions === undefined
+      ? 'Check whether you can shorten `description` frontmatter in the topic files, or prune or merge memory files to fit the character budget.'
+      : `Prune or merge memory files, or shorten \`description\` frontmatter in the topic files to bring the total within ${MAX_INDEX_CHARS} UTF-16 code units; check the regenerated index.`;
   const combinedCharacterAdvice =
     canFitWithoutDescriptions === false
       ? 'prune or merge more entries.'
-      : canFitWithoutDescriptions === true && !indexIsGenerated
-        ? `shorten descriptions enough to fit ${MAX_INDEX_CHARS} UTF-16 code units, or prune or merge more entries.`
-        : shorteningAdvice;
+      : canFitWithoutDescriptions === true
+        ? `shorten \`description\` frontmatter in the topic files enough to fit ${MAX_INDEX_CHARS} UTF-16 code units, or prune or merge more memory files; check the regenerated index.`
+        : 'check whether shortening `description` frontmatter in the topic files helps, or prune or merge more memory files.';
 
   const lever = overlongEntriesCauseOverflow
-    ? ` Keep index entries to one line at most ${MAX_INDEX_LINE_CHARS} UTF-16 code units; move detail into topic files. Prune or merge entries if the count is still over budget.`
+    ? ` Keep index entries to one line at most ${MAX_INDEX_LINE_CHARS} UTF-16 code units by shortening topic-file frontmatter; never cut link targets. Prune or merge memory files if the count is still over budget.`
     : wasLineTruncated && candidateCharCount > MAX_INDEX_CHARS
       ? ` Shortening entries cannot reduce the line count — prune or merge entries. The first ${candidates.length} entries also exceed the character budget; ${combinedCharacterAdvice}`
       : wasLineTruncated
@@ -302,7 +312,7 @@ function truncateManagedAutoMemoryIndex(
   return `${content}\n\n> WARNING: MEMORY.md is ${reason}. Only part of it was loaded.${describeDroppedEntries(
     dropped,
     entries.length,
-  )}${lever}`;
+  )}${lever} Make edits in the topic files; changes to regenerated index lines do not persist.`;
 }
 
 /**
@@ -353,14 +363,13 @@ function buildTeamScopeSection(): string[] {
 function renderIndexBlock(
   memoryDir: string,
   indexContent: string | null | undefined,
-  indexIsGenerated = false,
 ): string[] {
   const trimmed = indexContent?.trim();
   return [
     `## ${memoryDir}/MEMORY.md`,
     '',
     trimmed
-      ? truncateManagedAutoMemoryIndex(trimmed, indexIsGenerated)
+      ? truncateManagedAutoMemoryIndex(trimmed)
       : 'Your MEMORY.md is currently empty. When you save new memories, they will appear here.',
   ];
 }
@@ -382,11 +391,7 @@ function buildIndexSections(
   if (teamSection !== undefined) {
     sections.push(
       '',
-      ...renderIndexBlock(
-        teamSection.memoryDir,
-        teamSection.indexContent,
-        true,
-      ),
+      ...renderIndexBlock(teamSection.memoryDir, teamSection.indexContent),
     );
   }
   return sections;
