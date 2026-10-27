@@ -783,6 +783,7 @@ describe('AppContainer State Management', () => {
           initialize,
           subscribe: () => () => {},
           setPresentation: vi.fn(),
+          setRenderInput: vi.fn(),
         } as unknown as interactiveMods.InteractiveModSession);
       vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
       vi.spyOn(mockConfig, 'isInteractive').mockReturnValue(true);
@@ -880,6 +881,10 @@ describe('AppContainer State Management', () => {
     ['unknown', 'workflow inspect', false, false, true, true],
     ['opt-out', 'workflow inspect', true, true, true, true],
     ['missing tool', 'workflow inspect', true, false, false, true],
+    ['mode', 'Run the tests', false, false, true, false],
+    ['mode running', 'Run the tests', false, false, true, false],
+    ['pending exit', 'Run the tests', false, false, true, false],
+    ['late mode transition', 'Run the tests', false, false, true, false],
   ] as const)(
     'accepts completed speculation only without a current workflow intent: %s',
     async (_label, text, human, optOut, reachable, acceptCached) => {
@@ -912,16 +917,33 @@ describe('AppContainer State Management', () => {
       mockSettings.merged.ui!.disableWorkflowKeywordTrigger = optOut;
       generatePromptSuggestionMock.mockResolvedValue({ suggestion: text });
       const controller = new AbortController();
+      const cleanupOverlay = vi.fn().mockResolvedValue(undefined);
       const speculation = {
-        status: 'completed',
+        status: _label === 'mode running' ? 'running' : 'completed',
         suggestion: text,
         messages: [{ role: 'model', parts: [{ text: 'cached result' }] }],
-        overlayFs: null,
+        overlayFs: acceptCached ? null : { cleanup: cleanupOverlay },
         abortController: controller,
         startTime: Date.now(),
         toolUseCount: 0,
       };
-      startSpeculationMock.mockResolvedValue(speculation);
+      let resolveSpeculation!: (state: typeof speculation) => void;
+      if (_label === 'late mode transition') {
+        startSpeculationMock.mockReturnValue(
+          new Promise((resolve) => {
+            resolveSpeculation = resolve;
+          }),
+        );
+      } else {
+        startSpeculationMock.mockResolvedValue(speculation);
+      }
+      let modeChanged: (() => void) | undefined;
+      vi.spyOn(mockConfig, 'onWorkflowModeChange').mockImplementation(
+        (listener) => {
+          modeChanged = () => listener(mockConfig.getWorkflowMode());
+          return () => {};
+        },
+      );
       const queue = vi.fn();
       mockedUseMessageQueue.mockReturnValue({
         ...mockedUseMessageQueue(),
@@ -956,6 +978,28 @@ describe('AppContainer State Management', () => {
       await vi.waitFor(() =>
         expect(startSpeculationMock).toHaveBeenCalledOnce(),
       );
+      if (
+        _label === 'mode' ||
+        _label === 'mode running' ||
+        _label === 'pending exit' ||
+        _label === 'late mode transition'
+      ) {
+        const modeContext = vi
+          .spyOn(mockConfig, 'hasWorkflowModeContext')
+          .mockReturnValue(true);
+        if (_label !== 'mode') {
+          await act(async () => modeChanged?.());
+          if (_label === 'late mode transition') {
+            modeContext.mockReturnValue(false);
+            await act(async () => {
+              modeChanged?.();
+              resolveSpeculation(speculation);
+            });
+          }
+          expect(controller.signal.aborted).toBe(true);
+          expect(cleanupOverlay).toHaveBeenCalledOnce();
+        }
+      }
       await act(async () => {
         capturedUIActions.handleFinalSubmit(text, {
           submittedPrompt: text,
@@ -973,9 +1017,10 @@ describe('AppContainer State Management', () => {
         expect(addHistory).not.toHaveBeenCalled();
         expect(queue).toHaveBeenCalledWith(text, false, text, false, {
           displayText: text,
-          humanInput: { text },
+          humanInput: human ? { text } : undefined,
         });
         expect(controller.signal.aborted).toBe(true);
+        expect(cleanupOverlay).toHaveBeenCalledOnce();
       }
     },
   );
@@ -5154,7 +5199,7 @@ describe('AppContainer State Management', () => {
       // Third cleanup leg: in-memory chat history is stripped so the
       // cancelled prompt doesn't ride along on the next request as an
       // orphan user turn.
-      expect(mockStripOrphans).toHaveBeenCalled();
+      expect(mockStripOrphans).toHaveBeenCalledWith(true);
       // Fourth cleanup leg: Ink's static-rendered transcript region
       // is append-only — shrinking the underlying array doesn't unprint
       // already-flushed lines. `refreshStatic` writes the clear-terminal
@@ -5305,7 +5350,7 @@ describe('AppContainer State Management', () => {
         wasGoalTurn: true,
       });
 
-      expect(mockStripOrphans).toHaveBeenCalled();
+      expect(mockStripOrphans).toHaveBeenCalledWith(true);
       // Auto-restore itself bailed: there was no user item to rewind.
       expect(mockTruncateToItem).not.toHaveBeenCalled();
     });
@@ -7361,6 +7406,70 @@ describe('AppContainer State Management', () => {
       expect(lastCall[2]).toBe(1);
     });
 
+    it('reports the Mod band input and measures the controls again for a new tree', () => {
+      mockedUseTerminalSize.mockReturnValue({ columns: 100, rows: 30 });
+      mockedMeasureElement.mockReturnValue({ width: 100, height: 5 });
+      let band: interactiveMods.ModBand | undefined;
+      let notify = () => {};
+      const setRenderInput = vi.fn();
+      const modSession = {
+        initialize: vi.fn().mockResolvedValue(undefined),
+        subscribe: () => () => {},
+        setPresentation: vi.fn(),
+        setRenderInput,
+        subscribeBand: (listener: () => void) => {
+          notify = listener;
+          return () => {};
+        },
+        getBand: () => band,
+      } as unknown as interactiveMods.InteractiveModSession;
+      const getModSession = interactiveMods.getInteractiveModSession;
+      const owner = vi
+        .spyOn(interactiveMods, 'getInteractiveModSession')
+        .mockImplementation((config) =>
+          config === mockConfig ? modSession : getModSession(config),
+        );
+      try {
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+        expect(setRenderInput).toHaveBeenLastCalledWith({
+          surface: 'terminal',
+          component: 'AbovePrompt',
+          requestId: 'above-prompt',
+          viewport: { columns: 100, rows: 30, isFullscreen: false },
+          props: {
+            hasSurvey: false,
+            isWorking: false,
+            maxRows: 10,
+            bodyColumns: 95,
+            scroll: { offset: 0, bodyRows: 9 },
+            view: {},
+          },
+        });
+        const measured = mockedMeasureElement.mock.calls.length;
+        act(() => {
+          band = {
+            tree: { type: 'Text', children: ['☀'] },
+            owner: 'token-weather',
+            revision: 1,
+          };
+          notify();
+        });
+        expect(mockedMeasureElement.mock.calls.length).toBeGreaterThan(
+          measured,
+        );
+      } finally {
+        owner.mockRestore();
+        mockedMeasureElement.mockReset();
+      }
+    });
+
     it('hands ink the shared STATIC_EXTRA_HEIGHT for its dialog budget', () => {
       render(
         <AppContainer
@@ -7592,6 +7701,7 @@ describe('AppContainer State Management', () => {
         const runtime = {
           initialize: vi.fn().mockResolvedValue(undefined),
           loadCommands: vi.fn().mockResolvedValue([]),
+          setRenderInput: vi.fn(),
           close: vi.fn().mockResolvedValue(undefined),
         };
         const create = vi
@@ -7705,6 +7815,7 @@ describe('AppContainer State Management', () => {
             return () => {};
           },
           setPresentation: vi.fn(),
+          setRenderInput: vi.fn(),
         } as unknown as interactiveMods.InteractiveModSession;
         // Scope the mock to this test's own Config: mount effects from
         // earlier tests can still be in flight (they run the real
@@ -9280,6 +9391,94 @@ describe('AppContainer State Management', () => {
         expect.any(Number),
       );
     });
+  });
+
+  describe('rewind command origin admission', () => {
+    it('opens the admitted builtin slash rewind during its own artificial responding state', () => {
+      mockedUseLlmStream.mockReturnValue({
+        ...mockedUseLlmStream(),
+        streamingState: StreamingState.Responding,
+      });
+      renderRewindHarness();
+      const actions = mockedUseSlashCommandProcessor.mock.calls.at(
+        -1,
+      )?.[12] as Parameters<typeof useSlashCommandProcessor>[12];
+      act(() => actions.openRewindSelector('slash-command'));
+      expect(capturedUIState.isRewindSelectorOpen).toBe(true);
+    });
+
+    it.each([StreamingState.Responding, StreamingState.WaitingForConfirmation])(
+      'keeps keyboard double-Escape and default UI rewind closed while the owner is %s',
+      (streamingState) => {
+        mockedUseLlmStream.mockReturnValue({
+          ...mockedUseLlmStream(),
+          streamingState,
+        });
+        renderRewindHarness();
+        act(() => capturedUIActions.openRewindSelector());
+        expect(capturedUIState.isRewindSelectorOpen).toBe(false);
+        const keypress = getGlobalKeypress();
+        expect(keypress).toBeDefined();
+        const escape: Key = {
+          name: 'escape',
+          sequence: '\x1b',
+          ctrl: false,
+          meta: false,
+          shift: false,
+          paste: false,
+        };
+        act(() => {
+          keypress!(escape);
+          keypress!(escape);
+        });
+        expect(capturedUIState.isRewindSelectorOpen).toBe(false);
+      },
+    );
+
+    it('does not bypass tool confirmation with slash rewind origin', () => {
+      mockedUseLlmStream.mockReturnValue({
+        ...mockedUseLlmStream(),
+        streamingState: StreamingState.WaitingForConfirmation,
+      });
+      renderRewindHarness();
+      const actions = mockedUseSlashCommandProcessor.mock.calls.at(
+        -1,
+      )?.[12] as Parameters<typeof useSlashCommandProcessor>[12];
+      act(() => actions.openRewindSelector('slash-command'));
+      expect(capturedUIState.isRewindSelectorOpen).toBe(false);
+    });
+
+    it.each(['ide', 'dialog', 'no-user'] as const)(
+      'preserves the %s guard for admitted slash rewind',
+      (blockedBy) => {
+        mockedUseLlmStream.mockReturnValue({
+          ...mockedUseLlmStream(),
+          streamingState: StreamingState.Responding,
+        });
+        if (blockedBy === 'ide')
+          vi.spyOn(mockConfig, 'getIdeMode').mockReturnValue(true);
+        if (blockedBy === 'dialog')
+          mockedUseThemeCommand.mockReturnValue({
+            ...mockedUseThemeCommand(),
+            isThemeDialogOpen: true,
+          });
+        const harness = renderRewindHarness(
+          blockedBy === 'no-user' ? { history: [] } : {},
+        );
+        const actions = mockedUseSlashCommandProcessor.mock.calls.at(
+          -1,
+        )?.[12] as Parameters<typeof useSlashCommandProcessor>[12];
+        act(() => actions.openRewindSelector('slash-command'));
+        expect(capturedUIState.isRewindSelectorOpen).toBe(false);
+        if (blockedBy === 'ide')
+          expect(harness.addItem).toHaveBeenCalledWith(
+            expect.objectContaining({
+              text: 'Rewind is disabled in IDE mode.',
+            }),
+            expect.any(Number),
+          );
+      },
+    );
   });
 
   describe('IDE mode rewind guard', () => {

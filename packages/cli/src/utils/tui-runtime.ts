@@ -20,9 +20,8 @@ export const TUI_RENDERER_STRICT_ENV_VAR = 'QWEN_TUI_RENDERER_STRICT';
 /** The only non-default renderer value this gate recognizes. */
 export const OPEN_TUI_RENDERER_VALUE = 'opentui';
 
-/** Minimum runtime versions that can initialize the OpenTUI native FFI. */
+/** Minimum Bun version supported by the OpenTUI runtime. */
 export const MIN_BUN_VERSION = '1.3.0';
-export const MIN_NODE_VERSION = '26.4.0';
 
 /**
  * Parses a dotted version string into its numeric segments. Non-numeric or
@@ -68,9 +67,8 @@ export interface RuntimeVersionProbe {
 }
 
 /**
- * Whether the current runtime can initialize the OpenTUI native FFI. Bun >=
- * 1.3.0 and Node >= 26.4.0 (with `--experimental-ffi`) are the supported
- * floors; anything older returns false so the entry stays on ink.
+ * Whether the current runtime supports OpenTUI. Node launches must hand off
+ * to Bun; otherwise the entry stays on ink.
  */
 export function isOpenTuiRuntimeSupported(
   probe: RuntimeVersionProbe = {
@@ -80,9 +78,6 @@ export function isOpenTuiRuntimeSupported(
 ): boolean {
   if (probe.bun) {
     return compareVersions(probe.bun, MIN_BUN_VERSION) >= 0;
-  }
-  if (probe.node) {
-    return compareVersions(probe.node, MIN_NODE_VERSION) >= 0;
   }
   return false;
 }

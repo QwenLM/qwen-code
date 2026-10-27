@@ -38,9 +38,13 @@ const prSkill = readFileSync(
   'utf8',
 );
 const triageSkillDoc = readFileSync('.qwen/skills/triage/SKILL.md', 'utf8');
+import { VERDICTS } from '../../scripts/verify-pr-check.mjs';
+
 const verifySkill = readFileSync('.qwen/skills/verify-pr/SKILL.md', 'utf8');
 const hasGnuRealpath =
-  spawnSync('realpath', ['-m', '--', '/'], { stdio: 'ignore' }).status === 0;
+  spawnSync('realpath', ['-m', '--', '/'], {
+    stdio: 'ignore',
+  }).status === 0;
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -5266,6 +5270,16 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain('schedule nothing');
   });
 
+  // The TUI renders `argument-hint` beside the command name; without the field
+  // `/verify-pr` looks like it takes no arguments, unlike `/review`.
+  it('declares an argument hint for the command prompt', () => {
+    const frontmatter = parse(/^---\n([\s\S]*?)\n---/.exec(verifySkill)[1]);
+
+    expect(frontmatter['argument-hint']).toBe(
+      '<pr-number> [--publish] [--watch] [--repo <owner>/<repo>] [--assets-repo <owner>/<repo>] [--assets-branch <branch>]',
+    );
+  });
+
   // PR #7836's report said "Verdict: merge-ready — the 7 failures are all
   // expected A/B base-cell failures proving the tests are load-bearing"
   // while assertions.json said fail:7 — so the publisher's trust rule
@@ -5313,6 +5327,24 @@ describe('qwen-triage verify hardening round 2', () => {
     const publishStep = step('Post verification report comment');
     expect(publishStep).toContain('.total == .pass + .fail');
     expect(publishStep).toContain('all(type == "number" and . >= 0');
+  });
+
+  // The local artifact checker mirrors this step instead of sharing code with
+  // it (design decision 3), so the mirror needs a pin. The numeric rule is
+  // already asserted on both sides; the verdict vocabulary was the axis with
+  // nothing holding the two implementations together, so a fifth word added to
+  // the publisher would leave the local path silently accepting four.
+  it('keeps the local checker aligned with the publisher verdicts', () => {
+    const publishStep = step('Post verification report comment');
+    const agentCase = publishStep
+      .slice(publishStep.indexOf('case "$AGENT_VERDICT"'))
+      .split('esac')[0];
+    const labels = new Set(
+      [...agentCase.matchAll(/^\s+([a-z][a-z-]*)\)/gm)].map(
+        (match) => match[1],
+      ),
+    );
+    expect(labels).toEqual(new Set(VERDICTS));
   });
 });
 

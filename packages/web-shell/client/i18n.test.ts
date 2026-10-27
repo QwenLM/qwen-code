@@ -12,6 +12,15 @@ const FOLLOWUP_SETTING_KEYS = [
 ] as const;
 
 describe('web-shell i18n catalog', () => {
+  it('explains missing rewind identities in both locales', () => {
+    expect(getTranslator('en')('rewind.identityUnavailable')).toContain(
+      'no prompt identity',
+    );
+    expect(getTranslator('zh-CN')('rewind.identityUnavailable')).toContain(
+      '身份',
+    );
+  });
+
   it('pluralizes deletion counts and explains unsupported sessions in both locales', () => {
     const en = getTranslator('en');
     expect(en('messageDelete.selected', { count: 1 })).toBe('1 group selected');

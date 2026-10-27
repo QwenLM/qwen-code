@@ -116,6 +116,8 @@ export type {
   DaemonGlobResult,
   DaemonGoal,
   DaemonGoalList,
+  DaemonAutofixPrWatch,
+  DaemonAutofixPrWatchList,
   DaemonScheduledTask,
   DaemonScheduledTaskGateStatus,
   DaemonScheduledTaskRun,

@@ -27,7 +27,9 @@ import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { git, gitOpt } from '../review/lib/git.js';
 import { liveDestination, withLiveBase } from './push.js';
 import {
-  assertOwnedBySession,
+  assertWatching,
+  TASK_OPTION,
+  taskArg,
   autofixPrPaths,
   repoRoot,
   requireState,
@@ -42,6 +44,7 @@ import {
   networkGitEnv,
   requireWorktree,
 } from './worktree.js';
+import { assertNoFixInFlight, clearAbandonedFix } from './fix.js';
 
 export interface SyncOutcome {
   synced: boolean;
@@ -59,14 +62,33 @@ export interface SyncOutcome {
   /** Commits the worktree holds that the PR does not: a round's work not
    * pushed yet — or left behind by a round that never ended. */
   unpushed?: number;
+  /** A background fix whose session ended before its round went on: its
+   * marker is gone, and the round discards what the worktree holds. */
+  abandonedFix?: { startedAt: string | null };
 }
 
-export function runSync(prNumber: number, discard = false): SyncOutcome {
+/**
+ * `task` is the scheduled task that woke the round: a round starts with
+ * `sync`, so one a replaced task's queued fire began goes no further.
+ */
+export function runSync(
+  prNumber: number,
+  discard = false,
+  task?: string,
+): SyncOutcome {
   const root = repoRoot();
   const paths = autofixPrPaths(root, prNumber);
-  return withWatchLock(paths, prNumber, () =>
-    syncLocked(paths, prNumber, discard, root),
-  );
+  return withWatchLock(paths, prNumber, () => {
+    // Before anything moves: the attempt's agent may be working in the
+    // worktree. Only the session that owns the watch removes a marker its
+    // session left behind (Section 6.14): `syncLocked` checks it first.
+    assertNoFixInFlight(paths, prNumber);
+    // Removed once the sync answered: one that fails keeps it for the
+    // next, which then reports it.
+    const outcome = syncLocked(paths, prNumber, discard, root, task);
+    const abandonedFix = clearAbandonedFix(paths);
+    return abandonedFix ? { ...outcome, abandonedFix } : outcome;
+  });
 }
 
 function syncLocked(
@@ -74,9 +96,10 @@ function syncLocked(
   prNumber: number,
   discard: boolean,
   root: string,
+  task: string | undefined,
 ): SyncOutcome {
   const state = requireState(paths.statePath, prNumber);
-  assertOwnedBySession(state);
+  assertWatching(state, task);
   const worktree = paths.worktreePath;
   requireWorktree(paths, prNumber, root, discard);
 
@@ -435,10 +458,13 @@ export const syncCommand: CommandModule = {
         default: false,
         describe:
           "Return the worktree to the PR head, dropping a round's unpushed commits and uncommitted changes",
-      }),
+      })
+      .option('task', TASK_OPTION),
   handler: (argv) => {
     writeStdoutLine(
-      JSON.stringify(runSync(Number(argv['pr']), Boolean(argv['discard']))),
+      JSON.stringify(
+        runSync(Number(argv['pr']), Boolean(argv['discard']), taskArg(argv)),
+      ),
     );
   },
 };

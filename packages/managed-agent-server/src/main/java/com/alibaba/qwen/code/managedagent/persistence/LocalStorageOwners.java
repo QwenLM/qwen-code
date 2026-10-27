@@ -17,6 +17,7 @@ final class LocalStorageOwners {
     static final String OPERATION_AUTHORITY_SQL = "SELECT 1 FROM ma_operation WHERE storage_key = ?"
             + " AND ((operation_kind IN ('WORKSPACE_RECOVERY', 'WORKSPACE_OPERATOR_RECOVERY', 'STORAGE_MIGRATION')"
             + " AND state IN ('CAPTURING', 'VERIFYING', 'PREPARED', 'ATTESTED', 'RETIRING', 'RETIRED', 'PREPARING', 'INVALIDATED'))"
+            + " OR (operation_kind = 'WORKSPACE_UPLOAD' AND state = 'RUNNING')"
             + " OR (operation_kind = 'CHILD_WORKSPACE' AND state IN ('"
             + String.join("', '", ChildWorkspaceStore.PREPARING, ChildWorkspaceStore.READY, ChildWorkspaceStore.MERGING,
                     ChildWorkspaceStore.APPLYING, ChildWorkspaceStore.APPLIED, ChildWorkspaceStore.DISCARDING,

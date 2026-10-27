@@ -27,6 +27,7 @@ export interface ModToolCheckResult {
   reason?: string;
   rule?: string;
   hook?: string;
+  setting?: string;
   ceiling?: ModPermission;
   plugin?: string;
 }
@@ -98,9 +99,17 @@ export function validToolCheck(value: Record<string, unknown>): boolean {
     typeof value['decision'] === 'string' &&
     ['allow', 'ask', 'deny'].includes(value['decision']) &&
     Object.keys(value).every((key) =>
-      ['decision', 'reason', 'rule', 'hook', 'ceiling', 'plugin'].includes(key),
+      [
+        'decision',
+        'reason',
+        'rule',
+        'hook',
+        'setting',
+        'ceiling',
+        'plugin',
+      ].includes(key),
     ) &&
-    ['reason', 'rule', 'hook', 'plugin'].every(
+    ['reason', 'rule', 'hook', 'setting', 'plugin'].every(
       (key) => value[key] === undefined || typeof value[key] === 'string',
     ) &&
     (value['ceiling'] === undefined ||

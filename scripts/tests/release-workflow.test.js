@@ -550,6 +550,7 @@ describe('release workflow', () => {
       'integration_docker',
       'publish',
       'notify_failure',
+      'reconcile_failure',
     ]) {
       const steps = releaseYaml.jobs[jobId].steps;
       const targetCheckoutIndex = steps.findIndex(
@@ -571,7 +572,10 @@ describe('release workflow', () => {
         'sparse-checkout-cone-mode': false,
         path: '.release-workflow',
       });
-      if (jobId !== 'notify_failure') {
+      // The two issue jobs are the only ones whose script checkout has no
+      // preceding target checkout: they must run when that checkout is what
+      // failed.
+      if (jobId !== 'notify_failure' && jobId !== 'reconcile_failure') {
         expect(scriptCheckoutIndex, jobId).toBeGreaterThan(targetCheckoutIndex);
       }
       for (const [index, step] of steps.entries()) {
@@ -660,6 +664,11 @@ describe('release workflow', () => {
   });
 
   it('keeps the workflow focused on orchestration', () => {
+    // 920, raised from 880 for reconcile_failure: the success-gated sibling of
+    // notify_failure, one job carrying a single script step, because the close
+    // path cannot live inside notify_failure — that job is skipped on a
+    // passing re-run, which is the whole defect (#15705). The reconciliation
+    // logic itself stays in .github/scripts/run-release-step.sh.
     // 880, raised from 870 for quality_scripts' standalone runtime cache
     // step: the same four-line export of a host-wide cache path as ci.yml's
     // test job — orchestration; the cache logic lives in
@@ -677,7 +686,7 @@ describe('release workflow', () => {
     // is the job that reports their failure, so its last-resort issue filing
     // is deliberately inline. Every other step stays under the per-step cap
     // below, which is the rule that actually keeps logic out of the YAML.
-    expect(workflow.split('\n').length).toBeLessThan(880);
+    expect(workflow.split('\n').length).toBeLessThan(930);
     for (const [jobId, job] of Object.entries(releaseYaml.jobs)) {
       for (const step of job.steps ?? []) {
         if (step.name === 'Restore workspace ownership' || !step.run) continue;
@@ -1066,6 +1075,166 @@ describe('release workflow', () => {
         expect(fallback.if).toBe(
           "${{ always() && steps.notify.outcome != 'success' && !steps.notify.outputs.issue_url }}",
         );
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('reconciles a stale failure issue only when the release succeeded', () => {
+    const job = releaseYaml.jobs.reconcile_failure;
+    // notify_failure is skipped the moment a re-run passes, so the close path
+    // has to be a sibling gated on success rather than a step inside it.
+    expect(job.if).toContain('always()');
+    expect(job.if).toContain("needs.publish.result == 'success'");
+    expect(job.if).toContain("github.event.inputs.dry_run != 'true'");
+    // force_skip_tests lets publish run past a failed validation job: closing
+    // there would race the issue notify_failure is filing for that failure.
+    for (const need of [
+      'prepare',
+      'quality',
+      'integration_none',
+      'integration_docker',
+    ]) {
+      expect(job.if, need).toContain(`needs.${need}.result != 'failure'`);
+    }
+    expect(job.needs).toEqual(releaseYaml.jobs.notify_failure.needs);
+    expect(job.permissions).toEqual({ contents: 'read', issues: 'write' });
+    const step = job.steps.find(
+      (entry) => entry.name === 'Close the issue an earlier attempt filed',
+    );
+    expect(step.run).toBe(
+      '.release-workflow/.github/scripts/run-release-step.sh reconcile-failure',
+    );
+    // A reconciliation failure must never turn a shipped release red.
+    expect(step['continue-on-error']).toBe(true);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'closes the workflow-owned failure issue once a later attempt succeeds',
+    () => {
+      const directory = mkdtempSync(join(tmpdir(), 'release-reconcile-'));
+      const bin = join(directory, 'bin');
+      const ghLog = join(directory, 'gh-calls');
+      const issues = join(directory, 'issues.json');
+      mkdirSync(bin);
+      writeFileSync(
+        issues,
+        JSON.stringify([
+          {
+            number: 15672,
+            url: 'https://github.example/QwenLM/qwen-code/issues/15672',
+            labels: [{ name: 'type/bug' }, { name: 'status/ready-for-agent' }],
+            author: { login: 'github-actions[bot]' },
+            title: 'Release Failed for v1.2.3 on 2026-10-26',
+          },
+        ]),
+      );
+      writeFileSync(
+        join(bin, 'gh'),
+        '#!/bin/sh\n' +
+          'printf "%s\\n" "$*" >> "$GH_CALL_LOG"\n' +
+          'if [ "$1" = issue ] && [ "$2" = list ]; then\n' +
+          '  cat "$GH_ISSUES"\n' +
+          '  exit 0\n' +
+          'fi\n' +
+          'if [ "$1" = issue ] && [ "$2" = edit ]; then\n' +
+          '  case "$*" in\n' +
+          '    *autofix/approved*) exit 1 ;;\n' +
+          '  esac\n' +
+          'fi\n' +
+          'exit 0\n',
+        { mode: 0o755 },
+      );
+      try {
+        const result = spawnSync(
+          'bash',
+          [releaseStepScriptAbsolutePath, 'reconcile-failure'],
+          {
+            cwd: directory,
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${bin}:${process.env.PATH}`,
+              GH_CALL_LOG: ghLog,
+              GH_ISSUES: issues,
+              GH_REPO: 'QwenLM/qwen-code',
+              RELEASE_TAG: 'v1.2.3',
+              DETAILS_URL: 'https://github.example/run/1',
+              RUN_ATTEMPT: '2',
+            },
+          },
+        );
+        expect(result.status, result.stderr).toBe(0);
+        const calls = readFileSync(ghLog, 'utf8');
+        expect(calls).toContain('issue comment 15672');
+        expect(calls).toContain(
+          'issue close 15672 --repo QwenLM/qwen-code --reason not planned',
+        );
+        expect(calls).not.toContain('issue create');
+        // One absent label must not abort the remaining removals or the close.
+        expect(calls).toContain('--remove-label status/ready-for-agent');
+        expect(calls).toContain('--remove-label autofix/in-progress');
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'never closes a human-authored release-failure issue',
+    () => {
+      const directory = mkdtempSync(join(tmpdir(), 'release-reconcile-human-'));
+      const bin = join(directory, 'bin');
+      const ghLog = join(directory, 'gh-calls');
+      const issues = join(directory, 'issues.json');
+      mkdirSync(bin);
+      writeFileSync(
+        issues,
+        JSON.stringify([
+          {
+            number: 9001,
+            url: 'https://github.example/QwenLM/qwen-code/issues/9001',
+            labels: [{ name: 'type/bug' }],
+            author: { login: 'some-maintainer' },
+            title: 'Release Failed for v1.2.3 on 2026-10-26',
+          },
+        ]),
+      );
+      writeFileSync(
+        join(bin, 'gh'),
+        '#!/bin/sh\n' +
+          'printf "%s\\n" "$*" >> "$GH_CALL_LOG"\n' +
+          'if [ "$1" = issue ] && [ "$2" = list ]; then\n' +
+          '  cat "$GH_ISSUES"\n' +
+          'fi\n' +
+          'exit 0\n',
+        { mode: 0o755 },
+      );
+      try {
+        const result = spawnSync(
+          'bash',
+          [releaseStepScriptAbsolutePath, 'reconcile-failure'],
+          {
+            cwd: directory,
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${bin}:${process.env.PATH}`,
+              GH_CALL_LOG: ghLog,
+              GH_ISSUES: issues,
+              GH_REPO: 'QwenLM/qwen-code',
+              RELEASE_TAG: 'v1.2.3',
+              DETAILS_URL: 'https://github.example/run/1',
+              RUN_ATTEMPT: '2',
+            },
+          },
+        );
+        expect(result.status, result.stderr).toBe(0);
+        const calls = readFileSync(ghLog, 'utf8');
+        expect(calls).toContain('issue list');
+        expect(calls).not.toContain('issue close');
+        expect(calls).not.toContain('issue comment');
       } finally {
         rmSync(directory, { recursive: true, force: true });
       }
@@ -3062,6 +3231,7 @@ exit 0`,
           'integration_none',
           'integration_docker',
           'notify_failure',
+          'reconcile_failure',
         ].map((id) => [id, releaseYaml.jobs[id]['timeout-minutes']]),
       ),
     ).toEqual({
@@ -3080,6 +3250,7 @@ exit 0`,
       integration_none: 120,
       integration_docker: 120,
       notify_failure: 10,
+      reconcile_failure: 10,
     });
 
     for (const id of [
@@ -3119,6 +3290,121 @@ exit 0`,
     );
     expect(publishSetupNode?.with.cache).toBeUndefined();
     expect(publishSetupNode?.with['package-manager-cache']).toBe(false);
+  });
+
+  it('keeps the standalone runtime spawn inside the quality_scripts budget', () => {
+    const source = readFileSync('scripts/test-standalone-runtimes.mjs', 'utf8');
+    const worker = /^const WORKER_TIMEOUT_MS = ([\d_]+);$/m.exec(source);
+    const setup = /^const SETUP_TIMEOUT_MS = ([\d_]+);$/m.exec(source);
+    const derived =
+      /^const CI_TIMEOUT_MS = 2 \* WORKER_TIMEOUT_MS \+ SETUP_TIMEOUT_MS;$/m.exec(
+        source,
+      );
+    expect(
+      worker,
+      'WORKER_TIMEOUT_MS must stay a plain constant',
+    ).not.toBeNull();
+    expect(setup, 'SETUP_TIMEOUT_MS must stay a plain constant').not.toBeNull();
+    expect(
+      derived,
+      'CI_TIMEOUT_MS must derive from the worker and setup caps',
+    ).not.toBeNull();
+    // Pin the wiring, not just the declarations: these constants exist to
+    // bound exactly two spawnSync options, and every setup phase must spend
+    // the shared setup budget instead of inheriting the 300 s run() default.
+    expect(source.match(/timeout: WORKER_TIMEOUT_MS,/g)).toHaveLength(1);
+    expect(source.match(/timeout: CI_TIMEOUT_MS,/g)).toHaveLength(1);
+    // spawnSync treats timeout 0 as "no timeout", so a spent setup budget
+    // must fail the next phase at 1 ms rather than disarm its cap.
+    expect(
+      source.match(/Math\.max\(1, deadline - Date\.now\(\)\)/g),
+    ).toHaveLength(1);
+    // Both entry points must take their setup I/O from the one factory, and
+    // that factory must close both wrappers over the shared deadline.
+    expect(
+      source.match(/^ {2}const setup = makeSetupBudget\(\);$/gm),
+    ).toHaveLength(2);
+    expect(source).toMatch(
+      /run: \(bin, args\) =>\s*run\(bin, args, \{ timeout: remaining\(\) \}\),/,
+    );
+    expect(source).toMatch(
+      /fetch: \(url, init\) =>\s*fetch\(url, \{ \.\.\.init, signal: AbortSignal\.timeout\(remaining\(\)\) \}\),/,
+    );
+    const setupSlices = [];
+    let from = 0;
+    while (true) {
+      const start = source.indexOf('const setup = makeSetupBudget();', from);
+      if (start < 0) break;
+      const end = source.indexOf('const result = spawnSync(', start);
+      expect(end, 'setup must be followed by its spawn').toBeGreaterThan(start);
+      setupSlices.push(source.slice(start, end));
+      from = end;
+    }
+    expect(setupSlices).toHaveLength(2);
+    for (const slice of setupSlices) {
+      // A phase that reaches past the budget factory inherits run()'s 300 s
+      // default or escapes the deadline entirely. Naming the escape hatches
+      // avoids enumerating call spellings: budgeted calls are setup.run() /
+      // setup.fetch(), which the leading-dot exclusion leaves alone.
+      expect(
+        slice,
+        'every setup phase must go through the budget wrapper',
+      ).not.toMatch(/(?<![\w.])(?:spawnSync|run|fetch)\s*\(/);
+    }
+    // The slice's fetch must be the implementation the archive fetch uses,
+    // not a helper left behind after the wiring was removed.
+    expect(setupSlices[0]).toMatch(
+      /return fetchVerifiedArchive\(url, filename, pin, \{\s*cacheDir,\s*fetchImpl: setup\.fetch,?\s*\}\)/,
+    );
+    const workerMs = Number(worker[1].replaceAll('_', ''));
+    const setupMs = Number(setup[1].replaceAll('_', ''));
+    const spawnMs = 2 * workerMs + setupMs;
+    // The child spends the same setup budget on its five pre-worker probes
+    // and keygen, so the outer cap must cover setup before either worker
+    // starts. A near-zero margin would let the outer cap fire first and lose
+    // the host-naming diagnostic.
+    expect(
+      spawnMs - 2 * workerMs,
+      'outer cap must leave room for pre-worker probes and keygen',
+    ).toBeGreaterThanOrEqual(60_000);
+    // That margin only matters while a worker killed at its cap still names
+    // the host, so the diagnostic must precede the bare asserts that throw
+    // first on the failure path.
+    const workerLoop = source.slice(
+      source.indexOf('for (const [host, bin] of ['),
+    );
+    const diagnosticAt = workerLoop.indexOf('actualExitCode');
+    expect(
+      diagnosticAt,
+      'worker loop must print the host diagnostic',
+    ).toBeGreaterThanOrEqual(0);
+    expect(workerLoop.indexOf('assert.equal(result.status, 0')).toBeGreaterThan(
+      diagnosticAt,
+    );
+    // package.json is the only link that places this spawn inside the
+    // quality_scripts job, and the budget counts vitest as running after it.
+    const rootScripts = JSON.parse(
+      readFileSync('package.json', 'utf8'),
+    ).scripts;
+    expect(rootScripts['test:scripts']).toMatch(
+      /^npm run test:standalone:runtimes:ci && npm run test:scripts:unit /,
+    );
+    expect(rootScripts['test:scripts:unit']).toMatch(/^vitest run /);
+    expect(rootScripts['test:standalone:runtimes:ci']).toBe(
+      'node scripts/test-standalone-runtimes.mjs --ci',
+    );
+    // Reserve the slow-pool measurements outside the spawn: ~295 s of job
+    // setup and the ~288 s scripts suite, rounded up to 600 s. Re-measure
+    // when scripts/tests/** gains a suite; 600 s is only valid for the suite
+    // as of this commit.
+    const aroundTheSpawnSeconds = 600;
+    // Parent setup and the child spawn are separate caps; both plus the
+    // reserve must fit the job's declared 30-minute budget.
+    expect(
+      setupMs / 1000 + spawnMs / 1000 + aroundTheSpawnSeconds,
+    ).toBeLessThanOrEqual(
+      releaseYaml.jobs.quality_scripts['timeout-minutes'] * 60,
+    );
   });
 
   it('stages every integration package manifest after versioning', () => {
