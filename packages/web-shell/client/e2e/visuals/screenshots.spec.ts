@@ -23,6 +23,7 @@ import {
 import {
   captureScreenshot,
   completeReplay,
+  FIXED_CAPTURE_TIME,
   fillComposer,
   gotoNewSession,
   gotoSession,
@@ -1695,6 +1696,147 @@ for (const theme of THEMES) {
       await fillComposer(page, '/');
       await expect(page.locator('[data-web-shell-slash-menu]')).toBeVisible();
       await captureScreenshot(page, `slash-menu-${theme}`);
+    });
+
+    test(`PR watches`, async ({ page }, testInfo) => {
+      // The PR watches page and a watch's scheduled-task card render only
+      // from `GET /autofix-pr/watches`, which no other scenario answers. One
+      // watch fixes in the background with an item for a person, one runs in
+      // a terminal, one's PR merged with nothing running it.
+      const scenario = createWebShellDaemonScenario({
+        capabilities: {
+          features: [
+            'session_events',
+            'workspace_settings',
+            'scheduled_task_gate',
+            'autofix_pr_watches',
+          ],
+        },
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      const now = FIXED_CAPTURE_TIME.getTime();
+      const ago = (minutes: number) =>
+        new Date(now - minutes * 60_000).toISOString();
+      const watch = (over: Record<string, unknown>) => ({
+        pr: 12,
+        repo: 'acme/widgets',
+        host: 'github.com',
+        url: 'https://github.com/acme/widgets/pull/12',
+        headRefName: 'feat/cache',
+        headSha: 'a'.repeat(40),
+        pushes: 3,
+        maxPushes: 10,
+        session: scenario.sessionId,
+        preparedAt: ago(120),
+        lastCheck: ago(1),
+        checkedRecently: true,
+        lastRound: ago(9),
+        stopped: null,
+        watch: {
+          every: 2,
+          reply: true,
+          instructions: '',
+          task: 'feedc0ffee12',
+        },
+        ended: null,
+        needsHuman: [],
+        worktreeExists: true,
+        fix: null,
+        ...over,
+      });
+      const origin = new URL(resolveBaseURL(testInfo)).origin;
+      await page.route(`${origin}/autofix-pr/watches`, (route) =>
+        route.fulfill({
+          json: {
+            v: 1,
+            available: true,
+            root: scenario.capabilities.workspaceCwd,
+            now: FIXED_CAPTURE_TIME.toISOString(),
+            watches: [
+              watch({
+                needsHuman: [
+                  {
+                    sha: 'a'.repeat(40),
+                    at: ago(30),
+                    text: 'Should the cache key include the locale? The reviewer and the issue disagree.',
+                  },
+                ],
+                fix: {
+                  attempt: '0123456789ab',
+                  startedAt: ago(6),
+                  fresh: true,
+                },
+              }),
+              watch({
+                pr: 40,
+                url: 'https://github.com/acme/widgets/pull/40',
+                session: 'a-terminal-session',
+                pushes: 0,
+                lastRound: null,
+              }),
+              watch({
+                pr: 7,
+                url: 'https://github.com/acme/widgets/pull/7',
+                session: 'gone-session',
+                stopped: 'merged',
+                checkedRecently: false,
+              }),
+            ],
+          },
+        }),
+      );
+      await page.route(`${origin}/scheduled-tasks`, (route) =>
+        route.fulfill({
+          json: {
+            v: 1,
+            tasks: [
+              {
+                id: 'watch-task',
+                name: null,
+                cron: '*/2 * * * *',
+                prompt:
+                  'Run /autofix-pr tick acme/widgets#12 --task feedc0ffee12',
+                gate: '"${QWEN_CODE_CLI:-qwen}" autofix-pr snapshot 12 --gate --repo acme/widgets --host github.com --session web-shell-e2e-session --task feedc0ffee12',
+                gateStatus: {
+                  lastAt: now - 60_000,
+                  lastOutcome: 'quiet',
+                  quietSinceDelivery: 4,
+                  lastDeliveredAt: now - 9 * 60_000,
+                  consecutiveFailures: 0,
+                },
+                recurring: true,
+                enabled: true,
+                createdAt: now - 3_600_000,
+                lastFiredAt: now - 60_000,
+                nextRunAt: now + 60_000,
+                sessionId: scenario.sessionId,
+                sessionMode: 'persistent',
+                modelServiceId: null,
+                groupId: null,
+                runs: [],
+              },
+            ],
+          },
+        }),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      await page.getByRole('button', { name: 'PR watches' }).first().click();
+      const watchesPage = page.getByTestId('pr-watches-page');
+      await expect(watchesPage.getByTestId('autofix-pr-watch')).toHaveCount(3);
+      await watchesPage.getByText('Needs your decision (1)').click();
+      await captureScreenshot(page, `pr-watches-${theme}`);
+
+      await page
+        .getByRole('button', { name: 'Scheduled tasks' })
+        .first()
+        .click();
+      await expect(page.getByTestId('autofix-pr-watch')).toHaveCount(1);
+      await captureScreenshot(page, `scheduled-task-pr-watch-${theme}`);
     });
 
     test(`model dialog`, async ({ page }, testInfo) => {
