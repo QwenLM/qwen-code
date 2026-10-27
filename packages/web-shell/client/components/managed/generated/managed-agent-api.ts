@@ -152,23 +152,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/agent/web-shell/v1/sessions/cwd/change": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** @description W2, implemented: the camelCase twin of the public changeSessionCwd with the matched refusal order: 400 invalid_request for a missing or malformed field; 401 actor_required without a trusted actor; 400 invalid_idempotency_key for a malformed idempotencyKey — with two documented divergences: a key over 128 characters is refused during request validation with 400 invalid_request before the service's check, and a blank idempotencyKey is refused there too, while the public header answers 400 invalid_idempotency_key for both shapes; 400 invalid_cwd for a lexical violation and 400 invalid_request for an expectedContextRevision below 1; 404 session_not_found for an unknown Session id; 400 unsupported_feature for an unbound Session; 404 session_not_found for an unreadable Session; 409 idempotency_conflict when one key carries different content, and a completed change under the same key always replays instead, before the role refusal; 403 session_operation_forbidden when a readable actor's Workspace role is below OPERATOR; 409 workspace_unavailable when execution is disabled; 404 session_not_found for a deleted Session; then 409 session_state_conflict, 409 workspace_unavailable from moved Registry facts (the recorded create-command actor's grant included, and the settlement re-checks the V56-persisted initiator the same way, so demoting either actor fails the operation, exactly like the public surface), 409 context_revision_conflict and 409 session_context_busy. Poll the operation or await session.context.changed; do not treat 202 as activation. */
-        post: operations["webShellChangeCwd"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/agent/web-shell/v1/operations/query": {
         parameters: {
             query?: never;
@@ -1036,6 +1019,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/workspaces/files/upload": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Upload one binary file to a persisted Workspace
+         * @description Requires a trusted actor with OPERATOR or OWNER access, enabled Workspace files, verified LOCAL or SSH_LOCAL storage and an updated CLI. Uploads are limited to 8 MiB, require an existing parent directory and never overwrite an occupied path. A durable physical storage hold excludes tool execution and retirement until the original upload has a definite terminal result. Repeating the same upload ID reconciles its original command without replaying mutation; changed requests conflict. CSI is unsupported and never falls back to a primary Workspace. An uncertain result returns 503 workspace_upload_pending and must be queried by the original upload ID.
+         */
+        post: operations["webShellWorkspaceFilesUpload"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/workspaces/files/uploads/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reconcile the original Workspace upload
+         * @description Only the admitting actor with a current Workspace operator grant can query the upload. Status checks use the frozen original storage target and never execute an upload or select a replacement Runtime. Reconciliation remains available through storage fencing; pending commands retain their durable hold. The server also reconciles pending uploads after client cancellation or restart.
+         */
+        post: operations["webShellWorkspaceFilesUploadQuery"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1272,7 +1295,8 @@ export interface components {
         };
         WebShellSessionCapabilities: {
             /**
-             * @description True when Workspace files are enabled, the bound Session is active and undeleted, the caller holds OPERATOR or above on the Workspace and the exact ACTIVE Registry generation/storage and create-command-actor OPERATOR/OWNER grant still hold, matching cwd admission. This does not promise an idle Session and is independent of workspaceTurns execution-profile gates. Missing means false. Existing operations remain queryable under read authorization even when this capability is false.
+             * @deprecated
+             * @description Retired: Session directory-change submission has been removed; always false.
              * @default false
              */
             cwdChange?: boolean;
@@ -1485,15 +1509,6 @@ export interface components {
                 /** @constant */
                 canCreateSession?: true;
             }) | null;
-        };
-        WebShellChangeCwdRequest: {
-            /** Format: uuid */
-            sessionId: string;
-            idempotencyKey: string;
-            cwdRelative: components["schemas"]["WorkspaceRelativePath"];
-            /** Format: int64 */
-            expectedContextRevision: number;
-            requestId?: string | null;
         };
         WebShellOperationRequest: {
             /** Format: uuid */
@@ -2106,6 +2121,8 @@ export interface components {
             directory: string;
             entries: components["schemas"]["WebShellWorkspaceFileEntry"][];
             truncated: boolean;
+            /** @description Present only when the selected CLI supports durable Workspace uploads. */
+            maxUploadBytes?: number;
         };
         WebShellWorkspaceFileSnapshot: {
             scopeRevision: string;
@@ -2484,6 +2501,29 @@ export interface components {
             idempotencyKey: string;
             command: components["schemas"]["ManagedExtensionApplySelection"];
         };
+        WebShellWorkspaceFileUploadResult: {
+            scopeRevision: string;
+            /** Format: uuid */
+            uploadId: string;
+            path: string;
+            sizeBytes: number;
+            sha256: string;
+        };
+        WebShellWorkspaceFileUploadStatus: {
+            scopeRevision: string;
+            /** Format: uuid */
+            uploadId: string;
+            path: string;
+            sizeBytes: number;
+            sha256: string;
+            /** @enum {string} */
+            state: "completed" | "failed" | "pending";
+            code?: string;
+        };
+        WebShellWorkspaceFileUploadQueryRequest: {
+            /** Format: uuid */
+            uploadId: string;
+        };
     };
     responses: {
         /** @description The authenticated actor belongs to another tenant than X-Qwen-Tenant-Id or has an invalid ID (actor_scope_mismatch, which the tenant filter answers on every /v1/agents/ and WebShell route), or the resource is readable but the actor lacks this operation or the original Action responder permission. Artifact content reads may also return artifact_content_forbidden when the actor cannot read the original bytes. */
@@ -2850,36 +2890,6 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
-            413: components["responses"]["PayloadTooLarge"];
-        };
-    };
-    webShellChangeCwd: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["WebShellChangeCwdRequest"];
-            };
-        };
-        responses: {
-            /** @description Durable cwd operation; acceptance does not mean the new cwd is active. */
-            202: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["WebShellCwdOperation"];
-                };
-            };
-            400: components["responses"]["BadRequest"];
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
-            409: components["responses"]["Conflict"];
             413: components["responses"]["PayloadTooLarge"];
         };
     };
@@ -4630,6 +4640,90 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
+        };
+    };
+    webShellWorkspaceFilesUpload: {
+        parameters: {
+            query: {
+                workspaceId: string;
+                cwdRelative: string;
+                path: string;
+                expectedScopeRevision: string;
+                uploadId: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/octet-stream": string;
+            };
+        };
+        responses: {
+            /** @description Workspace upload result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellWorkspaceFileUploadResult"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            /** @description The upload exceeds the 8 MiB binary limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Uploads require unencoded application/octet-stream bytes. */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    webShellWorkspaceFilesUploadQuery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellWorkspaceFileUploadQueryRequest"];
+            };
+        };
+        responses: {
+            /** @description Workspace upload result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellWorkspaceFileUploadStatus"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            503: components["responses"]["Unavailable"];
         };
     };
 }

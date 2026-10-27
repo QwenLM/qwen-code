@@ -143,6 +143,12 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     standing: 'managed',
     evidence: 'surface:ARTIFACT_GET',
   },
+  workspace_artifact_library: NO_MANAGED_EQUIVALENT(
+    'no Managed workspace-wide artifact query or explicit-pair batch removal',
+  ),
+  workspace_artifact_library_stream: NO_MANAGED_EQUIVALENT(
+    'no Managed progressive workspace artifact query with session summaries',
+  ),
   session_sources: NO_MANAGED_EQUIVALENT('no Managed session source list'),
   slow_client_warning: LEGACY_ONLY(
     'SSE backpressure is a legacy transport knob',
@@ -230,6 +236,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   scheduled_task_gate: NO_MANAGED_EQUIVALENT(
     'no scheduled-task gate in Managed automations',
   ),
+  autofix_pr_watches: NO_MANAGED_EQUIVALENT(
+    'no /autofix-pr watch in a Managed workspace',
+  ),
   session_monitor_tool_correlation: {
     standing: 'managed',
     evidence: 'tool:monitor',
@@ -307,7 +316,10 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     standing: 'managed',
     evidence: 'tool:write_file,tool:edit',
   },
-  workspace_file_upload: NO_MANAGED_EQUIVALENT('no Managed file upload route'),
+  workspace_file_upload: {
+    standing: 'managed',
+    evidence: 'surface:WORKSPACE_FILES_UPLOAD',
+  },
   workspace_file_delete: NO_MANAGED_EQUIVALENT('no Managed file delete route'),
   workspace_directory_create: NO_MANAGED_EQUIVALENT(
     'no Managed directory create route',
@@ -552,7 +564,6 @@ export const MANAGED_ONLY_NOT_A_GAP = new Set([
   'SESSION_GET',
   'SESSION_RENAME',
   'SESSION_DELETE',
-  'SESSION_CWD_CHANGE',
   'SESSION_OPERATION_GET',
   'SESSION_MODELS',
   'SESSION_MCP',
@@ -570,6 +581,7 @@ export const MANAGED_ONLY_NOT_A_GAP = new Set([
   'WORKSPACE_DIRECTORY_CHECK',
   'WORKSPACE_FILES_QUERY',
   'WORKSPACE_FILES_READ',
+  'WORKSPACE_FILES_UPLOAD_QUERY',
   // Tenant resources and admission the daemon has no counterpart for.
   'AGENT_DEFINITION_GET',
   'AGENT_DEFINITION_UPDATE',
@@ -605,6 +617,9 @@ export const MANAGED_ONLY_NOT_A_GAP = new Set([
   'STORE_RECOVERY_BLOCK',
   'STORE_RESOURCE_GET',
   'STORE_RESTORE',
+  'STORE_SNAPSHOT_GET',
+  'STORE_SNAPSHOT_PAGES',
+  'STORE_SNAPSHOT_PUBLISH',
   'STORE_TOOL_RESULT_PUBLISH',
   'STORE_TRANSACTION_COMMIT',
   'STORE_TRANSACTION_LIST',

@@ -3377,11 +3377,6 @@ describe('multi-workspace session dispatch', () => {
       route: 'POST /session/:id/fork',
       body: { directive: 'review this' },
     },
-    {
-      suffix: 'cd',
-      route: 'POST /session/:id/cd',
-      body: { path: path.resolve(path.sep, 'work', 'next') },
-    },
   ])(
     'rejects $route for a non-primary live-session owner',
     async ({ suffix, route, body }) => {
@@ -3416,8 +3411,160 @@ describe('multi-workspace session dispatch', () => {
     },
   );
 
+  describe('secondary session cd', () => {
+    it('dispatches to the owner with server-controlled containment and client identity', async () => {
+      const changeCwd = vi.fn<AcpSessionBridge['changeSessionCwd']>(
+        async (sessionId, req) => ({
+          sessionId,
+          previousCwd: SECONDARY_CWD,
+          newCwd: req.path,
+          warnings: [],
+        }),
+      );
+      const { app, registry, primaryBridge, secondaryBridge } = makeHarness({
+        secondaryChangeSessionCwdImpl: changeCwd,
+      });
+      const sessionId = '22222222-2222-4222-a222-222222222222';
+      const targetPath = path.join(SECONDARY_CWD, 'sessions', 'session-a');
+      const response = await request(app)
+        .post(`/session/${sessionId}/cd`)
+        .set('Host', host())
+        .set('X-Qwen-Client-Id', 'client-secondary')
+        .send({ path: targetPath, allowedRoots: [PRIMARY_CWD] });
+
+      expect(response.status).toBe(200);
+      expect(response.body.newCwd).toBe(targetPath);
+      expect(changeCwd).toHaveBeenCalledExactlyOnceWith(
+        sessionId,
+        { path: targetPath, allowedRoots: [SECONDARY_CWD] },
+        { clientId: 'client-secondary' },
+      );
+      expect(registry.listEntries()).toHaveLength(2);
+      expect(secondaryBridge.getSessionSummary(sessionId).workspaceCwd).toBe(
+        SECONDARY_CWD,
+      );
+      expect(primaryBridge.primaryOnlyMutationCalls).toEqual([]);
+    });
+
+    it('allows load then cd for one secondary session without loading its neighbor', async () => {
+      const sessionId = '22222222-2222-4222-a222-222222222222';
+      const neighborId = '33333333-3333-4333-a333-333333333333';
+      const { app, primaryBridge, secondaryBridge } = makeHarness({
+        secondarySummaries: [
+          makeSummary(sessionId, SECONDARY_CWD),
+          makeSummary(neighborId, SECONDARY_CWD),
+        ],
+        secondaryChangeSessionCwdImpl: async (targetSessionId, req) => ({
+          sessionId: targetSessionId,
+          previousCwd: SECONDARY_CWD,
+          newCwd: req.path,
+          warnings: [],
+        }),
+      });
+      const loaded = await request(app)
+        .post(`/session/${sessionId}/load`)
+        .set('Host', host())
+        .send({ cwd: SECONDARY_CWD });
+      expect(loaded.status).toBe(200);
+
+      for (const targetSessionId of [sessionId, neighborId]) {
+        const targetPath = path.join(SECONDARY_CWD, targetSessionId);
+        const response = await request(app)
+          .post(`/session/${targetSessionId}/cd`)
+          .set('Host', host())
+          .send({ path: targetPath });
+        expect(response.status).toBe(200);
+        expect(response.body.newCwd).toBe(targetPath);
+      }
+
+      expect(secondaryBridge.restoreCalls).toHaveLength(1);
+      expect(secondaryBridge.restoreCalls[0]?.req.sessionId).toBe(sessionId);
+      expect(
+        secondaryBridge.cwdChangeCalls.map((call) => call.sessionId),
+      ).toEqual([sessionId, neighborId]);
+      expect(primaryBridge.restoreCalls).toEqual([]);
+      expect(primaryBridge.primaryOnlyMutationCalls).toEqual([]);
+    });
+
+    it('fails closed when the owning generation closes during cd', async () => {
+      const { app, registry, primaryBridge } = makeHarness({
+        secondaryChangeSessionCwdImpl: async (sessionId, req) => {
+          registry
+            .getEntryByWorkspaceId('secondary-id')!
+            .current!.guard.close();
+          return {
+            sessionId,
+            previousCwd: SECONDARY_CWD,
+            newCwd: req.path,
+            warnings: [],
+          };
+        },
+      });
+      const response = await request(app)
+        .post('/session/22222222-2222-4222-a222-222222222222/cd')
+        .set('Host', host())
+        .send({ path: path.join(SECONDARY_CWD, 'session-a') });
+
+      expect(response.status).toBe(503);
+      expect(response.body.code).toBe('workspace_runtime_unavailable');
+      expect(primaryBridge.primaryOnlyMutationCalls).toEqual([]);
+    });
+
+    it.each([undefined, '', 'relative/path', 42])(
+      'rejects malformed target %s before calling a bridge',
+      async (targetPath) => {
+        const { app, primaryBridge, secondaryBridge } = makeHarness();
+        const response = await request(app)
+          .post('/session/22222222-2222-4222-a222-222222222222/cd')
+          .set('Host', host())
+          .send({ path: targetPath });
+
+        expect(response.status).toBe(400);
+        expect(response.body.code).toBe('invalid_path');
+        expect(primaryBridge.primaryOnlyMutationCalls).toEqual([]);
+        expect(secondaryBridge.primaryOnlyMutationCalls).toEqual([]);
+      },
+    );
+
+    it.each(['unknown', 'untrusted', 'ambiguous', 'replacing'] as const)(
+      'fails closed for %s owners without primary fallback',
+      async (state) => {
+        const sessionId =
+          state === 'unknown'
+            ? 'missing'
+            : '22222222-2222-4222-a222-222222222222';
+        const { app, registry, primaryBridge, secondaryBridge } = makeHarness({
+          secondaryTrusted: state !== 'untrusted',
+          ...(state === 'ambiguous'
+            ? { primarySummaries: [makeSummary(sessionId, PRIMARY_CWD)] }
+            : {}),
+        });
+        if (state === 'replacing') {
+          registry.beginReplacement(
+            registry.getEntryByWorkspaceId('secondary-id')!,
+            'policy-2',
+          );
+        }
+        const response = await request(app)
+          .post(`/session/${sessionId}/cd`)
+          .set('Host', host())
+          .send({ path: path.join(SECONDARY_CWD, 'session-a') });
+
+        expect(response.status).toBe(
+          { unknown: 404, untrusted: 403, ambiguous: 500, replacing: 404 }[
+            state
+          ],
+        );
+        expect(primaryBridge.primaryOnlyMutationCalls).toEqual([]);
+        expect(secondaryBridge.primaryOnlyMutationCalls).toEqual([]);
+      },
+    );
+  });
+
   it('does not expose the Conversations runtime identity in an unsupported session route response', async () => {
+    const daemonLog = makeDaemonLog();
     const { app } = makeHarness({
+      daemonLog,
       secondaryProvenance: 'live-conversation',
     });
 
@@ -3433,6 +3580,13 @@ describe('multi-workspace session dispatch', () => {
       code: 'non_primary_session_route_not_supported',
       sessionId: '22222222-2222-4222-a222-222222222222',
       route: 'POST /session/:id/cd',
+    });
+    expect(daemonLog.warn).toHaveBeenCalledWith('session routing failed', {
+      route: 'POST /session/:id/cd',
+      resolutionKind: 'non_primary_session_route_not_supported',
+      sessionId: '22222222-2222-4222-a222-222222222222',
+      workspaceId: 'secondary-id',
+      workspaceCwd: SECONDARY_CWD,
     });
   });
 
