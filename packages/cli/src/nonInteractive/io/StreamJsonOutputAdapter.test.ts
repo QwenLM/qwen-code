@@ -875,6 +875,62 @@ describe('StreamJsonOutputAdapter', () => {
       expect(parsed.result).toBe('answer 2');
     });
 
+    it('should keep a caller-classified error after the turn limit', () => {
+      // The latch only converts a success. A `--json-schema` run whose next
+      // send is refused also reports its own failure from the contract branch
+      // (`Model produced plain text instead of calling the structured_output
+      // tool…`); relabelling that as the turn limit would pair the schema
+      // message with a remedy that does not apply to it.
+      adapter.startAssistantMessage();
+      adapter.processEvent({ type: LlmEventType.MaxSessionTurns });
+      stdoutWriteSpy.mockClear();
+
+      adapter.emitResult({
+        isError: true,
+        errorMessage: 'boom',
+        durationMs: 20,
+        apiDurationMs: 20,
+        numTurns: 2,
+      });
+
+      const parsed = JSON.parse(stdoutWriteSpy.mock.calls[0][0] as string);
+
+      expect(parsed.is_error).toBe(true);
+      expect(parsed.subtype).toBe('error_during_execution');
+      expect(parsed.error?.message).toBe('boom');
+    });
+
+    it('should consume the turn-limit latch when the result is built', () => {
+      // A session-scoped adapter outlives the message that tripped the limit,
+      // so a latch that is only cleared by `startAssistantMessage()` would
+      // also relabel a later monitor crash or abandoned continuation. Each
+      // `emitResult` builds exactly one result, so the latch is consumed here.
+      adapter.startAssistantMessage();
+      adapter.processEvent({ type: LlmEventType.MaxSessionTurns });
+      adapter.emitResult({
+        isError: false,
+        durationMs: 20,
+        apiDurationMs: 20,
+        numTurns: 2,
+      });
+      stdoutWriteSpy.mockClear();
+
+      adapter.emitResult({
+        isError: true,
+        errorMessage: 'Continuation abandoned: session shut down before it ran',
+        durationMs: 20,
+        apiDurationMs: 20,
+        numTurns: 2,
+      });
+
+      const parsed = JSON.parse(stdoutWriteSpy.mock.calls[0][0] as string);
+
+      expect(parsed.subtype).toBe('error_during_execution');
+      expect(parsed.error?.message).toBe(
+        'Continuation abandoned: session shut down before it ran',
+      );
+    });
+
     it('should use provided summary over extracted text', () => {
       stdoutWriteSpy.mockClear();
       adapter.emitResult({

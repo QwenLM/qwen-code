@@ -168,12 +168,16 @@ export abstract class BaseJsonOutputAdapter {
    *
    * `LlmClient` counts turns per session and never resets, while the headless
    * counter in `nonInteractiveCli.ts` is local to one `runNonInteractive`
-   * call. A stream-json session runs one call per user message, so the client
+   * call. A persistent session runs one call per user message, so the client
    * crosses the limit first: it refuses the send and returns an empty `Turn`.
    * The run loop then sees no tool calls and reports a successful `result`
    * whose text is whatever the previous turn left in `lastAssistantMessage`.
    * Latching the event here lets `buildResultMessage` turn that silent success
    * into the same terminal error `-p` reports.
+   *
+   * Lives in the shared base because every JSON adapter emits that same
+   * replayed answer: `nonInteractiveCli.ts` routes `stream-json`, `json` and
+   * `text` through this class (`JsonOutputAdapter` for the last two).
    */
   protected sessionTurnLimitReached = false;
 
@@ -1285,15 +1289,24 @@ export abstract class BaseJsonOutputAdapter {
     // Both callers pass `lastAssistantMessage`, which still holds the previous
     // turn's message, so a plain success would replay the old answer under
     // `is_error: false`. Report the limit instead, matching `-p`'s exit path.
-    const resultOptions: ResultOptions = this.sessionTurnLimitReached
-      ? {
-          ...options,
-          isError: true,
-          subtype: 'error_max_turns',
-          errorMessage:
-            options.errorMessage ?? formatMaxSessionTurnsMessage(this.config),
-        }
-      : options;
+    //
+    // Only convert a result the caller reported as a success: an error the
+    // caller already classified keeps its own subtype and message, and the
+    // latch is consumed here because each `emitResult` builds exactly one
+    // result. Without either half, an adapter reused across messages would
+    // relabel a later monitor crash or abandoned continuation as the turn
+    // limit while its `error.message` says otherwise.
+    const resultOptions: ResultOptions =
+      this.sessionTurnLimitReached && !options.isError
+        ? {
+            ...options,
+            isError: true,
+            subtype: 'error_max_turns',
+            errorMessage:
+              options.errorMessage ?? formatMaxSessionTurnsMessage(this.config),
+          }
+        : options;
+    this.sessionTurnLimitReached = false;
     const usage = resultOptions.usage ?? createExtendedUsage();
     const resultText =
       resultOptions.summary ??
