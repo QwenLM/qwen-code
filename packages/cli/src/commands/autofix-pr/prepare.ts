@@ -232,24 +232,35 @@ function report(state: AutofixPrState, extra: Record<string, unknown>): void {
 
 /**
  * What the user's own copy of the watch's head branch holds, as the report
- * says it: commits the PR does not have, and uncommitted work in a checkout
- * of that copy. Only a local branch whose upstream is the head branch on the
- * push remote counts as that copy.
+ * says it: commits the PR does not have, uncommitted work in a checkout of
+ * that copy, and whether any of it could not be read — never a "no" that
+ * only means git could not answer. Only a local branch whose upstream is the
+ * head branch on the push remote counts as that copy.
  */
 function localCopy(
   state: Pick<
     AutofixPrState,
     'headRefName' | 'pushTarget' | 'lastKnownHeadSha'
   >,
-): { localUnpushedCommits: number; localUncommittedChanges: boolean } {
+): {
+  localUnpushedCommits: number;
+  localUncommittedChanges: boolean;
+  localWorkUnknown: boolean;
+} {
   const upstream = gitOpt(
     'for-each-ref',
     '--format=%(upstream:short)',
     `refs/heads/${state.headRefName}`,
   );
   if (upstream !== `${state.pushTarget}/${state.headRefName}`) {
-    return { localUnpushedCommits: 0, localUncommittedChanges: false };
+    return {
+      localUnpushedCommits: 0,
+      localUncommittedChanges: false,
+      localWorkUnknown: false,
+    };
   }
+  // A head this clone does not have — pushed from another one — is unreadable
+  // here, and a zero would read as "nothing unpushed".
   const unpushed = gitOpt(
     'rev-list',
     '--count',
@@ -257,30 +268,32 @@ function localCopy(
     '--not',
     state.lastKnownHeadSha,
   );
+  const checkouts = worktreeCheckouts(state.headRefName);
+  const work = checkouts?.map(checkoutHoldsWork) ?? null;
   return {
     localUnpushedCommits: unpushed === null ? 0 : Number(unpushed),
-    localUncommittedChanges: worktreeCheckouts(state.headRefName).some(
-      hasUncommittedChanges,
-    ),
+    localUncommittedChanges: work?.some((held) => held === true) ?? false,
+    localWorkUnknown:
+      unpushed === null || work === null || work.some((held) => held === null),
   };
 }
 
 /**
  * Paths of this clone's worktrees that have `branch` checked out: the copies
- * the user may be working in. A branch no worktree has checked out has no
- * uncommitted work to report.
+ * the user may be working in, or null when git cannot list them. `-z` keeps a
+ * path git would otherwise C-quote, which `git -C` then cannot open.
  */
-function worktreeCheckouts(branch: string): string[] {
-  const listing = gitOpt('worktree', 'list', '--porcelain');
-  if (listing === null) return [];
+function worktreeCheckouts(branch: string): string[] | null {
+  const listing = gitOpt('worktree', 'list', '--porcelain', '-z');
+  if (listing === null) return null;
   const paths: string[] = [];
   let worktree: string | null = null;
-  for (const line of listing.split('\n')) {
-    if (line === '') {
+  for (const field of listing.split('\0')) {
+    if (field === '') {
       worktree = null;
-    } else if (line.startsWith('worktree ')) {
-      worktree = line.slice('worktree '.length);
-    } else if (worktree !== null && line === `branch refs/heads/${branch}`) {
+    } else if (field.startsWith('worktree ')) {
+      worktree = field.slice('worktree '.length);
+    } else if (worktree !== null && field === `branch refs/heads/${branch}`) {
       paths.push(worktree);
     }
   }
@@ -288,24 +301,45 @@ function worktreeCheckouts(branch: string): string[] {
 }
 
 /**
- * Whether a checkout holds changes git reports, other than the watch's own
- * `.qwen` directory: its state file is written before this runs.
+ * Whether a checkout holds work git reports, or null when git cannot read it.
+ * The flags override `status.showUntrackedFiles` and submodule `ignore`
+ * settings, as this directory's other scans do. Only `.qwen` is the watch's:
+ * anything beside its `tmp` directory under there is the user's work.
  */
-function hasUncommittedChanges(path: string): boolean {
+function checkoutHoldsWork(path: string): boolean | null {
   const status = gitOpt(
     '--no-optional-locks',
     '-C',
     path,
     'status',
     '--porcelain',
+    '--untracked-files=normal',
+    '--ignore-submodules=none',
   );
-  if (status === null) return false;
-  return status.split('\n').some((line) => line !== '' && !isWatchPath(line));
+  if (status === null) return null;
+  const lines = status.split('\n').filter((line) => line !== '');
+  const onlyWatchDir = (line: string) =>
+    line.startsWith('??') && isUnderQwen(line.slice(3));
+  if (lines.some((line) => !onlyWatchDir(line))) return true;
+  if (lines.length === 0) return false;
+  // Only `.qwen` is untracked: ask what it holds besides the watch's `tmp`.
+  const userFiles = gitOpt(
+    '--no-optional-locks',
+    '-C',
+    path,
+    'ls-files',
+    '--others',
+    '--exclude-standard',
+    '--',
+    '.qwen',
+    ':(exclude).qwen/tmp',
+  );
+  if (userFiles === null) return null;
+  return userFiles.trim() !== '';
 }
 
-/** A porcelain line naming the watch's own files under `.qwen`. */
-function isWatchPath(line: string): boolean {
-  const file = line.slice(3);
+/** A porcelain path at or under `.qwen`. */
+function isUnderQwen(file: string): boolean {
   return file === '.qwen' || file.startsWith('.qwen/');
 }
 

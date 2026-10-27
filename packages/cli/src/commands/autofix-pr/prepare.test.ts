@@ -568,6 +568,52 @@ describe('runPrepare (real git)', () => {
     });
   });
 
+  it('counts untracked work whatever status.showUntrackedFiles says', () => {
+    run(clone, 'config', 'status.showUntrackedFiles', 'no');
+    writeFileSync(join(clone, 'new-source.ts'), 'export {};\n');
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(lastReport()).toMatchObject({
+      localUncommittedChanges: true,
+      localWorkUnknown: false,
+    });
+  });
+
+  it('counts uncommitted work under .qwen outside the watch directory', () => {
+    mkdirSync(join(clone, '.qwen', 'skills'), { recursive: true });
+    writeFileSync(join(clone, '.qwen', 'skills', 'mine.md'), 'work\n');
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(lastReport()).toMatchObject({
+      localUncommittedChanges: true,
+      localWorkUnknown: false,
+    });
+  });
+
+  it('reports unknown when the PR head is not in this clone', () => {
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const other = join(dir, 'other');
+    run(dir, 'clone', '-q', join(dir, 'bare.git'), other);
+    run(other, 'config', 'user.email', 't@example.com');
+    run(other, 'config', 'user.name', 't');
+    run(other, 'commit', '-q', '--allow-empty', '-m', 'pushed elsewhere');
+    const elsewhere = run(other, 'rev-parse', 'HEAD');
+    run(other, 'push', '-q', 'origin', 'feat');
+    run(join(dir, 'bare.git'), 'update-ref', 'refs/pull/7/head', elsewhere);
+    mocks.gh.mockImplementation((...args: string[]) => {
+      if (args[0] === 'pr') {
+        return JSON.stringify(prView({ headRefOid: elsewhere }));
+      }
+      if (args[0] === 'repo') return JSON.stringify(writable);
+      if (args[0] === 'config') return 'https';
+      throw new Error(`unexpected gh ${args.join(' ')}`);
+    });
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(lastReport()).toMatchObject({
+      resumed: true,
+      localUnpushedCommits: 0,
+      localWorkUnknown: true,
+    });
+  });
+
   it('counts commits against the live head when it resumes a watch', () => {
     runPrepare({ pr: 7, repo: 'o/r' });
     run(clone, 'config', 'user.email', 't@example.com');

@@ -205,9 +205,11 @@ describe('bundled autofix-pr skill', () => {
     // Work in the user's own copy of the head branch keeps a start from
     // racing the user's push to that branch.
     expect(body).toContain(
-      "the user's own copy of the head branch still holds work the worktree never sees",
+      "the user's own copy of the head branch could not be squared with the PR",
     );
     expect(body).toContain('do not start, `--once` included');
+    expect(body).toContain('`localWorkUnknown` is true');
+    expect(body).toContain('have them fetch the branch or fix the checkout');
     // A --once round of a watch this session already runs spends its budget.
     expect(body).toContain("its push counts against that watch's budget");
     expect(body).toContain('`--no-work` skips its git scan');

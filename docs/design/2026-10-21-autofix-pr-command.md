@@ -226,14 +226,19 @@ worktree included:
    local branch whose upstream is the head branch on the push remote counts as
    that copy, so a fork's `main` is never compared with the user's `main`.
    The report also carries `localUncommittedChanges`: whether a worktree of
-   this clone has that copy checked out and holds changes git reports, its own
-   `.qwen` directory aside — the state file is written before this runs — read
-   with `--no-optional-locks`. It is computed only when the copy exists, and
-   only for checkouts of that branch; work in a checkout of another branch is
-   not work on that copy. The helper reports it and does not refuse: the
-   skill's start does not go on while it is true, unless the user asks once
-   told, because the watch's push and the user's own go to the same head
-   branch.
+   this clone has that copy checked out and holds changes git reports. It is
+   read with `--no-optional-locks`, `--untracked-files=normal` and
+   `--ignore-submodules=none`, so a user's `status.showUntrackedFiles` or
+   submodule `ignore` setting cannot hide work; only `.qwen/tmp`, where the
+   helpers write, is left out, and anything else under `.qwen` is the user's.
+   It is computed only when the copy exists and only for checkouts of that
+   branch; work in a checkout of another branch is not work on that copy.
+   `localWorkUnknown` says the comparison could not be made at all — the PR
+   head is not in this clone, or git could not read a checkout — which is
+   never reported as "no work". The helper reports them and does not refuse:
+   the skill's start does not go on while the work or that flag is set, unless
+   the user asks once told, because the watch's push and the user's own go to
+   the same head branch.
 
 ### 6.2 `snapshot <pr> [--repo <owner>/<repo>] [--host <host>] [--gate] [--session <id>] [--task <id>]`
 
