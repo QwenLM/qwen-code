@@ -3355,6 +3355,78 @@ describe('generic tool card details', () => {
     expect(occurrences - 1).toBe(1);
   });
 
+  it('keeps a long search description in the expanded card detail', () => {
+    const title =
+      `Search the repository ${'for matching files '.repeat(4)}`.trim();
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'grep_search',
+        title,
+        args: { pattern: 'needle' },
+        rawOutput: 'No matches found',
+      }),
+      { forceExpanded: true },
+    );
+
+    expect(
+      container.querySelector('[class*="expandedCardDetail"]')?.textContent,
+    ).toContain(title);
+  });
+
+  it('keeps a malformed todo description in the expanded card detail', () => {
+    const description = 'Malformed todo payload';
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'todo_write',
+        title: description,
+        args: { todos: 'not-a-list' },
+      }),
+      { forceExpanded: true },
+    );
+
+    const occurrences = (container.textContent ?? '').split(description).length;
+    expect(occurrences - 1).toBe(1);
+  });
+
+  it('keeps a short description when a custom header omits it', () => {
+    const description = 'Inspect check runs';
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__inspect',
+        title: description,
+        args: { method: 'get_check_runs' },
+        rawOutput: '{"total_count":38}',
+      }),
+      { forceExpanded: true },
+      { renderToolHeaderExtra: () => <span>custom header</span> },
+    );
+
+    expect(
+      container.querySelector('[class*="expandedCardDetail"]')?.textContent,
+    ).toContain(description);
+  });
+
+  it('keeps a short description in a single-tool document detail', () => {
+    const description = 'Inspect check runs';
+    const container = renderToolGroup(
+      [
+        makeTool({
+          toolName: 'mcp__demo__inspect',
+          title: description,
+          args: { method: 'get_check_runs' },
+          rawOutput: '{"total_count":38}',
+        }),
+      ],
+      {},
+      undefined,
+      'document',
+    );
+
+    expect(
+      container.querySelector('[class*="expandedCardDetail"]')?.textContent,
+    ).toContain(description);
+  });
+
   it('keeps a long description when a single-tool card hides its header', () => {
     const description = `Inspect check runs ${'and report failures '.repeat(8)}`;
     const container = renderToolGroup(

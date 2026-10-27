@@ -1245,7 +1245,8 @@ export const ToolLine = memo(function ToolLine({
   const transcriptRenderMode = useTranscriptRenderMode();
   const subagentDetails = useSubagentDetails();
   const monitorDetails = useMonitorDetails();
-  const { hostOwnsEditDiffPreview } = useWebShellCustomization();
+  const { hostOwnsEditDiffPreview, renderToolHeaderExtra } =
+    useWebShellCustomization();
   const monitorDetailsAvailable = monitorDetails !== undefined;
   const mcpApp = getMcpAppDisplay(tool.rawOutput);
   const mcpAppAllowed = useMcpAppAdmission(mcpApp);
@@ -1696,7 +1697,11 @@ export const ToolLine = memo(function ToolLine({
         <ToolExpandedCard
           title={displayName}
           detail={
-            hasGenericPayload && !hideDescriptionInHeader && !hideHeader
+            hasGenericPayload &&
+            !showDescriptionInDetail &&
+            !hideHeader &&
+            !isTodo &&
+            !renderToolHeaderExtra
               ? undefined
               : expandedCardDetail
           }

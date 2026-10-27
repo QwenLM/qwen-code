@@ -633,15 +633,28 @@ describe('formatJsonPayload', () => {
     },
   );
 
-  it('skips numbers JSON.parse cannot round-trip', () => {
-    for (const text of [
-      '{"id":12345678901234567890}',
-      '{"n":1e400}',
-      '{"nested":{"id":-9007199254740993}}',
-      '{"n":-0}',
-    ]) {
-      expect(formatJsonPayload(text)).toEqual({ text, json: false });
-    }
+  it('leaves non-canonical number literals as recorded', () => {
+    const text =
+      '{"n":1.2345678901234567890,"id":12345678901234567890,"neg":-0,"exp":1e3,"amount":1.10,"tiny":1e-400,"huge":1e400}';
+    expect(formatJsonPayload(text)).toEqual({ text, json: false });
+  });
+
+  it('leaves duplicate keys and their order as recorded', () => {
+    const text = '{"a":1,"a":2,"500":"server error","200":"ok"}';
+    expect(formatJsonPayload(text)).toEqual({ text, json: false });
+  });
+
+  it('preserves escaped string contents', () => {
+    const text = '{"s":"a\\"b}{","n":1}';
+    expect(formatJsonPayload(text)).toEqual({
+      text: '{\n  "s": "a\\"b}{",\n  "n": 1\n}',
+      json: true,
+    });
+  });
+
+  it('leaves deeply nested JSON unformatted', () => {
+    const text = '['.repeat(4000) + ']'.repeat(4000);
+    expect(formatJsonPayload(text)).toEqual({ text, json: false });
   });
 
   it('leaves an oversized payload alone instead of parsing it', () => {

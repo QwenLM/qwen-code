@@ -227,13 +227,12 @@ function safeJson(value: unknown): string {
 }
 
 /**
- * Pretty-prints a single JSON object or array for display. Anything else —
- * plain text, a primitive, an already truncated document, JSON Lines or a
- * mixed JSON/text log — is returned exactly as recorded so the caller can
- * fall back to plain text.
- *
- * Numbers that JSON.parse cannot round-trip (beyond 2^53, non-finite) keep
- * the payload unformatted rather than silently changing the recorded values.
+ * Re-indents a canonical JSON object or array for display. The input must be
+ * exactly its compact JSON form or its two-space form; anything else — plain
+ * text, a primitive, a truncated document, JSON Lines, a mixed JSON/text log
+ * or non-canonical JSON — is returned as recorded so the caller can fall back
+ * to plain text. Formatting therefore never rewrites literals, duplicate
+ * keys, key order or string escapes.
  */
 export function formatJsonPayload(text: string): {
   text: string;
@@ -254,6 +253,8 @@ export function formatJsonPayload(text: string): {
   return { text, json: false };
 }
 
+const MAX_JSON_FORMAT_DEPTH = 32;
+
 function formatJsonDocument(text: string): string | undefined {
   if (!/^[[{]/.test(text)) return undefined;
   let value: unknown;
@@ -263,26 +264,31 @@ function formatJsonDocument(text: string): string | undefined {
     return undefined;
   }
   if (value === null || typeof value !== 'object') return undefined;
-  if (containsUnsafeNumber(value)) return undefined;
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return undefined;
-  }
+  if (exceedsJsonDepth(value, MAX_JSON_FORMAT_DEPTH)) return undefined;
+
+  // Compare against both canonical forms; only an exact match is safe to
+  // reformat, because anything else would rewrite recorded literals or keys.
+  const pretty = JSON.stringify(value, null, 2);
+  if (text === pretty) return text;
+
+  const compact = JSON.stringify(value);
+  if (text === compact) return pretty;
+  return undefined;
 }
 
-function containsUnsafeNumber(root: unknown): boolean {
-  const stack: unknown[] = [root];
+function exceedsJsonDepth(root: unknown, maxDepth: number): boolean {
+  const stack: Array<[unknown, number]> = [[root, 1]];
   while (stack.length > 0) {
-    const value = stack.pop();
-    if (typeof value === 'number') {
-      if (!Number.isFinite(value)) return true;
-      if (Number.isInteger(value) && !Number.isSafeInteger(value)) return true;
-      if (Object.is(value, -0)) return true;
-    } else if (Array.isArray(value)) {
-      for (const entry of value) stack.push(entry);
+    const current = stack.pop();
+    if (!current) break;
+    const [value, depth] = current;
+    if (depth > maxDepth) return true;
+    if (Array.isArray(value)) {
+      for (const entry of value) stack.push([entry, depth + 1]);
     } else if (value !== null && typeof value === 'object') {
-      for (const entry of Object.values(value)) stack.push(entry);
+      for (const entry of Object.values(value)) {
+        stack.push([entry, depth + 1]);
+      }
     }
   }
   return false;
