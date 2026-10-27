@@ -1066,7 +1066,14 @@ fn cgevent_type_verified(
         if let Some(wid) = window_id {
             crate::input::skylight::prepare_background_keyboard(pid, wid)?;
         }
-        crate::input::keyboard::type_text_with_delay(pid, text, delay_ms)?;
+        let recipient = unsafe {
+            crate::ax::exact_target::keyboard_recipient_pid(
+                pid,
+                window_id,
+                element_ptr_and_idx.map(|(ptr, _)| ptr),
+            )
+        }?;
+        crate::input::keyboard::type_text_with_delay(recipient, text, delay_ms)?;
     }
 
     // CGEvent posting is asynchronous with respect to the renderer. In
@@ -1176,7 +1183,14 @@ fn type_app_text(
             });
         }
         crate::input::skylight::prepare_background_keyboard(pid, window)?;
-        crate::input::keyboard::type_text_with_delay(pid, text, delay_ms)?;
+        let recipient = unsafe {
+            crate::ax::exact_target::keyboard_recipient_pid(
+                pid,
+                Some(window),
+                Some(target as usize),
+            )
+        }?;
+        crate::input::keyboard::type_text_with_delay(recipient, text, delay_ms)?;
         (PATH_KEY_EVENTS, false)
     } else {
         if !settable {

@@ -30,6 +30,11 @@ pub fn is_screen_sharing_pid(pid: i32) -> bool {
         .is_some_and(is_screen_sharing_bundle_id)
 }
 
+pub(crate) fn uses_application_keyboard_target(foreground: bool, modifiers: &[&str]) -> bool {
+    // Command equivalents are dispatched through the application's menu chain.
+    foreground || modifier_flags(modifiers).contains(CGEventFlags::CGEventFlagCommand)
+}
+
 /// Press and release a single key, delivered to `pid` without stealing focus.
 pub fn press_key(pid: i32, key: &str, modifiers: &[&str]) -> anyhow::Result<()> {
     // Handle "+" / "plus" → Shift+= (US keyboard layout).
@@ -748,6 +753,17 @@ pub(super) fn key_name_to_code(key: &str) -> anyhow::Result<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_chords_keep_application_target() {
+        for command in ["cmd", "COMMAND", "meta", "super"] {
+            assert!(uses_application_keyboard_target(false, &[command]));
+        }
+        assert!(uses_application_keyboard_target(true, &[]));
+        for modifiers in [&[][..], &["shift"][..], &["ctrl", "option"][..]] {
+            assert!(!uses_application_keyboard_target(false, modifiers));
+        }
+    }
     use core_graphics::{event::CGEventType, event_source::CGEventSourceStateID};
 
     #[test]
