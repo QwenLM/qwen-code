@@ -10309,6 +10309,16 @@ export class Session implements SessionContext {
       ]);
     }
 
+    if (options.consumeInitialMemory) {
+      const lastHistory = this.#getCurrentChat().peekLastHistoryEntry();
+      const hasPendingToolCall =
+        lastHistory?.role === 'model' &&
+        (lastHistory.parts?.some((part) => 'functionCall' in part) ?? false);
+      if (!hasPendingToolCall) {
+        llmClient.drainPendingMcpReminders();
+      }
+    }
+
     const chat = this.#getCurrentChat();
     const request = {
       message,

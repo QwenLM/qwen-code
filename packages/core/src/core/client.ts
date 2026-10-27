@@ -2605,6 +2605,22 @@ export class LlmClient {
     this.pendingRemovedMcpToolNames.clear();
   }
 
+  drainPendingMcpReminders(): void {
+    try {
+      this.drainPendingMcpServerInstructionsReminder();
+    } catch (error) {
+      debugLogger.warn(
+        'drainPendingMcpServerInstructionsReminder failed',
+        error,
+      );
+    }
+    try {
+      this.drainPendingAddedMcpToolsReminder();
+    } catch (error) {
+      debugLogger.warn('drainPendingAddedMcpToolsReminder failed', error);
+    }
+  }
+
   /**
    * Per-turn delta for skills/commands that became invocable after session start
    * — skills enabled mid-session (e.g. via `/skills`) and MCP prompts added after
@@ -4801,19 +4817,7 @@ export class LlmClient {
         (messageType === SendMessageType.UserQuery ||
           messageType === SendMessageType.Cron)
       ) {
-        try {
-          this.drainPendingMcpServerInstructionsReminder();
-        } catch (error) {
-          debugLogger.warn(
-            'drainPendingMcpServerInstructionsReminder failed',
-            error,
-          );
-        }
-        try {
-          this.drainPendingAddedMcpToolsReminder();
-        } catch (error) {
-          debugLogger.warn('drainPendingAddedMcpToolsReminder failed', error);
-        }
+        this.drainPendingMcpReminders();
         try {
           await this.drainSkillAndCommandReminders();
         } catch (error) {
