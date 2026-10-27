@@ -1845,6 +1845,47 @@ describe('EmbeddedApp message edit rewind', () => {
     );
   });
 
+  it('refuses a stale edit ordinal without touching the composer or arming rewind', async () => {
+    const props = await renderApp();
+    await deliverTranscript(props, [
+      userBlock('u0', 'first'),
+      userBlock('u1', 'second'),
+    ]);
+    const composer = { clear: vi.fn(), setText: vi.fn(), focus: vi.fn() };
+    (props.composerRef as { current: typeof composer | null }).current =
+      composer;
+    const onEdit = callback<(turnIndex: number, content: string) => boolean>(
+      props,
+      'onUserMessageEditRequest',
+    );
+    await act(async () => {
+      expect(onEdit(5, 'stale target')).toBe(false);
+    });
+    expect(composer.clear).not.toHaveBeenCalled();
+    expect(composer.setText).not.toHaveBeenCalled();
+    expect(composer.focus).not.toHaveBeenCalled();
+    await expectNextSubmitIsOrdinary();
+  });
+
+  it('explains a legacy checkpoint with no daemon identity before refusing the edit', async () => {
+    const props = await renderApp();
+    await deliverTranscript(props, [userBlock('u0', 'original text')]);
+    sdkMocks.getRewindSnapshots.mockResolvedValue({
+      snapshots: [{ promptId: 'legacy-prompt', turnIndex: 0 }],
+    });
+    const prepareSubmit = await startEditing(props, 0);
+    await act(async () => {
+      await expect(
+        prepareSubmit({
+          sessionId: 'session-1',
+          prompt: 'edited text',
+          inputAnnotations: [],
+        }),
+      ).rejects.toThrow('This checkpoint has no prompt identity to rewind to.');
+    });
+    expect(sdkMocks.rewindSession).not.toHaveBeenCalled();
+  });
+
   it('refuses the edit when the turn no longer has a snapshot', async () => {
     const props = await renderApp();
     await deliverTranscript(
@@ -1875,22 +1916,23 @@ describe('EmbeddedApp message edit rewind', () => {
 
   it('edits the turn the web shell numbered, skipping an injected row', async () => {
     const props = await renderApp();
+    const injectedRow = {
+      id: 'n1',
+      kind: 'user',
+      text: 'injected note',
+      promptId: 'daemon-1',
+      meta: { source: 'mid_turn_message_injected' },
+    };
     await deliverTranscript(props, [
       userBlock('u0', 'first'),
-      {
-        id: 'n1',
-        kind: 'user',
-        text: 'injected note',
-        promptId: 'daemon-n1',
-        meta: { source: 'mid_turn_message_injected' },
-      },
+      injectedRow,
       userBlock('u1', 'original text'),
     ]);
     sdkMocks.getRewindSnapshots.mockResolvedValue({
       snapshots: [snapshot(1)],
     });
     sdkMocks.rewindSession.mockImplementation(async () => {
-      await deliverTranscript(props, [userBlock('u0', 'first')]);
+      await deliverTranscript(props, [userBlock('u0', 'first'), injectedRow]);
     });
     // The web shell numbers only `role === 'user'` rows and the injected row
     // renders as `role: 'system'`, so ordinal 1 is u1, not n1.

@@ -1705,7 +1705,12 @@ export function EmbeddedApp() {
                   : [];
               const snapshot = matches.length === 1 ? matches[0] : undefined;
               if (!snapshot || !target) {
-                throw new Error(t('composer.editExpired'));
+                const reason =
+                  snapshots.length > 0 &&
+                  snapshots.every((entry) => !entry.daemonPromptId)
+                    ? 'composer.editIdentityUnavailable'
+                    : 'composer.editExpired';
+                throw new Error(t(reason));
               }
               try {
                 // No X-Qwen-Client-Id on purpose: the daemon registers a

@@ -177,6 +177,9 @@ describe('RewindDialog keyboard', () => {
       press('Enter');
       expect(rewindButton().disabled).toBe(true);
       expect(rewind).not.toHaveBeenCalled();
+      if (kind === 'missing') {
+        expect(container!.textContent).toContain('no prompt identity');
+      }
     },
   );
 

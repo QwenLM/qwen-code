@@ -435,6 +435,7 @@ describe('worktree reset session transfer', () => {
           (call) => call.method,
         );
         for (const method of [
+          SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots,
           SERVE_CONTROL_EXT_METHODS.sessionRewind,
           SERVE_CONTROL_EXT_METHODS.sessionForkAgent,
           SERVE_CONTROL_EXT_METHODS.sessionBranch,

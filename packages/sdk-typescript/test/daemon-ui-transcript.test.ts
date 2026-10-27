@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   createDaemonTranscriptState,
+  findDaemonRewindUserBlock,
   reduceDaemonTranscriptEvents,
   selectUnrecognizedDiagnostics,
   UNRECOGNIZED_DIAGNOSTICS_LIMIT,
@@ -179,6 +180,13 @@ describe('daemon transcript rewind', () => {
       'ROOT',
       'ROOT reply',
     ]);
+    expect(after.blocks[0]).toMatchObject({
+      kind: 'user',
+      promptId: 'daemon-ROOT',
+    });
+    expect(findDaemonRewindUserBlock(after.blocks, 'daemon-ROOT')).toBe(
+      after.blocks[0],
+    );
     expect(after.lastEventId).toBe(102);
     expect(after.activeUserBlockId).toBeUndefined();
     expect(after.activeAssistantBlockId).toBeUndefined();
@@ -296,9 +304,68 @@ describe('daemon transcript rewind', () => {
     },
   );
 
-  it('installs an empty prefix over paged blocks without event IDs and clears a resync latch', () => {
+  it.each([
+    { name: 'empty', replay: [] },
+    {
+      name: 'non-empty',
+      replay: [
+        { type: 'user.text.delta', text: 'ROOT', promptId: 'daemon-ROOT' },
+        { type: 'assistant.text.delta', text: 'ROOT reply' },
+      ] satisfies DaemonUiEvent[],
+    },
+  ])(
+    'installs a $name authoritative prefix over a resync latch',
+    ({ name, replay }) => {
+      const before = reduceDaemonTranscriptEvents(
+        createDaemonTranscriptState(),
+        [
+          {
+            type: 'user.text.delta',
+            text: 'paged stale turn',
+            promptId: 'stale',
+          },
+          {
+            type: 'session.state_resync_required',
+            reason: 'test',
+            lastDeliveredId: 2,
+            earliestAvailableId: 9,
+          },
+        ],
+      );
+      const after = reduceDaemonTranscriptEvents(before, [
+        {
+          type: 'session.rewound',
+          promptId: 'native-first',
+          targetTurnIndex: 0,
+          eventId: 20,
+          replay,
+        },
+      ]);
+      if (name === 'empty') {
+        expect(after.blocks).toEqual([]);
+        expect(after.retainedBytes).toBe(0);
+        expect(Object.keys(after.blockIndexById)).toEqual([]);
+      } else {
+        expect(
+          after.blocks.map((block) => 'text' in block && block.text),
+        ).toEqual(['ROOT', 'ROOT reply']);
+        expect(after.retainedBytes).toBeGreaterThan(0);
+      }
+      expect(after.awaitingResync).toBe(false);
+      expect(after.lastResyncRequired).toBeUndefined();
+      expect(after.lastEventId).toBe(20);
+      const continued = reduceDaemonTranscriptEvents(after, [
+        { type: 'user.text.delta', text: 'fresh' },
+      ]);
+      expect(continued.blocks).toHaveLength(name === 'empty' ? 1 : 3);
+    },
+  );
+
+  it('keeps a replay-less rewind blocked while resync is pending', () => {
     const before = reduceDaemonTranscriptEvents(createDaemonTranscriptState(), [
-      { type: 'user.text.delta', text: 'paged stale turn', promptId: 'stale' },
+      { type: 'user.text.delta', text: 'A' },
+      { type: 'assistant.text.delta', text: 'A reply' },
+      { type: 'user.text.delta', text: 'B' },
       {
         type: 'session.state_resync_required',
         reason: 'test',
@@ -307,24 +374,11 @@ describe('daemon transcript rewind', () => {
       },
     ]);
     const after = reduceDaemonTranscriptEvents(before, [
-      {
-        type: 'session.rewound',
-        promptId: 'native-first',
-        targetTurnIndex: 0,
-        eventId: 20,
-        replay: [],
-      },
+      { type: 'session.rewound', promptId: 'native-A', targetTurnIndex: 0 },
     ]);
-    expect(after.blocks).toEqual([]);
-    expect(after.retainedBytes).toBe(0);
-    expect(Object.keys(after.blockIndexById)).toEqual([]);
-    expect(after.awaitingResync).toBe(false);
-    expect(after.lastResyncRequired).toBeUndefined();
-    expect(after.lastEventId).toBe(20);
-    const continued = reduceDaemonTranscriptEvents(after, [
-      { type: 'user.text.delta', text: 'fresh' },
-    ]);
-    expect(continued.blocks).toHaveLength(1);
+    expect(after.blocks).toEqual(before.blocks);
+    expect(after.awaitingResync).toBe(true);
+    expect(after.lastResyncRequired).toEqual(before.lastResyncRequired);
   });
 
   it('drops the target user turn and later transcript blocks', () => {

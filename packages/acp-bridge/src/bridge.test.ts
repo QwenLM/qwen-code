@@ -365,6 +365,7 @@ describe('authoritative rewind replay', () => {
           historyReplay: 'response',
         });
         const before = bridge.getSessionReplaySnapshot(session.sessionId);
+        expect(JSON.stringify(before)).toContain('restored A');
         await expect(
           bridge.rewindSession(session.sessionId, { promptId: 'native-A' }),
         ).rejects.toBeInstanceOf(InvalidRewindTargetError);
@@ -537,6 +538,7 @@ describe('authoritative rewind replay', () => {
   it.each([
     'missing mapping',
     'duplicate mapping',
+    'duplicate daemon mapping',
     'missing target',
     'duplicate target',
     'missing cache',
@@ -558,7 +560,9 @@ describe('authoritative rewind replay', () => {
                 ? []
                 : failure === 'duplicate mapping'
                   ? [target, target]
-                  : [target],
+                  : failure === 'duplicate daemon mapping'
+                    ? [target, { ...target, promptId: 'native-B' }]
+                    : [target],
           };
         }
         if (method === SERVE_CONTROL_EXT_METHODS.sessionRewind)
@@ -7487,7 +7491,7 @@ describe('createAcpSessionBridge', () => {
         expect(method).toBe('qwen/control/session/rewind');
         return {
           targetTurnIndex: 2,
-          daemonPromptId: 'daemon-B',
+          daemonPromptId: 'daemon-echo-must-be-ignored',
           filesChanged: [],
           filesFailed: [],
           artifactSnapshot: {

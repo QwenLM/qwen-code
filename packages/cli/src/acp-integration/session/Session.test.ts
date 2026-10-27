@@ -8630,8 +8630,9 @@ describe('Session', () => {
         _meta: { 'qwen.daemon.retry': true },
       } as unknown as Parameters<typeof session.prompt>[0]);
 
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
       const sendOptions = vi.mocked(mockChat.sendMessageStream).mock
-        .calls[0]?.[4];
+        .calls[0][4];
       expect(sendOptions).toBeUndefined();
     });
 
@@ -8669,8 +8670,9 @@ describe('Session', () => {
         _meta: { 'qwen.daemon.retry': true },
       } as unknown as Parameters<typeof session.prompt>[0]);
 
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
       const sendOptions = vi.mocked(mockChat.sendMessageStream).mock
-        .calls[0]?.[4];
+        .calls[0][4];
       expect(sendOptions).toBeUndefined();
     });
 
@@ -11605,6 +11607,54 @@ describe('Session', () => {
         ).toBe(startup ? 3 : 2);
       },
     );
+
+    it('preserves a compressed boundary across mixed legacy and bound prompt echoes', () => {
+      const history: Content[] = [
+        {
+          role: 'user',
+          parts: [{ text: 'Summary. Resume the prior task...' }],
+        },
+        {
+          role: 'model',
+          parts: [{ text: 'Got it. Thanks for the additional context!' }],
+        },
+      ];
+      markCompressedHistory(history);
+      history.push(
+        {
+          role: 'user',
+          parts: [
+            {
+              text: 'Recently accessed file (full current content embedded):\n\n## /tmp/a.ts\n\n```\nconst a = 1;\n```',
+            },
+          ],
+        },
+        { role: 'model', parts: [{ text: 'Legacy reply.' }] },
+      );
+      const fresh: Content = { role: 'user', parts: [{ text: 'Fresh task.' }] };
+      markApiHistoryPrompt(fresh, 'p1');
+      history.push(fresh);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      const snapshot = session.captureHistorySnapshot();
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(
+        history.slice(0, 2),
+      );
+      session.restoreHistory(
+        JSON.parse(
+          JSON.stringify(
+            snapshot.map((content) => ({
+              ...content,
+              rewindId: getApiHistoryPromptId(content),
+            })),
+          ),
+        ),
+      );
+      const restored = vi.mocked(mockChat.setHistory).mock.calls.at(-1)![0];
+      expect(
+        getStartupContextLength(restored, { includeCompressed: true }),
+      ).toBe(2);
+      expect(getApiHistoryPromptId(restored.at(-1)!)).toBe('p1');
+    });
 
     it.each(['in-process', 'JSON roundtrip'])(
       'restores a captured history snapshot through %s',
@@ -30332,9 +30382,28 @@ describe('Session', () => {
             )
             .mockResolvedValue({ messages: [] });
           const { streaming, state } = openResponse([textChunk]);
+          const history: Content[] = [];
+          vi.mocked(mockChat.getHistory).mockReturnValue(history);
+          vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+          vi.mocked(mockChat.addHistory).mockImplementation((entry) => {
+            history.push(entry);
+          });
 
           const done = startPrompt();
           await streaming;
+          const firstSend = vi.mocked(mockChat.sendMessageStream).mock
+            .calls[0]!;
+          const promptId = firstSend[4]?.promptId;
+          expect(promptId).toBeTypeOf('string');
+          const original: Content = {
+            role: 'user',
+            parts: firstSend[1].message as Part[],
+          };
+          markApiHistoryPrompt(original, promptId);
+          history.push(original);
+          vi.mocked(
+            mockChatRecordingService.getRewindTurnIndex,
+          ).mockImplementation((id: string) => (id === promptId ? 0 : -1));
           session.sendMidTurnInputNow();
           // The response is cut; the turn is stopped while it drains the
           // rest of the queue.
@@ -30348,6 +30417,9 @@ describe('Session', () => {
           });
           expect(state.signal?.aborted).toBe(true);
           expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+          const takeover = vi.mocked(mockChat.addHistory).mock.calls.at(-1)![0];
+          expect(getApiHistoryPromptId(takeover)).toBeUndefined();
+          expect(session.getRewindCutPoint(promptId!)).toBe(0);
           expect(mockChat.addHistory).toHaveBeenCalledWith(
             expect.objectContaining({
               role: 'user',
