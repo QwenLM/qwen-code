@@ -880,6 +880,64 @@ describe('BaseJsonOutputAdapter', () => {
       });
     });
 
+    it('resets main assistant state when restarting an attempt', () => {
+      adapter.processEvent({
+        type: LlmEventType.Content,
+        value: 'orphaned payload',
+      });
+      adapter.restartAttempt(false, []);
+      adapter.processEvent({
+        type: LlmEventType.Content,
+        value: 'clean response',
+      });
+
+      const message = adapter.finalizeAssistantMessage();
+
+      expect(message.message.content).toEqual([
+        { type: 'text', text: 'clean response' },
+      ]);
+    });
+
+    it('does not reuse an abandoned attempt as the final result', () => {
+      adapter.processEvent({
+        type: LlmEventType.Content,
+        value: 'orphaned payload',
+      });
+      const abandoned = adapter.finalizeAssistantMessage();
+      adapter['lastAssistantMessage'] = abandoned;
+
+      adapter.restartAttempt(false, []);
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1,
+        apiDurationMs: 1,
+        numTurns: 1,
+      });
+
+      expect(adapter.emittedMessages.at(-1)).toMatchObject({
+        type: 'result',
+        result: '',
+      });
+    });
+
+    it('keeps main assistant state when restarting a continuation', () => {
+      adapter.processEvent({
+        type: LlmEventType.Content,
+        value: 'partial',
+      });
+      adapter.restartAttempt(true, []);
+      adapter.processEvent({
+        type: LlmEventType.Content,
+        value: ' continuation',
+      });
+
+      const message = adapter.finalizeAssistantMessage();
+
+      expect(message.message.content).toEqual([
+        { type: 'text', text: 'partial continuation' },
+      ]);
+    });
+
     it('should ignore events after finalization', () => {
       adapter.processEvent({
         type: LlmEventType.Content,

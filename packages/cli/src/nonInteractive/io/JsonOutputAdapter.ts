@@ -101,9 +101,12 @@ export class JsonOutputAdapter
         this.messages.length - this.attemptMessageCheckpoint,
         ...retained,
       );
-      this.lastAssistantMessage = this.lastAssistantMessageAtAttemptStart;
     }
+    const retainedMessage = preserveText
+      ? this.lastAssistantMessage
+      : this.lastAssistantMessageAtAttemptStart;
     super.restartAttempt(preserveText, discardedToolCalls);
+    this.lastAssistantMessage = retainedMessage;
   }
 
   finalizeAssistantMessage(): CLIAssistantMessage {
