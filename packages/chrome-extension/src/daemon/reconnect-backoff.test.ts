@@ -86,7 +86,7 @@ describe('isBackingOff', () => {
 });
 
 describe('clearReconnectState', () => {
-  it('wipes the ladder after a successful open', async () => {
+  it('wipes the ladder after successful ACP initialization', async () => {
     await recordFailure(BASE);
     await clearReconnectState();
     expect(await readReconnectState(BASE)).toBeNull();

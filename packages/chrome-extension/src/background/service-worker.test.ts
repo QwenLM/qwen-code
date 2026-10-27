@@ -210,4 +210,43 @@ describe('service worker reconnect-backoff gates (#13966)', () => {
     await vi.waitFor(() => expect(sockets).toHaveLength(2));
     expect(sockets[1]?.url).toBe(WS_URL);
   });
+
+  it('preserves the ladder when the daemon closes before the ACP init ack', async () => {
+    installChromeHarness();
+    await loadServiceWorker();
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    const ws = sockets[0];
+    ws.readyState = MockWebSocket.OPEN;
+
+    ws.onopen?.();
+    expect(mocks.clearReconnectState).not.toHaveBeenCalled();
+
+    ws.onclose?.({ code: 1013, reason: 'Too many connections' });
+    await vi.waitFor(() =>
+      expect(mocks.recordFailure).toHaveBeenCalledWith(BASE_URL),
+    );
+    expect(mocks.clearReconnectState).not.toHaveBeenCalled();
+  });
+
+  it('clears the ladder only after a successful ACP init ack', async () => {
+    installChromeHarness();
+    await loadServiceWorker();
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    const ws = sockets[0];
+    ws.readyState = MockWebSocket.OPEN;
+    ws.onopen?.();
+    expect(mocks.clearReconnectState).not.toHaveBeenCalled();
+
+    ws.onmessage?.({
+      data: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 'browser-tools-acp-init',
+        result: {},
+      }),
+    });
+
+    await vi.waitFor(() =>
+      expect(mocks.clearReconnectState).toHaveBeenCalledTimes(1),
+    );
+  });
 });

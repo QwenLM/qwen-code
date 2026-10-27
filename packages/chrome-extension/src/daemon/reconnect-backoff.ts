@@ -26,7 +26,7 @@ export const RECONNECT_MIN_MS = 1_000;
 export const RECONNECT_MAX_MS = 300_000;
 
 export interface ReconnectState {
-  /** Consecutive connect attempts that never reached `onopen`. */
+  /** Consecutive connect attempts that never completed ACP initialization. */
   failures: number;
   /** Epoch ms before which no new attempt should be made. */
   nextRetryAt: number;
@@ -97,7 +97,7 @@ export async function recordFailure(baseUrl: string): Promise<number> {
   return delay;
 }
 
-/** Clear the ladder after a successful open. */
+/** Clear the ladder after successful ACP initialization. */
 export async function clearReconnectState(): Promise<void> {
   const store = storage();
   if (!store) return;

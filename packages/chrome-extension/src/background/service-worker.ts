@@ -119,6 +119,7 @@ function onWsMessage(ws: WebSocket, data: unknown): void {
       );
       ws.close();
     } else {
+      void clearReconnectState();
       console.log(LOG_PREFIX, 'ACP initialized; CDP tunnel ready');
     }
     return;
@@ -199,7 +200,6 @@ async function connect(): Promise<void> {
       ws.close();
       return;
     }
-    void clearReconnectState();
     console.log(LOG_PREFIX, 'Connected; sending ACP initialize');
     sendRaw(ws, {
       jsonrpc: '2.0',
