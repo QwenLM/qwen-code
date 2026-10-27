@@ -10,6 +10,10 @@ import styles from './WebShellSidebar.module.css';
 
 export interface SessionRenameEditorProps {
   label: string;
+  /** Restores an in-progress draft after the row moves or remounts. */
+  initialName?: string;
+  /** Records the draft outside the editor so a remount cannot lose it. */
+  onDraftChange?: (displayName: string) => void;
   onCommit: (displayName: string) => void;
   onCancel: () => void;
 }
@@ -21,11 +25,13 @@ export interface SessionRenameEditorProps {
  */
 export function SessionRenameEditor({
   label,
+  initialName,
+  onDraftChange,
   onCommit,
   onCancel,
 }: SessionRenameEditorProps) {
   const { t } = useI18n();
-  const [name, setName] = useState(label);
+  const [name, setName] = useState(initialName ?? label);
   return (
     <form
       className={styles.renameForm}
@@ -43,7 +49,10 @@ export function SessionRenameEditor({
         className={styles.renameInput}
         maxLength={256}
         value={name}
-        onChange={(event) => setName(event.target.value)}
+        onChange={(event) => {
+          setName(event.target.value);
+          onDraftChange?.(event.target.value);
+        }}
         onBlur={onCancel}
         onKeyDown={(event) => {
           if (event.key === 'Escape') {

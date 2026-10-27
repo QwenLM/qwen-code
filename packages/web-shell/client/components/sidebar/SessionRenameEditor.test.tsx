@@ -17,6 +17,8 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 function renderEditor(
   overrides: {
     label?: string;
+    initialName?: string;
+    onDraftChange?: (name: string) => void;
     onCommit?: (name: string) => void;
     onCancel?: () => void;
   } = {},
@@ -26,11 +28,14 @@ function renderEditor(
   const root = createRoot(container);
   const onCommit = overrides.onCommit ?? vi.fn();
   const onCancel = overrides.onCancel ?? vi.fn();
+  const onDraftChange = overrides.onDraftChange ?? vi.fn();
   act(() => {
     root.render(
       <I18nProvider language="en">
         <SessionRenameEditor
           label={overrides.label ?? 'Original name'}
+          initialName={overrides.initialName}
+          onDraftChange={onDraftChange}
           onCommit={onCommit}
           onCancel={onCancel}
         />
@@ -42,6 +47,7 @@ function renderEditor(
   return {
     container,
     input: input!,
+    onDraftChange,
     onCommit,
     onCancel,
     unmount: () => {
@@ -60,14 +66,16 @@ function type(input: HTMLInputElement, value: string): void {
 }
 
 describe('SessionRenameEditor', () => {
-  it('keeps the draft local and commits it on submit', () => {
-    const { container, input, onCommit, unmount } = renderEditor();
+  it('records the draft on every edit and commits it on submit', () => {
+    const { container, input, onDraftChange, onCommit, unmount } =
+      renderEditor();
 
     expect(input.value).toBe('Original name');
     act(() => type(input, 'Renamed session'));
     expect(input.value).toBe('Renamed session');
-    // Typing only touches this component; the parent is not notified until
-    // the draft is committed.
+    // The draft is recorded outside the editor so a remount can restore it;
+    // the rename itself is not committed until submit.
+    expect(onDraftChange).toHaveBeenCalledWith('Renamed session');
     expect(onCommit).not.toHaveBeenCalled();
 
     act(() =>
@@ -79,6 +87,16 @@ describe('SessionRenameEditor', () => {
     );
     expect(onCommit).toHaveBeenCalledWith('Renamed session');
     unmount();
+  });
+
+  it('restores an in-progress draft after a remount', () => {
+    const first = renderEditor({ initialName: 'My unsaved draft' });
+    expect(first.input.value).toBe('My unsaved draft');
+    first.unmount();
+
+    const second = renderEditor({ initialName: 'My unsaved draft' });
+    expect(second.input.value).toBe('My unsaved draft');
+    second.unmount();
   });
 
   it('cancels on Escape without committing', () => {
