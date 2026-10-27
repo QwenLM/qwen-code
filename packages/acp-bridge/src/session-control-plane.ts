@@ -14691,6 +14691,9 @@ export function createSessionControlPlane(
           transportClosed,
         ]);
         assertCurrentOwner();
+        if (entry.restoreState) {
+          entry.restoreState.configOptions = response.configOptions;
+        }
         return response;
       });
       entry.modelChangeQueue = work.then(
