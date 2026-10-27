@@ -12233,6 +12233,43 @@ Other open files:
         });
       });
 
+      it("keeps the host's steering on a stop policy's continuation", async () => {
+        notDoneChat();
+        mockTurnRunFn.mockImplementation(() => textTurn('not done'));
+        const policy = continueOnce('Finish the todos.');
+        const getSteerInput = vi.fn().mockResolvedValue(undefined);
+        const send = vi.spyOn(client, 'sendMessageStream');
+
+        await run([{ text: 'Hi' }], 'prompt-stop-policy-steer', {
+          type: SendMessageType.UserQuery,
+          stopPolicies: [policy],
+          getSteerInput,
+        });
+
+        expect(send.mock.calls[1][3]).toMatchObject({
+          type: SendMessageType.Hook,
+          getSteerInput,
+        });
+      });
+
+      it('lets the turn stop when a stop policy returns an empty request', async () => {
+        notDoneChat();
+        mockTurnRunFn.mockImplementation(() => textTurn('not done'));
+        const empty = { continueAt: vi.fn().mockResolvedValue([]) };
+        const next = continueOnce('Finish the todos.');
+
+        await run([{ text: 'Hi' }], 'prompt-stop-policy-empty', {
+          type: SendMessageType.UserQuery,
+          stopPolicies: [empty, next],
+        });
+
+        // The empty request sends nothing; the next policy is asked.
+        expect(mockTurnRunFn).toHaveBeenCalledTimes(2);
+        expect(mockTurnRunFn.mock.calls[1][1]).toContainEqual({
+          text: 'Finish the todos.',
+        });
+      });
+
       it('asks the stop policies only once the Stop hook lets the response stop', async () => {
         installMessageBus(blockStopOnce(), 'Stop');
         notDoneChat();

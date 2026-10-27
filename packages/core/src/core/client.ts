@@ -261,7 +261,7 @@ export enum SendMessageType {
 
 /** A host's reason to continue a turn whose response stopped. */
 export interface StopPolicy {
-  /** The request to continue with, or undefined to let the turn stop. */
+  /** The request to continue with, or undefined or empty to let the turn stop. */
   continueAt(stop: {
     promptId: string;
     signal: AbortSignal;
@@ -5921,7 +5921,7 @@ export class LlmClient {
             endCurrentInteraction('cancelled');
             return turn;
           }
-          if (!continueRequest) continue;
+          if (!continueRequest?.length) continue;
           // Like a Stop hook's continuation, each gets its own tool budget.
           this.loopDetector.reset(prompt_id);
           if (ownsExplorationBudget) this.toolExplorationBudget.reset();
@@ -5932,6 +5932,7 @@ export class LlmClient {
             {
               type: SendMessageType.Hook,
               modelOverride: options.modelOverride,
+              getSteerInput: options.getSteerInput,
               ...hostContinuationOptions(options),
             },
             boundedTurns - 1,

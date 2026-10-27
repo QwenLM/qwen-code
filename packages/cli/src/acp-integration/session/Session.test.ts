@@ -28525,6 +28525,93 @@ describe('Session', () => {
             },
           );
 
+          it('lets the Todo Stop Guard yield to input taken as the response finished', async () => {
+            let markStreaming!: () => void;
+            const streaming = new Promise<void>((resolve) => {
+              markStreaming = resolve;
+            });
+            let finish!: () => void;
+            const finishing = new Promise<void>((resolve) => {
+              finish = resolve;
+            });
+            let policyResult: unknown = 'not asked';
+            const sends: Array<[Part[], Record<string, unknown>]> = [];
+            mockConfig.isUnifiedAgentLoopEnabled = vi
+              .fn()
+              .mockReturnValue(true);
+            Object.assign(mockLlmClient, {
+              admitUserPrompt: vi.fn().mockResolvedValue({ blocked: false }),
+              sendMessageStream: vi.fn(
+                (
+                  parts: Part[],
+                  signal: AbortSignal,
+                  promptId: string,
+                  options: { stopPolicies?: core.StopPolicy[] },
+                ) => {
+                  sends.push([parts, options]);
+                  if (sends.length > 1) return createEmptyStream();
+                  return (async function* () {
+                    yield { type: core.LlmEventType.Content, value: 'plan A' };
+                    markStreaming();
+                    await finishing;
+                    yield {
+                      type: core.LlmEventType.Finished,
+                      value: { reason: FinishReason.STOP },
+                    };
+                    // The client's stop point, after the window closed.
+                    policyResult = await options.stopPolicies?.[0]?.continueAt({
+                      promptId,
+                      signal,
+                    });
+                  })();
+                },
+              ),
+            });
+            let answerDrain!: (value: unknown) => void;
+            mockClient.extMethod = vi
+              .fn()
+              .mockImplementationOnce(
+                () =>
+                  new Promise((resolve) => {
+                    answerDrain = resolve;
+                  }),
+              )
+              .mockResolvedValue({ messages: [] });
+            const decide = vi.spyOn(
+              (session as unknown as { todoStopGuard: { decide: () => void } })
+                .todoStopGuard,
+              'decide',
+            );
+
+            const done = startPrompt();
+            await streaming;
+            session.sendMidTurnInputNow();
+            await nextTick();
+            finish();
+            await nextTick();
+            answerDrain({ messages: ['also check tests'] });
+
+            await expect(done).resolves.toEqual({ stopReason: 'end_turn' });
+            // The guard neither decided nor claimed a continuation.
+            expect(policyResult).toBeUndefined();
+            expect(decide).not.toHaveBeenCalled();
+            expect(
+              vi
+                .mocked(mockClient.extMethod)
+                .mock.calls.some(
+                  ([method]) =>
+                    method === TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
+                ),
+            ).toBe(false);
+            expect(sends).toHaveLength(2);
+            expect(sends[1][0]).toEqual([
+              { text: `${responsePrefix}also check tests` },
+            ]);
+            expect(sends[1][1]).toMatchObject({
+              type: core.SendMessageType.Steer,
+            });
+          });
+
           /**
            * Holds the first request before it reaches history until `push`,
            * then holds its response, after `beforeAnswer` events, until it is

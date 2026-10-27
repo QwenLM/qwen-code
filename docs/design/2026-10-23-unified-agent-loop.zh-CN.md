@@ -251,9 +251,9 @@ PR 2 分步迁移 ACP。PR 2a 迁移全新用户 prompt 的模型轮：不是 re
 | 用户消息记录、todo 工作链和文件历史快照                                     | 仍由 ACP 处理；第一轮用 `userTurnRecordedByHost` 告知 client                                                                                                                                    |
 | 记忆召回、plan、arena 与 output-style 提醒、workflow intent、MessageDisplay | 由 client 处理                                                                                                                                                                                  |
 | 发送前压缩及其提示；session token 限制                                      | client 在发送过程中压缩，收到 `ChatCompressed` 时显示同样的提示；限制由 client 检查，报告方式不变（`max_tokens`）                                                                               |
-| 外部 Stop hook、它的上限和续发                                              | 仍由 ACP 的 Stop 循环处理，这个循环也负责 Todo Stop Guard 和当前轮次的后台结果；模型轮用 `stopHookRunByHost` 告知 client。这个 hook 在 PR 2c-1 中随这些续发一起迁移                             |
+| 外部 Stop hook、它的上限和续发                                              | 仍由 ACP 的 Stop 循环处理，这个循环也负责 Todo Stop Guard 和当前轮次的后台结果；模型轮用 `stopHookRunByHost` 告知 client，直到 PR 2c-1 把 stop 点迁到 client 的链上                             |
 | 请求失败时的 StopFailure hook 和 429 映射                                   | 仍由 ACP 处理，流中的 `Error` 事件也一样，抛出的是 provider 原本抛出的错误                                                                                                                      |
-| 轮次结束后的托管记忆任务                                                    | 轮次按现有条件结束时由 ACP 通过 client 的 `runManagedAutoMemoryBackgroundTasks` 安排；在 `stopHookRunByHost` 下 client 不安排，因为 ACP 的 Stop 循环还可能继续这个轮次                          |
+| 轮次结束后的托管记忆任务                                                    | 轮次按现有条件结束时由 ACP 通过 client 的 `runManagedAutoMemoryBackgroundTasks` 安排；PR 2c-1 之前，在 `stopHookRunByHost` 下 client 不安排，因为 ACP 的 Stop 循环还可能继续这个轮次            |
 | interaction span                                                            | 仍由 ACP 处理；模型轮用 `interactionSpanByHost` 告知 client                                                                                                                                     |
 | daemon 工具循环守卫：每轮工具调用上限、重复调用、探索提醒                   | 仍由 ACP 处理；模型轮用 `toolLoopGuardsByHost` 告知 client，client 因此不检查工具调用模式，也不添加探索提醒和 ACP 消息里已有的 todo 提醒                                                        |
 | 没有内容和 thought 循环启发式检测，也没有会话轮数上限                       | `model.skipLoopDetection` 为 false 时启用 client 的内容和 thought 启发式检测，它的 `LoopDetected` 以循环为由拒绝这个 prompt（`LOOP_DETECTED`）；`MaxSessionTurns` 以 `max_turn_requests` 结束它 |
@@ -312,7 +312,7 @@ client 在 Stop hook 续发中保留宿主的 span、工具守卫和 stop 策略
 
 hook 诊断消息不会重新打开已结束回复的中断窗口。每个新的模型请求都会重新开始捕获最终答案；没有后续请求的诊断消息会保留前一个答案。
 
-这一步对 core 的改动是增量的：新增 `SendMessageOptions.stopPolicies` 和 `StopPolicy` 接口。`stopHookRunByHost` 被删除。
+这一步对 core 的改动是新增 `SendMessageOptions.stopPolicies` 和 `StopPolicy` 接口，并删除只有 ACP 使用的 `stopHookRunByHost`。
 
 ## 迁移计划
 
@@ -425,7 +425,7 @@ PR 3–6 每一项之后，同样各自跟随默认开启和删除旧 loop 两�
   - PostToolUse hook 产生的 artifacts 随工具的结果更新一起发出，不再单独发 `artifact-event` 通知；
   - 从 PR 2c-1 起，当前轮次在最后一个回复之后才到达的后台结果，会开启一个后台通知轮次，而不是让 prompt 继续；Todo Stop Guard 生效时，中途排队的输入成为下一个 prompt，而不是让这一个继续；
   - Todo Stop Guard 只在 Stop hook 允许回复停下后才继续，并且使用单独的请求，不再与 hook 的理由合并；Stop hook 运行期间到达的输入不再作废它的决定；
-  - Stop hook 和 Todo Stop Guard 的续发沿用这一轮的 prompt id，与 TUI 的续发一样运行 UserPromptSubmit 和 client 的工具调用守卫，并像任何一批工具一样把工具结果发回；
+  - Stop hook 和 Todo Stop Guard 的续发沿用这一轮的 prompt id，与 TUI 的续发一样运行 UserPromptSubmit；除 Live 和 Agent Host 会话保留 ACP 的工具调用守卫外，运行 client 的守卫；并像任何一批工具一样把工具结果发回；
 
   ACP 对拍测试覆盖了保持不变的常见场景，并对日期提醒、工具结果上的 UserPromptSubmit、该 hook 运行时取消，以及一批的审批先于它的调用执行做了断言。
 

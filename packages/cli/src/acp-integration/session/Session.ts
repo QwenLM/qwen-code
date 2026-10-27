@@ -7600,6 +7600,8 @@ export class Session implements SessionContext {
             // A continuation the client starts follows the usage of the
             // response it continues, as on the current path.
             let emitResponseUsage = async () => {};
+            // Input the round's response took, which the round answers next.
+            let roundTookInput = async () => false;
             let toolLoopState = createDaemonToolLoopState(
               channelTurn ? 'off' : this.repeatedToolFailureGuardMode,
             );
@@ -7615,6 +7617,7 @@ export class Session implements SessionContext {
               ? [
                   this.#todoStopGuardStopPolicy(
                     () => emitResponseUsage(),
+                    () => roundTookInput(),
                     resetToolLoopState,
                     () => {
                       stopHookCapped = true;
@@ -7866,6 +7869,7 @@ export class Session implements SessionContext {
                     );
                     usageMetadata = null;
                   };
+                  roundTookInput = responseInterrupt.hasTakenInput;
                   // Open from the send, as `watch` is open once the request is
                   // out: input sent before the model answers cuts the wait.
                   responseInterrupt.begin();
@@ -9834,10 +9838,11 @@ export class Session implements SessionContext {
   /**
    * The Todo Stop Guard at the client's stop point: once the Stop hook lets a
    * response stop, it continues while todos remain, up to its attempts, and
-   * yields to a prompt the host has queued.
+   * yields to a prompt the host has queued or to input the round took.
    */
   #todoStopGuardStopPolicy(
     beforeDecision: () => Promise<void>,
+    tookInput: () => Promise<boolean>,
     onContinuation: () => void,
     onStopHookCap: () => void,
   ): StopPolicy {
@@ -9849,6 +9854,8 @@ export class Session implements SessionContext {
           return undefined;
         }
         if (this.todoStopGuardQueuedPromptPriority) return undefined;
+        // Input already shown as delivered is answered first.
+        if (await tookInput()) return undefined;
         const decision = this.todoStopGuard.decide(
           this.todoStopGuard.needsStopInspection
             ? this.#hasRelevantTodoStopGuardBackgroundInput()
@@ -11305,6 +11312,8 @@ export class Session implements SessionContext {
     takeInput: (
       onFullTurnModel?: (model: string) => boolean,
     ) => Promise<Content | null>;
+    /** Whether input was taken that `takeInput` will answer. */
+    hasTakenInput: () => Promise<boolean>;
   } {
     if (!enabled) {
       return {
@@ -11313,6 +11322,7 @@ export class Session implements SessionContext {
         begin: () => {},
         end: () => {},
         takeInput: async () => null,
+        hasTakenInput: async () => false,
       };
     }
     const controller = new AbortController();
@@ -11403,6 +11413,10 @@ export class Session implements SessionContext {
         } finally {
           end();
         }
+      },
+      hasTakenInput: async () => {
+        if (this.earlyMidTurnDrain) await this.earlyMidTurnDrain;
+        return tookInput && !turnSignal.aborted;
       },
       takeInput: async (onFullTurnModel) => {
         if (this.earlyMidTurnDrain) await this.earlyMidTurnDrain;
