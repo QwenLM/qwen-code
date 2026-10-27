@@ -723,6 +723,51 @@ describe('SharedTokenManager', () => {
       expect(getPrivateProperty(tokenManager, 'lockOwnerId')).toBeNull();
     });
 
+    it('should retry a failed cleanup while it still owns the lock', () => {
+      const cleanup = processExitHandler();
+      setPrivateProperty(tokenManager, 'lockOwnerId', 'owned-lock');
+      mockReadFileSync.mockImplementationOnce(() => {
+        throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+      });
+
+      cleanup();
+
+      expect(mockUnlinkSync).not.toHaveBeenCalled();
+      expect(getPrivateProperty(tokenManager, 'lockOwnerId')).toBe(
+        'owned-lock',
+      );
+
+      mockReadFileSync.mockReturnValueOnce('owned-lock');
+      cleanup();
+
+      expect(mockUnlinkSync).toHaveBeenCalledWith(
+        expect.stringContaining('oauth_creds.lock'),
+      );
+      expect(getPrivateProperty(tokenManager, 'lockOwnerId')).toBeNull();
+    });
+
+    it('should not delete a lock file another process now owns when releasing', async () => {
+      const mockClient = refreshingClient(
+        vi.fn().mockResolvedValue(createSuccessfulRefreshResponse()),
+      );
+      statAt(1000);
+      resolveFs('writeFile', 'mkdir', 'rename');
+      mockFs.readFile.mockImplementation(async (filePath) => {
+        if (String(filePath).endsWith('oauth_creds.lock')) {
+          return 'peer-lock';
+        }
+        throw enoent();
+      });
+
+      await tokenManager.getValidCredentials(mockClient);
+
+      expect(mockFs.unlink).not.toHaveBeenCalledWith(
+        expect.stringContaining('oauth_creds.lock'),
+      );
+      expect(getPrivateProperty(tokenManager, 'lockOwnerId')).toBeNull();
+      mockFs.readFile.mockReset();
+    });
+
     it('should track lock ownership only while the refresh holds the lock', async () => {
       const refresh = deferredRefresh();
       const mockClient = refreshingClient(
@@ -739,6 +784,11 @@ describe('SharedTokenManager', () => {
           ).not.toBeNull();
         },
         { timeout: 5000 },
+      );
+
+      // The retained token must be exactly what was written to the lock file.
+      expect(getPrivateProperty(tokenManager, 'lockOwnerId')).toBe(
+        mockFs.writeFile.mock.calls[0][1],
       );
 
       refresh.resolve(createSuccessfulRefreshResponse());
