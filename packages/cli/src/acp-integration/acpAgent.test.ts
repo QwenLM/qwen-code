@@ -29353,6 +29353,114 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
     await agentPromise;
   });
 
+  it('does not let a memory flush size the disposal drain', async () => {
+    const recording = makeRecordingService();
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    // A flush that never settles stands in for a forked extraction: nothing
+    // bounds the disposal drain from outside, so awaiting it here would hold
+    // process exit — and every session MCP subprocess — open for the whole
+    // SESSION_DRAIN_TIMEOUT_MS.
+    const flushPendingExtract = vi
+      .fn()
+      .mockReturnValue(new Promise<boolean>(() => {}));
+    (
+      innerConfig as unknown as { getMemoryManager: () => unknown }
+    ).getMemoryManager = vi.fn().mockReturnValue({ flushPendingExtract });
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    const settled = await Promise.race([
+      (agent as unknown as { disposeSessions: () => Promise<void> })
+        .disposeSessions()
+        .then(() => 'disposed' as const),
+      new Promise<'timeout'>((resolve) => {
+        setTimeout(() => resolve('timeout'), 2_000);
+      }),
+    ]);
+
+    expect(settled).toBe('disposed');
+    expect(flushPendingExtract).not.toHaveBeenCalled();
+    // The close still ran to completion — only the flush was skipped.
+    expect(innerConfig.shutdown).toHaveBeenCalledOnce();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('runs the close memory flush with the remaining close budget', async () => {
+    const recording = makeRecordingService();
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    const flushPendingExtract = vi.fn().mockResolvedValue(true);
+    (
+      innerConfig as unknown as { getMemoryManager: () => unknown }
+    ).getMemoryManager = vi.fn().mockReturnValue({
+      flushPendingExtract,
+      pendingExtractTurns: vi.fn().mockReturnValue(0),
+    });
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
+      sessionId: liveSessionId,
+    });
+
+    expect(flushPendingExtract).toHaveBeenCalledOnce();
+    const [sessionId, budget] = flushPendingExtract.mock.calls[0] as [
+      string,
+      number,
+    ];
+    expect(sessionId).toBe(liveSessionId);
+    expect(budget).toBeGreaterThan(0);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('reports the dropped close memory flush when the close budget is exhausted', async () => {
+    const recording = makeRecordingService();
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    const flushPendingExtract = vi.fn().mockResolvedValue(true);
+    const pendingExtractTurns = vi.fn().mockReturnValue(3);
+    (
+      innerConfig as unknown as { getMemoryManager: () => unknown }
+    ).getMemoryManager = vi.fn().mockReturnValue({
+      flushPendingExtract,
+      pendingExtractTurns,
+    });
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    // The settle phase consumes the whole close budget before the flush is
+    // sized, so the residue is non-positive and the flush is dropped.
+    let now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      liveWaitForActiveTurnsToSettle.mockImplementation(async () => {
+        now += 60;
+      });
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
+        sessionId: liveSessionId,
+        drainTimeoutMs: 50,
+      });
+    } finally {
+      clock.mockRestore();
+    }
+
+    expect(flushPendingExtract).not.toHaveBeenCalled();
+    expect(pendingExtractTurns).toHaveBeenCalledWith(liveSessionId);
+    expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('dropped the close auto-memory flush'),
+      expect.objectContaining({
+        sessionId: liveSessionId,
+        reason: 'close_budget_exhausted',
+        owedTurns: 3,
+      }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('times out a stuck close drain without releasing the live writer', async () => {
     const recording = makeRecordingService();
     const innerConfig = makeLiveSessionInnerConfig(recording);
