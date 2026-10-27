@@ -21782,6 +21782,112 @@ describe('DaemonSessionProvider', () => {
     );
   });
 
+  it.each(['same anchor', 'older prefix'] as const)(
+    'reopens a rejected history page after authoritative rewind with %s',
+    async (replacement) => {
+      sdkMocks.capabilities.mockResolvedValue({
+        workspaceCwd: '/mock-workspace',
+        features: ['session_transcript_pagination'],
+      });
+      const chunk = (
+        id: number,
+        kind: 'user_message_chunk' | 'agent_message_chunk',
+        recordId: string,
+      ): DaemonEvent => ({
+        v: 1,
+        id,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: kind,
+            content: { type: 'text', text: recordId },
+            _meta: {
+              'qwen.session.recordId': recordId,
+              qwenTranscript: { sourceRecordIds: [recordId] },
+            },
+          },
+        },
+      });
+      const turn = (id: number, name: string) => [
+        chunk(id, 'user_message_chunk', `${name}-user`),
+        chunk(id + 1, 'agent_message_chunk', `${name}-answer`),
+      ];
+      const rewind = createDeferred<void>();
+      const prefixName = replacement === 'same anchor' ? 'root' : 'earlier';
+      const prefix = turn(50, prefixName);
+      const session = createMockSession({
+        sessionId: 'rewind-capacity',
+        historyHasMore: true,
+        replaySnapshot: {
+          compactedReplay: [...turn(1, 'root'), ...turn(3, 'target')],
+          liveJournal: [],
+        },
+        async *events(opts) {
+          await rewind.promise;
+          yield {
+            v: 1,
+            id: 100,
+            type: 'session_rewound',
+            data: {
+              sessionId: 'rewind-capacity',
+              promptId: 'native-target',
+              targetTurnIndex: 1,
+              filesChanged: [],
+              filesFailed: [],
+              replay: prefix,
+            },
+          };
+          yield* createIdleEvents()(opts);
+        },
+      });
+      sdkMocks.sessions.push(session);
+      sdkMocks.getSessionTranscriptPage.mockResolvedValue({
+        v: 1,
+        sessionId: session.sessionId,
+        events: turn(10, 'older-page'),
+        hasMore: false,
+      });
+      let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
+      let blocks: readonly DaemonTranscriptBlock[] = [];
+      function Harness() {
+        history = useDaemonTranscriptHistory();
+        blocks = useDaemonTranscriptBlocks();
+        return null;
+      }
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        historyPageSize: 2,
+        maxBlocks: 5,
+      });
+      await act(async () => {
+        await history?.loadMore();
+        await flushPromises();
+      });
+      expect(history).toMatchObject({ capacityReached: true, hasMore: false });
+      expect(sdkMocks.getSessionTranscriptPage).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        rewind.resolve();
+        await flushTranscriptDispatch();
+      });
+      expect(blocks.map((block) => block.sourceRecordIds?.[0])).toEqual([
+        `${prefixName}-user`,
+        `${prefixName}-answer`,
+      ]);
+      expect(history).toMatchObject({ capacityReached: false, hasMore: true });
+      await act(async () => {
+        await history?.loadMore();
+        await flushPromises();
+      });
+      expect(sdkMocks.getSessionTranscriptPage).toHaveBeenCalledTimes(2);
+      expect(sdkMocks.getSessionTranscriptPage.mock.calls[1]).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ beforeRecordId: `${prefixName}-user` }),
+        ]),
+      );
+      expect(blocks).toHaveLength(4);
+    },
+  );
+
   it('grows the latched rejected-page footprint by a re-anchoring trim’s evicted band and keeps the latch closed', async () => {
     // A byte-budget rejection stores the rejected page's footprint. A later
     // re-anchoring eviction trim re-serves the evicted band on the next fetch,

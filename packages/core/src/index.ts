@@ -352,7 +352,6 @@ export {
 export { isClearedMediaPlaceholder } from './services/microcompaction/microcompact.js';
 export {
   isApiUserPrompt,
-  findApiRewindCutPoint,
   countApiUserPrompts,
   type ApiUserPromptOptions,
 } from './services/api-user-prompt.js';
