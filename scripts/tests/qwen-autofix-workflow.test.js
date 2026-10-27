@@ -3562,6 +3562,186 @@ describe('qwen-autofix workflow', () => {
     expect(loopHead).not.toContain('INSPECTED=');
   });
 
+  it('counts one attempt per run, parks a breaker stop, and keeps a spent bot budget', () => {
+    // Three shapes the budget boundary got wrong: (1) the census key, (2) a
+    // breaker stop that spends the budget on its way out, (3) the label an
+    // automatic release takes away from a spent bot engagement.
+    const budgetBlock = reviewScanJob.match(
+      /(BUDGET_FLOOR="\$\(jq[\s\S]*?\n {12}fi)/,
+    )?.[1];
+    expect(budgetBlock).toBeTruthy();
+    const haltBlock = reviewScanJob.match(
+      /(BUDGET_SENTINELS="\$\(jq[\s\S]*?BUDGET_CONV}" != '0' \]\] && BUDGET_HALTED=true)/,
+    )?.[1];
+    expect(haltBlock).toBeTruthy();
+    const read = ({
+      markers,
+      budget,
+      round = '0',
+      start = '0',
+      bot = 'false',
+      label = 'true',
+      notices = [],
+    }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-budget-identity-'));
+      try {
+        writeFileSync(
+          join(dir, 'ic.json'),
+          JSON.stringify([
+            {
+              user: { login: 'qwen-code-dev-bot' },
+              created_at: '2026-07-18T00:00:00Z',
+              body: `<!-- takeover-ack engaged -->\n<!-- autofix-round-budget ${budget} -->`,
+            },
+            ...notices,
+          ]),
+        );
+        const out = execFileSync(
+          'bash',
+          [
+            '-c',
+            [
+              "AUTOFIX_BOT='qwen-code-dev-bot'",
+              `WORKDIR='${dir}'`,
+              "REARM_KEY='2026-07-18T00:00:00Z'",
+              `ROUND_BUDGET='${budget}'`,
+              "BUDGET_FLOOR=''",
+              "TIMEOUT_WINDOW_CAP='3'",
+              `PR_META='${JSON.stringify({ author: { login: bot === 'true' ? 'qwen-code-dev-bot' : 'maint-a' } })}'`,
+              `HAS_TAKEOVER='${label}'`,
+              `MARKERS='${JSON.stringify(markers)}'`,
+              "EFF_MAX_ROUNDS='100'",
+              budgetBlock.replace(/\n {12}/g, '\n'),
+              `ROUND='${round}'`,
+              `ROUND_START='${start}'`,
+              haltBlock.replace(/\n {12}/g, '\n'),
+              'printf \'%s|%s|%s|%s\' "$ROUND_BUDGET" "$EFF_MAX_ROUNDS" "$BUDGET_SPENT" "$BUDGET_HALTED"',
+            ].join('\n'),
+          ],
+          { encoding: 'utf8' },
+        ).trim();
+        const [kept, eff, spent, halted] = out.split('|');
+        return { kept, eff, spent, halted };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    const mk = (round, run, ts = '2026-07-18T10:00:00Z') => ({
+      ts,
+      round,
+      win: '2026-07-18T00:00:00Z',
+      run,
+      at: '',
+    });
+    const SENTINEL = '9999-12-31T23:59:59Z';
+    const notice = (body) => ({
+      user: { login: 'qwen-code-dev-bot' },
+      created_at: '2026-07-18T11:00:00Z',
+      body,
+    });
+
+    // (1) Two executions that report the same watermark and round are two
+    // attempts; without a per-attempt identity they collapsed into one and a
+    // conflicted for-2 PR re-ran every tick forever.
+    expect(
+      read({
+        markers: [mk(2, 'run-a'), mk(2, 'run-b')],
+        budget: '2',
+        round: '2',
+      }),
+    ).toEqual({ kept: '2', eff: '2', spent: 'true', halted: 'false' });
+    // A legacy marker pair with no run= still dedupes, so a re-run cannot
+    // double-charge a budget written before the identity existed.
+    expect(
+      read({ markers: [mk(2, ''), mk(2, '')], budget: '2', round: '2' }).spent,
+    ).toBe('false');
+    // Two distinct runs are also two attempts for the prepare-side census.
+    expect(
+      read({
+        markers: [mk(1, 'run-a'), mk(1, 'run-b')],
+        budget: '2',
+        round: '1',
+      }).spent,
+    ).toBe('true');
+
+    // (2) A breaker stop is not a spent budget. The consecutive-failure breaker
+    // jumps the round to MAX_ROUNDS with a real timestamp, so the trailing
+    // sentinel streak stays 0 — the round/attempt comparison is what catches it.
+    expect(
+      read({
+        markers: [mk(5, 'a'), mk(6, 'b'), mk(7, 'c'), mk(8, 'd'), mk(10, 'e')],
+        budget: '5',
+        round: '10',
+      }).halted,
+    ).toBe('true');
+    // The cumulative timeout breaker spends the budget with no trailing streak.
+    expect(
+      read({
+        markers: [
+          mk(1, 'a', SENTINEL),
+          mk(1, 'b'),
+          mk(2, 'c', SENTINEL),
+          mk(2, 'd'),
+          mk(3, 'e', SENTINEL),
+        ],
+        budget: '5',
+        round: '3',
+      }).halted,
+    ).toBe('true');
+    // The convergence breaker pushes with real timestamps; its notice is the
+    // only artifact, and its continue preempts the park, so the gate reads it.
+    expect(
+      read({
+        markers: [mk(1, 'a'), mk(2, 'b'), mk(3, 'c')],
+        budget: '3',
+        round: '3',
+        notices: [notice('<!-- autofix-convergence-break -->')],
+      }).halted,
+    ).toBe('true');
+    // A genuinely spent budget is not halted.
+    expect(
+      read({
+        markers: [mk(1, 'a'), mk(2, 'b')],
+        budget: '2',
+        round: '2',
+      }).halted,
+    ).toBe('false');
+
+    // (3) The shepherds 3-day auto-release takes the label away from a paused
+    // bot PR. A spent budget must survive that, or EFF falls back to 10 and the
+    // PR is re-selected for rounds N+1..10.
+    expect(
+      read({
+        markers: [mk(1, 'a'), mk(2, 'b'), mk(3, 'c')],
+        budget: '3',
+        round: '3',
+        bot: 'true',
+        label: 'false',
+      }),
+    ).toEqual({ kept: '3', eff: '3', spent: 'true', halted: 'false' });
+    // An UNSPENT budget still dies with the label…
+    expect(
+      read({
+        markers: [mk(1, 'a')],
+        budget: '3',
+        round: '1',
+        bot: 'true',
+        label: 'false',
+      }).kept,
+    ).toBe('0');
+    // …and a human release keeps no cap at all (af-160: removing the label
+    // restores the strict cap).
+    expect(
+      read({
+        markers: [mk(1, 'a'), mk(2, 'b'), mk(3, 'c')],
+        budget: '3',
+        round: '3',
+        bot: 'false',
+        label: 'false',
+      }).kept,
+    ).toBe('0');
+  });
+
   it('bounds a for-N window and releases the PR when the budget is spent', () => {
     // The budget is a CAP, not a counter: the scan reads its own marker off
     // the window anchor and lowers EFF_MAX_ROUNDS, so every existing cap gate

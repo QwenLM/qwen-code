@@ -2804,31 +2804,20 @@ jobs:
             # Eval markers the bot left after a previous evaluation carry the
             # newest feedback timestamp it already considered, plus the round.
             # Only our own comments are trusted, so a spoofed marker is ignored.
-            # NOTE: this regex is POSITIONAL — group .[0]=ts, .[2]=round — and must
-            # match the marker string emitted at every write site verbatim (search
-            # `autofix-eval ts=`: the push/report success, noop, and handoff steps).
-            # Inserting or reordering a field here or at any write site silently
-            # corrupts round tracking; keep the `ts= acted= round=` order in lockstep.
+            # POSITIONAL: .[0]=ts .[2]=round .[3]=win .[4]=run; every write
+            # site must emit that order verbatim. → qwen-autofix.md#af-159
             MARKERS="$(jq -c --arg ab "${AUTOFIX_BOT}" '
               [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
-                | [ scan("<!-- autofix-eval ts=([^ ]+) acted=([^ ]+) round=([0-9]+)(?: win=([^ ]+))? -->") ] | .[]
-                | {ts: .[0], round: (.[2] | tonumber), win: (.[3] // "none"), at: ($c.created_at // "")} ]' "${WORKDIR}/ic.json")"
-            # The watermark is GLOBAL across all markers — feedback already
-            # evaluated stays evaluated, no matter how counting windows move.
-            # The terminal-handoff SENTINEL ts is excluded: it is a flag, not
-            # an evaluation time, and letting it into the watermark would
-            # filter all future feedback forever — making a re-arm after a
-            # terminal handoff dead on arrival (terminal skipping itself is
-            # round-based and window-scoped, so re-arm properly clears it).
+                | [ scan("<!-- autofix-eval ts=([^ ]+) acted=([^ ]+) round=([0-9]+)(?: win=([^ ]+))?(?: run=([^ ]+))? -->") ] | .[]
+                | {ts: .[0], round: (.[2] | tonumber), win: (.[3] // "none"), run: (.[4] // ""), at: ($c.created_at // "")} ]' "${WORKDIR}/ic.json")"
+            # GLOBAL watermark; the terminal-handoff sentinel ts is a flag,
+            # not an evaluation time. → qwen-autofix.md#af-159
             REARM_AT="$(jq -r --arg ab "${AUTOFIX_BOT}" '
               [ .[] | select((.user.login // "") == $ab)
                 | select((.body // "") | contains("<!-- autofix-rearm -->"))
                 | .created_at ] | max // ""' "${WORKDIR}/ic.json")"
-            # The head this PR's red checks were last reported against. Carried
-            # as its OWN marker inside the eval comment rather than a new field
-            # on autofix-eval, so none of the ts/acted/round parsers change —
-            # and the comment still matches the eval filter, so the agent never
-            # sees it as feedback.
+            # Last reported red head: its own marker, and it still matches the
+            # eval filter so the agent never sees it. → qwen-autofix.md#af-159
             RED_HEAD="$(jq -r --arg ab "${AUTOFIX_BOT}" '
               [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
                 | [ scan("<!-- autofix-redcheck head=([0-9a-f]+) -->") ] | .[]
@@ -2864,38 +2853,40 @@ jobs:
                 | ((.body // "") | [ scan("<!-- autofix-round-start ([0-9]{1,2}) -->") ] | .[] | .[0]) ]
               | last // "0"' "${WORKDIR}/ic.json" 2> /dev/null || echo '0')"
             [[ "${ROUND_START}" =~ ^[0-9]{1,2}$ ]] || ROUND_START=0
-            # Per ENGAGEMENT, not per window: a command opens one, an automatic
-            # growth-audit re-arm does not (its comment carries an eval marker).
+            # Per ENGAGEMENT, not per window. → qwen-autofix.md#af-159
             BUDGET_FLOOR="$(jq -r --arg ab "${AUTOFIX_BOT}" '[ .[] | select((.user.login // "") == $ab) | select((.body // "") as $b | ($b | contains("<!-- takeover-ack engaged -->")) or (($b | contains("<!-- autofix-rearm -->")) and (($b | contains("<!-- autofix-eval ")) | not))) | .created_at ] | max // ""' "${WORKDIR}/ic.json" 2> /dev/null || echo '')"
             ROUND_BUDGET="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg f "${BUDGET_FLOOR}" '[ .[] | select((.user.login // "") == $ab) | select((.created_at // "") >= $f) | ((.body // "") | [ scan("<!-- autofix-round-budget ([1-9][0-9]?) -->") ] | .[] | .[0]) ] | last // "0"' "${WORKDIR}/ic.json" 2> /dev/null || echo '0')"
             [[ "${ROUND_BUDGET}" =~ ^[0-9]{1,2}$ ]] || ROUND_BUDGET=0
-            [[ "${HAS_TAKEOVER:-false}" == "true" ]] || ROUND_BUDGET=0
+            IS_BOT_AUTHOR="$(jq -r --arg ab "${AUTOFIX_BOT}" '((.author.login // "") == $ab)' <<< "${PR_META}")"
+            # One ATTEMPT = one run= identity, else the legacy ts|round pair.
+            BUDGET_USED="$(jq -r --arg f "${BUDGET_FLOOR}" '[ .[] | select(.win != "none" and .win >= $f) | (.run // "\(.ts)|\(.round)") ] | unique | length' <<< "${MARKERS}" 2> /dev/null || echo 0)"
+            [[ "${BUDGET_USED}" =~ ^[0-9]+$ ]] || BUDGET_USED=0
+            BUDGET_SPENT=false
+            [[ "${ROUND_BUDGET}" -gt 0 && "${BUDGET_USED}" -ge "${ROUND_BUDGET}" ]] && BUDGET_SPENT=true
+            # A SPENT budget outlives the label's automatic removal; unspent dies with it.
+            [[ "${HAS_TAKEOVER:-false}" == "true" || ( "${IS_BOT_AUTHOR}" == 'true' && "${BUDGET_SPENT}" == 'true' ) ]] || { ROUND_BUDGET=0; BUDGET_SPENT=false; }
             if [[ "${ROUND_BUDGET}" -gt 0 && "${ROUND_BUDGET}" -lt "${EFF_MAX_ROUNDS}" ]]; then
               EFF_MAX_ROUNDS="${ROUND_BUDGET}"
             fi
-            BUDGET_USED="$(jq -r --arg f "${BUDGET_FLOOR}" '[ .[] | select(.win != "none" and .win >= $f) | "\(.ts)|\(.round)" ] | unique | length' <<< "${MARKERS}" 2> /dev/null || echo 0)"
-            [[ "${BUDGET_USED}" =~ ^[0-9]+$ ]] || BUDGET_USED=0
-            BUDGET_STREAK="$(jq -r --arg f "${BUDGET_FLOOR}" '[ .[] | select(.win != "none" and .win >= $f) ] | reverse | [ .[] | .ts == "9999-12-31T23:59:59Z" ] | (index(false) // length)' <<< "${MARKERS}" 2> /dev/null || echo 0)"
-            [[ "${BUDGET_STREAK}" =~ ^[0-9]+$ ]] || BUDGET_STREAK=0
-            BUDGET_SPENT=false
-            [[ "${ROUND_BUDGET}" -gt 0 && "${BUDGET_USED}" -ge "${ROUND_BUDGET}" ]] && BUDGET_SPENT=true
-            # Clamp strictly below the effective cap. The seed must be able to
-            # bring the Critical-only brake forward; it must NEVER be able to
-            # park a PR at its round cap on the very round it is taken over
-            # (which would stop the loop instead of starting it), and a seed
-            # is honoured on any PR whose window anchor carries the marker —
-            # including one whose takeover label was later removed, dropping
-            # EFF_MAX_ROUNDS back to the strict 10.
+            # A seed clamps strictly below the cap: it must never park the PR on
+            # the round that takes it over. → qwen-autofix.md#af-105
             if [[ "${EFF_MAX_ROUNDS:-0}" -gt 0 && "${ROUND_START}" -ge "${EFF_MAX_ROUNDS}" ]]; then
               echo "🔢 #${PR}: round seed ${ROUND_START} clamped to $(( EFF_MAX_ROUNDS - 1 )) (effective cap ${EFF_MAX_ROUNDS})"
               ROUND_START=$(( EFF_MAX_ROUNDS - 1 ))
             fi
             ROUND="$(jq -r --arg key "${REARM_KEY}" --argjson start "${ROUND_START}" 'map(select(.win == $key)) | map(.round) | max // $start' <<< "${MARKERS}")"
+            # A breaker stop is NOT a spent budget: a sentinel in the engagement,
+            # a round past the attempts, or a convergence notice parks the PR.
+            BUDGET_SENTINELS="$(jq -r --arg f "${BUDGET_FLOOR}" '[ .[] | select(.win != "none" and .win >= $f) | select(.ts == "9999-12-31T23:59:59Z") ] | length' <<< "${MARKERS}" 2> /dev/null || echo 0)"
+            [[ "${BUDGET_SENTINELS}" =~ ^[0-9]+$ ]] || BUDGET_SENTINELS=0
+            BUDGET_HALTED=false
+            [[ "${ROUND}" -gt "$(( ROUND_START + BUDGET_USED ))" ]] && BUDGET_HALTED=true
+            [[ "${BUDGET_SENTINELS}" -ge "${TIMEOUT_WINDOW_CAP}" ]] && BUDGET_HALTED=true
+            BUDGET_CONV="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg rt "${REARM_KEY}" '[ .[] | select((.user.login // "") == $ab) | select((.body // "") | contains("<!-- autofix-convergence-break -->")) | select((.created_at // "") > $rt) ] | length' "${WORKDIR}/ic.json" 2> /dev/null || echo 0)"
+            [[ "${BUDGET_CONV}" =~ ^[0-9]+$ ]] || BUDGET_CONV=0
+            [[ "${BUDGET_CONV}" != '0' ]] && BUDGET_HALTED=true
             # No mention of the Critical-only threshold here, deliberately: the
-            # scan must stay ignorant of that brake. It keeps SELECTING fresh
-            # suggestions so a no-op report can still advance the watermark;
-            # only prepare hides them from the agent. A test pins the scan
-            # against the string.
+            # scan stays ignorant of that brake and only prepare hides it.
             [[ "${ROUND_START}" != '0' ]] && echo "🔢 #${PR}: window seeded at round ${ROUND_START} → effective round ${ROUND}/${EFF_MAX_ROUNDS}"
 
             # Effective watermark = what the agent has actually evaluated (its last
@@ -2912,9 +2903,8 @@ jobs:
             fi
 
             if [[ "${ROUND}" -ge "${EFF_MAX_ROUNDS}" || "${BUDGET_SPENT}" == 'true' ]]; then
-              IS_BOT_AUTHOR="$(jq -r --arg ab "${AUTOFIX_BOT}" '((.author.login // "") == $ab)' <<< "${PR_META}")"
               # Budget spent: human PR released, bot PR paused. → qwen-autofix.md#af-159
-              if [[ "${BUDGET_SPENT}" == 'true' && "${IS_BOT_AUTHOR}" != 'true' && "${BUDGET_STREAK}" -lt "${TIMEOUT_WINDOW_CAP}" && ( -z "${FORCED_PR}" || "${EVENT_NAME}" != 'workflow_dispatch' ) ]]; then
+              if [[ "${BUDGET_SPENT}" == 'true' && "${IS_BOT_AUTHOR}" != 'true' && "${BUDGET_HALTED}" != 'true' && ( -z "${FORCED_PR}" || "${EVENT_NAME}" != 'workflow_dispatch' ) ]]; then
                 fleet_row "${PR}" 'budget-spent' "budget ${BUDGET_USED}/${ROUND_BUDGET} spent - releasing takeover"
                 BUDGET_RT="${REARM_KEY}"
                 [[ "${BUDGET_RT}" == "none" ]] && BUDGET_RT=''
@@ -4342,8 +4332,8 @@ jobs:
           STALE='false'
           LIVE_MARKS="$(jq -r --arg ab "${AUTOFIX_BOT}" '
             [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
-              | [ scan("<!-- autofix-eval ts=([^ ]+) acted=([^ ]+) round=([0-9]+)(?: win=([^ ]+))? -->") ] | .[]
-              | {ts: .[0], round: (.[2] | tonumber), win: (.[3] // "none"), at: ($c.created_at // "")} ]' "${WORKDIR}/ic.json")"
+              | [ scan("<!-- autofix-eval ts=([^ ]+) acted=([^ ]+) round=([0-9]+)(?: win=([^ ]+))?(?: run=([^ ]+))? -->") ] | .[]
+              | {ts: .[0], round: (.[2] | tonumber), win: (.[3] // "none"), run: (.[4] // ""), at: ($c.created_at // "")} ]' "${WORKDIR}/ic.json")"
           LIVE_REARM_AT="$(jq -r --arg ab "${AUTOFIX_BOT}" '
             [ .[] | select((.user.login // "") == $ab)
               | select((.body // "") | contains("<!-- autofix-rearm -->"))
@@ -4381,9 +4371,11 @@ jobs:
           LIVE_MAX_ROUND="$(jq -r --arg key "${LIVE_REARM_KEY}" --argjson start "${LIVE_ROUND_START}" 'map(select(.win == $key)) | map(.round) | max // $start' <<< "${LIVE_MARKS}")"
           LIVE_BUDGET_FLOOR="$(jq -r --arg ab "${AUTOFIX_BOT}" '[ .[] | select((.user.login // "") == $ab) | select((.body // "") as $b | ($b | contains("<!-- takeover-ack engaged -->")) or (($b | contains("<!-- autofix-rearm -->")) and (($b | contains("<!-- autofix-eval ")) | not))) | .created_at ] | max // ""' "${WORKDIR}/ic.json" 2> /dev/null || echo '')"
           LIVE_ROUND_BUDGET="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg f "${LIVE_BUDGET_FLOOR}" '[ .[] | select((.user.login // "") == $ab) | select((.created_at // "") >= $f) | ((.body // "") | [ scan("<!-- autofix-round-budget ([1-9][0-9]?) -->") ] | .[] | .[0]) ] | last // "0"' "${WORKDIR}/ic.json" 2> /dev/null || echo '0')"
-          [[ "${LIVE_ROUND_BUDGET}" =~ ^[0-9]{1,2}$ && "${LIVE_TAKEOVER}" == 'true' ]] || LIVE_ROUND_BUDGET=0
-          LIVE_ATTEMPTS="$(jq -r --arg f "${LIVE_BUDGET_FLOOR}" '[.[] | select(.win != "none" and .win >= $f) | "\(.ts)|\(.round)"] | unique | length' <<< "${LIVE_MARKS}" 2> /dev/null || echo 0)"
+          LIVE_ATTEMPTS="$(jq -r --arg f "${LIVE_BUDGET_FLOOR}" '[.[] | select(.win != "none" and .win >= $f) | (.run // "\(.ts)|\(.round)")] | unique | length' <<< "${LIVE_MARKS}" 2> /dev/null || echo 0)"
           [[ "${LIVE_ATTEMPTS}" =~ ^[0-9]+$ ]] || LIVE_ATTEMPTS=0
+          LIVE_BUDGET_SPENT=false
+          [[ "${LIVE_ROUND_BUDGET}" -gt 0 && "${LIVE_ATTEMPTS}" -ge "${LIVE_ROUND_BUDGET}" ]] && LIVE_BUDGET_SPENT=true
+          [[ "${LIVE_ROUND_BUDGET}" =~ ^[0-9]{1,2}$ && ( "${LIVE_TAKEOVER}" == 'true' || ( "${LIVE_AUTHOR}" == "${AUTOFIX_BOT}" && "${LIVE_BUDGET_SPENT}" == 'true' ) ) ]] || LIVE_ROUND_BUDGET=0
           # The head a sibling last judged, mirrored from the scan's RED_HEAD
           # parse. A no-op sibling records this marker while leaving BOTH ts and
           # round UNCHANGED — so the watermark/round triggers below never fire,
@@ -5099,7 +5091,7 @@ jobs:
             PRIOR_TIMEOUTS="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg key "${LIVE_REARM_KEY}" '
               [ .[] | select((.user.login // "") == $ab)
                 | select((.body // "") | contains("<!-- autofix-eval "))
-                | select(([ ((.body // "") | scan("<!-- autofix-eval ts=[^ ]+ acted=[^ ]+ round=[0-9]+(?: win=([^ ]+))? -->")) ] | map(.[0] // "none")) as $wins
+                | select(([ ((.body // "") | scan("<!-- autofix-eval ts=[^ ]+ acted=[^ ]+ round=[0-9]+(?: win=([^ ]+))?(?: run=[^ ]+)? -->")) ] | map(.[0] // "none")) as $wins
                     | ($wins | length) > 0 and (($wins | last) == $key))
               ] | sort_by(.created_at)
               | map((.body | gsub("\r"; "") | split("\n")[0]))
@@ -6524,7 +6516,7 @@ jobs:
                 [.[] | select((.user.login // "") == $ab)
                      | select((.body // "") | contains("<!-- autofix-eval "))
                      | select(
-                         ([ ((.body // "") | scan("<!-- autofix-eval ts=[^ ]+ acted=[^ ]+ round=[0-9]+(?: win=([^ ]+))? -->")) ] | map(.[0] // "none")) as $wins
+                         ([ ((.body // "") | scan("<!-- autofix-eval ts=[^ ]+ acted=[^ ]+ round=[0-9]+(?: win=([^ ]+))?(?: run=[^ ]+)? -->")) ] | map(.[0] // "none")) as $wins
                          | ($wins | length) > 0 and (($wins | last) == $win))]
                 | sort_by(.created_at) | .[]
                 | (.body | gsub("\r"; "") | split("\n")[0])' <<< "${COMMENTS_JSON}" 2> /dev/null || true)"
@@ -6706,7 +6698,7 @@ jobs:
               echo "---"
               echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`${CLI_DISPLAY}"
               echo
-              echo "<!-- autofix-eval ts=${MARK_TS} acted=false round=${MARK_ROUND} win=${WINDOW:-none} -->"
+              echo "<!-- autofix-eval ts=${MARK_TS} acted=false round=${MARK_ROUND} win=${WINDOW:-none} run=${GITHUB_RUN_ID} -->"
               # Per-round growth history the census counts — same marker
               # the push/no-op report paths write, so an over-budget
               # round that timed out or was gate-rejected is not a gap. run=

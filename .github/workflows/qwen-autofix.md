@@ -4604,21 +4604,35 @@ counted in eval markers rather than in ROUND:
   the marker, so the existing cap gate bounds DISPATCH exactly as it
   always did. The effective cap's other readers are prepare's attempt
   recount and the report script's budget carry.
-- Spend is the number of eval markers in the window, not ROUND. A
+- Spend is the number of eval markers in the engagement, not ROUND. A
   no-op round writes its marker with the round UNCHANGED — that is why
   a no-op never advanced the cap — but it is still an attempt, and a
   budget counted in ROUND would never end for a PR whose rounds keep
-  finding nothing. Counting markers charges it exactly once. The same
-  reading fixes the opposite error: a breaker stamps a terminal marker
-  at round=MAX_ROUNDS after far fewer real attempts, and that sentinel
-  jump adds no marker, so five failures in a twenty-round window read
-  as five attempts and land on the existing paused path with
-  needs-human instead of a release. A run that is cancelled or dies in
-  setup is NOT free: the report step runs on always(), writes its eval
-  marker with a sentinel timestamp and the round advanced by one, and
-  the census charges it — only a run killed before that finalizer is
-  free. The error direction is therefore an EARLY release, not a late
-  one.
+  finding nothing. The census keys on `run=` (the run id, the dedup
+  identity the growth marker already carries), falling back to
+  `ts|round` for markers written before it existed: two executions
+  that report the same watermark and round — the conflict no-op, which
+  re-dispatches every tick — are two attempts, while a re-run of one
+  run still charges once. A run that is cancelled or dies in setup is
+  NOT free: the report step runs on always() and writes its marker with
+  a sentinel timestamp, so the census charges it.
+- A breaker stop is NOT a spent budget. Three shapes reach the cap gate
+  with the budget spent anyway: the consecutive-failure breaker jumps
+  the round to MAX_ROUNDS with a real timestamp (no trailing sentinel),
+  the cumulative timeout breaker counts timeouts across the window with
+  pushes between them (so the trailing run stays short), and the
+  convergence breaker only pushes. The release is gated on
+  BUDGET_HALTED — a sentinel anywhere in the engagement, a round past
+  ROUND_START + attempts, or a convergence-break notice newer than the
+  window key — so all three park on the paused path instead of
+  releasing.
+- A SPENT budget outlives the label's AUTOMATIC removal: the shepherd
+  auto-releases a paused bot PR after three days, and if the budget died
+  with that label the effective cap would fall back to 10 and rounds
+  N+1..10 would run on a PR the dashboard still shows as awaiting a
+  human. A spent budget therefore survives for a bot-authored
+  engagement. An UNSPENT one still dies with the label, and a human
+  release keeps no cap at all (af-160).
 - It is ENGAGEMENT-scoped, and that is not the same key as the window.
   The budget is read from every ack/re-arm at or after the anchor whose
   comment carries it — BUDGET_FLOOR: a 'takeover-ack engaged', or an
