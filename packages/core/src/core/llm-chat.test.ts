@@ -47,6 +47,7 @@ import {
   type StreamEvent,
 } from './llm-chat.js';
 import { RETRYABLE_STREAM_TRANSPORT_CODES } from './stream-transport-retry.js';
+import { WorkflowModeContext } from './workflow-mode.js';
 import {
   convertResponsesEventToGemini,
   ResponsesStreamState,
@@ -954,6 +955,7 @@ describe('LlmChat', async () => {
 
   describe('prepared model request recovery', () => {
     it('awaits durability after normalization and before the first provider call', async () => {
+      const dispatched = vi.fn();
       let release!: () => void;
       const gate = new Promise<void>((resolve) => {
         release = resolve;
@@ -978,6 +980,7 @@ describe('LlmChat', async () => {
         'prompt',
         undefined,
         {
+          onModelRequestDispatched: dispatched,
           onPreparedRequest: async (prepared) => {
             saved = prepared;
             entered();
@@ -988,6 +991,7 @@ describe('LlmChat', async () => {
       const done = drain(response);
       await preparedReady;
       expect(streamMock()).not.toHaveBeenCalled();
+      expect(dispatched).not.toHaveBeenCalled();
       expect(saved!.history.at(-1)?.parts).toEqual([{ text: 'original' }]);
       expect(saved!.request.config.maxOutputTokens).toBeGreaterThan(0);
       expect(saved!.request.config).not.toHaveProperty('abortSignal');
@@ -996,6 +1000,10 @@ describe('LlmChat', async () => {
       release();
       await done;
       expect(streamMock()).toHaveBeenCalledOnce();
+      expect(dispatched).toHaveBeenCalledOnce();
+      expect(dispatched.mock.invocationCallOrder[0]).toBeLessThan(
+        streamMock().mock.invocationCallOrder[0],
+      );
     });
 
     it('avoids snapshot copies above the capture budget while sending live', async () => {
@@ -1023,6 +1031,7 @@ describe('LlmChat', async () => {
     });
 
     it('does not send, retry or fall back after a failed durability barrier', async () => {
+      const dispatched = vi.fn();
       const callback = vi
         .fn()
         .mockRejectedValue(new Error('Store unavailable'));
@@ -1031,7 +1040,7 @@ describe('LlmChat', async () => {
         { message: 'original' },
         'prompt',
         undefined,
-        { onPreparedRequest: callback },
+        { onPreparedRequest: callback, onModelRequestDispatched: dispatched },
       );
       await expect(drain(response)).rejects.toBeInstanceOf(
         LlmRequestPreparationError,
@@ -1039,6 +1048,54 @@ describe('LlmChat', async () => {
       expect(callback).toHaveBeenCalledOnce();
       expect(streamMock()).not.toHaveBeenCalled();
       expect(mockRetryWithBackoff).not.toHaveBeenCalled();
+      expect(dispatched).not.toHaveBeenCalled();
+    });
+
+    it('does not commit dispatch when preparation cancels the request', async () => {
+      const controller = new AbortController();
+      const dispatched = vi.fn();
+      const response = await chat.sendMessageStream(
+        'test-model',
+        {
+          message: 'cancel before dispatch',
+          config: { abortSignal: controller.signal },
+        },
+        'mode-cancel',
+        undefined,
+        {
+          onPreparedRequest: async () => {
+            controller.abort();
+          },
+          onModelRequestDispatched: dispatched,
+        },
+      );
+      await expect(drain(response)).rejects.toThrow();
+      expect(streamMock()).not.toHaveBeenCalled();
+      expect(dispatched).not.toHaveBeenCalled();
+    });
+
+    it('consumes a mode token when the generator fails before its first chunk', async () => {
+      const mode = new WorkflowModeContext();
+      mode.setRequested(true);
+      const context = {
+        surface: 'withheld',
+        bridgeWorkflowTool: false,
+        nameOnly: true,
+      } as const;
+      const prepared = mode.prepare(context, null);
+      streamMock().mockRejectedValueOnce(
+        Object.assign(new Error('invalid request'), { status: 400 }),
+      );
+      const response = await chat.sendMessageStream(
+        'test-model',
+        { message: 'first attempt' },
+        'mode-first-failure',
+        undefined,
+        prepared,
+      );
+      await expect(drain(response)).rejects.toThrow();
+      expect(streamMock()).toHaveBeenCalledOnce();
+      expect(mode.prepare(context, null).reminder).toBeUndefined();
     });
 
     it('reissues saved normalized history without another push, compaction or clamp', async () => {
@@ -7427,6 +7484,15 @@ describe('LlmChat', async () => {
     });
 
     it('keeps a captured fallback request outside persistent retry on replay', async () => {
+      const mode = new WorkflowModeContext();
+      mode.setRequested(true);
+      const context = {
+        surface: 'withheld',
+        bridgeWorkflowTool: false,
+        nameOnly: true,
+      } as const;
+      const token = mode.prepare(context, null);
+      const handoffs = vi.fn(token.onModelRequestDispatched);
       const fallbackGenerate = vi
         .fn()
         .mockImplementation(async () => textStream('fallback answer'));
@@ -7453,6 +7519,7 @@ describe('LlmChat', async () => {
             'fallback-replay',
             undefined,
             {
+              onModelRequestDispatched: handoffs,
               onPreparedRequest: async (prepared) => {
                 saved.push(prepared);
               },
@@ -7462,6 +7529,9 @@ describe('LlmChat', async () => {
         const fallback = saved.find(
           (prepared) => prepared.request.model === 'fallback-model',
         );
+        expect(handoffs).toHaveBeenCalledTimes(2);
+        expect(mode.snapshot().turns).toBe(0);
+        expect(mode.prepare(context, null).reminder).toBeUndefined();
         expect(fallback).toBeDefined();
         expect(fallback!.allowPersistentRetry).toBe(false);
         vi.stubEnv('QWEN_CODE_UNATTENDED_RETRY', 'true');

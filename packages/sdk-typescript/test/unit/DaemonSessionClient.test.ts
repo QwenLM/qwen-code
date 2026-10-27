@@ -160,6 +160,59 @@ function turnCompleteFrame(promptId: string): string {
 }
 
 describe('DaemonSessionClient', () => {
+  it.each([
+    ['workflow_mode', 'invalid'],
+    ['workflow_mode', 'on', { persist: true }],
+  ])(
+    'rejects invalid runtime mode arguments through its Promise: %j',
+    async (...args) => {
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, {}));
+      const session = new DaemonSessionClient({
+        client: new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+        session: {
+          sessionId: 'workflow-session',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'workflow-client',
+        },
+      });
+      const pending: unknown = Reflect.apply(
+        session.setConfigOption,
+        session,
+        args,
+      );
+      await expect(pending).rejects.toThrow(
+        'Workflow mode requires on/off and does not accept persist',
+      );
+      expect(calls).toHaveLength(0);
+    },
+  );
+
+  it('writes durable Workflow mode without a user settings persistence flag', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, { configOptions: [], persisted: true }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 'workflow-session',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'workflow-client',
+      },
+    });
+    await expect(
+      session.setConfigOption('workflow_mode', 'off'),
+    ).resolves.toEqual({ configOptions: [], persisted: true });
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(calls[0]!.body!)).toEqual({
+      configId: 'workflow_mode',
+      value: 'off',
+    });
+    expect(calls[0]!.headers['x-qwen-client-id']).toBe('workflow-client');
+  });
+
   it('binds continuation admission to the session without waiting for SSE', async () => {
     const body = {
       accepted: true,
