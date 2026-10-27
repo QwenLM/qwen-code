@@ -60,6 +60,18 @@ class ManagedAgentEmbeddingTest {
     }
 
     @Test
+    void coreRejectsRemotePlaintextPublicationEndpoint() {
+        runner().withPropertyValues("qwen.managed-agent.datasource.url=" + url(),
+                        "qwen.managed-agent.tool-publication.enabled=true",
+                        "qwen.managed-agent.tool-publication.service-base-url=http://192.0.2.1:8080")
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure()).hasStackTraceContaining(
+                            "qwen.managed-agent.tool-publication.service-base-url uses plaintext http");
+                });
+    }
+
+    @Test
     void ownsDedicatedPoolAndLeavesUnqualifiedHostBeansAlone() {
         runner().withPropertyValues("qwen.managed-agent.datasource.url=" + url()).run(context -> {
             assertThat(context).hasNotFailed();

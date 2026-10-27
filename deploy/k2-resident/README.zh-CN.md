@@ -93,7 +93,7 @@ reservation 并阻止切换。每个 Session 的 cwd 固定，可在下一 Sessi
 
 ```bash
 java -Dloader.main=com.alibaba.qwen.code.managedagent.persistence.ResidentWorkspaceRetirementMain \
-  -cp target/qwen-managed-agent-server-0.1.0-alpha.jar \
+  -cp target/qwen-managed-agent-server-0.1.0-alpha-exec.jar \
   org.springframework.boot.loader.launch.PropertiesLauncher \
   inspect /absolute/path/retirement.json \
   --spring.config.additional-location=file:/absolute/path/application.yaml

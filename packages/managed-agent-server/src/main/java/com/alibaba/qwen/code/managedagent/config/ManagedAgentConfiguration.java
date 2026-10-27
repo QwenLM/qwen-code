@@ -32,6 +32,10 @@ import org.springframework.transaction.annotation.EnableTransactionManagement;
         })
 })
 public class ManagedAgentConfiguration {
+    public ManagedAgentConfiguration(ManagedAgentProperties properties) {
+        BrokerSecurity.checkPublicationTransport(properties, new java.util.ArrayList<>());
+    }
+
     static class PersistenceImport implements org.springframework.context.annotation.DeferredImportSelector {
         @Override
         public String[] selectImports(org.springframework.core.type.AnnotationMetadata metadata) {
