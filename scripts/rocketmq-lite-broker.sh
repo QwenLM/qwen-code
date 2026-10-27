@@ -97,8 +97,12 @@ download() {
   local sum="${RMQ_CACHE_DIR}/${DIST_NAME}.zip.sha512"
   local base
   if [ ! -s "${zip}" ] || { [ "${RMQ_VERSION}" != "5.5.1" ] && [ ! -s "${sum}" ]; }; then
-    for base in "https://dlcdn.apache.org/rocketmq/${RMQ_VERSION}" \
-      "https://archive.apache.org/dist/rocketmq/${RMQ_VERSION}"; do
+    local bases=("https://dlcdn.apache.org/rocketmq/${RMQ_VERSION}"
+      "https://archive.apache.org/dist/rocketmq/${RMQ_VERSION}")
+    if [ "${RMQ_VERSION}" = "5.5.1" ]; then
+      bases=("https://mirrors.aliyun.com/apache/rocketmq/${RMQ_VERSION}" "${bases[@]}")
+    fi
+    for base in "${bases[@]}"; do
       if download_file "${zip}.part" "${base}/${DIST_NAME}.zip" &&
         { [ "${RMQ_VERSION}" = "5.5.1" ] ||
           download_file "${sum}" "${base}/${DIST_NAME}.zip.sha512"; }; then

@@ -369,7 +369,8 @@ appendFileSync(process.env.REQUESTS, JSON.stringify(args) + '\\n');
 for (const [flag, value] of [['--connect-timeout', '10'], ['--max-time', '45'], ['--retry', '1'], ['--retry-max-time', '45']]) {
   if (args[args.indexOf(flag) + 1] !== value) process.exit(95);
 }
-if (process.env.FAIL_ALL || url.includes('dlcdn.apache.org')) {
+if (process.env.FAIL_ALL || url.includes('dlcdn.apache.org') ||
+    (process.env.FAIL_MIRROR && url.includes('mirrors.aliyun.com'))) {
   writeFileSync(output, 'partial response');
   process.exit(28);
 }
@@ -393,6 +394,7 @@ else copyFileSync(process.env.RELEASE, output);
         REQUESTS: join(work, 'requests.jsonl'),
         PUBLISHED_SUM: `${hash}  release.zip\n`,
         FAIL_ALL: '',
+        FAIL_MIRROR: '',
       };
     });
 
@@ -461,8 +463,23 @@ else copyFileSync(process.env.RELEASE, output);
 
       expect(result.status).toBe(1);
       expect(result.stderr).toContain('failed its SHA-512 check');
-      expect(requests()).toHaveLength(2);
+      expect(requests()).toEqual([
+        'https://mirrors.aliyun.com/apache/rocketmq/5.5.1/rocketmq-all-5.5.1-bin-release.zip',
+      ]);
       expect(requests().every((url) => url.endsWith('.zip'))).toBe(true);
+      expect(existsSync(join(work, 'download-proof.txt'))).toBe(false);
+    });
+
+    it('falls back to Apache when the pinned mirror fails', () => {
+      const result = run({ RMQ_VERSION: '5.5.1', FAIL_MIRROR: '1' });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('failed its SHA-512 check');
+      expect(requests()).toEqual([
+        'https://mirrors.aliyun.com/apache/rocketmq/5.5.1/rocketmq-all-5.5.1-bin-release.zip',
+        'https://dlcdn.apache.org/rocketmq/5.5.1/rocketmq-all-5.5.1-bin-release.zip',
+        'https://archive.apache.org/dist/rocketmq/5.5.1/rocketmq-all-5.5.1-bin-release.zip',
+      ]);
       expect(existsSync(join(work, 'download-proof.txt'))).toBe(false);
     });
 
