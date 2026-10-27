@@ -48,7 +48,7 @@ import {
   realpathSync,
   statSync,
 } from 'node:fs';
-import { join, posix } from 'node:path';
+import { dirname, join, posix } from 'node:path';
 
 /**
  * The test scripts `vitest related` stands in for: vitest's one-shot run,
@@ -108,11 +108,11 @@ const DEFAULT_CONFIGS = ['vitest', 'vite'].flatMap((stem) =>
   ),
 );
 
-/** A config key or shorthand that sets vitest's `root`. */
-const ROOT_KEY_RE = /\broot\s*:|[{,]\s*root\s*[,}]/;
+/** A config key or shorthand that sets vitest's `root`, quoted or bare. */
+const ROOT_KEY_RE = /(?:\broot|['"]root['"])\s*:|[{,]\s*root\s*[,}]/;
 
-/** An inline projects list: each project may set its own root. */
-const PROJECTS_KEY_RE = /\bprojects\s*:/;
+/** An inline projects list, quoted or bare: each project may set its own root. */
+const PROJECTS_KEY_RE = /(?:\bprojects|['"]projects['"])\s*:/;
 
 /** An import of a local module: what it sets, a read of this file cannot see. */
 const LOCAL_IMPORT_RE =
@@ -342,22 +342,50 @@ function sameVitest(root: string, dir: string): boolean {
   };
   const rootBin = binOf('.');
   if (!rootBin) return false;
-  let rootTarget: string;
-  try {
-    rootTarget = realpathSync(rootBin);
-  } catch {
-    return false;
-  }
+  const rootTarget = vitestTargetOf(rootBin);
+  if (rootTarget === undefined) return false;
   for (let at = dir; at !== '.' && at !== ''; at = posix.dirname(at)) {
     const own = binOf(at);
     if (!own) continue;
-    try {
-      if (realpathSync(own) !== rootTarget) return false;
-    } catch {
-      return false;
-    }
+    if (vitestTargetOf(own) !== rootTarget) return false;
   }
   return true;
+}
+
+/**
+ * The vitest a `.bin/vitest` runs. A symlink resolves to the module itself.
+ * pnpm (and npm on some layouts) instead writes a small launcher per install
+ * root, each `exec`ing its own relative path to the same `vitest.mjs`; two
+ * such launchers have different real paths while running one and the same
+ * vitest, so identity is the module a launcher names, not the launcher.
+ */
+function vitestTargetOf(bin: string): string | undefined {
+  let real: string;
+  try {
+    real = realpathSync(bin);
+  } catch {
+    return undefined;
+  }
+  // The module itself: a link already resolved to it.
+  if (SCRIPT_RE.test(real)) return real;
+  let text: string;
+  try {
+    text = readFileSync(real, 'utf8');
+  } catch {
+    return real;
+  }
+  const named = [...text.matchAll(/[^\s"']*vitest[^\s"']*\.(?:mjs|cjs|js)/g)]
+    .map((m) =>
+      m[0].replace(/^\$basedir[\\/]/, '').replace(/^%~dp0[\\/]?/i, ''),
+    )
+    .filter((p) => !p.startsWith('-'));
+  const last = named.at(-1);
+  if (last === undefined) return real;
+  try {
+    return realpathSync(join(dirname(real), last));
+  } catch {
+    return undefined;
+  }
 }
 
 const escapeRe = (s: string): string =>
@@ -578,7 +606,11 @@ export function relatedTests(input: RelatedTestsInput): RelatedTests {
     // package's build output, beside the source the diff names.
     const built: string[] = [];
     for (const file of [...carried, ...namers]) {
-      const owner = ownerOf(file);
+      // In a single-root repo every path's owner is null — the one package IS
+      // the root, and `buildOutputOf(root, '.', file)` is its own build
+      // output. In a multi-root repo an ownerless path belongs to the root
+      // package, so only the root suite carries that output.
+      const owner = ownerOf(file) ?? (dir === '.' ? '.' : null);
       if (owner === null || TEST_FILE_RE.test(file) || !reachable(file)) {
         continue;
       }

@@ -342,6 +342,47 @@ describe('relatedTests', () => {
     expect(select(['packages/core/src/a.ts'], 'packages/core')).toBeUndefined();
   });
 
+  it('reads a quoted root or projects key the way vitest does', () => {
+    // `'root': 'client'` is the same key as `root:`; missing it narrows the
+    // suite and vitest then resolves every path under client/ twice.
+    write(
+      'packages/core/vitest.config.ts',
+      "export default { 'root': 'client' }",
+    );
+    expect(select(['packages/core/src/a.ts'], 'packages/core')).toBeUndefined();
+    write(
+      'packages/core/vitest.config.ts',
+      'export default { "projects": ["../other"] }',
+    );
+    expect(select(['packages/core/src/a.ts'], 'packages/core')).toBeUndefined();
+  });
+
+  it('hands a single-package suite the build output of its own package', () => {
+    // Production hardcodes `ownerOf` to null in a single-root repo, and the
+    // one package IS the root: its tests can import it by name, so the graph
+    // holds its build output, not only the source the diff names.
+    rmSync(join(root, 'packages'), { recursive: true });
+    write(
+      'package.json',
+      JSON.stringify({
+        name: 'r',
+        scripts: { test: 'vitest run' },
+        exports: { '.': './dist/index.js' },
+      }),
+    );
+    write('dist/index.js');
+    write('dist/value.js');
+    write('src/value.ts');
+    const own = relatedTests({
+      root,
+      changed: ['src/value.ts'],
+      renamedFrom: [],
+      ownerOf: () => null,
+      reachOf: (d) => [d],
+    });
+    expect(own.select('.')?.paths).toEqual(['dist/value.js', 'src/value.ts']);
+  });
+
   it('runs the suite whole for a path no command can carry, root included', () => {
     // Production hardcodes `ownerOf` to null for a single-root repo: every
     // path is in its reach, so an uncarriable one must not be dropped.
@@ -414,6 +455,46 @@ describe('relatedTests', () => {
     rmSync(link);
     write('vendor/vitest.mjs');
     symlinkSync(join(root, 'vendor/vitest.mjs'), link);
+    expect(own.select('packages/group/member')).toBeUndefined();
+  });
+
+  it('accepts pnpm launchers that exec the same vitest', () => {
+    // pnpm writes one shell launcher per install root. Each execs its own
+    // relative path to the same vitest.mjs; the launchers' own real paths
+    // differ, but the vitest they run does not.
+    rmSync(join(root, 'node_modules/.bin/vitest'));
+    write(
+      'node_modules/.bin/vitest',
+      '#!/bin/sh\nexec "$basedir/node" "$basedir/../vitest/vitest.mjs" "$@"\n',
+    );
+    write(
+      'packages/group/member/package.json',
+      JSON.stringify({ scripts: { test: 'vitest run' } }),
+    );
+    write('packages/group/member/src/m.ts');
+    const bin = join(root, 'packages/group/node_modules/.bin');
+    mkdirSync(bin, { recursive: true });
+    const launcher = join(bin, 'vitest');
+    writeFileSync(
+      launcher,
+      '#!/bin/sh\nexec "$basedir/node" ' +
+        '"$basedir/../../../../node_modules/vitest/vitest.mjs" "$@"\n',
+    );
+    const own = relatedTests({
+      root,
+      changed: ['packages/group/member/src/m.ts'],
+      renamedFrom: [],
+      ownerOf: (file) => /^packages\/group\/member/.exec(file)?.[0] ?? null,
+      reachOf: (d) => [d],
+    });
+    expect(own.select('packages/group/member')).toBeDefined();
+    // A launcher naming a different vitest is a different vitest.
+    write('vendor/vitest/vitest.mjs');
+    writeFileSync(
+      launcher,
+      '#!/bin/sh\nexec "$basedir/node" ' +
+        '"$basedir/../../../../vendor/vitest/vitest.mjs" "$@"\n',
+    );
     expect(own.select('packages/group/member')).toBeUndefined();
   });
 
