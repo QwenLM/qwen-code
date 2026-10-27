@@ -28,7 +28,8 @@ env:
 jobs:
   prepare:
     if: "${{ github.repository == 'QwenLM/qwen-code' && (github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'v')) }}"
-    runs-on: 'ubuntu-latest'
+    # Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 10
     outputs:
       eligible: '${{ steps.gate.outputs.eligible }}'
@@ -93,12 +94,21 @@ jobs:
       CLI_VERSION: '${{ needs.prepare.outputs.version }}'
       SOURCE_SHA: '${{ needs.prepare.outputs.sha }}'
       BUILD_TIMESTAMP: '${{ needs.prepare.outputs.timestamp }}'
+      ALIYUN_OSS_BUCKET: "${{ vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets' }}"
       OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com' }}"
     steps:
       - name: 'Checkout the pinned source'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: '${{ needs.prepare.outputs.sha }}'
+          persist-credentials: false
+
+      - name: 'Checkout release tooling from the workflow revision'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: '${{ github.workflow_sha }}'
+          path: '.qwen/managed-release-tools'
+          sparse-checkout: 'scripts'
           persist-credentials: false
 
       - name: 'Set up Java 21'
@@ -136,8 +146,8 @@ jobs:
 
       - name: 'Verify the executable JAR and publication profile'
         run: |-
-          mvn --batch-mode --no-transfer-progress -f packages/managed-agent-server/pom.xml clean verify -Pcentral-release -Dgpg.skip=true -Dproject.build.outputTimestamp="${BUILD_TIMESTAMP}"
-          node scripts/managed-runtime-release.js --jar "packages/managed-agent-server/target/qwen-managed-agent-server-${CLI_VERSION}.jar" --version "${CLI_VERSION}" --out-dir dist/managed-runtime
+          mvn --batch-mode --no-transfer-progress -f packages/managed-agent-server/pom.xml clean verify -Pcentral-release -Dgpg.skip=true -DforkCount=1 -DreuseForks=false -Dproject.build.outputTimestamp="${BUILD_TIMESTAMP}"
+          node .qwen/managed-release-tools/scripts/managed-runtime-release.js --jar "packages/managed-agent-server/target/qwen-managed-agent-server-${CLI_VERSION}.jar" --version "${CLI_VERSION}" --out-dir dist/managed-runtime
 
       - name: 'Retain verified JAR and checksum'
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
@@ -145,6 +155,36 @@ jobs:
           name: 'managed-runtime-${{ needs.prepare.outputs.version }}'
           path: 'dist/managed-runtime/*'
           if-no-files-found: 'error'
+
+      - name: 'Install the verified OSS uploader'
+        if: "${{ github.event_name == 'release' || !inputs.dry_run }}"
+        env:
+          OSSUTIL_URL: 'https://gosspublic.alicdn.com/ossutil/1.7.19/ossutil-v1.7.19-linux-amd64.zip'
+          OSSUTIL_SHA256: 'dcc512e4a893e16bbee63bc769339d8e56b21744fd83c8212a9d8baf28767343'
+        run: |-
+          set -euo pipefail
+          work=$(mktemp -d)
+          trap 'rm -rf "${work}"' EXIT
+          curl -fsSL --connect-timeout 15 --max-time 300 "${OSSUTIL_URL}" -o "${work}/ossutil.zip"
+          echo "${OSSUTIL_SHA256}  ${work}/ossutil.zip" | sha256sum -c -
+          unzip -q "${work}/ossutil.zip" -d "${work}"
+          binary=$(find "${work}" -type f -name 'ossutil64' -print -quit)
+          test -n "${binary}"
+          mkdir -p "${HOME}/.local/bin"
+          install -m 0755 "${binary}" "${HOME}/.local/bin/ossutil"
+          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+
+      - name: 'Configure authenticated OSS access'
+        if: "${{ github.event_name == 'release' || !inputs.dry_run }}"
+        env:
+          ALIYUN_OSS_ACCESS_KEY_ID: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}'
+          ALIYUN_OSS_ACCESS_KEY_SECRET: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}'
+          ALIYUN_OSS_ENDPOINT: "${{ vars.ALIYUN_OSS_ENDPOINT || 'https://oss-cn-hangzhou.aliyuncs.com' }}"
+        run: |-
+          set -euo pipefail
+          umask 077
+          [[ -n "${ALIYUN_OSS_ACCESS_KEY_ID}" && -n "${ALIYUN_OSS_ACCESS_KEY_SECRET}" ]]
+          ossutil config -e "${ALIYUN_OSS_ENDPOINT}" -i "${ALIYUN_OSS_ACCESS_KEY_ID}" -k "${ALIYUN_OSS_ACCESS_KEY_SECRET}" -L EN -c "${RUNNER_TEMP}/managed-ossutilconfig"
 
       - name: 'Recheck the immutable tag and existing publication bytes'
         id: 'publication'
@@ -162,18 +202,18 @@ jobs:
           gh api "repos/QwenLM/qwen-code/releases/tags/${RELEASE_TAG}" | jq --exit-status '.draft == false'
           jar="qwen-managed-agent-server-${CLI_VERSION}.jar"
           central="https://repo.maven.apache.org/maven2/com/alibaba/qwen-managed-agent-server/${CLI_VERSION}/${jar}"
-          state=$(node scripts/managed-runtime-release.js --check-url "${central}" --file "dist/managed-runtime/${jar}") || exit 1
+          state=$(node .qwen/managed-release-tools/scripts/managed-runtime-release.js --check-url "${central}" --file "dist/managed-runtime/${jar}") || exit 1
           echo "central=${state}" >> "${GITHUB_OUTPUT}"
           : > "${RUNNER_TEMP}/managed-github-missing"
           : > "${RUNNER_TEMP}/managed-oss-missing"
           for asset in "${jar}" "${jar}.sha256"; do
             github="https://github.com/QwenLM/qwen-code/releases/download/${RELEASE_TAG}/${asset}"
-            oss="${OSS_PUBLIC_BASE_URL}/releases/qwen-code/${RELEASE_TAG}/${asset}"
-            state=$(node scripts/managed-runtime-release.js --check-url "${github}" --file "dist/managed-runtime/${asset}") || exit 1
+            oss="oss://${ALIYUN_OSS_BUCKET}/releases/qwen-code/${RELEASE_TAG}/${asset}"
+            state=$(node .qwen/managed-release-tools/scripts/managed-runtime-release.js --check-url "${github}" --file "dist/managed-runtime/${asset}") || exit 1
             if [[ "${state}" == 'missing' ]]; then
               echo "dist/managed-runtime/${asset}" >> "${RUNNER_TEMP}/managed-github-missing"
             fi
-            state=$(node scripts/managed-runtime-release.js --check-url "${oss}" --file "dist/managed-runtime/${asset}") || exit 1
+            state=$(node .qwen/managed-release-tools/scripts/managed-runtime-release.js --check-oss "${oss}" --config "${RUNNER_TEMP}/managed-ossutilconfig" --file "dist/managed-runtime/${asset}") || exit 1
             if [[ "${state}" == 'missing' ]]; then
               echo "dist/managed-runtime/${asset}" >> "${RUNNER_TEMP}/managed-oss-missing"
             fi
@@ -212,7 +252,7 @@ jobs:
           set -euo pipefail
           jar="qwen-managed-agent-server-${CLI_VERSION}.jar"
           for attempt in {1..40}; do
-            state=$(node scripts/managed-runtime-release.js --check-url "https://repo.maven.apache.org/maven2/com/alibaba/qwen-managed-agent-server/${CLI_VERSION}/${jar}" --file "dist/managed-runtime/${jar}")
+            state=$(node .qwen/managed-release-tools/scripts/managed-runtime-release.js --check-url "https://repo.maven.apache.org/maven2/com/alibaba/qwen-managed-agent-server/${CLI_VERSION}/${jar}" --file "dist/managed-runtime/${jar}")
             if [[ "${state}" == 'present' ]]; then exit 0; fi
             sleep 30
           done
@@ -228,37 +268,12 @@ jobs:
           mapfile -t assets < "${RUNNER_TEMP}/managed-github-missing"
           if (( ${#assets[@]} )); then gh release upload "${RELEASE_TAG}" "${assets[@]}"; fi
 
-      - name: 'Install the verified OSS uploader'
-        if: "${{ github.event_name == 'release' || !inputs.dry_run }}"
-        env:
-          OSSUTIL_URL: 'https://gosspublic.alicdn.com/ossutil/1.7.19/ossutil-v1.7.19-linux-amd64.zip'
-          OSSUTIL_SHA256: 'dcc512e4a893e16bbee63bc769339d8e56b21744fd83c8212a9d8baf28767343'
-        run: |-
-          set -euo pipefail
-          work=$(mktemp -d)
-          trap 'rm -rf "${work}"' EXIT
-          curl -fsSL --connect-timeout 15 --max-time 300 "${OSSUTIL_URL}" -o "${work}/ossutil.zip"
-          echo "${OSSUTIL_SHA256}  ${work}/ossutil.zip" | sha256sum -c -
-          unzip -q "${work}/ossutil.zip" -d "${work}"
-          binary=$(find "${work}" -type f -name 'ossutil64' -print -quit)
-          test -n "${binary}"
-          mkdir -p "${HOME}/.local/bin"
-          install -m 0755 "${binary}" "${HOME}/.local/bin/ossutil"
-          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
-
       - name: 'Upload only missing OSS release assets'
         if: "${{ github.event_name == 'release' || !inputs.dry_run }}"
-        env:
-          ALIYUN_OSS_ACCESS_KEY_ID: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}'
-          ALIYUN_OSS_ACCESS_KEY_SECRET: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}'
-          ALIYUN_OSS_ENDPOINT: "${{ vars.ALIYUN_OSS_ENDPOINT || 'https://oss-cn-hangzhou.aliyuncs.com' }}"
-          ALIYUN_OSS_BUCKET: "${{ vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets' }}"
         run: |-
           set -euo pipefail
           mapfile -t assets < "${RUNNER_TEMP}/managed-oss-missing"
           if (( ${#assets[@]} == 0 )); then exit 0; fi
-          [[ -n "${ALIYUN_OSS_ACCESS_KEY_ID}" && -n "${ALIYUN_OSS_ACCESS_KEY_SECRET}" ]]
-          ossutil config -e "${ALIYUN_OSS_ENDPOINT}" -i "${ALIYUN_OSS_ACCESS_KEY_ID}" -k "${ALIYUN_OSS_ACCESS_KEY_SECRET}" -L EN -c "${RUNNER_TEMP}/managed-ossutilconfig"
           node scripts/upload-aliyun-oss-assets.js --bucket "${ALIYUN_OSS_BUCKET}" --config "${RUNNER_TEMP}/managed-ossutilconfig" --prefix "releases/qwen-code/${RELEASE_TAG}" "${assets[@]}"
 
       - name: 'Verify both public download channels'
@@ -268,6 +283,6 @@ jobs:
           jar="qwen-managed-agent-server-${CLI_VERSION}.jar"
           for base in "https://github.com/QwenLM/qwen-code/releases/download/${RELEASE_TAG}" "${OSS_PUBLIC_BASE_URL}/releases/qwen-code/${RELEASE_TAG}"; do
             for asset in "${jar}" "${jar}.sha256"; do
-              [[ "$(node scripts/managed-runtime-release.js --check-url "${base}/${asset}" --file "dist/managed-runtime/${asset}")" == 'present' ]]
+              [[ "$(node .qwen/managed-release-tools/scripts/managed-runtime-release.js --check-url "${base}/${asset}" --file "dist/managed-runtime/${asset}")" == 'present' ]]
             done
           done

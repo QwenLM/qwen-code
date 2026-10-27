@@ -1324,6 +1324,7 @@ describe('CoreToolScheduler', () => {
 
   function createSchedulerForLegacyToolTests(options: {
     toolsByName: Map<string, MockTool>;
+    onPermissionPromptTerminalSequence?: (terminalSequence: string) => void;
     approvalMode?: ApprovalMode;
     getPermissionsDeny?: () => string[] | undefined;
     messageBus?: { request: ReturnType<typeof vi.fn> };
@@ -1469,6 +1470,8 @@ describe('CoreToolScheduler', () => {
         chatRecordingService: options.chatRecordingService,
         onToolResultFullTurnModel: options.onToolResultFullTurnModel,
         isToolExecutionAllowed: options.isToolExecutionAllowed,
+        onPermissionPromptTerminalSequence:
+          options.onPermissionPromptTerminalSequence,
       },
     );
 
@@ -4851,6 +4854,41 @@ describe('CoreToolScheduler', () => {
     });
     expect(runSideQueryMock).not.toHaveBeenCalled();
     expect(hookSystem.firePermissionDeniedEvent).not.toHaveBeenCalled();
+  });
+
+  it('hands its owner the terminal sequence of the permission prompt hook', async () => {
+    const onConfirm = vi.fn().mockResolvedValue(undefined);
+    const tool = new MockTool({
+      name: 'needs-approval',
+      kind: Kind.Edit,
+      getDefaultPermission: MOCK_TOOL_GET_DEFAULT_PERMISSION,
+      getConfirmationDetails: async () =>
+        execDetails('Confirm', 'needs-approval', 'needs-approval', onConfirm),
+    });
+    const onPermissionPromptTerminalSequence = vi.fn();
+    const { scheduler } = createSchedulerForLegacyToolTests({
+      toolsByName: toolMap(tool),
+      approvalMode: ApprovalMode.DEFAULT,
+      messageBus: hookBus(async (request) =>
+        hookResponse(
+          `${request.eventName}-hook`,
+          request.eventName === 'Notification'
+            ? { terminalSequence: '\u0007' }
+            : {},
+        ),
+      ),
+      disableHooks: false,
+      onPermissionPromptTerminalSequence,
+    });
+
+    await scheduleBatch(
+      scheduler,
+      toolRequest('prompted', tool.name, {}, 'prompt-prompted'),
+    );
+
+    await vi.waitFor(() =>
+      expect(onPermissionPromptTerminalSequence).toHaveBeenCalledWith('\u0007'),
+    );
   });
 
   it('marks invalid PermissionRequest rewrites as pre-execution span failures', async () => {
@@ -13640,7 +13678,10 @@ describe('Fire hook functions integration', () => {
       vi.unstubAllEnvs();
     });
 
-    function createScheduler(tools: Map<string, MockTool>) {
+    function createScheduler(
+      tools: Map<string, MockTool>,
+      options: Partial<ConstructorParameters<typeof CoreToolScheduler>[0]> = {},
+    ) {
       return schedulerWithCallbacks(
         makeSchedulerConfig(
           makeToolRegistry(undefined, {
@@ -13662,6 +13703,7 @@ describe('Fire hook functions integration', () => {
             trackToolResultBytes: vi.fn(),
           },
         ),
+        options,
       );
     }
 
@@ -13795,6 +13837,107 @@ describe('Fire hook functions integration', () => {
         .map((e) => executionLog.indexOf(e));
       const firstEnd = executionLog.findIndex((e) => e.startsWith('end:'));
       expect(startIndices.every((i) => i < firstEnd)).toBe(true);
+    });
+
+    it('asks beforeToolLaunch serially, in request order, inside a concurrent batch', async () => {
+      const log: string[] = [];
+      const asked: string[] = [];
+      const { scheduler, onAllToolCallsComplete } = createScheduler(
+        toolMap(loggingTool(log, 'Agent', 'agent', undefined, { prefix: '' })),
+        {
+          beforeToolLaunch: async (call) => {
+            asked.push(call.request.callId);
+            await new Promise((resolve) => setTimeout(resolve, 5));
+            return true;
+          },
+        },
+      );
+
+      await scheduleBatch(scheduler, ...agentCalls());
+
+      expect(asked).toEqual(['1', '2', '3']);
+      expectAllSucceeded(onAllToolCallsComplete, 3);
+    });
+
+    it('cancels a call that beforeToolLaunch refuses, without running or logging it', async () => {
+      const log: string[] = [];
+      const logged = vi.spyOn(sizeLoggers, 'logToolCall');
+      const { scheduler, onAllToolCallsComplete } = createScheduler(
+        toolMap(loggingTool(log, 'Agent', 'agent', undefined, { prefix: '' })),
+        { beforeToolLaunch: (call) => call.request.callId !== '2' },
+      );
+
+      await scheduleBatch(scheduler, ...agentCalls());
+
+      expect(log).not.toContain('start:B');
+      expect(logged.mock.calls.map(([, event]) => event.call_id)).toEqual([
+        '1',
+        '3',
+      ]);
+      const completed = firstBatch(onAllToolCallsComplete);
+      const refused = completed.find((c) => c.request.callId === '2');
+      expect(refused?.status).toBe('cancelled');
+      expect(
+        refused && 'response' in refused
+          ? refused.response.executionStatus
+          : undefined,
+      ).toBe('not_started');
+      expect(
+        completed
+          .filter((c) => c.request.callId !== '2')
+          .every((c) => c.status === 'success'),
+      ).toBe(true);
+    });
+
+    it('fails a call its owner refuses as execution-denied, without running it', async () => {
+      const log: string[] = [];
+      const { scheduler, onAllToolCallsComplete } = createScheduler(
+        toolMap(loggingTool(log, 'Agent', 'agent', undefined, { prefix: '' })),
+        {
+          refuseToolCall: (request) =>
+            request.callId === '2' ? 'Not in this session.' : undefined,
+        },
+      );
+
+      await scheduleBatch(scheduler, ...agentCalls());
+
+      expect(log).not.toContain('start:B');
+      const completed = firstBatch(onAllToolCallsComplete);
+      const refused = completed.find((c) => c.request.callId === '2');
+      expect(refused?.status).toBe('error');
+      expect(
+        refused && 'response' in refused ? refused.response : {},
+      ).toMatchObject({
+        errorType: ToolErrorType.EXECUTION_DENIED,
+        executionStatus: 'not_started',
+        error: new Error('Not in this session.'),
+      });
+      expect(
+        completed
+          .filter((c) => c.request.callId !== '2')
+          .every((c) => c.status === 'success'),
+      ).toBe(true);
+    });
+
+    it('asks beforeToolLaunch for every call that fits in flight before launching them', async () => {
+      vi.stubEnv('QWEN_CODE_MAX_TOOL_CONCURRENCY', '2');
+      const log: string[] = [];
+      const { scheduler } = createScheduler(
+        toolMap(loggingTool(log, 'Agent', 'agent', undefined, { prefix: '' })),
+        {
+          beforeToolLaunch: (call) => {
+            log.push(`ask:${call.request.callId}`);
+            return true;
+          },
+        },
+      );
+
+      await scheduleBatch(scheduler, ...agentCalls());
+
+      expect(log.slice(0, 4)).toEqual(['ask:1', 'ask:2', 'start:A', 'start:B']);
+      expect(log.indexOf('ask:3')).toBeGreaterThan(
+        log.findIndex((entry) => entry.startsWith('end:')),
+      );
     });
 
     it('ignores malformed QWEN_CODE_MAX_TOOL_CONCURRENCY values', async () => {
