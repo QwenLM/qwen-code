@@ -938,10 +938,18 @@ public final class ManagedAgentPreflight {
                         || samePath(command, nodeExecutable));
     }
 
+    // The configured path may be a symlink while /proc/<pid>/exe names the
+    // target, so compare the files rather than how their paths are spelled.
     private static boolean samePath(String command, String configured) {
-        return configured != null && !configured.isBlank()
-                && Path.of(command).toAbsolutePath().normalize()
-                        .equals(Path.of(configured).toAbsolutePath().normalize());
+        if (configured == null || configured.isBlank()) {
+            return false;
+        }
+        try {
+            return Files.isSameFile(Path.of(command), Path.of(configured));
+        } catch (IOException | RuntimeException unreadable) {
+            return Path.of(command).toAbsolutePath().normalize()
+                    .equals(Path.of(configured).toAbsolutePath().normalize());
+        }
     }
 
     private static boolean isWorkerArguments(String[] arguments) {
