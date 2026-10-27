@@ -15,13 +15,9 @@ import {
   SettingScope,
   SETTINGS_VERSION,
 } from '../config/settings.js';
-import { trustedSystemSettingsDirs } from '../test-utils/trusted-system-settings.js';
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof fs>();
-  const { trustedSystemSettingsLstat } = await import(
-    '../test-utils/trusted-system-settings.js'
-  );
   return {
     ...actual,
     mkdtempSync: vi.fn(actual.mkdtempSync),
@@ -32,31 +28,6 @@ vi.mock('node:fs', async (importOriginal) => {
     readFileSync: vi.fn(actual.readFileSync),
     rmSync: vi.fn(actual.rmSync),
     unlinkSync: vi.fn(actual.unlinkSync),
-    // The system settings overrides are only honored for a root-owned
-    // regular file; the wrapper reports the temp fixtures as root-owned so
-    // the trust gate resolves them instead of the platform default.
-    lstatSync: trustedSystemSettingsLstat(actual.lstatSync.bind(actual)),
-  };
-});
-vi.mock('fs', async (importOriginal) => {
-  const actual = await importOriginal<typeof fs>();
-  const { trustedSystemSettingsLstat } = await import(
-    '../test-utils/trusted-system-settings.js'
-  );
-  // Identical to the node:fs factory: vitest normalizes the two specifiers
-  // to one module, the last registered factory wins, so it must carry the
-  // same vi.fn wrappers plus the lstat override.
-  return {
-    ...actual,
-    mkdtempSync: vi.fn(actual.mkdtempSync),
-    writeFileSync: vi.fn(actual.writeFileSync),
-    chmodSync: vi.fn(actual.chmodSync),
-    copyFileSync: vi.fn(actual.copyFileSync),
-    renameSync: vi.fn(actual.renameSync),
-    readFileSync: vi.fn(actual.readFileSync),
-    rmSync: vi.fn(actual.rmSync),
-    unlinkSync: vi.fn(actual.unlinkSync),
-    lstatSync: trustedSystemSettingsLstat(actual.lstatSync.bind(actual)),
   };
 });
 
@@ -75,13 +46,11 @@ describe('writeWithBackup', () => {
     vi.mocked(fs.unlinkSync).mockImplementation(nativeFs.unlinkSync);
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'write-with-backup-test-'));
     targetPath = path.join(tempDir, 'settings.json');
-    trustedSystemSettingsDirs.add(tempDir);
   });
 
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.clearAllMocks();
-    trustedSystemSettingsDirs.delete(tempDir);
     nativeFs.rmSync(tempDir, { recursive: true, force: true });
   });
 
@@ -360,16 +329,6 @@ describe('writeWithBackup', () => {
     vi.stubEnv(
       'QWEN_CODE_SYSTEM_DEFAULTS_PATH',
       path.join(tempDir, 'defaults'),
-    );
-    // Empty fixtures the trust gate (#13513) honors via the lstat mock above,
-    // so the system scopes resolve here instead of the platform default.
-    fs.writeFileSync(
-      path.join(tempDir, 'system'),
-      JSON.stringify({ $version: SETTINGS_VERSION }),
-    );
-    fs.writeFileSync(
-      path.join(tempDir, 'defaults'),
-      JSON.stringify({ $version: SETTINGS_VERSION }),
     );
     const policy = { filesystem: 'read-only', network: 'closed' };
     const settings = (theme: string) =>

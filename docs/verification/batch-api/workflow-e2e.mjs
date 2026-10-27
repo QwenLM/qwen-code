@@ -206,12 +206,8 @@ const home = fs.mkdtempSync(path.join(os.tmpdir(), 'batch-e2e-home-'));
 // Isolate settings: user, QWEN_HOME and system settings would all merge in,
 // and a provider config there would override the env endpoint and point the
 // command at a real, billable API. Every settings source is redirected into
-// an empty temp file. The system-scope overrides are honored only while the
-// fixtures are root-owned (trust gate, #13513); on an unprivileged host the
-// CLI fails closed to the platform default instead.
+// empty temp paths.
 const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'batch-e2e-fakehome-'));
-fs.writeFileSync(path.join(fakeHome, 'system-settings.json'), '{"$version":4}');
-fs.writeFileSync(path.join(fakeHome, 'system-defaults.json'), '{"$version":4}');
 fs.mkdirSync(path.join(project, 'docs', 'zh'), { recursive: true });
 fs.writeFileSync(path.join(project, 'docs', 'zh', 'a.md'), '# A\n\n甲文档。\n');
 fs.writeFileSync(path.join(project, 'docs', 'zh', 'b.md'), '# B\n\n乙文档。\n');

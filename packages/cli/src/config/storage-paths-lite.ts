@@ -12,10 +12,6 @@ import * as path from 'node:path';
 // import @qwen-code/qwen-code-core because it runs before serve listener ready.
 export const SETTINGS_DIRECTORY_NAME = '.qwen';
 
-// The system-wide settings directory on Windows, where the platform default
-// lives and an environment override may point.
-const WINDOWS_SYSTEM_SETTINGS_DIR = 'C:\\ProgramData\\qwen-code';
-
 /**
  * Whether a `QWEN_HOME` value expands against the home directory: `~`, or a
  * path that starts with `~/` or `~\`. Core's `Storage` applies the same rule.
@@ -174,82 +170,73 @@ export function getGlobalQwenDirLite(
 }
 
 /**
- * Whether a path supplied by `QWEN_CODE_SYSTEM_SETTINGS_PATH` or
- * `QWEN_CODE_SYSTEM_DEFAULTS_PATH` is trusted to carry system-wide settings.
- *
- * The platform defaults sit in locations only the OS administrator can
- * write, and that boundary is what keeps system settings under administrator
- * control; an override honored unconditionally would let a process's
- * environment point the system layer at a file its user controls. So an
- * override is honored only while it names a location the operating system
- * keeps out of reach of ordinary users, and fails closed to the platform
- * default otherwise: on Unix, a regular file owned by root, checked with
- * `lstatSync` so a link to a root-owned file does not qualify; on Windows, a
- * path that stays inside the system-wide settings directory once normalized.
+ * Where a system file named `fileName` lives when no override applies.
  */
-export function isSystemSettingsPathTrusted(configured: string): boolean {
+function getPlatformSystemFilePath(fileName: string): string {
+  if (os.platform() === 'darwin') {
+    return `/Library/Application Support/QwenCode/${fileName}`;
+  }
   if (os.platform() === 'win32') {
-    return isInsideWindowsSystemSettingsDir(configured);
+    return `C:\\ProgramData\\qwen-code\\${fileName}`;
   }
-  try {
-    const stats = fs.lstatSync(configured);
-    return stats.isFile() && stats.uid === 0;
-  } catch {
-    return false;
-  }
+  return `/etc/qwen-code/${fileName}`;
 }
 
 /**
- * Whether a Windows path stays inside the system-wide settings directory
- * once normalized: the path is case-folded and its forward slashes turned
- * into backslashes, then each `..` segment is resolved against the segments
- * that precede it, so a path such as `C:\ProgramData\qwen-code\..\..` cannot
- * be written to point outside the directory.
+ * The administrator file installed at a platform default location: the
+ * system settings file or, failing that, the system defaults file beside it.
+ * Only an administrator can create either, so an entry at one of those paths
+ * means the system layers are managed and a path override must not move them
+ * elsewhere. Any entry counts, a directory included, and so does a path that
+ * cannot be checked for a reason other than its absence: the settings loader
+ * then reads it and reports what is wrong with it.
  */
-export function isInsideWindowsSystemSettingsDir(configured: string): boolean {
-  const segments: string[] = [];
-  for (const segment of String(configured)
-    .toLowerCase()
-    .replace(/\//g, '\\')
-    .split('\\')) {
-    if (segment === '' || segment === '.') continue;
-    if (segment === '..') {
-      segments.pop();
-      continue;
+function findInstalledAdministratorFile(): string | undefined {
+  const candidates = [
+    getPlatformSystemFilePath('settings.json'),
+    getPlatformSystemFilePath('system-defaults.json'),
+  ];
+  for (const candidate of candidates) {
+    try {
+      fs.accessSync(candidate, fs.constants.F_OK);
+      return candidate;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') return candidate;
     }
-    segments.push(segment);
   }
-  return segments
-    .join('\\')
-    .startsWith(`${WINDOWS_SYSTEM_SETTINGS_DIR.toLowerCase()}\\`);
+  return undefined;
 }
 
-let warnedAboutRejectedSystemSettingsOverride = false;
+const warnedIgnoredOverrides = new Set<string>();
 
 /**
- * The one-shot breadcrumb for a system settings override the trust gate
- * rejected: which variable, the path it was set to, and why the platform
- * default is used instead. One warning per process, because the resolver
- * runs on every settings load and the reason does not change within one,
- * and the resolver runs before the debug log file is available, so
- * `console.warn` is the only channel left.
+ * Whether the override `name` is set to may replace a system layer: only
+ * while no administrator file is installed. The first time an override is
+ * ignored, a warning names the variable and the administrator file in effect;
+ * the resolver runs before the debug log file is available, so `console.warn`
+ * is the only channel.
  */
-function warnAboutRejectedSystemSettingsOverride(
+function isSystemPathOverrideHonored(
   name: string,
   configured: string,
-): void {
-  if (warnedAboutRejectedSystemSettingsOverride) return;
-  warnedAboutRejectedSystemSettingsOverride = true;
-  const reason =
-    os.platform() === 'win32'
-      ? `does not point inside ${WINDOWS_SYSTEM_SETTINGS_DIR}\\`
-      : 'is not a regular root-owned file';
-  // eslint-disable-next-line no-console -- one-shot breadcrumb; the debug log file is off where this resolver runs
-  console.warn(
-    `${name} is set to ${JSON.stringify(configured)}, which ${reason}, so the platform default is used instead.`,
-  );
+): boolean {
+  const administratorFile = findInstalledAdministratorFile();
+  if (administratorFile === undefined) return true;
+  if (!warnedIgnoredOverrides.has(name)) {
+    warnedIgnoredOverrides.add(name);
+    // eslint-disable-next-line no-console -- one-shot warning; the debug log file is not available where this resolver runs
+    console.warn(
+      `${name} is set to ${JSON.stringify(configured)}, but administrator settings are installed at ${JSON.stringify(administratorFile)}, so the override is ignored.`,
+    );
+  }
+  return false;
 }
 
+/**
+ * The system settings file. `QWEN_CODE_SYSTEM_SETTINGS_PATH` replaces the
+ * platform default only while no administrator file is installed.
+ */
 export function getSystemSettingsPath(
   env: Readonly<NodeJS.ProcessEnv> = process.env,
 ): string {
@@ -257,24 +244,21 @@ export function getSystemSettingsPath(
     env,
     'QWEN_CODE_SYSTEM_SETTINGS_PATH',
   );
-  if (configured && isSystemSettingsPathTrusted(configured)) {
+  if (
+    configured &&
+    isSystemPathOverrideHonored('QWEN_CODE_SYSTEM_SETTINGS_PATH', configured)
+  ) {
     return configured;
   }
-  if (configured) {
-    warnAboutRejectedSystemSettingsOverride(
-      'QWEN_CODE_SYSTEM_SETTINGS_PATH',
-      configured,
-    );
-  }
-  if (os.platform() === 'darwin') {
-    return '/Library/Application Support/QwenCode/settings.json';
-  }
-  if (os.platform() === 'win32') {
-    return 'C:\\ProgramData\\qwen-code\\settings.json';
-  }
-  return '/etc/qwen-code/settings.json';
+  return getPlatformSystemFilePath('settings.json');
 }
 
+/**
+ * The system defaults file. `QWEN_CODE_SYSTEM_DEFAULTS_PATH` replaces it only
+ * while no administrator file is installed; otherwise it sits beside the
+ * system settings file, so once an administrator file is installed both
+ * layers come from the platform default directory.
+ */
 export function getSystemDefaultsPath(
   env: Readonly<NodeJS.ProcessEnv> = process.env,
 ): string {
@@ -282,14 +266,11 @@ export function getSystemDefaultsPath(
     env,
     'QWEN_CODE_SYSTEM_DEFAULTS_PATH',
   );
-  if (configured && isSystemSettingsPathTrusted(configured)) {
+  if (
+    configured &&
+    isSystemPathOverrideHonored('QWEN_CODE_SYSTEM_DEFAULTS_PATH', configured)
+  ) {
     return configured;
-  }
-  if (configured) {
-    warnAboutRejectedSystemSettingsOverride(
-      'QWEN_CODE_SYSTEM_DEFAULTS_PATH',
-      configured,
-    );
   }
   return path.join(
     path.dirname(getSystemSettingsPath(env)),

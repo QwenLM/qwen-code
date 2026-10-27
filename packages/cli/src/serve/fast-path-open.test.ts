@@ -8,31 +8,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { trustedSystemSettingsDirs } from '../test-utils/trusted-system-settings.js';
-
-// The system settings overrides are only honored for a root-owned regular
-// file, which a non-root test host cannot arrange for its temp fixtures; the
-// fixtures stand in for administrator-created system files.
-vi.mock('node:fs', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:fs')>();
-  const { trustedSystemSettingsLstat } = await import(
-    '../test-utils/trusted-system-settings.js'
-  );
-  return {
-    ...actual,
-    lstatSync: trustedSystemSettingsLstat(actual.lstatSync.bind(actual)),
-  };
-});
-vi.mock('fs', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('fs')>();
-  const { trustedSystemSettingsLstat } = await import(
-    '../test-utils/trusted-system-settings.js'
-  );
-  return {
-    ...actual,
-    lstatSync: trustedSystemSettingsLstat(actual.lstatSync.bind(actual)),
-  };
-});
 
 const originalQwenHome = process.env['QWEN_HOME'];
 const originalSystemSettingsPath =
@@ -60,17 +35,6 @@ describe('serve fast path --open import boundary', () => {
       tempQwenHome,
       'system-defaults.json',
     );
-    // The trust gate (#13513) only honors a root-owned regular file; the
-    // lstat mock above reports these empty fixtures as root-owned, so the
-    // overrides resolve here instead of the platform default a dev host may
-    // ship with real content.
-    for (const name of ['system-settings.json', 'system-defaults.json']) {
-      fs.writeFileSync(
-        path.join(tempQwenHome, name),
-        JSON.stringify({ $version: 4 }),
-      );
-    }
-    trustedSystemSettingsDirs.add(tempQwenHome);
     process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = path.join(
       tempQwenHome,
       'trustedFolders.json',
@@ -117,7 +81,6 @@ describe('serve fast path --open import boundary', () => {
       process.env['FAST_PATH_OPEN_SETTINGS_MARKER'] = originalSettingsMarker;
     }
     if (tempQwenHome) {
-      trustedSystemSettingsDirs.delete(tempQwenHome);
       fs.rmSync(tempQwenHome, { recursive: true, force: true });
       tempQwenHome = undefined;
     }

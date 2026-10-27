@@ -104,7 +104,6 @@ import { LARGE_PIPE_FRAME_THRESHOLD_BYTES } from './large-pipe-frame-observer.js
 import type { ChannelWebhookEnqueueError } from './channel-webhook-ipc.js';
 import { ChannelDeliveryError } from '../runtime/channel-delivery-ipc.js';
 import { comparableBridgeOptions } from '../test-utils/bridge-options.js';
-import { trustedSystemSettingsDirs } from '../test-utils/trusted-system-settings.js';
 import { sessionAttachmentsRoots } from './session-attachments-root.js';
 import {
   workspaceRegistrationId,
@@ -973,18 +972,6 @@ it.each(
       'QWEN_CODE_SYSTEM_DEFAULTS_PATH',
       path.join(root, 'no-defaults'),
     );
-    // The trust gate (#13513) only honors a root-owned regular file; the
-    // lstat mock above reports these empty fixtures as root-owned, so the
-    // system scopes resolve here instead of the platform default.
-    trustedSystemSettingsDirs.add(root);
-    fs.writeFileSync(
-      path.join(root, 'no-system'),
-      JSON.stringify({ $version: 4 }),
-    );
-    fs.writeFileSync(
-      path.join(root, 'no-defaults'),
-      JSON.stringify({ $version: 4 }),
-    );
     const userFile = path.join(home, 'settings.json');
     const workspaceFile = path.join(workspace, '.qwen', 'settings.json');
     fs.writeFileSync(
@@ -1085,7 +1072,6 @@ it.each(
       vi.unstubAllEnvs();
       vi.restoreAllMocks();
       settingsRuntime.resetEnvironmentTrackingForTesting();
-      trustedSystemSettingsDirs.delete(root);
       fs.rmSync(root, { recursive: true, force: true });
     }
   },
@@ -1263,30 +1249,6 @@ vi.mock('node:os', async (importOriginal) => {
     totalmem,
     networkInterfaces,
     default: { ...actual, totalmem, networkInterfaces },
-  };
-});
-
-// The system settings overrides are only honored for a root-owned regular
-// file, which a non-root test host cannot arrange for its temp fixtures; the
-// fixtures stand in for administrator-created system files.
-vi.mock('node:fs', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:fs')>();
-  const { trustedSystemSettingsLstat } = await import(
-    '../test-utils/trusted-system-settings.js'
-  );
-  return {
-    ...actual,
-    lstatSync: trustedSystemSettingsLstat(actual.lstatSync.bind(actual)),
-  };
-});
-vi.mock('fs', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('fs')>();
-  const { trustedSystemSettingsLstat } = await import(
-    '../test-utils/trusted-system-settings.js'
-  );
-  return {
-    ...actual,
-    lstatSync: trustedSystemSettingsLstat(actual.lstatSync.bind(actual)),
   };
 });
 
@@ -15722,18 +15684,6 @@ describe('runQwenServe channel worker supervisor', () => {
       'QWEN_CODE_SYSTEM_DEFAULTS_PATH',
       path.join(tmpDir, 'no-system-defaults.json'),
     );
-    // The trust gate (#13513) only honors a root-owned regular file; the
-    // lstat mock above reports these empty fixtures as root-owned, so the
-    // system scopes resolve here instead of the platform default.
-    trustedSystemSettingsDirs.add(tmpDir);
-    fs.writeFileSync(
-      path.join(tmpDir, 'no-system-settings.json'),
-      JSON.stringify({ $version: 4 }),
-    );
-    fs.writeFileSync(
-      path.join(tmpDir, 'no-system-defaults.json'),
-      JSON.stringify({ $version: 4 }),
-    );
     fs.mkdirSync(path.join(tmpDir, '.qwen'));
     fs.writeFileSync(
       path.join(tmpDir, '.qwen', 'settings.json'),
@@ -15771,7 +15721,6 @@ describe('runQwenServe channel worker supervisor', () => {
     } finally {
       stderrSpy.mockRestore();
       vi.unstubAllEnvs();
-      trustedSystemSettingsDirs.delete(tmpDir);
       await started?.close();
     }
   });

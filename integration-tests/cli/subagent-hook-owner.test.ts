@@ -111,10 +111,6 @@ P01_ROLE_${role.toUpperCase()}
         ]),
       );
       const emptySettings = rig.createFile('system.json', '{}');
-      // The system-scope overrides: since the trust gate (#13513) only honors
-      // a root-owned file, this empty fixture is read while the suite runs as
-      // root (container runners); on an unprivileged host the CLI fails
-      // closed to the platform default, which the CI host does not ship.
       for (const [key, value] of Object.entries({
         HOME: join(rig.testDir!, 'home'),
         QWEN_HOME: join(rig.testDir!, '.qwen-home'),

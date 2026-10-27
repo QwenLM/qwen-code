@@ -4,7 +4,6 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { ModelsConfig } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../config/settings.js';
-import { trustedSystemSettingsDirs } from '../test-utils/trusted-system-settings.js';
 import {
   getModelConfigurationKey,
   findModelConfiguration,
@@ -12,30 +11,6 @@ import {
   listModelConfigurations,
   updateModelContextWindow,
 } from './model-configuration.js';
-
-// The system settings overrides are only honored for a root-owned file,
-// which a non-root test host cannot arrange for its temp fixtures; the
-// fixtures stand in for administrator-created system files.
-vi.mock('node:fs', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:fs')>();
-  const { trustedSystemSettingsLstat } = await import(
-    '../test-utils/trusted-system-settings.js'
-  );
-  return {
-    ...actual,
-    lstatSync: trustedSystemSettingsLstat(actual.lstatSync.bind(actual)),
-  };
-});
-vi.mock('fs', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('fs')>();
-  const { trustedSystemSettingsLstat } = await import(
-    '../test-utils/trusted-system-settings.js'
-  );
-  return {
-    ...actual,
-    lstatSync: trustedSystemSettingsLstat(actual.lstatSync.bind(actual)),
-  };
-});
 
 let temp: string;
 let previousHome: string | undefined;
@@ -76,7 +51,6 @@ function read() {
 }
 beforeEach(() => {
   temp = fs.mkdtempSync(path.join(os.tmpdir(), 'model-config-'));
-  trustedSystemSettingsDirs.add(temp);
   previousHome = process.env['QWEN_HOME'];
   process.env['QWEN_HOME'] = temp;
   fs.writeFileSync(
@@ -90,7 +64,6 @@ beforeEach(() => {
 afterEach(() => {
   if (previousHome === undefined) delete process.env['QWEN_HOME'];
   else process.env['QWEN_HOME'] = previousHome;
-  trustedSystemSettingsDirs.delete(temp);
   fs.rmSync(temp, { recursive: true, force: true });
 });
 describe('persisted model configuration', () => {

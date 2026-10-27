@@ -88,9 +88,6 @@ async function fixture(name, policy) {
       privacy: { usageStatisticsEnabled: false },
     }),
   );
-  // System scopes: the trust gate (#13513) only honors a root-owned file, so
-  // on the unprivileged Linux runner the CLI fails closed to the platform
-  // default (absent there); as root the empty fixtures below are honored.
   const system = path.join(dirs.home, 'system.json');
   const defaults = path.join(dirs.home, 'defaults.json');
   await Promise.all(

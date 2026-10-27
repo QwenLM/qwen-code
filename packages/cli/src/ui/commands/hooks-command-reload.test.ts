@@ -16,32 +16,7 @@ import {
 } from '../../config/settings.js';
 import { resolveHookSettingsForConfig } from '../../config/hook-settings.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
-import { trustedSystemSettingsDirs } from '../../test-utils/trusted-system-settings.js';
 import { hooksCommand } from './hooksCommand.js';
-
-// The system settings overrides are only honored for a root-owned regular
-// file, which a non-root test host cannot arrange for its temp fixtures; the
-// fixtures stand in for administrator-created system files.
-vi.mock('node:fs', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:fs')>();
-  const { trustedSystemSettingsLstat } = await import(
-    '../../test-utils/trusted-system-settings.js'
-  );
-  return {
-    ...actual,
-    lstatSync: trustedSystemSettingsLstat(actual.lstatSync.bind(actual)),
-  };
-});
-vi.mock('fs', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('fs')>();
-  const { trustedSystemSettingsLstat } = await import(
-    '../../test-utils/trusted-system-settings.js'
-  );
-  return {
-    ...actual,
-    lstatSync: trustedSystemSettingsLstat(actual.lstatSync.bind(actual)),
-  };
-});
 
 const hook = (command: string) => [
   { matcher: '*', hooks: [{ type: 'command' as const, command }] },
@@ -52,7 +27,6 @@ describe('/hooks reload with real settings files', () => {
 
   beforeEach(() => {
     directory = fs.mkdtempSync(path.join(os.tmpdir(), 'hooks-reload-'));
-    trustedSystemSettingsDirs.add(directory);
     vi.stubEnv('QWEN_HOME', path.join(directory, 'user'));
     vi.stubEnv(
       'QWEN_CODE_SYSTEM_SETTINGS_PATH',
@@ -67,7 +41,6 @@ describe('/hooks reload with real settings files', () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
-    trustedSystemSettingsDirs.delete(directory);
     fs.rmSync(directory, { recursive: true, force: true });
   });
 
