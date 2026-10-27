@@ -295,7 +295,7 @@ describe('CUA release workflow', () => {
 // The canonical workspace restoration script shared by all nine
 // 'Restore workspace ownership' copies in release.yml. The full wipe (vs
 // serve-ab.yml's keep-and-scrub) is deliberate on this lane: release
-// checkouts carry CI_BOT_PAT and the npm OIDC id-token, so no pre-existing
+// jobs hold CI_BOT_PAT and the npm OIDC id-token, so no pre-existing
 // repo state may survive into them. Pin the WHOLE body by equality, the way
 // review-worktree-cleanup-workflow.test.js pins its sweep copies: a
 // commented-out find, an inserted early exit, or a uniformly dropped
