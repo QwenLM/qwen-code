@@ -20,6 +20,8 @@ for (const width of [1280, 390]) {
       const request = route.request();
       const path = new URL(request.url()).pathname;
       const body = request.postDataJSON();
+      if (path.endsWith('/user-messages/query'))
+        return route.fulfill({ json: { paused: false, messages: [] } });
       expect(request.headers()['x-qwen-tenant-id']).toBe('managed-ui-test');
       if (path.endsWith('/sessions/query'))
         return route.fulfill({ json: { data: [], hasMore: false } });
@@ -32,6 +34,8 @@ for (const width of [1280, 390]) {
             capabilities: { workspaceBinding: true },
           },
         });
+      if (path.endsWith('/workspace-extensions/query'))
+        return route.fulfill({ json: { supported: false, extensions: [] } });
       if (path.endsWith('/runtime-nodes/query'))
         return route.fulfill({
           json: {

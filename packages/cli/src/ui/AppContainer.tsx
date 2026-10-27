@@ -28,7 +28,6 @@ import { ConfigContext } from './contexts/ConfigContext.js';
 import type { Part } from '@google/genai';
 import {
   type HistoryItem,
-  type HistoryItemUser,
   type IndividualToolCallDisplay,
   ToolCallStatus,
   type HistoryItemWithoutId,
@@ -90,9 +89,7 @@ import {
   applyCollapsePolicyAndSummary,
   buildResumedHistoryItems,
   computeResumedPromptCountSeed,
-  expandCollapsedHistory,
 } from './utils/resumeHistoryUtils.js';
-import { recoalesceFindingsHistoryItems } from './utils/findings-coalescing.js';
 import { buildWakeRepaint } from './utils/terminal-resize-reflow.js';
 import { loadLowlight } from './utils/lowlightLoader.js';
 import {
@@ -155,12 +152,14 @@ import { useResumeCommand } from './hooks/useResumeCommand.js';
 import { useDeleteCommand } from './hooks/useDeleteCommand.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
 import { getInteractiveModSession } from '../services/interactive-mod-session.js';
-import { useDoublePress } from './hooks/useDoublePress.js';
+import { useModBand } from './hooks/use-mod-band.js';
 import {
-  computeApiTruncationIndex,
-  isIdentifiedRetainedTurn,
-  isRealUserTurn,
-} from './utils/historyMapping.js';
+  MOD_BAND_RESERVED_COLUMNS,
+  modBandMaxRows,
+} from './components/ModBand.js';
+import { useDoublePress } from './hooks/useDoublePress.js';
+import { rewindSession } from './utils/session-rewind.js';
+import { isRewindableUserTurn } from './utils/historyMapping.js';
 import { waitForGoalRuntime } from './utils/goal-runtime.js';
 import { sanitizeTerminalLine } from './utils/textUtils.js';
 import {
@@ -1273,7 +1272,7 @@ export const AppContainer = (props: AppContainerProps) => {
       // Restore the transcript before Mod diagnostics, without making input
       // or Mod startup wait for asynchronous session recovery.
       void getInteractiveModSession(config)
-        ?.initialize()
+        ?.initialize(['AbovePrompt'])
         .catch(() => {});
 
       if (resumedSessionData) {
@@ -2059,7 +2058,9 @@ export const AppContainer = (props: AppContainerProps) => {
   // Ref bridges: these callbacks are defined later, but slashCommandActions
   // needs them now. The refs let the useMemo capture stable function pointers
   // whose implementations are swapped in once the real callbacks exist.
-  const openRewindSelectorRef = useRef<() => void>(() => {});
+  const openRewindSelectorRef = useRef<(origin?: 'slash-command') => void>(
+    () => {},
+  );
   const cancelOngoingRequestRef = useRef<() => void>(() => {});
 
   // /diff opens a per-turn diff dialog. Unlike rewind, no double-press or
@@ -2210,7 +2211,8 @@ export const AppContainer = (props: AppContainerProps) => {
       openHooksDialog,
       openStatsDialog,
       openResumeDialog,
-      openRewindSelector: () => openRewindSelectorRef.current(),
+      openRewindSelector: (origin?: 'slash-command') =>
+        openRewindSelectorRef.current(origin),
       openDiffDialog,
       handleResume,
       handleBranch,
@@ -4341,6 +4343,40 @@ export const AppContainer = (props: AppContainerProps) => {
     : 'hidden';
   const [controlsHeight, setControlsHeight] = useState(0);
 
+  // The Mods' band above the prompt: its input, and its tree, whose height
+  // the controls measurement below takes in.
+  const modBand = useModBand(config);
+  const modBandRows = modBandMaxRows(terminalHeight);
+  const isModWorking = streamingState !== StreamingState.Idle;
+  useEffect(() => {
+    getInteractiveModSession(config)?.setRenderInput({
+      surface: 'terminal',
+      component: 'AbovePrompt',
+      requestId: 'above-prompt',
+      viewport: {
+        columns: terminalWidth,
+        rows: terminalHeight,
+        isFullscreen: useTerminalBuffer,
+      },
+      props: {
+        hasSurvey: isFeedbackDialogOpen,
+        isWorking: isModWorking,
+        maxRows: modBandRows,
+        bodyColumns: Math.max(0, terminalWidth - MOD_BAND_RESERVED_COLUMNS),
+        scroll: { offset: 0, bodyRows: Math.max(0, modBandRows - 1) },
+        view: {},
+      },
+    });
+  }, [
+    config,
+    terminalWidth,
+    terminalHeight,
+    useTerminalBuffer,
+    isFeedbackDialogOpen,
+    isModWorking,
+    modBandRows,
+  ]);
+
   // Re-measure the footer whenever the LiveAgentPanel's height can change
   // (agents launching / finishing / focus), so `controlsHeight` — and thus
   // `availableTerminalHeight` — never goes stale below the composer. See
@@ -4388,6 +4424,7 @@ export const AppContainer = (props: AppContainerProps) => {
     embeddedShellFocused,
     messageQueue.length,
     isInputActive,
+    modBand,
   ]);
 
   // agentViewState is declared earlier (before handleFinalSubmit) so it
@@ -4478,23 +4515,34 @@ export const AppContainer = (props: AppContainerProps) => {
   // --- Rewind selector callbacks ---
   // IDE guard here is NOT redundant with the keyboard handler guard (line ~2375):
   // /rewind calls openRewindSelector directly, bypassing the keyboard handler.
-  const openRewindSelector = useCallback(() => {
-    if (streamingState !== StreamingState.Idle) return;
-    if (dialogsVisibleRef.current) return;
-    if (config.getIdeMode()) {
-      historyManager.addItem(
-        {
-          type: 'info',
-          text: 'Rewind is disabled in IDE mode.',
-        },
-        Date.now(),
-      );
-      return;
-    }
-    const hasUserTurns = historyManager.history.some((h) => h.type === 'user');
-    if (!hasUserTurns) return;
-    setIsRewindSelectorOpen(true);
-  }, [streamingState, config, historyManager]);
+  const openRewindSelector = useCallback(
+    (origin?: 'slash-command') => {
+      if (
+        streamingState !== StreamingState.Idle &&
+        !(
+          origin === 'slash-command' &&
+          streamingState === StreamingState.Responding
+        )
+      )
+        return;
+      if (dialogsVisibleRef.current) return;
+      if (config.getIdeMode()) {
+        historyManager.addItem(
+          {
+            type: 'info',
+            text: 'Rewind is disabled in IDE mode.',
+          },
+          Date.now(),
+        );
+        return;
+      }
+      const hasRewindableTurns =
+        historyManager.history.some(isRewindableUserTurn);
+      if (!hasRewindableTurns) return;
+      setIsRewindSelectorOpen(true);
+    },
+    [streamingState, config, historyManager],
+  );
   openRewindSelectorRef.current = openRewindSelector;
 
   const closeRewindSelector = useCallback(() => {
@@ -4503,217 +4551,57 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const handleRewindConfirm = useCallback(
     async (userItem: HistoryItem, option: RestoreOption) => {
+      const snapshot = historyManager.history;
+      const sessionId = config.getSessionId();
+      let loaded: HistoryItem[] | undefined;
+      let noticeId: number | undefined;
+      const isCurrent = () => {
+        const current = historyRef.current;
+        return (
+          config.getSessionId() === sessionId &&
+          isIdleRef.current &&
+          (current === snapshot ||
+            (loaded !== undefined &&
+              (current === loaded ||
+                (current.length === loaded.length + 1 &&
+                  current.at(-1)?.id === noticeId &&
+                  loaded.every((item, index) => item === current[index])))))
+        );
+      };
       try {
-        if (
-          config.getShellExecutionSandbox?.() &&
-          (option === 'code' || option === 'both')
-        ) {
-          historyManager.addItem(
-            {
-              type: 'error',
-              text: 'File restore is unavailable in tool sandbox.',
-            },
-            Date.now(),
-          );
-          return;
-        }
-
-        // For 'both', validate that conversation can be truncated BEFORE
-        // touching files — otherwise we'd roll back the workspace while
-        // the conversation stays at the newer state.
-        const needsConversation =
-          option === 'conversation' || option === 'both';
-        const llmClient = needsConversation ? config.getLlmClient() : null;
-        let apiTruncateIndex = -1;
-        let conversationSkippedNoClient = false;
-        if (needsConversation) {
-          if (!llmClient) {
-            if (option === 'conversation') {
-              historyManager.addItem(
-                {
-                  type: 'error',
-                  text: t(
-                    'Cannot rewind conversation: no active model client.',
-                  ),
-                },
-                Date.now(),
-              );
-              return;
+        const outcome = await rewindSession(
+          config,
+          snapshot,
+          userItem,
+          option,
+          (truncatedUi, draft) => {
+            clearPendingStateRef.current();
+            loaded = truncatedUi;
+            loadHistoryWithLatchReconciliation(truncatedUi);
+            refreshStatic();
+            if (draft) {
+              restoredSubmissionRef.current = null;
+              submittedPromptProvenanceUnavailableRef.current = true;
+              humanInputProvenanceUnavailableRef.current = true;
+              buffer.setText(draft);
             }
-            // 'both' with no client: skip conversation, still try files,
-            // and surface a warning after the restore output.
-            conversationSkippedNoClient = true;
-          } else {
-            apiTruncateIndex = computeApiTruncationIndex(
-              historyManager.history,
-              userItem.id,
-              llmClient.getHistoryShallow(),
+            noticeId = historyManager.addItem(
+              {
+                type: 'info',
+                text: t(
+                  'Conversation rewound. Edit your prompt and press Enter to continue.',
+                ),
+              },
+              Date.now(),
             );
-            if (apiTruncateIndex < 0) {
-              historyManager.addItem(
-                {
-                  type: 'error',
-                  text: isIdentifiedRetainedTurn(
-                    historyManager.history,
-                    userItem.id,
-                  )
-                    ? t(
-                        'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.',
-                      )
-                    : t(
-                        'Cannot rewind to a turn that was compressed. Try a more recent turn.',
-                      ),
-                },
-                Date.now(),
-              );
-              if (option === 'both') {
-                // Abort file restore too — don't create inconsistent state
-                return;
-              }
-              return;
-            }
-          }
-        }
-
-        // Restore code (files on disk). For 'code'-only, don't truncate
-        // the snapshot timeline — the conversation turns remain visible
-        // and their snapshots must stay available for future rewinds.
-        let fileRestoreMessage: string | undefined;
-        let fileRestoreError: string | undefined;
-        let hasRestoreFailure = false;
-        if (option === 'code' || option === 'both') {
-          const promptId = (userItem as HistoryItemUser).promptId;
-          if (promptId) {
-            try {
-              const truncateHistory =
-                option === 'both' && !!llmClient && apiTruncateIndex >= 0;
-              const result = await config
-                .getFileHistoryService()
-                .rewind(promptId, truncateHistory);
-              if (result.filesChanged.length > 0) {
-                fileRestoreMessage = t('Restored {{count}} file(s).', {
-                  count: String(result.filesChanged.length),
-                });
-              } else if (result.filesFailed.length === 0) {
-                fileRestoreMessage = t('No files needed to be restored.');
-              }
-              if (result.filesFailed.length > 0) {
-                hasRestoreFailure = true;
-                fileRestoreError = t(
-                  'Failed to restore {{count}} file(s): {{files}}',
-                  {
-                    count: String(result.filesFailed.length),
-                    files: result.filesFailed
-                      .map((f) => f.split('/').pop())
-                      .join(', '),
-                  },
-                );
-              }
-            } catch (error) {
-              hasRestoreFailure = true;
-              fileRestoreError = t('Failed to restore files: {{error}}', {
-                error: error instanceof Error ? error.message : String(error),
-              });
-            }
-          } else {
-            hasRestoreFailure = true;
-            fileRestoreError = t(
-              'Cannot restore files: this turn was created before file checkpointing was enabled.',
-            );
-          }
-        }
-
-        // Truncate conversation (already validated above).
-        // Skip if file restore had failures in "both" mode to avoid inconsistent state.
-        if (
-          needsConversation &&
-          llmClient &&
-          apiTruncateIndex >= 0 &&
-          !(option === 'both' && hasRestoreFailure)
-        ) {
-          const originalHistory = historyManager.history;
-          const hasSummary = originalHistory.some(
-            (h) => h.display?.kind === 'collapse-summary',
-          );
-          const effectiveLength = hasSummary
-            ? originalHistory.length - 1
-            : originalHistory.length;
-
-          let targetTurnIndex = 0;
-          for (const h of originalHistory) {
-            if (h.id === userItem.id) break;
-            if (isRealUserTurn(h)) targetTurnIndex++;
-          }
-
-          llmClient.truncateHistory(apiTruncateIndex);
-
-          // Strip suppressOnRestore flags and filter out collapse-summary items
-          // so rewound items remain visible without stale summary text
-          const truncatedUi = recoalesceFindingsHistoryItems(
-            expandCollapsedHistory(
-              originalHistory.filter((h) => h.id < userItem.id),
-            ),
-          );
-          clearPendingStateRef.current();
-          loadHistoryWithLatchReconciliation(truncatedUi);
-
-          refreshStatic();
-
-          if (userItem.type === 'user' && userItem.text) {
-            restoredSubmissionRef.current = null;
-            submittedPromptProvenanceUnavailableRef.current = true;
-            humanInputProvenanceUnavailableRef.current = true;
-            buffer.setText(userItem.text);
-          }
-
-          historyManager.addItem(
-            {
-              type: 'info',
-              text: t(
-                'Conversation rewound. Edit your prompt and press Enter to continue.',
-              ),
-            },
-            Date.now(),
-          );
-
-          config.getChatRecordingService()?.rewindRecording(
-            targetTurnIndex,
-            { truncatedCount: effectiveLength - truncatedUi.length },
-            !hasRestoreFailure
-              ? config
-                  .getFileHistoryService()
-                  .getSnapshots()
-                  .slice(0, targetTurnIndex + 1)
-              : undefined,
-          );
-        }
-
-        // Show file restore result after conversation truncation so the
-        // message isn't immediately removed by loadHistory.
-        if (fileRestoreMessage) {
-          historyManager.addItem(
-            { type: 'info', text: fileRestoreMessage },
-            Date.now(),
-          );
-        }
-        if (fileRestoreError) {
-          historyManager.addItem(
-            { type: 'error', text: fileRestoreError },
-            Date.now(),
-          );
-        }
-        if (conversationSkippedNoClient) {
-          historyManager.addItem(
-            {
-              type: 'info',
-              text: t(
-                'Code restored, but conversation could not be rewound (no active client).',
-              ),
-            },
-            Date.now(),
-          );
-        }
+          },
+          isCurrent,
+        );
+        if (!outcome.stale && isCurrent())
+          for (const message of outcome.messages)
+            historyManager.addItem(message, Date.now());
       } catch (error) {
+        if (!isCurrent()) return;
         historyManager.addItem(
           {
             type: 'error',

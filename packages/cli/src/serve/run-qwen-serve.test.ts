@@ -122,6 +122,7 @@ import type { WorkspaceFileSystemFactory } from './fs/workspace-file-system.js';
 import { ConversationWorkspace } from './conversations/conversation-workspace.js';
 import type { WorkspaceRuntimeProvenance } from './managed-scratch-workspace.js';
 import * as scheduledTaskKeepalive from './scheduled-task-keepalive.js';
+import { createDaemonUpdateRestarter } from './daemon-update-restart.js';
 
 const originalTestRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
 const isolatedTestRuntimeDir = fs.realpathSync(
@@ -1275,6 +1276,15 @@ vi.mock('@qwen-code/acp-bridge/spawnChannel', async (importOriginal) => {
         return actual.createSpawnChannelFactory(options);
       },
     ),
+  };
+});
+
+vi.mock('./daemon-update-restart.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./daemon-update-restart.js')>();
+  return {
+    ...actual,
+    createDaemonUpdateRestarter: vi.fn(actual.createDaemonUpdateRestarter),
   };
 });
 
@@ -6671,8 +6681,6 @@ describe('runQwenServe deployment profiles', () => {
   });
 
   it('does not restore channels or scheduled sessions for Hosted Harness', async () => {
-    vi.stubEnv('QWEN_HOSTED_HARNESS_BROKER_URL', 'https://broker.internal');
-    vi.stubEnv('QWEN_HOSTED_HARNESS_BROKER_TOKEN', 'file-fed-broker-secret');
     const workspace = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-hosted-profile-')),
     );
@@ -6697,6 +6705,8 @@ describe('runQwenServe deployment profiles', () => {
           token: 'hosted-secret',
           serveWebShell: false,
           hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+          managedRuntimeBrokerUrl: 'https://broker.internal',
+          managedRuntimeBrokerToken: 'file-fed-broker-secret',
         },
         {
           bridge: makeRuntimeBridge(),
@@ -6716,7 +6726,46 @@ describe('runQwenServe deployment profiles', () => {
     } finally {
       await handle?.close();
       createApp.mockRestore();
-      vi.unstubAllEnvs();
+      fs.rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('hands the update restarter the Broker pair the Hosted Harness resolved', async () => {
+    const workspace = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-hosted-restart-')),
+    );
+    vi.mocked(createDaemonUpdateRestarter).mockClear();
+    let handle: RunHandle | undefined;
+    try {
+      handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace,
+          profile: 'hosted-harness',
+          token: 'hosted-secret',
+          serveWebShell: false,
+          hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+          managedRuntimeBrokerUrl: 'https://broker.internal',
+          managedRuntimeBrokerToken: 'broker-secret',
+        },
+        {
+          bridge: makeRuntimeBridge(),
+          daemonLogBaseDir: path.join(workspace, 'debug'),
+          updateRestartArgv: ['serve', '--profile', 'hosted-harness'],
+        },
+      );
+      // `qwen serve` has already removed the pair from its environment, so
+      // the replacement gets it only through these options.
+      expect(createDaemonUpdateRestarter).toHaveBeenCalledWith(
+        expect.objectContaining({
+          managedRuntimeBrokerUrl: 'https://broker.internal',
+          managedRuntimeBrokerToken: 'broker-secret',
+        }),
+      );
+    } finally {
+      await handle?.close();
       fs.rmSync(workspace, { recursive: true, force: true });
     }
   });
@@ -21148,6 +21197,9 @@ describe('runQwenServe channel worker supervisor', () => {
   });
 
   it('keeps serve running when worker pidfile metadata cannot be written', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-pidfile-')),
     );
@@ -21182,8 +21234,14 @@ describe('runQwenServe channel worker supervisor', () => {
       await handle.runtimeReady;
       expect(worker.start).toHaveBeenCalled();
       expect(pidfile.writeServeServiceInfo).toHaveBeenCalled();
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'failed to write channel worker pidfile metadata: disk full',
+        ),
+      );
     } finally {
       await handle.close();
+      stderr.mockRestore();
     }
   });
 
@@ -21902,6 +21960,63 @@ describe('runQwenServe channel worker supervisor', () => {
     } finally {
       await handle.close();
     }
+  });
+
+  it('keeps the Hosted Harness on its requested port', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-hosted-port-')),
+    );
+    const portsAttempted: number[] = [];
+    const stderrWrites: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+    vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
+      locals: {},
+    } as unknown as express.Application);
+    const testServer = createServer();
+    testServer.listen = vi.fn((port: number) => {
+      portsAttempted.push(port);
+      const err = new Error('address in use') as NodeJS.ErrnoException;
+      err.code = 'EADDRINUSE';
+      setImmediate(() => testServer.emit('error', err));
+      return testServer;
+    }) as unknown as typeof testServer.listen;
+
+    try {
+      await expect(
+        runQwenServe(
+          {
+            port: 4170,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace: tmpDir,
+            profile: 'hosted-harness',
+            token: 'hosted-secret',
+            serveWebShell: false,
+            hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+          },
+          {
+            bridge: makeFakeBridge(),
+            httpServerFactory: () => testServer,
+            resolveOnListen: true,
+          },
+        ),
+      ).rejects.toMatchObject({ code: 'EADDRINUSE' });
+    } finally {
+      stderrSpy.mockRestore();
+    }
+    expect(portsAttempted).toEqual([4170]);
+    expect(
+      stderrWrites.some((w) =>
+        w.includes(
+          'port 4170 is in use; --profile hosted-harness does not move to another port',
+        ),
+      ),
+    ).toBe(true);
   });
 
   it('does not retry on non-EADDRINUSE listen errors', async () => {

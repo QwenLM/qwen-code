@@ -61,8 +61,10 @@ CREATE TABLE ma_session (
     CONSTRAINT ck_ma_session_model_selection CHECK ((model_id IS NULL AND model_revision = 0) OR (model_id IS NOT NULL AND model_revision >= 1 AND model_revision <= 9007199254740991)),
     selected_approval_mode VARCHAR(32),
     approval_revision BIGINT NOT NULL DEFAULT 0,
-    CONSTRAINT ck_ma_session_approval_selection CHECK ((selected_approval_mode IS NULL AND approval_revision = 0) OR (selected_approval_mode IS NOT NULL AND approval_revision >= 1 AND approval_revision <= 9007199254740991 AND (CASE selected_approval_mode WHEN 'default' THEN 7 WHEN 'auto-edit' THEN 9 WHEN 'yolo' THEN 4 ELSE -1 END = CHAR_LENGTH(selected_approval_mode)))),
+    CONSTRAINT ck_ma_session_approval_selection CHECK ((selected_approval_mode IS NULL AND approval_revision = 0) OR (selected_approval_mode IS NOT NULL AND approval_revision >= 1 AND approval_revision <= 9007199254740991 AND (CASE selected_approval_mode WHEN 'default' THEN 7 WHEN 'auto' THEN 4 WHEN 'auto-edit' THEN 9 WHEN 'yolo' THEN 4 ELSE -1 END = CHAR_LENGTH(selected_approval_mode)))),
     plan_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    permission_rules_json LONGTEXT,
+    CONSTRAINT ck_ma_session_permission_rules CHECK (permission_rules_json IS NULL OR (selected_approval_mode IS NOT NULL AND approval_revision >= 1 AND OCTET_LENGTH(permission_rules_json) <= 8192)),
     CONSTRAINT ck_ma_session_plan CHECK (plan_enabled = FALSE OR (selected_approval_mode IS NOT NULL AND approval_revision >= 1)),
     public_child_agents_version INT NOT NULL DEFAULT 0,
     CONSTRAINT ck_ma_public_child_agents CHECK (public_child_agents_version >= 0 AND public_child_agents_version <= 1),
@@ -78,6 +80,48 @@ CREATE INDEX ix_ma_harness_owner ON ma_session (harness_instance_id, harness_own
 CREATE INDEX ix_ma_session_retirement ON ma_session (retired_at, recovery_protected);
 
 CREATE INDEX ix_ma_session_storage_scope ON ma_session (tenant_id, workspace_storage_id, resource_gc_completed, session_id);
+
+CREATE TABLE ma_user_message_queue (
+    tenant_id VARBINARY(512) NOT NULL,
+    session_id VARBINARY(512) NOT NULL,
+    paused BOOLEAN NOT NULL DEFAULT FALSE,
+    resumed_turn_id VARBINARY(256),
+    next_sequence BIGINT NOT NULL DEFAULT 1,
+    last_dispatch_at BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    PRIMARY KEY (tenant_id, session_id),
+    FOREIGN KEY (tenant_id, session_id) REFERENCES ma_session (tenant_id, session_id)
+) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+
+CREATE TABLE ma_user_message (
+    tenant_id VARBINARY(512) NOT NULL,
+    session_id VARBINARY(512) NOT NULL,
+    message_id VARBINARY(144) NOT NULL,
+    sequence_number BIGINT NOT NULL,
+    revision BIGINT NOT NULL,
+    actor_id VARBINARY(512) NOT NULL,
+    input_json LONGTEXT NOT NULL,
+    state VARCHAR(32) NOT NULL,
+    context_revision BIGINT,
+    turn_id VARBINARY(256),
+    prompt_id VARBINARY(144),
+    consumed_sequence BIGINT,
+    PRIMARY KEY (tenant_id, session_id, message_id),
+    UNIQUE (tenant_id, session_id, sequence_number),
+    FOREIGN KEY (tenant_id, session_id) REFERENCES ma_session (tenant_id, session_id)
+) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+
+CREATE INDEX ix_ma_user_message_pending ON ma_user_message (state, tenant_id, session_id, sequence_number);
+
+CREATE TABLE ma_user_message_command (
+    tenant_id VARBINARY(512) NOT NULL,
+    session_id VARBINARY(512) NOT NULL,
+    command_key CHAR(64) NOT NULL,
+    actor_id VARBINARY(512) NOT NULL,
+    request_digest VARCHAR(71) NOT NULL,
+    result_json LONGTEXT NOT NULL,
+    PRIMARY KEY (tenant_id, session_id, command_key),
+    FOREIGN KEY (tenant_id, session_id) REFERENCES ma_session (tenant_id, session_id)
+) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
 CREATE TABLE ma_turn (
     tenant_id VARBINARY(512) NOT NULL,
@@ -111,8 +155,10 @@ CREATE TABLE ma_turn (
     CONSTRAINT ck_ma_turn_model_selection CHECK ((model_id IS NULL AND model_revision IS NULL) OR (model_id IS NOT NULL AND model_revision IS NOT NULL AND model_revision >= 1 AND model_revision <= 9007199254740991)),
     approval_mode VARCHAR(32),
     approval_revision BIGINT,
-    CONSTRAINT ck_ma_turn_approval_selection CHECK ((approval_mode IS NULL AND approval_revision IS NULL) OR (approval_mode IS NOT NULL AND approval_revision IS NOT NULL AND approval_revision >= 0 AND approval_revision <= 9007199254740991 AND (CASE approval_mode WHEN 'default' THEN 7 WHEN 'auto-edit' THEN 9 WHEN 'yolo' THEN 4 ELSE -1 END = CHAR_LENGTH(approval_mode)))),
+    CONSTRAINT ck_ma_turn_approval_selection CHECK ((approval_mode IS NULL AND approval_revision IS NULL) OR (approval_mode IS NOT NULL AND approval_revision IS NOT NULL AND approval_revision >= 0 AND approval_revision <= 9007199254740991 AND (CASE approval_mode WHEN 'default' THEN 7 WHEN 'auto' THEN 4 WHEN 'auto-edit' THEN 9 WHEN 'yolo' THEN 4 ELSE -1 END = CHAR_LENGTH(approval_mode)))),
     plan_enabled BOOLEAN,
+    permission_rules_json LONGTEXT,
+    CONSTRAINT ck_ma_turn_permission_rules CHECK (permission_rules_json IS NULL OR (approval_mode IS NOT NULL AND approval_revision >= 1 AND OCTET_LENGTH(permission_rules_json) <= 8192)),
     CONSTRAINT ck_ma_turn_plan CHECK (plan_enabled IS NULL OR (approval_mode IS NOT NULL AND approval_revision IS NOT NULL AND (plan_enabled = FALSE OR approval_revision >= 1)))
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
@@ -441,7 +487,7 @@ CREATE TABLE ma_resource_ref (
     resource_id VARBINARY(2048),
     gmt_create BIGINT UNSIGNED NOT NULL,
     PRIMARY KEY (session_scope_key, owner_kind, owner_key, owner_revision, resource_key),
-    CONSTRAINT ck_ma_ref_owner CHECK ((CASE owner_kind WHEN 'JOURNAL' THEN 7 WHEN 'SNAPSHOT' THEN 8 WHEN 'CAPTURE' THEN 7 WHEN 'ARTIFACT' THEN 8 WHEN 'MESSAGE' THEN 7 WHEN 'SESSION_RECORD' THEN 14 WHEN 'EVENT_STREAM' THEN 12 WHEN 'OPERATION' THEN 9 WHEN 'OPERATION_WORK' THEN 14 WHEN 'RECOVERY' THEN 8 WHEN 'HOSTED_CLEANUP' THEN 14 ELSE -1 END = CHAR_LENGTH(owner_kind))),
+    CONSTRAINT ck_ma_ref_owner CHECK ((CASE owner_kind WHEN 'JOURNAL' THEN 7 WHEN 'SNAPSHOT' THEN 8 WHEN 'NATIVE_SNAPSHOT' THEN 15 WHEN 'CAPTURE' THEN 7 WHEN 'ARTIFACT' THEN 8 WHEN 'MESSAGE' THEN 7 WHEN 'SESSION_RECORD' THEN 14 WHEN 'EVENT_STREAM' THEN 12 WHEN 'OPERATION' THEN 9 WHEN 'OPERATION_WORK' THEN 14 WHEN 'RECOVERY' THEN 8 WHEN 'HOSTED_CLEANUP' THEN 14 ELSE -1 END = CHAR_LENGTH(owner_kind))),
     CONSTRAINT fk_ma_ref_resource FOREIGN KEY (resource_key) REFERENCES ma_resource (resource_key),
     runtime_binding_key CHAR(64),
     CONSTRAINT ck_ma_ref_binding CHECK ((owner_kind = 'HOSTED_CLEANUP' AND runtime_binding_key IS NOT NULL AND owner_revision > 0) OR (owner_kind <> 'HOSTED_CLEANUP' AND runtime_binding_key IS NULL))
@@ -561,7 +607,7 @@ CREATE TABLE ma_request_receipt (
     PRIMARY KEY (receipt_key),
     CONSTRAINT uq_ma_decision_slot UNIQUE (tenant_key, decision_scope_key),
     CONSTRAINT uq_ma_request UNIQUE (namespace, tenant_key, scope_key, idempotency_digest),
-    CONSTRAINT ck_ma_request_namespace CHECK ((CASE namespace WHEN 'SESSION_COMMAND' THEN 15 WHEN 'SESSION_CREATE_MODE' THEN 19 WHEN 'SESSION_CREATE_ACTOR' THEN 20 WHEN 'AGENT_DEFINITION' THEN 16 WHEN 'AUTOMATION' THEN 10 WHEN 'CHANNEL_INGRESS' THEN 15 WHEN 'ACTION_DECISION' THEN 15 WHEN 'WORKSPACE_CREATE' THEN 16 ELSE -1 END = CHAR_LENGTH(namespace))),
+    CONSTRAINT ck_ma_request_namespace CHECK ((CASE namespace WHEN 'SESSION_COMMAND' THEN 15 WHEN 'SESSION_CREATE_MODE' THEN 19 WHEN 'SESSION_CREATE_ACTOR' THEN 20 WHEN 'AGENT_DEFINITION' THEN 16 WHEN 'AUTOMATION' THEN 10 WHEN 'CHANNEL_INGRESS' THEN 15 WHEN 'ACTION_DECISION' THEN 15 WHEN 'WORKSPACE_CREATE' THEN 16 WHEN 'EXTERNAL_STORAGE' THEN 16 ELSE -1 END = CHAR_LENGTH(namespace))),
     CONSTRAINT ck_ma_request_scope CHECK ((CASE scope_kind WHEN 'TENANT' THEN 6 WHEN 'ACTOR' THEN 5 WHEN 'SESSION' THEN 7 WHEN 'CHANNEL' THEN 7 ELSE -1 END = CHAR_LENGTH(scope_kind)))
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
@@ -638,7 +684,7 @@ CREATE TABLE ma_operation (
     CONSTRAINT uq_ma_operation_request UNIQUE (scope_key, operation_kind, target_key, actor_key, idempotency_digest),
     CONSTRAINT ck_ma_operation_generation CHECK (claim_generation >= 0 AND attempt_count >= 0 AND payload_version > 0),
     CONSTRAINT ck_ma_operation_mode CHECK ((CASE execution_mode WHEN 'SYNC' THEN 4 WHEN 'ASYNC' THEN 5 ELSE -1 END = CHAR_LENGTH(execution_mode))),
-    CONSTRAINT ck_ma_operation_kind CHECK ((CASE operation_kind WHEN 'CLOSE' THEN 5 WHEN 'ARCHIVE' THEN 7 WHEN 'DELETE' THEN 6 WHEN 'UNARCHIVE' THEN 9 WHEN 'RENAME' THEN 6 WHEN 'CWD_CHANGE' THEN 10 WHEN 'CONTEXT_COMPRESSION' THEN 19 WHEN 'ACTION_RESPONSE' THEN 15 WHEN 'TASK_CANCEL' THEN 11 WHEN 'CHILD_SESSION_START' THEN 19 WHEN 'CHILD_SESSION_CLOSE' THEN 19 WHEN 'CHILD_WORKSPACE' THEN 15 WHEN 'OUTPUT_UPLOAD' THEN 13 WHEN 'OUTPUT_VERIFY' THEN 13 WHEN 'OUTPUT_FINISH' THEN 13 WHEN 'OBJECT_PUT' THEN 10 WHEN 'TOOL_RESULT_PROJECTION' THEN 22 WHEN 'SESSION_RESOURCE_GC' THEN 19 WHEN 'CAPTURE_GC' THEN 10 WHEN 'WORKSPACE_OPERATOR_RECOVERY' THEN 27 WHEN 'WORKSPACE_RECOVERY' THEN 18 WHEN 'STORAGE_MIGRATION' THEN 17 WHEN 'CSI_RETIREMENT' THEN 14 WHEN 'CHANNEL_INGRESS' THEN 15 WHEN 'WORKSPACE_CREATE' THEN 16 WHEN 'SUBMIT_INPUT' THEN 12 WHEN 'CANCEL' THEN 6 WHEN 'WORKSPACE_RETIREMENT' THEN 20 ELSE -1 END = CHAR_LENGTH(operation_kind))),
+    CONSTRAINT ck_ma_operation_kind CHECK ((CASE operation_kind WHEN 'CLOSE' THEN 5 WHEN 'ARCHIVE' THEN 7 WHEN 'DELETE' THEN 6 WHEN 'UNARCHIVE' THEN 9 WHEN 'RENAME' THEN 6 WHEN 'CWD_CHANGE' THEN 10 WHEN 'CONTEXT_COMPRESSION' THEN 19 WHEN 'ACTION_RESPONSE' THEN 15 WHEN 'TASK_CANCEL' THEN 11 WHEN 'CHILD_SESSION_START' THEN 19 WHEN 'CHILD_SESSION_CLOSE' THEN 19 WHEN 'CHILD_WORKSPACE' THEN 15 WHEN 'OUTPUT_UPLOAD' THEN 13 WHEN 'OUTPUT_VERIFY' THEN 13 WHEN 'OUTPUT_FINISH' THEN 13 WHEN 'OBJECT_PUT' THEN 10 WHEN 'TOOL_RESULT_PROJECTION' THEN 22 WHEN 'SESSION_RESOURCE_GC' THEN 19 WHEN 'CAPTURE_GC' THEN 10 WHEN 'WORKSPACE_OPERATOR_RECOVERY' THEN 27 WHEN 'WORKSPACE_RECOVERY' THEN 18 WHEN 'STORAGE_MIGRATION' THEN 17 WHEN 'CSI_RETIREMENT' THEN 14 WHEN 'CHANNEL_INGRESS' THEN 15 WHEN 'WORKSPACE_CREATE' THEN 16 WHEN 'SUBMIT_INPUT' THEN 12 WHEN 'CANCEL' THEN 6 WHEN 'WORKSPACE_RETIREMENT' THEN 20 WHEN 'WORKSPACE_UPLOAD' THEN 16 ELSE -1 END = CHAR_LENGTH(operation_kind))),
     progress_format VARCHAR(64),
     progress_version BIGINT,
     progress_stage VARCHAR(16),
@@ -752,6 +798,64 @@ CREATE TABLE ma_workspace_access (
         REFERENCES ma_workspace (tenant_id, workspace_id),
     role VARCHAR(16) NOT NULL,
     CONSTRAINT ck_ma_access_role CHECK (CASE role WHEN 'READER' THEN 6 WHEN 'OPERATOR' THEN 8 WHEN 'OWNER' THEN 5 ELSE -1 END = CHAR_LENGTH(role))
+) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+
+CREATE TABLE ma_extension_package (
+    package_key CHAR(64) NOT NULL,
+    scope_key CHAR(64) NOT NULL,
+    tenant_id VARBINARY(512) NOT NULL,
+    workspace_id VARBINARY(512) NOT NULL,
+    extension_id VARBINARY(128) NOT NULL,
+    package_revision BIGINT NOT NULL,
+    package_digest CHAR(64) NOT NULL,
+    manifest_json LONGTEXT NOT NULL,
+    byte_length BIGINT NOT NULL,
+    state VARCHAR(16) NOT NULL,
+    gmt_create BIGINT UNSIGNED NOT NULL,
+    PRIMARY KEY (package_key),
+    CONSTRAINT uq_ma_extension_package UNIQUE (scope_key, extension_id, package_revision),
+    FOREIGN KEY (tenant_id, workspace_id) REFERENCES ma_workspace (tenant_id, workspace_id),
+    CONSTRAINT ck_ma_extension_package_revision CHECK (package_revision > 0),
+    CONSTRAINT ck_ma_extension_package_bytes CHECK (byte_length >= 0 AND byte_length <= 104857600),
+    CONSTRAINT ck_ma_extension_package_state CHECK (CASE state WHEN 'PREPARING' THEN 9 WHEN 'PUBLISHED' THEN 9 ELSE -1 END = CHAR_LENGTH(state))
+) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+
+CREATE TABLE ma_extension_settings (
+    settings_key CHAR(64) NOT NULL,
+    scope_key CHAR(64) NOT NULL,
+    tenant_id VARBINARY(512) NOT NULL,
+    workspace_id VARBINARY(512) NOT NULL,
+    extension_id VARBINARY(128) NOT NULL,
+    settings_revision BIGINT NOT NULL,
+    encryption_key_id VARBINARY(128) NOT NULL,
+    encrypted_values LONGTEXT NOT NULL,
+    configured_keys_json LONGTEXT NOT NULL,
+    gmt_create BIGINT UNSIGNED NOT NULL,
+    PRIMARY KEY (settings_key),
+    CONSTRAINT uq_ma_extension_settings UNIQUE (scope_key, extension_id, settings_revision),
+    FOREIGN KEY (tenant_id, workspace_id) REFERENCES ma_workspace (tenant_id, workspace_id),
+    CONSTRAINT ck_ma_extension_settings_revision CHECK (settings_revision > 0)
+) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+
+CREATE TABLE ma_extension_operation (
+    operation_key CHAR(64) NOT NULL,
+    scope_key CHAR(64) NOT NULL,
+    tenant_id VARBINARY(512) NOT NULL,
+    workspace_id VARBINARY(512) NOT NULL,
+    actor_key CHAR(64) NOT NULL,
+    operation_id VARCHAR(128) NOT NULL,
+    extension_id VARBINARY(128) NOT NULL,
+    operation_kind VARCHAR(16) NOT NULL,
+    revision BIGINT NOT NULL,
+    package_digest CHAR(64),
+    request_digest CHAR(64) NOT NULL,
+    state VARCHAR(16) NOT NULL,
+    gmt_create BIGINT UNSIGNED NOT NULL,
+    PRIMARY KEY (operation_key),
+    FOREIGN KEY (tenant_id, workspace_id) REFERENCES ma_workspace (tenant_id, workspace_id),
+    CONSTRAINT ck_ma_extension_operation_revision CHECK (revision > 0),
+    CONSTRAINT ck_ma_extension_operation_kind CHECK (CASE operation_kind WHEN 'publish' THEN 7 WHEN 'settings' THEN 8 ELSE -1 END = CHAR_LENGTH(operation_kind)),
+    CONSTRAINT ck_ma_extension_operation_state CHECK (CASE state WHEN 'pending' THEN 7 WHEN 'settled' THEN 7 ELSE -1 END = CHAR_LENGTH(state))
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
 CREATE TABLE ma_storage (

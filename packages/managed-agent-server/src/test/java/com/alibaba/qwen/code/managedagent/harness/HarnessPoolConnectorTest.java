@@ -45,6 +45,41 @@ class HarnessPoolConnectorTest {
     private static final String DIGEST = "sha256:" + "a".repeat(64);
 
     @Test
+    void extensionCommandsKeepTheSavedOwnerAndNegotiatedCapability() {
+        var placements = mock(HarnessPlacementStore.class);
+        var a = endpoint("a", 4101);
+        var b = endpoint("b", 4102);
+        var leafA = leaf();
+        var leafB = leaf();
+        var clientA = client("a");
+        var clientB = client("b");
+        var features = List.of("harness-pool-owner/1", "harness-instance-lifecycle/1", "session-extension-packages/1");
+        when(clientA.capabilities().getFeatures()).thenReturn(features);
+        when(clientB.capabilities().getFeatures()).thenReturn(features);
+        String ownerBoot = clientB.capabilities().getBootId();
+        when(placements.get("tenant", "held")).thenReturn(new Placement("tenant", "held", "workspace", "b",
+                ownerBoot, 2, "ACTIVE"));
+        Map<String, Object> command = Map.of("operationId", "original");
+        Map<String, Object> result = Map.of("phase", "active");
+        when(leafB.applyExtensions("tenant", "held", command)).thenReturn(result);
+        when(leafB.continueExtensionOperation("tenant", "held", "original", true)).thenReturn(result);
+        try (var pool = new HarnessPoolConnector(settings(), placements,
+                () -> new HarnessDiscovery.Snapshot(List.of(a, b), true),
+                endpoint -> endpoint.instanceId().equals("a") ? leafA : leafB, null, null,
+                endpoint -> endpoint.instanceId().equals("a") ? clientA : clientB)) {
+            assertThat(pool.supportsSessionExtensions()).isFalse();
+            pool.refresh();
+            assertThat(pool.supportsSessionExtensions()).isTrue();
+            assertThat(pool.applyExtensions("tenant", "held", command)).isEqualTo(result);
+            assertThat(pool.continueExtensionOperation("tenant", "held", "original", true)).isEqualTo(result);
+            verify(leafA, never()).applyExtensions(anyString(), anyString(), any());
+            verify(leafA, never()).continueExtensionOperation(anyString(), anyString(), anyString(), eq(true));
+            verify(placements, never()).assign(anyString(), anyString(), anyString(), anyString());
+            verify(placements, never()).takeover(anyString(), anyString(), any(), anyString(), anyString());
+        }
+    }
+
+    @Test
     void everyVerbKeepsItsPlacementAndObservationNeverCreatesOne() {
         var settings = settings();
         var placements = mock(HarnessPlacementStore.class);

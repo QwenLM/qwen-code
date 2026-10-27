@@ -12,6 +12,8 @@
 import type { CommandModule } from 'yargs';
 import { existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { realpathNearestExisting } from '@qwen-code/qwen-code-core/utils/paths.js';
+import { isWithinRoot } from '../../config/path-comparison.js';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import {
   currentUser,
@@ -28,6 +30,7 @@ import {
   assertOwnedBySession,
   autofixPrPaths,
   currentSessionId,
+  ghNotFound,
   historyPath,
   isBranchName,
   isCommandSafeName,
@@ -41,6 +44,7 @@ import {
   type AutofixPrHistory,
   type AutofixPrState,
 } from './state.js';
+import { assertNoFixInFlight, clearAbandonedFix } from './fix.js';
 import { networkGit } from './worktree.js';
 
 export interface PrView {
@@ -194,9 +198,15 @@ function authorCanPush(slug: string, author: string, viewer: string): boolean {
       '.permission',
     );
     return permission === 'admin' || permission === 'write';
-  } catch {
-    // Not a collaborator (404), or an account GitHub will not describe.
-    return false;
+  } catch (err) {
+    // Not a collaborator: GitHub answers 404. Anything else — a rate
+    // limit, the network — says nothing of the author, and must not pass
+    // for a no: a resume would end a watch over it.
+    if (ghNotFound(err)) return false;
+    const text = `${(err as Error).message}\n${String((err as { stderr?: unknown }).stderr ?? '')}`;
+    throw new Error(
+      `could not ask GitHub whether ${author} can push to ${slug}; try again: ${text.trim().split('\n').at(-1) ?? ''}`,
+    );
   }
 }
 
@@ -212,10 +222,43 @@ function report(state: AutofixPrState, extra: Record<string, unknown>): void {
       viewer: state.viewer,
       prAuthor: state.prAuthor,
       sessionId: state.sessionId,
+      host: state.host,
+      preparedAt: state.preparedAt ?? null,
       authorCanPush: state.authorCanPush ?? false,
       ...extra,
     }),
   );
+}
+
+/**
+ * The clone's remote for the PR's repository and the target its head is
+ * pushed to, from `git remote -v` — never from a state file, which the code
+ * a round runs can reach.
+ */
+function remotesFor(
+  host: string,
+  owner: string,
+  repo: string,
+  headOwner: string,
+  headName: string,
+): { remote: string; pushTarget: string } {
+  const remoteV = git('remote', '-v');
+  const remote = onlyRemote(remoteV, owner, repo, host);
+  if (!remote) {
+    throw new Error(
+      `no single git remote here serves ${host}/${owner}/${repo}; autofix needs a clone of the PR's repository.`,
+    );
+  }
+  // The brief names it in the fix agent's merge command.
+  if (!isBranchName(remote) || !isCommandSafeName(remote)) {
+    throw new Error(
+      `the remote ${JSON.stringify(remote)} cannot be named in a command as it is; rename it (\`git remote rename\`) to watch this PR.`,
+    );
+  }
+  return {
+    remote,
+    pushTarget: pushTargetFor(remoteV, host, headOwner, headName),
+  };
 }
 
 export interface PrepareArgs {
@@ -226,6 +269,25 @@ export interface PrepareArgs {
   takeOver?: boolean;
 }
 
+/**
+ * A daemon session runs the fix agent's commands only inside the session's own
+ * working directory or a worktree that session owns, so a worktree outside it
+ * can be created but never used: no test, no commit, no push. Refuse before a
+ * fresh start creates anything, and before a resume reports that same
+ * worktree as ready.
+ */
+function assertSessionCanRunWorktree(root: string, worktreePath: string): void {
+  if (process.env['QWEN_CODE_SERVE'] !== '1') return;
+  const sessionDir = realpathNearestExisting(process.cwd());
+  if (isWithinRoot(realpathNearestExisting(worktreePath), sessionDir)) return;
+  throw new Error(
+    `${worktreePath} is outside this session's working directory ` +
+      `(${sessionDir}): the daemon runs the fix agent's commands only there, ` +
+      `so a watch here could never run its checks, commit or push. Prepare the ` +
+      `PR from ${root}, where the worktree is inside the session's directory.`,
+  );
+}
+
 export function runPrepare(args: PrepareArgs): void {
   if (!isOwnerRepo(args.repo)) {
     throw new TypeError(`--repo must be <owner>/<repo>, got ${args.repo}`);
@@ -234,6 +296,17 @@ export function runPrepare(args: PrepareArgs): void {
   const host = resolveGhHost(args.host) ?? 'github.com';
   const root = repoRoot();
   const paths = autofixPrPaths(root, args.pr);
+
+  // A resume hands back the same worktree, so both refusals come before the
+  // state is read: a symlinked parent would put the worktree somewhere else,
+  // and a daemon session runs commands only inside its own directory.
+  const redirected = redirectedAncestor(dirname(paths.worktreePath), root);
+  if (redirected !== null) {
+    throw new Error(
+      `refusing to prepare ${paths.worktreePath}: ${redirected} is a symlink.`,
+    );
+  }
+  assertSessionCanRunWorktree(root, paths.worktreePath);
 
   // State is keyed by PR number alone, and one clone can reach several
   // repositories with a PR of that number.
@@ -248,29 +321,94 @@ export function runPrepare(args: PrepareArgs): void {
   };
   let existing = readState(paths.statePath);
   let tookOver = false;
+  let recreated = false;
+  let wasEnded: AutofixPrState['ended'];
+  const takesOver = (state: AutofixPrState) =>
+    args.takeOver === true && state.sessionId !== currentSessionId();
   if (existing) {
     sameWatch(existing);
-    // A /clear or /resume gives the session a new id while its scheduled
-    // task goes on: the user hands the watch, history and budgets kept, to
-    // the session that asks. The other session's helpers refuse from then on.
-    if (args.takeOver && existing.sessionId !== currentSessionId()) {
-      existing = withWatchLock(paths, args.pr, () => {
-        const current = requireState(paths.statePath, args.pr);
-        const moved = { ...current, sessionId: currentSessionId() };
-        writeState(paths.statePath, moved);
-        return moved;
-      });
-      tookOver = true;
-    }
-    assertOwnedBySession(existing);
+    // A fix agent works in the worktree now, for whichever session.
+    assertNoFixInFlight(paths, args.pr);
     // The recorded path goes stale when the clone moves; this one does not.
     if (existsSync(paths.worktreePath)) {
+      // A /clear or /resume gives the session a new id while its scheduled
+      // task goes on: the user hands the watch, history and budgets kept,
+      // to the session that asks. The other session's helpers refuse from
+      // then on.
+      if (!takesOver(existing)) assertOwnedBySession(existing);
+      // The state file sits beside the worktree, in reach of the code a
+      // round runs: whether the PR's author can push — which decides
+      // whether the PR may be watched at all — is asked of GitHub again,
+      // not read back from it. Asked first: a failure leaves the watch with
+      // the session that has it.
+      ensureAuthenticated();
+      const live = JSON.parse(
+        gh(
+          'pr',
+          'view',
+          String(args.pr),
+          '-R',
+          args.repo,
+          '--json',
+          'author,headRepository,headRepositoryOwner',
+        ),
+      ) as Pick<PrView, 'author' | 'headRepository' | 'headRepositoryOwner'>;
+      if (!live.headRepository || !live.headRepositoryOwner) {
+        throw new Error(
+          `PR #${args.pr}'s head repository no longer exists; nothing can be pushed to it.`,
+        );
+      }
+      const canPush = authorCanPush(
+        args.repo,
+        live.author?.login ?? '',
+        currentUser(),
+      );
+      // So are the remote a round merges from and the push target: this
+      // clone must serve the repository the file names.
+      const remotes = remotesFor(
+        host,
+        owner,
+        repoName,
+        live.headRepositoryOwner.login,
+        live.headRepository.name,
+      );
+      existing = withWatchLock(paths, args.pr, () => {
+        const current = requireState(paths.statePath, args.pr);
+        if (takesOver(current)) tookOver = true;
+        else assertOwnedBySession(current);
+        assertNoFixInFlight(paths, args.pr);
+        // An attempt whose session left it behind is no longer anyone's.
+        if (tookOver) clearAbandonedFix(paths);
+        // A start resumes a watch `cleanup` ended keeping its worktree: the
+        // user asked for it, and the start's confirmation said what the
+        // worktree holds. Read here, under the lock that also clears it.
+        wasEnded = current.ended;
+        const { ended: _resumed, ...rest } = current;
+        const next = {
+          ...rest,
+          sessionId: currentSessionId(),
+          authorCanPush: canPush,
+          ...remotes,
+        };
+        if (JSON.stringify(next) !== JSON.stringify(current)) {
+          writeState(paths.statePath, next);
+        }
+        return next;
+      });
       report(
         { ...existing, worktreePath: paths.worktreePath },
-        { resumed: true, ...(tookOver ? { tookOver } : {}) },
+        {
+          resumed: true,
+          ...(tookOver ? { tookOver } : {}),
+          ...(wasEnded ? { wasEnded } : {}),
+        },
       );
       return;
     }
+    // A removed worktree is made again below, once the PR has been checked:
+    // a take-over moves the watch only then, so a refusal leaves it with the
+    // session that has it.
+    if (!args.takeOver) assertOwnedBySession(existing);
   }
 
   ensureAuthenticated();
@@ -291,32 +429,21 @@ export function runPrepare(args: PrepareArgs): void {
   if (refusal) throw new Error(refusal);
   const headOwner = pr.headRepositoryOwner!.login;
   const headName = pr.headRepository!.name;
+  // Asked before anything is fetched or made: a refusal leaves nothing
+  // behind.
+  const canPush = authorCanPush(args.repo, pr.author?.login ?? '', viewer);
 
-  const remoteV = git('remote', '-v');
-  const remote = onlyRemote(remoteV, owner, repoName, host);
-  if (!remote) {
-    throw new Error(
-      `no single git remote here serves ${host}/${args.repo}; autofix needs a clone of the PR's repository.`,
-    );
-  }
-  // The brief names it in the fix agent's merge command.
-  if (!isBranchName(remote) || !isCommandSafeName(remote)) {
-    throw new Error(
-      `the remote ${JSON.stringify(remote)} cannot be named in a command as it is; rename it (\`git remote rename\`) to watch this PR.`,
-    );
-  }
-  const pushTarget = pushTargetFor(remoteV, host, headOwner, headName);
+  const { remote, pushTarget } = remotesFor(
+    host,
+    owner,
+    repoName,
+    headOwner,
+    headName,
+  );
 
   // One start at a time: two sessions starting the same PR would both pass
   // the leftover checks, and the one whose `worktree add` failed would roll
   // back the worktree and branch the other just made.
-  // Before anything is made under `.qwen/tmp`, the lock's directory included.
-  const redirected = redirectedAncestor(dirname(paths.worktreePath), root);
-  if (redirected !== null) {
-    throw new Error(
-      `refusing to create ${paths.worktreePath}: ${redirected} is a symlink.`,
-    );
-  }
   mkdirSync(dirname(paths.lockPath), { recursive: true });
   const state = withWatchLock(paths, args.pr, () => {
     // What was read before the lock may have moved since: another session
@@ -324,7 +451,15 @@ export function runPrepare(args: PrepareArgs): void {
     existing = readState(paths.statePath);
     if (existing) {
       sameWatch(existing);
-      assertOwnedBySession(existing);
+      // The state written below names this session.
+      if (takesOver(existing)) tookOver = true;
+      else assertOwnedBySession(existing);
+      assertNoFixInFlight(paths, args.pr);
+      if (tookOver) clearAbandonedFix(paths);
+      recreated = true;
+      // A watch `stop` ended keeping its worktree, the worktree removed
+      // since: the start resumes it all the same, and says so.
+      if (existing.ended) wasEnded = existing.ended;
     }
     // Never discard what an earlier watch left: only `cleanup` knows when that
     // is safe. The one exception is a branch whose worktree was removed and
@@ -415,8 +550,9 @@ export function runPrepare(args: PrepareArgs): void {
       worktreePath: paths.worktreePath,
       viewer,
       prAuthor: pr.author?.login ?? '',
-      authorCanPush: authorCanPush(args.repo, pr.author?.login ?? '', viewer),
+      authorCanPush: canPush,
       lastKnownHeadSha: headSha,
+      preparedAt: new Date().toISOString(),
       // A watch whose worktree was removed keeps its history, so it does not
       // answer the same comments again, and keeps its budgets. A new watch of
       // a PR watched before starts from what that one posted and handled.
@@ -445,6 +581,9 @@ export function runPrepare(args: PrepareArgs): void {
             pendingPosts: existing.pendingPosts,
             deferredRuns: existing.deferredRuns,
             heldChecks: existing.heldChecks,
+            // The task `resume` starts again, and what is left for a person.
+            watch: existing.watch,
+            needsHuman: existing.needsHuman,
           }
         : {}),
     };
@@ -473,6 +612,10 @@ export function runPrepare(args: PrepareArgs): void {
       : null;
   report(state, {
     resumed: false,
+    // The watch was there and keeps what it recorded: only its worktree is
+    // new. A start that is cancelled must not clean it up.
+    ...(recreated ? { recreated } : {}),
+    ...(wasEnded ? { wasEnded } : {}),
     url: pr.url,
     isDraft: pr.isDraft,
     isCrossRepository: pr.isCrossRepository,
