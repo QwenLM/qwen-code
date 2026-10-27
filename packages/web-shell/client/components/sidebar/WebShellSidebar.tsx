@@ -5965,7 +5965,7 @@ export function WebShellSidebar({
           >
             <TabsList
               className="w-full"
-              aria-label={t('sidebar.sessionSource')}
+              aria-label={t('sidebar.archiveSessionSource')}
             >
               <TabsTrigger value="default" className="min-w-0">
                 <ListTodoIcon />

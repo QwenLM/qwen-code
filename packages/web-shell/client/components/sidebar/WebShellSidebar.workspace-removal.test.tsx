@@ -404,6 +404,9 @@ let archiveSettingsOpen = false;
 
 function renderSidebar(
   overrides: {
+    layout?: Parameters<typeof WebShellSidebar>[0]['layout'];
+    activePage?: Parameters<typeof WebShellSidebar>[0]['activePage'];
+    primaryNav?: Parameters<typeof WebShellSidebar>[0]['primaryNav'];
     selectedWorkspaceCwd?: string;
     onSelectWorkspace?: (cwd: string | undefined) => void;
     onError?: (error: unknown, message: string) => void;
@@ -464,6 +467,9 @@ function renderSidebar(
           archivedSessionsTarget={
             archiveSettingsOpen ? archivedSessionsTarget : null
           }
+          layout={overrides.layout}
+          activePage={overrides.activePage}
+          primaryNav={overrides.primaryNav}
           collapsed={false}
           onCollapsedChange={() => {}}
           onOpenSettings={() => {}}
@@ -5346,7 +5352,13 @@ describe('WebShellSidebar session source switch', () => {
       activePage: 'settings',
       primaryNav: { items: ['channels'] },
     });
+    expect(container.querySelector('[class*="railLayout"]')).not.toBeNull();
     await openArchiveSettings();
+    expect(
+      archivedSessionsTarget
+        .querySelector('[role="tablist"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Archived session source');
 
     expect(container.textContent).toContain('Archived task session');
     expect(container.textContent).not.toContain('Archived channel session');

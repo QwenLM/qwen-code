@@ -25,9 +25,7 @@ for (const variant of [
           'session_events',
           'workspace_settings',
           'session_archive',
-          ...(variant.width === 1440 && variant.language === 'en'
-            ? ['session_source_metadata']
-            : []),
+          ...(variant.language === 'en' ? ['session_source_metadata'] : []),
           'workspace_qualified_rest_core',
         ],
         workspaces: [
@@ -128,6 +126,7 @@ for (const variant of [
     await expect(
       archive.getByText('Secondary archived conversation', { exact: true }),
     ).toBeVisible();
+    expect(archiveReads).toHaveLength(count + 2);
     if (variant.width === 1440 && variant.language === 'en') {
       fail = true;
       await nav.getByRole('button', { name: /^UI/ }).click();
@@ -139,6 +138,14 @@ for (const variant of [
       await expect(retry).toHaveCount(0);
       await expect(
         archive.getByText('Secondary archived conversation', { exact: true }),
+      ).toBeVisible();
+    }
+    if (variant.language === 'en') {
+      await expect(
+        archive.getByRole('tablist', {
+          name: 'Archived session source',
+          exact: true,
+        }),
       ).toBeVisible();
       await archive.getByRole('tab', { name: 'Channels', exact: true }).click();
       await expect(
@@ -216,6 +223,11 @@ test('hides archive management when the daemon has no archive capability @smoke'
   await submitLocalCommand(page, '/settings');
   await expect(
     page.getByRole('navigation', { name: 'Settings', exact: true }),
+  ).toBeVisible();
+  await expect(
+    page
+      .getByRole('navigation', { name: 'Settings', exact: true })
+      .getByRole('button', { name: /^UI/ }),
   ).toBeVisible();
   await expect(
     page.getByRole('button', { name: 'Archived conversations', exact: true }),
