@@ -4502,6 +4502,31 @@ describe('ChatPane pane title single-click rename', () => {
     expect(findRenameInput()).not.toBeNull();
   });
 
+  it('hands focus back to the title wrapped in the session details anchor', async () => {
+    // The title's ref reaches the DOM through the details anchor's asChild
+    // Slot; focus restoration depends on that composed ref.
+    render({
+      sessionSummary: { sessionId: 'sess-1', displayName: 'Refactor core' },
+    });
+    const title = findTitle();
+    title.focus();
+    await act(async () => {
+      title.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(findRenameInput()).not.toBeNull();
+    await act(async () => {
+      pressRenameKey('Escape');
+    });
+    expect(findRenameInput()).toBeNull();
+    expect(document.activeElement).toBe(findTitle());
+  });
+
   it('ignores the Enter that commits an IME composition', async () => {
     render();
     await openRename();
