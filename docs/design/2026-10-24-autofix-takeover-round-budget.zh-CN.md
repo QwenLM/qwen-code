@@ -74,7 +74,7 @@ workflow 文件紧贴**本仓库**的 470,000 字节门禁（`.github/scripts/ch
 
 ## 范围边界
 
-- 不改轮次上限、失败/收敛熔断器、Critical-only 刹车、增长预算或 fleet shepherd。
+- 不改轮次上限、失败/收敛熔断器、Critical-only 刹车或增长预算。fleet shepherd 只动一处——其恢复探测认识两种参数化命令——释放策略不变。
 - 不新增标签。人工 PR 上预算耗尽刻意不使用 `autofix/needs-human`。
 - 不改准入：同样的作者/write+ 门禁、fork 规则与 `autofix/skip` 优先级都适用于 `for N`。
 

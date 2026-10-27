@@ -163,7 +163,9 @@ constant, default, or behaviour changes.
 ## Scope boundaries
 
 - No change to the round caps, the failure/convergence breakers, the
-  Critical-only brake, the growth budgets, or the fleet shepherd.
+  Critical-only brake, or the growth budgets. The fleet shepherd is touched in
+  exactly one place — its resume detector learns the two parameterized command
+  forms — and its release policy is unchanged.
 - No new labels. Budget exhaustion deliberately does NOT use
   `autofix/needs-human` on human-authored PRs.
 - No change to admission: the same author/write+ gate, fork rules and

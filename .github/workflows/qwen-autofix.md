@@ -4581,7 +4581,8 @@ producing a round that quietly measures nothing.
 
 In `route` · `Decide phases`, `takeover-command` · `Toggle takeover label`,
 `review-scan` · `Scan for PRs with new feedback`, `review-address` · `Prepare
-branch and feedback`, and the report script's `emit_growth_audit_marker`.
+branch and feedback`, and the fleet shepherd's resume detector
+(`compute_resume_ts`), which has to recognise the same two command forms.
 
 ```text
 '@qwen-code /takeover' engages a persistent engagement capped at
@@ -4602,8 +4603,8 @@ counted in eval markers rather than in ROUND:
 
 - The scan lowers EFF_MAX_ROUNDS to N for the ENGAGEMENT that carries
   the marker, so the existing cap gate bounds DISPATCH exactly as it
-  always did. The effective cap's other readers are prepare's attempt
-  recount and the report script's budget carry.
+  always did. The effective cap's other reader is prepare's attempt
+  recount.
 - Spend is the number of eval markers in the engagement, not ROUND. A
   no-op round writes its marker with the round UNCHANGED — that is why
   a no-op never advanced the cap — but it is still an attempt, and a
@@ -4700,8 +4701,10 @@ In the workflow `env:` block.
 The workflow file sits against this repository's own 470 KB gate
 (`.github/scripts/check-workflow-size.sh`, env-overridable, ~42 KB below
 GitHub's 512 KB start-runs limit), so the long-form commentary on the constants
-below lives here verbatim. Each entry names the constant it documents; the
-workflow keeps a one-line summary plus a pointer.
+below lives here verbatim — with ONE exception, marked at its entry: the
+`TAKEOVER_COMMAND` entry was updated to name the second parameterized form, so
+it is no longer a byte-for-byte copy of the base block. Each entry names the
+constant it documents; the workflow keeps a one-line summary plus a pointer.
 
 ```text
 # FIXED_RULING_FILTER — The review bot's thread lifecycle replies
@@ -4754,7 +4757,7 @@ workflow keeps a one-line summary plus a pointer.
   # counter at N (af-002), and '<cmd> for N' records a round budget which the
   # scan reads back as a ceiling (af-159). The literal prefix still has to
   # match this constant byte-for-byte; only a bounded 1-2 digit integer is
-  # read out of the body.
+  # read out of the body, and it reaches nothing but an integer comparison.
 
 # TAKEOVER_MAX_ROUNDS — Round cap while TAKEOVER_LABEL is present.
   # Round cap while TAKEOVER_LABEL is present. Large managed PRs routinely
