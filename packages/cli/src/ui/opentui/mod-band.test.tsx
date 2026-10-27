@@ -62,6 +62,7 @@ const mocks = vi.hoisted(() => {
 
 vi.mock('@opentui/core', () => ({
   SyntaxStyle: { fromStyles: () => ({}) },
+  borderCharsToArray: (chars: unknown) => chars,
   MouseButton: { LEFT: 0 },
   TextAttributes: {
     NONE: 0,
@@ -81,8 +82,10 @@ vi.mock('@opentui/react/jsx-dev-runtime', () => mocks.buildJsxRuntime());
 import { C } from './theme.js';
 import {
   OpenTuiModBand,
+  clipBorder,
   drawOpenTuiModTree,
   openTuiColor,
+  type PlacedBox,
 } from './mod-band.js';
 
 type Drawn = ReactElement<
@@ -129,6 +132,13 @@ describe('OpenTuiModBand', () => {
     const [plain, span] = children(nested) as [string, Drawn];
     expect(plain).toBe('a');
     expect(span.props.tag).toBe('span');
+    // Uncolored text takes the theme's color, and a span its text's.
+    expect([title, loose, nested].map((text) => text.props['fg'])).toEqual([
+      C.text,
+      C.text,
+      C.text,
+    ]);
+    expect(span.props['fg']).toBeUndefined();
     // Ink's Box defaults: a row that shrinks, though it has a width.
     expect(drawn({ type: 'Box', props: { width: 4 } }).props).toMatchObject({
       flexDirection: 'row',
@@ -167,6 +177,13 @@ describe('OpenTuiModBand', () => {
       marginTop: 3,
       marginBottom: 3,
     });
+    // Ink's blank rows sit within the height; the margins here do not.
+    expect(
+      box({ borderStyle: 'quote', height: 3, minHeight: 1 }),
+    ).toMatchObject({ height: 1, minHeight: 0 });
+    expect(box({ borderStyle: 'quote', height: '50%' })).toMatchObject({
+      height: '50%',
+    });
     expect(box({ borderStyle: 'arrow' })).toMatchObject({
       customBorderChars: { topLeft: '↘', horizontal: '↓', vertical: '→' },
     });
@@ -176,12 +193,119 @@ describe('OpenTuiModBand', () => {
     expect(box({ borderStyle: 'single', borderDimColor: true })).toMatchObject({
       borderColor: C.dim,
     });
+    expect(box({ borderStyle: 'single' })).toMatchObject({
+      borderColor: C.text,
+    });
     expect(box({ gap: 'md' })).toMatchObject({ columnGap: 2, rowGap: 1 });
     expect(box({ borderColor: 'warning' })).not.toHaveProperty('borderColor');
     expect(box({ display: 'none' })).toMatchObject({ visible: false });
     expect(box({ display: 'flex' })).not.toHaveProperty('display');
     expect(box({ backgroundColor: '#123' })).toMatchObject({
       backgroundColor: '#112233',
+    });
+  });
+
+  it('draws text with nothing to draw as an empty box, as Ink takes no rows', () => {
+    const root = drawn({
+      type: 'Box',
+      children: [
+        '',
+        { type: 'Text', children: [] },
+        { type: 'Text', children: ['', { type: 'Text', children: [''] }] },
+        { type: 'Text', children: ['\u0007'] },
+        { type: 'Text', children: [' '] },
+      ],
+    });
+    const drawnChildren = children(root) as Drawn[];
+    expect(drawnChildren.map((child) => child.props.tag)).toEqual([
+      'box',
+      'box',
+      'box',
+      'box',
+      'text',
+    ]);
+    for (const empty of drawnChildren.slice(0, 4))
+      expect(empty.props).toMatchObject({ width: 0, height: 0 });
+  });
+
+  it('keeps borders within the boxes that clip them', () => {
+    const box = (props: Record<string, string | number | boolean>) =>
+      drawn({ type: 'Box', props }).props;
+    expect(box({ borderStyle: 'single' })['renderSelf']).toBeTypeOf('function');
+    expect(box({ borderStyle: 'quote' })['renderSelf']).toBeTypeOf('function');
+    expect(box({})).not.toHaveProperty('renderSelf');
+
+    const at = (
+      screenX: number,
+      screenY: number,
+      width: number,
+      height: number,
+      extra: Partial<PlacedBox> = {},
+    ): PlacedBox => ({
+      screenX,
+      screenY,
+      width,
+      height,
+      parent: null,
+      ...extra,
+    });
+    const band = at(0, 1, 40, 4, { overflow: 'hidden' });
+    const tall = at(0, 1, 35, 8, {
+      border: true,
+      parent: at(0, 1, 35, 8, { parent: band }),
+    });
+    // Cut off at the band's bottom: no bottom side, as Ink clips it.
+    expect(clipBorder(tall)).toEqual({
+      x: 0,
+      y: 1,
+      width: 35,
+      height: 4,
+      sides: ['top', 'right', 'left'],
+    });
+    expect(
+      clipBorder(at(0, 1, 35, 3, { border: ['left'], parent: band })),
+    ).toEqual({ x: 0, y: 1, width: 35, height: 3, sides: ['left'] });
+    // A bordered clip keeps its own border; one wholly outside draws nothing.
+    const framed = at(0, 0, 20, 5, { overflow: 'hidden', border: true });
+    expect(
+      clipBorder(at(1, 1, 30, 2, { border: true, parent: framed })),
+    ).toEqual({
+      x: 1,
+      y: 1,
+      width: 18,
+      height: 2,
+      sides: ['top', 'bottom', 'left'],
+    });
+    expect(
+      clipBorder(at(0, 6, 10, 2, { border: true, parent: band })),
+    ).toBeUndefined();
+
+    const drawBox = vi.fn();
+    const renderSelf = box({ borderStyle: 'dashed', borderColor: 'red' })[
+      'renderSelf'
+    ] as (this: unknown, buffer: unknown) => void;
+    renderSelf.call(
+      {
+        ...tall,
+        borderStyle: 'single',
+        customBorderChars: { vertical: '╎' },
+        borderColor: 'border',
+        backgroundColor: 'background',
+        shouldFill: true,
+      },
+      { drawBox },
+    );
+    expect(drawBox).toHaveBeenCalledWith({
+      x: 0,
+      y: 1,
+      width: 35,
+      height: 4,
+      border: ['top', 'right', 'left'],
+      borderStyle: 'single',
+      customBorderChars: { vertical: '╎' },
+      borderColor: 'border',
+      backgroundColor: 'background',
+      shouldFill: true,
     });
   });
 
@@ -202,7 +326,7 @@ describe('OpenTuiModBand', () => {
       { fg: C.green.toLowerCase(), bg: C.accent.toLowerCase() },
     );
     expect(text({ color: 'subtle' })['fg']).toBe(C.dim.toLowerCase());
-    expect(text({ color: 'permission' })['fg']).toBeUndefined();
+    expect(text({ color: 'permission' })['fg']).toBe(C.text);
     expect(text({ wrap: 'truncate-middle' })).toMatchObject({
       wrapMode: 'none',
       truncate: true,
@@ -223,8 +347,8 @@ describe('OpenTuiModBand', () => {
     expect(openTuiColor('ansi256(42)')).toBe('#00d787');
     expect(openTuiColor('ansi256(100)')).toBe('#878700');
     expect(openTuiColor('ansi256(240)')).toBe('#585858');
-    expect(text({ color: 'level' })['fg']).toBeUndefined();
-    expect(text({ color: 'grayBright' })['fg']).toBeUndefined();
+    expect(text({ color: 'level' })['fg']).toBe(C.text);
+    expect(text({ color: 'grayBright' })['fg']).toBe(C.text);
     expect(text({ color: 'grey' })['fg']).toBe('#808080');
   });
 

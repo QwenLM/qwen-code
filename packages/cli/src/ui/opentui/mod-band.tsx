@@ -12,7 +12,13 @@
  * text from the same normalized tree.
  */
 
-import { TextAttributes, type BorderCharacters } from '@opentui/core';
+import {
+  TextAttributes,
+  borderCharsToArray,
+  type BorderCharacters,
+  type BoxRenderable,
+  type OptimizedBuffer,
+} from '@opentui/core';
 import type { ReactNode } from 'react';
 import type {
   ModRenderElement,
@@ -152,6 +158,79 @@ const DRAWN_BORDERS: Record<string, ModBandBorder> = {
   },
 };
 
+type BorderSide = 'top' | 'right' | 'bottom' | 'left';
+const SIDES: readonly BorderSide[] = ['top', 'right', 'bottom', 'left'];
+const hasSide = (border: unknown, side: BorderSide) =>
+  border === true || (Array.isArray(border) && border.includes(side));
+
+/** A laid-out box, as far as its clipping reads it. */
+export interface PlacedBox {
+  screenX: number;
+  screenY: number;
+  width: number;
+  height: number;
+  border?: unknown;
+  overflow?: string;
+  parent: PlacedBox | null;
+}
+
+/**
+ * A bordered box's rectangle within the boxes that clip it, and the sides of
+ * its border left in view; nothing when it is clipped away.
+ */
+export function clipBorder(
+  box: PlacedBox,
+):
+  | { x: number; y: number; width: number; height: number; sides: BorderSide[] }
+  | undefined {
+  let left = box.screenX;
+  let top = box.screenY;
+  let right = left + box.width;
+  let bottom = top + box.height;
+  for (let node = box.parent; node; node = node.parent) {
+    if (node.overflow === undefined || node.overflow === 'visible') continue;
+    // A bordered box clips within its border.
+    const inset = (side: BorderSide) => (hasSide(node.border, side) ? 1 : 0);
+    left = Math.max(left, node.screenX + inset('left'));
+    top = Math.max(top, node.screenY + inset('top'));
+    right = Math.min(right, node.screenX + node.width - inset('right'));
+    bottom = Math.min(bottom, node.screenY + node.height - inset('bottom'));
+  }
+  if (right <= left || bottom <= top) return undefined;
+  const shown: Record<BorderSide, boolean> = {
+    top: top === box.screenY,
+    right: right === box.screenX + box.width,
+    bottom: bottom === box.screenY + box.height,
+    left: left === box.screenX,
+  };
+  return {
+    x: left,
+    y: top,
+    width: right - left,
+    height: bottom - top,
+    sides: SIDES.filter((side) => hasSide(box.border, side) && shown[side]),
+  };
+}
+
+// OpenTUI clips a box's fill to the boxes around it but not its border, so a
+// bordered box taller than the band would draw over the prompt. The border is
+// drawn within them instead, without the sides they cut off, as Ink clips it.
+function drawClippedBox(this: BoxRenderable, buffer: OptimizedBuffer): void {
+  const clipped = clipBorder(this);
+  if (!clipped) return;
+  const { sides, ...rect } = clipped;
+  const custom = this.customBorderChars;
+  buffer.drawBox({
+    ...rect,
+    border: sides,
+    borderStyle: this.borderStyle,
+    customBorderChars: custom && borderCharsToArray(custom),
+    borderColor: this.borderColor,
+    backgroundColor: this.backgroundColor,
+    shouldFill: this.shouldFill,
+  });
+}
+
 function boxProps(props: ModRenderProps): Record<string, unknown> {
   // Ink lays a Box out in a row and lets it shrink; OpenTUI's own box stacks
   // and stops shrinking once it has a width or height.
@@ -166,9 +245,11 @@ function boxProps(props: ModRenderProps): Record<string, unknown> {
   if (background) out['backgroundColor'] = background;
   const style = props['borderStyle'];
   if (typeof style !== 'string') return out;
+  // An uncolored border takes the text color, as Ink leaves it to the
+  // terminal's; OpenTUI's own default is white.
   out['borderColor'] =
     color(props['borderColor']) ??
-    (props['borderDimColor'] === true ? C.dim : undefined);
+    (props['borderDimColor'] === true ? C.dim : C.text);
   if (NAMED_BORDERS[style]) {
     out['border'] = true;
     out['borderStyle'] = NAMED_BORDERS[style];
@@ -182,14 +263,25 @@ function boxProps(props: ModRenderProps): Record<string, unknown> {
     out['marginTop'] = side('marginTop', 'marginY', 'margin');
     out['marginBottom'] = side('marginBottom', 'marginY', 'margin');
     out['paddingRight'] = side('paddingRight', 'paddingX', 'padding');
+    // Ink's blank top and bottom sit within the height; these margins do not.
+    for (const name of ['height', 'minHeight']) {
+      const value = out[name];
+      if (typeof value === 'number') out[name] = Math.max(0, value - 2);
+    }
   } else if (DRAWN_BORDERS[style]) {
     out['border'] = true;
     out['customBorderChars'] = chars(DRAWN_BORDERS[style]);
   }
+  if (out['border']) out['renderSelf'] = drawClippedBox;
   return out;
 }
 
-function textProps(props: ModRenderProps): Record<string, unknown> {
+// A span inherits its text's color; a text without one takes the theme's, as
+// Ink leaves it to the terminal's, where OpenTUI's own default is white.
+function textProps(
+  props: ModRenderProps,
+  inText: boolean,
+): Record<string, unknown> {
   let attributes = TextAttributes.NONE;
   if (modBandBold(props)) attributes |= TextAttributes.BOLD;
   if (props['dimColor'] === true) attributes |= TextAttributes.DIM;
@@ -199,23 +291,39 @@ function textProps(props: ModRenderProps): Record<string, unknown> {
     attributes |= TextAttributes.STRIKETHROUGH;
   if (props['inverse'] === true) attributes |= TextAttributes.INVERSE;
   return {
-    fg: color(props['color']),
+    fg: color(props['color']) ?? (inText ? undefined : C.text),
     bg: color(props['backgroundColor']),
     attributes,
   };
 }
+
+const textOf = (node: ModRenderNode): string =>
+  typeof node === 'string'
+    ? node
+    : node.type === 'engine'
+      ? ''
+      : (node.children ?? []).map(textOf).join('');
+
+// Ink measures a Text with nothing to draw as no rows, where OpenTUI's text
+// takes one; an empty box keeps its place in the layout.
+const emptyText = (key: string) => <box key={key} width={0} height={0} />;
 
 function drawNode(
   node: ModRenderNode,
   key: string,
   inText: boolean,
 ): ReactNode {
-  if (typeof node === 'string')
-    return inText ? (
-      cleanModBandText(node)
+  if (typeof node === 'string') {
+    const text = cleanModBandText(node);
+    if (inText) return text;
+    return text ? (
+      <text key={key} fg={C.text}>
+        {text}
+      </text>
     ) : (
-      <text key={key}>{cleanModBandText(node)}</text>
+      emptyText(key)
     );
+  }
   if (node.type === 'engine') return null;
   const props = node.props ?? {};
   const kids = node.children ?? [];
@@ -232,10 +340,11 @@ function drawNode(
   // A Text within a Text is a span of it.
   if (inText)
     return (
-      <span key={key} {...textProps(props)}>
+      <span key={key} {...textProps(props, true)}>
         {children}
       </span>
     );
+  if (!cleanModBandText(textOf(node))) return emptyText(key);
   // OpenTUI truncates in the middle; Ink's other truncations clip.
   const wrap = modBandWrap(props);
   const truncation: { wrapMode?: 'none'; truncate?: true } =
@@ -245,7 +354,7 @@ function drawNode(
         ? { wrapMode: 'none' }
         : {};
   return (
-    <text key={key} {...textProps(props)} {...truncation}>
+    <text key={key} {...textProps(props, false)} {...truncation}>
       {children}
     </text>
   );

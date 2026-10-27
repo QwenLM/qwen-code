@@ -735,12 +735,16 @@ These differ from Claude Code:
   running render waits for it, up to 10 seconds for each `ui.render` hook in
   the chain.
 - Refusal lines go only to the debug log, since Qwen Code has no hot reload.
-- OpenTUI has no session survey, so `hasSurvey` is always `false` there. Its
-  text truncates only in the middle, with `...` where Ink draws `…`:
-  `wrap: "middle"` and `"truncate-middle"` draw that way, and the other
-  truncations cut the text off at the right edge without a mark. Its borders
-  have one stroke per axis, so the `arrow` border draws its top arrow on the
-  bottom edge and its left arrow on the right edge.
+- OpenTUI has no session survey, so `hasSurvey` is always `false` there, and
+  `isWorking` stays `false` while a `!` shell command runs. OpenTUI takes
+  colors as hex values, so ANSI color names and `ansi256()` colors draw as
+  fixed values instead of the terminal's palette, and a `borderColor` border
+  draws undimmed under `borderDimColor`. Its text truncates only in the
+  middle, with `...` where Ink draws `…`: `wrap: "middle"` and
+  `"truncate-middle"` draw that way, and the other truncations cut the text
+  off at the right edge without a mark. Its borders have one stroke per axis,
+  so the `arrow` border draws its top arrow on the bottom edge and its left
+  arrow on the right edge.
 
 ## TypeScript, JSX and relative imports
 
