@@ -11578,7 +11578,6 @@ describe('Session', () => {
         vi.mocked(mockChat.getHistoryShallow).mockReturnValue(
           history.slice(0, -1),
         );
-        expect(session.getRewindableUserTurnCount()).toBe(0);
         session.restoreHistory(JSON.parse(JSON.stringify(snapshot)));
         const restored = vi.mocked(mockChat.setHistory).mock.calls.at(-1)![0];
         expect(detectTurnInterruption(restored)).toEqual({

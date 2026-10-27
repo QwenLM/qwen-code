@@ -20726,6 +20726,7 @@ describe('App session callbacks', () => {
           type: 'session.rewound',
           targetTurnIndex: snapshots[0].turnIndex,
           daemonPromptId: snapshots[0].daemonPromptId,
+          replay: [],
           promptId,
         });
         testState.blocks = transcript.getSnapshot().blocks;

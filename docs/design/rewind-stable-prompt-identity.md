@@ -108,8 +108,8 @@ The shared record-backed association and Ink behavior are delivered by #13737.
 This dependent change delivers ACP producers, strict rewind selection, JSON
 rollback, bridge transport and SDK/Web Shell/VS Code consumers together. The
 common transport lookup excludes recovered `legacy-record:` keys. The separate
-VS Code fix that exits edit mode after a refused submission must also land
-before this dependent change is ready to ship. Acceptance for #9437 spans the
+VS Code fix that exits edit mode after a refused submission is already in the
+merge base (#15439); it is no longer an outstanding shipping prerequisite. Acceptance for #9437 spans the
 shared/Ink and ACP deliveries; landing #13737 alone does not complete it.
 
 This delivery remains a draft pending independent runtime verification. Before
@@ -141,7 +141,7 @@ older restored prefix without adding the discarded tail to a rejected page's
 footprint, so available history capacity reopens. Persisted workspace approval
 broadcasts retain their origin session in replay; foreign session-local events
 remain invalid. The outer rewind cursor remains latest. Older producers without
-`replay` retain the identity or legacy-index behavior. Acceptance requires ROOT+A+B+C with A evicted only in the
+`replay` retain the legacy-index behavior. Acceptance requires ROOT+A+B+C with A evicted only in the
 client to rewind A and restore ROOT in the original client, server cache and
 unbounded observer. Reconnect, fresh/paged loads, a second rewind after reseeding
 and the next actual model request must not resurrect A/B/C. Both recording modes,
@@ -173,8 +173,8 @@ snapshot position, including retry gaps and compressed prefixes. Recorder
 projections recover the association from existing records, and with recording
 disabled ACP retains it only for live file-history snapshots. Web Shell and
 VS Code select a uniquely associated user block and checkpoint by this ID;
-the SDK installs authoritative replay when present and otherwise applies the
-rewind at that block, not the raw index. Missing or ambiguous associations disable
+the SDK installs authoritative replay when present. Older producers without replay
+retain the legacy ordinal behavior. Missing or ambiguous UI associations disable
 the target rather than guessing.
 Admission binds the existing optimistic block, including a failed submission
 reused by retry; no new transcript event or identity counter is needed.

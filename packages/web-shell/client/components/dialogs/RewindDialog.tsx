@@ -112,12 +112,6 @@ export function RewindDialog({
 
   const handleRewind = (promptId: string | null) => {
     if (!promptId || rewindingPromptId) return;
-    if (
-      !items.some(
-        (item) => item.snapshot.promptId === promptId && item.available,
-      )
-    )
-      return;
     setRewindingPromptId(promptId);
     setMessage(null);
     rewind(promptId)

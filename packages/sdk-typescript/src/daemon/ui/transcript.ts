@@ -587,13 +587,6 @@ function applyDaemonTranscriptEvent(
             maxRetainedBytes: next.maxRetainedBytes,
           });
         }
-      } else if (event.daemonPromptId) {
-        const block = findDaemonRewindUserBlock(
-          next.blocks,
-          event.daemonPromptId,
-        );
-        if (block)
-          truncateTranscriptBeforeBlock(next, next.blocks.indexOf(block));
       } else {
         rewindTranscriptToUserTurn(next, event.targetTurnIndex);
       }
@@ -2189,14 +2182,9 @@ function takeBlockIndexOwnership(state: DaemonTranscriptState): void {
 /**
  * Whether a transcript block is a user turn a rewind may target.
  *
- * The rendered chat numbers its rows by this same rule: a user-kind row only
- * becomes a `role: 'user'` message when it is a real prompt, so
- * `mid_turn_message_injected` (rendered as `role: 'system'`) and
- * `background_notification` (injected without a turn) must not advance the
- * ordinal. Any site that re-derives the rule instead of calling this function
- * shifts every later index onto its neighbour and rewinds the wrong turn, so
- * the ordinal consumers — the CLI/web-shell transcript projection, the VSCode
- * webview, and the rewind dialog — all go through here.
+ * The SDK's legacy ordinal traversal excludes background notifications and
+ * injected mid-turn messages. Prompt-ID lookup uses the same classification
+ * to ignore injected rows that share their owner's identity.
  */
 export function isDaemonRewindUserBlock(
   block: DaemonTranscriptBlock | undefined,

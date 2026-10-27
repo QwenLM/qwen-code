@@ -202,7 +202,6 @@ import {
   getOptInToolNotFoundMessage,
   resolveMainSessionOutputStyle,
   wrapSystemReminder,
-  countApiUserPrompts,
   buildSessionRecoveryPlanFromApiHistory,
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
   evaluatePermissionFlow,
@@ -682,29 +681,6 @@ function isTodoStopGuardPromptText(text: unknown): text is string {
     remainder === body + TODO_STOP_GUARD_FINAL_PROMPT_SUFFIX
   );
 }
-
-/**
- * ACP rewind's binding of the shared user-prompt classifier
- * (`isApiUserPrompt` in core). The three deltas from the TUI binding are
- * deliberate:
- *
- * - The todo-stop-guard's synthetic continuation prompts are injected as user
- *   entries but are not turns a client can rewind to, so they must not
- *   consume an ordinal.
- * - Delivered background-notification turns (`[...systemReminders,
- *   ...notificationParts]` as one user entry) likewise never produced a
- *   client-visible turn or a per-prompt file-history snapshot, so counting
- *   them inflates the rewindable count and shifts every cut point after
- *   them (#9608).
- * - Microcompaction media-clear placeholders stay COUNTED here, unlike the
- *   TUI binding. ACP rewind maps against per-prompt file-history snapshots,
- *   which ARE created for media-only prompts, so a cleared entry still owns
- *   an ordinal on this surface.
- */
-const ACP_API_USER_PROMPT_OPTIONS = {
-  excludeTextPart: isTodoStopGuardPromptText,
-  excludeTaskNotifications: true,
-};
 
 /** Finalizes preparations without allowing ACP cleanup to change the stream outcome. */
 async function finalizeToolCallPreparations(
@@ -5533,13 +5509,6 @@ export class Session implements SessionContext {
       history,
       promptId,
       getStartupContextLength(history, { includeCompressed: true }),
-    );
-  }
-
-  getRewindableUserTurnCount(): number {
-    return countApiUserPrompts(
-      this.config.getLlmClient()!.getChat().getHistoryShallow(),
-      ACP_API_USER_PROMPT_OPTIONS,
     );
   }
 
