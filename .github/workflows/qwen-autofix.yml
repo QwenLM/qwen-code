@@ -2905,7 +2905,6 @@ jobs:
             if [[ "${ROUND}" -ge "${EFF_MAX_ROUNDS}" || "${BUDGET_SPENT}" == 'true' ]]; then
               # Budget spent: human PR released, bot PR paused. → qwen-autofix.md#af-159
               if [[ "${BUDGET_SPENT}" == 'true' && "${IS_BOT_AUTHOR}" != 'true' && "${BUDGET_HALTED}" != 'true' && ( -z "${FORCED_PR}" || "${EVENT_NAME}" != 'workflow_dispatch' ) ]]; then
-                fleet_row "${PR}" 'budget-spent' "budget ${BUDGET_USED}/${ROUND_BUDGET} spent - releasing takeover"
                 BUDGET_RT="${REARM_KEY}"
                 [[ "${BUDGET_RT}" == "none" ]] && BUDGET_RT=''
                 BUDGET_NOTICED="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg rt "${BUDGET_RT}" '
@@ -2937,12 +2936,18 @@ jobs:
                     [[ "${BUDGET_DEL_ERR}" == *"HTTP 404"* ]] || echo "::warning::${TAKEOVER_LABEL} removal after budget failed for #${PR} — ${BUDGET_DEL_ERR}"
                   else
                     echo "🏷️ released ${TAKEOVER_LABEL} from #${PR} after a ${ROUND_BUDGET}-round budget"
+                    fleet_row "${PR}" 'budget-spent' "budget ${BUDGET_USED}/${ROUND_BUDGET} spent - released"
                   fi
                 fi
                 continue
               fi
-              echo "🚧 #${PR}: hit the round cap (${ROUND}/${EFF_MAX_ROUNDS}) — leaving for a human"
-              fleet_row "${PR}" 'round-capped' "round ${ROUND}/${EFF_MAX_ROUNDS} - needs a human or @qwen-code /retry"
+              if [[ "${BUDGET_SPENT}" == 'true' ]]; then
+                echo "🚧 #${PR}: ${BUDGET_USED}/${ROUND_BUDGET} budget spent — leaving for a human"
+                fleet_row "${PR}" 'budget-spent' "budget ${BUDGET_USED}/${ROUND_BUDGET} spent - needs a human"
+              else
+                echo "🚧 #${PR}: hit the round cap (${ROUND}/${EFF_MAX_ROUNDS}) — leaving for a human"
+                fleet_row "${PR}" 'round-capped' "round ${ROUND}/${EFF_MAX_ROUNDS} - needs a human or @qwen-code /retry"
+              fi
               # A FORCED dispatch refused here answers OUT LOUD. Observed on
               # #7836: the fleet shepherd detected a merge conflict, posted
               # Full rationale → qwen-autofix.md#af-031
@@ -4491,26 +4496,18 @@ jobs:
           NET_SRC=$(( NET_TOTAL - NET_TEST ))
           [[ "${NET_MEASURED}" != 'true' ]] &&
             echo "📏 growth measurement UNAVAILABLE this round (no merge base or shadowed base) — brake skipped, no anchor written"
-          # The marker's window field is spelled `key=`, NOT `win=`: this
-          # marker can legitimately carry a different window key than its
-          # Full rationale → qwen-autofix.md#af-045
+          # Window field spelled `key=`, NOT `win=`. → qwen-autofix.md#af-045
           BASE_UPD_AT="$(jq -r --arg ab "${AUTOFIX_BOT}" '
             [ .[] | select((.user.login // "") == $ab)
               | select((.body // "") | contains("<!-- autofix-base-updated"))
               | .created_at ] | max // ""' "${WORKDIR}/ic.json")"
-          # The instant THIS round's net was measured. Stamped into the
-          # growth-now marker so the census filters on measurement time,
-          # not the marker comment's created_at.
-          # Full rationale → qwen-autofix.md#af-118
+          # Growth-now marker carries the measurement instant. → qwen-autofix.md#af-118
           MEASURED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           [[ "${NET_MEASURED}" == 'true' ]] && echo "measured_at=${MEASURED_AT}" >> "${GITHUB_OUTPUT}"
           # NOTE (#9114 R2-8/R6-3): an EXTERNAL head move is NOT re-anchored.
           # Full rationale → qwen-autofix.md#af-119
           GROWTH_NOW_CUTOFF="${BASE_UPD_AT}"
-          # KNOWN RESIDUAL (#9114): this sibling read still filters on the
-          # comment's created_at, not a prepare-time measured= like the
-          # growth-now read below.
-          # Full rationale → qwen-autofix.md#af-120
+          # KNOWN RESIDUAL (#9114): filters on created_at, not measured=. → qwen-autofix.md#af-120
           GROWTH_BASELINE="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg key "${LIVE_REARM_KEY}" --arg baseupd "${BASE_UPD_AT}" '
             [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
               | [ scan("<!-- autofix-growth-base src=(-?[0-9]+) test=(-?[0-9]+) key=([^ ]+) -->") ] | .[]
