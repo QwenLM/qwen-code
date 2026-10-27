@@ -225,6 +225,22 @@ worktree included:
    head branch that the PR does not have. The worktree never sees them. Only a
    local branch whose upstream is the head branch on the push remote counts as
    that copy, so a fork's `main` is never compared with the user's `main`.
+   The report also carries `localUncommittedChanges`: whether a worktree of
+   this clone has that copy checked out and holds changes git reports. It is
+   read with `--no-optional-locks`, `--untracked-files=normal` and
+   `--ignore-submodules=none`, so a user's `status.showUntrackedFiles` or
+   submodule `ignore` setting cannot hide work; only `.qwen/tmp`, where the
+   helpers write, is left out, and anything else under `.qwen` is the user's.
+   It is computed only when the copy exists and only for checkouts of that
+   branch; work in a checkout of another branch is not work on that copy.
+   `worktree list --porcelain -z` keeps a path git would quote, with the line
+   form as the fallback where git has no `-z` (before 2.36): a path it quotes
+   then reads as unknown, not as no work. `localWorkUnknown` says the
+   comparison could not be made at all — the PR head is not in this clone, or
+   git could not read a checkout — which is never reported as "no work". The
+   helper reports them and does not refuse: the skill's start does not go on
+   while the work or that flag is set, unless the user asks once told, because
+   the watch's push and the user's own go to the same head branch.
 
 ### 6.2 `snapshot <pr> [--repo <owner>/<repo>] [--host <host>] [--gate] [--session <id>] [--task <id>]`
 
@@ -1403,6 +1419,82 @@ that option holds even when a turn forgets it.
 turning green (Section 10) needs a record of which checks passed, which no
 helper keeps yet; it stays a proposal.
 
+### 6.15 The Web Shell: watches and their tasks
+
+The Web Shell shows a watch where its owner already looks — the card of its
+scheduled task — and on a page of its own, **PR watches**, which lists every
+watch of the workspaces it reaches.
+
+**What the daemon serves.** `GET /autofix-pr/watches` (the primary
+workspace) and `GET /workspaces/:workspace/autofix-pr/watches` (a registered,
+trusted one), advertised as `autofix_pr_watches`, answer what `status`
+lists for the workspace's clone. The main worktree is found with
+`git worktree list`, so a workspace that is a linked worktree or a
+subdirectory reads the clone's watches, and the answer names it (`root`).
+`runStatus` takes that root and no session, rather than the daemon's own
+directory and environment, and runs no git command (`git: false`): the
+daemon lists the watches on its own thread, where a git command that hangs
+would hold every request. It reads the files only, each opened without
+following a link and without blocking, so a FIFO put in place of one cannot
+hold the daemon either (the helpers read them so too). No lock is taken and
+GitHub is not asked, so the answer comes back while a helper runs. Left out
+are `thisSession` (the daemon is no session), the worktree's path and what
+only git tells (`gitTrusted`, `worktreeWork`). `available` is false when no
+git repository is found for the workspace, or git cannot run there. The
+routes change nothing.
+
+**Which watch is a task's.** A scheduled task carries no kind: a watch's
+task is known by the prompt `schedule` writes,
+`Run /autofix-pr tick <owner>/<repo>#<n> [--task <id>]…`, matched to the
+watch of that repository and number in the task's workspace. The task is
+stale as its gate judges it: the watch ended, it records no task where the
+task has an id, or it records another task (a later `schedule` replaced
+it; a task from before task ids is not the one recorded either), or the
+watch is another session's (a take-over moved it). Its gate stops it at its
+next fire, and the card says so.
+
+**What is shown.** The PR, as a link, with where the watch is, the first
+that holds:
+
+- the PR merged or closed (`stopped`);
+- ended by a `cleanup` that kept the worktree (`ended`);
+- no task (`watch` null: a `--once` check's state);
+- fixing in the background (a fresh attempt, with its age);
+- a background fix left behind (a stale one: the next round redoes it);
+- checked within two intervals (`checkedRecently`);
+- otherwise, not checked recently.
+
+Then its pushes and maximum, when its gate last checked and its last round
+ran, and the items left for a person (`needsHuman`). The page lists the
+state files it cannot read with their reason, as `status` does.
+
+**Actions.** Only for a watch whose owning session is a session of this Web
+Shell: a task of it, not stale, is bound to the session the state file
+names. The page looks for that task in every workspace it lists, and lists
+a clone's watch once, as two checkouts of one clone can both be registered.
+
+- **Open session** opens that conversation.
+- **Stop watch** sends `/autofix-pr stop <n>` to it the way a scheduled
+  task's manual run sends its prompt — the session switches there and the
+  prompt goes through the same path as one typed — so the skill runs it,
+  with every confirmation it asks for there. The Web Shell does not write a
+  watch's files or delete its task itself.
+
+Both restore the session in the workspace of its task — the one workspace
+of a single-project daemon included — whatever workspace the watch is
+listed under and whatever the current conversation is (another workspace's,
+a standalone or a Live one).
+
+A watch no session of this Web Shell runs, but whose gate checked within
+two intervals, runs in another process (a terminal session) and is stopped
+there; the page says so. Any other — ended, with no task, or checked by
+nothing lately — is cleaned up or started again with `/autofix-pr stop <n>`
+or `resume <n>` in a session of its workspace, which the page names.
+
+**Refresh.** The page and the cards read the watches again every 15
+seconds while shown. The cards read them only while a watch's task is
+listed, and only from a daemon advertising the tag.
+
 ## 7. One check (`tick`)
 
 The gate already ran `snapshot --gate`; a fire that reaches the model carries
@@ -1701,6 +1793,8 @@ Delivery plan:
    `unattended` (Section 6.13) lets the fix agent of a confirmed watch run
    its commands without asking too, and such a watch's fix agent runs in the
    background (Section 6.14), stopped at the 30-minute limit of Section 10.
+   The Web Shell shows each watch on its task's card and on a PR watches
+   page, and stops one in the session that owns it (Section 6.15).
    Still to come: the fix-attempts-per-failing-check budget of Section 10.
 5. Follow-ups: a configurable bot allowlist.
 

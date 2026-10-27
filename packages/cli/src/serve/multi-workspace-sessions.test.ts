@@ -4544,6 +4544,179 @@ describe('multi-workspace session dispatch', () => {
     expect(secondaryBridge.sendMidTurnNowCalls).toEqual([]);
   });
 
+  it('advertises streaming BTW only when every runtime bridge supports it', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      token: TEST_TOKEN,
+    });
+    const generate = async function* () {
+      yield {
+        type: 'done' as const,
+        requestId: 'request',
+        model: 'main',
+        modelSource: 'main' as const,
+      };
+    };
+    primaryBridge.generateSessionBtwStream = generate;
+    const capabilities = () =>
+      request(app)
+        .get('/capabilities')
+        .set('Host', host())
+        .set('Authorization', TEST_AUTHORIZATION);
+    expect((await capabilities()).body.features).not.toContain(
+      'session_btw_stream',
+    );
+    secondaryBridge.generateSessionBtwStream = generate;
+    expect((await capabilities()).body.features).toContain(
+      'session_btw_stream',
+    );
+    delete primaryBridge.generateSessionBtwStream;
+    expect((await capabilities()).body.features).not.toContain(
+      'session_btw_stream',
+    );
+  });
+
+  it('keeps streaming BTW starts, resumes and cancellation in the session owner', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      token: TEST_TOKEN,
+    });
+    const primary = vi.fn(async function* () {
+      yield {
+        type: 'done' as const,
+        requestId: 'upstream',
+        model: 'primary',
+        modelSource: 'main' as const,
+      };
+    });
+    const secondary = vi.fn(async function* () {
+      yield {
+        type: 'delta' as const,
+        requestId: 'upstream',
+        seq: 0,
+        text: 'secondary answer',
+      };
+      yield {
+        type: 'done' as const,
+        requestId: 'upstream',
+        model: 'secondary',
+        modelSource: 'main' as const,
+      };
+    });
+    primaryBridge.generateSessionBtwStream = primary;
+    secondaryBridge.generateSessionBtwStream = secondary;
+    const sessionId = '22222222-2222-4222-a222-222222222222';
+    for (const resume of [false, true]) {
+      const response = await request(app)
+        .post(`/session/${sessionId}/btw/stream`)
+        .set('Host', host())
+        .set('Authorization', TEST_AUTHORIZATION)
+        .set('X-Qwen-Client-Id', 'secondary-client')
+        .send({ question: 'Why?', requestId: 'same-request', resume });
+      expect(response.status).toBe(200);
+      expect(response.text).toContain('secondary answer');
+    }
+    expect(secondary).toHaveBeenCalledTimes(1);
+    expect(secondary).toHaveBeenCalledWith(
+      sessionId,
+      'Why?',
+      expect.any(AbortSignal),
+      { clientId: 'secondary-client' },
+    );
+    const cancel = await request(app)
+      .delete(`/session/${sessionId}/btw/stream/same-request`)
+      .set('Host', host())
+      .set('Authorization', TEST_AUTHORIZATION)
+      .set('X-Qwen-Client-Id', 'secondary-client');
+    expect(cancel.status).toBe(204);
+    const foreign = await request(app)
+      .post(`/session/${sessionId}/btw/stream`)
+      .set('Host', host())
+      .set('Authorization', TEST_AUTHORIZATION)
+      .set('X-Qwen-Client-Id', 'different-client')
+      .send({ question: 'Why?', requestId: 'same-request', resume: true });
+    expect(foreign.status).toBe(410);
+    const missing = await request(app)
+      .post('/session/33333333-3333-4333-a333-333333333333/btw/stream')
+      .set('Host', host())
+      .set('Authorization', TEST_AUTHORIZATION)
+      .send({ question: 'Why?', requestId: 'same-request', resume: true });
+    expect(missing.status).toBe(404);
+    expect(primary).not.toHaveBeenCalled();
+  });
+
+  it('cancels an active streaming BTW only in the secondary owner', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      token: TEST_TOKEN,
+    });
+    let ready!: () => void;
+    const admitted = new Promise<void>((resolve) => {
+      ready = resolve;
+    });
+    let signal: AbortSignal | undefined;
+    const primary = vi.fn();
+    primaryBridge.generateSessionBtwStream = primary;
+    secondaryBridge.generateSessionBtwStream = vi.fn(
+      async function* (_session, _question, generationSignal) {
+        signal = generationSignal;
+        ready();
+        await new Promise<void>((resolve) =>
+          generationSignal.addEventListener('abort', () => resolve(), {
+            once: true,
+          }),
+        );
+        yield {
+          type: 'done' as const,
+          requestId: 'upstream',
+          model: 'secondary',
+          modelSource: 'main' as const,
+        };
+      },
+    );
+    const base = '/session/22222222-2222-4222-a222-222222222222/btw/stream';
+    const generation = request(app)
+      .post(base)
+      .set('Host', host())
+      .set('Authorization', TEST_AUTHORIZATION)
+      .set('X-Qwen-Client-Id', 'secondary-client')
+      .send({ question: 'Why?', requestId: 'active' })
+      .then((response) => response);
+    await admitted;
+    const cancelled = await request(app)
+      .delete(`${base}/active`)
+      .set('Host', host())
+      .set('Authorization', TEST_AUTHORIZATION)
+      .set('X-Qwen-Client-Id', 'secondary-client');
+    expect(cancelled.status).toBe(204);
+    expect(signal?.aborted).toBe(true);
+    expect((await generation).text).toContain('btw_cancelled');
+    expect(primary).not.toHaveBeenCalled();
+  });
+
+  it('rejects streaming BTW for an untrusted owner without primary fallback', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      secondaryTrusted: false,
+      token: TEST_TOKEN,
+    });
+    const primary = vi.fn();
+    const secondary = vi.fn();
+    primaryBridge.generateSessionBtwStream = primary;
+    secondaryBridge.generateSessionBtwStream = secondary;
+    const base = '/session/22222222-2222-4222-a222-222222222222/btw/stream';
+    const responses = await Promise.all([
+      request(app)
+        .post(base)
+        .set('Host', host())
+        .set('Authorization', TEST_AUTHORIZATION)
+        .send({ question: 'Why?', requestId: 'request' }),
+      request(app)
+        .delete(`${base}/request`)
+        .set('Host', host())
+        .set('Authorization', TEST_AUTHORIZATION),
+    ]);
+    expect(responses.map((response) => response.status)).toEqual([403, 403]);
+    expect(primary).not.toHaveBeenCalled();
+    expect(secondary).not.toHaveBeenCalled();
+  });
+
   it('rejects invalid secondary owner-local inputs before bridge actions', async () => {
     const { app, primaryBridge, secondaryBridge } = makeHarness({
       token: TEST_TOKEN,

@@ -5,6 +5,11 @@
  */
 
 export const MCP_APP_MESSAGES_EN: Record<string, string> = {
+  'mcpApp.generatedUi.reset': 'Reopen and reset',
+  'mcpApp.generatedUi.reopen': 'Reopen interactive view',
+  'mcpApp.generatedUi.openElsewhere': 'Already open elsewhere.',
+  'mcpApp.generatedUi.reopenNotice':
+    'Reopening starts from the original content and discards previous interactions. Check the original session first: analysis already sent is not revoked or automatically resent.',
   'mcpApp.generatedUi.unavailable':
     'Generated UI is unavailable for this session.',
   'mcpApp.message.title': 'Review App message',
@@ -34,6 +39,11 @@ export const MCP_APP_MESSAGES_EN: Record<string, string> = {
 };
 
 export const MCP_APP_MESSAGES_ZH: Record<string, string> = {
+  'mcpApp.generatedUi.reset': '重新打开并重置',
+  'mcpApp.generatedUi.reopen': '重新打开交互视图',
+  'mcpApp.generatedUi.openElsewhere': '已在另一处打开。',
+  'mcpApp.generatedUi.reopenNotice':
+    '重新打开将从原始内容开始，此前交互不会恢复。请先检查原会话：已发送的分析不会撤销，也不会自动重发。',
   'mcpApp.generatedUi.unavailable': '此会话未启用内置 Generated UI。',
   'mcpApp.message.title': '审阅 App 消息',
   'mcpApp.message.description':
