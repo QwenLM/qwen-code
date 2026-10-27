@@ -3880,11 +3880,12 @@ describe('qwen-autofix workflow', () => {
         );
         chmodSync(join(dir, 'gh'), 0o755);
         writeFileSync(join(dir, 'writes.log'), '');
+        writeFileSync(join(dir, 'fleet.log'), '');
         const stdout = execFileSync(
           'bash',
           [
             '-c',
-            `fleet_row() { :; }\nfor _ in 1; do\n${release.replace(/\n {14}/g, '\n')}\necho FELLTHROUGH\ndone`,
+            `fleet_row() { printf '%s|%s\\n' "$2" "$3" >> ${join(dir, 'fleet.log')}; }\nfor _ in 1; do\n${release.replace(/\n {14}/g, '\n')}\necho FELLTHROUGH\ndone`,
           ],
           {
             env: {
@@ -3915,6 +3916,7 @@ describe('qwen-autofix workflow', () => {
         return {
           log: stdout,
           writes: readFileSync(join(dir, 'writes.log'), 'utf8'),
+          fleet: readFileSync(join(dir, 'fleet.log'), 'utf8'),
         };
       } finally {
         rmSync(dir, { recursive: true, force: true });
@@ -3923,6 +3925,10 @@ describe('qwen-autofix workflow', () => {
     const released = runRelease();
     expect(released.log).not.toContain('FELLTHROUGH');
     expect(released.writes).toContain('<!-- autofix-budget-reached -->');
+    // The fleet row describes what happened: it is written by the DELETE's
+    // success branch, so it can only appear once the label is actually gone.
+    expect(released.fleet).toContain('budget-spent|');
+    expect(released.fleet).toContain('released');
     // The release is the URI-encoded REST DELETE every other site uses, and
     // the escalation label is never part of it.
     expect(released.writes).toContain('labels/autofix%2Ftakeover');
@@ -3956,7 +3962,109 @@ describe('qwen-autofix workflow', () => {
       const skipped = runRelease(variant);
       expect(skipped.writes).toBe('');
       expect(skipped.log).not.toContain('FELLTHROUGH');
+      // …and a skipped release never claims one in the fleet table either.
+      expect(skipped.fleet).not.toContain('released');
     }
+
+    // The OUTER entry condition is the only clause that lets a no-op-only
+    // window end: two no-op rounds leave ROUND at 0, so the cap half never
+    // fires on its own and the PR would stay managed forever.
+    const gate = reviewScanJob.match(
+      /(if \[\[ "\$\{ROUND\}" -ge "\$\{EFF_MAX_ROUNDS\}" \|\| "\$\{BUDGET_SPENT\}" == 'true' \]\]; then)/,
+    )?.[1];
+    expect(gate).toBeTruthy();
+    const enters = (round, eff, spent) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `ROUND='${round}'\nEFF_MAX_ROUNDS='${eff}'\nBUDGET_SPENT='${spent}'\n${gate}\necho ENTER\nfi`,
+        ],
+        { encoding: 'utf8' },
+      ).includes('ENTER');
+    expect(enters('0', '2', 'true')).toBe(true);
+    expect(enters('0', '2', 'false')).toBe(false);
+
+    // The BOT-authored half of the same branch: the release is skipped and
+    // the copy names the budget rather than a round cap the PR never hit.
+    const boundary = reviewScanJob.match(
+      /(if \[\[ "\$\{ROUND\}" -ge "\$\{EFF_MAX_ROUNDS\}" \|\| "\$\{BUDGET_SPENT\}" == 'true' \]\]; then[\s\S]*?\n {12}fi)/,
+    )?.[1];
+    expect(boundary).toBeTruthy();
+    const runBoundary = ({ botAuthor = 'true' } = {}) => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-budget-boundary-'));
+      try {
+        writeFileSync(join(dir, 'ic.json'), '[]');
+        writeFileSync(
+          join(dir, 'labels.json'),
+          '{"labels":[{"name":"autofix/takeover"}]}',
+        );
+        writeFileSync(
+          join(dir, 'gh'),
+          [
+            '#!/bin/bash',
+            'if [[ "$1" == "pr" && "$2" == "view" ]]; then cat ' +
+              join(dir, 'labels.json') +
+              '; exit 0; fi',
+            'if [[ "$1" == "api" && "$2" == "user" ]]; then printf "%s" "$STUB_ACTOR"; exit 0; fi',
+            'echo "WRITE $*" >> ' + join(dir, 'writes.log'),
+            'exit 0',
+          ].join('\n'),
+        );
+        chmodSync(join(dir, 'gh'), 0o755);
+        writeFileSync(join(dir, 'writes.log'), '');
+        writeFileSync(join(dir, 'fleet.log'), '');
+        const stdout = execFileSync(
+          'bash',
+          [
+            '-c',
+            `fleet_row() { printf '%s|%s\\n' "$2" "$3" >> ${join(dir, 'fleet.log')}; }\nfor _ in 1; do\n${boundary.replace(/\n {12}/g, '\n')}\necho FELLTHROUGH\ndone`,
+          ],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              WORKDIR: dir,
+              PR: '7165',
+              REPO: 'QwenLM/qwen-code',
+              TAKEOVER_LABEL: 'autofix/takeover',
+              SKIP_LABEL: 'autofix/skip',
+              NEEDS_HUMAN_LABEL: 'autofix/needs-human',
+              AUTOFIX_BOT: 'qwen-code-dev-bot',
+              REARM_KEY: 'K1',
+              ROUND_BUDGET: '3',
+              ROUND: '0',
+              EFF_MAX_ROUNDS: '3',
+              BUDGET_USED: '3',
+              BUDGET_HALTED: 'false',
+              FORCED_PR: '',
+              EVENT_NAME: 'schedule',
+              TIMEOUT_WINDOW_CAP: '3',
+              BUDGET_SPENT: 'true',
+              DRY_RUN: 'false',
+              IS_BOT_AUTHOR: botAuthor,
+              DISPATCH_SOURCE: 'scan',
+              STUB_ACTOR: 'qwen-code-dev-bot',
+            },
+            encoding: 'utf8',
+          },
+        );
+        return {
+          log: stdout,
+          writes: readFileSync(join(dir, 'writes.log'), 'utf8'),
+          fleet: readFileSync(join(dir, 'fleet.log'), 'utf8'),
+        };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    const bot = runBoundary();
+    // No label DELETE on a bot-authored PR…
+    expect(bot.writes).not.toContain('autofix%2Ftakeover');
+    // …and the notice names the budget, not a cap this PR never reached.
+    expect(bot.log).toContain('budget spent');
+    expect(bot.log).not.toContain('hit the round cap');
+    expect(bot.fleet).toContain('budget-spent');
   });
 
   it('counts no-op attempts for a for-N budget and keeps breaker stops escalated', () => {
