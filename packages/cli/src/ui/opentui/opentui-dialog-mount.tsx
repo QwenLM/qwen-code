@@ -283,19 +283,25 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
         ).then(settle);
         break;
       case 'update':
-        void applyExtensionUpdate(config, name).then(settle);
-        break;
-      case 'mark-update':
-        void applyExtensionUpdateCheck(config, name).then((state) => {
-          setExtBusy(false);
-          if (state) setExtStatus({ type: 'info', text: 'Update available.' });
+        return applyExtensionUpdate(config, name).then((result) => {
+          settle(result);
+          return result.changed ? ('up-to-date' as const) : undefined;
         });
-        break;
+      case 'mark-update':
+        return applyExtensionUpdateCheck(config, name).then((result) => {
+          setExtBusy(false);
+          setExtStatus({
+            type: result.state === 'error' ? 'error' : 'info',
+            text: result.message,
+          });
+          return result.state;
+        });
       default: {
         const exhaustive: never = action;
         void exhaustive;
       }
     }
+    return undefined;
   };
 
   // --- model dialog error (kept open on failed selection) -----------------
@@ -600,10 +606,9 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           onRowAction={(row, action) =>
             runExtensionAction(row.key, action as ExtensionDetailAction)
           }
-          onDetailAction={(row, action, arg) => {
-            runExtensionAction(row.key, action, arg);
-            return undefined;
-          }}
+          onDetailAction={(row, action, arg) =>
+            runExtensionAction(row.key, action, arg)
+          }
         />
       );
     }

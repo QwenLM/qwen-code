@@ -383,8 +383,8 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
         setView('uninstall-confirm');
         return;
       }
-      if (action === 'mark-update') {
-        void Promise.resolve(onDetailAction?.(currentRow, 'mark-update'))
+      if (action === 'mark-update' || action === 'update') {
+        void Promise.resolve(onDetailAction?.(currentRow, action))
           .then((state) => {
             if (state) setCheckedUpdateState(state);
           })
