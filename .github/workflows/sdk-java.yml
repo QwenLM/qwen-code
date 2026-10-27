@@ -595,7 +595,6 @@ jobs:
         engine: ['h2', 'mysql']
     env:
       MYSQL_CONTAINER: 'qwen-history-scale-${{ matrix.engine }}-${{ github.run_id }}-${{ github.run_attempt }}'
-      MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml -Dmaven.repo.local=${{ runner.temp }}/m2-history-scale'
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
@@ -650,6 +649,10 @@ jobs:
             if docker exec "${MYSQL_CONTAINER}" mysqladmin ping --host=127.0.0.1 --user=root --password=history-scale-fixture --silent; then
               break
             fi
+            if [[ "${attempt}" == '60' ]]; then
+              docker logs "${MYSQL_CONTAINER}"
+              exit 1
+            fi
             sleep 2
           done
           docker exec "${MYSQL_CONTAINER}" mysql --host=127.0.0.1 --user=root --password=history-scale-fixture \
@@ -657,11 +660,14 @@ jobs:
           port="$(docker port "${MYSQL_CONTAINER}" 3306/tcp | awk -F: '{print $NF}')"
           echo "MYSQL_PORT=${port}" >> "${GITHUB_ENV}"
       - name: 'Install history qualification SDK dependency'
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml -Dmaven.repo.local=${{ runner.temp }}/m2-history-scale'
         run: 'mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install'
       - name: 'Qualify native history residency'
         timeout-minutes: 130
         env:
           HISTORY_ENGINE: '${{ matrix.engine }}'
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml -Dmaven.repo.local=${{ runner.temp }}/m2-history-scale'
         run: |-
           if [[ ! -f packages/core/src/managed-runtime/managed-session-history.ts &&
                 ! -f packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/persistence/ManagedSessionHistoryStore.java &&
@@ -671,7 +677,8 @@ jobs:
           fi
           test -f packages/managed-agent-server/src/test/java/com/alibaba/qwen/code/managedagent/ManagedSessionHistoryScaleGate.java
           grep -q '<id>managed-history-scale</id>' packages/managed-agent-server/pom.xml
-          export QWEN_HISTORY_TEST_REVISION="$(git rev-parse HEAD)"
+          history_revision="$(git rev-parse HEAD)"
+          export QWEN_HISTORY_TEST_REVISION="${history_revision}"
           args=(-Pmanaged-history-scale "-Dqwen.managed.history.engine=${HISTORY_ENGINE}")
           if [[ "${HISTORY_ENGINE}" == 'mysql' ]]; then
             args+=("-Dmysql.url=jdbc:mysql://127.0.0.1:${MYSQL_PORT}/managed_history_scale?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false" -Dmysql.user=root -Dmysql.password=history-scale-fixture)

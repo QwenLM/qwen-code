@@ -33,9 +33,7 @@ describe('Managed native history scale qualification', () => {
       (s) => s.name === 'Qualify native history residency',
     );
     expect(qualify.run).toContain('-Pmanaged-history-scale');
-    expect(qualify.run).toContain(
-      'export QWEN_HISTORY_TEST_REVISION="$(git rev-parse HEAD)"',
-    );
+    expect(qualify.run).toContain('history_revision="$(git rev-parse HEAD)"');
     expect(qualify.run).toContain(
       '-Dqwen.managed.history.engine=${HISTORY_ENGINE}',
     );
@@ -95,6 +93,23 @@ describe('Managed native history scale qualification', () => {
     const stop = steps.at(-1);
     expect(stop.if).toBe("${{ always() && matrix.engine == 'mysql' }}");
     expect(stop.run).toContain('docker rm --force "${MYSQL_CONTAINER}"');
+  });
+
+  it('resolves runner paths only in step environments', () => {
+    expect(JSON.stringify(job.env)).not.toContain('${{ runner.');
+    const install = job.steps.find(
+      (s) => s.name === 'Install history qualification SDK dependency',
+    );
+    const qualify = job.steps.find(
+      (s) => s.name === 'Qualify native history residency',
+    );
+    expect(install.env.MAVEN_ARGS).toBe(qualify.env.MAVEN_ARGS);
+    expect(install.env.MAVEN_ARGS).toContain(
+      '${{ runner.temp }}/m2-history-scale',
+    );
+    expect(install.env.MAVEN_ARGS).toContain(
+      '--settings ${{ runner.temp }}/setup-java-m2/settings.xml',
+    );
   });
 
   it('preserves successful and failed metrics plus unfiltered test reports', () => {
@@ -179,7 +194,9 @@ describe('Managed history scale report enforcement', () => {
     const qualify = job.steps.find(
       (s) => s.name === 'Qualify native history residency',
     );
-    const guard = qualify.run.split('export QWEN_HISTORY_TEST_REVISION=')[0];
+    const guard = qualify.run.split(
+      'history_revision="$(git rev-parse HEAD)"',
+    )[0];
     const run = () =>
       spawnSync('bash', ['-eo', 'pipefail', '-c', guard], {
         cwd: root,
