@@ -187,7 +187,7 @@ public final class ManagedExtensionProtocol {
                 || !change.keySet().equals(Set.of("action", "serverId", "expectedRevision", "servers"))
                 || !Set.of("add", "edit", "remove", "enable", "disable", "reload", "restart").contains(String.valueOf(change.get("action")))
                 || !identity(change.get("serverId")) || !counter(change.get("expectedRevision"), 0)
-                || !(change.get("servers") instanceof List<?> servers) || servers.size() > 32) {
+                || !(change.get("servers") instanceof List<?> servers)) {
             throw invalid();
         }
         mcpPins(servers, true);
@@ -199,6 +199,7 @@ public final class ManagedExtensionProtocol {
     private static void mcpPins(List<?> servers, boolean selection) {
         Set<String> ids = new HashSet<>();
         int enabled = 0;
+        int selected = 0;
         for (Object item : servers) {
             if (!(item instanceof Map<?, ?> pin)
                     || !pin.keySet().equals(selection ? Set.of("serverId", "serverRevision", "definitionDigest", "state")
@@ -206,6 +207,11 @@ public final class ManagedExtensionProtocol {
                     || !identity(pin.get("serverId")) || !ids.add((String) pin.get("serverId"))
                     || !counter(pin.get("serverRevision"), 1) || !digest(pin.get("definitionDigest"))
                     || selection && !Set.of("enabled", "disabled", "removed").contains(String.valueOf(pin.get("state")))) {
+                throw invalid();
+            }
+            // The selection capacity counts live entries only: retained removed
+            // entries stay in the snapshot without consuming it.
+            if (selection && !"removed".equals(pin.get("state")) && ++selected > 32) {
                 throw invalid();
             }
             if ("enabled".equals(pin.get("state")) && ++enabled > 16) {
