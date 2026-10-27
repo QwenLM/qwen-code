@@ -2809,7 +2809,7 @@ jobs:
             MARKERS="$(jq -c --arg ab "${AUTOFIX_BOT}" '
               [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
                 | [ scan("<!-- autofix-eval ts=([^ ]+) acted=([^ ]+) round=([0-9]+)(?: win=([^ ]+))?(?: run=([^ ]+))? -->") ] | .[]
-                | {ts: .[0], round: (.[2] | tonumber), win: (.[3] // "none"), run: (.[4] // ""), at: ($c.created_at // "")} ]' "${WORKDIR}/ic.json")"
+                | {ts: .[0], round: (.[2] | tonumber), win: (.[3] // "none"), run: .[4], at: ($c.created_at // "")} ]' "${WORKDIR}/ic.json")"
             # GLOBAL watermark; the terminal-handoff sentinel ts is a flag,
             # not an evaluation time. → qwen-autofix.md#af-159
             REARM_AT="$(jq -r --arg ab "${AUTOFIX_BOT}" '
@@ -4338,7 +4338,7 @@ jobs:
           LIVE_MARKS="$(jq -r --arg ab "${AUTOFIX_BOT}" '
             [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
               | [ scan("<!-- autofix-eval ts=([^ ]+) acted=([^ ]+) round=([0-9]+)(?: win=([^ ]+))?(?: run=([^ ]+))? -->") ] | .[]
-              | {ts: .[0], round: (.[2] | tonumber), win: (.[3] // "none"), run: (.[4] // ""), at: ($c.created_at // "")} ]' "${WORKDIR}/ic.json")"
+              | {ts: .[0], round: (.[2] | tonumber), win: (.[3] // "none"), run: .[4], at: ($c.created_at // "")} ]' "${WORKDIR}/ic.json")"
           LIVE_REARM_AT="$(jq -r --arg ab "${AUTOFIX_BOT}" '
             [ .[] | select((.user.login // "") == $ab)
               | select((.body // "") | contains("<!-- autofix-rearm -->"))
@@ -4701,7 +4701,7 @@ jobs:
                 gsub("^(?:(?:\\s|<!--[\\s\\S]*?(?:-->|$)|\\p{Cf}))+"; ""; "s")
                 | startswith("**[Critical]**");
               ([ ($ic | add)[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
-                 | [ scan("<!-- autofix-eval ts=([^ ]+) acted=([^ ]+) round=([0-9]+)(?: win=([^ ]+))? -->") ] | .[]
+                 | [ scan("<!-- autofix-eval ts=([^ ]+) acted=([^ ]+) round=([0-9]+)(?: win=([^ ]+))?(?: run=([^ ]+))? -->") ] | .[]
                  | {ts: .[0], acted: .[1], round: (.[2] | tonumber), win: (.[3] // "none"), at: ($c.created_at // "")} ]
                | map(select(.win == $key) | select(.ts != "9999-12-31T23:59:59Z"))
                | sort_by(.at)) as $ms

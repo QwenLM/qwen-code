@@ -4134,6 +4134,52 @@ describe('qwen-autofix workflow', () => {
         FLOOR,
       ),
     ).toBe('2|true');
+    // The census is fed by the marker builder, so a legacy report (no `run=`)
+    // must stay distinguishable: `run: (.[4] // "")` produced an EMPTY STRING,
+    // and jq's `//` does not fall back for "" — so two DIFFERENT legacy reports
+    // collapsed onto one key and a `for 2` window under-counted its attempts.
+    const markersBuild = reviewScanJob.match(
+      /(MARKERS="\$\(jq[\s\S]*?ic\.json"\)")/,
+    )?.[1];
+    expect(markersBuild).toBeTruthy();
+    const legacyCensus = (bodies) => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-legacy-census-'));
+      try {
+        writeFileSync(
+          join(dir, 'ic.json'),
+          JSON.stringify(
+            bodies.map((body, i) => ({
+              user: { login: 'qwen-code-dev-bot' },
+              created_at: `2026-07-18T0${i + 1}:00:00Z`,
+              body,
+            })),
+          ),
+        );
+        return execFileSync(
+          'bash',
+          [
+            '-c',
+            `AUTOFIX_BOT='qwen-code-dev-bot'\nWORKDIR='${dir}'\n${markersBuild}\nREARM_KEY='K1'\nROUND_BUDGET='2'\nBUDGET_FLOOR=''\n${used}\nprintf '%s' "$BUDGET_USED"`,
+          ],
+          { encoding: 'utf8' },
+        ).trim();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    expect(
+      legacyCensus([
+        '<!-- autofix-eval ts=2026-07-18T09:00:00Z acted=false round=0 win=K1 -->',
+        '<!-- autofix-eval ts=2026-07-18T10:00:00Z acted=false round=0 win=K1 -->',
+      ]),
+    ).toBe('2');
+    // A re-posted legacy marker (identical ts and round) still charges once.
+    expect(
+      legacyCensus([
+        '<!-- autofix-eval ts=2026-07-18T09:00:00Z acted=false round=0 win=K1 -->',
+        '<!-- autofix-eval ts=2026-07-18T09:00:00Z acted=false round=0 win=K1 -->',
+      ]),
+    ).toBe('1');
   });
 
   it('reads the prepare budget from the engagement, and only while it is live', () => {
