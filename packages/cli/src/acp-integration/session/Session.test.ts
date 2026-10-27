@@ -1497,10 +1497,21 @@ describe('Session', () => {
           { role: 'user', parts: [{ text: 'second' }] },
           { role: 'model', parts: [{ text: 'second reply' }] },
         ];
+        // Rewind resolves its target by prompt identity, so the two
+        // rewindable turns carry ids and the delivered peer report
+        // deliberately carries none: it must stay out of the rewind surface.
+        markApiHistoryPrompt(history[0]!, 'p1');
+        markApiHistoryPrompt(history[4]!, 'p2');
+        vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue(
+          ['p1', 'p2'].map((promptId) => ({
+            promptId,
+            timestamp: new Date('2026-10-09T00:00:00.000Z'),
+            trackedFileBackups: {},
+          })),
+        );
         vi.mocked(mockChat.getHistory).mockReturnValue(history);
         vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-        expect(session.getRewindableUserTurnCount()).toBe(2);
-        expect(session.rewindToTurn(1)).toEqual({
+        expect(session.rewindToTurn(1, { rewindFiles: false })).toEqual({
           targetTurnIndex: 1,
           apiTruncateIndex: 4,
         });
