@@ -1104,7 +1104,7 @@ function SessionOverviewPanelInner({
         cell: ({ row }) => {
           const card = row.original;
           return (
-            <div className="min-w-0 space-y-1 py-1">
+            <div className="min-w-0 space-y-1 py-0">
               <div className="flex min-h-7 min-w-0 items-center gap-2">
                 {card.color && (
                   <span
