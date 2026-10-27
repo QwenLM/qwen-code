@@ -5165,6 +5165,18 @@ describe('qwen-autofix workflow', () => {
     );
     expect(budgetedEngage.writes).toContain('Budget: 2 round(s)');
     expect(budgetedEngage.writes).toContain('the loop removes the');
+    // The ack is one printf with twelve positional arguments, so a whole-body
+    // toContain cannot see an EN/ZH argument swap: splitting at the details
+    // summary makes each language assert its own sentence.
+    const byLang = (text) => {
+      const [en, zh = ''] = text.split('<summary>中文说明</summary>');
+      return { en, zh };
+    };
+    const engageLangs = byLang(budgetedEngage.writes);
+    expect(engageLangs.en).toContain('Budget: 2 round(s)');
+    expect(engageLangs.en).not.toContain('本次托管预算');
+    expect(engageLangs.zh).toContain('本次托管预算 2 轮');
+    expect(engageLangs.zh).not.toContain('Budget: 2 round(s)');
     const budgetedRearm = runToggle({
       cmd: 'add',
       labels: ['autofix/takeover'],
@@ -5173,6 +5185,13 @@ describe('qwen-autofix workflow', () => {
     expect(budgetedRearm.writes).toContain(
       '<!-- takeover-ack engaged -->\n<!-- autofix-round-budget 3 -->',
     );
+    // The re-arm copy is pinned per language too: it is a second printf with
+    // its own argument order.
+    const rearmLangs = byLang(budgetedRearm.writes);
+    expect(rearmLangs.en).toContain('Budget: 3 round(s)');
+    expect(rearmLangs.en).not.toContain('本次托管预算');
+    expect(rearmLangs.zh).toContain('本次托管预算 3 轮');
+    expect(rearmLangs.zh).not.toContain('Budget: 3 round(s)');
     // The two parameterized forms never co-emit, and the guard values emit
     // no marker at all — a stray marker would cap a window the maintainer
     // never bounded.
