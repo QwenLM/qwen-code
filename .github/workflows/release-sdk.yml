@@ -8,6 +8,16 @@ on:
         type: 'boolean'
         required: false
         default: false
+      central_status_only:
+        description: 'Only query the Sonatype Central deployment status (read-only).'
+        type: 'boolean'
+        required: false
+        default: false
+      deployment_id:
+        description: 'Central deployment id to query (used with central_status_only).'
+        type: 'string'
+        required: false
+        default: ''
 
 permissions:
   contents: 'read'
@@ -24,36 +34,37 @@ jobs:
     environment: 'production-release'
     steps:
       - name: 'Checkout the diagnostic revision'
-        if: "${{ ! inputs.probe_only }}"
+        if: "${{ ! inputs.probe_only && ! inputs.central_status_only }}"
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: '${{ github.sha }}'
           persist-credentials: false
       - name: 'Set up Node'
-        if: "${{ ! inputs.probe_only }}"
+        if: "${{ ! inputs.probe_only && ! inputs.central_status_only }}"
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version-file: '.nvmrc'
           package-manager-cache: false
       - name: 'Install the original npm version'
-        if: "${{ ! inputs.probe_only }}"
+        if: "${{ ! inputs.probe_only && ! inputs.central_status_only }}"
         run: 'npm install --global npm@11.19.0'
       - name: 'Install and build pinned release dependencies'
-        if: "${{ ! inputs.probe_only }}"
+        if: "${{ ! inputs.probe_only && ! inputs.central_status_only }}"
         run: 'corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only'
       - name: 'Set the original SDK target version locally'
-        if: "${{ ! inputs.probe_only }}"
+        if: "${{ ! inputs.probe_only && ! inputs.central_status_only }}"
         run: 'npm version -w @qwen-code/sdk 0.1.23 --no-git-tag-version --allow-same-version --no-workspaces-update'
       - name: 'Bundle the release CLI'
-        if: "${{ ! inputs.probe_only }}"
+        if: "${{ ! inputs.probe_only && ! inputs.central_status_only }}"
         run: 'npm run bundle'
       - name: 'Build SDK and bundle the CLI'
-        if: "${{ ! inputs.probe_only }}"
+        if: "${{ ! inputs.probe_only && ! inputs.central_status_only }}"
         working-directory: 'packages/sdk-typescript'
         run: |
           npm run build
           node scripts/bundle-cli.js
       - name: 'Probe the configured model endpoint'
+        if: "${{ ! inputs.central_status_only }}"
         env:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
@@ -78,7 +89,7 @@ jobs:
           done
           exit 0
       - name: 'Reproduce the session ID suite without retries'
-        if: "${{ ! inputs.probe_only }}"
+        if: "${{ ! inputs.probe_only && ! inputs.central_status_only }}"
         timeout-minutes: 12
         env:
           QWEN_SANDBOX: 'false'
@@ -89,3 +100,32 @@ jobs:
           ./node_modules/.bin/vitest run --root ./integration-tests
           --poolOptions.forks.maxForks 2 sdk-typescript/session-id.test.ts
           --retry 0 --bail 1
+
+      - name: 'Query the Sonatype Central deployment status'
+        if: "${{ inputs.central_status_only }}"
+        env:
+          CENTRAL_USERNAME: '${{ secrets.CENTRAL_USERNAME }}'
+          CENTRAL_PASSWORD: '${{ secrets.CENTRAL_PASSWORD }}'
+          DEPLOYMENT_ID: '${{ inputs.deployment_id }}'
+        run: |-
+          set -uo pipefail
+          if [[ -z "${DEPLOYMENT_ID}" ]]; then
+            echo 'deployment_id input is required.' >&2
+            exit 1
+          fi
+          q() {
+            label="$1"
+            url="$2"
+            out=$(mktemp)
+            code=$(curl -sS -o "${out}" -w '%{http_code}' -m 60 \
+              -u "${CENTRAL_USERNAME}:${CENTRAL_PASSWORD}" "${url}") || code='curl-error'
+            echo "--- ${label}: http=${code}"
+            jq -c '{deploymentId,deploymentName,status,publishingType,errors}' "${out}" 2>/dev/null \
+              || head -c 300 "${out}"
+            echo
+            rm -f "${out}"
+          }
+          q 'status?id' "https://central.sonatype.com/api/v1/publisher/status?id=${DEPLOYMENT_ID}"
+          q 'status?deploymentId' "https://central.sonatype.com/api/v1/publisher/status?deploymentId=${DEPLOYMENT_ID}"
+          q 'published' "https://central.sonatype.com/api/v1/publisher/published?namespace=com.alibaba&name=qwen-managed-agent-server&version=0.26.1"
+          exit 0
