@@ -146,11 +146,21 @@ function modifiedAt(path: string): string | null {
 
 export function runStatus(args: {
   pr?: number;
-  /** false skips `worktreeWork` (null), the one part that runs git. */
+  /** false skips `worktreeWork` (null), a git scan of the worktree. */
   work?: boolean;
+  /** false runs no git command at all: `worktreeWork` is null and
+   * `gitTrusted` false, unchecked. The daemon's listing runs on its own
+   * thread, where a git command that hangs would hold every request. */
+  git?: boolean;
+  /** The clone's main worktree: by default, the one the working directory
+   * is in. The daemon names it, as its own directory is not the clone's. */
+  root?: string;
+  /** Whose watches are `thisSession`: by default, the session this runs in
+   * (`QWEN_CODE_SESSION_ID`); null for none. */
+  session?: string | null;
 }): StatusOutcome {
   if (args.pr !== undefined) assertPositiveInteger(args.pr, 'PR number');
-  const root = repoRoot();
+  const root = args.root ?? repoRoot();
   const tmp = join(root, '.qwen', 'tmp');
   const numbers = (existsSync(tmp) ? readdirSync(tmp) : [])
     .map((name) => STATE_FILE_RE.exec(name)?.[1])
@@ -159,7 +169,8 @@ export function runStatus(args: {
     .filter((n) => Number.isSafeInteger(n) && n > 0)
     .filter((n) => args.pr === undefined || n === args.pr)
     .sort((a, b) => a - b);
-  const session = currentSessionId();
+  const session =
+    args.session === undefined ? currentSessionId() : args.session;
   const now = Date.now();
   const outcome: StatusOutcome = {
     now: new Date(now).toISOString(),
@@ -214,11 +225,12 @@ export function runStatus(args: {
         worktreePath: paths.worktreePath,
         worktreeExists: existsSync(paths.worktreePath),
         gitTrusted:
+          args.git !== false &&
           existsSync(paths.worktreePath) &&
           (untrustedGitfile(paths.worktreePath, root) ??
             untrustedSubmodules(paths.worktreePath, root)) === null,
         worktreeWork:
-          args.work === false
+          args.work === false || args.git === false
             ? null
             : unsavedWork(paths, [state.lastKnownHeadSha, ...state.pushedShas]),
         fix: fixOf(paths, now),
