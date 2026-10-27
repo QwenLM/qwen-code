@@ -495,6 +495,21 @@ class ManagedAgentPreflightTest {
         } finally {
             reap(worker);
         }
+        // The same binary reached through a symlink: /proc names the target,
+        // so the configured path has to be resolved before it is compared.
+        Path link = Files.createSymbolicLink(directory.resolve("current"), runtime);
+        properties.getRuntimeBroker().setNodeExecutable(link.toString());
+        Process throughLink = worker(link, state);
+        try {
+            ManagedAgentPreflight.Check check = ManagedAgentPreflight.workersCheck(
+                    properties, () -> List.of(throughLink.toHandle()), false);
+            assertEquals(ManagedAgentPreflight.Status.WARN, check.status(),
+                    check.detail());
+            assertEquals("1 Runtime worker(s) of an earlier run are alive (pid "
+                    + throughLink.pid() + ")", check.detail());
+        } finally {
+            reap(throughLink);
+        }
     }
 
     @Test
