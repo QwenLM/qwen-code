@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import type { DaemonWorkspaceCapability } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../../i18n';
 import { DialogShell } from '../dialogs/DialogShell';
@@ -45,6 +45,10 @@ export function WorkspaceRenameDialog({
 }: WorkspaceRenameDialogProps) {
   const { t } = useI18n();
   const [name, setName] = useState(workspace.displayName ?? '');
+  // The first focus selects the current display name and later ones do not,
+  // so a placed caret survives the focus the dialog hands back on Tab. An
+  // unnamed workspace starts empty, where the folder-name placeholder shows.
+  const selectedRef = useRef(false);
   const trimmed = name.trim();
   const unchanged = trimmed === (workspace.displayName?.trim() ?? '');
   const invalid = !isWorkspaceDisplayNameValid(trimmed);
@@ -78,6 +82,11 @@ export function WorkspaceRenameDialog({
               placeholder={workspaceBasename(workspace.cwd)}
               disabled={busy}
               onChange={(event) => setName(event.target.value)}
+              onFocus={(event) => {
+                if (selectedRef.current) return;
+                selectedRef.current = true;
+                event.currentTarget.select();
+              }}
             />
           </Field>
         </FieldGroup>

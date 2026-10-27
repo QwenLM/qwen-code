@@ -297,6 +297,33 @@ test('keeps text selection and rename drafts in the overview @smoke', async ({
   await expect(editor).toHaveCount(0);
 });
 
+test('inline rename selects the current name so typing replaces it @smoke', async ({
+  page,
+}) => {
+  const panel = page.locator('[data-web-shell-session-panel]');
+  const idle = panel.getByRole('row').filter({
+    has: page.getByRole('checkbox', {
+      name: 'Select Idle fixture',
+      exact: true,
+    }),
+  });
+  await idle.hover();
+  await idle.getByRole('button', { name: 'Rename', exact: true }).click();
+  const editor = idle.getByRole('textbox', { name: 'Rename: Idle fixture' });
+  await expect(editor).toBeFocused();
+  expect(
+    await editor.evaluate((element) => ({
+      value: element.value,
+      start: element.selectionStart,
+      end: element.selectionEnd,
+    })),
+  ).toEqual({ value: 'Idle fixture', start: 0, end: 'Idle fixture'.length });
+  // The point of the selection: the first keystroke replaces the old name
+  // instead of appending to it.
+  await editor.pressSequentially('Hot fix triage');
+  await expect(editor).toHaveValue('Hot fix triage');
+});
+
 test('reopened details yield focus when another title replaces them @smoke', async ({
   page,
 }) => {

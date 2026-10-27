@@ -773,6 +773,35 @@ describe('SessionOverviewPanel', () => {
     expect(onOpenSession).toHaveBeenCalledExactlyOnceWith('s1', '/w');
   });
 
+  it('selects the current name when inline rename opens', () => {
+    connectionState.sessionId = 's1';
+    sessionsState.sessions = [session('s1', { displayName: 'Project debug' })];
+    render();
+    act(() => click(rowActionButton(rows()[0]!, 'Rename')));
+    const input = container!.querySelector<HTMLInputElement>(
+      'input[aria-label="Rename: Project debug"]',
+    )!;
+    expect(document.activeElement).toBe(input);
+    expect(input.selectionStart).toBe(0);
+    expect(input.selectionEnd).toBe('Project debug'.length);
+  });
+
+  it('keeps a placed caret when focus returns to an open rename', () => {
+    connectionState.sessionId = 's1';
+    sessionsState.sessions = [session('s1', { displayName: 'Project debug' })];
+    render();
+    act(() => click(rowActionButton(rows()[0]!, 'Rename')));
+    const input = container!.querySelector<HTMLInputElement>(
+      'input[aria-label="Rename: Project debug"]',
+    )!;
+    act(() => {
+      input.setSelectionRange(4, 4);
+      input.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+    });
+    expect(input.selectionStart).toBe(4);
+    expect(input.selectionEnd).toBe(4);
+  });
+
   it('keeps an inline rename draft when clicking a plain row cell', () => {
     connectionState.sessionId = 's1';
     sessionsState.sessions = [session('s1', { displayName: 'One' })];
