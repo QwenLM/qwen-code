@@ -366,6 +366,7 @@ export class HostedContextCompression {
       acp: true,
       safeMode: true,
       chatRecording: false,
+      sessionIdGenerated: true,
       sessionId:
         this.options.session.authority.sessionHeader.sessionKey.sessionId,
     } as CliArgs;
