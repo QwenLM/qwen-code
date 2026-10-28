@@ -111,6 +111,13 @@ describe('parseGoalVerifierText', () => {
       ),
     ).toThrow(/too long/i);
   });
+
+  it('accepts a reason at exactly the length bound', () => {
+    const reason = 'x'.repeat(2_000);
+    expect(
+      parseGoalVerifierText(JSON.stringify({ decision: 'accept', reason })),
+    ).toEqual({ decision: 'accept', reason });
+  });
 });
 
 describe('createGoalVerifier', () => {
@@ -189,7 +196,10 @@ describe('createGoalVerifier', () => {
         }
       ).getOutputLanguageFilePath.mockReturnValue(langFile);
 
-      await createGoalVerifier(config)(input());
+      const result = await createGoalVerifier(config)(input());
+      // The preference rides in the instruction only: the verdict itself
+      // round-trips exactly as it does without the preference.
+      expect(result).toEqual(GROUNDED);
 
       const { request } = sent();
       expect(request.systemInstruction).toContain(
