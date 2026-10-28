@@ -141,6 +141,8 @@ describe('ToolApproval floating scroll layout', () => {
     expect(contentDecls).toContain('overflow-y: auto');
     const codeBlock = find('.codeBlock');
     expect(codeBlock).toHaveLength(1);
-    expect(declarations(codeBlock[0]!)).toContain('max-height: 300px');
+    const codeBlockDecls = declarations(codeBlock[0]!);
+    expect(codeBlockDecls).toContain('max-height: 300px');
+    expect(codeBlockDecls).toContain('overflow-y: auto');
   });
 });
