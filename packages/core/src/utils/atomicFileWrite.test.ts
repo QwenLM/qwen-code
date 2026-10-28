@@ -500,6 +500,44 @@ describe('atomicWriteFileSync', () => {
 });
 
 describe('forceMode option', () => {
+  describe.each([
+    { name: 'atomicWriteFile', write: atomicWriteFile },
+    { name: 'atomicWriteFileSync', write: atomicWriteFileSync },
+  ])('$name credential replacement', ({ write }) => {
+    it.skipIf(!arePermissionBitsEnforced())(
+      'heals a read-only credential to the forced mode',
+      async () => {
+        const target = existing('credential.json', 'old', 0o400);
+        try {
+          await write(target, 'new', {
+            mode: 0o600,
+            forceMode: true,
+            noFollow: true,
+          });
+          expect(read(target)).toBe('new');
+          expect(modeOf(target)).toBe(0o600);
+          expect(ls()).toEqual(['credential.json']);
+        } finally {
+          fsSync.chmodSync(target, 0o600);
+        }
+      },
+    );
+
+    it.skipIf(process.platform === 'win32' || !arePermissionBitsEnforced())(
+      'replaces a symlink to a read-only target without changing the target',
+      async () => {
+        const { real, link } = placeLink('target', 'credential', 'ORIGINAL');
+        fsSync.chmodSync(real, 0o444);
+        try {
+          await write(link, 'NEW', { noFollow: true, mode: 0o600 });
+          expectLinkReplaced(link, real);
+        } finally {
+          fsSync.chmodSync(real, 0o600);
+        }
+      },
+    );
+  });
+
   useTmpDir('force-mode-test-');
 
   itPosix(
@@ -1174,50 +1212,5 @@ describe('noFollow option — symlink protection', () => {
     expect(flags & fsSync.constants.O_EXCL).toBe(fsSync.constants.O_EXCL);
     expect(flags & fsSync.constants.O_CREAT).toBe(fsSync.constants.O_CREAT);
     expect(read(target)).toBe('NEW');
-  });
-});
-
-describe('read-only targets and hard links', () => {
-  useTmpDir('atomic-write-target-');
-
-  const writers: ReadonlyArray<{
-    name: string;
-    write: (filePath: string, data: string) => Promise<void> | void;
-  }> = [
-    { name: 'atomicWriteFile', write: (p, d) => atomicWriteFile(p, d) },
-    { name: 'atomicWriteFileSync', write: (p, d) => atomicWriteFileSync(p, d) },
-  ];
-
-  describe.each(writers)('$name', ({ write }) => {
-    it.skipIf(!arePermissionBitsEnforced())(
-      'refuses to replace a read-only file and leaves no temp file',
-      async () => {
-        const filePath = existing('locked.txt', 'original', 0o444);
-        try {
-          await expect(
-            (async () => write(filePath, 'replaced'))(),
-          ).rejects.toMatchObject({ code: 'EACCES' });
-          expect(read(filePath)).toBe('original');
-          expect(ls()).toEqual(['locked.txt']);
-        } finally {
-          fsSync.chmodSync(filePath, 0o600);
-        }
-      },
-    );
-
-    it('keeps every hard link pointing at the new content', async () => {
-      const first = existing('a.txt', 'shared');
-      const second = tmp('b.txt');
-      fsSync.linkSync(first, second);
-      const { ino } = fsSync.statSync(first);
-
-      await write(first, 'edited');
-
-      expect(read(first)).toBe('edited');
-      expect(read(second)).toBe('edited');
-      const stats = fsSync.statSync(first);
-      expect(stats.nlink).toBe(2);
-      expect(stats.ino).toBe(ino);
-    });
   });
 });

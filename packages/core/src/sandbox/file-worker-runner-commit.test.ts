@@ -5,7 +5,15 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  linkSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
@@ -17,6 +25,11 @@ const mockAtomicWriteFile = vi.hoisted(() => vi.fn());
 vi.mock('../utils/atomicFileWrite.js', () => ({
   atomicWriteFile: mockAtomicWriteFile,
 }));
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return { ...actual, access: vi.fn(actual.access) };
+});
 
 import { runFileWorker } from './file-worker-runner.js';
 
@@ -56,5 +69,38 @@ describe('sandbox file worker commit check', () => {
     expect(exitCode).toBe(1);
     expect(JSON.parse(reply)).toMatchObject({ ok: false, code: 'ESTALE' });
     expect(readFileSync(destination, 'utf8')).toBe('concurrent change');
+  });
+
+  it('rechecks a hard-linked target before the in-place write', async () => {
+    root = mkdtempSync(path.join(os.tmpdir(), 'file-worker-hardlink-'));
+    const destination = path.join(root, 'file');
+    const alias = path.join(root, 'alias');
+    writeFileSync(destination, 'first');
+    linkSync(destination, alias);
+    const expected = getSandboxFileVersion(destination);
+    vi.mocked(fs.access).mockImplementationOnce(async () => {
+      writeFileSync(destination, 'concurrent change');
+    });
+    let reply = '';
+
+    const exitCode = await runFileWorker(
+      Readable.from([
+        encodeSandboxWriteRequest({
+          operation: 'write',
+          destination,
+          expected,
+          content: Buffer.from('replacement'),
+        }),
+      ]),
+      (value) => {
+        reply += value;
+      },
+    );
+
+    expect(exitCode).toBe(1);
+    expect(JSON.parse(reply)).toMatchObject({ ok: false, code: 'ESTALE' });
+    expect(readFileSync(destination, 'utf8')).toBe('concurrent change');
+    expect(readFileSync(alias, 'utf8')).toBe('concurrent change');
+    expect(readdirSync(root)).toEqual(['alias', 'file']);
   });
 });
