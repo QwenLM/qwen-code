@@ -368,7 +368,6 @@ export interface CLIControlInitializeRequest {
    * Applied at session start via config.setReasoningEffort().
    */
   effort?: string;
-  workflowMode?: boolean;
 }
 
 export interface CLIControlSetPermissionModeRequest {
@@ -417,15 +416,6 @@ export interface CLIControlSetEffortRequest {
   effort: string;
 }
 
-export interface CLIControlGetWorkflowModeRequest {
-  subtype: 'get_workflow_mode';
-}
-
-export interface CLIControlSetWorkflowModeRequest {
-  subtype: 'set_workflow_mode';
-  enabled: boolean;
-}
-
 export interface CLIControlGetAvailableModelsRequest {
   subtype: 'get_available_models';
 }
@@ -448,8 +438,6 @@ export type ControlRequestPayload =
   | CLIControlSupportedCommandsRequest
   | CLIControlGetContextUsageRequest
   | CLIControlSetEffortRequest
-  | CLIControlGetWorkflowModeRequest
-  | CLIControlSetWorkflowModeRequest
   | CLIControlGetAvailableModelsRequest
   | CLIControlGetUsageInfoRequest;
 
@@ -646,8 +634,6 @@ export enum ControlRequestType {
   INTERRUPT = 'interrupt',
   CONTINUE_LAST_TURN = 'continue_last_turn',
   SET_MODEL = 'set_model',
-  GET_WORKFLOW_MODE = 'get_workflow_mode',
-  SET_WORKFLOW_MODE = 'set_workflow_mode',
   SET_EFFORT = 'set_effort',
   SUPPORTED_COMMANDS = 'supported_commands',
   GET_CONTEXT_USAGE = 'get_context_usage',

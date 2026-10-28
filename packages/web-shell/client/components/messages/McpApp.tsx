@@ -6,22 +6,13 @@ import {
 import {
   McpAppHostContext,
   useMcpAppAdmission,
-  isBuiltInGeneratedUi,
   McpAppMessagesContext,
   McpAppSessionContext,
   McpAppToolsContext,
-  McpAppGeneratedUiOwnerContext,
-  McpAppVisibilityContext,
 } from '../../mcpAppHostContext';
 import { useI18n } from '../../i18n';
 import { useTheme } from '../../themeContext';
 import styles from './McpApp.module.css';
-import {
-  GeneratedUiSlot,
-  useGeneratedUiRetention,
-} from '../../generated-ui/GeneratedUiRuntimeProvider';
-import { Button } from '../ui/button';
-import type { GeneratedUiInstance } from '../../generated-ui/instance-store';
 
 type SandboxResource = Parameters<AppBridge['sendSandboxResourceReady']>[0];
 type AppToolResult = Parameters<AppBridge['sendToolResult']>[0];
@@ -181,34 +172,8 @@ export function GeneratedUiFallback({ display }: { display: McpAppDisplay }) {
   );
 }
 
-export function McpApp({
-  display,
-  toolId,
-  visible = true,
-}: {
-  display: McpAppDisplay;
-  toolId?: string;
-  visible?: boolean;
-}) {
+export function McpApp({ display }: { display: McpAppDisplay }) {
   const allowed = useMcpAppAdmission(display);
-  const retention = useGeneratedUiRetention();
-  const owner = useContext(McpAppGeneratedUiOwnerContext)?.source;
-  const sessionId = useContext(McpAppSessionContext);
-  const surfaceVisible = useContext(McpAppVisibilityContext);
-  if (
-    import.meta.env.MODE !== 'transcript' &&
-    allowed &&
-    retention &&
-    toolId &&
-    isBuiltInGeneratedUi(display) &&
-    owner?.eventEpoch &&
-    owner.sessionId === sessionId
-  )
-    return surfaceVisible ? (
-      <GeneratedUiSlot display={display} toolId={toolId} visible={visible} />
-    ) : (
-      <GeneratedUiFallback display={display} />
-    );
   return allowed ? (
     <McpAppRuntime display={display} />
   ) : (
@@ -216,14 +181,7 @@ export function McpApp({
   );
 }
 
-export function McpAppRuntime({
-  display,
-  retained,
-}: {
-  display: McpAppDisplay;
-  retained?: GeneratedUiInstance['runtime'];
-}) {
-  const { t } = useI18n();
+function McpAppRuntime({ display }: { display: McpAppDisplay }) {
   const daemonBaseUrl = useContext(McpAppHostContext);
   const sessionId = useContext(McpAppSessionContext);
   const tools = useContext(McpAppToolsContext);
@@ -287,11 +245,7 @@ export function McpAppRuntime({
     let messagePending = false;
     if (requestMessage) {
       bridge.onmessage = async (params, extra) => {
-        const signal = AbortSignal.any([
-          extra.signal,
-          appAbort.signal,
-          ...(retained ? [retained.getSignal()] : []),
-        ]);
+        const signal = AbortSignal.any([extra.signal, appAbort.signal]);
         const content = params.content;
         if (
           signal.aborted ||
@@ -322,11 +276,7 @@ export function McpAppRuntime({
     }
     if (callTool) {
       bridge.oncalltool = async (params, extra) => {
-        const signal = AbortSignal.any([
-          extra.signal,
-          appAbort.signal,
-          ...(retained ? [retained.getSignal()] : []),
-        ]);
+        const signal = AbortSignal.any([extra.signal, appAbort.signal]);
         let progress = 0;
         const progressToken = params._meta?.progressToken;
         // ext-apps omits the base MCP progress notification from its union.
@@ -418,8 +368,7 @@ export function McpAppRuntime({
     bridge.onsizechange = ({ height: requestedHeight }) => {
       if (
         typeof requestedHeight === 'number' &&
-        Number.isFinite(requestedHeight) &&
-        (!retained || (retained.isVisible() && requestedHeight > 0))
+        Number.isFinite(requestedHeight)
       ) {
         setHeight(Math.min(640, Math.max(120, Math.ceil(requestedHeight))));
       }
@@ -474,7 +423,6 @@ export function McpAppRuntime({
     cspKey,
     toolArgumentsKey,
     toolResultKey,
-    retained,
   ]);
 
   useEffect(() => {
@@ -490,22 +438,7 @@ export function McpAppRuntime({
       <div className={styles.header}>
         <span>MCP App</span>
         <span className={styles.server}>{display.serverName}</span>
-        {retained && (
-          <Button
-            variant="ghost"
-            size="sm"
-            title={t('mcpApp.generatedUi.reopenNotice')}
-            onClick={retained.reset}
-          >
-            {t('mcpApp.generatedUi.reset')}
-          </Button>
-        )}
       </div>
-      {retained?.reopened && (
-        <div className={styles.fallback}>
-          {t('mcpApp.generatedUi.reopenNotice')}
-        </div>
-      )}
       {error ? (
         <div className={styles.fallback}>
           {display.fallbackText || 'MCP App could not initialize.'}

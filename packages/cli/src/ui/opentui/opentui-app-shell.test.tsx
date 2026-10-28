@@ -509,7 +509,6 @@ describe('OpenTuiApp shell wiring', () => {
           >;
         config.getMemoryManager = () =>
           ({
-            invalidatePendingExtract: vi.fn(),
             restoreMemoryBodiesPresentInHistory: vi.fn(),
           }) as unknown as ReturnType<Config['getMemoryManager']>;
         config.clearActiveTodoReminders = vi.fn();

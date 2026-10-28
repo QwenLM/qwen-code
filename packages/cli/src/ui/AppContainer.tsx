@@ -2678,14 +2678,6 @@ export const AppContainer = (props: AppContainerProps) => {
     }
   }, []);
 
-  useEffect(
-    () =>
-      config.onWorkflowModeChange?.(() => {
-        if (config.hasWorkflowModeContext()) abortPromptSuggestion();
-      }),
-    [config, abortPromptSuggestion],
-  );
-
   // Auto-accept indicator — disabled on agent tabs (agents handle their own)
   const llmClient = config.getLlmClient();
 
@@ -3474,8 +3466,7 @@ export const AppContainer = (props: AppContainerProps) => {
         spec.status !== 'idle' &&
         spec.suggestion === submittedValue &&
         spec.status === 'completed' &&
-        !needsWorkflowIntent &&
-        !config.hasWorkflowModeContext()
+        !needsWorkflowIntent
       ) {
         // Accept completed speculation: inject messages and apply files
         acceptSpeculation(spec, llmClient)
@@ -3572,11 +3563,7 @@ export const AppContainer = (props: AppContainerProps) => {
       }
 
       // Automatic speculation never received the current human intent.
-      if (
-        spec.status === 'running' ||
-        needsWorkflowIntent ||
-        (spec.status !== 'idle' && config.hasWorkflowModeContext())
-      ) {
+      if (spec.status === 'running' || needsWorkflowIntent) {
         abortSpeculation(spec).catch(() => {});
         speculationRef.current = IDLE_SPECULATION;
       }
@@ -3726,7 +3713,7 @@ export const AppContainer = (props: AppContainerProps) => {
       // the strip only pops trailing user entries, and a responded prompt is
       // not trailing.
       if (info?.wasGoalTurn) {
-        llmClient?.stripOrphanedUserEntriesFromHistory?.(true);
+        llmClient?.stripOrphanedUserEntriesFromHistory?.();
       }
 
       // Restore-on-cancel: pull the just-submitted prompt back into the input
@@ -3892,7 +3879,7 @@ export const AppContainer = (props: AppContainerProps) => {
       // contradict what the UI told the user was rewound. Mirrors the
       // existing strip in the Retry submit path
       // (LlmClient.sendMessageStream).
-      llmClient?.stripOrphanedUserEntriesFromHistory?.(true);
+      llmClient?.stripOrphanedUserEntriesFromHistory?.();
       // Also undo the cross-session ↑-history disk entry written by
       // useLlmStream's `logger.logMessage` — otherwise
       // getPreviousUserMessages would resurrect the cancelled prompt next
@@ -4126,16 +4113,9 @@ export const AppContainer = (props: AppContainerProps) => {
           if (result.suggestion) {
             setPromptSuggestion(result.suggestion);
             // Start speculation if enabled (runs in background)
-            if (
-              settings.merged.ui?.enableSpeculation &&
-              !config.hasWorkflowModeContext()
-            ) {
+            if (settings.merged.ui?.enableSpeculation) {
               startSpeculation(config, result.suggestion, ac.signal)
                 .then((state) => {
-                  if (ac.signal.aborted || config.hasWorkflowModeContext()) {
-                    void abortSpeculation(state).catch(() => {});
-                    return;
-                  }
                   speculationRef.current = state;
                 })
                 .catch(() => {

@@ -48,7 +48,6 @@ import {
 } from './bridgeTypes.js';
 import type {
   BackgroundNotificationTurn,
-  BridgeSessionState,
   BridgeWorkspaceGenerationNotificationEvent,
   BridgeGenerationNotificationEvent,
   BridgePendingInteraction,
@@ -702,7 +701,6 @@ export interface BridgeClientSessionEntry {
   sourceType?: string;
   sourceId?: string;
   events: EventBus;
-  restoreState?: BridgeSessionState;
   artifacts: SessionArtifactStore;
   artifactWorkspaceReady: boolean;
   prepareArtifactWorkspace?: () => Promise<void>;
@@ -1259,12 +1257,6 @@ export class BridgeClient implements Client {
     const events =
       entry?.events ?? this.resolvePendingRestoreEvents(params.sessionId);
     if (!events) return;
-    if (
-      entry?.restoreState &&
-      params.update.sessionUpdate === 'config_option_update'
-    ) {
-      entry.restoreState.configOptions = params.update.configOptions;
-    }
     const prepared = this.prepareSessionUpdateFrames(params, entry);
     for (const frame of prepared.frames) {
       events.publish(frame);

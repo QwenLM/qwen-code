@@ -287,35 +287,6 @@ function toolBlock(
 }
 
 describe('transcriptBlocksToDaemonMessages', () => {
-  it('keeps producer identity across live/history projections and separates identical tool results', () => {
-    const output = {
-      resultDisplay: { type: 'mcp_app', documentId: 'same-content' },
-    };
-    const live = transcriptBlocksToDaemonMessages([
-      toolBlock('live-block', 'producer-a', 'completed', 1, {
-        rawOutput: output,
-      }),
-    ]);
-    const history = transcriptBlocksToDaemonMessages([
-      toolBlock('history-block', 'producer-a', 'completed', 1, {
-        rawOutput: output,
-      }),
-      toolBlock('history-block-2', 'producer-b', 'completed', 2, {
-        rawOutput: output,
-      }),
-    ]);
-    const ids = (
-      messages: ReturnType<typeof transcriptBlocksToDaemonMessages>,
-    ) =>
-      messages.flatMap((message) =>
-        message.role === 'tool_group'
-          ? message.tools.map((tool) => tool.generatedUiToolCallId)
-          : [],
-      );
-    expect(ids(live)).toEqual(['producer-a']);
-    expect(ids(history)).toEqual(['producer-a', 'producer-b']);
-  });
-
   it('keeps shell input previews out of output while preserving actual content', () => {
     const block = toolBlock('shell-live', 'shell-1', 'in_progress', 1000, {
       toolName: 'run_shell_command',
@@ -4341,7 +4312,6 @@ describe('transcriptBlocksToDaemonMessages', () => {
       status: 'in_progress',
       kind: 'fetch',
     });
-    expect(pendingTool?.generatedUiToolCallId).toBeUndefined();
 
     const messages = transcriptBlocksToDaemonMessages([
       {
@@ -4384,7 +4354,6 @@ describe('transcriptBlocksToDaemonMessages', () => {
       toolName: 'web_fetch',
       status: 'completed',
       rawOutput: 'Content processed successfully.',
-      generatedUiToolCallId: 'webfetch-1',
     });
   });
 

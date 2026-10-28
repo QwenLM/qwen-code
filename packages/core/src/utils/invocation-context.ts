@@ -16,7 +16,6 @@ export interface InvocationContextV1 {
   readonly sessionId: string;
   readonly promptId: string;
   readonly originatorClientId?: string;
-  readonly workflowModeWriteAllowed?: boolean;
 }
 
 const invocationContextKeys = new Set([
@@ -24,7 +23,6 @@ const invocationContextKeys = new Set([
   'sessionId',
   'promptId',
   'originatorClientId',
-  'workflowModeWriteAllowed',
 ]);
 
 const invocationContextStorage = new AsyncLocalStorage<
@@ -61,21 +59,12 @@ export function parseInvocationContext(
     }
     originatorClientId = record['originatorClientId'];
   }
-  if (
-    Object.hasOwn(record, 'workflowModeWriteAllowed') &&
-    typeof record['workflowModeWriteAllowed'] !== 'boolean'
-  ) {
-    return undefined;
-  }
 
   return Object.freeze({
     version: 1,
     sessionId: record['sessionId'],
     promptId: record['promptId'],
     ...(originatorClientId ? { originatorClientId } : {}),
-    ...(typeof record['workflowModeWriteAllowed'] === 'boolean'
-      ? { workflowModeWriteAllowed: record['workflowModeWriteAllowed'] }
-      : {}),
   });
 }
 

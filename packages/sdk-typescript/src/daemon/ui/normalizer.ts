@@ -12,7 +12,7 @@ import type {
   DaemonSessionArtifactChange,
 } from '../types.js';
 import { DAEMON_ERROR_KINDS, parseDaemonBackgroundTurn } from '../types.js';
-import { asKnownDaemonEvent, isSettingsChangedData } from '../events.js';
+import { isSettingsChangedData } from '../events.js';
 import type {
   DaemonAgentIdentity,
   DaemonLoopStop,
@@ -283,7 +283,7 @@ export function normalizeDaemonEvent(
       return [];
 
     case 'session_rewound':
-      return normalizeSessionRewound(event, base, opts);
+      return normalizeSessionRewound(event, base);
 
     case 'session_branched':
       return normalizeSessionBranched(event, base);
@@ -583,7 +583,6 @@ function normalizeHistoryTruncated(
 function normalizeSessionRewound(
   event: DaemonEvent,
   base: NormalizedEventBase,
-  opts: NormalizeDaemonEventOptions,
 ): DaemonUiEvent[] {
   const promptId = getString(event.data, 'promptId');
   const targetTurnIndex = numberField(event.data, 'targetTurnIndex');
@@ -591,25 +590,11 @@ function normalizeSessionRewound(
     return fallbackDebug(event, base, 'malformed session_rewound payload');
   }
   const sessionId = getString(event.data, 'sessionId');
-  const daemonPromptId = getString(event.data, 'daemonPromptId');
-  let replay: DaemonUiEvent[] | undefined;
-  if (isRecord(event.data) && event.data['replay'] !== undefined) {
-    const known = asKnownDaemonEvent(event);
-    if (known?.type !== 'session_rewound') {
-      return fallbackDebug(event, base, 'malformed session_rewound replay');
-    }
-    // Replacement includes our own formerly optimistic user rows too.
-    replay = known.data.replay?.flatMap((frame) =>
-      normalizeDaemonEvent(frame, { ...opts, suppressOwnUserEcho: false }),
-    );
-  }
   return [
     {
       ...base,
       type: 'session.rewound',
-      ...(replay !== undefined ? { replay } : {}),
       promptId,
-      ...(daemonPromptId ? { daemonPromptId } : {}),
       targetTurnIndex,
       ...(sessionId ? { sessionId } : {}),
     },
@@ -1152,7 +1137,6 @@ function normalizeSessionUpdate(
     }
     case 'plan':
       return [normalizePlanUpdate(update, base)];
-    case 'config_option_update':
     case 'current_mode_update':
     case 'session_info_update':
     case 'usage_update':

@@ -18,10 +18,7 @@ import {
   SessionNotFoundError,
   SessionResetPendingError,
 } from './bridgeErrors.js';
-import {
-  SERVE_CONTROL_EXT_METHODS,
-  SERVE_STATUS_EXT_METHODS,
-} from './status.js';
+import { SERVE_CONTROL_EXT_METHODS } from './status.js';
 import {
   ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM,
   ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
@@ -339,17 +336,6 @@ describe('worktree reset session transfer', () => {
     it('fences the non-prompt writers that reach the checkout or the cwd', async () => {
       const handle = makeChannel({
         extMethodImpl: (method) => {
-          if (method === SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots) {
-            return {
-              snapshots: [
-                {
-                  promptId: 'prompt-1',
-                  daemonPromptId: 'daemon-reset-target',
-                  turnIndex: 0,
-                },
-              ],
-            };
-          }
           if (method === SERVE_CONTROL_EXT_METHODS.sessionRewind) {
             return { targetTurnIndex: 0, filesChanged: [], filesFailed: [] };
           }
@@ -372,15 +358,6 @@ describe('worktree reset session transfer', () => {
       try {
         const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
         const context = { clientId: session.clientId };
-        await bridge.sendPrompt(
-          session.sessionId,
-          {
-            sessionId: session.sessionId,
-            prompt: [{ type: 'text', text: 'rewind target before reset' }],
-          },
-          undefined,
-          { promptId: 'daemon-reset-target' },
-        );
         bridge.setSessionResetPending?.(session.sessionId);
 
         // A rewind restores files under the session cwd, a fork agent runs its
@@ -435,7 +412,6 @@ describe('worktree reset session transfer', () => {
           (call) => call.method,
         );
         for (const method of [
-          SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots,
           SERVE_CONTROL_EXT_METHODS.sessionRewind,
           SERVE_CONTROL_EXT_METHODS.sessionForkAgent,
           SERVE_CONTROL_EXT_METHODS.sessionBranch,

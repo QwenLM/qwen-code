@@ -46,7 +46,6 @@ import type {
   InstructionLoadReason,
 } from './types.js';
 import { SessionHooksManager } from './sessionHooksManager.js';
-import { resolveHookExecutionOwner } from './hook-execution-context.js';
 import type { AsyncHookRegistry } from './asyncHookRegistry.js';
 
 // Re-export MessagesProvider for external use
@@ -70,7 +69,7 @@ export class HookSystem {
   private messagesProvider?: MessagesProvider;
 
   constructor(
-    private readonly config: Config,
+    config: Config,
     private readonly managedDispatcher?: ManagedHookDispatcher,
   ) {
     // Get allowed HTTP URLs from config
@@ -164,27 +163,6 @@ export class HookSystem {
     const event = eventName as HookEventName;
     if (this.hookRegistry.getHooksForEvent(event).length > 0) return true;
     return this.sessionHooksManager.hasHooksForEvent(event, sessionId);
-  }
-
-  hasHooksMatchingTool(
-    eventName: string,
-    toolName: string,
-    sessionId?: string,
-  ): boolean {
-    if (this.managedDispatcher)
-      return this.managedDispatcher.hasHooksForEvent(eventName);
-    const event = eventName as HookEventName;
-    const owner = resolveHookExecutionOwner(
-      this.runtimeId,
-      sessionId ?? this.config.getSessionId(),
-    );
-    return Boolean(
-      this.hookPlanner.createExecutionPlan(event, { toolName }, owner)
-        ?.hookConfigs.length ||
-        this.sessionHooksManager
-          .getMatchingHooks(owner.sessionId, event, toolName)
-          .some((entry) => !entry.trustGated || this.config.isTrustedFolder()),
-    );
   }
 
   isManaged(): boolean {

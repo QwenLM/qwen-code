@@ -28,7 +28,7 @@ async function collect(
 }
 
 describe('EventBus', () => {
-  it('clears stale replay and keeps the compaction engine usable', async () => {
+  it('clears stale replay and keeps the compaction engine usable', () => {
     const bus = new EventBus(10, 10, new TurnBoundaryCompactionEngine());
     bus.seedReplayEvents([{ type: 'old', data: { text: 'deleted' } }]);
     expect(bus.snapshotReplay()?.compactedTurns).toHaveLength(1);
@@ -39,24 +39,6 @@ describe('EventBus', () => {
     expect(bus.snapshotReplay()?.compactedTurns).toMatchObject([
       { id: 2, type: 'new', data: { text: 'retained' } },
     ]);
-    const rewind = bus.publish({
-      type: 'session_rewound',
-      data: { replay: [] },
-    });
-    expect(rewind?.id).toBe(3);
-    expect(await collect(bus.subscribe({ lastEventId: 2 }), 1)).toEqual([
-      rewind,
-    ]);
-    const snapshot = bus.snapshotReplay()!;
-    expect(
-      [...snapshot.compactedTurns, ...snapshot.liveJournal].some(
-        (event) => event.type === 'session_rewound',
-      ),
-    ).toBe(false);
-    bus.resetReplay();
-    expect(bus.snapshotReplay()?.compactedTurns).toEqual([]);
-    expect(bus.snapshotReplay()?.liveJournal).toEqual([]);
-    expect(bus.lastEventId).toBe(3);
     bus.close();
   });
 

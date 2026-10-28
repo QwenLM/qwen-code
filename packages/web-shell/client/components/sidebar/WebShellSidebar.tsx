@@ -1,7 +1,6 @@
 import {
   Fragment,
   useCallback,
-  useContext,
   useEffect,
   useMemo,
   useRef,
@@ -75,7 +74,6 @@ import {
 import { WebShellThemeId, type WebShellTheme } from '../../themeContext';
 import { useBrand, useBrandName } from '../../brandContext';
 import { useI18n } from '../../i18n';
-import { McpAppGeneratedUiOwnerContext } from '../../mcpAppHostContext';
 import { Input } from '../ui/input';
 import { Button } from '../ui/button';
 import { Empty, EmptyMedia, EmptyDescription } from '../ui/empty';
@@ -1216,7 +1214,6 @@ export function WebShellSidebar({
   const actions = useActions();
   const workspaceActions = useWorkspaceActions();
   const workspace = useWorkspace();
-  const generatedUiOwner = useContext(McpAppGeneratedUiOwnerContext);
   // Fixed per-origin rank for host groups (#13727): every connected host,
   // including the focused one, occupies its stable position regardless of
   // focus, so switching hosts never reshuffles the sidebar.
@@ -3587,13 +3584,9 @@ export function WebShellSidebar({
     const removeSession =
       scope.kind === 'locked' || scope.kind === 'restricted'
         ? async (id: string) => {
-            const invalidateDeleted = generatedUiOwner?.captureSessionDeletion(
-              scope.cwd,
-            );
             const result = await workspace.client
               .workspaceByCwd(scope.cwd)
               .deleteSessionsData([id]);
-            invalidateDeleted?.([...result.removed, ...result.notFound]);
             const itemError = result.errors.find(
               (entry) => entry.sessionId === id,
             );
@@ -3628,7 +3621,6 @@ export function WebShellSidebar({
     deleteArchivedSession,
     deleteCandidate,
     deleteSession,
-    generatedUiOwner,
     getIdentityForSession,
     isCurrentSession,
     onError,

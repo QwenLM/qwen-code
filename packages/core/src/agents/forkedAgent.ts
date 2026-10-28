@@ -471,8 +471,6 @@ export interface ForkedAgentResult {
   terminateReason?: string;
   /** File paths observed in path-like tool call arguments during execution. */
   filesTouched: string[];
-  /** File paths from successful non-mutating tool results. */
-  filesRead?: string[];
   /** File paths from successful mutating tool results. */
   filesWritten?: string[];
   /** Aggregate model usage for this isolated agent run. */
@@ -685,12 +683,8 @@ export async function runForkedAgent(
   // this function ever switches away from YOLO the lifecycle stays
   // correct without further refactor.
   const filesTouched = new Set<string>();
-  const pendingFileCalls = new Map<
-    string,
-    { paths: string[]; mutating: boolean }
-  >();
+  const pendingMutatingPaths = new Map<string, string[]>();
   const filesWritten = new Set<string>();
-  const filesRead = new Set<string>();
   let usage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
 
   const initialMessages =
@@ -734,21 +728,17 @@ export async function runForkedAgent(
     for (const filePath of filePaths) {
       filesTouched.add(filePath);
     }
-    pendingFileCalls.set(event.callId, {
-      paths: filePaths,
-      mutating: isMutatingFileTool(event.name),
-    });
+    if (isMutatingFileTool(event.name)) {
+      pendingMutatingPaths.set(event.callId, filePaths);
+    }
   });
   emitter.on(AgentEventType.TOOL_RESULT, (event) => {
-    const pending = pendingFileCalls.get(event.callId);
-    pendingFileCalls.delete(event.callId);
     if (!event.success) {
+      pendingMutatingPaths.delete(event.callId);
       return;
     }
-    if (pending && !pending.mutating) {
-      for (const filePath of pending.paths) filesRead.add(filePath);
-    }
-    const filePaths = pending?.mutating ? pending.paths : [];
+    const filePaths = pendingMutatingPaths.get(event.callId) ?? [];
+    pendingMutatingPaths.delete(event.callId);
     for (const filePath of filePaths) {
       filesWritten.add(filePath);
     }
@@ -847,7 +837,6 @@ export async function runForkedAgent(
         finalText,
         filesTouched: touched,
         filesWritten: written,
-        filesRead: [...filesRead],
         usage,
       };
     }
@@ -858,7 +847,6 @@ export async function runForkedAgent(
         finalText,
         filesTouched: touched,
         filesWritten: written,
-        filesRead: [...filesRead],
         usage,
       };
     }
@@ -869,7 +857,6 @@ export async function runForkedAgent(
         finalText,
         filesTouched: touched,
         filesWritten: written,
-        filesRead: [...filesRead],
         usage,
       };
     }
@@ -879,7 +866,6 @@ export async function runForkedAgent(
       finalText,
       filesTouched: touched,
       filesWritten: written,
-      filesRead: [...filesRead],
       usage,
     };
   } finally {
