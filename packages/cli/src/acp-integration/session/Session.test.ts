@@ -13298,7 +13298,7 @@ describe('Session', () => {
         let snapshotBuilds = 0;
         getAvailableCommandsSpy.mockImplementation(async (_config, signal) => {
           snapshotBuilds += 1;
-          if (snapshotBuilds > 1) throw new Error('recursive snapshot rebuild');
+          if (snapshotBuilds > 2) throw new Error('recursive snapshot rebuild');
           const commands = await new SkillCommandLoader(
             mockConfig,
           ).loadCommands(signal);
@@ -13311,6 +13311,13 @@ describe('Session', () => {
           mockClient,
           mockSettings,
         );
+        let releaseFirstPublish!: () => void;
+        const firstPublish = new Promise<void>((resolve) => {
+          releaseFirstPublish = resolve;
+        });
+        vi.mocked(mockClient.sessionUpdate)
+          .mockImplementationOnce(() => firstPublish)
+          .mockResolvedValue(undefined);
         vi.mocked(mockClient.sessionUpdate).mockClear();
 
         await fs.writeFile(
@@ -13338,11 +13345,36 @@ describe('Session', () => {
           );
         });
 
+        await fs.writeFile(
+          skillFile,
+          '---\nname: review\ndescription: Review again\n---\n\nReview.\n',
+        );
+        await skillManager.refreshCache();
+        releaseFirstPublish();
+
+        await vi.waitFor(() => {
+          expect(snapshotBuilds).toBe(2);
+          expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(2);
+          expect(mockClient.sessionUpdate).toHaveBeenLastCalledWith(
+            expect.objectContaining({
+              update: expect.objectContaining({
+                sessionUpdate: 'available_commands_update',
+                availableCommands: expect.arrayContaining([
+                  expect.objectContaining({
+                    name: 'review',
+                    description: 'Review again',
+                  }),
+                ]),
+              }),
+            }),
+          );
+        });
+
         session.dispose();
         vi.mocked(mockClient.sessionUpdate).mockClear();
         await fs.writeFile(
           skillFile,
-          '---\nname: review\ndescription: Review again\n---\n\nReview.\n',
+          '---\nname: review\ndescription: Review after disposal\n---\n\nReview.\n',
         );
         await skillManager.refreshCache();
         expect(mockClient.sessionUpdate).not.toHaveBeenCalled();
