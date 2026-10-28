@@ -49,7 +49,7 @@ final class HostedOperatorRecoveryProbe implements AutoCloseable {
     HostedOperatorRecoveryProbe(ServletWebServerApplicationContext spring, List<Map<String, Object>> sessions,
             Path state, HttpServer server) {
         this.spring = spring;
-        this.jdbc = spring.getBean(JdbcTemplate.class);
+        this.jdbc = spring.getBean("managedJdbcTemplate", JdbcTemplate.class);
         this.sessions = sessions;
         this.state = state;
         broker = (RuntimeBrokerService) ReflectionTestUtils.getField(spring.getBean(EmbeddedRuntimeBroker.class), "service");

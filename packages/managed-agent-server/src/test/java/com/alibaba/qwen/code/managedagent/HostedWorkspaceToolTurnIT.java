@@ -233,12 +233,12 @@ class HostedWorkspaceToolTurnIT {
             public void validateConfiguration() {}
         });
         context.registerBean("unicodeGrants", ToolPublicationStore.class, () -> new ToolPublicationStore(
-                context.getBean(JdbcTemplate.class), context.getBean(PlatformTransactionManager.class),
+                context.getBean("managedJdbcTemplate", JdbcTemplate.class), context.getBean(PlatformTransactionManager.class),
                 context.getBean(ManagedSessionStore.class), context.getBean(ToolExecutionRepository.class),
                 context.getBean(RuntimeBindingRepository.class),
                 new ToolPublicationStore.Capacity(1024 * 1024, 16 * 1024 * 1024, 64 * 1024 * 1024, 4)));
         context.registerBean("unicodeData", ToolPublicationDataStore.class, () -> new ToolPublicationDataStore(
-                context.getBean(JdbcTemplate.class), context.getBean(PlatformTransactionManager.class),
+                context.getBean("managedJdbcTemplate", JdbcTemplate.class), context.getBean(PlatformTransactionManager.class),
                 context.getBean(ToolPublicationStore.class), context.getBean(ManagedSessionStore.class),
                 context.getBean(ToolPublicationObjectStore.class), Duration.ofSeconds(30), Duration.ofSeconds(5),
                 new ToolPublicationDataStore.VerificationBudget(1024 * 1024, Duration.ofMinutes(25))));
@@ -247,7 +247,7 @@ class HostedWorkspaceToolTurnIT {
             properties.getToolPublication().setEntryConcurrency(4);
             return new ToolPublicationController(context.getBean(ToolPublicationStore.class),
                     context.getBean(ToolPublicationDataStore.class),
-                    new ToolPublicationAdmissionStore(context.getBean(JdbcTemplate.class),
+                    new ToolPublicationAdmissionStore(context.getBean("managedJdbcTemplate", JdbcTemplate.class),
                             context.getBean(PlatformTransactionManager.class), context.getBean(ManagedSessionStore.class),
                             context.getBean(ToolPublicationDataStore.class)), properties);
         });
@@ -344,7 +344,7 @@ class HostedWorkspaceToolTurnIT {
                     "fg6eAuthentication", HostedGateTestSupport.authentication(tenant, "fg6e-fixture")));
         }
         try (var spring = (ServletWebServerApplicationContext) application.run(arguments.toArray(String[]::new))) {
-            JdbcTemplate jdbc = spring.getBean(JdbcTemplate.class);
+            JdbcTemplate jdbc = spring.getBean("managedJdbcTemplate", JdbcTemplate.class);
             if (unicode) {
                 spring.getBean(ManagedAgentProperties.class).getToolPublication()
                         .setServiceBaseUrl("http://127.0.0.1:" + spring.getWebServer().getPort());
