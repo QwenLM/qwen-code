@@ -357,6 +357,7 @@ class ManagedAgentApiContractTest {
     private FixtureHarness harness;
 
     @Autowired
+    @Qualifier("managedJdbcTemplate")
     private JdbcTemplate jdbc;
 
     @Autowired
