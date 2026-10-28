@@ -53,12 +53,21 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * Resolves the tool name a peer reports for a call. Peers frame it
- * differently: Claude Code nests it under `_meta.claudeCode.toolName`, while a
- * Qwen peer stamps `_meta.toolName` and carries `kind: 'think'` for a question.
- * Every reader in this file must agree, or one call would present two names —
- * a permission request under the Qwen name and its tool call/result under the
- * Claude-shaped fallback.
+ * Resolves the tool name a peer reports for a call. Peers frame it differently:
+ * Claude Code nests it under `_meta.claudeCode.toolName`, while a Qwen peer
+ * stamps `_meta.toolName` and carries `kind: 'think'` for a question. Every
+ * reader in this file goes through this one ladder, so a peer is never resolved
+ * under one framing here and another there — a permission request under the
+ * Qwen name and its tool call under the Claude-shaped fallback.
+ *
+ * A shared ladder is not the same as one value everywhere, and this file does
+ * not claim it. The name a call is announced with is first-frame-wins
+ * (`toolNames`), because `TOOL_CALL` is already emitted and cannot be recalled,
+ * while `response.toolName` carries the latest frame's resolution, which a peer
+ * may refine: announced as `kind: 'execute'`, later reported as
+ * `_meta.claudeCode.toolName: 'Bash'`. Both readings are pinned by tests, so a
+ * peer that renames mid-call shows the announced name in the events and the
+ * refined one in the response payload.
  */
 function resolvePeerToolName(tool: {
   _meta?: Record<string, unknown> | null;

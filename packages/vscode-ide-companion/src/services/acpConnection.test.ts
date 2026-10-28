@@ -211,60 +211,32 @@ describe('AcpConnection handshake wiring', () => {
     vi.restoreAllMocks();
   });
 
-  it('writes the structured-question capability on the initialize request it sends', async () => {
+  type CapturingConnection = {
+    connect: (cliEntryPath: string) => Promise<void>;
+    onAskUserQuestion: (data: unknown) => Promise<{
+      optionId: string;
+      answers?: Record<string, string>;
+    }>;
+  };
+
+  /**
+   * Boots a connection against the real `setupChildProcessHandlers` —
+   * deliberately not stubbed, so what these tests assert is what the extension
+   * puts on the wire — with a capturing stdin, a pushable stdout, and returns
+   * once the `initialize` frame has been written. `settle` fires the exit
+   * listeners `connect()` waits on.
+   */
+  async function connectCapturingHandshake(): Promise<{
+    conn: CapturingConnection;
+    written: string[];
+    stdout: Readable;
+    settle: () => Promise<void>;
+  }> {
     const written: string[] = [];
     const exitListeners: Array<
       (code: number | null, signal: string | null) => void
     > = [];
     // A real Writable so the SDK's ndjson stream actually serializes into it.
-    const stdin = new Writable({
-      write(chunk, _encoding, callback) {
-        written.push(String(chunk));
-        callback();
-      },
-    });
-    const child = createMockChild({
-      stdin,
-      stdout: new Readable({ read() {} }),
-      stderr: new Readable({ read() {} }),
-      on: (event: string, listener: (...args: unknown[]) => void) => {
-        if (event === 'exit') {
-          exitListeners.push(
-            listener as (code: number | null, signal: string | null) => void,
-          );
-        }
-        return child;
-      },
-    });
-    spawnMock.mockReturnValue(child);
-    const conn = new AcpConnection() as unknown as {
-      connect: (cliEntryPath: string) => Promise<void>;
-    };
-
-    // Deliberately not stubbing setupChildProcessHandlers: the point is to drive
-    // the real handshake, so a reverted capability call site turns this red.
-    const pending = conn.connect(process.execPath).catch(() => undefined);
-    // Poll for the frame rather than sleeping past the handler's settle delay:
-    // a fixed sleep leaves whatever margin that unnamed literal allows, and a
-    // miss reads as an empty capture, i.e. as a capability regression. The
-    // timeout must stay above it, since vi.waitFor defaults to the same 1s.
-    await vi.waitFor(
-      () => expect(written.join('')).toContain('"qwen.askUserQuestion":true'),
-      { timeout: 5_000, interval: 25 },
-    );
-    // connect() settles only once the child exits, and that same window is how
-    // a spawn failure is reported.
-    for (const listener of exitListeners) listener(0, null);
-    await pending;
-
-    expect(written.join('')).toContain('"qwen.askUserQuestion":true');
-  }, 20_000);
-
-  it('cancels a flattened question rather than voting an id the peer did not offer', async () => {
-    const written: string[] = [];
-    const exitListeners: Array<
-      (code: number | null, signal: string | null) => void
-    > = [];
     const stdin = new Writable({
       write(chunk, _encoding, callback) {
         written.push(String(chunk));
@@ -286,13 +258,38 @@ describe('AcpConnection handshake wiring', () => {
       },
     });
     spawnMock.mockReturnValue(child);
-    const conn = new AcpConnection() as unknown as {
-      connect: (cliEntryPath: string) => Promise<void>;
-      onAskUserQuestion: (data: unknown) => Promise<{
-        optionId: string;
-        answers?: Record<string, string>;
-      }>;
+    const conn = new AcpConnection() as unknown as CapturingConnection;
+    const pending = conn.connect(process.execPath).catch(() => undefined);
+    // Poll rather than sleep past the handler's settle delay: a fixed sleep
+    // leaves only whatever margin that unnamed literal allows, and a miss reads
+    // as an empty capture. The timeout must stay above it, since vi.waitFor
+    // defaults to the same 1s.
+    await vi.waitFor(
+      () => expect(written.join('')).toContain('"method":"initialize"'),
+      { timeout: 5_000, interval: 25 },
+    );
+    return {
+      conn,
+      written,
+      stdout,
+      // connect() settles only once the child exits, and that same window is
+      // how a spawn failure is reported.
+      settle: async () => {
+        for (const listener of exitListeners) listener(0, null);
+        await pending;
+      },
     };
+  }
+
+  it('writes the structured-question capability on the initialize request it sends', async () => {
+    const { written, settle } = await connectCapturingHandshake();
+    await settle();
+
+    expect(written.join('')).toContain('"qwen.askUserQuestion":true');
+  }, 20_000);
+
+  it('cancels a flattened question rather than voting an id the peer did not offer', async () => {
+    const { conn, written, stdout, settle } = await connectCapturingHandshake();
     // The webview votes the structured-question id. A peer that flattened the
     // question never offered it, so the handler must cancel instead of echoing
     // it back: the agent throws "unoffered option" and discards the answers.
@@ -300,12 +297,6 @@ describe('AcpConnection handshake wiring', () => {
       optionId: ToolConfirmationOutcome.ProceedOnce,
       answers: { '0': 'Alpha' },
     });
-
-    const pending = conn.connect(process.execPath).catch(() => undefined);
-    await vi.waitFor(
-      () => expect(written.join('')).toContain('"qwen.askUserQuestion":true'),
-      { timeout: 5_000, interval: 25 },
-    );
 
     // A flattened frame arriving from a peer that ignored (or predates) the
     // capability this companion just advertised. Its option set matches
@@ -359,8 +350,7 @@ describe('AcpConnection handshake wiring', () => {
     });
     expect(written.join('')).not.toContain(ToolConfirmationOutcome.ProceedOnce);
 
-    for (const listener of exitListeners) listener(0, null);
-    await pending;
+    await settle();
   }, 20_000);
 });
 
