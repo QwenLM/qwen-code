@@ -2854,7 +2854,7 @@ jobs:
               | last // "0"' "${WORKDIR}/ic.json" 2> /dev/null || echo '0')"
             [[ "${ROUND_START}" =~ ^[0-9]{1,2}$ ]] || ROUND_START=0
             # Per ENGAGEMENT, not per window. → qwen-autofix.md#af-159
-            BUDGET_FLOOR="$(jq -r --arg ab "${AUTOFIX_BOT}" '[ .[] | select((.user.login // "") == $ab) | select((.body // "") as $b | ($b | contains("<!-- takeover-ack engaged -->")) or (($b | contains("<!-- autofix-rearm -->")) and (($b | contains("<!-- autofix-eval ")) | not))) | .created_at ] | max // ""' "${WORKDIR}/ic.json" 2> /dev/null || echo '')"
+            BUDGET_FLOOR="$(jq -r --arg ab "${AUTOFIX_BOT}" '[ .[] | select((.user.login // "") == $ab) | select((.body // "") as $b | ($b | contains("<!-- takeover-ack engaged -->")) or ($b | contains("<!-- takeover-ack released -->")) or (($b | contains("<!-- autofix-rearm -->")) and (($b | contains("<!-- autofix-eval ")) | not))) | .created_at ] | max // ""' "${WORKDIR}/ic.json" 2> /dev/null || echo '')"
             ROUND_BUDGET="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg f "${BUDGET_FLOOR}" '[ .[] | select((.user.login // "") == $ab) | select((.created_at // "") >= $f) | ((.body // "") | [ scan("<!-- autofix-round-budget ([1-9][0-9]?) -->") ] | .[] | .[0]) ] | last // "0"' "${WORKDIR}/ic.json" 2> /dev/null || echo '0')"
             [[ "${ROUND_BUDGET}" =~ ^[0-9]{1,2}$ ]] || ROUND_BUDGET=0
             IS_BOT_AUTHOR="$(jq -r --arg ab "${AUTOFIX_BOT}" '((.author.login // "") == $ab)' <<< "${PR_META}")"
@@ -2877,7 +2877,11 @@ jobs:
             ROUND="$(jq -r --arg key "${REARM_KEY}" --argjson start "${ROUND_START}" 'map(select(.win == $key)) | map(.round) | max // $start' <<< "${MARKERS}")"
             # A breaker stop is NOT a spent budget: a sentinel in the engagement,
             # a round past the attempts, or a convergence notice parks the PR.
-            BUDGET_SENTINELS="$(jq -r --arg f "${BUDGET_FLOOR}" '[ .[] | select(.win != "none" and .win >= $f) | select(.ts == "9999-12-31T23:59:59Z") ] | length' <<< "${MARKERS}" 2> /dev/null || echo 0)"
+            # Idle (silent-sandbox) timeouts write the sentinel too, but the
+            # cumulative breaker excludes them (af-073): map their runs and
+            # drop them here as well.
+            BUDGET_IDLE_RUNS="$(jq -c --arg ab "${AUTOFIX_BOT}" '[ .[] | select((.user.login // "") == $ab) | select((.body // "") | contains("(idle-timeout")) | (.body // "") | scan("actions/runs/([0-9]+)") | .[0] ] | unique' "${WORKDIR}/ic.json" 2> /dev/null || echo '[]')"
+            BUDGET_SENTINELS="$(jq -r --arg f "${BUDGET_FLOOR}" --argjson idle "${BUDGET_IDLE_RUNS:-[]}" '[ .[] | select(.win != "none" and .win >= $f) | select(.ts == "9999-12-31T23:59:59Z") | select((.run // "") as $r | ($idle | index($r)) == null) ] | length' <<< "${MARKERS}" 2> /dev/null || echo 0)"
             [[ "${BUDGET_SENTINELS}" =~ ^[0-9]+$ ]] || BUDGET_SENTINELS=0
             BUDGET_HALTED=false
             [[ "${ROUND}" -gt "$(( ROUND_START + BUDGET_USED ))" ]] && BUDGET_HALTED=true
@@ -3173,17 +3177,9 @@ jobs:
             if [[ "${CONV_STREAK}" -ge "${CONVERGENCE_BREAK_ROUNDS}" ]]; then
               CONV_PARKED='true'
             else
-              # Release census = the park's own enumeration: a posted notice
-              # HOLDS the park until the boundary itself moves (a trusted-
-              # human response or a re-arm). Any clean round resets the
-              # streak — including the review a maintainer push triggers via
-              # synchronize — but must not silently release: the dedup
-              # counts notices newer than the boundary, so a release-then-
-              # re-trip would re-park under the stale notice with no fresh
-              # one. If the signal resumes, the streak census above re-parks
-              # loudly; this hold only keeps the quiet middle honest.
-              # Mirrored live in prepare and in the report guard; keep in
-              # lockstep. Full rationale → qwen-autofix.md#af-152
+              # Release census = the park's own enumeration: a posted notice HOLDS the park until
+              # the boundary moves. Mirrored in prepare and the report guard — keep in lockstep.
+              # Full rationale → qwen-autofix.md#af-152
               CONV_NOTICES="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg since "${CONV_SINCE}" '
                 [ .[] | select((.user.login // "") == $ab)
                   | select((.body // "") | contains("<!-- autofix-convergence-break -->"))
@@ -4374,7 +4370,7 @@ jobs:
             LIVE_ROUND_START=$(( MAX_ROUNDS - 1 ))
           fi
           LIVE_MAX_ROUND="$(jq -r --arg key "${LIVE_REARM_KEY}" --argjson start "${LIVE_ROUND_START}" 'map(select(.win == $key)) | map(.round) | max // $start' <<< "${LIVE_MARKS}")"
-          LIVE_BUDGET_FLOOR="$(jq -r --arg ab "${AUTOFIX_BOT}" '[ .[] | select((.user.login // "") == $ab) | select((.body // "") as $b | ($b | contains("<!-- takeover-ack engaged -->")) or (($b | contains("<!-- autofix-rearm -->")) and (($b | contains("<!-- autofix-eval ")) | not))) | .created_at ] | max // ""' "${WORKDIR}/ic.json" 2> /dev/null || echo '')"
+          LIVE_BUDGET_FLOOR="$(jq -r --arg ab "${AUTOFIX_BOT}" '[ .[] | select((.user.login // "") == $ab) | select((.body // "") as $b | ($b | contains("<!-- takeover-ack engaged -->")) or ($b | contains("<!-- takeover-ack released -->")) or (($b | contains("<!-- autofix-rearm -->")) and (($b | contains("<!-- autofix-eval ")) | not))) | .created_at ] | max // ""' "${WORKDIR}/ic.json" 2> /dev/null || echo '')"
           LIVE_ROUND_BUDGET="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg f "${LIVE_BUDGET_FLOOR}" '[ .[] | select((.user.login // "") == $ab) | select((.created_at // "") >= $f) | ((.body // "") | [ scan("<!-- autofix-round-budget ([1-9][0-9]?) -->") ] | .[] | .[0]) ] | last // "0"' "${WORKDIR}/ic.json" 2> /dev/null || echo '0')"
           LIVE_ATTEMPTS="$(jq -r --arg f "${LIVE_BUDGET_FLOOR}" '[.[] | select(.win != "none" and .win >= $f) | (.run // "\(.ts)|\(.round)")] | unique | length' <<< "${LIVE_MARKS}" 2> /dev/null || echo 0)"
           [[ "${LIVE_ATTEMPTS}" =~ ^[0-9]+$ ]] || LIVE_ATTEMPTS=0
@@ -6377,18 +6373,8 @@ jobs:
                     if [[ -n "${MAIN_HEAD_R}" && -n "${REPORT_HEAD}" ]]; then
                       CMP_R="$(gh api "repos/${REPO}/compare/${MAIN_HEAD_R}...${REPORT_HEAD}" --jq '.status' 2> /dev/null || echo '')"
                       if [[ "${CMP_R}" == 'behind' || "${CMP_R}" == 'diverged' ]]; then
-                        # Review-in-flight hold for the loop's OWN report-time
-                        # head move (#10110), fail-open on probe errors. Wider
-                        # than the scan's dispatch gate (#8888), which holds
-                        # only on IN_PROGRESS now that a queued review can sit
-                        # out a whole closed `ecs-review` window; a hold here
-                        # only defers one stale-base merge the next round
-                        # retries. The probe sees LIFECYCLE runs only: a
-                        # command run executes against the base branch, so its
-                        # review-pr check never shows under this PR's rollup,
-                        # and the runs fallback is event-scoped to
-                        # pull_request_target — an in-flight command review
-                        # does NOT hold the refresh (af-155).
+                        # Review-in-flight hold for the report-time head move (#10110, af-155):
+                        # LIFECYCLE runs only, and fail-open on probe errors.
                         # Full rationale → qwen-autofix.md#af-155
                         ROLLUP_R="$(gh pr view "${PR}" --repo "${REPO}" --json statusCheckRollup --jq '.statusCheckRollup // []' 2> /dev/null || echo '[]')"
                         REVIEW_LIVE_R="$(jq -r '
@@ -6795,18 +6781,7 @@ jobs:
         if: |-
           ${{ always() && steps.prepare.outputs.stale != 'true' && needs.route.outputs.dry_run != 'true' }}
         env:
-          # Startup-channel pins, the gate steps' doctrine: BASH_ENV is
-          # sourced by bash at process STARTUP, before the launch below,
-          # and SHELLOPTS is the sibling option-import channel — a
-          # body-side unset is one hop late, so both are pinned empty at
-          # step level, which outranks any $GITHUB_ENV plant. The LD_*
-          # family is mapped by ld.so at startup the same way. These pins
-          # protect the parent shell that executes the launch; the
-          # BASH_FUNC_<name>%% channel no env: block can enumerate — the
-          # attacker chooses the name, and bash imports the entries as
-          # functions at startup even under --norc, ahead of builtins and
-          # PATH — is closed by the env -i clean child below (R9-1), the
-          # gate's R6-4 pattern.
+          # Startup-channel pins: BASH_ENV/SHELLOPTS/LD_* at step level, BASH_FUNC via the env -i child.
           # Full rationale → qwen-autofix.md#af-149
           BASH_ENV: ''
           SHELLOPTS: ''

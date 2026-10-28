@@ -4182,6 +4182,88 @@ describe('qwen-autofix workflow', () => {
     ).toBe('1');
   });
 
+  it('lets an explicit release close a spent budget, and keeps idle timeouts out of the halt', () => {
+    // Two behaviours at the engagement floor:
+    //  - `takeover-ack released` (an explicit `stop`, or a hand-removal) moves
+    //    the floor, so no budget is read afterwards: a SPENT budget on a bot PR
+    //    must not outlive the maintainer's own release, even though it does
+    //    outlive the shepherd's silent one.
+    //  - idle (silent-sandbox) timeouts write the sentinel too, and the
+    //    cumulative breaker excludes them (af-073), so the halt census must
+    //    subtract the same rounds or three infra wedges park a for-N window.
+    const lines = reviewScanJob.split('\n');
+    const slice = (from, count) => {
+      const start = lines.findIndex((l) => l.includes(from));
+      expect(start).toBeGreaterThanOrEqual(0);
+      return lines
+        .slice(start, start + count)
+        .join('\n')
+        .replace(/\n {12}/g, '\n');
+    };
+    const floorAndBudget = slice('BUDGET_FLOOR="$(', 2);
+    const idleAndSentinels = slice('BUDGET_IDLE_RUNS="$(', 3);
+    const run = (script) =>
+      execFileSync('bash', ['-c', script], { encoding: 'utf8' }).trim();
+
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-floor-release-'));
+    try {
+      writeFileSync(
+        join(dir, 'ic.json'),
+        JSON.stringify([
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: '2026-07-18T10:00:00Z',
+            body: '<!-- takeover-ack engaged -->\n<!-- autofix-round-budget 2 -->',
+          },
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: '2026-07-18T11:00:00Z',
+            body: '<!-- takeover-ack released -->',
+          },
+        ]),
+      );
+      expect(
+        run(
+          `AUTOFIX_BOT='qwen-code-dev-bot'\nWORKDIR='${dir}'\n${floorAndBudget}\nprintf '%s|%s' "$BUDGET_FLOOR" "$ROUND_BUDGET"`,
+        ),
+      ).toBe('2026-07-18T11:00:00Z|0');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+
+    const sentinels = (idleRuns) => {
+      const d2 = mkdtempSync(join(tmpdir(), 'autofix-idle-sentinel-'));
+      try {
+        writeFileSync(
+          join(d2, 'ic.json'),
+          JSON.stringify(
+            idleRuns.map((r) => ({
+              user: { login: 'qwen-code-dev-bot' },
+              created_at: '2026-07-18T10:00:00Z',
+              body:
+                '⏸ AutoFix ran out of time before finishing (idle-timeout) ' +
+                `[View job](https://x/actions/runs/${r}/job/1)`,
+            })),
+          ),
+        );
+        const markers = [1, 2, 3].map((i) => ({
+          ts: '9999-12-31T23:59:59Z',
+          round: i,
+          win: 'T1',
+          run: `${1000 + i}`,
+          at: '',
+        }));
+        return run(
+          `AUTOFIX_BOT='qwen-code-dev-bot'\nWORKDIR='${d2}'\nBUDGET_FLOOR=''\nMARKERS='${JSON.stringify(markers)}'\n${idleAndSentinels}\nprintf '%s' "$BUDGET_SENTINELS"`,
+        );
+      } finally {
+        rmSync(d2, { recursive: true, force: true });
+      }
+    };
+    expect(sentinels(['1001', '1002', '1003'])).toBe('0');
+    expect(sentinels([])).toBe('3');
+  });
+
   it('reads the prepare budget from the engagement, and only while it is live', () => {
     // prepare mirrors the scan's census: the same engagement floor (a re-arm
     // carrying an eval marker does NOT open one) and the same liveness rule
