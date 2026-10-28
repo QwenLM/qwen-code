@@ -1102,6 +1102,8 @@ export class ShellExecutionService {
         let remainingDrainMs = POST_EXIT_STREAM_DRAIN_MS;
         let drainStartedAt = 0;
         let stdoutHeld = false;
+        // Whether the drain stopped waiting for stderr; only the decode reads it.
+        let stderrHeld = false;
         let pendingCaptureWrites = 0;
         let stdoutEnded = false;
         let stderrEnded = false;
@@ -1120,6 +1122,7 @@ export class ShellExecutionService {
           }
           if (remainingDrainMs <= 0) {
             stdoutHeld = !stdoutEnded;
+            stderrHeld = !stderrEnded;
             void handleExit(recordedExit.code, recordedExit.signal);
             return;
           }
@@ -1127,6 +1130,7 @@ export class ShellExecutionService {
           drainTimer = setTimeout(() => {
             drainTimer = null;
             stdoutHeld = !stdoutEnded;
+            stderrHeld = !stderrEnded;
             const recorded = recordedExit;
             if (recorded) void handleExit(recorded.code, recorded.signal);
           }, remainingDrainMs);
@@ -1377,7 +1381,8 @@ export class ShellExecutionService {
             // UTF-8; decode each stream again from its complete bytes, as
             // the PTY path does at exit.
             // A cancel or a signal ends both streams; the capture limit cuts
-            // only the streams it dropped bytes from. A background promote
+            // only the streams it dropped bytes from, and the post-exit drain
+            // only the streams it stopped waiting for. A background promote
             // that finds the shell already exited cut nothing.
             const endedEarly =
               (abortSignal.aborted &&
@@ -1385,11 +1390,11 @@ export class ShellExecutionService {
               signal !== null;
             stdout = decodeCompleteOutput(
               Buffer.concat(stdoutBytes),
-              stdoutCut || endedEarly,
+              stdoutCut || stdoutHeld || endedEarly,
             );
             stderr = decodeCompleteOutput(
               Buffer.concat(stderrBytes),
-              stderrCut || endedEarly,
+              stderrCut || stderrHeld || endedEarly,
             );
           }
           // Ensure we don't add an extra newline if stdout already ends with one.

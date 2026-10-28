@@ -2309,6 +2309,54 @@ describe('ShellExecutionService child_process fallback', () => {
     expect(result.output).not.toContain('x'.repeat(100));
   });
 
+  it.each(['stdout', 'stderr'] as const)(
+    'decodes %s that the post-exit drain stopped waiting for as cut-off UTF-8 on a legacy code page',
+    async (stream) => {
+      useSystemEncoding('gbk');
+      vi.useFakeTimers();
+      try {
+        for (const pipe of [
+          mockChildProcess.stdout!,
+          mockChildProcess.stderr!,
+        ]) {
+          Object.assign(pipe, { pause: vi.fn(), resume: vi.fn() });
+        }
+        const capture = {
+          write: vi.fn(async () => {}),
+          finish: vi.fn(async () => {}),
+          setStarted: vi.fn(),
+          setProcessResult: vi.fn(),
+        };
+        const handle = await ShellExecutionService.execute(
+          'server &',
+          '/test/dir',
+          onOutputEventMock,
+          new AbortController().signal,
+          true,
+          shellExecutionConfig,
+          { rawCapture: capture },
+        );
+        // A background server keeps this stream open, so the drain gives up
+        // partway through 好; the other stream ends normally.
+        emitOut('Listening on port 8080\n', stream);
+        emitOut(Buffer.from('你好').subarray(0, 4), stream);
+        (stream === 'stdout'
+          ? mockChildProcess.stderr!
+          : mockChildProcess.stdout!
+        ).emit('end');
+        mockChildProcess.emit('exit', 0, null);
+        await vi.advanceTimersByTimeAsync(1000);
+        const result = await handle.result;
+        expect(result.stdoutHeldAfterExit).toBe(
+          stream === 'stdout' ? true : undefined,
+        );
+        expect(result.output).toBe('Listening on port 8080\n你\ufffd');
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it('keeps recent stderr visible after later stdout fills the preview tail', async () => {
     const { result, capture } = await runCaptured(
       'failing build',
