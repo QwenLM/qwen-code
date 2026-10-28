@@ -652,8 +652,11 @@ describe('formatJsonPayload', () => {
     });
   });
 
-  it('leaves deeply nested JSON unformatted', () => {
-    const text = '['.repeat(4000) + ']'.repeat(4000);
+  it('leaves deeply nested small JSON unformatted', () => {
+    const text = '{"a":'.repeat(40) + '1' + '}'.repeat(40);
+    expect(JSON.stringify(JSON.parse(text), null, 2).length).toBeLessThan(
+      EXPANDED_TOOL_PAYLOAD_LENGTH,
+    );
     expect(formatJsonPayload(text)).toEqual({ text, json: false });
   });
 

@@ -370,9 +370,11 @@ function ToolPayloadBlock({
 }) {
   const { t } = useI18n();
   const renderMode = useTranscriptRenderMode();
-  const truncated = payload.text.length > limit;
-  const displayed = truncateText(payload.text, limit);
-  const shown = sanitizeControlChars(displayed);
+  // Escape before applying the cap: control-character escapes can expand a
+  // payload up to six characters per input character.
+  const escaped = sanitizeControlChars(truncateText(payload.text, limit));
+  const shown = escaped.length > limit ? truncateText(escaped, limit) : escaped;
+  const truncated = payload.text.length > limit || escaped.length > limit;
   // Highlight a canonical JSON payload as long as it fits the Markdown budget.
   // The former 1000-line read-file guard is deliberately not applied here: a
   // tool result is one logical value, not a file preview, and can be short in
@@ -380,7 +382,7 @@ function ToolPayloadBlock({
   // records). formatJsonPayload already caps the formatted text by render mode,
   // and the read-file line budget lives on to guard ExpandedReadContent below.
   const renderAsMarkdown =
-    payload.json && displayed.length <= MAX_MARKDOWN_READ_CHARS;
+    payload.json && shown.length <= MAX_MARKDOWN_READ_CHARS;
   return (
     <>
       {renderAsMarkdown ? (
@@ -401,14 +403,31 @@ function ToolPayloadBlock({
   );
 }
 
-function toolResultText(tool: ACPToolCall): string {
+function toolResultText(tool: ACPToolCall, includeExtractText = true): string {
   const texts: string[] = [];
   for (const block of tool.content ?? []) {
     if (block.type === 'content' && typeof block.content?.text === 'string') {
       texts.push(block.content.text);
     }
   }
-  return texts.length > 0 ? texts.join('\n') : (extractText(tool) ?? '');
+  if (texts.length > 0) return texts.join('\n');
+  return includeExtractText ? (extractText(tool) ?? '') : '';
+}
+
+function cancelledOutputText(rawOutput: unknown): string {
+  if (typeof rawOutput === 'string') return rawOutput;
+  if (
+    rawOutput === null ||
+    typeof rawOutput !== 'object' ||
+    Array.isArray(rawOutput)
+  ) {
+    return '';
+  }
+  const record = rawOutput as Record<string, unknown>;
+  for (const key of ['text', 'output', 'stdout'] as const) {
+    if (typeof record[key] === 'string') return record[key];
+  }
+  return '';
 }
 
 function GenericToolDetails({
@@ -430,17 +449,16 @@ function GenericToolDetails({
   );
   const resultText = useMemo(
     () =>
-      tool.wasCancelled
-        ? ''
-        : toolResultText(tool) || stringifyValue(tool.rawOutput) || '',
+      toolResultText(tool, !tool.wasCancelled) ||
+      (tool.wasCancelled
+        ? cancelledOutputText(tool.rawOutput)
+        : stringifyValue(tool.rawOutput)) ||
+      '',
     [tool],
   );
   const renderMode = useTranscriptRenderMode();
   const documentMode = renderMode === 'document';
-  const formatLimit = documentMode
-    ? MAX_DOCUMENT_JSON_PAYLOAD_LENGTH
-    : EXPANDED_TOOL_PAYLOAD_LENGTH;
-  const formatInputLimit = documentMode
+  const formatBudget = documentMode
     ? MAX_DOCUMENT_JSON_PAYLOAD_LENGTH
     : EXPANDED_TOOL_PAYLOAD_LENGTH;
   const [expanded, setExpanded] = useState(false);
@@ -453,12 +471,12 @@ function GenericToolDetails({
   // Pretty-printing grows a compact payload, and the blocks truncate what they
   // render, so the "Show more" decision has to use the formatted lengths.
   const argumentsPayload = useMemo(
-    () => formatJsonPayload(argumentsText, formatLimit, formatInputLimit),
-    [argumentsText, formatLimit, formatInputLimit],
+    () => formatJsonPayload(argumentsText, formatBudget, formatBudget),
+    [argumentsText, formatBudget],
   );
   const resultPayload = useMemo(
-    () => formatJsonPayload(resultText, formatLimit, formatInputLimit),
-    [resultText, formatLimit, formatInputLimit],
+    () => formatJsonPayload(resultText, formatBudget, formatBudget),
+    [resultText, formatBudget],
   );
   const canExpand =
     !documentMode &&
@@ -1610,9 +1628,7 @@ export const ToolLine = memo(function ToolLine({
     tool.rawOutput !== null &&
     (typeof tool.rawOutput !== 'string' || tool.rawOutput.length > 0);
   const hasGenericResult =
-    showGenericDetails &&
-    !tool.wasCancelled &&
-    (hasContentText || hasRawOutput);
+    showGenericDetails && (hasContentText || hasRawOutput);
   const hasGenericPayload =
     hasGenericArguments ||
     hasGenericResult ||

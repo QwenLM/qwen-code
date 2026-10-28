@@ -3240,7 +3240,8 @@ describe('generic tool card details', () => {
 
     expect(container.textContent).toContain('line one');
     expect(container.textContent).toContain('line two');
-    expect(container.querySelector('pre')).not.toBeNull();
+    expect(container.querySelector('[class*="payloadText"]')).not.toBeNull();
+    expect(container.querySelector('[class*="payloadJson"]')).toBeNull();
   });
 
   it('shows the failure text in the Result block', () => {
@@ -3303,20 +3304,23 @@ describe('generic tool card details', () => {
   });
 
   it('stops at the expanded cap and keeps the truncation notice', () => {
+    const midMarker = 'MID-MARKER';
     const pastCap = 'PAST-40K-MARKER';
     const container = renderToolLine(
       makeTool({
         toolName: 'mcp__demo__huge',
-        rawOutput: `${'x'.repeat(40_000)}${pastCap}`,
+        rawOutput: `${'x'.repeat(39_900)}${midMarker}${'x'.repeat(100)}${pastCap}`,
       }),
       { forceExpanded: true },
     );
 
+    expect(container.textContent).not.toContain(midMarker);
     const more = [...container.querySelectorAll('button')].find(
       (button) => button.textContent === 'Show more',
     );
     expect(more).toBeDefined();
     act(() => more?.click());
+    expect(container.textContent).toContain(midMarker);
     expect(container.textContent).not.toContain(pastCap);
     expect(container.textContent).toContain('Content truncated');
   });
@@ -3527,6 +3531,20 @@ describe('generic tool card details', () => {
     expect(text).not.toContain('\u202e');
   });
 
+  it('bounds the rendered payload after escaping control characters', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__nul',
+        rawOutput: '\u0000'.repeat(2000),
+      }),
+      { forceExpanded: true },
+    );
+
+    const payload = container.querySelector('[class*="payloadText"]');
+    expect(payload).not.toBeNull();
+    expect(payload?.textContent?.length ?? 0).toBeLessThanOrEqual(4003);
+  });
+
   it('does not repeat a cancelled call input as the result', () => {
     const container = renderToolLine(
       makeTool({
@@ -3544,7 +3562,8 @@ describe('generic tool card details', () => {
     );
 
     const text = container.textContent ?? '';
-    expect(text).toContain('Cancelled');
+    expect(text).toContain('partial');
+    expect(text).not.toContain('"reason"');
     expect(text.split('"method": "ping"').length - 1).toBe(1);
   });
 
@@ -3589,6 +3608,32 @@ describe('generic tool card details', () => {
 
     expect(container.textContent).not.toContain(tail);
     expect(container.textContent).toContain('Content truncated');
+  });
+
+  it('keeps document-mode JSON formatting above the interactive budget', () => {
+    const items = Array.from({ length: 1200 }, (_, i) => ({
+      id: i,
+      name: 'x'.repeat(30),
+    }));
+    const raw = JSON.stringify(items);
+    const formatted = JSON.stringify(items, null, 2);
+    expect(raw.length).toBeGreaterThan(40_000);
+    expect(formatted.length).toBeLessThan(100_000);
+
+    const container = renderToolGroup(
+      [
+        makeTool({
+          toolName: 'mcp__demo__docjson',
+          rawOutput: raw,
+        }),
+      ],
+      {},
+      undefined,
+      'document',
+    );
+
+    expect(container.querySelector('[class*="payloadJson"]')).not.toBeNull();
+    expect(container.querySelector('[class*="payloadText"]')).toBeNull();
   });
 
   it('shows the full payload without Show more in document mode', () => {
