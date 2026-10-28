@@ -91,10 +91,13 @@ plus a pointer:
 # Full rationale → qwen-autofix.md#af-030
 ```
 
-Each section below is the **verbatim** text of the block that pointer replaced,
-titled with the job and step it belongs to. Editing rules: keep the pointer and
-the section id in sync, put new long-form reasoning here rather than in the
-YAML, and never delete a section without deleting its pointer.
+Each section below carries the text of the block that pointer replaced, titled
+with the job and step it belongs to. A summary line may be rewritten after the
+block was compressed (the section is then authoritative, not the comment), and
+af-160 marks the entries whose text is new rather than moved. Editing rules:
+keep the pointer and the section id in sync, put new long-form reasoning here
+rather than in the YAML, and never delete a section without deleting its
+pointer.
 
 This file records _why the code is the way it is_, indexed by code site. For
 task-oriented guides — what a maintainer types and what happens next — see:
@@ -4409,6 +4412,7 @@ The lane names in `LOOP_OWNED_LANES` are pinned against the workflows' own
 the JSON entry.
 
 ```text
+Classify the live head: a round that pushes onto a fully
 GREEN head and leaves it red introduced the red. Until this
 existed the loop had no notion of a regression at all —
 `grep -rE 'regress|introduced'` over the workflow, the gate
@@ -4596,7 +4600,9 @@ states "N rounds".
 
 'for N' is the second parameterized form, and it is a separate marker
 rather than a field on the ack literal for the same reason the seed is
-(af-016): the ack is matched by substring everywhere.
+(af-016): the ack is matched by substring everywhere. The re-arm invariants
+this relies on are recorded in docs/design/autofix-growth-audit.md — read
+that before changing how the audit re-arms.
 
 The budget is enforced in two steps, and the second is why spend is
 counted in eval markers rather than in ROUND:
@@ -4623,20 +4629,26 @@ counted in eval markers rather than in ROUND:
   the cumulative timeout breaker counts timeouts across the window with
   pushes between them (so the trailing run stays short), and the
   convergence breaker only pushes. The release is gated on
-  BUDGET_HALTED — a sentinel anywhere in the engagement, a round past
-  ROUND_START + attempts, or a convergence-break notice newer than the
-  window key — so all three park on the paused path instead of
-  releasing.
+  BUDGET_HALTED — TIMEOUT_WINDOW_CAP (3) sentinel-stamped rounds in the
+  engagement with idle (silent-sandbox) rounds subtracted (af-073), a
+  round past ROUND_START + attempts, or a convergence-break notice newer
+  than the window key — so all three park on the paused path instead of
+  releasing. ONE crash or timeout does not halt anything: it only spends
+  its attempt.
 - A SPENT budget outlives the label's AUTOMATIC removal: the shepherd
   auto-releases a paused bot PR after three days, and if the budget died
   with that label the effective cap would fall back to 10 and rounds
   N+1..10 would run on a PR the dashboard still shows as awaiting a
   human. A spent budget therefore survives for a bot-authored
   engagement. An UNSPENT one still dies with the label, and a human
-  release keeps no cap at all (af-160).
+  release keeps no cap at all (af-160). An explicit 'stop' DOES end a
+  spent budget: its 'takeover-ack released' marker is a floor boundary,
+  so the engagement closes and standard management resumes — the one
+  release the loop can tell apart from a silent label removal.
 - It is ENGAGEMENT-scoped, and that is not the same key as the window.
   The budget is read from every ack/re-arm at or after the anchor whose
-  comment carries it — BUDGET_FLOOR: a 'takeover-ack engaged', or an
+  comment carries it — BUDGET_FLOOR: a 'takeover-ack engaged', a
+  'takeover-ack released' (which CLOSES the engagement), or an
   'autofix-rearm' that does NOT also carry an 'autofix-eval ' marker.
   Round accounting (af-105) stays window-keyed instead: equality with
   the ack comment's created_at. So /retry or a bare /takeover opens an
@@ -4675,10 +4687,11 @@ and DELETEs the label. A BOT-authored PR is managed without the label,
 so releasing it would hand the PR back to standard ten-round management
 and the budget would be a lie; it keeps the existing paused path
 (needs-human, shepherd auto-release) and is stopped at N for as long as
-the engagement is live. The shepherd's three-day auto-release does end
-that engagement by removing the label, and a paused bot PR then returns
-to standard ten-round management like any other bot PR — the budget
-marker is not a second, unlabelled stop.
+the engagement is live. A spent budget outlives every removal that leaves
+no 'takeover-ack released' marker — the shepherd's three-day auto-release
+and a hand-removal alike — so the PR stays parked at N/N until a new
+command moves the engagement. Only an explicit 'stop' carries that
+marker, and that is what the ack promises.
 
 The release re-reads live labels and fails closed on an unreadable
 snapshot, honors autofix/skip, and verifies the PAT identity before any
@@ -4701,10 +4714,12 @@ In the workflow `env:` block.
 The workflow file sits against this repository's own 470 KB gate
 (`.github/scripts/check-workflow-size.sh`, env-overridable, ~42 KB below
 GitHub's 512 KB start-runs limit), so the long-form commentary on the constants
-below lives here verbatim — with ONE exception, marked at its entry: the
-`TAKEOVER_COMMAND` entry was updated to name the second parameterized form, so
-it is no longer a byte-for-byte copy of the base block. Each entry names the
-constant it documents; the workflow keeps a one-line summary plus a pointer.
+below lives here verbatim — with TWO exceptions, each marked at its entry: the
+`TAKEOVER_COMMAND` entry was updated to name the second parameterized form, and
+the `TRUSTED_ASSOC` entry gained the note on where the constant is read and what
+widening it would do. Neither is a byte-for-byte copy of the base block. Each
+entry names the constant it documents; the workflow keeps a one-line summary
+plus a pointer.
 
 ```text
 # FIXED_RULING_FILTER — The review bot's thread lifecycle replies
@@ -4790,8 +4805,9 @@ constant it documents; the workflow keeps a one-line summary plus a pointer.
 # TRUSTED_ASSOC — Human feedback: maintainers only (prompt-injection gate)
   # Human reviews/comments only count when the author is a real maintainer. This
   # is the prompt-injection trust gate: feedback from anyone else is ignored so a
-  # hostile commenter cannot steer the agent. It is matched against
-  # `author_association` at every census site; widening it (NONE,
-  # FIRST_TIME_CONTRIBUTOR) hands untrusted text to an agent that runs with a
-  # write PAT.
+  # hostile commenter cannot steer the agent.
+  # NOT moved verbatim: the two sentences below are new in this change (af-160).
+  # It is matched against `author_association` at every census site; widening it
+  # (NONE, FIRST_TIME_CONTRIBUTOR) hands untrusted text to an agent that runs
+  # with a write PAT.
 ```

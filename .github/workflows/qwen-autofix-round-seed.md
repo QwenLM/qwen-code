@@ -151,12 +151,16 @@ lands: the report step retries its post, but a comment-API outage that outlasts
 those retries leaves a round uncounted, which delays the release rather than
 ending it early.
 
-**Crash, timeout and breaker stops end the window at once.** Those paths stamp
-the round as the effective cap, so the very first such round parks the PR on
-the ordinary paused path (`autofix/needs-human` plus the paused notice) instead
-of spending the rest of the budget. That is the pre-existing breaker semantics,
-unchanged by `for N`; read a pause on a budgeted PR as "a human should look",
-never as "the budget finished".
+**A crash or a timeout spends its attempt; a breaker parks.** A crashed or
+timed-out round stamps the sentinel timestamp and only advances the round by
+one, so it consumes an attempt and nothing else — one such round does not stop
+anything. The release is withheld (`autofix/needs-human` plus the paused notice)
+only when the engagement holds `TIMEOUT_WINDOW_CAP` (3) sentinel-stamped rounds
+with silent-sandbox (idle) ones subtracted, when a round is past
+`ROUND_START + attempts`, or when a convergence-break notice is newer than the
+window key. Those are the breaker's own thresholds, unchanged by `for N`; read a
+pause on a budgeted PR as "a human should look", never as "the budget
+finished".
 
 **A breaker stop is not a spent budget.** When the consecutive-failure, timeout
 or convergence breaker stops the loop early, it stamps a terminal sentinel round
