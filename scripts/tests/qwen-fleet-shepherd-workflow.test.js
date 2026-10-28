@@ -3098,7 +3098,7 @@ exit 1`;
       `head \`${HEAD}\` 与 \`main\`（以 \`abc123456\` 为准`,
     );
     expect(r.writes[0]).toContain(
-      'closes this PR on a later tick: no sooner than 10 minutes from now, usually within about 20.',
+      'closes this PR on a later tick: no sooner than 10 minutes from now, usually within about 40 (grace plus one tick interval).',
     );
     expect(r.writes[0]).toContain(
       'or the per-tick close cap postpones it, and the `autofix/needs-human` label parks it for a human. To keep it open, add the `autofix/skip` label — the fleet-wide opt-out: the PR leaves the dashboard and every shepherd lever until it is removed.',
@@ -3107,7 +3107,7 @@ exit 1`;
       '带有 `autofix/needs-human` 标签则交由人工处理。如需保留，请添加 `autofix/skip` 标签（车队级退出开关：标签存续期间，本 PR 不出现在仪表盘上，也不经过任何 shepherd 杠杆）。',
     );
     expect(r.writes[0]).toContain(
-      '会在之后的某个 tick 关闭本 PR：最早在 10 分钟之后，通常在约 20 分钟内。',
+      '会在之后的某个 tick 关闭本 PR：最早在 10 分钟之后，通常在约 40 分钟内（宽限期加一个节拍间隔）。',
     );
     expect(r.writes[0]).not.toContain('on its next tick');
     expect(r.writes[0]).not.toContain('%s');
@@ -3612,51 +3612,97 @@ exit 1`;
   it('separates the tick, the watch and the rescue into different groups', () => {
     expect(workflow).toContain("cron: '*/30 * * * *'");
     expect(workflow).toContain("cron: '10,40 * * * *'");
-    // */15 is the cadence that starved itself.
+    // */15 is the cadence this change replaces.
     expect(workflow).not.toContain("cron: '*/15");
-    expect(workflow).toContain("SHEPHERD_STALE_MINUTES: '75'");
-    // The rescue is reachable only through its own event type.
+    // Every lane names itself in the run title, which is the only field that
+    // distinguishes the two crons (both arrive as `event: schedule`) and
+    // therefore the only way the watch can avoid counting itself.
+    expect(workflow).toContain(
+      "github.event_name == 'repository_dispatch' && 'shepherd rescue'",
+    );
+    expect(workflow).toContain("&& 'shepherd watch'");
+    expect(workflow).toContain("|| 'shepherd tick'");
+    // The literal-to-lane MAPPING is pinned exactly, not just for presence:
+    // flipping either comparison swaps the lanes in production (every tick
+    // would run the watch mode and exit, while the other cron ran the full
+    // fleet tick) and every presence assertion above would stay green.
+    expect(workflow).toContain(
+      'WATCHDOG_MODE: "${{ github.event.schedule == \'10,40 * * * *\' }}"',
+    );
+    expect(workflow).toContain(
+      "${{ github.event_name == 'repository_dispatch' && 'fleet-shepherd-rescue'\n" +
+        "    || (github.event.schedule == '10,40 * * * *' && 'fleet-shepherd-watchdog'\n" +
+        "    || 'fleet-shepherd') }}",
+    );
+    // Exceeds the measured completion gap, so a merely slow loop is not
+    // doubled; the detection bound it implies is stated at the definition.
+    expect(workflow).toContain("SHEPHERD_STALE_MINUTES: '240'");
+    expect(workflow).toContain('240-275');
     expect(workflow).toContain('repository_dispatch:');
     expect(workflow).toContain("- 'shepherd-rescue'");
-    // A pending run is replaced by the next arrival in the same group, so the
-    // rescue must never share the tick's group — that split is the whole point.
-    expect(workflow).toMatch(
-      /github\.event_name == 'repository_dispatch' && 'fleet-shepherd-rescue'/,
-    );
-    // Three groups, each reachable from exactly one trigger.
-    expect(workflow).toContain('fleet-shepherd-watchdog');
-    expect(workflow).toContain("'fleet-shepherd'");
-    // The watch cron literal is identical in the schedule, the mode expression
-    // and the group expression.
-    expect(workflow.split("'10,40 * * * *'").length - 1).toBe(3);
+    // The literal appears in the schedule, the group expression, the run-name
+    // and the mode expression; all four must name the SAME cron.
+    expect(workflow.split("'10,40 * * * *'").length - 1).toBe(4);
   });
 
-  it('behaviorally proves the rescue watch fires only on a stale, idle shepherd', () => {
+  it('behaviorally proves the rescue watch fires only on a stale, idle tick lane', () => {
     const watch = workflow.match(
       /(if \[\[ "\$\{WATCHDOG_MODE\}" == 'true' \]\]; then\n[\s\S]*?exit 0\n {10}fi)\n/,
     )?.[1];
     expect(watch).toBeTruthy();
+    // The replay must not touch the lane's real temp file: two executions
+    // sharing one /tmp would overwrite each other's run list between the
+    // redirect and the read, and a must-not-dispatch case would evaluate the
+    // other case's fixture.
+    expect(watch).toContain('/tmp/self-runs.json');
     const NOW = Math.floor(Date.parse('2026-10-28T08:30:00Z') / 1000);
     const at = (minutesAgo) =>
       new Date((NOW - minutesAgo * 60) * 1000)
         .toISOString()
         .replace(/\.\d+Z$/, 'Z');
-    const run = (fields) => ({ event: 'schedule', ...fields });
+    let seq = 0;
+    // The watch counts TICK runs by title; the two crons are indistinguishable
+    // by event, so every fixture must carry the title the run-name produces.
+    const tick = (fields) => ({
+      event: 'schedule',
+      displayTitle: 'shepherd tick',
+      databaseId: 10_000 + seq++,
+      ...fields,
+    });
+    const watchRun = (fields) => ({
+      event: 'schedule',
+      displayTitle: 'shepherd watch',
+      databaseId: 20_000 + seq++,
+      ...fields,
+    });
+    const rescue = (fields) => ({
+      event: 'repository_dispatch',
+      displayTitle: 'shepherd rescue',
+      databaseId: 30_000 + seq++,
+      ...fields,
+    });
+    // The posted event type must exist in on.repository_dispatch.types: GitHub
+    // answers 204 for an undeclared type and creates no run at all, so a rename
+    // on either side would log "dispatched a rescue" forever, for nothing.
+    const declared = JSON.parse(
+      JSON.stringify(parse(workflow).on.repository_dispatch.types),
+    );
+    expect(declared).toEqual(['shepherd-rescue']);
     const replay = ({
       runs,
-      empty = false,
+      emptyFile = false,
       dispatchFails = false,
-      stale = '75',
+      stale = '240',
+      self = '900001',
     }) => {
       const dir = mkdtempSync(join(tmpdir(), 'shepherd-watch-'));
       try {
-        // An absent runs.json makes the stub's read fail — the fail-closed arm.
-        // `empty` is the subtler one: the command SUCCEEDS and prints nothing,
-        // which must also take no action.
+        // `emptyFile` is the unreadable arm; `runs: []` is the empty ARRAY arm,
+        // which must not be confused with it.
         if (runs !== null) {
           writeFileSync(
-            join(dir, 'runs.json'),
-            empty ? '' : JSON.stringify(runs),
+            join(dir, 'fixture.json'),
+            emptyFile ? '' : JSON.stringify(runs),
           );
         }
         if (dispatchFails) writeFileSync(join(dir, 'dispatch-fails'), '');
@@ -3664,11 +3710,11 @@ exit 1`;
           join(dir, 'gh'),
           `#!/bin/bash
 if [[ "$1" == 'run' && "$2" == 'list' ]]; then
-  cat '${dir}/runs.json' || exit 1
+  cat '${dir}/fixture.json' || exit 1
   exit 0
 fi
 if [[ "$1" == 'api' ]]; then
-  printf 'POST %s\\n' "$*" >> '${dir}/dispatches'
+  printf '%s\\n' "$*" >> '${dir}/dispatches'
   [[ -f '${dir}/dispatch-fails' ]] && exit 1
   exit 0
 fi
@@ -3685,9 +3731,14 @@ set -eo pipefail
 WATCHDOG_MODE='true'
 NOW_EPOCH='${NOW}'
 SHEPHERD_STALE_MINUTES='${stale}'
+SELF_RUN_ID='${self}'
 REPO='QwenLM/qwen-code'
 ACTIONS_TOKEN='x'
-( ${watch.replace(/\n {10}/g, '\n')} )
+( ${watch
+              .replace(/\n {10}/g, '\n')
+              // replaceAll: the block names the path TWICE (the redirect and the jq
+              // input), and replacing one leaves the other reading the shared file.
+              .replaceAll('/tmp/self-runs.json', `'${dir}/self-runs.json'`)} )
 `,
           ],
           {
@@ -3695,124 +3746,172 @@ ACTIONS_TOKEN='x'
             encoding: 'utf8',
           },
         );
-        return { log: out, dispatched: existsSync(join(dir, 'dispatches')) };
+        const dispatches = existsSync(join(dir, 'dispatches'))
+          ? readFileSync(join(dir, 'dispatches'), 'utf8').trim()
+          : '';
+        return { log: out, dispatch: dispatches };
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
     };
-
-    // Nothing completed inside the threshold and nothing is running → exactly
-    // one dispatch, through the rescue-only event type.
-    const stale = replay({
-      runs: [
-        run({ status: 'completed', conclusion: 'success', updatedAt: at(120) }),
-      ],
+    const staleTick = tick({
+      status: 'completed',
+      conclusion: 'success',
+      updatedAt: at(300),
     });
-    expect(stale.dispatched).toBe(true);
+
+    // Stale (300m > 240m) and idle → exactly one dispatch, through the event
+    // type the workflow declares.
+    const stale = replay({ runs: [staleTick] });
+    expect(stale.dispatch).toContain('event_type=shepherd-rescue');
+    expect(stale.dispatch).toContain('/dispatches');
     expect(stale.log).toContain('dispatched a rescue');
 
-    // A fresh completion means no dispatch. updatedAt is what counts: a run
-    // created long ago and finished a minute ago is FRESH, and reading
-    // createdAt instead would dispatch a duplicate here.
-    const fresh = replay({
+    // THE defect this revision exists for: the watch's own run is in the list
+    // it just read, `in_progress`, and the previous watch succeeded 20 minutes
+    // ago. Counting either one made both gates permanently true, so the rescue
+    // branch was unreachable and the log blamed a phantom in-flight tick.
+    const selfAndSibling = replay({
       runs: [
-        run({ status: 'completed', conclusion: 'success', updatedAt: at(5) }),
-      ],
-    });
-    expect(fresh.dispatched).toBe(false);
-    expect(fresh.log).toContain('the shepherd is current');
-
-    // A tick that actually STARTED defers the rescue even though nothing has
-    // completed recently — it is making progress on its own.
-    const running = replay({
-      runs: [
-        run({ status: 'completed', conclusion: 'success', updatedAt: at(120) }),
-        run({ status: 'in_progress', conclusion: null, updatedAt: at(2) }),
-      ],
-    });
-    expect(running.dispatched).toBe(false);
-    expect(running.log).toContain('a tick is in progress');
-
-    // `pending` is the state that dies here — it must NOT defer the rescue.
-    const pendingOnly = replay({
-      runs: [
-        run({ status: 'completed', conclusion: 'success', updatedAt: at(120) }),
-        run({ status: 'pending', conclusion: null, updatedAt: at(1) }),
-      ],
-    });
-    expect(pendingOnly.dispatched).toBe(true);
-
-    // At most one outstanding rescue: it keeps its queue position in its own
-    // group, so a second would only add pressure.
-    const alreadyQueued = replay({
-      runs: [
-        run({ status: 'completed', conclusion: 'success', updatedAt: at(120) }),
-        run({
-          event: 'repository_dispatch',
-          status: 'pending',
+        staleTick,
+        watchRun({
+          status: 'in_progress',
           conclusion: null,
-          updatedAt: at(1),
+          updatedAt: at(0),
+          databaseId: 900001,
+        }),
+        watchRun({
+          status: 'completed',
+          conclusion: 'success',
+          updatedAt: at(20),
         }),
       ],
     });
-    expect(alreadyQueued.dispatched).toBe(false);
-    expect(alreadyQueued.log).toContain('already queued or running');
+    expect(selfAndSibling.log).toContain('dispatched a rescue');
+    expect(selfAndSibling.log).not.toContain('a tick is in progress');
 
-    // An unresolvable history takes NO action: a rescue launched on an
-    // unreadable snapshot could double up on a live tick.
-    const unreadable = replay({ runs: null });
-    expect(unreadable.dispatched).toBe(false);
-    expect(unreadable.log).toContain('unreadable');
-
-    // The subtler fail-open: the read SUCCEEDS and answers nothing. Reading
-    // that as "nothing running, never succeeded" would dispatch a rescue on no
-    // evidence, so an empty answer is treated as unreadable too.
-    const emptyAnswer = replay({ runs: [], empty: true });
-    expect(emptyAnswer.dispatched).toBe(false);
-    expect(emptyAnswer.log).toContain('unreadable');
-
-    // No success anywhere in the window reads as maximally stale.
-    const neverRan = replay({
+    // A fresh completion → no dispatch. updatedAt is what counts: a run that
+    // queued for two hours and finished a minute ago is FRESH.
+    const fresh = replay({
       runs: [
-        run({ status: 'completed', conclusion: 'cancelled', updatedAt: at(3) }),
+        tick({ status: 'completed', conclusion: 'success', updatedAt: at(5) }),
       ],
     });
-    expect(neverRan.dispatched).toBe(true);
+    expect(fresh.dispatch).toBe('');
+    expect(fresh.log).toContain('the shepherd is current');
 
-    // A failed dispatch is surfaced for the next watch, not swallowed.
-    const dispatchFails = replay({
+    // A tick that actually STARTED defers the rescue.
+    const running = replay({
       runs: [
-        run({ status: 'completed', conclusion: 'success', updatedAt: at(120) }),
+        staleTick,
+        tick({ status: 'in_progress', conclusion: null, updatedAt: at(2) }),
       ],
-      dispatchFails: true,
     });
-    expect(dispatchFails.log).toContain('rescue dispatch failed');
+    expect(running.dispatch).toBe('');
+    expect(running.log).toContain('a tick is in progress');
 
-    // The threshold is the env value, not a hardcoded 75.
+    // `pending` is the state that dies here — it must NOT defer the rescue.
     expect(
       replay({
         runs: [
-          run({
+          staleTick,
+          tick({ status: 'pending', conclusion: null, updatedAt: at(1) }),
+        ],
+      }).dispatch,
+    ).toContain('event_type=shepherd-rescue');
+
+    // At most one outstanding rescue: it keeps its queue position in its own
+    // group, so a second would only add pressure.
+    const queued = replay({
+      runs: [
+        staleTick,
+        rescue({ status: 'pending', conclusion: null, updatedAt: at(1) }),
+      ],
+    });
+    expect(queued.dispatch).toBe('');
+    expect(queued.log).toContain('already queued or running');
+
+    // A shepherd that keeps FAILING is broken, not starved. Completion is what
+    // the clock counts, so a failure five minutes ago is current — and does not
+    // earn a duplicate tick every watch interval, forever.
+    const failing = replay({
+      runs: [
+        staleTick,
+        tick({ status: 'completed', conclusion: 'failure', updatedAt: at(5) }),
+      ],
+    });
+    expect(failing.dispatch).toBe('');
+    expect(failing.log).toContain('the shepherd is current');
+
+    // A cancelled tick is not progress either: it never ran.
+    expect(
+      replay({
+        runs: [
+          staleTick,
+          tick({
+            status: 'completed',
+            conclusion: 'cancelled',
+            updatedAt: at(1),
+          }),
+        ],
+      }).dispatch,
+    ).toContain('event_type=shepherd-rescue');
+
+    // An EMPTY answer is not evidence: `jq -r '@tsv'` over `[]` would hand the
+    // decision "0 0 " and approve a rescue on nothing.
+    const emptyArray = replay({ runs: [] });
+    expect(emptyArray.dispatch).toBe('');
+    expect(emptyArray.log).toContain('unusable');
+
+    // …as is an unreadable one.
+    const unreadable = replay({ runs: null });
+    expect(unreadable.dispatch).toBe('');
+    expect(unreadable.log).toContain('unreadable');
+
+    // A non-empty history with NO tick in it is different: it is evidence the
+    // tick lane produced nothing, which is exactly what this watch repairs.
+    expect(
+      replay({
+        runs: [
+          watchRun({
+            status: 'completed',
+            conclusion: 'success',
+            updatedAt: at(5),
+          }),
+        ],
+      }).dispatch,
+    ).toContain('event_type=shepherd-rescue');
+
+    // A failed dispatch is surfaced for the next watch, not swallowed.
+    expect(replay({ runs: [staleTick], dispatchFails: true }).log).toContain(
+      'rescue dispatch failed',
+    );
+
+    // The threshold is the env value, not a hardcoded 240.
+    expect(
+      replay({
+        runs: [
+          tick({
             status: 'completed',
             conclusion: 'success',
             updatedAt: at(30),
           }),
         ],
         stale: '10',
-      }).dispatched,
-    ).toBe(true);
+      }).dispatch,
+    ).toContain('event_type=shepherd-rescue');
     expect(
       replay({
         runs: [
-          run({
+          tick({
             status: 'completed',
             conclusion: 'success',
             updatedAt: at(30),
           }),
         ],
         stale: '600',
-      }).dispatched,
-    ).toBe(false);
+      }).dispatch,
+    ).toBe('');
   });
 
   // ---- Actions queue census (read-only) ---------------------------------
@@ -4260,12 +4359,378 @@ printf '%s|%s|%s|%s|%s|%s|%s|%s' "$QUEUE_OK" "$QUEUE_COMPLETE" "$QUEUE_DEPTH" "$
     expect(jq(agedOldest, [{ created_at: at(10) }])).toBe('');
   });
 
+  it('behaviorally proves a page of the wrong shape, or a duplicated boundary run, cannot certify a sample', () => {
+    const NOW = Math.floor(Date.parse('2026-10-28T00:00:00Z') / 1000);
+    const iso = (minutesAgo) =>
+      new Date((NOW - minutesAgo * 60) * 1000)
+        .toISOString()
+        .replace('.000Z', 'Z');
+    const run = (id) => ({
+      id,
+      name: 'CI',
+      event: 'pull_request',
+      created_at: iso(10),
+    });
+    const page = (runs, total = runs.length) => ({
+      total_count: total,
+      workflow_runs: runs,
+    });
+    const replay = ({ pages, prev = '' }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'shepherd-queue-'));
+      try {
+        pages.forEach((p, i) =>
+          writeFileSync(join(dir, `page-${i + 1}.json`), JSON.stringify(p)),
+        );
+        writeFileSync(join(dir, 'running'), '19');
+        writeFileSync(
+          join(dir, 'gh'),
+          `#!/bin/bash
+url="$2"
+case "$url" in
+  *status=in_progress*) cat '${dir}/running' ;;
+  *status=queued*)
+    f='${dir}/page-'"\${url##*page=}"'.json'
+    [[ -r "$f" ]] || exit 1
+    cat "$f" ;;
+  *) exit 1 ;;
+esac
+`,
+        );
+        chmodSync(join(dir, 'gh'), 0o755);
+        const out = execFileSync(
+          'bash',
+          [
+            '-c',
+            `set -eo pipefail
+${censusBlock
+  .replace(/\n {10}/g, '\n')
+  .replaceAll('/tmp/queue-', '"$QUEUE_TMP"/queue-')}
+printf '%s|%s|%s' "$QUEUE_OK" "$QUEUE_COMPLETE" "$QUEUE_N"
+printf '|%s' "$QUEUE_IDS"`,
+          ],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              QUEUE_TMP: dir,
+              ACTIONS_TOKEN: 'x',
+              REPO: 'QwenLM/qwen-code',
+              NOW_EPOCH: String(NOW),
+              QUEUE_MAX_PAGES: '5',
+              QUEUE_AGED_HOURS: '24',
+              PREV_QUEUE_IDS: prev,
+            },
+            encoding: 'utf8',
+          },
+        );
+        return out.split('\n').at(-1);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+
+    // A page WITHOUT a runs array is not a short final page: reading it as one
+    // stamps a truncated enumeration complete — the exact fail-open the
+    // completeness gate exists to prevent — and records the truncated ids as
+    // the next tick's baseline.
+    expect(
+      replay({
+        pages: [
+          page(
+            Array.from({ length: 100 }, (_, i) => run(1000 + i)),
+            1000,
+          ),
+          { total_count: 1000 },
+        ],
+      }),
+    ).toBe('false|false|100|');
+    // A null array is the same shape, not an empty page. (Page 1 must be full
+    // for page 2 to be requested at all.)
+    expect(
+      replay({
+        pages: [
+          page(
+            Array.from({ length: 100 }, (_, i) => run(2000 + i)),
+            101,
+          ),
+          { total_count: 101, workflow_runs: null },
+        ],
+      }),
+    ).toBe('false|false|100|');
+
+    // A run that shifts across the page boundary is read twice; the merge
+    // de-duplicates so the enumerated count, the fan-out counts and the id set
+    // all describe distinct runs. A duplicate would also make the next tick's
+    // "still queued" exceed the real queue. Page 1 must be FULL for page 2 to
+    // be requested at all, so the boundary run is duplicated at its edge.
+    const boundary = replay({
+      pages: [
+        page(
+          Array.from({ length: 100 }, (_, i) => run(1000 + i)),
+          101,
+        ),
+        page([run(1099)], 101),
+      ],
+    }).split('|');
+    expect(boundary.slice(0, 3)).toEqual(['true', 'true', '100']);
+    const ids = boundary[3].split(',');
+    expect(ids).toHaveLength(100);
+    expect(new Set(ids).size).toBe(100);
+    expect(ids.filter((id) => id === '1099')).toHaveLength(1);
+
+    // The previous id list is de-duplicated too, so a marker written before
+    // the merge fix cannot double-count today.
+    expect(
+      replay({
+        pages: [page([run(1), run(2)], 2)],
+        prev: '1,2,2,3',
+      }),
+    ).toBe('true|true|2|1,2');
+  });
+
+  it('round-trips the queue sample marker through its own readers', () => {
+    // The reader greps and the writer echo are two halves that can drift apart
+    // with the suite green: every other marker case feeds the reader a
+    // hand-written literal. Here the writer's output becomes the body and the
+    // three reader lines parse it back verbatim.
+    const readers = workflow.match(
+      /(PREV_QUEUE_LINE="\$\(grep[\s\S]*?PREV_QUEUE_TS="\$\(grep[^\n]*)/,
+    )?.[1];
+    expect(readers).toBeTruthy();
+    const marker = workflow.match(
+      /(if \[\[ "\$\{QUEUE_OK\}" == "true" && "\$\{QUEUE_COMPLETE\}" == "true" && "\$\{QUEUE_N\}" -gt 0 \]\]; then\n[\s\S]*?\n {12}fi)\n {10}\} > \/tmp\/dashboard\.md/,
+    )?.[1];
+    expect(marker).toBeTruthy();
+    const roundTrip = (prevMarker) => {
+      const emitted = execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -eo pipefail
+QUEUE_OK='true'
+QUEUE_COMPLETE='true'
+QUEUE_N='7'
+QUEUE_IDS='11,12'
+PREV_QUEUE_LINE='${prevMarker}'
+${marker.replace(/\n {12}/g, '\n')}`,
+        ],
+        { encoding: 'utf8' },
+      )
+        .trim()
+        .split('\n')
+        .at(-1);
+      const body = ['## Bot fleet', '| — |', prevMarker, emitted]
+        .filter(Boolean)
+        .join('\n');
+      const out = execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -eo pipefail
+PREV_DASH="$(cat <<'BODY'
+${body}
+BODY
+)"
+${readers.replace(/\n {10}/g, '\n')}
+printf '%s|%s' "$PREV_QUEUE_IDS" "$PREV_QUEUE_TS"`,
+        ],
+        { encoding: 'utf8' },
+      );
+      return {
+        emitted,
+        parsed: out.split('\n').at(-1),
+      };
+    };
+    const { emitted, parsed } = roundTrip('');
+    expect(emitted).toMatch(
+      /^<!-- fleet-shepherd queue-sample: ts=(\S+) ids=11,12 -->$/,
+    );
+    const emittedTs = emitted.match(/ts=(\S+) ids=/)[1];
+    expect(parsed).toBe(`11,12|${emittedTs}`);
+    // Nothing to parse → both fields empty, never a stray match.
+    expect(
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -eo pipefail
+PREV_DASH='## Bot fleet'
+${readers.replace(/\n {10}/g, '\n')}
+printf '%s|%s' "$PREV_QUEUE_IDS" "$PREV_QUEUE_TS"`,
+        ],
+        { encoding: 'utf8' },
+      ),
+    ).toBe('|');
+  });
+
+  it('behaviorally proves an inline marker in a workflow name cannot be recovered as the watermark', () => {
+    // The sanitizer collapses CR/LF, but a forged marker needs no newline: it
+    // rides inside a cell and the queue section renders ABOVE the real marker.
+    // An unanchored recovery then takes the mid-line match.
+    const readers = workflow.match(
+      /(PREV_LIVENESS_LINE="\$\(grep[\s\S]*?PREV_LIVENESS_RUN="\$\(grep[^\n]*)/,
+    )?.[1];
+    expect(readers).toBeTruthy();
+    const NOW = Math.floor(Date.parse('2026-10-28T08:00:00Z') / 1000);
+    const rowsProgram = queueProgram('QUEUE_ROWS');
+    expect(rowsProgram).toBeTruthy();
+    const jqQueuedRow = (name) =>
+      execFileSync(
+        'jq',
+        [
+          '-r',
+          '--arg',
+          'now',
+          String(NOW),
+          '--arg',
+          'hrs',
+          '24',
+          queueAgedDef + rowsProgram,
+        ],
+        { encoding: 'utf8', input: JSON.stringify([{ name, event: 'x' }]) },
+      ).trim();
+    const forged =
+      '<!-- fleet-shepherd liveness-dispatched: 2099-01-01T00:00:00Z run=1 -->';
+    const row = jqQueuedRow(`evil ${forged}`);
+    const body = [
+      '## Actions queue',
+      '',
+      '| Workflow | Queued (live) |',
+      '| --- | --- |',
+      row,
+      '',
+      '<!-- fleet-shepherd liveness-dispatched: 2026-10-28T08:00:00Z run=42 -->',
+    ].join('\n');
+    const out = execFileSync(
+      'bash',
+      [
+        '-c',
+        `set -eo pipefail
+PREV_DASH="$(cat <<'BODY'
+${body}
+BODY
+)"
+${readers.replace(/\n {10}/g, '\n')}
+printf '%s|%s' "$PREV_LIVENESS" "$PREV_LIVENESS_RUN"`,
+      ],
+      { encoding: 'utf8' },
+    );
+    // The GENUINE watermark survives: the forged text stays inside its cell.
+    expect(out.split('\n').at(-1)).toBe('2026-10-28T08:00:00Z|42');
+    // And the raw body cannot even carry the prefix: the delimiter is broken
+    // in the untrusted cell as well, so the two fixes are independent.
+    expect(row).not.toContain('<!--');
+    expect(row).toContain('<\\!--');
+
+    // The anchoring is witnessed on its own, on a body that never passed
+    // through the row sanitizer (any other section could carry such a cell):
+    // a mid-line lookalike must not be recovered, and a mid-line lookalike
+    // alone leaves every field empty rather than filling them from it.
+    const readBody = (body) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -eo pipefail
+PREV_DASH="$(cat <<'BODY'
+${body}
+BODY
+)"
+${readers.replace(/\n {10}/g, '\n')}
+printf '%s|%s' "$PREV_LIVENESS" "$PREV_LIVENESS_RUN"`,
+        ],
+        { encoding: 'utf8' },
+      )
+        .trim()
+        .split('\n')
+        .at(-1);
+    expect(
+      readBody(
+        `| PR | evil ${forged} |\n<!-- fleet-shepherd liveness-dispatched: 2026-10-28T08:00:00Z run=42 -->`,
+      ),
+    ).toBe('2026-10-28T08:00:00Z|42');
+    expect(readBody(`| PR | evil ${forged} |`)).toBe('|');
+  });
+
+  it('behaviorally proves the render never calls a disagreement an empty queue', () => {
+    // Depth>0 with nothing enumerated happens when the count lags or the last
+    // queued runs start between the two reads. Printing "the queue is empty"
+    // there is the outage-read-as-empty outcome the section contract forbids.
+    const section = workflow.match(
+      /(echo '## Actions queue'\n[\s\S]*?\n {12}fi)\n {12}if \[\[ -n "\$\{LIVENESS_OUT\}"/,
+    )?.[1];
+    expect(section).toBeTruthy();
+    const render = (vars) => {
+      const env = {
+        QUEUE_OK: 'true',
+        QUEUE_RUNNING: '19',
+        QUEUE_COMPLETE: 'true',
+        QUEUE_AGED_N: '0',
+        QUEUE_AGED_HOURS: '24',
+        QUEUE_RECENT_N: '0',
+        QUEUE_WAIT: 'n/a',
+        QUEUE_ROWS: '',
+        QUEUE_EVENTS: '',
+        QUEUE_TREND: '',
+        QUEUE_MAX_PAGES: '5',
+        PREV_QUEUE_TS: '',
+        ...vars,
+      };
+      const assignments = Object.entries(env)
+        .map(([k, v]) => `${k}='${v}'`)
+        .join('\n');
+      return execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -eo pipefail
+${assignments}
+${section.replace(/\n {10}/g, '\n')}`,
+        ],
+        { encoding: 'utf8' },
+      );
+    };
+
+    // A positive depth with nothing enumerated reports BOTH numbers and says
+    // they disagree.
+    const disagree = render({ QUEUE_DEPTH: '5', QUEUE_N: '0' });
+    expect(disagree).toContain('Queued 5');
+    expect(disagree).toContain('the two reads disagree');
+    expect(disagree).not.toContain('the queue is empty');
+
+    // Only a depth of zero may claim emptiness.
+    const empty = render({ QUEUE_DEPTH: '0', QUEUE_N: '0' });
+    expect(empty).toContain('the queue is empty at this tick');
+
+    // A normal tick still renders the tables.
+    const normal = render({
+      QUEUE_DEPTH: '3',
+      QUEUE_N: '3',
+      QUEUE_RECENT_N: '3',
+      QUEUE_AGED_N: '0',
+      QUEUE_WAIT: 'p50 146m · max 461m',
+      QUEUE_ROWS: '| CI | 3 |\n',
+      QUEUE_EVENTS: 'pull_request 3',
+    });
+    expect(normal).toContain('p50 146m');
+    expect(normal).toContain('| CI | 3 |');
+    expect(normal).toContain('Events (live): pull_request 3');
+
+    // An unreadable snapshot says UNKNOWN and never a number.
+    const unknown = render({
+      QUEUE_OK: 'false',
+      QUEUE_DEPTH: '',
+      QUEUE_N: '0',
+    });
+    expect(unknown).toContain('UNKNOWN, not zero');
+  });
+
   it('behaviorally proves the queue sample marker survives an unreadable tick and is dropped when capped', () => {
     // The marker is the trend's ONLY state. Overwriting it with a partial or
     // failed enumeration would report every run that merely left the window
     // as digested — the fake-drainage reading this census must never produce.
     const marker = workflow.match(
-      /(if \[\[ "\$\{QUEUE_OK\}" == "true" && "\$\{QUEUE_COMPLETE\}" == "true" \]\]; then\n[\s\S]*?\n {12}fi)\n {10}\} > \/tmp\/dashboard\.md/,
+      /(if \[\[ "\$\{QUEUE_OK\}" == "true" && "\$\{QUEUE_COMPLETE\}" == "true" && "\$\{QUEUE_N\}" -gt 0 \]\]; then\n[\s\S]*?\n {12}fi)\n {10}\} > \/tmp\/dashboard\.md/,
     )?.[1];
     expect(marker).toBeTruthy();
     const PREV =
@@ -4278,6 +4743,7 @@ printf '%s|%s|%s|%s|%s|%s|%s|%s' "$QUEUE_OK" "$QUEUE_COMPLETE" "$QUEUE_DEPTH" "$
           `set -eo pipefail
 QUEUE_OK='${ok}'
 QUEUE_COMPLETE='${complete}'
+QUEUE_N='2'
 QUEUE_IDS='7,8'
 PREV_QUEUE_LINE='${prev}'
 ${marker.replace(/\n {12}/g, '\n')}`,

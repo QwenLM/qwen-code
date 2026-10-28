@@ -66,11 +66,13 @@ readable enumeration; otherwise the previous marker is carried forward verbatim.
 
 Measuring the queue exposed a second defect in the workflow that reports it: the shepherd had stopped running. In the thirty runs before 2026-10-28 16:00 Beijing, eighteen were cancelled, every one of them within a second of the next run's creation, and nothing completed between 14:13 and 15:19.
 
-The mechanism is a concurrency-group property rather than a capacity problem. A group keeps one _pending_ run, and a newer pending run **cancels** the older one — `cancel-in-progress: false` protects only runs that have already started. With a hosted-pool wait longer than the tick interval, each tick replaced the previous tick's queue position, so no tick ever reached a runner. Depth alone would have reported "queued", which is exactly the reading that hides this.
+The mechanism is a concurrency-group property, but not total starvation. A group keeps one _active_ run, and a newer pending run **cancels** the older pending one — `cancel-in-progress: false` protects only runs that have already started. The run that got past the group therefore waits out the pool while later arrivals replace each other behind it. Measured on the same day: two scheduled runs sat `queued` for 120 and 135 minutes across eight or nine later arrivals, then both ran, with 22 and 28 seconds of work. So throughput is pool-bound — roughly one landing per pool latency — and the loop is not dead, it is throttled to about one tick every two hours. Depth alone reads "queued" either way, which is exactly the reading that hides it.
 
-Three changes, all inside the same workflow. The fleet cadence drops from fifteen to thirty minutes, so a tick has a full interval in which it can be scheduled. The concurrency key becomes an expression with three groups — `fleet-shepherd` for ticks, `fleet-shepherd-watchdog` for the rescue watch, and `fleet-shepherd-rescue` for rescued runs — so a rescued run keeps its position, because nothing else arrives in its group to replace it. And a second cron (`10,40 * * * *`) runs the same job in a watch mode that ends before any dashboard work: it reads this workflow's own run history and, when nothing has completed for `SHEPHERD_STALE_MINUTES` (75) and nothing is in progress, sends one `repository_dispatch` of type `shepherd-rescue`.
+That bound is what the fixes target. The fleet cadence drops from fifteen to thirty minutes and the concurrency key becomes an expression with three groups — `fleet-shepherd` for ticks, `fleet-shepherd-watchdog` for the rescue watch, and `fleet-shepherd-rescue` for rescued runs — so a rescued run keeps its position, because nothing else arrives in its group to replace it. That second serialized lane, not the cadence, is what shortens recovery; halving the interval only halves pending churn against a shared queue. A second cron (`10,40 * * * *`) runs the same job in a watch mode that ends before any dashboard work: it reads this workflow's own run history and, when no fleet tick has completed for `SHEPHERD_STALE_MINUTES` (240) and no tick is in progress, sends one `repository_dispatch` of type `shepherd-rescue`.
 
-Four decisions in that watch are load-bearing. Staleness is measured from `updatedAt` of the last success, never `createdAt`: a run that waited ninety minutes for a runner and finished a minute ago is fresh, and `createdAt` would call it stale and duplicate it. A `pending` run does not defer the rescue — pending is the state that dies here. An `in_progress` run always does defer it, because a tick that started is making progress on its own. At most one `repository_dispatch` run may be unresolved, since one keeps its position and a second would only add queue pressure. And an unreadable _or empty_ history takes no action at all: reading an empty answer as "nothing running, never succeeded" would dispatch a rescue on no evidence.
+Four decisions in that watch are load-bearing. It counts **fleet ticks only, by run title** — the history it reads necessarily contains its own run (`in_progress`) and every earlier watch (which exited success), and counting either made both gates permanently true, so the rescue branch was unreachable and the log blamed a phantom in-flight tick; the run id excludes itself as a second defence. Staleness is measured from `updatedAt` of the last **completion**, never `createdAt` and never success alone: a run that waited two hours for a runner and finished a minute ago is fresh, and counting successes would re-dispatch a shepherd that fails on every tick. A `pending` run does not defer the rescue — pending is the state that dies here — while an `in_progress` tick always does. At most one `repository_dispatch` run may be unresolved, and an unreadable _or empty_ history takes no action at all: reading an empty answer as "nothing running, never succeeded" would dispatch on no evidence. A history with runs but no tick inside it is different, and still fires — that is evidence the tick lane produced nothing.
+
+**The 240-minute threshold is derived from measurement, not from the interval.** Ordinary completions are 80-150 minutes apart here (live median wait 146 minutes; 120-135 minutes queueing for this job), so a threshold of two or three intervals would double a working shepherd — and did, in an earlier revision set at 75. 240 clears the worst measured gap. It accepts a detection window of 240-275 minutes (threshold plus up to one watch interval) and then roughly one further pool wait while the watch and the rescue are themselves scheduled; slower detection is the price of never firing on a merely slow loop.
 
 ## Decisions and rationale
 
@@ -127,6 +129,23 @@ spaces and pipes escaped, and the rows join on real newlines and print with
 downstream. The other dashboard tables keep `'%b'` with escaped separators
 because their inputs cannot carry a newline; this one cannot, and the difference
 is deliberate.
+
+**Every page must be an array, and the merge de-duplicates.** A page body
+without a `workflow_runs` array reads as a short final page, which would stamp a
+truncated enumeration complete — the fail-open the completeness gate exists to
+prevent — so an unexpected shape voids the sample. And because a run can leave
+the already-read range between two page requests, the merge applies
+`unique_by(.id)`: a duplicated boundary run inflates every count and the stored
+id set, and a skipped one reads as digested, manufacturing drainage with no cap
+involved. The previous id set is de-duplicated at the read site too, so a marker
+written before this fix cannot double-count today.
+
+**A positive depth with nothing enumerated is a disagreement, not an empty
+queue.** A lagging count, or the last queued runs starting between the two
+reads, used to render "the queue is empty at this tick" — the outage-read-as-
+empty outcome the section forbids — and record an empty sample. It now reports
+both numbers and says they disagree, and only a depth of zero may claim
+emptiness.
 
 **Capped, not `--paginate`.** A page cap bounds one tick's cost during a surge and
 makes truncation an explicit, reported state instead of an implicit property of
@@ -197,7 +216,9 @@ figures quoted above, including a real set difference against a snapshot taken
 - Waits and breakdown exclude the aged tail; the banner reports its size and age.
 - A workflow name cannot break out of its row or place a line that parses as a
   dashboard marker.
-- No new write, dispatch, or scheduled lane is introduced.
+- The census itself introduces no write, dispatch, or scheduled lane. The
+  rescue lane is the one deliberate exception, documented in its own section
+  above: one `shepherd-rescue` dispatch and one watch cron.
 
 ## Open questions
 
