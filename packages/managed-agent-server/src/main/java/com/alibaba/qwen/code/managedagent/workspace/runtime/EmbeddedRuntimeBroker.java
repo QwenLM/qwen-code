@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.workspace.runtime;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.persistence.ExternalStorageRegistrationStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
@@ -25,7 +26,9 @@ import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalHttpRuntimeClient;
+import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalRuntimeKinds;
 import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalRuntimeProvisioner;
+import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalWorkspaceProvisioner;
 import com.alibaba.qwen.code.runtimebroker.provisioning.LocalProcessRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.provisioning.StaticRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.transport.HttpRuntimeTransport;
@@ -213,7 +216,9 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
             if (!broker.getResidentWorkspaces().isEmpty()) {
                 throw new IllegalStateException("Resident mappings require kubernetes-workspace provisioner");
             }
-            baseProvisioner = provisioner(broker, remote ? new HttpRuntimeTransport() : http);
+            baseProvisioner = provisioner(broker, remote ? new HttpRuntimeTransport() : http,
+                    jdbc == null || manager == null ? null
+                            : new ExternalStorageRegistrationStore(jdbc, manager));
         }
         if (properties.getManagedExtensions().isEnabled() && baseProvisioner instanceof LocalProcessRuntimeProvisioner local) {
             local.withManagedExtensionCacheDirectory(properties.getManagedExtensions().getCacheDirectory(), properties.getManagedExtensions().getCgroupRoot());
@@ -492,7 +497,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
     }
 
     @Override
-    public boolean supportsWorkspaceCwdChange(ContextBinding binding) {
+    public boolean supportsWorkspaceContextChange(ContextBinding binding) {
         return residents.find(binding) == null;
     }
 
@@ -616,9 +621,10 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         }
     }
 
-    private static RuntimeProvisioner provisioner(
+    static RuntimeProvisioner provisioner(
             ManagedAgentProperties.RuntimeBroker broker,
-            HttpRuntimeTransport transport) {
+            HttpRuntimeTransport transport,
+            com.alibaba.qwen.code.runtimebroker.provisioning.ExternalStorageRegistry registry) {
         if (broker.isTrustedLocalRebootRecovery()
                 && (!broker.isDurableLocalProcess() || !LocalProcessRuntimeProvisioner.KIND.equals(broker.getProvisioner()))) {
             if (!broker.isDurableLocalProcess()) {
@@ -669,21 +675,32 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                     broker.getStaticToken(), broker.getStaticLeaseId(),
                     broker.getStaticEpoch()));
         }
-        if (ExternalRuntimeProvisioner.KIND.equals(broker.getProvisioner())) {
+        if (ExternalRuntimeKinds.isExternal(broker.getProvisioner())) {
             // validateExternalRuntime() runs first in the constructor and
-            // owns every rule for this branch; duplicating it here would
+            // owns every rule for this family; duplicating it here would
             // only rot against it.
-            return new ExternalRuntimeProvisioner(new ExternalHttpRuntimeClient(
+            ExternalHttpRuntimeClient client = new ExternalHttpRuntimeClient(
                     URI.create(broker.getExternalProviderUrl()), broker.getExternalProviderToken(),
-                    broker.getExternalRequestTimeout()), broker.getExternalProviderId(),
+                    broker.getExternalRequestTimeout());
+            if (ExternalRuntimeKinds.isWorkspace(broker.getProvisioner())) {
+                if (registry == null) {
+                    throw new IllegalStateException("External Workspace provisioning"
+                            + " requires the Managed Session Store database");
+                }
+                return new ExternalWorkspaceProvisioner(client, registry,
+                                broker.getExternalProviderId(), broker.getExternalStartupTimeout());
+            }
+            return new ExternalRuntimeProvisioner(client, broker.getExternalProviderId(),
                     broker.getExternalStartupTimeout());
         }
         if ("kubernetes".equals(broker.getProvisioner()) || "kubernetes-workspace".equals(broker.getProvisioner())) {
             throw new IllegalStateException("Kubernetes Runtime provisioner"
-                    + " is not supported (supported: local-process, static, " + ExternalRuntimeProvisioner.KIND + ")");
+                    + " is not supported (supported: local-process, static, "
+                    + ExternalRuntimeKinds.supported() + ")");
         }
         throw new IllegalStateException("Runtime Broker provisioner must be"
-                + " local-process, static or " + ExternalRuntimeProvisioner.KIND);
+                + " local-process, static or "
+                + ExternalRuntimeKinds.supported());
     }
 
     private static void requireRecoveryDirectoryOutsideWorkspaces(ManagedAgentProperties.RuntimeBroker broker,

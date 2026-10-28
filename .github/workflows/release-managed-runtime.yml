@@ -146,7 +146,7 @@ jobs:
 
       - name: 'Verify the executable JAR and publication profile'
         run: |-
-          mvn --batch-mode --no-transfer-progress -f packages/managed-agent-server/pom.xml clean verify -Pcentral-release -Dgpg.skip=true -Dproject.build.outputTimestamp="${BUILD_TIMESTAMP}"
+          mvn --batch-mode --no-transfer-progress -f packages/managed-agent-server/pom.xml clean verify -Pcentral-release -Dgpg.skip=true -DforkCount=1 -DreuseForks=false -Dproject.build.outputTimestamp="${BUILD_TIMESTAMP}"
           node .qwen/managed-release-tools/scripts/managed-runtime-release.js --jar "packages/managed-agent-server/target/qwen-managed-agent-server-${CLI_VERSION}.jar" --version "${CLI_VERSION}" --out-dir dist/managed-runtime
 
       - name: 'Retain verified JAR and checksum'

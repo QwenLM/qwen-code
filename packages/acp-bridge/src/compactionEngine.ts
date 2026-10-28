@@ -57,6 +57,8 @@ const TRANSIENT_TYPES = new Set([
   'client_evicted',
   'replay_complete',
   'stream_error',
+  // The surviving prefix is already seeded; never nest it in later snapshots.
+  'session_rewound',
 ]);
 const LATEST_WINS_UPDATES = new Set([
   'available_commands_update',
