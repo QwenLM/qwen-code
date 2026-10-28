@@ -732,8 +732,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     async (config: {
       refreshHierarchicalMemory?: () => Promise<void>;
       getLlmClient?: () =>
-        | { refreshSystemInstruction?: () => Promise<void> }
-        | undefined;
+        { refreshSystemInstruction?: () => Promise<void> } | undefined;
     }) => {
       try {
         await config.refreshHierarchicalMemory?.();
@@ -1059,9 +1058,8 @@ vi.mock('../config/loadedSettingsAdapter.js', () => ({
   }),
 }));
 vi.mock('../config/config.js', async () => {
-  const { APPROVAL_MODES, ApprovalMode } = await import(
-    '@qwen-code/qwen-code-core'
-  );
+  const { APPROVAL_MODES, ApprovalMode } =
+    await import('@qwen-code/qwen-code-core');
   return {
     loadCliConfig: vi.fn(),
     buildDisabledSkillNamesProvider: vi.fn(() => () => new Set<string>()),
@@ -1370,8 +1368,7 @@ describe('runAcpAgent shutdown cleanup', () => {
     let agent: PreloadTestAgent | undefined;
     if (instantiateAgent) {
       const createAgent = vi.mocked(AgentSideConnection).mock.calls[0]?.[0] as
-        | ((connection: AgentSideConnection) => unknown)
-        | undefined;
+        ((connection: AgentSideConnection) => unknown) | undefined;
       if (!createAgent) throw new Error('Expected ACP agent factory');
       agent = createAgent({} as AgentSideConnection) as PreloadTestAgent;
     }
@@ -2435,8 +2432,7 @@ describe('toHttpServer', () => {
 describe('QwenAgent MCP SSE/HTTP support', () => {
   // We need to capture the agent factory from AgentSideConnection constructor
   let capturedAgentFactory:
-    | ((conn: AgentSideConnectionLike) => AgentLike)
-    | undefined;
+    ((conn: AgentSideConnectionLike) => AgentLike) | undefined;
 
   type AgentSideConnectionLike = {
     closed: Promise<void>;
@@ -7546,8 +7542,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         expect(lastSessionMock?.prompt).toHaveBeenCalled(),
       );
       const cancellationSignal = lastSessionMock?.prompt.mock.calls[0]?.[2] as
-        | AbortSignal
-        | undefined;
+        AbortSignal | undefined;
 
       let cancellationSettled = false;
       const cancellation = agent
@@ -7614,8 +7609,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     const prompt = agent.prompt({ sessionId: callerSessionId, prompt: [] });
     await vi.waitFor(() => expect(lastSessionMock?.prompt).toHaveBeenCalled());
     const admissionSignal = lastSessionMock?.prompt.mock.calls[0]?.[2] as
-      | AbortSignal
-      | undefined;
+      AbortSignal | undefined;
 
     await agent.cancel({ sessionId: callerSessionId });
     expect(admissionSignal?.aborted).toBe(true);
@@ -9347,8 +9341,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       .fn()
       .mockReturnValue({ readSessionSources: vi.fn().mockResolvedValue({}) });
     let service:
-      | import('@qwen-code/qwen-code-core').SessionSourceService
-      | undefined;
+      import('@qwen-code/qwen-code-core').SessionSourceService | undefined;
     innerConfig.setSessionSourceServiceFactory.mockImplementation(
       (
         factory: () => import('@qwen-code/qwen-code-core').SessionSourceService,
@@ -18620,9 +18613,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     const { WorkflowRunRegistry } = await vi.importActual<
       typeof import('@qwen-code/qwen-code-core')
     >('@qwen-code/qwen-code-core');
-    const { WorkflowTool } = await import(
-      '@qwen-code/qwen-code-core/tools/workflow/workflow.js'
-    );
+    const { WorkflowTool } =
+      await import('@qwen-code/qwen-code-core/tools/workflow/workflow.js');
     const registry = new WorkflowRunRegistry();
     registry.setCompletionCallback(vi.fn());
     const workflowTool = new WorkflowTool({
@@ -23090,8 +23082,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     // the transcript tail is a restorable ask_user_question.
     expect(mockHistoryReplay).toHaveBeenCalled();
     const replayOptions = mockHistoryReplay.mock.calls[0]?.[3] as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
     expect(replayOptions?.['skipFinalizeCallIds']).toBeUndefined();
 
     mockConnectionState.resolve();
@@ -27072,8 +27063,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     // captures the callback at the Config boundary and verifies the
     // ordering vs `initialize()`.
     let capturedCallback:
-      | ((event: Record<string, unknown>) => void)
-      | undefined;
+      ((event: Record<string, unknown>) => void) | undefined;
     const callOrder: string[] = [];
     (innerConfig as unknown as Record<string, unknown>)[
       'setMcpBudgetEventCallback'
@@ -27671,8 +27661,7 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
   };
 
   let capturedAgentFactory:
-    | ((conn: AgentSideConnectionLike) => AgentLike)
-    | undefined;
+    ((conn: AgentSideConnectionLike) => AgentLike) | undefined;
   let mockConfig: Config;
   let liveCancelPendingPrompt: ReturnType<typeof vi.fn>;
   let liveWaitForActiveTurnsToSettle: ReturnType<typeof vi.fn>;
@@ -31107,8 +31096,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         }
 
         const argv = vi.mocked(loadCliConfig).mock.calls.at(-1)?.[1] as
-          | CliArgs
-          | undefined;
+          CliArgs | undefined;
         expect(argv?.resume).toBe(storageSessionId);
 
         expect(vi.mocked(Session).mock.calls.at(-1)?.[0]).toBe(sessionId);
@@ -31192,8 +31180,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         }
 
         const argv = vi.mocked(loadCliConfig).mock.calls.at(-1)?.[1] as
-          | CliArgs
-          | undefined;
+          CliArgs | undefined;
         expect(argv?.resume).toBe(sessionId);
       } finally {
         mockConnectionState.resolve();
@@ -31987,6 +31974,50 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     await agent.beginManagedShutdown().writerShutdown;
 
     // Already marked read on disk: it only counts ahead of the writer loop.
+    expect(liveSession.flushPendingPeerNotifications).toHaveBeenCalledOnce();
+    expect(
+      liveSession.flushPendingPeerNotifications.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      vi.mocked(innerConfig.closeSessionWriter).mock.invocationCallOrder[0],
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('waits for the cancelled turn before landing peer reports', async () => {
+    // Cancelling a delivery turn re-queues its teammate report on a later
+    // microtask, so a flush that runs while the cancel is still pending
+    // iterates a queue the report has already left; the re-queued landing then
+    // hits a closed writer and is silently dropped.
+    let releaseCancel: () => void = () => {};
+    const cancelSettled = new Promise<void>((resolve) => {
+      releaseCancel = resolve;
+    });
+    const innerConfig = makeRestoreInnerConfig();
+    const liveSession = {
+      getId: vi.fn().mockReturnValue('persisted-1'),
+      getConfig: vi.fn().mockReturnValue(innerConfig),
+      beginCloseIfAvailable: vi.fn().mockReturnValue(vi.fn()),
+      cancelMcpAppCalls: vi.fn(),
+      cancelPendingPrompt: vi.fn().mockReturnValue(cancelSettled),
+      flushPendingPeerNotifications: vi.fn(),
+      dispose: vi.fn(),
+    };
+    const { agent, agentPromise } = await spawnAgent('expected-capability');
+    (agent as unknown as { sessions: Map<string, unknown> }).sessions.set(
+      'persisted-1',
+      liveSession,
+    );
+
+    const shutdown = agent.beginManagedShutdown();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(liveSession.flushPendingPeerNotifications).not.toHaveBeenCalled();
+    expect(innerConfig.closeSessionWriter).not.toHaveBeenCalled();
+
+    releaseCancel();
+    await shutdown.writerShutdown;
+
     expect(liveSession.flushPendingPeerNotifications).toHaveBeenCalledOnce();
     expect(
       liveSession.flushPendingPeerNotifications.mock.invocationCallOrder[0],
