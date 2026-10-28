@@ -16588,6 +16588,10 @@
           "baseCommit": {
             "type": ["string", "null"]
           },
+          "currentBranch": {
+            "type": ["string", "null"],
+            "description": "Source checkout branch independent of base ref; HEAD when detached, null when unavailable."
+          },
           "branches": {
             "type": "array",
             "items": {
@@ -16609,6 +16613,10 @@
           },
           "base_commit": {
             "type": ["string", "null"]
+          },
+          "current_branch": {
+            "type": ["string", "null"],
+            "description": "Source checkout branch independent of base ref; HEAD when detached, null when unavailable."
           },
           "branches": {
             "type": "array",

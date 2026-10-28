@@ -2618,6 +2618,8 @@ export interface components {
             supported: boolean;
             reason?: string | null;
             baseCommit?: string | null;
+            /** @description Source checkout branch independent of base ref; HEAD when detached, null when unavailable. */
+            currentBranch?: string | null;
             branches: string[];
         };
         WebShellSessionWorktreePage: {

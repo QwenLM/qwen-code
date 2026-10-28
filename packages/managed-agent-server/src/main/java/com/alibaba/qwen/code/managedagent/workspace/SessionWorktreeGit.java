@@ -39,15 +39,7 @@ public final class SessionWorktreeGit implements AutoCloseable {
                 || ref.codePoints().anyMatch(value -> Character.isISOControl(value) || "~^:@{\\".indexOf(value) >= 0)) {
             throw error("worktree_invalid_ref", "Choose an existing local branch, tag or commit.");
         }
-        ChildWorktreeGit.Layout layout;
-        try {
-            layout = git.sessionLayout(root, cwd);
-        } catch (ChildWorkspaceException exception) {
-            if (exception.getMessage().contains("not in a Git repository")) {
-                throw error("worktree_not_git", "Select a Git project directory.");
-            }
-            throw exception;
-        }
+        var layout = sourceLayout(root, cwd);
         var repository = git.sessionOpen(root, layout.repositoryRelative());
         String commit;
         try {
@@ -69,6 +61,27 @@ public final class SessionWorktreeGit implements AutoCloseable {
                 .lines().limit(200).toList();
         return new Source(layout.repositoryRelative(), layout.offset(), repository.commonDir().toString(),
                 identity(repository.commonDir()), commit, branches);
+    }
+
+    public String currentBranch(Path root, String cwd) {
+        if (cwd.split("/")[0].equals(CONTAINER)) {
+            throw error("worktree_source_private", "Select the original project directory.");
+        }
+        var layout = sourceLayout(root, cwd);
+        var repository = git.sessionOpen(root, layout.repositoryRelative());
+        String branch = command(repository.top(), root, "branch", "--show-current").strip();
+        return branch.isEmpty() ? "HEAD" : branch;
+    }
+
+    private ChildWorktreeGit.Layout sourceLayout(Path root, String cwd) {
+        try {
+            return git.sessionLayout(root, cwd);
+        } catch (ChildWorkspaceException exception) {
+            if (exception.getMessage().contains("not in a Git repository")) {
+                throw error("worktree_not_git", "Select a Git project directory.");
+            }
+            throw exception;
+        }
     }
 
     public String prepare(Plan plan) {

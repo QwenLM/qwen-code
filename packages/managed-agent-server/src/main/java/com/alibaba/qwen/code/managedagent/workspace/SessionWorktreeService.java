@@ -48,7 +48,8 @@ public class SessionWorktreeService {
     }
 
     public record Request(String baseRef) { }
-    public record Options(boolean supported, String reason, String baseCommit, List<String> branches) { }
+    public record Options(boolean supported, String reason, String baseCommit, List<String> branches,
+            String currentBranch) { }
     public record Inspection(Descriptor worktree, boolean canCleanup, String cleanupBlocker) { }
 
     public static Request parse(JsonNode value, boolean webShell) {
@@ -75,14 +76,16 @@ public class SessionWorktreeService {
     public Options options(String tenant, String actor, WorkspaceSelection selection, String baseRef) {
         store.authorizeOptions(tenant, actor, selection.workspaceId());
         if (!enabled()) {
-            return new Options(false, "worktree_unsupported", null, List.of());
+            return new Options(false, "worktree_unsupported", null, List.of(), null);
         }
+        String currentBranch = null;
         try {
             var source = store.source(tenant, actor, selection);
+            currentBranch = git().currentBranch(source.root(), source.resolved().binding().getCwdRelative());
             var located = git().source(source.root(), source.resolved().binding().getCwdRelative(), baseRef);
-            return new Options(true, null, located.commit(), located.branches());
+            return new Options(true, null, located.commit(), located.branches(), currentBranch);
         } catch (RuntimeException exception) {
-            return new Options(false, code(exception), null, List.of());
+            return new Options(false, code(exception), null, List.of(), currentBranch);
         }
     }
 

@@ -86,6 +86,8 @@ describe('ManagedSessionWorktrees', () => {
     await render();
     expect(document.body.textContent).toContain('deleted-session');
     expect(document.body.textContent).toContain('keeps the branch');
+    expect(document.body.textContent).toContain('worktree-managed-a');
+    expect(document.body.textContent).toContain('Base commit: aaaaaaaaaaaa');
     expect(api.inspect).not.toHaveBeenCalled();
     await click('Inspect cleanup');
     expect(api.inspect).toHaveBeenCalledWith(

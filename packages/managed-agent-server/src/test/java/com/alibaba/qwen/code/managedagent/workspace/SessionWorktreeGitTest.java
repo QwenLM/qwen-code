@@ -1,12 +1,16 @@
 package com.alibaba.qwen.code.managedagent.workspace;
 
+import com.alibaba.qwen.code.managedagent.api.SessionWorktreeController;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.model.TenantContext;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry.ResolvedBinding;
 import com.alibaba.qwen.code.managedagent.persistence.SessionWorktreeStore;
 import com.alibaba.qwen.code.managedagent.persistence.SessionWorktreeStore.Plan;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -67,6 +71,61 @@ class SessionWorktreeGitTest {
         assertThat(SessionWorktreeGit.verify(plan, identity)).isEqualTo(identity);
         git.cleanup(plan, identity);
         assertThat(Files.exists(target(plan))).isFalse();
+    }
+
+    @Test
+    void optionsKeepCurrentBranchIndependentOfBaseAndExposeBothApiNames() throws Exception {
+        run(repository, "branch", "topic");
+        run(repository, "tag", "start");
+        String commit = run(repository, "rev-parse", "HEAD").strip();
+        var store = mock(SessionWorktreeStore.class);
+        var selection = new WorkspaceSelection("workspace", "project");
+        var binding = new ContextBinding("tenant", "workspace", 1, "storage", "project", "config", 1);
+        when(store.source("tenant", "actor", selection)).thenReturn(new SessionWorktreeStore.SourceLocation(
+                new ResolvedBinding(binding, "config", "policy"), root, null));
+        var properties = new ManagedAgentProperties();
+        var broker = properties.getRuntimeBroker();
+        broker.setEnabled(true);
+        broker.setSessionWorktreesEnabled(true);
+        broker.setDurableLocalProcess(true);
+        broker.setProvisioner("local-process");
+        broker.setBoundSessionIsolationClass("session");
+        var service = new SessionWorktreeService(store, mock(WorkspaceExecutionStore.class), properties,
+                mock(ManagedAgentStore.class), mock(HarnessCoordinator.class));
+        try {
+            for (String ref : List.of("topic", "start", commit, "missing", "../invalid")) {
+                var options = service.options("tenant", "actor", selection, ref);
+                assertThat(options.currentBranch()).isEqualTo("main");
+                assertThat(options.supported()).isEqualTo(!List.of("missing", "../invalid").contains(ref));
+                assertThat(new ObjectMapper().valueToTree(options).path("currentBranch").asText()).isEqualTo("main");
+            }
+            var tenant = mock(TenantContext.class);
+            when(tenant.tenantId()).thenReturn("tenant");
+            when(tenant.requireActorId()).thenReturn("actor");
+            assertThat(new SessionWorktreeController(service).publicOptions(tenant, "workspace", "project", "topic")
+                    .getBody()).containsEntry("current_branch", "main");
+            run(repository, "checkout", "topic");
+            assertThat(service.options("tenant", "actor", selection, null).currentBranch()).isEqualTo("topic");
+            run(repository, "checkout", "--detach", commit);
+            assertThat(service.options("tenant", "actor", selection, null).currentBranch()).isEqualTo("HEAD");
+            broker.setSessionWorktreesEnabled(false);
+            assertThat(service.options("tenant", "actor", selection, null).currentBranch()).isNull();
+        } finally {
+            service.stop();
+        }
+    }
+
+    @Test
+    void currentBranchHandlesNestedAndUnbornReposAndRefusesPrivateOrNonGitPaths() throws Exception {
+        assertThat(git.currentBranch(root, "project/src")).isEqualTo("main");
+        Path unborn = Files.createDirectory(root.resolve("unborn"));
+        run(unborn, "init", "-b", "new-branch");
+        assertThat(git.currentBranch(root, "unborn")).isEqualTo("new-branch");
+        Files.createDirectory(root.resolve("not-git"));
+        assertThatThrownBy(() -> git.currentBranch(root, "not-git"))
+                .hasFieldOrPropertyWithValue("code", "worktree_not_git");
+        assertThatThrownBy(() -> git.currentBranch(root, SessionWorktreeGit.CONTAINER + "/private"))
+                .hasFieldOrPropertyWithValue("code", "worktree_source_private");
     }
 
     @Test

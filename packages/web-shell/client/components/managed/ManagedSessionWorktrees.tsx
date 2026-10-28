@@ -32,8 +32,10 @@ import {
 
 export function ManagedWorktreeStatus({
   worktree,
+  compact = false,
 }: {
   worktree: ManagedSessionWorktree;
+  compact?: boolean;
 }) {
   const text = useManagedWorktreeText();
   const reason = useManagedWorktreeReason();
@@ -46,12 +48,16 @@ export function ManagedWorktreeStatus({
           {text(worktree.state === 'blocked' ? 'blockedState' : worktree.state)}
         </Badge>
       </div>
-      <p className="break-all">
-        {text('branch')}: {worktree.branch}
-      </p>
-      <p className="text-muted-foreground">
-        {text('baseCommit')}: {worktree.baseCommit.slice(0, 12)}
-      </p>
+      {!compact && (
+        <>
+          <p className="break-all">
+            {text('branch')}: {worktree.branch}
+          </p>
+          <p className="text-muted-foreground">
+            {text('baseCommit')}: {worktree.baseCommit.slice(0, 12)}
+          </p>
+        </>
+      )}
       {worktree.errorCode && (
         <p className="text-destructive">{reason(worktree.errorCode)}</p>
       )}

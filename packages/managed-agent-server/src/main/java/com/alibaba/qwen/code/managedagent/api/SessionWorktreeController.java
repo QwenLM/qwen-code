@@ -66,6 +66,7 @@ public class SessionWorktreeController {
         result.put("reason", options.reason());
         result.put("base_commit", options.baseCommit());
         result.put("branches", options.branches());
+        result.put("current_branch", options.currentBranch());
         return noStore(result);
     }
 

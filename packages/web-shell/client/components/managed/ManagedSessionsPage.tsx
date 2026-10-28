@@ -1791,9 +1791,13 @@ function ManagedSessionsContent({
               )}
             </div>
           )}
-          {summary?.worktree && (
-            <ManagedWorktreeStatus worktree={summary.worktree} />
-          )}
+          {summary?.worktree &&
+            (!home || summary.worktree.state !== 'ready') && (
+              <ManagedWorktreeStatus
+                worktree={summary.worktree}
+                compact={home}
+              />
+            )}
           {summary?.failure && (
             <p className="text-sm text-destructive">{failureMessage}</p>
           )}

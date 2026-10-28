@@ -2,19 +2,19 @@
 
 [English](managed-session-worktrees.md) | [简体中文](managed-session-worktrees.zh-CN.md)
 
-In a supported local Managed deployment, select a Git project when creating a
-Session, then choose **Independent worktree**. Optionally select a local branch,
-tag or commit; the default is HEAD. The new Session starts from that committed
-version on its own branch. Uncommitted files, ignored configuration and installed
-dependencies stay in the source directory.
+In a supported local Managed deployment, select a Git project when creating a Session. Open the Git branch button beside the workspace below the composer and choose **Worktree**. The picker closes; sending your first message automatically creates an isolated checkout from the current HEAD on its own branch. There is no branch or directory form to fill in. Uncommitted files, ignored configuration and installed dependencies stay in the source directory.
+
+Before sending, choose **Current branch** or clear the Worktree chip to work directly on the source branch. The chip displays the actual source branch, such as **main**, when isolation is not selected.
 
 The Session reports preparation and may wait for other tools using the same
 storage. File references and Workspace uploads become available after the
 worktree is ready. Project instructions come from the target directory; Managed
 model, approval, Skills, MCP and Extensions settings retain their Session pins.
 
+In Home chat, the session's more-information card contains the worktree status, branch and base commit. Ready worktree details no longer occupy the top of the conversation; preparation and error messages remain visible there when needed.
+
 Closing, archiving or deleting the chat keeps the checkout and branch. Open
-**Session worktrees** for the Workspace to inspect retained directories. Close
+**Session worktrees** from the same Workspace’s new-task composer popover to inspect retained directories. Close
 the Session and finish its background work before cleanup. Commit or otherwise
 save tracked/untracked/ignored content first. Cleanup removes only a clean
 checkout and keeps all branches; it does not merge changes into the source.
