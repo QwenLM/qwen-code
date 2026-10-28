@@ -20,6 +20,7 @@ vi.mock('../models/model-catalog.js', async (importOriginal) => {
     'catalog-model': { context: 123_456, output: 7_890 },
     'qwen-catalog-context-only': { context: 50_000 },
     'qwen-catalog-tiny': { context: 5 },
+    'qwen4-catalog-override': { context: 400_000 },
     // Spelling twins: `findTokenLimit` consults OUTPUT_PATTERNS against the
     // other spelling only when this one matched no row.
     'glm-4-7': { context: 200_000, output: 131_072 },
@@ -263,6 +264,21 @@ describe('tokenLimit', () => {
       expect(tokenLimit('qwen3-vl-plus')).toBe(262144);
       expect(tokenLimit('qwen3-coder-7b')).toBe(262144);
       expect(tokenLimit('qwen3-coder-next')).toBe(262144);
+    });
+
+    it('should return 1M for the qwen4 generation', () => {
+      expect(tokenLimit('qwen4')).toBe(1000000);
+      expect(tokenLimit('qwen4-max')).toBe(1000000);
+      expect(tokenLimit('qwen4-plus')).toBe(1000000);
+      expect(tokenLimit('qwen4-coder-plus')).toBe(1000000);
+      // A later minor must not need another code change.
+      expect(tokenLimit('qwen4.5-max')).toBe(1000000);
+      expect(tokenLimit('qwen4-max-2026-10-01')).toBe(1000000);
+      expect(tokenLimit('openai/qwen4-max')).toBe(1000000);
+    });
+
+    it('should let a qwen4 catalog entry outrank the family row', () => {
+      expect(tokenLimit('qwen4-catalog-override')).toBe(400000);
     });
 
     it('should return 1M for studio latest models', () => {
