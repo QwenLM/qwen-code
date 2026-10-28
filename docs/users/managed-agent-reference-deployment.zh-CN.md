@@ -105,7 +105,7 @@ bin/qwen-managed-agent-server --check
 
 ## 维护命令
 
-`bin/qwen-managed-agent-admin <command> [arguments]` 通过 Spring Boot 的 `PropertiesLauncher`，从 server jar 运行各个离线维护入口，例如 `storage-registration`、`workspace-migration` 和各条 CSI 命令。不带参数运行可列出所有命令；某条命令不带参数运行会打印它的用法。与 server 启动脚本一样，当 `config/application.yml` 存在且未设置 `SPRING_CONFIG_ADDITIONAL_LOCATION` 时，它会使用该文件。需要连接数据库的命令使用各自的凭据，而不是 `server.env` 中的 `SPRING_DATASOURCE_*`：Workspace 相关命令读取 `W1_JDBC_URL`、`W1_JDBC_USER` 和 `W1_JDBC_PASSWORD`，CSI 相关命令读取 `K2_JDBC_URL`、`K2_JDBC_USER` 和 `K2_JDBC_PASSWORD`。每条命令都是一个离线流程，各有前提条件，写在相应的文档中；运行前请先满足这些条件。Hosted Shell 恢复流程仍以 `bin/qwen-managed-agent-operator-recovery` 为入口，`bin/qwen-managed-agent-admin operator-recovery` 运行的是同一条命令。
+`bin/qwen-managed-agent-admin <command> [arguments]` 通过 Spring Boot 的 `PropertiesLauncher`，从 server jar 运行各个离线维护入口，例如 `storage-registration`、`workspace-migration` 和各条 CSI 命令。不带参数运行可列出所有命令；某条命令不带参数运行会打印它的用法。与 server 启动脚本一样，当 `config/application.yml` 存在且未设置 `SPRING_CONFIG_ADDITIONAL_LOCATION` 时，它会使用该文件。大多数需要连接数据库的命令使用各自的凭据，而不是 `server.env` 中的 `SPRING_DATASOURCE_*`：Workspace 相关命令读取 `W1_JDBC_URL`、`W1_JDBC_USER` 和 `W1_JDBC_PASSWORD`，CSI 相关命令读取 `K2_JDBC_URL`、`K2_JDBC_USER` 和 `K2_JDBC_PASSWORD`。有两个例外：`operator-recovery` 和 `resident-retirement` 会启动服务端的 Spring 配置并使用其数据源，因此从环境变量和 `config/application.yml` 读取 `SPRING_DATASOURCE_URL`、`SPRING_DATASOURCE_USERNAME`、`SPRING_DATASOURCE_PASSWORD` 以及控制面的其他设置；运行它们时需先载入 `server.env`。`csi-protection` 不连接数据库。每条命令都是一个离线流程，各有前提条件，写在相应的文档中；运行前请先满足这些条件。Hosted Shell 恢复流程仍以 `bin/qwen-managed-agent-operator-recovery` 为入口，`bin/qwen-managed-agent-admin operator-recovery` 运行的是同一条命令。
 
 ## systemd
 

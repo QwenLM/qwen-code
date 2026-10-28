@@ -59,7 +59,7 @@ The packager writes `bin/qwen-managed-agent-admin`, a POSIX shell script.
 - Without a command, or with `help`, it prints the commands and their summaries and exits 0, without starting Java.
 - An unknown command prints the same list to standard error and exits 2.
 - A known command runs `java -Dloader.main=<class> -cp lib/<server jar> org.springframework.boot.loader.launch.PropertiesLauncher <arguments>`.
-- It maps no environment. Each entry point keeps reading its own credentials, such as `W1_JDBC_*` or `K2_JDBC_*`, which the guide lists.
+- It maps no environment. Each entry point keeps reading its own credentials, which the guide lists: `W1_JDBC_*` for the Workspace commands, `K2_JDBC_*` for the CSI commands, and the control plane's Spring datasource, `SPRING_DATASOURCE_*`, for `operator-recovery` and `resident-retirement`, which start the server's Spring configuration.
 
 Every classified jar in the module build is the same application repackaged with another main class, so the server jar already contains every entry point.
 

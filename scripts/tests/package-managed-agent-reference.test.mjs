@@ -366,6 +366,33 @@ test('maps every admin command to an entry point in the server', async () => {
       name,
     );
   }
+  // And the other way: a new entry point needs a command too. The server
+  // application is the one main the admin launcher does not run.
+  const sources = path.join(
+    root,
+    'packages/managed-agent-server/src/main/java',
+  );
+  const mains = [];
+  for (const file of await readdir(sources, { recursive: true })) {
+    if (
+      file.endsWith('.java') &&
+      /public static void main\(String/.test(
+        await readFile(path.join(sources, file), 'utf8'),
+      )
+    ) {
+      mains.push(file.slice(0, -'.java'.length).replaceAll(path.sep, '.'));
+    }
+  }
+  assert.deepEqual(
+    mains
+      .filter(
+        (main) =>
+          main !==
+          'com.alibaba.qwen.code.managedagent.ManagedAgentServerApplication',
+      )
+      .sort(),
+    ADMIN_COMMANDS.map(([, main]) => main).sort(),
+  );
 });
 
 test('ships systemd units with the documented kill modes', async () => {

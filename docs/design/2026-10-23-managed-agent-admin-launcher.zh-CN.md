@@ -59,7 +59,7 @@ server 有十二个离线维护入口，包括 Workspace storage 注册、Worksp
 - 不带命令或使用 `help` 时，打印所有命令及其简介后以 0 退出，不启动 Java。
 - 未知命令把同样的列表打印到标准错误，并以 2 退出。
 - 已知命令运行 `java -Dloader.main=<class> -cp lib/<server jar> org.springframework.boot.loader.launch.PropertiesLauncher <arguments>`。
-- 它不做任何环境变量映射。每个入口继续读取自己的凭据（例如 `W1_JDBC_*` 或 `K2_JDBC_*`），部署文档中列出了这些变量。
+- 它不做任何环境变量映射。每个入口继续读取自己的凭据，部署文档中列出了这些变量：Workspace 命令读取 `W1_JDBC_*`，CSI 命令读取 `K2_JDBC_*`，`operator-recovery` 和 `resident-retirement` 会启动服务端的 Spring 配置，使用控制面的 Spring 数据源 `SPRING_DATASOURCE_*`。
 
 模块构建中每个带 classifier 的 jar 都是同一个应用，只是换了 main class 重新打包，因此 server jar 已经包含所有入口。
 

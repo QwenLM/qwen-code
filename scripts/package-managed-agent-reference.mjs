@@ -227,8 +227,9 @@ async function copy(root, stage, source, destination) {
   return target;
 }
 
-function launcher(jar) {
-  return `#!/usr/bin/env sh
+// Every launcher reads config/application.yml the same way, so the
+// operator's configuration cannot depend on which one they ran.
+const LAUNCHER_PREAMBLE = `#!/usr/bin/env sh
 set -eu
 base="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 config="$base/config/application.yml"
@@ -236,7 +237,10 @@ if [ -f "$config" ] && [ -z "\${SPRING_CONFIG_ADDITIONAL_LOCATION:-}" ]; then
   SPRING_CONFIG_ADDITIONAL_LOCATION="file:\${config}"
   export SPRING_CONFIG_ADDITIONAL_LOCATION
 fi
-exec java -jar "$base/lib/${jar}" "$@"
+`;
+
+function launcher(jar) {
+  return `${LAUNCHER_PREAMBLE}exec java -jar "$base/lib/${jar}" "$@"
 `;
 }
 
@@ -248,15 +252,7 @@ function adminLauncher(jar) {
   const cases = ADMIN_COMMANDS.map(
     ([name, main]) => `  ${name}) main=${main} ;;`,
   );
-  return `#!/usr/bin/env sh
-set -eu
-base="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
-config="$base/config/application.yml"
-if [ -f "$config" ] && [ -z "\${SPRING_CONFIG_ADDITIONAL_LOCATION:-}" ]; then
-  SPRING_CONFIG_ADDITIONAL_LOCATION="file:\${config}"
-  export SPRING_CONFIG_ADDITIONAL_LOCATION
-fi
-usage() {
+  return `${LAUNCHER_PREAMBLE}usage() {
   cat <<'USAGE'
 Usage: qwen-managed-agent-admin <command> [arguments]
 
