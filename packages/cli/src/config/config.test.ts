@@ -3946,6 +3946,19 @@ describe('loadCliConfig', () => {
     expect(nativeLspServiceMock).not.toHaveBeenCalled();
   });
 
+  it('should keep LSP off in bare mode even when the flag opts in', async () => {
+    // Bare mode shares safe mode's distrust of workspace-declared state, so the
+    // pre-existing `!bareMode` term has to keep refusing the flag entrance.
+    process.argv = ['node', 'script.js', '--bare', '--experimental-lsp'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+
+    const config = await loadCliConfig(settings, argv);
+
+    expect(config.isLspEnabled()).toBe(false);
+    expect(nativeLspServiceMock).not.toHaveBeenCalled();
+  });
+
   it('should keep LSP off when QWEN_CODE_SAFE_MODE opts in', async () => {
     vi.stubEnv('QWEN_CODE_SAFE_MODE', '1');
     process.argv = ['node', 'script.js'];
