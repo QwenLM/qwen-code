@@ -149,10 +149,16 @@ for is a file no round produces, and a check over an absent file is silent:
   characters are dropped before it is printed.
 - These are local helpers: the lane pins `.qwen` from the base branch, so the
   skill text that references them takes effect only after this change merges.
-- The guard normalizes each item to `id` plus a stamp read as
-  `updated_at ?? submitted_at`, because reviews carry only the latter. Reading
-  one field name across all three lists would compare `undefined` with
-  `undefined` and never notice an edited review.
+- The guard normalizes each item to `id`, a stamp read as
+  `updated_at ?? submitted_at`, and the `body`. The stamp alone cannot answer
+  "was anything edited?": measured against this repo's API, a review object
+  carries `submitted_at` and no `updated_at`, and editing its body moves
+  neither. A `CHANGES_REQUESTED` review rewritten to LGTM would compare clean.
+  All three lists return a string `body`, so it is compared alongside the
+  stamp, and a fetched item without one is refused rather than compared as
+  though nothing had changed. The cost is a larger snapshot file — bodies are
+  stored verbatim, which also lets the round read what arrived without a
+  second fetch.
 - A short list reports its own reason and a count of the ids it lost, not one
   line per id. Measured on a live PR: a truncated re-fetch printed the
   short-list reason and then 321 `disappeared` lines, burying the one
@@ -189,7 +195,7 @@ for is a file no round produces, and a check over an absent file is silent:
 - A vacuity matrix over every guard this change adds: revert one clause in
   place, run the suite that should catch it, restore. A row counts as killed
   only when the named assertion goes red, not merely some assertion. Measured:
-  26 rows, 26 killed, including a control row on the pre-existing
+  29 rows, 29 killed, including a control row on the pre-existing
   `merge-ready`/`fail` guard, so the other kills are not "the harness never
   reached the code". Each row also carries the commit that introduced its
   clause, derived rather than assigned: the first branch commit whose blob
@@ -200,7 +206,7 @@ for is a file no round produces, and a check over an absent file is silent:
   claim; the same data claimed per-commit is refused, naming them. The rule
   caught its own author, and the answer was to narrow the claim rather than
   invent a row.
-- Ten of those rows exist because self-audit found defects in this change
+- Thirteen of those rows exist because self-audit found defects in this change
   itself. Five from the first pass: a warning-suppression branch that let a
   malformed ledger reach a null read, a refusal message that blamed the head
   for a malformed list item, a `--compare` that read clean when both sides were
@@ -214,10 +220,14 @@ for is a file no round produces, and a check over an absent file is silent:
   list. One from a later pass: the prose told every round to claim per-commit
   coverage unconditionally, which is the same overstatement the contract had —
   the claim is earned by the enumeration, and a round with a gap reports
-  per-guard instead. Three further findings — a cross-reference to a report item that does
-  not exist, a return value no caller could observe, and a contract that asked
-  for the matrix unconditionally while the checker treats it as optional — were
-  fixed without a row, because none of them is a guard.
+  per-guard instead. Three from a seventh pass, all one defect: the guard read
+  only timestamps, so a review edited without its stamp moving compared clean —
+  one row for the comparison, one for accepting a list with no bodies at all,
+  and one for the rule text that claimed timestamps were enough. Three other
+  findings — a cross-reference to a report item that does not exist, a return
+  value no caller could observe, and a contract that asked for the matrix
+  unconditionally while the checker treats it as optional — were fixed without
+  a row, because none of them is a guard.
 
 ## Acceptance criteria
 
@@ -247,6 +257,8 @@ for is a file no round produces, and a check over an absent file is silent:
   sides are the same file, and exits 0 only when nothing moved. A short list
   reports its reason plus a count of lost ids; an equal-length list still names
   each vanished id.
+- `guard --compare` reports dirty when an item's body changed and its timestamp
+  did not, and `guard --snapshot` refuses a list whose items carry no body.
 - No script executes PR code.
 
 ## Open questions

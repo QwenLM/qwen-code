@@ -49,23 +49,31 @@ const HELP = `Usage:
 
 --compare is fail-closed: a malformed snapshot, a moved head, a changed state, a
 new or edited item, a vanished item, or a list shorter than the start snapshot
-all report dirty. A short list is a failed fetch, not a quiet PR. Passing the
-same file as both sides is a usage error, not a clean round.
+all report dirty. A short list is a failed fetch, not a quiet PR. Edits are read
+from the body as well as the timestamp, because editing a review moves no
+timestamp. Passing the same file as both sides is a usage error, not a clean
+round.
 
 Exit codes: 0 clean / written, 1 dirty or fetch failed, 2 usage.
 `;
 
 /**
  * Reviews carry `submitted_at`, not `updated_at`, so reading one field name
- * across all three lists would compare `undefined` with `undefined` and never
- * notice an edited review.
+ * across all three lists leaves one of them comparing `undefined` with
+ * `undefined`. Neither stamp moves when a review body is edited — measured
+ * against this repo's API, a review object has `submitted_at` and no
+ * `updated_at` — so the body travels with the stamp and is compared too.
  */
 function stampOf(item) {
   return item?.updated_at ?? item?.submitted_at ?? null;
 }
 
 function normalize(items) {
-  return items.map((item) => ({ id: item.id, stamp: stampOf(item) }));
+  return items.map((item) => ({
+    id: item.id,
+    stamp: stampOf(item),
+    body: item.body,
+  }));
 }
 
 /**
@@ -122,7 +130,7 @@ export function fetchSnapshot({ pr, repo, run }) {
     return {
       ok: false,
       errors: [
-        'fetched snapshot failed validation: a head OID, a state, or an id in one of the lists is missing or malformed',
+        'fetched snapshot failed validation: a head OID, a state, or an id or body in one of the lists is missing or malformed',
       ],
       snapshot: null,
     };
@@ -147,7 +155,10 @@ export function isSnapshot(value) {
         (item) =>
           item &&
           Number.isInteger(item.id) &&
-          (item.stamp === null || typeof item.stamp === 'string'),
+          (item.stamp === null || typeof item.stamp === 'string') &&
+          // A list without bodies cannot answer "was anything edited?", so
+          // it is refused rather than compared as if nothing had changed.
+          typeof item.body === 'string',
       )
     );
   });
@@ -205,6 +216,8 @@ export function compareSnapshots(start, now) {
         reasons.push(
           `${key}: ${item.id} was edited (${item.stamp} -> ${seen.stamp})`,
         );
+      } else if (seen.body !== item.body) {
+        reasons.push(`${key}: ${item.id} was edited (body changed)`);
       }
     }
     if (missing > 0) {

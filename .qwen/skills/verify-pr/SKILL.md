@@ -371,9 +371,14 @@ failed rather than the PR going quiet. The script therefore treats a failed
 fetch as fatal and writes no snapshot, and treats a list shorter than the start
 snapshot, a vanished id, a moved head or a changed state as dirty, and refuses a
 `--compare` whose two sides are the same file. **A question you did not get
-answered is never a clean guard.** Note that reviews carry `submitted_at`, not
-`updated_at`: reading one field name across all three lists compares `undefined`
-with `undefined` and never sees an edited review.
+answered is never a clean guard.** Timestamps alone are not enough to answer
+"was anything edited?": reviews carry `submitted_at`, not `updated_at`, and
+editing a review body moves neither — measured on this repo's API. A
+`CHANGES_REQUESTED` review rewritten to LGTM is the most consequential edit a
+round can miss, and a stamp-only comparison calls it clean. The snapshot
+therefore carries each item's body next to its stamp and compares both, and
+refuses a fetched list whose items have no body rather than comparing it as
+though nothing had changed.
 
 **Local rounds start from CI.** Before building any harness, pull the
 failing test names from every red job and reproduce them on both arms: a
@@ -776,10 +781,11 @@ otherwise report the matrix per-guard and name what you did not reach.
 `verify-pr-check.mjs` refuses the claim when a listed commit has no row, and
 refuses a claim over an empty enumeration, which is vacuously true and proves
 nothing. Narrowing the claim is the honest response to a gap — inventing a row
-for a commit you did not mutate is not.
-Measured example: that sentence shipped while two of the round's production
-commits had no row at all, and only a self-audit caught it — the matrix was
-per-guard, which is a different and weaker claim than the one the prose made.
+for a commit you did not mutate is not. Measured example: "every production
+commit since the previous round was mutated on its own" shipped while two of
+that round's production commits had no row at all, and only a self-audit caught
+it — the matrix was per-guard, a different and weaker claim than the prose made.
+
 Survivors are not noise — classify each as an ordinary
 **coverage gap** (the behaviour is right, nothing asserts it), as **dead
 code** (the clause cannot decide any outcome), or as **redundant defence** (a
