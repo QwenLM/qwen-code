@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -21,7 +22,8 @@ public final class ExternalWorkspaceMaterializationStore {
     private final TransactionTemplate transaction;
     private final ObjectMapper json = new ObjectMapper();
 
-    public ExternalWorkspaceMaterializationStore(JdbcTemplate jdbc, PlatformTransactionManager manager) {
+    public ExternalWorkspaceMaterializationStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
+            @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager) {
         this.jdbc = jdbc;
         this.transaction = new TransactionTemplate(manager);
         this.transaction.setTimeout(10);
