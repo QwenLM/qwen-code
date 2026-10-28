@@ -192,9 +192,14 @@ for is a file no round produces, and a check over an absent file is silent:
   25 rows, 25 killed, including a control row on the pre-existing
   `merge-ready`/`fail` guard, so the other kills are not "the harness never
   reached the code". Each row also carries the commit that introduced its
-  clause, verified against git — the anchor must be present in that commit's
-  blob and absent from its parent's — which is what makes this change's own
-  per-commit coverage claim checkable rather than asserted.
+  clause, derived rather than assigned: the first branch commit whose blob
+  carries the anchor, with the parent's blob read to confirm it did not. The
+  control row is the exception — its clause is on `main`, and that is verified
+  too. Applying the enumeration to this change then named docs-only commits
+  with no row, so the matrix is reported as per-guard and makes no per-commit
+  claim; the same data claimed per-commit is refused, naming them. The rule
+  caught its own author, and the answer was to narrow the claim rather than
+  invent a row.
 - Nine of those rows exist because self-audit found defects in this change
   itself. Five from the first pass: a warning-suppression branch that let a
   malformed ledger reach a null read, a refusal message that blamed the head
