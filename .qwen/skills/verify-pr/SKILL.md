@@ -1565,11 +1565,11 @@ defect.
 ## Hard rules
 
 - **Counts are sacred.** Every number in `assertions.json` and the report maps
-  to a scripted check that ran. The same binds a **coverage claim**: "every
-  commit", "all callers", "each guard" is a number over a set, so enumerate the
-  set and generate the claim from it (see the mutation matrix) rather than
-  asserting it. No projected, estimated, or "would pass"
-  entries; a harness that didn't finish counts under _Not covered_. Keep a
+  to a scripted check that ran. No projected, estimated, or "would pass"
+  entries; a harness that didn't finish counts under _Not covered_. The same
+  binds a **coverage claim**: "every commit", "all callers", "each guard" is a
+  number over a set, so enumerate the set and generate the claim from it (see
+  the mutation matrix) rather than asserting it. Keep a
   results ledger: every result the report or its summary states maps to a
   RESULT line or result file from this round, and a designed or planned run
   is reported as "not run". Generate every number in prose and figures
