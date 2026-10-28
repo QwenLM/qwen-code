@@ -4,12 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { createRequire } from 'node:module';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
-import { build } from 'esbuild';
+import { startGeneratedUiSandbox } from './utils/generatedUiSandbox';
 import { expect, test, type Page, type TestInfo } from '@playwright/test';
 import {
   createWebShellDaemonScenario,
@@ -19,7 +14,6 @@ import {
   userTextEvent,
 } from './utils/mockDaemon';
 
-const root = new URL('../../../../', import.meta.url);
 const resourceUri = 'ui://qwen-code-generated-ui/view-v1.html';
 const input = {
   title: 'Parameter continuation fixture',
@@ -54,61 +48,16 @@ interface SnapshotMessage {
 
 let appHtml: string;
 let toolResult: Record<string, unknown>;
-let sandbox: { url: string; close(): Promise<void> };
-let fixtureDirectory: string;
+let sandbox: Awaited<ReturnType<typeof startGeneratedUiSandbox>>;
 
 test.beforeAll(async () => {
-  appHtml = await readFile(
-    new URL('integrations/generated-ui/dist/app.html', root),
-    'utf8',
-  );
-  const require = createRequire(new URL('packages/cli/package.json', root));
-  const fixture = await build({
-    stdin: {
-      resolveDir: fileURLToPath(root),
-      contents: `
-        import express from ${JSON.stringify(require.resolve('express'))};
-        import { mountMcpAppSandbox } from './packages/cli/src/serve/mcp-app-sandbox.ts';
-        export { createShowResult } from './integrations/generated-ui/src/contracts.ts';
-        export async function startSandbox() {
-          const app = express();
-          const dispose = mountMcpAppSandbox(app);
-          const server = await new Promise((resolve) => {
-            const listener = app.listen(0, '127.0.0.1', () => resolve(listener));
-          });
-          return {
-            url: 'http://127.0.0.1:' + server.address().port,
-            async close() {
-              dispose();
-              server.closeAllConnections();
-              await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
-            },
-          };
-        }
-      `,
-    },
-    bundle: true,
-    platform: 'node',
-    format: 'esm',
-    write: false,
-    banner: {
-      js: `import { createRequire } from 'node:module'; const require = createRequire(${JSON.stringify(fileURLToPath(new URL('packages/cli/package.json', root)))});`,
-    },
-  });
-  fixtureDirectory = await mkdtemp(join(tmpdir(), 'generated-ui-e2e-'));
-  const fixturePath = join(fixtureDirectory, 'sandbox.mjs');
-  await writeFile(fixturePath, fixture.outputFiles[0].text);
-  const helpers = (await import(pathToFileURL(fixturePath).href)) as {
-    createShowResult(document: typeof input): Record<string, unknown>;
-    startSandbox(): Promise<typeof sandbox>;
-  };
-  toolResult = helpers.createShowResult(input);
-  sandbox = await helpers.startSandbox();
+  sandbox = await startGeneratedUiSandbox();
+  appHtml = sandbox.appHtml;
+  toolResult = sandbox.createShowResult(input);
 });
 
 test.afterAll(async () => {
   await sandbox?.close();
-  if (fixtureDirectory) await rm(fixtureDirectory, { recursive: true });
 });
 
 async function openCards(page: Page, testInfo: TestInfo, count = 1) {

@@ -267,6 +267,8 @@ export interface InputPromptProps {
   /** Esc-while-streaming hook (aborts the live turn in the parent). */
   onInterrupt?: (onSettled?: OpenTuiCancelSettled) => void;
   onCancelCommand?: () => boolean;
+  onShellKey?: (key: KeyEvent) => boolean;
+  onShellPaste?: (text: string) => boolean;
   onRetry?: () => void;
   onRewind?: () => void;
   approvalMode?: ApprovalMode;
@@ -1328,8 +1330,14 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   //    into a `[Pasted Content N chars]` placeholder (ink useBracketedPaste
   //    parity). Global keyInput paste listeners run BEFORE the focused
   //    editor's handler; preventDefault stops the raw insertion ───────────
+  const onShellPaste = props.onShellPaste;
   useLayoutEffect(() => {
     const onPaste = (event: PasteEvent): void => {
+      if (onShellPaste?.(decodePasteBytes(event.bytes))) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
       if (!focus) return;
       const el = editorRef.current;
       if (!el) return;
@@ -1373,6 +1381,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     insertText,
     collapsePastedText,
     shellModeActive,
+    onShellPaste,
   ]);
 
   const editorRequestRef = useRef<Draft | null>(null);
@@ -1454,6 +1463,11 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   //    preventDefault here keeps the editor from double-handling a key ─────
   useKeyboard((key: KeyEvent) => {
     if (!focus || key.eventType === 'release') return;
+    if (props.onShellKey?.(key)) {
+      key.preventDefault();
+      key.stopPropagation();
+      return;
+    }
     const el = editorRef.current;
 
     // Any non-Esc key disarms the double-Esc clear window.
@@ -2216,13 +2230,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         interimText={voiceInput.interimText}
         audioLevel={voiceInput.audioLevel}
       />
-      {voiceStatusLabel ? (
-        <text fg={borderColor}>
-          {dashLine} <span>{renderedLabel}</span> ──
-        </text>
-      ) : (
-        <text fg={borderColor}>{topBorderLine}</text>
-      )}
+      <text fg={borderColor}>{topBorderLine}</text>
       <box
         flexDirection="row"
         border={['bottom']}

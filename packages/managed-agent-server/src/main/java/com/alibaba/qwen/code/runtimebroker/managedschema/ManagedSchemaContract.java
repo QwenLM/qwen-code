@@ -110,6 +110,7 @@ public final class ManagedSchemaContract {
     public enum ResourceOwnerKind {
         JOURNAL,
         SNAPSHOT,
+        NATIVE_SNAPSHOT,
         CAPTURE,
         ARTIFACT,
         MESSAGE,

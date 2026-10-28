@@ -11,7 +11,14 @@ import { resolveManagedRuntimeBrokerBaseUrl } from './managed-runtime-broker-url
 type Verdict = 'accepted' | 'invalid' | 'not-origin' | 'plain-outside-loopback';
 interface Fixture {
   url: string;
+  // The verdict where the URL parser keeps the host.
   verdict: Verdict;
+  // The host of a URL with an xn-- label. Node's URL parsers disagree on
+  // some of them: ada 2.9 (Node 22) keeps xn--localhost- and refuses xn--a,
+  // ada 3 (Node 24.0 to 24.19, and 25) refuses both, and ada 4 (Node 24.20
+  // and later, and 26) keeps both. A parser that refuses the host makes the
+  // URL invalid before the Harness's own rules apply.
+  idnaHost?: string;
   hostname?: string;
   port?: number;
 }
@@ -31,16 +38,32 @@ const REFUSALS: Record<Exclude<Verdict, 'accepted'>, string> = {
     'Managed Runtime Broker URL must use HTTPS outside the loopback interface.',
 };
 
+// Asks the running parser about the host itself, not the Node version.
+const readings = cases.map((fixture) => ({
+  ...fixture,
+  expected:
+    fixture.idnaHost !== undefined &&
+    !URL.canParse(`http://${fixture.idnaHost}/`)
+      ? 'invalid'
+      : fixture.verdict,
+}));
+
 describe('resolveManagedRuntimeBrokerBaseUrl', () => {
-  it.each(cases)(
-    'reads $url as $verdict',
-    ({ url, verdict, hostname, port }) => {
+  it.each(readings)(
+    'reads $url as $expected',
+    ({ url, verdict, idnaHost, expected, hostname, port }) => {
       // The fixture holds this reader's verdicts only; an unknown one would
       // leave toThrow() checking just that something threw.
       expect(['accepted', ...Object.keys(REFUSALS)]).toContain(verdict);
-      if (verdict !== 'accepted') {
+      // Every xn-- host is named, so no case rests on one parser's IDNA.
+      if (/xn--/i.test(url)) {
+        expect(url.toLowerCase().split('/')[2]?.split(':')[0]).toBe(idnaHost);
+      } else {
+        expect(idnaHost).toBeUndefined();
+      }
+      if (expected !== 'accepted') {
         expect(() => resolveManagedRuntimeBrokerBaseUrl(url)).toThrow(
-          REFUSALS[verdict],
+          REFUSALS[expected],
         );
         return;
       }

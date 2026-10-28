@@ -187,7 +187,7 @@ public final class ManagedHostedRecoveryRecords {
                 ? promptId : "wake-" + ToolPublicationContract.sha256(promptId.getBytes(StandardCharsets.UTF_8));
     }
 
-    private static List<JsonNode> references(JsonNode body) {
+    static List<JsonNode> references(JsonNode body) {
         var refs = new java.util.ArrayList<JsonNode>();
         for (String field : List.of("definitionRef", "rootSnapshotRef", "assistantRef", "inputRef", "continuationRef")) {
             if (body.hasNonNull(field)) {
