@@ -2718,7 +2718,6 @@ export class Session implements SessionContext {
   private removeSkillChangeListener?: () => void;
   private commandSnapshotInFlight?: Promise<unknown>;
   private commandSnapshotPending = false;
-  private skillRefreshPublishing = false;
   private lastGoalSnapshot?: GoalSnapshotV2;
   private lastGoalPublicationKey?: string;
   // Set only when runtime recovery selected a Goal that initial replay hid.
@@ -3019,13 +3018,7 @@ export class Session implements SessionContext {
     this.removeSkillChangeListener = this.config
       .getSkillManager()
       ?.addChangeListener(() => {
-        if (
-          this.disposed ||
-          this.skillRefreshPublishing ||
-          commandSnapshotBuildContext.getStore()
-        ) {
-          return;
-        }
+        if (this.disposed || commandSnapshotBuildContext.getStore()) return;
         void this.sendAvailableCommandsUpdate();
       });
     this.config
@@ -14082,9 +14075,6 @@ export class Session implements SessionContext {
     if (skillManager && (options.notifyConfigChanged ?? true)) {
       try {
         skillManager.suppressNextSlashReload();
-        // The explicit publish above already sent this snapshot; keep the
-        // change listener from sending an identical second frame.
-        this.skillRefreshPublishing = true;
         await skillManager.notifyConfigChanged();
       } catch (error) {
         if (!updateFailed) throw error;
@@ -14092,8 +14082,6 @@ export class Session implements SessionContext {
           'SkillManager refresh failed after command update failure:',
           error,
         );
-      } finally {
-        this.skillRefreshPublishing = false;
       }
     }
     if (updateFailed) throw updateError;

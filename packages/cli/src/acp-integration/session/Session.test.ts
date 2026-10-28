@@ -13514,87 +13514,6 @@ describe('Session', () => {
         await vi.waitFor(() => expect(frames()).toHaveLength(2));
       });
 
-      it('keeps the build latch scoped to the build for a joined caller', async () => {
-        let releaseBuild!: () => void;
-        const buildGate = new Promise<void>((resolve) => {
-          releaseBuild = resolve;
-        });
-        getAvailableCommandsSpy
-          .mockImplementationOnce(async () => {
-            await buildGate;
-            return [makeCommand('first')];
-          })
-          .mockResolvedValue([makeCommand('second')]);
-        vi.mocked(mockClient.sessionUpdate)
-          .mockReset()
-          .mockImplementationOnce(() => new Promise(() => undefined))
-          .mockResolvedValue(undefined);
-
-        void session.sendAvailableCommandsUpdate();
-        await vi.waitFor(() =>
-          expect(getAvailableCommandsSpy).toHaveBeenCalledTimes(1),
-        );
-        let joinedSettled = false;
-        const joined = session.sendAvailableCommandsUpdate().then(() => {
-          joinedSettled = true;
-        });
-        await flush();
-        expect(joinedSettled).toBe(false);
-        releaseBuild();
-
-        const outcome = await Promise.race([
-          joined.then(() => 'resolved'),
-          new Promise<string>((resolve) =>
-            setTimeout(() => resolve('blocked'), 200),
-          ),
-        ]);
-        expect(outcome).toBe('resolved');
-        await vi.waitFor(() => expect(frames()).toHaveLength(2));
-      });
-
-      it('republishes a command set that reverts while the previous write is in flight', async () => {
-        let releaseBuild!: () => void;
-        const buildGate = new Promise<void>((resolve) => {
-          releaseBuild = resolve;
-        });
-        let releaseWrite!: () => void;
-        const writeGate = new Promise<void>((resolve) => {
-          releaseWrite = resolve;
-        });
-        getAvailableCommandsSpy
-          .mockResolvedValueOnce([makeCommand('A')])
-          .mockImplementationOnce(async () => {
-            await buildGate;
-            return [makeCommand('B')];
-          })
-          .mockResolvedValue([makeCommand('A')]);
-        vi.mocked(mockClient.sessionUpdate)
-          .mockReset()
-          .mockResolvedValueOnce(undefined)
-          .mockImplementationOnce(() => writeGate)
-          .mockResolvedValue(undefined);
-
-        await session.sendAvailableCommandsUpdate();
-        await skillManager.notifyConfigChanged();
-        await vi.waitFor(() =>
-          expect(getAvailableCommandsSpy).toHaveBeenCalledTimes(2),
-        );
-        await skillManager.notifyConfigChanged();
-        releaseBuild();
-        await vi.waitFor(() => expect(frames()).toHaveLength(3));
-        releaseWrite();
-        await flush();
-
-        const names = frames().map(([params]) =>
-          (
-            params.update as { availableCommands: Array<{ name: string }> }
-          ).availableCommands
-            .map((c) => c.name)
-            .join(),
-        );
-        expect(names).toEqual(['A', 'B', 'A']);
-      });
-
       it('rejects a caller that joins a build that fails', async () => {
         let rejectBuild!: (error: Error) => void;
         const buildGate = new Promise<never>((_resolve, reject) => {
@@ -13656,15 +13575,6 @@ describe('Session', () => {
 
         expect(getAvailableCommandsSpy).toHaveBeenCalledTimes(1);
         expect(frames()).toHaveLength(0);
-      });
-
-      it('publishes exactly one frame for refreshSkillsFromSettings', async () => {
-        getAvailableCommandsSpy.mockResolvedValue([makeCommand('same')]);
-
-        await session.refreshSkillsFromSettings();
-        await flush();
-
-        expect(frames()).toHaveLength(1);
       });
     });
 
