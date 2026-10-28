@@ -12,8 +12,33 @@ import {
   loadSettings,
   resetHomeEnvBootstrapForTesting,
 } from '../config/settings.js';
+import { trustedSystemSettingsDirs } from '../test-utils/trusted-system-settings.js';
 import { createWorkspaceProvidersStatusProvider } from './workspace-providers-status.js';
 import { listModelConfigurations } from './model-configuration.js';
+
+// The system settings overrides are only honored for a root-owned file,
+// which a non-root test host cannot arrange for its temp fixtures; the
+// fixtures stand in for administrator-created system files.
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  const { trustedSystemSettingsLstat } = await import(
+    '../test-utils/trusted-system-settings.js'
+  );
+  return {
+    ...actual,
+    lstatSync: trustedSystemSettingsLstat(actual.lstatSync.bind(actual)),
+  };
+});
+vi.mock('fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('fs')>();
+  const { trustedSystemSettingsLstat } = await import(
+    '../test-utils/trusted-system-settings.js'
+  );
+  return {
+    ...actual,
+    lstatSync: trustedSystemSettingsLstat(actual.lstatSync.bind(actual)),
+  };
+});
 
 const coreMock = vi.hoisted(() => ({
   throwModelsConfigError: false,
@@ -57,6 +82,7 @@ describe('createWorkspaceProvidersStatusProvider', () => {
 
   beforeEach(async () => {
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'providers-status-'));
+    trustedSystemSettingsDirs.add(tmpDir);
     workspace = path.join(tmpDir, 'workspace');
     qwenHome = path.join(tmpDir, 'qwen-home');
     await fs.mkdir(workspace, { recursive: true });
@@ -84,6 +110,7 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     restoreEnv('QWEN_CODE_SYSTEM_SETTINGS_PATH', originalSystemSettings);
     restoreEnv('QWEN_CODE_SYSTEM_DEFAULTS_PATH', originalSystemDefaults);
     resetHomeEnvBootstrapForTesting();
+    trustedSystemSettingsDirs.delete(tmpDir);
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
