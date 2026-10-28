@@ -453,6 +453,9 @@ public class WorkspaceExecutionStore {
     }
 
     public boolean beginRewind(ContextBinding binding, RuntimeSessionRecord session) {
+        if (storageGuard != null) {
+            storageGuard.requireOwnedRoot(binding.getTenantId(), binding.getStorageId());
+        }
         return Boolean.TRUE.equals(transaction.execute(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, binding.getTenantId());
             String key = storageKey(binding);

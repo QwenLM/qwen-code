@@ -110,13 +110,12 @@ qwen serve --managed --managed-data-dir /absolute/private/data --open
 
 启动通过现有幂等 Workspace API 创建应用管理的默认 Workspace 和 OWNER 授权。
 使用已有本机项目时，打开“工作区 → 选择已有目录”，浏览或输入绝对路径后添加
-文件夹。服务会自动登记项目父目录并授予 OWNER 权限，已有文件保留原处，
-新任务从所选项目启动。也可创建空 Workspace。
+文件夹。服务自动授予 OWNER 权限，已有文件保留原处，新任务从所选项目启动。新导入是共享外部目录：独立本机实例可以导入同一项目，无需移交父目录，也不替换已有全局存储标记。父目录继续作为各实例内共享的导航及 worktree 布局边界。也可创建空 Workspace。
 
 启动目录仍供 Local 会话使用，不会自动导入。Managed 本地模式继续拒绝
-`--workspace`，请从界面选择项目。`.qwen-managed-storage.json` 维护标记保留在
-Git 工作树之外，不要编辑、删除、stash 或提交。导入的项目文件位于私有 Managed
-数据目录之外，需要单独备份。
+`--workspace`，请从界面选择项目。新导入的实例私有元数据位于 `runtime/imported-projects/<storage ID>/.qwen-managed-storage.json`，应与整个 Managed 数据目录一起保留。已有导入及应用自有存储保留此前的标记契约，不要编辑、删除、stash 或提交这些标记。导入项目的文件位于私有 Managed 数据目录之外，需要单独备份。
+
+共享项目会承担与多个独立终端相同的编辑冲突，需要隔离编辑时使用独立 worktree。新共享导入不支持整存储迁移、物理恢复和独占文件历史 rewind；本实例自身 Runtime 进程的恢复仍可用。不自动转换早期导入。参见[共享项目设计](../design/2026-10-28-managed-local-shared-projects.zh-CN.md)。
 
 Local 会话历史继续使用普通 Qwen 存储，与 Managed 数据目录独立，仅备份 Managed
 目录不会包含 Local 会话历史。
