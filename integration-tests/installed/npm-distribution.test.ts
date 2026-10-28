@@ -514,6 +514,7 @@ for (const kind of ['global', 'npx'] as const) {
           ],
         }));
         let session: InteractiveSession | undefined;
+        let startupOutput: string | undefined;
         let failure: unknown;
         const facts: Record<string, unknown> = {
           outcome: 'RUNNING',
@@ -540,8 +541,12 @@ for (const kind of ['global', 'npx'] as const) {
             'default',
           ]);
           let startupError: unknown;
+          const startupStartedAt = Date.now();
           try {
             session = await InteractiveSession.start({
+              onStartupFailure: (output) => {
+                startupOutput = output;
+              },
               command: {
                 bin: '/bin/sh',
                 args: [launcher, command.bin, ...command.args],
@@ -563,6 +568,10 @@ for (const kind of ['global', 'npx'] as const) {
                 QWEN_CODE_DISABLE_CRON: '1',
                 QWEN_CODE_SKIP_UPDATE_CHECK_ONCE: 'true',
                 QWEN_CODE_MODELS_DEV_REFRESH: 'off',
+                QWEN_DEBUG_LOG_FILE: '1',
+                QWEN_CODE_PROFILE_STARTUP: '1',
+                QWEN_CODE_PROFILE_STARTUP_OUTER: '1',
+                QWEN_CODE_PROFILE_STARTUP_NO_HEAP: '1',
                 DISTRIBUTION_PID: pidFile,
                 DISTRIBUTION_EXIT: exitFile,
                 DISTRIBUTION_STDERR: stderr,
@@ -573,6 +582,8 @@ for (const kind of ['global', 'npx'] as const) {
           } catch (error) {
             startupError = error;
           }
+          facts.startupElapsedMs = Date.now() - startupStartedAt;
+          facts.startupObserverTiming = observer.timing();
           facts.startupError = startupError ? String(startupError) : undefined;
           observer.poll();
           if (mode === 'no-relaunch-strict') {
@@ -703,6 +714,7 @@ for (const kind of ['global', 'npx'] as const) {
             fs.writeFileSync(
               path.join(out, 'terminal.ansi'),
               session?.output() ??
+                startupOutput ??
                 String(facts.startupError ?? 'STARTUP_NOT_RETURNED'),
             ),
           );

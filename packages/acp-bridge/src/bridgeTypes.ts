@@ -84,6 +84,7 @@ import type {
 
 export interface RewindSnapshotInfo {
   promptId: string;
+  daemonPromptId?: string;
   turnIndex: number;
   timestamp: string;
   diffStats: { filesChanged: number; insertions: number; deletions: number };
@@ -2763,6 +2764,8 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   setSessionConfigOption(
     sessionId: string,
     req: SetSessionConfigOptionRequest,
+    context?: BridgeClientRequestContext,
+    assertCanCommit?: () => void,
   ): Promise<SetSessionConfigOptionResponse>;
 
   /**

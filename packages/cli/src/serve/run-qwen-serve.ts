@@ -5869,6 +5869,27 @@ async function runQwenServeImpl(
     const workspaceRegistryForPersistence: {
       current: WorkspaceRegistry | undefined;
     } = { current: undefined };
+    const createRuntimeWorkflowOwnerCheck =
+      (
+        workspaceCwd: string,
+        getBridge: () => AcpSessionBridge | undefined,
+        generationGuard: WorkspaceGenerationGuard,
+      ) =>
+      (sessionId: string): boolean => {
+        const registry = workspaceRegistryForPersistence.current;
+        if (!registry || generationGuard.closed) return false;
+        const owner = registry.resolveLiveSessionOwner(sessionId);
+        const entry = registry.getManagedEntryByWorkspaceCwd(workspaceCwd);
+        return (
+          owner.kind === 'found' &&
+          owner.runtime.trusted &&
+          owner.runtime.workspaceCwd === workspaceCwd &&
+          owner.runtime.bridge === getBridge() &&
+          entry?.state === 'active' &&
+          entry.current?.runtime === owner.runtime &&
+          entry.current.guard === generationGuard
+        );
+      };
     const createRuntimeWorkflowAncestorTrustHandler = (
       workspaceCwd: string,
       getBridge: () => AcpSessionBridge | undefined,
@@ -5880,21 +5901,11 @@ async function runQwenServeImpl(
         admissionPolicy,
         getPublished: () => publishedWorkflowTrustPolicy,
         ideScopeCwd: workflowTrustIdeScopeCwd,
-        isCurrentOwner: (sessionId) => {
-          const registry = workspaceRegistryForPersistence.current;
-          if (!registry) return false;
-          const owner = registry.resolveLiveSessionOwner(sessionId);
-          const entry = registry.getManagedEntryByWorkspaceCwd(workspaceCwd);
-          return (
-            owner.kind === 'found' &&
-            owner.runtime.trusted &&
-            owner.runtime.workspaceCwd === workspaceCwd &&
-            owner.runtime.bridge === getBridge() &&
-            entry?.state === 'active' &&
-            entry.current?.runtime === owner.runtime &&
-            entry.current.guard === generationGuard
-          );
-        },
+        isCurrentOwner: createRuntimeWorkflowOwnerCheck(
+          workspaceCwd,
+          getBridge,
+          generationGuard,
+        ),
       });
     const isWorkspaceTrustedForPersistence = (workspace: string): boolean =>
       workspaceRegistryForPersistence.current?.getByWorkspaceCwd(workspace)
@@ -6291,6 +6302,11 @@ async function runQwenServeImpl(
     const bridge =
       deps.bridge ??
       runtime.createAcpSessionBridge({
+        isWorkflowModeWriteAllowed: createRuntimeWorkflowOwnerCheck(
+          boundWorkspace,
+          () => bridgeRef,
+          primaryGenerationGuard,
+        ),
         onWorkflowAncestorTrust: createRuntimeWorkflowAncestorTrustHandler(
           boundWorkspace,
           () => bridgeRef,
@@ -6937,6 +6953,11 @@ async function runQwenServeImpl(
         secondaryEnv.sessionRuntimeBaseDir,
       );
       const secondaryBridge = runtime.createAcpSessionBridge({
+        isWorkflowModeWriteAllowed: createRuntimeWorkflowOwnerCheck(
+          workspaceInput.cwd,
+          () => secondaryBridgeRef,
+          secondaryGenerationGuard,
+        ),
         onWorkflowAncestorTrust: createRuntimeWorkflowAncestorTrustHandler(
           workspaceInput.cwd,
           () => secondaryBridgeRef,
@@ -7670,6 +7691,11 @@ async function runQwenServeImpl(
           wsEnv.sessionRuntimeBaseDir,
         );
         wsBridge = runtime.createAcpSessionBridge({
+          isWorkflowModeWriteAllowed: createRuntimeWorkflowOwnerCheck(
+            cwd,
+            () => wsBridgeRef,
+            generationGuard,
+          ),
           onWorkflowAncestorTrust: createRuntimeWorkflowAncestorTrustHandler(
             cwd,
             () => wsBridgeRef,

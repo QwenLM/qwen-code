@@ -1026,6 +1026,14 @@ describe('Managed Session log recording', () => {
       expect.objectContaining({ kind: 'prompt', promptId: 'daemon-prompt-1' }),
       expect.objectContaining({ kind: 'prompt', promptId: 'prompt-2' }),
     ]);
+    const projection = await sessionService().readRestoreProjection(
+      SESSION_ID,
+      { replay: { kind: 'none' } },
+    );
+    expect(projection?.runtime.recording.turnDaemonPromptIds).toEqual([
+      'daemon-prompt-1',
+      undefined,
+    ]);
   });
 
   it('skips a malformed file-history record instead of failing the managed restore', async () => {

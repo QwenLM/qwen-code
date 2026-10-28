@@ -77,8 +77,10 @@ import {
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import {
   createDaemonTranscriptState,
+  findDaemonRewindUserBlock,
   DaemonHttpError,
   getSessionUpdatePayload,
+  isDaemonRewindUserBlock,
   isDaemonTurnError,
   isStandaloneSessionNotFoundError,
   isStaleBranchPointError,
@@ -328,7 +330,12 @@ import { ExtensionsManagerPage } from './components/extensions/ExtensionsManager
 import { PluginManagerPage } from './components/plugins/PluginManagerPage';
 import { ChannelsManagerPage } from './components/channels/ChannelsManagerPage';
 import { ShadowDomBoundary } from './components/ShadowDomBoundary';
-import { McpAppHostContext, McpAppMessagesContext } from './mcpAppHostContext';
+import {
+  McpAppHostContext,
+  McpAppMessagesContext,
+  McpAppVisibilityContext,
+} from './mcpAppHostContext';
+import { GeneratedUiRuntimeProvider } from './generated-ui/GeneratedUiRuntimeProvider';
 import {
   useMcpAppMessages,
   type McpAppPromptSubmission,
@@ -791,6 +798,7 @@ interface SendPromptOptionsWithRetry {
   submittedPrompt?: string;
   source?: 'mcp-app';
   optimisticUserMessage?: boolean;
+  bindBlockId?: string;
   images?: PromptImage[];
   files?: PromptFile[];
   inputAnnotations?: DaemonInputAnnotation[];
@@ -977,10 +985,7 @@ function getLatestUserBlock(
 ): DaemonTranscriptBlock | undefined {
   for (let index = blocks.length - 1; index >= 0; index -= 1) {
     const block = blocks[index];
-    if (
-      block?.kind === 'user' &&
-      block.meta?.['source'] !== 'background_notification'
-    ) {
+    if (isDaemonRewindUserBlock(block)) {
       return block;
     }
   }
@@ -994,10 +999,7 @@ function getLatestUserBlock(
 function countUserTurns(blocks: readonly DaemonTranscriptBlock[]): number {
   let count = 0;
   for (const block of blocks) {
-    if (
-      block?.kind === 'user' &&
-      block.meta?.['source'] !== 'background_notification'
-    ) {
+    if (isDaemonRewindUserBlock(block)) {
       count += 1;
     }
   }
@@ -1493,6 +1495,8 @@ export interface WebShellProps {
   composerToolbarActions?: readonly ComposerToolbarAction[];
   /** Execution mode choices. Overrides ui.allowedApprovalModes; [] offers none. Presentation only. */
   allowedApprovalModes?: readonly WebShellApprovalMode[];
+  /** Composer presentation shared by the main chat, split panes, and side tasks. */
+  composerVariant?: 'default' | 'simple';
   /** Optionally filter main-model entries without changing shared defaults. */
   mainModelFilter?: (model: ModelDialogModel) => boolean;
   /** Stack completion details vertically for narrow embedded hosts. */
@@ -3478,6 +3482,7 @@ export function App({
   shellRef,
   composerToolbarActions,
   allowedApprovalModes: allowedApprovalModesProp,
+  composerVariant = 'default',
   mainModelFilter,
   compactComposerOverlays = false,
   autoSubmitSlashCommands = false,
@@ -3811,6 +3816,7 @@ export function App({
       filterArtifact,
       askUserFreeTextLabel,
       composerTagIcons,
+      composerVariant,
       builtinAtProviders,
       atProviders,
       renderToolHeaderExtra,
@@ -3847,6 +3853,7 @@ export function App({
       filterArtifact,
       askUserFreeTextLabel,
       composerTagIcons,
+      composerVariant,
       builtinAtProviders,
       atProviders,
       renderToolHeaderExtra,
@@ -11879,6 +11886,7 @@ export function App({
       files?: PromptFile[],
       opts?: {
         optimisticUserMessage?: boolean;
+        bindBlockId?: string;
         retry?: boolean;
         // Skips prepareSubmit without daemon retry semantics; used
         // by the failed-prompt retry, whose user message was never
@@ -12172,6 +12180,7 @@ export function App({
             ? preparedInputAnnotations
             : undefined,
         optimisticUserMessage: opts?.optimisticUserMessage,
+        ...(opts?.bindBlockId ? { bindBlockId: opts.bindBlockId } : {}),
         retry: opts?.retry,
         ...(opts?.beforeDispatch
           ? { beforeDispatch: opts.beforeDispatch }
@@ -12639,6 +12648,8 @@ export function App({
     let admissionStarted = false;
     sendPrompt(failed.text, failed.images, failed.files, {
       optimisticUserMessage: false,
+      // The failed attempt appended this block but never got it bound.
+      bindBlockId: failed.messageId,
       skipPrepareSubmit: true,
       inputAnnotations: failed.inputAnnotations,
       onAdmissionStarted: () => {
@@ -17447,9 +17458,18 @@ export function App({
             }
             const { snapshots } = await sessionActions.getRewindSnapshots();
             assertTarget();
-            const snapshot = snapshots.find(
-              (entry) => entry.turnIndex === turnIndex,
-            );
+            const current = getLatestUserBlock(store.getSnapshot().blocks);
+            const matches =
+              current?.promptId &&
+              findDaemonRewindUserBlock(
+                store.getSnapshot().blocks,
+                current.promptId,
+              )?.id === current.id
+                ? snapshots.filter(
+                    (entry) => entry.daemonPromptId === current.promptId,
+                  )
+                : [];
+            const snapshot = matches.length === 1 ? matches[0] : undefined;
             if (!snapshot) throw new Error(t('rewind.empty'));
             rewindStarted = true;
             await sessionActions.rewindSession(snapshot.promptId, {
@@ -19307,7 +19327,19 @@ export function App({
         // it reached the model has no snapshot of its own, and the newest one
         // then belongs to the turn before it.
         const newest = snapshots[snapshots.length - 1];
-        if (!newest || newest.turnIndex !== bareTurnIndex()) return;
+        const blocks = store.getSnapshot().blocks;
+        const current = getLatestUserBlock(blocks);
+        if (
+          bareTurnIndex() === undefined ||
+          !newest?.daemonPromptId ||
+          !current?.promptId ||
+          newest.daemonPromptId !== current.promptId ||
+          findDaemonRewindUserBlock(blocks, current.promptId)?.id !==
+            current.id ||
+          snapshots.filter((entry) => entry.daemonPromptId === current.promptId)
+            .length !== 1
+        )
+          return;
         target = newest.promptId;
         await sessionActions.rewindSession(target, {
           rewindFiles: false,
@@ -21492,6 +21524,7 @@ export function App({
           data-compact-sidebar={compactShell ? '' : undefined}
           lang={selectedLanguage}
         >
+          <GeneratedUiRuntimeProvider>
           {mcpAppMessages.review}
           {capacityRecovery && <CapacityRecoveryDialog intent={capacityRecovery} onClose={dismissCapacityRecovery} />}
           {!onToast && (
@@ -23308,6 +23341,7 @@ export function App({
                       session chat does (todo contexts stay chat-only — they
                       belong to the outer session, not the panes). */}
                   <WebShellCustomizationProvider value={customization}>
+                    <McpAppVisibilityContext.Provider value={!activePanel && !artifactPanelFullscreen}>
                       <SplitView
                         showResponseTokensPerSecond={showResponseTokensPerSecond}
                         modelManagement={modelManagement}
@@ -23357,6 +23391,7 @@ export function App({
                         }
                         sessionWorkflowEnabled={sessionWorkflowEnabled}
                       />
+                    </McpAppVisibilityContext.Provider>
                   </WebShellCustomizationProvider>
                 </div>
               )}
@@ -23490,6 +23525,7 @@ export function App({
                   }
                 >
                   <WebShellCustomizationProvider value={mainChatCustomization}>
+                    <McpAppVisibilityContext.Provider value={chatActive && !showMissingSessionState}>
                       <TodoContextsProvider
                         timeline={todoTimeline}
                         details={todoDetails}
@@ -24573,6 +24609,7 @@ export function App({
                         </div>
                       )}
                     </div>
+                    </McpAppVisibilityContext.Provider>
                   </WebShellCustomizationProvider>
                 </div>
               </div>
@@ -24848,6 +24885,7 @@ export function App({
                 artifactPanelSlotEl,
               )}
           </div>
+          </GeneratedUiRuntimeProvider>
         </div>
         </CompactModeContext.Provider>
         </WebShellPortalRootContext.Provider>
