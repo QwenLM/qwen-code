@@ -563,6 +563,7 @@ export interface DaemonSessionActions {
     }) => void | Promise<void>,
   ): Promise<void>;
 
+  setWorkflowMode(requested: boolean): Promise<void>;
   setReasoningEffort(
     value: ReasoningSelection,
     opts?: { persist?: boolean },
