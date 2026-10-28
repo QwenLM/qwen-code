@@ -37,9 +37,11 @@ import java.util.function.Supplier;
  * the host tz database, records one decision per slot — fired, skipped or
  * missed, by the overlap and catch-up policies — and fires an occurrence as
  * one idempotent Harness operation whose claim row was durable first. Rows
- * are worked on a bounded pool so one slow gated fire never stalls every
- * definition on the node; each row claims itself at task start and leases
- * from the claim time (#15418). A
+ * are worked on a bounded pool, so one slow gated fire does not stall the
+ * other definitions' rows within a tick; each row claims itself at task
+ * start and leases from the claim time (#15418). The tick still joins its
+ * rows before returning, so one slow row delays the next tick for every
+ * definition the node works (#15667). A
  * claim whose answer was lost is re-driven by later ticks with bounded
  * backoff and, past the bound, recorded unknown — never guessed; a scanner
  * that lost its lease cannot move the ledger. See
@@ -176,9 +178,16 @@ public class AutomationScanner {
                 }
                 if (failureSample.size() < 3) {
                     ScheduleRow row = task.getValue();
+                    // The sample is the only record of an additional
+                    // failure, so a message-less one must still name
+                    // itself instead of rendering "failure=null".
+                    Throwable cause = error.getCause();
+                    String detail = cause.getMessage() != null
+                            ? cause.getMessage()
+                            : cause.getClass().getName();
                     failureSample.add("tenant=" + row.tenantId()
                             + " schedule=" + row.scheduleId()
-                            + " failure=" + error.getCause().getMessage());
+                            + " failure=" + detail);
                 }
             }
         }
