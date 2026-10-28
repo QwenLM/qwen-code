@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.config.SshRuntimeSettings;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.workspace.SshWorkspaceService;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
@@ -20,6 +21,7 @@ import javax.sql.DataSource;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -29,6 +31,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 class WorkspaceFileStoreTest {
     @TempDir
@@ -36,6 +39,8 @@ class WorkspaceFileStoreTest {
     JdbcTemplate jdbc;
     WorkspaceFileStore files;
     WorkspaceStorageGuard guard;
+    ManagedWorkspaceRegistry registry;
+    SshWorkspaceService ssh;
     ManagedAgentProperties properties;
     String workspace;
 
@@ -54,13 +59,14 @@ class WorkspaceFileStoreTest {
         properties.getRuntimeBroker().setWorkspaceCreationRoot(Files.createDirectory(temp.resolve("created")).toRealPath().toString());
         properties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true);
         var manager = new DataSourceTransactionManager(source);
-        var registry = new ManagedWorkspaceRegistry(jdbc);
+        registry = new ManagedWorkspaceRegistry(jdbc);
         guard = new WorkspaceStorageGuard(jdbc, manager, properties,
                 path -> new WorkspaceStorageGuard.Identity(path.toString(), "test-host", "1", "2", "2026-10-15T00:00:00.123456789Z"));
         var mapper = new ObjectMapper();
         workspace = new WorkspaceCreationStore(jdbc, manager, guard, registry, properties, mapper, Clock.systemUTC())
                 .create("tenant", "actor", "Files", "create").workspaceId();
-        files = new WorkspaceFileStore(registry, guard, mock(SshWorkspaceService.class), properties, jdbc, manager, mapper);
+        ssh = mock(SshWorkspaceService.class);
+        files = new WorkspaceFileStore(registry, guard, ssh, properties, jdbc, manager, mapper);
         Files.createDirectory(Path.of(guard.fileRoot(files.scope("tenant", "actor", workspace, ".").binding()).get("root")).resolve("src"));
     }
 
@@ -81,6 +87,40 @@ class WorkspaceFileStoreTest {
                 + " FROM ma_workspace WHERE tenant_id = ? AND workspace_id = ?", id, "agent", binding.getContextConfigRef(),
                 ManagedWorkspaceRegistry.actorKey("tenant", "actor"), "tenant", workspace);
         return new WorkspaceFileStore.Locator(id, null, null);
+    }
+
+    @Test
+    void sessionFilesPreservePinnedContextButRequireTheSshNodeActorAllowlist() {
+        var locator = session("session");
+        var remote = properties.getRuntimeBroker().getSsh();
+        remote.setEnabled(true);
+        remote.setNodes(List.of(new SshRuntimeSettings.Node("mac", "Mac", "mac", "/node", "/qwen.js", "/state",
+                List.of("/work"), 33222, "0.25.1", List.of(new SshRuntimeSettings.Access("tenant", "actor")))));
+        registry.configureSsh(properties);
+        jdbc.update("UPDATE ma_storage SET storage_kind = 'SSH_LOCAL', registration_json = ?", "{\"nodeId\":\"mac\"}");
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, ?, ?, 'OPERATOR')",
+                "tenant", workspace, ManagedWorkspaceRegistry.actorKey("tenant", "unlisted"));
+        var allowed = files.scope("tenant", "actor", locator);
+        assertThat(allowed.binding().getCwdRelative()).isEqualTo("src");
+        assertThat(allowed.binding().getContextRevision()).isEqualTo(7);
+        assertThatThrownBy(() -> files.scope("tenant", "unlisted", workspace, "."))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("runtime_node_forbidden"));
+        assertThatThrownBy(() -> files.scope("tenant", "unlisted", locator))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("runtime_node_forbidden"));
+        assertThatThrownBy(() -> files.query("tenant", "unlisted", locator, ".", "", null))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("runtime_node_forbidden"));
+        assertThatThrownBy(() -> files.read("tenant", "unlisted", locator, "a.txt", allowed.revision()))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("runtime_node_forbidden"));
+        var uploads = new WorkspaceFileUploadStore(files, registry, guard, ssh, properties, jdbc,
+                new DataSourceTransactionManager(jdbc.getDataSource()), new ObjectMapper(), Runnable::run);
+        assertThatThrownBy(() -> uploads.upload("tenant", "unlisted", locator, "a.txt", allowed.revision(),
+                UUID.randomUUID().toString(), new java.io.ByteArrayInputStream(new byte[] {1}), 1))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("runtime_node_forbidden"));
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'WORKSPACE_UPLOAD'", Integer.class)).isZero();
+        verifyNoInteractions(ssh);
+        remote.setEnabled(false);
+        assertThatThrownBy(() -> files.scope("tenant", "actor", locator))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("runtime_node_forbidden"));
     }
 
     @Test

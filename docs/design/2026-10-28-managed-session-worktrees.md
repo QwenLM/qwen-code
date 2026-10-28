@@ -44,12 +44,18 @@ safe cleanup of existing worktrees, but new preparation is refused.
    the frozen commit and validates the resulting identity before marking ready.
    Storage busy defers without consuming the failure budget.
 5. Only ready worktrees admit warm, attach, dispatch, new input or file access.
-   Cancellation and lifecycle draining remain possible before readiness.
+   Cancellation, lifecycle draining and queued-message query/edit/withdraw remain
+   possible before readiness. New queue input and resume require readiness;
+   rename also remains gated because it attaches to the Harness.
 
 Worktree state is orthogonal to Session status: `preparing`, `ready`, `failed`,
 `blocked`, `removing`, `removed`. Closing during preparation never starts the
-Runtime afterwards, even if Git completed. Known preparation failure fails the
-initial Turn. Retry answers the same identity rather than allocating a new one.
+Runtime afterwards, even if Git completed. Known preparation failure fails an
+initial Turn only if it was never submitted. If the checkout becomes blocked
+after submission, its Turn retains the unknown outcome until existing
+cancellation/reconciliation yields committed settlement; a blocked checkout alone
+cannot prove failure. The UI exposes that block and preserves cancellation.
+Retry answers the same identity rather than allocating a new one.
 
 Ordinary Sessions retain the existing shared execution model. Preparation and
 cleanup exclusively maintain the whole physical storage and may wait for other
@@ -102,6 +108,8 @@ The former resolves the durable binding and includes worktree revision in the
 scope revision. The latter remains for pre-creation browsing and cannot enter
 private worktree paths. Only server-resolved Session bases may bypass the
 private-base restriction; user-relative paths keep their existing validation.
+Both locators enforce the SSH runtime-node actor allowlist as well as Workspace
+grants. A Session locator keeps its pinned cwd and context revision.
 
 WebShell offers current directory/worktree in the composer and creates isolated
 worktrees from HEAD; an explicit starting ref remains available through the API.

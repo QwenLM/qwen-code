@@ -244,6 +244,7 @@ public class WorkspaceFileStore {
                 binding.getWorkspaceGeneration(), binding.getStorageId()).isEmpty()) {
             throw unavailable();
         }
+        registry.requireSshNodeAccess(tenant, actor, binding.getStorageId());
         return binding;
     }
 

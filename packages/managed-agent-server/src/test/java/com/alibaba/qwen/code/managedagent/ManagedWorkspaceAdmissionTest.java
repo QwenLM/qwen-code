@@ -15,6 +15,7 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationKind;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentDefinitionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedUserMessageStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.SessionWorktreeStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
@@ -2373,6 +2374,51 @@ class ManagedWorkspaceAdmissionTest {
                 .andExpect(jsonPath("$.worktree.session_id").value(session))
                 .andExpect(jsonPath("$.worktree.base_commit").value("a".repeat(40)))
                 .andExpect(jsonPath("$.worktree.state").value("preparing"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"PREPARING", "FAILED", "BLOCKED", "REMOVING", "REMOVED"})
+    void unreadyWorktreesAllowQueueManagementButKeepRuntimeActionsGated(String state) throws Exception {
+        String tenant = "tenant-" + UUID.randomUUID();
+        String session = boundSession(tenant);
+        grant(tenant, "ws-a", "operator2", true);
+        grant(tenant, "ws-a", "reader", false);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        when(harness.isAvailable()).thenReturn(true);
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        when(harness.supportsFencedTitles()).thenReturn(true);
+        when(harness.supportsUserMessageQueue()).thenReturn(true);
+        var enabled = boundServiceWith(harness);
+        var messages = new ManagedUserMessageStore(jdbc, mapper, new RequestDigests(), enabled);
+        var transaction = new TransactionTemplate(transactionManager);
+        var input = List.of(new InputBlock("text", "queued"));
+        var first = transaction.execute(status -> messages.command(tenant, "actor-a", session, "seed",
+                new ManagedUserMessageStore.Command("submit", null, null, input))).messages().getFirst();
+        persistWorktree(tenant, session, state);
+
+        assertThat(transaction.execute(status -> messages.queryMessages(tenant, "operator2", session)).messages()).hasSize(1);
+        var edited = transaction.execute(status -> messages.command(tenant, "operator2", session, "edit",
+                new ManagedUserMessageStore.Command("edit", first.id(), 1L, List.of(new InputBlock("text", "edited")))));
+        assertThat(edited.messages().getFirst().revision()).isEqualTo(2);
+        assertThat(edited.messages().getFirst().input().getFirst().get("text")).isEqualTo("edited");
+        assertRefused(() -> transaction.execute(status -> messages.command(tenant, "operator2", session, "new",
+                new ManagedUserMessageStore.Command("submit", null, null, input))), "worktree_" + state.toLowerCase(java.util.Locale.ROOT));
+        assertRefused(() -> transaction.execute(status -> messages.command(tenant, "operator2", session, "resume",
+                new ManagedUserMessageStore.Command("resume", null, null, null))), "worktree_" + state.toLowerCase(java.util.Locale.ROOT));
+        assertThat(transaction.execute(status -> messages.command(tenant, "operator2", session, "withdraw",
+                new ManagedUserMessageStore.Command("withdraw", first.id(), 2L, null))).messages()).isEmpty();
+        assertRefused(() -> enabled.submitTurn(tenant, "operator2", "submit", session, input),
+                "worktree_" + state.toLowerCase(java.util.Locale.ROOT));
+        assertRefused(() -> enabled.renameSession(tenant, "operator2", "rename", session, "renamed"),
+                "worktree_" + state.toLowerCase(java.util.Locale.ROOT));
+        assertThat(enabled.getWebShellSession(tenant, "operator2", session).capabilities().rename()).isFalse();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn WHERE tenant_id = ? AND session_id = ?", Integer.class, tenant, session)).isZero();
+        verify(harness, never()).createOrLoad(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.anyBoolean(), org.mockito.ArgumentMatchers.anyBoolean());
+        assertRefused(() -> enabled.authorizeUserMessages(tenant, "reader", session), "session_operation_forbidden");
+        jdbc.update("UPDATE ma_workspace_access SET role = 'READER' WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
+                tenant, "ws-a", ManagedWorkspaceRegistry.actorKey(tenant, "actor-a"));
+        assertRefused(() -> enabled.authorizeUserMessages(tenant, "operator2", session), "workspace_unavailable");
     }
 
     @Test

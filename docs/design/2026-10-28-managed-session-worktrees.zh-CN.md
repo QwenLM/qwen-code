@@ -31,10 +31,14 @@ linked source 的 common directory 越出存储根时拒绝，不自动扩大挂
    可选首 Turn 和创建回执。context revision 从一开始。
 4. worker 取得 claim 及物理存储维护占用后，从冻结 commit 创建并验证身份，再改为 ready。
    存储忙仅延后，不消耗失败预算。
-5. 仅 ready 放行 warm、attach、dispatch、新输入和文件访问；准备前仍可取消及排空生命周期。
+5. 仅 ready 放行 warm、attach、dispatch、新输入和文件访问；就绪前仍可取消、排空生命周期，
+   以及查询、编辑和撤回队列消息。新队列输入和恢复队列要求就绪；重命名会连接 Harness，
+   因此也保留就绪检查。
 
 worktree 状态独立于会话状态：`preparing`、`ready`、`failed`、`blocked`、`removing`、
-`removed`。准备中关闭后，即使 Git 完成也不再启动 Runtime。已知准备失败使首 Turn 失败。
+`removed`。准备中关闭后，即使 Git 完成也不再启动 Runtime。已知准备失败仅使尚未提交的
+首 Turn 失败。若提交后 checkout 受阻，Turn 保留未知执行结果，直到既有取消/对账流程取得
+已提交的结算证据；仅 checkout 受阻不能证明失败。界面显示该阻塞并保留取消入口。
 重试返回相同身份，不分配另一份目录。
 
 普通会话沿用现有共享执行模型。准备和清理独占整个物理存储，可能等待其他执行。
@@ -73,6 +77,8 @@ Workspace 下增加 options、query、inspect、cleanup，提供支持情况、�
 文件请求严格二选一：Session ID，或 Workspace ID 加 cwd。前者解析持久绑定并将 worktree
 修订纳入 scope revision；后者保留用于创建前浏览，禁止进入内部 worktree 路径。
 仅服务端解析的 Session base 可通过内部保留目录，用户相对路径仍沿用原有验证。
+两种定位方式均检查 Workspace 授权及 SSH Runtime 节点的 actor 白名单。Session 定位保留
+其固定的 cwd 和 context revision。
 
 WebShell 在输入框中提供当前目录/worktree，从 HEAD 创建隔离工作树；显式起始 ref 仍可通过 API 指定。
 界面显示当前分支，冻结待提交请求，并显示准备、等待、失败和受阻。目标创建前暂停目录文件引用与上传，

@@ -696,6 +696,7 @@ public class ManagedAgentService {
         // retire it.
         requireVisibleSession(session);
         requireSubmitterFacts(session, actorId);
+        requireReadyWorktree(session);
         requireHarness();
         String payloadDigest = SubmitHarnessTurn.computePayloadDigest(input);
         Admission admission;
@@ -858,6 +859,7 @@ public class ManagedAgentService {
         SessionRecord current = requireVisibleSession(tenantId, sessionId);
         requireSubmitterRole(current, actorId);
         requireSubmitterFacts(current, actorId);
+        requireReadyWorktree(current);
         String effectiveTitle = validRenameTitle(title);
         requireHarness();
         if (!harness.supportsFencedTitles()) {
@@ -1725,15 +1727,18 @@ public class ManagedAgentService {
         if (session.publicChildAgentsVersion() == 1 && store.findChildLineage(session.tenantId(), session.sessionId()) != null) {
             throw new ManagedAgentException(HttpStatus.CONFLICT, "unsupported_feature", "Public child Sessions accept only their delegated input");
         }
+        if (session.workspace() != null
+                && !maySubmitWorkspaceTurn(session, actorId)) {
+            requireLegacyWorkspace(session, actorId);
+        }
+    }
+
+    private void requireReadyWorktree(SessionRecord session) {
         var worktree = store.findSessionWorktree(session.tenantId(), session.sessionId());
         if (!ready(worktree)) {
             throw new ManagedAgentException(HttpStatus.CONFLICT,
                     worktree.errorCode() == null ? "worktree_" + worktree.state() : worktree.errorCode(),
                     "The Session worktree is not ready.");
-        }
-        if (session.workspace() != null
-                && !maySubmitWorkspaceTurn(session, actorId)) {
-            requireLegacyWorkspace(session, actorId);
         }
     }
 
@@ -1827,7 +1832,7 @@ public class ManagedAgentService {
 
     private boolean maySubmitWorkspaceTurn(SessionRecord session,
             String actorId) {
-        if (!maySubmitShape(session) || actorId == null
+        if (!maySubmitShape(session, null) || actorId == null
                 || actorId.isEmpty()) {
             return false;
         }
@@ -1851,7 +1856,7 @@ public class ManagedAgentService {
                         session.sessionId());
     }
 
-    // The page twin of the singular: the same rule answered from the two
+    // The page rule also requires readiness; its permission facts use the
     // batch reads the assembler already made — the caller's role from the
     // grant batch, the creator-keyed facts of each submit-shaped Session
     // from the facts batch.
@@ -1877,10 +1882,6 @@ public class ManagedAgentService {
         var grant = grants.get(session.workspace().getWorkspaceId());
         return grant != null && grant.canCreateSession()
                 && executable.contains(session.sessionId());
-    }
-
-    private boolean maySubmitShape(SessionRecord session) {
-        return maySubmitShape(session, store.findSessionWorktree(session.tenantId(), session.sessionId()));
     }
 
     private boolean maySubmitShape(SessionRecord session, SessionWorktreeStore.Descriptor worktree) {
