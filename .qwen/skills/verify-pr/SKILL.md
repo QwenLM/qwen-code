@@ -1,6 +1,6 @@
 ---
 name: verify-pr
-description: This skill should be used to run a sandboxed deep verification of a qwen-code PR — "/verify-pr <n>", "/verify-pr <n> --publish" (local round that also posts the report comment), "深度验证这个 PR", "验证这个 PR 并把报告发到评论", A/B load-bearing proof against the base build, mock-free harnesses with wire oracles, and targeted gates — producing tmp/pr<n>-verify-<ts>/report.md plus a machine-readable verdict. Designed for the token-free CI verify job; also usable locally.
+description: This skill should be used to run a sandboxed deep verification of a qwen-code PR — "/verify-pr <n>", "/verify-pr <n> --publish" (local round that also posts the report comment), "深度验证这个 PR", "验证这个 PR 并把报告发到评论", "有更新了，重新验证", "重新验证 PR <n>", "re-verify after update", A/B load-bearing proof against the base build, mock-free harnesses with wire oracles, and targeted gates — producing tmp/pr<n>-verify-<ts>/report.md plus a machine-readable verdict. Designed for the token-free CI verify job; also usable locally.
 argument-hint: '<pr-number> [--publish] [--watch] [--repo <owner>/<repo>] [--assets-repo <owner>/<repo>] [--assets-branch <branch>]'
 ---
 
@@ -250,13 +250,16 @@ base. Resolve `baseRefOid` and `headRefOid` explicitly from `gh pr view` and
 use those OIDs throughout; if either is not present locally, report
 `inconclusive` rather than substituting a parent.
 
-**Local follow-up rounds: check the PR's comment history before scoping.**
+**Local follow-up rounds: check the prior round before scoping.**
 The CI follow-up trigger (`previous-report.md` next to the context file)
-does not exist locally. When you have `gh` access (a maintainer-driven run
-on their own machine), look for prior verification rounds first —
+does not exist locally. Look for prior verification rounds in the newest
+`tmp/pr<n>-verify-*/` artifact dir — a round that was never published
+exists only there — and, when you have `gh` access (a maintainer-driven
+run on their own machine), in
 `gh api repos/<owner>/<repo>/issues/<n>/comments`, plus any linked assets
-branches or artifact indexes those comments name. If a substantive earlier
-round exists, run the follow-up protocol exactly as the CI path requires:
+branches or artifact indexes those comments name; take the newest
+substantive round across both sources. If one exists, run the follow-up
+protocol exactly as the CI path requires:
 lead with a previous-finding status table and **re-measure every
 carried-forward finding at the new head, never quote the old verdict**. The
 trigger is per finding, not per scenario: a finding whose repro needs a
@@ -300,6 +303,40 @@ treat the round as a production change.
   an automated round wrote on a runner without a JDK, once booted, warned
   on correctly suffixed values (including the repo's own `2s` / `500ms`)
   and still bound a stale `HARNESS_TURN_DEADLINE=600000` as 6.9 days.
+
+**Manual re-verification: "有更新了，重新验证" / "re-verify after update".**
+When the maintainer says a previously verified PR has moved, that phrase is
+a follow-up trigger, not a fresh round, and it needs no PR number restated:
+resolve the PR from the session's earlier round, or from the newest
+`tmp/pr<n>-verify-*/` when the session has none — ask when that is
+ambiguous rather than verify a guessed PR. Then, in order:
+
+1. Find the previous verified head `P` from the newest substantive round
+   across both sources: the local artifact dir's report verdict line, and
+   the verification comments (an unpublished round exists only locally; a
+   CI round published after it supersedes it). No prior round anywhere →
+   run a fresh round and say so.
+2. Fetch the current head and state with
+   `gh pr view <n> --repo <owner>/<repo> --json headRefOid,state`.
+   A merged or closed PR gets that answer, not a round. Head `H == P` → no
+   round either: report that the head has not moved since `P`. Comments,
+   reviews and CI results that arrived since are data to fold into that
+   answer, never a reason to re-verify — the same rule the watch gate
+   applies.
+3. `H != P` → run the follow-up protocol above: classify the `P..H` delta,
+   lead with the previous-finding status table, re-measure every
+   carried-forward finding at `H`.
+4. Inherit the previous round's coordinates (`--repo`, assets repo/branch)
+   instead of asking again. Publishing stays a per-invocation request: the
+   phrase alone does not post a comment.
+5. If a watch is installed for this PR, read
+   `.qwen/tmp/verify-pr-watch-<n>.json` first — a watch round may already
+   be in flight for `H`; let it finish instead of racing it. After a
+   completed manual round, record `H` in that same file so the watch does
+   not fire again for a head already verified.
+
+To make this trigger automatic instead of typed, install `--watch` (above);
+the two share that head-dedup file.
 
 **Maintainer-driven local publish (only on explicit request).** "Never
 post" yields when the maintainer running the local round explicitly asks
