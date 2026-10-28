@@ -2218,8 +2218,8 @@ describe('package scripts', () => {
     expect(pushReleaseBranchStep).toContain(
       "CI_BOT_PAT: '${{ secrets.CI_BOT_PAT }}'",
     );
-    // A dry run skips every live PAT consumer, so it probes the token itself
-    // instead of learning about a rotated one on the next live release.
+    // A dry run skips every live PAT consumer, so it probes write capability
+    // instead of learning about a rotated token on the next live release.
     const patProbeStep = getWorkflowStep(
       publishJob,
       'Verify bot PAT (dry run)',
@@ -2227,10 +2227,11 @@ describe('package scripts', () => {
     expect(patProbeStep).toContain(
       'if: "${{ needs.prepare.outputs.is_dry_run == \'true\' }}"',
     );
-    expect(patProbeStep).toContain('continue-on-error: true');
     expect(patProbeStep).toContain("PAT: '${{ secrets.CI_BOT_PAT }}'");
     const patProbeRun = patProbeStep.slice(patProbeStep.indexOf('run: |-'));
     expect(patProbeRun).toContain('GH_TOKEN="$PAT"');
+    expect(patProbeRun).toContain('.permissions.push');
+    expect(patProbeRun).toContain('::warning::CI_BOT_PAT cannot push');
     expect(patProbeRun).not.toContain('secrets.');
     expect(releaseStepScript).toContain('git config core.hooksPath .husky');
     expect(releaseStepScript).toContain('export GH_TOKEN="${CI_BOT_PAT}"');

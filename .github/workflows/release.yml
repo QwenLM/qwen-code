@@ -715,11 +715,10 @@ jobs:
 
       - name: 'Verify bot PAT (dry run)'
         if: "${{ needs.prepare.outputs.is_dry_run == 'true' }}"
-        continue-on-error: true
         env:
           PAT: '${{ secrets.CI_BOT_PAT }}'
         run: |-
-          GH_TOKEN="$PAT" gh api "repos/${GITHUB_REPOSITORY}" --jq .full_name || echo "::warning::CI_BOT_PAT is unusable"
+          GH_TOKEN="$PAT" gh api "repos/${GITHUB_REPOSITORY}" --jq '.permissions.push' | grep -qx true || echo "::warning::CI_BOT_PAT cannot push to ${GITHUB_REPOSITORY}"
 
       - name: 'Download audio capture prebuilds'
         if: |-
