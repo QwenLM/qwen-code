@@ -3706,6 +3706,32 @@ describe('qwen-autofix workflow', () => {
         round: '2',
       }).halted,
     ).toBe('false');
+    // ONE sentinel is not a halt: the threshold is TIMEOUT_WINDOW_CAP, so a
+    // single crashed attempt spends its turn and the window goes on. Lowering
+    // the bound to `-ge 1` reds this.
+    expect(
+      read({
+        markers: [mk(1, 'a', SENTINEL), mk(2, 'b')],
+        budget: '3',
+        round: '2',
+      }).halted,
+    ).toBe('false');
+    // …and a convergence notice OLDER than the window key is not a halt
+    // either: only a notice inside the current window counts.
+    expect(
+      read({
+        markers: [mk(1, 'a')],
+        budget: '2',
+        round: '1',
+        notices: [
+          {
+            user: { login: 'qwen-code-dev-bot' },
+            created_at: '2026-07-17T23:00:00Z',
+            body: '<!-- autofix-convergence-break -->',
+          },
+        ],
+      }).halted,
+    ).toBe('false');
 
     // (3) The shepherds 3-day auto-release takes the label away from a paused
     // bot PR. A spent budget must survive that, or EFF falls back to 10 and the
@@ -3906,6 +3932,7 @@ describe('qwen-autofix workflow', () => {
               FORCED_PR: '',
               TIMEOUT_WINDOW_CAP: '3',
               BUDGET_SPENT: 'true',
+              BUDGET_HALTED: 'false',
               DRY_RUN: dryRun,
               IS_BOT_AUTHOR: 'false',
               STUB_ACTOR: actor,
@@ -3991,7 +4018,12 @@ describe('qwen-autofix workflow', () => {
       /(if \[\[ "\$\{ROUND\}" -ge "\$\{EFF_MAX_ROUNDS\}" \|\| "\$\{BUDGET_SPENT\}" == 'true' \]\]; then[\s\S]*?\n {12}fi)/,
     )?.[1];
     expect(boundary).toBeTruthy();
-    const runBoundary = ({ botAuthor = 'true' } = {}) => {
+    const runBoundary = ({
+      botAuthor = 'true',
+      halted = 'false',
+      forcedPr = '',
+      eventName = 'schedule',
+    } = {}) => {
       const dir = mkdtempSync(join(tmpdir(), 'autofix-budget-boundary-'));
       try {
         writeFileSync(join(dir, 'ic.json'), '[]');
@@ -4036,9 +4068,9 @@ describe('qwen-autofix workflow', () => {
               ROUND: '0',
               EFF_MAX_ROUNDS: '3',
               BUDGET_USED: '3',
-              BUDGET_HALTED: 'false',
-              FORCED_PR: '',
-              EVENT_NAME: 'schedule',
+              BUDGET_HALTED: halted,
+              FORCED_PR: forcedPr,
+              EVENT_NAME: eventName,
               TIMEOUT_WINDOW_CAP: '3',
               BUDGET_SPENT: 'true',
               DRY_RUN: 'false',
@@ -4065,6 +4097,30 @@ describe('qwen-autofix workflow', () => {
     expect(bot.log).toContain('budget spent');
     expect(bot.log).not.toContain('hit the round cap');
     expect(bot.fleet).toContain('budget-spent');
+
+    // The two suppressors on the same gate, on their failing side: a halted
+    // engagement (the breaker fired on the round that spent the budget) and a
+    // real forced dispatch both skip the release and land on the paused path.
+    // Deleting either clause from the gate leaves these green without them.
+    const haltedNow = runBoundary({ botAuthor: 'false', halted: 'true' });
+    expect(haltedNow.writes).not.toContain('autofix%2Ftakeover');
+    expect(haltedNow.log).toContain('budget spent');
+    expect(haltedNow.fleet).toContain('needs a human');
+
+    const forced = runBoundary({
+      botAuthor: 'false',
+      forcedPr: '7165',
+      eventName: 'workflow_dispatch',
+    });
+    expect(forced.writes).not.toContain('autofix%2Ftakeover');
+
+    // …and the same dispatch identity on a passive event still releases.
+    const targeted = runBoundary({
+      botAuthor: 'false',
+      forcedPr: '7165',
+      eventName: 'pull_request',
+    });
+    expect(targeted.writes).toContain('labels/autofix%2Ftakeover');
   });
 
   it('counts no-op attempts for a for-N budget and keeps breaker stops escalated', () => {
@@ -4262,6 +4318,61 @@ describe('qwen-autofix workflow', () => {
     };
     expect(sentinels(['1001', '1002', '1003'])).toBe('0');
     expect(sentinels([])).toBe('3');
+  });
+
+  it('parses the run field in both eval-marker builders', () => {
+    // The format change made `run=` mandatory at every write site and relaxed
+    // six reader regexes, but nothing fed a `run=` body back through a reader:
+    // reverting the optional group stayed green while production markers (all
+    // carrying `run=`) stopped matching — an empty census, silently.
+    const builders = {
+      scan: reviewScanJob.match(/(MARKERS="\$\(jq[\s\S]*?ic\.json"\)")/)?.[1],
+      prepare: workflow.match(/(LIVE_MARKS="\$\(jq[\s\S]*?ic\.json"\)")/)?.[1],
+    };
+    const body = (run) =>
+      '<!-- autofix-eval ts=2026-07-18T09:00:00Z acted=true round=2 win=K1' +
+      (run ? ` run=${run}` : '') +
+      ' -->';
+    for (const [name, builder] of Object.entries(builders)) {
+      expect(builder, name).toBeTruthy();
+      const dir = mkdtempSync(join(tmpdir(), `autofix-run-${name}-`));
+      try {
+        writeFileSync(
+          join(dir, 'ic.json'),
+          JSON.stringify([
+            {
+              user: { login: 'qwen-code-dev-bot' },
+              created_at: '2026-07-18T10:00:00Z',
+              body: body('1111'),
+            },
+            {
+              user: { login: 'qwen-code-dev-bot' },
+              created_at: '2026-07-18T11:00:00Z',
+              body: body(null),
+            },
+          ]),
+        );
+        // Both builders print ONE array (compact for the scan, pretty for
+        // prepare), so the inspection reads it as a single value.
+        const inspect = 'jq -c';
+        // Each builder assigns its own variable; the scan uses MARKERS, the
+        // prepare leg LIVE_MARKS.
+        const varName = name === 'scan' ? 'MARKERS' : 'LIVE_MARKS';
+        const out = execFileSync(
+          'bash',
+          [
+            '-c',
+            `AUTOFIX_BOT='qwen-code-dev-bot'\nWORKDIR='${dir}'\n${builder.replace(/\n {10,12}/g, '\n')}\nprintf '%s' "$(${inspect} 'map("\\(.round)|\\(.win)|\\(.run // "null")")' <<< "$${varName}")"`,
+          ],
+          { encoding: 'utf8' },
+        ).trim();
+        // The new marker parses its round, window and run; the legacy one still
+        // parses round and window, and its run stays absent (null, not "").
+        expect(out, name).toBe('["2|K1|1111","2|K1|null"]');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
   });
 
   it('reads the prepare budget from the engagement, and only while it is live', () => {
