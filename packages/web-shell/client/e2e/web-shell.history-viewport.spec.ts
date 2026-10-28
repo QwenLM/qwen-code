@@ -50,7 +50,7 @@ async function historyScenario(
   baseURL: string | undefined,
   pageRecords: number,
 ) {
-  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.setViewportSize({ width: 1600, height: 900 });
   const count = pageRecords * 12;
   const sessionId = `history-navigation-${pageRecords}`;
   const live = Array.from({ length: 40 }, (_, index) =>
@@ -192,9 +192,12 @@ for (const pageRecords of [16, 200]) {
     baseURL,
   }) => {
     if (pageRecords === 200) {
-      // 4x CPU throttling over a 2,400-record fixture runs at 75-91% of the
-      // shared 60s budget and has timed out on all 3 attempts on CI (#11736).
-      test.setTimeout(120_000);
+      // 4x CPU throttling over a 2,400-record fixture ran at 75-91% of the
+      // shared 60s budget and timed out on all 3 attempts on CI (#11736); the
+      // 120s budget held on hosted runners but not on the loaded ECS pool —
+      // on 2026-10-26 it timed out on all attempts of three unrelated PR runs
+      // (40285903183, 40297391221, 40337428619), each 367/368 green otherwise.
+      test.setTimeout(300_000);
       const client = await page.context().newCDPSession(page);
       await client.send('Emulation.setCPUThrottlingRate', { rate: 4 });
     }

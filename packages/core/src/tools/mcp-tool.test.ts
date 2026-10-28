@@ -263,6 +263,21 @@ describe('DiscoveredMCPTool', () => {
       );
     });
 
+    it.each([false, true])(
+      'keeps daemon Workflow write permission %s out of MCP metadata',
+      async (workflowModeWriteAllowed) => {
+        const mcpClient = successfulClient();
+        await runWithInvocationContext(
+          { ...invocationContext, workflowModeWriteAllowed },
+          () => exec(createDirectTool(mcpClient, true)),
+        );
+
+        expect(vi.mocked(mcpClient.callTool).mock.calls[0][0]._meta).toEqual({
+          [INVOCATION_CONTEXT_META_KEY]: invocationContext,
+        });
+      },
+    );
+
     it.each([
       { allowInvocationContext: false, runWithContext: true },
       { allowInvocationContext: true, runWithContext: false },

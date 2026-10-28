@@ -2465,6 +2465,7 @@ function currentServeFeaturesForRunQwenServe(
     sessionShellCommandEnabled,
     sessionArtifactsPersistenceAvailable,
     sessionGenerationAvailable: true,
+    sessionBtwStreamAvailable: true,
     currentSessionSchedulingAvailable,
     workspaceGenerationAvailable: true,
     rateLimit: opts.rateLimit === true,
@@ -3495,16 +3496,6 @@ async function runQwenServeImpl(
   const hostedCsiSessionStoreUrl =
     optsIn.hostedCsiSessionStoreUrl ??
     process.env[HOSTED_CSI_SESSION_STORE_URL_ENV];
-  const managedRuntimeBrokerUrl =
-    optsIn.managedRuntimeBrokerUrl ??
-    (optsIn.profile === 'hosted-harness'
-      ? process.env['QWEN_HOSTED_HARNESS_BROKER_URL']
-      : undefined);
-  const managedRuntimeBrokerToken =
-    optsIn.managedRuntimeBrokerToken ??
-    (optsIn.profile === 'hosted-harness'
-      ? process.env['QWEN_HOSTED_HARNESS_BROKER_TOKEN']
-      : undefined);
   validateHostedHarnessProfile({
     ...optsIn,
     token,
@@ -3512,8 +3503,6 @@ async function runQwenServeImpl(
       optsIn.profile === 'hosted-harness' ? true : optsIn.requireAuth,
     hostedHarnessCapabilityDigest,
     hostedCsiSessionStoreUrl,
-    managedRuntimeBrokerUrl,
-    managedRuntimeBrokerToken,
   });
   const baseEnv: NodeJS.ProcessEnv = { ...process.env };
   const launchMemoryProjectScopeValue =
@@ -3651,8 +3640,6 @@ async function runQwenServeImpl(
     token,
     hostedHarnessCapabilityDigest,
     hostedCsiSessionStoreUrl,
-    managedRuntimeBrokerUrl,
-    managedRuntimeBrokerToken,
     promptDeadlineMs,
     writerIdleTimeoutMs,
     workspace: rawWorkspace,
@@ -4834,8 +4821,8 @@ async function runQwenServeImpl(
         env: daemonRuntimeBaseEnv,
         token,
         externalToolGuardToken: optsIn.externalToolGuard?.token,
-        managedRuntimeBrokerUrl,
-        managedRuntimeBrokerToken,
+        managedRuntimeBrokerUrl: opts.managedRuntimeBrokerUrl,
+        managedRuntimeBrokerToken: opts.managedRuntimeBrokerToken,
         getPort: () => actualPort,
         close: () => serveAppLifecycle.close(),
       })
@@ -5883,6 +5870,27 @@ async function runQwenServeImpl(
     const workspaceRegistryForPersistence: {
       current: WorkspaceRegistry | undefined;
     } = { current: undefined };
+    const createRuntimeWorkflowOwnerCheck =
+      (
+        workspaceCwd: string,
+        getBridge: () => AcpSessionBridge | undefined,
+        generationGuard: WorkspaceGenerationGuard,
+      ) =>
+      (sessionId: string): boolean => {
+        const registry = workspaceRegistryForPersistence.current;
+        if (!registry || generationGuard.closed) return false;
+        const owner = registry.resolveLiveSessionOwner(sessionId);
+        const entry = registry.getManagedEntryByWorkspaceCwd(workspaceCwd);
+        return (
+          owner.kind === 'found' &&
+          owner.runtime.trusted &&
+          owner.runtime.workspaceCwd === workspaceCwd &&
+          owner.runtime.bridge === getBridge() &&
+          entry?.state === 'active' &&
+          entry.current?.runtime === owner.runtime &&
+          entry.current.guard === generationGuard
+        );
+      };
     const createRuntimeWorkflowAncestorTrustHandler = (
       workspaceCwd: string,
       getBridge: () => AcpSessionBridge | undefined,
@@ -5894,21 +5902,11 @@ async function runQwenServeImpl(
         admissionPolicy,
         getPublished: () => publishedWorkflowTrustPolicy,
         ideScopeCwd: workflowTrustIdeScopeCwd,
-        isCurrentOwner: (sessionId) => {
-          const registry = workspaceRegistryForPersistence.current;
-          if (!registry) return false;
-          const owner = registry.resolveLiveSessionOwner(sessionId);
-          const entry = registry.getManagedEntryByWorkspaceCwd(workspaceCwd);
-          return (
-            owner.kind === 'found' &&
-            owner.runtime.trusted &&
-            owner.runtime.workspaceCwd === workspaceCwd &&
-            owner.runtime.bridge === getBridge() &&
-            entry?.state === 'active' &&
-            entry.current?.runtime === owner.runtime &&
-            entry.current.guard === generationGuard
-          );
-        },
+        isCurrentOwner: createRuntimeWorkflowOwnerCheck(
+          workspaceCwd,
+          getBridge,
+          generationGuard,
+        ),
       });
     const isWorkspaceTrustedForPersistence = (workspace: string): boolean =>
       workspaceRegistryForPersistence.current?.getByWorkspaceCwd(workspace)
@@ -6305,6 +6303,11 @@ async function runQwenServeImpl(
     const bridge =
       deps.bridge ??
       runtime.createAcpSessionBridge({
+        isWorkflowModeWriteAllowed: createRuntimeWorkflowOwnerCheck(
+          boundWorkspace,
+          () => bridgeRef,
+          primaryGenerationGuard,
+        ),
         onWorkflowAncestorTrust: createRuntimeWorkflowAncestorTrustHandler(
           boundWorkspace,
           () => bridgeRef,
@@ -6609,7 +6612,7 @@ async function runQwenServeImpl(
         trustMaterialization: primaryTrustMaterialization,
       },
     ];
-    if (trustedWorkspace) {
+    if (trustedWorkspace && opts.profile !== 'hosted-harness') {
       await recoverBranchWorktreePreparations({
         workspaceCwd: boundWorkspace,
         sessionService: await createBranchRecoverySessionService(
@@ -6951,6 +6954,11 @@ async function runQwenServeImpl(
         secondaryEnv.sessionRuntimeBaseDir,
       );
       const secondaryBridge = runtime.createAcpSessionBridge({
+        isWorkflowModeWriteAllowed: createRuntimeWorkflowOwnerCheck(
+          workspaceInput.cwd,
+          () => secondaryBridgeRef,
+          secondaryGenerationGuard,
+        ),
         onWorkflowAncestorTrust: createRuntimeWorkflowAncestorTrustHandler(
           workspaceInput.cwd,
           () => secondaryBridgeRef,
@@ -7475,35 +7483,37 @@ async function runQwenServeImpl(
     // closure check forbids in this pre-listen root's static closure.
     sessionPrRefreshTimer?.dispose();
     const refreshGeneration = ++sessionPrRefreshGeneration;
-    void import('./server/session-pr-refresh.js')
-      .then((mod) => {
-        if (refreshGeneration !== sessionPrRefreshGeneration) return;
-        sessionPrRefreshTimer = mod.startSessionPrRefreshTimer({
-          workspaceRegistry,
-          // The coordinator lives on the serve app (createServeApp below),
-          // which is built after this timer starts; read it per tick like
-          // the metrics sampler reads `acpHandle`.
-          getArchiveCoordinator: () =>
-            (
-              app.locals as {
-                sessionArchiveCoordinator?: SessionArchiveCoordinator;
-              }
-            ).sessionArchiveCoordinator,
+    if (opts.profile !== 'hosted-harness') {
+      void import('./server/session-pr-refresh.js')
+        .then((mod) => {
+          if (refreshGeneration !== sessionPrRefreshGeneration) return;
+          sessionPrRefreshTimer = mod.startSessionPrRefreshTimer({
+            workspaceRegistry,
+            // The coordinator lives on the serve app (createServeApp below),
+            // which is built after this timer starts; read it per tick like
+            // the metrics sampler reads `acpHandle`.
+            getArchiveCoordinator: () =>
+              (
+                app.locals as {
+                  sessionArchiveCoordinator?: SessionArchiveCoordinator;
+                }
+              ).sessionArchiveCoordinator,
+          });
+        })
+        .catch((error) => {
+          // Degrade to "no PR-state sweep" instead of leaking an unhandled
+          // rejection: the serve fast path installs no process-level
+          // unhandledRejection handler before this runs, and Node's default
+          // for one is to exit — a failed chunk load (e.g. an in-place
+          // upgrade replacing dist/ under the running daemon) would take
+          // down every runtime, session, and connection the daemon serves.
+          daemonLog.warn(
+            `session-pr-refresh load failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
         });
-      })
-      .catch((error) => {
-        // Degrade to "no PR-state sweep" instead of leaking an unhandled
-        // rejection: the serve fast path installs no process-level
-        // unhandledRejection handler before this runs, and Node's default
-        // for one is to exit — a failed chunk load (e.g. an in-place
-        // upgrade replacing dist/ under the running daemon) would take
-        // down every runtime, session, and connection the daemon serves.
-        daemonLog.warn(
-          `session-pr-refresh load failed: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      });
+    }
 
     // Factory for dynamically creating workspace runtimes (POST /workspaces).
     interface WorkspaceRuntimeBuildOptions {
@@ -7682,6 +7692,11 @@ async function runQwenServeImpl(
           wsEnv.sessionRuntimeBaseDir,
         );
         wsBridge = runtime.createAcpSessionBridge({
+          isWorkflowModeWriteAllowed: createRuntimeWorkflowOwnerCheck(
+            cwd,
+            () => wsBridgeRef,
+            generationGuard,
+          ),
           onWorkflowAncestorTrust: createRuntimeWorkflowAncestorTrustHandler(
             cwd,
             () => wsBridgeRef,
@@ -8086,7 +8101,11 @@ async function runQwenServeImpl(
           });
         }
       }
-      if (wsRuntime.primary && wsRuntime.trusted) {
+      if (
+        wsRuntime.primary &&
+        wsRuntime.trusted &&
+        opts.profile !== 'hosted-harness'
+      ) {
         await recoverBranchWorktreePreparations({
           workspaceCwd: cwd,
           sessionService: await createBranchRecoverySessionService(wsRuntime),
