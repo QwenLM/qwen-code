@@ -51,7 +51,10 @@ import {
 } from '../openaiContentGenerator/constants.js';
 import { reconcileMaxTokens } from '../tokenLimits.js';
 import { buildSessionAwareFetch } from '../outbound-session-id.js';
-import { withDashScopeSourceConfig } from '../dashscope-source-config.js';
+import {
+  withDashScopeSourceConfig,
+  withoutDashScopeSourceConfig,
+} from '../dashscope-source-config.js';
 import { createHash } from 'node:crypto';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { ResponsesHttpError } from '../../utils/responses-http-error.js';
@@ -689,7 +692,7 @@ export class ResponsesPipeline {
     const fetchFn = buildSessionAwareFetch(
       pinnedFetch,
       this.cliConfig,
-      this.config.customHeaders,
+      withoutDashScopeSourceConfig(this.config.customHeaders),
     );
 
     // Connect-phase timeout: fetch() resolves once response headers arrive, so

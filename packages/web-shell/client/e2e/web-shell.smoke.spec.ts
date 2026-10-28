@@ -171,7 +171,7 @@ test('branches from an earlier completed Assistant response and resumes the fork
     .filter({ hasText: 'First completed answer' });
   await firstAnswerRow.hover();
   await firstAnswerRow
-    .getByRole('button', { name: 'Branch', exact: true })
+    .getByRole('button', { name: 'New chat from here', exact: true })
     .click();
 
   await expect.poll(() => daemon.branchRequests().length).toBe(1);
@@ -222,7 +222,10 @@ test('branches from an earlier completed Assistant response and resumes the fork
     .filter({ hasText: 'First completed answer' });
   await restoredFirstAnswer.hover();
   await expect(
-    restoredFirstAnswer.getByRole('button', { name: 'Branch', exact: true }),
+    restoredFirstAnswer.getByRole('button', {
+      name: 'New chat from here',
+      exact: true,
+    }),
   ).toBeVisible();
 });
 

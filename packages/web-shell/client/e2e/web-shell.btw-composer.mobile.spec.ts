@@ -36,14 +36,14 @@ test('mobile Add drawer prepares a side question and restores textarea focus @sm
   await expect(editor).toBeFocused();
   await expect(editor).toHaveValue('/btw What does this mean?');
   expect(daemon.promptRequests()).toHaveLength(0);
-  expect(daemon.requests.filter((r) => r.path.endsWith('/btw'))).toHaveLength(
-    0,
-  );
+  expect(
+    daemon.requests.filter((r) => r.path.endsWith('/btw/stream')),
+  ).toHaveLength(0);
   await page.locator('[data-web-shell-composer-submit]').tap();
   await expect(page.getByText(answer, { exact: true })).toBeVisible();
   expect(
     daemon.requests.filter(
-      (r) => r.method === 'POST' && r.path.endsWith('/btw'),
+      (r) => r.method === 'POST' && r.path.endsWith('/btw/stream'),
     ),
   ).toHaveLength(1);
   expect(daemon.promptRequests()).toHaveLength(0);
@@ -55,6 +55,11 @@ test('mobile Add drawer prepares a side question and restores textarea focus @sm
     path: testInfo.outputPath('btw-mobile-answer.png'),
   });
 
+  expect(
+    daemon.requests.filter(
+      (request) => request.method === 'POST' && /\/btw$/.test(request.path),
+    ),
+  ).toHaveLength(0);
   await page.getByTestId('composer-add-menu-trigger').tap();
   await page.getByRole('button', { name: 'Shell mode', exact: true }).tap();
   await page.getByTestId('composer-add-menu-trigger').tap();

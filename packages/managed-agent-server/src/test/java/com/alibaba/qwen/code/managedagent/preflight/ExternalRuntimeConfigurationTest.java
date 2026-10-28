@@ -125,10 +125,10 @@ class ExternalRuntimeConfigurationTest {
         assertFalse(checks.stream().anyMatch(check -> check.name().equals("broker-state")));
     }
 
-    private static ManagedAgentProperties scratchProperties() {
+    private static ManagedAgentProperties properties(String provisioner) {
         var environment = new MockEnvironment()
                 .withProperty("QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED", "true")
-                .withProperty("QWEN_MANAGED_AGENT_RUNTIME_PROVISIONER", "external-scratch")
+                .withProperty("QWEN_MANAGED_AGENT_RUNTIME_PROVISIONER", provisioner)
                 .withProperty("QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN", "broker-token-for-tests")
                 .withProperty("QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID", "key-1")
                 .withProperty("QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY",
@@ -141,10 +141,82 @@ class ExternalRuntimeConfigurationTest {
                 .withProperty("QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_PROVIDER_ID", "placement-service")
                 .withProperty("QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_REQUEST_TIMEOUT", "7")
                 .withProperty("QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_STARTUP_TIMEOUT", "90");
-        var checks = new ArrayList<ManagedAgentPreflight.Check>();
-        ManagedAgentPreflight.loadConfiguration(environment, List.of(), checks);
-        var properties = ManagedAgentPreflight.bind(environment, checks);
-        assertTrue(checks.isEmpty(), checks.toString());
+        var notes = new ArrayList<ManagedAgentPreflight.Check>();
+        ManagedAgentPreflight.loadConfiguration(environment, List.of(), notes);
+        var properties = ManagedAgentPreflight.bind(environment, notes);
+        assertTrue(notes.isEmpty(), notes.toString());
         return properties;
+    }
+
+    private static ManagedAgentPreflight.Check brokerCheck(ManagedAgentProperties properties) {
+        return ManagedAgentPreflight.brokerChecks(properties).stream()
+                .filter(check -> check.name().equals("broker"))
+                .findFirst()
+                .orElseThrow();
+    }
+
+    @Test
+    void bindsTheExternalWorkspaceKindWithoutAdmittingHostedWorkspaceFeatures() {
+        var properties = properties(
+                com.alibaba.qwen.code.runtimebroker.provisioning.ExternalWorkspaceProvisioner.KIND);
+        assertEquals(
+                com.alibaba.qwen.code.runtimebroker.provisioning.ExternalWorkspaceProvisioner.KIND,
+                properties.getRuntimeBroker().getProvisioner());
+        assertEquals(ManagedAgentPreflight.Status.PASS,
+                ManagedAgentPreflight.startupValidationCheck(properties).status());
+        var broker = brokerCheck(properties);
+        assertEquals(ManagedAgentPreflight.Status.PASS, broker.status(), broker.detail());
+        assertTrue(broker.detail().startsWith("external-workspace configuration accepted"),
+                broker.detail());
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        var error = assertThrows(IllegalStateException.class, properties::validateForPreflight);
+        assertTrue(error.getMessage().contains("storage provisioning prerequisite"), error.getMessage());
+    }
+
+    @Test
+    void theOperatorVisibleTextOfBothExternalKindsIsPinned() {
+        var workspace = brokerCheck(properties(
+                com.alibaba.qwen.code.runtimebroker.provisioning.ExternalWorkspaceProvisioner.KIND));
+        assertEquals("external-workspace configuration accepted; provider reachability,"
+                + " worker attestation and storage registration are checked on first use",
+                workspace.detail());
+        var scratch = brokerCheck(scratchProperties());
+        assertEquals("external-scratch configuration accepted; provider reachability,"
+                + " worker attestation and storage registration are checked on first use",
+                scratch.detail());
+        // Configurable is not usable: the prerequisite WARN must say so.
+        var warn = ManagedAgentPreflight.brokerChecks(properties(
+                        com.alibaba.qwen.code.runtimebroker.provisioning.ExternalWorkspaceProvisioner.KIND))
+                .stream().filter(check -> check.name().equals("external-prerequisite"))
+                .findFirst().orElseThrow();
+        assertEquals(ManagedAgentPreflight.Status.WARN, warn.status());
+        assertTrue(warn.detail().contains("cannot execute Hosted tools or close a Session yet"),
+                warn.detail());
+        assertTrue(warn.detail().contains("every placement fails closed"), warn.detail());
+        assertTrue(ManagedAgentPreflight.brokerChecks(scratchProperties()).stream()
+                        .noneMatch(check -> check.name().equals("external-prerequisite")),
+                "the scratch profile is not a prerequisite");
+    }
+
+    @Test
+    void anUnknownExternalKindStillFailsClosed() {
+        var broker = brokerCheck(properties("external-workspace-typo"));
+        assertEquals(ManagedAgentPreflight.Status.FAIL, broker.status());
+        assertTrue(broker.detail().contains("unknown provisioner external-workspace-typo"),
+                broker.detail());
+        assertTrue(broker.fix().contains("external-scratch"), broker.fix());
+        assertTrue(broker.fix().contains("external-workspace"), broker.fix());
+    }
+
+    @Test
+    void theShippedScratchRefusalWordingIsUnchanged() {
+        var properties = scratchProperties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        var error = assertThrows(IllegalStateException.class, properties::validateForPreflight);
+        assertTrue(error.getMessage().contains("scratch Sessions only"), error.getMessage());
+    }
+
+    private static ManagedAgentProperties scratchProperties() {
+        return properties(ExternalRuntimeProvisioner.KIND);
     }
 }

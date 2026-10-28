@@ -15,6 +15,10 @@ import type {
   DaemonStatusReportSession,
 } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../i18n';
+import {
+  McpAppGeneratedUiOwnerContext,
+  type McpAppGeneratedUiOwner,
+} from '../mcpAppHostContext';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -37,6 +41,7 @@ let connectionState: {
   workspaceCwd?: string;
 };
 let workspaceCapabilities: DaemonCapabilities | undefined;
+let generatedUiOwner: McpAppGeneratedUiOwner | undefined;
 let sessionsState: {
   sessions: DaemonSessionSummary[];
   loading: boolean;
@@ -194,6 +199,7 @@ beforeEach(() => {
     workspaceCwd: '/w',
   };
   workspaceCapabilities = undefined;
+  generatedUiOwner = undefined;
   sessionsState = { sessions: [], loading: false };
   statusState = { report: { full: { sessions: [] } } };
   otherWorkspaceSessions = {};
@@ -290,7 +296,9 @@ function render(
   act(() =>
     root!.render(
       <I18nProvider language="en">
-        <SessionOverviewPanel onOpenSession={onOpenSession} {...props} />
+        <McpAppGeneratedUiOwnerContext.Provider value={generatedUiOwner}>
+          <SessionOverviewPanel onOpenSession={onOpenSession} {...props} />
+        </McpAppGeneratedUiOwnerContext.Provider>
       </I18nProvider>,
     ),
   );
@@ -310,7 +318,9 @@ function rerender(
   act(() =>
     root!.render(
       <I18nProvider language="en">
-        <SessionOverviewPanel onOpenSession={onOpenSession} {...props} />
+        <McpAppGeneratedUiOwnerContext.Provider value={generatedUiOwner}>
+          <SessionOverviewPanel onOpenSession={onOpenSession} {...props} />
+        </McpAppGeneratedUiOwnerContext.Provider>
       </I18nProvider>,
     ),
   );
@@ -392,6 +402,18 @@ function statusFilterButton(label: string): HTMLButtonElement {
       '[aria-label="Filter by session status"] button',
     ),
   ).find((button) => button.textContent?.startsWith(label))!;
+}
+
+function deletionOwner(
+  captureSessionDeletion: McpAppGeneratedUiOwner['captureSessionDeletion'],
+): McpAppGeneratedUiOwner {
+  return {
+    scopeId: 'overview-owner',
+    workspaceCwd: '/w',
+    subscribeInvalidation: () => () => {},
+    invalidate: vi.fn(),
+    captureSessionDeletion,
+  };
 }
 
 describe('deriveSessionCards', () => {
@@ -2602,6 +2624,158 @@ describe('SessionOverviewPanel', () => {
     act(() => click(confirm));
     await flushAsync();
     expect(workspaceClient.deleteSessionsData).toHaveBeenCalledWith(['s1']);
+  });
+
+  it.each(['removed', 'notFound'] as const)(
+    'cleans up a %s background session using the owner captured before deletion',
+    async (outcome) => {
+      sessionsState.sessions = [session('background', { displayName: 'Old' })];
+      const deleted = vi.fn();
+      const capture = vi.fn(() => deleted);
+      generatedUiOwner = deletionOwner(capture);
+      const result = {
+        removed: outcome === 'removed' ? ['background'] : [],
+        notFound: outcome === 'notFound' ? ['background'] : [],
+        errors: [],
+      };
+      let resolveDeletion!: (value: typeof result) => void;
+      workspaceClient.deleteSessionsData.mockImplementationOnce(
+        () =>
+          new Promise<typeof result>((resolve) => {
+            resolveDeletion = resolve;
+          }),
+      );
+      render();
+      act(() => click(rowActionButton(rows()[0]!, 'Delete')));
+      expect(capture).not.toHaveBeenCalled();
+      act(() =>
+        click(
+          document.querySelector<HTMLElement>(
+            '[data-slot="alert-dialog-action"]',
+          )!,
+        ),
+      );
+      expect(workspaceClient.deleteSessionsData).toHaveBeenCalledWith([
+        'background',
+      ]);
+      expect(capture).toHaveBeenCalledExactlyOnceWith('/w');
+      expect(capture.mock.invocationCallOrder[0]).toBeLessThan(
+        workspaceClient.deleteSessionsData.mock.invocationCallOrder[0]!,
+      );
+      expect(deleted).not.toHaveBeenCalled();
+
+      const nextDeleted = vi.fn();
+      const nextCapture = vi.fn(() => nextDeleted);
+      generatedUiOwner = {
+        ...deletionOwner(nextCapture),
+        scopeId: 'replacement-owner',
+        workspaceCwd: '/replacement',
+      };
+      rerender();
+      await act(async () => resolveDeletion(result));
+      await flushAsync();
+
+      expect(deleted).toHaveBeenCalledExactlyOnceWith(['background']);
+      expect(nextCapture).not.toHaveBeenCalled();
+      expect(nextDeleted).not.toHaveBeenCalled();
+    },
+  );
+
+  it('cleans up only confirmed batch deletions in each owning workspace', async () => {
+    connectionState.capabilities = {
+      features: ['session_archive', 'workspace_qualified_rest_core'],
+      workspaceCwd: '/w',
+      workspaces: [
+        { id: 'w0', cwd: '/w', primary: true, trusted: true },
+        { id: 'w1', cwd: '/wsB', primary: false, trusted: true },
+      ],
+    };
+    sessionsState.sessions = [
+      session('same', { displayName: 'Primary same' }),
+      session('missing', { displayName: 'Primary missing' }),
+      session('failed', { displayName: 'Primary failed' }),
+    ];
+    otherWorkspaceSessions['/wsB'] = [
+      session('same', { workspaceCwd: '/wsB', displayName: 'Secondary same' }),
+      session('other', {
+        workspaceCwd: '/wsB',
+        displayName: 'Secondary other',
+      }),
+    ];
+    const primaryDeleted = vi.fn();
+    const secondaryDeleted = vi.fn();
+    const capture = vi.fn((cwd: string | undefined) =>
+      cwd === '/w' ? primaryDeleted : secondaryDeleted,
+    );
+    generatedUiOwner = deletionOwner(capture);
+    workspaceClient.deleteSessionsData.mockResolvedValueOnce({
+      removed: ['same'],
+      notFound: ['missing'],
+      errors: [{ sessionId: 'failed', error: 'primary locked' }],
+    });
+    const qualified = workspaceClient.workspaceByCwd('/wsB');
+    qualified.deleteSessionsData.mockResolvedValueOnce({
+      removed: ['other'],
+      notFound: [],
+      errors: [{ sessionId: 'same', error: 'secondary locked' }],
+    });
+    workspaceClient.workspaceByCwd.mockReturnValue(qualified);
+
+    render();
+    await flushAsync();
+    expect(rows()).toHaveLength(5);
+    act(() => click(selectAllCheckbox()));
+    act(() => click(footerButton('Delete')!));
+    act(() =>
+      click(
+        document.querySelector<HTMLElement>(
+          '[data-slot="alert-dialog-action"]',
+        )!,
+      ),
+    );
+    await flushAsync();
+
+    expect(workspaceClient.deleteSessionsData).toHaveBeenCalledWith([
+      'same',
+      'missing',
+      'failed',
+    ]);
+    expect(qualified.deleteSessionsData).toHaveBeenCalledWith([
+      'same',
+      'other',
+    ]);
+    expect(capture.mock.calls).toEqual([['/w'], ['/wsB']]);
+    expect(primaryDeleted).toHaveBeenCalledExactlyOnceWith(['same', 'missing']);
+    expect(secondaryDeleted).toHaveBeenCalledExactlyOnceWith(['other']);
+    expect(container!.textContent).toContain(
+      'Failed to delete session: primary locked',
+    );
+  });
+
+  it('keeps retained sessions when the overview delete request rejects', async () => {
+    sessionsState.sessions = [session('background', { displayName: 'Old' })];
+    const deleted = vi.fn();
+    const capture = vi.fn(() => deleted);
+    generatedUiOwner = deletionOwner(capture);
+    workspaceClient.deleteSessionsData.mockRejectedValueOnce(
+      new Error('daemon unavailable'),
+    );
+    render();
+    act(() => click(rowActionButton(rows()[0]!, 'Delete')));
+    act(() =>
+      click(
+        document.querySelector<HTMLElement>(
+          '[data-slot="alert-dialog-action"]',
+        )!,
+      ),
+    );
+    await flushAsync();
+
+    expect(capture).toHaveBeenCalledExactlyOnceWith('/w');
+    expect(deleted).not.toHaveBeenCalled();
+    expect(container!.textContent).toContain(
+      'Failed to delete session: daemon unavailable',
+    );
   });
 
   it('batch-archives the selected sessions', async () => {
