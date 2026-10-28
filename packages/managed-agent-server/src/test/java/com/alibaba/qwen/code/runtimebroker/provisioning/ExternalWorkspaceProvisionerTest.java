@@ -515,7 +515,10 @@ class ExternalWorkspaceProvisionerTest {
                 draining(original.request(), changedToken, original.handle(), tokenLease, true),
                 draining(original.request(), original.seed(), original.handle(), changedEndpoint, true))) {
             assertFalse(subject.supportsDrainedStop(invalid));
-            failure(subject.stopDrained(invalid));
+            var refused = failure(subject.stopDrained(invalid));
+            assertEquals(409, refused.getStatusCode());
+            assertEquals("runtime_broker_resource_conflict", refused.getCode());
+            assertFalse(refused.isRetryable());
         }
         failure(subject.stopDrained(draining(original.request(), original.seed(), original.handle(), original.lease(), false)));
         assertEquals(observations, client.observes.size());
@@ -531,6 +534,24 @@ class ExternalWorkspaceProvisionerTest {
         failure(subject.stopDrained(saved));
         assertEquals(observations, client.observes.size());
         assertEquals(1, client.provisions.size());
+    }
+
+    @Test
+    void drainCapabilityPreservesRetryableRegistryFailure() throws Exception {
+        var subject = provisioner(registration(PROVIDER, 1, MOUNT));
+        var original = place(subject, "registry-outage");
+        var saved = draining(original.request(), original.seed(), original.handle(), original.lease(), true);
+        subject.close();
+        var unavailable = new RuntimeBrokerException(503, "runtime_external_unavailable", "Registry read failed.", true);
+        provisioner = new ExternalWorkspaceProvisioner(client, (tenant, alias) -> {
+            throw unavailable;
+        }, PROVIDER, Duration.ofSeconds(5));
+        var failure = org.junit.jupiter.api.Assertions.assertThrows(RuntimeBrokerException.class,
+                () -> provisioner.supportsDrainedStop(saved));
+        org.junit.jupiter.api.Assertions.assertSame(unavailable, failure);
+        assertEquals(503, failure.getStatusCode());
+        assertTrue(failure.isRetryable());
+        org.junit.jupiter.api.Assertions.assertSame(unavailable, failure(provisioner.stopDrained(saved)));
     }
 
     @Test

@@ -631,6 +631,7 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
         }
         Context context = context(lease, session, false);
         if (external(context)) {
+            ownership.requireExternalExecution(context.binding());
             return verifyExternalAcquisition.apply(context.runtime()).thenRun(() -> {
                 context(lease, session, true);
                 ownership.claim(context.binding(), context.session(), context.runtime(), bindings);
@@ -691,7 +692,11 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
             }
             for (Object value : (List<?>) operation.get("paths")) {
                 String path = (String) value;
-                if (".".equals(path) || !path.equals(com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceRelativePath.normalize(path))) {
+                try {
+                    if (".".equals(path) || !path.equals(com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceRelativePath.normalize(path))) {
+                        throw WorkspaceExecutionStore.unavailable();
+                    }
+                } catch (com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceException invalid) {
                     throw WorkspaceExecutionStore.unavailable();
                 }
             }

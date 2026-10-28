@@ -917,6 +917,9 @@ class QwenHostedHarnessConnectorTest {
         ReflectionTestUtils.setField(connector, "client", client);
         String profile = "hosted-workspace-external-files/1";
         assertThat(connector.supportsLifecycle(profile)).isFalse();
+        when(capabilities.getFeatures()).thenReturn(List.of("hosted-workspace-external-files/2"));
+        assertThat(connector.supportsLifecycle(profile)).isFalse();
+        assertThat(connector.supportsSavedLifecycle(profile)).isFalse();
         when(capabilities.getFeatures()).thenReturn(List.of(profile));
         assertThat(connector.supportsLifecycle(profile)).isTrue();
         properties.getHarness().setWorkspaceFilesEnabled(false);

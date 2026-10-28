@@ -218,6 +218,12 @@ class ExternalWorkspaceMaterializationTest {
                         assertThat(row.canSelectDirectory()).isFalse();
                     });
             assertThat(registry.findReadable("tenant", "owner", List.of("workspace")).get("workspace").canCreateSession()).isTrue();
+            properties.getRuntimeBroker().setExternalProviderId("other-provider");
+            assertThat(registry.findReadable("tenant", "owner", "workspace").canCreateSession()).isFalse();
+            assertThat(registry.findReadable("tenant", "owner", List.of("workspace")).get("workspace").canCreateSession()).isFalse();
+            assertThat(store.materialize("tenant", "workspace", "Name", "owner", "key").workspaceId()).isEqualTo("workspace");
+            properties.getRuntimeBroker().setExternalProviderId("provider");
+            assertThat(registry.findReadable("tenant", "owner", "workspace").canCreateSession()).isTrue();
             var sessions = new ManagedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {}, registry, properties);
             var transaction = new TransactionTemplate(manager);
             transaction.executeWithoutResult(status -> WorkspaceMigrationAdmission.requireOpen(jdbc, "tenant", "workspace"));
@@ -278,6 +284,21 @@ class ExternalWorkspaceMaterializationTest {
             jdbc.update("UPDATE ma_workspace_access SET role='READER'");
             assertThat(registry.findReadable("tenant", "owner", "workspace").canCreateSession()).isFalse();
             jdbc.update("UPDATE ma_workspace_access SET role='OWNER'");
+            jdbc.update("UPDATE ma_storage SET registration_revision=2");
+            assertThat(registry.findReadable("tenant", "owner", "workspace").canCreateSession()).isFalse();
+            assertThat(registry.listReadable("tenant", "owner", null, 10)).singleElement()
+                    .satisfies(row -> assertThat(row.canCreateSession()).isFalse());
+            assertThat(registry.findReadable("tenant", "owner", List.of("workspace")).get("workspace").canCreateSession()).isFalse();
+            var binding = new com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding(
+                    "tenant", "workspace", 1, "workspace", ".", WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
+            assertThatThrownBy(() -> registry.externalFilesAllowed(binding))
+                    .isInstanceOfSatisfying(RuntimeBrokerException.class,
+                            error -> assertThat(error.getCode()).isEqualTo("external_storage_registration_mismatch"));
+            assertThatThrownBy(() -> execution.requireExternalExecution(binding))
+                    .isInstanceOfSatisfying(RuntimeBrokerException.class,
+                            error -> assertThat(error.getCode()).isEqualTo("external_storage_registration_mismatch"));
+            jdbc.update("UPDATE ma_storage SET registration_revision=1");
+            assertThat(registry.findReadable("tenant", "owner", "workspace").canCreateSession()).isTrue();
             jdbc.update("UPDATE ma_storage SET registration_state='RETIRED'");
             assertThat(registry.findReadable("tenant", "owner", "workspace").canCreateSession()).isFalse();
         }

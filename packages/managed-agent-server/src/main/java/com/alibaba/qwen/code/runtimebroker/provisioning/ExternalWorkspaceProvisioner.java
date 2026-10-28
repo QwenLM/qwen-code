@@ -153,6 +153,11 @@ public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvision
         try {
             validatedSavedBoot(binding);
             return true;
+        } catch (RuntimeBrokerException failure) {
+            if (failure.isRetryable()) {
+                throw failure;
+            }
+            return false;
         } catch (RuntimeException invalid) {
             return false;
         }

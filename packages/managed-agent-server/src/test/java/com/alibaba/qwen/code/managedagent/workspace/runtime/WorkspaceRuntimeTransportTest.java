@@ -338,6 +338,30 @@ class WorkspaceRuntimeTransportTest {
     }
 
     @Test
+    void externalReclaimRefusesUnavailableRegistrationBeforeClaimingStorage() throws Exception {
+        var fixture = externalFixture(runtime -> CompletableFuture.completedFuture(null));
+        doThrow(WorkspaceExecutionStore.unavailable()).when(fixture.ownership()).requireExternalExecution(any());
+        unavailable(() -> fixture.transport().reclaimMount(fixture.lease(), fixture.session()));
+        verify(fixture.ownership(), never()).claim(any(), any(), any(), any());
+        verifyNoInteractions(fixture.http());
+    }
+
+    @Test
+    void externalPreparePermanentlyRefusesInvalidAndNonCanonicalPaths() throws Exception {
+        var fixture = externalFixture(runtime -> CompletableFuture.completedFuture(null));
+        for (String path : java.util.List.of("../etc", "src/../lib", "src//lib", "src/./lib", ".")) {
+            assertThatThrownBy(() -> fixture.transport().control(fixture.lease(), fixture.session(),
+                    Map.of("kind", "raw-file-history", "action", "prepare", "promptId", "prompt-1", "paths", java.util.List.of(path))))
+                    .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
+                        assertThat(error.getStatusCode()).isEqualTo(409);
+                        assertThat(error.getCode()).isEqualTo("workspace_unavailable");
+                        assertThat(error.isRetryable()).isFalse();
+                    });
+        }
+        verifyNoInteractions(fixture.http());
+    }
+
+    @Test
     void externalFileAuxiliaryControlsPreserveOriginalHolderAndRejectOtherOperations() throws Exception {
         var fixture = externalFixture(runtime -> CompletableFuture.completedFuture(null));
         when(fixture.http().control(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(Map.of()));

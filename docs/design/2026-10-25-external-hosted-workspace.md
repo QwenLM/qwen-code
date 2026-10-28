@@ -282,6 +282,10 @@ Observed: authorized/idempotent registration and materialization; owner-only dis
 
 The retained evidence packet matched all 47 recorded runtime source hashes to checkpoint `dd5c2d2fb2e2665dd593b27fffa50e2cf4dc510d` and verified the artifact manifest before/after execution; copied Core commit metadata was separately disclosed. This establishes the selected scenario through source/artifact provenance, **not that every checkpoint test or latest full CI is certified**. Earlier failed attempts remain evidence, not erased by this pass.
 
+### Changes after the recorded checkpoint
+
+The acceptance packet above is historical evidence for `dd5c2d2fb2e2665dd593b27fffa50e2cf4dc510d`; #15685 was integrated as `0f7b8c006d77527a3a4555caf8d8ec41e998ffca`. Later repairs moved Agent pin validation before Workspace resolution and permitted a legitimately claimed LOST binding to retain its state until stop proof commits. Subsequent review repairs also change registration error handling and execution eligibility checks. These changes are **outside that recorded end-to-end run**. Focused regression tests are separate evidence, not a replay of the public-files/close acceptance on the latest head.
+
 ### Remaining goal and gates
 
 **C remains open:** foreground `run_shell_command`, `monitor`, publication/capture and their close semantics are not done. `monitor` was in the initial §1 goal and remains a target, not a silently dropped requirement. True `LOST` recovery, Broker/adapter process-restart recovery, real concurrent ownership/recovery scenarios and real-provider acceptance remain open work, not completed or verified by this run. Full CI/fault suites, human review and acceptance/deployment gates remain pending. UI verification is pending; no viewer or screenshot success is claimed here. This closes the documentation comparison of user impact against the goal, not #15512 or the full phase-2 goal.

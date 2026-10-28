@@ -228,7 +228,7 @@ mount root 归属、不返回 `rootDevice`/`rootInode` receipt。这些属于 wo
 
 - **同一个已保存 origin，既有路由。** external boot 将既有 publication 对象和 executor 注册到 worker 主应用，并将其路由加入 owned-route 门禁。原独立 publication listener 和 ready 通告保持兼容；两个 listener 共享退役与 channel 状态。Express 注册时转义 `publication:*` 路径中的字面量冒号，避免将其视为参数而匹配另一种操作；线上路径不变。Broker 使用持久化的 `RuntimeLease.endpoint` 独立 attest context，随后向 `/internal/managed-runtime/v2/publication:stop-drained` 发起 POST，请求体严格为 `{"protocolVersion":2,"channel":"all"}`。不引入第二个 endpoint，也不推算端口。
 - **I/O 前校验原始身份。** provisioner 复用基类校验，检查已保存 request、seed、凭据和 canonical storage-bound handle，核对当前注册元组与已保留 endpoint，并要求 `external-workspace`、managed context、session 隔离和精确的 Workspace capability digest。原始信息缺失或冲突不产生 receipt；adapter 重启后使用完整的已保存身份，不分配资源，也不调用 provider observe。传输层在 attest 前拒绝重定向和被替换的解析 origin。stop 发送 Bearer、lease ID/epoch、`X-Qwen-Managed-Storage-Revision`、`X-Qwen-Managed-Runtime-Incarnation`、JSON 和 `Cache-Control: no-store`；boot 头的值在 attest 前固定。publication 不返回 response-incarnation 头，stop 也不要求该头。stop 信封限 64 KiB，超时或取消会关闭活动 HTTP 请求。
-- **有限证据，不读取证明内容。** 仅接受 HTTP 200、JSON/no-store 和精确的 `{protocolVersion:2,state:'drained',proof,receipts:[]}`。严格解析拒绝重复键、尾随 token、畸形 UTF-8 和非整数数值 token。proof 恰有 `resourceId/kind/schemaVersion/byteLength/digest`：符合生产者形状的 UUID、`external-publication`、整数 `1`、不超过 64 MiB 的正整数长度，以及原始小写 64 位十六进制 SHA-256。unknown、undrained、非空 channel/receipt 或畸形回包不产生 receipt。Broker 在 attest 后信任经过认证的 worker 声明；它**不**读取或计算私有 proof 字节的哈希，不声称 attest 与 stop 原子执行，也不抵抗被攻陷的可信 ingress 后方的恶意克隆。同源路由必须到达原 worker。
+- **有限证据，不读取证明内容。** 仅接受 HTTP 200、JSON/no-store 和精确的 `{protocolVersion:2,state:'drained',proof,receipts:[]}`。严格解析拒绝重复键、尾随 token、畸形 UTF-8 和非整数数值 token。proof 恰有 `resourceId/kind/schemaVersion/byteLength/digest`：符合生产者形状的 UUID、`external-publication`、整数 `1`、不超过 64 MiB 的正整数长度，以及原始小写 64 个十六进制字符的 SHA-256 摘要。unknown、undrained、非空 channel/receipt 或畸形回包不产生 receipt。Broker 在 attest 后信任经过认证的 worker 声明；它**不**读取或计算私有 proof 字节的哈希，不声称 attest 与 stop 原子执行，也不抵抗被攻陷的可信 ingress 后方的恶意克隆。同源路由必须到达原 worker。
 - **退役不等于进程退出。** 成功 drain 会封闭 managed writer 准入并退役执行资源；HTTP 进程可以继续存活。原生 receipt 使用既有 binding/generation/provision-request/handle/time 五字段构造器，`stoppedAt` 为 Broker 观察时间，不携带 extension mode 或 scope。binding state 与 operation claim 的授权由 Broker 调用链负责，provisioner 不重复建立这些判据；原语要求 drain 请求和经过校验的原始身份。
 - **B0 单独检查点尚未激活（已由 §14 取代）。** 当时按 binding 的 `supportsDrainedStop(binding)` 可以识别有效原始绑定，但无参 `supportsDrainedStop()` 为 false，SQL 支撑的 `WorkspaceExecutionStore.canStopDrained` 门禁拒绝 EXTERNAL。ACK 重放、先持久化 receipt 再释放 owner 的编排，以及 EXTERNAL 执行归属均属后续工作。当时没有启用任何公开工具、Hosted profile 或准入开关，`release` 为空操作，#15512 未完成。
 
@@ -257,6 +257,10 @@ remote191 上指定的[公开 files/close E2E](../../packages/managed-agent-serv
 已观察：鉴权/幂等登记与物化、仅 owner 可发现、四个真实工具按 write → read → edit → glob 执行、两次 Action 审批、五次模型请求与一次分配、decoy 根未改动、终态公共事件、Items/工具详情及同 Session 历史资源校验。关闭达到 Session `CLOSED` / binding `RELEASED`，清除 holder runtime 字段，保留元数据/授权/历史且无 live writer。原生 drain receipt 持久化，main/legacy stop 端点一致；鉴权后的 late write 返回 `409` 且未创建文件；晚到公共输入和幂等关闭均未新增副作用或分配。原 worker 一直存活到 cleanup。
 
 保留证据包中的 47 个 runtime 源码哈希均匹配检查点 `dd5c2d2fb2e2665dd593b27fffa50e2cf4dc510d`，执行前后 artifact manifest 一致；复制的 Core commit 元数据另行披露。这以源码/产物来源证明指定场景，**不代表检查点所有测试或最新完整 CI 均已认证**。此前失败尝试继续保留，不会被本次通过抹去。
+
+### 验收检查点之后的改动
+
+以上验收包是检查点 `dd5c2d2fb2e2665dd593b27fffa50e2cf4dc510d` 的历史证据；#15685 以 `0f7b8c006d77527a3a4555caf8d8ec41e998ffca` 合入。后续修复将 Agent pin 校验移到 Workspace 解析之前，并允许合法认领的 LOST binding 在停止证明提交前保持该状态。此后的评审修复还调整了登记记录的错误处理与执行资格检查。这些改动**不在上述已记录的端到端运行内**。聚焦回归测试是单独的证据，不代表在最新 head 重跑过公开 files/close 验收。
 
 ### 剩余目标与门禁
 

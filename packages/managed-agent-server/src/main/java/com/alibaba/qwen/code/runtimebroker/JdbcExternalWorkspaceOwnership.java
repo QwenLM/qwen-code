@@ -49,7 +49,12 @@ public final class JdbcExternalWorkspaceOwnership {
                         || !"REGISTERED".equals(row.getString("registration_state"))) {
                     throw unavailable();
                 }
-                registration = ExternalStorageRegistry.decodeRegistration(row.getString("registration_json"));
+                String encoded = row.getString("registration_json");
+                try {
+                    registration = ExternalStorageRegistry.decodeRegistration(encoded);
+                } catch (RuntimeException invalid) {
+                    throw unavailable();
+                }
                 if (!storage.equals(registration.tenantWorkspaceId())
                         || !registration.ownerKey().equals(row.getString("physical_key"))
                         || registration.registrationRevision() != row.getLong("registration_revision")) {

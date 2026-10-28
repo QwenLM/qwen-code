@@ -527,12 +527,16 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                     || !service.supportsDrainedStopKind(ExternalWorkspaceProvisioner.KIND)) {
                 return false;
             }
-            var registered = externalRegistrations.find(binding.getTenantId(), binding.getStorageId()).orElse(null);
-            return registered != null && binding.getWorkspaceId().equals(registered.tenantWorkspaceId())
-                    && brokerSettings.getExternalProviderId().equals(registered.providerId())
-                    && !jdbc.queryForList("SELECT 1 FROM ma_workspace WHERE tenant_id = ? AND workspace_id = ?"
-                            + " AND workspace_generation = ? AND storage_id = ? AND workspace_kind = 'ROOT'",
-                            Integer.class, binding.getTenantId(), binding.getWorkspaceId(), binding.getWorkspaceGeneration(), binding.getStorageId()).isEmpty();
+            try {
+                var registered = externalRegistrations.find(binding.getTenantId(), binding.getStorageId()).orElse(null);
+                return registered != null && binding.getWorkspaceId().equals(registered.tenantWorkspaceId())
+                        && brokerSettings.getExternalProviderId().equals(registered.providerId())
+                        && !jdbc.queryForList("SELECT 1 FROM ma_workspace WHERE tenant_id = ? AND workspace_id = ?"
+                                + " AND workspace_generation = ? AND storage_id = ? AND workspace_kind = 'ROOT'",
+                                Integer.class, binding.getTenantId(), binding.getWorkspaceId(), binding.getWorkspaceGeneration(), binding.getStorageId()).isEmpty();
+            } catch (RuntimeBrokerException | org.springframework.dao.DataAccessException unavailable) {
+                return false;
+            }
         }
         if (resident && residents.find(binding) != null) {
             return true;

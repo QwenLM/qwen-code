@@ -17029,62 +17029,107 @@ describe('Hosted Harness no-tool session', () => {
     60_000,
   );
 
-  it('refuses an external files saved definition with a Hook pin before constructing its lane', async () => {
-    const key = {
-      tenantId: 'tenant',
-      workspaceId: 'workspace',
-      sessionId: SESSION_ID,
-    };
-    const resources = LocalManagedSessionResourceStore.create({
-      runtimeBaseDir: state.root,
-      sessionKey: key,
-    });
-    const managed = await openManagedSession({
-      runtimeBaseDir: state.root,
-      transcriptPath: '',
-      sessionId: SESSION_ID,
-      sessionKey: key,
-      cwd: state.root,
-      version: 'hosted-harness/1',
-      workerId: BOOT_ID,
-      activationLeaseDurationMs: 60_000,
-      journalStore: new LocalJsonlManagedSessionJournalStore({
-        runtimeBaseDir: state.root,
+  it.each(['Hook pin', 'extension config_install'])(
+    'refuses an external files saved session with %s on cold load',
+    async (configuration) => {
+      const key = {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
         sessionId: SESSION_ID,
-        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
-      }),
-      resourceStore: resources,
-      create: {
-        definitionRef: await resources.publish(
-          'managed-definition',
-          Buffer.from(
-            JSON.stringify({
-              engine: 'managed',
-              sessionId: SESSION_ID,
-              toolProfile: 'hosted-workspace-external-files/1',
-              approvalMode: 'yolo',
-              approvalTimeoutMs: 60_000,
-              hookCatalog: hookPin,
-            }),
+      };
+      const resources = LocalManagedSessionResourceStore.create({
+        runtimeBaseDir: state.root,
+        sessionKey: key,
+      });
+      const managed = await openManagedSession({
+        runtimeBaseDir: state.root,
+        transcriptPath: '',
+        sessionId: SESSION_ID,
+        sessionKey: key,
+        cwd: state.root,
+        version: 'hosted-harness/1',
+        workerId: BOOT_ID,
+        activationLeaseDurationMs: 60_000,
+        journalStore: new LocalJsonlManagedSessionJournalStore({
+          runtimeBaseDir: state.root,
+          sessionId: SESSION_ID,
+          transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        }),
+        resourceStore: resources,
+        create: {
+          definitionRef: await resources.publish(
+            'managed-definition',
+            Buffer.from(
+              JSON.stringify({
+                engine: 'managed',
+                sessionId: SESSION_ID,
+                toolProfile: 'hosted-workspace-external-files/1',
+                approvalMode: 'yolo',
+                approvalTimeoutMs: 60_000,
+                ...(configuration === 'Hook pin'
+                  ? { hookCatalog: hookPin }
+                  : {}),
+              }),
+            ),
           ),
-        ),
-        rootSnapshotRef: await resources.publish(
-          'managed-root',
-          Buffer.from(JSON.stringify({ cwd: state.root })),
-        ),
-        createdBy: 'hosted-harness',
-      },
-    });
-    await managed.close();
-    const broker = vi.spyOn(HostedWorkspaceBroker.prototype, 'control');
-    const response = await headers(
-      supertest(await app(true)).post(`/session/${SESSION_ID}/load`),
-    ).send({ managedSessionStore: store() });
-    expect(response.status).toBe(409);
-    expect(response.body.code).toBe('hosted_tool_profile_conflict');
-    expect(broker).not.toHaveBeenCalled();
-    expect(state.model).not.toHaveBeenCalled();
-  });
+          rootSnapshotRef: await resources.publish(
+            'managed-root',
+            Buffer.from(JSON.stringify({ cwd: state.root })),
+          ),
+          createdBy: 'hosted-harness',
+        },
+      });
+      if (configuration === 'extension config_install') {
+        const operationId = randomUUID();
+        await managed.authority.commitDomainRecord(
+          {
+            operation: 'extensionConfig.apply.preparing',
+            commandId: operationId,
+            sessionKey: key,
+            contentDigest: 'c'.repeat(64),
+          },
+          {
+            domain: 'config_install',
+            content: {
+              kind: 'hosted-extension-config',
+              formatVersion: 1,
+              command: {
+                operationId,
+                actorKey: 'b'.repeat(64),
+                expectedRevision: 0,
+                extensions: [],
+              },
+              mode: 'apply',
+              phaseOperationId: operationId,
+              configRevision: 1,
+              previousConfigRevision: 0,
+              phase: 'preparing',
+              previousBundleRef: null,
+              restoresBundleRef: null,
+              bundleRef: null,
+              rootSnapshotRef: await resources.publish(
+                'managed-root',
+                Buffer.from(JSON.stringify({ cwd: state.root })),
+              ),
+              stageAckRefs: [],
+              enableAckRefs: [],
+              error: null,
+            },
+          },
+          { class: 'trusted_entry' },
+        );
+      }
+      await managed.close();
+      const broker = vi.spyOn(HostedWorkspaceBroker.prototype, 'control');
+      const response = await headers(
+        supertest(await app(true)).post(`/session/${SESSION_ID}/load`),
+      ).send({ managedSessionStore: store() });
+      expect(response.status).toBe(409);
+      expect(response.body.code).toBe('hosted_tool_profile_conflict');
+      expect(broker).not.toHaveBeenCalled();
+      expect(state.model).not.toHaveBeenCalled();
+    },
+  );
 
   it('requires the exact consumer token for external files create and lifecycle load', async () => {
     const descriptorCount = state.storeOptions.length;

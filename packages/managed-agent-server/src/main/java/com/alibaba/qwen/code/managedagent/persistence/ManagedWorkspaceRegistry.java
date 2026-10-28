@@ -83,14 +83,18 @@ public class ManagedWorkspaceRegistry {
     }
 
     private boolean externalFilesAllowed(String tenant, String workspace) {
-        if (!externalFilesAvailable()) {
+        try {
+            if (!externalFilesAvailable()) {
+                return false;
+            }
+            var rows = jdbc.query("SELECT workspace_generation, storage_id, config_ref, policy_ref FROM ma_workspace"
+                    + " WHERE tenant_id = ? AND workspace_id = ?", (row, index) -> new ContextBinding(tenant, workspace,
+                            row.getLong("workspace_generation"), row.getString("storage_id"), ".",
+                            descriptorRef(row.getString("config_ref"), row.getString("policy_ref")), 1), tenant, workspace);
+            return rows.size() == 1 && externalBindingCurrent(rows.getFirst());
+        } catch (com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException | org.springframework.dao.DataAccessException unavailable) {
             return false;
         }
-        var rows = jdbc.query("SELECT workspace_generation, storage_id, config_ref, policy_ref FROM ma_workspace"
-                + " WHERE tenant_id = ? AND workspace_id = ?", (row, index) -> new ContextBinding(tenant, workspace,
-                        row.getLong("workspace_generation"), row.getString("storage_id"), ".",
-                        descriptorRef(row.getString("config_ref"), row.getString("policy_ref")), 1), tenant, workspace);
-        return rows.size() == 1 && externalBindingCurrent(rows.getFirst());
     }
 
     @org.springframework.beans.factory.annotation.Autowired(required = false)

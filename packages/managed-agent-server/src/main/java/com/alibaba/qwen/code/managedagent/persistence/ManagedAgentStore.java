@@ -495,10 +495,9 @@ public class ManagedAgentStore implements AgentStateStore {
             throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "unsupported_model",
                     "The model is not published for this Agent.");
         }
-        // The Agent pin is a property of the stored definition, not of the
-        // Workspace: a request whose revision cannot be selected, or whose
-        // definition cannot take effect, is refused on that ground before any
-        // durable Workspace resolution runs.
+        // Resolve the revision and compile the stored definition before Workspace
+        // resolution. External-profile eligibility and requested approval/plan
+        // options are checked after the Workspace determines the effective profile.
         AgentPin resolvedPin = resolveAgentPin(tenantId, agentId, requestedRevision, true);
         requireCreationScope(tenantId, idempotencyKey, true);
         ResolvedBinding workspace = workspaces.resolveForCreation(tenantId, actorId, selection);

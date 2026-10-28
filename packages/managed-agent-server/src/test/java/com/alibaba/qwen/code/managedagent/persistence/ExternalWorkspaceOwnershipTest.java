@@ -102,6 +102,77 @@ class ExternalWorkspaceOwnershipTest {
     }
 
     @Test
+    void malformedRegistrationPermanentlyRefusesOwnershipWithoutMutatingHolder() {
+        ownership.claim(context, session, binding, bindings);
+        var owner = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
+        String original = jdbc.queryForObject("SELECT registration_json FROM ma_storage", String.class);
+        for (String encoded : java.util.List.of("not-json", "{}",
+                original.replaceFirst("\\{", "{\"extra\":true,"),
+                original.replace("\"registrationRevision\":7", "\"registrationRevision\":\"7\""))) {
+            jdbc.update("UPDATE ma_storage SET registration_json = ?", encoded);
+            assertThatThrownBy(() -> ownership.assertHeld(context, session, binding, bindings))
+                    .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
+                        assertThat(error.getStatusCode()).isEqualTo(409);
+                        assertThat(error.getCode()).isEqualTo("workspace_close_identity_unverified");
+                        assertThat(error.isRetryable()).isFalse();
+                    });
+            assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(owner);
+        }
+    }
+
+    @Test
+    void canStopExternalDrainedRequiresCurrentClaimAndQuiescentExecution() {
+        ownership.claim(context, session, binding, bindings);
+        binding = bindings.claimOperation(binding.getBindingId(), "drainer", Duration.ofMinutes(1));
+        binding = bindings.compareAndSet(binding, binding.withDrainRequested(true, Instant.now())
+                .withState(RuntimeBindingRecord.State.DRAINING, binding.getLease(), Instant.now()));
+        var owner = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
+        assertThat(ownership.canStopExternalDrained(binding, bindings)).isTrue();
+        executions.findOrCreate(com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord.prepared(
+                "execution", "tenant", binding.getBindingId(), binding.getGeneration(), "harness",
+                session.getRuntimeSessionId(), "turn", "call", "digest", Map.of("sessionId", session.getRuntimeSessionId(),
+                        "promptId", "turn", "callId", "call", "argsDigest", "digest")));
+        assertThat(ownership.canStopExternalDrained(binding, bindings)).isFalse();
+        var stale = binding;
+        bindings.releaseOperation(binding.getBindingId(), binding.getOperationOwner(), binding.getOperationGeneration());
+        binding = bindings.claimOperation(binding.getBindingId(), "next-drainer", Duration.ofMinutes(1));
+        assertThatThrownBy(() -> ownership.canStopExternalDrained(stale, bindings))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("workspace_close_identity_unverified"));
+        assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(owner);
+    }
+
+    @Test
+    void releaseLostRejectsExternalEvenWithStoppedWriterEvidence() {
+        binding = bindings.claimOperation(binding.getBindingId(), "recovery", Duration.ofMinutes(1));
+        var seed = binding.getProvisionSeed();
+        var handle = binding.getResourceHandle();
+        java.util.function.Function<com.alibaba.qwen.code.runtimebroker.RuntimeRecoveryEvidence.Fact,
+                com.alibaba.qwen.code.runtimebroker.RuntimeRecoveryEvidence> evidence = fact ->
+                        new com.alibaba.qwen.code.runtimebroker.RuntimeRecoveryEvidence("evidence-" + fact, fact,
+                                "test-recovery", Instant.now(), "original-host", seed.getProvisionRequestId(),
+                                seed.getProvisionalRuntimeId(), seed.getGatewayIncarnation(), seed.getLeaseId(), seed.getEpoch(), handle);
+        binding = bindings.compareAndSet(binding, binding.withRecoveryEvidence(
+                evidence.apply(com.alibaba.qwen.code.runtimebroker.RuntimeRecoveryEvidence.Fact.JOURNAL_LOST),
+                evidence.apply(com.alibaba.qwen.code.runtimebroker.RuntimeRecoveryEvidence.Fact.WRITERS_STOPPED), Instant.now()));
+        var owner = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
+        var member = jdbc.queryForMap("SELECT * FROM ma_runtime_session");
+        assertThat(binding.hasStoppedWriters()).isTrue();
+        var manager = org.mockito.Mockito.spy(new DataSourceTransactionManager(jdbc.getDataSource()));
+        var recovery = new WorkspaceExecutionStore(jdbc, manager);
+        org.mockito.Mockito.clearInvocations(manager);
+        assertThatThrownBy(() -> recovery.releaseLost(binding))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
+                    assertThat(error.getStatusCode()).isEqualTo(409);
+                    assertThat(error.getCode()).isEqualTo("workspace_unavailable");
+                    assertThat(error.isRetryable()).isFalse();
+                });
+        org.mockito.Mockito.verifyNoInteractions(manager);
+        assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(owner);
+        assertThat(jdbc.queryForMap("SELECT * FROM ma_runtime_session")).isEqualTo(member);
+    }
+
+    @Test
     void turnHandbackRetainsPhysicalOwnerAndOnlyExactSessionCanReacquire() {
         ownership.claim(context, session, binding, bindings);
         var owner = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
