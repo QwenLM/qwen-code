@@ -541,11 +541,22 @@ jobs:
                 | ((($now | tonumber) - (.created_at | fromdateiso8601)) / 60 | floor) ] | sort
               | if length == 0 then "n/a"
                 else "p50 \(.[length / 2 | floor])m · max \(.[-1])m" end' /tmp/queue-runs.json)" || QUEUE_OK=false
+            # `.name` is UNTRUSTED and reaches a control signal: a `pull_request`
+            # run executes the head branch's workflow file, so its author picks
+            # the name, and this section is emitted BEFORE the liveness marker
+            # that the next tick recovers with `head -1`. A name carrying a
+            # newline could therefore end the row early and land a forged
+            # watermark above the real one, and that watermark gates the
+            # liveness dispatch. Control characters collapse to spaces here;
+            # the rows then join on a REAL newline and print with '%s' (not
+            # '%b'), so no escape sequence is interpreted anywhere downstream —
+            # the R4-10 escaping on the takeover rows exists because those stay
+            # on '%b'. Pipes are escaped for the table.
             QUEUE_ROWS="$(jq -r --arg now "${NOW_EPOCH}" --arg hrs "${QUEUE_AGED_HOURS}" "${QUEUE_JQ}"'
               [ .[] | select(aged($now; $hrs) | not) ]
-              | group_by(.name) | map({name: .[0].name, n: length}) | sort_by(-.n) | .[0:5]
+              | group_by(.name) | map({name: (.[0].name // ""), n: length}) | sort_by(-.n) | .[0:5]
               | if length == 0 then ""
-                else (map("| \(.name) | \(.n) |") | join("\\n")) + "\\n" end' /tmp/queue-runs.json)" || QUEUE_OK=false
+                else (map("| \(.name | gsub("[\\r\\n\\t]"; " ") | gsub("\\|"; "\\|")) | \(.n) |") | join("\n")) end' /tmp/queue-runs.json)" || QUEUE_OK=false
             QUEUE_EVENTS="$(jq -r --arg now "${NOW_EPOCH}" --arg hrs "${QUEUE_AGED_HOURS}" "${QUEUE_JQ}"'
               [ .[] | select(aged($now; $hrs) | not) ]
               | group_by(.event) | map({event: .[0].event, n: length}) | sort_by(-.n) | .[0:6]
@@ -1841,8 +1852,11 @@ jobs:
               else
                 echo "| Workflow | Queued (live) |"
                 echo '| --- | --- |'
-                printf '%b' "${QUEUE_ROWS}"
-                echo
+                # '%s', not '%b': the rows already carry real newlines and the
+                # names are untrusted — nothing here may interpret an escape.
+                # The doubled newline terminates the last row and keeps the
+                # blank line the other tables get from their '%b' payload.
+                printf '%s\n\n' "${QUEUE_ROWS}"
                 echo "Events (live): ${QUEUE_EVENTS}"
               fi
             fi

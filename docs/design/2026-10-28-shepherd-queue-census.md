@@ -101,6 +101,19 @@ assignments: under `set -e` a single unparseable `created_at` would otherwise
 abort the entire tick, taking every lever and the dashboard write down with a
 read-only report.
 
+**Workflow names are untrusted, and the rows are rendered without an
+interpreter.** A `pull_request` run executes the head branch's workflow file, so
+the author of that file chooses the `name` that appears in the run listing. The
+queue section is emitted before the liveness watermark that the next tick
+recovers with `head -1`, so a name carrying a newline could end its row early and
+place a forged watermark above the real one — and that watermark gates the
+liveness dispatch. Workflow names therefore have CR, LF and TAB collapsed to
+spaces and pipes escaped, and the rows join on real newlines and print with
+`printf '%s'` rather than `'%b'`, so no escape sequence is interpreted anywhere
+downstream. The other dashboard tables keep `'%b'` with escaped separators
+because their inputs cannot carry a newline; this one cannot, and the difference
+is deliberate.
+
 **Capped, not `--paginate`.** A page cap bounds one tick's cost during a surge and
 makes truncation an explicit, reported state instead of an implicit property of
 GitHub's listing limit.
@@ -141,15 +154,20 @@ replaying it against fixtures with real `jq` and a PATH-stubbed `gh`:
 - Trend: churn versus drainage, complete drainage, no previous sample, trailing
   separator, and a run crossing the age line still counting as still queued.
 - Distribution and breakdown: p50/max, unknown age dropped, top-5 ordering, the
-  corpse-cohort fixture that reproduces the misattribution measured live.
+  corpse-cohort fixture that reproduces the misattribution measured live, and a
+  hostile-name fixture (embedded newline carrying a forged liveness watermark,
+  carriage return, tab, pipe, backslash) asserting one row per workflow and no
+  line that parses as a marker.
 - Marker: recorded when complete, carried forward when unreadable or capped,
   absent when there is nothing to carry.
 
-Six mutations were each confirmed to fail the suite: keeping aged runs in the
+Nine mutations were each confirmed to fail the suite: keeping aged runs in the
 breakdown, dropping the completeness gate on the trend, dropping it on the
-marker, stopping on a full page, sorting the fan-out ascending, and turning one
-stat back into a bare assignment — the last aborts the whole replay under
-`set -e`, which is the failure the `|| QUEUE_OK=false` guards exist to prevent.
+marker, stopping on a full page, sorting the fan-out ascending, turning one stat
+back into a bare assignment (which aborts the whole replay under `set -e` — the
+failure the `|| QUEUE_OK=false` guards exist to prevent), dropping the
+control-character collapse, dropping the pipe escaping, and rendering the rows
+with `'%b'` again.
 
 Live read-only rehearsal against `QwenLM/qwen-code` on 2026-10-28 produced the
 figures quoted above, including a real set difference against a snapshot taken
@@ -161,6 +179,8 @@ figures quoted above, including a real set difference against a snapshot taken
 - An API failure reports UNKNOWN and preserves the previous sample.
 - A capped enumeration reports a floor, records no sample, and claims no trend.
 - Waits and breakdown exclude the aged tail; the banner reports its size and age.
+- A workflow name cannot break out of its row or place a line that parses as a
+  dashboard marker.
 - No new write, dispatch, or scheduled lane is introduced.
 
 ## Open questions

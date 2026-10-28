@@ -3919,19 +3919,88 @@ printf '%s|%s|%s|%s|%s|%s|%s|%s' "$QUEUE_OK" "$QUEUE_COMPLETE" "$QUEUE_DEPTH" "$
       '| Gate | 1 |',
       '| Owner | 1 |',
     ];
-    // The rows are printf '%b' payload, like every other dashboard table:
-    // escaped separators on the wire, real lines once rendered. Pin both
-    // halves — a literal newline here would break the single-line assignment.
-    expect(jq(rows, named)).toBe(`${table.join('\\n')}\\n`);
+    // The rows carry REAL newlines and the dashboard prints them with '%s'.
+    // Every other table here is '%b' with escaped separators; this one cannot
+    // be, because its names are untrusted API strings. (The `jq` helper trims,
+    // so the trailing newline is pinned by the raw call below.)
+    expect(jq(rows, named)).toBe(table.join('\n'));
     expect(
-      execFileSync('bash', ['-c', 'printf \'%b\' "$1"', '_', jq(rows, named)], {
-        encoding: 'utf8',
-      }),
+      execFileSync(
+        'jq',
+        [
+          '-r',
+          '--arg',
+          'now',
+          String(NOW),
+          '--arg',
+          'hrs',
+          '24',
+          queueAgedDef + rows,
+        ],
+        {
+          encoding: 'utf8',
+          input: JSON.stringify(named),
+        },
+      ),
     ).toBe(`${table.join('\n')}\n`);
+    expect(workflow).toContain('printf \'%s\\n\\n\' "${QUEUE_ROWS}"');
     expect(jq(events, named)).toBe(
       'pull_request 6 · pull_request_review 2 · issue_comment 1',
     );
     expect(jq(rows, [])).toBe('');
+
+    // A workflow name is chosen by the workflow file's author, and a
+    // `pull_request` run executes the HEAD branch's file — so a fork controls
+    // it. This section is emitted BEFORE the liveness watermark the next tick
+    // recovers with `head -1`, so a name carrying a newline could end its row
+    // early and land a forged `<!-- fleet-shepherd liveness-dispatched -->`
+    // above the real one; that watermark gates SCAN_AGE_MIN and with it the
+    // liveness dispatch. Collapse control characters, escape pipes, and let no
+    // escape sequence survive: the payload must stay one row per workflow and
+    // must not contain a line that parses as our marker.
+    const MARKER = (ts, id) =>
+      `<!-- fleet-shepherd liveness-dispatched: ${ts} run=${id} -->`;
+    const hostile = [
+      `evil\n${MARKER('2099-01-01T00:00:00Z', '1')}`,
+      `carriage\r\nreturn\r${MARKER('2099-01-02T00:00:00Z', '2')}`,
+      'tab\there',
+      'pipe|name',
+      'back\\nslash',
+      'trailing|',
+    ];
+    const oneRow = (name) => {
+      const rendered = jq(rows, [{ name, event: 'x' }]);
+      const lines = rendered.trimEnd().split('\n');
+      // One row, whatever the name contains, and the marker text (if any)
+      // stays inside a cell instead of opening a line.
+      expect(lines).toHaveLength(1);
+      expect(lines[0].startsWith('| ')).toBe(true);
+      expect(lines.some((line) => line.startsWith('<!--'))).toBe(false);
+      expect(rendered).not.toContain(
+        `\n${MARKER('2099-01-01T00:00:00Z', '1')}`,
+      );
+      expect(rendered).not.toContain(
+        `\n${MARKER('2099-01-02T00:00:00Z', '2')}`,
+      );
+      // '%s' adds no interpretation of its own: printing the payload the way
+      // the dashboard prints it changes nothing.
+      expect(
+        execFileSync('bash', ['-c', 'printf \'%s\' "$1"', '_', rendered], {
+          encoding: 'utf8',
+        }),
+      ).toBe(rendered);
+      return rendered;
+    };
+    for (const name of hostile) oneRow(name);
+    // CR/LF/tab collapse to spaces; pipes are escaped for the table; a
+    // backslash is left alone because nothing interprets it any more.
+    expect(oneRow(`evil\n${MARKER('2099-01-01T00:00:00Z', '1')}`)).toContain(
+      '| evil ',
+    );
+    expect(oneRow('pipe|name')).toContain('| pipe\\|name |');
+    expect(oneRow('trailing|')).toContain('| trailing\\| |');
+    expect(oneRow('tab\there')).toContain('| tab here |');
+    expect(oneRow('back\\nslash')).toContain('| back\\nslash |');
 
     // THE live-data defect the aged split exists for. Measured 2026-10-28:
     // 81 of 231 queued runs were the 2026-08-19 cohort, and two workflows
@@ -3958,7 +4027,7 @@ printf '%s|%s|%s|%s|%s|%s|%s|%s' "$QUEUE_OK" "$QUEUE_COMPLETE" "$QUEUE_DEPTH" "$
     expect(jq(agedCount, corpses)).toBe('39');
     expect(jq(agedOldest, corpses)).toBe(at(101111));
     expect(jq(rows, corpses)).toBe(
-      `${['| Managed Agent gate | 11 |', '| Qwen Code CI | 1 |'].join('\\n')}\\n`,
+      ['| Managed Agent gate | 11 |', '| Qwen Code CI | 1 |'].join('\n'),
     );
     expect(jq(events, corpses)).toBe('pull_request 12');
     // Without the split the same fixture reports a 70-day max wait.
