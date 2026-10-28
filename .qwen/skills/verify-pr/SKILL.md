@@ -770,10 +770,13 @@ production commits, `--first-parent --no-merges` listed 24, and the 61 extra
 came from one `Merge branch 'main'`. Enumerate the wrong set and the claim
 either demands 61 rows for commits the PR never touched, or gets quietly
 narrowed to whatever was convenient. Record it as `mutations.json` with
-`coverageClaim: "per-commit"`, `productionCommits` from that log and
-`rows[].commit`; `verify-pr-check.mjs` refuses the claim when a listed commit
-has no row, and refuses a claim over an empty enumeration, which is vacuously
-true and proves nothing.
+`productionCommits` from that log and `rows[].commit`, and claim
+`coverageClaim: "per-commit"` **only when every enumerated commit has a row**;
+otherwise report the matrix per-guard and name what you did not reach.
+`verify-pr-check.mjs` refuses the claim when a listed commit has no row, and
+refuses a claim over an empty enumeration, which is vacuously true and proves
+nothing. Narrowing the claim is the honest response to a gap — inventing a row
+for a commit you did not mutate is not.
 Measured example: that sentence shipped while two of the round's production
 commits had no row at all, and only a self-audit caught it — the matrix was
 per-guard, which is a different and weaker claim than the one the prose made.

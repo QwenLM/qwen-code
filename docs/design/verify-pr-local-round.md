@@ -189,7 +189,7 @@ for is a file no round produces, and a check over an absent file is silent:
 - A vacuity matrix over every guard this change adds: revert one clause in
   place, run the suite that should catch it, restore. A row counts as killed
   only when the named assertion goes red, not merely some assertion. Measured:
-  25 rows, 25 killed, including a control row on the pre-existing
+  26 rows, 26 killed, including a control row on the pre-existing
   `merge-ready`/`fail` guard, so the other kills are not "the harness never
   reached the code". Each row also carries the commit that introduced its
   clause, derived rather than assigned: the first branch commit whose blob
@@ -200,7 +200,7 @@ for is a file no round produces, and a check over an absent file is silent:
   claim; the same data claimed per-commit is refused, naming them. The rule
   caught its own author, and the answer was to narrow the claim rather than
   invent a row.
-- Nine of those rows exist because self-audit found defects in this change
+- Ten of those rows exist because self-audit found defects in this change
   itself. Five from the first pass: a warning-suppression branch that let a
   malformed ledger reach a null read, a refusal message that blamed the head
   for a malformed list item, a `--compare` that read clean when both sides were
@@ -211,7 +211,10 @@ for is a file no round produces, and a check over an absent file is silent:
   without `--first-parent`, an artifact contract that never asked for
   `mutations.json` or for the ledger (two rows, one per file the checker reads
   and nothing produced), and a coverage claim accepted over an empty commit
-  list. Three further findings — a cross-reference to a report item that does
+  list. One from a later pass: the prose told every round to claim per-commit
+  coverage unconditionally, which is the same overstatement the contract had —
+  the claim is earned by the enumeration, and a round with a gap reports
+  per-guard instead. Three further findings — a cross-reference to a report item that does
   not exist, a return value no caller could observe, and a contract that asked
   for the matrix unconditionally while the checker treats it as optional — were
   fixed without a row, because none of them is a guard.

@@ -5361,6 +5361,10 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain('productionCommits');
     expect(flat).toContain('rows[].commit');
     expect(flat).toContain('git log --first-parent --no-merges base..head');
+    // The claim is earned by the enumeration, not by having run mutations: a
+    // round with an uncovered commit reports per-guard and names the gap.
+    expect(flat).toContain('only when every enumerated commit has a row');
+    expect(flat).toContain('otherwise report the matrix per-guard');
     const rules = flat.slice(flat.indexOf('## Hard rules'));
     expect(rules).toContain('The same binds a **coverage claim**');
   });
