@@ -265,7 +265,7 @@ if (!pomVersion) {
 }
 const springJar = path.join(
   springTarget,
-  `qwen-managed-agent-server-${pomVersion}.jar`,
+  `qwen-managed-agent-server-${pomVersion}-exec.jar`,
 );
 for (const required of [
   cliBundle,

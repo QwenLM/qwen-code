@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -30,7 +31,7 @@ public class SessionRecoveryService {
     private final ManagedSessionStore journals;
 
     public SessionRecoveryService(ManagedAgentService sessions, AgentStateStore store,
-            HarnessCoordinator coordinator, HarnessConnector harness, JdbcTemplate jdbc, ManagedSessionStore journals) {
+            HarnessCoordinator coordinator, HarnessConnector harness, @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, ManagedSessionStore journals) {
         this.sessions = sessions;
         this.store = store;
         this.coordinator = coordinator;
