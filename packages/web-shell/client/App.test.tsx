@@ -17678,7 +17678,7 @@ describe('App session callbacks', () => {
       startTime: 4,
       runtimeMs: 40,
     };
-    testState.backgroundTasks = [agent, monitor];
+    testState.backgroundTasks = [agent, foregroundAgent, monitor];
     let footerTasks: unknown;
     renderApp({
       renderFooter: (props) => {
@@ -17690,6 +17690,11 @@ describe('App session callbacks', () => {
       expect.objectContaining({ kind: 'agent', id: 'agent-host' }),
       expect.objectContaining({ kind: 'monitor', id: 'monitor-host' }),
     ]);
+    expect(footerTasks).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'agent-foreground' }),
+      ]),
+    );
   });
 
   it('passes terminal background shell task ids to the message list', async () => {

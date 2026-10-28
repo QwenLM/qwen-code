@@ -8732,13 +8732,15 @@ export function App({
       return changed ? next : tabs;
     });
   }, [backgroundTasks, connection.sessionId]);
-  // Host footers own their task rendering, so they get the same snapshot
-  // the shipped pill sees: composer tasks plus background agents (the
-  // isComposerTask filter exists only for the pill's composer count).
+  // Host-provided footers render their own task list from composer tasks
+  // plus background agents (foreground agents are transcript-only; terminal
+  // background agents keep reaching hosts, matching the design doc).
   const footerHostTasks = useMemo(
     () =>
       sessionTasks.filter(
-        (task) => isComposerTask(task) || task.kind === 'agent',
+        (task) =>
+          isComposerTask(task) ||
+          (task.kind === 'agent' && task.isBackgrounded === true),
       ),
     [sessionTasks],
   );
