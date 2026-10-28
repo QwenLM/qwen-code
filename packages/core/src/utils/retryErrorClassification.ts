@@ -290,6 +290,32 @@ export function classifyRetryError(
           ...common,
         };
       }
+
+      // A 4xx whose provider body is genuinely empty surfaces as the OpenAI
+      // SDK's "<status> status code (no body)": the upstream answered a
+      // well-formed request with a 4xx whose body the client could not read, so
+      // there is no provider `code`/`type`/`message` to act on. Such a response
+      // is transient and spurious — the gateway occasionally answers with an
+      // empty body — and re-sending the identical request succeeds on the next
+      // try, which is exactly the retry the user observes fixing the "400
+      // status code (no body)" error. Classify it retryable so the bounded
+      // auto-retry ladder applies, but do not populate `transportCode` on
+      // purpose: admitting these into the transportCode-keyed stream
+      // replay/continuation gates (as the network-error branch above pins) would
+      // relabel a permanent fail-fast into a persistent loop.
+      if (
+        providerCode === undefined &&
+        providerMessage === undefined &&
+        isEmptyBodyError(error)
+      ) {
+        return {
+          kind,
+          diagnosis: 'retryable',
+          reason: 'empty-body-4xx',
+          ...common,
+        };
+      }
+
       return {
         kind,
         diagnosis: 'fail-fast',
@@ -435,6 +461,29 @@ export function hasNetworkFailureCause(error: unknown): boolean {
       typeof message === 'string' &&
       NETWORK_FAILURE_MESSAGE_RE.test(message)
     ) {
+      return true;
+    }
+    current = current instanceof Error ? current.cause : undefined;
+  }
+  return false;
+}
+
+// A 4xx whose provider body is empty surfaces as the OpenAI SDK's
+// "<status> status code (no body)": the gateway returned an HTTP 4xx with no
+// body the client can read, so there is no provider `code`/`type`/`message`
+// to act on. Such a response is transient and spurious — the upstream
+// occasionally answers a well-formed request with an empty body — and re-
+// sending the identical request succeeds on the next try. Detect it by the
+// marker, walking the SDK's cause chain (SDKs nest the failing request a level
+// or two down), the same way `hasNetworkFailureCause` detects its marker.
+const EMPTY_BODY_MESSAGE_RE = /status code \(no body\)/i;
+
+export function isEmptyBodyError(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth <= MAX_TRANSPORT_CAUSE_DEPTH; depth++) {
+    if (typeof current !== 'object' || current === null) return false;
+    const message = (current as { message?: unknown }).message;
+    if (typeof message === 'string' && EMPTY_BODY_MESSAGE_RE.test(message)) {
       return true;
     }
     current = current instanceof Error ? current.cause : undefined;
