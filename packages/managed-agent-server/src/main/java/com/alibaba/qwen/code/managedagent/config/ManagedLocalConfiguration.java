@@ -19,7 +19,7 @@ import java.util.Set;
 @Configuration
 @Profile("managed-local")
 public class ManagedLocalConfiguration {
-    @Bean(destroyMethod = "close")
+    @Bean(name = "managedAgentDataSource", destroyMethod = "close")
     DruidDataSource managedLocalDataSource(DataSourceProperties source,
             ServerProperties server, ManagedAgentProperties properties,
             Environment environment) throws IOException {

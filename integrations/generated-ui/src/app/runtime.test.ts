@@ -375,7 +375,7 @@ describe('UiRuntime', () => {
       const runtime = createRuntime();
       runtime.initialize(`ui.on('run', 'click', ${handler});`, {});
       expect(() => runtime.dispatch(event(), {})).toThrow(
-        'Generated JavaScript failed or exceeded a runtime limit.',
+        /^Script error: Invalid UI operation or output limit exceeded/,
       );
       expect(() => runtime.dispatch(event(), {})).toThrow(/stopped/);
     },
@@ -406,7 +406,7 @@ describe('UiRuntime', () => {
            .catch(() => {});`,
         {},
       ),
-    ).toThrow('Generated JavaScript failed or exceeded a runtime limit.');
+    ).toThrow(/^Script error: Invalid UI operation or output limit exceeded/);
     expect(() => runtime.dispatch(event(), {})).toThrow(/stopped/);
   });
 

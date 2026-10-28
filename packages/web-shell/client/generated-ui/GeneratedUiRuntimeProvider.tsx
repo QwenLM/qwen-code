@@ -210,9 +210,14 @@ export function GeneratedUiSlot({
     return () => store.release(key, token);
   }, [store, key, resource, ordinaryActive, token]);
   useLayoutEffect(() => {
-    if (input.current && element.current) {
-      input.current.element = element.current;
-      store.update(input.current);
+    const slot = input.current;
+    if (slot && element.current) {
+      slot.element = element.current;
+      // The first attach can be refused while the owner snapshot is stale,
+      // which happens during a live turn. Retry until the card first attaches;
+      // a card whose instance was later released still needs an explicit open.
+      if (!ordinaryActive && !store.getRecord(slot.key)) store.attach(slot);
+      else store.update(slot);
     }
   });
   const entry = store.getRecord(key)?.entry;
