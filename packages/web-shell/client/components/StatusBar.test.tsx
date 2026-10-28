@@ -68,7 +68,31 @@ describe('getTaskPillLabel', () => {
       agentTask('running', true, 'a1'),
       agentTask('paused', true, 'a2'),
     ];
-    expect(getTaskPillLabel(tasks, t)).toBe('1 shell, 2 local agents');
+    expect(getTaskPillLabel(tasks, t)).toBe(
+      '1 shell, 1 local agent, 1 local agent paused',
+    );
+  });
+
+  it('labels paused background agents as paused', () => {
+    expect(getTaskPillLabel([agentTask('paused', true)], t)).toBe(
+      '1 local agent paused',
+    );
+  });
+
+  it('joins running and paused agent counts', () => {
+    const tasks = [
+      agentTask('running', true, 'a1'),
+      agentTask('paused', true, 'a2'),
+      agentTask('paused', true, 'a3'),
+    ];
+    expect(getTaskPillLabel(tasks, t)).toBe(
+      '1 local agent, 2 local agents paused',
+    );
+  });
+
+  it('lets a paused agent show instead of the done count', () => {
+    const tasks = [shellTask('completed'), agentTask('paused', true)];
+    expect(getTaskPillLabel(tasks, t)).toBe('1 local agent paused');
   });
 
   it('does not count foreground agents', () => {

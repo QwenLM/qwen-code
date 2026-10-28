@@ -91,15 +91,25 @@ export function getTaskPillLabel(
 ): string {
   const composerTasks = tasks.filter(isComposerTask);
   // Background subagents stay out of the composer task count (they have
-  // their own surfaces) but get a running-only count in the pill: they drop
-  // out entirely once terminal, so no "done" residue can linger.
-  const runningAgents = tasks.filter(
-    (task) =>
-      task.kind === 'agent' &&
-      task.isBackgrounded === true &&
-      (task.status === 'running' || task.status === 'paused'),
+  // their own surfaces) but keep their own counts in the pill: running and
+  // paused agents are labelled separately, and terminal agents drop out
+  // entirely, so no "done" residue can linger.
+  const backgroundAgents = tasks.filter(
+    (task) => task.kind === 'agent' && task.isBackgrounded === true,
   );
-  if (composerTasks.length === 0 && runningAgents.length === 0) return '';
+  const runningAgents = backgroundAgents.filter(
+    (task) => task.status === 'running',
+  );
+  const pausedAgents = backgroundAgents.filter(
+    (task) => task.status === 'paused',
+  );
+  if (
+    composerTasks.length === 0 &&
+    runningAgents.length === 0 &&
+    pausedAgents.length === 0
+  ) {
+    return '';
+  }
 
   const running = composerTasks.filter(
     (task) =>
@@ -107,7 +117,11 @@ export function getTaskPillLabel(
       task.status === 'pausing' ||
       task.status === 'paused',
   );
-  if (running.length > 0 || runningAgents.length > 0) {
+  if (
+    running.length > 0 ||
+    runningAgents.length > 0 ||
+    pausedAgents.length > 0
+  ) {
     const counts = { shell: 0, monitor: 0, workflow: 0 };
     for (const task of running) {
       if (task.kind === 'shell') counts.shell += 1;
@@ -146,6 +160,16 @@ export function getTaskPillLabel(
           runningAgents.length,
           'tasks.pill.agent',
           'tasks.pill.agents',
+          t,
+        ),
+      );
+    }
+    if (pausedAgents.length > 0) {
+      parts.push(
+        formatCount(
+          pausedAgents.length,
+          'tasks.pill.agentPaused',
+          'tasks.pill.agentsPaused',
           t,
         ),
       );

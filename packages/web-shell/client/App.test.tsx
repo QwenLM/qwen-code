@@ -46,6 +46,7 @@ import {
   GOAL_PAUSE_REASON_COMMAND,
   type DaemonInputAnnotation,
   type DaemonSessionBtwStreamEvent,
+  type DaemonSessionAgentTaskStatus,
   type DaemonSessionArtifact,
   type DaemonSessionAttachmentReference,
   type DaemonSessionSummary,
@@ -56,6 +57,7 @@ import {
   type DaemonBrand,
   type DaemonSessionStatsStatus,
   type DaemonSessionTaskStatus,
+  type DaemonSessionTaskWithWorkflowStatus,
   type DaemonSettingDescriptor,
   type DaemonSkillToggleMutation,
   type DaemonWorkspaceMcpServerStatus,
@@ -906,7 +908,9 @@ const {
       latestChatEditorProps: null as ChatEditorTestProps | null,
       onChatEditorLayout: null as ((props: ChatEditorTestProps) => void) | null,
       latestToastHostElevated: false,
-      latestStatusBarTasks: null as DaemonSessionMonitorTaskStatus[] | null,
+      latestStatusBarTasks: null as
+        | DaemonSessionTaskWithWorkflowStatus[]
+        | null,
       latestStatusBarOnOpenTasks: null as (() => void) | null,
       latestStatusBarHideSettings: false,
       latestStatusBarOnSelectModel: null as (() => void) | null,
@@ -2301,7 +2305,7 @@ vi.doMock('./components/StatusBar', async () => {
   const React = await import('react');
   return {
     StatusBar: (props: {
-      tasks?: DaemonSessionMonitorTaskStatus[];
+      tasks?: readonly DaemonSessionTaskWithWorkflowStatus[];
       onOpenTasks?: () => void;
       hideSettings?: boolean;
       onSelectModel?: () => void;
@@ -17604,6 +17608,88 @@ describe('App session callbacks', () => {
     });
 
     expect(testState.latestStatusBarTasks).toEqual([monitor]);
+  });
+
+  it('feeds the footer pill the task snapshot while a background agent runs', () => {
+    const agent: DaemonSessionAgentTaskStatus = {
+      kind: 'agent',
+      id: 'agent-running',
+      label: 'Research',
+      description: 'Research',
+      status: 'running',
+      startTime: 1,
+      runtimeMs: 10,
+      isBackgrounded: true,
+      subagentType: 'general-purpose',
+    };
+    testState.backgroundTasks = [agent];
+
+    renderApp({
+      header: { items: ['title', 'environment', 'rightPanel'] },
+      environmentPanel: {
+        items: [
+          'environment',
+          'sources',
+          'subagents',
+          'backgroundTasks',
+          'artifacts',
+        ],
+      },
+    });
+
+    expect(testState.latestStatusBarTasks).toEqual([agent]);
+  });
+
+  it('keeps the footer pill suppressed in the shipped entry without a running agent', () => {
+    const monitor: DaemonSessionMonitorTaskStatus = {
+      kind: 'monitor',
+      id: 'monitor-suppressed',
+      label: 'Watch build',
+      description: 'Watch build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+    };
+    testState.backgroundTasks = [monitor];
+
+    renderApp();
+
+    expect(testState.latestStatusBarTasks).toEqual([]);
+  });
+
+  it('passes agent tasks to a host-provided footer', () => {
+    const agent: DaemonSessionAgentTaskStatus = {
+      kind: 'agent',
+      id: 'agent-host',
+      label: 'Refactor',
+      description: 'Refactor',
+      status: 'running',
+      startTime: 3,
+      runtimeMs: 30,
+      isBackgrounded: true,
+      subagentType: 'general-purpose',
+    };
+    const monitor: DaemonSessionMonitorTaskStatus = {
+      kind: 'monitor',
+      id: 'monitor-host',
+      label: 'Watch deploy',
+      description: 'Watch deploy',
+      status: 'running',
+      startTime: 4,
+      runtimeMs: 40,
+    };
+    testState.backgroundTasks = [agent, monitor];
+    let footerTasks: unknown;
+    renderApp({
+      renderFooter: (props) => {
+        footerTasks = props.tasks;
+        return null;
+      },
+    });
+    expect(footerTasks).toEqual([
+      expect.objectContaining({ kind: 'agent', id: 'agent-host' }),
+      expect.objectContaining({ kind: 'monitor', id: 'monitor-host' }),
+    ]);
   });
 
   it('passes terminal background shell task ids to the message list', async () => {

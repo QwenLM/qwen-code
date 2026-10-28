@@ -147,7 +147,10 @@ import { useModelRefresh } from './hooks/useModelRefresh';
 import { MonitorDetailsProvider } from './monitorDetailsContext';
 import { WorkflowDetailsProvider } from './workflowDetailsContext';
 import { findMonitorTaskForTool } from './utils/monitorTasks';
-import { isComposerTask } from './utils/composerTasks';
+import {
+  hasActiveBackgroundAgent,
+  isComposerTask,
+} from './utils/composerTasks';
 import {
   getTaskActivityKey,
   hasActiveTaskActivity,
@@ -8729,9 +8732,19 @@ export function App({
       return changed ? next : tabs;
     });
   }, [backgroundTasks, connection.sessionId]);
+  // Host footers own their task rendering, so they get the same snapshot
+  // the shipped pill sees: composer tasks plus background agents (the
+  // isComposerTask filter exists only for the pill's composer count).
+  const footerHostTasks = useMemo(
+    () =>
+      sessionTasks.filter(
+        (task) => isComposerTask(task) || task.kind === 'agent',
+      ),
+    [sessionTasks],
+  );
   const footerTasks = useMemo(
-    () => (renderFooter ? backgroundTasks.map(mapToWebShellTaskInfo) : []),
-    [backgroundTasks, renderFooter],
+    () => (renderFooter ? footerHostTasks.map(mapToWebShellTaskInfo) : []),
+    [footerHostTasks, renderFooter],
   );
   const statusBarRef = useRef<StatusBarHandle>(null);
   const messageListRef = useRef<MessageListHandle | null>(null);
@@ -24692,11 +24705,16 @@ export function App({
                           onOpenTasks={() => openTasksPanel()}
                           onReturnToInput={handleReturnToEditor}
                           // The pill filters composer tasks itself; it also
-                          // counts running background agents, which the
-                          // pre-filtered list would have dropped.
+                          // counts background agents, which the
+                          // pre-filtered list would have dropped. While a
+                          // background agent is still running the pill gets
+                          // the full snapshot even when the environment
+                          // panel replaces it, so active agents stay
+                          // visible in the shipped entry.
                           tasks={
                             isChatEmptyState ||
-                            !environmentTasksReplacementEnabled
+                            !environmentTasksReplacementEnabled ||
+                            hasActiveBackgroundAgent(sessionTasks)
                               ? sessionTasks
                               : []
                           }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { DaemonSessionTaskWithWorkflowStatus } from '@qwen-code/sdk/daemon';
-import { isComposerTask } from './composerTasks';
+import { hasActiveBackgroundAgent, isComposerTask } from './composerTasks';
 
 const base = {
   id: 'task-1',
@@ -99,5 +99,42 @@ describe('isComposerTask', () => {
     };
     expect(isComposerTask(historical)).toBe(false);
     expect(isComposerTask({ ...historical, isHistorical: false })).toBe(true);
+  });
+});
+
+describe('hasActiveBackgroundAgent', () => {
+  const agent = (
+    status: 'running' | 'paused' | 'completed',
+    isBackgrounded: boolean,
+  ): DaemonSessionTaskWithWorkflowStatus =>
+    ({
+      ...base,
+      kind: 'agent',
+      status,
+      isBackgrounded,
+      subagentType: 'general-purpose',
+    }) as DaemonSessionTaskWithWorkflowStatus;
+
+  it('is true only for a running background agent', () => {
+    const tasks: Array<[DaemonSessionTaskWithWorkflowStatus, boolean]> = [
+      [agent('running', true), true],
+      [agent('paused', true), false],
+      [agent('completed', true), false],
+      [agent('running', false), false],
+      [
+        {
+          ...base,
+          kind: 'shell',
+          command: 'npm test',
+          cwd: '/workspace',
+        } as DaemonSessionTaskWithWorkflowStatus,
+        false,
+      ],
+    ];
+
+    for (const [task, expected] of tasks) {
+      expect(hasActiveBackgroundAgent([task])).toBe(expected);
+    }
+    expect(hasActiveBackgroundAgent([])).toBe(false);
   });
 });
