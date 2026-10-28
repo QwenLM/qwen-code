@@ -33,6 +33,7 @@ import {
   WAITING_SPINNER_FRAME,
 } from '../constants.js';
 import { usePhraseCycler } from '../hooks/usePhraseCycler.js';
+import { useWorkflowMode } from '../hooks/use-workflow-mode.js';
 import { useTimer } from '../hooks/useTimer.js';
 import { useAnimationFrame } from '../hooks/useAnimationFrame.js';
 import { formatApprovalModeName } from '../utils/approvalModeDisplay.js';
@@ -216,6 +217,7 @@ export function OpenTuiFooter({
   vimMode,
   exitHint = null,
 }: OpenTuiFooterProps) {
+  const workflowMode = useWorkflowMode(config);
   const { width } = useTerminalDimensions();
   const generationConfig = config.getContentGeneratorConfig();
   const promptTokenCount = sessionStats.lastPromptTokenCount;
@@ -360,6 +362,16 @@ export function OpenTuiFooter({
                 )}
               </text>
             )}
+          {workflowMode?.requested && (
+            <text fg={workflowMode.effective ? C.accent : C.yellow}>
+              {truncateToWidth(
+                workflowMode.effective
+                  ? 'Workflow mode: on'
+                  : 'Workflow mode: on (unavailable)',
+                statusWidth,
+              )}
+            </text>
+          )}
           {hintRow.length > 0 && (
             <box flexDirection="row">
               {hintRow.map((part, i) => (
