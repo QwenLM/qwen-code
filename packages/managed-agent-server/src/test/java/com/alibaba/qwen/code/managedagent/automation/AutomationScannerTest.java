@@ -2586,6 +2586,45 @@ class AutomationScannerTest {
     }
 
     @Test
+    void aMessageLessRowFailureKeepsItsIdentityInTheSummary() {
+        // The summary is the only record of an additional failure, so an
+        // exception without a message must name its class rather than
+        // render as "failure=null".
+        define("* * * * *", "allow", "none", null, true);
+        define("* * * * *", "allow", "none", null, true);
+        clock.set(T0 + MINUTE + 1_000);
+        AtomicInteger claims = new AtomicInteger();
+        AutomationLedgerStore downAtClaim = new AutomationLedgerStore(jdbc) {
+            @Override
+            public long claim(String tenantId, String scheduleId,
+                    String owner, long leaseUntil, long now) {
+                if (claims.incrementAndGet() == 1) {
+                    throw new IllegalStateException("claim store down");
+                }
+                throw new IllegalStateException();
+            }
+        };
+        AutomationScanner broken = new AutomationScanner(downAtClaim,
+                connector, settings, clock::get, "scanner-silent-store");
+        Logger log = (Logger) LoggerFactory.getLogger(AutomationScanner.class);
+        ListAppender<ILoggingEvent> logged = new ListAppender<>();
+        logged.start();
+        log.addAppender(logged);
+        try {
+            assertThatThrownBy(() -> broken.tick(clock.get()))
+                    .hasMessage("claim store down");
+            assertThat(logged.list).hasSize(1);
+            String summary = logged.list.getFirst().getFormattedMessage();
+            assertThat(summary).contains("failure="
+                    + IllegalStateException.class.getName());
+            assertThat(summary).doesNotContain("failure=null");
+        } finally {
+            log.detachAppender(logged);
+            logged.stop();
+        }
+    }
+
+    @Test
     void theScannerWorksRowsOnItsOwnBoundedPool() {
         ThreadPoolTaskExecutor executor = applicationContext.getBean(
                 "automationScannerExecutor", ThreadPoolTaskExecutor.class);
