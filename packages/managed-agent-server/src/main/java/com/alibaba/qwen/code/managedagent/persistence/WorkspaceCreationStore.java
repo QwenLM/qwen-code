@@ -13,6 +13,7 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -43,9 +44,9 @@ public class WorkspaceCreationStore {
     private final ObjectMapper json;
     private final Clock clock;
 
-    public WorkspaceCreationStore(JdbcTemplate jdbc, PlatformTransactionManager manager,
+    public WorkspaceCreationStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager,
             WorkspaceStorageGuard guard, ManagedWorkspaceRegistry registry,
-            ManagedAgentProperties properties, ObjectMapper json, Clock clock) {
+            ManagedAgentProperties properties, @Qualifier("managedAgentObjectMapper") ObjectMapper json, @Qualifier("managedAgentClock") Clock clock) {
         this.jdbc = jdbc;
         transaction = new TransactionTemplate(manager);
         this.guard = guard;
