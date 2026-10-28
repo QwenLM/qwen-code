@@ -70,6 +70,8 @@ describe('daemon update restart', () => {
       env,
       token: 'effective-secret',
       externalToolGuardToken: 'guard-secret',
+      managedRuntimeBrokerUrl: 'http://127.0.0.1:4182',
+      managedRuntimeBrokerToken: 'broker-secret',
       getPort: () => port,
       close,
     });
@@ -101,6 +103,8 @@ describe('daemon update restart', () => {
         QWEN_HOME: '/home/qwen',
         QWEN_SERVER_TOKEN: 'effective-secret',
         QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN: 'guard-secret',
+        QWEN_MANAGED_RUNTIME_BROKER_URL: 'http://127.0.0.1:4182',
+        QWEN_MANAGED_RUNTIME_BROKER_TOKEN: 'broker-secret',
       },
     );
     expect(env.QWEN_CODE_MANAGED_NPM_PIN).toBe('old');

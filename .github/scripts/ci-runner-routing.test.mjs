@@ -1,9 +1,10 @@
 // Runner-routing regression guards for ci.yml, serve-ab.yml, e2e.yml, the
-// qwen-autofix.yml scan lane, and the trusted-PR lanes of #13245.
+// qwen-autofix.yml scan lane, the trusted-PR lanes of #13245, and the
+// control-plane jobs that run no PR code.
 //
 // classify_pr carries the routing logic TWICE — the `runs-on` expression
 // (which selects the classify job's own runner) and the `pick_runner` shell
-// step (which publishes `ubuntu_runner` for every downstream Linux job). If
+// step (which publishes `ubuntu_runner` for downstream Linux jobs). If
 // they drift, classify and the Test job land on different pools. These tests
 // evaluate BOTH against the same event matrix — including the negative
 // associations that must stay hosted — and assert they agree.
@@ -117,7 +118,14 @@ function evalRunsOn(expression, { ecsDisabled, eventName, sameRepo, assoc }) {
 
 // Executes the real pick_runner shell with the same inputs and returns the
 // selected runner exactly as CI would publish it.
-function runPickRunner({ ecsDisabled, sameRepo, assoc, eventName, dispatch }) {
+function runPickRunner({
+  ecsDisabled,
+  sameRepo,
+  assoc,
+  eventName,
+  dispatch,
+  fleet,
+}) {
   const tmp = mkdtempSync(join(tmpdir(), 'pick-runner-'));
   const outputFile = join(tmp, 'github_output');
   const result = spawnSync('bash', ['-c', pickRunner.run], {
@@ -126,6 +134,7 @@ function runPickRunner({ ecsDisabled, sameRepo, assoc, eventName, dispatch }) {
       AUTHOR_ASSOCIATION: assoc,
       ECS_DISABLED: ecsDisabled ? 'true' : '',
       EVENT_NAME: eventName,
+      LINUX_RUNNER_FLEET: fleet ?? '',
       DISPATCH_LINUX_RUNNER: dispatch ?? '',
       GITHUB_OUTPUT: outputFile,
     },
@@ -262,6 +271,73 @@ describe('ci.yml classify_pr runner routing', () => {
       /vars\.MAINTAINER_ECS_RUNNER_DISABLED != 'true'/,
     );
     assert.match(classifyRunsOn, /github\.event_name == 'merge_group'/);
+  });
+});
+
+describe('ci.yml web_shell_e2e_smoke runner routing', () => {
+  const expression = String(ciDoc.jobs.web_shell_e2e_smoke['runs-on'])
+    .replace(/^\$\{\{\s*/, '')
+    .replace(/\s*\}\}$/, '');
+  const selectSmokeRunner = new Function(
+    'needs',
+    'fromJSON',
+    'contains',
+    `return (${expression});`,
+  );
+
+  it('uses ARM64 for self-hosted runs while preserving every hosted fallback', () => {
+    for (const ecsDisabled of [false, true]) {
+      for (const fleet of ['', 'x64', 'arm64', 'hosted']) {
+        for (const sameRepo of [false, true]) {
+          for (const assoc of ASSOCIATIONS) {
+            for (const dispatch of [
+              undefined,
+              'self-hosted',
+              'self-hosted-arm64',
+              'hosted',
+            ]) {
+              const runner = runPickRunner({
+                ecsDisabled,
+                fleet,
+                sameRepo,
+                assoc,
+                dispatch,
+                eventName: dispatch ? 'workflow_dispatch' : 'pull_request',
+              });
+              assert.deepEqual(
+                selectSmokeRunner(
+                  { classify_pr: { outputs: { ubuntu_runner: runner } } },
+                  JSON.parse,
+                  (labels, label) => labels.includes(label),
+                ),
+                JSON.parse(runner).includes('self-hosted')
+                  ? ['self-hosted', 'linux', 'arm64']
+                  : JSON.parse(HOSTED),
+                JSON.stringify({
+                  ecsDisabled,
+                  fleet,
+                  sameRepo,
+                  assoc,
+                  dispatch,
+                  runner,
+                }),
+              );
+            }
+          }
+        }
+      }
+    }
+  });
+
+  it('stays hosted when the classifier output is missing', () => {
+    assert.deepEqual(
+      selectSmokeRunner(
+        { classify_pr: { outputs: {} } },
+        JSON.parse,
+        (labels, label) => labels.includes(label),
+      ),
+      JSON.parse(HOSTED),
+    );
   });
 });
 
@@ -706,6 +782,53 @@ describe('trusted-PR lanes moved off the hosted queue (#13245)', () => {
       'pull_request',
       ['push', 'workflow_dispatch'],
     ],
+    // managed-agent-gate.yml calls sdk-java.yml on an approval, whose event
+    // a fork PR can raise too: approving one must not put it on the pool.
+    [
+      'sdk-java.yml',
+      'mysql-integration',
+      'pull_request_review',
+      ['push', 'merge_group', 'workflow_dispatch'],
+    ],
+    // The gate's own jobs report the would-be required check, so a starved
+    // hosted queue must not hold them; fork PRs and fork approvals stay hosted.
+    [
+      'managed-agent-gate.yml',
+      'scope',
+      'pull_request',
+      ['push', 'merge_group'],
+    ],
+    [
+      'managed-agent-gate.yml',
+      'scope',
+      'pull_request_review',
+      ['push', 'merge_group'],
+    ],
+    [
+      'sdk-java.yml',
+      'event-transport-broker',
+      'pull_request',
+      ['schedule', 'workflow_dispatch'],
+    ],
+    [
+      'sdk-java.yml',
+      'event-transport-multi-node',
+      'pull_request',
+      ['schedule', 'workflow_dispatch'],
+    ],
+    // Both gate lanes also run in the gate's approval-triggered full tier.
+    [
+      'sdk-java.yml',
+      'event-transport-broker',
+      'pull_request_review',
+      ['schedule', 'workflow_dispatch'],
+    ],
+    [
+      'sdk-java.yml',
+      'event-transport-multi-node',
+      'pull_request_review',
+      ['schedule', 'workflow_dispatch'],
+    ],
     [
       'assign-pr-owner.yml',
       'assign',
@@ -791,13 +914,29 @@ describe('trusted-PR lanes moved off the hosted queue (#13245)', () => {
       'utf8',
     );
     const build = parse(text).jobs.build;
-    assert.deepEqual(build.services.mysql.ports, ['3306/tcp']);
-    assert.match(build.services.mysql.options, /type=tmpfs/);
+    // A service container cannot take a command, so it always reserves native
+    // AIO contexts and can exhaust the pool host's fs.aio-max-nr (#14416).
+    assert.equal(build.services, undefined);
+    const start = build.steps.find(
+      (s) => s.name === 'Start MySQL without native AIO',
+    );
+    assert.match(start.run, /--publish '127\.0\.0\.1::3306'/);
+    assert.match(start.run, /type=tmpfs,destination=\/var\/lib\/mysql/);
+    assert.match(start.run, /--innodb-use-native-aio=0/);
+    assert.match(start.run, /MYSQL_PORT=.*GITHUB_ENV/);
+    const remove = build.steps.find(
+      (s) => s.name === 'Remove the MySQL container',
+    );
+    assert.match(remove.if, /always\(\)/);
     const run = (name) => build.steps.find((s) => s.name === name).run;
     assert.match(run('Build Java components'), /-Dmaven\.repo\.local=/);
     assert.match(
       run('Build Java components'),
       /rm -rf -- "\$\{repo\}\/com\/alibaba\/qwencode-sdk" "\$\{repo\}\/com\/alibaba\/qwen-managed-agent-server"/,
+    );
+    assert.match(
+      run('Assemble reference distribution'),
+      /rm -rf -- "\$\{RUNNER_TEMP\}\/managed-agent-reference"\n\s*node scripts\/package-managed-agent-reference\.mjs/,
     );
     const boot = run('Verify and boot the exact archive');
     assert.match(boot, /SERVER_PORT="\$\{server_port\}"/);
@@ -841,4 +980,243 @@ describe('trusted-PR lanes moved off the hosted queue (#13245)', () => {
     );
     assert.equal(gate.env?.OUT, '${{ runner.temp }}/opentui-noflicker-out');
   });
+
+  it('tui-parity changes gate is routed like the lanes it guards', () => {
+    // The changes job is the door to parity/noflicker: a 40-minute hosted
+    // queue wait behind it starves two pool-routed lanes. Route it like them;
+    // it runs no checkout, so the workspace-restore pin does not apply.
+    const doc = parse(
+      readFileSync(join(workflowsDir, 'tui-parity.yml'), 'utf8'),
+    );
+    const job = doc.jobs.changes;
+    const runsOn = String(job['runs-on']);
+    const route = (eventName, sameRepo, assoc, ecsDisabled = false) =>
+      evalRunsOn(runsOn, { ecsDisabled, eventName, sameRepo, assoc });
+    assert.match(runsOn, /github\.repository == 'QwenLM\/qwen-code'/);
+    assert.deepEqual(route('pull_request', true, 'NONE'), ECS_LABELS);
+    for (const assoc of TRUSTED) {
+      assert.deepEqual(route('pull_request', false, assoc), ECS_LABELS, assoc);
+    }
+    assert.deepEqual(route('workflow_dispatch', false, ''), ECS_LABELS);
+    for (const assoc of ['CONTRIBUTOR', 'FIRST_TIME_CONTRIBUTOR', 'NONE']) {
+      assert.deepEqual(
+        route('pull_request', false, assoc),
+        HOSTED_LABELS,
+        assoc,
+      );
+    }
+    for (const eventName of ['pull_request', 'workflow_dispatch']) {
+      assert.deepEqual(
+        route(eventName, true, 'OWNER', true),
+        HOSTED_LABELS,
+        eventName,
+      );
+    }
+    // Byte-identity with the lanes it guards is this change's own acceptance
+    // criterion: the gate is their door, so drift here is what re-starves
+    // them behind a hosted queue.
+    for (const lane of ['parity', 'noflicker']) {
+      assert.equal(
+        runsOn,
+        String(doc.jobs[lane]['runs-on']),
+        `the gate must be routed by the same expression as ${lane}`,
+      );
+    }
+    // Any added step would run on the reused pool workspace with no hygiene
+    // step before it, so the whole step list is pinned, not just checkouts.
+    assert.deepEqual(
+      job.steps.map((s) => s.uses),
+      ['actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3'],
+      'changes gate must stay checkout-free and shell-free; adding a step re-adds the pool-hygiene requirement',
+    );
+  });
+});
+
+describe('control-plane jobs moved off the hosted queue', () => {
+  // None of these checks out or runs PR code, so each reaches the pool on
+  // every trigger, fork-raised events included; the kill-switch wins.
+  const ECS_LABELS = ['self-hosted', 'linux', 'x64', 'ecs-qwen'];
+  const HOSTED_LABELS = ['ubuntu-latest'];
+  const jobs = [
+    [
+      'qwen-code-pr-review.yml',
+      'delay-automatic-review',
+      ['pull_request_target'],
+    ],
+    ['assign-issue-owner.yml', 'assign', ['issues', 'workflow_dispatch']],
+    [
+      'auto-minimize-spam.yml',
+      'minimize',
+      [
+        'issue_comment',
+        'pull_request_review_comment',
+        'schedule',
+        'push',
+        'workflow_dispatch',
+      ],
+    ],
+  ];
+
+  for (const [file, jobName, events] of jobs) {
+    const job = parse(readFileSync(join(workflowsDir, file), 'utf8')).jobs[
+      jobName
+    ];
+    const runsOn = String(job['runs-on']);
+    const route = (eventName, assoc, ecsDisabled = false) =>
+      evalRunsOn(runsOn, { ecsDisabled, eventName, sameRepo: false, assoc });
+    const checkouts = job.steps.filter((s) =>
+      String(s.uses || '').startsWith('actions/checkout'),
+    );
+
+    it(`${file} ${jobName}: every trigger reaches the pool, forks included`, () => {
+      assert.match(runsOn, /github\.repository == 'QwenLM\/qwen-code'/);
+      for (const eventName of events) {
+        for (const assoc of ASSOCIATIONS) {
+          assert.deepEqual(route(eventName, assoc), ECS_LABELS, eventName);
+        }
+      }
+    });
+
+    it(`${file} ${jobName}: the kill-switch wins on every event`, () => {
+      for (const eventName of events) {
+        assert.deepEqual(route(eventName, 'OWNER', true), HOSTED_LABELS);
+      }
+    });
+
+    it(`${file} ${jobName}: checks out only the default branch`, () => {
+      // An omitted ref is the default branch on issues events and the
+      // write-access dispatcher's choice on workflow_dispatch.
+      for (const step of checkouts) {
+        assert.ok(
+          [undefined, '${{ github.event.repository.default_branch }}'].includes(
+            step.with?.ref,
+          ),
+          String(step.with?.ref),
+        );
+      }
+    });
+
+    if (checkouts.length > 0) {
+      it(`${file} ${jobName}: checkout is safe on a reused pool workspace`, () => {
+        const heal = job.steps.findIndex(
+          (s) => s.name === 'Restore workspace ownership',
+        );
+        assert.ok(heal !== -1 && heal < job.steps.indexOf(checkouts[0]));
+        assert.equal(
+          job.steps[heal].if,
+          "${{ runner.environment == 'self-hosted' }}",
+        );
+        // Cone mode rejects a file entry the reused index holds as a file.
+        for (const step of checkouts) {
+          assert.equal(step.with['sparse-checkout'], '.github/scripts');
+          assert.equal(step.with['sparse-checkout-cone-mode'], undefined);
+        }
+      });
+    }
+  }
+});
+
+describe('credential-free release fanout routing (#15465)', () => {
+  const reference = parse(
+    readFileSync(join(workflowsDir, 'repo-hygiene.yml'), 'utf8'),
+  ).jobs.dedup['runs-on'];
+  it('keeps the Desktop reusable caller limited to schedule and dispatch', () => {
+    const caller = parse(
+      readFileSync(join(workflowsDir, 'desktop-packaging-check.yml'), 'utf8'),
+    );
+    assert.deepEqual(Object.keys(caller.on).sort(), [
+      'schedule',
+      'workflow_dispatch',
+    ]);
+    assert.equal(
+      caller.jobs.package.uses,
+      './.github/workflows/desktop-release.yml',
+    );
+  });
+  for (const [file, jobId, events] of [
+    ['desktop-release.yml', 'prepare', ['release', 'workflow_dispatch']],
+    ['live-host-release.yml', 'prepare', ['workflow_dispatch']],
+    [
+      'dsw-swe-verified-release.yml',
+      'release_gate',
+      ['release', 'workflow_dispatch'],
+    ],
+    [
+      'release-managed-runtime.yml',
+      'prepare',
+      ['release', 'workflow_dispatch'],
+    ],
+  ]) {
+    const doc = parse(readFileSync(join(workflowsDir, file), 'utf8'));
+    const job = doc.jobs[jobId];
+    const expression = job['runs-on'];
+    it(`${file}: routes release preparation to ECS with hosted fallbacks`, () => {
+      assert.equal(
+        expression,
+        file === 'live-host-release.yml'
+          ? reference.replace(
+              "vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'",
+              "vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && github.event_name != 'pull_request'",
+            )
+          : reference,
+      );
+      for (const eventName of events) {
+        assert.ok(Object.hasOwn(doc.on, eventName));
+        assert.deepEqual(
+          evalRunsOn(expression, { eventName, ecsDisabled: false }),
+          JSON.parse(ECS),
+        );
+        assert.deepEqual(
+          evalRunsOn(expression, { eventName, ecsDisabled: true }),
+          JSON.parse(HOSTED),
+        );
+        assert.deepEqual(
+          evalRunsOn(
+            expression.replace(
+              "github.repository == 'QwenLM/qwen-code'",
+              'false',
+            ),
+            { eventName, ecsDisabled: false },
+          ),
+          JSON.parse(HOSTED),
+        );
+      }
+    });
+    it(`${file}: keeps release secrets and PR execution outside this migration`, () => {
+      assert.doesNotMatch(JSON.stringify([doc.env, job]), /secrets(?:\.|\[)/);
+      assert.equal(job.environment, undefined);
+      assert.equal((job.permissions ?? doc.permissions).contents, 'read');
+      assert.doesNotMatch(
+        expression,
+        /ECS_RELEASE_HOST_RUNNER_ENABLED|ecs-qwen-release-host/,
+      );
+      if (file === 'live-host-release.yml') {
+        assert.ok(Object.hasOwn(doc.on, 'pull_request'));
+        assert.deepEqual(
+          evalRunsOn(expression, {
+            eventName: 'pull_request',
+            ecsDisabled: false,
+            sameRepo: true,
+            assoc: 'OWNER',
+          }),
+          JSON.parse(HOSTED),
+        );
+        assert.deepEqual(
+          evalRunsOn(expression, {
+            eventName: 'pull_request',
+            ecsDisabled: false,
+            sameRepo: false,
+            assoc: 'NONE',
+          }),
+          JSON.parse(HOSTED),
+        );
+      } else {
+        assert.ok(
+          !Object.keys(doc.on).some((event) =>
+            event.startsWith('pull_request'),
+          ),
+        );
+      }
+    });
+  }
 });

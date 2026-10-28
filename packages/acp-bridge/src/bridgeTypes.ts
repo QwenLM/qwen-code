@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { BundledGeneratedUiStatus } from '@qwen-code/qwen-code-core/config/generated-ui.js';
 import type {
   ApprovalMode,
   McpAppToolResult,
@@ -63,6 +64,7 @@ import type {
   ServeSessionResourcesStatus,
   ServeSessionSavedWorkflowStatus,
   ServeSessionSupportedCommandsStatus,
+  ServeSessionTaskRuntimeStatus,
   ServeSessionTasksStatus,
   ServeSessionWorkflowTaskStatus,
   ServeWorkflowActionInput,
@@ -82,6 +84,7 @@ import type {
 
 export interface RewindSnapshotInfo {
   promptId: string;
+  daemonPromptId?: string;
   turnIndex: number;
   timestamp: string;
   diffStats: { filesChanged: number; insertions: number; deletions: number };
@@ -325,6 +328,26 @@ function requireManagedSessionStoreString(
 
 export type { ManagedToolV2Client } from '@qwen-code/qwen-code-core';
 
+export interface MessageGroupsSnapshot {
+  snapshot: string;
+  groups: Array<{
+    id: string;
+    promptId?: string;
+    promptIds?: string[];
+    recordIds: string[];
+  }>;
+}
+
+export interface DeleteMessageGroupsRequest {
+  snapshot: string;
+  groupIds: string[];
+}
+
+export interface DeleteMessageGroupsResponse {
+  deletedGroupIds: string[];
+  deletedPromptIds: string[];
+}
+
 export interface RewindRequest {
   promptId: string;
   rewindFiles?: boolean;
@@ -456,6 +479,7 @@ export function parseBackgroundNotificationTurn(
 }
 
 export interface BridgeSession {
+  generatedUi?: BundledGeneratedUiStatus;
   startupConfigApplied?: SessionStartupConfigApplied;
   sessionId: string;
   /**
@@ -1308,6 +1332,12 @@ export interface CloseSessionOpts {
   cause?: 'workspace_runtime_stop';
   /** Explicit client close cancels active work as user intent. */
   cancelReason?: 'user';
+  /**
+   * Attempt to close without interrupting known active work. A negotiated
+   * child confirms atomically; refusal, uncertainty, or unsafe local state
+   * leaves the session live.
+   */
+  closeIfUnheld?: boolean;
   /** Refuse the close unless the owning runtime confirms the session is idle. */
   requireIdle?: boolean;
   /** Override the default `'client_close'` reason in the `session_closed` event. */
@@ -2261,8 +2291,9 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   ): SessionReplaySnapshot | undefined;
 
   /**
-   * Explicitly close a live session. Force-closes even when other clients
-   * are attached. Throws `SessionNotFoundError` for unknown ids.
+   * Explicitly close a live session. Force-closes even when other clients are
+   * attached unless `closeIfUnheld` requests a conditional close. Throws
+   * `SessionNotFoundError` for unknown ids.
    */
   closeSession(
     sessionId: string,
@@ -2346,6 +2377,15 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     sessionId: string,
     artifact: SessionArtifactInput,
     context?: BridgeClientRequestContext,
+  ): Promise<SessionArtifactMutationResult>;
+
+  /**
+   * Only for management routes with strict mutation and workspace ownership
+   * checks; clients cannot grant themselves this authority.
+   */
+  removeSessionArtifactForWorkspaceOwner(
+    sessionId: string,
+    artifactId: string,
   ): Promise<SessionArtifactMutationResult>;
 
   /**
@@ -2538,6 +2578,16 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     opts?: { includeWorkflows?: boolean },
   ): Promise<ServeSessionTasksStatus>;
 
+  /**
+   * Read on-demand runtime detail for one shell task: the process-tree RSS,
+   * the captured-output size/mtime, and the output tail. Read-only; returns
+   * `runtime: null` for an unknown/evicted task or a non-shell task.
+   */
+  getSessionTaskRuntime(
+    sessionId: string,
+    taskId: string,
+  ): Promise<ServeSessionTaskRuntimeStatus>;
+
   /** Read persisted and live subagents for a live session. */
   getSessionAgentsStatus(sessionId: string): Promise<ServeSessionAgentsStatus>;
 
@@ -2686,12 +2736,12 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   getWorkspaceExtensionsStatus(): Promise<ServeWorkspaceExtensionsStatus>;
 
   /**
-   * Broadcast extension refresh to all active sessions and emit an
-   * `extensions_changed` workspace event when complete.
+   * Refresh selected active sessions, or all when sessionIds is omitted,
+   * and emit an `extensions_changed` workspace event when complete.
    */
   refreshExtensionsForAllSessions(
     data?: Omit<BridgeExtensionsChangedData, 'refreshed' | 'failed'>,
-    options?: { skillsOnly?: boolean },
+    options?: { skillsOnly?: boolean; sessionIds?: readonly string[] },
   ): Promise<{
     refreshed: number;
     failed: number;
@@ -2714,6 +2764,8 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   setSessionConfigOption(
     sessionId: string,
     req: SetSessionConfigOptionRequest,
+    context?: BridgeClientRequestContext,
+    assertCanCommit?: () => void,
   ): Promise<SetSessionConfigOptionResponse>;
 
   /**
@@ -2814,6 +2866,14 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   generateSessionContent?(
     sessionId: string,
     prompt: string,
+    signal: AbortSignal,
+    context?: BridgeClientRequestContext,
+  ): AsyncIterable<BridgeGenerationStreamEvent>;
+
+  /** Stream a tool-free side answer using the session's conversation context. */
+  generateSessionBtwStream?(
+    sessionId: string,
+    question: string,
     signal: AbortSignal,
     context?: BridgeClientRequestContext,
   ): AsyncIterable<BridgeGenerationStreamEvent>;
@@ -3007,11 +3067,17 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     context?: BridgeClientRequestContext,
   ): Promise<ShellCommandResult>;
 
+  /** List persisted message groups after previously admitted history mutations. */
+  getMessageGroups(sessionId: string): Promise<MessageGroupsSnapshot>;
+  deleteMessageGroups(
+    sessionId: string,
+    req: DeleteMessageGroupsRequest,
+    context?: BridgeClientRequestContext,
+  ): Promise<DeleteMessageGroupsResponse>;
+
   /**
    * List rewindable snapshots for a session with per-turn diff stats.
-   * Answered only after every rewind admitted before the call has run, so
-   * the listing never describes a turn the bridge has already agreed to
-   * drop.
+   * Answered after previously admitted history mutations.
    */
   getRewindSnapshots(
     sessionId: string,
@@ -3059,6 +3125,15 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     name: string,
     originatorClientId?: string,
   ): Promise<RuntimeMcpServerRemoveResult>;
+
+  /**
+   * Whether this workspace runtime holds any MCP server that was added at
+   * runtime and is still registered. A paired Bridge reads it while it
+   * evaluates whether the Managed engine can reproduce the runtime's
+   * configuration: a Managed child starts without those servers, so a session
+   * must not select Managed while one is registered.
+   */
+  hasRuntimeMcpServers(): boolean;
 
   /**
    * Add a runtime MCP server to one live session only. This does not mutate

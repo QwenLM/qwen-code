@@ -22,6 +22,8 @@ import path from 'node:path';
 import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
 import { HostedHarnessProcess, waitUntil } from './hosted-harness-process.js';
 import { relayUpstream } from './hosted-relay-headers.js';
+import { SseObserver, projectEvents } from './hosted-sse-observer.js';
+import { quotePosix } from './hosted-shell-quote.js';
 
 const configPath = process.argv[2];
 const config = JSON.parse(await readFile(configPath, 'utf8')) as {
@@ -38,138 +40,6 @@ const config = JSON.parse(await readFile(configPath, 'utf8')) as {
   }>;
   resultFile: string;
 };
-
-type Frame = { id: number; event: string; data: Record<string, unknown> };
-
-class Observer {
-  frames: Frame[] = [];
-  controller = new AbortController();
-  task?: Promise<void>;
-  failure?: unknown;
-
-  constructor(
-    private readonly surface: 'public' | 'web',
-    private readonly sessionId: string,
-  ) {}
-
-  async start(after?: number) {
-    const response = await fetch(
-      new URL(
-        this.surface === 'public'
-          ? `/v1/agents/sessions/${this.sessionId}/events?stream=true&after=0`
-          : '/api/agent/web-shell/v1/events/stream',
-        config.storeUrl,
-      ),
-      {
-        method: this.surface === 'public' ? 'GET' : 'POST',
-        headers: {
-          'X-Qwen-Tenant-Id': config.tenantId,
-          Accept: 'text/event-stream',
-          ...(this.surface === 'web'
-            ? { 'Content-Type': 'application/json' }
-            : {}),
-          ...(this.surface === 'public' && after !== undefined
-            ? { 'Last-Event-ID': String(after) }
-            : {}),
-        },
-        ...(this.surface === 'web'
-          ? {
-              body: JSON.stringify({
-                sessionId: this.sessionId,
-                afterSequence: after ?? 0,
-              }),
-            }
-          : {}),
-        signal: AbortSignal.any([
-          this.controller.signal,
-          AbortSignal.timeout(300_000),
-        ]),
-      },
-    );
-    assert.equal(response.status, 200);
-    assert.match(
-      response.headers.get('content-type') ?? '',
-      /text\/event-stream/,
-    );
-    const reader = response
-      .body!.pipeThrough(new TextDecoderStream())
-      .getReader();
-    this.task = (async () => {
-      let pending = '';
-      try {
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          pending += value;
-          let end: number;
-          while ((end = pending.indexOf('\n\n')) >= 0) {
-            const block = pending.slice(0, end);
-            pending = pending.slice(end + 2);
-            const lines = block.split('\n');
-            const data = lines
-              .filter((line) => line.startsWith('data:'))
-              .map((line) => line.slice(5).trimStart())
-              .join('\n');
-            if (!data) continue;
-            const frame = {
-              id: Number(
-                lines
-                  .find((line) => line.startsWith('id:'))
-                  ?.slice(3)
-                  .trim(),
-              ),
-              event:
-                lines
-                  .find((line) => line.startsWith('event:'))
-                  ?.slice(6)
-                  .trim() ?? '',
-              data: JSON.parse(data) as Record<string, unknown>,
-            };
-            assert.match(String(frame.id), /^\d+$/);
-            assert.equal(
-              frame.id,
-              frame.data['sequence'],
-              'SSE id must equal payload sequence',
-            );
-            assert.equal(frame.event, frame.data['type']);
-            this.frames.push(frame);
-          }
-        }
-      } catch (cause) {
-        if (!this.controller.signal.aborted) this.failure = cause;
-      } finally {
-        reader.releaseLock();
-      }
-    })();
-  }
-
-  /** The turn a frame belongs to, read in the surface's own key style. */
-  turnIdOf(frame: Frame): string | undefined {
-    const value = frame.data[this.surface === 'web' ? 'turnId' : 'turn_id'];
-    return typeof value === 'string' ? value : undefined;
-  }
-
-  /** Wait until a terminal frame of a turn other than {@code exclude} arrived. */
-  async terminalOfOtherTurn(exclude: string) {
-    await waitUntil(() => {
-      if (this.failure) throw this.failure;
-      return this.frames.some((frame) => {
-        const turnId = this.turnIdOf(frame);
-        return (
-          frame.data['terminal'] === true &&
-          turnId !== undefined &&
-          turnId !== exclude
-        );
-      });
-    }, 120_000);
-  }
-
-  async close() {
-    this.controller.abort();
-    await this.task;
-    if (this.failure) throw this.failure;
-  }
-}
 
 async function probe<T>(
   sessionId: string,
@@ -195,26 +65,38 @@ async function probe<T>(
 }
 
 // One Session per case on the background-capable v3 lane: the captureBytes
-// budget is what admits is_background and monitor at all.
+// budget is what admits is_background and monitor at all. FG8c's reload
+// sends the same body to /load under the new Harness's writer identity.
+function sessionBody(
+  cli: HostedHarnessProcess,
+  storeBaseUrl: string,
+  leaseDurationMs: number,
+) {
+  return {
+    sessionScope: 'thread',
+    toolProfile: 'hosted-workspace-shell/1',
+    captureBytes: 64 * 1024 * 1024,
+    managedSessionStore: {
+      baseUrl: storeBaseUrl,
+      tenantId: config.tenantId,
+      workspaceId: current.workspaceId,
+      writerId: cli.bootId,
+      leaseDurationMs,
+    },
+  };
+}
+
 async function createSession(
   cli: HostedHarnessProcess,
   storeBaseUrl: string,
+  leaseDurationMs = 60_000,
 ): Promise<{ clientId: string; created: Record<string, unknown> }> {
   const created = await cli.request('/session', {
     method: 'POST',
     headers: { ...cli.headers(), 'Content-Type': 'application/json' },
     body: JSON.stringify({
       sessionId: current.sessionId,
-      sessionScope: 'thread',
-      toolProfile: 'hosted-workspace-shell/1',
-      captureBytes: 64 * 1024 * 1024,
-      managedSessionStore: {
-        baseUrl: storeBaseUrl,
-        tenantId: config.tenantId,
-        workspaceId: current.workspaceId,
-        writerId: cli.bootId,
-        leaseDurationMs: 60_000,
-      },
+      ...sessionBody(cli, storeBaseUrl, leaseDurationMs),
     }),
   });
   const createdBody = await created.text();
@@ -310,8 +192,6 @@ type ProbeState = {
   }>;
 };
 
-const quote = (value: string) => "'" + value.replaceAll("'", "'\"'\"'") + "'";
-
 // The background producer: announce, hold on a FIFO the driver owns, then
 // finish. The gate makes "mid-run" a deterministic state, never a sleep.
 function backgroundProducer(): string {
@@ -404,12 +284,28 @@ function pacedProducer(): string {
   ].join('\n');
 }
 
+// FG8c's monitor producer: announce its pid, emit one observation, then
+// hold on a FIFO the driver never opens — the watch is live and silent, so
+// only its idle window can end it.
+function crashMonitorProducer(): string {
+  return [
+    "const fs = require('fs');",
+    "fs.writeFileSync('bg-started.txt', String(process.pid));",
+    "process.stdout.write('FG8_MON_0\\n');",
+    "fs.readFileSync('monitor-gate');",
+  ].join('\n');
+}
+
 function producerFor(name: string): { monitor: boolean; script: string } {
+  if (name === 'monitor-worker-kill') {
+    return { monitor: true, script: crashMonitorProducer() };
+  }
   if (name.includes('monitor') || name.startsWith('observation')) {
     return { monitor: true, script: monitorProducer() };
   }
   switch (name) {
     case 'publisher-kill-mid-capture':
+    case 'harness-kill-capture':
       return { monitor: false, script: pacedProducer() };
     case 'in-flight-cap':
     case 'receipt-drop-after-watermark':
@@ -491,6 +387,27 @@ let heldStartArrived = false;
 let pausedBrokerControls = false;
 const heldStartReplies: Array<(destroy: boolean) => void> = [];
 const heldControlReplies: Array<() => void> = [];
+// What the paused arm actually parked, by method and path: the hold
+// witness names the request it holds instead of trusting a count.
+const heldControlLog: string[] = [];
+// FG8c: every broker answer (op, status, declared code; a release's
+// Runtime Session and arm), and the after-commit :start hold.
+const brokerAnswers: Array<{
+  op: string;
+  status: number;
+  code: string;
+  kind?: string;
+  runtimeSessionId?: string;
+  drain?: boolean;
+}> = [];
+let holdCommittedStart = false;
+let committedStartHeld = false;
+const heldCommittedStarts: Array<() => void> = [];
+
+function releaseCommittedStarts() {
+  holdCommittedStart = false;
+  for (const resolve of heldCommittedStarts.splice(0)) resolve();
+}
 
 function releaseHeldStart(destroy: boolean) {
   holdNextStart = false;
@@ -509,7 +426,15 @@ function releaseBrokerControls() {
 const brokerProxy = createServer(async (req, res) => {
   try {
     const chunks: Buffer[] = [];
-    for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    try {
+      for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    } catch (cause) {
+      // A request body fails only with its connection — a client killed
+      // mid-request, as FG8c kills the Harness: the request was never
+      // forwarded, and the proxy itself has not failed.
+      console.log(`FG8_PROXY client went away mid-request: ${cause}`);
+      return;
+    }
     const body = Buffer.concat(chunks);
     const url = new URL(req.url!, config.brokerUrl);
     const operation =
@@ -557,6 +482,7 @@ const brokerProxy = createServer(async (req, res) => {
     }
     if (pausedBrokerControls && (req.method === 'GET' || isControl)) {
       console.log(`FG8_PROXY holding ${req.method} ${operation}`);
+      heldControlLog.push(`${req.method} ${url.pathname}`);
       await new Promise<void>((resolve) => heldControlReplies.push(resolve));
     }
     operations.push(operation);
@@ -585,6 +511,50 @@ const brokerProxy = createServer(async (req, res) => {
     }
     const bytes = Buffer.from(await upstream.arrayBuffer());
     console.log(`FG8_PROXY ${req.method} ${operation} -> ${upstream.status}`);
+    // FG8c reads every broker answer by its declared code — a crash case's
+    // refusals are its evidence — and every release by the Runtime Session
+    // it names and the arm it asked for.
+    let answerCode = '';
+    if (upstream.status >= 400) {
+      try {
+        answerCode = String(
+          (JSON.parse(bytes.toString('utf8')) as Record<string, unknown>)[
+            'code'
+          ] ?? '',
+        );
+      } catch {
+        // an unparsable refusal keeps the empty code
+      }
+    }
+    const released = /\/tool-sessions\/([^/]+):release$/.exec(url.pathname);
+    brokerAnswers.push({
+      op: operation,
+      status: upstream.status,
+      code: answerCode,
+      ...(controlKind ? { kind: controlKind } : {}),
+      ...(released
+        ? {
+            runtimeSessionId: decodeURIComponent(released[1]),
+            drain: parsed?.['drain'] === true,
+          }
+        : {}),
+    });
+    if (
+      holdCommittedStart &&
+      operation === 'start' &&
+      upstream.status === 200
+    ) {
+      // FG8c harness-kill-dispatch: the broker committed the admission and
+      // started the process; the reply never reaches the Harness, which the
+      // case kills while this socket is parked.
+      holdCommittedStart = false;
+      committedStartHeld = true;
+      console.log('FG8_PROXY holding the committed :start reply');
+      await new Promise<void>((resolve) => heldCommittedStarts.push(resolve));
+      console.log('FG8_DROPPED broker committed :start reply');
+      req.socket.destroy();
+      return;
+    }
     const matchDrop =
       (dropNextStart && operation === 'start') ||
       (dropNextMonitorStop && isMonitorStop);
@@ -623,20 +593,63 @@ let holdSegments = false;
 let heldSegments = 0;
 let segmentReleaseBudget = 0;
 const heldReplies: Array<() => void> = [];
-let dropNextCommit = false;
 let droppedCommits = 0;
 let droppedOps = 0;
 const commitLog: Array<{
   op: string;
+  commandId?: string;
   kind?: string;
+  // The shell child_run record a commitChildRunRecord carries, when its
+  // stop fields are what tells one revision from another.
+  stopRequested?: boolean;
+  stopReason?: string | null;
   status: number | 'dropped';
 }> = [];
 // FG8a's discriminated arms: a dropped PAGE publish reply (capture commit)
 // and a dropped journal commit filtered by operation name (observation
-// advance / cancel reply). Filters live in a Set — drop each op once.
+// advance). Filters live in a Set — drop each op once. FG8d's
+// cancel-reply-lost arm is keyed by content instead: commitChildRunRecord
+// names every shell revision (admit, dispatch, attach, each output advance,
+// the settle), so only the revision that sets stopRequested may fall.
 let dropNextPagePublish = false;
 let droppedPagePublishes = 0;
 const dropCommitOps = new Set<string>();
+let dropNextStopRevision = false;
+
+// The shell child_run record a journal commit carries. The journal event
+// names it only by recordRef; the record body rides the same commit as a
+// staged `managed-child_run` resource in the `resources` array — undefined
+// when the commit carries none.
+function shellRunOf(
+  parsed: Record<string, unknown> | undefined,
+): { stopRequested: boolean; stopReason: string | null } | undefined {
+  const resources = parsed?.['resources'];
+  if (!Array.isArray(resources)) return undefined;
+  for (const resource of resources) {
+    if (typeof resource !== 'object' || resource === null) continue;
+    const fields = resource as Record<string, unknown>;
+    if (
+      fields['kind'] !== 'managed-child_run' ||
+      typeof fields['bytesBase64'] !== 'string'
+    )
+      continue;
+    let run: Record<string, unknown>;
+    try {
+      run = JSON.parse(
+        Buffer.from(fields['bytesBase64'], 'base64').toString('utf8'),
+      ) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    if (run['kind'] !== 'shell' || typeof run['stopRequested'] !== 'boolean')
+      continue;
+    return {
+      stopRequested: run['stopRequested'],
+      stopReason: (run['stopReason'] as string | null | undefined) ?? null,
+    };
+  }
+  return undefined;
+}
 const storeProxy = createServer(async (req, res) => {
   try {
     const chunks: Buffer[] = [];
@@ -699,20 +712,36 @@ const storeProxy = createServer(async (req, res) => {
           (resource as Record<string, unknown>)['kind'] ===
             'managed-tool-result-page',
       );
-    // dropNextCommit drops the next journal commit of any op (FG8f). The
-    // op-filtered Set arms FG8a (a monitor observation's advance) and FG8d
-    // (a cancel's commit), each keyed to fire on the named operation only.
-    // FG8a's capture-commit arm drops the first journal commit carrying a
-    // page envelope — the capture-page commit whose reply is the loss.
+    const shellRun =
+      commitOp === 'commitChildRunRecord' ? shellRunOf(parsed) : undefined;
+    // The revision requestStop commits: the first to carry the stop mark,
+    // before the settle names its stop reason.
+    const isStopRevision =
+      shellRun?.stopRequested === true && shellRun.stopReason === null;
+    const entry = {
+      op: commitOp,
+      ...(typeof parsed?.['commandId'] === 'string'
+        ? { commandId: parsed['commandId'] }
+        : {}),
+      ...(carriesPageEnvelope ? { kind: 'managed-tool-result-page' } : {}),
+      ...(shellRun ?? {}),
+    };
+    // The op-filtered Set arms FG8f's settle manifest-commit and FG8a's
+    // monitor observation advance, each keyed to fire on the named
+    // operation only. FG8a's capture-commit arm drops the first journal
+    // commit carrying a page envelope — the capture-page commit whose reply
+    // is the loss — and FG8d's stop arm the first commit of the stop
+    // revision. Only a commit the store accepted may lose its reply: a
+    // refused one never landed, so it relays and the arm stays armed.
+    const pageEnvelopeFell = dropNextPagePublish && carriesPageEnvelope;
+    const stopRevisionFell = dropNextStopRevision && isStopRevision;
     if (
       isCommit &&
-      (dropNextCommit ||
-        dropCommitOps.has(commitOp) ||
-        (dropNextPagePublish && carriesPageEnvelope))
+      upstream.ok &&
+      (dropCommitOps.has(commitOp) || pageEnvelopeFell || stopRevisionFell)
     ) {
-      const pageEnvelopeFell = dropNextPagePublish && carriesPageEnvelope;
-      dropNextCommit = false;
       dropCommitOps.delete(commitOp);
+      if (stopRevisionFell) dropNextStopRevision = false;
       if (pageEnvelopeFell) {
         dropNextPagePublish = false;
         droppedPagePublishes++;
@@ -722,26 +751,23 @@ const storeProxy = createServer(async (req, res) => {
       }
       // The commit landed; the reply never does. A socket destroy is the
       // loss — no HTTP status the harness could mistake for a refusal.
-      commitLog.push({
-        op: commitOp,
-        ...(pageEnvelopeFell ? { kind: 'managed-tool-result-page' } : {}),
-        status: 'dropped',
-      });
+      commitLog.push({ ...entry, status: 'dropped' });
       console.log(
         pageEnvelopeFell
           ? `FG8_DROPPED page-envelope commit ${commitOp}`
-          : `FG8_DROPPED commit ${commitOp}`,
+          : `FG8_DROPPED commit ${commitOp} ${entry.commandId ?? ''}`,
       );
       req.socket.destroy();
       return;
     }
     if (isCommit) {
-      commitLog.push({
-        op: commitOp,
-        status: upstream.status,
-      });
+      commitLog.push({ ...entry, status: upstream.status });
       console.log(
-        `FG8_STORE_PROXY commit op=${commitOp} -> ${upstream.status}`,
+        `FG8_STORE_PROXY commit op=${commitOp} ${entry.commandId ?? ''}` +
+          (shellRun
+            ? ` stopRequested=${shellRun.stopRequested} stopReason=${shellRun.stopReason}`
+            : '') +
+          ` -> ${upstream.status}`,
       );
     }
     relayUpstream(res, upstream, bytes);
@@ -772,9 +798,29 @@ function checkStoreProxy() {
 
 let current = config.cases[0];
 let modelCalls = 0;
+// FG8c generation-remint: the post-crash prompt's first model call asks for
+// a foreground Shell, so the turn awaits the Runtime warm every turn issues
+// and its refusal lands among that prompt's broker answers (the Shell
+// itself never runs).
+let foregroundNext = false;
 const model = await startFakeOpenAIServer(() => {
   modelCalls++;
   const producer = producerFor(current.name);
+  if (foregroundNext) {
+    foregroundNext = false;
+    return {
+      toolCalls: [
+        fakeToolCall(
+          'run_shell_command',
+          {
+            command: 'echo FG8_FOREGROUND',
+            description: `fg8 ${current.name} foreground`,
+          },
+          'foreground-shell',
+        ),
+      ],
+    };
+  }
   if (modelCalls === 1) {
     return {
       toolCalls: [
@@ -782,13 +828,19 @@ const model = await startFakeOpenAIServer(() => {
           ? fakeToolCall(
               'monitor',
               {
-                command: `${quote(process.execPath)} -e ${quote(producer.script)}`,
+                command: `${quotePosix(process.execPath)} -e ${quotePosix(producer.script)}`,
                 max_events: 2,
                 // The fixture's 60 s events poll/heartbeat can hold a
                 // WebShell resume for a full poll cycle; the watch's idle
                 // window must outlive that, or it idle-kills the gated
                 // producer mid-gap and the gate never reopens.
-                idle_timeout_ms: 180_000,
+                // FG8c's monitor-worker-kill wants the idle stop inside
+                // the case, after the worker is gone: the window runs from
+                // the watch's last flush (its one observation), and a loaded
+                // lane was seen to take ~25 s from there to the kill, so
+                // 60 s keeps the order.
+                idle_timeout_ms:
+                  current.name === 'monitor-worker-kill' ? 60_000 : 180_000,
                 description: `fg8 ${current.name}`,
               },
               'monitor-watch',
@@ -796,7 +848,7 @@ const model = await startFakeOpenAIServer(() => {
           : fakeToolCall(
               'run_shell_command',
               {
-                command: `${quote(process.execPath)} -e ${quote(producer.script)}`,
+                command: `${quotePosix(process.execPath)} -e ${quotePosix(producer.script)}`,
                 is_background: true,
                 timeout: 120_000,
                 description: `fg8 ${current.name}`,
@@ -813,47 +865,17 @@ function checkProxy() {
   if (proxyFailure) throw proxyFailure;
 }
 
-// The events one case's Session committed, projected exactly the way the
-// public/WebShell surfaces shape them (FG6e's field mapping).
-function projection(rows: Array<Record<string, unknown>>, surface: string) {
-  return rows.map((row) => {
-    const fields: Record<string, unknown> = {
-      schema_version: row['schema_version'],
-      projection_version: row['projection_version'],
-      sequence: row['sequence_id'],
-      event_id: row['event_id'],
-      session_id: row['session_id'],
-      turn_id: row['turn_id'],
-      item_id: row['item_id'],
-      content_part_id: row['content_part_id'],
-      type: row['event_type'],
-      created_at:
-        surface === 'public'
-          ? Math.floor(Number(row['gmt_create']) / 1000)
-          : row['gmt_create'],
-      data: JSON.parse(String(row['data_json'])),
-      terminal: Boolean(row['terminal']),
-    };
-    return Object.fromEntries(
-      Object.entries(fields)
-        .filter(([, value]) => value !== null)
-        .map(([key, value]) => [
-          surface === 'web'
-            ? key.replace(/_([a-z])/g, (_, letter: string) =>
-                letter.toUpperCase(),
-              )
-            : key,
-          value,
-        ]),
-    );
-  });
-}
-
 async function runStreamCase(surface: 'public' | 'web') {
   const monitor = current.name.includes('monitor');
-  const observer = new Observer(surface, current.sessionId);
+  const observer = new SseObserver({
+    surface,
+    sessionId: current.sessionId,
+    storeUrl: config.storeUrl,
+    tenantId: config.tenantId,
+    timeoutMs: 300_000,
+  });
   // Hoisted so the DIAG catch can dump both halves of the stream.
-  let resumed: Observer | undefined;
+  let resumed: SseObserver | undefined;
   const cli = new HostedHarnessProcess();
   step('harness boot');
   await cli.start(model.baseUrl, {
@@ -949,7 +971,13 @@ async function runStreamCase(surface: 'public' | 'web') {
       return ledger.length > cursor;
     }, 120_000);
     step(`backlog committed beyond ${cursor}`);
-    resumed = new Observer(surface, current.sessionId);
+    resumed = new SseObserver({
+      surface,
+      sessionId: current.sessionId,
+      storeUrl: config.storeUrl,
+      tenantId: config.tenantId,
+      timeoutMs: 300_000,
+    });
     await resumed.start(cursor);
     step('stream resumed');
     await resumed.terminalOfOtherTurn(promptId);
@@ -989,7 +1017,7 @@ async function runStreamCase(surface: 'public' | 'web') {
     );
     assert.deepEqual(
       frames.map((frame) => frame.data),
-      projection(ledger, surface),
+      projectEvents(ledger, surface),
       `${surface} frames are the exact SQL projection`,
     );
     return {
@@ -1132,9 +1160,12 @@ async function receiptDrop(cli: HostedHarnessProcess, clientId: string) {
     checkStoreProxy();
     return progressLines() >= 24;
   }, 60_000);
-  // The producer parks on its gate, so the session is quiet: the next
-  // journal commit after the arm is the settle cascade's manifest-commit.
-  dropNextCommit = true;
+  // The producer parks on its gate, so the shell record is quiet: its next
+  // commit after the arm is the settle cascade's manifest-commit. The arm
+  // is keyed to that operation, not to "the next commit": the Session's
+  // activation renewal commits on its own clock and took a bare next-commit
+  // drop on the 0.75 Linux rig (droppedOp renewActivation).
+  dropCommitOps.add('commitChildRunRecord');
   await releaseFifo(current.directory, 'run-gate');
   await waitUntil(async () => {
     checkProxy();
@@ -1269,10 +1300,30 @@ async function runReplyLossCase() {
       // the client socket, so on a cgroup host the physical process is
       // already running and its producer is parked on the run-gate —
       // the run can never settle until the gate opens. A cgroup-less
-      // runtime (this box) never starts, so there is nothing to open.
+      // runtime never starts, so there is nothing to open. One look at
+      // the marker decides neither: the Broker answers :start once
+      // beginDispatch committed, and the worker may write the marker
+      // after that — wait until the run either started or settled as
+      // never started.
+      await waitUntil(async () => {
+        checkProxy();
+        if (bgStartedFile()) return true;
+        const state = await probe<ProbeState>(current.sessionId, 'state');
+        const runState = childRunOf(state)?.run?.state;
+        return (
+          runState === 'failed' ||
+          state.executions.some(
+            (row) =>
+              row.execution_call_id.endsWith(':process') &&
+              row.execution_state === 'SETTLED',
+          )
+        );
+      }, 60_000);
       if (bgStartedFile()) {
         await releaseFifo(current.directory, 'run-gate');
         step('run-gate released for the started producer');
+      } else {
+        step('the dispatch settled as never started');
       }
     } else if (name === 'monitor-stop-reply') {
       dropNextMonitorStop = true;
@@ -1378,9 +1429,7 @@ async function runStoreFailureCase() {
       await new Promise((resolve) => setTimeout(resolve, 10_000));
     } else {
       // manifest/page-envelope-commit: the trigger keeps refusing the
-      // target commit kind for the rest of the case. What the refusal
-      // does to the run differs by kind — the two branches below own
-      // each issue cell.
+      // target commit kind for the rest of the case.
       await waitUntil(async () => {
         checkProxy();
         checkStoreProxy();
@@ -1399,73 +1448,45 @@ async function runStoreFailureCase() {
       }, 180_000);
       await releaseFifo(current.directory, 'run-gate');
       step('gate released');
-      if (name === 'manifest-commit') {
-        // The refused manifest commit is the settle transaction's own
-        // head: the fused settle commit rolls back whole, so the run
-        // never settles — the issue's "blocks the run" cell made
-        // literal. The witness is the refused settle commit itself; the
-        // stable window after it is what makes "never settles"
-        // observable without hanging the fork (run 38868090681: three
-        // commitChildRunRecord 500s, then silence, then a drain release
-        // that changed nothing).
-        await waitUntil(() => {
-          checkStoreProxy();
-          return commitLog.some(
-            (entry) =>
-              entry.op === 'commitChildRunRecord' && entry.status === 500,
-          );
-        }, 180_000);
-        step('the settle commit was refused');
-        await new Promise((resolve) => setTimeout(resolve, 10_000));
-        step('still blocked after the stable window');
-        const state = await probe<ProbeState>(current.sessionId, 'state');
-        return {
-          case: name,
-          recovered: false,
-          bgStarted: bgStartedFile(),
-          brokerStartAttempts,
-          brokerStartFailures,
-          operations: [...operations],
-          committedSegments: fullSegments(state).length,
-          record: childRunOf(state),
-        };
-      }
-      // page-envelope-commit: the refusal poisons the capture, never the
-      // run — the producer exits 0 and the record settles exited with
-      // the envelope degraded (capture unavailable), so the settle below
-      // is the natural one, not a drain.
-      let settled = true;
-      try {
-        await waitUntil(async () => {
-          checkProxy();
-          checkStoreProxy();
-          const record = childRunOf(
-            await probe<ProbeState>(current.sessionId, 'state'),
-          );
-          return record?.run?.state === 'settled' && record.stopReason != null;
-        }, 120_000);
-        step('settled after the rejected commit');
-      } catch {
-        settled = false;
-        step('no settle after the rejected commit — draining to end');
-        await brokerRelease(true);
-        await waitUntil(async () => {
-          checkProxy();
-          const record = childRunOf(
-            await probe<ProbeState>(current.sessionId, 'state'),
-          );
-          return record?.run?.state === 'settled';
-        }, 180_000);
-        step('drained after the blocked settle');
-      }
+      // Both arms block the settle. A 24-block capture fills no page
+      // before finish (a page holds 512 segments): its only page envelope
+      // is staged when the stream seals and rides the next output-advance
+      // commitChildRunRecord, and the finalize's success manifest rides
+      // the advance after it — the settle needs both first. Refusing the
+      // page refuses the first advance and, since every later manifest
+      // still names the staged page, every retry; refusing the manifest
+      // refuses the second. Either way the run never settles — the
+      // issue's "blocks the run" cell made literal. The witness is the
+      // refused advance itself (for the page arm, one that carried the
+      // page envelope); the stable window after it is what makes "never
+      // settles" observable without hanging the fork (run 38868090681:
+      // three commitChildRunRecord 500s, then silence, then a drain
+      // release that changed nothing).
+      await waitUntil(() => {
+        checkStoreProxy();
+        return commitLog.some(
+          (entry) =>
+            entry.op === 'commitChildRunRecord' &&
+            entry.status === 500 &&
+            (name === 'manifest-commit' ||
+              entry.kind === 'managed-tool-result-page'),
+        );
+      }, 180_000);
+      step('the settle commit was refused');
+      await new Promise((resolve) => setTimeout(resolve, 10_000));
+      step('still blocked after the stable window');
       const state = await probe<ProbeState>(current.sessionId, 'state');
       return {
         case: name,
-        recovered: settled,
+        recovered: false,
         bgStarted: bgStartedFile(),
         brokerStartAttempts,
         brokerStartFailures,
         operations: [...operations],
+        refusedSettleCommits: commitLog.filter(
+          (entry) =>
+            entry.op === 'commitChildRunRecord' && entry.status === 500,
+        ).length,
         committedSegments: fullSegments(state).length,
         record: childRunOf(state),
       };
@@ -1494,13 +1515,32 @@ async function runStoreFailureCase() {
   }
 }
 
+// FG8d's six cases share one tenant, and the fixture admits four active
+// captures (`active-captures=4`). A capture a case leaves OPEN keeps the
+// expiry its last grant renewal set (the writer lease or the activation,
+// whichever ends first), and grant renewals stop once the tool call that
+// launched the run returns, so under the default 60 s lease the capture
+// holds its slot for up to a minute after its case moves on. On a fast
+// host drain-release found all four slots held and its reservation was
+// refused (the store's "Publication capacity exhausted", which the Harness
+// logged as "The request is invalid."), so the run never started. Under a
+// 10 s lease a capture stops counting within ten seconds of its last
+// renewal. FG8d's one store arm matches a single stop-revision commit, so
+// the extra writer and activation renewals a shorter lease brings never
+// trip it.
+const CANCEL_DRAIN_LEASE_MS = 10_000;
+
 async function runCancelDrainCase() {
   const cli = await bootHarness();
   try {
     const name = current.name;
     if (name === 'cancel-before-start') holdNextStart = true;
     execFileSync('mkfifo', [path.join(current.directory, 'run-gate')]);
-    const { clientId } = await createSession(cli, storeProxyUrl);
+    const { clientId } = await createSession(
+      cli,
+      storeProxyUrl,
+      CANCEL_DRAIN_LEASE_MS,
+    );
     const promptId = await submitPrompt(cli, clientId, `fg8d ${name} launch`);
     step('prompt admitted');
     if (name === 'cancel-before-start') {
@@ -1558,6 +1598,7 @@ async function runCancelDrainCase() {
         // answers is the broker's drain release. The drain arm IS this
         // case's cancel: stopRequested commits with the stop evidence,
         // and the record settles cancelled, never exited.
+        await awaitTurnHandback();
         const canceled = await brokerRelease(true);
         step(`drain cancel mid-capture -> ${canceled.status}`);
         assert.equal(canceled.status, 200, JSON.stringify(canceled.body));
@@ -1575,28 +1616,63 @@ async function runCancelDrainCase() {
           return fullSegments(state).length >= 1;
         }, 120_000);
         step('mid-capture');
+        const processRow = (
+          await probe<ProbeState>(current.sessionId, 'state')
+        ).executions.find((row) => row.execution_call_id.endsWith(':process'));
+        assert(processRow, 'the mid-capture run has its :process row');
+        const processCallId = processRow.execution_call_id;
+        await awaitTurnHandback();
         pausedBrokerControls = true;
         step('maintenance route held');
-        // Positive hold witness: at least one maintenance/status request
-        // must actually be parked in the proxy, otherwise the held arm
-        // was never armed and the outage is fiction. A quiet Harness
-        // issues no status calls of its own on this lane — the witness
-        // the driver must produce itself, as one genuine tool-session
-        // status read through the same proxy: it parks only if the arm
-        // truly swallows the call.
-        const captiveStatus = fetch(
-          new URL(
-            '/internal/runtime-broker/v1/tool-sessions/' +
-              `${encodeURIComponent(brokerIdentity.runtimeSessionId!)}:status`,
-            proxyUrl,
-          ),
-          {
-            headers: { Authorization: 'Bearer hosted-tools-broker-token' },
-            signal: AbortSignal.timeout(120_000),
+        // Positive hold witness: a status read must actually be parked in
+        // the proxy, otherwise the held arm was never armed and the outage
+        // is fiction. A quiet Harness issues no status reads of its own on
+        // this lane, so the driver issues the one it would: the Harness's
+        // backgroundProcessStatus read (GET /executions/<call>:process,
+        // the Broker's real route) through the same proxy. It parks only
+        // if the arm truly swallows the call, and after the restore it
+        // must come back answered, not refused.
+        const statusUrl = new URL(
+          `/internal/runtime-broker/v1/executions/${encodeURIComponent(processCallId)}`,
+          proxyUrl,
+        );
+        for (const [key, value] of Object.entries({
+          protocolVersion: '1',
+          requestId: randomUUID(),
+          harnessSessionId:
+            brokerIdentity.harnessSessionId ?? current.sessionId,
+          runtimeSessionId: brokerIdentity.runtimeSessionId!,
+        }))
+          statusUrl.searchParams.set(key, value);
+        const captiveStatus: Promise<{
+          status: number;
+          body: Record<string, unknown>;
+        }> = fetch(statusUrl, {
+          headers: { Authorization: 'Bearer hosted-tools-broker-token' },
+          signal: AbortSignal.timeout(120_000),
+        }).then(
+          async (response) => {
+            // Settles, never rejects: the read is awaited only after the
+            // restore, and an early failure must not surface as an
+            // unhandled rejection before then.
+            const text = await response.text().catch(() => '');
+            let body: Record<string, unknown> = { text };
+            try {
+              body = JSON.parse(text) as Record<string, unknown>;
+            } catch {
+              // a non-JSON answer keeps its text for the assertion message
+            }
+            return { status: response.status, body };
           },
-        ).catch(() => undefined);
-        await waitUntil(() => heldControlReplies.length >= 1, 60_000);
-        step('a status request is really held');
+          (cause: unknown) => ({ status: 0, body: { error: String(cause) } }),
+        );
+        await waitUntil(
+          () =>
+            heldControlLog.includes(`GET ${statusUrl.pathname}`) &&
+            heldControlReplies.length >= 1,
+          60_000,
+        );
+        step('the status read is really held');
         const unFabricated = childRunOf(
           await probe<ProbeState>(current.sessionId, 'state'),
         );
@@ -1608,8 +1684,10 @@ async function runCancelDrainCase() {
         assert.equal(outletDrain.status, 200, JSON.stringify(outletDrain.body));
         releaseBrokerControls();
         step('maintenance route restored');
-        await captiveStatus;
-        step('the captive status returned after the restore');
+        const restored = await captiveStatus;
+        assert.equal(restored.status, 200, JSON.stringify(restored.body));
+        assert.equal(restored.body['executionCallId'], processCallId);
+        step('the held status read was answered after the restore');
       } else if (name === 'cancel-reply-lost') {
         await waitUntil(async () => {
           checkStoreProxy();
@@ -1617,14 +1695,25 @@ async function runCancelDrainCase() {
           return fullSegments(state).length >= 1;
         }, 120_000);
         step('mid-capture');
-        dropCommitOps.add('commitChildRunRecord');
+        await awaitTurnHandback();
+        dropNextStopRevision = true;
         // Same drain surface: the stopRequested write's commit reply is
-        // what gets dropped after it committed; the committed record
-        // must never mint a second stop revision.
+        // what gets dropped after it committed — the arm matches that
+        // revision by content, not by the operation name every shell
+        // revision shares; the committed record must never mint a second
+        // stop revision.
         const canceled = await brokerRelease(true);
         step(`drain cancel with armed reply drop -> ${canceled.status}`);
         assert.equal(canceled.status, 200, JSON.stringify(canceled.body));
-        await waitUntil(() => droppedOps >= 1, 60_000);
+        await waitUntil(() => {
+          checkStoreProxy();
+          return commitLog.some(
+            (entry) =>
+              entry.status === 'dropped' &&
+              entry.stopRequested === true &&
+              entry.stopReason === null,
+          );
+        }, 60_000);
         step('stopRequested commit reply dropped once');
         await waitUntil(async () => {
           const record = childRunOf(
@@ -1633,22 +1722,16 @@ async function runCancelDrainCase() {
           return record?.stopRequested === true;
         }, 60_000);
         step('stopRequested committed despite the lost reply');
-        const commits = commitLog.filter(
-          (entry) => entry.op === 'commitChildRunRecord',
-        );
-        assert.equal(
-          commits.filter((entry) => entry.status !== 'dropped').length,
-          1,
-          `exactly one committed stop revision, saw ${JSON.stringify(commits)}`,
-        );
-        step('the re-drive minted no duplicate revision');
       } else if (name === 'routine-release-refusal') {
+        await awaitTurnHandback();
         const progressBefore = progressLines();
         const refusal = await brokerRequest(
           `/tool-sessions/${encodeURIComponent(brokerIdentity.runtimeSessionId!)}:release`,
           {},
         );
-        step(`routine release -> ${refusal.status} ${refusal.code}`);
+        step(
+          `routine release -> ${refusal.status} ${refusal.code} at progress ${progressBefore}`,
+        );
         assert.equal(refusal.status, 409, JSON.stringify(refusal.body));
         assert.equal(refusal.code, 'runtime_session_held');
         assert.ok(
@@ -1657,15 +1740,16 @@ async function runCancelDrainCase() {
           ),
           `the routine arm must stop nothing, saw ${brokerControlKinds.join(',')}`,
         );
+        // The producer may already be parked on its gate by now; what the
+        // refusal must not do is cut it short: it still reaches its full
+        // 24 blocks, and once the gate opens it exits on its own — the IT
+        // pins that natural exit (settled / exited / 0).
         await waitUntil(() => progressLines() >= 24, 120_000);
-        assert.ok(
-          progressLines() > progressBefore,
-          'the producer kept progressing past the refusal',
-        );
-        step('producer kept progressing past the refusal');
+        step('producer completed its blocks past the refusal');
         await releaseFifo(current.directory, 'run-gate');
         step('gate released for the natural exit');
       } else if (name === 'drain-release') {
+        await awaitTurnHandback();
         const drained = await brokerRequest(
           `/tool-sessions/${encodeURIComponent(brokerIdentity.runtimeSessionId!)}:release`,
           { drain: true },
@@ -1702,8 +1786,23 @@ async function runCancelDrainCase() {
       controlKinds: [...brokerControlKinds],
       droppedCancelReply: commitLog.some(
         (entry) =>
-          entry.op === 'commitChildRunRecord' && entry.status === 'dropped',
+          entry.status === 'dropped' &&
+          entry.stopRequested === true &&
+          entry.stopReason === null,
       ),
+      // Every journal command that set the stop mark, dropped or answered:
+      // a re-drive of the lost reply resends the same command, a second
+      // stop revision would add another.
+      stopRevisionCommandIds: [
+        ...new Set(
+          commitLog
+            .filter(
+              (entry) =>
+                entry.stopRequested === true && entry.stopReason === null,
+            )
+            .map((entry) => entry.commandId ?? '<none>'),
+        ),
+      ],
       operations: [...operations],
       record: childRunOf(terminal),
     };
@@ -1740,6 +1839,7 @@ async function bootHarness() {
 async function brokerRequest(
   pathSuffix: string,
   fields: Record<string, unknown>,
+  timeoutMs = 30_000,
 ): Promise<{ status: number; code: string; body: Record<string, unknown> }> {
   const runtimeSessionId = brokerIdentity.runtimeSessionId;
   assert(
@@ -1761,7 +1861,7 @@ async function brokerRequest(
         runtimeSessionId,
         ...fields,
       }),
-      signal: AbortSignal.timeout(30_000),
+      signal: AbortSignal.timeout(timeoutMs),
     },
   );
   const text = await response.text();
@@ -1779,10 +1879,42 @@ async function brokerRequest(
   };
 }
 
-async function brokerRelease(drain: boolean) {
+// A driver release answers for the background hold only once the
+// dispatching turn is done with the Runtime Session. While a foreground
+// execution is still active the Broker answers runtime_session_busy ahead
+// of the hold (releaseSessionAfterSweep). And the Harness hands the
+// Runtime Session back with its own routine release when the turn ends; a
+// release that lands while that attempt is in flight joins it and gets its
+// answer (runtime_session_held, even for a drain — 0.75 rig, baseline
+// cancel-status-unavailable). Neither is the cell these cases gate, so wait
+// until every invocation row settled with the background `:process` row
+// still live, and the Harness's own release was answered.
+async function awaitTurnHandback() {
+  await waitUntil(async () => {
+    checkProxy();
+    checkStoreProxy();
+    if (!operationsLog.some((entry) => entry.op === 'release')) return false;
+    const rows = (await probe<ProbeState>(current.sessionId, 'state'))
+      .executions;
+    return (
+      rows.some(
+        (row) =>
+          row.execution_call_id.endsWith(':process') &&
+          row.execution_state === 'PREPARED',
+      ) &&
+      rows
+        .filter((row) => !row.execution_call_id.endsWith(':process'))
+        .every((row) => row.execution_state === 'SETTLED')
+    );
+  }, 120_000);
+  step('turn handed the Runtime Session back with the background run live');
+}
+
+async function brokerRelease(drain: boolean, timeoutMs?: number) {
   return brokerRequest(
     `/tool-sessions/${encodeURIComponent(brokerIdentity.runtimeSessionId!)}:release`,
     drain ? { drain: true } : {},
+    timeoutMs,
   );
 }
 
@@ -1792,6 +1924,600 @@ function bgStartedFile(): boolean {
     return true;
   } catch {
     return false;
+  }
+}
+
+// FG8g (H4f-c): the public task cancel of a live background Shell or
+// Monitor watch. The process holds on its gate, so only the cancel can end
+// it: the operation completes from the committed record, the record
+// settles cancelled by stop_requested, and the retained key replays.
+async function api(
+  route: string,
+  init: { method?: string; key?: string } = {},
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const response = await fetch(new URL(route, config.storeUrl), {
+    method: init.method ?? 'GET',
+    headers: {
+      'X-Qwen-Tenant-Id': config.tenantId,
+      ...(init.key ? { 'Idempotency-Key': init.key } : {}),
+    },
+    signal: AbortSignal.timeout(20_000),
+  });
+  const text = await response.text();
+  return { status: response.status, body: text ? JSON.parse(text) : {} };
+}
+
+async function runCancelCase() {
+  const monitor = current.name.includes('monitor');
+  const cli = await bootHarness();
+  try {
+    execFileSync('mkfifo', [
+      path.join(current.directory, monitor ? 'monitor-gate' : 'run-gate'),
+    ]);
+    const { clientId } = await createSession(cli, config.storeUrl);
+    await submitPrompt(cli, clientId, `fg8 ${current.name} launch`);
+    step('prompt admitted');
+    const sessionRoute = `/v1/agents/sessions/${current.sessionId}`;
+    const kind = monitor ? 'monitor' : 'background_shell';
+    let task: Record<string, unknown> | undefined;
+    await waitUntil(async () => {
+      checkProxy();
+      const state = await probe<ProbeState>(current.sessionId, 'state');
+      const live = monitor
+        ? ((state.monitors[0] as { observationSequence?: number })
+            ?.observationSequence ?? 0) >= 1
+        : state.executions.some(
+            (row) =>
+              row.execution_call_id.endsWith(':process') &&
+              row.execution_state === 'PREPARED',
+          );
+      if (!live) return false;
+      const tasks = await api(`${sessionRoute}/tasks`);
+      assert.equal(tasks.status, 200, JSON.stringify(tasks.body));
+      task = (tasks.body['data'] as Array<Record<string, unknown>>).find(
+        (candidate) => candidate['kind'] === kind,
+      );
+      return task !== undefined;
+    }, 120_000);
+    assert.deepEqual(task!['action_capabilities'], ['cancel']);
+    step(`${kind} live as ${task!['id']}`);
+    const cancelRoute = `${sessionRoute}/tasks/${task!['id']}/cancel`;
+    const admitted = await api(cancelRoute, {
+      method: 'POST',
+      key: `fg8g-${current.name}`,
+    });
+    assert.equal(admitted.status, 202, JSON.stringify(admitted.body));
+    assert.equal(admitted.body['type'], 'task_cancel');
+    const operationId = admitted.body['id'] as string;
+    let operation: Record<string, unknown> = admitted.body;
+    await waitUntil(async () => {
+      operation = (await api(`${sessionRoute}/operations/${operationId}`)).body;
+      return operation['status'] === 'completed';
+    }, 120_000);
+    step('cancel completed');
+    const state = await probe<ProbeState>(current.sessionId, 'state');
+    const record = (monitor ? state.monitors[0] : state.childRuns[0]) as {
+      stopReason?: string | null;
+      stopRequested?: boolean;
+      run?: { state?: string };
+    };
+    assert.equal(record.run?.state, 'cancelled');
+    assert.equal(record.stopReason, 'stop_requested');
+    if (!monitor) assert.equal(record.stopRequested, true);
+    const settledTask = (await api(`${sessionRoute}/tasks/${task!['id']}`))
+      .body;
+    assert.equal(settledTask['state'], 'cancelled');
+    assert.deepEqual(settledTask['action_capabilities'], []);
+    const replay = await api(cancelRoute, {
+      method: 'POST',
+      key: `fg8g-${current.name}`,
+    });
+    assert.equal(replay.body['id'], operationId);
+    assert.equal(replay.body['status'], 'completed');
+    assert.equal(replay.body['replayed'], true);
+    return {
+      case: current.name,
+      taskId: task!['id'],
+      operation,
+      operations: [...operations],
+    };
+  } catch (cause) {
+    await diagnose(cli, `operations=${operations.join(',')}`);
+    throw cause;
+  } finally {
+    await cli.close();
+  }
+}
+
+// FG8c — process crashes. The Harness, the managed worker, and the
+// background process itself are killed (or stopped) for real, one at a
+// time, under a live background run; a Harness restart reloads the Session
+// cold from the store under a new writer identity. Crash Sessions run a
+// 10 s writer lease: a reload outlives the killed writer without a minute's
+// wait, the capture a crashed or closed Session leaves OPEN expires within
+// seconds — the fixture tenant admits four active captures, and seven cases
+// in a row under a 60 s lease exhausted it on the seventh — and a renewal,
+// due at half the lease, still has 5 s of slack on a loaded lane. Crash
+// Sessions talk to the store directly: a Harness killed mid-upload must not
+// leave the store proxy holding an aborted request.
+const CRASH_LEASE_MS = 10_000;
+
+type RuntimeProbe = {
+  bindings: Array<{
+    binding_id: string;
+    binding_state: string;
+    runtime_generation: number;
+    loss_evidence: number | boolean;
+    stop_evidence: number | boolean;
+  }>;
+  slots: Array<{ last_generation: number; active_binding_id: string | null }>;
+  runtimeSessions: Array<{ runtime_session_id: string; session_state: string }>;
+  executions: Array<{
+    execution_call_id: string;
+    execution_state: string;
+    execution_status: string | null;
+    runtime_generation: number;
+    runtime_session_id: string;
+    loss_evidence_id: string | null;
+    abandoned: number | boolean;
+    result_json: string | null;
+  }>;
+};
+
+function procState(pid: number): string | undefined {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    return stat[stat.lastIndexOf(')') + 2];
+  } catch {
+    return undefined;
+  }
+}
+
+const pidAlive = (pid: number) => {
+  const state = procState(pid);
+  return state !== undefined && state !== 'Z' && state !== 'X';
+};
+
+function bgPid(): number {
+  const pid = Number(
+    readFileSync(path.join(current.directory, 'bg-started.txt'), 'utf8'),
+  );
+  assert(Number.isSafeInteger(pid) && pid > 0, `bg pid ${pid}`);
+  return pid;
+}
+
+async function crashSnapshot(label: string) {
+  const state = await probe<ProbeState>(current.sessionId, 'state');
+  const runtime = await probe<RuntimeProbe>(current.sessionId, 'runtime');
+  const snapshot = {
+    label,
+    record: childRunOf(state) ?? null,
+    monitor: state.monitors[0] ?? null,
+    bindings: runtime.bindings,
+    slots: runtime.slots,
+    runtimeSessions: runtime.runtimeSessions,
+    executions: runtime.executions,
+    fullSegments: fullSegments(state).length,
+  };
+  console.log(`FG8_CRASH_STATE ${current.name} ${JSON.stringify(snapshot)}`);
+  return snapshot;
+}
+
+async function harnessJson(
+  cli: HostedHarnessProcess,
+  method: string,
+  route: string,
+  clientId?: string,
+  body?: unknown,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const response = await cli.request(route, {
+    method,
+    headers: {
+      ...cli.headers(clientId),
+      ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    signal: AbortSignal.timeout(90_000),
+  });
+  const text = await response.text();
+  let parsed: Record<string, unknown> = {};
+  try {
+    parsed = text ? (JSON.parse(text) as Record<string, unknown>) : {};
+  } catch {
+    parsed = { text };
+  }
+  return { status: response.status, body: parsed };
+}
+
+async function sigkillHarness(cli: HostedHarnessProcess) {
+  const child = cli.child!;
+  const pid = child.pid!;
+  const exited = new Promise<[number | null, string | null]>((resolve) =>
+    child.once('exit', (code, signal) => resolve([code, signal])),
+  );
+  assert(child.kill('SIGKILL'));
+  const [code, signal] = await exited;
+  assert.equal(code, null);
+  assert.equal(signal, 'SIGKILL');
+  step(`harness ${pid} SIGKILLed`);
+  return { process: 'harness', pid, signal };
+}
+
+// The case's own worker: the JVM's worker children diffed around the
+// case's first dispatch — exactly one is new.
+async function caseWorker(before: number[]): Promise<number> {
+  const after = await probe<number[]>(current.sessionId, 'workers');
+  const fresh = after.filter((pid) => !before.includes(pid));
+  assert.equal(fresh.length, 1, `one new worker: ${before} -> ${after}`);
+  return fresh[0];
+}
+
+// The case's Session status as the Harness reports it.
+async function sessionStatus(cli: HostedHarnessProcess, clientId: string) {
+  const status = await harnessJson(
+    cli,
+    'GET',
+    `/session/${current.sessionId}/status`,
+    clientId,
+  );
+  assert.equal(status.status, 200, JSON.stringify(status.body));
+  return status.body;
+}
+
+// Create the Session on a booted Harness and launch the case's background
+// run through a launch turn that settles while the run keeps its hold
+// (unless the case parks the :start reply, when `settle` is false). The run
+// is live once its supervised process announced itself and the `:process`
+// row is PREPARED; the turn has settled once the Session reports no active
+// prompt.
+async function launchCrashRun(cli: HostedHarnessProcess, settle: boolean) {
+  const workersBefore = await probe<number[]>(current.sessionId, 'workers');
+  const monitor = current.name === 'monitor-worker-kill';
+  if (current.name !== 'harness-kill-capture') {
+    execFileSync('mkfifo', [
+      path.join(current.directory, monitor ? 'monitor-gate' : 'run-gate'),
+    ]);
+  }
+  const { clientId } = await createSession(
+    cli,
+    config.storeUrl,
+    CRASH_LEASE_MS,
+  );
+  const promptId = await submitPrompt(
+    cli,
+    clientId,
+    `fg8c ${current.name} launch`,
+  );
+  step('prompt admitted');
+  await waitUntil(async () => {
+    checkProxy();
+    checkStoreProxy();
+    if (!bgStartedFile()) return false;
+    const state = await probe<ProbeState>(current.sessionId, 'state');
+    return state.executions.some(
+      (row) =>
+        row.execution_call_id.endsWith(':process') &&
+        row.execution_state === 'PREPARED',
+    );
+  }, 120_000);
+  step('run live');
+  if (settle) {
+    await waitUntil(async () => {
+      checkProxy();
+      if ((await sessionStatus(cli, clientId))['hasActivePrompt'] !== false)
+        return false;
+      if (!monitor) return true;
+      // The watch committed its observation before the case faults it.
+      const watch = (await probe<ProbeState>(current.sessionId, 'state'))
+        .monitors[0] as { observationSequence?: number } | undefined;
+      return (watch?.observationSequence ?? 0) >= 1;
+    }, 120_000);
+    step('launch turn settled, run still live');
+  }
+  const worker = await caseWorker(workersBefore);
+  return { clientId, promptId, worker };
+}
+
+// The cold reload on a fresh Harness, under its own writer identity. The
+// killed writer's lease runs from its last renewal, which the store can
+// commit just after the kill, so the one 409 that heals on its own — the
+// writer conflict — is retried until the lease lapses; any other answer is
+// the reload's.
+async function reloadSession(cli: HostedHarnessProcess) {
+  const deadline = Date.now() + 30_000;
+  for (;;) {
+    const loaded = await harnessJson(
+      cli,
+      'POST',
+      `/session/${current.sessionId}/load`,
+      undefined,
+      sessionBody(cli, config.storeUrl, CRASH_LEASE_MS),
+    );
+    step(`reload -> ${loaded.status} ${JSON.stringify(loaded.body)}`);
+    if (
+      loaded.status !== 409 ||
+      loaded.body['code'] !== 'managed_session_writer_conflict' ||
+      Date.now() >= deadline
+    ) {
+      return loaded;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+}
+
+// DELETE /session — the close whose drain arm releases every hold the
+// Session knows of, live or restored.
+async function closeCrashSession(cli: HostedHarnessProcess, clientId: string) {
+  const at = brokerAnswers.length;
+  const closed = await harnessJson(
+    cli,
+    'DELETE',
+    `/session/${current.sessionId}`,
+    clientId,
+  );
+  step(`close -> ${closed.status}`);
+  return {
+    status: closed.status,
+    releases: brokerAnswers
+      .slice(at)
+      .filter((answer) => answer.op === 'release')
+      .map(({ runtimeSessionId, drain, status, code }) => ({
+        runtimeSessionId,
+        drain,
+        status,
+        code,
+      })),
+  };
+}
+
+async function sigkillWorker(worker: number, signals: unknown[]) {
+  process.kill(worker, 'SIGKILL');
+  await waitUntil(() => !pidAlive(worker), 10_000);
+  signals.push({ process: 'worker', pid: worker, signal: 'SIGKILL' });
+  step(`worker ${worker} SIGKILLed`);
+}
+
+async function runCrashCase() {
+  const name = current.name;
+  const report: Record<string, unknown> = { case: name };
+  const signals: Array<Record<string, unknown>> = [];
+  report['signals'] = signals;
+  const harnesses: HostedHarnessProcess[] = [];
+  let bg: number | undefined;
+  let stoppedWorker: number | undefined;
+  try {
+    // harness-kill-dispatch parks the committed :start reply, so its launch
+    // turn never learns the run started and never settles.
+    if (name === 'harness-kill-dispatch') holdCommittedStart = true;
+    const first = await bootHarness();
+    harnesses.push(first);
+    const launched = {
+      cli: first,
+      ...(await launchCrashRun(first, name !== 'harness-kill-dispatch')),
+    };
+    bg = bgPid();
+    report['promptId'] = launched.promptId;
+    if (name === 'harness-kill-dispatch' || name === 'harness-kill-capture') {
+      if (name === 'harness-kill-dispatch') {
+        // The broker writes the row and starts the process before it
+        // answers, so the parked reply can trail the live run.
+        await waitUntil(() => committedStartHeld, 30_000);
+      } else {
+        // Mid-capture is a state: three full segments committed, the paced
+        // producer still appending.
+        await waitUntil(async () => {
+          const state = await probe<ProbeState>(current.sessionId, 'state');
+          return fullSegments(state).length >= 3;
+        }, 60_000);
+      }
+      signals.push(await sigkillHarness(launched.cli));
+      releaseCommittedStarts();
+      report['committedStartDropped'] = committedStartHeld;
+      // The killed writer's lease must lapse before another writer may
+      // open (the reload retries a writer conflict until it has).
+      await new Promise((resolve) => setTimeout(resolve, CRASH_LEASE_MS + 200));
+      const at = brokerAnswers.length;
+      const cli = await bootHarness();
+      harnesses.push(cli);
+      const loaded = await reloadSession(cli);
+      // Once another writer opened, the dead one is fenced: any commit it
+      // still had in flight has landed or been refused, so this count is
+      // the capture's last.
+      report['segmentsAtReload'] = (
+        await crashSnapshot('after-reload')
+      ).fullSegments;
+      report['reload'] = {
+        status: loaded.status,
+        code: loaded.body['code'] ?? null,
+        reason: loaded.body['reason'] ?? null,
+      };
+      report['reloadOps'] = brokerAnswers
+        .slice(at)
+        .map(({ op, status, code }) => ({ op, status, code }));
+      report['bgAliveAfterReload'] = pidAlive(bg);
+      if (loaded.status === 200) {
+        report['close'] = await closeCrashSession(
+          cli,
+          loaded.body['clientId'] as string,
+        );
+        // The restored drain's stop is the only thing that may end the run.
+        await waitUntil(() => !pidAlive(bg!), 30_000).catch(() => undefined);
+        report['bgAliveAfterClose'] = pidAlive(bg);
+      }
+    } else if (name === 'worker-kill' || name === 'generation-remint') {
+      await sigkillWorker(launched.worker, signals);
+      await crashSnapshot('after-kill');
+      if (name === 'generation-remint') {
+        // Two ordinary prompts after the loss, each reaching for the
+        // Runtime with a foreground Shell: the first finds the dead worker,
+        // the second the lost generation.
+        const attempts = [];
+        for (const attempt of [1, 2]) {
+          const at = brokerAnswers.length;
+          foregroundNext = true;
+          await submitPrompt(
+            launched.cli,
+            launched.clientId,
+            `fg8c ${name} post-crash ${attempt}`,
+          );
+          await waitUntil(
+            async () =>
+              (await sessionStatus(launched.cli, launched.clientId))[
+                'hasActivePrompt'
+              ] === false,
+            120_000,
+          );
+          attempts.push(
+            brokerAnswers
+              .slice(at)
+              .map(({ op, status, code }) => ({ op, status, code })),
+          );
+        }
+        report['postCrash'] = attempts;
+      }
+      report['close'] = await closeCrashSession(
+        launched.cli,
+        launched.clientId,
+      );
+    } else if (name === 'worker-stop') {
+      process.kill(launched.worker, 'SIGSTOP');
+      stoppedWorker = launched.worker;
+      await waitUntil(() => procState(launched.worker) === 'T', 5_000);
+      signals.push({
+        process: 'worker',
+        pid: launched.worker,
+        signal: 'SIGSTOP',
+      });
+      step('worker SIGSTOPped');
+      // The uncertainty window: a release sweep's status read against the
+      // stopped worker runs into the broker's 30 s worker-request bound.
+      const started = Date.now();
+      const held = await brokerRelease(false, 90_000);
+      report['stoppedRelease'] = {
+        status: held.status,
+        code: held.code,
+        elapsedMs: Date.now() - started,
+      };
+      step(`routine release while stopped -> ${held.status} ${held.code}`);
+      const during = await crashSnapshot('while-stopped');
+      report['whileStopped'] = {
+        recordState: during.record?.run?.state ?? null,
+        stopReason: during.record?.stopReason ?? null,
+        processRow: during.executions.find((row) =>
+          row.execution_call_id.endsWith(':process'),
+        )?.execution_state,
+        bindingStates: during.bindings.map((row) => row.binding_state),
+      };
+      process.kill(launched.worker, 'SIGCONT');
+      await waitUntil(() => procState(launched.worker) !== 'T', 5_000);
+      stoppedWorker = undefined;
+      signals.push({
+        process: 'worker',
+        pid: launched.worker,
+        signal: 'SIGCONT',
+      });
+      step('worker SIGCONTed');
+      await releaseFifo(current.directory, 'run-gate');
+      await waitUntil(async () => {
+        checkStoreProxy();
+        const record = childRunOf(
+          await probe<ProbeState>(current.sessionId, 'state'),
+        );
+        return record?.run?.state === 'settled';
+      }, 120_000);
+      step('resumed run settled');
+      report['close'] = await closeCrashSession(
+        launched.cli,
+        launched.clientId,
+      );
+    } else if (name === 'process-kill') {
+      process.kill(bg, 'SIGKILL');
+      await waitUntil(() => !pidAlive(bg!), 10_000);
+      signals.push({ process: 'background', pid: bg, signal: 'SIGKILL' });
+      step('background process SIGKILLed');
+      await waitUntil(async () => {
+        checkStoreProxy();
+        const record = childRunOf(
+          await probe<ProbeState>(current.sessionId, 'state'),
+        );
+        return record?.run?.state === 'settled';
+      }, 120_000);
+      step('killed run settled');
+      report['close'] = await closeCrashSession(
+        launched.cli,
+        launched.clientId,
+      );
+    } else {
+      assert.equal(name, 'monitor-worker-kill');
+      // The idle window must still be open at the kill, or the stop would
+      // meet a live worker and settle honestly — a case that never faulted.
+      const watch = (await probe<ProbeState>(current.sessionId, 'state'))
+        .monitors[0] as
+        | { run?: { state?: string }; stopReason?: string | null }
+        | undefined;
+      assert.equal(
+        watch?.run?.state,
+        'running',
+        'the watch is live at the kill',
+      );
+      assert.equal(watch?.stopReason, null);
+      await sigkillWorker(launched.worker, signals);
+      // The watch is silent past its observation, so its idle window ends
+      // it — and that auto-stop must ask the worker the Runtime lost.
+      await waitUntil(async () => {
+        const watch = (await probe<ProbeState>(current.sessionId, 'state'))
+          .monitors[0] as { run?: { state?: string } } | undefined;
+        return watch?.run?.state === 'recovery_blocked';
+      }, 120_000).catch((cause) => {
+        throw new Error(
+          'the watch never parked after its idle stop met the lost worker',
+          { cause },
+        );
+      });
+      step('watch parked');
+      report['close'] = await closeCrashSession(
+        launched.cli,
+        launched.clientId,
+      );
+    }
+    report['monitorStops'] = brokerAnswers
+      .filter((answer) => answer.kind === 'monitor-stop')
+      .map(({ status, code }) => ({ status, code }));
+    report['starts'] = brokerAnswers.filter(
+      (answer) => answer.op === 'start',
+    ).length;
+    report['modelCalls'] = modelCalls;
+    checkProxy();
+    checkStoreProxy();
+    return report;
+  } catch (cause) {
+    await diagnose(
+      harnesses.at(-1) ?? new HostedHarnessProcess(),
+      `modelCalls=${modelCalls} signals=${JSON.stringify(signals)}\n` +
+        `answers=${JSON.stringify(brokerAnswers)}`,
+    );
+    throw cause;
+  } finally {
+    releaseCommittedStarts();
+    if (stoppedWorker !== undefined) {
+      try {
+        process.kill(stoppedWorker, 'SIGCONT');
+      } catch {
+        // already gone
+      }
+    }
+    for (const cli of harnesses) await cli.close();
+    // The case owns its physical leftovers: a refused reload or a killed
+    // worker leaves the background process running, and nothing in
+    // production reaps it in this topology.
+    if (bg === undefined && bgStartedFile()) bg = bgPid();
+    if (bg !== undefined && pidAlive(bg)) {
+      try {
+        process.kill(bg, 'SIGKILL');
+      } catch {
+        // already gone
+      }
+    }
   }
 }
 
@@ -1805,7 +2531,6 @@ try {
     holdSegments = false;
     heldSegments = 0;
     segmentReleaseBudget = 0;
-    dropNextCommit = false;
     droppedCommits = 0;
     droppedOps = 0;
     dropNextStart = false;
@@ -1824,14 +2549,28 @@ try {
     dropNextPagePublish = false;
     droppedPagePublishes = 0;
     dropCommitOps.clear();
+    dropNextStopRevision = false;
+    // Per-case like every arm above: a drop the previous case witnessed
+    // must not read as this case's (FG8a's capture-commit drop would
+    // otherwise surface in observation-advance-reply's droppedCommitOps).
+    commitLog.length = 0;
+    heldControlLog.length = 0;
+    brokerAnswers.length = 0;
+    holdCommittedStart = false;
+    committedStartHeld = false;
+    foregroundNext = false;
     if (config.letter === 'fg8a') {
       reports.push(await runReplyLossCase());
     } else if (config.letter === 'fg8b') {
       reports.push(await runStoreFailureCase());
     } else if (config.letter === 'fg8d') {
       reports.push(await runCancelDrainCase());
+    } else if (config.letter === 'fg8c') {
+      reports.push(await runCrashCase());
     } else if (config.letter === 'fg8f') {
       reports.push(await runPublishCase());
+    } else if (config.letter === 'fg8g') {
+      reports.push(await runCancelCase());
     } else {
       const surface = current.name.startsWith('public') ? 'public' : 'web';
       reports.push(await runStreamCase(surface));
@@ -1850,7 +2589,11 @@ try {
           ? 'FG8_STORE_FAILURE_OK'
           : config.letter === 'fg8d'
             ? 'FG8_CANCEL_DRAIN_OK'
-            : 'FG8_STREAM_GAPS_OK',
+            : config.letter === 'fg8g'
+              ? 'FG8_TASK_CANCEL_OK'
+              : config.letter === 'fg8c'
+                ? 'FG8_PROCESS_CRASH_OK'
+                : 'FG8_STREAM_GAPS_OK',
   );
 } catch (cause) {
   console.error('FG8 failed at', current?.name, cause);

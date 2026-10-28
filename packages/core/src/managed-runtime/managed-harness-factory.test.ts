@@ -35,6 +35,7 @@ import {
   type ManagedSessionCommand,
 } from './managed-session-authority.js';
 import type { ManagedSessionDurableRef } from './managed-session-records.js';
+import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
 import {
   managedRuntimeDispatchGate,
   resetManagedRuntimeDispatchGatesForTest,
@@ -85,7 +86,11 @@ async function createWorkspace(): Promise<Workspace> {
   return { runtimeBaseDir, projectRoot, transcriptPath };
 }
 
-function open(workspace: Workspace): Promise<ManagedSession> {
+async function open(workspace: Workspace): Promise<ManagedSession> {
+  const resources = LocalManagedSessionResourceStore.create({
+    runtimeBaseDir: workspace.runtimeBaseDir,
+    sessionKey,
+  });
   return openManagedSession({
     runtimeBaseDir: workspace.runtimeBaseDir,
     sessionId,
@@ -96,8 +101,14 @@ function open(workspace: Workspace): Promise<ManagedSession> {
     workerId: 'worker-1',
     activationLeaseDurationMs: 60_000,
     create: {
-      definitionRef: ref('managed-definition'),
-      rootSnapshotRef: ref('managed-root'),
+      definitionRef: await resources.publish(
+        'managed-definition',
+        Buffer.from('{}'),
+      ),
+      rootSnapshotRef: await resources.publish(
+        'managed-root',
+        Buffer.from('{}'),
+      ),
       createdBy: 'daemon',
     },
   });
@@ -165,6 +176,50 @@ async function settleTurnComplete(
 }
 
 describe('managed harness factory', () => {
+  it('assigns checkpoint command identity and digest after an intervening activation renewal', async () => {
+    let now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    const authority = session.authority;
+    const before = authority.committedSequence;
+    const commit = authority.commitCheckpoint.bind(authority);
+    const boundary = vi
+      .spyOn(authority, 'commitCheckpoint')
+      .mockImplementationOnce(async (...args) => {
+        now += 10_000;
+        await authority.renewActivation({ leaseDurationMs: 60_000 });
+        return commit(...args);
+      });
+    try {
+      const checkpoint =
+        await createManagedHarnessHandle(session).ensureRunnable();
+      expect(checkpoint.identity.coveredSequence).toBe(before + 1);
+      const published = await authority.readCheckpointState();
+      const records = (await fs.readFile(workspace.transcriptPath, 'utf8'))
+        .trim()
+        .split('\n')
+        .map(
+          (line) =>
+            JSON.parse(line) as { managedSession?: Record<string, unknown> },
+        );
+      const marker = records.find(
+        (record) => record.managedSession?.['operation'] === 'commitCheckpoint',
+      )?.managedSession;
+      expect(marker).toMatchObject({
+        commandId: `harness:before_model:${session.activation.activationId}:${before + 1}`,
+        contentDigest: createHash('sha256').update(published!).digest('hex'),
+      });
+      expect(authority.latestCheckpoint?.stateRef.digest).toBe(
+        marker?.['contentDigest'],
+      );
+    } finally {
+      boundary.mockRestore();
+      clock.mockRestore();
+      await session.close();
+    }
+  });
+
   it('does not treat opening or accepted input as a runnable start', async () => {
     const session = await open(await createWorkspace());
     expect(session.authority.restoreBasis()).toBe('initial');
@@ -878,6 +933,43 @@ describe('managed harness factory', () => {
     expect(managedRuntimeDispatchGate(sessionKey).state('ex-2')).toBe(
       'settled',
     );
+    await session.close();
+  });
+
+  it('does not hand off a settled binding after its gate entry was evicted', async () => {
+    const session = await open(await createWorkspace());
+    const handle = createManagedHarnessHandle(session);
+    await handle.ensureRunnable();
+    const first = await runtimeCommit(session);
+    const second = {
+      ...first,
+      functionCallId: 'fc-2',
+      executionCallId: 'ex-2',
+      invocationBindingId: 'bind-2',
+      modelMessageId: 'msg-2',
+      ordinal: 1,
+      inputDigest: '8'.repeat(64),
+    };
+    await handle.commitAwaitRuntimeBatch([first, second], {
+      turnId: 'current-turn',
+      promptId: 'current-prompt',
+    });
+    const firstRef = await session.resources.publish(
+      'managed-tool-outcome',
+      Buffer.from('{"executionCallId":"ex-1"}', 'utf8'),
+    );
+    await handle.resolveAwaitRuntime('ex-1', firstRef);
+
+    const gate = managedRuntimeDispatchGate(sessionKey);
+    expect(gate.state('ex-1')).toBe('settled');
+    for (let index = 0; index < 1025; index++) {
+      gate.settle(`evict-${index}`);
+    }
+    expect(gate.state('ex-1')).toBeUndefined();
+
+    await handle.detach();
+    expect(gate.state('ex-1')).toBeUndefined();
+    expect(gate.isHandedOff('ex-2')).toBe(true);
     await session.close();
   });
 

@@ -13,6 +13,7 @@ import {
   splitCompoundCommand,
   SHELL_TOOL_NAMES,
   toolMatchesRuleToolName,
+  warnDroppedPermissionRule,
 } from './rule-parser.js';
 import type { McpToolIdentity, PathMatchContext } from './rule-parser.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
@@ -797,6 +798,7 @@ export class PermissionManager {
     'loop_wakeup',
     'create_sub_session',
     'monitor',
+    'autofix_pr',
   ]);
 
   /**
@@ -1440,6 +1442,7 @@ export class PermissionManager {
         debugLogger.warn(
           `Ignoring malformed allow rule (unbalanced parentheses): ${rule.raw}`,
         );
+        warnDroppedPermissionRule(rule.raw, 'allow');
         return;
       }
       // AUTO mode invariant: while dangerous allow rules are stripped,
@@ -1493,6 +1496,7 @@ export class PermissionManager {
         debugLogger.warn(
           `Ignoring malformed deny rule (unbalanced parentheses): ${rule.raw}`,
         );
+        warnDroppedPermissionRule(rule.raw, 'deny');
         return;
       }
       this.sessionRules.deny.push(rule);
@@ -1509,6 +1513,7 @@ export class PermissionManager {
         debugLogger.warn(
           `Ignoring malformed ask rule (unbalanced parentheses): ${rule.raw}`,
         );
+        warnDroppedPermissionRule(rule.raw, 'ask');
         return;
       }
       this.sessionRules.ask.push(rule);
@@ -1534,6 +1539,7 @@ export class PermissionManager {
       debugLogger.warn(
         `Ignoring malformed ${type} rule (unbalanced parentheses): ${rule.raw}`,
       );
+      warnDroppedPermissionRule(rule.raw, type);
       return rule;
     }
     // AUTO mode invariant: see addSessionAllowRule above. A dangerous

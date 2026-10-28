@@ -159,7 +159,7 @@ proxy 的 TypeScript fault driver、每用例一个「故障确实点火」的�
 
 5. **#13339 纪律。** 车道没有隔离或重试机制。FG9 因此：(a) 只新增
    `Hosted*IT` 类，绝不动 `HostedWorkspaceToolTurnIT`；(b) 每个用例都先
-   断言其故障确实点火（丢弃计数、`FG9B_*` marker、kill marker、断流的
+   断言其故障确实点火（丢弃计数、`fg9b_fire` 计数、被扣住的 kill 点、断流的
    未读证明、超过续传游标的 JDBC 已提交行），门禁绝不无声变绿；(c) 所有
    JDBC 变更（种子、trigger）限定在用例 tenant；(d) 保留 FG8 的夹具教训
    —— watch 的 idle 窗口必须长于 60 s 事件 poll，且被断言停止方式的
@@ -175,8 +175,8 @@ Ground truth 是 JDBC：`ma_session_record` 的 journal 行
 （`session_command` 与 `session_message` 两个域）、`ma_delivery` 的
 relay 台账、FG9e 的公开事件台账，以及捕获的 Spring 与 Harness 日志。
 每个用例都断言其故障确实点火：`FG9_DROPPED <what>` / `FG9_HELD <what>`
-proxy 计数与 commit 日志（FG9a、FG9d、FG9f）、`FG9B_<case>`
-SQLException marker（FG9b）、从 producer 自身进度读到的 kill marker
+proxy 计数与 commit 日志（FG9a、FG9d、FG9f）、trigger 自身在
+`fg9b_fire` 里的点火计数（FG9b）、kill 所落的那次被扣住的提交
 （FG9c）、或续传游标的 JDBC 见证（FG9e）。「一行」始终指 journal 恰好
 持有一条该 id、预期 revision 的记录；发送方视图与已提交回执逐字节比对
 （`sessionCommandReplyBytes`，
@@ -295,29 +295,74 @@ HttpClient 的 `shutdownNow`）与续传，所以本字母不需要 proxy。每�
   （#14163）拥有那唯一的用例（`cursor-expired-resync`）—— 它的设计把该用例
   延后，其切片 2（#14334）尚未交付。
 
-### FG9b —— 存储故障（切片 3，#13918 之后）
+### FG9b —— 存储故障（切片 3，已交付）
 
-测试专用 SQL trigger，限定 tenant 与 scope，每用例安装与卸载，像
-FG7b/FG6f 一样，`SIGNAL SQLSTATE` 文本 `FG9B_<case>` 在捕获的 Spring
-输出中断言。这些用例断言的错误码是 #13918 之后的分类，切片落地时重钉。
+故障源是 `ma_session_record` 上的测试专用 trigger，限定用例 tenant、一个
+Session 和一种记录形态，在用例拆掉它之前拒绝每一次匹配的写入 —— 即 FG8b
+的形态。每次点火还会记进一张 MyISAM 旁表：Spring 把 `SIGNAL` 压成一个
+500 `internal_error`，`FG9B_<CASE>` 文本出不了它自己的日志。草稿里的一次性
+trigger 根本到不了 Session：store 客户端对不确定错误的有界重试（三次，间隔
+250 ms）会在提交调用内部把它治愈。第三次被拒之后，该 Session 的 authority
+锁存写入（`writesStopped` —— 被拒事务的序号可能已落盘），而锁存的 writer
+不接受任何重试：拆掉 trigger 什么也治不好。所以每个用例都会拆掉 trigger
+并冷启动 Harness，钉住的是冷加载的治愈 —— 经由原命令完成，绝不出现第二个
+条目、第二次铸造或第二份回执。每次布防前 lead 自己的 Turn 都已结束，bob 与
+carol 在整个窗口内都停在模型闩锁上（见「夹具设计」）。
 
-| 用例                      | 注入                                                      | 期望                                                                                                                                                                          |
-| ------------------------- | --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `outbound-commit-refused` | 一次性 trigger 拒绝成员的 outbound `session_command` 提交 | 零下游效果：无 `ma_delivery` 行、无 execute、无 `msgc_` 行；发送方 park 的等待保持可恢复状态；Harness 重载后无重复 journal 行（铸造只经原调用自己的重放重驱，绝不另铸新条目） |
-| `receipt-commit-refused`  | 一次性 trigger 拒绝 lead 的入站回执提交                   | execute 无回执失败；trigger 卸载后 relay 重驱一次，重跑经探测应答（已提交位置报 `sent.`），绝不重发；收件人视图不因失败的回执推进 —— 恰好一次投递，无重复                     |
-| `answered-commit-refused` | 一次性 trigger 拒绝成员 journal 上 `answered` 回写提交    | relay 重试 `answered` 动词；恰好一次 `accepted` revision 携带 reply；成员 park 的等待恰好消费一次；journal 上无重复 reply 字节                                                |
+| 用例                      | 注入                                                            | 期望                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| ------------------------- | --------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `outbound-commit-refused` | 拒绝 alice 出站 `session_command`（`planned`）的插入            | 锁存期间：trigger 恰好点火三次；Harness 日志记下她的 Turn `recovery blocked: ManagedSessionWritesStoppedError`；没有条目、没有台账行、没有应答，Turn 停在 `RUNNING`，不会越过她的调用去结算。拆掉 trigger 并冷启动之后（新的 writer generation 持有她的 Session）：她 park 的调用从 journal 得到恰好一次「未发送」应答；她的 journal 仍没有 `session_command`，store 也从未接受过她的任何 `sendSessionCommand` 提交 —— 是应答，绝非另铸；没有回执、没有 `msgc_`，bob 的 journal 上什么都没有 |
+| `receipt-commit-refused`  | 拒绝 lead 入站回执的插入                                        | execute 在回执之前已探测并铸出 bob 的位置，于是 Harness 记下 execute `failed in its store`（503 `session_command_failed`），一条 `msgc_`、没有回执；alice 的条目停在 `accepting`、未应答。lead 冷加载之后 relay 的重试重新 execute：探测找到已铸位置 —— 整个用例里 lead 上只有一次 `sendSessionMessage` 提交 —— 唯一的回执应答 `Message sent to bob.\n- bob: sent.`，alice 持有它；bob 恰好一次投递                                                                                          |
+| `answered-commit-refused` | 拒绝 alice 条目上 `accepted` 的写入 —— relay 的 `answered` 回写 | lead 这一半已持久（它的回执与 bob 的 `msgc_`），alice 的条目停在 `accepting`、未应答。她冷加载之后 relay 的重试重新 execute，落到已存的回执上 —— 没有第二次回执提交、没有第二次铸造 —— 并回写一次：她的条目走 planned → accepting → accepted → consumed（revision 4），逐字节持有回执的 reply，她的调用恰好应答一次                                                                                                                                                                          |
 
-### FG9c —— 进程崩溃（切片 3，#13986 之后）
+落地时记录的机制说明：
 
-仅 POSIX。driver 持有 Harness 子进程并发信号；冷载断言按 #13361 的
-branch-tagged 409 arm 名称书写，切片落地时对照已合入的 #13986 表面重钉。
-此处杀 Harness 会同时杀掉它托管的所有 team session —— 两个用例的差别
-只在 kill 落在哪个 relay 窗口。
+- 一次被拒的 journal 提交锁存的是整个 Session 的 authority，不只是这次调用
+  （「停止的 writer 不接受任何重试；被阻塞的 Session 不会自己恢复」）。relay
+  里没有任何东西能治愈它；草稿里的「Harness 重载之后」是唯一的治愈途径，
+  receipt 用例的「trigger 卸载后 relay 重驱」也只发生在它之后。期间 relay
+  仍按退避重试：消息 relay 每遇到一次 `writes_stopped` 拒绝都会消耗一次
+  attempt（1 s 起翻倍，封顶 300 s），所以放着一分钟不管的锁存会把下一次重试
+  推到几分钟之后。每个用例都在第三次点火后数秒内重启。
+- `answered` 动词会误标存储故障。`runCommandOperation` 的 `answered` 分支把
+  `ManagedSessionRecordError` 当成非法请求，而 store 的
+  `ManagedSessionStoreHttpError` 与锁存的 `ManagedSessionWritesStoppedError`
+  都继承它 —— 所以 relay 读到的是 400 `invalid_command_operation`（且无
+  stderr 行），而 `execute` 在同样情形下回 503 `session_command_failed`。
+  relay 对两者的 defer 方式相同，投递不受影响；门禁钉住结果而非错误码，
+  误标另行跟踪（#14419）。
+- lead 的 Session 锁存或其 Harness 死掉时若 lead 还有未结束的 Turn，这个
+  Turn 持有的 workspace 会留在死去的持有者手里：探测中冷启动的 lead 一直在
+  `workspace_unavailable` 与 `hosted_session_already_attached` 上打转（两分钟内
+  writer generation 从 2 涨到 12），什么也没执行，alice 的等待最终超时成
+  `unknown`。夹具里的 lead 原先在收尾轮回空文本，模型客户端会对空响应重试
+  约 20 s，所以布防时它的 Turn 仍开着；修法与结束等待见「夹具设计」。
 
-| 用例                     | 注入                                                                                      | 期望                                                                                                                                                                                                            |
-| ------------------------ | ----------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `lead-kill-mid-fanout`   | 在第一个 `msgc_` 铸造提交（在 store proxy 见证）之后、回执提交之前 SIGKILL Harness        | 重启：未结算的命令绝不重铸（一行 `session_command`）；重执行探测到位置 1 已提交 —— 报 `sent.`、绝不重发 —— 且位置 2 恰好发送一次；回执诚实提交；两名收件人各投递一次                                            |
-| `member-kill-after-mint` | 在 alice 的 outbound `session_command` 提交之后、她的等待第一个检查点之前 SIGKILL Harness | 重开：已铸但未等待的条目不变成不可见重复 —— 一行 `session_command`，等待从 journal 恢复（`sessionCommandJournalAnswer` 臂，`hosted-runtime-recovery.ts:1180-1225`）；relay 完成该命令；发送方 Turn 恰好应答一次 |
+### FG9c —— 进程崩溃（切片 3，已交付）
+
+仅 POSIX。用例 SIGKILL 打包的 Harness 及其子孙进程 —— 它托管的每个 team
+Session 随之一起死掉 —— 并在同一端口冷启动一个新的（新的
+`HOME`/`QWEN_HOME`）；被测 Session 上出现新的 writer generation 即为接管
+见证。每次 kill 都落在一次 store 已接受、但应答被 store proxy 扣住的提交上，
+所以死去的进程从未得知它已落地：这是每一步最尖锐的窗口。bob 与 carol 在
+kill 前后都停在模型闩锁上，算数的是它们被重驱的那一轮。
+
+| 用例                     | 注入                                                                                                                                           | 期望                                                                                                                                                                                                                                                                                                                                          |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `lead-kill-mid-fanout`   | 向 bob 与 carol 的 `*` 广播；扣住 lead 第一次 `sendSessionMessage` 提交的应答；扣住期间 SIGKILL Harness；冷启动                                | kill 时已提交一条 `msgc_`、没有回执。lead 冷加载之后 relay 的重试重新 execute：探测从 journal 把第一个位置报为 `sent.`，只铸第二个 —— 整个用例两次 `sendSessionMessage` 提交，每个位置一次 —— 唯一的回执应答 `Message sent to every other member of team "review".\n- bob: sent.\n- carol: sent.`，alice 持有它；每名收件人恰好投递并消费一次 |
+| `member-kill-after-mint` | 扣住 relay；扣住 alice `sendSessionCommand` 提交的应答；扣住期间 SIGKILL Harness；冷启动；新的 writer generation 持有她的 Session 后放开 relay | 死去的进程从未确认的那个条目就是唯一的命令：同一个 id，整个用例一次 `sendSessionCommand` 提交，revision 4（planned → accepting → accepted → consumed）。接管从 journal 恢复她 park 的等待，她的调用恰好应答一次 `Message sent to bob.\n- bob: sent.`；一条 `msgc_`，一次投递                                                                  |
+
+落地时记录的机制说明：
+
+- H4e-b3 的重启用例（`memberHarnessRestartDuringCommandWait`）在 planned 条目
+  已被确认、等待已 park 之后才 kill；`member-kill-after-mint` 把 kill 挪进
+  该提交自己的应答里 —— 只有 journal 知道该条目存在的那个窗口。park 先于出站
+  提交，所以接管经 `resumeCommandWaitRuns` 恢复它：它读 journal，绝不再调用
+  `runCommand`；出站从未提交的 park 会走该函数的「从未提交」分支，FG9b 的
+  `outbound-commit-refused` 走的正是这个分支。
+- 在模型轮中途被杀的成员不会丢：协调器在新的 generation 上重驱它们这一轮，
+  被杀那一轮的连接在闩锁放开后写进一个死连接，模型夹具按 Harness generation
+  忽略它。
 
 ## 夹具设计
 
@@ -423,15 +468,34 @@ WAIT 闩卡在用例自己的铸造见证（`awaitMsgcMinted` 读 `msgc_` 行）
 lead 先于被闩成员完结的顺序下本来就停在 `delivered` —— 那是编排簿记，
 不是用例欠缴的 relay 活。
 
-**存储故障 trigger**（切片 3，FG9b）拷贝 FG7b DDL 形态，
-`SIGNAL SQLSTATE` 文本 `FG9B_<case>`，限定用例 tenant 与记录 id
-前缀，在捕获的 Spring 输出中断言，拆卸放 teardown。
+**存储故障 trigger**（切片 3，FG9b）沿用 FG8b 而非 FG7b：在
+`ma_session_record` 上建 `BEFORE INSERT` 或 `BEFORE UPDATE` trigger，条件写明
+用例 tenant、Session、`session_command` 域，回写那一例再加
+`NEW.delivery_state = 'accepted'`；它先把用例名插进 MyISAM 表 `fg9b_fire`，
+再 `SIGNAL SQLSTATE '45000'`，文本 `FG9B_<CASE>`。Spring 给 store 客户端回
+500（`internal_error`），所以点火计数就是归因。用例在重启前拆掉自己的
+trigger；teardown 再拆掉残留的 trigger 与旁表。
 
-**杀伤臂**（切片 3，FG9c）逐字复用 H4e-b3 重启机制：
-`harness.destroyForcibly()`，换一个 `startHarness()`（每个用例新的
-`HOME`/`QWEN_HOME` = 真冷），writer generation 接管见证，以及前后
-各一次 relay 闩锁保证 kill 落在在飞段。仅 POSIX；两个切片都保持每
-字母 `@Timeout(600)`。
+**杀伤臂**（切片 3，FG9c，以及 FG9b 的冷重启）沿用 H4e-b3 的重启机制：先对
+Harness 的子孙进程、再对 Harness 本身 `destroyForcibly()`，在同一端口换一个
+`startHarness()`（新的 `HOME`/`QWEN_HOME` —— 真冷），并在被测 Session 上做
+writer generation 接管见证。`member-kill-after-mint` 和 H4e-b3 一样在 kill
+前后都扣住 relay，接管之后才放开。仅 POSIX；每个字母保持 `@Timeout(600)`。
+
+**切片 3 的新增。** 四件，全部在门禁 JVM 内：
+
+- lead 的**收尾轮回文本**（`LEAD_REPORT done`），不再回空响应 —— 模型客户端
+  会对空响应重试四次（间隔 2.5–8.2 s，共约 20 s）才结算 Turn，所以 lead 的
+  Turn（以及每个读成员结果的唤醒 Turn）过去都要开着这么久。切片 1、2 从未
+  依赖这一点；全类在此改动下重新测得全绿；
+- FG9b 与 FG9c 在布防前**等 lead 的 Turn 结束**（`awaitLeadSettled`），并让
+  bob 与 carol 在整个布防期间保持 WAIT，故障窗口内 lead 不会有开着的 Turn；
+- store proxy 现在记录每次提交的 `op=<operation>` 与上游 `status=`，
+  `journalCommits(session, operation)` 数 store 接受了的提交。它是「绝不铸两次」
+  的见证：`ma_session_record` 每个记录 id 只保留一行，同 id 的重铸不会留下
+  第二行；
+- Harness 日志在重启之间追加，每次重启递增一个 generation，模型夹具据此忽略
+  被 kill 打断那一轮的死连接。
 
 **CI。** 类名把它放进 `hosted-harness-mysql` 车道（`Hosted*IT`
 include；`check-failsafe-reports.js hosted` 强制它必须跑过）。每
@@ -452,11 +516,19 @@ include；`check-failsafe-reports.js hosted` 强制它必须跑过）。每
 已把 hosted fork 提到 3600 s，它已覆盖一个 600 s 上限加这份健康时长（3240 s），
 所以 fork、Verify 步骤与 job 上限都保持 #14334 留下的值。
 
+切片 3 把六字母全类在本地重测三次，健康 528–557 s（FG9b 129–137 s、FG9c
+100–109 s；此前四个字母仍约 310 s，与 lane run 38957583765 一致，该次运行中本类
+用时 310 s），按同样的 1.7× 预算约 950 s，比切片 2 的约 534 s 多约 416 s。
+配额要与本片开发期间改动过它的字母叠加 —— FG8c 崩溃字母（#14407，2640→2930 s）
+与 FG10a 工作流摘要字母（#14390，2930→2963 s）：2963 − 534 + 950 ≈ 3380 s。
+一个 600 s 上限加上它已放不进 3600 s 的 fork，于是 fork 3600→3990 s；Verify
+步骤必须在其 600 s 之外包住 fork，改为 75→80 分钟（余量 210 s）；job 上限
+320→325，以保持在各 step 上限之和（310）加未设上限的准备步骤之上。
+
 ## 变异检查
 
 每个变异先应用、证明恰好其门禁变红、再还原，沿用 FG6/FG7/FG8 的文档化
-手工流程。以下切片 1 变异随本设计提交；切片 2 的紧随其后；切片 3 的变异
-随其字母落地时细化。
+手工流程。以下切片 1 变异随本设计提交；切片 2 与切片 3 的紧随其后。
 
 1. FG9a —— store 客户端的不确定错误重试铸出新事务身份而不是重驱原身
    份：`admission-commit-reply` 红（出现第二行 `session_command`，或
@@ -495,10 +567,30 @@ include；`check-failsafe-reports.js hosted` 强制它必须跑过）。每
 9. FG9e —— WebShell `afterSequence` 游标在续传时多读一位：
    `webshell-resume` 红（续传边界上一处缺口）。
 
-计划项，切片落地时细化：FG9b —— 被拒的 outbound 提交继续铸出 delivery 行
-（`outbound-commit-refused` 在零投递断言处红）；FG9c —— 冷载把 park
-的命令等待当成干净（`member-kill-after-mint` 在从 journal 恢复的断言
-处红）。
+切片 3，每个只对其目标用例运行（`-Dqwen.fg9b.case` /
+`-Dqwen.fg9c.case`）；Harness 侧的变异原地修补 bundle 的 chunk 并逐字节还原，
+relay 那一个修补 Java 源码：
+
+10. FG9b —— 冷加载告诉一条从未提交的出站「已到达 leader」
+    （`resumeCommandWaitRuns` 的「从未提交」分支给出 `accepting` 文案）：
+    `outbound-commit-refused` 在作答断言处红 —— 被告知消息可能已落地的发送方，
+    永远不会去重发那条其实没发出去的消息。
+11. FG9b —— execute 在没有持久回执的情况下作答（回执提交的失败被吞掉）：
+    `receipt-commit-refused` 红 —— execute 回 202，用例等待的存储故障根本不
+    出现，alice 将持有的 reply 背后没有回执。
+12. FG9b —— `answered` 回写失败时 relay 仍把命令归为 done：
+    `answered-commit-refused` 红 —— 她的条目永远得不到应答，她的等待最终
+    超时成 `unknown`。
+13. FG9c —— 每次执行都派生新的 `msgc_` id（命令 id 每次加盐，id 不再可重放）：
+    `lead-kill-mid-fanout` 红 —— 重执行以新 id 再次发送位置 1（两个位置出现
+    三条 `msgc_`）。只中和发送循环的已提交位置探测（切片 1 的变异 2）在这个
+    kill 点是等价变异：`sendToRunningMember` 对同 id、同内容的重驱发送直接答
+    `sent`、不提交，两道防线任一单独都能挡住位置 1 的第二次发送。二者都依赖
+    可重放的 id，这个变异破坏的正是它。
+14. FG9c —— 冷加载把一个已 park 的条目读成从未提交（记录存在时
+    `resumeCommandWaitRuns` 仍走「从未提交」分支）：`member-kill-after-mint`
+    红 —— alice 被告知「未发送」而她的条目仍然有效，relay 照样投递它，回写的
+    reply 永远不被消费。
 
 ## 验证与验收
 
@@ -506,8 +598,8 @@ include；`check-failsafe-reports.js hosted` 强制它必须跑过）。每
   `hosted-relay-headers.test.ts` 带新名单条目全绿。
 - 模块 surefire 套件、Checkstyle、SpotBugs 全绿。
 - 新类在本地 MySQL/MariaDB 上全绿（CI 车道是 MySQL 8.4）：每个用例的
-  声明故障都点火 —— 每个丢弃计数、扣留计数、`FG9B_*` marker 与 kill
-  marker 都被观察到 —— 按字母选择子可用，且快乐路径（无注入的一次
+  声明故障都点火 —— 每个丢弃计数、扣留计数、`fg9b_fire` 计数与被扣住的
+  kill 点都被观察到 —— 按字母选择子可用，且快乐路径（无注入的一次
   广播）全绿、每个 roster 位置恰好一行 `msgc_`。
 - 以上切片 1 与切片 2 变异每个单独变红；源码还原；门禁复绿。切片 3 对其
   变异重复同一流程。

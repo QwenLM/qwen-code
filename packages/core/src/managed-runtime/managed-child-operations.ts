@@ -18,8 +18,14 @@ import {
   type DefinitionPin,
 } from './managed-extension-record.js';
 import {
+  parseManagedExtensionPin,
+  type ManagedExtensionPin,
+} from './managed-extension-package.js';
+import {
+  assertManagedSessionDurableRef,
   ManagedSessionRecordError,
   type ManagedSessionDurableRef,
+  type ManagedSessionJsonValue,
 } from './managed-session-records.js';
 
 // H4b of #12827: the pure construction side of the six child operations —
@@ -60,10 +66,190 @@ export const MANAGED_CHILD_LIMITS = Object.freeze({
 export const MANAGED_CHILD_ADMITTED_WORKSPACE_MODES: readonly ChildWorkspaceMode[] =
   Object.freeze(['shared', 'worktree', 'snapshot']);
 
+export interface PublicChildModelRoute {
+  readonly authType: string;
+  readonly endpointDigest: string;
+  readonly providerPin: string;
+  readonly origin?: {
+    readonly modelId: string;
+    readonly authType: string;
+    readonly endpointDigest: string;
+    readonly providerPin: string;
+  };
+}
+
+export function parsePublicChildModelRoute(
+  value: unknown,
+): PublicChildModelRoute {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ManagedSessionRecordError('Invalid public child model route.');
+  }
+  const route = value as Record<string, unknown>;
+  if (
+    Object.keys(route).sort().join(',') !==
+      (Object.hasOwn(route, 'origin')
+        ? 'authType,endpointDigest,origin,providerPin'
+        : 'authType,endpointDigest,providerPin') ||
+    typeof route['authType'] !== 'string' ||
+    !/^[a-z][a-z0-9_-]{0,63}$/.test(route['authType']) ||
+    typeof route['endpointDigest'] !== 'string' ||
+    !/^[a-f0-9]{64}$/.test(route['endpointDigest']) ||
+    typeof route['providerPin'] !== 'string' ||
+    !/^[a-f0-9]{64}$/.test(route['providerPin'])
+  ) {
+    throw new ManagedSessionRecordError('Invalid public child model route.');
+  }
+  let origin: PublicChildModelRoute['origin'];
+  if (Object.hasOwn(route, 'origin')) {
+    const value = route['origin'];
+    if (!value || typeof value !== 'object' || Array.isArray(value))
+      throw new ManagedSessionRecordError('Invalid public child model origin.');
+    const source = value as Record<string, unknown>;
+    if (
+      Object.keys(source).sort().join(',') !==
+        'authType,endpointDigest,modelId,providerPin' ||
+      typeof source['modelId'] !== 'string' ||
+      !source['modelId'].trim() ||
+      Buffer.byteLength(source['modelId']) > 512
+    )
+      throw new ManagedSessionRecordError('Invalid public child model origin.');
+    origin = Object.freeze({
+      modelId: source['modelId'],
+      ...parsePublicChildModelRoute({
+        authType: source['authType'],
+        endpointDigest: source['endpointDigest'],
+        providerPin: source['providerPin'],
+      }),
+    });
+  }
+  return Object.freeze({
+    authType: route['authType'] as string,
+    endpointDigest: route['endpointDigest'] as string,
+    providerPin: route['providerPin'] as string,
+    ...(origin ? { origin } : {}),
+  });
+}
+
+export interface PublicChildLaunchSnapshot {
+  readonly version: 1 | 2;
+  readonly sourcePromptId: string;
+  readonly approvalMode: 'default' | 'auto-edit' | 'yolo';
+  readonly approvalRevision: number;
+  readonly modelId: string;
+  readonly modelRevision: number;
+  readonly modelRoute: PublicChildModelRoute;
+  readonly skillsRef: ManagedSessionDurableRef | null;
+  readonly extensionAgent?: PublicChildExtensionAgent;
+}
+
+export interface PublicChildExtensionAgent {
+  readonly configRevision: number;
+  readonly bundleRef: ManagedSessionDurableRef;
+  readonly pin: ManagedExtensionPin;
+  readonly contributionsRef: ManagedSessionDurableRef;
+  readonly agentName: string;
+  readonly toolNames: readonly string[];
+}
+
+export function parsePublicChildExtensionAgent(
+  value: unknown,
+): PublicChildExtensionAgent {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new ManagedSessionRecordError('Invalid extension agent descriptor.');
+  const fields = value as Record<string, ManagedSessionJsonValue>;
+  if (
+    Object.keys(fields).sort().join(',') !==
+      'agentName,bundleRef,configRevision,contributionsRef,pin,toolNames' ||
+    !Number.isSafeInteger(fields['configRevision']) ||
+    Number(fields['configRevision']) < 1 ||
+    typeof fields['agentName'] !== 'string' ||
+    !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u.test(fields['agentName']) ||
+    !Array.isArray(fields['toolNames']) ||
+    fields['toolNames'].length > 256 ||
+    fields['toolNames'].some(
+      (name) =>
+        typeof name !== 'string' || !/^[A-Za-z0-9_.:-]{1,128}$/u.test(name),
+    ) ||
+    new Set(fields['toolNames']).size !== fields['toolNames'].length
+  )
+    throw new ManagedSessionRecordError('Invalid extension agent descriptor.');
+  const bundleRef = assertManagedSessionDurableRef(
+    fields['bundleRef'],
+    'extension agent bundle',
+  );
+  const contributionsRef = assertManagedSessionDurableRef(
+    fields['contributionsRef'],
+    'extension agent contributions',
+  );
+  if (
+    bundleRef.kind !== 'managed-extension-config-bundle' ||
+    bundleRef.schemaVersion !== 1 ||
+    contributionsRef.kind !== 'managed-extension-contributions' ||
+    contributionsRef.schemaVersion !== 1
+  )
+    throw new ManagedSessionRecordError('Invalid extension agent references.');
+  return Object.freeze({
+    configRevision: fields['configRevision'] as number,
+    bundleRef,
+    pin: parseManagedExtensionPin(fields['pin']),
+    contributionsRef,
+    agentName: fields['agentName'],
+    toolNames: Object.freeze([...(fields['toolNames'] as string[])]),
+  });
+}
+
 export interface ChildLaunchEnvelope {
   readonly description: string;
   readonly prompt: string;
   readonly definition: DefinitionPin;
+  readonly publicLaunch?: PublicChildLaunchSnapshot;
+}
+
+function parsePublicChildLaunch(value: unknown): PublicChildLaunchSnapshot {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ManagedSessionRecordError(
+      'Invalid public child launch snapshot.',
+    );
+  }
+  const fields = value as Record<string, unknown>;
+  if (
+    Object.keys(fields).sort().join(',') !==
+      (fields['version'] === 2
+        ? 'approvalMode,approvalRevision,extensionAgent,modelId,modelRevision,modelRoute,skillsRef,sourcePromptId,version'
+        : 'approvalMode,approvalRevision,modelId,modelRevision,modelRoute,skillsRef,sourcePromptId,version') ||
+    (fields['version'] !== 1 && fields['version'] !== 2) ||
+    typeof fields['sourcePromptId'] !== 'string' ||
+    !fields['sourcePromptId'].trim() ||
+    fields['sourcePromptId'].length > 144 ||
+    typeof fields['approvalMode'] !== 'string' ||
+    !['default', 'auto-edit', 'yolo'].includes(fields['approvalMode']) ||
+    typeof fields['modelId'] !== 'string' ||
+    !fields['modelId'].trim() ||
+    Buffer.byteLength(fields['modelId'], 'utf8') > 512 ||
+    !Number.isSafeInteger(fields['approvalRevision']) ||
+    (fields['approvalRevision'] as number) < 0 ||
+    !Number.isSafeInteger(fields['modelRevision']) ||
+    (fields['modelRevision'] as number) < 0
+  ) {
+    throw new ManagedSessionRecordError(
+      'Invalid public child launch snapshot.',
+    );
+  }
+  parsePublicChildModelRoute(fields['modelRoute']);
+  if (fields['version'] === 2)
+    parsePublicChildExtensionAgent(fields['extensionAgent']);
+  if (fields['skillsRef'] !== null) {
+    const ref = assertManagedSessionDurableRef(
+      fields['skillsRef'] as ManagedSessionJsonValue,
+      'child Skills',
+    );
+    if (ref.kind !== 'managed-agent-skills' || ref.schemaVersion !== 1) {
+      throw new ManagedSessionRecordError(
+        'Invalid public child Skills snapshot.',
+      );
+    }
+  }
+  return Object.freeze({ ...fields }) as unknown as PublicChildLaunchSnapshot;
 }
 
 /**
@@ -102,6 +288,11 @@ export function encodeChildLaunchEnvelope(
       description: envelope.description,
       prompt: envelope.prompt,
       definition: envelope.definition,
+      ...(envelope.publicLaunch === undefined
+        ? {}
+        : {
+            publicLaunch: parsePublicChildLaunch(envelope.publicLaunch),
+          }),
     }),
     'utf8',
   );
@@ -132,7 +323,10 @@ export function decodeChildLaunchEnvelope(bytes: Buffer): ChildLaunchEnvelope {
   }
   const record = value as Record<string, unknown>;
   const keys = Object.keys(record).sort();
-  if (keys.join(',') !== 'definition,description,prompt') {
+  if (
+    keys.join(',') !== 'definition,description,prompt' &&
+    keys.join(',') !== 'definition,description,prompt,publicLaunch'
+  ) {
     throw new ManagedSessionRecordError(
       'Child launch envelope must have exactly description, prompt and definition.',
     );
@@ -164,6 +358,11 @@ export function decodeChildLaunchEnvelope(bytes: Buffer): ChildLaunchEnvelope {
     description: record['description'],
     prompt: record['prompt'],
     definition: Object.freeze({ ...(definition as DefinitionPin) }),
+    ...(record['publicLaunch'] === undefined
+      ? {}
+      : {
+          publicLaunch: parsePublicChildLaunch(record['publicLaunch']),
+        }),
   });
 }
 
@@ -579,6 +778,37 @@ export function childCancelBody(
       state: 'cancelled',
       execution: params.started ? 'settled' : 'not_started_proven',
       delivery: Object.freeze({ target: 'session', state: 'cancelled' }),
+    }),
+  });
+}
+
+/**
+ * #14387: the recovery-blocked settlement — the Harness generation running
+ * this child was lost and its execution's outcome stays unwitnessed (the
+ * workflow kind's in-process work leaves no witness on a new generation).
+ * The run is blocked, never ended: no stop reason, the delivery is not
+ * cancelled, and the execution stays provably unknown so a later revision
+ * could still settle the run if evidence ever arrived.
+ */
+export function childRecoveryBlockedBody(
+  previous: ChildSessionRun,
+  params: {
+    readonly reason: ChildSessionRun['run']['reason'];
+    readonly childSessionId?: string;
+  },
+): ChildSessionRun {
+  return Object.freeze({
+    ...previous,
+    childSessionId: adoptChildSessionId(
+      previous,
+      params.childSessionId,
+      'recovery_blocked',
+    ),
+    run: Object.freeze({
+      ...previous.run,
+      state: 'recovery_blocked',
+      reason: params.reason,
+      execution: 'outcome_unknown',
     }),
   });
 }

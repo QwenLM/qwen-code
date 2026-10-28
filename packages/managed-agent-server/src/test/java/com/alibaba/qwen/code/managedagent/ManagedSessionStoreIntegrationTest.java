@@ -1,14 +1,15 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
-import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecordStore.TaskRow;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
-import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore.TaskRow;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.ManagedCheckpointHistory;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.security.AesGcmSecretProtector;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -16,6 +17,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.autoconfigure.web.servlet.MockMvcPrint;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -80,13 +82,222 @@ class ManagedSessionStoreIntegrationTest {
     private ObjectMapper objectMapper;
 
     @Autowired
-    private JdbcTemplate jdbc;
+    private @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc;
 
     @Autowired
     private ManagedExtensionRecordStore records;
 
     @Autowired
     private ManagedSessionStore sessionStore;
+
+    @Test
+    void nativeJournalSnapshotRoutesPublishReadAndPageWithinWriterScope() throws Exception {
+        String session = "native-snapshot-" + UUID.randomUUID();
+        String base = historySession(session);
+        mvc.perform(get(base + "/restore").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A).param("workspaceId", WORKSPACE))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.journalRevision").value(1))
+                .andExpect(jsonPath("$.head").doesNotExist()).andExpect(jsonPath("$.nativeSnapshot").doesNotExist());
+        ObjectNode request = objectMapper.createObjectNode().put("workspaceId", WORKSPACE)
+                .put("writerId", WRITER_A).put("writerGeneration", 1).put("snapshotId", "native-one")
+                .put("expectedJournalRevision", 1).put("expectedCommittedSequence", 0);
+        MvcResult published = mvc.perform(post(base + "/journal-snapshots:publish").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
+                .contentType(MediaType.APPLICATION_JSON).content(request.toString()))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.snapshot.payloadFormat").value("committed-prefix-v1"))
+                .andExpect(jsonPath("$.snapshot.coveredJournalRevision").value(1)).andReturn();
+        mvc.perform(get(base + "/restore").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A).param("workspaceId", WORKSPACE)
+                .param("includeNativeSnapshot", "true"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.journalRevision").value(1))
+                .andExpect(jsonPath("$.nativeSnapshot.snapshot.snapshotId").value("native-one"))
+                .andExpect(jsonPath("$.nativeSnapshot.snapshot.coveredJournalRevision").value(1));
+        mvc.perform(get(base + "/journal-snapshots/native-one").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A).param("workspaceId", WORKSPACE))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.snapshot.snapshotId").value("native-one"));
+        mvc.perform(get(base + "/journal-snapshots/native-one/pages").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A).param("workspaceId", WORKSPACE))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.pages.length()").value(1))
+                .andExpect(jsonPath("$.nextRevision").value(1)).andExpect(jsonPath("$.hasMore").value(false));
+        mvc.perform(get(base + "/journal-snapshots/native-one").header(TenantContextFilter.HEADER, TENANT)
+                .param("workspaceId", WORKSPACE)).andExpect(status().isBadRequest());
+        mvc.perform(get(base + "/journal-snapshots/native-one").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_B).param("workspaceId", WORKSPACE))
+                .andExpect(status().isConflict());
+        String manifestId = objectMapper.readTree(published.getResponse().getContentAsByteArray())
+                .path("manifest").path("resourceId").asText();
+        jdbc.update("DELETE FROM ma_resource_ref WHERE owner_kind = 'NATIVE_SNAPSHOT' AND resource_id = ?", manifestId);
+        mvc.perform(get(base + "/restore").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A).param("workspaceId", WORKSPACE))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.nativeSnapshot").doesNotExist());
+        mvc.perform(get(base + "/restore").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A).param("workspaceId", WORKSPACE)
+                .param("includeNativeSnapshot", "true"))
+                .andExpect(status().isConflict());
+        assertThat(sessionStore.restore(TENANT, WORKSPACE, session, TOKEN_A).compactedThroughRevision()).isZero();
+    }
+
+    @Test
+    void checkpointHistoryReusesCommittedDependenciesWithoutRecensus() throws Exception {
+        String session = "checkpoint-history-" + UUID.randomUUID();
+        String base = historySession(session);
+        ObjectNode outcome = historyResource("resource-context", "managed-tool-outcome", objectMapper.createObjectNode());
+        ObjectNode page = historyPage(session, outcome);
+        ObjectNode pageResource = historyResource("page-one", ManagedCheckpointHistory.KIND, page);
+        ObjectNode root = historyRoot(pageResource, page);
+        ObjectNode request = historyCommit(session, root, pageResource, 1);
+        mvc.perform(post(base + "/transactions:commit").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
+                .contentType(MediaType.APPLICATION_JSON).content(request.toString()))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.journalRevision").value(2));
+
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE session_id = ? AND resource_id = ?",
+                Integer.class, session, "resource-context")).isEqualTo(1);
+        assertThat(sessionStore.readResource(TENANT, WORKSPACE, session, "page-one", TOKEN_A).bytes())
+                .isEqualTo(page.toString().getBytes(StandardCharsets.UTF_8));
+
+        ((ObjectNode) root.path("identity")).put("checkpointId", "checkpoint-next");
+        ObjectNode reused = pageResource.deepCopy();
+        reused.remove("bytesBase64");
+        ObjectNode next = historyCommit(session, root, reused, 2);
+        mvc.perform(post(base + "/transactions:commit").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
+                .contentType(MediaType.APPLICATION_JSON).content(next.toString()))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.journalRevision").value(3));
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE session_id = ? AND resource_id = ?",
+                Integer.class, session, "resource-context")).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE session_id = ? AND resource_id = ?",
+                Integer.class, session, "page-one")).isEqualTo(2);
+    }
+
+    @Test
+    void checkpointHistoryRefusesUncommittedForeignAndCorruptDependenciesAtomically() throws Exception {
+        for (String fault : List.of("uncommitted", "future-owner", "foreign", "digest", "coverage")) {
+            String session = "checkpoint-history-" + UUID.randomUUID();
+            String base = historySession(session);
+            ObjectNode outcome = historyResource("resource-context", "managed-tool-outcome", objectMapper.createObjectNode());
+            ObjectNode page = historyPage(session, outcome);
+            if ("uncommitted".equals(fault)) {
+                jdbc.update("DELETE FROM ma_resource_ref WHERE session_id = ?", session);
+            } else if ("future-owner".equals(fault)) {
+                jdbc.update("UPDATE ma_resource_ref SET owner_revision = 99, journal_revision = 99 WHERE session_id = ?", session);
+            } else if ("foreign".equals(fault)) {
+                ((ObjectNode) page.path("sessionKey")).put("sessionId", "another-session");
+            } else if ("digest".equals(fault)) {
+                ((ObjectNode) page.path("items").get(0).path("outcomeRef")).put("digest", "0".repeat(64));
+            } else {
+                page.put("toolCount", 2);
+            }
+            ObjectNode pageResource = historyResource("page-one", ManagedCheckpointHistory.KIND, page);
+            ObjectNode request = historyCommit(session, historyRoot(pageResource, page), pageResource, 1);
+            mvc.perform(post(base + "/transactions:commit").header(TenantContextFilter.HEADER, TENANT)
+                    .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
+                    .contentType(MediaType.APPLICATION_JSON).content(request.toString()))
+                    .andExpect(status().isBadRequest());
+            assertThat(jdbc.queryForObject("SELECT journal_revision FROM ma_session_head WHERE session_id = ?",
+                    Long.class, session)).as(fault).isEqualTo(1);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE session_id = ? AND resource_id <> ?",
+                    Integer.class, session, "resource-context")).as(fault).isZero();
+        }
+    }
+
+    private String historySession(String session) throws Exception {
+        String base = "/internal/managed-session-store/v1/sessions/" + session;
+        mvc.perform(post(base + "/writers:acquire").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
+                .contentType(MediaType.APPLICATION_JSON).content(writerRequest(WRITER_A).toString()))
+                .andExpect(status().isOk());
+        ObjectNode genesis = genesisRequest("{\"subtype\":\"session_execution_engine\"}\n"
+                + "{\"subtype\":\"managed_session_header_v1\"}\n", "{}".getBytes(StandardCharsets.UTF_8));
+        ((ObjectNode) genesis.path("resources").get(0)).put("kind", "managed-tool-outcome");
+        mvc.perform(post(base + "/transactions:commit").header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
+                .contentType(MediaType.APPLICATION_JSON).content(genesis.toString())).andExpect(status().isOk());
+        return base;
+    }
+
+    private ObjectNode historyPage(String session, ObjectNode outcome) {
+        ObjectNode page = objectMapper.createObjectNode().put("storageProfile", ManagedCheckpointHistory.KIND + "/1")
+                .put("turnId", "turn-history").put("promptId", "prompt-history").put("toolCount", 1).put("bindingCount", 0);
+        page.putObject("sessionKey").put("tenantId", TENANT).put("workspaceId", WORKSPACE).put("sessionId", session);
+        page.putNull("previous");
+        ObjectNode item = page.putArray("items").addObject().put("state", "settled").put("consumed", true);
+        ObjectNode ref = outcome.deepCopy();
+        ref.remove("bytesBase64");
+        item.set("outcomeRef", ref);
+        page.putArray("bindings");
+        return page;
+    }
+
+    private ObjectNode historyRoot(ObjectNode pageResource, ObjectNode page) {
+        ObjectNode root = objectMapper.createObjectNode().put("storageProfile", ManagedCheckpointHistory.PROFILE);
+        root.putObject("identity").put("checkpointId", "checkpoint-first")
+                .put("turnId", "turn-history").put("promptId", "prompt-history")
+                .set("sessionKey", page.path("sessionKey").deepCopy());
+        root.putObject("tools").putArray("items");
+        root.putNull("runtime");
+        ObjectNode ref = pageResource.deepCopy();
+        ref.remove("bytesBase64");
+        root.putObject("history").put("toolCount", page.path("toolCount").longValue()).put("bindingCount", 0).set("ref", ref);
+        return root;
+    }
+
+    private ObjectNode historyResource(String id, String kind, JsonNode body) {
+        byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
+        return objectMapper.createObjectNode().put("resourceId", id).put("kind", kind).put("schemaVersion", 1)
+                .put("byteLength", bytes.length).put("digest", sha256(bytes))
+                .put("bytesBase64", Base64.getEncoder().encodeToString(bytes));
+    }
+
+    private ObjectNode historyCommit(String session, ObjectNode root, ObjectNode pageResource, long previous) {
+        String records = TurnEventLines.turnBytes(TENANT, WORKSPACE, session)
+                .replace("\"sequence\":1", "\"sequence\":" + previous);
+        ObjectNode request = transactionRequest(records, WRITER_A, 1)
+                .put("expectedJournalRevision", previous).put("expectedCommittedSequence", previous - 1)
+                .put("firstSequence", previous).put("lastSequence", previous)
+                .put("commandId", "history-command-" + previous).put("transactionId", "history-tx-" + previous)
+                .put("commitDigest", (previous == 1 ? "c" : "d").repeat(64))
+                .put("latestCheckpointResourceId", "root-" + previous);
+        if (previous > 1) {
+            request.put("previousCommitDigest", "c".repeat(64));
+        }
+        request.putArray("resources").add(pageResource).add(historyResource("root-" + previous, "managed-checkpoint", root));
+        return request;
+    }
+
+    @Test
+    void checkpointResourcesUseTheReaderBudgetWhileOrdinaryResourcesStaySmall() throws Exception {
+        for (String kind : List.of("managed-checkpoint", "managed-context", "oversized-checkpoint")) {
+            String session = "checkpoint-budget-" + UUID.randomUUID();
+            String base = "/internal/managed-session-store/v1/sessions/" + session;
+            mvc.perform(post(base + "/writers:acquire")
+                    .header(TenantContextFilter.HEADER, TENANT)
+                    .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .content(writerRequest(WRITER_A).toString())).andExpect(status().isOk());
+            int length = ManagedSessionStoreModels.MAX_EVENT_BYTES
+                    + ("oversized-checkpoint".equals(kind) ? 1 : 0);
+            byte[] bytes = new byte[length];
+            Arrays.fill(bytes, (byte) 'x');
+            String records = "{\"subtype\":\"session_execution_engine\"}\n"
+                    + "{\"subtype\":\"managed_session_header_v1\"}\n";
+            ObjectNode request = genesisRequest(records, bytes);
+            ((ObjectNode) request.withArray("resources").get(0)).put("kind",
+                    "managed-context".equals(kind) ? kind : "managed-checkpoint");
+            var result = mvc.perform(post(base + "/transactions:commit")
+                    .header(TenantContextFilter.HEADER, TENANT)
+                    .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
+                    .contentType(MediaType.APPLICATION_JSON).content(request.toString()));
+            if ("managed-checkpoint".equals(kind)) {
+                result.andExpect(status().isOk());
+                assertThat(sessionStore.readResource(TENANT, WORKSPACE, session,
+                        "resource-context", TOKEN_A).bytes()).isEqualTo(bytes);
+            } else {
+                result.andExpect(status().isNotImplemented())
+                        .andExpect(jsonPath("$.error.code").value("managed_session_oss_disabled"));
+            }
+        }
+    }
 
     @Test
     void acceptsClientBuiltCensusAfterTheDefinitionIsCommitted(@TempDir Path directory) throws Exception {
@@ -175,7 +386,7 @@ class ManagedSessionStoreIntegrationTest {
         jdbc.update("UPDATE ma_resource SET inline_bytes = ? WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
                 "[]".getBytes(StandardCharsets.UTF_8), TENANT, session, published.resourceId());
         org.assertj.core.api.Assertions.assertThatThrownBy(() -> sessionStore.readResource(TENANT,
-                WORKSPACE, session, published.resourceId(), TOKEN_A)).isInstanceOfSatisfying(com.alibaba.qwen.code.managedagent.api.ApiException.class,
+                WORKSPACE, session, published.resourceId(), TOKEN_A)).isInstanceOfSatisfying(com.alibaba.qwen.code.managedagent.exception.ManagedAgentException.class,
                         error -> assertThat(error.getCode()).isEqualTo("managed_session_resource_corrupt"));
         org.assertj.core.api.Assertions.assertThatThrownBy(() -> sessionStore.publishAgentSkills(TENANT,
                 WORKSPACE, session, skills)).isInstanceOf(RuntimeException.class);
@@ -485,16 +696,16 @@ class ManagedSessionStoreIntegrationTest {
         for (JsonNode resource : oversizedResources) {
             inlineBytes += resource.get("byteLength").asInt();
         }
-        for (int index = 0; inlineBytes < ManagedSessionStoreModels.MAX_TRANSACTION_BYTES; index++) {
+        for (int index = 0; inlineBytes < ManagedSessionStoreModels.MAX_INLINE_TRANSACTION_BYTES; index++) {
             byte[] bytes = new byte[Math.min(ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES,
-                    ManagedSessionStoreModels.MAX_TRANSACTION_BYTES - inlineBytes)];
+                    ManagedSessionStoreModels.MAX_INLINE_TRANSACTION_BYTES - inlineBytes)];
             oversizedResources.addObject().put("resourceId", "budget-part-" + index)
                     .put("kind", "managed-message-part").put("schemaVersion", 1)
                     .put("byteLength", bytes.length).put("digest", sha256(bytes))
                     .put("bytesBase64", Base64.getEncoder().encodeToString(bytes));
             inlineBytes += bytes.length;
         }
-        assertThat(inlineBytes).isEqualTo(8 * 1024 * 1024);
+        assertThat(inlineBytes).isEqualTo(40 * 1024 * 1024);
         mvc.perform(post(base + "/transactions:commit")
                 .header(TenantContextFilter.HEADER, TENANT)
                 .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)

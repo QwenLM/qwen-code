@@ -3735,8 +3735,8 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
   it('opens the gate on any upstream failure but never on skip or resolve', () => {
     // Every job whose failure marks review-pr 'skipped' is enumerated: the
     // incident's trigger can kill the chain's self-hosted jobs first
-    // (authorize / review-config), and a transient API failure can kill the
-    // hosted ones (precheck-pr / delay-automatic-review).
+    // (authorize / review-config / delay-automatic-review), and a transient
+    // API failure can kill the hosted one (precheck-pr).
     expect(job.needs).toEqual([
       'precheck-pr',
       'review-config',
@@ -7422,4 +7422,172 @@ describe('review supersede salvage (#10110)', () => {
       );
     },
   );
+});
+
+describe('review model canary routing', () => {
+  const run = runReviewStep();
+
+  it('wires the three model variables instead of pinning OPENAI_MODEL', () => {
+    const step = parse(workflow).jobs['review-pr'].steps.find(
+      (s) => s.name === 'Run review',
+    );
+    expect(step.env.REVIEW_MODEL_DEFAULT).toBe(
+      '${{ vars.QWEN_PR_REVIEW_MODEL }}',
+    );
+    expect(step.env.REVIEW_MODEL_CANARY).toBe(
+      '${{ vars.QWEN_PR_REVIEW_MODEL_CANARY }}',
+    );
+    expect(step.env.REVIEW_MODEL_CANARY_PERCENT).toBe(
+      '${{ vars.QWEN_PR_REVIEW_MODEL_CANARY_PERCENT }}',
+    );
+    // The env no longer carries the model itself: a literal there would make
+    // every split a workflow edit, which is the thing a rollout must not need.
+    expect(step.env.OPENAI_MODEL).toBeUndefined();
+
+    // Selection runs before --model is built, and the run announces its
+    // cohort: the model is recorded nowhere else a later comparison could
+    // read it, so without the notice a rollout leaves no trace of which model
+    // served a given review.
+    const select = run.indexOf('OPENAI_MODEL="$(review_model_for_bucket');
+    expect(select).toBeGreaterThan(-1);
+    expect(select).toBeLessThan(run.indexOf('MODEL_ARGS=()'));
+    expect(run.indexOf('::notice title=Review model::')).toBeGreaterThan(
+      select,
+    );
+  });
+
+  it('buckets by PR number and stays inside the configured percent', () => {
+    // The router delegates its clamp to canary_percent_effective, so executing
+    // either needs both. js-yaml has stripped the block scalar's indentation,
+    // so both closing braces sit at column 0.
+    const fn = run.match(
+      /canary_percent_effective\(\) \{[\s\S]*?review_model_for_bucket\(\) \{[\s\S]*?\n\}/,
+    )?.[0];
+    expect(fn).toBeTruthy();
+    const pick = (defaultModel, canaryModel, percent, pr) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -euo pipefail\n${fn}\nreview_model_for_bucket '${defaultModel}' '${canaryModel}' '${percent}' '${pr}'`,
+        ],
+        { encoding: 'utf8' },
+      ).trim();
+
+    // Off unless a percent is set: merging this changes nothing, which is
+    // what makes the rollout a variable change and its revert one too.
+    for (const percent of ['', '0', 'abc']) {
+      expect(pick('main', 'canary', percent, '12345')).toBe('main');
+    }
+    // No canary model, no split, however high the percent goes.
+    expect(pick('main', '', '100', '12345')).toBe('main');
+    expect(pick('main', 'canary', '100', '12345')).toBe('canary');
+
+    // Whole buckets only, measured as an effect: at 10%, sweep the full
+    // bucket range and pin exactly which PRs are selected. This dominates a
+    // single boundary pair, and two identical calls are self-equality.
+    const canaried = execFileSync(
+      'bash',
+      [
+        '-c',
+        `set -euo pipefail\n${fn}\nfor pr in {12300..12399}; do if [ "$(review_model_for_bucket main canary 10 "$pr")" = canary ]; then echo "$pr"; fi; done`,
+      ],
+      { encoding: 'utf8' },
+    )
+      .trim()
+      .split('\n');
+    expect(canaried).toEqual(
+      Array.from({ length: 10 }, (_, i) => String(12300 + i)),
+    );
+
+    // Repository-variable typos fail toward off, never toward full rollout.
+    // One row per clamp step; deleting that step alone flips its row. The
+    // 20-digit value is the digit bound's: bash wraps it to 50.
+    expect(pick('main', 'canary', '08', '12307')).toBe('canary');
+    expect(pick('main', 'canary', '0050', '12325')).toBe('canary');
+    expect(pick('main', 'canary', '250', '12399')).toBe('main');
+    expect(pick('main', 'canary', '18446744073709551666', '12300')).toBe(
+      'main',
+    );
+
+    // A PR number that cannot be read keeps the default rather than guessing.
+    expect(pick('main', 'canary', '100', '')).toBe('main');
+    expect(pick('main', 'canary', '100', 'x123')).toBe('main');
+  });
+
+  // The rows above supply their own positional arguments, so they cannot see
+  // the four the workflow actually passes: transposing the default and canary
+  // arguments inverts the rollout, and swapping PR_NUMBER for a per-run value
+  // loses the bucket entirely — both with every row above still green. Slice
+  // the real block (helper, router, trim, call site, notice, MODEL_ARGS) and
+  // execute it with the values the step's `env:` supplies.
+  it('routes and reports at the real call site, not a paraphrase of it', () => {
+    const start = run.indexOf('canary_percent_effective() {');
+    const notice = run.indexOf('echo "::notice title=Review model::');
+    const args = run.indexOf('MODEL_ARGS=()', notice);
+    const end = run.indexOf('\nfi', args) + '\nfi'.length;
+    expect(start).toBeGreaterThan(-1);
+    expect(notice).toBeGreaterThan(start);
+    expect(args).toBeGreaterThan(notice);
+    expect(end).toBeGreaterThan(args);
+    const block = run.slice(start, end);
+
+    // GITHUB_RUN_ID is pinned so the fourth argument cannot be swapped for a
+    // per-run value unnoticed: 9999999 % 100 = 99 is outside every percent a
+    // case below configures, so such a swap routes to the default model.
+    const serve = (canary, percent, pr) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -euo pipefail\n${block}\nprintf '%s' "$OPENAI_MODEL|${'${MODEL_ARGS[*]-}'}"`,
+        ],
+        {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            REVIEW_MODEL_DEFAULT: 'default-model',
+            REVIEW_MODEL_CANARY: canary,
+            REVIEW_MODEL_CANARY_PERCENT: percent,
+            PR_NUMBER: pr,
+            GITHUB_RUN_ID: '9999999',
+          },
+        },
+      );
+
+    // 12309 % 100 = 9 is inside a 10% split; 12310 % 100 = 10 is not. The
+    // notice's model field is anchored — a bare 'canary' check is satisfied
+    // by the percent suffix even when the model field is wrong.
+    expect(serve('canary-model', '10', '12309')).toBe(
+      '::notice title=Review model::canary-model (PR #12309, canary 10%)\n' +
+        'canary-model|--model canary-model',
+    );
+    expect(serve('canary-model', '10', '12310')).toBe(
+      '::notice title=Review model::default-model (PR #12310, canary 10%)\n' +
+        'default-model|--model default-model',
+    );
+
+    // The notice reports the percent the router APPLIED, not the configured
+    // one. Both of these clamp to off, so the raw variable would announce a
+    // canary cohort that never ran — '10 ' is the silent spelling, since
+    // nothing about `canary 10 %` looks malformed.
+    for (const percent of ['250', '10 ']) {
+      expect(serve('canary-model', percent, '12309')).toBe(
+        `::notice title=Review model::default-model (PR #12309, canary 0%)\n` +
+          'default-model|--model default-model',
+      );
+    }
+
+    // A padded canary name must not reach --model verbatim: the provider
+    // rejects it and that failure is terminal for the whole cohort. Trimming
+    // still leaves whitespace-only meaning "no split", not an invented one.
+    expect(serve(' canary-model ', '100', '12345')).toBe(
+      '::notice title=Review model::canary-model (PR #12345, canary 100%)\n' +
+        'canary-model|--model canary-model',
+    );
+    expect(serve('   ', '100', '12345')).toBe(
+      '::notice title=Review model::default-model (PR #12345, canary 100%)\n' +
+        'default-model|--model default-model',
+    );
+  });
 });
