@@ -36,6 +36,15 @@ name: 'Fleet Shepherd'
 #                        so deferring to it starves the watchdog forever
 #                        (2026-08-19, an oversized workflow file)
 #
+# The dashboard also carries a READ-ONLY Actions queue census: repo-wide
+# queued depth, in-progress count, wait distribution, the queued breakdown
+# by workflow and by event, and the digested/new/still-queued diff against
+# the previous tick's run-id set. It pulls no lever and opens no issue:
+# whether a backlog is fixable in-repo at all (event fan-out) or is pool
+# capacity / a GitHub incident is an attribution call that stays with a
+# human. Measurement caveats and the aged-tail rationale:
+# docs/design/2026-10-28-shepherd-queue-census.md
+#
 # It also maintains a single "Fleet Shepherd Dashboard" issue (edited in
 # place, never comment spam) so fleet state is observable at a glance. The
 # dashboard additionally lists the TAKEOVER pool (open PRs carrying
@@ -103,6 +112,19 @@ env:
   # liveness watchdog sat at in-flight=1 for 18 hours while the loop was dark.
   # Generous by design: it must never fire on an ordinary runner queue.
   ZOMBIE_QUEUED_MINUTES: "${{ vars.QWEN_SHEPHERD_ZOMBIE_QUEUED_MINUTES || '30' }}"
+  # Queue census: pages of 100 queued runs, capped so a surge cannot turn one
+  # tick into an unbounded read. Past the cap the enumerated id set is
+  # incomplete, so waits are a floor and no comparable snapshot is recorded.
+  QUEUE_MAX_PAGES: '5'
+  # The queue's aged tail is a DIFFERENT population, not slow runs. Measured
+  # 2026-10-28: 81 of 231 queued runs were created on 2026-08-19 — the 500 KB
+  # incident above — and nothing sat between 1 day and 70 days. Left in, they
+  # put the wait p50 at 243m/max at 70 days and ranked two workflows with ZERO
+  # live queued runs into the fan-out top-5. A day is the line because no
+  # ordinary runner wait crosses it; it is NOT the wedge threshold above,
+  # which is tuned for this loop's own dispatches and would swallow a live
+  # queue whose median wait is already hours.
+  QUEUE_AGED_HOURS: '24'
   MAX_SYNCS_PER_TICK: '3'
   MAX_CONFLICT_DISPATCHES_PER_TICK: '2'
   # No-op closes per tick. Notices are uncapped: they are marker-deduped per
@@ -251,6 +273,12 @@ jobs:
           PREV_LIVENESS_LINE="$(grep -oE '<!-- fleet-shepherd liveness-dispatched: [^>]* -->' <<< "${PREV_DASH}" | head -1 || true)"
           PREV_LIVENESS="$(grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z' <<< "${PREV_LIVENESS_LINE}" | head -1 || true)"
           PREV_LIVENESS_RUN="$(grep -oE 'run=[0-9]+' <<< "${PREV_LIVENESS_LINE}" | head -1 | cut -d= -f2 || true)"
+          # The queue census keeps its previous run-id set the same way. It is
+          # written ONLY for a complete enumeration, so an absent marker means
+          # "no comparable sample", never "the queue was empty".
+          PREV_QUEUE_LINE="$(grep -oE '<!-- fleet-shepherd queue-sample: [^>]* -->' <<< "${PREV_DASH}" | head -1 || true)"
+          PREV_QUEUE_IDS="$(grep -oE 'ids=[0-9,]*' <<< "${PREV_QUEUE_LINE}" | head -1 | cut -d= -f2 || true)"
+          PREV_QUEUE_TS="$(grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z' <<< "${PREV_QUEUE_LINE}" | head -1 || true)"
 
           # ---- scan liveness watchdog -------------------------------------
           # GitHub cron is unreliable (observed 16h of silence on a */10
@@ -426,6 +454,123 @@ jobs:
             done <<< "${MATCHED}"
           done < <(jq -r '.[] | select(.status != "completed") | .databaseId' /tmp/scan-runs.json 2> /dev/null)
           [[ "${SHEP_BUSY}" != ' ' ]] && echo "🚧 review-address in flight/queued for PR(s):${SHEP_BUSY}"
+
+          # ---- Actions queue census (read-only, no lever) ------------------
+          # Repo-wide, not autofix-only: the shepherd's own runs are a small
+          # share of the queue, and a census scoped to them would miss the
+          # fan-out that actually fills it. Reads use the workflow token for
+          # the same reason the liveness reads do. Every failure is UNKNOWN,
+          # never zero — a census that reported an empty queue during an API
+          # outage would be worse than no census.
+          QUEUE_OK=true
+          QUEUE_COMPLETE=false
+          QUEUE_DEPTH=''
+          QUEUE_RUNNING=''
+          QUEUE_N=0
+          QUEUE_RECENT_N=0
+          QUEUE_AGED_N=0
+          QUEUE_AGED_OLDEST=''
+          QUEUE_WAIT='n/a'
+          QUEUE_ROWS=''
+          QUEUE_EVENTS=''
+          QUEUE_TREND=''
+          QUEUE_IDS=''
+          rm -f /tmp/queue-pages.jsonl
+          for ((QUEUE_PAGE = 1; QUEUE_PAGE <= QUEUE_MAX_PAGES; QUEUE_PAGE++)); do
+            if ! env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh api \
+              "repos/${REPO}/actions/runs?status=queued&per_page=100&page=${QUEUE_PAGE}" \
+              > /tmp/queue-page.json 2> /dev/null \
+              || ! QUEUE_N="$(jq -er '.workflow_runs | length' /tmp/queue-page.json 2> /dev/null)" \
+              || ! jq -c '.workflow_runs' /tmp/queue-page.json >> /tmp/queue-pages.jsonl 2> /dev/null; then
+              QUEUE_OK=false
+              echo "::warning::queued-run enumeration failed at page ${QUEUE_PAGE}; queue census skipped this tick"
+              break
+            fi
+            if [[ "${QUEUE_PAGE}" == "1" ]] && ! QUEUE_DEPTH="$(jq -er '.total_count' /tmp/queue-page.json 2> /dev/null)"; then
+              QUEUE_OK=false
+              # jq prints "null" before exiting nonzero; the substitution has
+              # already captured it. Unknown depth is empty, not that string.
+              QUEUE_DEPTH=''
+              echo "::warning::queued-run total_count unreadable; queue census skipped this tick"
+              break
+            fi
+            # A short page is the last page. Stopping on the page COUNT alone
+            # would call an exactly-full queue truncated forever.
+            if [[ "${QUEUE_N}" -lt 100 ]]; then
+              QUEUE_COMPLETE=true
+              break
+            fi
+          done
+          if [[ "${QUEUE_OK}" == "true" ]] \
+            && ! QUEUE_RUNNING="$(env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh api \
+              "repos/${REPO}/actions/runs?status=in_progress&per_page=1" --jq '.total_count' 2> /dev/null)"; then
+            QUEUE_OK=false
+            echo "::warning::in-progress count unreadable; queue census skipped this tick"
+          fi
+          if [[ "${QUEUE_OK}" == "true" ]]; then
+            if ! jq -s 'add // []' /tmp/queue-pages.jsonl > /tmp/queue-runs.json 2> /dev/null; then
+              QUEUE_OK=false
+              echo "::warning::queued-run pages could not be merged; queue census skipped this tick"
+            fi
+          fi
+          if [[ "${QUEUE_OK}" == "true" ]]; then
+            # Every stat below is `|| QUEUE_OK=false`, never a bare assignment:
+            # under set -e one unparseable created_at would otherwise abort the
+            # WHOLE tick — taking the levers and the dashboard write down with
+            # a read-only report. A payload jq cannot read voids the census,
+            # exactly like a failed API read.
+            #
+            # QUEUE_N is the last PAGE's length inside the loop; the census
+            # needs the whole enumeration.
+            QUEUE_N="$(jq -r 'length' /tmp/queue-runs.json)" || QUEUE_OK=false
+            # One definition of "aged", shared by the split, the waits and the
+            # breakdown so they can never disagree about which population they
+            # describe. Unknown age is NOT evidence of an aged run (same rule
+            # as ZOMBIE_JQ): such a run stays in the live population.
+            QUEUE_JQ='def aged($now; $hrs): .created_at != null and ((($now | tonumber) - (.created_at | fromdateiso8601)) >= ($hrs | tonumber) * 3600);'
+            QUEUE_AGED_N="$(jq -r --arg now "${NOW_EPOCH}" --arg hrs "${QUEUE_AGED_HOURS}" "${QUEUE_JQ}"'
+              [ .[] | select(aged($now; $hrs)) ] | length' /tmp/queue-runs.json)" || QUEUE_OK=false
+            QUEUE_RECENT_N=$((QUEUE_N - QUEUE_AGED_N))
+            QUEUE_AGED_OLDEST="$(jq -r --arg now "${NOW_EPOCH}" --arg hrs "${QUEUE_AGED_HOURS}" "${QUEUE_JQ}"'
+              [ .[] | select(aged($now; $hrs)) | .created_at ] | sort | first // ""' /tmp/queue-runs.json)" || QUEUE_OK=false
+            # Waits and breakdown describe the LIVE population only. A run
+            # without created_at has unknown age: it is dropped from the
+            # distribution rather than counted as a zero-minute wait.
+            QUEUE_WAIT="$(jq -r --arg now "${NOW_EPOCH}" --arg hrs "${QUEUE_AGED_HOURS}" "${QUEUE_JQ}"'
+              [ .[] | select(aged($now; $hrs) | not) | select(.created_at != null)
+                | ((($now | tonumber) - (.created_at | fromdateiso8601)) / 60 | floor) ] | sort
+              | if length == 0 then "n/a"
+                else "p50 \(.[length / 2 | floor])m · max \(.[-1])m" end' /tmp/queue-runs.json)" || QUEUE_OK=false
+            QUEUE_ROWS="$(jq -r --arg now "${NOW_EPOCH}" --arg hrs "${QUEUE_AGED_HOURS}" "${QUEUE_JQ}"'
+              [ .[] | select(aged($now; $hrs) | not) ]
+              | group_by(.name) | map({name: .[0].name, n: length}) | sort_by(-.n) | .[0:5]
+              | if length == 0 then ""
+                else (map("| \(.name) | \(.n) |") | join("\\n")) + "\\n" end' /tmp/queue-runs.json)" || QUEUE_OK=false
+            QUEUE_EVENTS="$(jq -r --arg now "${NOW_EPOCH}" --arg hrs "${QUEUE_AGED_HOURS}" "${QUEUE_JQ}"'
+              [ .[] | select(aged($now; $hrs) | not) ]
+              | group_by(.event) | map({event: .[0].event, n: length}) | sort_by(-.n) | .[0:6]
+              | map("\(.event) \(.n)") | join(" · ")' /tmp/queue-runs.json)" || QUEUE_OK=false
+            QUEUE_IDS="$(jq -r 'map(.id | tostring) | join(",")' /tmp/queue-runs.json)" || QUEUE_OK=false
+            # Depth is non-monotonic: it falls when runs are cancelled and rises
+            # while the queue drains, so two depths cannot answer "is it going
+            # down". Only the id-set difference can, and only between two
+            # COMPLETE enumerations — a capped one would count runs that merely
+            # left the window as digested. The diff spans EVERY enumerated run,
+            # aged tail included: "no longer queued" is true whatever the age,
+            # and filtering here would report a run crossing the age line as
+            # digested while it sits in the very same queue.
+            if [[ "${QUEUE_COMPLETE}" == "true" ]]; then
+              QUEUE_TREND="$(jq -r --arg prev "${PREV_QUEUE_IDS}" '
+                ($prev | split(",") | map(select(. != ""))) as $p
+                | map(.id | tostring) as $c
+                | ($c | map({key: ., value: true}) | from_entries) as $cs
+                | ($p | map({key: ., value: true}) | from_entries) as $ps
+                | if ($p | length) == 0 then ""
+                  else "digested \([$p[] | select($cs[.] != true)] | length) · new \([$c[] | select($ps[.] != true)] | length) · still queued \([$p[] | select($cs[.] == true)] | length)"
+                end' /tmp/queue-runs.json)" || QUEUE_OK=false
+            fi
+          fi
+          echo "🧮 queue: ok=${QUEUE_OK} complete=${QUEUE_COMPLETE} depth=${QUEUE_DEPTH:-unknown} running=${QUEUE_RUNNING:-unknown} enumerated=${QUEUE_N} live=${QUEUE_RECENT_N} aged=${QUEUE_AGED_N} wait=${QUEUE_WAIT} trend=${QUEUE_TREND:-none}"
 
 
           # Live opt-out recheck used immediately before every MUTATING lever:
@@ -1667,9 +1812,53 @@ jobs:
             echo '| PR | Author | Updated | Note |'
             echo '| --- | --- | --- | --- |'
             printf '%b' "${HUMAN_ROWS}"
+            echo
+            echo '## Actions queue'
+            echo
+            if [[ "${QUEUE_OK}" != "true" ]]; then
+              echo '⚠️ Queue snapshot unreadable this tick — depth, waits and trend are UNKNOWN, not zero. Any previous sample is kept so the next readable tick still has a baseline.'
+            elif [[ "${QUEUE_N}" == "0" ]]; then
+              echo "Queued 0 · in progress ${QUEUE_RUNNING} — the queue is empty at this tick."
+            else
+              echo "Queued ${QUEUE_DEPTH} · in progress ${QUEUE_RUNNING} · enumerated ${QUEUE_N} (${QUEUE_RECENT_N} live + ${QUEUE_AGED_N} aged)"
+              echo
+              if [[ "${QUEUE_AGED_N}" -gt 0 ]]; then
+                echo "> ⚠️ **${QUEUE_AGED_N} queued run(s) are older than ${QUEUE_AGED_HOURS}h** (oldest ${QUEUE_AGED_OLDEST:-unknown}). They are excluded from the waits and the breakdown below: a run this old was never started, and counting it names last season's workflows as today's fan-out. The list is status+age only — check \`gh run view <id> --json jobs\` before deleting any."
+                echo
+              fi
+              echo "Wait since creation (live, under ${QUEUE_AGED_HOURS}h): ${QUEUE_WAIT}"
+              echo
+              if [[ "${QUEUE_COMPLETE}" != "true" ]]; then
+                echo "> ⚠️ Enumeration capped at ${QUEUE_MAX_PAGES} pages of 100 — the waits above are a FLOOR and the breakdown covers the newest ${QUEUE_N} only. No sample is recorded, so no trend until the queue fits again."
+              elif [[ -n "${QUEUE_TREND}" ]]; then
+                echo "Since ${PREV_QUEUE_TS}: ${QUEUE_TREND} (every enumerated run, aged tail included). Depth alone is not drainage — only digested > new is."
+              else
+                echo 'No comparable previous sample (first tick, or the last one was empty, unreadable or capped) — no trend this tick.'
+              fi
+              echo
+              if [[ "${QUEUE_RECENT_N}" == "0" ]]; then
+                echo "No live runs queued — everything enumerated is in the aged tail above."
+              else
+                echo "| Workflow | Queued (live) |"
+                echo '| --- | --- |'
+                printf '%b' "${QUEUE_ROWS}"
+                echo
+                echo "Events (live): ${QUEUE_EVENTS}"
+              fi
+            fi
             if [[ -n "${LIVENESS_OUT}" ]]; then
               echo
               echo "<!-- fleet-shepherd liveness-dispatched: ${LIVENESS_OUT} run=${LIVENESS_RUN_OUT:-none} -->"
+            fi
+            # Recorded only for a COMPLETE, readable enumeration; otherwise the
+            # previous marker is carried forward verbatim so an outage or a
+            # capped surge cannot masquerade as "everything was digested".
+            if [[ "${QUEUE_OK}" == "true" && "${QUEUE_COMPLETE}" == "true" ]]; then
+              echo
+              echo "<!-- fleet-shepherd queue-sample: ts=$(date -u +%Y-%m-%dT%H:%M:%SZ) ids=${QUEUE_IDS} -->"
+            elif [[ -n "${PREV_QUEUE_LINE}" ]]; then
+              echo
+              echo "${PREV_QUEUE_LINE}"
             fi
           } > /tmp/dashboard.md
           # Every act() call is if-wrapped: act propagates the real exit code

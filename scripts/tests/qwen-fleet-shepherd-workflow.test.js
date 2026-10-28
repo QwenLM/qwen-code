@@ -3599,4 +3599,418 @@ exit 1`;
       expect(note(state, 'synced with main')).toBe('synced with main');
     }
   });
+
+  // ---- Actions queue census (read-only) ---------------------------------
+  // Extracted once and replayed by the behavioral tests below, so a workflow
+  // edit updates one extraction instead of drifting between copies.
+  const censusBlock = workflow.match(
+    /(QUEUE_OK=true\n[\s\S]*?echo "🧮 queue: [^\n]*)/,
+  )?.[1];
+  // The `aged` predicate is defined once in the workflow and reused by the
+  // split, the waits and both breakdowns; tests replay it VERBATIM so a drift
+  // in any of them fails here.
+  const queueAgedDef = workflow.match(/QUEUE_JQ='([\s\S]*?)'\n/)?.[1];
+  const QUEUE_POP_ARGS =
+    '--arg now "\\$\\{NOW_EPOCH\\}" --arg hrs "\\$\\{QUEUE_AGED_HOURS\\}" "\\$\\{QUEUE_JQ\\}"';
+  const queueProgram = (assignment, args = QUEUE_POP_ARGS) =>
+    workflow.match(
+      new RegExp(
+        `${assignment}="\\$\\(jq -r ${args}'([\\s\\S]*?)' /tmp/queue-runs\\.json\\)`,
+      ),
+    )?.[1];
+
+  it('censuses the Actions queue read-only, bounded, and fail-closed', () => {
+    expect(workflow).toContain("QUEUE_MAX_PAGES: '5'");
+    expect(workflow).toContain("QUEUE_AGED_HOURS: '24'");
+    expect(censusBlock).toBeTruthy();
+    // Read-only: no lever, no issue, no dispatch. Its only output is the
+    // dashboard body the tick already writes.
+    expect(censusBlock).not.toContain('act ');
+    expect(censusBlock).not.toContain('gh issue');
+    expect(censusBlock).not.toContain('gh workflow run');
+    // Repo-wide, not autofix-scoped — the shepherd's own runs are a small
+    // share of the queue, and the fan-out that fills it is elsewhere. Both
+    // reads ride the workflow token, whose actions scope is guaranteed.
+    expect(censusBlock).toContain('repos/${REPO}/actions/runs?status=queued');
+    expect(censusBlock).toContain('status=in_progress');
+    expect(
+      censusBlock.split('env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh api').length -
+        1,
+    ).toBe(2);
+    // Bounded by a page cap, never an open-ended --paginate.
+    expect(censusBlock).toContain('QUEUE_PAGE <= QUEUE_MAX_PAGES');
+    expect(censusBlock).not.toContain('--paginate');
+    // An unreadable queue is UNKNOWN, never an empty one.
+    expect(censusBlock).toContain('queue census skipped this tick');
+    expect(workflow).toContain('depth, waits and trend are UNKNOWN, not zero');
+  });
+
+  it('behaviorally proves the queue census enumerates every page, caps, and fails closed', () => {
+    const NOW = Math.floor(Date.parse('2026-10-28T00:00:00Z') / 1000);
+    const iso = (minutesAgo) =>
+      new Date((NOW - minutesAgo * 60) * 1000)
+        .toISOString()
+        .replace('.000Z', 'Z');
+    const run = (id, minutesAgo = 10) => ({
+      id,
+      name: 'CI',
+      event: 'pull_request',
+      created_at: iso(minutesAgo),
+    });
+    const page = (runs, total = runs.length) => ({
+      total_count: total,
+      workflow_runs: runs,
+    });
+    const hundred = (from) =>
+      page(
+        Array.from({ length: 100 }, (_, i) => run(from + i)),
+        1000,
+      );
+    const replay = ({ pages, running = '19', maxPages = '5', prev = '' }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'shepherd-queue-'));
+      try {
+        pages.forEach((p, i) =>
+          writeFileSync(join(dir, `page-${i + 1}.json`), JSON.stringify(p)),
+        );
+        // An absent file makes the stub exit nonzero — the API-failure arm.
+        if (running !== null) writeFileSync(join(dir, 'running'), running);
+        writeFileSync(
+          join(dir, 'gh'),
+          `#!/bin/bash
+url="$2"
+printf '%s\\n' "$url" >> '${dir}/calls'
+case "$url" in
+  *status=in_progress*) cat '${dir}/running' ;;
+  *status=queued*)
+    f='${dir}/page-'"\${url##*page=}"'.json'
+    [[ -r "$f" ]] || exit 1
+    cat "$f" ;;
+  *) exit 1 ;;
+esac
+`,
+        );
+        chmodSync(join(dir, 'gh'), 0o755);
+        const out = execFileSync(
+          'bash',
+          [
+            '-c',
+            `set -eo pipefail
+${censusBlock
+  .replace(/\n {10}/g, '\n')
+  .replaceAll('/tmp/queue-', '"$QUEUE_TMP"/queue-')}
+printf '%s|%s|%s|%s|%s|%s|%s|%s' "$QUEUE_OK" "$QUEUE_COMPLETE" "$QUEUE_DEPTH" "$QUEUE_RUNNING" "$QUEUE_N" "$QUEUE_RECENT_N" "$QUEUE_AGED_N" "$QUEUE_TREND"`,
+          ],
+          {
+            env: {
+              ...process.env,
+              PATH: `${dir}:${process.env.PATH}`,
+              QUEUE_TMP: dir,
+              ACTIONS_TOKEN: 'x',
+              REPO: 'QwenLM/qwen-code',
+              NOW_EPOCH: String(NOW),
+              QUEUE_MAX_PAGES: maxPages,
+              QUEUE_AGED_HOURS: '24',
+              PREV_QUEUE_IDS: prev,
+            },
+            encoding: 'utf8',
+          },
+        );
+        return {
+          summary: out.split('\n').at(-1),
+          calls: readFileSync(join(dir, 'calls'), 'utf8').trim().split('\n'),
+        };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+
+    // One short page: depth is the API's total_count, the enumerated count is
+    // the runs actually read, and both are reported.
+    const short = replay({ pages: [page([run(1), run(2), run(3)], 3)] });
+    expect(short.summary).toBe('true|true|3|19|3|3|0|');
+    expect(short.calls).toHaveLength(2);
+
+    // An exactly-full page is NOT the end: the next page is fetched, and its
+    // emptiness is what closes the enumeration. A page-count stop would
+    // report a 100-run queue as truncated forever.
+    const exact = replay({ pages: [hundred(1), page([], 100)] });
+    expect(exact.summary).toBe('true|true|1000|19|100|100|0|');
+    expect(exact.calls).toHaveLength(3);
+
+    // Past the cap the enumeration is INCOMPLETE: no sixth request, and
+    // completeness false so no sample is recorded and no trend is claimed.
+    const capped = replay({
+      pages: [
+        hundred(1),
+        hundred(101),
+        hundred(201),
+        hundred(301),
+        hundred(401),
+      ],
+      prev: '1,2,3',
+    });
+    expect(capped.summary).toBe('true|false|1000|19|500|500|0|');
+    expect(capped.calls).toHaveLength(6);
+    expect(capped.calls.some((c) => c.endsWith('page=6'))).toBe(false);
+
+    // The cap is the env value, not a hardcoded 5.
+    const tuned = replay({ pages: [hundred(1)], maxPages: '1' });
+    expect(tuned.summary).toBe('true|false|1000|19|100|100|0|');
+    expect(tuned.calls).toHaveLength(2);
+
+    // A failed page read is UNKNOWN — and the in-progress read is not even
+    // attempted, so a half-read queue can never be rendered as a whole one.
+    const broken = replay({ pages: [hundred(1)] });
+    expect(broken.summary).toBe('false|false|1000||100|0|0|');
+    expect(broken.calls).toHaveLength(2); // page 1 ok, page 2 failed
+    expect(broken.calls.some((c) => c.includes('status=in_progress'))).toBe(
+      false,
+    );
+
+    // A failed in-progress read voids the whole census: queued-vs-running is
+    // the pair that distinguishes a saturated pool from a stalled dispatcher,
+    // and half of it would read as "nothing is running".
+    expect(replay({ pages: [page([run(1)], 1)], running: null }).summary).toBe(
+      'false|true|1||1|0|0|',
+    );
+
+    // An unreadable total_count is a failure too, not a depth of zero.
+    expect(replay({ pages: [{ workflow_runs: [run(1)] }] }).summary).toBe(
+      'false|false|||1|0|0|',
+    );
+
+    // An empty queue is a KNOWN empty queue: complete, zero, and no waits.
+    expect(replay({ pages: [page([], 0)] }).summary).toBe(
+      'true|true|0|19|0|0|0|',
+    );
+
+    // A payload jq cannot read voids the census instead of aborting the tick.
+    // The stats are `|| QUEUE_OK=false`, not bare assignments: under set -e a
+    // single unparseable created_at would otherwise take the levers and the
+    // dashboard write down with a read-only report. The replay runs under
+    // `set -eo pipefail` and prints its summary LAST, so an abort surfaces as
+    // a missing summary rather than as a passing assertion.
+    // The trailing split/trend fields are whatever the failed jq left behind;
+    // QUEUE_OK=false means the dashboard renders none of them.
+    expect(
+      replay({ pages: [page([{ id: 1, created_at: 'not-a-date' }], 1)] })
+        .summary,
+    ).toMatch(/^false\|true\|1\|19\|1\|/);
+
+    // The aged tail is counted separately, and the trend still SPANS it: a
+    // run that merely crossed the age line is still queued, not digested.
+    expect(
+      replay({
+        pages: [page([run(1), run(2), run(3, 4320), run(4, 4320)], 4)],
+        prev: '3,4',
+      }).summary,
+    ).toBe('true|true|4|19|4|2|2|digested 0 · new 2 · still queued 2');
+
+    // The trend is the id-set difference against the previous complete
+    // sample, carried through the same block that records the next one.
+    expect(
+      replay({
+        pages: [page([run(2), run(3), run(4), run(5)], 4)],
+        prev: '1,2,3',
+      }).summary,
+    ).toBe('true|true|4|19|4|4|0|digested 1 · new 2 · still queued 2');
+  });
+
+  it('behaviorally proves the queue trend separates churn from drainage', () => {
+    const trend = queueProgram(
+      'QUEUE_TREND',
+      '--arg prev "\\$\\{PREV_QUEUE_IDS\\}" ',
+    );
+    expect(trend).toBeTruthy();
+    const diff = (prev, ids) =>
+      execFileSync('jq', ['-r', '--arg', 'prev', prev, trend], {
+        encoding: 'utf8',
+        input: JSON.stringify(ids.map((id) => ({ id }))),
+      }).trim();
+    // THE case two depths cannot answer: same depth, entirely different
+    // runs. A depth delta of 0 reads as "stable"; the set difference shows
+    // the queue merely refilling as fast as it drains.
+    expect(diff('1,2,3', [4, 5, 6])).toBe(
+      'digested 3 · new 3 · still queued 0',
+    );
+    // Real drainage: more digested than new.
+    expect(diff('1,2,3,4', [3, 4, 5])).toBe(
+      'digested 2 · new 1 · still queued 2',
+    );
+    // Nothing moved at all.
+    expect(diff('1,2', [1, 2])).toBe('digested 0 · new 0 · still queued 2');
+    // Everything drained.
+    expect(diff('1,2', [])).toBe('digested 2 · new 0 · still queued 0');
+    // No previous sample (first tick, or the last one was empty, capped or
+    // unreadable) → no trend, never a fabricated "digested 0 · new N".
+    expect(diff('', [1, 2])).toBe('');
+    // A trailing separator in a hand-edited marker is not an empty run id.
+    expect(diff('1,', [1, 2])).toBe('digested 0 · new 1 · still queued 1');
+  });
+
+  it('behaviorally proves the queue waits and breakdown describe the enumerated runs', () => {
+    const waits = queueProgram('QUEUE_WAIT');
+    const rows = queueProgram('QUEUE_ROWS');
+    const events = queueProgram('QUEUE_EVENTS');
+    const agedCount = queueProgram('QUEUE_AGED_N');
+    const agedOldest = queueProgram('QUEUE_AGED_OLDEST');
+    for (const program of [waits, rows, events, agedCount, agedOldest]) {
+      expect(program).toBeTruthy();
+    }
+    expect(queueAgedDef).toBeTruthy();
+    const NOW = Math.floor(Date.parse('2026-10-28T00:00:00Z') / 1000);
+    const at = (minutesAgo) =>
+      new Date((NOW - minutesAgo * 60) * 1000)
+        .toISOString()
+        .replace('.000Z', 'Z');
+    const jq = (program, runs, hrs = '24') =>
+      execFileSync(
+        'jq',
+        [
+          '-r',
+          '--arg',
+          'now',
+          String(NOW),
+          '--arg',
+          'hrs',
+          hrs,
+          queueAgedDef + program,
+        ],
+        { encoding: 'utf8', input: JSON.stringify(runs) },
+      ).trim();
+    const wait = (runs) => jq(waits, runs);
+
+    expect(wait([{ created_at: at(10) }, { created_at: at(220) }])).toBe(
+      'p50 220m · max 220m',
+    );
+    expect(
+      wait([
+        { created_at: at(4) },
+        { created_at: at(107) },
+        { created_at: at(220) },
+      ]),
+    ).toBe('p50 107m · max 220m');
+    // Unknown age is dropped, never counted as a zero-minute wait — a run
+    // with no created_at would otherwise drag the median to the floor.
+    expect(wait([{ created_at: at(60) }, {}])).toBe('p50 60m · max 60m');
+    expect(wait([])).toBe('n/a');
+
+    // Top-5 by count, descending: the fan-out attribution the census exists
+    // for. A sort that kept GitHub's newest-first order would name the wrong
+    // workflows during exactly the surge it is read in.
+    const named = [
+      ...Array.from({ length: 3 }, () => ({
+        name: 'tui-parity',
+        event: 'pull_request',
+      })),
+      ...Array.from({ length: 2 }, () => ({
+        name: 'Review',
+        event: 'pull_request_review',
+      })),
+      { name: 'E2E', event: 'pull_request' },
+      { name: 'Gate', event: 'pull_request' },
+      { name: 'Owner', event: 'pull_request' },
+      { name: 'Triage', event: 'issue_comment' },
+    ];
+    const table = [
+      '| tui-parity | 3 |',
+      '| Review | 2 |',
+      '| E2E | 1 |',
+      '| Gate | 1 |',
+      '| Owner | 1 |',
+    ];
+    // The rows are printf '%b' payload, like every other dashboard table:
+    // escaped separators on the wire, real lines once rendered. Pin both
+    // halves — a literal newline here would break the single-line assignment.
+    expect(jq(rows, named)).toBe(`${table.join('\\n')}\\n`);
+    expect(
+      execFileSync('bash', ['-c', 'printf \'%b\' "$1"', '_', jq(rows, named)], {
+        encoding: 'utf8',
+      }),
+    ).toBe(`${table.join('\n')}\n`);
+    expect(jq(events, named)).toBe(
+      'pull_request 6 · pull_request_review 2 · issue_comment 1',
+    );
+    expect(jq(rows, [])).toBe('');
+
+    // THE live-data defect the aged split exists for. Measured 2026-10-28:
+    // 81 of 231 queued runs were the 2026-08-19 cohort, and two workflows
+    // whose queued runs are ALL corpses outranked the live ones — reporting
+    // them would send the reader after the wrong fan-out entirely.
+    const corpses = [
+      ...Array.from({ length: 26 }, () => ({
+        name: 'Triage Finalize',
+        event: 'issue_comment',
+        created_at: at(101111),
+      })),
+      ...Array.from({ length: 13 }, () => ({
+        name: 'Attachment Guard',
+        event: 'pull_request_review_comment',
+        created_at: at(101000),
+      })),
+      ...Array.from({ length: 11 }, () => ({
+        name: 'Managed Agent gate',
+        event: 'pull_request',
+        created_at: at(120),
+      })),
+      { name: 'Qwen Code CI', event: 'pull_request', created_at: at(60) },
+    ];
+    expect(jq(agedCount, corpses)).toBe('39');
+    expect(jq(agedOldest, corpses)).toBe(at(101111));
+    expect(jq(rows, corpses)).toBe(
+      `${['| Managed Agent gate | 11 |', '| Qwen Code CI | 1 |'].join('\\n')}\\n`,
+    );
+    expect(jq(events, corpses)).toBe('pull_request 12');
+    // Without the split the same fixture reports a 70-day max wait.
+    expect(wait(corpses)).toBe('p50 120m · max 120m');
+
+    // Unknown age stays in the LIVE population (the wedge predicate's rule):
+    // it is not evidence of an aged run.
+    expect(jq(agedCount, [{}, { created_at: at(101111) }])).toBe('1');
+    // The boundary is inclusive at exactly the threshold…
+    expect(jq(agedCount, [{ created_at: at(1440) }])).toBe('1');
+    expect(jq(agedCount, [{ created_at: at(1439) }])).toBe('0');
+    // …and the threshold is the env value, not a hardcoded day.
+    expect(jq(agedCount, [{ created_at: at(120) }], '1')).toBe('1');
+    // Nothing aged → no oldest timestamp, never a bogus one.
+    expect(jq(agedOldest, [{ created_at: at(10) }])).toBe('');
+  });
+
+  it('behaviorally proves the queue sample marker survives an unreadable tick and is dropped when capped', () => {
+    // The marker is the trend's ONLY state. Overwriting it with a partial or
+    // failed enumeration would report every run that merely left the window
+    // as digested — the fake-drainage reading this census must never produce.
+    const marker = workflow.match(
+      /(if \[\[ "\$\{QUEUE_OK\}" == "true" && "\$\{QUEUE_COMPLETE\}" == "true" \]\]; then\n[\s\S]*?\n {12}fi)\n {10}\} > \/tmp\/dashboard\.md/,
+    )?.[1];
+    expect(marker).toBeTruthy();
+    const PREV =
+      '<!-- fleet-shepherd queue-sample: ts=2026-10-27T23:45:00Z ids=1,2,3 -->';
+    const emit = (ok, complete, prev = PREV) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -eo pipefail
+QUEUE_OK='${ok}'
+QUEUE_COMPLETE='${complete}'
+QUEUE_IDS='7,8'
+PREV_QUEUE_LINE='${prev}'
+${marker.replace(/\n {12}/g, '\n')}`,
+        ],
+        { encoding: 'utf8' },
+      ).trim();
+    // A complete, readable tick records the new set.
+    expect(emit('true', 'true')).toMatch(
+      /^<!-- fleet-shepherd queue-sample: ts=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z ids=7,8 -->$/,
+    );
+    // An unreadable tick and a capped one both carry the PREVIOUS marker
+    // forward verbatim, so the next readable tick still diffs against a
+    // complete set.
+    expect(emit('false', 'false')).toBe(PREV);
+    expect(emit('true', 'false')).toBe(PREV);
+    // Nothing to carry forward → no marker at all, never an empty one that
+    // would read as "the queue was empty".
+    expect(emit('false', 'false', '')).toBe('');
+  });
 });

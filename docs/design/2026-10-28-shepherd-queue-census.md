@@ -1,0 +1,171 @@
+# Fleet Shepherd: read-only Actions queue census
+
+[English](2026-10-28-shepherd-queue-census.md) | [简体中文](2026-10-28-shepherd-queue-census.zh-CN.md)
+
+Status: implemented in this PR. Sampling and reporting only; no lever, no issue
+filing, no thresholds.
+
+## Problem
+
+The repository's Actions queue backs up for hours at a time, and nothing in the
+repository reports it. Measured on 2026-10-28 between 13:47 and 14:24 (Beijing):
+229–233 runs queued against 19–33 in progress, with a live median wait of about
+146 minutes.
+
+The Fleet Shepherd already runs every 15 minutes on a hosted runner and already
+maintains a single dashboard issue, but its queue awareness is limited to
+`ZOMBIE_QUEUED_MINUTES`, which watches this loop's own autofix dispatches. A
+repo-wide backlog is invisible until someone opens the Actions tab.
+
+Autofix cannot discover this on its own: its inputs are issue labels, PR reviews,
+comments, and a scheduled scan of open PRs. None of them reads a queue metric.
+
+## Goals
+
+- Make the repo-wide queue observable on a surface a maintainer already reads.
+- Report enough attribution to tell an in-repo cause (event fan-out, PR-stage
+  budget) from an out-of-repo one (pool capacity, a GitHub incident).
+- Answer "is it draining?" honestly, not with a depth delta.
+
+## Non-goals
+
+- No lever. The census never dispatches, reruns, cancels, or deletes anything.
+- No issue filing and no alert thresholds. Whether a backlog is worth acting on,
+  and which side can fix it, stays a human call. Filing an evidence-bearing issue
+  for the in-repo class is a deliberate follow-up, not part of this change.
+- No new scheduled lane. The census rides the shepherd's existing tick.
+
+## Design
+
+One census block in the shepherd's run step, plus one dashboard section.
+
+**Enumeration.** `GET /repos/{repo}/actions/runs?status=queued&per_page=100&page=N`,
+up to `QUEUE_MAX_PAGES` (5) pages, stopping at the first short page. A second
+read takes the `in_progress` total. Both use the workflow token, whose `actions`
+scope is guaranteed, as the liveness reads already do.
+
+**Two populations.** Runs at least `QUEUE_AGED_HOURS` (24) old are the aged tail;
+the rest are live. A single `aged()` jq predicate feeds the split, the wait
+distribution, and both breakdowns, so they cannot disagree about which population
+they describe. Unknown age is not evidence of an aged run.
+
+**Reported.**
+
+- Depth (`total_count`), in-progress count, enumerated count, live/aged split.
+- Wait since creation, p50 and max, over live runs only.
+- Aged-tail banner with the oldest `created_at`.
+- Top 5 workflows and top 6 events by queued count, live runs only.
+- Trend against the previous tick: digested / new / still queued.
+
+**Trend state.** The previous tick's queued run-id set rides in the dashboard
+body as `<!-- fleet-shepherd queue-sample: ts=… ids=… -->`, parsed the same way as
+the existing liveness watermark. The marker is written only for a complete,
+readable enumeration; otherwise the previous marker is carried forward verbatim.
+
+## Decisions and rationale
+
+**Set difference, not depth delta.** Depth is non-monotonic: it falls when runs
+are cancelled and rises while the queue drains. Only "digested > new" means
+drainage. Measured on 2026-10-20, a queue went 724 → 524 while 405 runs were
+digested and 205 new ones arrived; an earlier window that looked identical was
+pure churn.
+
+**Completeness gates the marker.** A capped enumeration is a window, not a set.
+Diffing a complete set against a capped one counts every run that merely left the
+window as digested — manufactured drainage. Demonstrated live: diffing a
+100-of-229 sample against a complete 232-run enumeration reported `new 145`,
+an artifact of the partial baseline rather than a burst.
+
+**The aged tail is excluded from waits and breakdown, but not from the trend.**
+Measured on 2026-10-28, 81 of 231 queued runs were created on 2026-08-19 — the
+500 KB workflow-size incident the shepherd's own comments record — and nothing sat
+between 1 day and 70 days. Including them put p50 at 243m and max at 70 days, and
+ranked `Qwen Triage Finalize` (26) and `Comment Attachment Guard` (13) into the
+top 5 although neither had a single live queued run. Excluding them yields p50
+146m / max 461m and a top 5 of PR Review 55, tui-parity 40, Managed Agent gate 11,
+E2E Tests 9, Qwen Code CI 5. The trend still spans every enumerated run: "no
+longer queued" is true whatever the age, and filtering there would report a run
+crossing the age line as digested while it sits in the same queue.
+
+**24 hours, not `ZOMBIE_QUEUED_MINUTES`.** The wedge threshold (30m) is tuned for
+this loop's own dispatches and is deliberately generous. Applied to a repo-wide
+queue whose live median wait is already hours, it would classify most live runs
+as wedged. The two thresholds answer different questions and stay separate.
+
+**Fail closed.** Any failed read — a page, `total_count`, the in-progress count,
+the page merge, or a stat jq cannot compute — voids the whole census for the
+tick. The section then says UNKNOWN, not zero, and the previous marker survives.
+A census that reported an empty queue during an API outage would be worse than
+no census. The stats carry `|| QUEUE_OK=false` rather than being bare
+assignments: under `set -e` a single unparseable `created_at` would otherwise
+abort the entire tick, taking every lever and the dashboard write down with a
+read-only report.
+
+**Capped, not `--paginate`.** A page cap bounds one tick's cost during a surge and
+makes truncation an explicit, reported state instead of an implicit property of
+GitHub's listing limit.
+
+## Constraints
+
+- The shepherd is checkout-free by design; the census is inline bash and jq, and
+  reads no repository file.
+- The workflow file is subject to the size ratchet in
+  `.github/scripts/check-workflow-size.sh`; `.github/workflows/.size-baseline` is
+  updated in this PR.
+- Cost per tick: at most 6 API calls, on the hosted runner the shepherd already
+  uses. At the measured depth the enumerated payload is about 3.6 MB.
+- `depth` and `enumerated` can differ by a run or two: the depth is the API's
+  count at page 1, and runs keep arriving while later pages are read.
+
+## Risks
+
+- Dashboard body growth. A complete 500-run id set adds roughly 6 KB to a body
+  that is edited in place; GitHub's issue-body limit is 65536 characters.
+- The aged tail is identified by age alone. The list carries no job state, so the
+  banner tells the reader to check `gh run view <id> --json jobs` before deleting
+  anything — an offline runner pool keeps live jobs queued just as long.
+- A workflow name containing `|` would break a table row. No current name does;
+  the failure is cosmetic.
+
+## Validation
+
+Unit coverage in `scripts/tests/qwen-fleet-shepherd-workflow.test.js`, following
+the file's existing convention of extracting the program from the workflow and
+replaying it against fixtures with real `jq` and a PATH-stubbed `gh`:
+
+- Contract: read-only, repo-wide, workflow token, page cap, fail-closed wording.
+- Enumeration: short page, exactly-full page followed by an empty one, cap reached
+  (no sixth request), env-tuned cap, failed page, failed in-progress read,
+  unreadable `total_count`, empty queue, aged split, and a payload jq cannot
+  parse.
+- Trend: churn versus drainage, complete drainage, no previous sample, trailing
+  separator, and a run crossing the age line still counting as still queued.
+- Distribution and breakdown: p50/max, unknown age dropped, top-5 ordering, the
+  corpse-cohort fixture that reproduces the misattribution measured live.
+- Marker: recorded when complete, carried forward when unreadable or capped,
+  absent when there is nothing to carry.
+
+Six mutations were each confirmed to fail the suite: keeping aged runs in the
+breakdown, dropping the completeness gate on the trend, dropping it on the
+marker, stopping on a full page, sorting the fan-out ascending, and turning one
+stat back into a bare assignment — the last aborts the whole replay under
+`set -e`, which is the failure the `|| QUEUE_OK=false` guards exist to prevent.
+
+Live read-only rehearsal against `QwenLM/qwen-code` on 2026-10-28 produced the
+figures quoted above, including a real set difference against a snapshot taken
+25 minutes earlier.
+
+## Acceptance criteria
+
+- The dashboard carries an `## Actions queue` section on every readable tick.
+- An API failure reports UNKNOWN and preserves the previous sample.
+- A capped enumeration reports a floor, records no sample, and claims no trend.
+- Waits and breakdown exclude the aged tail; the banner reports its size and age.
+- No new write, dispatch, or scheduled lane is introduced.
+
+## Open questions
+
+- Thresholds and issue filing for the in-repo class are deferred until the
+  dashboard has produced a few days of real data.
+- Whether the aged tail should be cleaned up is a separate operational decision;
+  this change only makes it visible.
