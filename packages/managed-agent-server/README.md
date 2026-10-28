@@ -28,12 +28,15 @@ existing MySQL defaults. Design:
 [简体中文](../../docs/design/2026-10-20-managed-local-serve.zh-CN.md).
 
 The `central-release` Maven profile attaches sources, Javadoc and GPG signatures
-for the main executable server JAR, without attaching the auxiliary operator
-JARs. Ordinary builds keep the existing attachments and do not activate Central
+for server publication, without attaching the auxiliary operator JARs. The
+executable server JAR uses the `exec` classifier. Ordinary builds keep the existing attachments and do not activate Central
 publishing. The protected `Release Managed server runtime` workflow sets the
 artifact version from an existing CLI release tag and publishes identical JAR
-bytes to Central, GitHub Release assets and the official OSS mirror. The CLI's
-first-use download uses OSS/GitHub and requires no Maven installation. See the
+bytes and checksums to GitHub Release assets and the official OSS mirror after
+full SDK/server verification. Distribution does not require Central credentials,
+GPG signing or a successful Central publication. Signed Maven publication remains
+an independent operation using the existing profile. The CLI's first-use download
+uses OSS/GitHub and requires no Maven installation. See the
 [release procedure](../../docs/users/managed-local-serve.md#publish-the-first-use-jar)
 and its [Chinese version](../../docs/users/managed-local-serve.zh-CN.md#发布首次使用的-jar).
 
@@ -1416,7 +1419,10 @@ mvn -q -DskipTests compile exec:java \
   -Dexec.args='register tenant-a storage-a /absolute/canonical/workspace-a <operation-uuid> --offline-confirmed'
 ```
 
-The same entry is available from a shipped Spring Boot fat jar, without the source checkout or Maven:
+In the reference distribution, run it as
+`bin/qwen-managed-agent-admin storage-registration register tenant-a storage-a /absolute/canonical/workspace-a '<operation-uuid>' --offline-confirmed`;
+`bin/qwen-managed-agent-admin` with no arguments lists every maintenance entry it
+wraps. The same entry is available from a shipped Spring Boot fat jar, without the source checkout or Maven:
 
 ```bash
 java -cp /path/to/app.jar \
@@ -1730,19 +1736,18 @@ npm run test:e2e:managed-harness-restart-approval-expiry
 npm run test:e2e:managed-harness-restart-continuation-closeout
 ```
 
-Five additional arms layer one fault on the Allow path (#14481 step 2). The
-first crashes the replacement Harness as soon as the decision is durably
-recorded; the second holds the Runtime Broker's execution `:start` so the
-crash lands after the `PREPARED` row and before the physical dispatch; the
-third crashes after the approved result commits while the post-tool model
-round is held, so its reissue must reuse the saved request and retract the
-published prefix. All three leave the original Action, prepare key, digest
-and Runtime identity in place, start a third Harness generation, and require
-exactly one settled execution, one file effect and one terminal. The other
-two drop the control plane's reply after it committed; the retry under the
-same `Idempotency-Key` must land on the original record, so a lost decision
-produces one `ACTION_RESPONSE` operation and a lost Turn admission produces
-one Turn row:
+Five arms from #14481 step 2 layer one fault on the Allow path. The first
+crashes the replacement Harness as soon as the decision is durably recorded;
+the second holds the Runtime Broker's execution `:start` so the crash lands
+after the `PREPARED` row and before the physical dispatch; the third crashes
+after the approved result commits while the post-tool model round is held, so
+its reissue must reuse the saved request and retract the published prefix. All
+three leave the original Action, prepare key, digest and Runtime identity in
+place, start a third Harness generation, and require exactly one settled
+execution, one file effect and one terminal. The other two drop the control
+plane's reply after it committed; the retry under the same `Idempotency-Key`
+must land on the original record, so a lost decision produces one
+`ACTION_RESPONSE` operation and a lost Turn admission produces one Turn row:
 
 ```bash
 npm run test:e2e:managed-harness-restart-approval-after-decision
@@ -1752,12 +1757,30 @@ npm run test:e2e:managed-harness-restart-approval-decision-reply-lost
 npm run test:e2e:managed-harness-restart-approval-admission-reply-lost
 ```
 
+The remaining two cover the next barriers of the same matrix. The terminal
+reply-loss arm commits `turn.settled`, loses its reply (and every bounded
+retry of it) until the crash, and restarts the Harness; the replacement
+projects the committed terminal, and no second store commit is required. The
+missing-terminal arm refuses the write itself, so the replacement must
+compensate the payable checkpoint exactly once. Both keep one original
+Action, one settled execution, one file effect, one terminal, the recovered
+model answer and the original cleanup:
+
+```bash
+npm run test:e2e:managed-harness-restart-approval-terminal-reply-lost
+npm run test:e2e:managed-harness-restart-approval-terminal-write-failed
+```
+
 They write their evidence under `.qwen/investigations/g3-step3-implementation/`;
-`G3_VERIFY_REPORT_DIR` overrides the directory. The approval path still has no
-packaged arm for a lost load reply, a failed cleanup followed by another
-crash, a committed terminal that was not delivered, or a payable checkpoint
-whose terminal write is missing; those rows stay focused or integration
-tested (#14481).
+`G3_VERIFY_REPORT_DIR` overrides the directory. The remaining rows stay
+focused or integration tested for now: a refused cleanup release followed by
+another crash (the packaged arm reproduced a control-plane gap where a
+delayed replacement receives no cleanup retry or adoption), the lost
+takeover-load reply (the packaged arm showed the redrive's active handoff
+leaves the original Turn RUNNING instead of projecting its terminal), mixed
+calls and rewritten inputs across a replacement, Hook/MCP/child uncertainty,
+the attempt and stream identities plus the live SSE view, the round and cost
+budgets, and the mixed-version reader/bundle closure (#14481).
 
 Two arms keep a former owner alive while its replacement finishes the Turn
 and then wake it with `SIGCONT`:
@@ -1854,7 +1877,7 @@ See the [English design](../../docs/design/workspace-storage-migration.md) and [
 
 The current baseline includes the Workspace migration schema. Earlier development catalogs require fresh disposable fixtures; do not edit Flyway history to reuse them.
 
-The private artifact is `qwen-managed-agent-server-0.1.0-alpha-workspace-migration.jar`. Set `W1_JDBC_URL`, `W1_JDBC_USER`, `W1_JDBC_PASSWORD`, `W1_RUNTIME_CREDENTIAL_KEY_ID`, and `W1_RUNTIME_CREDENTIAL_KEY` to the original deployment database and Broker credential key. The full request file contains `version` (the JSON integer `1`), `migrationOperationId`, `tenantId`, `storageId`, `fenceOperationId`, `captureOperationId`, `mountRevision`, `sourceRoot`, `targetRoot`, `bundleRoot`, `fileHistoryRoot`, `stateDirectory`, `nodeExecutable`, and `cliEntry`. Fence admission is storage-scoped for bound Sessions; unbound legacy Sessions are outside that ownership. Metadata transactions share the tenant placement lock, so other storages of the same tenant may wait until those transactions finish; file scans and physical retirement hold no such lock. Paths must be canonical absolute deployment paths; roots and the durable Runtime state directory cannot overlap. IDs must be distinct UUIDs. Keep this exact request file for retries.
+The private artifact is `qwen-managed-agent-server-0.1.0-alpha-workspace-migration.jar`; the reference distribution runs the same entry as `bin/qwen-managed-agent-admin workspace-migration`. Set `W1_JDBC_URL`, `W1_JDBC_USER`, `W1_JDBC_PASSWORD`, `W1_RUNTIME_CREDENTIAL_KEY_ID`, and `W1_RUNTIME_CREDENTIAL_KEY` to the original deployment database and Broker credential key. The full request file contains `version` (the JSON integer `1`), `migrationOperationId`, `tenantId`, `storageId`, `fenceOperationId`, `captureOperationId`, `mountRevision`, `sourceRoot`, `targetRoot`, `bundleRoot`, `fileHistoryRoot`, `stateDirectory`, `nodeExecutable`, and `cliEntry`. Fence admission is storage-scoped for bound Sessions; unbound legacy Sessions are outside that ownership. Metadata transactions share the tenant placement lock, so other storages of the same tenant may wait until those transactions finish; file scans and physical retirement hold no such lock. Paths must be canonical absolute deployment paths; roots and the durable Runtime state directory cannot overlap. IDs must be distinct UUIDs. Keep this exact request file for retries.
 
 Before starting a new operation, the original Runtime state directory and retained history directory must exist at canonical paths, and the unchanged Linux identity reader must prove the history volume, including unambiguous birth time. Run maintenance as the original service user; the Runtime state directory must belong to that UID with exact POSIX `0700` permissions, checked by the same durable provider validator without creating or changing it. Failure returns `migration_state_unavailable` or `migration_history_unverified` before creating a migration row/fence or retiring placements. The target copy is still prepared after retirement. Run `java -jar <migration.jar> retire <request.json> --offline-confirmed` first. Then use the existing registration command to fence the original revision with the request's fence ID, and capture the W1b bundle with the request's capture ID. Prepare the target Workspace through the external offline copy procedure, preserving modes and the copied source marker. Run `prepare` and then `promote` with the same arguments. The first `prepare` and every new `promote` attempt verify sealed content, live source, target, retained history and original physical identities. Replaying `prepare` after PREPARED or any completed operation returns the saved receipt without rescanning; use `promote` for fresh transition verification. `inspect <request.json>` reads progress and the original receipt. `abort <request.json> --offline-confirmed` requires all placements retired and W1a still fenced; it does not restart anything or remove target artifacts. After abort or invalidation, prepare a fresh external target copy matching the new capture before starting a new operation; foreign marker or temporary files are rejected.
 

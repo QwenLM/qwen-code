@@ -280,3 +280,54 @@ describe('SubAgentPanel sub-tool timestamps', () => {
     expect(container.textContent).toContain('2 item(s)');
   });
 });
+
+describe('SubAgentPanel agent path', () => {
+  it('keeps the path on the name title without rendering it as a chip', () => {
+    // Nothing in the projection can produce a path deeper than `/root/<name>`
+    // today: the nested sub-content fallback was unreachable, so a visible
+    // nested-path chip claimed a capability the wire never delivers. The path
+    // stays available on hover, where it is accurate at any depth.
+    const container = renderPanel(
+      {
+        callId: 'agent-1',
+        toolName: 'Task',
+        status: 'completed',
+        args: { subagent_type: 'security' },
+        agentPath: '/root/security/deps',
+      },
+      { hideHeader: false },
+    );
+    expect(container.textContent).not.toContain('/root/security/deps');
+    expect(
+      container.querySelector('[title="/root/security/deps"]'),
+    ).not.toBeNull();
+  });
+
+  it('keeps a depth-1 path off the visible header but on the name title', () => {
+    // At depth 1 the path's last segment *is* the type name the header already
+    // shows, so rendering both is noise; hover still gives the full path.
+    const container = renderPanel(
+      {
+        callId: 'agent-1',
+        toolName: 'Task',
+        status: 'completed',
+        args: { subagent_type: 'general-purpose' },
+        agentPath: '/root/general-purpose',
+      },
+      { hideHeader: false },
+    );
+    expect(container.textContent).not.toContain('/root/general-purpose');
+    expect(
+      container.querySelector('[title="/root/general-purpose"]'),
+    ).not.toBeNull();
+  });
+
+  it('renders no path chrome when the daemon stamped no identity', () => {
+    const container = renderPanel(
+      { callId: 'agent-1', toolName: 'Task', status: 'completed' },
+      { hideHeader: false },
+    );
+    expect(container.querySelector('[title^="/root"]')).toBeNull();
+    expect(container.textContent).not.toContain('/root');
+  });
+});
