@@ -210,7 +210,7 @@ export class FileCommandLoader implements ICommandLoader {
       const configPath = path.join(ext.path, EXTENSIONS_CONFIG_FILENAME);
       if (fsSync.existsSync(configPath)) {
         const configContent = fsSync.readFileSync(configPath, 'utf-8');
-        const config = JSON.parse(configContent);
+        const config = JSON.parse(stripUtf8Bom(configContent));
 
         if (config.commands) {
           const commandsArray = Array.isArray(config.commands)

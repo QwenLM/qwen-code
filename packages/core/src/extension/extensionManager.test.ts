@@ -3832,6 +3832,19 @@ describe('extension tests', () => {
       expect(serverConfig.env!['MISSING_VAR']).toBe('$UNDEFINED_ENV_VAR');
       expect(serverConfig.env!['MISSING_VAR_BRACES']).toBe('${ALSO_UNDEFINED}');
     });
+
+    it('should load a manifest saved with a UTF-8 BOM', async () => {
+      writeTree(path.join(userExtensionsDir, 'test-extension'), {
+        [EXTENSIONS_CONFIG_FILENAME]:
+          '\uFEFF' +
+          JSON.stringify({ name: 'test-extension', version: '1.0.0' }),
+      });
+
+      const { extensions } = await ready();
+
+      expect(extensions).toHaveLength(1);
+      expect(extensions[0].config.name).toBe('test-extension');
+    });
     describe('refreshTools', () => {
       it('refreshTools should return early if config is not set', async () => {
         const manager = createExtensionManager();
