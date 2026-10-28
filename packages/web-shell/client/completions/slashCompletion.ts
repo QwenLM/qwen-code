@@ -6,6 +6,7 @@ import type {
 } from '@codemirror/autocomplete';
 import { Fzf } from 'fzf';
 import type { CommandInfo } from '../adapters/types';
+import { WEB_SHELL_LANGUAGES, languageLabel } from '../i18n';
 import type { WebShellLanguage } from '../i18n';
 import {
   compareCommandsByCategory,
@@ -54,6 +55,11 @@ interface SubcommandNode {
   children?: SubcommandNode[];
 }
 
+const LANGUAGE_OPTIONS: SubcommandNode[] = WEB_SHELL_LANGUAGES.map((l) => ({
+  name: l,
+  description: languageLabel(l),
+}));
+
 const SUBCOMMAND_TREE_ZH: Record<string, SubcommandNode[]> = {
   agents: [
     { name: 'manage', description: '管理现有 subagents' },
@@ -73,10 +79,7 @@ const SUBCOMMAND_TREE_ZH: Record<string, SubcommandNode[]> = {
     {
       name: 'ui',
       description: '设置 UI 语言',
-      children: [
-        { name: 'en', description: 'English' },
-        { name: 'zh-CN', description: '中文' },
-      ],
+      children: LANGUAGE_OPTIONS,
     },
     {
       name: 'output',
@@ -113,10 +116,7 @@ const SUBCOMMAND_TREE_EN: Record<string, SubcommandNode[]> = {
     {
       name: 'ui',
       description: 'Set UI language',
-      children: [
-        { name: 'en', description: 'English' },
-        { name: 'zh-CN', description: '中文' },
-      ],
+      children: LANGUAGE_OPTIONS,
     },
     {
       name: 'output',

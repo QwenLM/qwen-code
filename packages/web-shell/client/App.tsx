@@ -436,6 +436,7 @@ import {
   languageSettingToWebShellLanguage,
   languageLabel,
   normalizeLanguage,
+  WEB_SHELL_LANGUAGES,
   type WebShellLanguage,
 } from './i18n';
 import { CapacityRecoveryDialog } from './components/workspaces/CapacityRecoveryDialog';
@@ -18240,8 +18241,9 @@ export function App({
                     }),
                     t('language.usage'),
                     t('language.options'),
-                    '  - en: English',
-                    '  - zh-CN: 中文',
+                    ...WEB_SHELL_LANGUAGES.map(
+                      (l) => `  - ${l}: ${languageLabel(l)}`,
+                    ),
                   ].join('\n'),
                 },
               ]);
@@ -18259,22 +18261,21 @@ export function App({
                       t('language.usage'),
                       '',
                       t('language.options'),
-                      '  - en: English',
-                      '  - zh-CN: 中文',
+                      ...WEB_SHELL_LANGUAGES.map(
+                        (l) => `  - ${l}: ${languageLabel(l)}`,
+                      ),
                     ].join('\n'),
                   },
                 ]);
                 return true;
               }
-              const normalizedArg = languageArg.toLowerCase();
-              const valid = ['en', 'zh', 'zh-cn', 'zh_cn'].includes(
-                normalizedArg,
+              const nextLanguage = languageSettingToWebShellLanguage(
+                languageArg,
               );
-              if (!valid) {
+              if (nextLanguage === undefined) {
                 pushToast('error', t('language.invalid'));
                 return true;
               }
-              const nextLanguage = normalizeLanguage(languageArg);
               const owner = { current: sessionOwnerGuard.capture() };
               const previousLanguage = selectedLanguage;
               // The daemon sync is what keeps the agent answering in the

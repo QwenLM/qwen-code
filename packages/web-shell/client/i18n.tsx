@@ -2663,10 +2663,10 @@ const EN: Messages = {
   'slash.category.system': 'System commands',
   'language.changed': (v) => `UI language changed to ${v?.language ?? ''}`,
   'language.current': (v) => `Current UI language: ${v?.language ?? ''}`,
-  'language.invalid': 'Invalid language. Available: en, zh-CN',
+  'language.invalid': `Invalid language. Available: ${WEB_SHELL_LANGUAGES.join(', ')}`,
   'language.options': 'Available options:',
   'language.set': 'Set UI language',
-  'language.usage': 'Usage: /language ui [en|zh-CN] | output <language>',
+  'language.usage': `Usage: /language ui [${WEB_SHELL_LANGUAGES.join('|')}] | output <language>`,
   'localCommand.noSession':
     'No active session yet. Send your first message before using this command.',
   'localCommand.diffNoWorkspace':
@@ -7105,10 +7105,10 @@ const ZH: Messages = {
   'slash.category.system': '系统',
   'language.changed': (v) => `UI 语言已切换为 ${v?.language ?? ''}`,
   'language.current': (v) => `当前 UI 语言：${v?.language ?? ''}`,
-  'language.invalid': '语言无效。可用值：en, zh-CN',
+  'language.invalid': `语言无效。可用值：${WEB_SHELL_LANGUAGES.join(', ')}`,
   'language.options': '可用选项：',
   'language.set': '设置 UI 语言',
-  'language.usage': '用法：/language ui [en|zh-CN] | output <language>',
+  'language.usage': `用法：/language ui [${WEB_SHELL_LANGUAGES.join('|')}] | output <language>`,
   'localCommand.noSession':
     '当前还没有会话。请先发送第一条消息，再使用这个命令。',
   'localCommand.diffNoWorkspace': '当前还没有可用于查看变更的工作区。',
