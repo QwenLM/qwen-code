@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @license
  * Copyright 2025 Qwen team
  * SPDX-License-Identifier: Apache-2.0
@@ -826,6 +826,20 @@ describe('extractShellOperationsAcrossCommand', () => {
       expect(across('HOME[1]=/tmp/one ; cd ; echo {} > settings.json')).toEqual(
         [write('/home/tester/settings.json')],
       );
+      // `unset -f` looks up a function and `unset -n` a nameref, so neither
+      // removes the variable and `HOME` keeps its value.
+      for (const command of ['unset -f HOME', 'unset -n HOME']) {
+        expect(across(`${command} ; cd ; echo {} > settings.json`)).toEqual([
+          write('/home/tester/settings.json'),
+        ]);
+      }
+      // A redirect on either side of the assignment statement is performed by
+      // the shell, not by the assignment, so `HOME` still changes. The
+      // `/dev/null` target is reported the same way the other redirect rows
+      // report it, and the later writes get the latch.
+      expect(
+        across('HOME=/tmp/attacker > /dev/null ; cd ; echo {} > settings.json'),
+      ).toEqual([write('/dev/null'), uncertainWrite('/repo/settings.json')]);
       // Bash recognises an assignment before quote removal, so a quote or an
       // escape inside the name makes the whole word a command name instead.
       // `export`/`readonly` reject an array subscript outright ("not a valid
