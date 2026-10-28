@@ -323,17 +323,19 @@ ambiguous rather than verify a guessed PR. Then, in order:
    reviews and CI results that arrived since are data to fold into that
    answer, never a reason to re-verify — the same rule the watch gate
    applies.
-3. `H != P` → run the follow-up protocol above: classify the `P..H` delta,
-   lead with the previous-finding status table, re-measure every
-   carried-forward finding at `H`.
-4. Inherit the previous round's coordinates (`--repo`, assets repo/branch)
+3. Register the round in the shared watch state before starting it. Read
+   `.qwen/tmp/verify-pr-watch-<n>.json`: when it already records `H` or
+   marks a round in flight, let that round answer instead of starting a
+   duplicate. Otherwise write `H` as in-flight to that file **before** the
+   round starts — the same write-before-start rule the watch prompt follows,
+   so a watch fire during the manual round skips `H` — and record `H` as
+   verified in the same file once the round completes.
+4. Run the follow-up protocol above: classify the `P..H` delta, lead with
+   the previous-finding status table, re-measure every carried-forward
+   finding at `H`.
+5. Inherit the previous round's coordinates (`--repo`, assets repo/branch)
    instead of asking again. Publishing stays a per-invocation request: the
    phrase alone does not post a comment.
-5. If a watch is installed for this PR, read
-   `.qwen/tmp/verify-pr-watch-<n>.json` first — a watch round may already
-   be in flight for `H`; let it finish instead of racing it. After a
-   completed manual round, record `H` in that same file so the watch does
-   not fire again for a head already verified.
 
 To make this trigger automatic instead of typed, install `--watch` (above);
 the two share that head-dedup file.
