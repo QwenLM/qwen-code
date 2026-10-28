@@ -225,7 +225,7 @@ for is a file no round produces, and a check over an absent file is silent:
 - A vacuity matrix over every guard this change adds: revert one clause in
   place, run the suite that should catch it, restore. A row counts as killed
   only when the named assertion goes red, not merely some assertion. Measured:
-  32 rows, 32 killed, including a control row on the pre-existing
+  35 rows, 35 killed, including a control row on the pre-existing
   `merge-ready`/`fail` guard, so the other kills are not "the harness never
   reached the code". Each row also carries the commit that introduced its
   clause, derived rather than assigned: the first branch commit whose blob
@@ -236,7 +236,7 @@ for is a file no round produces, and a check over an absent file is silent:
   claim; the same data claimed per-commit is refused, naming them. The rule
   caught its own author, and the answer was to narrow the claim rather than
   invent a row.
-- Sixteen of those rows exist because self-audit found defects in this change
+- Nineteen of those rows exist because self-audit found defects in this change
   itself. Five from the first pass: a warning-suppression branch that let a
   malformed ledger reach a null read, a refusal message that blamed the head
   for a malformed list item, a `--compare` that read clean when both sides were
