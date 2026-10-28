@@ -2,7 +2,9 @@ import { useDaemonAvailability } from '../../daemon/availability-context.js';
 import {
   Fragment,
   useCallback,
+  useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -13,6 +15,7 @@ import {
   type ReactNode,
   type RefObject,
 } from 'react';
+import { createPortal } from 'react-dom';
 import {
   useActions,
   useChannels,
@@ -75,6 +78,7 @@ import {
 import { WebShellThemeId, type WebShellTheme } from '../../themeContext';
 import { useBrand, useBrandName } from '../../brandContext';
 import { useI18n } from '../../i18n';
+import { McpAppGeneratedUiOwnerContext } from '../../mcpAppHostContext';
 import { Input } from '../ui/input';
 import { Button } from '../ui/button';
 import { Empty, EmptyMedia, EmptyDescription } from '../ui/empty';
@@ -545,6 +549,8 @@ interface WebShellSidebarProps {
   sessionContent?: ReactNode;
   sessionHeader?: ReactNode;
   managedWorkspaces?: ReactNode;
+  canOpenSettings?: boolean;
+  archivedSessionsTarget?: HTMLElement | null;
   managedArchivedSessions?: ManagedArchivedSessionsStatus & {
     content: ReactNode;
   };
@@ -1107,6 +1113,7 @@ export function WebShellSidebar({
   onOpenHome,
   onCollapsedChange,
   onOpenSettings,
+  canOpenSettings,
   onOpenAgents,
   onOpenPlugins,
   onOpenChannels,
@@ -1149,6 +1156,7 @@ export function WebShellSidebar({
   sessionHeader,
   managedWorkspaces,
   managedArchivedSessions,
+  archivedSessionsTarget,
   onSearchQueryChange,
   currentSessionActive = true,
   showSessionSourceSwitch = true,
@@ -1218,6 +1226,7 @@ export function WebShellSidebar({
   const actions = useActions();
   const workspaceActions = useWorkspaceActions();
   const workspace = useWorkspace();
+  const generatedUiOwner = useContext(McpAppGeneratedUiOwnerContext);
   // Fixed per-origin rank for host groups (#13727): every connected host,
   // including the focused one, occupies its stable position regardless of
   // focus, so switching hosts never reshuffles the sidebar.
@@ -1337,6 +1346,13 @@ export function WebShellSidebar({
       : 'default'
     : undefined;
   const daemonAvailable = useDaemonAvailability() === 'available';
+  const [archiveSessionSource, setArchiveSessionSource] =
+    useState<SidebarSessionSource>('default');
+  const archiveSourceType = sourceMetadataEnabled
+    ? showSessionSourceSwitch
+      ? archiveSessionSource
+      : 'default'
+    : undefined;
   const channelManagementEnabled = Boolean(
     workspace.capabilities?.features.includes('channel_management'),
   );
@@ -1587,8 +1603,7 @@ export function WebShellSidebar({
       view: 'organized',
       group: 'pinned',
     });
-  const [archivedExpanded, setArchivedExpanded] = useState(false);
-  const [archivedContentMounted, setArchivedContentMounted] = useState(false);
+  const archivedExpanded = Boolean(archivedSessionsTarget);
   const [standaloneRefreshKey, setStandaloneRefreshKey] = useState(0);
   const [standaloneArchivedStatus, setStandaloneArchivedStatus] = useState({
     count: 0,
@@ -1620,7 +1635,7 @@ export function WebShellSidebar({
       includePrimaryWorkspaceSessions,
     pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'archived',
-    ...(selectedSessionSource ? { sourceType: selectedSessionSource } : {}),
+    ...(archiveSourceType ? { sourceType: archiveSourceType } : {}),
     ...(organizationEnabled
       ? { view: 'organized' as const, group: 'all' }
       : {}),
@@ -2080,15 +2095,13 @@ export function WebShellSidebar({
         options: {
           pageSize: SESSION_LIST_PAGE_SIZE,
           archiveState: 'archived',
-          ...(selectedSessionSource
-            ? { sourceType: selectedSessionSource }
-            : {}),
+          ...(archiveSourceType ? { sourceType: archiveSourceType } : {}),
           ...(organizationEnabled
             ? { view: 'organized' as const, group: 'all' }
             : {}),
         },
       })),
-    [organizationEnabled, secondaryWorkspaceCwds, selectedSessionSource],
+    [organizationEnabled, secondaryWorkspaceCwds, archiveSourceType],
   );
   const secondaryArchivedSnapshots = useSessionCatalogQueries(
     workspace.client,
@@ -2113,9 +2126,17 @@ export function WebShellSidebar({
   const secondaryArchivedError = secondaryArchivedSnapshots.some(
     (snapshot) => snapshot.error !== undefined,
   );
-  const toggleArchived = useCallback(() => {
-    if (!archivedExpanded) {
-      setArchivedContentMounted(true);
+  // Start the fresh read before catalog subscriptions auto-load the same entry.
+  useLayoutEffect(() => {
+    if (!archivedExpanded || archiveSourceType === 'channel') {
+      setStandaloneArchivedStatus((current) =>
+        current.count === 0 && !current.loading && !current.error
+          ? current
+          : { count: 0, loading: false, error: false },
+      );
+    }
+    if (!archivedExpanded) return;
+    if (sessionArchiveEnabled) {
       const queries = [
         ...(includePrimaryWorkspaceSessions && archivedCatalogQuery
           ? [archivedCatalogQuery]
@@ -2126,10 +2147,11 @@ export function WebShellSidebar({
         sessionCatalogController.refreshQueries(queries);
       }
     }
-    setArchivedExpanded((expanded) => !expanded);
   }, [
     archivedCatalogQuery,
     archivedExpanded,
+    archiveSourceType,
+    sessionArchiveEnabled,
     includePrimaryWorkspaceSessions,
     secondaryArchivedQueries,
     sessionCatalogController,
@@ -2494,7 +2516,7 @@ export function WebShellSidebar({
       ...(includePrimaryWorkspaceSessions ? archivedSessions : []),
       ...secondaryArchivedSessions,
     ]) {
-      if (!matchesSessionSource(session, selectedSessionSource)) continue;
+      if (!matchesSessionSource(session, archiveSourceType)) continue;
       byIdentity.set(getIdentityForSession(session), session);
     }
     return [...byIdentity.values()];
@@ -2502,7 +2524,7 @@ export function WebShellSidebar({
     archivedSessions,
     getIdentityForSession,
     includePrimaryWorkspaceSessions,
-    selectedSessionSource,
+    archiveSourceType,
     secondaryArchivedSessions,
   ]);
   const effectiveArchivedLoading =
@@ -3594,9 +3616,13 @@ export function WebShellSidebar({
     const removeSession =
       scope.kind === 'locked' || scope.kind === 'restricted'
         ? async (id: string) => {
+            const invalidateDeleted = generatedUiOwner?.captureSessionDeletion(
+              scope.cwd,
+            );
             const result = await workspace.client
               .workspaceByCwd(scope.cwd)
               .deleteSessionsData([id]);
+            invalidateDeleted?.([...result.removed, ...result.notFound]);
             const itemError = result.errors.find(
               (entry) => entry.sessionId === id,
             );
@@ -3631,6 +3657,7 @@ export function WebShellSidebar({
     deleteArchivedSession,
     deleteCandidate,
     deleteSession,
+    generatedUiOwner,
     getIdentityForSession,
     isCurrentSession,
     onError,
@@ -5799,6 +5826,8 @@ export function WebShellSidebar({
       onLoadStandaloneSession &&
       onStandaloneNotice,
   );
+  const archivedStandaloneSessionsVisible =
+    standaloneSessionsVisible && archiveSourceType !== 'channel';
   const handleStandaloneMutation = useCallback(() => {
     setStandaloneRefreshKey((value) => value + 1);
   }, []);
@@ -5878,45 +5907,22 @@ export function WebShellSidebar({
       (!sessionArchiveEnabled &&
         !standaloneSessionsVisible &&
         managedArchivedSessions === undefined) ||
-      searchQuery.trim()
+      !archivedSessionsTarget
     ) {
       return null;
     }
 
     const archivedCount =
       allArchivedSessions.length +
-      (standaloneSessionsVisible ? standaloneArchivedStatus.count : 0) +
+      (archivedStandaloneSessionsVisible ? standaloneArchivedStatus.count : 0) +
       (managedArchivedSessions?.count ?? 0);
     const archivedLoadingWithStandalone =
       effectiveArchivedLoading ||
-      (standaloneSessionsVisible && standaloneArchivedStatus.loading) ||
+      (archivedStandaloneSessionsVisible && standaloneArchivedStatus.loading) ||
       managedArchivedSessions?.loading;
     const archivedErrorWithStandalone =
       effectiveArchivedError ||
-      (standaloneSessionsVisible && standaloneArchivedStatus.error);
-
-    const header = (
-      <button
-        type="button"
-        className={styles.archivedHeader}
-        aria-expanded={archivedExpanded}
-        onClick={toggleArchived}
-      >
-        <span className={styles.archivedTitle} style={{ flex: '0 1 auto' }}>
-          {t('sidebar.archivedTitle')}
-        </span>
-        <span className={styles.archivedChevron} aria-hidden="true">
-          {archivedExpanded ? <ChevronDownIcon /> : <ChevronRightIcon />}
-        </span>
-        {archivedExpanded && archivedCount > 0 && (
-          <span className={styles.archivedCount}>{archivedCount}</span>
-        )}
-      </button>
-    );
-
-    if (!archivedContentMounted) {
-      return <div className={styles.archivedSection}>{header}</div>;
-    }
+      (archivedStandaloneSessionsVisible && standaloneArchivedStatus.error);
 
     const retry = (
       <button
@@ -5952,8 +5958,35 @@ export function WebShellSidebar({
 
     const content = (
       <>
+        {showSessionSourceSwitch && sourceMetadataEnabled && (
+          <Tabs
+            className="px-2 pb-2"
+            value={archiveSessionSource}
+            onValueChange={(value) =>
+              setArchiveSessionSource(value as SidebarSessionSource)
+            }
+          >
+            <TabsList
+              className="w-full"
+              aria-label={t('sidebar.archiveSessionSource')}
+            >
+              <TabsTrigger value="default" className="min-w-0">
+                <ListTodoIcon />
+                <span className="min-w-0 truncate">
+                  {t('sidebar.sessionSource.tasks')}
+                </span>
+              </TabsTrigger>
+              <TabsTrigger value="channel" className="min-w-0">
+                <MessageCircleIcon />
+                <span className="min-w-0 truncate">
+                  {t('sidebar.sessionSource.channels')}
+                </span>
+              </TabsTrigger>
+            </TabsList>
+          </Tabs>
+        )}
         {managedArchivedSessions?.content}
-        {standaloneSessionsVisible &&
+        {archivedStandaloneSessionsVisible &&
           onLoadStandaloneSession &&
           onStandaloneNotice && (
             <StandaloneRecents
@@ -6006,18 +6039,16 @@ export function WebShellSidebar({
       </>
     );
 
-    return (
-      <div className={styles.archivedSection}>
-        {header}
-        <div className={styles.archivedList} hidden={!archivedExpanded}>
-          {content}
-        </div>
-      </div>
+    return createPortal(
+      <div className={styles.archivedList}>{content}</div>,
+      archivedSessionsTarget,
     );
   }, [
-    archivedContentMounted,
-    archivedExpanded,
+    archivedSessionsTarget,
     archivedWorkspaceGroups,
+    archiveSessionSource,
+    showSessionSourceSwitch,
+    sourceMetadataEnabled,
     allArchivedSessions,
     connection.catchingUp,
     connection.error,
@@ -6035,15 +6066,14 @@ export function WebShellSidebar({
     onStandaloneNotice,
     reloadArchived,
     renderSessionRow,
-    searchQuery,
     secondaryWorkspaceCwds,
     sessionCatalogController,
     sessionArchiveEnabled,
     standaloneArchivedStatus,
     standaloneRefreshKey,
+    archivedStandaloneSessionsVisible,
     standaloneSessionsVisible,
     t,
-    toggleArchived,
   ]);
   const primaryNavigation = hasScrollingPrimaryNav && (
     <div className={styles.primaryNav}>
@@ -6270,27 +6300,28 @@ export function WebShellSidebar({
           footer &&
           typeof footer === 'object' &&
           footer.render?.()}
-        {projectFeaturesEnabled && footerItems.has('settings') && (
-          <button
-            className={styles.footerButton}
-            type="button"
-            title={t('sidebar.settings')}
-            aria-label={t('sidebar.settings')}
-            aria-current={
-              railLayout && activePage === 'settings' ? 'page' : undefined
-            }
-            onClick={() => openNavigation(onOpenSettings)}
-          >
-            <span className={`${styles.navIcon} ${styles.settingsIcon}`}>
-              <SettingsIcon size={16} strokeWidth={1.2} />
-            </span>
-            {(railLayout || (!collapsed && !footerCompact)) && (
-              <span className={styles.footerButtonLabel}>
-                {t('sidebar.settings')}
+        {(canOpenSettings ?? projectFeaturesEnabled) &&
+          footerItems.has('settings') && (
+            <button
+              className={styles.footerButton}
+              type="button"
+              title={t('sidebar.settings')}
+              aria-label={t('sidebar.settings')}
+              aria-current={
+                railLayout && activePage === 'settings' ? 'page' : undefined
+              }
+              onClick={() => openNavigation(onOpenSettings)}
+            >
+              <span className={`${styles.navIcon} ${styles.settingsIcon}`}>
+                <SettingsIcon size={16} strokeWidth={1.2} />
               </span>
-            )}
-          </button>
-        )}
+              {(railLayout || (!collapsed && !footerCompact)) && (
+                <span className={styles.footerButtonLabel}>
+                  {t('sidebar.settings')}
+                </span>
+              )}
+            </button>
+          )}
       </div>
       <div className={styles.footerActions}>
         {footerItems.has('theme') && (
@@ -7908,7 +7939,6 @@ export function WebShellSidebar({
                     }}
                   />
                 )}
-              {!liveView && archivedSection}
             </SidebarSessionSurface>
           </div>
 
@@ -7927,6 +7957,7 @@ export function WebShellSidebar({
           onPointerDown={handleResizePointerDown}
         />
       </aside>
+      {archivedSection}
     </>
   );
 }

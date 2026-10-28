@@ -47,7 +47,7 @@ async function fixture(root) {
       <version>0.4.0-alpha</version>
       <java.version>21</java.version>
     `,
-    'packages/managed-agent-server/target/qwen-managed-agent-server-0.4.0-alpha.jar':
+    'packages/managed-agent-server/target/qwen-managed-agent-server-0.4.0-alpha-exec.jar':
       'server',
     'packages/managed-agent-server/target/qwen-managed-agent-server-0.4.0-alpha-operator-recovery.jar':
       'recovery',

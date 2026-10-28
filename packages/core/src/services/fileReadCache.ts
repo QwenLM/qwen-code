@@ -358,6 +358,13 @@ export class FileReadCache {
     return false;
   }
 
+  /** Disarm quote-back after truncation without revoking prior-read rights. */
+  markAllReadsEvictedFromHistory(): void {
+    for (const entry of this.byInode.values()) {
+      entry.readResidentInHistory = false;
+    }
+  }
+
   /** Remove the entry for the given Stats, if any. */
   invalidate(stats: Stats): void {
     if (!FileReadCache.hasVerifiableIdentity(stats)) {

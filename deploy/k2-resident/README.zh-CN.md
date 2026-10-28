@@ -12,7 +12,7 @@ Read、Write 和 Edit。Session 关闭会结算并撤销原上下文，下一个
 可选的显式空闲退役由 #14765 实现，使用方式见下文。本配置不需要 Go 工具链、
 定制 containerd/shim、节点 collector 或冷启动安装。
 
-[2026-10-24 范围决定](../../docs/design/2026-10-23-csi-evidence-source.zh-CN.md)明确完整 CSI 审计不再是首版前置条件。Session 交接保留原 Pod/PVC，显式空闲退役保留存储归属。平台托管回收和跨 Workspace 卷复用仍是后续工作。
+[2026-10-24 范围决定](../../docs/design/2026-10-23-csi-evidence-source.zh-CN.md)明确完整 CSI 审计不再是首版前置条件。Session 交接保留原 Pod/PVC，仅删除 Pod 的空闲退役保留存储归属。下文的显式 S2/S3 回收与保留数据交接实现需要独立原生验收。
 
 ## 可信平台与支持的存储
 
@@ -93,7 +93,7 @@ reservation 并阻止切换。每个 Session 的 cwd 固定，可在下一 Sessi
 
 ```bash
 java -Dloader.main=com.alibaba.qwen.code.managedagent.persistence.ResidentWorkspaceRetirementMain \
-  -cp target/qwen-managed-agent-server-0.1.0-alpha.jar \
+  -cp target/qwen-managed-agent-server-0.1.0-alpha-exec.jar \
   org.springframework.boot.loader.launch.PropertiesLauncher \
   inspect /absolute/path/retirement.json \
   --spring.config.additional-location=file:/absolute/path/application.yaml
@@ -110,7 +110,7 @@ Kubernetes API 核验原资源，再记录带原 UID/resourceVersion 前置条�
 及 Background propagation 的正常 Pod DELETE。凭据留在已有 API/token/CA 配置中。
 不删除 PVC/PV、Secret 或保护对象。同版本重试只读原结果，不重发；新版本需要
 显式再次调用，总计最多八次。HTTP 回复和 Pod 缺失不会释放存储或重新开放 Workspace。
-物理释放和复用延后。
+回收必须使用下文的准备与完成协议。
 
 即使 Kubernetes 已接受删除，回复丢失仍可能留下 `UNKNOWN`。原 Pod 一旦具有
 `deletionTimestamp` 或已缺失，不同 `resourceVersion` 也不能授权再次 DELETE。
@@ -120,6 +120,22 @@ Kubernetes API 核验原资源，再记录带原 UID/resourceVersion 前置条�
 完整退役设计见[English](../../docs/design/2026-10-20-k2-physical-retirement-progress.md)
 与[简体中文](../../docs/design/2026-10-20-k2-physical-retirement-progress.zh-CN.md)。
 原生 ACK 退役资格验证继续待完成。
+
+## 显式回收与同租户数据交接
+
+[S2/S3 设计](../../docs/design/2026-10-27-resident-workspace-reclamation.zh-CN.md) 增加健康正常清理路径。原生 ACK 验收仍待完成，不能由命令存在或先前 S1 运行推断通过。保留现有单控制面信任边界，使用专用 runtime namespace/PVC。准入/RBAC 必须保证只有该 Managed provisioner 能创建使用此 PVC 的 Pod；维护和交接期间不得有外部控制器、其他 Pod 创建者、PV 物理别名或管理员存储操作。现有资源保护不约束 Pod 创建的独占性。
+
+维护凭据额外需要 runtime namespace 的 Pod `list`/`patch`、`kube-node-lease` 中 Node Lease 的 `get`，以及集群 PV/VolumeAttachment `list`。不修改节点、attachment、PVC 或 PV。不要向 worker 和公开调用者授予这些权限。
+
+沿用上文的 Java 入口、请求与部署配置：
+
+1. 关闭全部 Session，然后执行 `begin /absolute/path/retirement.json`。退役期间与释放后，Workspace 均保持 `DRAINING`。
+2. 读取精确原 Pod 当前 resourceVersion，在 DELETE 前执行 `prepare-reclamation /absolute/path/retirement.json <resourceVersion>`。它校验原运行中容器、健康节点/boot、Node Lease、原 attachment 及物理卷独占使用，保存基线，再条件添加操作的自有 finalizer。之后重新读取 resourceVersion。
+3. 执行 `delete-pod /absolute/path/retirement.json <fresh-resourceVersion>`，发送原有正常 30 秒优雅 DELETE，保留实际响应或 `UNKNOWN`。没有准备步骤的仅删除操作，不能在 Pod 消失后追认合格。
+4. 执行 `reclaim /absolute/path/retirement.json` 观察完成。要求保留的原 Pod 和明确终止的原容器、相同节点/boot 上新鲜的 Ready 状态和 Lease、节点不再使用卷且没有 attachment、物理别名或其他 Pod 消费者。任一条件缺失都保留归属。持久化清理回执后，仅条件移除自己的 finalizer，并等待原 Pod 消失，再原子释放操作/绑定/active slot/物理归属。结果未知时执行 `inspect`；命令有界，平台尚未完成时可能需要再次调用。
+5. 只有达到 `RELEASED` 后，管理员才可将唯一配置映射替换为同租户的新 Workspace ID，准备经审查的 saved Workspace 元数据和 OWNER 授权，并按新配置重启。保留原 PVC/PV、注册、磁盘和文件。新请求的 runtime generation 从 1 开始，取得下一个物理 reservation revision。旧 Workspace/请求保持围栏；配置替换和后续复用后，持有当前 OWNER 授权仍可读取其终态回执。
+
+数据策略是 `retain-same-tenant-admin-handoff/1`。物理 revision 在占用/释放轮次间递增且不重置；保留的数据所属租户拒绝其他租户的别名。不提供自动分配、数据擦除、强制释放 override 或重新开放已退役 Workspace。节点/API 分区、身份变化、强制删除，或保存清理回执前原 Pod 消失，均保留归属。基础设施修复本身不授权产品释放。回执依赖独占使用边界持续成立，不授权外部重挂载。
 
 ## 故障处理与验收
 
