@@ -17622,7 +17622,18 @@ describe('App session callbacks', () => {
       isBackgrounded: true,
       subagentType: 'general-purpose',
     };
-    testState.backgroundTasks = [agent];
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    testState.backgroundTasks = [agent, shell];
 
     renderApp({
       header: { items: ['title', 'environment', 'rightPanel'] },
@@ -17637,7 +17648,9 @@ describe('App session callbacks', () => {
       },
     });
 
-    expect(testState.latestStatusBarTasks).toEqual([agent]);
+    // The pill must see the unfiltered snapshot (the design doc's
+    // "1 shell, 3 local agents"), not an agents-only projection.
+    expect(testState.latestStatusBarTasks).toEqual([agent, shell]);
   });
 
   it('keeps the footer pill suppressed in the shipped entry without a running agent', () => {
@@ -17650,7 +17663,20 @@ describe('App session callbacks', () => {
       startTime: 2,
       runtimeMs: 20,
     };
-    testState.backgroundTasks = [monitor];
+    // A parked (paused) background agent must not re-open the pill: the
+    // gate is hasActiveBackgroundAgent (running only), not a kind check.
+    const pausedAgent: DaemonSessionAgentTaskStatus = {
+      kind: 'agent',
+      id: 'agent-paused',
+      label: 'Research',
+      description: 'Research',
+      status: 'paused',
+      startTime: 3,
+      runtimeMs: 30,
+      isBackgrounded: true,
+      subagentType: 'general-purpose',
+    };
+    testState.backgroundTasks = [monitor, pausedAgent];
 
     renderApp();
 
@@ -17667,6 +17693,19 @@ describe('App session callbacks', () => {
       startTime: 3,
       runtimeMs: 30,
       isBackgrounded: true,
+      subagentType: 'general-purpose',
+    };
+    // The host footer gets composer tasks plus BACKGROUND agents (design
+    // doc); foreground agents are transcript-only and must stay out.
+    const foregroundAgent: DaemonSessionAgentTaskStatus = {
+      kind: 'agent',
+      id: 'agent-foreground',
+      label: 'Refactor foreground',
+      description: 'Refactor foreground',
+      status: 'running',
+      startTime: 5,
+      runtimeMs: 50,
+      isBackgrounded: false,
       subagentType: 'general-purpose',
     };
     const monitor: DaemonSessionMonitorTaskStatus = {
