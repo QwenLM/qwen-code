@@ -5204,6 +5204,7 @@ export class Session implements SessionContext {
     this.goalRuntimeUnsubscribe = undefined;
     this.removeSkillChangeListener?.();
     this.removeSkillChangeListener = undefined;
+    this.commandSnapshotPending = false;
     this.notificationAbortController?.abort();
     this.notificationAbortController = null;
     this.notificationProcessing = false;
@@ -14130,7 +14131,7 @@ export class Session implements SessionContext {
       this.commandSnapshotInFlight = undefined;
       if (this.commandSnapshotPending) {
         this.commandSnapshotPending = false;
-        if (!this.disposed) {
+        if (!this.disposed && !this.closing) {
           void this.sendAvailableCommandsUpdate({ skipIfUnchanged: true });
         }
       }

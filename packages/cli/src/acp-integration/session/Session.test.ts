@@ -13578,6 +13578,29 @@ describe('Session', () => {
         expect(frames()).toHaveLength(0);
       });
 
+      it('does not run a queued re-run for a session disposed during the build', async () => {
+        let releaseBuild!: () => void;
+        const buildGate = new Promise<void>((resolve) => {
+          releaseBuild = resolve;
+        });
+        getAvailableCommandsSpy.mockImplementation(async () => {
+          await buildGate;
+          return [makeCommand('late')];
+        });
+
+        await skillManager.notifyConfigChanged();
+        await vi.waitFor(() =>
+          expect(getAvailableCommandsSpy).toHaveBeenCalledTimes(1),
+        );
+        await skillManager.notifyConfigChanged();
+        session.dispose();
+        releaseBuild();
+        await flush();
+
+        expect(getAvailableCommandsSpy).toHaveBeenCalledTimes(1);
+        expect(frames()).toHaveLength(0);
+      });
+
       it('publishes exactly one frame for refreshSkillsFromSettings', async () => {
         getAvailableCommandsSpy.mockResolvedValue([makeCommand('same')]);
 
