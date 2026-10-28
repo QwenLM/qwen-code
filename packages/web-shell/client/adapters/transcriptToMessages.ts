@@ -319,8 +319,7 @@ function getSessionBranchDisplayName(data: unknown): string | null {
 function getMidTurnInjectedImages(
   data: unknown,
 ):
-  | Array<{ data: string; mimeType: string; attachmentId?: string }>
-  | undefined {
+  Array<{ data: string; mimeType: string; attachmentId?: string }> | undefined {
   if (!data || typeof data !== 'object') return undefined;
   const items = (data as { items?: unknown }).items;
   if (!Array.isArray(items) || items.length === 0) return undefined;
@@ -611,14 +610,24 @@ export function transcriptBlocksToDaemonMessages(
       (block as DaemonTextTranscriptBlock).agent,
     );
     if (block.kind === 'status' && block.source === 'teammate_activity') {
+      const activityData = getRecord(block.data);
+      // On an inter-agent message the wire's `agent` names the *recipient*; the
+      // author travels structurally in `data.author` (the frame's own text is
+      // already `author → recipient`). Chip the author so the chip and the row
+      // text cannot disagree, and chip nothing when a message row has no
+      // trustworthy author — never fall back to the recipient.
+      const activityTeammate =
+        activityData?.['status'] === 'message'
+          ? teammateOfAuthor(activityData['author'])
+          : (teammateOfAuthor(activityData?.['author']) ?? blockTeammate);
       messages.push({
         id: block.id,
         role: 'system',
         content: block.text,
         variant: 'info',
         source: block.source,
-        data: getRecord(block.data),
-        ...(blockTeammate ? { teammate: blockTeammate } : {}),
+        data: activityData,
+        ...(activityTeammate ? { teammate: activityTeammate } : {}),
         timestamp: blockTime,
         sourceBlockIds: [block.id],
       });
@@ -1935,6 +1944,20 @@ function getToolCallRawInput(
 }
 
 /**
+ * Teammate author of an inter-agent message, from the frame's structured
+ * `data.author`. The leader (`kind: 'root'`) and an unknown sender stay
+ * unchipped, the same way subagent frames do.
+ */
+function teammateOfAuthor(value: unknown): { name: string } | undefined {
+  const author = getRecord(value);
+  if (!author || author['kind'] !== 'teammate') return undefined;
+  const agentName = author['agentName'];
+  if (typeof agentName !== 'string') return undefined;
+  const name = agentName.split('/').filter(Boolean).pop();
+  return name ? { name } : undefined;
+}
+
+/**
  * Teammate (Agent Team peer) author of a projected notification, from the
  * daemon-minted identity. Peer reports and roster changes carry
  * `_meta.agent.kind === 'teammate'`; tasks and subagents stay unchipped.
@@ -2194,8 +2217,7 @@ type ParsedInsight =
   | { type: 'insight_error'; error: string };
 
 type InsightSegment =
-  | { kind: 'text'; text: string }
-  | { kind: 'insight'; data: ParsedInsight };
+  { kind: 'text'; text: string } | { kind: 'insight'; data: ParsedInsight };
 
 const INSIGHT_PREFIXES = [
   '"insight_progress":',

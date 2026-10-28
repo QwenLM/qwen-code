@@ -725,7 +725,9 @@ describe('transcriptBlocksToDaemonMessages', () => {
           kind: 'peer',
           author,
         },
-        teammate: { name: 'checker' },
+        // The row reads `writer → checker`; the chip names the author, not
+        // the recipient the wire's `agent` field carries for this frame.
+        teammate: { name: 'writer' },
         timestamp: 4,
       },
     ]);

@@ -9,6 +9,31 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+// Compile-time pin for the peer-activity fields. TypeScript does not
+// excess-property-check an object spread, so the sites that spread
+// `item.structured` into this payload lose the check the literal form keeps;
+// declaring the fields here restores it in both directions.
+{
+  const declared: NotificationRecordPayload['backgroundTask'] = {
+    taskId: 'teammate-activity-1',
+    status: 'message',
+    kind: 'peer',
+    author: { agentName: '/root/writer', depth: 1, kind: 'teammate' },
+    toolName: 'read_file',
+    phase: 'call',
+    success: false,
+  };
+  void declared;
+  const undeclared: NotificationRecordPayload['backgroundTask'] = {
+    taskId: 'teammate-activity-2',
+    status: 'message',
+    kind: 'peer',
+    // @ts-expect-error - an undeclared field must still be rejected here
+    undeclaredActivityField: true,
+  };
+  void undeclared;
+}
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/approval-mode.js';
 import { AuthType } from '../utils/auth-type.js';
@@ -29,6 +54,7 @@ import {
   type AtCommandRecordPayload,
   type SessionModelRecordPayload,
   type TurnResultRecordPayload,
+  type NotificationRecordPayload,
 } from './chatRecordingService.js';
 import { MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS } from '../utils/toolResultDisplayCompaction.js';
 import * as jsonl from '../utils/jsonl-utils.js';
@@ -93,23 +119,21 @@ type ResumedSpec = [string, 'user' | 'assistant', string, Partial<ChatRecord>?];
 // Resumed records without provenance, each parented on the previous one (the
 // first on `root`), one second apart; assistants carry a model.
 function resumedChain(root: string | null, ...specs: ResumedSpec[]) {
-  return specs.map(
-    ([uuid, type, text, extra], index): ChatRecord => ({
-      uuid,
-      parentUuid: index ? specs[index - 1][0] : root,
-      sessionId: 'test-session-id',
-      timestamp: `2026-06-27T00:00:0${index}.000Z`,
-      type,
-      ...extra,
-      cwd: '/test/project/root',
-      version: '1.0.0',
-      message: {
-        role: type === 'assistant' ? 'model' : 'user',
-        parts: [{ text }],
-      },
-      ...(type === 'assistant' ? { model: 'gemini-pro' } : {}),
-    }),
-  );
+  return specs.map(([uuid, type, text, extra], index): ChatRecord => ({
+    uuid,
+    parentUuid: index ? specs[index - 1][0] : root,
+    sessionId: 'test-session-id',
+    timestamp: `2026-06-27T00:00:0${index}.000Z`,
+    type,
+    ...extra,
+    cwd: '/test/project/root',
+    version: '1.0.0',
+    message: {
+      role: type === 'assistant' ? 'model' : 'user',
+      parts: [{ text }],
+    },
+    ...(type === 'assistant' ? { model: 'gemini-pro' } : {}),
+  }));
 }
 
 function deferred() {
