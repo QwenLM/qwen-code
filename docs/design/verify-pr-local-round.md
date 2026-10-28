@@ -155,7 +155,7 @@ for is a file no round produces, and a check over an absent file is silent:
   against this repo's API, a review object carries `submitted_at` and no
   `updated_at`, and neither editing its body nor dismissing it moves that
   stamp. On PR 15388, review 5673309455 reports `submitted_at` 2026-10-27T19:47:16Z
-  and was dismissed at 2026-10-28T01:22:57Z, five and a half hours later. The
+  and was dismissed at 2026-10-28T01:22:57Z, five hours and thirty-six minutes later. The
   stamp still reads the earlier time, so the dismissal did not move it, and
   the review still reports a 4838-character body: nothing but `state` records
   that it was dismissed. Whether its body was edited too is unobservable,
