@@ -3,7 +3,11 @@
  * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
-import { App, applyDocumentTheme } from '@modelcontextprotocol/ext-apps';
+import {
+  App,
+  applyDocumentTheme,
+  applyHostStyleVariables,
+} from '@modelcontextprotocol/ext-apps';
 import { ViewController } from './controller.js';
 import type { CaptureResult, ViewState } from './controller.js';
 import { buildContinuationText } from './continuation.js';
@@ -265,10 +269,16 @@ app.addEventListener('toolresult', (result) => {
   void controller.receive(result);
 });
 app.addEventListener('toolcancelled', () => controller.stop());
-app.addEventListener('hostcontextchanged', () => {
-  const theme = app.getHostContext()?.theme;
+function syncHostStyle(): void {
+  const context = app.getHostContext();
+  const theme = context?.theme;
+  const variables = context?.styles?.variables;
   if (theme) applyDocumentTheme(theme);
-});
+  if (variables) applyHostStyleVariables(variables);
+  surface.setHostStyle({ theme, variables });
+}
+
+app.addEventListener('hostcontextchanged', syncHostStyle);
 app.onteardown = async () => {
   controller.stop();
   return {};
@@ -288,8 +298,7 @@ app.connect().then(
       app.getHostVersion()?.name === 'qwen-code-web-shell' &&
       !!app.getHostCapabilities()?.message?.text;
     renderContinuation();
-    const theme = app.getHostContext()?.theme;
-    if (theme) applyDocumentTheme(theme);
+    syncHostStyle();
   },
   () =>
     controller.fail('The interactive host is unavailable. Use the summary.'),

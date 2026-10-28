@@ -57,6 +57,7 @@ vi.mock('@modelcontextprotocol/ext-apps', () => ({
     }
   },
   applyDocumentTheme: vi.fn(),
+  applyHostStyleVariables: vi.fn(),
 }));
 
 const input = {
