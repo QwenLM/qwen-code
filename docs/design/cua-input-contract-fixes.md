@@ -4,33 +4,39 @@
 
 ## Status and scope
 
-Prepare native driver, CUA SDK, Browser SDK and Node REPL 0.26.1 together, following the existing release contract. Browser behavior and the Qwen Code CLI version are outside this change.
+Prepare native driver, CUA SDK, Browser SDK and Node REPL 0.26.1 together under the existing release contract. This is a patch release for input delivery, window selection and lifecycle reporting. Browser behavior and the Qwen Code CLI version are unchanged. Cursor/PiP feature work is separate.
 
-The original 22-file input/session correction patch is the `0b2ec12bab99` patch used by the four running RecreationBench groups, rebased onto current main for release preparation. The release candidate additionally corrects macOS accessory-app discovery after an offline reproduction of the first R8 startup failures. Those experiments retain their original 0.26.0 package metadata and immutable archive; the additional fix does not upgrade or restart them. The user explicitly authorized the full runs before complete macOS case acceptance; results remain pending.
+Earlier real-host checks used private, immutable payloads with 0.26.0 compatibility metadata. Their evidence applies to the corresponding functional changes; it does not establish production signatures, installation of future 0.26.1 assets, or complete benchmark acceptance. No benchmark or monitoring operation is part of this release preparation.
 
 ## Windows dispatch and cleanup
 
 A UIA provider can remain inside an action while its modal is open. The clicked menu popup can disappear, and a new same-process dialog can have no owner. Waiting only for a dialog owned by the original popup misses this transition.
 
-Capture the exact target HWND/PID and existing visible same-process windows. Only after native invocation starts, recognize a disappearing target or the supported disabled-target/new-modal transition as pending. Preserve strict ownership, capture and foreground authorization helpers. The direct/embedded click and secondary-action paths retain COM references, NoActivate, session dispatch and runtime drain guards until the original operation ends. Disappeared-target and ownerless-modal receipts stay unconfirmed and require observation; existing owned-surface evidence retains its classification. No input is replayed.
+Capture the exact target HWND/PID and existing visible same-process windows. Only after native invocation starts, recognize a disappearing target or the supported disabled-target/new-modal transition as pending. The direct/embedded click and secondary-action paths retain COM references, NoActivate, session dispatch and runtime drain guards until the original operation ends. Disappeared-target and ownerless-modal receipts stay unconfirmed and require observation. Existing owned-surface evidence retains its classification. Input is not replayed.
 
-An unsupported UIA pattern can select another actuator before input. Other pattern-lookup failures refuse dispatch. An error after possible input must not trigger another actuator. Bound SDK session shutdown waits through typed `session_cleanup_pending`, retaining its handle until a final result and preserving final cleanup errors. Successful cleanup hooks keep their existing deduplication; failed hooks retain their existing semantics.
+An unsupported UIA pattern can select another actuator before input. Other pattern-lookup failures refuse dispatch. An error after possible input must not trigger another actuator. Bound SDK session shutdown waits through typed `session_cleanup_pending`, retaining its handle until a final result and preserving final cleanup errors. Successful cleanup hooks retain their existing deduplication.
 
-## Other Windows corrections
+## Windows targeting and readback
 
-The foreground SendInput preflight recognizes the actual TokenUIAccess value. Posted-message and synthetic-pointer guards remain stricter; no process elevation or signed-worker installation is added.
+When the app is in the background, start window selection at a candidate owner rather than an idle owned helper, then retain the existing validated `GetLastActivePopup` promotion. Exact foreground preference, same-PID/owner-chain checks, independent small windows and the single-minimized-window branch remain intact. Screenshot crop and coordinate conversion do not change. A small screenshot is not replaced with desktop pixels or accepted by lowering the caller's size threshold.
 
-An actual Edit child identifies the editable route in a ComboBoxEx whose inner combo reports a list-only style. Existing value/index readback and unknown-value refusal for lists without an Edit remain in place.
+Legacy PostMessage text input reads back only an exact cached element. Without an element index, it no longer performs a system-focused UIA query that can block or identify an unrelated recipient. The receipt remains unverified and asks for a fresh observation before another input. A changed value alone does not prove the insertion point.
 
-## macOS identity and input
+An actual Edit child identifies the editable route in a ComboBoxEx whose inner combo reports a list-only style. Existing value/index readback and unknown-value refusal for lists without an Edit remain in place. Foreground SendInput preflight recognizes the actual TokenUIAccess value; posted-message and synthetic-pointer guards remain stricter. No elevation or signed-worker installation is added.
 
-Application inventory retains live Accessory-policy applications, including menu-bar apps launched outside standard installation directories. Previously those entries were omitted unless the same bundle path appeared in the installation scan, causing exact bundle-ID lookup to fail. Prohibited-policy background processes still require a matching installed bundle, and legacy Regular-only enumeration remains unchanged. Offline source reproduction verifies the discovery defect; historical R8 process activation policy and exact PID/path binding were not retained, so this does not claim complete causal closure or GUI acceptance for the failed guests.
+## macOS identity and discovery
 
-When `PROC_PIDTBSDINFO` is unavailable, `KERN_PROC_PID` can supply the same microsecond process-birth identity. Reject invalid PIDs, incomplete data, PID mismatch and invalid timestamps, retaining subsequent lifetime checks. This historical failure does not establish the cause of every later input with no visible effect.
+Application inventory retains live Accessory-policy applications outside standard installation directories, so exact bundle-ID lookup can find menu-bar apps. Prohibited-policy background processes still require a matching installed bundle, and legacy Regular-only enumeration remains unchanged. This discovery correction does not supply a window or establish GUI acceptance for windowless apps.
 
-Keyboard, pointer, interactive input and cursor-event construction share a CombinedSessionState event source to avoid observed hardware-source construction hangs. Posting destinations, explicit modifiers, PID/window checks and successful focus-restoration policy remain unchanged.
+When `PROC_PIDTBSDINFO` is unavailable, `KERN_PROC_PID` can supply the same microsecond process-birth identity. Reject invalid PIDs, incomplete data, PID mismatch and invalid timestamps, retaining subsequent lifetime checks. Check Objective-C class-factory availability on the class, rather than asking whether its instances implement that factory.
 
-Failed key-focus tap setup rolls back registration, count, tail and idle teardown without constructing a completed-action lease. It therefore does not run post-action restoration before any action occurred. Secondary actions accept exact case-preserved advertised aliases alongside existing raw/lowercase forms, retaining membership and ambiguity checks without an implicit AXPress or pixel fallback.
+## macOS keyboard and text delivery
+
+Keyboard, pointer, interactive input and cursor-event construction share a CombinedSessionState event source. Posting destinations, explicit modifiers and logical PID/window checks remain in place. Failed key-focus tap setup rolls back registration, count, tail and idle teardown without constructing a completed-action lease or running post-action restoration.
+
+For a focused Open/Save field implemented by an auxiliary AX host, resolve its actual keyboard recipient while preserving the logical application's window and ownership checks. A different recipient must be a live, finished Prohibited process proven by the same focused AX object, public owner, exact window and CG owner. A missing private symbol keeps the original recipient; a failed query or mismatched identity refuses before posting. Command shortcuts retain the application PID, and foreground/global routes remain unchanged. No timestamp-only or authentication-bypass diagnostic variant is included.
+
+App text insertion uses supported `AXSelectedText` with the current UTF-16 selection and expected-value readback for literal text. Terminal targets and ASCII control characters retain their guarded key-event routes; unsupported targets continue to fail closed. AX-only readback is not treated as renderer/DOM confirmation for web content. Secondary actions accept exact case-preserved advertised aliases alongside the existing raw/lowercase forms, retaining membership and ambiguity checks without an implicit AXPress or pixel fallback.
 
 ## Clipboard start handshake
 
@@ -38,16 +44,21 @@ Bound only a clipboard transaction's main-thread start to three seconds. The que
 
 This fails closed in a host without a servicing AppKit main queue. It does not install a different GUI host, change identities or replay paste.
 
-## Model-facing documentation
+## Public errors and documentation
 
-The Node REPL initial description directs models to `cua.getState()` or the runtime documentation before desktop actions. App-option examples distinguish numeric IDs, key arrays and JavaScript timeout from app options. No compatibility API is invented.
+A keyboard refusal must recommend supported element/browser actions or explicit desktop observation and focus. It must not recommend `delivery_mode` as a public App option: that option is not in the public schema. An explicit `effect: refused` defaults to `sent: false` when dispatch evidence is absent. An explicit `sent` boolean remains authoritative; unknown mutating failures remain conservative. No new delivery option or automatic retry is added.
+
+Node REPL's initial description directs models to `cua.getState()` or runtime documentation before desktop actions. Examples distinguish numeric IDs, key arrays and JavaScript timeout from app options.
 
 ## Verification and remaining acceptance
 
-Public SimpleConvert, with one Qt6 translation-path API compatibility line and unchanged modal construction, reproduced a 30.341-second click wait on Windows. Corrected MCP click, SDK click and secondary invoke returned in 150/153/149 milliseconds. Independent AX/PNG observations confirmed the modal before one controlled close per run. SDK dispose actually succeeded after 25.681 seconds; no caught error was presented as success. These are scoped host results, not a latency guarantee or proof of every historical AP call's cause.
+- **Windows modal/cleanup:** A public Qt fixture reproduced a 30.341-second click wait. Corrected direct MCP click, SDK click and secondary invoke returned in 150/153/149 ms with independent AX/PNG modal observations. SDK dispose waited through pending cleanup and succeeded after 25.681 seconds. These are scoped host checks; optional UIAccess-worker behavior is separate.
+- **Windows window selection:** A real idle owned helper changed a normal 624×391/14,212-byte PNG into a 2×2/86-byte PNG before the fix. Corrected direct MCP and actual Medium Node REPL/SDK returned the original main-window PNG. The kernel's loaded candidate DLL/NAPI hashes were checked. Background active-popup capture and single-minimized target selection also passed. A minimized screenshot and the foreground selection branch were not accepted by that run. Historical FX's 73-byte image and frozen executable identity are missing, so the original case is not accepted.
+- **macOS editing:** Six one-shot character/deletion, semantic text, Command-selection and Escape checks passed on an owned TextEdit sheet, with independent exact value/range, own-window pixels and process cleanup. This does not establish macOS 14/x64/Electron, standalone CLI, JSONExport or full benchmark parity.
+- **Public refusal contract:** Two new Rust tests fail before the fix and pass after it; the actual public facade/schema test changes from 2 pass/1 fail to 3 pass/0 fail. The core library passes 652 tests serially. Contract checks do not prove native GUI input effects.
 
-Native tests cover pending-window transitions, actuator selection, retained session/runtime lifetime, final cleanup failure, clipboard callback cancellation and birth identity. Version, build, typecheck and packaging checks accompany release preparation.
+Native tests also cover lifecycle retention, final cleanup failure, clipboard callback cancellation, process identity and the window-selection policy. Build, typecheck, version and package checks accompany PR preparation. A parallel core run stalled in existing registry tests; its result is not counted as passing.
 
-TextEdit input and saved-file readback passed within their tested macOS identity/target scope. JSONExport input parity remains unaccepted: company policy terminates the host's self-compiled app before input, and the AP typeText/no-change symptom remains unresolved. That policy does not establish the AP cause. Optional UIAccess-worker behavior, Linux GUI parity, full benchmark quality and the future published 0.26.1 installation are not marked passed.
+Known limits remain explicit: Windows App.paste is unimplemented; a SAFER-derived Medium host retains TokenElevation and can be refused by the existing app-launch token policy; some Windows UIA effects are unconfirmed; Mac TimeToLeave's synchronous readback failure versus later matching text is unresolved. Company policy terminating a self-built Mac app does not establish the AP input cause. Model image-context limits are outside the tool corrections.
 
-Release acceptance requires the corresponding artifacts, normal signed distribution where required, checksum-verified installation and meaningful runtime effects. Builds, permissions, receipts and Running states do not replace those results. No permission, protection, account or model change is included.
+Release acceptance still requires every architecture's artifacts, normal signing/notarization where applicable, checksum-verified installation and final consumer checks. Builds, permissions, acknowledgements and benchmark control-plane status do not replace runtime effects or quality results. No permission, protection, account or model change is included.

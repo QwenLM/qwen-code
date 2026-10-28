@@ -6,9 +6,12 @@
 - macOS process identity checks can read the same PID/birth identity through `KERN_PROC_PID` when `PROC_PIDTBSDINFO` is unavailable. Synthetic events use the combined-session source, and failed focus-guard setup rolls back without running post-action restoration.
 - Clipboard transactions refuse an unserviced main-thread start after three seconds without a late clipboard write. Already-started transactions retain their completion and restoration semantics.
 - macOS accepts the case-preserved advertised secondary-action aliases. Windows recognizes writable Edit children inside ComboBoxEx controls and honors TokenUIAccess only for the foreground SendInput preflight.
+- Windows app observations prefer a visible owner over an idle owned helper, retaining active-popup selection. Unbound PostMessage input avoids system-focused UIA value probes and keeps delivery unverified.
+- macOS literal app text uses verified AX insertion when supported. Editing keys resolve an exact focused AX auxiliary recipient while Command shortcuts keep the logical app PID; Objective-C class factories are checked on the class.
+- Public keyboard refusals recommend supported recovery actions and default explicit refused effects to `sent: false` without overriding explicit dispatch evidence.
 - Clarify the Node REPL's initial API documentation and app-option examples. Native driver, CUA SDK, Browser SDK and Node REPL remain version-aligned.
 
-Windows direct/embedded modal and SDK cleanup checks passed on a real host. Complete macOS JSONExport input validation and the full benchmark results remain pending; these checks do not establish overall GUI parity or quality improvements.
+Scoped Windows direct/embedded modal, cleanup and real Medium Node REPL window-capture checks passed, along with six macOS TextEdit editing checks. Original FX/JSONExport case acceptance, optional UIAccess-worker coverage, Linux GUI parity and public signed 0.26.1 installation remain unaccepted. Windows paste and derived-Medium-host app-launch compatibility are known limits; this release does not claim complete benchmark quality or input parity.
 
 # 0.26.0 (2026-10-16)
 
