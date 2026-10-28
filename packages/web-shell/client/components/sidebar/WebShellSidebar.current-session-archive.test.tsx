@@ -290,7 +290,11 @@ beforeEach(() => {
   connection.error = undefined;
   connection.capabilities = {
     qwenCodeVersion: '1.2.3',
-    features: ['session_archive', 'workspace_qualified_rest_core'],
+    features: [
+      'session_archive',
+      'session_archive_idle_guard',
+      'workspace_qualified_rest_core',
+    ],
   };
   workspace.capabilities = {
     qwenCodeVersion: '1.2.3',
@@ -367,6 +371,30 @@ describe('WebShellSidebar current-session archive (issue #15480)', () => {
         displayName: 'Current session',
         hasActivePrompt: true,
       }),
+    ];
+    active.data = active.sessions;
+    connection.sessionId = 'session-current';
+
+    renderSidebar();
+    await flushSidebar();
+
+    const archiveItem = openSessionMenu('Current session');
+    expect(archiveItem.hasAttribute('data-disabled')).toBe(true);
+    await act(async () => {
+      click(archiveItem);
+    });
+    expect(active.archiveSession).not.toHaveBeenCalled();
+  });
+
+  it('keeps archive disabled for the current session when the daemon cannot guard idleness', async () => {
+    // A daemon without `session_archive_idle_guard` ignores `requireIdle`, so
+    // letting the current session through would close it under running work.
+    connection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_archive', 'workspace_qualified_rest_core'],
+    };
+    active.sessions = [
+      makeSession('session-current', { displayName: 'Current session' }),
     ];
     active.data = active.sessions;
     connection.sessionId = 'session-current';

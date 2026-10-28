@@ -2713,6 +2713,7 @@ describe('Recent sessions shared rows', () => {
       features: [
         'session_organization',
         'session_archive',
+        'session_archive_idle_guard',
         'workspace_qualified_rest_core',
         'standalone_sessions_v1',
       ],
