@@ -49194,13 +49194,24 @@ describe('App view navigation shortcuts (#13175)', () => {
 
   it('leaves the split chord to the browser on a narrow viewport', async () => {
     // The sidebar withholds its split button below the large-screen
-    // breakpoint, so the chord is inert and must not consume the key.
+    // breakpoint, so the chord is inert and must not consume the key —
+    // while the overview chord stays live: its button carries no
+    // large-screen gate, so this one screen pins the gates' width
+    // asymmetry on both sides (button gate and chord must agree).
     stubLargeScreen(false);
     const { container } = renderViewApp();
     await flush();
-    const event = await press(SPLIT_CHORD);
-    expect(event.defaultPrevented).toBe(false);
+    const sidebar = container.querySelector('[data-testid="sidebar"]');
+    expect(sidebar?.getAttribute('data-can-open-sessions-overview')).toBe(
+      'true',
+    );
+    expect(sidebar?.getAttribute('data-can-open-split-view')).toBe('false');
+    const split = await press(SPLIT_CHORD);
+    expect(split.defaultPrevented).toBe(false);
     expect(container.querySelector(SPLIT_VIEW_PAGE)).toBeNull();
+    const overview = await press(OVERVIEW_CHORD);
+    expect(overview.defaultPrevented).toBe(true);
+    expect(container.querySelector(OVERVIEW_PANEL)).not.toBeNull();
   });
 
   it('leaves both chords to the browser when the sidebar does not offer the buttons', async () => {
@@ -49221,6 +49232,35 @@ describe('App view navigation shortcuts (#13175)', () => {
       expect(container.querySelector(SPLIT_VIEW_PAGE)).toBeNull();
       unmount();
     }
+  });
+
+  it('gates each chord on its own footer item', async () => {
+    // The footer items are an independent per-item allowlist, so a host can
+    // offer only one of the two buttons; each chord must follow its own
+    // item, not the other's.
+    stubLargeScreen(true);
+    const { container, unmount } = renderApp({
+      sidebar: { enabled: true, footer: { items: ['sessionsOverview'] } },
+    });
+    await flush();
+    const overview = await press(OVERVIEW_CHORD);
+    expect(overview.defaultPrevented).toBe(true);
+    expect(container.querySelector(OVERVIEW_PANEL)).not.toBeNull();
+    const split = await press(SPLIT_CHORD);
+    expect(split.defaultPrevented).toBe(false);
+    expect(container.querySelector(SPLIT_VIEW_PAGE)).toBeNull();
+    unmount();
+    const splitOnly = renderApp({
+      sidebar: { enabled: true, footer: { items: ['splitView'] } },
+    });
+    await flush();
+    const split2 = await press(SPLIT_CHORD);
+    expect(split2.defaultPrevented).toBe(true);
+    expect(splitOnly.container.querySelector(SPLIT_VIEW_PAGE)).not.toBeNull();
+    const overview2 = await press(OVERVIEW_CHORD);
+    expect(overview2.defaultPrevented).toBe(false);
+    expect(splitOnly.container.querySelector(OVERVIEW_PANEL)).toBeNull();
+    splitOnly.unmount();
   });
 
   it('leaves both chords to the browser when the sidebar withholds the buttons for lack of project features', async () => {
