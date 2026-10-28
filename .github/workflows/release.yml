@@ -713,6 +713,14 @@ jobs:
           CI_BOT_PAT: '${{ secrets.CI_BOT_PAT }}'
         run: '.release-workflow/.github/scripts/run-release-step.sh push-release-branch'
 
+      - name: 'Verify bot PAT (dry run)'
+        if: "${{ needs.prepare.outputs.is_dry_run == 'true' }}"
+        continue-on-error: true
+        env:
+          PAT: '${{ secrets.CI_BOT_PAT }}'
+        run: |-
+          GH_TOKEN="$PAT" gh api "repos/${GITHUB_REPOSITORY}" --jq .full_name || echo "::warning::CI_BOT_PAT is unusable"
+
       - name: 'Download audio capture prebuilds'
         if: |-
           ${{ github.repository == 'QwenLM/qwen-code' }}
