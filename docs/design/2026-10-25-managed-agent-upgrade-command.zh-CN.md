@@ -38,76 +38,87 @@
 
 ### 阶段
 
-`bin/qwen-managed-agent-upgrade <phase>` 是与 bootstrap 并列的 Node.js 脚本，以 root 身份从解压后的新分发产物中运行。它通过 `systemctl show` 读取两个 unit：从服务端 unit 的 `ExecStart` 找到已安装的版本，从 `EnvironmentFiles` 和 `Environment` 属性读取配置。
+`bin/qwen-managed-agent-upgrade <phase>` 是与 bootstrap 并列的 Node.js 脚本，以 root 身份从解压后的新分发产物中运行。它通过 `systemctl show` 读取两个 unit：从服务端 unit 的 `ExecStart` 找到已安装的版本，从 `EnvironmentFiles` 和 `Environment` 属性读取配置。它按 systemd 自己的语法读取环境文件，即 systemd `env-file.c` 中的状态机，因此密码这类值传给 `mysqldump` 时与服务收到的完全一致。用 1579 个随机文件与 systemd 257 做差分运行，没有发现任何差异。
 
 - **`check`**
   - 前置条件：无。
   - 执行：每项输入打印一行，再打印计划；任一 FAIL 时退出码为 1。
 - **`stop`**
-  - 前置条件：`check` 没有 FAIL。
+  - 前置条件：`check` 没有 FAIL，除非新版本已经安装。那时 `stop` 是撤销一次失败的 `start` 的方式，而它所守护的比较已经做过。
   - 执行：
     1. 停止控制面。
     2. 其 cgroup 中仍有进程时执行 `systemctl kill --kill-whom=all`，并等到 cgroup 为空。
     3. 停止 Harness。
 - **`backup`**
-  - 前置条件：两个 unit 都已停止，服务端 cgroup 为空。
+  - 前置条件：两个 unit 都已停止，服务端 cgroup 为空；`backup-tools` 和 `runtime-state` 两行没有 FAIL。
   - 执行：
-    - 用 `mysqldump` 写出 `database.sql`，凭据放在临时选项文件中传入；
-    - 写出 `runtime-state.tar` 和 `configuration.tar`；
+    - 用 `mysqldump` 写出 `database.sql`，凭据放在备份目录之外某个临时目录里的选项文件中传入；
+    - 写出 `runtime-state.tar`、包含版本目录之外配置的 `configuration.tar`，以及按版本目录内路径记录其中配置的 `release-config.tar`；
     - 最后写入 `backup.json`，记录前面这些文件；
     - 任一步失败时删除已写出的内容。
 - **`install`**
   - 前置条件：两个 unit 都已停止；备份仍与当前部署相符；`check` 没有 FAIL。
   - 执行：
-    1. 把新版本复制到 `<分发路径>-releases/<version>`，并校验副本。
+    1. 把新版本复制到 `<分发路径>-releases/<version>` 并校验副本，任一步失败时删除副本。该位置已有目录时，只有其 `SHA256SUMS` 与新分发产物相同、且文件与之相符时才会使用。
     2. 复制已安装版本 `config/` 中的运维文件。
-    3. 用一次 `rename` 替换分发链接。第一次运行改为把已安装的目录移入版本目录，再在原位置放一个链接。
+    3. 用一次 `rename` 替换分发链接。第一次运行改为把已安装的目录移入版本目录，再在原位置放一个链接；第二次 `rename` 失败时把目录移回原处。
 - **`start`**
   - 前置条件：新版本已安装；服务端 unit 已停止；Broker 配置已修改。
   - 执行：
     1. 启动 Harness 并等待其端口就绪。
     2. 通过 `systemd-run`，按 unit 的用户、工作目录和环境运行已安装版本的 `--check`。
-    3. 通过后才启动控制面，并等待 `/actuator/health` 报告 `UP`。
+    3. 通过后才启动控制面，并等待 `/actuator/health` 报告 `UP`。单次探测最多等待 5 秒。unit 失败时报告为失败；到 `--timeout` 仍未健康时保持运行，拒绝信息会指明 `verify` 和 `stop`。
 - **`verify`**
   - 前置条件：两个 unit 都在运行。
   - 执行：
     - 以同样方式运行 `--check --online`；
     - 读取 actuator；
-    - 指定 `--tenant` 时，读取一个 Session 及其 Item；
+    - 指定 `--tenant` 时，在 `--turn` 创建 Session 之前读取最近的 Session 及其 Item；
     - 指定 `--turn` 时，在新 Session 中运行一个 Turn，这会调用模型。
 
-各阶段不保存状态文件，而是每次重新读取 unit、文件和链接，因此因崩溃中断的阶段可以直接重新运行。再次运行 `stop` 不会重复已经完成的操作；`install` 会复用校验和匹配的副本。
+各阶段不保存状态文件，而是每次重新读取 unit、文件和链接，因此因崩溃中断的阶段可以直接重新运行。再次运行 `stop` 不会重复已经完成的操作；`install` 会复用同一构建的副本。重新运行无法弥补的只有一个窗口：第一次 install 的两次 rename 之间发生崩溃。此时分发路径缺失，新链接以 `<分发路径>.upgrade-<后缀>` 留在旁边；每个阶段都会报告这一状态，并给出完成安装所需的 `mv -T` 命令。
 
 ### check 的各行
 
-| 行             | FAIL                                                                | WARN                                                             |
-| -------------- | ------------------------------------------------------------------- | ---------------------------------------------------------------- |
-| `distribution` | 有文件与 `SHA256SUMS` 不符                                          |                                                                  |
-| `deployment`   | unit 未加载，或服务端启动的不是分发产物中的启动脚本                 |                                                                  |
-| `version`      | 版本相同或更旧                                                      |                                                                  |
-| `database`     | 已安装数据库执行过的脚本被修改或删除                                | 有新脚本要执行；无法读取 jar                                     |
-| `java`、`node` | 低于 manifest 的最低版本，或找不到                                  | 版本范围无法解析                                                 |
-| `qwen-code`    |                                                                     | Harness 运行的版本与 manifest 不同                               |
-| `harness-env`  |                                                                     | 存在 `QWEN_HOSTED_HARNESS_BROKER_ARGS`，或 Broker token 设了两份 |
-| `config`       | 已安装版本的 `config/` 中有非文件项                                 |                                                                  |
-| `unit-files`   |                                                                     | 两个版本之间 unit 模板有变化                                     |
-| `layout`       | 版本目录位于分发产物内部，或与 install 要移动的目录不在同一文件系统 |                                                                  |
-| `backup-tools` |                                                                     | `PATH` 上没有 `mysqldump`                                        |
+| 行              | FAIL                                                                                       | WARN                                                             |
+| --------------- | ------------------------------------------------------------------------------------------ | ---------------------------------------------------------------- |
+| `distribution`  | 有文件与 `SHA256SUMS` 不符                                                                 |                                                                  |
+| `deployment`    | unit 未加载，服务端启动的不是分发产物中的启动脚本，新 manifest 无法读取，或 install 被中断 |                                                                  |
+| `version`       | 版本相同或更旧                                                                             |                                                                  |
+| `database`      | 已安装数据库执行过的脚本被修改或删除；可重复脚本被删除                                     | 有脚本要执行，包括有变化的可重复脚本；无法读取 jar               |
+| `java`、`node`  | 低于 manifest 的最低版本，或找不到                                                         | 版本范围无法解析                                                 |
+| `qwen-code`     |                                                                                            | Harness 运行的版本与 manifest 不同                               |
+| `harness-env`   |                                                                                            | 存在 `QWEN_HOSTED_HARNESS_BROKER_ARGS`，或 Broker token 设了两份 |
+| `config`        | 已安装版本的 `config/` 中有非文件项                                                        |                                                                  |
+| `unit-files`    |                                                                                            | 两个版本之间 unit 模板有变化                                     |
+| `layout`        | 版本目录位于任一分发产物内部，或与 install 要移动的目录不在同一文件系统                    |                                                                  |
+| `backup-tools`  | `--mysqldump` 指定的客户端未安装，或数据源不是单主机 MySQL URL                             | （指定 `--skip-database` 时为 SKIP）                             |
+| `runtime-state` | 有其他来源可以设置状态目录且未传 `--runtime-state`；`--runtime-state` 不是目录             | 配置的目录不存在（未配置时为 SKIP）                              |
 
-`database` 行从两个服务端 jar 中读取 Flyway 脚本：取 manifest 中的控制面组件，读取 `BOOT-INF/classes/db/**/V*__*.sql` 或 `U*__*.sql` 条目。一个简短的 zip 读取器沿中央目录找到条目，再用 `zlib` 解压，因此早于本改动的版本也能比较。决定这一行结果的是脚本内容，而不是 manifest 中的版本字符串：即使两个 manifest 都写版本 `1`，脚本有变化也会报 FAIL。
+`check` 接受后续阶段的选项，并把它们写进打印的计划，因此这些行描述的正是运维将要执行的那次运行。`stop` 和 `install` 会重复 `backup-tools` 以上的所有行；`backup` 重复最后两行。
+
+`database` 行从两个服务端 jar 中读取 Flyway 脚本：取 manifest 中的控制面组件，读取 `BOOT-INF/classes/db/**/` 下按 Flyway 规则命名的版本化、撤销和可重复脚本。与 Flyway 一样，`V`、`U`、`R` 前缀区分大小写，`.sql` 后缀不区分。一个简短的 zip 读取器沿中央目录找到条目，再用 `zlib` 解压，因此早于本改动的版本也能比较。决定这一行结果的是脚本内容，而不是 manifest 中的版本字符串：即使两个 manifest 都写版本 `1`，脚本有变化也会报 FAIL。Flyway 会重新执行有变化的可重复脚本，因此这种情况报 WARN；可重复脚本被删除则会导致校验失败。读取器在 jar 中一个脚本都没找到时，视为无法读取而不是没有变化，因为没有哪个服务端会不带 schema 发布。
 
 `harness-env` 报 WARN 而不是 FAIL：备份必须保留旧版本读取的文件，所以修改发生在 `backup` 之后；修改完成之前，`start` 会拒绝执行。
 
+### Runtime 状态目录
+
+服务端的 `application.yml` 把 `qwen.managed-agent.runtime-broker.state-directory` 映射到 `QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY`，而这个变量是命令读取的唯一来源。Spring 还会从许多其他地方解析这个属性：launcher 传入的配置文件中的字面量、`JAVA_OPTS` 等变量中的系统属性、`SPRING_APPLICATION_JSON`、relaxed binding 形式的变量 `QWEN_MANAGEDAGENT_RUNTIMEBROKER_STATEDIRECTORY`、unit 的启动参数，以及 profile 或 import 引入的文件。它们都优先于映射的变量。
+
+命令不重新实现 Spring 的解析。只要上述来源中有提到该属性的，或者加载了命令无法读取的配置，它就逐一列出，`backup` 随即拒绝执行，直到 `--runtime-state` 指明目录。缺少数据库所引用的 Runtime 状态的备份无法一致地恢复，因此悄悄漏掉状态的备份比拒绝更糟。没有任何来源配置该目录时（例如未开启工具路径的部署），`backup` 不归档 Runtime 状态，并打印说明。
+
 ### 备份是否仍然有效
 
-`backup.json` 记录五项内容：
+`backup.json` 记录以下内容：
 
 - 已安装版本和目标版本；
+- `install` 会把旧版本放在哪里；
 - boot ID；
 - 服务端 unit 的 `ActiveEnterTimestampMonotonic` 与 `InactiveEnterTimestampMonotonic`；
+- 导出的是哪个数据库：主机、端口和库名，不含凭据；
 - 每个文件的大小和 SHA-256。
 
-其中任一项变化，`install` 都会拒绝这份备份。具体来说，重启会改变 boot ID，备份之后的任何一次启动都会改变上述时间戳之一。
+其中任一项变化，`install` 都会拒绝这份备份。具体来说，重启会改变 boot ID，备份之后的任何一次启动都会改变上述时间戳之一，修改过的 `SPRING_DATASOURCE_URL` 会指向另一个数据库，而不是被导出的那个。记录中还写明了分发路径和两个 unit，因此部署指南中的回滚步骤可以从中读取每一个路径。
 
 ### 预检的变化
 
@@ -135,16 +146,20 @@
   - 环境文件、`systemctl show` 输出、版本号、JDBC URL 和 jar 中脚本的解析；
   - check 的每一行；
   - 每个阶段的拒绝条件与执行步骤。
-- **变异测试。** 脚本中的判断 21 个变异，预检改动 4 个变异。
+- **环境文件。** 通过 systemd 257 的 `systemd-run` 读回 1579 个随机文件，与命令的读取结果没有任何差异。
+- **变异测试。** 脚本中的判断 52 个变异，预检改动 5 个变异。
 - **预检单元测试：**
   - Flyway 顺序；
-  - 校验钩子。
+  - 校验钩子；
+  - `databaseCheck` 实际执行的校验，在 Flyway 迁移出的 H2 数据库上运行。
 - **真实主机端到端**（systemd 257、MySQL 8.4，真实 Hosted Harness 配合伪造模型）。旧版本按 `systemd/README.md` 的方式安装，并在服务端 cgroup 中留一个替身 worker。
   - **兼容的升级：** 跑完所有阶段，并验证：
     - 在服务运行时或阶段顺序不对时的拒绝；
     - 恢复到全新 MySQL 的演练；
     - `verify --turn`；
-    - 文档中的回滚步骤。
+    - 带反斜杠的数据库密码，旧的读取方式会丢掉它；
+    - `install` 之后的 `stop`；
+    - 文档中的回滚步骤，所有路径都从 `backup.json` 读取。
   - **基线被原地重写：** `check` 报 FAIL，`stop` 拒绝执行。
   - **同一主机状态下的预检 A/B：**
     - 本改动之前的版本放过服务端会拒绝的数据库；

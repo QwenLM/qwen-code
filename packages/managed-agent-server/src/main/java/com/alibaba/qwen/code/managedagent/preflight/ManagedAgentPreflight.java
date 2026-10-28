@@ -1480,8 +1480,7 @@ public final class ManagedAgentPreflight {
                                 + "performance_schema.user_variables_by_thread"
                                 + " to the datasource user");
             }
-            return schemaCheck(schemaVersion(connection),
-                    expectedSchemaVersion(), () -> ManagedSchema.validate(connection));
+            return schemaCheck(connection, expectedSchemaVersion());
         } catch (SQLException error) {
             return new Check("database", Status.FAIL,
                     url + ": " + error.getMessage(),
@@ -1645,6 +1644,12 @@ public final class ManagedAgentPreflight {
                 "schema=" + (schema == null ? "not migrated yet" : schema)
                         + "; performance_schema grant ok",
                 null);
+    }
+
+    /** The database row for a reachable database: its schema, held to the server's validation. */
+    static Check schemaCheck(Connection connection, String expected) {
+        return schemaCheck(schemaVersion(connection), expected,
+                () -> ManagedSchema.validate(connection));
     }
 
     private static String schemaVersion(Connection connection) {

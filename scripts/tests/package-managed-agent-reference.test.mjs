@@ -199,6 +199,15 @@ test('packages an independently verifiable reference distribution', async () => 
       '#!/usr/bin/env sh\nupgrade\n',
     );
     assert.equal((await stat(upgrade)).mode & 0o777, 0o755);
+    for (const module of [
+      'qwen-managed-agent-bootstrap.mjs',
+      'qwen-managed-agent-upgrade.mjs',
+    ]) {
+      assert.equal(
+        await readFile(path.join(bundle, 'bin', module), 'utf8'),
+        'export {};\n',
+      );
+    }
     execFileSync('sha256sum', ['--check', 'SHA256SUMS.txt'], {
       cwd: output,
       stdio: 'pipe',

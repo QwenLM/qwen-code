@@ -10,14 +10,17 @@ import { createHash } from 'node:crypto';
 import { writeSync } from 'node:fs';
 import {
   chmod,
+  cp,
   lstat,
   mkdir,
   mkdtemp,
   readFile,
   readdir,
   readlink,
+  rename,
   rm,
   stat,
+  symlink,
   writeFile,
 } from 'node:fs/promises';
 import os from 'node:os';
@@ -68,6 +71,42 @@ test('reads environment files the way systemd does', () => {
     CONTINUED: 'onetwo',
     INDENTED: 'spaced',
   });
+  // systemd.exec(5): inside double quotes only \" \\ \` \$ and
+  // backslash-newline are escapes; outside quotes a backslash escapes any
+  // character. Each value below was read back from systemd 257.
+  assert.deepEqual(
+    Object.fromEntries(
+      parseEnvironmentFile(
+        [
+          'PASSWORD="p@ss\\word"',
+          'BARE=C:\\temp',
+          'HEX="p\\x41ss"',
+          "RAW='a\\b'",
+          'JOINED="a"\'b\'c',
+          'SPACED="x  " ',
+          'MULTI="one',
+          'two"',
+          'FOLDED="one\\',
+          'two"',
+          '# a comment ending in a backslash \\',
+          'AFTER=1',
+          'OPEN="runs to the end',
+        ].join('\n'),
+      ),
+    ),
+    {
+      PASSWORD: 'p@ss\\word',
+      BARE: 'C:temp',
+      HEX: 'p\\x41ss',
+      RAW: 'a\\b',
+      JOINED: 'abc',
+      SPACED: 'x  ',
+      MULTI: 'one\ntwo',
+      FOLDED: 'onetwo',
+      AFTER: '1',
+      OPEN: 'runs to the end',
+    },
+  );
 });
 
 test('reads the unit properties systemctl show prints', () => {
@@ -141,9 +180,18 @@ test('reads the datasource, configuration and listener settings', () => {
   assert.equal(parseMysqlJdbcUrl('jdbc:postgresql://a/db'), undefined);
   assert.deepEqual(
     configurationFiles(
-      'file:/etc/q/application.yml, optional:file:/etc/q/extra.yml,classpath:x.yml,file:/etc/q/',
+      'file:/etc/q/application.yml, optional:file:/etc/q/extra.yml,classpath:x.yml,file:/etc/d/',
     ),
-    ['/etc/q/application.yml', '/etc/q/extra.yml'],
+    {
+      files: [
+        '/etc/q/application.yml',
+        '/etc/q/extra.yml',
+        '/etc/d/application.properties',
+        '/etc/d/application.yaml',
+        '/etc/d/application.yml',
+      ],
+      unread: ['classpath:x.yml'],
+    },
   );
   assert.equal(serverBaseUrl(new Map()), 'http://127.0.0.1:8080');
   assert.equal(
@@ -270,7 +318,10 @@ async function rig(t, overrides = {}) {
   const tools = path.join(root, 'tools');
   const cgroups = path.join(root, 'cgroup');
   const state = path.join(root, 'state');
-  await writeDistribution(current, { version: '0.1.0' });
+  await writeDistribution(current, {
+    version: '0.1.0',
+    scripts: overrides.installedScripts,
+  });
   await writeFile(path.join(current, 'config/application.yml'), 'key: x\n', {
     mode: 0o600,
   });
@@ -290,7 +341,9 @@ async function rig(t, overrides = {}) {
       'SPRING_DATASOURCE_USERNAME=qwen',
       "SPRING_DATASOURCE_PASSWORD='p\"w'",
       `QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE=${etc}/harness.env`,
-      `QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY=${state}`,
+      ...(overrides.state === null
+        ? []
+        : [`QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY=${state}`]),
       'SERVER_PORT=18080',
       ...(overrides.serverEnv ?? []),
       '',
@@ -374,6 +427,7 @@ async function rig(t, overrides = {}) {
     java: 'openjdk version "21.0.2" 2024-01-16',
     qwen: '1.2.3',
     mysqldumpStatus: 0,
+    mysqldumpVersion: 'mysqldump  Ver 8.4.6',
     preflightStatus: 0,
     // Whether the main process alone stops (KillMode=process) or workers
     // ignore TERM.
@@ -433,6 +487,18 @@ async function rig(t, overrides = {}) {
     connect: async () => true,
     fetch: async (url, init = {}) => {
       host.requests.push({ url, init });
+      if (host.hang) {
+        // A listener that accepts and never answers: only the signal ends it.
+        return new Promise((resolve, reject) => {
+          // The open socket a real fetch holds keeps the process alive;
+          // AbortSignal.timeout() alone does not.
+          const socket = setInterval(() => {}, 1000);
+          init.signal?.addEventListener('abort', () => {
+            clearInterval(socket);
+            reject(init.signal.reason);
+          });
+        });
+      }
       const { pathname, search } = new URL(url);
       const response = host.responses[`${init.method ?? 'GET'} ${pathname}`];
       const body =
@@ -462,9 +528,14 @@ async function rig(t, overrides = {}) {
       }
       if (name === 'mysqldump') {
         if (args[0] === '--version') {
-          return { status: 0, stdout: 'mysqldump  Ver 8.4.6\n', stderr: '' };
+          return {
+            status: 0,
+            stdout: `${host.mysqldumpVersion}\n`,
+            stderr: '',
+          };
         }
-        host.dumpCredentials = readFileSyncText(args[0].split('=')[1]);
+        host.dumpCredentialsFile = args[0].split('=')[1];
+        host.dumpCredentials = readFileSyncText(host.dumpCredentialsFile);
         writeSync(options.stdio[1], '-- dump\n');
         return host.mysqldumpStatus === 0
           ? { status: 0, stdout: '', stderr: '' }
@@ -486,6 +557,14 @@ async function rig(t, overrides = {}) {
     host.output = [];
     return runUpgrade(argv, system);
   };
+  // check with the rig's client, which the host's own PATH may lack.
+  host.check = (...argv) =>
+    host.upgrade(
+      'check',
+      '--mysqldump',
+      path.join(tools, 'mysqldump'),
+      ...argv,
+    );
   host.stop = async () => {
     for (const unit of Object.values(units)) {
       unit.ActiveState = 'inactive';
@@ -521,11 +600,19 @@ test('reads the Flyway scripts out of a jar by content', async (t) => {
       ['BOOT-INF/classes/db/managed-schema/V2__more.sql', 'create table b;\n'],
       ['BOOT-INF/classes/db/managed-schema/README.md', 'not a script'],
       ['BOOT-INF/lib/V3__nested.sql', 'not on the classpath root'],
+      ['BOOT-INF/classes/db/managed-schema/V4__upper.SQL', 'insert;\n'],
+      ['BOOT-INF/classes/db/managed-schema/R__view.sql', 'create view;\n'],
+      ['BOOT-INF/classes/db/managed-schema/U2__undo.sql', 'drop table b;\n'],
+      // The prefixes are case-sensitive.
+      ['BOOT-INF/classes/db/managed-schema/v5__lower.sql', 'ignored'],
     ]),
   );
   assert.deepEqual(Object.fromEntries(await migrationScripts(jar)), {
     'db/managed-schema/V1__base.sql': sha256('create table a;\n'),
     'db/managed-schema/V2__more.sql': sha256('create table b;\n'),
+    'db/managed-schema/V4__upper.SQL': sha256('insert;\n'),
+    'db/managed-schema/R__view.sql': sha256('create view;\n'),
+    'db/managed-schema/U2__undo.sql': sha256('drop table b;\n'),
   });
 });
 
@@ -542,6 +629,15 @@ test('check keeps the releases outside the distribution', async (t) => {
   assert.match(
     rowsOf(host.output).layout,
     /^FAIL .* is inside the distribution/,
+  );
+  // install copies the new distribution into the releases directory.
+  assert.equal(
+    await host.check('--releases', path.join(host.distribution, 'releases')),
+    1,
+  );
+  assert.match(
+    rowsOf(host.output).layout,
+    new RegExp(`^FAIL .* is inside the distribution ${host.distribution}$`),
   );
   // install renames the installed directory into the releases directory,
   // which a rename cannot do across file systems.
@@ -591,7 +687,7 @@ test('refuses a checksum list that names a path outside the release', async (t) 
 
 test('check compares the new release with the installed one', async (t) => {
   const host = await rig(t);
-  assert.equal(await host.upgrade('check'), 0);
+  assert.equal(await host.check(), 0);
   const rows = rowsOf(host.output);
   assert.match(rows.distribution, /^PASS 6 file\(s\)/);
   assert.match(rows.deployment, /^PASS/);
@@ -603,6 +699,11 @@ test('check compares the new release with the installed one', async (t) => {
   assert.match(rows['harness-env'], /^PASS/);
   assert.match(rows.config, /^PASS install copies application.yml/);
   assert.match(rows['unit-files'], /^PASS/);
+  assert.match(rows['backup-tools'], /^PASS backup dumps the database with /);
+  assert.equal(
+    rows['runtime-state'],
+    `PASS backup archives ${host.state} (QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY)`,
+  );
   assert.match(
     rows.layout,
     new RegExp(
@@ -635,7 +736,32 @@ test('check refuses what the new release cannot replace', async (t) => {
     [
       { scripts: {} },
       'database',
-      /^FAIL this release changed or removed V1__managed_schema.sql/,
+      /^WARN cannot compare the Flyway scripts \(no Flyway script found in .*server.jar\)/,
+    ],
+    [
+      // Flyway reads the suffix in any case.
+      {
+        scripts: { ...BASELINE, 'db/managed-schema/V2__seed.SQL': 'insert;\n' },
+      },
+      'database',
+      /^WARN start applies V2__seed.SQL; only the database backup undoes it/,
+    ],
+    [
+      // A changed repeatable script runs again; a removed one fails validation.
+      {
+        installedScripts: { ...BASELINE, 'db/managed-schema/R__view.sql': 'a' },
+        scripts: { ...BASELINE, 'db/managed-schema/R__view.sql': 'b' },
+      },
+      'database',
+      /^WARN start applies R__view.sql/,
+    ],
+    [
+      {
+        installedScripts: { ...BASELINE, 'db/managed-schema/R__view.sql': 'a' },
+        scripts: BASELINE,
+      },
+      'database',
+      /^FAIL this release changed or removed R__view.sql/,
     ],
     [
       {
@@ -670,7 +796,7 @@ test('check refuses what the new release cannot replace', async (t) => {
   ];
   for (const [overrides, name, expected] of cases) {
     const host = await rig(t, overrides);
-    const code = await host.upgrade('check');
+    const code = await host.check();
     assert.match(rowsOf(host.output)[name], expected, name);
     assert.equal(code, expected.source.startsWith('^FAIL') ? 1 : 0, name);
   }
@@ -682,7 +808,7 @@ test('check refuses what the new release cannot replace', async (t) => {
     path.join(old.distribution, 'bin/qwen-managed-agent-server'),
     'tampered',
   );
-  assert.equal(await old.upgrade('check'), 1);
+  assert.equal(await old.check(), 1);
   assert.ok(
     old.output.includes(
       'stop refuses until the FAIL rows pass. Then the plan is:',
@@ -705,7 +831,7 @@ test('the Broker settings change after backup and before start', async (t) => {
     harnessEnv: ['QWEN_HOSTED_HARNESS_BROKER_ARGS=--x'],
     serverEnv: ['QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN=b'],
   });
-  assert.equal(await host.upgrade('check'), 0);
+  assert.equal(await host.check(), 0);
   const plan = host.output.slice(host.output.indexOf('Plan:'));
   assert.match(
     plan.join('\n'),
@@ -782,7 +908,7 @@ test('stop leaves the Harness running while workers outlive the timeout', async 
 });
 
 test('stop changes nothing when check fails', async (t) => {
-  const host = await rig(t, { version: '0.1.0' });
+  const host = await rig(t, { version: '0.0.9' });
   assert.equal(await host.upgrade('stop'), 1);
   assert.ok(
     host.calls.every(
@@ -821,6 +947,7 @@ test('backup records the database, Runtime state and configuration', async (t) =
     'backup.json',
     'configuration.tar',
     'database.sql',
+    'release-config.tar',
     'runtime-state.tar',
   ]);
   assert.equal((await stat(target)).mode & 0o777, 0o700);
@@ -832,6 +959,11 @@ test('backup records the database, Runtime state and configuration', async (t) =
     );
   }
   assert.match(host.dumpCredentials, /^password="p\\"w"$/m);
+  // The option file never sits in the backup, and is gone after the dump.
+  assert.ok(!host.dumpCredentialsFile.startsWith(`${target}${path.sep}`));
+  await assert.rejects(stat(path.dirname(host.dumpCredentialsFile)), {
+    code: 'ENOENT',
+  });
   const dump = host.calls.find(
     ([command, first]) => command === 'mysqldump' && first !== '--version',
   );
@@ -841,12 +973,28 @@ test('backup records the database, Runtime state and configuration', async (t) =
   const record = JSON.parse(
     await readFile(path.join(target, 'backup.json'), 'utf8'),
   );
-  assert.equal(record.from.version, '0.1.0');
+  assert.deepEqual(record.from, {
+    version: '0.1.0',
+    release: `${host.current}-releases/0.1.0`,
+  });
+  assert.equal(record.distribution, host.current);
   assert.equal(record.to.version, '0.2.0');
+  assert.equal(record.harness.unit, HARNESS);
   assert.equal(record.database, 'database.sql');
+  assert.deepEqual(record.datasource, {
+    host: '127.0.0.1',
+    port: '3306',
+    database: 'qwen_managed_agent',
+  });
+  assert.equal(record.runtimeState, host.state);
   assert.deepEqual(
     record.files.map((file) => file.name),
-    ['database.sql', 'runtime-state.tar', 'configuration.tar'],
+    [
+      'database.sql',
+      'runtime-state.tar',
+      'configuration.tar',
+      'release-config.tar',
+    ],
   );
   const listed = spawnSync(
     'tar',
@@ -857,10 +1005,26 @@ test('backup records the database, Runtime state and configuration', async (t) =
     'etc/server.env',
     'etc/harness.env',
     'etc/qwen-managed-agent-server.service',
-    'opt/qwen-managed-agent/config/application.yml',
   ]) {
     assert.ok(listed.includes(file), file);
   }
+  // The installed config/ goes in by its path in the release, which is where
+  // the rollback finds it once the distribution path is a link.
+  assert.ok(!listed.includes('opt/qwen-managed-agent'));
+  assert.deepEqual(
+    spawnSync('tar', ['-tf', path.join(target, 'release-config.tar')], {
+      encoding: 'utf8',
+    })
+      .stdout.split('\n')
+      .filter(Boolean)
+      .sort(),
+    ['config/', 'config/application.example.yml', 'config/application.yml'],
+  );
+  assert.ok(
+    host.output.includes(
+      `install moves the previous release to ${host.current}-releases/0.1.0.`,
+    ),
+  );
   assert.ok(
     spawnSync('tar', ['-tf', path.join(target, 'runtime-state.tar')], {
       encoding: 'utf8',
@@ -990,6 +1154,42 @@ test('install refuses a backup the control plane has run past', async (t) => {
     third.host.output.join('\n'),
     /has started since the backup; run backup again/,
   );
+
+  // start migrates the database the unit names, which the dump must be of.
+  const fourth = await backedUp(t);
+  const environment = path.join(fourth.host.etc, 'server.env');
+  await writeFile(
+    environment,
+    (await readFile(environment, 'utf8')).replace(
+      '/qwen_managed_agent',
+      '/qwen_managed_agent_b',
+    ),
+  );
+  assert.equal(
+    await fourth.host.upgrade('install', '--backup', fourth.target),
+    1,
+  );
+  assert.match(
+    fourth.host.output.join('\n'),
+    /SPRING_DATASOURCE_URL names another database than the backup's; run backup again/,
+  );
+
+  // The rollback finds the old release where backup said install puts it.
+  const fifth = await backedUp(t);
+  assert.equal(
+    await fifth.host.upgrade(
+      'install',
+      '--backup',
+      fifth.target,
+      '--releases',
+      path.join(fifth.host.root, 'elsewhere'),
+    ),
+    1,
+  );
+  assert.match(
+    fifth.host.output.join('\n'),
+    /the backup expects the previous release at .*-releases\/0.1.0, not .*elsewhere\/0.1.0; pass the --releases backup had/,
+  );
 });
 
 test('install replaces an existing link in one step', async (t) => {
@@ -1076,8 +1276,52 @@ test('start gives up when the control plane never reports UP', async (t) => {
   assert.equal(await host.upgrade('start', '--timeout', '5'), 1);
   assert.match(
     host.output.join('\n'),
-    /did not report UP at http:\/\/127.0.0.1:18080\/actuator\/health/,
+    /did not report UP at http:\/\/127.0.0.1:18080\/actuator\/health within 5s and keeps running; .* run stop to start it again/,
   );
+  assert.equal(host.units[SERVER].ActiveState, 'active');
+  assert.equal(await host.upgrade('start'), 1);
+  assert.match(
+    host.output.join('\n'),
+    /already runs; run verify, or run stop to start it again/,
+  );
+
+  // The release is installed, and stop still stops it.
+  host.calls = [];
+  assert.equal(await host.upgrade('stop'), 0);
+  assert.deepEqual(
+    host.calls.filter(
+      ([command, verb]) => command === 'systemctl' && verb !== 'show',
+    ),
+    [
+      ['systemctl', 'stop', SERVER],
+      ['systemctl', 'stop', HARNESS],
+    ],
+  );
+  // check keeps refusing to upgrade to what is installed.
+  assert.equal(await host.check(), 1);
+  assert.match(rowsOf(host.output).version, /^FAIL 0.2.0 is already installed/);
+
+  // A unit that fails is told apart from one that is slow.
+  host.responses['GET /actuator/health'] = () => {
+    host.units[SERVER].ActiveState = 'failed';
+    return { status: 'DOWN' };
+  };
+  assert.equal(await host.upgrade('start', '--timeout', '5'), 1);
+  assert.match(
+    host.output.join('\n'),
+    /qwen-managed-agent-server failed before it reported UP at .*; see journalctl -u qwen-managed-agent-server, then run start again/,
+  );
+});
+
+test('a health probe that never answers ends at the timeout', async (t) => {
+  const { host, target } = await backedUp(t);
+  assert.equal(await host.upgrade('install', '--backup', target), 0);
+  host.hang = true;
+  const started = Date.now();
+  assert.equal(await host.upgrade('start', '--timeout', '1'), 1);
+  assert.ok(Date.now() - started < 4000, `${Date.now() - started}ms`);
+  assert.match(host.output.join('\n'), /within 1s and keeps running/);
+  assert.ok(host.requests.every(({ init }) => init.signal));
 });
 
 test('verify runs the online preflight and reads the API', async (t) => {
@@ -1156,4 +1400,312 @@ test('verify leaves signed APIs to the ingress', async (t) => {
     /^SKIP the API takes signed requests only/,
   );
   assert.ok(!host.requests.some(({ url }) => url.includes('/v1/')));
+});
+
+test('check reads the options the later phases are given', async (t) => {
+  const host = await rig(t);
+  const releases = path.join(host.root, 'qwen releases');
+  assert.equal(await host.check('--releases', releases), 0);
+  const plan = host.output.slice(host.output.indexOf('Plan:')).join('\n');
+  const mysqldump = path.join(host.tools, 'mysqldump');
+  assert.ok(plan.includes(` stop --releases '${releases}'\n`), plan);
+  assert.ok(
+    plan.includes(
+      ` backup --to <new empty directory> --releases '${releases}' --mysqldump ${mysqldump}\n`,
+    ),
+    plan,
+  );
+  assert.ok(
+    plan.includes(
+      ` install --backup <that directory> --releases '${releases}'\n`,
+    ),
+    plan,
+  );
+  // The client the operator named, though it is not on PATH.
+  assert.equal(
+    rowsOf(host.output)['backup-tools'],
+    `PASS backup dumps the database with ${mysqldump}`,
+  );
+
+  assert.equal(
+    await host.upgrade('check', '--mysqldump', path.join(host.root, 'none')),
+    1,
+  );
+  assert.match(
+    rowsOf(host.output)['backup-tools'],
+    /^FAIL .*none is not installed/,
+  );
+  assert.ok(
+    host.output.includes(
+      'backup refuses until the FAIL rows pass; pass them before stop. Then the plan is:',
+    ),
+  );
+  assert.equal(await host.upgrade('check', '--skip-database'), 0);
+  assert.equal(
+    rowsOf(host.output)['backup-tools'],
+    'SKIP backup dumps no database, as --skip-database asks',
+  );
+  assert.ok(
+    host.output.some((line) =>
+      line.endsWith(' backup --to <new empty directory> --skip-database'),
+    ),
+  );
+});
+
+test('backup archives the Runtime state directory the server uses', async (t) => {
+  // config/application.yml wins over the variable the command reads.
+  const host = await rig(t);
+  const yaml = path.join(host.current, 'config/application.yml');
+  const elsewhere = path.join(host.root, 'state-from-yaml');
+  await mkdir(path.join(elsewhere, 'workers'), { recursive: true });
+  await writeFile(path.join(elsewhere, 'workers/w2.json'), '{}\n');
+  await writeFile(
+    yaml,
+    `qwen:\n  managed-agent:\n    runtime-broker:\n      state-directory: ${elsewhere}\n`,
+    { mode: 0o600 },
+  );
+  assert.equal(await host.check(), 1);
+  assert.equal(
+    rowsOf(host.output)['runtime-state'],
+    `FAIL ${yaml} can set the Runtime state directory, which this command reads only from QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY`,
+  );
+  await host.stop();
+  const target = path.join(host.root, 'backup');
+  const mysqldump = path.join(host.tools, 'mysqldump');
+  assert.equal(
+    await host.upgrade('backup', '--to', target, '--mysqldump', mysqldump),
+    1,
+  );
+  assert.match(
+    host.output.join('\n'),
+    /backup refused: .*application.yml can set the Runtime state directory, .*; pass --runtime-state <the directory the server uses> to check and backup\./,
+  );
+  await assert.rejects(stat(target), { code: 'ENOENT' });
+  assert.equal(
+    await host.upgrade(
+      'backup',
+      '--to',
+      target,
+      '--mysqldump',
+      mysqldump,
+      '--runtime-state',
+      elsewhere,
+    ),
+    0,
+  );
+  assert.ok(
+    spawnSync('tar', ['-tf', path.join(target, 'runtime-state.tar')], {
+      encoding: 'utf8',
+    }).stdout.includes('./workers/w2.json'),
+  );
+  const record = JSON.parse(
+    await readFile(path.join(target, 'backup.json'), 'utf8'),
+  );
+  assert.equal(record.runtimeState, elsewhere);
+
+  // The other places Spring reads it from.
+  for (const [serverEnv, source] of [
+    [
+      ['JAVA_OPTS=-Dqwen.managed-agent.runtime-broker.state-directory=/x'],
+      'JAVA_OPTS',
+    ],
+    [
+      ['QWEN_MANAGEDAGENT_RUNTIMEBROKER_STATEDIRECTORY=/x'],
+      'QWEN_MANAGEDAGENT_RUNTIMEBROKER_STATEDIRECTORY',
+    ],
+    [
+      ['SPRING_PROFILES_ACTIVE=managed-local'],
+      'the configuration SPRING_PROFILES_ACTIVE selects',
+    ],
+    [
+      ['SPRING_CONFIG_ADDITIONAL_LOCATION=classpath:extra.yml'],
+      'SPRING_CONFIG_ADDITIONAL_LOCATION entry classpath:extra.yml',
+    ],
+  ]) {
+    const other = await rig(t, { serverEnv });
+    assert.equal(await other.check(), 1, source);
+    assert.ok(
+      rowsOf(other.output)['runtime-state'].startsWith(
+        `FAIL ${source} can set the Runtime state directory`,
+      ),
+      rowsOf(other.output)['runtime-state'],
+    );
+  }
+});
+
+test('backup says when it archives no Runtime state', async (t) => {
+  const host = await rig(t, { state: null });
+  assert.equal(await host.check(), 0);
+  assert.equal(
+    rowsOf(host.output)['runtime-state'],
+    'SKIP no Runtime state directory is configured, so backup archives none',
+  );
+  await host.stop();
+  const target = path.join(host.root, 'backup');
+  assert.equal(
+    await host.upgrade(
+      'backup',
+      '--to',
+      target,
+      '--mysqldump',
+      path.join(host.tools, 'mysqldump'),
+    ),
+    0,
+  );
+  assert.ok(!(await readdir(target)).includes('runtime-state.tar'));
+  assert.ok(
+    host.output.includes(
+      'No Runtime state archived: no Runtime state directory is configured, so backup archives none.',
+    ),
+  );
+
+  const missing = path.join(host.root, 'gone');
+  const other = await rig(t, {
+    serverEnv: [`QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY=${missing}`],
+  });
+  assert.equal(await other.check(), 0);
+  assert.equal(
+    rowsOf(other.output)['runtime-state'],
+    `WARN ${missing} (QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY) does not exist, so backup archives no Runtime state`,
+  );
+});
+
+test('backup --skip-database runs no client', async (t) => {
+  const host = await rig(t);
+  await host.stop();
+  const target = path.join(host.root, 'backup');
+  assert.equal(
+    await host.upgrade('backup', '--to', target, '--skip-database'),
+    0,
+  );
+  assert.ok(!(await readdir(target)).includes('database.sql'));
+  const record = JSON.parse(
+    await readFile(path.join(target, 'backup.json'), 'utf8'),
+  );
+  assert.equal(record.database, 'skipped');
+  assert.ok(!host.calls.some(([command]) => command === 'mysqldump'));
+});
+
+test("backup leaves out an option MariaDB's mysqldump lacks", async (t) => {
+  const host = await rig(t);
+  await host.stop();
+  host.mysqldumpVersion = 'mysqldump  Ver 10.19 Distrib 10.11.6-MariaDB';
+  assert.equal(
+    await host.upgrade(
+      'backup',
+      '--to',
+      path.join(host.root, 'backup'),
+      '--mysqldump',
+      path.join(host.tools, 'mysqldump'),
+    ),
+    0,
+  );
+  const dump = host.calls.find(
+    ([command, first]) => command === 'mysqldump' && first !== '--version',
+  );
+  assert.ok(!dump.some((arg) => arg.startsWith('--set-gtid-purged')), dump);
+});
+
+test('check refuses a directory in the installed config', async (t) => {
+  const host = await rig(t);
+  await mkdir(path.join(host.current, 'config/certs'));
+  assert.equal(await host.check(), 1);
+  assert.equal(
+    rowsOf(host.output).config,
+    `FAIL ${host.current}/config holds certs, which is not a file`,
+  );
+});
+
+test('check reports an incomplete extraction as a row', async (t) => {
+  const host = await rig(t);
+  await rm(path.join(host.distribution, 'manifest.json'));
+  assert.equal(await host.check(), 1);
+  assert.equal(
+    rowsOf(host.output).distribution,
+    'FAIL manifest.json does not match SHA256SUMS',
+  );
+  assert.equal(
+    rowsOf(host.output).deployment,
+    `FAIL ${host.distribution}/manifest.json is unreadable`,
+  );
+  assert.ok(
+    host.output.includes(
+      `${''.padEnd(21)} fix: extract the verified archive again`,
+    ),
+  );
+  await host.stop();
+  assert.equal(
+    await host.upgrade('backup', '--to', path.join(host.root, 'backup')),
+    1,
+  );
+  assert.match(
+    host.output.join('\n'),
+    /backup refused: .*manifest.json is unreadable; extract the verified archive again/,
+  );
+});
+
+test('install uses an existing release directory only when it is this build', async (t) => {
+  const { host, target } = await backedUp(t);
+  const releases = `${host.current}-releases`;
+  const release = path.join(releases, '0.2.0');
+  // Another build of 0.2.0 that matches its own SHA256SUMS.
+  await writeDistribution(release, {
+    version: '0.2.0',
+    files: { 'bin/qwen-managed-agent-server': '#!/bin/sh\n# another build\n' },
+  });
+  assert.equal(await host.upgrade('install', '--backup', target), 1);
+  assert.match(
+    host.output.join('\n'),
+    /0.2.0 exists but is not this release; remove it and run install again/,
+  );
+  assert.ok((await lstat(host.current)).isDirectory());
+
+  // The copy an interrupted install left is this build, and is used.
+  await rm(release, { recursive: true });
+  await cp(host.distribution, release, { recursive: true });
+  assert.equal(await host.upgrade('install', '--backup', target), 0);
+  assert.ok(host.output.includes(`Using ${release}`));
+  assert.equal(await readlink(host.current), release);
+});
+
+test('install leaves no partial copy, and an interrupted one is reported', async (t) => {
+  const { host, target } = await backedUp(t);
+  const releases = `${host.current}-releases`;
+  // A copy that fails halfway: fs.cp refuses a FIFO.
+  const pipe = path.join(host.distribution, 'pipe');
+  if (spawnSync('mkfifo', [pipe]).status !== 0) {
+    t.diagnostic('no mkfifo on this host');
+    return;
+  }
+  await assert.rejects(host.upgrade('install', '--backup', target), {
+    code: 'ERR_FS_CP_FIFO_PIPE',
+  });
+  assert.deepEqual(await readdir(releases), []);
+  assert.ok((await lstat(host.current)).isDirectory());
+  await rm(pipe);
+
+  // A crash between moving the directory and renaming the link over it.
+  await cp(host.distribution, path.join(releases, '0.2.0'), {
+    recursive: true,
+  });
+  await rename(host.current, path.join(releases, '0.1.0'));
+  const link = `${host.current}.upgrade-0000abcd`;
+  await symlink(path.join(releases, '0.2.0'), link);
+  assert.equal(await host.check(), 1);
+  assert.equal(
+    rowsOf(host.output).deployment,
+    `FAIL ${host.current} is missing and ${link} is left from an interrupted install`,
+  );
+  assert.ok(
+    host.output.some((line) =>
+      line.endsWith(
+        `fix: finish the install with mv -T ${link} ${host.current}, then run start`,
+      ),
+    ),
+  );
+  assert.equal(await host.upgrade('install', '--backup', target), 1);
+  assert.match(
+    host.output.join('\n'),
+    /install refused: .*finish the install with mv -T/,
+  );
 });

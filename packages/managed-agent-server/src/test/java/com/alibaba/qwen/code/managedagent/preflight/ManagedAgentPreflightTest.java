@@ -1,7 +1,10 @@
 package com.alibaba.qwen.code.managedagent.preflight;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.sun.net.httpserver.HttpServer;
+import org.flywaydb.core.Flyway;
+import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.core.env.StandardEnvironment;
@@ -14,6 +17,7 @@ import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -21,6 +25,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -2104,6 +2109,33 @@ class ManagedAgentPreflightTest {
                 ManagedAgentPreflight.schemaCheck("1", "2", rewritten)
                         .status());
         assertEquals(1, runs[0]);
+    }
+
+    @Test
+    void holdsAMigratedDatabaseToTheBaselineThisReleaseShips() throws Exception {
+        JdbcDataSource source = new JdbcDataSource();
+        source.setURL("jdbc:h2:mem:preflight-schema-" + UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        Flyway.configure()
+                .dataSource(source)
+                .locations(ManagedSchema.FLYWAY_LOCATION)
+                .load()
+                .migrate();
+        try (Connection connection = source.getConnection()) {
+            assertEquals(ManagedAgentPreflight.Status.PASS,
+                    ManagedAgentPreflight.schemaCheck(connection, "1").status());
+            // What a release that rewrote its baseline finds in the database.
+            try (Statement statement = connection.createStatement()) {
+                statement.execute("ALTER TABLE ma_operation"
+                        + " DROP CONSTRAINT ck_ma_operation_kind");
+            }
+            ManagedAgentPreflight.Check rewritten =
+                    ManagedAgentPreflight.schemaCheck(connection, "1");
+            assertEquals(ManagedAgentPreflight.Status.FAIL, rewritten.status());
+            assertTrue(rewritten.detail().startsWith(
+                    "schema=1 does not match this distribution: "),
+                    rewritten.detail());
+        }
     }
 
     @Test

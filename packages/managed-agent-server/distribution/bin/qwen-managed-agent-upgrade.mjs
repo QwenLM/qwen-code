@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/* global Buffer, URL, console, fetch, process, setTimeout */
+/* global AbortSignal, Buffer, URL, console, fetch, process, setTimeout */
 
 /**
  * Upgrades a systemd deployment of the reference distribution in phases.
@@ -23,6 +23,7 @@ import {
   cp,
   lstat,
   mkdir,
+  mkdtemp,
   open,
   readFile,
   readdir,
@@ -36,6 +37,7 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import net from 'node:net';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -85,8 +87,10 @@ Options:
   --server-unit <name>     control-plane unit (default ${SERVER_UNIT})
   --harness-unit <name>    Hosted Harness unit (default ${HARNESS_UNIT})
   --releases <dir>         release directory (default <distribution link>-releases)
-  --mysqldump <path>       backup: mysqldump to run (default mysqldump)
-  --skip-database          backup: the database is backed up another way
+  --mysqldump <path>       check, backup: mysqldump to run (default mysqldump)
+  --skip-database          check, backup: the database is backed up another way
+  --runtime-state <dir>    check, backup: the Runtime state directory, when not
+                           only QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY sets it
   --server-url <url>       start, verify: control-plane URL (default from server.env)
   --timeout <seconds>      stop, start, verify: how long to wait
   --turn                   verify: create a Session and run one Turn, which calls the model`;
@@ -96,41 +100,143 @@ class Refusal extends Error {}
 // ---------------------------------------------------------------------------
 // Parsing
 
-/** Reads a systemd EnvironmentFile the way systemd does for the forms it accepts. */
+const WHITESPACE = ' \t\n\r';
+const NEWLINE = '\n\r';
+// Inside double quotes a backslash escapes only these; before any other
+// character it stays, as in the shell.
+const DOUBLE_QUOTE_ESCAPES = '"\\`$';
+
+/**
+ * Reads a systemd EnvironmentFile with systemd's own grammar, the state
+ * machine of parse_env_file_internal() in src/basic/env-file.c.
+ */
 export function parseEnvironmentFile(text) {
   const values = new Map();
-  const lines = text.replace(/\r\n/g, '\n').split('\n');
-  for (let index = 0; index < lines.length; index += 1) {
-    let line = lines[index];
-    while (line.endsWith('\\') && index + 1 < lines.length) {
-      index += 1;
-      line = line.slice(0, -1) + lines[index];
+  let state = 'pre-key';
+  let key = '';
+  let value = '';
+  // Where trailing whitespace starts, or -1.
+  let keyEnd = -1;
+  let valueEnd = -1;
+  const push = (chomp) => {
+    const name = keyEnd >= 0 ? key.slice(0, keyEnd) : key;
+    const content = chomp && valueEnd >= 0 ? value.slice(0, valueEnd) : value;
+    // systemd skips, with a warning, a name a shell could not export.
+    if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+      values.set(name, content);
     }
-    line = line.trim();
-    if (line === '' || line.startsWith('#') || line.startsWith(';')) {
-      continue;
+    key = '';
+    value = '';
+  };
+  for (const character of text) {
+    switch (state) {
+      case 'pre-key':
+        if (character === '#' || character === ';') {
+          state = 'comment';
+        } else if (!WHITESPACE.includes(character)) {
+          state = 'key';
+          key = character;
+          keyEnd = -1;
+        }
+        break;
+      case 'key':
+        if (NEWLINE.includes(character)) {
+          state = 'pre-key';
+          key = '';
+        } else if (character === '=') {
+          state = 'pre-value';
+          value = '';
+          valueEnd = -1;
+        } else {
+          if (!WHITESPACE.includes(character)) {
+            keyEnd = -1;
+          } else if (keyEnd < 0) {
+            keyEnd = key.length;
+          }
+          key += character;
+        }
+        break;
+      case 'pre-value':
+        if (NEWLINE.includes(character)) {
+          state = 'pre-key';
+          push(false);
+        } else if (character === "'") {
+          state = 'single-quote';
+        } else if (character === '"') {
+          state = 'double-quote';
+        } else if (character === '\\') {
+          state = 'value-escape';
+        } else if (!WHITESPACE.includes(character)) {
+          state = 'value';
+          value += character;
+        }
+        break;
+      case 'value':
+        if (NEWLINE.includes(character)) {
+          state = 'pre-key';
+          push(true);
+        } else if (character === '\\') {
+          state = 'value-escape';
+          valueEnd = -1;
+        } else {
+          if (!WHITESPACE.includes(character)) {
+            valueEnd = -1;
+          } else if (valueEnd < 0) {
+            valueEnd = value.length;
+          }
+          value += character;
+        }
+        break;
+      case 'value-escape':
+        // An escaped newline continues the line.
+        state = 'value';
+        if (!NEWLINE.includes(character)) {
+          value += character;
+        }
+        break;
+      case 'single-quote':
+        if (character === "'") {
+          state = 'pre-value';
+        } else {
+          value += character;
+        }
+        break;
+      case 'double-quote':
+        if (character === '"') {
+          state = 'pre-value';
+        } else if (character === '\\') {
+          state = 'double-quote-escape';
+        } else {
+          value += character;
+        }
+        break;
+      case 'double-quote-escape':
+        state = 'double-quote';
+        if (DOUBLE_QUOTE_ESCAPES.includes(character)) {
+          value += character;
+        } else if (character !== '\n') {
+          value += `\\${character}`;
+        }
+        break;
+      case 'comment':
+        if (character === '\\') {
+          state = 'comment-escape';
+        } else if (NEWLINE.includes(character)) {
+          state = 'pre-key';
+        }
+        break;
+      case 'comment-escape':
+        state = NEWLINE.includes(character) ? 'pre-key' : 'comment';
+        break;
+      default:
+        throw new Error(`unknown state ${state}`);
     }
-    const separator = line.indexOf('=');
-    if (separator <= 0) {
-      continue;
-    }
-    const key = line.slice(0, separator).trim();
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
-      continue;
-    }
-    values.set(key, unquote(line.slice(separator + 1).trim()));
+  }
+  // The last assignment needs no newline, and an open quote runs to the end.
+  if (!['pre-key', 'key', 'comment', 'comment-escape'].includes(state)) {
+    push(state === 'value');
   }
   return values;
-}
-
-function unquote(value) {
-  if (value.length >= 2 && value.startsWith("'") && value.endsWith("'")) {
-    return value.slice(1, -1);
-  }
-  if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
-    return value.slice(1, -1).replace(/\\(.)/g, '$1');
-  }
-  return value;
 }
 
 /** Splits `systemctl show` output; a property listed more than once keeps every value. */
@@ -296,13 +402,34 @@ function optionFileValue(value) {
   return `"${String(value).replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`;
 }
 
-/** Locations Spring reads from SPRING_CONFIG_ADDITIONAL_LOCATION that are files. */
+/**
+ * The files Spring reads for SPRING_CONFIG_ADDITIONAL_LOCATION, and the
+ * entries that are not files this command can read.
+ */
 export function configurationFiles(value) {
-  return (value ?? '')
-    .split(',')
-    .map((entry) => entry.trim().replace(/^optional:/, ''))
-    .filter((entry) => entry.startsWith('file:') && !entry.endsWith('/'))
-    .map((entry) => entry.slice('file:'.length));
+  const files = [];
+  const unread = [];
+  for (const entry of (value ?? '').split(',')) {
+    const location = entry.trim().replace(/^optional:/, '');
+    if (!location) {
+      continue;
+    }
+    if (!location.startsWith('file:')) {
+      unread.push(location);
+    } else if (location.endsWith('/')) {
+      // A directory location: the default names within it.
+      files.push(
+        ...[
+          'application.properties',
+          'application.yaml',
+          'application.yml',
+        ].map((name) => path.join(location.slice('file:'.length), name)),
+      );
+    } else {
+      files.push(location.slice('file:'.length));
+    }
+  }
+  return { files, unread };
 }
 
 export function serverBaseUrl(environment) {
@@ -477,6 +604,7 @@ async function showUnit(system, name) {
     name,
     loaded: first('LoadState') === 'loaded',
     activeState: first('ActiveState'),
+    execStart: first('ExecStart'),
     execPath: execStartPath(first('ExecStart')),
     environmentFiles: (properties.get('EnvironmentFiles') ?? [])
       .filter(Boolean)
@@ -538,10 +666,28 @@ async function readManifest(root) {
   }
 }
 
+// install renames a link over the distribution path; a crash between moving
+// a directory away and that rename leaves the link beside the missing path.
+async function interruptedInstall(current) {
+  const prefix = `${path.basename(current)}.upgrade-`;
+  let entries;
+  try {
+    entries = await readdir(path.dirname(current), { withFileTypes: true });
+  } catch {
+    return undefined;
+  }
+  const links = entries.filter(
+    (entry) => entry.isSymbolicLink() && entry.name.startsWith(prefix),
+  );
+  return links.length === 1
+    ? path.join(path.dirname(current), links[0].name)
+    : undefined;
+}
+
 /** Everything a phase reads about the running deployment, read afresh. */
 async function inspect(system, options) {
   const { distribution } = system;
-  const manifest = await readJson(path.join(distribution, 'manifest.json'));
+  const manifest = await readManifest(distribution);
   const server = await showUnit(system, options.serverUnit);
   const harness = await showUnit(system, options.harnessUnit);
   const deployment = {
@@ -551,6 +697,11 @@ async function inspect(system, options) {
     harness,
     problems: [],
   };
+  if (!manifest) {
+    deployment.problems.push(`${distribution}/manifest.json is unreadable`);
+    deployment.remedy = 'extract the verified archive again';
+    return deployment;
+  }
   for (const unit of [server, harness]) {
     if (!unit.loaded) {
       deployment.problems.push(`${unit.name} is not a loaded unit`);
@@ -569,7 +720,15 @@ async function inspect(system, options) {
     deployment.currentIsLink = link.isSymbolicLink();
     deployment.currentTarget = await realpath(deployment.current);
   } catch {
-    deployment.problems.push(`${deployment.current} does not exist`);
+    const link = await interruptedInstall(deployment.current);
+    if (link) {
+      deployment.problems.push(
+        `${deployment.current} is missing and ${link} is left from an interrupted install`,
+      );
+      deployment.remedy = `finish the install with mv -T ${link} ${deployment.current}, then run start`;
+    } else {
+      deployment.problems.push(`${deployment.current} does not exist`);
+    }
     return deployment;
   }
   deployment.installed = await readManifest(deployment.current);
@@ -670,7 +829,9 @@ function versionOutput(system, command, args, searchPath) {
   return `${result.stdout ?? ''}${result.stderr ?? ''}`.trim();
 }
 
-const MIGRATION_SCRIPT = /^BOOT-INF\/classes\/(db\/.+\/[VU][^/]*__[^/]*\.sql)$/;
+// Flyway's versioned, undo and repeatable prefixes are case-sensitive; its
+// suffix is not.
+const MIGRATION_SCRIPT = /^BOOT-INF\/classes\/(db\/.+\/[VUR][^/]*__[^/]*)$/;
 
 /** The Flyway scripts in a Spring Boot jar, by path, as SHA-256 digests. */
 export async function migrationScripts(jar) {
@@ -713,7 +874,7 @@ export async function migrationScripts(jar) {
         directory.readUInt16LE(at + 30) +
         directory.readUInt16LE(at + 32);
       const script = MIGRATION_SCRIPT.exec(name)?.[1];
-      if (!script) {
+      if (!script || !script.toLowerCase().endsWith('.sql')) {
         continue;
       }
       const header = await read(30, local);
@@ -756,10 +917,19 @@ async function databaseRow({
   let before;
   let after;
   try {
-    [before, after] = await Promise.all([
-      migrationScripts(controlPlaneJar(currentTarget, installed)),
-      migrationScripts(controlPlaneJar(distribution, manifest)),
-    ]);
+    [before, after] = await Promise.all(
+      [
+        controlPlaneJar(currentTarget, installed),
+        controlPlaneJar(distribution, manifest),
+      ].map(async (jar) => {
+        const scripts = await migrationScripts(jar);
+        // No server ships without its schema, so none found is a misread.
+        if (scripts.size === 0) {
+          throw new Error(`no Flyway script found in ${jar}`);
+        }
+        return scripts;
+      }),
+    );
   } catch (error) {
     return row(
       'database',
@@ -767,9 +937,17 @@ async function databaseRow({
       `cannot compare the Flyway scripts (${error.message}); the first start refuses a database this release cannot serve`,
     );
   }
-  const rewritten = [...before]
-    .filter(([name, digest]) => after.get(name) !== digest)
-    .map(([name]) => path.posix.basename(name));
+  // Flyway runs a changed repeatable script again; any other change to a
+  // script the database ran, or its removal, fails validation.
+  const repeatable = (name) => path.posix.basename(name).startsWith('R');
+  const name = (each) => path.posix.basename(each);
+  const rewritten = [...before.keys()]
+    .filter(
+      (each) =>
+        !after.has(each) ||
+        (!repeatable(each) && after.get(each) !== before.get(each)),
+    )
+    .map(name);
   if (rewritten.length > 0) {
     return row(
       'database',
@@ -778,14 +956,14 @@ async function databaseRow({
       'keep the installed release, or deploy this one on a new, empty database',
     );
   }
-  const added = [...after.keys()]
-    .filter((name) => !before.has(name))
-    .map((name) => path.posix.basename(name));
-  return added.length > 0
+  const applied = [...after.keys()]
+    .filter((each) => before.get(each) !== after.get(each))
+    .map(name);
+  return applied.length > 0
     ? row(
         'database',
         'WARN',
-        `start applies ${added.join(', ')}; only the database backup undoes it`,
+        `start applies ${applied.join(', ')}; only the database backup undoes it`,
       )
     : row(
         'database',
@@ -886,7 +1064,8 @@ export async function compatibilityRows(system, deployment) {
         'deployment',
         'FAIL',
         deployment.problems.join('; '),
-        'install the units as systemd/README.md shows, or pass --server-unit and --harness-unit',
+        deployment.remedy ??
+          'install the units as systemd/README.md shows, or pass --server-unit and --harness-unit',
       ),
     );
     return rows;
@@ -1011,13 +1190,20 @@ async function layoutRow(deployment) {
   const inside = (parent) =>
     deployment.releases === parent ||
     deployment.releases.startsWith(`${parent}${path.sep}`);
-  if (inside(deployment.current) || inside(deployment.currentTarget)) {
-    return row(
-      'layout',
-      'FAIL',
-      `${deployment.releases} is inside the distribution ${deployment.current}`,
-      'pass --releases outside it',
-    );
+  // install copies the new distribution into the releases directory.
+  for (const root of [
+    deployment.current,
+    deployment.currentTarget,
+    deployment.distribution,
+  ]) {
+    if (inside(root)) {
+      return row(
+        'layout',
+        'FAIL',
+        `${deployment.releases} is inside the distribution ${root}`,
+        'pass --releases outside it',
+      );
+    }
   }
   const parent = path.dirname(deployment.current);
   const releasesParent = (await exists(deployment.releases))
@@ -1063,7 +1249,9 @@ function requireRoot(system) {
 
 function refuseUnless(deployment) {
   if (deployment.problems.length > 0) {
-    throw new Refusal(deployment.problems.join('; '));
+    throw new Refusal(
+      [...deployment.problems, deployment.remedy].filter(Boolean).join('; '),
+    );
   }
 }
 
@@ -1092,31 +1280,220 @@ function requireInstalled(deployment) {
   }
 }
 
-async function phaseCheck(system, deployment) {
-  const rows = await compatibilityRows(system, deployment);
-  const mysqldump = which('mysqldump', process.env.PATH);
-  rows.push(
-    mysqldump
-      ? row(
-          'backup-tools',
-          'PASS',
-          `backup dumps the database with ${mysqldump}`,
-        )
-      : row(
-          'backup-tools',
-          'WARN',
-          'no mysqldump on PATH for backup',
-          'install a MySQL client or pass --mysqldump; with another database backup, pass --skip-database',
-        ),
+const STATE_VARIABLE = 'QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY';
+// qwen.managed-agent.runtime-broker.state-directory in the spellings Spring's
+// relaxed binding accepts.
+const STATE_PROPERTY = /state[-_]?directory/i;
+const STATE_ENVIRONMENT_NAME = 'qwen.managedagent.runtimebroker.statedirectory';
+
+/** The configuration files the server's launcher hands to Spring. */
+function serverConfigurationFiles(deployment) {
+  const locations = deployment.serverEnvironment.get(
+    'SPRING_CONFIG_ADDITIONAL_LOCATION',
   );
+  // The launcher's default when the variable is unset.
+  return locations === undefined
+    ? {
+        files: [path.join(deployment.currentTarget, 'config/application.yml')],
+        unread: [],
+      }
+    : configurationFiles(locations);
+}
+
+/**
+ * Where the server keeps its Runtime state. The server's application.yml maps
+ * the property to QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY; any other source
+ * that sets it wins over that variable, and this command reads none of them,
+ * so it names them instead of guessing.
+ */
+export async function runtimeState(deployment, options) {
+  if (options.runtimeState) {
+    return { directory: options.runtimeState, source: '--runtime-state' };
+  }
+  const environment = deployment.serverEnvironment;
+  const elsewhere = [];
+  for (const [name, value] of environment) {
+    if (name.toLowerCase().replaceAll('_', '.') === STATE_ENVIRONMENT_NAME) {
+      elsewhere.push(name);
+    } else if (
+      [
+        'JAVA_OPTS',
+        'JAVA_TOOL_OPTIONS',
+        'JDK_JAVA_OPTIONS',
+        'SPRING_APPLICATION_JSON',
+      ].includes(name) &&
+      STATE_PROPERTY.test(value)
+    ) {
+      elsewhere.push(name);
+    } else if (
+      [
+        'SPRING_CONFIG_LOCATION',
+        'SPRING_CONFIG_IMPORT',
+        'SPRING_PROFILES_ACTIVE',
+      ].includes(name) &&
+      value.trim()
+    ) {
+      elsewhere.push(`the configuration ${name} selects`);
+    }
+  }
+  if (STATE_PROPERTY.test(deployment.server.execStart)) {
+    elsewhere.push(`the arguments of ${deployment.server.name}`);
+  }
+  const { files, unread } = serverConfigurationFiles(deployment);
+  elsewhere.push(
+    ...unread.map(
+      (entry) => `SPRING_CONFIG_ADDITIONAL_LOCATION entry ${entry}`,
+    ),
+  );
+  for (const file of files) {
+    let text;
+    try {
+      text = await readFile(file, 'utf8');
+    } catch {
+      continue;
+    }
+    const settings = text
+      .split('\n')
+      .filter((line) => !/^\s*[#!]/.test(line))
+      .join('\n');
+    if (STATE_PROPERTY.test(settings)) {
+      elsewhere.push(file);
+    }
+  }
+  if (elsewhere.length > 0) {
+    return { elsewhere };
+  }
+  const directory = environment.get(STATE_VARIABLE);
+  return directory ? { directory, source: STATE_VARIABLE } : {};
+}
+
+async function runtimeStateRow(deployment, options) {
+  const state = await runtimeState(deployment, options);
+  if (state.elsewhere) {
+    return row(
+      'runtime-state',
+      'FAIL',
+      `${state.elsewhere.join(', ')} can set the Runtime state directory, which this command reads only from ${STATE_VARIABLE}`,
+      'pass --runtime-state <the directory the server uses> to check and backup',
+    );
+  }
+  if (!state.directory) {
+    return row(
+      'runtime-state',
+      'SKIP',
+      `no Runtime state directory is configured, so backup archives none`,
+    );
+  }
+  let directory = false;
+  try {
+    directory = (await stat(state.directory)).isDirectory();
+  } catch {
+    // Reported below.
+  }
+  if (directory) {
+    return row(
+      'runtime-state',
+      'PASS',
+      `backup archives ${state.directory} (${state.source})`,
+    );
+  }
+  return state.source === '--runtime-state'
+    ? row(
+        'runtime-state',
+        'FAIL',
+        `${state.directory} is not a directory`,
+        'pass the directory the server keeps its Runtime state in',
+      )
+    : row(
+        'runtime-state',
+        'WARN',
+        `${state.directory} (${state.source}) does not exist, so backup archives no Runtime state`,
+        `correct ${STATE_VARIABLE} if the server keeps its Runtime state elsewhere`,
+      );
+}
+
+function backupToolsRow(deployment, options) {
+  if (options.skipDatabase) {
+    return row(
+      'backup-tools',
+      'SKIP',
+      'backup dumps no database, as --skip-database asks',
+    );
+  }
+  if (
+    !parseMysqlJdbcUrl(
+      deployment.serverEnvironment.get('SPRING_DATASOURCE_URL'),
+    )
+  ) {
+    return row(
+      'backup-tools',
+      'FAIL',
+      'SPRING_DATASOURCE_URL is not a single-host jdbc:mysql URL',
+      'back the database up yourself and pass --skip-database',
+    );
+  }
+  const mysqldump = which(options.mysqldump, process.env.PATH);
+  return mysqldump
+    ? row('backup-tools', 'PASS', `backup dumps the database with ${mysqldump}`)
+    : row(
+        'backup-tools',
+        'FAIL',
+        `${options.mysqldump} is not installed`,
+        'install a MySQL client or pass --mysqldump <path>; with another database backup, pass --skip-database',
+      );
+}
+
+/** The rows that decide whether backup can stand for the deployment. */
+async function backupRows(deployment, options) {
+  return [
+    backupToolsRow(deployment, options),
+    await runtimeStateRow(deployment, options),
+  ];
+}
+
+function shellWord(word) {
+  return /^[\w@%+=:,./-]+$/.test(word)
+    ? word
+    : `'${word.replaceAll("'", `'\\''`)}'`;
+}
+
+/** The options a phase was given that the printed plan must repeat. */
+function planFlags(options, names) {
+  const flags = {
+    'server-unit':
+      options.serverUnit !== SERVER_UNIT ? options.serverUnit : undefined,
+    'harness-unit':
+      options.harnessUnit !== HARNESS_UNIT ? options.harnessUnit : undefined,
+    releases: options.releases,
+    mysqldump:
+      options.mysqldump !== 'mysqldump' ? options.mysqldump : undefined,
+    'skip-database': options.skipDatabase || undefined,
+    'runtime-state': options.runtimeState,
+    'server-url': options.serverUrl,
+  };
+  return names
+    .filter((name) => flags[name] !== undefined)
+    .map((name) =>
+      flags[name] === true
+        ? ` --${name}`
+        : ` --${name} ${shellWord(flags[name])}`,
+    )
+    .join('');
+}
+
+async function phaseCheck(system, deployment, options) {
+  const rows = await compatibilityRows(system, deployment);
+  const backup =
+    deployment.problems.length === 0
+      ? await backupRows(deployment, options)
+      : [];
   printRows(
     system,
-    `Managed Agent upgrade check: ${deployment.installed?.version ?? '?'} -> ${deployment.manifest.version}`,
-    rows,
+    `Managed Agent upgrade check: ${deployment.installed?.version ?? '?'} -> ${deployment.manifest?.version ?? '?'}`,
+    [...rows, ...backup],
   );
-  const self = path.join(
-    deployment.distribution,
-    'bin/qwen-managed-agent-upgrade',
+  const self = shellWord(
+    path.join(deployment.distribution, 'bin/qwen-managed-agent-upgrade'),
   );
   // The steps this command leaves to the operator, where they fall.
   const manual = (name) => {
@@ -1125,33 +1502,42 @@ async function phaseCheck(system, deployment) {
       ? [`${found.fix[0].toUpperCase()}${found.fix.slice(1)} (manual).`]
       : [];
   };
+  const units = ['server-unit', 'harness-unit'];
   const steps = [
     'Stop new ingress and let admitted work settle (manual).',
-    `${self} stop`,
-    `${self} backup --to <new empty directory>`,
-    `${self} install --backup <that directory>`,
+    `${self} stop${planFlags(options, [...units, 'releases'])}`,
+    `${self} backup --to <new empty directory>${planFlags(options, [...units, 'releases', 'mysqldump', 'skip-database', 'runtime-state'])}`,
+    `${self} install --backup <that directory>${planFlags(options, [...units, 'releases'])}`,
     ...manual('qwen-code'),
     ...manual('harness-env'),
     ...manual('unit-files'),
-    `${self} start`,
-    `${self} verify --tenant <tenant> [--turn], then reopen ingress (manual).`,
+    `${self} start${planFlags(options, [...units, 'server-url'])}`,
+    `${self} verify --tenant <tenant> [--turn]${planFlags(options, [...units, 'server-url'])}, then reopen ingress (manual).`,
   ];
   system.out('');
   if (failed(rows)) {
     system.out('stop refuses until the FAIL rows pass. Then the plan is:');
+  } else if (failed(backup)) {
+    system.out(
+      'backup refuses until the FAIL rows pass; pass them before stop. Then the plan is:',
+    );
   } else {
     system.out('Plan:');
   }
   steps.forEach((step, index) => system.out(`  ${index + 1}. ${step}`));
-  return failed(rows) ? 1 : 0;
+  return failed(rows) || failed(backup) ? 1 : 0;
 }
 
 async function phaseStop(system, deployment, options) {
   refuseUnless(deployment);
-  const rows = await compatibilityRows(system, deployment);
-  if (failed(rows)) {
-    printRows(system, 'Managed Agent upgrade stop refused', rows);
-    return 1;
+  // Once this release is installed, stop is how a failed start is undone,
+  // and the comparison it guards has already been made.
+  if (deployment.installed?.version !== deployment.manifest.version) {
+    const rows = await compatibilityRows(system, deployment);
+    if (failed(rows)) {
+      printRows(system, 'Managed Agent upgrade stop refused', rows);
+      return 1;
+    }
   }
   const { server, harness } = deployment;
   system.out(`Stopping ${server.name}`);
@@ -1191,21 +1577,27 @@ async function phaseStop(system, deployment, options) {
 async function dumpDatabase(system, deployment, options, directory) {
   const environment = deployment.serverEnvironment;
   const database = parseMysqlJdbcUrl(environment.get('SPRING_DATASOURCE_URL'));
-  const credentials = path.join(directory, '.mysqldump.cnf');
-  await writeFile(
-    credentials,
-    [
-      '[client]',
-      `user=${optionFileValue(environment.get('SPRING_DATASOURCE_USERNAME') ?? '')}`,
-      `password=${optionFileValue(environment.get('SPRING_DATASOURCE_PASSWORD') ?? '')}`,
-      `host=${optionFileValue(database.host)}`,
-      `port=${database.port}`,
-      '',
-    ].join('\n'),
-    { mode: 0o600, flag: 'wx' },
+  // Outside the backup, which the operator copies elsewhere: a killed dump
+  // must not leave the password in it.
+  const scratch = await mkdtemp(
+    path.join(os.tmpdir(), 'qwen-managed-agent-upgrade-'),
   );
-  const handle = await open(path.join(directory, 'database.sql'), 'wx', 0o600);
+  const credentials = path.join(scratch, 'mysqldump.cnf');
+  let handle;
   try {
+    await writeFile(
+      credentials,
+      [
+        '[client]',
+        `user=${optionFileValue(environment.get('SPRING_DATASOURCE_USERNAME') ?? '')}`,
+        `password=${optionFileValue(environment.get('SPRING_DATASOURCE_PASSWORD') ?? '')}`,
+        `host=${optionFileValue(database.host)}`,
+        `port=${database.port}`,
+        '',
+      ].join('\n'),
+      { mode: 0o600, flag: 'wx' },
+    );
+    handle = await open(path.join(directory, 'database.sql'), 'wx', 0o600);
     const version = system.run(options.mysqldump, ['--version']);
     system.out(
       `Dumping ${database.database} from ${database.host}:${database.port}`,
@@ -1233,10 +1625,43 @@ async function dumpDatabase(system, deployment, options, directory) {
       { stdio: ['ignore', handle.fd, 'pipe'] },
     );
   } finally {
-    await handle.close();
-    await rm(credentials, { force: true });
+    await handle?.close();
+    await rm(scratch, { recursive: true, force: true });
   }
   return 'database.sql';
+}
+
+/** What a dump is of, without credentials; a backup holds for that database only. */
+function datasourceIdentity(environment) {
+  const url = environment.get('SPRING_DATASOURCE_URL') ?? '';
+  return (
+    parseMysqlJdbcUrl(url) ?? {
+      urlSha256: createHash('sha256').update(url).digest('hex'),
+    }
+  );
+}
+
+// Where install leaves the installed release.
+function previousRelease(deployment) {
+  return deployment.currentIsLink
+    ? deployment.currentTarget
+    : path.join(deployment.releases, deployment.installed.version);
+}
+
+/** Paths below a release root, relative to it, or undefined. */
+function releasePath(deployment, file) {
+  for (const root of [deployment.current, deployment.currentTarget]) {
+    const relative = path.relative(root, file);
+    if (
+      relative &&
+      relative !== '..' &&
+      !relative.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(relative)
+    ) {
+      return relative;
+    }
+  }
+  return undefined;
 }
 
 async function phaseBackup(system, deployment, options) {
@@ -1245,19 +1670,14 @@ async function phaseBackup(system, deployment, options) {
   if (!options.to) {
     throw new Refusal('backup needs --to <new empty directory>.');
   }
-  const environment = deployment.serverEnvironment;
-  if (!options.skipDatabase) {
-    if (!parseMysqlJdbcUrl(environment.get('SPRING_DATASOURCE_URL'))) {
-      throw new Refusal(
-        'SPRING_DATASOURCE_URL is not a single-host jdbc:mysql URL; back the database up yourself and pass --skip-database.',
-      );
-    }
-    if (!which(options.mysqldump, process.env.PATH)) {
-      throw new Refusal(
-        `${options.mysqldump} is not installed; pass --mysqldump <path>, or back the database up yourself and pass --skip-database.`,
-      );
+  const preconditions = await backupRows(deployment, options);
+  for (const each of preconditions) {
+    if (each.status === 'FAIL') {
+      throw new Refusal(`${each.detail}; ${each.fix}.`);
     }
   }
+  const [, stateRow] = preconditions;
+  const state = (await runtimeState(deployment, options)).directory;
   const directory = path.resolve(options.to);
   const created = !(await exists(directory));
   if (!created && (await readdir(directory)).length > 0) {
@@ -1266,7 +1686,7 @@ async function phaseBackup(system, deployment, options) {
   await mkdir(directory, { recursive: true, mode: 0o700 });
   await chmod(directory, 0o700);
   const files = [];
-  const state = environment.get('QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY');
+  const previous = previousRelease(deployment);
   try {
     if (options.skipDatabase) {
       system.out('Skipping the database, as --skip-database asks.');
@@ -1275,7 +1695,7 @@ async function phaseBackup(system, deployment, options) {
       await dumpDatabase(system, deployment, options, directory);
     }
 
-    if (state && (await exists(state))) {
+    if (stateRow.status === 'PASS') {
       system.out(`Archiving ${state}`);
       files.push('runtime-state.tar');
       runChecked(system, 'tar', [
@@ -1294,37 +1714,62 @@ async function phaseBackup(system, deployment, options) {
         ...unit.unitFiles,
         ...unit.environmentFiles.map((entry) => entry.path),
       ]),
-      ...configurationFiles(
-        environment.get('SPRING_CONFIG_ADDITIONAL_LOCATION'),
-      ),
+      ...serverConfigurationFiles(deployment).files,
       ...(deployment.credentialsFile ? [deployment.credentialsFile] : []),
       path.join(deployment.currentTarget, 'config'),
     ]);
-    const present = [];
+    // Files under the release go in by their path within it: after install
+    // the distribution path is a link to the new release, and the old one is
+    // at `previous`.
+    const outside = [];
+    const inside = [];
     for (const file of configuration) {
       if (await exists(file)) {
-        present.push(path.resolve(file).slice(1));
+        const resolved = path.resolve(file);
+        const relative = releasePath(deployment, resolved);
+        if (relative === undefined) {
+          outside.push(resolved.slice(1));
+        } else {
+          inside.push(relative);
+        }
       }
     }
-    system.out(`Archiving ${present.length} configuration path(s)`);
-    files.push('configuration.tar');
-    runChecked(system, 'tar', [
-      '--create',
-      '--numeric-owner',
-      '--file',
-      path.join(directory, 'configuration.tar'),
-      '--directory',
-      '/',
-      ...present,
-    ]);
+    const covered = (relative) =>
+      inside.some(
+        (other) =>
+          other !== relative && relative.startsWith(`${other}${path.sep}`),
+      );
+    const release = [...new Set(inside)].filter((each) => !covered(each));
+    system.out(
+      `Archiving ${outside.length + release.length} configuration path(s)`,
+    );
+    for (const [name, root, members] of [
+      ['configuration.tar', '/', outside],
+      ['release-config.tar', deployment.currentTarget, release],
+    ]) {
+      if (members.length === 0) {
+        continue;
+      }
+      files.push(name);
+      runChecked(system, 'tar', [
+        '--create',
+        '--numeric-owner',
+        '--file',
+        path.join(directory, name),
+        '--directory',
+        root,
+        ...members,
+      ]);
+    }
 
     const record = {
       schemaVersion: 1,
       createdAt: new Date(system.now()).toISOString(),
       bootId: await system.bootId(),
+      distribution: deployment.current,
       from: {
         version: deployment.installed.version,
-        path: deployment.currentTarget,
+        release: previous,
       },
       to: { version: deployment.manifest.version },
       server: {
@@ -1332,6 +1777,8 @@ async function phaseBackup(system, deployment, options) {
         activeEnter: deployment.server.activeEnter,
         inactiveEnter: deployment.server.inactiveEnter,
       },
+      harness: { unit: deployment.harness.name },
+      datasource: datasourceIdentity(deployment.serverEnvironment),
       database: options.skipDatabase ? 'skipped' : 'database.sql',
       runtimeState: state ?? null,
       files: [],
@@ -1352,7 +1799,7 @@ async function phaseBackup(system, deployment, options) {
       { mode: 0o600, flag: 'wx' },
     );
   } catch (error) {
-    for (const name of [...files, '.mysqldump.cnf']) {
+    for (const name of files) {
       await rm(path.join(directory, name), { force: true });
     }
     if (created) {
@@ -1361,7 +1808,14 @@ async function phaseBackup(system, deployment, options) {
     throw error;
   }
   system.out(`Backed up ${files.join(', ')} to ${directory}.`);
-  system.out(`The previous release stays at ${deployment.currentTarget}.`);
+  if (stateRow.status !== 'PASS') {
+    system.out(`No Runtime state archived: ${stateRow.detail}.`);
+  }
+  system.out(
+    deployment.currentIsLink
+      ? `The previous release stays at ${previous}.`
+      : `install moves the previous release to ${previous}.`,
+  );
   return 0;
 }
 
@@ -1373,11 +1827,16 @@ export async function staleBackup(system, deployment, directory) {
   } catch {
     return `${directory} holds no completed backup`;
   }
-  if (record.from?.version !== deployment.installed.version) {
-    return `the backup is of ${record.from?.version}, but ${deployment.installed.version} is installed`;
+  const installed = deployment.installed?.version;
+  if (record.from?.version !== installed) {
+    return `the backup is of ${record.from?.version}, but ${installed} is installed`;
   }
   if (record.to?.version !== deployment.manifest.version) {
     return `the backup was taken for ${record.to?.version}, not ${deployment.manifest.version}`;
+  }
+  // The rollback restores the old release's files to where install put it.
+  if (record.from?.release !== previousRelease(deployment)) {
+    return `the backup expects the previous release at ${record.from?.release}, not ${previousRelease(deployment)}; pass the --releases backup had`;
   }
   // A start since the backup could have written to the database.
   if (
@@ -1387,6 +1846,13 @@ export async function staleBackup(system, deployment, directory) {
     record.server?.inactiveEnter !== deployment.server.inactiveEnter
   ) {
     return `${deployment.server.name} has started since the backup`;
+  }
+  // start migrates the database the unit names, which the dump must be of.
+  if (
+    JSON.stringify(record.datasource) !==
+    JSON.stringify(datasourceIdentity(deployment.serverEnvironment))
+  ) {
+    return `SPRING_DATASOURCE_URL names another database than the backup's`;
   }
   for (const file of record.files ?? []) {
     const location = path.join(directory, file.name);
@@ -1425,12 +1891,20 @@ async function phaseInstall(system, deployment, options) {
   await mkdir(deployment.releases, { recursive: true, mode: 0o755 });
 
   if (await exists(target)) {
+    // An earlier install of this release, or the archive extracted there:
+    // the same SHA256SUMS, and files that still match it, make it this build.
     if ((await realpath(target)) !== deployment.distribution) {
+      const [ours, theirs] = await Promise.all(
+        [deployment.distribution, target].map((root) =>
+          readFile(path.join(root, 'SHA256SUMS'), 'utf8').catch(
+            () => undefined,
+          ),
+        ),
+      );
       const sums = await verifyChecksums(target).catch(() => ({
         failed: ['SHA256SUMS'],
       }));
-      const manifest = await readManifest(target);
-      if (sums.failed.length > 0 || manifest?.version !== version) {
+      if (theirs === undefined || theirs !== ours || sums.failed.length > 0) {
         throw new Refusal(
           `${target} exists but is not this release; remove it and run install again.`,
         );
@@ -1443,21 +1917,25 @@ async function phaseInstall(system, deployment, options) {
       `.${version}.partial-${randomBytes(4).toString('hex')}`,
     );
     system.out(`Copying ${deployment.distribution} to ${target}`);
-    await cp(deployment.distribution, partial, {
-      recursive: true,
-      errorOnExist: true,
-      force: false,
-      preserveTimestamps: true,
-      verbatimSymlinks: true,
-    });
-    const sums = await verifyChecksums(partial);
-    if (sums.failed.length > 0) {
+    try {
+      await cp(deployment.distribution, partial, {
+        recursive: true,
+        errorOnExist: true,
+        force: false,
+        preserveTimestamps: true,
+        verbatimSymlinks: true,
+      });
+      const sums = await verifyChecksums(partial);
+      if (sums.failed.length > 0) {
+        throw new Refusal(
+          `The copy at ${partial} does not match SHA256SUMS (${sums.failed.join(', ')}).`,
+        );
+      }
+      await rename(partial, target);
+    } catch (error) {
       await rm(partial, { recursive: true, force: true });
-      throw new Refusal(
-        `The copy at ${partial} does not match SHA256SUMS (${sums.failed.join(', ')}).`,
-      );
+      throw error;
     }
-    await rename(partial, target);
   }
 
   const config = await operatorConfigFiles(deployment.currentTarget);
@@ -1477,9 +1955,7 @@ async function phaseInstall(system, deployment, options) {
     system.out(`Copied config/${name}`);
   }
 
-  const previous = deployment.currentIsLink
-    ? deployment.currentTarget
-    : path.join(deployment.releases, deployment.installed.version);
+  const previous = previousRelease(deployment);
   if (!deployment.currentIsLink && (await exists(previous))) {
     throw new Refusal(
       `${previous} exists, so ${deployment.current} cannot move there.`,
@@ -1487,13 +1963,25 @@ async function phaseInstall(system, deployment, options) {
   }
   // The link exists before anything moves; rename() over the old link
   // swaps it in one step, and a directory leaves only between two renames.
+  // A crash between them leaves the link behind, which inspect reports.
   const link = `${deployment.current}.upgrade-${randomBytes(4).toString('hex')}`;
   await symlink(target, link);
-  if (!deployment.currentIsLink) {
-    system.out(`Moving ${deployment.current} to ${previous}`);
-    await rename(deployment.current, previous);
+  try {
+    if (!deployment.currentIsLink) {
+      system.out(`Moving ${deployment.current} to ${previous}`);
+      await rename(deployment.current, previous);
+    }
+    try {
+      await rename(link, deployment.current);
+    } catch (error) {
+      if (!deployment.currentIsLink) {
+        await rename(previous, deployment.current);
+      }
+      throw error;
+    }
+  } finally {
+    await rm(link, { force: true });
   }
-  await rename(link, deployment.current);
   system.out(`${deployment.current} -> ${await readlink(deployment.current)}`);
   system.out(`The previous release stays at ${previous}.`);
   const wanted = deployment.manifest.compatibility?.qwenCodeVersion;
@@ -1530,10 +2018,11 @@ function preflight(system, deployment, extra) {
   return !result.error && result.status === 0;
 }
 
+// The probe's own answer, or undefined once the time is up.
 async function waitFor(system, timeoutSeconds, probe) {
   const deadline = system.now() + timeoutSeconds * 1000;
   for (;;) {
-    const outcome = await probe();
+    const outcome = await probe(Math.max(deadline - system.now(), 1));
     if (outcome !== undefined) {
       return outcome;
     }
@@ -1544,9 +2033,15 @@ async function waitFor(system, timeoutSeconds, probe) {
   }
 }
 
-async function health(system, baseUrl) {
+// One probe waits at most this long, so a listener that never answers
+// cannot hold a phase past its --timeout.
+const PROBE_TIMEOUT_MS = 5000;
+
+async function health(system, baseUrl, budgetMs = PROBE_TIMEOUT_MS) {
   try {
-    const response = await system.fetch(`${baseUrl}/actuator/health`);
+    const response = await system.fetch(`${baseUrl}/actuator/health`, {
+      signal: AbortSignal.timeout(Math.min(budgetMs, PROBE_TIMEOUT_MS)),
+    });
     const body = await response.json();
     return response.ok && body?.status === 'UP';
   } catch {
@@ -1559,7 +2054,9 @@ async function phaseStart(system, deployment, options) {
   requireInstalled(deployment);
   const { server, harness } = deployment;
   if (!['inactive', 'failed'].includes(server.activeState)) {
-    throw new Refusal(`${server.name} already runs; run verify.`);
+    throw new Refusal(
+      `${server.name} already runs; run verify, or run stop to start it again.`,
+    );
   }
   const environment = harnessEnvironmentRow(deployment);
   if (environment.status !== 'PASS') {
@@ -1589,9 +2086,14 @@ async function phaseStart(system, deployment, options) {
     }
     return (await system.connect(harnessHost, harnessPort)) ? true : undefined;
   });
+  if (listening === false) {
+    throw new Refusal(
+      `${harness.name} failed before it listened on ${harnessUrl.host}; see journalctl -u ${harness.name}.`,
+    );
+  }
   if (!listening) {
     throw new Refusal(
-      `${harness.name} is not listening on ${harnessUrl.host}; see journalctl -u ${harness.name}.`,
+      `${harness.name} is not listening on ${harnessUrl.host} after ${options.timeout}s; see journalctl -u ${harness.name}.`,
     );
   }
 
@@ -1606,15 +2108,21 @@ async function phaseStart(system, deployment, options) {
   runChecked(system, 'systemctl', ['start', server.name]);
   const baseUrl =
     options.serverUrl ?? serverBaseUrl(deployment.serverEnvironment);
-  const healthy = await waitFor(system, options.timeout, async () => {
+  const healthy = await waitFor(system, options.timeout, async (budget) => {
     if ((await showUnit(system, server.name)).activeState === 'failed') {
       return false;
     }
-    return (await health(system, baseUrl)) ? true : undefined;
+    return (await health(system, baseUrl, budget)) ? true : undefined;
   });
-  if (!healthy) {
+  if (healthy === false) {
     throw new Refusal(
-      `${server.name} did not report UP at ${baseUrl}/actuator/health; see journalctl -u ${server.name}.`,
+      `${server.name} failed before it reported UP at ${baseUrl}/actuator/health; see journalctl -u ${server.name}, then run start again.`,
+    );
+  }
+  if (!healthy) {
+    // Left running: the journal may show a start that is merely slow.
+    throw new Refusal(
+      `${server.name} did not report UP at ${baseUrl}/actuator/health within ${options.timeout}s and keeps running; see journalctl -u ${server.name}, then run verify, or run stop to start it again.`,
     );
   }
   system.out(
@@ -1760,7 +2268,7 @@ async function phaseVerify(system, deployment, options) {
   const baseUrl =
     options.serverUrl ?? serverBaseUrl(deployment.serverEnvironment);
   rows.push(
-    (await health(system, baseUrl))
+    (await health(system, baseUrl, options.timeout * 1000))
       ? row('health', 'PASS', `${baseUrl}/actuator/health is UP`)
       : row('health', 'FAIL', `${baseUrl}/actuator/health is not UP`),
   );
@@ -1824,6 +2332,7 @@ export async function runUpgrade(argv, system = createSystem()) {
         backup: { type: 'string' },
         mysqldump: { type: 'string', default: 'mysqldump' },
         'skip-database': { type: 'boolean', default: false },
+        'runtime-state': { type: 'string' },
         'server-url': { type: 'string' },
         timeout: { type: 'string' },
         tenant: { type: 'string' },
@@ -1864,6 +2373,8 @@ export async function runUpgrade(argv, system = createSystem()) {
     backup: values.backup,
     mysqldump: values.mysqldump,
     skipDatabase: values['skip-database'],
+    runtimeState:
+      values['runtime-state'] && path.resolve(values['runtime-state']),
     serverUrl: values['server-url']?.replace(/\/+$/, ''),
     timeout,
     tenant: values.tenant,

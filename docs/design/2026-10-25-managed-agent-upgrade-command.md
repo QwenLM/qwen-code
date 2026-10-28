@@ -38,76 +38,87 @@ Three other problems show up only on a real host:
 
 ### Phases
 
-`bin/qwen-managed-agent-upgrade <phase>` is a Node.js script beside the bootstrap. It runs as root from the extracted new distribution. It reads the two units through `systemctl show`: the server unit's `ExecStart` locates the installed release, and the `EnvironmentFiles` and `Environment` properties supply the settings.
+`bin/qwen-managed-agent-upgrade <phase>` is a Node.js script beside the bootstrap. It runs as root from the extracted new distribution. It reads the two units through `systemctl show`: the server unit's `ExecStart` locates the installed release, and the `EnvironmentFiles` and `Environment` properties supply the settings. It reads environment files with systemd's own grammar, the state machine in systemd's `env-file.c`, so a value such as a password reaches `mysqldump` exactly as the service receives it. A differential run of 1579 random files against systemd 257 found no difference.
 
 - **`check`**
   - Requires: nothing.
   - Does: prints one row per input and a plan, and exits 1 on any FAIL.
 - **`stop`**
-  - Requires: `check` has no FAIL.
+  - Requires: `check` has no FAIL, unless the new release is already installed. Then `stop` is how a failed `start` is undone, and the comparison it guards has already been made.
   - Does:
     1. Stops the control plane.
     2. Runs `systemctl kill --kill-whom=all` when its cgroup still holds processes, and waits until the cgroup is empty.
     3. Stops the Harness.
 - **`backup`**
-  - Requires: both units stopped and the server cgroup empty.
+  - Requires: both units stopped and the server cgroup empty; the `backup-tools` and `runtime-state` rows have no FAIL.
   - Does:
-    - writes `database.sql` from `mysqldump`, with the credentials in a temporary option file;
-    - writes `runtime-state.tar` and `configuration.tar`;
+    - writes `database.sql` from `mysqldump`, with the credentials in an option file in a temporary directory outside the backup;
+    - writes `runtime-state.tar`, `configuration.tar` of the configuration outside the release, and `release-config.tar` of the configuration in the release by its path there;
     - writes `backup.json` last, recording the other files;
     - removes what it wrote when a step fails.
 - **`install`**
   - Requires: both units stopped; a backup that still describes the deployment; `check` has no FAIL.
   - Does:
-    1. Copies the release to `<distribution>-releases/<version>` and verifies the copy.
+    1. Copies the release to `<distribution>-releases/<version>` and verifies the copy, removing it when either step fails. An existing directory there is used only when its `SHA256SUMS` is the new distribution's and its files match it.
     2. Copies operator files from the installed `config/`.
-    3. Replaces the distribution link with one `rename`. The first run instead moves the installed directory into the releases directory and puts a link in its place.
+    3. Replaces the distribution link with one `rename`. The first run instead moves the installed directory into the releases directory and puts a link in its place, and moves the directory back when the second `rename` fails.
 - **`start`**
   - Requires: the new release installed; the server unit stopped; the Broker settings edited.
   - Does:
     1. Starts the Harness and waits for its port.
     2. Runs the installed launcher's `--check` through `systemd-run`, with the unit's user, working directory and environment.
-    3. Only when that passes, starts the control plane and waits for `/actuator/health` to report `UP`.
+    3. Only when that passes, starts the control plane and waits for `/actuator/health` to report `UP`. One probe waits at most 5 seconds. A unit that fails is reported as failed; one still not healthy at `--timeout` keeps running, and the refusal names `verify` and `stop`.
 - **`verify`**
   - Requires: both units running.
   - Does:
     - runs `--check --online` the same way;
     - reads the actuator;
-    - with `--tenant`, reads a Session and its Items;
+    - with `--tenant`, reads the most recent Session and its Items, before `--turn` creates one;
     - with `--turn`, runs one Turn in a new Session, which calls the model.
 
-The phases keep no state file. Each re-reads the units, files and links, so a phase interrupted by a crash is simply run again. Running `stop` again changes nothing it already did, and `install` reuses a copy whose checksums match.
+The phases keep no state file. Each re-reads the units, files and links, so a phase interrupted by a crash is simply run again. Running `stop` again changes nothing it already did, and `install` reuses a copy of the same build. The one window a re-run cannot close is a crash between the first install's two renames. The distribution path is then missing and the new link sits beside it as `<distribution>.upgrade-<suffix>`. Every phase reports that state and names the `mv -T` that finishes the install.
 
 ### Check rows
 
-| Row            | FAIL                                                                                                        | WARN                                                             |
-| -------------- | ----------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
-| `distribution` | a file differs from `SHA256SUMS`                                                                            |                                                                  |
-| `deployment`   | a unit is not loaded, or the server does not start a distribution launcher                                  |                                                                  |
-| `version`      | same or older release                                                                                       |                                                                  |
-| `database`     | a script the installed database ran was changed or removed                                                  | new scripts to apply; the jars cannot be read                    |
-| `java`, `node` | below the manifest's minimum, or not found                                                                  | a range the command cannot read                                  |
-| `qwen-code`    |                                                                                                             | the Harness runs another version than the manifest               |
-| `harness-env`  |                                                                                                             | `QWEN_HOSTED_HARNESS_BROKER_ARGS`, or the Broker token set twice |
-| `config`       | a non-file in the installed `config/`                                                                       |                                                                  |
-| `unit-files`   |                                                                                                             | a unit template changed between the releases                     |
-| `layout`       | the releases directory is inside the distribution, or on another file system than a directory install moves |                                                                  |
-| `backup-tools` |                                                                                                             | no `mysqldump` on `PATH`                                         |
+| Row             | FAIL                                                                                                                                   | WARN                                                                         |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `distribution`  | a file differs from `SHA256SUMS`                                                                                                       |                                                                              |
+| `deployment`    | a unit is not loaded, the server does not start a distribution launcher, the new manifest is unreadable, or an install was interrupted |                                                                              |
+| `version`       | same or older release                                                                                                                  |                                                                              |
+| `database`      | a script the installed database ran was changed or removed; a repeatable script was removed                                            | scripts to apply, a changed repeatable one included; the jars cannot be read |
+| `java`, `node`  | below the manifest's minimum, or not found                                                                                             | a range the command cannot read                                              |
+| `qwen-code`     |                                                                                                                                        | the Harness runs another version than the manifest                           |
+| `harness-env`   |                                                                                                                                        | `QWEN_HOSTED_HARNESS_BROKER_ARGS`, or the Broker token set twice             |
+| `config`        | a non-file in the installed `config/`                                                                                                  |                                                                              |
+| `unit-files`    |                                                                                                                                        | a unit template changed between the releases                                 |
+| `layout`        | the releases directory is inside either distribution, or on another file system than a directory install moves                         |                                                                              |
+| `backup-tools`  | the `--mysqldump` client is not installed, or the datasource is not a single-host MySQL URL                                            | (SKIP with `--skip-database`)                                                |
+| `runtime-state` | another source can set the state directory and `--runtime-state` is absent; `--runtime-state` is not a directory                       | the configured directory does not exist (SKIP when none is configured)       |
 
-The `database` row reads the Flyway scripts from both server jars: the manifest's control-plane component, entries `BOOT-INF/classes/db/**/V*__*.sql` or `U*__*.sql`. A short zip reader follows the central directory and inflates the entries with `zlib`, so releases that predate this change are compared as well. Script contents, not the manifests' version strings, decide the row: a changed script fails even when both manifests name version `1`.
+`check` takes the options of the later phases and prints them into its plan, so the rows describe the run the operator will make. `stop` and `install` repeat all rows above `backup-tools`; `backup` repeats the last two.
+
+The `database` row reads the Flyway scripts from both server jars: the manifest's control-plane component, entries `BOOT-INF/classes/db/**/` named as Flyway names versioned, undo and repeatable scripts. The `V`, `U` and `R` prefixes are case-sensitive and the `.sql` suffix is not, as in Flyway. A short zip reader follows the central directory and inflates the entries with `zlib`, so releases that predate this change are compared as well. Script contents, not the manifests' version strings, decide the row: a changed script fails even when both manifests name version `1`. Flyway runs a changed repeatable script again, so that is a WARN, while a removed one fails validation. A jar in which the reader finds no script is unreadable rather than unchanged, since no server ships without its schema.
 
 `harness-env` warns rather than fails. The backup has to keep the files the old release reads, so the edits happen after `backup`; `start` refuses until they are made.
 
+### Runtime state directory
+
+The server's `application.yml` maps `qwen.managed-agent.runtime-broker.state-directory` to `QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY`, and that variable is the only source the command reads. Spring resolves the property from many other places: a literal in a configuration file the launcher passes, system properties in `JAVA_OPTS` and its siblings, `SPRING_APPLICATION_JSON`, the relaxed-binding variable `QWEN_MANAGEDAGENT_RUNTIMEBROKER_STATEDIRECTORY`, the unit's arguments, and profile or import files. Each of them wins over the mapped variable.
+
+The command does not reimplement Spring's resolution. It names any of these sources that mentions the property, or that loads configuration the command cannot read, and `backup` then refuses until `--runtime-state` names the directory. A backup without the Runtime state the database refers to cannot be restored consistently, so a backup that silently left it out would be worse than a refusal. When no source configures the directory, as on a deployment without the tool path, `backup` archives none and prints that.
+
 ### Backup freshness
 
-`backup.json` records five things:
+`backup.json` records these facts:
 
 - the installed and target versions;
+- where `install` leaves the previous release;
 - the boot ID;
 - the server unit's `ActiveEnterTimestampMonotonic` and `InactiveEnterTimestampMonotonic`;
+- the database the dump is of: host, port and name, without credentials;
 - each file's size and SHA-256.
 
-`install` refuses the backup if any of these differs. In particular, a reboot changes the boot ID, and a start since the backup changes either timestamp.
+`install` refuses the backup if any of these differs. In particular, a reboot changes the boot ID, a start since the backup changes either timestamp, and an edited `SPRING_DATASOURCE_URL` names another database than the one dumped. The record also names the distribution path and the units, so the guide's rollback reads every path from it.
 
 ### Preflight changes
 
@@ -135,16 +146,20 @@ The control-plane unit adds `SuccessExitStatus=143`. `check` reports the changed
   - parsing of environment files, `systemctl show` output, versions, JDBC URLs and the jar's scripts;
   - each check row;
   - every phase's refusals and its steps.
-- **Mutation testing.** 21 mutants of the script's decisions and 4 of the preflight changes.
+- **Environment files.** 1579 random files read back through `systemd-run` on systemd 257, with no difference from the command's reader.
+- **Mutation testing.** 52 mutants of the script's decisions and 5 of the preflight changes.
 - **Preflight unit tests:**
   - Flyway ordering;
-  - the validation hook.
+  - the validation hook;
+  - the validation `databaseCheck` runs, on an H2 database Flyway migrated.
 - **End to end on a real host** (systemd 257, MySQL 8.4, the real Hosted Harness with a fake model). The old release was installed the way `systemd/README.md` describes, with a stand-in worker left in the server cgroup.
   - **Compatible upgrade:** every phase, plus these checks:
     - the refusals for running and out-of-order phases;
     - a restore drill into a fresh MySQL;
     - `verify --turn`;
-    - the documented rollback.
+    - a database password with a backslash, which the previous reader dropped;
+    - `stop` after `install`;
+    - the documented rollback, every path read from `backup.json`.
   - **Baseline rewritten in place:** `check` fails and `stop` refuses.
   - **Preflight A/B on the same host state:**
     - the release before this change passes a database the server refuses;

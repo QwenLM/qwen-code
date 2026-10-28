@@ -152,12 +152,13 @@ bin/qwen-managed-agent-upgrade verify --tenant <tenant> --turn
 
 每个阶段都会重新读取 unit、其环境文件和已安装的版本；上一阶段留下的状态不符合预期时就拒绝执行，因此中断的升级可以从失败的阶段继续。unit 名不是 `qwen-managed-agent-server` 和 `qwen-hosted-harness` 时，用 `--server-unit` 和 `--harness-unit` 指定；命令通过这两个 unit 找到已安装的版本、环境文件和服务账号。
 
-- `check` 不做任何改动。它按 `SHA256SUMS` 校验新分发产物，比较新旧两个版本（版本号、服务端 jar 中的 Flyway 脚本、Java、Node.js 与 Qwen Code），并读取 Harness 的 Broker 配置、unit 模板、已安装版本 `config/` 中的运维文件以及版本目录布局。它为每项输入打印一行，再打印一份计划，把人工步骤放在对应位置；任一 FAIL 时退出码为 1。如果新版本修改或删除了已安装数据库执行过的脚本，`database` 行报 FAIL：在首个正式版发布之前，版本可能会原地重写 schema 基线，这样的版本无法在现有数据库上启动。
-- `stop` 重新执行上述检查，检查不通过就什么都不停。它先停止控制面，再停止 `KillMode=process` 留在其 cgroup 中的 Runtime worker 并等待它们退出（`--timeout`，默认 60 秒），最后停止 Harness。
-- `backup --to <新的空目录>` 要求两个 unit 都已停止且没有遗留 worker。它用 `mysqldump` 写出 `database.sql`，unit 中的 `SPRING_DATASOURCE_*` 凭据通过临时选项文件传入，而不是放在命令行上；写出 `QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY` 的 `runtime-state.tar`；以及 `configuration.tar`，其中包含 unit 文件、它们的环境文件、Harness 凭据文件、`SPRING_CONFIG_ADDITIONAL_LOCATION` 指向的文件和已安装版本的 `config/`。所有文件都是 `0600`，所在目录为 `0700`；最后写入的 `backup.json` 记录各文件的校验和。`--mysqldump <path>` 指定其他客户端；数据库已用其他方式备份时，用 `--skip-database` 跳过导出。备份失败时会删除已写出的内容。
-- `install --backup <目录>` 拒绝其他版本的备份、内容有变化的备份文件，以及控制面在备份之后又启动过的备份。它把新版本复制到 `<分发路径>-releases/<version>`，例如 `/opt/qwen-managed-agent-releases/<version>`（用 `--releases` 指定其他目录），把已安装版本 `config/` 中的运维文件连同属主和权限复制过去，再用一次 rename 把分发路径指向新版本。第一次运行会把已安装的目录移到 `<releases>/<旧版本>`，并在原位置放一个链接，因此 unit 中的路径不变。旧版本保留在原处。
-- `install` 之前，以及 Harness 的 Broker 配置仍需按下文第 5 步修改时，`start` 会拒绝执行。它先启动 Harness，再以服务账号、按 unit 的环境运行 `bin/qwen-managed-agent-server --check`，通过后才启动控制面，并等待 actuator 报告健康（`--timeout`，默认 300 秒）。Flyway 在这次启动中迁移 schema。
-- `verify` 以同样方式运行 `--check --online` 并读取 actuator。指定 `--tenant <id>` 时，它读取该租户最早的 Session 及其 Item；`--turn` 还会创建一个 Session 并等待一个 Turn 完成，这会调用模型。使用签名认证时两者都跳过，请通过入口读取 Session。
+- `check` 不做任何改动。它按 `SHA256SUMS` 校验新分发产物，比较新旧两个版本（版本号、服务端 jar 中的 Flyway 脚本、Java、Node.js 与 Qwen Code），并读取 Harness 的 Broker 配置、unit 模板、已安装版本 `config/` 中的运维文件以及版本目录布局。它的 `backup-tools` 和 `runtime-state` 两行说明 `backup` 在给定选项下能否执行，因此备份用的选项也要传给 `check`；打印出的计划会带上这些选项。它为每项输入打印一行，再打印一份计划，把人工步骤放在对应位置；任一 FAIL 时退出码为 1。如果新版本修改或删除了已安装数据库执行过的脚本，`database` 行报 FAIL：在首个正式版发布之前，版本可能会原地重写 schema 基线，这样的版本无法在现有数据库上启动。
+- `stop` 重新执行上述检查，检查不通过就什么都不停。它先停止控制面，再停止 `KillMode=process` 留在其 cgroup 中的 Runtime worker 并等待它们退出（`--timeout`，默认 60 秒），最后停止 Harness。新版本安装之后，`stop` 不再执行这些检查，因此也能停止 `start` 留下仍在运行的控制面。
+- `backup --to <新的空目录>` 要求两个 unit 都已停止且没有遗留 worker。它用 `mysqldump` 写出 `database.sql`，unit 中的 `SPRING_DATASOURCE_*` 凭据通过备份目录之外某个临时目录里的选项文件传入，而不是放在命令行上。它写出 Runtime 状态目录的 `runtime-state.tar`；`configuration.tar`，其中包含 unit 文件、它们的环境文件、Harness 凭据文件和 `SPRING_CONFIG_ADDITIONAL_LOCATION` 指向的文件；以及 `release-config.tar`，其中包含已安装版本的 `config/` 和上述文件中位于版本目录内的部分，按它们在版本目录中的路径记录。所有文件都是 `0600`，所在目录为 `0700`；最后写入的 `backup.json` 记录各文件的校验和、导出的是哪个数据库，以及 `install` 会把旧版本放在哪里。`--mysqldump <path>` 指定其他客户端；数据库已用其他方式备份时，用 `--skip-database` 跳过导出。备份失败时会删除已写出的内容。
+  - 命令从 `QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY` 读取 Runtime 状态目录，也就是服务端 `application.yml` 所映射的变量。如果还有其他来源可以设置它——launcher 交给 Spring 的配置文件、`JAVA_OPTS`、`JAVA_TOOL_OPTIONS`、`JDK_JAVA_OPTIONS`、`SPRING_APPLICATION_JSON`、relaxed binding 形式的变量、unit 的启动参数、`SPRING_PROFILES_ACTIVE`、`SPRING_CONFIG_LOCATION` 或 `SPRING_CONFIG_IMPORT`——这样的来源优先于该变量，`backup` 会拒绝执行，直到用 `--runtime-state <目录>` 指明服务端实际使用的目录。没有配置状态目录时（例如未开启工具路径的部署），`backup` 不归档 Runtime 状态，并明确说明。
+- `install --backup <目录>` 拒绝其他版本的备份、内容有变化的备份文件、控制面在备份之后又启动过的备份，以及所导出的数据库与 unit 的 `SPRING_DATASOURCE_URL` 不同的备份。它把新版本复制到 `<分发路径>-releases/<version>`，例如 `/opt/qwen-managed-agent-releases/<version>`（用 `--releases` 指定其他目录，并在每个阶段都传同一个），把已安装版本 `config/` 中的运维文件连同属主和权限复制过去，再用一次 rename 把分发路径指向新版本。第一次运行会把已安装的目录移到 `<releases>/<旧版本>`，并在原位置放一个链接，因此 unit 中的路径不变。旧版本保留在原处。已存在的 `<releases>/<version>` 只有在其 `SHA256SUMS` 与新分发产物相同、且文件与之相符时才会被使用；复制失败时会删除复制出的内容。如果第一次运行在两次 rename 之间崩溃，分发路径会缺失，旁边留下 `<分发路径>.upgrade-<后缀>`；此后每个阶段都会给出完成安装所需的 `mv -T` 命令。
+- `install` 之前，以及 Harness 的 Broker 配置仍需按下文第 5 步修改时，`start` 会拒绝执行。它先启动 Harness，再以服务账号、按 unit 的环境运行 `bin/qwen-managed-agent-server --check`，通过后才启动控制面，并等待 actuator 报告健康（`--timeout`，默认 300 秒；单次探测最多等待 5 秒）。Flyway 在这次启动中迁移 schema。控制面启动失败时会报告为失败；超时仍未健康时控制面保持运行，请查看其日志，然后运行 `verify`，或先 `stop` 再重新 `start`。
+- `verify` 以同样方式运行 `--check --online` 并读取 actuator。指定 `--tenant <id>` 时，它在 `--turn` 创建 Session 之前读取该租户最近的 Session 及其 Item；`--turn` 会创建一个 Session 并等待一个 Turn 完成，这会调用模型。使用签名认证时两者都跳过，请通过入口读取 Session。
 
 该命令只启动和停止 unit，不会停止入口流量、安装 Qwen Code、修改环境文件或 unit 文件，也不会删除任何版本。`check` 提示 unit 模板有变化时，请在 `start` 之前把变化同步到已安装的 unit，并执行 `systemctl daemon-reload`。
 
@@ -175,19 +176,20 @@ bin/qwen-managed-agent-upgrade verify --tenant <tenant> --turn
 
 不支持数据库降级。如果在恢复流量前启动或验证失败，应修正配置并重试同一产物。如需退回到 manifest 声明较旧 schema 范围的版本，必须在接受任何新写入前同时恢复升级前的数据库与 Runtime-state 备份；不得假设旧 server 可以直接运行在已迁移数据库上。任何退回旧版分发产物的操作，都要从同一份备份恢复 `server.env` 与 `harness.env`，因为第 5 步已为新版本改写了它们。
 
-使用该命令生成的备份时，在两个 unit 都已停止的情况下按以下步骤退回旧版本：
+使用该命令生成的备份时，在两个 unit 都已停止的情况下按以下步骤退回旧版本。尖括号中的名称是 `<backup>/backup.json` 的字段。`files` 列表中没有的归档，跳过对应的那一行；`database` 为 `skipped` 时跳过两行 `mysql`，改用当初备份数据库的方式恢复。
 
 ```bash
-mysql -u root -e 'DROP DATABASE qwen_managed_agent'
-mysql -u root < <backup>/database.sql        # 重新创建数据库
-tar -C <runtime state directory> --numeric-owner -xpf <backup>/runtime-state.tar
+mysql -h <datasource.host> -P <datasource.port> -u root -e 'DROP DATABASE <datasource.database>'
+mysql -h <datasource.host> -P <datasource.port> -u root < <backup>/database.sql   # 重新创建数据库
+tar -C <runtimeState> --numeric-owner -xpf <backup>/runtime-state.tar
 tar -C / --numeric-owner -xpf <backup>/configuration.tar
-ln -sfn /opt/qwen-managed-agent-releases/<old version> /opt/qwen-managed-agent
+tar -C <from.release> --numeric-owner -xpf <backup>/release-config.tar
+ln -sfn <from.release> <distribution>
 systemctl daemon-reload
-systemctl start qwen-hosted-harness qwen-managed-agent-server
+systemctl start <harness.unit> <server.unit>
 ```
 
-解压到 Runtime 状态目录之前先清空该目录。如果新控制面因为数据库与其 schema 不匹配而拒绝启动，它没有做任何迁移，只需恢复链接和文件。
+解压到 Runtime 状态目录之前先清空该目录。`release-config.tar` 直接解压到旧版本目录，而不是经由 `<distribution>`：在执行 `ln` 那一行之前，它仍链接到新版本。如果新控制面因为数据库与其 schema 不匹配而拒绝启动，它没有做任何迁移，只需恢复链接和文件。
 
 ## 轮换 Runtime credential key
 

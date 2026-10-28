@@ -602,8 +602,11 @@ export async function createReferenceDistribution({
     `${rootName}/bin/qwen-managed-agent-server`,
     `${rootName}/bin/qwen-managed-agent-operator-recovery`,
     `${rootName}/bin/qwen-managed-agent-admin`,
+    // The two launchers exec these modules.
     `${rootName}/bin/qwen-managed-agent-bootstrap`,
+    `${rootName}/bin/qwen-managed-agent-bootstrap.mjs`,
     `${rootName}/bin/qwen-managed-agent-upgrade`,
+    `${rootName}/bin/qwen-managed-agent-upgrade.mjs`,
     `${rootName}/config/application.example.yml`,
     ...systemdFiles.map((file) => `${rootName}/systemd/${file}`),
   ]) {
