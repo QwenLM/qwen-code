@@ -133,6 +133,25 @@ describe('OpenTuiPermissionsDialog rule rows', () => {
     expect(container.textContent).toContain('(invalid: not applied)');
   });
 
+  // Rows clip the label from the tail, so a badge that trails the rule is what
+  // a long rule loses. The ink twin pins the same thing; the two dialogs are a
+  // parity pair and must not drift on this.
+  it('keeps the badge on a rule too long for the row', () => {
+    const { container } = renderPermissions([
+      {
+        raw: `Bash(${'x'.repeat(300)}`,
+        toolName: 'Bash',
+        type: 'deny',
+        scope: 'user',
+        invalid: true,
+      },
+    ]);
+
+    press('right');
+    press('right');
+    expect(container.textContent).toContain('(invalid: not applied)');
+  });
+
   it('clips the add-rule scope row to the framed width, so it cannot wrap', () => {
     // The scope step paints inside the DialogFrame — border and padding take
     // four columns of the area width first — but the label clip was budgeted

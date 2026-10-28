@@ -429,8 +429,12 @@ export function PermissionsDialog({
     ];
     for (const r of filteredRules) {
       items.push({
+        // The badge leads the row: both renderers clip the label from the
+        // tail, so a trailing badge disappears on a long rule and the row
+        // then reads as a rule in force, which is what the badge is here to
+        // prevent.
         label: r.rule.invalid
-          ? `${r.rule.raw} ${t('(invalid: not applied)')}`
+          ? `${t('(invalid: not applied)')} ${r.rule.raw}`
           : r.rule.raw,
         value: r.rule.raw,
         key: `${r.type}-${r.scope}-${r.rule.raw}`,

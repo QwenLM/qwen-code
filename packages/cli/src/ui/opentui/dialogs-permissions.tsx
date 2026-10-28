@@ -275,7 +275,9 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
   const ruleListItems = [
     { label: t('Add a new rule…'), key: '__add__', value: '__add__' },
     ...filteredRules.map((r) => ({
-      label: r.invalid ? `${r.raw} ${t('(invalid: not applied)')}` : r.raw,
+      // Badge first, matching the ink dialog: rows clip from the tail, so a
+      // trailing badge is what a long rule loses.
+      label: r.invalid ? `${t('(invalid: not applied)')} ${r.raw}` : r.raw,
       value: r.raw,
       key: `${r.type}-${r.scope}-${r.raw}`,
     })),
