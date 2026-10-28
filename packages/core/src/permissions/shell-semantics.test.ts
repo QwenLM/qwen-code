@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @license
  * Copyright 2025 Qwen team
  * SPDX-License-Identifier: Apache-2.0
@@ -639,6 +639,93 @@ describe('extractShellOperationsAcrossCommand', () => {
           "export HOME=/tmp/attacker && bash -lc 'cd && echo {} > settings.json'",
         ),
       ).toEqual([uncertainWrite('/repo/settings.json')]);
+      // A command-scoped `HOME=` prefix is exported into the wrapper child, so
+      // the child's bare `cd` resolves against the prefixed value too.
+      expect(
+        across("HOME=/repo/.qwen bash -lc 'cd && echo {} > settings.json'"),
+      ).toEqual([uncertainWrite('/repo/settings.json')]);
+      // `HOME[0]=` assigns the scalar itself (`HOME[1]=` only an array
+      // element, which leaves `$HOME` alone). `declare` and `typeset` accept
+      // the subscript as well.
+      expect(
+        across('HOME[0]=/repo/.qwen ; cd ; echo {} > settings.json'),
+      ).toEqual([uncertainWrite('/repo/settings.json')]);
+      expect(
+        across('declare HOME[0]=/repo/.qwen ; cd ; echo {} > settings.json'),
+      ).toEqual([uncertainWrite('/repo/settings.json')]);
+      expect(
+        across(
+          'setup() {\n local HOME[0]=/repo/.qwen\n cd && echo {} > settings.json\n}',
+        ),
+      ).toEqual([uncertainWrite('/repo/settings.json')]);
+      // Bash accepts a redirect on a bare assignment, and the assignment still
+      // persists; both the redirect write and the latched `cd` must show up.
+      expect(
+        across('> /dev/null HOME=/tmp/attacker ; cd ; echo {} > settings.json'),
+      ).toEqual([write('/dev/null'), uncertainWrite('/repo/settings.json')]);
+      // Reserved words put the builtin in a later position of the segment, and
+      // `for HOME in …` assigns the loop variable in the current shell.
+      expect(
+        across(
+          'if true; then export HOME=/tmp/attacker; fi ; cd ; echo {} > settings.json',
+        ),
+      ).toEqual([uncertainWrite('/repo/settings.json')]);
+      expect(
+        across('! export HOME=/tmp/attacker ; cd ; echo {} > settings.json'),
+      ).toEqual([uncertainWrite('/repo/settings.json')]);
+      expect(
+        across(
+          'for HOME in /tmp/attacker; do cd; done ; echo {} > settings.json',
+        ),
+      ).toEqual([uncertainWrite('/repo/settings.json')]);
+      // `command` and `builtin` run the builtin in this shell.
+      expect(
+        across(
+          'command export HOME=/tmp/attacker ; cd ; echo {} > settings.json',
+        ),
+      ).toEqual([uncertainWrite('/repo/settings.json')]);
+      expect(
+        across(
+          'builtin export HOME=/tmp/attacker ; cd ; echo {} > settings.json',
+        ),
+      ).toEqual([uncertainWrite('/repo/settings.json')]);
+      // `-g` across a function boundary is global, while the same `declare`
+      // without it is function-scoped (see the guard test below).
+      expect(
+        across(
+          'setup() {\n declare -g HOME=/tmp/global\n}\nsetup\ncd && echo {} > settings.json',
+        ),
+      ).toEqual([uncertainWrite('/repo/settings.json')]);
+      // A single-line function definition does not leave a body open, so this
+      // later top-level `declare` still persists.
+      expect(
+        across(
+          'setup() { local HOME=/tmp/sandbox; } ; declare HOME=/tmp/top ; cd ; echo {} > settings.json',
+        ),
+      ).toEqual([uncertainWrite('/repo/settings.json')]);
+      // A `~` built from a prefix command (`timeout`, `nohup`, `env`) or from a
+      // `find -exec` never appears as a top-level token, yet the child expands
+      // it against the reassigned value.
+      expect(
+        across(
+          "export HOME=/tmp/attacker ; timeout 5 bash -c 'echo {} > ~/settings.json'",
+        ),
+      ).toEqual([
+        uncertainWrite(`${homedir().replace(/\\/g, '/')}/settings.json`),
+      ]);
+      expect(
+        across('export HOME=/tmp/attacker ; find . -exec cp {} ~/bak \\;'),
+      ).toEqual([
+        dir('/repo'),
+        read('/repo/__find_exec_path__'),
+        uncertainWrite(`${homedir().replace(/\\/g, '/')}/bak`),
+      ]);
+      // `cp -t ~/dir` composes the destination with the source basename, so a
+      // `~`-derived path is never exactly equal to the resolved directory.
+      expect(across('export HOME=/tmp/x ; cp settings.json -t ~/bak')).toEqual([
+        read('/repo/settings.json'),
+        uncertainWrite(`${homedir().replace(/\\/g, '/')}/bak/settings.json`),
+      ]);
     } finally {
       if (previous === undefined) delete process.env['HOME'];
       else process.env['HOME'] = previous;
@@ -710,6 +797,79 @@ describe('extractShellOperationsAcrossCommand', () => {
           'export HOME=/tmp/attacker | cat ; cd && echo {} > settings.json',
         ),
       ).toEqual([write('/home/tester/settings.json')]);
+      // A self-reference assigns the current value back — also with a trailing
+      // slash, which names the same directory — so bash's `HOME` is unchanged.
+      for (const command of [
+        'HOME=$HOME',
+        'HOME="$HOME"',
+        'HOME=${HOME}',
+        'HOME="${HOME}/"',
+        'export HOME=$HOME',
+        'HOME[0]=$HOME',
+      ]) {
+        expect(across(`${command} ; cd ; echo {} > settings.json`)).toEqual([
+          write('/home/tester/settings.json'),
+        ]);
+      }
+      // Single quotes suppress expansion, so these DO change the value, as does
+      // a genuinely different value built from `$HOME`.
+      for (const command of [
+        "HOME='/tmp/attacker'",
+        'HOME="$HOME/x"',
+        'HOME+=$HOME',
+      ]) {
+        expect(across(`${command} ; cd ; echo {} > settings.json`)).toEqual([
+          uncertainWrite('/repo/settings.json'),
+        ]);
+      }
+      // `HOME[1]=` assigns an array element and leaves the scalar alone.
+      expect(across('HOME[1]=/tmp/one ; cd ; echo {} > settings.json')).toEqual(
+        [write('/home/tester/settings.json')],
+      );
+      // Bash recognises an assignment before quote removal, so a quote or an
+      // escape inside the name makes the whole word a command name instead.
+      // `export`/`readonly` reject an array subscript outright ("not a valid
+      // identifier"), so those words leave `HOME` alone too.
+      for (const command of [
+        '"HOME=/tmp/attacker"',
+        "'HOME=/tmp/attacker'",
+        '\\HOME=/tmp/attacker',
+        '"HO"ME=/tmp/attacker',
+        '"HOME[0]=/tmp/attacker"',
+        'export HOME[0]=/tmp/attacker',
+        'readonly HOME[0]=/tmp/attacker',
+        'export HOME',
+      ]) {
+        expect(across(`${command} ; cd ; echo {} > settings.json`)).toEqual([
+          write('/home/tester/settings.json'),
+        ]);
+      }
+      // `local` is function-local, and `declare`/`typeset` in a function body
+      // are too unless `-g` asks for the global variable.
+      for (const builtin of ['local', 'declare', 'typeset']) {
+        expect(
+          across(
+            `setup() {\n ${builtin} HOME=/tmp/sandbox\n}\nsetup\ncd && echo {} > settings.json`,
+          ),
+        ).toEqual([write('/home/tester/settings.json')]);
+      }
+      // A backgrounded brace group runs in a subshell as a whole.
+      expect(
+        across('{ export HOME=/tmp/attacker; } & cd ; echo {} > settings.json'),
+      ).toEqual([write('/home/tester/settings.json')]);
+      expect(
+        across(
+          '{ export HOME=/tmp/attacker; } | cat ; cd ; echo {} > settings.json',
+        ),
+      ).toEqual([write('/home/tester/settings.json')]);
+      // A `#` at the start of a word starts a comment, so the bare `cd` really
+      // has no target; mid-word `#` stays part of the directory name.
+      expect(across('cd # note ; echo {} > settings.json')).toEqual([
+        write('/home/tester/settings.json'),
+      ]);
+      expect(across('cd dir#part ; echo {} > settings.json')).toEqual([
+        write('/repo/dir#part/settings.json'),
+      ]);
     } finally {
       if (previous === undefined) delete process.env['HOME'];
       else process.env['HOME'] = previous;
@@ -764,6 +924,21 @@ describe('extractShellOperationsAcrossCommand', () => {
   ])('does not move the cwd for the backgrounded `cd` in %s', (command) => {
     expect(across(command)).toEqual([write('/repo/settings.json')]);
   });
+
+  // A prefixed `cd`/`pushd`/`popd` is still a cd for cwd purposes, so the
+  // segment takes the cd branch — which must not swallow the redirections bash
+  // performs before running the builtin.
+  it.each<[string, ShellOperation[]]>([
+    ['TMPDIR=/t cd build > build.log', [write('/repo/build.log')]],
+    ['FOO=1 cd < input.txt', [read('/repo/input.txt')]],
+    ['TMPDIR=/t pushd build > build.log', [write('/repo/build.log')]],
+    ['FOO=1 popd > popd.log', [write('/repo/popd.log')]],
+  ])(
+    'keeps the redirect operations of the prefixed cd in %s',
+    (command, expected) => {
+      expect(across(command)).toEqual(expected);
+    },
+  );
 
   it.each(['pushd', 'pushd +2', 'pushd -2', 'pushd -n /tmp'])(
     'marks writes after `%s` as cwd-unknown',
