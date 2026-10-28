@@ -829,7 +829,9 @@ describe('dryRunGitWorktreePrune', () => {
       path.join(adminDir(repo), 'dangling'),
     );
 
-    expect(await dryRunGitWorktreePrune(repo)).toEqual([
+    const entries = await dryRunGitWorktreePrune(repo);
+    entries.sort((a, b) => (a.id ?? '').localeCompare(b.id ?? ''));
+    expect(entries).toEqual([
       { id: 'dangling', worktreePath: null },
       { id: 'stale', worktreePath: fs.realpathSync(stale) },
     ]);
