@@ -15,6 +15,7 @@ vi.mock('chardet');
 
 import {
   getCachedEncodingForBuffer,
+  getCachedSystemEncoding,
   getSystemEncoding,
   windowsCodePageToEncoding,
   detectEncodingFromBuffer,
@@ -267,6 +268,17 @@ describe('Shell Command Processor - Encoding Functions', () => {
       // Changing the environment must not affect the cached result
       process.env['LANG'] = 'fr_FR.ISO-8859-1';
       expect(getCachedEncodingForBuffer(buffer)).toBe('utf-8');
+    });
+
+    it('should read the system encoding once, shared with buffer detection', () => {
+      mockedOsPlatform.mockReturnValue('win32');
+      mockedExecSync.mockReturnValue('Active code page: 936');
+      mockedExecSync.mockClear();
+
+      expect(getCachedSystemEncoding()).toBe('gbk');
+      expect(getCachedEncodingForBuffer(notUtf8(0xb9, 0xdc))).toBe('gbk');
+      expect(getCachedSystemEncoding()).toBe('gbk');
+      expect(mockedExecSync).toHaveBeenCalledTimes(1);
     });
 
     it('should fall back to buffer detection when system encoding fails', () => {

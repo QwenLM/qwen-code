@@ -13,6 +13,7 @@ import {
   afterEach,
   type Mock,
 } from 'vitest';
+import { isUtf8 } from 'node:buffer';
 import EventEmitter from 'node:events';
 import type { Readable } from 'node:stream';
 import { type ChildProcess } from 'node:child_process';
@@ -35,6 +36,8 @@ const { Terminal } = pkg;
 const mockGetSystemEncoding = vi.hoisted(() =>
   vi.fn().mockReturnValue('utf-8'),
 );
+const mockGetCachedEncodingForBuffer = vi.hoisted(() => vi.fn());
+const mockGetCachedSystemEncoding = vi.hoisted(() => vi.fn());
 const mockPtySpawn = vi.hoisted(() => vi.fn());
 const mockCpSpawn = vi.hoisted(() => vi.fn());
 const mockSpawnSync = vi.hoisted(() => vi.fn());
@@ -113,9 +116,21 @@ vi.mock('../utils/shell-utils.js', () => ({
   getShellConfiguration: mockGetShellConfiguration,
 }));
 vi.mock('../utils/systemEncoding.js', () => ({
-  getCachedEncodingForBuffer: vi.fn().mockReturnValue('utf-8'),
+  getCachedEncodingForBuffer: mockGetCachedEncodingForBuffer,
+  getCachedSystemEncoding: mockGetCachedSystemEncoding,
   getSystemEncoding: mockGetSystemEncoding,
 }));
+
+// Detection as on a system with this encoding (null: unknown). Bytes that are
+// valid UTF-8 are UTF-8; anything else is in the system encoding or, on a
+// UTF-8 or unknown system, gets the statistical detector's guess, Latin-1.
+const useSystemEncoding = (encoding: string | null) => {
+  mockGetCachedSystemEncoding.mockReturnValue(encoding);
+  const fallback = encoding && encoding !== 'utf-8' ? encoding : 'iso-8859-1';
+  mockGetCachedEncodingForBuffer.mockImplementation((buffer: Buffer) =>
+    isUtf8(buffer) ? 'utf-8' : fallback,
+  );
+};
 
 const mockProcessKill = vi
   .spyOn(process, 'kill')
@@ -199,6 +214,8 @@ let onOutputEventMock: Mock<(event: ShellOutputEvent) => void>;
 
 beforeEach(() => {
   originalProcessEnv = process.env;
+  mockGetCachedSystemEncoding.mockReturnValue('utf-8');
+  mockGetCachedEncodingForBuffer.mockReturnValue('utf-8');
 });
 
 afterEach(() => {
@@ -2244,6 +2261,10 @@ describe('ShellExecutionService child_process fallback', () => {
   const groupKill = (signal?: string) => [-mockChildProcess.pid!, signal];
   const dataChunksOf = (events: Array<{ type: string; chunk?: unknown }>) =>
     events.filter((e) => e.type === 'data').map((e) => e.chunk);
+  // Text of the data events a run emitted: its streamed chunks, or the
+  // buffered result.
+  const emittedText = () =>
+    dataChunksOf(onOutputEventMock.mock.calls.map(([event]) => event)).join('');
 
   /**
    * Executes under a raw-output capture with a 64-byte preview; `drive` emits
@@ -2393,6 +2414,195 @@ describe('ShellExecutionService child_process fallback', () => {
       ]);
       expect(result.output.trim()).toBe('你好');
     });
+
+    it.each([
+      ['gbk', 'b9dcc0edd4b1', '管理员'],
+      ['shift_jis', '8ac7979d8ed2', '管理者'],
+      ['ibm866', '8aa0e2a0abaea3', 'Каталог'],
+    ])(
+      'decodes %s output that follows an ASCII-only first chunk (#7936)',
+      async (codePage, hex, text) => {
+        useSystemEncoding(codePage);
+        const { result } = await runChunks('dir', [
+          'C:\\Users\\',
+          Buffer.from(hex, 'hex'),
+        ]);
+        expect(result.output).toBe(`C:\\Users\\${text}`);
+      },
+    );
+
+    it('decodes the buffered result from the complete output (#7936)', async () => {
+      useSystemEncoding('gbk');
+      // 目 in GBK (C4 BF) is also valid UTF-8 (Ŀ), so its chunk alone reads
+      // as UTF-8; the complete output does not.
+      const { result } = await runChunks('python report.py', [
+        'Loading...\n',
+        Buffer.from('c4bf', 'hex'),
+        Buffer.from('b9dcc0edd4b1', 'hex'),
+      ]);
+      expect(result.output).toBe('Loading...\n目管理员');
+    });
+
+    it('decodes buffered UTF-8 whose first chunk ends inside a character on a legacy code page', async () => {
+      useSystemEncoding('gbk');
+      // The first chunk ends inside 你, so on its own it is not UTF-8.
+      const bytes = Buffer.from('ASCII\n你好世界');
+      const { result } = await runChunks('git log', [
+        bytes.subarray(0, 8),
+        bytes.subarray(8),
+      ]);
+      expect(result.output).toBe('ASCII\n你好世界');
+    });
+
+    it('keeps buffered output whose first chunk ends on a GBK lead byte in the code page', async () => {
+      useSystemEncoding('gbk');
+      // D6 D0 is 中 in GBK; D6 is also a UTF-8 lead byte.
+      const { result } = await runChunks('dir', [
+        Buffer.concat([Buffer.from('C:\\Users\\'), Buffer.from('d6', 'hex')]),
+        Buffer.from('d0cec4', 'hex'),
+      ]);
+      expect(result.output).toBe('C:\\Users\\中文');
+    });
+
+    it('decodes complete output that ends like a cut-off UTF-8 character with the code page', async () => {
+      useSystemEncoding('gbk');
+      // 目浣 in GBK (C4 BF E4 BD) reads as UTF-8 Ŀ followed by the start of
+      // a character, but nothing cut this output off.
+      const { result } = await runChunks('type notes.txt', [
+        Buffer.from('c4bfe4bd', 'hex'),
+      ]);
+      expect(result.output).toBe('目浣');
+    });
+
+    it.each([
+      [
+        'the capture limit',
+        { maxBufferedOutputBytes: 10 },
+        (bytes: Buffer) => {
+          emitOut(bytes.subarray(8));
+          finish();
+        },
+      ],
+      [
+        'a cancel',
+        {},
+        (bytes: Buffer, ac: AbortController) => {
+          emitOut(bytes.subarray(8, 10));
+          ac.abort();
+          finish(1);
+        },
+      ],
+      [
+        'a kill',
+        {},
+        (bytes: Buffer) => {
+          emitOut(bytes.subarray(8, 10));
+          finish(null, 'SIGKILL');
+        },
+      ],
+    ])(
+      'keeps UTF-8 output cut off by %s as UTF-8 on a legacy code page',
+      async (_label, config, cutOff) => {
+        useSystemEncoding('gbk');
+        // The first chunk ends inside 你, and the output ends inside 好.
+        const bytes = Buffer.from('ASCII\n你好世界');
+        const { result } = await simulateExecution(
+          'git log',
+          (_cp, ac) => {
+            emitOut(bytes.subarray(0, 8));
+            cutOff(bytes, ac);
+          },
+          {},
+          { ...shellExecutionConfig, ...config },
+        );
+        expect(result.output).toMatch(
+          /^ASCII\n你\ufffd(\n\n\[Output exceeded|$)/,
+        );
+      },
+    );
+
+    it('decodes buffered stderr from its complete output on a legacy code page', async () => {
+      useSystemEncoding('gbk');
+      const { result } = await simulateExecution('python report.py', () => {
+        emitOut('ASCII\n');
+        emitOut(Buffer.from('b9dcc0edd4b1', 'hex'), 'stderr');
+        finish(1);
+      });
+      expect(result.output).toBe('ASCII\n管理员');
+    });
+
+    it('decodes cut-off output with only ASCII before the cut with the code page', async () => {
+      useSystemEncoding('gbk');
+      // 浣熊 in GBK (E4 BD D0 DC) is cut after 浣. With no complete UTF-8
+      // character before the cut, the output keeps the code page.
+      const { result } = await runChunks(
+        'type notes.txt',
+        ['C:\\Users\\', Buffer.from('e4bdd0dc', 'hex')],
+        { ...shellExecutionConfig, maxBufferedOutputBytes: 11 },
+      );
+      expect(result.output).toMatch(/^C:\\Users\\浣\n\n\[Output exceeded/);
+    });
+
+    it.each([
+      ['UTF-8', 'utf-8'],
+      ['unknown', null],
+      ['plain ASCII (macOS with no locale set)', 'us-ascii'],
+    ])(
+      'still picks the decoder from the first chunk when the system encoding is %s',
+      async (_label, encoding) => {
+        useSystemEncoding(encoding);
+        // The ASCII first chunk picks UTF-8, so the stray Latin-1 byte costs
+        // one replacement character instead of the whole output.
+        const { result } = await runChunks('grep -rn x .', [
+          'Build log\n',
+          Buffer.concat([
+            Buffer.from('caf\xe9 ', 'latin1'),
+            Buffer.from('你好\n'),
+          ]),
+          '世界\n',
+        ]);
+        expect(result.output).toBe('Build log\ncaf\ufffd 你好\n世界');
+      },
+    );
+
+    it.each([
+      [
+        'UTF-8 split inside a character after an ASCII chunk',
+        'gbk',
+        ['ASCII\n', Buffer.from('e4bd', 'hex'), Buffer.from('a0e5a5bd', 'hex')],
+        'ASCII\n你好',
+      ],
+      [
+        'UTF-8 split inside a character after an ASCII chunk',
+        'shift_jis',
+        ['ASCII\n', Buffer.from('e4bd', 'hex'), Buffer.from('a0e5a5bd', 'hex')],
+        'ASCII\n你好',
+      ],
+      [
+        'emoji split after an ASCII chunk',
+        'gbk',
+        ['ASCII\n', Buffer.from('f09f98', 'hex'), Buffer.from('80', 'hex')],
+        'ASCII\n😀',
+      ],
+      [
+        'GBK whose first chunk ends on a lead byte',
+        'gbk',
+        [
+          Buffer.concat([Buffer.from('C:\\Users\\'), Buffer.from('d6', 'hex')]),
+          Buffer.from('d0cec4', 'hex'),
+        ],
+        'C:\\Users\\中文',
+      ],
+    ])(
+      'decodes streamed %s with the decoder its first chunk picked (%s)',
+      async (_label, codePage, chunks, text) => {
+        useSystemEncoding(codePage);
+        await runChunks('git log', chunks, shellExecutionConfig, {
+          streamStdout: true,
+        });
+        expect(emittedText()).toBe(text);
+      },
+    );
 
     it('bounds buffered child_process output before building the final string', async () => {
       const handle = await exec('large-output', {
@@ -2887,6 +3097,41 @@ describe('ShellExecutionService child_process fallback', () => {
       expect(dataChunks).toContain('post-promote-stdout\n');
       expect(dataChunks).toContain('post-promote-stderr\n');
     });
+
+    it.each([
+      [
+        'UTF-8 split inside a character after ASCII',
+        ['Listening on port 8080\n'],
+        [Buffer.from('e4bd', 'hex'), Buffer.from('a0e5a5bd', 'hex')],
+        'Listening on port 8080',
+        '你好',
+      ],
+      [
+        'GBK after GBK',
+        [Buffer.from('b9dcc0edd4b1', 'hex')],
+        [Buffer.from('c4bf', 'hex')],
+        '管理员',
+        '目',
+      ],
+    ])(
+      'child_process: decodes post-promote %s with the decoder picked before the promote on a legacy code page',
+      async (_label, before, after, snapshot, text) => {
+        useSystemEncoding('gbk');
+        const events: Array<{ type: string; chunk?: string | unknown }> = [];
+        const { result } = await simulateExecution(
+          'python server.py',
+          (_cp, ac) => {
+            before.forEach((chunk) => emitOut(chunk));
+            ac.abort(bg('bg_cp_encoding'));
+            after.forEach((chunk) => emitOut(chunk));
+          },
+          { postPromote: { onData: (event) => events.push(event) } },
+        );
+        expect(result.promoted).toBe(true);
+        expect(result.output).toBe(snapshot);
+        expect(dataChunksOf(events).join('')).toBe(text);
+      },
+    );
 
     it('PR-2.5 child_process: onSettle fires on `close` (NOT `exit`) so late chunks land before the registry transitions', async () => {
       // Data can arrive between 'exit' and 'close'; settling on 'exit' has the

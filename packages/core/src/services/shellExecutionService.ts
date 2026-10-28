@@ -14,7 +14,10 @@ import os from 'node:os';
 import path from 'node:path';
 import type { IPty } from '@lydell/node-pty';
 import type { Terminal } from '@xterm/headless';
-import { getCachedEncodingForBuffer } from '../utils/systemEncoding.js';
+import {
+  getCachedEncodingForBuffer,
+  getCachedSystemEncoding,
+} from '../utils/systemEncoding.js';
 import { isBinary } from '../utils/textUtils.js';
 import { getShellConfiguration, type ShellType } from '../utils/shell-utils.js';
 import {
@@ -343,6 +346,44 @@ function decodePreviewTail(buffer: Buffer): string {
       ? aligned
       : buffer,
   );
+}
+
+/**
+ * Whether the system encoding is a code page other than UTF-8. An unknown
+ * encoding (code page 437, a C locale) or plain ASCII (macOS with no locale
+ * set) says nothing about bytes outside ASCII, so it does not count.
+ */
+function hasLegacyCodePage(): boolean {
+  const encoding = getCachedSystemEncoding();
+  return (
+    !!encoding &&
+    encoding !== 'ascii' &&
+    encoding !== 'us-ascii' &&
+    new TextDecoder(encoding).encoding !== 'utf-8'
+  );
+}
+
+/**
+ * Decodes one stream's complete output with the usual detection: UTF-8 when
+ * it is UTF-8, otherwise the code page. Output cut off at the capture limit
+ * or by a cancel or kill can end partway through a UTF-8 character; it still
+ * counts as UTF-8 when the bytes before that character are UTF-8 and hold a
+ * multibyte character.
+ */
+function decodeCompleteOutput(bytes: Buffer, wasCut: boolean): string {
+  if (wasCut && !isUtf8(bytes)) {
+    try {
+      const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes, {
+        stream: true,
+      });
+      if (/[\u0080-\uffff]/.test(text)) {
+        return new TextDecoder('utf-8').decode(bytes);
+      }
+    } catch {
+      // Not UTF-8 before the cut either.
+    }
+  }
+  return decodeBufferedOutput(bytes);
 }
 
 function appendOutputCaptureLimitNotice(
@@ -1027,6 +1068,8 @@ export class ShellExecutionService {
 
         let stdout = '';
         let stderr = '';
+        const stdoutBytes: Buffer[] = [];
+        const stderrBytes: Buffer[] = [];
         let stdoutPreview = '';
         let stderrPreview = '';
         const outputChunks: Buffer[] = [];
@@ -1268,8 +1311,10 @@ export class ShellExecutionService {
           // Buffered text mode: accumulate for the final cleaned-blob emit.
           if (stream === 'stdout') {
             stdout += decodedChunk;
+            stdoutBytes.push(capturedData);
           } else {
             stderr += decodedChunk;
+            stderrBytes.push(capturedData);
           }
           if (streamBufferedOutput) {
             if (stream === 'stdout') {
@@ -1320,6 +1365,17 @@ export class ShellExecutionService {
             }
           }
           const { finalBuffer } = cleanup();
+          if (!streamStdout && hasLegacyCodePage()) {
+            // The first chunk picked the decoder, and an ASCII one is valid
+            // UTF-8; decode each stream again from its complete bytes, as
+            // the PTY path does at exit.
+            const wasCut =
+              outputCaptureLimitExceeded ||
+              abortSignal.aborted ||
+              signal !== null;
+            stdout = decodeCompleteOutput(Buffer.concat(stdoutBytes), wasCut);
+            stderr = decodeCompleteOutput(Buffer.concat(stderrBytes), wasCut);
+          }
           // Ensure we don't add an extra newline if stdout already ends with one.
           const separator = stdout.endsWith('\n') ? '' : '\n';
           const combinedOutput =
