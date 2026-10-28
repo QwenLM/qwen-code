@@ -6,12 +6,13 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { setTimeout as settleInput } from 'node:timers/promises';
+import { Box } from 'ink';
 import { AuthDialog } from './AuthDialog.js';
 import { LoadedSettings } from '../../config/settings.js';
 import type { Settings } from '../../config/settingsSchema.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { AuthType } from '@qwen-code/qwen-code-core';
-import { renderWithProviders } from '../../test-utils/render.js';
+import { renderWithProviders, withProviders } from '../../test-utils/render.js';
 import { UIStateContext } from '../contexts/UIStateContext.js';
 import { UIActionsContext } from '../contexts/UIActionsContext.js';
 import type { UIState } from '../contexts/UIStateContext.js';
@@ -298,6 +299,97 @@ describe('AuthDialog', { timeout: 15000 }, () => {
   afterEach(() => {
     process.env = originalEnv;
   });
+
+  it.each([36, 100])(
+    'keeps provider navigation readable in a 14-row dialog at width %i',
+    async (width) => {
+      const empty = { path: '', settings: {}, originalSettings: {} };
+      const settings = new LoadedSettings(
+        empty,
+        empty,
+        empty,
+        empty,
+        true,
+        new Set(),
+      );
+      const config = {
+        getAuthType: () => undefined,
+        getContentGeneratorConfig: () => undefined,
+      } as unknown as Config;
+      const actions = createMockUIActions();
+      const state = createMockUIState({ mainAreaWidth: width });
+      const dialog = (height: number) => (
+        <UIStateContext.Provider value={state}>
+          <UIActionsContext.Provider value={actions}>
+            <Box
+              height={height}
+              width={width}
+              flexDirection="column"
+              overflow="hidden"
+            >
+              <AuthDialog availableTerminalHeight={height} />
+            </Box>
+          </UIActionsContext.Provider>
+        </UIStateContext.Provider>
+      );
+      const { stdin, lastFrame, rerender, unmount } = renderWithProviders(
+        dialog(14),
+        { settings, config },
+      );
+      const expectReadableSelection = (label: string, height = 14) => {
+        const frame = lastFrame() ?? '';
+        expect(frame.split('\n').length).toBeLessThanOrEqual(height);
+        const selectedLine = frame
+          .split('\n')
+          .find((line) => line.includes('›'));
+        expect(selectedLine?.replaceAll('│', '').trim()).toBe(`› ${label}`);
+      };
+
+      await waitForSelectedOption(lastFrame, 'QwenCloud');
+      expectReadableSelection('QwenCloud');
+      for (const label of [
+        'Alibaba ModelStudio',
+        'Third-party Providers',
+        'Custom Provider',
+      ]) {
+        await moveDownAndWaitForSelection(stdin, lastFrame, label);
+        expectReadableSelection(label);
+      }
+      expect(lastFrame()?.replace(/[│\s]/g, '')).toContain(
+        'https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/',
+      );
+
+      rerender(withProviders(dialog(1), { settings, config }));
+      await waitForSelectedOption(lastFrame, 'Custom Provider');
+      expectReadableSelection('Custom Provider', 1);
+      stdin.write('\u001b[A');
+      await waitForSelectedOption(lastFrame, 'Third-party Providers');
+      expectReadableSelection('Third-party Providers', 1);
+      rerender(withProviders(dialog(14), { settings, config }));
+      await pressEnterAndWaitFor(stdin, lastFrame, 'DeepSeek API Key');
+      stdin.write('\u001b[A');
+      await waitForSelectedOption(lastFrame, 'Requesty');
+      expectReadableSelection('Requesty');
+
+      rerender(withProviders(dialog(40), { settings, config }));
+      await waitForSelectedOption(lastFrame, 'Requesty');
+      rerender(withProviders(dialog(14), { settings, config }));
+      await waitForSelectedOption(lastFrame, 'Requesty');
+      expectReadableSelection('Requesty');
+      // The multi-step form has its own layout; expand before entering it.
+      rerender(withProviders(dialog(40), { settings, config }));
+      await pressEnterAndWaitFor(
+        stdin,
+        lastFrame,
+        'Requesty · Step 1/2 · API Key',
+      );
+      stdin.write('\u001b');
+      await waitForSelectedOption(lastFrame, 'Requesty');
+      stdin.write('\u001b');
+      await waitForSelectedOption(lastFrame, 'Third-party Providers');
+      unmount();
+    },
+  );
 
   it('should show an error if the initial auth type is invalid', () => {
     process.env['GEMINI_API_KEY'] = '';
