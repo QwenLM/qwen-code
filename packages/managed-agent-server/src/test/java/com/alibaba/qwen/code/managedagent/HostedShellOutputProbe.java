@@ -15,6 +15,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
@@ -134,7 +135,7 @@ final class HostedShellOutputProbe implements AutoCloseable {
                 assertThat(worker.isAlive()).isTrue();
                 capture(worker);
                 long pid = Long.parseLong(Files.readString(Path.of(session.get("directory").toString()).resolve("shell.pid")));
-                assertThat(worker.descendants().filter(process -> process.pid() == pid && running(process)).toList())
+                assertThat(worker.descendants().filter(process -> process.pid() == pid && HostedProcessLiveness.running(process)).toList())
                         .as("real Shell child alive at durable-prefix barrier").hasSize(1);
                 assertThat(resources(id, "managed-tool-result-manifest")).isEmpty();
                 assertThat(resources(id, "managed-tool-outcome")).isEmpty();
@@ -398,22 +399,6 @@ final class HostedShellOutputProbe implements AutoCloseable {
         return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
     }
 
-    private static boolean running(ProcessHandle process) {
-        if (!process.isAlive()) {
-            return false;
-        }
-        Path stat = Path.of("/proc", Long.toString(process.pid()), "stat");
-        if (!Files.exists(stat)) {
-            return true;
-        }
-        try {
-            String value = Files.readString(stat);
-            return value.charAt(value.lastIndexOf(')') + 2) != 'Z';
-        } catch (java.io.IOException gone) {
-            return process.isAlive();
-        }
-    }
-
     @Override
     public void close() throws Exception {
         for (Object value : owned()) {
@@ -421,11 +406,7 @@ final class HostedShellOutputProbe implements AutoCloseable {
         }
         processes.forEach(ProcessHandle::destroyForcibly);
         for (ProcessHandle process : processes) {
-            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-            while (running(process)) {
-                assertThat(System.nanoTime()).as("Shell worker/descendant cleanup %s", process.pid()).isLessThan(deadline);
-                Thread.sleep(20);
-            }
+            HostedProcessLiveness.awaitStopped(process, Duration.ofSeconds(10), "Shell worker/descendant cleanup");
         }
     }
 }

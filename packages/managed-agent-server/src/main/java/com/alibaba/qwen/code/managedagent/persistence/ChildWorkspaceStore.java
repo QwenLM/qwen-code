@@ -7,6 +7,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.lang3.StringUtils;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
@@ -78,7 +79,7 @@ public class ChildWorkspaceStore {
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transaction;
 
-    public ChildWorkspaceStore(JdbcTemplate jdbc, PlatformTransactionManager transactionManager) {
+    public ChildWorkspaceStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentTransactionManager") PlatformTransactionManager transactionManager) {
         this.jdbc = jdbc;
         this.transaction = new TransactionTemplate(transactionManager);
     }
