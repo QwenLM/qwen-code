@@ -325,6 +325,24 @@ describe('checkMutationCoverage', () => {
     expect(checkMutationCoverage(matrix()).errors).toEqual([]);
   });
 
+  // "Every commit was mutated" over no commits is vacuously true, and an
+  // empty list is the cheapest enumeration to supply. It is also the one
+  // incomplete list that satisfies the coverage check without this refusal.
+  it('refuses a claim over an empty enumeration', () => {
+    const result = checkMutationCoverage(
+      matrix({ productionCommits: [], rows: [] }),
+    );
+    expect(result.errors.join('\n')).toMatch(
+      /empty productionCommits list: a claim over an empty set is vacuously true/,
+    );
+    expect(result.errors.join('\n')).toContain('--first-parent');
+    // Dropping the claim is the honest way out for a docs-only round.
+    expect(
+      checkMutationCoverage(JSON.stringify({ rows: [], productionCommits: [] }))
+        .errors,
+    ).toEqual([]);
+  });
+
   it('names the commits that have no row', () => {
     const result = checkMutationCoverage(
       matrix({ rows: [{ id: 'M1', commit: A }] }),

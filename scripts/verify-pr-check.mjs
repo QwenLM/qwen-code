@@ -49,7 +49,8 @@ Checks a local round against the rules the CI publisher enforces:
   - a merge-ready verdict carries no failed assertion
   - a findings/blocked verdict whose failures ledger attributes no failure to
     the PR is a contradiction: expected reds are passes
-  - a mutations.json claiming per-commit coverage covers every commit it lists
+  - a mutations.json claiming per-commit coverage covers every commit it lists,
+    and lists at least one commit (an empty set makes the claim vacuous)
 
 and warns (without failing) when the report does not lead with its verdict and
 head OID, when evidence/ carries no kebab-case PNG capture, or when a round with
@@ -73,31 +74,28 @@ function sameCommit(a, b) {
  * production commit since the previous round was mutated on its own" while two
  * commits had no row; only a self-audit caught it.
  *
- * The enumeration comes from `git log` in the round, not from this script: a
- * checker with no repository cannot derive it, so an incomplete list is the
- * skill rule's job. What is machine-checkable is the claim against the list the
- * round itself supplies.
+ * The enumeration comes from `git log --first-parent --no-merges` in the round,
+ * not from this script: a checker with no repository cannot derive it, so an
+ * incomplete list is the skill rule's job. What is machine-checkable is the
+ * claim against the list the round itself supplies — plus the one incomplete
+ * list that would otherwise pass every check, the empty one.
  */
 export function checkMutationCoverage(text) {
   const errors = [];
-  const warnings = [];
   if (text === null || text === undefined || text.trim() === '') {
-    return { errors, warnings };
+    return { errors };
   }
 
   let parsed;
   try {
     parsed = JSON.parse(text);
   } catch {
-    return { errors: ['mutations.json is not valid JSON'], warnings };
+    return { errors: ['mutations.json is not valid JSON'] };
   }
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    return {
-      errors: ['mutations.json must be an object with rows'],
-      warnings,
-    };
+    return { errors: ['mutations.json must be an object with rows'] };
   }
-  if (parsed.coverageClaim !== 'per-commit') return { errors, warnings };
+  if (parsed.coverageClaim !== 'per-commit') return { errors };
 
   const commits = parsed.productionCommits;
   const rows = parsed.rows;
@@ -105,13 +103,21 @@ export function checkMutationCoverage(text) {
     errors.push(
       "mutations.json claims per-commit coverage: it needs productionCommits[] from git log and rows[] carrying each row's commit",
     );
-    return { errors, warnings };
+    return { errors };
   }
   if (!commits.every((oid) => typeof oid === 'string' && OID.test(oid))) {
     errors.push(
       'mutations.json productionCommits must be hex commit ids (7-40 characters)',
     );
-    return { errors, warnings };
+    return { errors };
+  }
+  // An empty enumeration is the cheapest way to make the claim uncheckable:
+  // "every commit was mutated" is vacuously true over no commits at all.
+  if (commits.length === 0) {
+    errors.push(
+      'mutations.json claims per-commit coverage over an empty productionCommits list: a claim over an empty set is vacuously true, so enumerate the commits (git log --first-parent --no-merges) or drop the claim',
+    );
+    return { errors };
   }
 
   const mutated = rows
@@ -125,7 +131,7 @@ export function checkMutationCoverage(text) {
       `mutations.json claims per-commit coverage but ${uncovered.length} of ${commits.length} production commits have no row: ${uncovered.join(', ')}`,
     );
   }
-  return { errors, warnings };
+  return { errors };
 }
 
 /**
@@ -258,9 +264,7 @@ export function checkArtifacts({ files, evidence = [], expectedHead = null }) {
     }
   }
 
-  const mutations = checkMutationCoverage(files.mutations);
-  errors.push(...mutations.errors);
-  warnings.push(...mutations.warnings);
+  errors.push(...checkMutationCoverage(files.mutations).errors);
 
   if (files.report && files.report.trim() !== '') {
     const lead = files.report

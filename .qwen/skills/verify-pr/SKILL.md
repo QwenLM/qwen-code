@@ -759,11 +759,21 @@ one row per guard the PR introduces, the suite that should catch it, and
 pinned / not-pinned. **A coverage claim is universally quantified, so generate
 it from the enumeration instead of writing it.** "Every production commit since
 the previous round was mutated on its own" is a claim over a set `git log` can
-list; derive the set (`git log --no-merges base..head` minus test and generated
-files), give each row its `commit`, and let the difference name what you did
-not reach. Record it as `mutations.json` with `coverageClaim: "per-commit"`,
-`productionCommits` from that log and `rows[].commit`;
-`verify-pr-check.mjs` refuses the claim when a listed commit has no row.
+list; derive the set (`git log --first-parent --no-merges base..head` minus test
+and generated files), give each row its `commit`, and let the difference name
+what you did not reach. **`--first-parent` is load-bearing, and `--no-merges`
+does not substitute for it**: `--no-merges` drops the merge commit but keeps
+every commit that merge brought in, so a branch that merged `main` hands you
+main's own work as if the PR had authored it. Measured on the round that shipped
+the wrong claim, over its previous-round range: `--no-merges` alone listed 85
+production commits, `--first-parent --no-merges` listed 24, and the 61 extra
+came from one `Merge branch 'main'`. Enumerate the wrong set and the claim
+either demands 61 rows for commits the PR never touched, or gets quietly
+narrowed to whatever was convenient. Record it as `mutations.json` with
+`coverageClaim: "per-commit"`, `productionCommits` from that log and
+`rows[].commit`; `verify-pr-check.mjs` refuses the claim when a listed commit
+has no row, and refuses a claim over an empty enumeration, which is vacuously
+true and proves nothing.
 Measured example: that sentence shipped while two of the round's production
 commits had no row at all, and only a self-audit caught it — the matrix was
 per-guard, which is a different and weaker claim than the one the prose made.
@@ -1400,7 +1410,16 @@ workflow globs). It must contain:
 - `verdict.txt` — exactly one word: `merge-ready` | `findings` | `blocked` |
   `inconclusive`. Anything else is discarded by the workflow.
 - `assertions.json` — `{"pass": <int>, "fail": <int>, "total": <int>}`,
-  counting **only scripted assertions that actually executed**.
+  counting **only scripted assertions that actually executed**. When `fail` is
+  nonzero add `failures`, one `{id, attribution}` entry per failed assertion,
+  with `attribution` one of `pr`, `harness` or `environment` — the verdict is
+  read from that ledger, so a red the PR did not cause cannot decide it (see
+  **Hard rules**).
+- `mutations.json` — the mutation matrix as data: `rows[]`, and, when the
+  report claims per-commit coverage, `coverageClaim: "per-commit"` plus
+  `productionCommits` from `git log --first-parent --no-merges` and a `commit`
+  on each row. The claim is checked against that enumeration (see the mutation
+  matrix section); without this file the claim is prose nothing verifies.
 - Harness scripts and raw logs (per-cell stdout/stderr, build logs).
 - `evidence/*.png` — image evidence. **Produce these whenever you ran a
   harness**, not only for TUI work. A table in the report is your _claim_
@@ -1560,10 +1579,11 @@ defect.
   entry per failed assertion, with `attribution` one of `pr`, `harness` or
   `environment`. Only `pr` can carry `findings` or `blocked`; a `harness` fault
   is `inconclusive`; an `environment` red is re-encoded as an expected-red pass
-  under _Not covered_ item 6 once its A/A control proves both arms fail, so it
-  should not be sitting in `fail` at all. `verify-pr-check.mjs` refuses a
-  `findings`/`blocked` verdict whose ledger names no `pr` failure, and refuses a
-  ledger whose length disagrees with `fail`.
+  and recorded under report item 6 (_Not covered_) once its A/A control proves
+  both arms fail, so it should not be sitting in `fail` at all.
+  `verify-pr-check.mjs` refuses a `findings`/`blocked` verdict whose ledger
+  names no `pr` failure, and refuses a ledger whose length disagrees with
+  `fail`.
   Real case: a `merge-ready` report shipped `fail: 7` where all seven
   were intended base-cell reds proving the tests load-bearing; the publisher
   correctly refused the mismatch and the headline degraded to "no usable

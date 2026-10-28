@@ -77,16 +77,20 @@ them rather than at the end of the document.
   when every call succeeded. `--compare --start <a> --now <b>` reports every
   reason the round is dirty and exits 1.
 
-The checker gains two rules over the artifacts a round already writes:
+The checker gains two rules over the artifacts the contract asks the round to
+write. The artifact contract names both, because a file no artifact list asks
+for is a file no round produces, and a check over an absent file is silent:
 
-- `assertions.json` may carry `failures: [{ id, attribution }]`, one entry per
-  failed assertion, attributed `pr`, `harness` or `environment`. A
-  `findings`/`blocked` verdict whose ledger names no `pr` failure is an error,
-  as is a ledger whose length disagrees with `fail`. A round with failures and
-  no ledger is a warning, so older artifacts still pass.
+- `assertions.json` carries `failures: [{ id, attribution }]` whenever `fail` is
+  nonzero, one entry per failed assertion, attributed `pr`, `harness` or
+  `environment`. A `findings`/`blocked` verdict whose ledger names no `pr`
+  failure is an error, as is a ledger whose length disagrees with `fail`. A
+  round with failures and no ledger is a warning, so older artifacts still
+  pass.
 - `mutations.json` may claim `coverageClaim: "per-commit"` with
-  `productionCommits` from `git log` and `rows[].commit`. A listed commit with
-  no row is an error naming the commits.
+  `productionCommits` from `git log --first-parent --no-merges` and
+  `rows[].commit`. A listed commit with no row is an error naming the commits,
+  and so is an empty list: a claim over no commits is vacuously true.
 
 ## Design decisions
 
@@ -125,7 +129,10 @@ The checker gains two rules over the artifacts a round already writes:
    enumeration.** It has no repository, so it cannot derive the commit set; an
    incomplete `productionCommits` list is the skill rule's job, and the doc says
    so. What is machine-checkable is the claim against the list supplied, which
-   is exactly the gap the measured round had.
+   is exactly the gap the measured round had — plus the one incomplete list
+   that would otherwise satisfy every check, the empty one. Refusing that costs
+   a docs-only round nothing: it drops the claim instead of making it over an
+   empty set.
 
 ## Constraints and risks
 
@@ -157,6 +164,14 @@ The checker gains two rules over the artifacts a round already writes:
   The checker cannot see that control, so the skill still requires both arms
   and the shared cause in the report; the ledger stops the miscount, not a
   fabricated attribution.
+- The enumeration is `git log --first-parent --no-merges`, and the
+  `--first-parent` half is load-bearing: `--no-merges` drops the merge commit
+  but keeps every commit that merge brought in. Measured on the branch that
+  shipped the wrong coverage claim, over its previous-round range: 85
+  production commits without `--first-parent`, 24 with, and the 61 extra came
+  from a single `Merge branch 'main'`. The checker cannot catch this — it has
+  no repository — so the recipe and a pin on it are the only defence, and the
+  first draft of this change shipped the recipe without the flag.
 
 ## Validation plan
 
@@ -171,16 +186,29 @@ The checker gains two rules over the artifacts a round already writes:
 - For the guard, a `gh` stand-in on `PATH` drives the real CLI down both
   paths, so "writes no file when a call fails" is observed rather than inferred
   from the pure function.
-- A vacuity matrix over the new guards: revert each one in place, run the
-  suite that should catch it, restore. Measured: 13 rows, 13 killed, including
-  a control row on the pre-existing `merge-ready`/`fail` guard. Four of those
-  rows exist because the self-audit found defects in this change itself: a
-  warning-suppression branch that let a malformed ledger reach a null read, a
-  refusal message that blamed the head for a malformed list item, a
-  `--compare` that read clean when both sides were the same file, and a
-  short-list report that named all 321 lost ids and buried its own actionable
-  line. The last two rows are a pair — one proves the suppression happens, the
-  other proves it does not swallow a genuine deletion at equal length.
+- A vacuity matrix over every guard this change adds: revert one clause in
+  place, run the suite that should catch it, restore. A row counts as killed
+  only when the named assertion goes red, not merely some assertion. Measured:
+  25 rows, 25 killed, including a control row on the pre-existing
+  `merge-ready`/`fail` guard, so the other kills are not "the harness never
+  reached the code". Each row also carries the commit that introduced its
+  clause, verified against git — the anchor must be present in that commit's
+  blob and absent from its parent's — which is what makes this change's own
+  per-commit coverage claim checkable rather than asserted.
+- Nine of those rows exist because self-audit found defects in this change
+  itself. Five from the first pass: a warning-suppression branch that let a
+  malformed ledger reach a null read, a refusal message that blamed the head
+  for a malformed list item, a `--compare` that read clean when both sides were
+  the same file, and a short-list report that named all 321 lost ids and buried
+  its own actionable line — the last one a pair of rows, one proving the
+  suppression happens and the other proving it does not swallow a genuine
+  deletion at equal length. Four from a second pass: the enumeration recipe
+  without `--first-parent`, an artifact contract that never asked for
+  `mutations.json` or for the ledger (two rows, one per file the checker reads
+  and nothing produced), and a coverage claim accepted over an empty commit
+  list. Two further second-pass findings — a cross-reference to a report item
+  that does not exist and a return value no caller could observe — were fixed
+  without a row, because neither is a guard.
 
 ## Acceptance criteria
 
@@ -198,7 +226,12 @@ The checker gains two rules over the artifacts a round already writes:
   accepts `inconclusive` with a `harness` failure, and only warns when an older
   artifact carries no ledger.
 - `check` rejects a `per-commit` coverage claim whose listed commits are not
-  all covered by a row, matching abbreviated and full OIDs in either direction.
+  all covered by a row, matching abbreviated and full OIDs in either direction,
+  and rejects the claim over an empty commit list while staying silent when no
+  claim is made.
+- The skill's artifact contract asks for both files those rules read, and its
+  enumeration recipe carries `--first-parent`; a pin fails if either is
+  dropped.
 - `guard --snapshot` writes nothing and exits 1 when any call fails;
   `guard --compare` exits 1 on a malformed snapshot, a short list, a new,
   edited or vanished item, a moved head and a changed state, exits 2 when both

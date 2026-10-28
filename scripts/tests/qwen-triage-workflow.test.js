@@ -5360,9 +5360,46 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain('coverageClaim: "per-commit"');
     expect(flat).toContain('productionCommits');
     expect(flat).toContain('rows[].commit');
-    expect(flat).toContain('git log --no-merges base..head');
+    expect(flat).toContain('git log --first-parent --no-merges base..head');
     const rules = flat.slice(flat.indexOf('## Hard rules'));
     expect(rules).toContain('The same binds a **coverage claim**');
+  });
+
+  // --no-merges drops the merge commit but keeps everything the merge brought
+  // in, so a branch that merged main enumerates main's work as its own.
+  // Measured on the round that shipped the wrong claim: 85 production commits
+  // without --first-parent, 24 with, 61 of them from one Merge branch 'main'.
+  it('enumerates the commits the branch authored, not the ones a merge brought in', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+
+    expect(flat).toContain('`--first-parent` is load-bearing');
+    expect(flat).toContain('`--no-merges` drops the merge commit but keeps');
+    // Scoped to the coverage paragraph: the bare recipe is wrong for this
+    // enumeration, while another section could legitimately want it.
+    const paragraph = flat.slice(
+      flat.indexOf('A coverage claim is universally quantified'),
+      flat.indexOf('Survivors are not noise'),
+    );
+    expect(paragraph).not.toContain('git log --no-merges');
+  });
+
+  // A rule the artifact contract never asks for is a rule nothing produces:
+  // the checker reads mutations.json and failures[], so the contract that
+  // tells the round what to write has to name both.
+  it('asks the artifact contract for the files the new checks read', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+    const start = flat.indexOf('## Artifact contract');
+    const contract = flat.slice(start, flat.indexOf('## ', start + 3));
+
+    expect(contract).toContain('`mutations.json`');
+    expect(contract).toContain('coverageClaim: "per-commit"');
+    expect(contract).toContain('git log --first-parent --no-merges');
+    expect(contract).toContain(
+      'one `{id, attribution}` entry per failed assertion',
+    );
+    expect(contract).toContain(
+      '`attribution` one of `pr`, `harness` or `environment`',
+    );
   });
 
   // The whole report is already inside a <details> on the PR. With the
