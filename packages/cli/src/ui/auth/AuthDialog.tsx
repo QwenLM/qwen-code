@@ -218,11 +218,12 @@ function ProviderMenu<T>({
         <DescriptiveRadioButtonSelect
           items={items.map((item) => ({
             ...item,
-            title: truncateItem ? (
-              <Text wrap="truncate">{item.title}</Text>
-            ) : (
-              item.title
-            ),
+            // Truncate the string, not a nested <Text>: the list wraps every
+            // title in its own <Text>, and Ink applies the OUTER node's
+            // textWrap, so a nested wrap="truncate" never takes effect.
+            title: truncateItem
+              ? wrapAnsi(item.title, itemWidth, { hard: true }).split('\n')[0]
+              : item.title,
             description: truncateItem ? (
               listHeight >= 2 ? (
                 <Text color={theme.text.secondary} wrap="truncate">

@@ -300,7 +300,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
     process.env = originalEnv;
   });
 
-  it.each([36, 100])(
+  itWhenTuiInputReliable.each([36, 100])(
     'keeps provider navigation readable in a 14-row dialog at width %i',
     async (width) => {
       const empty = { path: '', settings: {}, originalSettings: {} };
@@ -318,15 +318,12 @@ describe('AuthDialog', { timeout: 15000 }, () => {
       } as unknown as Config;
       const actions = createMockUIActions();
       const state = createMockUIState({ mainAreaWidth: width });
+      // Unclipped on purpose: a fixed height plus overflow="hidden" would make
+      // the rows<=height assertion below hold for any output the dialog paints.
       const dialog = (height: number) => (
         <UIStateContext.Provider value={state}>
           <UIActionsContext.Provider value={actions}>
-            <Box
-              height={height}
-              width={width}
-              flexDirection="column"
-              overflow="hidden"
-            >
+            <Box width={width} flexDirection="column">
               <AuthDialog availableTerminalHeight={height} />
             </Box>
           </UIActionsContext.Provider>
