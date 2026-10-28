@@ -154,43 +154,41 @@ function readOperatorSettingsScopes(): OperatorSettingsScope[] {
       )}, which is not administrator-controlled, so it was ignored; the system settings layer is absent, so no operator sandbox policy is in effect. Point the variable at an administrator-controlled file or unset it, and restart.`,
     );
   }
-  return [
-    getSystemDefaultsPath(),
-    userSettingsPath,
-    systemSettingsPath,
-  ].map((file) => {
-    let source: string;
-    try {
-      source = fs.readFileSync(file, 'utf8');
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
-      throw new InvalidExecutionSandboxConfigError(
-        `Cannot read operator sandbox policy from ${file}: ${String(error)}. Restore read access to this settings file and restart; it has not been reset.`,
-      );
-    }
-    try {
-      const parsed: unknown = JSON.parse(
-        stripJsonComments(stripUtf8Bom(source)),
-      );
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-        throw new Error('Expected a settings object.');
+  return [getSystemDefaultsPath(), userSettingsPath, systemSettingsPath].map(
+    (file) => {
+      let source: string;
+      try {
+        source = fs.readFileSync(file, 'utf8');
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
+        throw new InvalidExecutionSandboxConfigError(
+          `Cannot read operator sandbox policy from ${file}: ${String(error)}. Restore read access to this settings file and restart; it has not been reset.`,
+        );
       }
-      return parsed as OperatorSettingsScope;
-    } catch (error) {
-      let backupPath: string | undefined;
-      if (file === userSettingsPath) {
-        try {
-          backupPath = `${file}.corrupted`;
-          fs.copyFileSync(file, backupPath);
-        } catch {
-          backupPath = undefined;
+      try {
+        const parsed: unknown = JSON.parse(
+          stripJsonComments(stripUtf8Bom(source)),
+        );
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          throw new Error('Expected a settings object.');
         }
+        return parsed as OperatorSettingsScope;
+      } catch (error) {
+        let backupPath: string | undefined;
+        if (file === userSettingsPath) {
+          try {
+            backupPath = `${file}.corrupted`;
+            fs.copyFileSync(file, backupPath);
+          } catch {
+            backupPath = undefined;
+          }
+        }
+        throw new InvalidExecutionSandboxConfigError(
+          `Cannot read operator sandbox policy from ${file}: ${String(error)}${backupPath ? `. A copy was saved to ${backupPath}` : ''}. Repair the JSON object in ${file} and restart; the original file has not been reset.`,
+        );
       }
-      throw new InvalidExecutionSandboxConfigError(
-        `Cannot read operator sandbox policy from ${file}: ${String(error)}${backupPath ? `. A copy was saved to ${backupPath}` : ''}. Repair the JSON object in ${file} and restart; the original file has not been reset.`,
-      );
-    }
-  });
+    },
+  );
 }
 
 function sandboxSettingsFromScopes(

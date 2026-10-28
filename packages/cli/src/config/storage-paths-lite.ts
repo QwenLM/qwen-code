@@ -202,8 +202,8 @@ export function isInsideWindowsSystemSettingsDir(configured: string): boolean {
   if (!/^[a-zA-Z]:[\\/]/.test(configured)) {
     return false; // not an absolute drive path
   }
-  return path
-    .win32.resolve(configured)
+  return path.win32
+    .resolve(configured)
     .toLowerCase()
     .startsWith(`${WINDOWS_SYSTEM_SETTINGS_DIR.toLowerCase()}\\`);
 }

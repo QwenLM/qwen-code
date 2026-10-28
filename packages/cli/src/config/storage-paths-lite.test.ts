@@ -408,7 +408,10 @@ describe('system settings overrides are honored only for administrator-controlle
     ['qwen-code\\settings.json', false],
     ['..\\..\\settings.json', false],
     ['\\\\server\\share\\settings.json', false],
-    ['\\\\server\\share\\..\\..\\C:\\ProgramData\\qwen-code\\settings.json', false],
+    [
+      '\\\\server\\share\\..\\..\\C:\\ProgramData\\qwen-code\\settings.json',
+      false,
+    ],
     ['..\\C:\\ProgramData\\qwen-code\\settings.json', false],
     ['', false],
   ])(
@@ -423,18 +426,16 @@ describe('system settings overrides are honored only for administrator-controlle
   // guards against a working directory that sits inside it, where a relative
   // spelling would resolve into the directory if the guards were absent.
   it('on Windows, refuses a relative or UNC spelling even from a working directory inside the system settings directory', () => {
-    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(
-      'C:\\ProgramData\\qwen-code\\nested',
-    );
+    const cwdSpy = vi
+      .spyOn(process, 'cwd')
+      .mockReturnValue('C:\\ProgramData\\qwen-code\\nested');
     try {
       expect(
         isInsideWindowsSystemSettingsDir(
           '..\\C:\\ProgramData\\qwen-code\\settings.json',
         ),
       ).toBe(false);
-      expect(
-        isInsideWindowsSystemSettingsDir('..\\settings.json'),
-      ).toBe(false);
+      expect(isInsideWindowsSystemSettingsDir('..\\settings.json')).toBe(false);
       expect(
         isInsideWindowsSystemSettingsDir('\\\\server\\share\\settings.json'),
       ).toBe(false);
