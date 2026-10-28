@@ -121,10 +121,16 @@ describe('ToolApproval floating scroll layout', () => {
     expect(rules[0]!.selectors[0]).toContain(':not(.planContent)');
   });
 
-  it('lifts the command block cap inside the sheet only', () => {
+  it('lifts the command block cap and self-scroll inside the sheet only', () => {
     const rules = find('.floating .codeBlock');
     expect(rules).toHaveLength(1);
-    expect(declarations(rules[0]!)).toEqual(['max-height: none']);
+    // The base .codeBlock keeps overflow-y: auto, so the override must
+    // release the self-scroll too: with only the cap lifted, the <pre> stays
+    // its own scroller when the region is squeezed.
+    expect(declarations(rules[0]!)).toEqual([
+      'max-height: none',
+      'overflow-y: visible',
+    ]);
   });
 
   it('leaves the inline variant caps intact', () => {

@@ -1981,6 +1981,37 @@ describe('floating variant scroll layout', () => {
     expect(wrapper.parentElement).toBe(dialog);
   });
 
+  it('keeps the exec command region a direct child of the floating sheet', () => {
+    // The `.floating > .code` half of the scroll-region rule (pinned as CSS
+    // text in ToolApproval.css.test.ts) rests on a DOM premise: the command
+    // wrapper is a direct child of the panel that carries .floating. Shell
+    // command approvals are the common floating case, so guard the premise
+    // with a render: wrap the region in one more element and the child
+    // combinator stops matching, the command no longer absorbs the sheet's
+    // overflow, and the decision buttons are clipped again.
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() =>
+      root!.render(
+        <I18nProvider language="en">
+          <ToolApproval
+            request={execRequest}
+            onConfirm={onConfirm}
+            variant="floating"
+          />
+        </I18nProvider>,
+      ),
+    );
+    const dialog = container!.querySelector('[role="alertdialog"]')!;
+    expect(dialog.classList.contains(styles.floating)).toBe(true);
+    expect(
+      Array.from(dialog.children).some((el) =>
+        el.classList.contains(styles.code),
+      ),
+    ).toBe(true);
+  });
+
   it('keeps every region of a compound card a floored direct child of the sheet', () => {
     // The issue's own reproduction: an outside-workspace write emits a warning
     // text block before the diff block, so the card renders two sibling

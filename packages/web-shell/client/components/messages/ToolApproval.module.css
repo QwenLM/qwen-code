@@ -56,8 +56,13 @@
   overflow-y: auto;
 }
 
+/* The base .codeBlock keeps min-height: 0 and overflow-y: auto: lifting only
+   the cap would leave the <pre> as its own scroller — squeezed, it shrinks to
+   the region's content box and scrolls inside the padding while the region's
+   own overflow-y: auto never engages. */
 .floating .codeBlock {
   max-height: none;
+  overflow-y: visible;
 }
 
 .floatingWorkflow {
