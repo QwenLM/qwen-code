@@ -32,14 +32,20 @@ final class HostedProcessLiveness {
     // Without procfs, liveness is all there is to go on. A stat read that
     // fails while the process lives surfaces rather than reading as stopped.
     static boolean running(ProcessHandle process) {
+        return running(process, PROC);
+    }
+
+    // The procfs root is a parameter so the unit test can drive the
+    // no-procfs and unreadable-stat branches on any host.
+    static boolean running(ProcessHandle process, Path proc) {
         if (!process.isAlive()) {
             return false;
         }
-        if (!Files.isDirectory(PROC)) {
+        if (!Files.isDirectory(proc)) {
             return true;
         }
         try {
-            return statRunning(process, stat(process));
+            return statRunning(process, proc.resolve(Long.toString(process.pid())).resolve("stat"));
         } catch (IOException unreadable) {
             throw new UncheckedIOException(unreadable);
         }

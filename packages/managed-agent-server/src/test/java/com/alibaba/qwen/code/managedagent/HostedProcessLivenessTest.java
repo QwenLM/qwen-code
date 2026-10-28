@@ -6,12 +6,14 @@ import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.concurrent.TimeUnit;
 
 import static com.alibaba.qwen.code.managedagent.HostedProcessLiveness.awaitStopped;
+import static com.alibaba.qwen.code.managedagent.HostedProcessLiveness.running;
 import static com.alibaba.qwen.code.managedagent.HostedProcessLiveness.statRunning;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -104,6 +106,36 @@ class HostedProcessLivenessTest {
         Files.writeString(stat, "677555 (x) Z (y) S 677554 677555 677554 0 -1 4194304 224 0 0 0 0 0 0 0 20 0 1 0"
                 + " 45649481 5709824 500 18446744073709551615 0 0 0 0 0 0 0 1 0 0 17 3 0 0 0 0 0 0 0 0 0 0 0 0 0\n");
         assertThat(statRunning(alive, stat)).as("sleeper whose comm spells ') Z ('").isTrue();
+    }
+
+    @Test
+    void treatsALiveProcessAsRunningWithoutProcfs() {
+        ProcessHandle alive = mock(ProcessHandle.class);
+        when(alive.isAlive()).thenReturn(true);
+        assertThat(running(alive, temporary.resolve("no-procfs"))).isTrue();
+    }
+
+    @Test
+    void surfacesAnUnrelatedStatFailureOnALiveProcess() throws Exception {
+        ProcessHandle alive = mock(ProcessHandle.class);
+        when(alive.isAlive()).thenReturn(true);
+        when(alive.pid()).thenReturn(4242L);
+        // A directory where the stat file belongs fails the read for a reason other than reaping.
+        Files.createDirectories(temporary.resolve("proc/4242/stat"));
+        assertThatThrownBy(() -> running(alive, temporary.resolve("proc")))
+                .isInstanceOf(UncheckedIOException.class).hasCauseInstanceOf(IOException.class);
+    }
+
+    @Test
+    void readsTheStatOfThatPidUnderTheProcRoot() throws Exception {
+        ProcessHandle alive = mock(ProcessHandle.class);
+        when(alive.isAlive()).thenReturn(true);
+        when(alive.pid()).thenReturn(4242L);
+        Path stat = Files.createDirectories(temporary.resolve("proc/4242")).resolve("stat");
+        Files.writeString(stat, "4242 (node) Z 4241 4242 4241 0 -1 4227084 98 0 0 0 0 0 0 0 20 0 1 0\n");
+        assertThat(running(alive, temporary.resolve("proc"))).as("zombie").isFalse();
+        Files.writeString(stat, "4242 (node) S 4241 4242 4241 0 -1 4194304 224 0 0 0 0 0 0 0 20 0 1 0\n");
+        assertThat(running(alive, temporary.resolve("proc"))).as("sleeper").isTrue();
     }
 
     private static boolean zombie(ProcessHandle process) {
