@@ -150,15 +150,24 @@ for is a file no round produces, and a check over an absent file is silent:
 - These are local helpers: the lane pins `.qwen` from the base branch, so the
   skill text that references them takes effect only after this change merges.
 - The guard normalizes each item to `id`, a stamp read as
-  `updated_at ?? submitted_at`, and the `body`. The stamp alone cannot answer
-  "was anything edited?": measured against this repo's API, a review object
-  carries `submitted_at` and no `updated_at`, and editing its body moves
-  neither. A `CHANGES_REQUESTED` review rewritten to LGTM would compare clean.
-  All three lists return a string `body`, so it is compared alongside the
-  stamp, and a fetched item without one is refused rather than compared as
-  though nothing had changed. The cost is a larger snapshot file — bodies are
-  stored verbatim, which also lets the round read what arrived without a
+  `updated_at ?? submitted_at`, the `body`, and — for reviews only — the
+  `state`. The stamp alone cannot answer "did anything change?": measured
+  against this repo's API, a review object carries `submitted_at` and no
+  `updated_at`, and neither editing its body nor dismissing it moves that
+  stamp. On PR 15388, review 5673309455 was submitted `CHANGES_REQUESTED` at
+  2026-10-27T19:47:16Z and dismissed at 2026-10-28T01:22:57Z with its
+  4838-character body and its stamp unchanged; only `state` moved, and that
+  dismissal is what unblocked the merge gate. All three lists return a string
+  `body` and reviews return a string `state`, so both are compared alongside
+  the stamp, and a fetched item missing either is refused rather than compared
+  as though nothing had changed. The cost is a larger snapshot file — bodies
+  are stored verbatim, which also lets the round read what arrived without a
   second fetch.
+- The compared fields are the ones that change what a reviewer said or decided.
+  Reaction counts and other metadata are deliberately excluded: comparing whole
+  items would make a thumbs-up a dirty round and send the maintainer into a
+  re-fetch loop over nothing. Naming the boundary is what keeps the field list
+  from growing one audit at a time.
 - A short list reports its own reason and a count of the ids it lost, not one
   line per id. Measured on a live PR: a truncated re-fetch printed the
   short-list reason and then 321 `disappeared` lines, burying the one
@@ -195,7 +204,7 @@ for is a file no round produces, and a check over an absent file is silent:
 - A vacuity matrix over every guard this change adds: revert one clause in
   place, run the suite that should catch it, restore. A row counts as killed
   only when the named assertion goes red, not merely some assertion. Measured:
-  29 rows, 29 killed, including a control row on the pre-existing
+  32 rows, 32 killed, including a control row on the pre-existing
   `merge-ready`/`fail` guard, so the other kills are not "the harness never
   reached the code". Each row also carries the commit that introduced its
   clause, derived rather than assigned: the first branch commit whose blob
@@ -206,7 +215,7 @@ for is a file no round produces, and a check over an absent file is silent:
   claim; the same data claimed per-commit is refused, naming them. The rule
   caught its own author, and the answer was to narrow the claim rather than
   invent a row.
-- Thirteen of those rows exist because self-audit found defects in this change
+- Sixteen of those rows exist because self-audit found defects in this change
   itself. Five from the first pass: a warning-suppression branch that let a
   malformed ledger reach a null read, a refusal message that blamed the head
   for a malformed list item, a `--compare` that read clean when both sides were
@@ -223,7 +232,12 @@ for is a file no round produces, and a check over an absent file is silent:
   per-guard instead. Three from a seventh pass, all one defect: the guard read
   only timestamps, so a review edited without its stamp moving compared clean —
   one row for the comparison, one for accepting a list with no bodies at all,
-  and one for the rule text that claimed timestamps were enough. Three other
+  and one for the rule text that claimed timestamps were enough. Three from an
+  eighth pass, which asked what else moves without moving a timestamp: a
+  dismissed review, measured on PR 15388 — one row for the state comparison,
+  one for accepting a review list with no state, and one for the rule text that
+  named the body but not the state. That pass also fixed the boundary in writing
+  so the next one does not reopen it. Three other
   findings — a cross-reference to a report item that does not exist, a return
   value no caller could observe, and a contract that asked for the matrix
   unconditionally while the checker treats it as optional — were fixed without
@@ -258,7 +272,8 @@ for is a file no round produces, and a check over an absent file is silent:
   reports its reason plus a count of lost ids; an equal-length list still names
   each vanished id.
 - `guard --compare` reports dirty when an item's body changed and its timestamp
-  did not, and `guard --snapshot` refuses a list whose items carry no body.
+  did not, and when a review's state changed, and `guard --snapshot` refuses a
+  list whose items carry no body or, for reviews, no state.
 - No script executes PR code.
 
 ## Open questions

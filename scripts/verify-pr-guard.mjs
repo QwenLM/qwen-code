@@ -32,11 +32,15 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { isEntryPoint } from './lib/entry-point.js';
 
-/** The three lists the guard covers; `--paginate` or only the first 30 arrive. */
+/**
+ * The three lists the guard covers; `--paginate` or only the first 30 arrive.
+ * The third column says whether the list's items carry a review state, which
+ * only reviews do and which a dismissal changes on its own.
+ */
 export const LISTS = [
-  ['reviews', (pr) => `repos/{repo}/pulls/${pr}/reviews`],
-  ['reviewComments', (pr) => `repos/{repo}/pulls/${pr}/comments`],
-  ['issueComments', (pr) => `repos/{repo}/issues/${pr}/comments`],
+  ['reviews', (pr) => `repos/{repo}/pulls/${pr}/reviews`, true],
+  ['reviewComments', (pr) => `repos/{repo}/pulls/${pr}/comments`, false],
+  ['issueComments', (pr) => `repos/{repo}/issues/${pr}/comments`, false],
 ];
 
 const HELP = `Usage:
@@ -50,9 +54,9 @@ const HELP = `Usage:
 --compare is fail-closed: a malformed snapshot, a moved head, a changed state, a
 new or edited item, a vanished item, or a list shorter than the start snapshot
 all report dirty. A short list is a failed fetch, not a quiet PR. Edits are read
-from the body as well as the timestamp, because editing a review moves no
-timestamp. Passing the same file as both sides is a usage error, not a clean
-round.
+from the body and the review state as well as the timestamp, because neither
+editing nor dismissing a review moves a timestamp. Passing the same file as both
+sides is a usage error, not a clean round.
 
 Exit codes: 0 clean / written, 1 dirty or fetch failed, 2 usage.
 `;
@@ -60,19 +64,23 @@ Exit codes: 0 clean / written, 1 dirty or fetch failed, 2 usage.
 /**
  * Reviews carry `submitted_at`, not `updated_at`, so reading one field name
  * across all three lists leaves one of them comparing `undefined` with
- * `undefined`. Neither stamp moves when a review body is edited — measured
- * against this repo's API, a review object has `submitted_at` and no
- * `updated_at` — so the body travels with the stamp and is compared too.
+ * `undefined`. Neither stamp moves when a review body is edited, or when a
+ * review is dismissed — measured against this repo's API — so the body and the
+ * review state travel with the stamp and are compared too. These are the
+ * fields that change what a reviewer said or decided; reaction counts and
+ * other metadata are deliberately left out, so a thumbs-up is not a dirty
+ * round.
  */
 function stampOf(item) {
   return item?.updated_at ?? item?.submitted_at ?? null;
 }
 
-function normalize(items) {
+function normalize(items, carriesState) {
   return items.map((item) => ({
     id: item.id,
     stamp: stampOf(item),
     body: item.body,
+    ...(carriesState ? { state: item.state } : {}),
   }));
 }
 
@@ -109,7 +117,7 @@ export function fetchSnapshot({ pr, repo, run }) {
     state: meta?.state ?? null,
   };
 
-  for (const [key, path] of LISTS) {
+  for (const [key, path, carriesState] of LISTS) {
     // `--paginate` merges array pages into one JSON array (verified on gh
     // 2.103.0: 17 comments over 4 pages parsed as a single array). `--slurp`
     // would instead nest one array per page and break the normalize below.
@@ -122,7 +130,7 @@ export function fetchSnapshot({ pr, repo, run }) {
       errors.push(`${key}: expected an array, got ${typeof items}`);
       continue;
     }
-    snapshot[key] = normalize(items);
+    snapshot[key] = normalize(items, carriesState);
   }
 
   if (errors.length > 0) return { ok: false, errors, snapshot: null };
@@ -130,7 +138,7 @@ export function fetchSnapshot({ pr, repo, run }) {
     return {
       ok: false,
       errors: [
-        'fetched snapshot failed validation: a head OID, a state, or an id or body in one of the lists is missing or malformed',
+        'fetched snapshot failed validation: a head OID, a state, or an id, body or review state in one of the lists is missing or malformed',
       ],
       snapshot: null,
     };
@@ -147,7 +155,7 @@ export function isSnapshot(value) {
   if (typeof value.repo !== 'string' || !value.repo.includes('/')) return false;
   if (!/^[0-9a-f]{40}$/.test(value.headRefOid ?? '')) return false;
   if (typeof value.state !== 'string' || value.state === '') return false;
-  return LISTS.every(([key]) => {
+  return LISTS.every(([key, , carriesState]) => {
     const list = value[key];
     return (
       Array.isArray(list) &&
@@ -156,9 +164,12 @@ export function isSnapshot(value) {
           item &&
           Number.isInteger(item.id) &&
           (item.stamp === null || typeof item.stamp === 'string') &&
-          // A list without bodies cannot answer "was anything edited?", so
-          // it is refused rather than compared as if nothing had changed.
-          typeof item.body === 'string',
+          // A list that cannot answer "was anything edited?" or "was a review
+          // dismissed?" is refused, not compared as if the answer were no.
+          typeof item.body === 'string' &&
+          (carriesState
+            ? typeof item.state === 'string'
+            : item.state === undefined),
       )
     );
   });
@@ -218,6 +229,10 @@ export function compareSnapshots(start, now) {
         );
       } else if (seen.body !== item.body) {
         reasons.push(`${key}: ${item.id} was edited (body changed)`);
+      } else if (seen.state !== item.state) {
+        reasons.push(
+          `${key}: ${item.id} changed state (${item.state} -> ${seen.state})`,
+        );
       }
     }
     if (missing > 0) {

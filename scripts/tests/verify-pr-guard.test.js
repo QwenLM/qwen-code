@@ -34,7 +34,9 @@ function snapshot(overrides = {}) {
     repo: 'owner/repo',
     headRefOid: HEAD,
     state: 'OPEN',
-    reviews: [{ id: 1, stamp: '2026-10-28T00:00:00Z', body: '' }],
+    reviews: [
+      { id: 1, stamp: '2026-10-28T00:00:00Z', body: '', state: 'COMMENTED' },
+    ],
     reviewComments: [{ id: 2, stamp: '2026-10-28T00:01:00Z', body: '' }],
     issueComments: [],
     ...overrides,
@@ -61,7 +63,12 @@ function allLists() {
   return {
     'pr view': ok({ headRefOid: HEAD, state: 'OPEN' }),
     'repos/owner/repo/pulls/7/reviews': ok([
-      { id: 1, submitted_at: '2026-10-28T00:00:00Z', body: '' },
+      {
+        id: 1,
+        submitted_at: '2026-10-28T00:00:00Z',
+        body: '',
+        state: 'COMMENTED',
+      },
     ]),
     'repos/owner/repo/pulls/7/comments': ok([
       { id: 2, updated_at: '2026-10-28T00:01:00Z', body: '' },
@@ -170,7 +177,7 @@ describe('fetchSnapshot', () => {
   it('refuses a list item with no id, without blaming the head', () => {
     const responses = allLists();
     responses['repos/owner/repo/pulls/7/reviews'] = ok([
-      { submitted_at: 'x', body: '' },
+      { submitted_at: 'x', body: '', state: 'COMMENTED' },
     ]);
     const result = fetchSnapshot({
       pr: 7,
@@ -180,7 +187,7 @@ describe('fetchSnapshot', () => {
     expect(result.ok).toBe(false);
     expect(result.snapshot).toBeNull();
     expect(result.errors.join('\n')).toMatch(
-      /an id or body in one of the lists/,
+      /an id, body or review state in one of the lists/,
     );
   });
 
@@ -190,7 +197,7 @@ describe('fetchSnapshot', () => {
   it('refuses a list whose items carry no body', () => {
     const responses = allLists();
     responses['repos/owner/repo/pulls/7/reviews'] = ok([
-      { id: 1, submitted_at: '2026-10-28T00:00:00Z' },
+      { id: 1, submitted_at: '2026-10-28T00:00:00Z', state: 'COMMENTED' },
     ]);
     const result = fetchSnapshot({
       pr: 7,
@@ -200,7 +207,26 @@ describe('fetchSnapshot', () => {
     expect(result.ok).toBe(false);
     expect(result.snapshot).toBeNull();
     expect(result.errors.join('\n')).toMatch(
-      /an id or body in one of the lists/,
+      /an id, body or review state in one of the lists/,
+    );
+  });
+
+  // A dismissal moves only the state, so a review list without it cannot
+  // answer "was a review dismissed?" and is refused for the same reason.
+  it('refuses a review list whose items carry no state', () => {
+    const responses = allLists();
+    responses['repos/owner/repo/pulls/7/reviews'] = ok([
+      { id: 1, submitted_at: '2026-10-28T00:00:00Z', body: '' },
+    ]);
+    const result = fetchSnapshot({
+      pr: 7,
+      repo: 'owner/repo',
+      run: fakeRun(responses),
+    });
+    expect(result.ok).toBe(false);
+    expect(result.snapshot).toBeNull();
+    expect(result.errors.join('\n')).toMatch(
+      /an id, body or review state in one of the lists/,
     );
   });
 });
@@ -222,7 +248,11 @@ describe('isSnapshot', () => {
     expect(isSnapshot([])).toBe(false);
     expect(isSnapshot(snapshot({ headRefOid: 'short' }))).toBe(false);
     expect(
-      isSnapshot(snapshot({ reviews: [{ id: 'x', stamp: null, body: '' }] })),
+      isSnapshot(
+        snapshot({
+          reviews: [{ id: 'x', stamp: null, body: '', state: 'COMMENTED' }],
+        }),
+      ),
     ).toBe(false);
   });
 });
@@ -324,7 +354,14 @@ describe('compareSnapshots', () => {
     const edited = compareSnapshots(
       snapshot(),
       snapshot({
-        reviews: [{ id: 1, stamp: '2026-10-28T02:00:00Z', body: '' }],
+        reviews: [
+          {
+            id: 1,
+            stamp: '2026-10-28T02:00:00Z',
+            body: '',
+            state: 'COMMENTED',
+          },
+        ],
       }),
     );
     expect(edited.reasons.join('\n')).toMatch(/reviews: 1 was edited/);
@@ -346,15 +383,61 @@ describe('compareSnapshots', () => {
   // timestamp-only comparison calls it clean.
   it('catches a review edited without its timestamp moving', () => {
     const start = snapshot({
-      reviews: [{ id: 1, stamp: '2026-10-28T00:00:00Z', body: 'needs work' }],
+      reviews: [
+        {
+          id: 1,
+          stamp: '2026-10-28T00:00:00Z',
+          body: 'needs work',
+          state: 'CHANGES_REQUESTED',
+        },
+      ],
     });
     const now = snapshot({
-      reviews: [{ id: 1, stamp: '2026-10-28T00:00:00Z', body: 'lgtm' }],
+      reviews: [
+        {
+          id: 1,
+          stamp: '2026-10-28T00:00:00Z',
+          body: 'lgtm',
+          state: 'CHANGES_REQUESTED',
+        },
+      ],
     });
     expect(compareSnapshots(start, start).clean).toBe(true);
     const result = compareSnapshots(start, now);
     expect(result.clean).toBe(false);
     expect(result.reasons).toEqual(['reviews: 1 was edited (body changed)']);
+  });
+
+  // Measured on PR 15388: review 5673309455 was submitted CHANGES_REQUESTED at
+  // 2026-10-27T19:47:16Z and dismissed at 2026-10-28T01:22:57Z. Its body (4838
+  // characters) and its submitted_at are unchanged; only state moved. That
+  // dismissal is what unblocked the merge gate, and id+stamp+body reads clean.
+  it('catches a dismissed review, which moves neither stamp nor body', () => {
+    const start = snapshot({
+      reviews: [
+        {
+          id: 1,
+          stamp: '2026-10-27T19:47:16Z',
+          body: 'needs work',
+          state: 'CHANGES_REQUESTED',
+        },
+      ],
+    });
+    const now = snapshot({
+      reviews: [
+        {
+          id: 1,
+          stamp: '2026-10-27T19:47:16Z',
+          body: 'needs work',
+          state: 'DISMISSED',
+        },
+      ],
+    });
+    const result = compareSnapshots(start, now);
+    expect(result.clean).toBe(false);
+    expect(result.reasons).toEqual([
+      'reviews: 1 changed state (CHANGES_REQUESTED -> DISMISSED)',
+    ]);
   });
 
   it('catches a moved head, a changed state and a different PR', () => {
@@ -468,7 +551,7 @@ describe.skipIf(process.platform === 'win32')('guard (CLI)', () => {
 
   const GH_OK = `case "$*" in
   *"pr view"*) echo '{"headRefOid":"${HEAD}","state":"OPEN"}' ;;
-  *reviews*) echo '[{"id":1,"submitted_at":"2026-10-28T00:00:00Z","body":""}]' ;;
+  *reviews*) echo '[{"id":1,"submitted_at":"2026-10-28T00:00:00Z","body":"","state":"COMMENTED"}]' ;;
   *pulls/7/comments*) echo '[{"id":2,"updated_at":"2026-10-28T00:01:00Z","body":""}]' ;;
   *issues/7/comments*) echo '[]' ;;
 esac`;

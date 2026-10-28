@@ -5343,12 +5343,16 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain(
       'A question you did not get answered is never a clean guard',
     );
-    // A review has submitted_at and no updated_at, and editing its body moves
-    // neither, so the stamp alone cannot answer "was anything edited?".
+    // A review has submitted_at and no updated_at, and neither an edit nor a
+    // dismissal moves it, so the stamp alone cannot answer "did anything
+    // change?". The boundary is stated too: reactions are not compared.
     expect(flat).toContain('reviews carry `submitted_at`, not `updated_at`');
-    expect(flat).toContain('editing a review body moves neither');
-    expect(flat).toContain("carries each item's body next to its stamp");
-    expect(flat).toContain('refuses a fetched list whose items have no body');
+    expect(flat).toContain(
+      'neither editing a review body nor dismissing the review moves it',
+    );
+    expect(flat).toContain("and each review's state, next to its stamp");
+    expect(flat).toContain('refuses a fetched list missing either');
+    expect(flat).toContain('reaction counts are deliberately not compared');
   });
 
   // "Every production commit was mutated on its own" shipped while two commits
