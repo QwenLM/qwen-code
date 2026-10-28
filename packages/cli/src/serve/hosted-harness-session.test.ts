@@ -35021,14 +35021,14 @@ describe('Hosted Harness Runtime turn takeover', () => {
             }),
           ]),
         );
+        const idle = await replacementHeaders(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(idle.body.hasActivePrompt).toBe(false);
+        expect(idle.body.recoveryBlocked).toBe(false);
       },
       { timeout: SETTLE_TIMEOUT_MS },
     );
-    const idle = await replacementHeaders(
-      supertest(server).get(`/session/${SESSION_ID}/status`),
-    ).set('X-Qwen-Client-Id', clientId);
-    expect(idle.body.hasActivePrompt).toBe(false);
-    expect(idle.body.recoveryBlocked).toBe(false);
     await replacementHeaders(
       supertest(server).delete(`/session/${SESSION_ID}`),
     );

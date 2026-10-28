@@ -134,7 +134,9 @@ describe('Managed native history scale qualification', () => {
     expect(profile).toContain(
       '<forkedProcessTimeoutInSeconds>7200</forkedProcessTimeoutInSeconds>',
     );
-    expect(profile).toContain('<argLine>-Xmx512m</argLine>');
+    expect(profile).toContain(
+      '<argLine>-Xmx512m -Djdk.nio.maxCachedBufferSize=1048576</argLine>',
+    );
     const gate = readFileSync(
       'packages/managed-agent-server/src/test/java/com/alibaba/qwen/code/managedagent/ManagedSessionHistoryScaleGate.java',
       'utf8',
