@@ -43,6 +43,7 @@ import { parseGoalStateRecordPayloadV2 } from '../goals/goal-reducer.js';
 import type { GoalStateRecordPayloadV2 } from '../goals/goal-protocol.js';
 import {
   isValidSessionApprovalModePayload,
+  isValidSessionWorkflowModePayload,
   isValidSessionModelPayload,
   isTurnResultRecordPayload,
   normalizeSessionApprovalModePayload,
@@ -52,6 +53,7 @@ import {
   type ParentSessionRecordPayload,
   type SessionModelRecordPayload,
   type SessionApprovalModeRecordPayload,
+  type SessionWorkflowModeRecordPayload,
   type SessionSourceRecordPayload,
   type TitleSource,
   type UiTelemetryRecordPayload,
@@ -308,6 +310,7 @@ export interface SessionRuntimeResumeState extends SessionSourcesRestoreState {
     sourceId?: string;
     sessionModel?: SessionModelRecordPayload;
     sessionApprovalMode?: SessionApprovalModeRecordPayload;
+    sessionWorkflowMode?: SessionWorkflowModeRecordPayload;
     lastAssistantModel?: string;
     executionEngine?: SessionExecutionEngine;
   };
@@ -3423,6 +3426,13 @@ export class SessionTranscriptReader {
       );
     });
     const sessionApprovalModeSet = new Set(sessionApprovalModeUuids);
+    const sessionWorkflowModeUuids = index.runtimeUuids.filter((uuid) => {
+      const entry = index.byUuid.get(uuid);
+      return (
+        entry?.type === 'system' && entry.subtype === 'session_workflow_mode'
+      );
+    });
+    const sessionWorkflowModeSet = new Set(sessionWorkflowModeUuids);
     // The legacy-model fallback reads the last assistant record's `model`.
     // Without an explicit selection it is only dispatched when it happens to
     // land in the replay/model read sets, so on a resume whose tail is a
@@ -3472,6 +3482,7 @@ export class SessionTranscriptReader {
         sessionSourceUuid,
         ...sessionModelUuids,
         ...sessionApprovalModeUuids,
+        ...sessionWorkflowModeUuids,
         lastAssistantUuid,
       ].filter((uuid): uuid is string => uuid !== undefined),
     );
@@ -3497,6 +3508,7 @@ export class SessionTranscriptReader {
     let sourceId: string | undefined;
     let sessionModel: SessionModelRecordPayload | undefined;
     let sessionApprovalMode: SessionApprovalModeRecordPayload | undefined;
+    let sessionWorkflowMode: SessionWorkflowModeRecordPayload | undefined;
     let lastAssistantModel: string | undefined;
     let firstRecordSeen = false;
     const deferredPreReadRecords = new Map<string, ChatRecord>();
@@ -3536,6 +3548,10 @@ export class SessionTranscriptReader {
       } else if (sessionModelSet.has(record.uuid)) {
         if (isValidSessionModelPayload(record.systemPayload)) {
           sessionModel = record.systemPayload;
+        }
+      } else if (sessionWorkflowModeSet.has(record.uuid)) {
+        if (isValidSessionWorkflowModePayload(record.systemPayload)) {
+          sessionWorkflowMode = { enabled: record.systemPayload.enabled };
         }
       } else if (sessionApprovalModeSet.has(record.uuid)) {
         if (isValidSessionApprovalModePayload(record.systemPayload)) {
@@ -3761,6 +3777,7 @@ export class SessionTranscriptReader {
         ...(sourceId !== undefined ? { sourceId } : {}),
         ...(sessionModel !== undefined ? { sessionModel } : {}),
         ...(sessionApprovalMode !== undefined ? { sessionApprovalMode } : {}),
+        ...(sessionWorkflowMode !== undefined ? { sessionWorkflowMode } : {}),
         ...(lastAssistantModel !== undefined ? { lastAssistantModel } : {}),
         ...(index.executionEngine.status === 'verified' &&
         index.executionEngine.recorded
