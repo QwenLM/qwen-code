@@ -22,12 +22,14 @@ import type {
 import { SESSION_EXECUTION_ENGINE_META_KEY } from './bridgeOptions.js';
 import {
   ACTIVE_WORK_CLOSE_TIMEOUT_MS,
+  ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM,
   ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
   ACTIVE_WORK_HEARTBEAT_META_KEY,
   ACTIVE_WORK_HEARTBEAT_VERSION,
   ACTIVE_WORK_HOLD_CATEGORIES,
   ACTIVE_WORK_NOTIFICATION_METHOD,
   MID_TURN_QUEUE_DRAIN_METHOD,
+  PROMPT_CANCEL_REASON_META_KEY,
   REQUESTED_SESSION_ID_META_KEY,
   type AcpSessionBridge,
   type BridgeRuntimeStopRequest,
@@ -847,48 +849,263 @@ describe('ACP Bridge execution engines', () => {
     },
   );
 
-  it('ignores generation events from a foreign connection', async () => {
+  it.each(['generateSessionContent', 'generateSessionBtwStream'] as const)(
+    '%s ignores generation events from a foreign connection',
+    async (method) => {
+      const completion = deferred<Record<string, unknown>>();
+      const managed = engineChannel('managed', {
+        extMethodImpl: () => completion.promise,
+      });
+      const p = paired({}, engineChannel('legacy'), managed);
+      const session = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      p.choose('legacy');
+      await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const stream = p.bridge[method]!(
+        session.sessionId,
+        'generate',
+        new AbortController().signal,
+      );
+      await vi.waitFor(() =>
+        expect(managed.agent.extMethodCalls).toHaveLength(1),
+      );
+      const requestId = managed.agent.extMethodCalls[0].params['requestId'];
+      expect(managed.agent.extMethodCalls[0]).toEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionGenerationStart,
+        params: {
+          sessionId: session.sessionId,
+          requestId,
+          prompt: 'generate',
+          ...(method === 'generateSessionBtwStream' ? { purpose: 'btw' } : {}),
+        },
+      });
+      try {
+        for (const [channel, model] of [
+          [p.legacy, 'foreign model'],
+          [managed, 'owner model'],
+        ] as const) {
+          await channel.agentConnection.extNotification(
+            'qwen/notify/session/generation/event',
+            {
+              v: 1,
+              sessionId: session.sessionId,
+              requestId,
+              event: { type: 'started', model, modelSource: 'main' },
+            },
+          );
+        }
+      } finally {
+        completion.resolve({ model: 'owner model', modelSource: 'main' });
+      }
+      const events = [];
+      for await (const event of stream) events.push(event);
+      expect(events).toEqual([
+        {
+          type: 'started',
+          requestId,
+          model: 'owner model',
+          modelSource: 'main',
+        },
+        { type: 'done', requestId, model: 'owner model', modelSource: 'main' },
+      ]);
+    },
+  );
+
+  it('authorizes the BTW stream before dispatching to the session owner', async () => {
+    const p = paired();
+    const session = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    expect(() =>
+      p.bridge.generateSessionBtwStream!(
+        session.sessionId,
+        'question',
+        new AbortController().signal,
+        { clientId: 'foreign-client' },
+      ),
+    ).toThrow('is not registered');
+    expect(() =>
+      p.bridge.generateSessionBtwStream!(
+        'unknown-session',
+        'question',
+        new AbortController().signal,
+      ),
+    ).toThrow(SessionNotFoundError);
+    expect(p.managed.agent.extMethodCalls).toHaveLength(0);
+  });
+
+  it.each([
+    'generateSessionContent',
+    'generateSessionBtwStream',
+    'generateSessionBtw',
+  ] as const)(
+    '%s prevents idle close until generation settles after detach',
+    async (method) => {
+      vi.useFakeTimers();
+      const completion = deferred<Record<string, unknown>>();
+      const managed = engineChannel('managed', {
+        initializeImpl: () => activeWorkInitialize(),
+        extMethodImpl: (extMethod) =>
+          extMethod === SERVE_CONTROL_EXT_METHODS.sessionGenerationStart ||
+          extMethod === SERVE_CONTROL_EXT_METHODS.sessionBtw
+            ? completion.promise
+            : { closed: true, holds: [] },
+      });
+      const p = paired(
+        { sessionReapIntervalMs: 10, sessionIdleTimeoutMs: 10 },
+        engineChannel('legacy'),
+        managed,
+      );
+      const session = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await reportActiveWork(managed, 1, [
+        { sessionId: session.sessionId, holds: [] },
+      ]);
+      expect(
+        p.bridge.getSessionSummary(session.sessionId).activeWorkState,
+      ).toBe('idle');
+      const pending = p.bridge[method]!(
+        session.sessionId,
+        'question',
+        new AbortController().signal,
+      );
+      const consuming = (async () => {
+        if ('then' in pending)
+          expect(await pending).toMatchObject({ answer: 'side answer' });
+        else for await (const event of pending) expect(event.type).toBe('done');
+      })();
+      try {
+        await vi.advanceTimersByTimeAsync(0);
+        expect(
+          p.bridge.getSessionSummary(session.sessionId).activeWorkState,
+        ).toBe('active');
+        await expect(
+          p.bridge.closeSession(session.sessionId, undefined, {
+            requireIdle: true,
+          }),
+        ).rejects.toMatchObject({ name: 'SessionBusyError' });
+        await p.bridge.detachClient(session.sessionId, session.clientId);
+        await vi.advanceTimersByTimeAsync(40);
+        expect(p.bridge.sessionCount).toBe(1);
+        expect(
+          managed.agent.extMethodCalls.filter(
+            (call) => call.method === SERVE_CONTROL_EXT_METHODS.sessionClose,
+          ),
+        ).toHaveLength(0);
+      } finally {
+        completion.resolve({
+          model: 'main',
+          modelSource: 'main',
+          sessionId: session.sessionId,
+          answer: 'side answer',
+        });
+        await consuming;
+      }
+      await flushWithoutTime();
+      expect(p.bridge.sessionCount).toBe(0);
+      expect(
+        managed.agent.extMethodCalls.filter(
+          (call) =>
+            call.method === SERVE_CONTROL_EXT_METHODS.sessionClose &&
+            call.params[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] === true,
+        ),
+      ).toHaveLength(1);
+    },
+  );
+
+  it('cancels only its BTW generation and drops subsequent output', async () => {
+    const completion = deferred<Record<string, unknown>>();
+    const managed = engineChannel('managed', {
+      extMethodImpl: (method) =>
+        method === SERVE_CONTROL_EXT_METHODS.sessionGenerationStart
+          ? completion.promise
+          : {},
+    });
+    const p = paired({}, engineChannel('legacy'), managed);
+    const session = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const controller = new AbortController();
+    const stream = p.bridge.generateSessionBtwStream!(
+      session.sessionId,
+      'question',
+      controller.signal,
+      { clientId: session.clientId },
+    );
+    await vi.waitFor(() =>
+      expect(managed.agent.extMethodCalls).toHaveLength(1),
+    );
+    const requestId = managed.agent.extMethodCalls[0].params['requestId'];
+    controller.abort();
+    await vi.waitFor(() =>
+      expect(managed.agent.extMethodCalls).toHaveLength(2),
+    );
+    expect(managed.agent.extMethodCalls[1]).toEqual({
+      method: SERVE_CONTROL_EXT_METHODS.sessionGenerationCancel,
+      params: { sessionId: session.sessionId, requestId },
+    });
+    await managed.agentConnection.extNotification(
+      'qwen/notify/session/generation/event',
+      {
+        v: 1,
+        sessionId: session.sessionId,
+        requestId,
+        event: { type: 'delta', seq: 0, text: 'stale answer' },
+      },
+    );
+    completion.resolve({ model: 'test', modelSource: 'main' });
+    const events = [];
+    for await (const event of stream) events.push(event);
+    expect(events).toEqual([]);
+    expect(managed.agent.cancelCalls).toEqual([]);
+  });
+
+  it.each([
+    ['generateSessionContent', 65_000],
+    ['generateSessionBtwStream', 310_000],
+  ] as const)('%s retains its own bridge deadline', async (method, timeout) => {
     const completion = deferred<Record<string, unknown>>();
     const managed = engineChannel('managed', {
       extMethodImpl: () => completion.promise,
     });
     const p = paired({}, engineChannel('legacy'), managed);
     const session = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
-    p.choose('legacy');
-    await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
-    const stream = p.bridge.generateSessionContent!(
+    vi.useFakeTimers();
+    const stream = p.bridge[method]!(
       session.sessionId,
-      'generate',
+      'question',
       new AbortController().signal,
     );
-    await vi.waitFor(() =>
-      expect(managed.agent.extMethodCalls).toHaveLength(1),
+    const result = stream[Symbol.asyncIterator]()
+      .next()
+      .catch((error: unknown) => error);
+    let settled = false;
+    void result.then(() => {
+      settled = true;
+    });
+    await vi.advanceTimersByTimeAsync(timeout - 1);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await result).toMatchObject({
+      name: 'BridgeTimeoutError',
+      timeoutMs: timeout,
+    });
+    const starts = managed.agent.extMethodCalls.filter(
+      (call) =>
+        call.method === SERVE_CONTROL_EXT_METHODS.sessionGenerationStart,
     );
-    const requestId = managed.agent.extMethodCalls[0].params['requestId'];
-    try {
-      for (const [channel, model] of [
-        [p.legacy, 'foreign model'],
-        [managed, 'owner model'],
-      ] as const) {
-        await channel.agentConnection.extNotification(
-          'qwen/notify/session/generation/event',
-          {
-            v: 1,
+    const cancels = managed.agent.extMethodCalls.filter(
+      (call) =>
+        call.method === SERVE_CONTROL_EXT_METHODS.sessionGenerationCancel,
+    );
+    if (method === 'generateSessionBtwStream') {
+      expect(cancels).toEqual([
+        {
+          method: SERVE_CONTROL_EXT_METHODS.sessionGenerationCancel,
+          params: {
             sessionId: session.sessionId,
-            requestId,
-            event: { type: 'started', model, modelSource: 'main' },
+            requestId: starts[0].params['requestId'],
           },
-        );
-      }
-    } finally {
-      completion.resolve({ model: 'owner model', modelSource: 'main' });
-    }
-    const events = [];
-    for await (const event of stream) events.push(event);
-    expect(events).toEqual([
-      { type: 'started', requestId, model: 'owner model', modelSource: 'main' },
-      { type: 'done', requestId, model: 'owner model', modelSource: 'main' },
-    ]);
+        },
+      ]);
+      expect(managed.agent.cancelCalls).toEqual([]);
+    } else expect(cancels).toEqual([]);
+    completion.resolve({ model: 'test', modelSource: 'main' });
   });
 
   it('reserves a generated ID while a rejected receipt is being cleaned up', async () => {
@@ -3242,44 +3459,47 @@ describe('paired quarantine recovery', () => {
     await vi.waitFor(() => expect(managed.killed).toBe(true));
   });
 
-  it('keeps a session while its content generation runs', async () => {
-    const generated = deferred<Record<string, unknown>>();
-    const managed = engineChannel('managed', {
-      newSessionImpl: (_request, agent) => ({
-        sessionId:
-          agent.newSessionCalls.length === 2
-            ? ''
-            : `managed-${agent.newSessionCalls.length}`,
-        ...receipt('managed'),
-      }),
-      extMethodImpl: (method) =>
-        method === SERVE_CONTROL_EXT_METHODS.sessionGenerationStart
-          ? generated.promise
-          : method === SERVE_CONTROL_EXT_METHODS.sessionClose
-            ? { closed: true }
-            : {},
-    });
-    const p = paired({}, engineChannel('legacy'), managed);
-    const session = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
-    const stream = p.bridge.generateSessionContent!(
-      session.sessionId,
-      'generate',
-      new AbortController().signal,
-    );
-    await vi.waitFor(() =>
-      expect(managed.agent.extMethodCalls).toHaveLength(1),
-    );
-    await expect(
-      p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
-    ).rejects.toThrow('invalid');
-    expect(p.bridge.getSessionSummary(session.sessionId)).toBeDefined();
+  it.each(['generateSessionContent', 'generateSessionBtwStream'] as const)(
+    'keeps a session while %s runs',
+    async (method) => {
+      const generated = deferred<Record<string, unknown>>();
+      const managed = engineChannel('managed', {
+        newSessionImpl: (_request, agent) => ({
+          sessionId:
+            agent.newSessionCalls.length === 2
+              ? ''
+              : `managed-${agent.newSessionCalls.length}`,
+          ...receipt('managed'),
+        }),
+        extMethodImpl: (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionGenerationStart
+            ? generated.promise
+            : method === SERVE_CONTROL_EXT_METHODS.sessionClose
+              ? { closed: true }
+              : {},
+      });
+      const p = paired({}, engineChannel('legacy'), managed);
+      const session = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const stream = p.bridge[method]!(
+        session.sessionId,
+        'generate',
+        new AbortController().signal,
+      );
+      await vi.waitFor(() =>
+        expect(managed.agent.extMethodCalls).toHaveLength(1),
+      );
+      await expect(
+        p.bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).rejects.toThrow('invalid');
+      expect(p.bridge.getSessionSummary(session.sessionId)).toBeDefined();
 
-    generated.resolve({ model: 'test', modelSource: 'main' });
-    const events: string[] = [];
-    for await (const event of stream) events.push(event.type);
-    expect(events).toEqual(['done']);
-    await vi.waitFor(() => expect(managed.killed).toBe(true));
-  });
+      generated.resolve({ model: 'test', modelSource: 'main' });
+      const events: string[] = [];
+      for await (const event of stream) events.push(event.type);
+      expect(events).toEqual(['done']);
+      await vi.waitFor(() => expect(managed.killed).toBe(true));
+    },
+  );
 
   it('lets background jobs that finish during a quarantine settle', async () => {
     const managed = engineChannel('managed', {
@@ -4169,6 +4389,279 @@ describe('paired per-engine operations', () => {
 });
 
 describe('workspace change propagation', () => {
+  it('returns zero skill refresh counts without starting a cold runtime', async () => {
+    const p = paired();
+
+    await expect(
+      p.bridge.invokeWorkspaceCommand(
+        SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
+        { reason: 'all' },
+      ),
+    ).resolves.toEqual({
+      sessionsRefreshed: 0,
+      sessionsFailed: 0,
+      configsRefreshed: 0,
+      configsFailed: 0,
+      reason: 'all',
+    });
+    expect(p.legacyFactory).not.toHaveBeenCalled();
+    expect(p.managedFactory).not.toHaveBeenCalled();
+  });
+
+  it('excludes closing skill sessions while batching healthy selections on their owner', async () => {
+    const closeStarted = deferred<void>();
+    const closeReply = deferred<Record<string, unknown>>();
+    const live = new Set<string>();
+    const p = paired(
+      {},
+      engineChannel('legacy'),
+      engineChannel('managed', {
+        newSessionImpl: (_request, agent) => {
+          const sessionId = `managed-${agent.newSessionCalls.length}`;
+          live.add(sessionId);
+          return { sessionId, ...receipt('managed') };
+        },
+        extMethodImpl: (method, params) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionClose) {
+            live.delete(params['sessionId'] as string);
+            closeStarted.resolve();
+            return closeReply.promise;
+          }
+          const ids = params['sessionIds'] as string[];
+          if (ids.some((id) => !live.has(id))) {
+            throw RequestError.invalidParams(undefined, 'Session not found');
+          }
+          return {
+            sessionsRefreshed: ids.length,
+            sessionsFailed: 0,
+            configsRefreshed: 1,
+            configsFailed: 0,
+          };
+        },
+      }),
+    );
+    const closing = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const first = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const second = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const close = p.bridge.closeSession(closing.sessionId);
+    await closeStarted.promise;
+    const method = SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh;
+    try {
+      await expect(
+        p.bridge.invokeWorkspaceCommand(method, {
+          sessionIds: [
+            closing.sessionId,
+            second.sessionId,
+            first.sessionId,
+            second.sessionId,
+          ],
+        }),
+      ).resolves.toEqual({
+        sessionsRefreshed: 2,
+        sessionsFailed: 1,
+        configsRefreshed: 1,
+        configsFailed: 0,
+        reason: 'all',
+      });
+      expect(
+        p.managed.agent.extMethodCalls.filter((call) => call.method === method),
+      ).toEqual([
+        { method, params: { sessionIds: [second.sessionId, first.sessionId] } },
+      ]);
+      expect(p.legacyFactory).not.toHaveBeenCalled();
+    } finally {
+      closeReply.resolve({ closed: true });
+      await close;
+    }
+  });
+
+  it('routes selected skill refreshes only to their owner channels and merges counts', async () => {
+    const refresh = (method: string, params: Record<string, unknown>) =>
+      method === SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh
+        ? {
+            sessionsRefreshed: (params['sessionIds'] as string[]).length,
+            sessionsFailed: 0,
+            configsRefreshed: 1,
+            configsFailed: 0,
+          }
+        : {};
+    const p = paired(
+      {},
+      engineChannel('legacy', { extMethodImpl: refresh }),
+      engineChannel('managed', { extMethodImpl: refresh }),
+    );
+    const managed = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const omittedManaged = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    p.choose('legacy');
+    const legacy = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const method = SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh;
+    await expect(
+      p.bridge.invokeWorkspaceCommand(method, {
+        cwd: WS_A,
+        reason: 'content',
+        sessionIds: [legacy.sessionId, managed.sessionId, managed.sessionId],
+      }),
+    ).resolves.toEqual({
+      sessionsRefreshed: 2,
+      sessionsFailed: 0,
+      configsRefreshed: 2,
+      configsFailed: 0,
+      reason: 'content',
+    });
+    expect(p.legacy.agent.extMethodCalls).toEqual([
+      {
+        method,
+        params: {
+          cwd: WS_A,
+          reason: 'content',
+          sessionIds: [legacy.sessionId],
+        },
+      },
+    ]);
+    expect(p.managed.agent.extMethodCalls).toEqual([
+      {
+        method,
+        params: {
+          cwd: WS_A,
+          reason: 'content',
+          sessionIds: [managed.sessionId],
+        },
+      },
+    ]);
+    expect(
+      p.managed.agent.extMethodCalls[0]?.params['sessionIds'],
+    ).not.toContain(omittedManaged.sessionId);
+  });
+
+  it('does no selected skill work for an empty, malformed, or unknown selection', async () => {
+    const p = paired();
+    const session = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const method = SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh;
+    await expect(
+      p.bridge.invokeWorkspaceCommand(method, { sessionIds: [] }),
+    ).resolves.toEqual({
+      sessionsRefreshed: 0,
+      sessionsFailed: 0,
+      configsRefreshed: 0,
+      configsFailed: 0,
+      reason: 'all',
+    });
+    await expect(
+      p.bridge.invokeWorkspaceCommand(method, {
+        sessionIds: [session.sessionId, 'missing'],
+      }),
+    ).rejects.toBeInstanceOf(SessionNotFoundError);
+    for (const sessionIds of [null, 'all', [1], [' ']]) {
+      await expect(
+        p.bridge.invokeWorkspaceCommand(method, { sessionIds }),
+      ).rejects.toBeInstanceOf(RequestError);
+    }
+    expect(p.legacy.agent.extMethodCalls).toEqual([]);
+    expect(p.managed.agent.extMethodCalls).toEqual([]);
+    expect(p.legacy.agent.newSessionCalls).toEqual([]);
+  });
+
+  it('counts the selected sessions of a failing skill owner channel', async () => {
+    const p = paired(
+      {},
+      engineChannel('legacy', {
+        extMethodImpl: () => ({ sessionsRefreshed: 1, sessionsFailed: 0 }),
+      }),
+      engineChannel('managed', {
+        extMethodImpl: () => {
+          throw new Error('refresh failed');
+        },
+      }),
+    );
+    const first = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const second = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    p.choose('legacy');
+    const legacy = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await expect(
+      p.bridge.invokeWorkspaceCommand(
+        SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
+        { sessionIds: [first.sessionId, second.sessionId, legacy.sessionId] },
+      ),
+    ).resolves.toEqual({
+      sessionsRefreshed: 1,
+      sessionsFailed: 2,
+      configsRefreshed: 0,
+      configsFailed: 0,
+      reason: 'all',
+    });
+  });
+
+  it('holds the selected skill owner channel until workspace control completes', async () => {
+    const gate = deferred<Record<string, unknown>>();
+    const p = paired(
+      {},
+      engineChannel('legacy'),
+      engineChannel('managed', {
+        extMethodImpl: (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh
+            ? gate.promise
+            : { closed: true },
+      }),
+    );
+    const session = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const refresh = p.bridge.invokeWorkspaceCommand(
+      SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
+      { sessionIds: [session.sessionId] },
+    );
+    try {
+      await vi.waitFor(() =>
+        expect(p.managed.agent.extMethodCalls).toHaveLength(1),
+      );
+      expect(p.bridge.getRuntimeStopSnapshot!().blockedReasons).toContain(
+        'workspace_control_pending',
+      );
+      await p.bridge.closeSession(session.sessionId);
+      expect(p.managed.killed).toBe(false);
+      expect(p.legacyFactory).not.toHaveBeenCalled();
+    } finally {
+      gate.resolve({ sessionsRefreshed: 1, sessionsFailed: 0 });
+      await refresh;
+    }
+    expect(p.bridge.getRuntimeStopSnapshot!().blockedReasons).not.toContain(
+      'workspace_control_pending',
+    );
+  });
+
+  it('refuses selected skill refresh while its runtime is stopping', async () => {
+    const closeGate = deferred<Record<string, unknown>>();
+    const p = restartable(
+      {},
+      {
+        managed: {
+          extMethodImpl: (method) =>
+            method === SERVE_CONTROL_EXT_METHODS.sessionClose
+              ? closeGate.promise
+              : {},
+        },
+      },
+    );
+    const session = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const stop = p.bridge.stopWorkspaceRuntime!(stopConfirmation(p.bridge));
+    try {
+      await expect(
+        p.bridge.invokeWorkspaceCommand(
+          SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
+          { sessionIds: [session.sessionId] },
+        ),
+      ).rejects.toBeInstanceOf(WorkspaceDrainingError);
+      expect(
+        p.channels.managed[0].agent.extMethodCalls.some(
+          (call) =>
+            call.method === SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
+        ),
+      ).toBe(false);
+      expect(p.channels.legacy).toEqual([]);
+    } finally {
+      closeGate.resolve({ closed: true });
+      await stop;
+    }
+  });
+
   const acknowledge = (
     method: string,
     params: Record<string, unknown>,
@@ -4249,6 +4742,7 @@ describe('workspace change propagation', () => {
       revision: 1,
       kind: 'permissions',
       tightening: true,
+      scope: 'workspace',
       cwd: WS_A,
     });
     await p.bridge.sendPrompt(
@@ -4430,7 +4924,13 @@ describe('workspace change propagation', () => {
     }
     await vi.waitFor(() =>
       expect(p.managed.agent.cancelCalls).toEqual([
-        { sessionId: managed.sessionId },
+        {
+          sessionId: managed.sessionId,
+          // A fence-triggered cancel is an interruption, not user intent: the
+          // child must not stamp the turn as user-cancelled, or the stopped
+          // turn is durably excluded from recovery.
+          _meta: { [PROMPT_CANCEL_REASON_META_KEY]: 'interrupted' },
+        },
       ]),
     );
     expect(p.legacy.agent.cancelCalls).toEqual([]);
@@ -4559,7 +5059,10 @@ describe('workspace change propagation', () => {
       if (verdict === 'fences') {
         await vi.waitFor(() =>
           expect(p.managed.agent.cancelCalls).toEqual([
-            { sessionId: 'persisted' },
+            {
+              sessionId: 'persisted',
+              _meta: { [PROMPT_CANCEL_REASON_META_KEY]: 'interrupted' },
+            },
           ]),
         );
       } else {
@@ -4652,6 +5155,16 @@ describe('workspace change propagation', () => {
           p.bridge.generateSessionContent!(
             sessionId,
             'summarize',
+            new AbortController().signal,
+            context,
+          ),
+      ],
+      [
+        'streamed side question',
+        () =>
+          p.bridge.generateSessionBtwStream!(
+            sessionId,
+            'why?',
             new AbortController().signal,
             context,
           ),

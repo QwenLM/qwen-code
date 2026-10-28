@@ -82,6 +82,7 @@ const broker = vi.hoisted(() => ({
 vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./hosted-workspace-broker.js')>()),
   HostedWorkspaceBroker: class {
+    resolveCapabilities = async () => {};
     readonly runtimeSessionId = 'prompt';
     warm = broker.warm;
     acquire = broker.acquire;
@@ -751,8 +752,8 @@ describe('hosted child wait recovery (#13708)', () => {
   });
 
   // #13753 I2: a worktree orphan's fold carries its merge outcome, as the
-  // live wait's answer does; a shared one's carries none.
-  it.each(['shared', 'worktree'] as const)(
+  // live wait's answer does; a shared or snapshot one's carries none (I3).
+  it.each(['shared', 'worktree', 'snapshot'] as const)(
     'an admitted %s orphan never gets the fabricated answer: its own outcome folds',
     async (workspaceMode) => {
       await parkWedged(true);
@@ -862,12 +863,15 @@ describe('hosted child wait recovery (#13708)', () => {
   );
 
   // A started worktree orphan that failed tells the parent to inspect its
-  // Workspace; a shared one, or one that never started, adds nothing.
+  // Workspace; a shared or snapshot one, or one that never started, adds
+  // nothing.
   it.each([
     ['worktree', true, false, true],
     ['worktree', true, true, true],
     ['worktree', false, false, false],
     ['shared', true, false, false],
+    ['snapshot', true, false, false],
+    ['snapshot', true, true, false],
   ] as const)(
     'an ended admitted %s orphan (started: %s, cancelled: %s) folds the workspace line: %s',
     async (workspaceMode, started, cancelled, line) => {
@@ -1277,6 +1281,49 @@ describe('hosted child wait recovery (#13708)', () => {
     }
   });
 
+  // #13858 R4-7/R3-8: the gap fill answers a workflow orphan with the
+  // workflow kind, background receipt and terminal cause alike.
+  it('a workflow orphan folds its own kind on both fill arms', async () => {
+    await parkWedged(true);
+    const first = await open('boot-2', false);
+    try {
+      await settleTheChild(first);
+      await resumeTurn(first, []).resumeAgentWaitRuns(
+        [{ ...waitRun, functionCallId: 'call-1' }],
+        'recovered',
+        new AbortController().signal,
+      );
+      const orphanRunId = await admitWorkflowChild(first, 'call-2', 'sent');
+      expect(orphanRunId).toBe(`${PROMPT_ID}:call-2`);
+    } finally {
+      await first.close();
+    }
+    const replacement = await open('boot-3', false);
+    try {
+      expect(
+        await fillParkedRoundAgentGaps({
+          managed: replacement,
+          sessionId: SESSION_ID,
+          promptId: PROMPT_ID,
+          cwd: root,
+          gapText: HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
+          children: childrenOf(replacement),
+        }),
+      ).toBe(1);
+      const callTwo = toolResultEntries(await replacement.sink.project()).find(
+        (entry) =>
+          entry.message?.parts?.some(
+            (part) => part.functionResponse?.id === 'call-2',
+          ),
+      );
+      expect(JSON.stringify(callTwo?.message?.parts)).toContain(
+        'Workflow child started in the background',
+      );
+    } finally {
+      await replacement.close();
+    }
+  });
+
   it('the interrupted-turn settlement folds the wait and answers the gaps, replayed silently (R1-3)', async () => {
     await parkWedged(true);
     const replacement = await open('boot-2', false);
@@ -1514,6 +1561,88 @@ describe('hosted child wait recovery (#13708)', () => {
   // like a team call: what it committed is answered as sent on every
   // route, and one that committed nothing is told it never ran where the
   // turn resumes.
+  /** A workflow launch of call `callId`, admitted with `completion`. */
+  async function admitWorkflowChild(
+    session: ManagedSession,
+    callId: string,
+    completion: 'sent' | 'tool',
+  ): Promise<string> {
+    const childRunId = `${PROMPT_ID}:${callId}`;
+    await childrenOf(session).admitWorkflow({
+      childRunId,
+      ownerScopeId: SESSION_ID,
+      rootSessionId: SESSION_ID,
+      completion,
+      script: 'return 1;',
+      args: null,
+      definition: {
+        definitionId: 'workflow/unnamed',
+        definitionRevision: 1,
+        definitionDigest: 'a'.repeat(64),
+      },
+      workingDirectory: '.',
+      executionCallId: childRunId,
+    });
+    return childRunId;
+  }
+
+  // #13858 R3-9: a committed workflow launch is answered by what committed
+  // on both the settling and the resuming route, exactly like an agent
+  // launch — and its started receipt names the workflow kind (R4-7).
+  it('answers an interrupted workflow launch by what it committed', async () => {
+    const session = await open('boot-1', true);
+    try {
+      await park(session, false);
+      const children = childrenOf(session);
+      const background = await admitWorkflowChild(session, 'call-5', 'sent');
+      await admitWorkflowChild(session, 'call-6', 'tool');
+      await session.sink.write({
+        uuid: 'assistant-2',
+        parentUuid: null,
+        sessionId: SESSION_ID,
+        timestamp: new Date().toISOString(),
+        type: 'assistant',
+        cwd: root,
+        version: 'test',
+        daemonPromptId: PROMPT_ID,
+        message: {
+          role: 'model',
+          parts: ['call-5', 'call-6', 'call-7'].map((id) => ({
+            functionCall: { id, name: 'workflow', args: {} },
+          })),
+        },
+      });
+      const funnels = {
+        session,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        children,
+      };
+      const answers = async () =>
+        new Map(
+          toolResultEntries(await session.sink.project()).flatMap((entry) =>
+            (entry.message?.parts ?? []).map((part) => [
+              part.functionResponse?.id,
+              JSON.stringify(part.functionResponse?.response),
+            ]),
+          ),
+        );
+      expect(await answerCommittedTurnCalls(funnels)).toBe(1);
+      expect((await answers()).get('call-5')).toContain(
+        `Workflow child started in the background as ${children.taskIdOf(background)}`,
+      );
+      // The admitted foreground launch stays its wait's to answer.
+      expect((await answers()).has('call-6')).toBe(false);
+      expect(await answerResumedTurnCalls(funnels)).toBe(1);
+      const resumed = await answers();
+      expect(resumed.get('call-7')).toContain('The tool call never ran');
+      expect(resumed.has('call-6')).toBe(false);
+    } finally {
+      await session.close();
+    }
+  });
+
   it('answers an interrupted send_message by what it committed', async () => {
     const session = await open('boot-1', true);
     try {

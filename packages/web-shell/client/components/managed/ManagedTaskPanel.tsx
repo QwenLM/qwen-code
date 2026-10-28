@@ -52,6 +52,21 @@ function taskErrorKey(code?: string): string {
   }
 }
 
+// Typed by the generated union, so a label for a kind the contract does
+// not name fails the type check; a newer server's kind still reads as other.
+const TASK_KINDS = new Set<ManagedTask['kind']>([
+  'child_agent',
+  'workflow',
+  'background_shell',
+  'monitor',
+  'automation_run',
+  'channel_delivery',
+]);
+
+function taskKindKey(kind: ManagedTask['kind']): string {
+  return `managed.tasks.kind.${TASK_KINDS.has(kind) ? kind : 'other'}`;
+}
+
 export function ManagedTaskPanel({
   wide,
   tasks,
@@ -62,6 +77,8 @@ export function ManagedTaskPanel({
   sessionId,
   onClose,
   restoreFocus,
+  waitingSessions,
+  onOpenChild,
 }: {
   wide: boolean;
   tasks: ReturnType<typeof useManagedTasks>;
@@ -72,6 +89,8 @@ export function ManagedTaskPanel({
   sessionId: string;
   onClose: () => void;
   restoreFocus: () => void;
+  waitingSessions?: ReadonlySet<string>;
+  onOpenChild?: (sessionId: string) => void;
 }) {
   const { t, language } = useI18n();
   const heading = useId();
@@ -99,9 +118,6 @@ export function ManagedTaskPanel({
       ? t('managed.tasks.notStarted')
       : new Date(value).toLocaleString(language);
   const task = tasks.task;
-  const children = tasks.page.data.filter(
-    (task) => task.kind === 'child_agent',
-  );
   const close = () => {
     onClose();
     if (wide) restoreFocus();
@@ -135,6 +151,7 @@ export function ManagedTaskPanel({
         {status(task.taskId)}
         {canCancel &&
           task.actionCapabilities.includes('cancel') &&
+          !task.stopRequested &&
           (confirm === task.taskId ? (
             <div className="space-y-2">
               <p>{t('managed.tasks.confirmDescription')}</p>
@@ -173,6 +190,23 @@ export function ManagedTaskPanel({
     );
   };
 
+  const childStatus = (task: ManagedTask) => (
+    <>
+      {task.childSessionId && waitingSessions?.has(task.childSessionId) && (
+        <Badge variant="outline">{t('managed.tasks.awaitingApproval')}</Badge>
+      )}
+      {task.stopRequested &&
+        !['completed', 'failed', 'cancelled'].includes(task.state) && (
+          <p role="status">{t('managed.tasks.cancel.stopping')}</p>
+        )}
+      {task.approvalMode && (
+        <p>
+          {t('managed.tasks.approvalMode')}: {task.approvalMode}
+        </p>
+      )}
+    </>
+  );
+
   const body = (
     <div
       ref={bodyRef}
@@ -208,6 +242,13 @@ export function ManagedTaskPanel({
           )}
         </p>
       )}
+      {tasks.page.activeChildCount !== undefined && (
+        <p role="status">
+          {t('managed.tasks.activeChildren', {
+            count: tasks.page.activeChildCount,
+          })}
+        </p>
+      )}
       {tasks.loading && <p role="status">{t('managed.loading')}</p>}
       {!tasks.selectedId ? (
         <div
@@ -217,32 +258,35 @@ export function ManagedTaskPanel({
             scroll.current = event.currentTarget.scrollTop;
           }}
         >
-          {children.map((task) => (
+          {tasks.page.data.map((task) => (
             <div key={task.taskId} className="space-y-2 rounded-md border p-3">
               <Button
                 variant="ghost"
                 className="h-auto w-full justify-start whitespace-normal text-left"
                 onClick={() => tasks.select(task.taskId)}
               >
-                {t('managed.tasks.child')} ·{' '}
+                {t(taskKindKey(task.kind))} ·{' '}
                 {task.taskId.replace(/^task_/, '').slice(0, 8)}
               </Button>
               <Badge variant="secondary">
                 {t(`managed.tasks.state.${task.state}`)}
               </Badge>
+              {childStatus(task)}
               <p className="text-muted-foreground">{time(task.createdAt)}</p>
               {cancelControl(task)}
             </div>
           ))}
-          {!tasks.loading && tasks.error === undefined && !children.length && (
-            <p className="text-muted-foreground">
-              {t(
-                tasks.page.hasMore || tasks.hasPrevious
-                  ? 'managed.tasks.emptyPage'
-                  : 'managed.tasks.empty',
-              )}
-            </p>
-          )}
+          {!tasks.loading &&
+            tasks.error === undefined &&
+            !tasks.page.data.length && (
+              <p className="text-muted-foreground">
+                {t(
+                  tasks.page.hasMore || tasks.hasPrevious
+                    ? 'managed.tasks.emptyPage'
+                    : 'managed.tasks.empty',
+                )}
+              </p>
+            )}
           <div className="flex gap-2">
             <Button
               size="sm"
@@ -262,7 +306,7 @@ export function ManagedTaskPanel({
             </Button>
           </div>
           {cancel.pendingTaskIds
-            .filter((id) => !children.some((task) => task.taskId === id))
+            .filter((id) => !tasks.page.data.some((task) => task.taskId === id))
             .map((id) => (
               <div key={id} className="rounded-md border p-3">
                 <p className="break-all">{id}</p>
@@ -277,10 +321,21 @@ export function ManagedTaskPanel({
           )}
           {task && (
             <>
-              <p className="break-all font-medium">{task.taskId}</p>
+              <p className="font-medium">{t(taskKindKey(task.kind))}</p>
+              <p className="break-all">{task.taskId}</p>
               <Badge variant="secondary">
                 {t(`managed.tasks.state.${task.state}`)}
               </Badge>
+              {childStatus(task)}
+              {task.childSessionId && onOpenChild && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => onOpenChild(task.childSessionId!)}
+                >
+                  {t('managed.tasks.viewChild')}
+                </Button>
+              )}
               <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-2 [&>dt]:text-muted-foreground [&>dd]:break-all">
                 <dt>{t('managed.tasks.created')}</dt>
                 <dd>{time(task.createdAt)}</dd>

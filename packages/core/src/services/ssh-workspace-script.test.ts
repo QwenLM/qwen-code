@@ -23,6 +23,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SSH_WORKSPACE_SCRIPT } from './ssh-workspace-script.js';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 interface Reply {
   ok: boolean;
@@ -631,7 +632,7 @@ describe.skipIf(process.platform === 'win32')('SSH filesystem script', () => {
     );
   });
 
-  it.skipIf(process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'keeps readable results when files and directories deny access',
     () => {
       writeFileSync(join(root, 'visible.txt'), 'needle');

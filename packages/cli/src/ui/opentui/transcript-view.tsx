@@ -16,8 +16,11 @@
  * silent no-op, which the composition-root contract forbids.
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ErrorInfo } from 'react';
+import { useRenderer } from '@opentui/react';
+import type { Renderable, ScrollBoxRenderable } from '@opentui/core';
 import { AgentStatus } from '@qwen-code/qwen-code-core';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { C, SYNTAX, SYNTAX_DIM, type Palette } from './theme.js';
 import {
   AnsiRows,
@@ -52,7 +55,15 @@ import {
   type LiveArenaSessionItem,
 } from './live-session-model.js';
 import { renderDiffBody } from './diff-render.js';
+import {
+  ESTIMATED_FIRST_ITEM_ROWS,
+  ESTIMATED_ITEM_ROWS,
+  computeTranscriptWindow,
+  itemOffsets,
+  type TranscriptWindow,
+} from './transcript-window.js';
 import { assistantMarkdownForRender } from './markdown-heal.js';
+import { OpenTuiErrorBoundary } from './opentui-error-boundary.js';
 import { formatInlineToolArgsJson } from '../components/messages/ToolMessage.js';
 import {
   getCachedStringWidth,
@@ -62,7 +73,14 @@ import { getCompressionStatusText } from '../utils/compression-text.js';
 import { ICON } from '../constants.js';
 import { formatClockTime, formatDuration } from '../utils/formatters.js';
 import { getArenaStatusLabel } from '../utils/displayUtils.js';
-import type { ArenaAgentCardData } from '../types.js';
+import { ToolCallStatus, type ArenaAgentCardData } from '../types.js';
+import { isHistoryItemVisibleAfterRestore } from '../types.js';
+import { t } from '../../i18n/index.js';
+import {
+  buildToolSummary,
+  isCollapsibleTool,
+  isSubagentToolEntry,
+} from '../utils/tool-group-summary.js';
 
 /** ink HistoryItemDisplay picks between two hints by whether the card is
  *  clickable; `ui.mouseTracking: false` hands the pointer back to the
@@ -110,6 +128,15 @@ export interface TranscriptViewProps {
    * *behind* another waiting call, while its card goes back to pending in place,
    * so transcript order and queue order disagree. */
   awaitingCallId?: string;
+  activeShellCallId?: string;
+  focusedShellCallId?: string;
+  /**
+   * Which end of the transcript is on screen before the first frame reports a
+   * real scroll position. The app shell pins its scroll region to the bottom,
+   * so it wants the tail; the session preview is a clipped, non-scrolling pane
+   * that reads from the first turn down.
+   */
+  initialAnchor?: 'top' | 'bottom';
 }
 
 /** ink HistoryItemDisplay getHistoryItemMarginTop: conversation turns and the
@@ -131,6 +158,389 @@ function itemMarginTop(kind: LiveHistoryItem['kind']): number {
   }
 }
 
+/** Stands in for "pinned to the last row" before the first frame reports a
+ *  real offset; `computeTranscriptWindow` clamps it to the bottom. */
+const ANCHOR_BOTTOM = Number.MAX_SAFE_INTEGER;
+
+const transcriptLogger = createDebugLogger('OPEN_TUI_TRANSCRIPT');
+
+/**
+ * The whole point of a per-item boundary: @opentui/react's own root boundary
+ * answers a render error with a red `text` fallback that calls `jsxDEV`, which
+ * the bundled CLI does not provide, so the fallback throws too and React
+ * unmounts the entire root, leaving a blank screen with no message. An item
+ * that renders nothing costs one row of transcript and keeps the banner, the
+ * composer and the exit path alive.
+ */
+function renderNothing(): null {
+  return null;
+}
+
+function logItemFailure(
+  error: Error,
+  item: LiveHistoryItem,
+  info: ErrorInfo,
+): void {
+  transcriptLogger.error(
+    `[TRANSCRIPT_ITEM_ERROR] kind=${item.kind} id=${item.id} ` +
+      `${error.message}\n${info.componentStack ?? ''}\n${error.stack ?? ''}`,
+  );
+}
+
+function findScrollHost(node: Renderable | null): ScrollBoxRenderable | null {
+  for (
+    let cur: Renderable | null = node;
+    cur;
+    cur = cur.parent as Renderable | null
+  ) {
+    const host = cur as unknown as Partial<ScrollBoxRenderable>;
+    if (
+      typeof host.scrollTop === 'number' &&
+      host.content &&
+      host.viewport &&
+      host.verticalScrollBar
+    ) {
+      return cur as unknown as ScrollBoxRenderable;
+    }
+  }
+  return null;
+}
+
+function sameWindow(a: TranscriptWindow, b: TranscriptWindow): boolean {
+  return (
+    a.start === b.start &&
+    a.end === b.end &&
+    a.topPad === b.topPad &&
+    a.bottomPad === b.bottomPad
+  );
+}
+
+/** The model's own item identity, and the one `findToolIndex` uses: a subagent
+ *  call mints a tool card and a task card from one call id, so `id` alone is
+ *  not unique among live items and two of them would share one height slot. */
+function itemKey(item: LiveHistoryItem): string {
+  return `${item.kind}:${item.id}${item.kind === 'tool' && item.renderId ? `:${item.renderId}` : ''}`;
+}
+
+interface MountedNode {
+  item: LiveHistoryItem;
+  node: Renderable;
+}
+
+/** The rows Yoga laid out, or `undefined` for a node not laid out yet.
+ *  `Renderable.height` is clamped to at least one row, so reading it back would
+ *  charge a row to an item that paints nothing — which `renderNothing` and a
+ *  hidden goal card both are. Reading Yoga instead is what ink's own
+ *  virtualized list does (`VirtualizedList.tsx`, `getComputedHeight()`). */
+function laidOutRows(node: Renderable): number | undefined {
+  if (!(node.height > 0)) return undefined;
+  const { yogaNode } = node as unknown as {
+    yogaNode: { getComputedHeight(): number };
+  };
+  return yogaNode.getComputedHeight();
+}
+
+/**
+ * Row-budgeted windowing: only the items near the viewport are mounted, and
+ * spacers stand in for the rest so the scroll geometry still spans the whole
+ * transcript. See ./transcript-window.ts for why mounting everything blanks the
+ * screen on a long session.
+ *
+ * Two signals, because they fire at the two moments that matter. The scroll
+ * bar's `change` event is emitted synchronously as the position moves, before
+ * the renderer paints, so an absolute jump — a track click or a thumb drag,
+ * which can land anywhere in the transcript — still gets a window that covers
+ * it in the same frame. The renderer's `frame` event fires after layout, which
+ * is the only moment an item's real row count can be read. Both recompute the
+ * window; only the frame measures. Idle costs nothing: neither event fires.
+ */
+function useTranscriptWindow(
+  items: readonly LiveHistoryItem[],
+  availableTerminalHeight: number,
+  initialAnchor: 'top' | 'bottom',
+) {
+  const renderer = useRenderer();
+  const rootRef = useRef<Renderable | null>(null);
+  /** Measured rows per item identity, kept after the item scrolls out of the
+   *  window so an estimate is never re-applied to something already measured. A
+   *  resize does not clear it: the mounted items are re-measured on the next
+   *  frame, and dropping the whole table would renumber every row offset
+   *  underneath a scroll position that is itself counted in rows. */
+  const heightsRef = useRef(new Map<string, number>());
+  /** The laid-out node per mounted item identity, written by the item's own ref
+   *  callback and dropped when it unmounts. Measuring through this rather than
+   *  through the root's child list keeps the JSX child order out of the
+   *  arithmetic — the spacers and the error boundary already have to sit
+   *  exactly where they do for that order to name an item. */
+  const nodesRef = useRef(new Map<string, MountedNode>());
+  /** Rows the table charged each item an upward window move pulled in above the
+   *  viewport, keyed by identity and dropped once the item is measured. Keyed by
+   *  identity rather than index because `task-end` splices the task card out by
+   *  index, shifting every index above it. The top spacer is short by whatever
+   *  these turn out to cost. */
+  const enteredRef = useRef(new Map<string, number>());
+  const offsetsRef = useRef<number[]>([0]);
+  const itemsRef = useRef(items);
+  const mountedRef = useRef<TranscriptWindow>({
+    start: 0,
+    end: 0,
+    topPad: 0,
+    bottomPad: 0,
+  });
+  /** `rows: 0` means no scroll host has reported a viewport yet, so the height
+   *  prop is the fallback — read every render, which keeps a host-less pane
+   *  (the session preview) in step across a resize. */
+  const scrollRef = useRef({
+    top: initialAnchor === 'bottom' ? ANCHOR_BOTTOM : 0,
+    rows: 0,
+  });
+  const [revision, setRevision] = useState(0);
+
+  const offsets = useMemo(() => {
+    const measured = heightsRef.current;
+    return itemOffsets(
+      items.map(
+        (item, index) =>
+          measured.get(itemKey(item)) ??
+          (index === 0 ? ESTIMATED_FIRST_ITEM_ROWS : ESTIMATED_ITEM_ROWS),
+      ),
+    );
+    // Measured heights live in a ref that the frame handler mutates, so
+    // `revision` is what tells this memo one of them changed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items, revision]);
+
+  itemsRef.current = items;
+  offsetsRef.current = offsets;
+
+  const win = computeTranscriptWindow({
+    itemCount: items.length,
+    offsets,
+    scrollTop: scrollRef.current.top,
+    viewportRows: scrollRef.current.rows || availableTerminalHeight,
+  });
+  // Recorded here rather than in the frame handler: the render body is what
+  // mounts a window, so it is also what can say which items the move pulled in
+  // above the viewport.
+  const pulledIn = enteredRef.current;
+  const painted = mountedRef.current;
+  if (win.end > painted.start && win.start < painted.end) {
+    // These were spacer rows charged at whatever the table said, which for an
+    // item that was never mounted is the estimate. What they turn out to cost
+    // is settled on the frame that measures them.
+    for (let index = win.start; index < painted.start; index++) {
+      const key = itemKey(items[index]);
+      // An identity the previous commit already mounted is not a pull-in: its
+      // rows are painted, not charged to a spacer. Skipping it is what keeps a
+      // `task-end` splice above the window — which shifts the index space this
+      // loop walks — from charging items that never left the screen.
+      if (nodesRef.current.has(key) || pulledIn.has(key)) continue;
+      pulledIn.set(key, (offsets[index + 1] ?? 0) - (offsets[index] ?? 0));
+    }
+  } else {
+    // A jump lands somewhere the painted state says nothing about, so there is
+    // no reading position to carry over and nothing left to settle.
+    pulledIn.clear();
+  }
+  mountedRef.current = win;
+
+  useEffect(() => {
+    if (!renderer?.on) return;
+    let bar: ScrollBoxRenderable['verticalScrollBar'] | null = null;
+
+    const locate = () => {
+      const root = rootRef.current;
+      if (!root) return null;
+      const host = findScrollHost(root);
+      return host ? { root, host } : null;
+    };
+
+    /** Samples the host's real position for the render body to read back, and
+     *  reports whether it implies a window other than the mounted one. */
+    const syncWindow = (root: Renderable, host: ScrollBoxRenderable) => {
+      // `y` is absolute, so the difference is the offset inside the scroll
+      // content and cancels the translation the scroll position applies.
+      const top =
+        Math.round(host.scrollTop) - Math.round(root.y - host.content.y);
+      const rows = Math.max(1, Math.round(host.viewport.height));
+      scrollRef.current = { top, rows };
+      // Compared against the painted window rather than adopted here: the
+      // render body is what mounts a window, so it is also what records which
+      // items the move pulled in.
+      const next = computeTranscriptWindow({
+        itemCount: itemsRef.current.length,
+        offsets: offsetsRef.current,
+        scrollTop: top,
+        viewportRows: rows,
+      });
+      return !sameWindow(next, mountedRef.current);
+    };
+
+    const onScroll = () => {
+      const found = locate();
+      if (!found) return;
+      if (syncWindow(found.root, found.host)) setRevision((value) => value + 1);
+    };
+
+    const onFrame = () => {
+      const root = rootRef.current;
+      if (!root) return;
+
+      const measured = heightsRef.current;
+      const entered = enteredRef.current;
+      let revised = false;
+      let owed = 0;
+      for (const { item, node } of nodesRef.current.values()) {
+        const laidOut = laidOutRows(node);
+        if (laidOut === undefined) continue;
+        const key = itemKey(item);
+        const rows = Math.round(laidOut) + itemMarginTop(item.kind);
+        // Consumed on every measurement, not only the first: a height recorded
+        // before the item left the window can go stale while it is unmounted (a
+        // resize, or ctrl+O flipping every card at once), so what says the
+        // spacer above the reader was charged wrong is the charge itself.
+        const charged = entered.get(key);
+        if (charged !== undefined) {
+          entered.delete(key);
+          // The spacer rows this item replaced, minus the rows it paints.
+          owed += charged - rows;
+        }
+        const known = measured.get(key);
+        if (known === rows) continue;
+        measured.set(key, rows);
+        revised = true;
+      }
+
+      // Measuring needs only the root; the settlement and the window sync need
+      // a host. Splitting them is what lets the session preview — which mounts
+      // outside the shell's scrollbox, so `findScrollHost` never matches —
+      // record real heights instead of staying sized from estimates for its
+      // whole life.
+      const found = locate();
+      let changed = revised;
+      if (found) {
+        const { host } = found;
+        if (bar !== host.verticalScrollBar) {
+          bar?.off('change', onScroll);
+          bar = host.verticalScrollBar;
+          bar.on('change', onScroll);
+        }
+        if (owed !== 0) {
+          // Measuring an item that was already mounted owes nothing: it is
+          // painted at the height just read, and both spacers come from offsets
+          // a change inside the window leaves alone. An item the window pulled
+          // in above the viewport is different — the spacer rows it replaced
+          // were charged at the estimate, which is the only number that exists
+          // before it is laid out, so the table under it shrank by the
+          // difference and the reader is now that many rows away from the
+          // content they were on. Settling it into the scroll position is what
+          // makes a three-row wheel tick travel three rows over one-row turns
+          // instead of one. See Decision 5.
+          const rows = Math.max(1, Math.round(host.viewport.height));
+          const tail = Math.max(0, host.scrollHeight - rows);
+          const from = Math.round(host.scrollTop);
+          const to = Math.max(0, from - owed);
+          // The setter recomputes `_hasManualScroll` from wherever the write
+          // lands, and a position one row off the tail takes the shell's bottom
+          // pin off for the rest of the session — that was R1-4. Settle only
+          // where the reader's own scrolling has already gone, and never onto
+          // the tail, so the write cannot change what the pin is doing.
+          if (from < tail && to < tail) host.scrollTop = to;
+        }
+        changed = syncWindow(found.root, host) || changed;
+      }
+      if (changed) setRevision((value) => value + 1);
+    };
+
+    renderer.on('frame', onFrame);
+    return () => {
+      renderer.off('frame', onFrame);
+      bar?.off('change', onScroll);
+    };
+  }, [renderer]);
+
+  return { rootRef, nodesRef, win };
+}
+
+type ToolPresentationRow = Extract<LiveHistoryItem, { kind: 'tool' }>;
+
+type CompactToolPresentation = ToolPresentationRow & {
+  compactToolSummary?: string;
+};
+
+function projectCompactToolGroups(
+  items: readonly LiveHistoryItem[],
+  fullDetail: boolean,
+  showToolCallArgs: boolean,
+  showToolCallDetails: boolean,
+): readonly LiveHistoryItem[] {
+  if (fullDetail || !showToolCallDetails) return items;
+  const projected: LiveHistoryItem[] = [];
+  for (let index = 0; index < items.length; ) {
+    const first = items[index];
+    const group = first.canonicalHistoryItem;
+    if (first.kind !== 'tool' || group?.type !== 'tool_group') {
+      projected.push(first);
+      index++;
+      continue;
+    }
+    const rows: ToolPresentationRow[] = [];
+    let end = index;
+    while (end < items.length) {
+      const row = items[end];
+      if (row.kind !== 'tool' || row.canonicalHistoryItem?.id !== group.id)
+        break;
+      rows.push(row);
+      end++;
+    }
+    const completeGroup =
+      rows.length === group.tools.length &&
+      rows.every((row, position) => row.id === group.tools[position].callId);
+    const forceIndividual =
+      group.isUserInitiated ||
+      group.tools.some(
+        (tool) => isSubagentToolEntry(tool) || tool.ptyId !== undefined,
+      ) ||
+      (group.memoryReadCount ?? 0) > 0 ||
+      (group.memoryWriteCount ?? 0) > 0 ||
+      rows.some(
+        (row) => !row.done || row.confirm === 'pending' || row.canonicalPending,
+      ) ||
+      group.tools.some(
+        (tool) =>
+          tool.status !== ToolCallStatus.Success &&
+          tool.status !== ToolCallStatus.Canceled,
+      ) ||
+      (showToolCallArgs &&
+        group.tools.some(
+          (tool) => tool.args != null && Object.keys(tool.args).length > 0,
+        ));
+    const compact = group.tools.filter(
+      (tool) =>
+        tool.status === ToolCallStatus.Success &&
+        isCollapsibleTool(tool.name) &&
+        !tool.images?.length &&
+        !tool.omittedImageCount,
+    );
+    if (!completeGroup || forceIndividual || compact.length === 0) {
+      projected.push(...rows);
+      index = end;
+      continue;
+    }
+    const compactIds = new Set(compact.map((tool) => tool.callId));
+    const summaryRow = rows.find((row) => compactIds.has(row.id))!;
+    const presentation: CompactToolPresentation = {
+      ...summaryRow,
+      renderId: `${summaryRow.renderId ?? summaryRow.id}:compact-${group.id}`,
+      compactToolSummary: buildToolSummary(compact, false),
+    };
+    projected.push(presentation);
+    projected.push(...rows.filter((row) => !compactIds.has(row.id)));
+    index = end;
+  }
+  return projected;
+}
+
 export function OpenTuiTranscriptView({
   items,
   availableWidth = 80,
@@ -141,37 +551,91 @@ export function OpenTuiTranscriptView({
   showToolCallDetails = true,
   mouseTracking = true,
   awaitingCallId,
+  activeShellCallId,
+  focusedShellCallId,
+  initialAnchor = 'bottom',
 }: TranscriptViewProps) {
+  const visibleItems = useMemo(
+    () =>
+      projectCompactToolGroups(
+        items.filter(
+          (item) =>
+            !item.canonicalOnly && isHistoryItemVisibleAfterRestore(item),
+        ),
+        thoughtsExpanded,
+        showToolCallArgs,
+        showToolCallDetails,
+      ),
+    [items, thoughtsExpanded, showToolCallArgs, showToolCallDetails],
+  );
   const maxRows = maxHistoryItemRows(availableTerminalHeight);
-  const awaitingId = items.find(
+  const awaitingItem = visibleItems.findLast(
     (item) =>
       item.kind === 'tool' &&
       item.confirm === 'pending' &&
       !item.done &&
       item.id === awaitingCallId,
-  )?.id;
+  );
+  const { rootRef, nodesRef, win } = useTranscriptWindow(
+    visibleItems,
+    availableTerminalHeight,
+    initialAnchor,
+  );
   return (
-    <box flexDirection="column" marginLeft={2} marginRight={2}>
-      {items.map((item) => (
-        <box
-          key={item.id}
-          flexDirection="column"
-          marginTop={itemMarginTop(item.kind)}
-        >
-          <TranscriptItem
-            item={item}
-            maxRows={maxRows}
-            terminalHeight={availableTerminalHeight}
-            width={availableWidth}
-            thoughtsExpanded={thoughtsExpanded}
-            showToolCallArgs={showToolCallArgs}
-            showTimestamps={showTimestamps}
-            showToolCallDetails={showToolCallDetails}
-            mouseTracking={mouseTracking}
-            awaitingApproval={item.id === awaitingId}
-          />
-        </box>
-      ))}
+    <box
+      flexDirection="column"
+      marginLeft={2}
+      marginRight={2}
+      ref={(el) => {
+        rootRef.current = el as Renderable | null;
+      }}
+    >
+      <box height={win.topPad} flexShrink={0} />
+      {visibleItems.slice(win.start, win.end).map((item) => {
+        const key = itemKey(item);
+        return (
+          <box
+            key={key}
+            flexDirection="column"
+            marginTop={itemMarginTop(item.kind)}
+            ref={(el) => {
+              if (el) {
+                nodesRef.current.set(key, { item, node: el as Renderable });
+              } else {
+                nodesRef.current.delete(key);
+              }
+            }}
+          >
+            <OpenTuiErrorBoundary
+              fallback={renderNothing}
+              onError={(error, info) => logItemFailure(error, item, info)}
+            >
+              <TranscriptItem
+                item={item}
+                maxRows={maxRows}
+                terminalHeight={availableTerminalHeight}
+                width={availableWidth}
+                thoughtsExpanded={thoughtsExpanded}
+                showToolCallArgs={showToolCallArgs}
+                showTimestamps={showTimestamps}
+                showToolCallDetails={showToolCallDetails}
+                mouseTracking={mouseTracking}
+                awaitingApproval={item === awaitingItem}
+                shellFocus={
+                  item.kind === 'tool' &&
+                  !item.done &&
+                  item.id === activeShellCallId
+                    ? item.id === focusedShellCallId
+                      ? 'focused'
+                      : 'available'
+                    : undefined
+                }
+              />
+            </OpenTuiErrorBoundary>
+          </box>
+        );
+      })}
+      <box height={win.bottomPad} flexShrink={0} />
     </box>
   );
 }
@@ -187,6 +651,7 @@ function TranscriptItem({
   showToolCallDetails,
   mouseTracking,
   awaitingApproval,
+  shellFocus,
 }: {
   item: LiveHistoryItem;
   maxRows: number;
@@ -198,6 +663,7 @@ function TranscriptItem({
   showToolCallDetails: boolean;
   mouseTracking: boolean;
   awaitingApproval: boolean;
+  shellFocus?: 'available' | 'focused';
 }) {
   switch (item.kind) {
     case 'user':
@@ -230,6 +696,7 @@ function TranscriptItem({
           showToolCallDetails={showToolCallDetails}
           mouseTracking={mouseTracking}
           awaitingApproval={awaitingApproval}
+          shellFocus={shellFocus}
         />
       );
     case 'task':
@@ -410,8 +877,9 @@ function ToolCard({
   showToolCallDetails,
   mouseTracking,
   awaitingApproval,
+  shellFocus,
 }: {
-  item: LiveToolItem;
+  item: CompactToolPresentation;
   maxRows: number;
   terminalHeight: number;
   width: number;
@@ -420,9 +888,22 @@ function ToolCard({
   showToolCallDetails: boolean;
   mouseTracking: boolean;
   awaitingApproval: boolean;
+  shellFocus?: 'available' | 'focused';
 }) {
   const [clickedOpen, setClickedOpen] = useState(false);
   const status = toolStatusMeta(item);
+  if (item.compactToolSummary !== undefined) {
+    return (
+      <box flexDirection="row">
+        <box width={STATUS_INDICATOR_WIDTH}>
+          <text fg={status.color}>{status.glyph}</text>
+        </box>
+        <text fg={C.text} attributes={1} flexGrow={1} {...selectionProps()}>
+          {item.compactToolSummary}
+        </text>
+      </box>
+    );
+  }
   const name = toolCardName(item.tool);
   // ink's CollapsibleToolGroupMessage keeps a call open while it needs an
   // answer: the card is the only surface carrying the payload being approved.
@@ -522,6 +1003,11 @@ function ToolCard({
             ) : null}
           </text>
         )}
+        {shellFocus ? (
+          <text fg={C.accent} flexShrink={0}>
+            {shellFocus === 'focused' ? ' (Focused)' : ' (ctrl+f to focus)'}
+          </text>
+        ) : null}
       </box>
       {collapsed ? null : (
         <>
@@ -535,7 +1021,22 @@ function ToolCard({
               </text>
             </box>
           ) : null}
-          <ToolCardBody item={item} maxRows={maxRows} width={width} />
+          <ToolCardBody
+            item={
+              fullDetail && item.detailedDisplay
+                ? {
+                    ...item,
+                    output: sanitizeTerminalText(item.detailedDisplay),
+                    diff: undefined,
+                    todos: undefined,
+                    ansi: undefined,
+                    subagentSummary: undefined,
+                  }
+                : item
+            }
+            maxRows={maxRows}
+            width={width}
+          />
         </>
       )}
     </box>
@@ -729,11 +1230,18 @@ function RetryRows({
     <box flexDirection="column">
       <text fg={C.red} {...selectionProps()}>
         {sanitizeTerminalText(
-          message ?? `Attempt ${attempt} of ${maxRetries} failed`,
+          message ?? t('Rate limit exceeded. Please wait and try again.'),
         )}
       </text>
       <text fg={C.yellow}>
-        {`↻ Retrying in ${remainingSec}s… (attempt ${attempt} of ${maxRetries})`}
+        {`↻ ${t(
+          'Retrying in {{seconds}} seconds… (attempt {{attempt}}/{{maxRetries}})',
+          {
+            seconds: String(remainingSec),
+            attempt: String(attempt),
+            maxRetries: String(maxRetries),
+          },
+        )}`}
       </text>
     </box>
   );

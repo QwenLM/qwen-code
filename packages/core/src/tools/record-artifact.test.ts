@@ -24,6 +24,7 @@ import {
   RecordArtifactTool,
   type RecordArtifactParams,
 } from './record-artifact.js';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 const signal = new AbortController().signal;
 const RES = 'https://example.com/resource';
@@ -139,6 +140,10 @@ describe('RecordArtifactTool', () => {
     removeLater(outside, true);
     return secret;
   }
+
+  it('does not point the model at the Artifact tool', () => {
+    expect(makeTool().description).not.toContain('Artifact tool');
+  });
 
   it('records a link artifact without touching the resource', async () => {
     const url = 'https://example.com/tables/orders';
@@ -452,21 +457,23 @@ describe('RecordArtifactTool', () => {
     );
   });
 
-  it('classifies an unreadable path as permission denied', async () => {
-    if (process.platform === 'win32' || process.getuid?.() === 0) return;
-    const ws = await workspace();
-    await ws.write('hidden/a.csv', 'x');
-    const hidden = path.join(ws.cwd, 'hidden');
-    await chmod(hidden, 0);
-    try {
-      expectFailed(
-        await ws.record('Hidden', 'hidden/a.csv'),
-        ToolErrorType.PERMISSION_DENIED,
-      );
-    } finally {
-      await chmod(hidden, 0o755);
-    }
-  });
+  it.skipIf(!arePermissionBitsEnforced())(
+    'classifies an unreadable path as permission denied',
+    async () => {
+      const ws = await workspace();
+      await ws.write('hidden/a.csv', 'x');
+      const hidden = path.join(ws.cwd, 'hidden');
+      await chmod(hidden, 0);
+      try {
+        expectFailed(
+          await ws.record('Hidden', 'hidden/a.csv'),
+          ToolErrorType.PERMISSION_DENIED,
+        );
+      } finally {
+        await chmod(hidden, 0o755);
+      }
+    },
+  );
 
   it('rejects a wrong workspace-folder prefix instead of reporting success', async () => {
     const ws = await workspace();

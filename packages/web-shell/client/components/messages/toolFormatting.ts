@@ -44,6 +44,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   cron_create: 'CronCreate',
   cron_list: 'CronList',
   cron_delete: 'CronDelete',
+  autofix_pr: 'AutofixPr',
   loop_wakeup: 'LoopWakeup',
   create_sub_session: 'CreateSubSession',
   task_stop: 'TaskStop',
@@ -258,6 +259,17 @@ export function extractText(tool: ACPToolCall): string | null {
     if (b.type === 'content' && b.content?.text) return b.content.text;
   }
   return extractRawOutputText(tool.rawOutput);
+}
+
+export function hasRecordedOutput(tool: ACPToolCall): boolean {
+  return (
+    tool.rawOutput != null ||
+    (tool.content?.some(
+      (block) =>
+        block.type === 'content' && typeof block.content?.text === 'string',
+    ) ??
+      false)
+  );
 }
 
 export function getAdvisorDisplayText(tool: ACPToolCall): string | null {
