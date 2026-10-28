@@ -272,6 +272,16 @@ const documentBuildResult = await build({
   entryPoints: [join(srcDir, 'document-main.tsx')],
   bundle: true,
   minify: true,
+  // esbuild escapes every non-ASCII character in a string literal by default
+  // (`charset: 'ascii'`), and this bundle carries the Web Shell's translation
+  // table for both locales, so `"\u4F60"` costs six bytes where the character
+  // is three in UTF-8. The escaped and literal forms are the same string value
+  // to the parser, and every path that serves this asset decodes it as UTF-8 —
+  // the document that loads it declares `<meta charset="UTF-8">`, and unpkg
+  // serves it as `application/javascript; charset=utf-8` — so this is bytes
+  // returned without changing what the renderer renders. Local main at
+  // bfa7a2f52e measured 2,049,210 bytes with the default; this emits 1,956,663.
+  charset: 'utf8',
   write: false,
   metafile: true,
   plugins: [stripDocumentDeadModules, extractTranscriptCss],
