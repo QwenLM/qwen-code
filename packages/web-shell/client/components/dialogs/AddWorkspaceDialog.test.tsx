@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act } from 'react';
+import { StrictMode, act, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../i18n';
 import { WebShellPortalRootContext } from '../../portalRoot';
@@ -18,6 +18,19 @@ function mount(node: React.ReactNode) {
   root = createRoot(container);
   act(() => {
     root!.render(<I18nProvider language="en">{node}</I18nProvider>);
+  });
+}
+
+function mountStrict(node: React.ReactNode) {
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+  act(() => {
+    root!.render(
+      <StrictMode>
+        <I18nProvider language="en">{node}</I18nProvider>
+      </StrictMode>,
+    );
   });
 }
 
@@ -1254,5 +1267,513 @@ describe('AddWorkspaceDialog', () => {
       await Promise.resolve();
     });
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  function gitUrlInput() {
+    return document.querySelector<HTMLInputElement>('#add-workspace-git-url')!;
+  }
+
+  function gitTargetInput() {
+    return document.querySelector<HTMLInputElement>(
+      '#add-workspace-git-target',
+    )!;
+  }
+
+  async function selectGitSource() {
+    const trigger = document.querySelector<HTMLElement>(
+      '#add-workspace-source',
+    )!;
+    await act(async () => trigger.click());
+    const option = [
+      ...document.querySelectorAll<HTMLElement>('[role="option"]'),
+    ].find((item) => item.textContent === 'Git repository')!;
+    await act(async () => option.click());
+  }
+
+  async function flushAsync() {
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  }
+
+  it('hides the Git source when the daemon does not advertise cloning', () => {
+    mount(<AddWorkspaceDialog onClose={vi.fn()} onAdd={vi.fn()} />);
+    expect(document.querySelector('#add-workspace-source')).toBeNull();
+  });
+
+  it('clones into the target and registers the cloned directory', async () => {
+    const onAdd = vi.fn().mockResolvedValue(undefined);
+    const onClose = vi.fn();
+    const start = vi.fn().mockResolvedValue({ jobId: 'job-1' });
+    const poll = vi.fn().mockResolvedValue({
+      jobId: 'job-1',
+      status: 'succeeded',
+      percent: 100,
+      cwd: '/home/me/repo',
+    });
+    mount(
+      <AddWorkspaceDialog
+        onClose={onClose}
+        onAdd={onAdd}
+        gitClone={{ start, poll, cancel: vi.fn() }}
+      />,
+    );
+    await selectGitSource();
+    typeInto(gitUrlInput(), 'https://example.com/org/repo.git');
+    typeInto(gitTargetInput(), '/home/me/repo');
+    submit();
+    await flushAsync();
+
+    expect(start).toHaveBeenCalledWith({
+      url: 'https://example.com/org/repo.git',
+      target: '/home/me/repo',
+    });
+    expect(poll).toHaveBeenCalledWith('job-1');
+    expect(onAdd).toHaveBeenCalledWith('/home/me/repo', true);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows clone progress and cancels the job', async () => {
+    let polls = 0;
+    const poll = vi.fn().mockImplementation(async () => {
+      polls++;
+      return polls === 1
+        ? { jobId: 'job-2', status: 'running', percent: 42 }
+        : { jobId: 'job-2', status: 'cancelled' };
+    });
+    const cancel = vi.fn().mockResolvedValue(undefined);
+    mount(
+      <AddWorkspaceDialog
+        onClose={vi.fn()}
+        onAdd={vi.fn()}
+        gitClone={{
+          start: vi.fn().mockResolvedValue({ jobId: 'job-2' }),
+          poll,
+          cancel,
+        }}
+      />,
+    );
+    await selectGitSource();
+    typeInto(gitUrlInput(), 'https://example.com/org/repo.git');
+    typeInto(gitTargetInput(), '/home/me/repo');
+    submit();
+    await flushAsync();
+
+    expect(document.body.textContent).toContain('Cloning… 42%');
+    const cancelButton = [
+      ...document.querySelectorAll<HTMLButtonElement>('button'),
+    ].find((button) => button.textContent === 'Cancel clone')!;
+    await act(async () => {
+      cancelButton.click();
+      await Promise.resolve();
+    });
+    await flushAsync();
+
+    expect(cancel).toHaveBeenCalledWith('job-2');
+    expect(document.body.textContent).toContain('Clone cancelled.');
+  });
+
+  it('surfaces a clone failure and returns to the form', async () => {
+    mount(
+      <AddWorkspaceDialog
+        onClose={vi.fn()}
+        onAdd={vi.fn()}
+        gitClone={{
+          start: vi.fn().mockResolvedValue({ jobId: 'job-3' }),
+          poll: vi.fn().mockResolvedValue({
+            jobId: 'job-3',
+            status: 'failed',
+            error: { code: 'clone_failed', message: 'fatal: not found' },
+          }),
+          cancel: vi.fn(),
+        }}
+      />,
+    );
+    await selectGitSource();
+    typeInto(gitUrlInput(), 'https://example.com/org/repo.git');
+    typeInto(gitTargetInput(), '/home/me/repo');
+    submit();
+    await flushAsync();
+
+    expect(document.body.textContent).toContain('fatal: not found');
+    const back = [
+      ...document.querySelectorAll<HTMLButtonElement>('button'),
+    ].find((button) => button.textContent === 'Back')!;
+    await act(async () => back.click());
+    expect(gitUrlInput()).not.toBeNull();
+  });
+
+  it('rejects a relative target without starting a clone', async () => {
+    const start = vi.fn();
+    mount(
+      <AddWorkspaceDialog
+        onClose={vi.fn()}
+        onAdd={vi.fn()}
+        gitClone={{ start, poll: vi.fn(), cancel: vi.fn() }}
+      />,
+    );
+    await selectGitSource();
+    typeInto(gitUrlInput(), 'https://example.com/org/repo.git');
+    typeInto(gitTargetInput(), 'relative/repo');
+    submit();
+    await flushAsync();
+
+    expect(start).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain(
+      'Enter an absolute target path.',
+    );
+  });
+
+  it('offers recheck after a polling failure before the stale cancel action', async () => {
+    let polls = 0;
+    const poll = vi.fn().mockImplementation(async () => {
+      polls++;
+      if (polls === 1) throw new Error('network down');
+      return {
+        jobId: 'job-unknown',
+        status: 'succeeded',
+        percent: 100,
+        cwd: '/home/me/repo',
+      };
+    });
+    const onAdd = vi.fn().mockResolvedValue(undefined);
+    const onClose = vi.fn();
+    mount(
+      <AddWorkspaceDialog
+        onClose={onClose}
+        onAdd={onAdd}
+        gitClone={{
+          start: vi.fn().mockResolvedValue({ jobId: 'job-unknown' }),
+          poll,
+          cancel: vi.fn(),
+        }}
+      />,
+    );
+    await selectGitSource();
+    typeInto(gitUrlInput(), 'https://example.com/org/repo.git');
+    typeInto(gitTargetInput(), '/home/me/repo');
+    submit();
+    await flushAsync();
+
+    expect(document.body.textContent).toContain(
+      'Could not confirm the clone result.',
+    );
+    const buttons = [...document.querySelectorAll<HTMLButtonElement>('button')];
+    const recheck = buttons.find(
+      (button) => button.textContent === 'Check again',
+    );
+    expect(recheck).toBeTruthy();
+    expect(
+      buttons.some((button) => button.textContent === 'Cancel clone'),
+    ).toBe(false);
+
+    await act(async () => {
+      recheck!.click();
+      await Promise.resolve();
+    });
+    await flushAsync();
+    expect(onAdd).toHaveBeenCalledWith('/home/me/repo', true);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('registers a clone under StrictMode', async () => {
+    const onAdd = vi.fn().mockResolvedValue(undefined);
+    mountStrict(
+      <AddWorkspaceDialog
+        onClose={vi.fn()}
+        onAdd={onAdd}
+        gitClone={{
+          start: vi.fn().mockResolvedValue({ jobId: 'job-strict' }),
+          poll: vi.fn().mockResolvedValue({
+            jobId: 'job-strict',
+            status: 'succeeded',
+            percent: 100,
+            cwd: '/home/me/repo',
+          }),
+          cancel: vi.fn(),
+        }}
+      />,
+    );
+    await selectGitSource();
+    typeInto(gitUrlInput(), 'https://example.com/org/repo.git');
+    typeInto(gitTargetInput(), '/home/me/repo');
+    submit();
+    await flushAsync();
+
+    expect(onAdd).toHaveBeenCalledTimes(1);
+    expect(onAdd).toHaveBeenCalledWith('/home/me/repo', true);
+  });
+
+  it('reuses the directory path as the clone parent', async () => {
+    mount(
+      <AddWorkspaceDialog
+        onClose={vi.fn()}
+        onAdd={vi.fn()}
+        gitClone={{ start: vi.fn(), poll: vi.fn(), cancel: vi.fn() }}
+      />,
+    );
+    typeInto(input(), '/home/me/src');
+    await selectGitSource();
+    typeInto(gitUrlInput(), 'https://example.com/org/repo.git');
+
+    expect(gitTargetInput().value).toBe('/home/me/src/repo');
+  });
+
+  it('keeps a directory path that already ends with the repository name', async () => {
+    mount(
+      <AddWorkspaceDialog
+        onClose={vi.fn()}
+        onAdd={vi.fn()}
+        gitClone={{ start: vi.fn(), poll: vi.fn(), cancel: vi.fn() }}
+      />,
+    );
+    typeInto(input(), '/home/me/src/repo');
+    await selectGitSource();
+    typeInto(gitUrlInput(), 'https://example.com/org/repo.git');
+
+    expect(gitTargetInput().value).toBe('/home/me/src/repo');
+  });
+
+  it('does not overwrite a manually edited clone target', async () => {
+    mount(
+      <AddWorkspaceDialog
+        onClose={vi.fn()}
+        onAdd={vi.fn()}
+        gitClone={{ start: vi.fn(), poll: vi.fn(), cancel: vi.fn() }}
+      />,
+    );
+    typeInto(input(), '/home/me/src');
+    await selectGitSource();
+    typeInto(gitUrlInput(), 'https://example.com/org/repo.git');
+    typeInto(gitTargetInput(), '/custom/target');
+    typeInto(gitUrlInput(), 'https://example.com/org/other.git');
+
+    expect(gitTargetInput().value).toBe('/custom/target');
+  });
+
+  it('selects a clone parent from directory suggestions', async () => {
+    const onSuggest = vi.fn().mockResolvedValue({
+      dir: '/home/me',
+      sep: '/',
+      suggestions: [{ name: 'src', path: '/home/me/src' }],
+      truncated: false,
+    });
+    mount(
+      <AddWorkspaceDialog
+        onClose={vi.fn()}
+        onAdd={vi.fn()}
+        onSuggest={onSuggest}
+        gitClone={{ start: vi.fn(), poll: vi.fn(), cancel: vi.fn() }}
+      />,
+    );
+    await selectGitSource();
+    typeInto(gitUrlInput(), 'https://example.com/org/repo.git');
+    typeInto(gitTargetInput(), '/home/me/');
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    });
+
+    expect(onSuggest).toHaveBeenCalledWith('/home/me/');
+    const option = [
+      ...document.querySelectorAll<HTMLElement>('[role="option"]'),
+    ].find((item) => item.textContent?.startsWith('src'));
+    expect(option).toBeTruthy();
+    await act(async () => {
+      option!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    });
+    expect(gitTargetInput().value).toBe('/home/me/src/repo');
+  });
+
+  it('returns to the directory source when the clone capability disappears', async () => {
+    const controls = {
+      start: vi.fn(),
+      poll: vi.fn(),
+      cancel: vi.fn(),
+    };
+    function Harness() {
+      const [enabled, setEnabled] = useState(true);
+      return (
+        <>
+          <button type="button" onClick={() => setEnabled(false)}>
+            drop-capability
+          </button>
+          <AddWorkspaceDialog
+            onClose={vi.fn()}
+            onAdd={vi.fn()}
+            gitClone={enabled ? controls : undefined}
+          />
+        </>
+      );
+    }
+    mount(<Harness />);
+    await selectGitSource();
+    expect(document.querySelector('#add-workspace-git-url')).not.toBeNull();
+    const drop = [
+      ...document.querySelectorAll<HTMLButtonElement>('button'),
+    ].find((button) => button.textContent === 'drop-capability')!;
+    await act(async () => drop.click());
+    expect(document.querySelector('#add-workspace-path')).not.toBeNull();
+    expect(document.querySelector('#add-workspace-git-url')).toBeNull();
+  });
+
+  it('reports a pruned clone job instead of offering recheck forever', async () => {
+    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
+    mount(
+      <AddWorkspaceDialog
+        onClose={vi.fn()}
+        onAdd={vi.fn()}
+        gitClone={{
+          start: vi.fn().mockResolvedValue({ jobId: 'job-gone' }),
+          poll: vi.fn().mockRejectedValue(
+            new DaemonHttpError(
+              404,
+              {
+                error: 'Workspace clone job not found',
+                code: 'clone_job_not_found',
+              },
+              'GET /workspace-git-clone-jobs/job-gone',
+            ),
+          ),
+          cancel: vi.fn(),
+        }}
+      />,
+    );
+    await selectGitSource();
+    typeInto(gitUrlInput(), 'https://example.com/org/repo.git');
+    typeInto(gitTargetInput(), '/home/me/repo');
+    submit();
+    await flushAsync();
+
+    expect(document.body.textContent).toContain('no longer available');
+    const buttons = [...document.querySelectorAll<HTMLButtonElement>('button')];
+    expect(buttons.some((button) => button.textContent === 'Check again')).toBe(
+      false,
+    );
+  });
+
+  it('does not register a clone the user asked to cancel', async () => {
+    let polls = 0;
+    const poll = vi.fn().mockImplementation(async () => {
+      polls++;
+      return polls === 1
+        ? { jobId: 'job-race', status: 'running', percent: 10 }
+        : {
+            jobId: 'job-race',
+            status: 'succeeded',
+            percent: 100,
+            cwd: '/home/me/repo',
+          };
+    });
+    const onAdd = vi.fn().mockResolvedValue(undefined);
+    const onClose = vi.fn();
+    const cancel = vi.fn().mockResolvedValue(undefined);
+    mount(
+      <AddWorkspaceDialog
+        onClose={onClose}
+        onAdd={onAdd}
+        gitClone={{
+          start: vi.fn().mockResolvedValue({ jobId: 'job-race' }),
+          poll,
+          cancel,
+        }}
+      />,
+    );
+    await selectGitSource();
+    typeInto(gitUrlInput(), 'https://example.com/org/repo.git');
+    typeInto(gitTargetInput(), '/home/me/repo');
+    submit();
+    await flushAsync();
+
+    const cancelButton = [
+      ...document.querySelectorAll<HTMLButtonElement>('button'),
+    ].find((button) => button.textContent === 'Cancel clone')!;
+    await act(async () => {
+      cancelButton.click();
+      await Promise.resolve();
+    });
+    await flushAsync();
+
+    expect(cancel).toHaveBeenCalledWith('job-race');
+    expect(onAdd).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+    const back = [
+      ...document.querySelectorAll<HTMLButtonElement>('button'),
+    ].find((button) => button.textContent === 'Back');
+    expect(back).toBeTruthy();
+  });
+
+  it('closes instead of cancelling an unconfirmed clone', async () => {
+    const cancel = vi.fn().mockResolvedValue(undefined);
+    const onClose = vi.fn();
+    mount(
+      <AddWorkspaceDialog
+        onClose={onClose}
+        onAdd={vi.fn()}
+        gitClone={{
+          start: vi.fn().mockResolvedValue({ jobId: 'job-unknown-2' }),
+          poll: vi.fn().mockRejectedValue(new Error('network down')),
+          cancel,
+        }}
+      />,
+    );
+    await selectGitSource();
+    typeInto(gitUrlInput(), 'https://example.com/org/repo.git');
+    typeInto(gitTargetInput(), '/home/me/repo');
+    submit();
+    await flushAsync();
+
+    const footerCancel = [
+      ...document.querySelectorAll<HTMLButtonElement>('button'),
+    ].find((button) => button.textContent === 'Cancel')!;
+    await act(async () => footerCancel.click());
+
+    expect(cancel).not.toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('tears the clone panel down when the capability disappears mid-clone', async () => {
+    const controls = {
+      start: vi.fn().mockResolvedValue({ jobId: 'job-drop' }),
+      poll: vi.fn().mockResolvedValue({
+        jobId: 'job-drop',
+        status: 'running',
+        percent: 7,
+      }),
+      cancel: vi.fn(),
+    };
+    function Harness() {
+      const [enabled, setEnabled] = useState(true);
+      return (
+        <>
+          <button type="button" onClick={() => setEnabled(false)}>
+            drop-capability
+          </button>
+          <AddWorkspaceDialog
+            onClose={vi.fn()}
+            onAdd={vi.fn()}
+            gitClone={enabled ? controls : undefined}
+          />
+        </>
+      );
+    }
+    mount(<Harness />);
+    await selectGitSource();
+    typeInto(gitUrlInput(), 'https://example.com/org/repo.git');
+    typeInto(gitTargetInput(), '/home/me/repo');
+    submit();
+    await flushAsync();
+    expect(document.body.textContent).toContain('Cloning');
+
+    const drop = [
+      ...document.querySelectorAll<HTMLButtonElement>('button'),
+    ].find((button) => button.textContent === 'drop-capability')!;
+    await act(async () => drop.click());
+    await flushAsync();
+
+    expect(document.querySelector('#add-workspace-path')).not.toBeNull();
+    expect(document.body.textContent).not.toContain('Cloning');
+    expect(document.body.textContent).not.toContain('Cancel clone');
   });
 });

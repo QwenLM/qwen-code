@@ -20,7 +20,7 @@ Hosted Harness 和 Java 控制面必须共享同一个 bearer token 和同一个
 ## 非目标
 
 - 改变 Harness 读取凭据的方式，或为 CLI 增加文件选项。
-- 改变 Runtime Broker token；它在 CLI 中仍没有环境变量来源。
+- 共享 Runtime Broker token。[Hosted Harness Broker 环境变量设计](2026-10-21-hosted-harness-broker-environment.zh-CN.md) 在本文件的基础上实现了这一点。
 - 删除现有的直接配置项；它们单独使用时仍然有效。
 
 ## 设计
@@ -32,16 +32,20 @@ Hosted Harness 和 Java 控制面必须共享同一个 bearer token 和同一个
 - `QWEN_SERVER_TOKEN` 赋给 `harness.token`；
 - `QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST` 赋给 `harness.capability-digest`。
 
-其他键（如 `QWEN_HOSTED_HARNESS_BROKER_ARGS`）被忽略。这些值只保存在绑定后的配置中，从不写入日志。
+可选的 `QWEN_MANAGED_RUNTIME_BROKER_TOKEN` 提供 `runtime-broker.token`，预检还会把可选的 `QWEN_MANAGED_RUNTIME_BROKER_URL` 与 Broker 的地址比对，详见 [Hosted Harness Broker 环境变量设计](2026-10-21-hosted-harness-broker-environment.zh-CN.md)。其他键（例如旧的 `QWEN_HOSTED_HARNESS_BROKER_ARGS`）被忽略。这些值只保存在绑定后的配置中，从不写入日志。
 
-systemd 和 shell 的 `source` 都会为 Harness 读取这个文件，因此控制面只接受两种读取方式都按字面理解的行，其余一律拒绝，而不是读出不同的值。含回车符的行会被拒绝（注释行也一样），因为 shell 会把它保留在值里；因此以 CRLF 换行保存的文件会在第 1 行失败。随后每行去掉首尾空白。以 `\` 结尾的行会被拒绝（注释行也一样），因为两种读取方式都会把它续接到下一行。其余以 `#` 或 `;` 开头的行、以及没有 `=` 的行被跳过。每行在第一个 `=` 处拆分。对这两个键，`=` 任一侧有空白都会被拒绝，因为 shell 会把这样的行当作命令而不是赋值来执行；其他键则去掉首尾空白。值可以用一对相同的单引号或双引号包围。只有开引号没有闭引号、闭引号之后还有文字、双引号内出现反斜杠，都会被拒绝。两个键的值只能包含字母、数字和 `._:/+=-`，这些字符两种读取方式都按字面理解。这排除了转义、变量展开、命令替换，以及 `;`、`&`、`~` 等 shell 的其他运算符。与 systemd 一样，后出现的赋值覆盖先出现的。拒绝信息给出文件、行号和写法，从不包含该行内容。
+systemd 和 shell 的 `source` 都会为 Harness 读取这个文件，因此控制面只接受两种读取方式都按字面理解的行，其余一律拒绝，而不是读出不同的值。含回车符的行会被拒绝（注释行也一样），因为 shell 会把它保留在值里；因此以 CRLF 换行保存的文件会在第 1 行失败。随后每行去掉首尾空白。以 `\` 结尾的行会被拒绝（注释行也一样），因为两种读取方式都会把它续接到下一行。以 `;` 开头的行无论出现在哪里都会被拒绝：systemd 把它当作注释跳过，但 shell 会报错并在这一行停止读取文件。其余以 `#` 开头的行、以及没有 `=` 的行被跳过。每行在第一个 `=` 处拆分。拆分后键名中仍含空白的行，无论是哪个键都会被拒绝：systemd 会忽略 shell 能够赋值的 `export KEY=value`，而 shell 会把 `NAME KEY=value` 当作命令执行。对 Harness 读取的键（token、digest，以及可选的 Broker URL 和 token），`=` 任一侧有空白都会被拒绝，因为 shell 会把这样的行当作命令而不是赋值来执行；其他键则去掉首尾空白。值可以用一对相同的单引号或双引号包围。只有开引号没有闭引号、闭引号之后还有文字、双引号内出现反斜杠，都会被拒绝。这些键的值只能包含字母、数字和 `._:/+=-`，这些字符两种读取方式都按字面理解；Broker URL 还可以用 `[` 和 `]` 括住 IPv6 字面量。这排除了转义、变量展开、命令替换，以及 `;`、`&`、`~` 等 shell 的其他运算符。与 systemd 一样，后出现的赋值覆盖先出现的。拒绝信息给出文件、行号和写法，从不包含该行内容。控制面不会像 shell 那样解析其他键的行，因此 shell 仍可能丢掉其中一行。shell 会把 `KEY = value` 当作命令执行，丢掉这个键；遇到无法解析的行（例如值里未加引号的 `(`）则会停下：bash 保留该行之上的赋值，丢掉该行之后的每一行，dash 则在启动 Harness 之前直接退出。`harness` 行的探测会发送 token，随后用配置的 `QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST` 进行协商，因此 digest 丢失或被改动时 `--check` 同样会失败；丢失的其他键只能从 Harness 自身的行为看出。其他键也请写成 `KEY=value`，并给 shell 会解析的值加引号。
 
 ### 失败语义
 
 - 同时设置了该文件和非空的 `harness.token` 或 `harness.capability-digest`：启动失败，要求只保留一个来源。
+- 文件设置了 `QWEN_MANAGED_RUNTIME_BROKER_TOKEN`，同时也设置了 `runtime-broker.token`：启动失败，要求只保留一个来源。
+- 文件只设置了 `QWEN_MANAGED_RUNTIME_BROKER_URL` 和 `QWEN_MANAGED_RUNTIME_BROKER_TOKEN` 中的一个：启动失败，因为 Harness 要求两者同时提供或同时缺省。
+- 文件把任一 Broker 键设为空值：启动失败，并给出键名，因为 Harness 把空值视为已设置，随后因缺少另一半而拒绝启动。
 - 文件无法读取：启动失败，并给出路径和异常类型。
 - 某行使用了被拒绝的写法：启动失败，并给出路径和行号。
 - 必需的键缺失或为空：启动失败，并给出键名和路径。
+- 以上任一情况下，文件中的值都不会被绑定。
 - Harness 关闭：不读取该文件。
 
 解析发生在 preflight 也会调用的同一个启动校验中，因此 `--check` 会在任何监听启动之前，于 `validation` 行报告这些失败。随后已有的 `harness` 行照旧检查解析出的 token 和 digest。若启动校验拒绝了该文件、凭据从未绑定，`harness` 行报告 `SKIP` 并指向 `validation` 行，而不是用残留的绑定值去探测。此外，当 token 仍是随包模板中以 `replace-` 开头的占位符（Harness 会接受它）时报告失败。新增的 `credentials` 行在 Harness 关闭或未设置文件时为 `SKIP`；服务账号无法读取该文件时为 `FAIL` 并给出 `chown` 修复；文件对 group 或 others 可读时为 `WARN` 并给出 `chmod 600` 修复，与 `config` 行对 `application.yml` 采用的策略和措辞相同；其余情况为 `PASS`。
@@ -74,4 +78,4 @@ systemd 和 shell 的 `source` 都会为 Harness 读取这个文件，因此控�
 
 ## 后续工作
 
-- 为 CLI 的 Runtime Broker URL 和 token 提供环境变量或文件来源，并让 Hosted Harness profile 在端口被占用时直接失败而不是顺延。
+- 已由 [Hosted Harness Broker 环境变量设计](2026-10-21-hosted-harness-broker-environment.zh-CN.md) 实现：Broker token 与本文件共用，Hosted Harness profile 在端口被占用时直接失败而不是顺延。

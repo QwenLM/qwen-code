@@ -1,11 +1,15 @@
-# Round seeding — `@qwen-code /takeover from N`
+# Parameterized takeover commands
 
-Operator guide for the one parameterized takeover command. For the
-implementation rationale behind each gate, see the design record:
+Operator guide for the two parameterized takeover forms — `from N` (round seed,
+below) and `for N` (round budget, further down). For the implementation
+rationale behind each gate, see the design record:
 [`qwen-autofix.md`](./qwen-autofix.md) — [af-007](./qwen-autofix.md#af-007)
-(the parser) and [af-016](./qwen-autofix.md#af-016) (the marker).
+(the parser), [af-016](./qwen-autofix.md#af-016) (the seed marker) and
+[af-159](./qwen-autofix.md#af-159) (the budget).
 
-## The problem it solves
+## Round seed — `@qwen-code /takeover from N`
+
+### The problem it solves
 
 The autofix loop stops implementing non-Critical feedback once a PR has
 completed `CRITICAL_ONLY_AFTER_ROUND` (5) change-producing rounds. From there
@@ -22,7 +26,7 @@ diff on nice-to-haves at exactly the point it should have been converging.
 `from N` lets you state what the loop cannot infer: how much review this PR has
 already been through.
 
-## Usage
+### Usage
 
 ```
 @qwen-code /takeover from 4
@@ -49,7 +53,7 @@ The same refusals apply — a non-`main` base, `autofix/skip`, a fork without
 maintainer-edit access, and a fork whose author lacks write+ on this repository
 are all declined out loud.
 
-### Picking N
+#### Picking N (seed)
 
 N is "how many review rounds has this PR already had", counted the way the loop
 counts: **rounds that produced changes**, not individual comments or reviews. A
@@ -70,7 +74,7 @@ seed.
 | `from 4` | 4                 | 1                                              |
 | `from 5` | 5                 | 0 — Critical-only from the first managed round |
 
-## Semantics
+### Semantics
 
 **The seed is a floor for an empty window, not an offset added to every round.**
 The counter is `max(this window's round markers)`, falling back to the seed when
@@ -96,7 +100,7 @@ the loop instead of starting it — so it is clamped to `cap - 1`. When that
 happens, the Critical-only audit record cites the number you **typed**, plus a
 note naming the clamp, so it never quotes a command nobody sent.
 
-## What it does not do
+### What it does not do
 
 **It does not seed the growth brake.** `CRITICAL_ONLY_AFTER_ROUND` is only one
 of two brakes; the other trips when the diff grows past
@@ -112,34 +116,148 @@ base-conflict resolution all keep flowing. Only the suggestion channel stops.
 **It does not shorten the round cap in any meaningful way.** Under takeover the
 cap is 100, so a seed of 4 leaves 96.
 
+## Round budget — `@qwen-code /takeover for N`
+
+The bounded opposite of the seed. `from N` decides how much _suggestion_ budget
+this window has; `for N` decides how many _rounds_ the loop may run at all.
+
+```
+@qwen-code /takeover for 2
+```
+
+Engages takeover and records a window round budget of 2 on the engage ack:
+
+```
+<!-- takeover-ack engaged -->
+<!-- autofix-round-budget 2 -->
+```
+
+The effective cap for this window becomes `N` (it only ever lowers the takeover
+cap of 100). When the counter reaches `N`, the loop **releases** the PR:
+
+- it posts one bilingual "budget spent — released" note, per window;
+- it removes `autofix/takeover`;
+- it does **not** apply `autofix/needs-human` and does **not** post the paused
+  "reached its round cap" notice — a finished budget leaves nothing stuck, so
+  both would be false.
+
+**A forced dispatch defers that release to the next non-forced scan.** If the
+fleet shepherd dispatches a conflict round at the moment the budget finishes,
+that pass has to answer the dispatch out loud, so it takes the paused path
+(paused notice plus `autofix/needs-human`) and the next scheduled scan releases
+— clearing that escalation label with it. The notices on the deferred pass
+quote the attempts spent (N/N), not the change-producing round counter, which a
+no-op-only engagement leaves at 0.
+
+**Every finished attempt counts.** The budget is measured by the round's eval
+marker, one per attempt: a no-op round writes one with its round number
+unchanged, and a round that is cancelled or dies in setup writes one with the
+round advanced by one and a sentinel timestamp. So a PR whose rounds keep
+finding nothing still ends after N — that is the case a round counter cannot
+express. The guarantee is one attempt per marker, and it assumes the marker
+lands: the report step retries its post, but a comment-API outage that outlasts
+those retries leaves a round uncounted, which delays the release rather than
+ending it early.
+
+**A crash or a timeout spends its attempt; a breaker parks.** A crashed or
+timed-out round stamps the sentinel timestamp and only advances the round by
+one, so it consumes an attempt and nothing else — one such round does not stop
+anything. A breaker withholds the release (`autofix/needs-human` plus the paused
+notice) when the engagement holds `TIMEOUT_WINDOW_CAP` (3) sentinel-stamped
+rounds with silent-sandbox (idle) ones subtracted, when a round is past
+`ROUND_START + attempts`, or when a convergence-break notice is newer than the
+window key. Those are the breaker's own thresholds, unchanged by `for N`; read a
+lasting pause on a budgeted PR as "a human should look", never as "the budget
+finished" — the one transient pause is the deferred release above.
+
+**A breaker stop is not a spent budget.** When the consecutive-failure, timeout
+or convergence breaker stops the loop early, it stamps a terminal sentinel round
+far past the real attempts and posts no extra marker — so the window is not
+"spent", and the release note is not posted. A breaker asks for a human.
+
+**An automatic re-arm rebases the growth window, and the budget rides along.**
+A growth-audit round appends `autofix-rearm` for its own round accounting, and
+suppressing it would pin the growth baseline and make every later round
+Critical-only — so it is unconditional. It is not the only thing that re-anchors
+that baseline (a base-branch update and the scan's heal ack do too). What keeps
+the budget honest is its key: the budget and the attempts spent are counted per
+engagement — a command opens one, that automatic re-arm does not — so the audit
+rebases while the remaining budget still applies.
+
+**A queued round from the same window is discarded once the budget is spent.** A
+no-op leaves the round number UNCHANGED and the window key unchanged, so neither the
+superseded-window nor the round-cap check would catch a round that was queued
+before it; the address leg recounts the window's attempts and drops it.
+
+**The budget is engagement-scoped, not window-scoped.** It is read from every
+ack or re-arm at or after the anchor that carries it, excluding the automatic
+growth-audit re-arm (whose comment carries that round's eval marker). So
+`/retry` or a bare `/takeover` opens a new engagement with no budget (unbounded
+takeover, as before), and a budgeted re-arm (`@qwen-code /takeover for 3` on an
+already-managed PR) starts a fresh one at round 0 with a 3-round budget. Round
+accounting is the read that stays window-keyed.
+
+**Bot-authored PRs are the one exception.** They are managed without the label,
+so releasing it would hand them back to standard ten-round management and the
+budget would be a lie. They land on the existing paused path instead: paused
+notice plus `autofix/needs-human`, and the fleet shepherd's auto-release ages the
+label out. The budget stops them at N, and a SPENT one outlives that auto-release
+(and a hand-removal, which leaves no marker either): the PR stays parked at N/N
+until a new command moves the engagement. Only an explicit `stop` ends it, which
+is why its ack says standard management continues.
+
+**A budgeted re-arm also cancels queued work, conflicts included.** A conflict
+round is normally exempt from the superseded-window discard because it stays
+actionable, but a queued job carries the old cap: with a smaller budget it would
+run past the new limit. The next scan re-selects the conflict under the new
+window.
+
+### Picking N
+
+| You type | Rounds the loop may run | Typical use                                         |
+| -------- | ----------------------- | --------------------------------------------------- |
+| `for 1`  | 1                       | "clear this batch of review comments, then stop"    |
+| `for 2`  | 2                       | one round plus a follow-up after CI comes back      |
+| `for 5`  | 5                       | a small, deliberately bounded engagement            |
+| `for 99` | 99                      | effectively unbounded; use bare `/takeover` instead |
+
+`for 0` is **not** accepted: a zero-round engagement is what `/takeover stop`
+already does, so it fails closed with the rest of the malformed bodies.
+
 ## Accepted and rejected forms
 
 The literal prefix must match `@qwen-code /takeover` byte-for-byte and the tail
-must be a bare 1–2 digit integer. The command has to be the very first thing in
-the comment: **no leading whitespace of any kind** — space, tab, or blank line.
+must be either `from N` or `for N` with a bare 1–2 digit integer. The command
+has to be the very first thing in the comment: **no leading whitespace of any
+kind** — space, tab, or blank line.
 The router prefilters on the _raw_ comment body with `startsWith`, so a body
 with leading whitespace never starts a job at all, and the trim
 that runs inside that job never gets the chance
 ([af-004](./qwen-autofix.md#af-004)). Trailing whitespace is harmless. Anything
-else fails closed — no label, no seed, no partial effect, and, when the router
-never started, not even a log line.
+else fails closed — no label, no seed, no budget, no partial effect, and, when
+the router never started, not even a log line.
 
-| Body                                 | Result                                      |
-| ------------------------------------ | ------------------------------------------- |
-| `@qwen-code /takeover from 4`        | engage, seed 4                              |
-| `@qwen-code /takeover from 04`       | engage, seed 4 (read as decimal, not octal) |
-| `@qwen-code /takeover from 0`        | engage, no seed — the explicit spelling     |
-| `@qwen-code /takeover`               | engage, no seed                             |
-| `@qwen-code /takeover stop`          | release                                     |
-| `@qwen-code /takeover stop from 4`   | **nothing** — neither releases nor engages  |
-| `@qwen-code /takeover from 100`      | **nothing** — 3 digits rejected             |
-| `@qwen-code /takeover  from 4`       | **nothing** — double space                  |
-| `please @qwen-code /takeover from 4` | **nothing** — must start the comment        |
-| `  @qwen-code /takeover from 4`      | **nothing** — leading spaces                |
-| blank line, then the command         | **nothing** — leading newline               |
-| `@qwen-code /takeover from 4 please` | **nothing** — must end the comment          |
+| Body                                 | Result                                          |
+| ------------------------------------ | ----------------------------------------------- |
+| `@qwen-code /takeover from 4`        | engage, seed 4                                  |
+| `@qwen-code /takeover from 04`       | engage, seed 4 (read as decimal, not octal)     |
+| `@qwen-code /takeover from 0`        | engage, no seed — the explicit spelling         |
+| `@qwen-code /takeover for 2`         | engage, 2-round budget                          |
+| `@qwen-code /takeover for 02`        | engage, 2-round budget (decimal, not octal)     |
+| `@qwen-code /takeover`               | engage, no seed, no budget                      |
+| `@qwen-code /takeover stop`          | release                                         |
+| `@qwen-code /takeover stop from 4`   | **nothing** — neither releases nor engages      |
+| `@qwen-code /takeover for 0`         | **nothing** — a zero-round engagement is `stop` |
+| `@qwen-code /takeover from 4 for 2`  | **nothing** — the two forms do not combine      |
+| `@qwen-code /takeover from 100`      | **nothing** — 3 digits rejected                 |
+| `@qwen-code /takeover for 100`       | **nothing** — 3 digits rejected                 |
+| `@qwen-code /takeover  from 4`       | **nothing** — double space                      |
+| `please @qwen-code /takeover from 4` | **nothing** — must start the comment            |
+| `  @qwen-code /takeover from 4`      | **nothing** — leading spaces                    |
+| blank line, then the command         | **nothing** — leading newline                   |
+| `@qwen-code /takeover from 4 please` | **nothing** — must end the comment              |
 
-## Reading the result
+### Reading the result
 
 Once the brake engages, the round report carries a `Deferred non-Critical
 feedback` section whose preamble names the seed explicitly, for example:

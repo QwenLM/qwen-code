@@ -17,6 +17,7 @@ import {
   Turn,
   LlmEventType,
   createDuplicateProviderToolCallResponse,
+  getStructuredErrorCause,
   findRepeatedDuplicateProviderToolCall,
 } from './turn.js';
 import type {
@@ -30,6 +31,7 @@ import type { LlmChat } from './llm-chat.js';
 import { StreamEventType } from './llm-chat.js';
 import { normalizeModelToolCallIds } from './toolCallIdUtils.js';
 import { markToolCallArgumentsIncomplete } from './incomplete-tool-call-args.js';
+import { setToolCallPreparations } from './tool-call-preparation.js';
 import { createOpenAIReasoningThoughtPart } from '../utils/thoughtUtils.js';
 import {
   collect,
@@ -252,6 +254,31 @@ describe('Turn', () => {
   });
 
   describe('run', () => {
+    it('forwards dispatch notification without treating stream acquisition as dispatch', async () => {
+      const dispatched = vi.fn();
+      const isolated = new Turn(
+        { sendMessageStream: mockSendMessageStream } as unknown as LlmChat,
+        'mode-prompt',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        dispatched,
+      );
+      for await (const event of isolated.run(
+        'test-model',
+        [{ text: 'hello' }],
+        new AbortController().signal,
+      )) {
+        expect(event).toBeDefined();
+      }
+      expect(dispatched).not.toHaveBeenCalled();
+      expect(mockSendMessageStream.mock.lastCall?.[4]).toEqual({
+        onModelRequestDispatched: dispatched,
+      });
+    });
     it('should yield content events for text parts', async () => {
       const reqParts: Part[] = [{ text: 'Hi' }];
       const events = await run(
@@ -326,6 +353,7 @@ describe('Turn', () => {
         {
           type: LlmEventType.Thought,
           value: { subject: '', description: 'hidden' },
+          text: 'hidden',
         },
         {
           type: LlmEventType.Content,
@@ -350,6 +378,7 @@ describe('Turn', () => {
         {
           type: LlmEventType.Thought,
           value: { subject: '', description: 'reasoning...' },
+          text: 'reasoning...',
         },
         contentEvent('final answer'),
       ]);
@@ -368,6 +397,7 @@ describe('Turn', () => {
         {
           type: LlmEventType.Thought,
           value: { subject: '', description: '**Analyzing the request**' },
+          text: '**Analyzing the request**',
         },
       ]);
     });
@@ -381,6 +411,7 @@ describe('Turn', () => {
         {
           type: LlmEventType.Thought,
           value: { subject: 'Only Subject', description: '' },
+          text: '**Only Subject**',
         },
       ]);
     });
@@ -395,10 +426,12 @@ describe('Turn', () => {
         {
           type: LlmEventType.Thought,
           value: { subject: '', description: 'part1' },
+          text: 'part1',
         },
         {
           type: LlmEventType.Thought,
           value: { subject: '', description: 'part2' },
+          text: 'part2',
         },
       ]);
     });
@@ -442,6 +475,79 @@ describe('Turn', () => {
         expect.stringMatching(/^tool2-\d{13}-\w{10,}$/),
       );
       expect(turn.pendingToolCalls[1]).toEqual(event2.value);
+    });
+
+    it('keeps a structured thought as the model sent it', async () => {
+      const events = await run([
+        chunk(
+          modelChunk([
+            { thought: true, text: '  **Planning** next  ' },
+            { thought: true, text: 'step' },
+          ]),
+        ),
+      ]);
+
+      expect(events).toEqual([
+        {
+          type: LlmEventType.Thought,
+          value: { subject: 'Planning', description: 'next  step' },
+          text: '  **Planning** next  step',
+        },
+      ]);
+    });
+
+    const preparingChunk = () => {
+      const preparing = cand([]);
+      setToolCallPreparations(preparing.value as GenerateContentResponse, [
+        { callId: 'fc1', toolName: 'write_file' },
+        { callId: 'fc2', toolName: 'read_file' },
+      ]);
+      return preparing;
+    };
+
+    it('keeps tool call preparations to itself by default', async () => {
+      expect(await run([preparingChunk()])).toEqual([]);
+    });
+
+    it('yields each tool call the model started streaming before its arguments arrive', async () => {
+      turn = new Turn(
+        {
+          sendMessageStream: mockSendMessageStream,
+          getHistory: mockGetHistory,
+          getHistoryLength: mockGetHistoryLength,
+          getHistoryTailShallow: mockGetHistoryTailShallow,
+          maybeIncludeSchemaDepthContext: mockMaybeIncludeSchemaDepthContext,
+        } as unknown as LlmChat,
+        'prompt-id-1',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        true,
+      );
+
+      const events = await run([preparingChunk()]);
+
+      expect(events).toEqual([
+        {
+          type: LlmEventType.ToolCallPreparation,
+          value: { callId: 'fc1', toolName: 'write_file' },
+        },
+        {
+          type: LlmEventType.ToolCallPreparation,
+          value: { callId: 'fc2', toolName: 'read_file' },
+        },
+      ]);
+    });
+
+    it('carries the function call each tool call request was built from', async () => {
+      const functionCall = { id: 'fc1', name: 'tool1', args: { a: 1 } };
+
+      const [event] = (await run([
+        callsChunk(functionCall),
+      ])) as ServerLlmToolCallRequestEvent[];
+
+      expect(event.functionCall).toBe(functionCall);
     });
 
     it('clears response id state when a model fallback occurs', async () => {
@@ -515,6 +621,7 @@ describe('Turn', () => {
       expect(errorEvent.value).toEqual({
         error: { message: 'API Error', status: undefined },
       });
+      expect(getStructuredErrorCause(errorEvent.value.error)).toBe(error);
       expectReported(error, {
         rawLength: 1,
         tail: [summary(1, 'Previous history', { role: 'model' })],
@@ -936,12 +1043,26 @@ describe('Turn', () => {
 
     it('should yield a Retry event when it receives one from the chat stream', async () => {
       const events = await run([
-        { type: StreamEventType.RETRY },
+        {
+          type: StreamEventType.RETRY,
+          retryDiagnostics: {
+            kind: 'transport',
+            reason: 'transport-error',
+            transportCode: 'UND_ERR_SOCKET',
+          },
+        },
         textChunk('Success'),
       ]);
 
       expect(events).toEqual([
-        { type: LlmEventType.Retry },
+        {
+          type: LlmEventType.Retry,
+          retryDiagnostics: {
+            kind: 'transport',
+            reason: 'transport-error',
+            transportCode: 'UND_ERR_SOCKET',
+          },
+        },
         contentEvent('Success'),
       ]);
     });

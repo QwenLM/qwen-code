@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.daemon.StreamHarnessEvents;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
+import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.SourceEvent;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
@@ -46,6 +47,38 @@ final class HostedGateTestSupport {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     private HostedGateTestSupport() {
+    }
+
+    // A Hosted IT advertises ports it probed by binding an ephemeral port
+    // and closing it again. Anything that binds in between -- a MySQL
+    // connection's local port, a worker left by an earlier test in the same
+    // fork, a neighbour process on a shared host -- can take the number back,
+    // and the application's own bind then fails with "Address already in
+    // use". That is the boot failure recorded on the Hook reload, extensions
+    // and MCP restart gates across nightly runs. Probe again and retry a
+    // bounded number of times instead of trusting a port the OS may already
+    // have handed out; a bind conflict is the only retried failure.
+    static ConfigurableApplicationContext bootWithFreshPorts(Runnable probe,
+            java.util.function.Supplier<ConfigurableApplicationContext> boot) {
+        for (int attempt = 1; ; attempt++) {
+            probe.run();
+            try {
+                return boot.get();
+            } catch (RuntimeException error) {
+                if (attempt == 3 || !bindConflict(error)) {
+                    throw error;
+                }
+            }
+        }
+    }
+
+    private static boolean bindConflict(Throwable error) {
+        for (Throwable cause = error; cause != null; cause = cause.getCause()) {
+            if (cause instanceof java.net.BindException) {
+                return true;
+            }
+        }
+        return false;
     }
 
     static String quote(String text) {
@@ -334,5 +367,21 @@ final class HostedGateTestSupport {
         var records = extensionRecords(jdbc, tenant, sessionId, domain);
         assertThat(records).as(domain + " records").hasSize(1);
         return records.getFirst();
+    }
+
+    // The Harness-private routes identify the caller by the client id its
+    // attach minted and the process generation it attached to; the connector
+    // keeps both on its private attachment ref for the Session. Null when
+    // Spring holds no attachment to it.
+    static HarnessSessionRef attachment(HarnessConnector connector,
+            String sessionId) {
+        for (Object value : ((Map<?, ?>) ReflectionTestUtils.getField(
+                connector, "attachments")).values()) {
+            if (value instanceof HarnessSessionRef ref
+                    && sessionId.equals(ref.getHarnessSessionId())) {
+                return ref;
+            }
+        }
+        return null;
     }
 }

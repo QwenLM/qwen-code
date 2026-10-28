@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.security.AesGcmSecretProtector;
@@ -231,7 +232,7 @@ class HostedShellLifecycleRecoveryIT {
             assertThat(released.getDrainReceipt().matches(originalBinding)).isTrue();
             assertThat(jdbc.queryForObject("SELECT binding_state FROM ma_runtime_binding WHERE binding_id = ?",
                     String.class, originalBinding.getBindingId())).isEqualTo("RELEASED");
-            assertThat(running(worker)).isFalse();
+            assertThat(HostedProcessLiveness.running(worker)).isFalse();
             // The completion transaction of a DELETE retires the Session and nulls the
             // head's writer identity with it, so only the writer generation column still
             // witnesses the writer count: the pre-delete writer alone, plus the reload
@@ -253,22 +254,27 @@ class HostedShellLifecycleRecoveryIT {
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE retired_at IS NOT NULL AND session_kind = 'PUBLIC' AND tenant_id = ? AND session_id = ?",
                     Integer.class, tenant, session)).isEqualTo(1);
             // The restarted ledger scan and capture GC each retry on a one-minute cadence.
-            await().atMost(Duration.ofSeconds(150)).untilAsserted(() -> {
-                var collections = jdbc.queryForList("SELECT completed_at AS collected_at, CAST(JSON_UNQUOTE(JSON_EXTRACT(result_json, '$.collectedBytes')) AS UNSIGNED) AS collected_bytes FROM ma_operation WHERE operation_kind = 'SESSION_RESOURCE_GC'"
-                        + " AND tenant_id = ? AND session_id = ?", tenant, session);
-                assertThat(collections).hasSize(1);
-                assertThat(collections.getFirst().get("collected_at")).isNotNull();
-                assertThat(((Number) collections.getFirst().get("collected_at")).longValue()).isPositive();
-                var publication = jdbc.queryForMap("SELECT retention_state, collected_at FROM ma_output_capture"
-                        + " WHERE tenant_id = ? AND session_id = ? AND publication_id = ?", tenant, session, publications.getFirst());
-                assertThat(publication.get("retention_state")).isEqualTo("COLLECTED");
-                assertThat(publication.get("collected_at")).isNotNull();
-                for (var output : outputs) {
-                    assertThat(jdbc.queryForObject("SELECT capture_state FROM ma_resource WHERE capture_object_key = ?",
-                            String.class, output.get("capture_object_key"))).isEqualTo("COLLECTED");
-                    assertThat(root.resolve("objects").resolve(output.get("capture_object_key").toString())).doesNotExist();
-                }
-            });
+            try {
+                await().atMost(Duration.ofSeconds(150)).untilAsserted(() -> {
+                    var collections = jdbc.queryForList("SELECT completed_at AS collected_at, CAST(JSON_UNQUOTE(JSON_EXTRACT(result_json, '$.collectedBytes')) AS UNSIGNED) AS collected_bytes FROM ma_operation WHERE operation_kind = 'SESSION_RESOURCE_GC'"
+                            + " AND tenant_id = ? AND session_id = ?", tenant, session);
+                    assertThat(collections).hasSize(1);
+                    assertThat(collections.getFirst().get("collected_at")).isNotNull();
+                    assertThat(((Number) collections.getFirst().get("collected_at")).longValue()).isPositive();
+                    var publication = jdbc.queryForMap("SELECT retention_state, collected_at FROM ma_output_capture"
+                            + " WHERE tenant_id = ? AND session_id = ? AND publication_id = ?", tenant, session, publications.getFirst());
+                    assertThat(publication.get("retention_state")).isEqualTo("COLLECTED");
+                    assertThat(publication.get("collected_at")).isNotNull();
+                    for (var output : outputs) {
+                        assertThat(jdbc.queryForObject("SELECT capture_state FROM ma_resource WHERE capture_object_key = ?",
+                                String.class, output.get("capture_object_key"))).isEqualTo("COLLECTED");
+                        assertThat(root.resolve("objects").resolve(output.get("capture_object_key").toString())).doesNotExist();
+                    }
+                });
+            } catch (org.awaitility.core.ConditionTimeoutException timeout) {
+                throw new AssertionError("Retired Session collection did not settle: "
+                        + collectionState(), timeout);
+            }
             assertThat(jdbc.queryForObject("SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                     String.class, tenant, companion)).isEqualTo("ACTIVE");
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE retired_at IS NOT NULL AND session_kind = 'PUBLIC' AND tenant_id = ? AND session_id = ?",
@@ -368,7 +374,7 @@ class HostedShellLifecycleRecoveryIT {
                 first.destroyForcibly();
                 assertThat(first.waitFor(10, TimeUnit.SECONDS)).isTrue();
                 assertThat(first.exitValue()).isEqualTo(137);
-                assertThat(running(worker)).as("original worker survives Spring SIGKILL").isTrue();
+                assertThat(HostedProcessLiveness.running(worker)).as("original worker survives Spring SIGKILL").isTrue();
                 assertThat(harness.isAlive()).isTrue();
                 releaseFirst.countDown();
                 await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> assertThat(jdbc.queryForObject(
@@ -431,6 +437,25 @@ class HostedShellLifecycleRecoveryIT {
 
         private boolean liveWriter() {
             return Boolean.TRUE.equals(jdbc.queryForObject("SELECT writer_lease_until > " + ManagedSchemaTime.SQL_NOW + " FROM ma_session_head WHERE tenant_id = ? AND session_id = ?", Boolean.class, tenant, session));
+        }
+
+        /** The durable blocker the collectors persisted; survives a lost Spring log. */
+        private Map<String, Object> collectionState() {
+            var state = new LinkedHashMap<String, Object>();
+            state.put("capture", jdbc.queryForList("SELECT retention_state, collected_at, write_evidence,"
+                    + " accepted_complete, quarantined, producer_phase FROM ma_output_capture"
+                    + " WHERE tenant_id = ? AND session_id = ?", tenant, session));
+            state.put("operations", jdbc.queryForList("SELECT operation_kind, state, phase, failure_code,"
+                    + " available_at FROM ma_operation WHERE operation_kind IN ('CAPTURE_GC',"
+                    + " 'SESSION_RESOURCE_GC') AND tenant_id = ? AND session_id = ?", tenant, session));
+            state.put("retirement", jdbc.queryForList("SELECT retired_at, recovery_protected,"
+                    + " resource_gc_completed FROM ma_session WHERE tenant_id = ? AND session_id = ?",
+                    tenant, session));
+            state.put("liveReadLeases", jdbc.queryForObject("SELECT COUNT(*) FROM ma_read_lease"
+                    + " WHERE tenant_key = ? AND session_key = ? AND expires_at > ?", Long.class,
+                    ManagedSchemaKeys.key(tenant), ManagedSchemaKeys.key(session),
+                    System.currentTimeMillis()));
+            return state;
         }
 
         private String create(String key) throws Exception {
@@ -665,18 +690,6 @@ class HostedShellLifecycleRecoveryIT {
     private static int freePort() throws IOException {
         try (var socket = new ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress())) {
             return socket.getLocalPort();
-        }
-    }
-
-    private static boolean running(ProcessHandle process) throws IOException {
-        if (!process.isAlive()) {
-            return false;
-        }
-        try {
-            String stat = Files.readString(Path.of("/proc", Long.toString(process.pid()), "stat"));
-            return stat.charAt(stat.lastIndexOf(')') + 2) != 'Z';
-        } catch (java.nio.file.NoSuchFileException exited) {
-            return false;
         }
     }
 

@@ -20,6 +20,7 @@ vi.mock('../models/model-catalog.js', async (importOriginal) => {
     'catalog-model': { context: 123_456, output: 7_890 },
     'qwen-catalog-context-only': { context: 50_000 },
     'qwen-catalog-tiny': { context: 5 },
+    'qwen4-catalog-override': { context: 400_000 },
     // Spelling twins: `findTokenLimit` consults OUTPUT_PATTERNS against the
     // other spelling only when this one matched no row.
     'glm-4-7': { context: 200_000, output: 131_072 },
@@ -265,9 +266,42 @@ describe('tokenLimit', () => {
       expect(tokenLimit('qwen3-coder-next')).toBe(262144);
     });
 
+    it('should return 1M for the qwen4 generation', () => {
+      expect(tokenLimit('qwen4')).toBe(1000000);
+      expect(tokenLimit('qwen4-max')).toBe(1000000);
+      expect(tokenLimit('qwen4-plus')).toBe(1000000);
+      expect(tokenLimit('qwen4-coder-plus')).toBe(1000000);
+      // A later minor must not need another code change.
+      expect(tokenLimit('qwen4.5-max')).toBe(1000000);
+      expect(tokenLimit('qwen4-max-2026-10-01')).toBe(1000000);
+      expect(tokenLimit('openai/qwen4-max')).toBe(1000000);
+    });
+
+    it('should let a qwen4 catalog entry outrank the family row', () => {
+      expect(tokenLimit('qwen4-catalog-override')).toBe(400000);
+    });
+
     it('should return 1M for studio latest models', () => {
       expect(tokenLimit('qwen-plus-latest')).toBe(1000000);
       expect(tokenLimit('qwen-flash-latest')).toBe(1000000);
+    });
+
+    it('should return 1M for the invite-only latest series aliases', () => {
+      expect(tokenLimit('qwen-latest-series-invite-202610-m4')).toBe(1000000);
+      // A later invite code must not need another code change.
+      expect(tokenLimit('qwen-latest-series-invite-202611-m5')).toBe(1000000);
+      // The beta-series spelling, whose trailing -v28 normalize() strips as a
+      // version rather than a date.
+      expect(tokenLimit('qwen-latest-series-invite-beta-v28')).toBe(1000000);
+      // Without the trailing code, normalize() strips the date instead.
+      expect(tokenLimit('qwen-latest-series-invite-202610')).toBe(1000000);
+      expect(tokenLimit('openai/qwen-latest-series-invite-202610-m4')).toBe(
+        1000000,
+      );
+    });
+
+    it('should not claim ids that only share the series prefix letters', () => {
+      expect(tokenLimit('qwen-latest-seriesfoo')).toBe(262144);
     });
 
     it('should return 256K for Qwen fallback', () => {

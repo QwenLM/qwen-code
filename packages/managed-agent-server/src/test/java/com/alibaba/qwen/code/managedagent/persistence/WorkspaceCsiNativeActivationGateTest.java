@@ -235,7 +235,7 @@ class WorkspaceCsiNativeActivationGateTest {
                     .map(row -> JSON.valueToTree(new TreeMap<>(row)).toString()).sorted().toList());
         }
         assertThat(rows).containsKeys("ma_delivery", "ma_session", "ma_session_head", "ma_request_receipt");
-        assertThat(rows).hasSize(33);
+        assertThat(rows).hasSize(39);
         return rows;
     }
 
@@ -406,8 +406,12 @@ class WorkspaceCsiNativeActivationGateTest {
                     .add("pending"), event -> {}));
             assertThat(authorityRows()).as(pointer).isEqualTo(before);
         }
-        for (String field : List.of("attempt", "tools", "runtime", "approval")) {
+        for (String field : List.of("attempt", "tools", "runtime", "approval", "agentWait", "commandWait", "commandLock")) {
             rejectedCommit(changedCheckpoint(state -> state.putObject(field), event -> {}));
+            assertThat(authorityRows()).as(field).isEqualTo(before);
+        }
+        for (String field : List.of("agentWait", "commandWait", "commandLock")) {
+            rejectedCommit(changedCheckpoint(state -> state.remove(field), event -> {}));
             assertThat(authorityRows()).as(field).isEqualTo(before);
         }
         rejectedCommit(changedCheckpoint(state -> ((ObjectNode) state.path("continuation"))

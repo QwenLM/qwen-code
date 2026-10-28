@@ -40,6 +40,20 @@ class OwnerSubscriptionsTest {
     }
 
     @Test
+    void sharedPoolVerifiesEachAttachmentsOwnWriterInsteadOfOneGlobalIdentity() throws Exception {
+        when(harness.writerIdentity()).thenReturn(null);
+        when(harness.attachedSessions()).thenReturn(List.of(
+                new AttachedSession("tenant", "first", "boot-a", 1),
+                new AttachedSession("tenant", "second", "boot-b", 2)));
+        when(consumer.getLiteTopicSet()).thenReturn(Set.of());
+        when(store.heldBy("boot-a", "tenant", List.of("first"))).thenReturn(Set.of("first"));
+        when(store.heldBy("boot-b", "tenant", List.of("second"))).thenReturn(Set.of("second"));
+        owners.reconcile();
+        verify(consumer).subscribeLite("first");
+        verify(consumer).subscribeLite("second");
+    }
+
+    @Test
     void followsTheSessionsThisNodesHarnessWrites() throws Exception {
         when(consumer.getLiteTopicSet()).thenReturn(Set.of("held", "released"));
         when(harness.attachedSessions()).thenReturn(List.of(

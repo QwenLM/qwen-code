@@ -18,6 +18,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
@@ -35,7 +36,8 @@ public class ManagedActionService {
             LoggerFactory.getLogger(ManagedActionService.class);
     private static final int INPUT_PREVIEW_BYTES = 8192;
     private static final Set<String> PREVIEW_TOOLS =
-            Set.of("read_file", "write_file", "edit", "run_shell_command",
+            Set.of("web_fetch", "read_file", "write_file", "edit", "run_shell_command",
+                    "todo_write",
                     "agent", "send_message", "team_create", "task_create",
                     "task_update", "workflow", "request_shutdown", "exit_plan_mode",
                     "team_plan_approval");
@@ -53,8 +55,8 @@ public class ManagedActionService {
             ManagedExtensionRecordStore resources,
             ActionResponseCoordinator coordinator,
             RequestDigests digests,
-            Clock clock,
-            ObjectMapper json) {
+            @Qualifier("managedAgentClock") Clock clock,
+            @Qualifier("managedAgentObjectMapper") ObjectMapper json) {
         this.sessions = sessions;
         this.actions = actions;
         this.resources = resources;
@@ -346,7 +348,9 @@ public class ManagedActionService {
         }
         try {
             JsonNode ref = options.path("inputRef");
-            if (!"managed-tool-input".equals(ref.path("kind").asText())
+            boolean command = options.path("v").asLong() == 3
+                    && "managed-extension-command-input".equals(ref.path("kind").asText());
+            if ((!command && !"managed-tool-input".equals(ref.path("kind").asText()))
                     || ref.path("schemaVersion").asLong() != 1
                     || ref.path("byteLength").asLong() < 1
                     || ref.path("byteLength").asLong()
@@ -355,21 +359,28 @@ public class ManagedActionService {
             }
             var resource = resources.readCommittedResource(tenant, session, ref);
             JsonNode wrapper = ToolPublicationContract.readJson(resource.bytes());
-            if (wrapper == null || !wrapper.isObject()
-                    || wrapper.size() != 3
-                    || !session.equals(wrapper.path("harnessSessionId").asText())
-                    || !wrapper.path("runtimeSessionId").isTextual()
-                    || wrapper.path("runtimeSessionId").asText().isBlank()
-                    || !wrapper.path("payloadJson").isTextual()) {
+            if (wrapper == null || !wrapper.isObject()) {
                 return null;
             }
-            String text = wrapper.path("payloadJson").asText();
-            JsonNode payload = ManagedExtensionRecordStore.parse(text);
-            if (payload == null
-                    || payload.size() != 2
-                    || !tool.equals(payload.path("toolName").asText())
-                    || !payload.path("input").isObject()) {
-                return null;
+            String text;
+            if (command) {
+                text = wrapper.toString();
+            } else {
+                if (wrapper.size() != 3
+                        || !session.equals(wrapper.path("harnessSessionId").asText())
+                        || !wrapper.path("runtimeSessionId").isTextual()
+                        || wrapper.path("runtimeSessionId").asText().isBlank()
+                        || !wrapper.path("payloadJson").isTextual()) {
+                    return null;
+                }
+                text = wrapper.path("payloadJson").asText();
+                JsonNode payload = ManagedExtensionRecordStore.parse(text);
+                if (payload == null
+                        || payload.size() != 2
+                        || !tool.equals(payload.path("toolName").asText())
+                        || !payload.path("input").isObject()) {
+                    return null;
+                }
             }
             byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
             if (!text.equals(new String(bytes, StandardCharsets.UTF_8))) {
