@@ -24,6 +24,7 @@ import {
   repoRoot,
   requireState,
 } from './state.js';
+import { assertNoFixInFlight } from './fix.js';
 
 const FAILED_JOB_CONCLUSIONS = new Set(['failure', 'timed_out']);
 
@@ -88,6 +89,7 @@ export function runCiLog(
   const paths = autofixPrPaths(root, prNumber);
   const state = requireState(paths.statePath, prNumber);
   assertWatching(state, task);
+  assertNoFixInFlight(paths, prNumber);
   setGhHost(state.host);
   ensureAuthenticated();
   // From the start: listing the jobs of a large run takes its time too.

@@ -526,7 +526,6 @@ describe('attachTeamSink', () => {
     detach();
     expect(emitter.listenerCount('teammate_approval_request')).toBe(0);
   });
-
   it('reports teammate tool activity and inter-teammate messages, and retracts them on detach', () => {
     const detach = attachTeamSink(deps);
 
