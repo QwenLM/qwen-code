@@ -1473,12 +1473,12 @@ public class ManagedSessionStore {
                 "SELECT journal_revision, byte_length"
                         + " FROM ma_session_journal_tx"
                         + " WHERE tenant_id = ? AND session_id = ?"
-                        + " AND journal_revision > ?"
+                        + " AND journal_revision > ? AND journal_revision <= ?"
                         + " ORDER BY journal_revision LIMIT ?",
                 (result, row) -> new TransactionSize(
                         result.getLong("journal_revision"),
                         result.getLong("byte_length")),
-                tenantId, sessionId, afterRevision,
+                tenantId, sessionId, afterRevision, head.journalRevision(),
                 limit + 1);
         int selectedCount = 0;
         long selectedBytes = 0;
@@ -1514,10 +1514,10 @@ public class ManagedSessionStore {
                         "SELECT " + ManagedSchemaProjection.SESSION_JOURNAL_TX.columns() + ""
                                 + " FROM ma_session_journal_tx"
                                 + " WHERE tenant_id = ? AND session_id = ?"
-                                + " AND journal_revision > ?"
+                                + " AND journal_revision > ? AND journal_revision <= ?"
                                 + " ORDER BY journal_revision LIMIT ?",
                         transactionMapper, tenantId, sessionId,
-                        afterRevision, selectedCount);
+                        afterRevision, head.journalRevision(), selectedCount);
         if (rows.size() != selectedCount) {
             throw journalCorrupt();
         }

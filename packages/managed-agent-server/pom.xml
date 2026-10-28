@@ -405,7 +405,7 @@
                         <failIfNoSpecifiedTests>true</failIfNoSpecifiedTests>
                         <forkCount>1</forkCount>
                         <reuseForks>true</reuseForks>
-                        <argLine>-Xmx512m</argLine>
+                        <argLine>-Xmx512m -Djdk.nio.maxCachedBufferSize=1048576</argLine>
                         <forkedProcessTimeoutInSeconds>7200</forkedProcessTimeoutInSeconds>
                         <properties><configurationParameters>junit.jupiter.execution.parallel.enabled = false</configurationParameters></properties>
                     </configuration>

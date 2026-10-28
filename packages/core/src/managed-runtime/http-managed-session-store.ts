@@ -1181,7 +1181,7 @@ class ManagedSessionStoreHttpClient {
     if (view.journalRevision === 0) return [];
     for (let attempt = 0; ; attempt++) {
       try {
-        await this.ensureWriter();
+        this.requireGrant();
         const result = asRecord(
           await this.json('/history:query', 'POST', {
             workspaceId: this.sessionKey.workspaceId,
@@ -1312,7 +1312,7 @@ class ManagedSessionStoreHttpClient {
     let previousRevision = -1;
     let previousGeneration = -1;
     for (;;) {
-      await this.ensureWriter();
+      this.requireGrant();
       const coverage = asRecord(
         await this.json('/history:backfill', 'POST', {
           workspaceId: this.sessionKey.workspaceId,
@@ -1355,7 +1355,7 @@ class ManagedSessionStoreHttpClient {
   private async nativeHistoryTransaction(
     fact: ManagedSessionNativeHistoryFact,
   ) {
-    await this.ensureWriter();
+    this.requireGrant();
     const page = asRecord(
       await this.json(
         `/transactions?workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}&afterRevision=${fact.journalRevision - 1}&limit=1`,
@@ -1449,7 +1449,7 @@ class ManagedSessionStoreHttpClient {
     let previousDigest: string | null | undefined;
     let previousRecordUuid: string | undefined;
     while (expected <= through) {
-      await this.ensureWriter();
+      this.requireGrant();
       const page = asRecord(
         await this.json(
           `/transactions?workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}&afterRevision=${after}&limit=${Math.min(100, view.journalRevision - after)}`,

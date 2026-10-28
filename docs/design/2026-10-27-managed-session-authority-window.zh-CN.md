@@ -4,7 +4,7 @@
 
 ## 状态与基线
 
-#13184 的 PR5 以 `0539160f35f983ba4a6d4d369c0ae18941b2fdb2` 为调研基线，包含 PR1 #15566、PR2/PR3 #15569/#15599 和 PR4 #15626，并集成到 main `7a9a88938e65a528311973a552189f7dea1aa04d`。有界驻留是新实现的正常路径，没有 opt-in 开关或完整历史的同步兼容层。验证仍在进行：实现、聚焦验收和最终 CI 资格是不同状态。执行报告记录准确源码摘要、失败与待验门禁。
+#13184 的 PR5 以 `0539160f35f983ba4a6d4d369c0ae18941b2fdb2` 为调研基线，包含 PR1 #15566、PR2/PR3 #15569/#15599 和 PR4 #15626，并集成到 main `32f6713ce6394b48dc384d301ee761fb9a1b5b80`。有界驻留是新实现的正常路径，没有 opt-in 开关或完整历史的同步兼容层。验证仍在进行：实现、聚焦验收和最终 CI 资格是不同状态。执行报告记录准确源码摘要、失败与待验门禁。
 
 ## 问题与目标
 
@@ -35,6 +35,10 @@ canonical native journal 继续作为权威。Hosted 通过 Java/JDBC 使用现�
 Core 使用 native 身份及事件范围查询。领域身份枚举目前使用独立重建的 canonical 文件目录；SQL 的 `extension-domain` 类型可供服务调用方使用，但并非 Core 的目录读取器。来源校验重新计算 canonical 事件/marker 摘要，核对序列、数量、范围及跨事务物理 parent；仅刷新原始字节 checksum 不能使篡改后的 canonical 内容有效。
 
 CSI application inventory 包含两张历史表的完整类型定义，共 40 张 managed 表、827 列。派生元数据不能发现 authority 关联，也不能参与全局 JSON-carrier 扫描；按范围和已捕获主键读取时仍核对准确行。覆盖前缀内的事实必须匹配 canonical 事务、条数及 bucket 清单。终态 cut 通过正常 append 的提取器生成准确的五个历史事实，只跨连续前缀推进覆盖。缺失 state 时新建 generation，覆盖从零开始。freeze 在既有资格上限内预留九行，包含可能新增的 state 行。
+
+事务来源分页固定读取一次 head，并以该 revision 同时约束长度候选与正文行。在 READ_COMMITTED 下，后续提交不能混入候选的前瞻行并被误判为 journal 损坏。连续性、缺行、字节、范围及摘要校验仍是强制要求。native 历史查询、补建与来源读取不先续约普通 writer：生命周期清理可在普通写准入关闭后使用仍有效的 read grant。客户端已停止/sealed 屏障和服务端 token、租约及 read-grant 校验均保留。未结算追加对应的 native 视图仍不可读，且只由既有追加协议结算。
+
+恢复状态的全部证据读取（包括输入与终态身份查询）共用一个拒绝准入的异常边界。历史不可用或追加结果未知时返回等待证据，禁止下一轮准入；不能逸出为状态 HTTP500，也不能当作输入不存在的证明。前缀变化仍拒绝准入。
 
 ## 文件查询视图
 
@@ -81,6 +85,8 @@ Managed recorder 仅保留 tail、记录 ordinal、用户轮次数、未完成�
 Java checkpoint proof 使用同样的 compact root 与逐页模型。execution/function ID、ordinal 唯一性及 binding 到 tool 的外键通过请求私有的磁盘事实校验；按时间枚举使用经过校验的逆序页 spool。普通 JDBC CSI proof 同时将历史 ID、batch、intent、receipt、frozen batch、资源 inventory 元数据及 execution snapshot 落盘。每个 proof owner 只有固定 640 KiB bucket 目录，记录摘要链连接到受信 bucket head，只有验证完整链后才能回答键不存在。数字前缀游标冻结旧查询，无须复制目录。私有 scratch value 上限为 32 MiB：已经合法的 8 MiB 消息在规范化数值拼写时最多使用三倍字节，另加不足 512 KiB 的有界 batch/refusal 元数据。该上界依据当前 Jackson writer 与 [Java 21 十进制格式](<https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/Double.html#toString(double)>)。私有 codec 保留数值节点类型，包括仍待语义校验拒绝的溢出值。其读取深度 72 容纳经过深度 64 校验的资源外层固定 DTO。execution snapshot 保存 SQL reference/result 原始 JSON，并使用原 ledger parser 恢复，保留小数精度及其来源深度。公共 parser、canonical 消息及通用资源上限保持不变。正文逐条读取，手动 JDBC transaction scope、Spring completion 或显式 offline proof close 释放 scratch owner。这些改动不取消既有 CSI 资格限制，也不能单独证明最终 Java/平台验收通过。
 
 冻结 CSI batch 在 scratch 类型化解码后，将缺失的可选 prepared 引用归一回 Java null。Jackson 的 JSON null node 不能被未修改的准入检查视为已完成 preparation。prepared 对象引用和旧冻结前缀仍保留原值；该归一化不改变 canonical 线上字节。
+
+嵌入式 H2 文件存储通过 JDK 临时 direct buffer 写出 heap buffer。managed-local Java 启动器与 native 规模 fork 在 JVM 启动时设置 `-Djdk.nio.maxCachedBufferSize=1048576`，使超过 1 MiB 的缓冲在 I/O 后释放，不常驻工作线程的临时 buffer 缓存。这是每个缓存 buffer 的上限，不是进程 direct 内存或 RSS 上限；不缩小 canonical 事务、不改变 H2 同步持久化，也不提高既有 heap/direct 内存预算。外部启动的文件 H2 部署须配置相同启动参数，启动器无法配置外部 JVM。规模证据记录 direct/mapped buffer 的数量、容量和使用量，并在堆增长之外断言常驻 direct buffer 增量。修复后的 H2 10k/100k lane 仍须通过验收。
 
 ## Core API 迁移
 

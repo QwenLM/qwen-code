@@ -565,6 +565,8 @@ no new database is required for the pure-file CLI adapter. See the
 [authority-window design](../../docs/design/2026-10-27-managed-session-authority-window.md)
 ([简体中文](../../docs/design/2026-10-27-managed-session-authority-window.zh-CN.md)).
 
+Native history source pages stay within the captured journal revision even when a concurrent commit advances the head. Queries and backfill require the existing live read grant, without first renewing an ordinary writer during lifecycle cleanup. For an externally launched file-H2 service, start Java with `-Djdk.nio.maxCachedBufferSize=1048576`; `qwen serve --managed` supplies this flag automatically. It limits each cached JDK temporary direct buffer to 1 MiB, rather than increasing the JVM memory budget or changing H2 synchronous durability. The scale profile uses the same flag and records direct/mapped buffer pools; heap, direct-memory and RSS remain separate evidence.
+
 The routes follow `qwen.managed-agent.harness.enabled` by default, because
 the Hosted Harness requires them; `QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED`
 overrides that default. Serve them only on a private service listener or

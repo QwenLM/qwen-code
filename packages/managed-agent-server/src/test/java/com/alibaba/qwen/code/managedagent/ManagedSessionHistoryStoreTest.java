@@ -19,6 +19,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -26,6 +27,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import javax.sql.DataSource;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -144,6 +146,28 @@ class ManagedSessionHistoryStoreTest {
         assertThat(descending.facts().getFirst().sequence()).isEqualTo(2);
         assertThat(query(current, "event-kind", "domain.committed", "latest", descending.nextSequence(), 1).facts().getFirst().sequence()).isEqualTo(1);
         assertThat(query(first, "event-id", "monitor_run:2", "first", null, 1).facts()).isEmpty();
+    }
+
+    @Test
+    void sourcePagesStayInsideTheirReadHeadWhenAConcurrentCommitLands() throws IOException {
+        commitMonitor("first", 0);
+        View first = view();
+        jdbc.beforeTransactionPage = () -> {
+            var writer = new TransactionTemplate(tx.getTransactionManager());
+            writer.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+            writer.executeWithoutResult(status -> {
+                try {
+                    commitMonitor("second", 1);
+                } catch (IOException error) {
+                    throw new UncheckedIOException(error);
+                }
+            });
+        };
+        assertThat(query(first, "event", "1", "first", null, 1).facts().getFirst().sequence()).isEqualTo(1);
+        assertThat(jdbc.beforeTransactionPage).isNull();
+        assertThat(view().committedSequence()).isEqualTo(2);
+        assertThat(query(first, "event", "2", "first", null, 1).facts()).isEmpty();
+        assertThat(query(view(), "event", "2", "first", null, 1).facts().getFirst().sequence()).isEqualTo(2);
     }
 
     @Test
@@ -519,9 +543,20 @@ class ManagedSessionHistoryStoreTest {
 
     protected static class FaultJdbc extends ManagedSchemaJdbcTemplate {
         boolean failFacts;
+        Runnable beforeTransactionPage;
 
         FaultJdbc(DataSource source) {
             super(source);
+        }
+
+        @Override
+        public <T> List<T> query(String sql, RowMapper<T> mapper, Object... arguments) {
+            if (beforeTransactionPage != null && sql.startsWith("SELECT journal_revision, byte_length FROM ma_session_journal_tx")) {
+                Runnable callback = beforeTransactionPage;
+                beforeTransactionPage = null;
+                callback.run();
+            }
+            return super.query(sql, mapper, arguments);
         }
 
         @Override

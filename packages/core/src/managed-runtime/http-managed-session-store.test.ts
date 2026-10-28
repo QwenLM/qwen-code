@@ -717,6 +717,113 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
+  it('reads frozen native history during cleanup without renewing the ordinary writer', async () => {
+    const server = new FakeManagedSessionStore();
+    let indexed = false;
+    let readRefused = false;
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+      const url = requestUrl(input);
+      if (url.endsWith('/writers:renew'))
+        return jsonResponse(
+          {
+            error: { code: 'workspace_lifecycle_blocked', message: 'claimed' },
+          },
+          409,
+        );
+      if (!url.endsWith('/history:query') && !url.endsWith('/history:backfill'))
+        return server.fetch(input, init);
+      if (readRefused)
+        return jsonResponse(
+          {
+            error: {
+              code: 'managed_session_writer_conflict',
+              message: 'expired',
+            },
+          },
+          409,
+        );
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      if (url.endsWith('/history:backfill')) {
+        indexed = true;
+        const head = server.storedTransactions.at(-1)!;
+        return jsonResponse({
+          view: body['view'],
+          indexedRevision: head['journalRevision'],
+          indexedSequence: head['lastSequence'],
+          lastCommitDigest: head['commitDigest'],
+          generation: 1,
+          complete: true,
+        });
+      }
+      if (!indexed)
+        return jsonResponse(
+          {
+            error: {
+              code: 'managed_session_history_not_ready',
+              message: 'indexing',
+            },
+          },
+          409,
+        );
+      return jsonResponse({
+        view: body['view'],
+        throughSequence: body['throughSequence'],
+        generation: 1,
+        facts: [
+          {
+            family: body['family'],
+            identity: body['identity'],
+            journalRevision: 2,
+            sequence: 1,
+            eventOrdinal: 0,
+            recordDigest: server.storedTransactions[1]['recordDigest'],
+            metadata: {},
+          },
+        ],
+        nextSequence: 1,
+        hasMore: false,
+      });
+    });
+    const { stores, authority } = await bootOriginalCsiAuthority(
+      server,
+      fetchFn,
+    );
+    try {
+      server.headOverrides['nativeHistory'] = { version: 1 };
+      const journal = await stores.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      await journal.scan(async () => {});
+      const native = journal.history!;
+      const now = Date.now();
+      vi.spyOn(Date, 'now').mockReturnValue(now + 299_800);
+      const [fact] = await native.query('event', '1', { throughSequence: 1 });
+      expect(await native.readEvent(fact)).toMatchObject({ sequence: 1 });
+      const events = [];
+      for await (const event of native.iterateEvents(1, 1)) events.push(event);
+      expect(events).toHaveLength(1);
+      expect(
+        fetchFn.mock.calls.filter(([url]) =>
+          requestUrl(url).endsWith('/writers:renew'),
+        ),
+      ).toHaveLength(0);
+      readRefused = true;
+      await expect(
+        native.query('event', '1', { throughSequence: 1 }),
+      ).rejects.toMatchObject({
+        remoteCode: 'managed_session_writer_conflict',
+      });
+      await stores.stopLocal();
+      await expect(native.readEvent(fact)).rejects.toThrow(
+        'writer is not active',
+      );
+    } finally {
+      vi.restoreAllMocks();
+      await authority.disposeHistory();
+      await stores.stopLocal();
+    }
+  });
+
   it('rejects a broken physical transaction chain across native history pages before yielding it', async () => {
     const server = new FakeManagedSessionStore();
     const fetchFn = vi.fn<typeof fetch>(async (input, init) => {

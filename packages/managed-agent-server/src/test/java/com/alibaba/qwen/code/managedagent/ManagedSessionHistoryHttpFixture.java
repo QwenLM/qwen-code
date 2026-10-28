@@ -8,6 +8,7 @@ import org.springframework.boot.SpringApplication;
 
 import javax.sql.DataSource;
 
+import java.lang.management.BufferPoolMXBean;
 import java.lang.management.ManagementFactory;
 import java.lang.management.MemoryType;
 import java.net.ServerSocket;
@@ -142,7 +143,14 @@ final class ManagedSessionHistoryHttpFixture {
         var heap = ManagementFactory.getMemoryMXBean().getHeapMemoryUsage();
         ObjectNode evidence = json.createObjectNode().put("heapUsedBytes", heap.getUsed())
                 .put("heapMaxBytes", heap.getMax()).put("collectionsBefore", before).put("collectionsAfter", after)
+                .put("nioMaxCachedBufferSize", Long.getLong("jdk.nio.maxCachedBufferSize", Long.MAX_VALUE))
+                .put("liveThreadCount", ManagementFactory.getThreadMXBean().getThreadCount())
                 .put("isolation", "Shared sequential JVM fork; service context and database pool remain open during this sample.");
+        ObjectNode buffers = evidence.putObject("bufferPools");
+        for (var pool : ManagementFactory.getPlatformMXBeans(BufferPoolMXBean.class)) {
+            buffers.putObject(pool.getName()).put("count", pool.getCount())
+                    .put("memoryUsedBytes", pool.getMemoryUsed()).put("totalCapacityBytes", pool.getTotalCapacity());
+        }
         ObjectNode pools = evidence.putObject("pools");
         for (var pool : ManagementFactory.getMemoryPoolMXBeans()) {
             var peak = pool.getPeakUsage();

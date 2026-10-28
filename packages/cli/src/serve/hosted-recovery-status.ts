@@ -46,28 +46,8 @@ export async function inspectHostedRecovery(
 ): Promise<HostedRecoveryStatus> {
   const authority = session.managed.authority;
   const sequence = authority.committedSequence;
-  const pending = await authority.pendingInputsAt(sequence);
-  const input = requestedPromptId
-    ? await authority.findEvent('input.accepted', 'turnId', requestedPromptId, {
-        throughSequence: sequence,
-      })
-    : await authority.findEvent('input.accepted', 'kind', 'input.accepted', {
-        last: true,
-        throughSequence: sequence,
-      });
-  const promptId =
-    requestedPromptId ??
-    (typeof input?.payload['turnId'] === 'string'
-      ? input.payload['turnId']
-      : null);
-  const settled =
-    promptId === null
-      ? undefined
-      : await authority.findEvent('turn.settled', 'turnId', promptId, {
-          throughSequence: sequence,
-        });
-  const inputSettled =
-    promptId === null || (input !== undefined && settled !== undefined);
+  let promptId: string | null = requestedPromptId ?? null;
+  let inputSettled = false;
   let continuationReady = false;
   const status = (
     state: HostedRecoveryStatus['state'],
@@ -80,9 +60,36 @@ export async function inspectHostedRecovery(
     continuationReady,
     nextTurnAllowed: state === 'ready',
   });
-  if (requestedPromptId && input === undefined)
-    return status('operator_required', 'original_input_missing');
   try {
+    const pending = await authority.pendingInputsAt(sequence);
+    const input = requestedPromptId
+      ? await authority.findEvent(
+          'input.accepted',
+          'turnId',
+          requestedPromptId,
+          {
+            throughSequence: sequence,
+          },
+        )
+      : await authority.findEvent('input.accepted', 'kind', 'input.accepted', {
+          last: true,
+          throughSequence: sequence,
+        });
+    promptId =
+      requestedPromptId ??
+      (typeof input?.payload['turnId'] === 'string'
+        ? input.payload['turnId']
+        : null);
+    const settled =
+      promptId === null
+        ? undefined
+        : await authority.findEvent('turn.settled', 'turnId', promptId, {
+            throughSequence: sequence,
+          });
+    inputSettled =
+      promptId === null || (input !== undefined && settled !== undefined);
+    if (requestedPromptId && input === undefined)
+      return status('operator_required', 'original_input_missing');
     const authorization = await authority.harnessRunAuthorization();
     const history = await readHostedFileHistory(session.managed);
     if (authority.committedSequence !== sequence)

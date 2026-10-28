@@ -99,6 +99,8 @@ class ManagedSessionHistoryScaleGate {
         JsonNode jvm = evidence.path("jvm");
         assertThat(number(jvm, "heapUsedBytes")).isPositive();
         assertThat(number(jvm, "heapMaxBytes")).isPositive().isLessThanOrEqualTo(512L * 1024 * 1024);
+        assertThat(number(jvm, "nioMaxCachedBufferSize")).isEqualTo(1024 * 1024);
+        assertThat(number(jvm.path("bufferPools").path("direct"), "memoryUsedBytes")).isNotNegative();
         assertThat(number(jvm, "collectionsAfter")).isGreaterThan(number(jvm, "collectionsBefore"));
         assertThat(jvm.path("pools").isObject()).isTrue();
         assertThat(jvm.path("pools").isEmpty()).isFalse();
@@ -120,7 +122,7 @@ class ManagedSessionHistoryScaleGate {
         ObjectMapper json = new ObjectMapper();
         ObjectNode comparison = json.createObjectNode().put("engine", System.getProperty("qwen.managed.history.engine", "missing"))
                 .put("retainedGrowthBudgetBytes", HEAP_GROWTH_BYTES)
-                .put("jvmIsolation", "Shared sequential JVM; peak pool deltas are reported, retained GC heap is asserted.")
+                .put("jvmIsolation", "Shared sequential JVM; peak pool deltas are reported, retained GC heap and direct buffers are asserted.")
                 .put("status", "collecting")
                 .put("rssQualification", "RSS and pool peaks are recorded; scan callback boundaries and retained heap/buffers are asserted, not all network buffers.");
         Path report = Path.of("target/managed-history-scale/comparison.json");
@@ -152,6 +154,9 @@ class ManagedSessionHistoryScaleGate {
         }
         long jvmDelta = number(large.path("jvm"), "heapUsedBytes") - number(small.path("jvm"), "heapUsedBytes");
         comparison.put("jvmRetainedHeapDeltaBytes", jvmDelta);
+        long directDelta = number(large.path("jvm").path("bufferPools").path("direct"), "memoryUsedBytes")
+                - number(small.path("jvm").path("bufferPools").path("direct"), "memoryUsedBytes");
+        comparison.put("jvmRetainedDirectBufferDeltaBytes", directDelta);
         ObjectNode pools = comparison.putObject("jvmPoolPeakDeltas");
         large.path("jvm").path("pools").fields().forEachRemaining(entry -> pools.put(entry.getKey(),
                 number(entry.getValue(), "peakUsedBytes")
@@ -168,6 +173,7 @@ class ManagedSessionHistoryScaleGate {
             }
         }
         assertThat(jvmDelta).as("Service GC heap growth with its context still open").isLessThanOrEqualTo(HEAP_GROWTH_BYTES);
+        assertThat(directDelta).as("Service retained direct buffer growth").isLessThanOrEqualTo(HEAP_GROWTH_BYTES);
         comparison.put("status", "pass");
         json.writerWithDefaultPrettyPrinter().writeValue(report.toFile(), comparison);
     }

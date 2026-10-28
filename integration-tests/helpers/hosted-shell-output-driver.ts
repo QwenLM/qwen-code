@@ -32,6 +32,7 @@ const config = JSON.parse(await readFile(configPath, 'utf8')) as {
   }>;
 };
 type Transaction = {
+  journalRevision: number;
   transactionId: string;
   recordBytesBase64: string;
 };
@@ -53,6 +54,7 @@ const reports = config.sessions.map((session) => ({
 let current = reports[0];
 let cli = new HostedHarnessProcess();
 let clientId = '';
+const restoredByRevision = new Map<string, Transaction>();
 let restoring = false;
 let proxyFailure: unknown;
 
@@ -258,8 +260,21 @@ const proxy = createServer(async (req, res) => {
       res.destroy();
       return;
     }
-    if (restoring && store && url.pathname.endsWith('/transactions'))
-      current.restoreTransactions.push(...json.transactions);
+    if (restoring && store && url.pathname.endsWith('/transactions')) {
+      for (const transaction of json.transactions as Transaction[]) {
+        assert(Number.isSafeInteger(transaction.journalRevision));
+        const key = `${current.sessionId}:${transaction.journalRevision}`;
+        const previous = restoredByRevision.get(key);
+        if (previous) assert.deepEqual(transaction, previous);
+        else {
+          restoredByRevision.set(key, transaction);
+          current.restoreTransactions.push(transaction);
+          current.restoreTransactions.sort(
+            (a, b) => a.journalRevision - b.journalRevision,
+          );
+        }
+      }
+    }
     relayUpstream(res, upstream, bytes);
   } catch (cause) {
     proxyFailure = cause;
