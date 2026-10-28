@@ -56,7 +56,7 @@ public class WorkspaceFileUploadStore {
 
     public WorkspaceFileUploadStore(WorkspaceFileStore files, ManagedWorkspaceRegistry registry,
             WorkspaceStorageGuard guard, SshWorkspaceService ssh, ManagedAgentProperties properties,
-            JdbcTemplate jdbc, PlatformTransactionManager manager, ObjectMapper mapper,
+            @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager, @Qualifier("managedAgentObjectMapper") ObjectMapper mapper,
             @Qualifier("managedAgentExecutor") Executor executor) {
         this.files = files;
         this.registry = registry;
@@ -170,7 +170,7 @@ public class WorkspaceFileUploadStore {
         }
     }
 
-    @Scheduled(initialDelay = 5000, fixedDelay = 5000)
+    @Scheduled(scheduler = "managedAgentScheduler", initialDelay = 5000, fixedDelay = 5000)
     public void reconcile() {
         var due = jdbc.queryForList("SELECT tenant_id, operation_id FROM ma_operation WHERE operation_kind = ?"
                 + " AND state = 'RUNNING' AND available_at <= " + ManagedSchemaTime.SQL_NOW
