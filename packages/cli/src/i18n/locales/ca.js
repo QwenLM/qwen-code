@@ -2463,6 +2463,7 @@ export default {
   'toolDisplayName.CronCreate': 'Crea tasca programada',
   'toolDisplayName.CronList': 'Llista tasques programades',
   'toolDisplayName.CronDelete': 'Suprimeix tasca programada',
+  'toolDisplayName.AutofixPr': 'Autocorrecció de PR',
   'toolDisplayName.LoopWakeup': 'Desperta el bucle',
   'toolDisplayName.CreateSubSession': 'Crea subsessió',
   'toolDisplayName.ListAgents': "Llista d'agents",

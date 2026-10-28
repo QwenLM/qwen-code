@@ -16,6 +16,7 @@ import {
   UNSAFE_OBJECT_KEYS,
 } from '../commands/channel/channel-registry.js';
 import {
+  effectiveSessionScope,
   multiSessionCompatibilityError,
   parseMessageRoutingConfig,
   parseSessionRotationConfig,
@@ -669,15 +670,14 @@ export class WorkspaceChannelSettingsStore {
         name,
         nextConfig['sessionRotation'],
       ),
-      sessionScope:
-        (nextConfig['sessionScope'] as
-          | 'user'
-          | 'thread'
-          | 'chat_thread'
-          | 'single'
-          | undefined) ??
-        plugin.defaultSessionScope ??
-        'user',
+      // Same resolution the parser uses, so an existing multiSession channel
+      // with no stored scope is not re-scoped to the plugin default and
+      // rejected on every save.
+      sessionScope: effectiveSessionScope(
+        nextConfig,
+        nextConfig['multiSession'] === true,
+        plugin,
+      ),
       groupHistoryLimit: nextConfig['groupHistoryLimit'],
       groups: isRecord(nextConfig['groups']) ? nextConfig['groups'] : {},
       webhooks: nextConfig['webhooks'],

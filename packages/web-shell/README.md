@@ -19,6 +19,8 @@ Java 新建页直接复用标准 Web Shell 的欢迎标题、输入框、原生�
 
 Java 工作区查询返回 `capabilities.workspaceCreation: true` 时，工作区菜单提供“新建工作区 → 从空目录开始”。输入名称后，服务端创建并登记独立的空目录、授权给当前用户，页面自动选中它并保留任务草稿与模型。创建请求在发送前保存在当前标签页；响应不确定时，关闭弹窗或刷新页面后仍可重试同一请求。该能力默认关闭，需要服务端配置 `qwen.managed-agent.runtime-broker.workspace-creation-root` 及相应的已验证 Workspace 执行依赖；浏览器不选择服务器路径。
 
+本地守护进程通告 `git_workspace_clone` 时，“添加工作区”对话框额外提供“Git 仓库”来源：输入 clone 地址和必须尚不存在的绝对目标路径后，`POST /workspaces { kind: "git", url, target }` 返回 `202` 与任务 id，对话框通过 `/workspace-git-clone-jobs/:id` 轮询进度并可取消。clone 成功后对话框复用现有 `POST /workspaces { cwd }` 注册该目录，因此容量、嵌套、持久化和信任策略与手动添加已有目录一致；clone 本身不授予信任。该来源只对当前连接的守护进程开放；私有仓库可用 SSH agent 认证，或把 token 放进粘贴的 URL（由守护进程转交 Git，不写入克隆仓库的配置）。clone 子进程不读取宿主上已配置的 Git 凭据（`credential.helper`、`url.*.insteadOf`、`http.*` 均不生效）。失败、取消或超时会删除守护进程创建的目标目录。
+
 本地 Vite Java 演示可添加 `managedWorkspace=1`，或设置 `VITE_MANAGED_AGENT_WORKSPACE_BINDING=true`。`VITE_MANAGED_AGENT_MODEL_PRESETS` 为上述预设数组的 JSON；`VITE_MANAGED_AGENT_ACTOR_ID` 可通过 `X-Qwen-Actor-Id` 提供本地用户身份，同时进入存储隔离 scope。Java 列出当前用户已有授权的工作区，创建能力按上述服务端配置开启；本地演示需显式配置 `QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER=X-Qwen-Actor-Id`，该配置仅用于可信 loopback 环境。文件工具执行还需要 Java 文档中的 Workspace files、Session Store、Broker mounts 和 Harness Broker 连接配置。
 
 ## Managed 工具结果
@@ -624,6 +626,7 @@ daemon 参数的完整含义和配置方式见
 | `onSessionArtifactsChange`     | `(change: WebShellSessionArtifactsChange) => void`                                                                                    | Session Artifact 初始恢复或变化后返回当前完整快照与 turn 投影                                                                                                                |
 | `onAssistantTurnSettled`       | `(event: WebShellAssistantTurnSettledEvent) => void`                                                                                  | daemon 权威终态提交后触发；多个 provider 可能重复上报，宿主按 `(sessionId, promptId)` 去重                                                                                   |
 | `settings`                     | `WebShellSettingsOptions`                                                                                                             | 可选。控制原生 `/settings` 页面的呈现；见 [原生设置呈现](#原生设置呈现)。                                                                                                    |
+| `composerVariant`              | `'default' \| 'simple'`                                                                                                               | 输入框展示模式；默认 `default`，`simple` 使用胶囊形简洁输入框，适用于主聊天、分屏和侧任务。                                                                                  |
 | `showToolCalls`                | `boolean`                                                                                                                             | 是否展示用户消息旁的工具调用入口；默认 `false`，独立页面设置为 `true`。                                                                                                      |
 | `modelManagement`              | `WebShellModelManagementOptions`                                                                                                      | 可选。控制 WebShell 内模型新增/删除交互，默认均允许；见 [模型增删交互](#模型增删交互)。                                                                                      |
 | `unavailableModels`            | `readonly WebShellUnavailableModel[]`                                                                                                 | 可选。在输入框模型选择器中追加禁用模型；见 [不可用模型目录](#不可用模型目录)。                                                                                               |
@@ -699,6 +702,40 @@ load/catch-up 结束；同 Session 短暂断线保留去重基线并主动对账
 
 隐藏后，Sidebar 的会话目录固定查询 `sourceType: "default"`；独立 WebShell 和未配置
 该选项的宿主仍默认展示来源切换。
+
+### 简洁输入框
+
+通过 `composerVariant="simple"` 启用胶囊形输入框，适用于 `WebShell` 和
+`WebShellWithProviders`：
+
+```tsx
+<WebShellWithProviders composerVariant="simple" />
+<WebShell composerVariant="simple" />
+```
+
+`WebShell` 仍需放在现有 daemon providers 中。省略该属性或传入 `"default"`
+时使用原有输入框；该选项不增加 daemon 配置或持久化设置。
+
+简洁模式在左侧保留 ＋ 菜单，中间为编辑区，右侧显示当前主要操作：有内容时发送，
+语音可用且输入为空时显示已有语音入口，运行中保留停止操作。语音不受支持或不可用
+时，简洁布局右侧显示发送按钮，空内容的闲置状态下禁用，不提供麦克风占位入口。
+长文本和附件可展开，继续使用已有文本编辑、输入法、附件和提交行为；简洁加号使用
+中性灰。简洁录音／转写时，语音控件占据胶囊整行以容纳波形、计时和停止操作，暂时
+隐藏编辑区、加号、模式和提交控件但不卸载编辑器，结束后恢复。高级／默认录音展示
+保持原样。
+触屏设备可通过语音／发送左侧的设置图标直接“切换至高级模式”，原地使用现有完整
+移动端输入框，再通过原语音控件前的返回图标“切换至简洁模式”，顺序为返回 →
+麦克风 → 发送，让麦克风紧挨发送。高级模式除返回
+按钮外保持原有布局、工具栏、语音／发送行为和图标尺寸，不应用简洁模式的麦克风
+放大或语音／发送互斥。切换保留文字、附件和编辑器节点，不打开菜单或全屏对话框，
+也不修改 iOS 原生编辑菜单；默认模式及桌面端不新增此切换按钮。
+
+简洁 ＋ 菜单仅提供照片、拍照、添加文件附件、上传至工作区、引用文件、扩展、MCP、
+技能八类入口，并遵守平台及能力检查。命令、历史、shell 模式、Plan、实时语音及次要
+工具栏控件不放入简洁菜单，工作区、权限模式、模型、上下文和宿主控件在高级模式按
+原方式展示。桌面菜单使用下拉形式，触屏使用抽屉。已有 `composerToolbarActions`
+等配置继续决定默认和高级模式的可选操作，`composerPlaceholders` 占位文字覆盖继续
+生效。
 
 ### 品牌（白标）
 
@@ -835,7 +872,7 @@ Live 和频道右侧标题都为「设置」，左栏标题与首页品牌名共
 />
 ```
 
-`WebShellSettingsOptions.includeItems` 与 `excludeItems` 接受 `WebShellSettingItemId` 值。可导入 `WEB_SHELL_SETTING_ITEM_IDS` 获取受支持的只读列表。这些 ID 是经过整理的别名，而不是 daemon 的配置路径：`setting:language` 对应语言控件，`setting:fast-model` 对应快速模型选择器。即使内部 schema 路径变化，别名也保持稳定。未知的运行时 ID 不匹配任何条目；配置白名单后，尚无公开别名的字段也会隐藏。
+`WebShellSettingsOptions.includeItems` 与 `excludeItems` 接受 `WebShellSettingItemId` 值。可导入 `WEB_SHELL_SETTING_ITEM_IDS` 获取受支持的只读列表。这些 ID 是经过整理的别名，而不是 daemon 的配置路径：`setting:language` 对应语言控件（界面语言），`setting:output-language` 对应模型输出语言（用户作用域，仅用户标签页显示），`setting:fast-model` 对应快速模型选择器。即使内部 schema 路径变化，别名也保持稳定。未知的运行时 ID 不匹配任何条目；配置白名单后，尚无公开别名的字段也会隐藏。
 
 前端内置块有自己的 ID：`builtin:chat-width`、`builtin:browser-notifications`、`builtin:live-setup`、`builtin:local-control`、`builtin:connections` 和 `builtin:model-management`。`builtin:connections` 区块仅在 standalone 构建中渲染，而 standalone 入口不接收 `settings` 呈现配置，因此该 ID 目前对嵌入方没有作用。模型管理块与普通 Model 字段独立过滤；仅排除普通 Model 字段时，模型列表与选择仍然可用；配置白名单时需包含 `builtin:model-management` 才会显示该块。浏览器通知与聊天宽度相互独立。既有的能力和隐藏限制仍然适用，白名单不能强制显示不可用的控件，也不会改变排序。
 
