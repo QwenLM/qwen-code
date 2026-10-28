@@ -1730,19 +1730,18 @@ npm run test:e2e:managed-harness-restart-approval-expiry
 npm run test:e2e:managed-harness-restart-continuation-closeout
 ```
 
-Five additional arms layer one fault on the Allow path (#14481 step 2). The
-first crashes the replacement Harness as soon as the decision is durably
-recorded; the second holds the Runtime Broker's execution `:start` so the
-crash lands after the `PREPARED` row and before the physical dispatch; the
-third crashes after the approved result commits while the post-tool model
-round is held, so its reissue must reuse the saved request and retract the
-published prefix. All three leave the original Action, prepare key, digest
-and Runtime identity in place, start a third Harness generation, and require
-exactly one settled execution, one file effect and one terminal. The other
-two drop the control plane's reply after it committed; the retry under the
-same `Idempotency-Key` must land on the original record, so a lost decision
-produces one `ACTION_RESPONSE` operation and a lost Turn admission produces
-one Turn row:
+Five arms from #14481 step 2 layer one fault on the Allow path. The first
+crashes the replacement Harness as soon as the decision is durably recorded;
+the second holds the Runtime Broker's execution `:start` so the crash lands
+after the `PREPARED` row and before the physical dispatch; the third crashes
+after the approved result commits while the post-tool model round is held, so
+its reissue must reuse the saved request and retract the published prefix. All
+three leave the original Action, prepare key, digest and Runtime identity in
+place, start a third Harness generation, and require exactly one settled
+execution, one file effect and one terminal. The other two drop the control
+plane's reply after it committed; the retry under the same `Idempotency-Key`
+must land on the original record, so a lost decision produces one
+`ACTION_RESPONSE` operation and a lost Turn admission produces one Turn row:
 
 ```bash
 npm run test:e2e:managed-harness-restart-approval-after-decision
@@ -1752,12 +1751,30 @@ npm run test:e2e:managed-harness-restart-approval-decision-reply-lost
 npm run test:e2e:managed-harness-restart-approval-admission-reply-lost
 ```
 
+The remaining three cover the next barriers of the same matrix. The cleanup
+arm refuses the first Runtime release, crashes the Harness, and requires the
+replacement to retry the original cleanup identity until one confirmation.
+The terminal reply-loss arm commits `turn.settled`, loses only its reply, and
+restarts the Harness; the missing-terminal arm refuses the write itself, so
+the replacement must compensate the payable checkpoint exactly once. All
+three keep one original Action, one settled execution, one file effect, one
+terminal and the original cleanup:
+
+```bash
+npm run test:e2e:managed-harness-restart-approval-cleanup-failed
+npm run test:e2e:managed-harness-restart-approval-terminal-reply-lost
+npm run test:e2e:managed-harness-restart-approval-terminal-write-failed
+```
+
 They write their evidence under `.qwen/investigations/g3-step3-implementation/`;
-`G3_VERIFY_REPORT_DIR` overrides the directory. The approval path still has no
-packaged arm for a lost load reply, a failed cleanup followed by another
-crash, a committed terminal that was not delivered, or a payable checkpoint
-whose terminal write is missing; those rows stay focused or integration
-tested (#14481).
+`G3_VERIFY_REPORT_DIR` overrides the directory. The remaining rows stay
+focused or integration tested for now: the lost takeover-load reply (the
+packaged arm showed the redrive's active handoff leaves the original Turn
+RUNNING instead of projecting its terminal), mixed calls and rewritten inputs
+across a replacement,
+Hook/MCP/child uncertainty, the attempt and stream identities plus the live
+SSE view, the round and cost budgets, and the mixed-version reader/bundle
+closure (#14481).
 
 Two arms keep a former owner alive while its replacement finishes the Turn
 and then wake it with `SIGCONT`:

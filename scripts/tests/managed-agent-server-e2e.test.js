@@ -288,6 +288,28 @@ describe('managed-agent-server e2e runner', () => {
     expect(approvalDecisionCommitted('decided\t1\t1')).toBe(true);
   });
 
+  it('recognizes only a turn.settled store commit as the terminal write', () => {
+    const { commitCarriesTurnSettled } = load(
+      ['commitCarriesTurnSettled'],
+      'commitCarriesTurnSettled',
+    )();
+    const commit = (kind) =>
+      Buffer.from(
+        JSON.stringify({
+          recordBytesBase64: Buffer.from(
+            JSON.stringify({
+              subtype: 'managed_session_event_v1',
+              managedSession: { kind },
+            }),
+          ).toString('base64'),
+        }),
+      );
+    expect(commitCarriesTurnSettled(commit('turn.settled'))).toBe(true);
+    expect(commitCarriesTurnSettled(commit('message.committed'))).toBe(false);
+    expect(commitCarriesTurnSettled(Buffer.from('{}'))).toBe(false);
+    expect(commitCarriesTurnSettled(Buffer.from('not json'))).toBe(false);
+  });
+
   it('pins the #14481 approval fault arms to durable barriers', () => {
     const source = read('scripts/run-managed-agent-server-e2e.ts');
     const workflow = read('.github/workflows/sdk-java.yml');
@@ -298,6 +320,9 @@ describe('managed-agent-server e2e runner', () => {
       'test:e2e:managed-harness-restart-approval-after-result',
       'test:e2e:managed-harness-restart-approval-decision-reply-lost',
       'test:e2e:managed-harness-restart-approval-admission-reply-lost',
+      'test:e2e:managed-harness-restart-approval-cleanup-failed',
+      'test:e2e:managed-harness-restart-approval-terminal-reply-lost',
+      'test:e2e:managed-harness-restart-approval-terminal-write-failed',
     ];
     for (const script of scripts) {
       expect(manifest, `${script} must be an npm script`).toContain(
@@ -377,6 +402,21 @@ describe('managed-agent-server e2e runner', () => {
     expect(source.slice(proxy - 500, proxy)).not.toContain(
       "approvalFault === 'after-result'",
     );
+    // C3: the release refusal is a durable barrier, and the retry must be
+    // witnessed on the same proxy rather than silently switching to the
+    // live Broker.
+    expect(source).toContain('Runtime cleanup release refused');
+    expect(source).toContain('releaseFailureCount()');
+    expect(source).toContain('replacementBrokerProxy.allowRelease()');
+    expect(source).toContain('failRelease = false');
+    // C1/C2: the store proxy must be armed before the decision and must
+    // distinguish a lost reply (committed) from a refused write (missing).
+    expect(source).toContain('storeFaultProxy = await startStoreFaultProxy');
+    expect(source).toContain('Terminal commit store fault observed');
+    expect(source).toContain('storeFaultProxy?.armTerminal(');
+    expect(source).toContain('storeFaultProxy?.allowTerminal()');
+    expect(source).toContain('commitCarriesTurnSettled');
+    expect(source).toContain('Terminal write fault was not compensated');
   });
 
   // #12941: the Stage A acceptance criterion names a 15-second Runtime delay,
