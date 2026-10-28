@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceRecord;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceState;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
@@ -32,7 +33,7 @@ public class ManagedWorkspaceRegistry {
         this.ssh = properties.getRuntimeBroker().getSsh();
     }
 
-    public ManagedWorkspaceRegistry(JdbcTemplate jdbc) {
+    public ManagedWorkspaceRegistry(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
         this.jdbc = jdbc;
     }
 

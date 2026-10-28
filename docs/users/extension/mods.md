@@ -128,7 +128,7 @@ this recovery exception.
 
 | Surface    | Behavior                                                                                                                                                                                |
 | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Packaging  | One `.js`, `.mjs`, `.cjs`, `.ts`, `.mts` or `.cts` ESM entry; relative static imports and re-exports inside the installed plugin                                                        |
+| Packaging  | One `.ts`, `.tsx`, `.jsx`, `.js`, `.mjs`, `.cjs`, `.mts` or `.cts` ESM entry; relative static imports and re-exports inside the installed plugin; JSX in `.tsx` and `.jsx` files        |
 | Entry      | `register(on, options)`; async registration is awaited; typed non-secret options are copied and deeply frozen                                                                           |
 | Lifecycle  | All modules register before the initial `session.start` chain; `session.end` on exit and conversation replacement; clear/resume do not reload modules                                   |
 | Commands   | Register during `session.start` using name, description and optional argumentHint; intercept registered Mod commands across plugins; return `{text}` or `{}`                            |
@@ -139,11 +139,11 @@ this recovery exception.
 | Turns      | `turn.start`, `turn.complete` and `$.turn.abort` for the prompts a person submits, described in [Turn events](#turn-events)                                                             |
 | Logging    | `$.ui.log` returns void and queues delivery; transcript logs use stderr in text mode or `system/ui_log` in JSON modes; debug logs stay in the debug logger; neither becomes model input |
 | Elements   | `$.ui.resolve`, `$.ui.invalidate` and the `h` and `Fragment` globals, described in [Elements](#elements)                                                                                |
-| Drawing    | `ui.render` for the band above the prompt in the Ink terminal, described in [The band above the prompt](#the-band-above-the-prompt)                                                     |
+| Drawing    | `ui.render` for the band above the prompt in the Ink and OpenTUI terminals, described in [The band above the prompt](#the-band-above-the-prompt)                                        |
 | Isolation  | Separate QuickJS environment per plugin inside a session worker; no Node, filesystem or network APIs; memory, stack, source/output and execution limits                                 |
 
 This is a supported subset, not full compatibility with existing Claude Mods.
-JSX/TSX, runtime package imports, built-in command interception, tool registration and active `$.tool` APIs, context,
+Runtime package imports, built-in command interception, tool registration and active `$.tool` APIs, context,
 `$.session.messages` and `repo`, state/store, `$.clock.after` and `every`, `ui.render` sites other than the band above the prompt, streaming events and hot reload are not implemented.
 Commands cannot return `context`, `exitCode` or engine references yet. Hooks for
 other Claude Code events load without running, as described in
@@ -157,7 +157,7 @@ command names are matched against the resulting name.
 ## Middleware and recovery
 
 Patterns select among the engine events `session.start`, `session.end`,
-`command.run`, `tool.call`, `tool.check`, `turn.start`, `turn.complete` and, in the Ink terminal, `ui.render`, and the API event of each supported
+`command.run`, `tool.call`, `tool.check`, `turn.start`, `turn.complete` and, in the Ink and OpenTUI terminals, `ui.render`, and the API event of each supported
 `$` method, which `$.session.version()` lists. Use an exact name, a prefix such as `command.*`,
 `*`, or a single negation such as `!session.*`. The patterns `!*` and `!!...` are
 rejected.
@@ -461,7 +461,7 @@ supports:
 }
 ```
 
-This is a headless run. In the Ink terminal, `events` also lists `ui.render`.
+This is a headless run. In the Ink and OpenTUI terminals, `events` also lists `ui.render`.
 `claudeCode` is the Claude Code release whose event names are recognized,
 `events` lists the events hooks can receive and `methods` the `$` methods a Mod can
 call. A Mod can use it to choose a fallback, such as a command reply where a
@@ -640,6 +640,8 @@ numbers become strings. `key` is kept only on a `Box`. The `h(tag, props,
 ...children)` and `Fragment` globals build the same elements, as Claude Code's
 JSX factory does; `Fragment` is a column `Box`. `h` calls a function tag with
 its props and its children flattened into an array, and throws for a string tag other than `Box` or `Text`.
+JSX in a `.tsx` or `.jsx` file compiles to these calls, as described in
+[TypeScript, JSX and relative imports](#typescript-jsx-and-relative-imports).
 
 A tree a hook returns is judged with Claude Code 2.1.310's rules for `Box` and
 `Text`, and any other element refuses it with
@@ -653,9 +655,9 @@ hook that asks for a redraw does not fail where nothing is drawn.
 
 ## The band above the prompt
 
-The Ink terminal raises `ui.render` for Claude Code's `AbovePrompt` site, a band
-between the session survey and the prompt input. OpenTUI and headless runs draw
-no site yet: there a `ui.render` hook is skipped and listed at startup, and
+The Ink and OpenTUI terminals raise `ui.render` for Claude Code's `AbovePrompt`
+site, a band between the session survey and the prompt input. Headless runs
+draw no site: there a `ui.render` hook is skipped and listed at startup, and
 `$.session.version()` leaves it out.
 
 A hook receives Claude Code's input:
@@ -733,24 +735,57 @@ These differ from Claude Code:
   running render waits for it, up to 10 seconds for each `ui.render` hook in
   the chain.
 - Refusal lines go only to the debug log, since Qwen Code has no hot reload.
-- JSX is not compiled yet, although `h` and `Fragment` exist.
+- OpenTUI has no session survey, so `hasSurvey` is always `false` there, and
+  `isWorking` stays `false` while a `!` shell command runs. OpenTUI takes
+  colors as hex values, so ANSI color names and `ansi256()` colors draw as
+  fixed values instead of the terminal's palette, and a `borderColor` border
+  draws undimmed under `borderDimColor`. Its text truncates only in the
+  middle, with `...` where Ink draws `…`: `wrap: "middle"` and
+  `"truncate-middle"` draw that way, and the other truncations cut the text
+  off at the right edge without a mark. Its borders have one stroke per axis,
+  so the `arrow` border draws its top arrow on the bottom edge and its left
+  arrow on the right edge.
 
-## TypeScript and relative imports
+## TypeScript, JSX and relative imports
 
-Change the hooks entry to `./register.ts` to use TypeScript. Imports and
-re-exports may use relative paths, extensionless paths, directory `index` files,
-or JavaScript spellings of TypeScript files (`./helper.js` can resolve to
-`helper.ts`). Exact files win. Next come `.js` → `.ts`, `.mjs` → `.mts`, and
-`.cjs` → `.cts` substitutions, followed by `.ts`, `.js`, `.mjs`, `.cjs`, `.mts`,
-`.cts` candidates, trying each file and then its directory index. All six
-suffixes use ESM, including `.cjs` and `.cts`. Module cycles and shared imported
-state within one plugin are supported.
+Change the hooks entry to `./register.ts` to use TypeScript, or to
+`./register.tsx` or `./register.jsx` to write JSX. Imports and re-exports may
+use relative paths, extensionless paths, directory `index` files, or JavaScript
+spellings of TypeScript files (`./helper.js` can resolve to `helper.ts`). Exact
+files win. Next come `.js` → `.ts` or `.tsx`, `.jsx` → `.tsx`, `.mjs` → `.mts`
+and `.cjs` → `.cts` substitutions, followed by `.ts`, `.tsx`, `.jsx`, `.js`,
+`.mjs`, `.cjs`, `.mts`, `.cts` candidates, trying each file and then its
+directory index. This is Claude Code's order. All eight suffixes use ESM,
+including `.cjs` and `.cts`. Module cycles and shared imported state within one
+plugin are supported.
+
+JSX compiles with the classic runtime to calls of the `h` and `Fragment`
+globals, as Claude Code compiles it, so `<>...</>` is a column `Box`. A tag is
+one of the constructors `$.ui.resolve(e)` returns, or a function component:
+
+```tsx
+on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
+  const { Box, Text } = $.ui.resolve(e);
+  return (
+    <Box flexDirection="row" paddingX={1}>
+      <Text bold>☀ Clear</Text>
+      <Text dimColor> {e.props.bodyColumns} columns</Text>
+    </Box>
+  );
+});
+```
+
+Only `.tsx` and `.jsx` files take JSX. As in Claude Code, a module that declares
+its own `h` or `Fragment`, or carries a `@jsx` pragma, points its JSX away from
+the globals. A file that fails to compile reports the first error with its line
+and column, such as
+`Invalid Mod JSX: view.jsx: JSX element 'Text' has no corresponding closing tag. (line 4, column 12).`
 
 Compilation uses fixed options inside the cancellable worker; it does not
 type-check or load `tsconfig.json`, package resolvers or build plugins. Type-only
 imports, including types from `claude-code`, are erased. Runtime value imports
 from `claude-code` require APIs outside this subset and are rejected, as are
-package/Node/URL imports, dynamic imports, `require`, JSX and imported top-level
+package/Node/URL imports, dynamic imports, `require` and imported top-level
 `await`. Guest code continues to execute only in QuickJS.
 
 ## Plugin options

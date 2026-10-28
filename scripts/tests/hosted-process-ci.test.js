@@ -145,6 +145,30 @@ const failoverArms = [
     ],
   ],
   [
+    'Run committed terminal reply-loss E2E',
+    'test:e2e:managed-harness-restart-approval-terminal-reply-lost',
+    [
+      '--continuation-failover',
+      '--harness-only',
+      '--g3-verify',
+      'allow',
+      '--g3-fault',
+      'terminal-reply-lost',
+    ],
+  ],
+  [
+    'Run missing terminal write E2E',
+    'test:e2e:managed-harness-restart-approval-terminal-write-failed',
+    [
+      '--continuation-failover',
+      '--harness-only',
+      '--g3-verify',
+      'allow',
+      '--g3-fault',
+      'terminal-write-failed',
+    ],
+  ],
+  [
     'Run Harness-restart continuation closeout E2E',
     'test:e2e:managed-harness-restart-continuation-closeout',
     ['--continuation-failover', '--harness-only', '--g3-verify continuation'],
@@ -583,8 +607,8 @@ describe('Hosted real-process gates', () => {
     // Step ceilings today (201 + 20 + 50 + 20): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
     ['hosted-harness-mysql', 291, 304],
-    // Twenty failover arms at 10 each.
-    ['hosted-failover-e2e', 200, 215],
+    // Twenty-two failover arms at 10 each.
+    ['hosted-failover-e2e', 220, 235],
   ])(
     'keeps the %s job ceiling above its summed step ceilings',
     (name, steps, ceiling) => {
@@ -845,6 +869,33 @@ describe('Hosted real-process gates', () => {
       }
     },
   );
+
+  it('runs the Broker fault gates even when the Hosted verify fails', () => {
+    const steps = java.jobs['hosted-harness-mysql'].steps;
+    const gates = steps.find(
+      (step) => step.name === 'Run Runtime Broker fault gates',
+    );
+    // Without a condition a red Hosted verify skipped them on 11 of the 14
+    // nights to 10-27, though they need neither its build nor MySQL.
+    expect(gates.if).toBe(
+      "${{ !cancelled() && steps.managed_dependencies.outcome == 'success' }}",
+    );
+    expect(gates['continue-on-error']).toBeUndefined();
+    // An unknown step id reads as '' and would skip the gates on every run.
+    // The install step itself runs only after every setup step before it,
+    // the CLI bundle the gates spawn among them, succeeded.
+    const install = steps.find((step) => step.id === 'managed_dependencies');
+    expect(install, 'the managed_dependencies step').toBeDefined();
+    expect(install.name).toBe('Install Managed Agent dependencies');
+    expect(install.if).toBeUndefined();
+    expect(install.run).toContain('-f packages/sdk-java/qwencode/pom.xml');
+    const bundle = steps.findIndex(
+      (step) => step.name === 'Install, build and bundle CLI',
+    );
+    expect(bundle).toBeGreaterThan(-1);
+    expect(bundle).toBeLessThan(steps.indexOf(install));
+    expect(steps.indexOf(install)).toBeLessThan(steps.indexOf(gates));
+  });
 
   // The Hosted*IT classes share one failsafe fork, so a case stalled to its
   // @Timeout must still leave the fork its healthy runtime: on main the
