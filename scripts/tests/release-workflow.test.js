@@ -295,12 +295,12 @@ describe('CUA release workflow', () => {
 // The canonical workspace restoration script shared by all nine
 // 'Restore workspace ownership' copies in release.yml. The full wipe (vs
 // serve-ab.yml's keep-and-scrub) is deliberate on this lane: release
-// checkouts carry CI_BOT_PAT and the npm OIDC id-token, so no pre-existing
-// repo state may survive into them. Pin the WHOLE body by equality, the way
-// review-worktree-cleanup-workflow.test.js pins its sweep copies: a
-// commented-out find, an inserted early exit, or a uniformly dropped
-// ownership ladder all ship green under substring pins, and each of those
-// mutants reopens the incident class this step exists for.
+// checkouts persist credentials and the publish job can mint the npm OIDC
+// id-token, so no pre-existing repo state may survive into them. Pin the
+// WHOLE body by equality, the way review-worktree-cleanup-workflow.test.js
+// pins its sweep copies: a commented-out find, an inserted early exit, or a
+// uniformly dropped ownership ladder all ship green under substring pins,
+// and each of those mutants reopens the incident class this step exists for.
 const canonicalWipe = `set -uo pipefail
 # Reject symlinked or non-canonical paths before recursive changes.
 RWS="\${RUNNER_WORKSPACE:?}"
@@ -550,6 +550,7 @@ describe('release workflow', () => {
       'integration_docker',
       'publish',
       'notify_failure',
+      'reconcile_failure',
     ]) {
       const steps = releaseYaml.jobs[jobId].steps;
       const targetCheckoutIndex = steps.findIndex(
@@ -571,7 +572,10 @@ describe('release workflow', () => {
         'sparse-checkout-cone-mode': false,
         path: '.release-workflow',
       });
-      if (jobId !== 'notify_failure') {
+      // The two issue jobs are the only ones whose script checkout has no
+      // preceding target checkout: they must run when that checkout is what
+      // failed.
+      if (jobId !== 'notify_failure' && jobId !== 'reconcile_failure') {
         expect(scriptCheckoutIndex, jobId).toBeGreaterThan(targetCheckoutIndex);
       }
       for (const [index, step] of steps.entries()) {
@@ -660,6 +664,11 @@ describe('release workflow', () => {
   });
 
   it('keeps the workflow focused on orchestration', () => {
+    // 920, raised from 880 for reconcile_failure: the success-gated sibling of
+    // notify_failure, one job carrying a single script step, because the close
+    // path cannot live inside notify_failure — that job is skipped on a
+    // passing re-run, which is the whole defect (#15705). The reconciliation
+    // logic itself stays in .github/scripts/run-release-step.sh.
     // 880, raised from 870 for quality_scripts' standalone runtime cache
     // step: the same four-line export of a host-wide cache path as ci.yml's
     // test job — orchestration; the cache logic lives in
@@ -677,7 +686,7 @@ describe('release workflow', () => {
     // is the job that reports their failure, so its last-resort issue filing
     // is deliberately inline. Every other step stays under the per-step cap
     // below, which is the rule that actually keeps logic out of the YAML.
-    expect(workflow.split('\n').length).toBeLessThan(880);
+    expect(workflow.split('\n').length).toBeLessThan(930);
     for (const [jobId, job] of Object.entries(releaseYaml.jobs)) {
       for (const step of job.steps ?? []) {
         if (step.name === 'Restore workspace ownership' || !step.run) continue;
@@ -1066,6 +1075,166 @@ describe('release workflow', () => {
         expect(fallback.if).toBe(
           "${{ always() && steps.notify.outcome != 'success' && !steps.notify.outputs.issue_url }}",
         );
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('reconciles a stale failure issue only when the release succeeded', () => {
+    const job = releaseYaml.jobs.reconcile_failure;
+    // notify_failure is skipped the moment a re-run passes, so the close path
+    // has to be a sibling gated on success rather than a step inside it.
+    expect(job.if).toContain('always()');
+    expect(job.if).toContain("needs.publish.result == 'success'");
+    expect(job.if).toContain("github.event.inputs.dry_run != 'true'");
+    // force_skip_tests lets publish run past a failed validation job: closing
+    // there would race the issue notify_failure is filing for that failure.
+    for (const need of [
+      'prepare',
+      'quality',
+      'integration_none',
+      'integration_docker',
+    ]) {
+      expect(job.if, need).toContain(`needs.${need}.result != 'failure'`);
+    }
+    expect(job.needs).toEqual(releaseYaml.jobs.notify_failure.needs);
+    expect(job.permissions).toEqual({ contents: 'read', issues: 'write' });
+    const step = job.steps.find(
+      (entry) => entry.name === 'Close the issue an earlier attempt filed',
+    );
+    expect(step.run).toBe(
+      '.release-workflow/.github/scripts/run-release-step.sh reconcile-failure',
+    );
+    // A reconciliation failure must never turn a shipped release red.
+    expect(step['continue-on-error']).toBe(true);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'closes the workflow-owned failure issue once a later attempt succeeds',
+    () => {
+      const directory = mkdtempSync(join(tmpdir(), 'release-reconcile-'));
+      const bin = join(directory, 'bin');
+      const ghLog = join(directory, 'gh-calls');
+      const issues = join(directory, 'issues.json');
+      mkdirSync(bin);
+      writeFileSync(
+        issues,
+        JSON.stringify([
+          {
+            number: 15672,
+            url: 'https://github.example/QwenLM/qwen-code/issues/15672',
+            labels: [{ name: 'type/bug' }, { name: 'status/ready-for-agent' }],
+            author: { login: 'github-actions[bot]' },
+            title: 'Release Failed for v1.2.3 on 2026-10-26',
+          },
+        ]),
+      );
+      writeFileSync(
+        join(bin, 'gh'),
+        '#!/bin/sh\n' +
+          'printf "%s\\n" "$*" >> "$GH_CALL_LOG"\n' +
+          'if [ "$1" = issue ] && [ "$2" = list ]; then\n' +
+          '  cat "$GH_ISSUES"\n' +
+          '  exit 0\n' +
+          'fi\n' +
+          'if [ "$1" = issue ] && [ "$2" = edit ]; then\n' +
+          '  case "$*" in\n' +
+          '    *autofix/approved*) exit 1 ;;\n' +
+          '  esac\n' +
+          'fi\n' +
+          'exit 0\n',
+        { mode: 0o755 },
+      );
+      try {
+        const result = spawnSync(
+          'bash',
+          [releaseStepScriptAbsolutePath, 'reconcile-failure'],
+          {
+            cwd: directory,
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${bin}:${process.env.PATH}`,
+              GH_CALL_LOG: ghLog,
+              GH_ISSUES: issues,
+              GH_REPO: 'QwenLM/qwen-code',
+              RELEASE_TAG: 'v1.2.3',
+              DETAILS_URL: 'https://github.example/run/1',
+              RUN_ATTEMPT: '2',
+            },
+          },
+        );
+        expect(result.status, result.stderr).toBe(0);
+        const calls = readFileSync(ghLog, 'utf8');
+        expect(calls).toContain('issue comment 15672');
+        expect(calls).toContain(
+          'issue close 15672 --repo QwenLM/qwen-code --reason not planned',
+        );
+        expect(calls).not.toContain('issue create');
+        // One absent label must not abort the remaining removals or the close.
+        expect(calls).toContain('--remove-label status/ready-for-agent');
+        expect(calls).toContain('--remove-label autofix/in-progress');
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'never closes a human-authored release-failure issue',
+    () => {
+      const directory = mkdtempSync(join(tmpdir(), 'release-reconcile-human-'));
+      const bin = join(directory, 'bin');
+      const ghLog = join(directory, 'gh-calls');
+      const issues = join(directory, 'issues.json');
+      mkdirSync(bin);
+      writeFileSync(
+        issues,
+        JSON.stringify([
+          {
+            number: 9001,
+            url: 'https://github.example/QwenLM/qwen-code/issues/9001',
+            labels: [{ name: 'type/bug' }],
+            author: { login: 'some-maintainer' },
+            title: 'Release Failed for v1.2.3 on 2026-10-26',
+          },
+        ]),
+      );
+      writeFileSync(
+        join(bin, 'gh'),
+        '#!/bin/sh\n' +
+          'printf "%s\\n" "$*" >> "$GH_CALL_LOG"\n' +
+          'if [ "$1" = issue ] && [ "$2" = list ]; then\n' +
+          '  cat "$GH_ISSUES"\n' +
+          'fi\n' +
+          'exit 0\n',
+        { mode: 0o755 },
+      );
+      try {
+        const result = spawnSync(
+          'bash',
+          [releaseStepScriptAbsolutePath, 'reconcile-failure'],
+          {
+            cwd: directory,
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${bin}:${process.env.PATH}`,
+              GH_CALL_LOG: ghLog,
+              GH_ISSUES: issues,
+              GH_REPO: 'QwenLM/qwen-code',
+              RELEASE_TAG: 'v1.2.3',
+              DETAILS_URL: 'https://github.example/run/1',
+              RUN_ATTEMPT: '2',
+            },
+          },
+        );
+        expect(result.status, result.stderr).toBe(0);
+        const calls = readFileSync(ghLog, 'utf8');
+        expect(calls).toContain('issue list');
+        expect(calls).not.toContain('issue close');
+        expect(calls).not.toContain('issue comment');
       } finally {
         rmSync(directory, { recursive: true, force: true });
       }
@@ -3062,6 +3231,7 @@ exit 0`,
           'integration_none',
           'integration_docker',
           'notify_failure',
+          'reconcile_failure',
         ].map((id) => [id, releaseYaml.jobs[id]['timeout-minutes']]),
       ),
     ).toEqual({
@@ -3080,6 +3250,7 @@ exit 0`,
       integration_none: 120,
       integration_docker: 120,
       notify_failure: 10,
+      reconcile_failure: 10,
     });
 
     for (const id of [
@@ -3303,6 +3474,24 @@ exit 0`,
     expect(releaseStepScript).toMatch(
       /if \[\[ "\$\{IS_DRY_RUN\}" == "false" \]\]; then[\s\S]*?git push --force --set-upstream origin "\$\{release_branch_name\}" --follow-tags\n {4}else\n {6}echo "Dry run enabled\. Skipping push\."/,
     );
+  });
+
+  it('reads the release tree with the run-scoped token, not the bot PAT', () => {
+    // The publish checkout is read-only and the repository is public, so
+    // authenticating it with the long-lived bot PAT adds an auth dependency
+    // without adding access: a transient PAT rejection failed the release at
+    // Checkout (#15726). The PAT stays exported to the steps that write.
+    const steps = releaseYaml.jobs.publish.steps;
+    const checkout = steps.find((step) => step.name === 'Checkout');
+    expect(checkout.with.token).toBeUndefined();
+    expect(checkout.with['persist-credentials']).toBe(false);
+    expect(
+      steps.find((step) => step.id === 'push_release_branch').env.CI_BOT_PAT,
+    ).toBe('${{ secrets.CI_BOT_PAT }}');
+    expect(
+      steps.find((step) => step.name === 'Create GitHub Release and Tag').env
+        .GITHUB_TOKEN,
+    ).toBe('${{ secrets.CI_BOT_PAT }}');
   });
 
   it('serializes publish jobs per release tag', () => {
