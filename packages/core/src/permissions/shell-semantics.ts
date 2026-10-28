@@ -198,10 +198,14 @@ function pushToken(
   trailingSyntax: boolean,
   provenance: TokenProvenance,
 ): void {
-  const normalized = trimShellSyntax(token, bare);
+  const normalized = trimShellSyntax(token, bareChars);
   let leadTrim = 0;
-  if (bare) {
-    while (leadTrim < token.length && token[leadTrim] === '(') leadTrim++;
+  while (
+    leadTrim < token.length &&
+    token[leadTrim] === '(' &&
+    bareChars[leadTrim]
+  ) {
+    leadTrim++;
   }
   const normalizedBareChars = bareChars.slice(
     leadTrim,
@@ -221,17 +225,24 @@ function pushToken(
   }
 }
 
-function trimShellSyntax(token: string, bare: boolean): string {
-  if (!bare) return token;
+/**
+ * Strip grouping and background syntax from a word. The decision is per
+ * character, not per word: quoting any part of a word used to switch the whole
+ * trim off, so `'settings.json')` published the trailing `)` as part of the
+ * path and a Write deny rule on the real target stopped matching. Only
+ * punctuation that is itself quoted or escaped survives, so a quoted `)`
+ * operand and an interior `R&D` are left alone (#12280 R7-1).
+ */
+function trimShellSyntax(token: string, bareChars: boolean[]): string {
   let start = 0;
   let end = token.length;
 
-  while (start < end && token[start] === '(') {
+  while (start < end && token[start] === '(' && bareChars[start]) {
     start++;
   }
   while (end > start) {
     const ch = token[end - 1];
-    if (ch !== ')' && ch !== '&') break;
+    if ((ch !== ')' && ch !== '&') || !bareChars[end - 1]) break;
     end--;
   }
 

@@ -510,6 +510,19 @@ describe('extractShellOperationsAcrossCommand', () => {
       '(echo > .qwen/settings.json) && echo > .qwen/hooks/run.sh&',
       [write(REPO_SETTINGS), write('/repo/.qwen/hooks/run.sh')],
     ],
+    // Quoting any part of a word used to switch the syntax trim off for the
+    // whole word, so the grouping paren was published as part of the path and
+    // a Write deny rule on the real target stopped matching (#12280 R7-1).
+    [
+      'strips grouping syntax when the redirect target is quoted',
+      "(cd sub ; echo {} > 'settings.json')",
+      [write('/repo/sub/settings.json')],
+    ],
+    [
+      'strips grouping syntax when a command substitution operand is quoted',
+      "rm -rf $(cat 'files.txt')",
+      [edit('/repo/files.txt')],
+    ],
     [
       'does not treat heredoc body lines as executable shell segments',
       [
