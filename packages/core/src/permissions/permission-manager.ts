@@ -13,6 +13,7 @@ import {
   splitCompoundCommand,
   SHELL_TOOL_NAMES,
   toolMatchesRuleToolName,
+  warnDroppedPermissionRule,
 } from './rule-parser.js';
 import type { McpToolIdentity, PathMatchContext } from './rule-parser.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
@@ -44,13 +45,6 @@ import type {
 } from './types.js';
 
 const debugLogger = createDebugLogger('PERMISSIONS');
-
-function warnMalformedRule(kind: RuleType | undefined, raw: string) {
-  // eslint-disable-next-line no-console -- malformed security controls must be visible without debug logging
-  console.warn(
-    `Ignoring malformed${kind ? ` ${kind}` : ''} rule (unbalanced parentheses): ${raw}`,
-  );
-}
 
 /**
  * How a tool participates in the registry for this session.
@@ -1445,7 +1439,10 @@ export class PermissionManager {
       const rule = parseRule(raw);
       if (options?.trustGated) rule.trustGated = true;
       if (rule.invalid) {
-        warnMalformedRule('allow', rule.raw);
+        debugLogger.warn(
+          `Ignoring malformed allow rule (unbalanced parentheses): ${rule.raw}`,
+        );
+        warnDroppedPermissionRule(rule.raw, 'allow');
         return;
       }
       // AUTO mode invariant: while dangerous allow rules are stripped,
@@ -1496,7 +1493,10 @@ export class PermissionManager {
     if (raw && raw.trim()) {
       const rule = parseRule(raw);
       if (rule.invalid) {
-        warnMalformedRule('deny', rule.raw);
+        debugLogger.warn(
+          `Ignoring malformed deny rule (unbalanced parentheses): ${rule.raw}`,
+        );
+        warnDroppedPermissionRule(rule.raw, 'deny');
         return;
       }
       this.sessionRules.deny.push(rule);
@@ -1510,7 +1510,10 @@ export class PermissionManager {
     if (raw && raw.trim()) {
       const rule = parseRule(raw);
       if (rule.invalid) {
-        warnMalformedRule('ask', rule.raw);
+        debugLogger.warn(
+          `Ignoring malformed ask rule (unbalanced parentheses): ${rule.raw}`,
+        );
+        warnDroppedPermissionRule(rule.raw, 'ask');
         return;
       }
       this.sessionRules.ask.push(rule);
@@ -1533,7 +1536,10 @@ export class PermissionManager {
   addPersistentRule(raw: string, type: RuleType): PermissionRule {
     const rule = parseRule(raw);
     if (rule.invalid) {
-      warnMalformedRule(type, rule.raw);
+      debugLogger.warn(
+        `Ignoring malformed ${type} rule (unbalanced parentheses): ${rule.raw}`,
+      );
+      warnDroppedPermissionRule(rule.raw, type);
       return rule;
     }
     // AUTO mode invariant: see addSessionAllowRule above. A dangerous

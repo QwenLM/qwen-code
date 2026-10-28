@@ -362,6 +362,27 @@ describe('GeneratedUiRuntimeProvider lifecycle', () => {
     expect(h.requestMessage).toHaveBeenCalledTimes(2);
   });
 
+  it('attaches a live card once a refused first attach becomes current', async () => {
+    const h = setup();
+    let current = false;
+    const source: McpAppGeneratedUiOwnerSource = {
+      scopeId: 'daemon-a',
+      sessionId: 'session-a',
+      clientId: 'client-a',
+      workspaceCwd: '/workspace/a',
+      eventEpoch: 'epoch-a',
+      captureOwner: () => ({ isCurrent: () => current }),
+    };
+    // During a live turn the owner snapshot can be stale when the card first
+    // renders; that refusal must not turn into a released card.
+    await h.render({ source });
+    expect(h.surface().querySelector('iframe')).toBeNull();
+    current = true;
+    await h.render({ source });
+    expect(h.surface().querySelectorAll('iframe')).toHaveLength(1);
+    expect(h.surface().textContent).not.toContain('Reopen interactive view');
+  });
+
   it('initializes without native moves but releases a populated runtime on relocation', async () => {
     Reflect.deleteProperty(HTMLElement.prototype, 'moveBefore');
     const h = setup(true);

@@ -2753,6 +2753,31 @@ describe('PermissionManager', () => {
       // Should NOT deny — the malformed rule must not act as catch-all
       expect(await pm.evaluate(sh('git status'))).not.toBe('deny');
     });
+
+    it('tells the operator when a malformed deny rule is dropped', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        pm.addSessionDenyRule('Bash(rm -rf /)*');
+        // A deny rule that protects nothing is the dangerous direction: the
+        // operator's model says "blocked" while the runtime has no rule.
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn.mock.calls[0]![0]).toContain('deny rule');
+        expect(warn.mock.calls[0]![0]).toContain('Bash(rm -rf /)*');
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('tells the operator when a malformed ask rule is dropped', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        pm.addSessionAskRule('Bash(git commit');
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn.mock.calls[0]![0]).toContain('ask rule');
+      } finally {
+        warn.mockRestore();
+      }
+    });
   });
 
   describe('allowedTools via permissionsAllow', () => {

@@ -16,6 +16,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.apache.commons.codec.digest.DigestUtils;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -39,8 +40,8 @@ public class ManagedExtensionManagementService {
     private final HarnessConnector harness;
 
     public ManagedExtensionManagementService(AgentStateStore store, ManagedAgentService sessions,
-            ManagedExtensionRecordStore records, ManagedExtensionPackageService packages, JdbcTemplate jdbc,
-            ObjectMapper json, HarnessConnector harness) {
+            ManagedExtensionRecordStore records, ManagedExtensionPackageService packages, @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
+            @Qualifier("managedAgentObjectMapper") ObjectMapper json, HarnessConnector harness) {
         this.store = store;
         this.sessions = sessions;
         this.records = records;
