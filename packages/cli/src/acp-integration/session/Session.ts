@@ -2716,9 +2716,9 @@ export class Session implements SessionContext {
   private goalHostUnbind?: () => void;
   private goalRuntimeUnsubscribe?: () => void;
   private removeSkillChangeListener?: () => void;
-  private commandSnapshotInFlight?: Promise<void>;
+  private commandSnapshotInFlight?: Promise<unknown>;
   private commandSnapshotPending = false;
-  private lastCommandsPublicationKey?: string;
+  private skillRefreshPublishing = false;
   private lastGoalSnapshot?: GoalSnapshotV2;
   private lastGoalPublicationKey?: string;
   // Set only when runtime recovery selected a Goal that initial replay hid.
@@ -3019,8 +3019,14 @@ export class Session implements SessionContext {
     this.removeSkillChangeListener = this.config
       .getSkillManager()
       ?.addChangeListener(() => {
-        if (this.disposed || commandSnapshotBuildContext.getStore()) return;
-        void this.sendAvailableCommandsUpdate({ skipIfUnchanged: true });
+        if (
+          this.disposed ||
+          this.skillRefreshPublishing ||
+          commandSnapshotBuildContext.getStore()
+        ) {
+          return;
+        }
+        void this.sendAvailableCommandsUpdate();
       });
     this.config
       .getWorkflowRunRegistry?.()
@@ -14046,11 +14052,9 @@ export class Session implements SessionContext {
     }
   }
 
-  async sendAvailableCommandsUpdate(
-    options: { skipIfUnchanged?: boolean } = {},
-  ): Promise<void> {
+  async sendAvailableCommandsUpdate(): Promise<void> {
     try {
-      await this.sendAvailableCommandsUpdateOrThrow(options);
+      await this.sendAvailableCommandsUpdateOrThrow();
     } catch (error) {
       // Log error but don't fail session creation
       debugLogger.error('Error sending available commands update:', error);
@@ -14078,6 +14082,9 @@ export class Session implements SessionContext {
     if (skillManager && (options.notifyConfigChanged ?? true)) {
       try {
         skillManager.suppressNextSlashReload();
+        // The explicit publish above already sent this snapshot; keep the
+        // change listener from sending an identical second frame.
+        this.skillRefreshPublishing = true;
         await skillManager.notifyConfigChanged();
       } catch (error) {
         if (!updateFailed) throw error;
@@ -14085,6 +14092,8 @@ export class Session implements SessionContext {
           'SkillManager refresh failed after command update failure:',
           error,
         );
+      } finally {
+        this.skillRefreshPublishing = false;
       }
     }
     if (updateFailed) throw updateError;
@@ -14103,12 +14112,11 @@ export class Session implements SessionContext {
     );
   }
 
-  private async sendAvailableCommandsUpdateOrThrow(
-    options: { skipIfUnchanged?: boolean } = {},
-  ): Promise<void> {
-    // The latch covers only the snapshot build, so a client write that never
-    // settles cannot wedge later publications. A caller that arrives during
-    // the build resolves with it, and the change is republished afterwards.
+  private async sendAvailableCommandsUpdateOrThrow(): Promise<void> {
+    // The latch covers only the snapshot build, not the client write, so the
+    // session never blocks its own next build on a pending write. A caller
+    // that arrives during the build shares its outcome (including a failure),
+    // and the change is republished once afterwards.
     if (this.commandSnapshotInFlight) {
       this.commandSnapshotPending = true;
       await this.commandSnapshotInFlight;
@@ -14120,10 +14128,7 @@ export class Session implements SessionContext {
         this.buildAvailableCommandsSnapshot(),
       );
     })();
-    this.commandSnapshotInFlight = build.then(
-      () => undefined,
-      () => undefined,
-    );
+    this.commandSnapshotInFlight = build;
     let snapshot: Awaited<typeof build>;
     try {
       snapshot = await build;
@@ -14132,7 +14137,7 @@ export class Session implements SessionContext {
       if (this.commandSnapshotPending) {
         this.commandSnapshotPending = false;
         if (!this.disposed && !this.closing) {
-          void this.sendAvailableCommandsUpdate({ skipIfUnchanged: true });
+          void this.sendAvailableCommandsUpdate();
         }
       }
     }
@@ -14153,23 +14158,7 @@ export class Session implements SessionContext {
         : {}),
     };
     if (this.disposed) return;
-    const key = createHash('sha256')
-      .update(JSON.stringify(update))
-      .digest('hex');
-    if (options.skipIfUnchanged && key === this.lastCommandsPublicationKey) {
-      return;
-    }
-    // Record the key when the write starts: client writes are ordered, so the
-    // last started frame is the state the client ends up with.
-    this.lastCommandsPublicationKey = key;
-    try {
-      await this.sendUpdate(update);
-    } catch (error) {
-      if (this.lastCommandsPublicationKey === key) {
-        this.lastCommandsPublicationKey = undefined;
-      }
-      throw error;
-    }
+    await this.sendUpdate(update);
   }
 
   #withBackgroundPermission(

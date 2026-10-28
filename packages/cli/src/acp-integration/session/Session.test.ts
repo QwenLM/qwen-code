@@ -13453,7 +13453,7 @@ describe('Session', () => {
         vi.mocked(mockClient.sessionUpdate).mockResolvedValue(undefined);
       });
 
-      it('does not let a never-settling client write wedge later publications', async () => {
+      it('does not hold the build latch while a client write is pending', async () => {
         getAvailableCommandsSpy
           .mockResolvedValueOnce([makeCommand('first')])
           .mockResolvedValue([makeCommand('second')]);
@@ -13476,7 +13476,45 @@ describe('Session', () => {
         });
       });
 
-      it('resolves a caller that joins a build even when the first write never settles', async () => {
+      it('resolves a caller that joins a build without waiting for the client write', async () => {
+        let releaseBuild!: () => void;
+        const buildGate = new Promise<void>((resolve) => {
+          releaseBuild = resolve;
+        });
+        getAvailableCommandsSpy
+          .mockImplementationOnce(async () => {
+            await buildGate;
+            return [makeCommand('first')];
+          })
+          .mockResolvedValue([makeCommand('second')]);
+        vi.mocked(mockClient.sessionUpdate)
+          .mockReset()
+          .mockImplementationOnce(() => new Promise(() => undefined))
+          .mockResolvedValue(undefined);
+
+        void session.sendAvailableCommandsUpdate();
+        await vi.waitFor(() =>
+          expect(getAvailableCommandsSpy).toHaveBeenCalledTimes(1),
+        );
+        let joinedSettled = false;
+        const joined = session.sendAvailableCommandsUpdate().then(() => {
+          joinedSettled = true;
+        });
+        await flush();
+        expect(joinedSettled).toBe(false);
+        releaseBuild();
+
+        const outcome = await Promise.race([
+          joined.then(() => 'resolved'),
+          new Promise<string>((resolve) =>
+            setTimeout(() => resolve('blocked'), 200),
+          ),
+        ]);
+        expect(outcome).toBe('resolved');
+        await vi.waitFor(() => expect(frames()).toHaveLength(2));
+      });
+
+      it('keeps the build latch scoped to the build for a joined caller', async () => {
         let releaseBuild!: () => void;
         const buildGate = new Promise<void>((resolve) => {
           releaseBuild = resolve;
@@ -13555,6 +13593,25 @@ describe('Session', () => {
             .join(),
         );
         expect(names).toEqual(['A', 'B', 'A']);
+      });
+
+      it('rejects a caller that joins a build that fails', async () => {
+        let rejectBuild!: (error: Error) => void;
+        const buildGate = new Promise<never>((_resolve, reject) => {
+          rejectBuild = reject;
+        });
+        getAvailableCommandsSpy.mockImplementationOnce(() => buildGate);
+
+        void session.sendAvailableCommandsUpdate();
+        await vi.waitFor(() =>
+          expect(getAvailableCommandsSpy).toHaveBeenCalledTimes(1),
+        );
+        const joined = session.refreshSkillsFromSettings({
+          reloadSettings: false,
+          notifyConfigChanged: false,
+        });
+        rejectBuild(new Error('discovery failed'));
+        await expect(joined).rejects.toThrow('discovery failed');
       });
 
       it('emits nothing for a publish in flight when the session is disposed', async () => {
