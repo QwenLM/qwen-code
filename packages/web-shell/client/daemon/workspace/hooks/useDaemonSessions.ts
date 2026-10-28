@@ -89,8 +89,11 @@ export function useDaemonSessions(options: DaemonSessionsOptions = {}) {
     [workspace.actions],
   );
   const archiveSession = useCallback(
-    async (sessionId: string) => {
-      const archived = await workspace.actions.archiveSession(sessionId);
+    async (sessionId: string, options?: { requireIdle?: boolean }) => {
+      const archived = await workspace.actions.archiveSession(
+        sessionId,
+        options,
+      );
       if (archived) reload();
       return archived;
     },

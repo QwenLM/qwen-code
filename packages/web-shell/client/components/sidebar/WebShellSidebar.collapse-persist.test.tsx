@@ -2674,7 +2674,9 @@ describe('Recent sessions shared rows', () => {
     ).toBeTruthy();
     click(row.querySelector<HTMLButtonElement>('[aria-label="Archive"]')!);
     await flushSidebar();
-    expect(active.archiveSession).toHaveBeenCalledWith('session-a');
+    expect(active.archiveSession).toHaveBeenCalledWith('session-a', {
+      requireIdle: true,
+    });
     workspaceActions.updateSessionOrganization.mockImplementationOnce(
       async () => {
         workspace.client.listWorkspaceSessionsPage.mockResolvedValue({

@@ -350,7 +350,9 @@ describe('WebShellSidebar current-session archive (issue #15480)', () => {
       click(archiveItem);
     });
 
-    expect(active.archiveSession).toHaveBeenCalledWith('session-current');
+    expect(active.archiveSession).toHaveBeenCalledWith('session-current', {
+      requireIdle: true,
+    });
     // The row is the attached one, so the sidebar reports the id it captured
     // before the request: the daemon's terminal `session_closed` frame clears
     // the attachment before the archive resolves (#15480).
@@ -398,21 +400,18 @@ describe('WebShellSidebar current-session archive (issue #15480)', () => {
       click(archiveItem);
     });
 
-    expect(active.archiveSession).toHaveBeenCalledWith('session-other');
+    expect(active.archiveSession).toHaveBeenCalledWith('session-other', {
+      requireIdle: true,
+    });
     // Only the attached session routes the post-archive landing (#15480).
     expect(onSessionsDeleted).not.toHaveBeenCalled();
   });
 
-  it('archives the idle current standalone session from the recent row', async () => {
+  it('keeps archive disabled for the attached standalone session', async () => {
     connection.sessionId = 'session-current';
     connection.sessionContext = { kind: 'standalone' };
     workspace.client.listStandaloneSessionsPage.mockResolvedValue({
       sessions: [makeSession('session-current', { displayName: 'Standalone' })],
-    });
-    workspace.client.archiveStandaloneSessions.mockResolvedValue({
-      archived: ['session-current'],
-      alreadyArchived: [],
-      errors: [],
     });
     const onSessionsDeleted = vi.fn();
 
@@ -424,21 +423,20 @@ describe('WebShellSidebar current-session archive (issue #15480)', () => {
       'button[aria-label="Archive"]',
     );
     expect(archiveButton).not.toBeNull();
-    expect(archiveButton!.disabled).toBe(false);
+    // A standalone archive closes the bridge session with
+    // `requireZeroAttaches`, and the daemon refuses that while this tab is
+    // attached, so the button stays off for the session being viewed.
+    expect(archiveButton!.disabled).toBe(true);
 
     await act(async () => {
       archiveButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
 
-    expect(workspace.client.archiveStandaloneSessions).toHaveBeenCalledWith([
-      'session-current',
-    ]);
-    expect(onSessionsDeleted).toHaveBeenCalledWith(['session-current'], {
-      attachedSessionId: 'session-current',
-    });
+    expect(workspace.client.archiveStandaloneSessions).not.toHaveBeenCalled();
+    expect(onSessionsDeleted).not.toHaveBeenCalled();
   });
 
-  it('archives a non-current standalone recent row without routing the landing', async () => {
+  it('archives a non-current standalone recent row', async () => {
     connection.sessionId = 'session-current';
     connection.sessionContext = { kind: 'standalone' };
     workspace.client.listStandaloneSessionsPage.mockResolvedValue({

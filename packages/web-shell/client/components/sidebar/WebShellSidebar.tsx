@@ -431,6 +431,22 @@ type SessionWorkspaceScope =
   | { kind: 'untrusted'; cwd: string; workspace: DaemonWorkspaceCapability }
   | { kind: 'unknown'; cwd: string };
 
+/**
+ * An archive sent with `requireIdle` is refused with `session_busy` when the
+ * session started or resumed work after the client's last poll. That refusal
+ * is the guarantee working as intended, so it gets a real message instead of
+ * the raw daemon code.
+ */
+function sessionBusyMessage(
+  error: unknown,
+  t: (key: 'sidebar.archiveBusy') => string,
+): Error {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes('session_busy')
+    ? new Error(t('sidebar.archiveBusy'))
+    : new Error(message);
+}
+
 export interface WebShellSidebarWorkspaceOverviewOptions {
   /**
    * Facet chips under an expanded workspace row. Defaults to every facet
@@ -2458,9 +2474,10 @@ export function WebShellSidebar({
   );
   const canArchiveSession = useCallback(
     (session: DaemonSessionSummary) =>
-      // The current session is archivable too (issue #15480): the idle guards
-      // match the Session Overview's idle-only policy, and the daemon closes
-      // the idle session before archiving it.
+      // The current session is archivable too (issue #15480). These idle
+      // fields come from a polled catalog, so they only keep the button
+      // honest between polls; the archive request asks the daemon for the
+      // guarantee itself with `requireIdle`.
       session.sourceType !== 'qwen-live' &&
       sessionActionItems.has('archive') &&
       !session.hasActivePrompt &&
@@ -4032,13 +4049,13 @@ export function WebShellSidebar({
       const sessionId = session.sessionId;
       const sessionIdentity = getIdentityForSession(session);
       // Mirrors the delete guard (issue #12619): an idle current session is
-      // archivable too, and the daemon closes that idle session before
-      // archiving it. The attachment is captured before the request because
-      // the daemon's terminal `session_closed` frame clears
+      // archivable too, but the client-side idle fields above are a polled
+      // snapshot. The request therefore asks the daemon for the guarantee
+      // itself (`requireIdle`), so a session that starts or resumes work
+      // between two polls is refused with `session_busy` instead of being
+      // closed under it. The attachment is captured before the request
+      // because the daemon's terminal `session_closed` frame clears
       // `connection.sessionId` before the archive resolves (issue #15480).
-      // Only the attached session routes the post-archive landing, matching
-      // the Session Overview's current-card handling; a same-id row from
-      // another workspace must not detach the live session.
       if (!canArchiveSession(session)) return;
       if (busySessionIdsRef.current.has(sessionIdentity)) return;
       const attachedSessionId = isCurrentSession(session)
@@ -4051,17 +4068,20 @@ export function WebShellSidebar({
           if (scope.kind === 'locked' || scope.kind === 'restricted') {
             const result = await workspace.client
               .workspaceByCwd(scope.cwd)
-              .archiveSessionsData([sessionId]);
+              .archiveSessionsData([sessionId], { requireIdle: true });
             const itemError = result.errors.find(
               (entry) => entry.sessionId === sessionId,
             );
             if (itemError) {
-              onError(new Error(itemError.error), t('sidebar.archiveFailed'));
+              onError(
+                sessionBusyMessage(itemError.error, t),
+                t('sidebar.archiveFailed'),
+              );
             } else if (attachedSessionId !== undefined) {
               onSessionsDeleted?.([sessionId], { attachedSessionId });
             }
           } else if (scope.kind === 'primary') {
-            await archiveSession(sessionId);
+            await archiveSession(sessionId, { requireIdle: true });
             if (attachedSessionId !== undefined) {
               onSessionsDeleted?.([sessionId], { attachedSessionId });
             }
@@ -4069,7 +4089,7 @@ export function WebShellSidebar({
             return;
           }
         } catch (err) {
-          onError(err, t('sidebar.archiveFailed'));
+          onError(sessionBusyMessage(err, t), t('sidebar.archiveFailed'));
         } finally {
           bumpWorkspaceReload();
           const workspaceCwd = session.workspaceCwd ?? primaryWorkspaceCwd;
@@ -5416,11 +5436,22 @@ export function WebShellSidebar({
                             )}
                             {showArchive && (
                               <DropdownMenuItem
-                                disabled={busy || running}
+                                // A standalone archive closes the bridge
+                                // session with requireZeroAttaches, so the
+                                // session this tab is attached to can never
+                                // be archived from here (see
+                                // closeLiveStandaloneIfPresent in the daemon).
+                                disabled={
+                                  busy ||
+                                  running ||
+                                  Boolean(standalone && isCurrent)
+                                }
                                 title={
-                                  running
-                                    ? t('sidebar.archiveRunningDisabled')
-                                    : undefined
+                                  standalone && isCurrent
+                                    ? t('sidebar.archiveCurrentDisabled')
+                                    : running
+                                      ? t('sidebar.archiveRunningDisabled')
+                                      : undefined
                                 }
                                 onSelect={() => {
                                   if (standalone) standalone.onArchive?.();
@@ -5707,15 +5738,15 @@ export function WebShellSidebar({
   }, []);
   const handleArchiveRecentStandalone = useCallback(
     (session: DaemonSessionSummary) => {
-      // The current idle standalone session is archivable too (issue #15480);
-      // the daemon closes the session as part of archiving, so the attachment
-      // must be captured before the request routes the post-archive landing.
-      const attachedSessionId =
-        session.sessionId === connection.sessionId
-          ? session.sessionId
-          : undefined;
+      // The session this tab is attached to stays off-limits: a standalone
+      // archive closes the bridge session with `requireZeroAttaches`, and
+      // `closeLiveStandaloneIfPresent` in the daemon refuses with
+      // `session_busy` while any client is attached — so the request could
+      // never succeed here. Unlike the workspace path there is no `requireIdle`
+      // arm that tolerates an attached-but-idle session.
       if (
         !sessionActionItems.has('archive') ||
+        session.sessionId === connection.sessionId ||
         session.hasActivePrompt ||
         session.activeWorkState === 'active' ||
         busySessionIdsRef.current.has(getIdentityForSession(session))
@@ -5739,9 +5770,6 @@ export function WebShellSidebar({
             );
           }
           handleStandaloneMutation();
-          if (attachedSessionId !== undefined) {
-            onSessionsDeleted?.([session.sessionId], { attachedSessionId });
-          }
         } catch (error) {
           onError(error, t('sidebar.archiveFailed'));
         } finally {
@@ -5754,7 +5782,6 @@ export function WebShellSidebar({
       getIdentityForSession,
       handleStandaloneMutation,
       onError,
-      onSessionsDeleted,
       setSessionBusy,
       sessionActionItems,
       t,
@@ -7268,7 +7295,6 @@ export function WebShellSidebar({
                               )
                             }
                             onMutated={handleStandaloneMutation}
-                            onSessionsDeleted={onSessionsDeleted}
                             onError={onError}
                             onNotice={onStandaloneNotice}
                           />
@@ -7732,6 +7758,7 @@ export function WebShellSidebar({
                       const archiveDisabled =
                         busy ||
                         running ||
+                        (isStandalone && isCurrent) ||
                         !sessionActionItems.has('archive') ||
                         (!isStandalone && !canArchiveSession(session));
                       return renderSessionRow(session, {
@@ -7784,9 +7811,11 @@ export function WebShellSidebar({
                                 className={styles.sessionActionButton}
                                 aria-label={t('sidebar.archive')}
                                 title={
-                                  running
-                                    ? t('sidebar.archiveRunningDisabled')
-                                    : t('sidebar.archive')
+                                  isStandalone && isCurrent
+                                    ? t('sidebar.archiveCurrentDisabled')
+                                    : running
+                                      ? t('sidebar.archiveRunningDisabled')
+                                      : t('sidebar.archive')
                                 }
                                 disabled={archiveDisabled}
                                 onClick={() =>

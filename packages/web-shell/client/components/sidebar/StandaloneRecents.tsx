@@ -55,16 +55,6 @@ interface StandaloneRecentsProps {
   ) => Promise<void> | void;
   onRenameSession?: (sessionId: string, displayName: string) => void;
   onMutated?: () => void;
-  /**
-   * Fired after an archive of the attached session succeeds, so the client
-   * can land elsewhere (#15480). `attachedSessionId` is the session this
-   * client was attached to when the archive started — the daemon closes it
-   * as part of archiving, so the attachment is gone by the time this runs.
-   */
-  onSessionsDeleted?: (
-    sessionIds: string[],
-    meta?: { attachedSessionId?: string },
-  ) => void;
   onStatusChange?: (status: {
     count: number;
     loading: boolean;
@@ -127,7 +117,6 @@ export function StandaloneRecents({
   onLoadSession,
   onRenameSession,
   onMutated,
-  onSessionsDeleted,
   onStatusChange,
   onError,
   onNotice,
@@ -337,11 +326,6 @@ export function StandaloneRecents({
 
   const archiveSession = useCallback(
     async (session: DaemonStandaloneSessionSummary) => {
-      // The current idle standalone session is archivable too (issue #15480).
-      // The daemon closes it as part of archiving, so capture the attachment
-      // before the request to route the post-archive landing.
-      const attachedSessionId =
-        session.sessionId === currentSessionId ? session.sessionId : undefined;
       await run(session.sessionId, async () => {
         const result = await workspace.client.archiveStandaloneSessions([
           session.sessionId,
@@ -352,11 +336,6 @@ export function StandaloneRecents({
           result.notFound?.includes(session.sessionId)
         ) {
           removeMutated(session.sessionId);
-          // Only the attached session routes the post-archive landing,
-          // matching the Session Overview's current-card handling.
-          if (attachedSessionId !== undefined) {
-            onSessionsDeleted?.([session.sessionId], { attachedSessionId });
-          }
           return;
         }
         const failure = result.errors.find(
@@ -368,14 +347,7 @@ export function StandaloneRecents({
         );
       });
     },
-    [
-      currentSessionId,
-      onSessionsDeleted,
-      removeMutated,
-      run,
-      t,
-      workspace.client,
-    ],
+    [removeMutated, run, t, workspace.client],
   );
 
   const unarchiveSession = useCallback(

@@ -1165,7 +1165,9 @@ describe('WebShellSidebar workspace removal', () => {
     await act(async () => {
       await secondaryArchive.mock.results.at(-1)?.value;
     });
-    expect(secondaryArchive).toHaveBeenCalledWith(['other-secondary']);
+    expect(secondaryArchive).toHaveBeenCalledWith(['other-secondary'], {
+      requireIdle: true,
+    });
     expect(primaryArchive).not.toHaveBeenCalled();
   }, 15000);
 
@@ -1499,7 +1501,9 @@ describe('WebShellSidebar workspace removal', () => {
     await act(async () => {
       await secondaryArchive.mock.results.at(-1)?.value;
     });
-    expect(secondaryArchive).toHaveBeenCalledWith(['locked-archive']);
+    expect(secondaryArchive).toHaveBeenCalledWith(['locked-archive'], {
+      requireIdle: true,
+    });
     expect(refreshWorkspaceSessionCatalog).toHaveBeenLastCalledWith(
       '/tmp/other',
     );
@@ -4136,7 +4140,9 @@ describe('WebShellSidebar non-primary archive', () => {
     });
 
     expect(workspace.client.workspaceByCwd).toHaveBeenCalledWith('/tmp/other');
-    expect(archiveSessionsData).toHaveBeenCalledWith(['secondary-active']);
+    expect(archiveSessionsData).toHaveBeenCalledWith(['secondary-active'], {
+      requireIdle: true,
+    });
     expect(active.reload).not.toHaveBeenCalled();
     expect(archived.reload).not.toHaveBeenCalled();
     expect(
@@ -4557,7 +4563,9 @@ describe('WebShellSidebar non-primary archive', () => {
       await Promise.resolve();
     });
 
-    expect(archiveSessionsData).toHaveBeenCalledWith(['shared-session']);
+    expect(archiveSessionsData).toHaveBeenCalledWith(['shared-session'], {
+      requireIdle: true,
+    });
     expect(onError).not.toHaveBeenCalled();
     expect(active.reload).not.toHaveBeenCalled();
     expect(archived.reload).not.toHaveBeenCalled();

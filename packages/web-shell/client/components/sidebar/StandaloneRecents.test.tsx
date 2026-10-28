@@ -128,10 +128,6 @@ describe('StandaloneRecents', () => {
       onLoadSession?: (sessionId: string) => Promise<void> | void;
       onNewSession?: () => void;
       onMutated?: () => void;
-      onSessionsDeleted?: (
-        sessionIds: string[],
-        meta?: { attachedSessionId?: string },
-      ) => void;
     } = {},
   ) {
     const onError = options.onError ?? vi.fn();
@@ -177,7 +173,6 @@ describe('StandaloneRecents', () => {
           onError={onError}
           onRenameSession={onRenameSession}
           onMutated={onMutated}
-          onSessionsDeleted={options.onSessionsDeleted}
           onNotice={vi.fn()}
         />,
       );
@@ -473,52 +468,6 @@ describe('StandaloneRecents', () => {
     expect(container.textContent).not.toContain('Active chat');
     expect(onMutated).toHaveBeenCalledOnce();
     expect(onError).not.toHaveBeenCalled();
-  });
-
-  it('reports the attached session when archiving the current standalone chat', async () => {
-    mocks.archive.mockResolvedValue({
-      archived: ['active'],
-      alreadyArchived: [],
-      errors: [],
-    });
-    const onSessionsDeleted = vi.fn();
-    const { onMutated } = await render({
-      currentSessionId: 'active',
-      onSessionsDeleted,
-    });
-    const archiveButton = Array.from(container.querySelectorAll('button')).find(
-      (button) => button.textContent?.includes('sidebar.archive'),
-    );
-
-    await act(async () => archiveButton?.click());
-
-    expect(mocks.archive).toHaveBeenCalledWith(['active']);
-    // The row is the attached one: the daemon closes the session as part of
-    // archiving, so the id is captured before the request (#15480).
-    expect(onSessionsDeleted).toHaveBeenCalledWith(['active'], {
-      attachedSessionId: 'active',
-    });
-    expect(onMutated).toHaveBeenCalledOnce();
-    expect(container.textContent).not.toContain('Active chat');
-  });
-
-  it('archives a non-current standalone chat without routing the landing', async () => {
-    mocks.archive.mockResolvedValue({
-      archived: ['active'],
-      alreadyArchived: [],
-      errors: [],
-    });
-    const onSessionsDeleted = vi.fn();
-    await render({ currentSessionId: 'another', onSessionsDeleted });
-    const archiveButton = Array.from(container.querySelectorAll('button')).find(
-      (button) => button.textContent?.includes('sidebar.archive'),
-    );
-
-    await act(async () => archiveButton?.click());
-
-    expect(mocks.archive).toHaveBeenCalledWith(['active']);
-    // Only the attached session routes the post-archive landing (#15480).
-    expect(onSessionsDeleted).not.toHaveBeenCalled();
   });
 
   it('treats an already active row as a completed restore', async () => {
