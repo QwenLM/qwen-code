@@ -266,7 +266,7 @@ describe('CodeModeOnly exposure', () => {
     )?.description;
     expect(readFileDescription).toContain('Reads a file from the filesystem.');
     expect(readFileDescription).toContain(
-      'read_file(args: { "path": string })',
+      'declare const tools: { read_file(args: { "path": string }): Promise<CodeModeToolResult>; };',
     );
     expect(
       declarations.find((item) => item.name === 'agent')?.description,
