@@ -768,6 +768,24 @@
             </plugin></plugins></build>
         </profile>
         <profile>
+            <id>external-public-files-e2e</id>
+            <build><plugins><plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>${maven-failsafe-plugin.version}</version>
+                <configuration>
+                    <includes><include>**/ExternalPublicFilesE2E.java</include></includes>
+                    <failIfNoTests>true</failIfNoTests>
+                    <forkedProcessTimeoutInSeconds>300</forkedProcessTimeoutInSeconds>
+                    <!-- Opt-in fresh-catalog run: extension autodetection stays
+                         off, so the truncating Hosted isolation extension and
+                         the guard's isolation check never apply. -->
+                    <systemPropertyVariables><qwen.external.public-files.it>true</qwen.external.public-files.it></systemPropertyVariables>
+                </configuration>
+                <executions><execution><goals><goal>integration-test</goal><goal>verify</goal></goals></execution></executions>
+            </plugin></plugins></build>
+        </profile>
+        <profile>
             <id>hosted-workspace-tools</id>
             <build><plugins><plugin>
                 <groupId>org.apache.maven.plugins</groupId>

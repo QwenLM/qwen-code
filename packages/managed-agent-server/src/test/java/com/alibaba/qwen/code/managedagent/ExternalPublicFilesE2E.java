@@ -56,18 +56,21 @@ import static org.awaitility.Awaitility.await;
 
 /**
  * Dedicated opt-in, fresh-MySQL public path; only allocation and OpenAI are fixtures.
- * Run exactly this class with qwen.external.public-files.it=true, explicit mysql.url/user,
+ * Run it with {@code mvn -Pexternal-public-files-e2e verify} and explicit mysql.url/user,
  * node.executable, qwen.cli.entry and qwen.external.public-files.tmp (private evidence parent).
+ * The class name keeps it out of the {@code Hosted*IT} family: that lane collects the
+ * whole family, disables this class, and then fails any collected class that runs no test.
  * Do NOT use hosted-harness-mysql: its automatic isolation extension truncates before tests.
- * Disable extension autodetection and isolation in the runner, validate the dedicated server
- * and absent/new issue15512_b2_public_* catalog there, then let normal Spring initialize it.
- * The condition checks effective JUnit configuration before BeforeAll; the test never truncates.
- * Retained private logs/reports may contain credentials; publish only the sanitized JSON files.
+ * The dedicated profile disables extension autodetection and isolation, validates the
+ * dedicated server and absent/new issue15512_b2_public_* catalog there, then lets normal
+ * Spring initialize it. The condition checks effective JUnit configuration before BeforeAll;
+ * the test never truncates. Retained private logs/reports may contain credentials; publish
+ * only the sanitized JSON files.
  */
 @EnabledIfSystemProperty(named = "qwen.external.public-files.it", matches = "true")
-@ExtendWith(HostedExternalPublicFilesIT.NoTruncation.class)
+@ExtendWith(ExternalPublicFilesE2E.NoTruncation.class)
 @Timeout(300)
-class HostedExternalPublicFilesIT {
+class ExternalPublicFilesE2E {
     private static final String PROFILE = "hosted-workspace-external-files/1";
     private static final String PROVIDER = "issue15512-fixture";
     private static final String WORKSPACE = "external-b2";

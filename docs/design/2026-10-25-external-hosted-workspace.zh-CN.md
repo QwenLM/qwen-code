@@ -252,7 +252,7 @@ SQL 物理 holder 跨工具完成与 Runtime member/mount 释放继续保留，�
 
 ### 已观察验收与来源
 
-remote191 上指定的[公开 files/close E2E](../../packages/managed-agent-server/src/test/java/com/alibaba/qwen/code/managedagent/HostedExternalPublicFilesIT.java)完整执行，**1 项测试、0 失败、0 错误、0 跳过**，包括最终 summary 与 cleanup。链路使用真实 Spring 公共 API、独立 MySQL 8.4.13、构建后的 Hosted Harness、external Runtime worker、文件系统与 journal；allocator 和 OpenAI 模型是本地受控夹具，**不是云 provider 或真实模型验收**。
+remote191 上指定的[公开 files/close E2E](../../packages/managed-agent-server/src/test/java/com/alibaba/qwen/code/managedagent/ExternalPublicFilesE2E.java)完整执行，**1 项测试、0 失败、0 错误、0 跳过**，包括最终 summary 与 cleanup。链路使用真实 Spring 公共 API、独立 MySQL 8.4.13、构建后的 Hosted Harness、external Runtime worker、文件系统与 journal；allocator 和 OpenAI 模型是本地受控夹具，**不是云 provider 或真实模型验收**。
 
 已观察：鉴权/幂等登记与物化、仅 owner 可发现、四个真实工具按 write → read → edit → glob 执行、两次 Action 审批、五次模型请求与一次分配、decoy 根未改动、终态公共事件、Items/工具详情及同 Session 历史资源校验。关闭达到 Session `CLOSED` / binding `RELEASED`，清除 holder runtime 字段，保留元数据/授权/历史且无 live writer。原生 drain receipt 持久化，main/legacy stop 端点一致；鉴权后的 late write 返回 `409` 且未创建文件；晚到公共输入和幂等关闭均未新增副作用或分配。原 worker 一直存活到 cleanup。
 
