@@ -248,12 +248,24 @@ test('standalone Recents keeps lifecycle actions on exact standalone routes @smo
   await expect(
     page.getByText('Renamed conversation', { exact: true }),
   ).toHaveCount(0);
-  await page.getByRole('button', { name: 'Archived', exact: true }).click();
+  await page.getByRole('button', { name: 'More', exact: true }).click();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page
+    .getByRole('navigation', { name: 'Settings' })
+    .getByRole('button', { name: 'Archived conversations', exact: true })
+    .click();
   await expect(
     page.getByText('Renamed conversation', { exact: true }),
   ).toBeVisible();
 
   await openSessionAction(page, 'Renamed conversation', 'Restore');
+  await expect(
+    page.locator('[data-web-shell-archived-sessions]'),
+  ).not.toContainText('Renamed conversation');
+  await page
+    .getByRole('region', { name: 'Settings', exact: true })
+    .getByRole('button', { name: 'back', exact: true })
+    .click();
   await expect(
     page.getByText('Renamed conversation', { exact: true }),
   ).toBeVisible();
