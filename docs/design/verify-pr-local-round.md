@@ -240,13 +240,16 @@ for is a file no round produces, and a check over an absent file is silent:
   dismissed review, measured on PR 15388 — one row for the state comparison,
   one for accepting a review list with no state, and one for the rule text that
   named the body but not the state. That pass also fixed the boundary in writing
-  so the next one does not reopen it. Five further findings were fixed without
-  a row, because none of them is a guard: a cross-reference to a report item
-  that does not exist, a return value no caller could observe, a contract that
-  asked for the matrix unconditionally while the checker treats it as optional,
-  a note that cited a dismissed review's body as unchanged when only its stamp
-  is on the record, and a rule sentence that said a fetched list missing either
-  field is refused when a comment item has no state to miss.
+  so the next one does not reopen it. A further set of findings are not guards, so they carry no row and are
+  listed rather than counted — a count over a growing set is the thing this
+  change is about. They are: a cross-reference to a report item that does not
+  exist, a return value no caller could observe, an export no module imports, a
+  contract that asked for the matrix unconditionally while the checker treats it
+  as optional, a note that cited a dismissed review's body as unchanged when only
+  its stamp is on the record, a rule sentence that said a fetched list missing
+  either field is refused when a comment item has no state to miss, a duration
+  rounded down by six minutes, and the last two corrections applied to the
+  design doc but not yet to the published comment.
 
 ## Acceptance criteria
 
