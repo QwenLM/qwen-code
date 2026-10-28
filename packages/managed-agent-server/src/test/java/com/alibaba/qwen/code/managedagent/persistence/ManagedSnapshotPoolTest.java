@@ -35,6 +35,7 @@ class ManagedSnapshotPoolTest {
                 + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1");
         source.setMaxActive(1);
         source.setMaxWait(500);
+        source.setInitialSize(1);
         source.init();
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);

@@ -187,6 +187,11 @@ describe('Hosted context compression', () => {
     const before = session.authority.committedSequence;
     await compression.admit(request);
     await compression.wait();
+    expect(vi.mocked(loadCliConfig).mock.calls[0]?.[1]).toMatchObject({
+      sessionId: session.authority.sessionHeader.sessionKey.sessionId,
+      sessionIdGenerated: true,
+      chatRecording: false,
+    });
     const result = compression.status(request.operationId)!;
     expect(result).toMatchObject({
       status: 'completed',
