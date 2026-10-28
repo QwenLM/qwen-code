@@ -94,7 +94,7 @@ export class MyChannel extends ChannelBase {
 
 Most adapters should pass `options` through unchanged. If an adapter creates its own `SessionRouter` and passes that router to `super()`, set `registerBridgeEvents: true` in `ChannelBaseOptions` so `ChannelBase` still receives `toolCall` and `sessionDied` events directly. Leave it unset for routers supplied by the channel gateway.
 
-If your adapter exposes shell-command or BTW side-question behavior, check that the corresponding `bridge.shellCommand` / `bridge.btw` method exists before enabling it. Daemon-managed workers omit those optional methods unless the daemon advertises the matching `session_shell_command` / `session_btw` capability.
+If your adapter exposes shell-command or BTW side-question behavior, check that the corresponding `bridge.shellCommand` / `bridge.btw` method exists before enabling it. Daemon-managed workers omit those optional methods unless the daemon advertises the matching `session_shell_command` / `session_btw` capability. These channel-adapter methods cover the existing JSON side-question API. Direct daemon clients that use SSE must separately check `session_btw_stream` before calling `streamSessionBtw`; the daemon advertises it only when every registered runtime ACP session bridge implements `generateSessionBtwStream`. The existing `bridge.btw` adapter contract does not imply streaming support.
 
 ## The Envelope
 

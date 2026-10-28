@@ -334,6 +334,26 @@ describe('useHistoryManager', () => {
     expect(result.current.history[2].text).toBe('Another user message');
   });
 
+  it('keeps distinct paste bodies behind identical consecutive placeholders', () => {
+    const { result } = renderHook(() => useHistory());
+    const placeholder = '[Pasted Content 1200 chars]';
+    const first = 'PASTE_ALPHA '.padEnd(1200, 'a');
+    const second = 'PASTE_BETA '.padEnd(1200, 'b');
+    act(() => {
+      for (const recallText of [first, second, second]) {
+        result.current.addItem(
+          { type: 'user', text: placeholder, recallText },
+          Date.now(),
+        );
+      }
+    });
+    expect(result.current.history).toHaveLength(2);
+    expect(result.current.history).toEqual([
+      expect.objectContaining({ text: placeholder, recallText: first }),
+      expect.objectContaining({ text: placeholder, recallText: second }),
+    ]);
+  });
+
   it('should add duplicate user messages if they are not consecutive', () => {
     const { result } = renderHook(() => useHistory());
     const timestamp = Date.now();
