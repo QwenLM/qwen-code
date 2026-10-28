@@ -3960,9 +3960,11 @@ describe('qwen-autofix workflow', () => {
     expect(released.fleet).toContain('budget-spent|');
     expect(released.fleet).toContain('released');
     // The release is the URI-encoded REST DELETE every other site uses, and
-    // the escalation label is never part of it.
+    // it never APPLIES the escalation label — a deferred release deletes the
+    // one its own pause applied, which is the opposite write.
     expect(released.writes).toContain('labels/autofix%2Ftakeover');
-    expect(released.writes).not.toContain('needs-human');
+    expect(released.writes).not.toContain('labels[]=autofix/needs-human');
+    expect(released.writes).toContain('labels/autofix%2Fneeds-human');
     // The note precedes the DELETE, so a failed removal retries next tick
     // with the note already dedup'd.
     expect(released.writes.indexOf('autofix-budget-reached')).toBeLessThan(
@@ -4012,6 +4014,8 @@ describe('qwen-autofix workflow', () => {
     expect(failedDelete.log).toContain('after budget failed');
     expect(failedDelete.fleet).not.toContain('released');
     expect(failedDelete.log).not.toContain('FELLTHROUGH');
+    // The PR is still managed, so its escalation (if any) stays too.
+    expect(failedDelete.writes).not.toContain('labels/autofix%2Fneeds-human');
 
     // Fail-closed and consent gates: none of these write anything.
     for (const variant of [
@@ -4058,13 +4062,23 @@ describe('qwen-autofix workflow', () => {
       halted = 'false',
       forcedPr = '',
       eventName = 'schedule',
+      spent = 'true',
+      round = '0',
+      used = '3',
+      nhPresent = false,
+      nhDeleteFails = '',
     } = {}) => {
       const dir = mkdtempSync(join(tmpdir(), 'autofix-budget-boundary-'));
       try {
         writeFileSync(join(dir, 'ic.json'), '[]');
         writeFileSync(
           join(dir, 'labels.json'),
-          '{"labels":[{"name":"autofix/takeover"}]}',
+          JSON.stringify({
+            labels: [
+              { name: 'autofix/takeover' },
+              ...(nhPresent ? [{ name: 'autofix/needs-human' }] : []),
+            ],
+          }),
         );
         writeFileSync(
           join(dir, 'gh'),
@@ -4075,6 +4089,7 @@ describe('qwen-autofix workflow', () => {
               '; exit 0; fi',
             'if [[ "$1" == "api" && "$2" == "user" ]]; then printf "%s" "$STUB_ACTOR"; exit 0; fi',
             'echo "WRITE $*" >> ' + join(dir, 'writes.log'),
+            'if [[ -n "${STUB_NH_FAIL:-}" && "$*" == *"labels/autofix%2Fneeds-human"* ]]; then echo "${STUB_NH_FAIL}" >&2; exit 1; fi',
             'if [[ -n "${STUB_WRITE_FAIL:-}" && "$*" == *"labels/"* ]]; then echo "HTTP 502" >&2; exit 1; fi',
             'exit 0',
           ].join('\n'),
@@ -4101,18 +4116,22 @@ describe('qwen-autofix workflow', () => {
               AUTOFIX_BOT: 'qwen-code-dev-bot',
               REARM_KEY: 'K1',
               ROUND_BUDGET: '3',
-              ROUND: '0',
+              ROUND: round,
               EFF_MAX_ROUNDS: '3',
-              BUDGET_USED: '3',
+              BUDGET_USED: used,
               BUDGET_HALTED: halted,
               FORCED_PR: forcedPr,
               EVENT_NAME: eventName,
               TIMEOUT_WINDOW_CAP: '3',
-              BUDGET_SPENT: 'true',
+              BUDGET_SPENT: spent,
               DRY_RUN: 'false',
               IS_BOT_AUTHOR: botAuthor,
               DISPATCH_SOURCE: 'scan',
               STUB_ACTOR: 'qwen-code-dev-bot',
+              STUB_NH_FAIL: nhDeleteFails,
+              HAS_TAKEOVER: 'true',
+              TAKEOVER_COMMAND: '@qwen-code /takeover',
+              RETRY_COMMAND: '@qwen-code /retry',
             },
             encoding: 'utf8',
           },
@@ -4149,6 +4168,25 @@ describe('qwen-autofix workflow', () => {
       eventName: 'workflow_dispatch',
     });
     expect(forced.writes).not.toContain('autofix%2Ftakeover');
+    // The deferred release pauses FIRST, so the notices a maintainer reads
+    // must quote the attempts the budget counts (3/3) — ROUND is still 0
+    // here, and '0/3' would name a cap this PR never reached.
+    expect(forced.writes).toContain('(3/3)');
+    expect(forced.writes).not.toContain('(0/3)');
+    expect(forced.writes).toContain('labels[]=autofix/needs-human');
+    // An ordinary cap keeps quoting ROUND: the substitution is budget-only.
+    // The attempt count differs here, so always quoting it would show (1/3).
+    const capped = runBoundary({
+      botAuthor: 'false',
+      spent: 'false',
+      round: '3',
+      used: '1',
+      forcedPr: '7165',
+      eventName: 'workflow_dispatch',
+    });
+    expect(capped.writes).toContain('(3/3)');
+    expect(capped.writes).not.toContain('(1/3)');
+    expect(capped.writes).not.toContain('labels/autofix%2Fneeds-human');
 
     // …and the same dispatch identity on a passive event still releases.
     const targeted = runBoundary({
@@ -4157,6 +4195,31 @@ describe('qwen-autofix workflow', () => {
       eventName: 'pull_request',
     });
     expect(targeted.writes).toContain('labels/autofix%2Ftakeover');
+
+    // The release that follows a deferred pause clears the escalation the
+    // pause applied: the note says nothing is waiting on a human, so the
+    // label must not survive it. 404 (never paused) is the common case.
+    const deferred = runBoundary({ botAuthor: 'false', nhPresent: true });
+    expect(deferred.writes).toContain(
+      'DELETE repos/QwenLM/qwen-code/issues/7165/labels/autofix%2Fneeds-human',
+    );
+    expect(deferred.fleet).toContain('released');
+    const neverPaused = runBoundary({
+      botAuthor: 'false',
+      nhPresent: true,
+      nhDeleteFails: 'HTTP 404: Not Found',
+    });
+    expect(neverPaused.fleet).toContain('released');
+    expect(neverPaused.log).not.toContain('removal failed after budget');
+    // A real failure warns but still releases — the takeover DELETE already
+    // landed, and holding the PR managed over a stale label would be worse.
+    const nhDown = runBoundary({
+      botAuthor: 'false',
+      nhPresent: true,
+      nhDeleteFails: 'HTTP 502: bad gateway',
+    });
+    expect(nhDown.fleet).toContain('released');
+    expect(nhDown.log).toContain('removal failed after budget');
   });
 
   it('counts no-op attempts for a for-N budget and keeps breaker stops escalated', () => {
@@ -4795,14 +4858,15 @@ describe('qwen-autofix workflow', () => {
       'DRY-RUN: would post cap-paused notice and apply ${NEEDS_HUMAN_LABEL}',
     );
     // Removal at every resume/release point — the URI-encoded REST DELETE
-    // with 404 tolerance, same shape as the TAKEOVER_LABEL removal. Six
+    // with 404 tolerance, same shape as the TAKEOVER_LABEL removal. Seven
     // sites: takeover-command re-arm, fresh engage, and stop; the ack
-    // job's engage/release; the /retry marker; the scan's first-pickup ack.
+    // job's engage/release; the /retry marker; the scan's first-pickup ack;
+    // and the scan's budget release (a deferred release paused first).
     const removals =
       workflow.match(
         /gh api -X DELETE "repos\/\$\{REPO\}\/issues\/\$\{PR\}\/labels\/\$\(jq -rn --arg l "\$\{NEEDS_HUMAN_LABEL\}"/g,
       ) ?? [];
-    expect(removals).toHaveLength(6);
+    expect(removals).toHaveLength(7);
     // R9-16: the escalation POST rides the cap detection exactly ONCE — a
     // duplicate outside the gate would re-add the label on every cap
     // detection of a released human PR (the R3-1/R4-1 ping-pong with the
@@ -4825,7 +4889,7 @@ describe('qwen-autofix workflow', () => {
     // Every removal tolerates the common 404 (never-paused PR).
     expect(
       workflow.match(/\$\{NEEDS_HUMAN_LABEL\} removal failed/g)?.length,
-    ).toBe(6);
+    ).toBe(7);
     // The ack job removes on a real engage or any release — but NOT on
     // base-refused (nothing changed), NOT on skip-blocked (management never
     // resumed), and NOT on a release onto a skip-frozen PR (nothing manages

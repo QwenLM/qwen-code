@@ -2919,7 +2919,7 @@ jobs:
                   echo "🧪 DRY-RUN: would release ${TAKEOVER_LABEL} on #${PR} after its ${ROUND_BUDGET}-round budget"
                   continue
                 fi
-                  LIVE_LABELS_JSON="$(gh pr view "${PR}" --repo "${REPO}" --json labels 2> /dev/null || echo '')"
+                LIVE_LABELS_JSON="$(gh pr view "${PR}" --repo "${REPO}" --json labels 2> /dev/null || echo '')"
                 LIVE_LABELS="$(jq -r '[.labels[]?.name] | join(" ")' <<< "${LIVE_LABELS_JSON}" 2> /dev/null || echo '')"
                 if [[ -z "${SCAN_BOT_ACTOR:-}" ]]; then
                   SCAN_BOT_ACTOR="$(gh api user --jq '.login' 2> /dev/null || echo 'unknown')"
@@ -2940,6 +2940,10 @@ jobs:
                     [[ "${BUDGET_DEL_ERR}" == *"HTTP 404"* ]] || echo "::warning::${TAKEOVER_LABEL} removal after budget failed for #${PR} — ${BUDGET_DEL_ERR}"
                   else
                     echo "🏷️ released ${TAKEOVER_LABEL} from #${PR} after a ${ROUND_BUDGET}-round budget"
+                    # A deferred release paused first: clear that escalation.
+                    if ! NH_ERR="$(gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${NEEDS_HUMAN_LABEL}" '$l|@uri')" 2>&1)"; then
+                      [[ "${NH_ERR}" == *"HTTP 404"* ]] || echo "::warning::#${PR}: ${NEEDS_HUMAN_LABEL} removal failed after budget — ${NH_ERR}"
+                    fi
                     fleet_row "${PR}" 'budget-spent' "budget ${BUDGET_USED}/${ROUND_BUDGET} spent - released"
                   fi
                 fi
@@ -2952,6 +2956,10 @@ jobs:
                 echo "🚧 #${PR}: hit the round cap (${ROUND}/${EFF_MAX_ROUNDS}) — leaving for a human"
                 fleet_row "${PR}" 'round-capped' "round ${ROUND}/${EFF_MAX_ROUNDS} - needs a human or @qwen-code /retry"
               fi
+              # A spent budget arrives with ROUND below the cap (no-ops never
+              # advance it), so the notices quote the attempts instead.
+              CAP_ROUND="${ROUND}"
+              [[ "${BUDGET_SPENT}" == 'true' ]] && CAP_ROUND="${BUDGET_USED}"
               # A FORCED dispatch refused here answers OUT LOUD. Observed on
               # #7836: the fleet shepherd detected a merge conflict, posted
               # Full rationale → qwen-autofix.md#af-031
@@ -2978,7 +2986,7 @@ jobs:
                   fi
                   if [[ "${SCAN_BOT_ACTOR}" != "${AUTOFIX_BOT}" ]]; then
                     echo "::warning::cap-refused notice skipped: PAT authenticates as '${SCAN_BOT_ACTOR}', expected ${AUTOFIX_BOT}"
-                  elif ! gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '⏸️ Dispatch refused: this PR has exhausted its automatic round cap (%s/%s), so the loop will not touch it — whatever triggered this dispatch (a merge conflict, new feedback) stays unhandled. Comment `%s` to re-arm a fresh window, or `%s` for the raised takeover cap; the next scheduled scan then picks it up.\n\n<details>\n<summary>中文说明</summary>\n\n⏸️ 已拒绝本次调度：本 PR 的自动轮次上限已用完（%s/%s），循环不会介入——触发本次调度的事项（合并冲突、新反馈）仍未处理。评论 `%s` 可重置计数窗口，或 `%s` 获得更高的接管上限；随后下一次定时扫描会接手。\n\n</details>\n\n<!-- takeover-cap-refused -->' "${ROUND}" "${EFF_MAX_ROUNDS}" "${RETRY_COMMAND}" "${TAKEOVER_COMMAND}" "${ROUND}" "${EFF_MAX_ROUNDS}" "${RETRY_COMMAND}" "${TAKEOVER_COMMAND}")"; then
+                  elif ! gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '⏸️ Dispatch refused: this PR has exhausted its automatic round cap (%s/%s), so the loop will not touch it — whatever triggered this dispatch (a merge conflict, new feedback) stays unhandled. Comment `%s` to re-arm a fresh window, or `%s` for the raised takeover cap; the next scheduled scan then picks it up.\n\n<details>\n<summary>中文说明</summary>\n\n⏸️ 已拒绝本次调度：本 PR 的自动轮次上限已用完（%s/%s），循环不会介入——触发本次调度的事项（合并冲突、新反馈）仍未处理。评论 `%s` 可重置计数窗口，或 `%s` 获得更高的接管上限；随后下一次定时扫描会接手。\n\n</details>\n\n<!-- takeover-cap-refused -->' "${CAP_ROUND}" "${EFF_MAX_ROUNDS}" "${RETRY_COMMAND}" "${TAKEOVER_COMMAND}" "${CAP_ROUND}" "${EFF_MAX_ROUNDS}" "${RETRY_COMMAND}" "${TAKEOVER_COMMAND}")"; then
                     echo "::warning::cap-refused notice failed for #${PR}"
                   fi
                 fi
@@ -3065,9 +3073,9 @@ jobs:
                   fi
                   if [[ "${CAP_NOTICED}" == "0" ]]; then
                     if [[ "${HAS_TAKEOVER}" == "true" ]]; then
-                      CAP_BODY="$(printf '⏸️ Takeover paused: this PR reached its round cap (%s/%s). Comment `%s` to re-arm a fresh window and continue management, or `%s stop` to release.\n\n<details>\n<summary>中文说明</summary>\n\n⏸️ 托管已暂停：本 PR 达到轮次上限（%s/%s）。评论 `%s` 可重新武装、开启新窗口继续托管；或评论 `%s stop` 释放。\n\n</details>\n\n<!-- takeover-cap-reached -->' "${ROUND}" "${EFF_MAX_ROUNDS}" "${TAKEOVER_COMMAND}" "${TAKEOVER_COMMAND}" "${ROUND}" "${EFF_MAX_ROUNDS}" "${TAKEOVER_COMMAND}" "${TAKEOVER_COMMAND}")"
+                      CAP_BODY="$(printf '⏸️ Takeover paused: this PR reached its round cap (%s/%s). Comment `%s` to re-arm a fresh window and continue management, or `%s stop` to release.\n\n<details>\n<summary>中文说明</summary>\n\n⏸️ 托管已暂停：本 PR 达到轮次上限（%s/%s）。评论 `%s` 可重新武装、开启新窗口继续托管；或评论 `%s stop` 释放。\n\n</details>\n\n<!-- takeover-cap-reached -->' "${CAP_ROUND}" "${EFF_MAX_ROUNDS}" "${TAKEOVER_COMMAND}" "${TAKEOVER_COMMAND}" "${CAP_ROUND}" "${EFF_MAX_ROUNDS}" "${TAKEOVER_COMMAND}" "${TAKEOVER_COMMAND}")"
                     else
-                      CAP_BODY="$(printf '⏸️ AutoFix paused: this PR reached its automatic round cap (%s/%s) and the loop will not manage it further — new feedback and base conflicts stay unhandled. Comment `%s` to re-arm a fresh window under the same cap, or `%s` to take it over with the raised cap.\n\n<details>\n<summary>中文说明</summary>\n\n⏸️ AutoFix 已暂停：本 PR 达到自动轮次上限（%s/%s），循环不再管理——新反馈与 base 冲突将无人处理。评论 `%s` 可在同一上限下重置计数窗口，或评论 `%s` 以更高上限接管。\n\n</details>\n\n<!-- takeover-cap-reached -->' "${ROUND}" "${EFF_MAX_ROUNDS}" "${RETRY_COMMAND}" "${TAKEOVER_COMMAND}" "${ROUND}" "${EFF_MAX_ROUNDS}" "${RETRY_COMMAND}" "${TAKEOVER_COMMAND}")"
+                      CAP_BODY="$(printf '⏸️ AutoFix paused: this PR reached its automatic round cap (%s/%s) and the loop will not manage it further — new feedback and base conflicts stay unhandled. Comment `%s` to re-arm a fresh window under the same cap, or `%s` to take it over with the raised cap.\n\n<details>\n<summary>中文说明</summary>\n\n⏸️ AutoFix 已暂停：本 PR 达到自动轮次上限（%s/%s），循环不再管理——新反馈与 base 冲突将无人处理。评论 `%s` 可在同一上限下重置计数窗口，或评论 `%s` 以更高上限接管。\n\n</details>\n\n<!-- takeover-cap-reached -->' "${CAP_ROUND}" "${EFF_MAX_ROUNDS}" "${RETRY_COMMAND}" "${TAKEOVER_COMMAND}" "${CAP_ROUND}" "${EFF_MAX_ROUNDS}" "${RETRY_COMMAND}" "${TAKEOVER_COMMAND}")"
                     fi
                     if ! gh pr comment "${PR}" --repo "${REPO}" --body "${CAP_BODY}"; then
                       echo "::warning::cap-paused notice failed for #${PR}; will retry next scan"
