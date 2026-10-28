@@ -37,7 +37,12 @@ import type {
 import type { CommandDisplayCategoryOrder } from '../utils/commandDisplay';
 import type { SkillInfo } from '../completions/slashCompletion';
 import { useI18n } from '../i18n';
-import type { DaemonReasoningControls } from '@qwen-code/web-shell/daemon-react-sdk';
+import type {
+  DaemonReasoningControls,
+  DaemonWorkflowMode,
+  DaemonWorkflowModeStatus,
+} from '@qwen-code/web-shell/daemon-react-sdk';
+import { WorkflowModeControl } from './WorkflowModeControl';
 import { useWebShellPortalRoot } from '../portalRoot';
 import {
   useWebShellCustomization,
@@ -160,6 +165,7 @@ const MAX_DROP_DIALOG_ROWS = 100;
 export type ComposerToolbarAction =
   | 'approvalMode'
   | 'plan'
+  | 'workflowMode'
   | 'contextUsage'
   | 'gitBranch'
   | 'model'
@@ -191,6 +197,7 @@ function collectDroppedFiles(dataTransfer: DataTransfer): File[] {
 const ACTIVE_TOOLBAR_ACTIONS = [
   'approvalMode',
   'plan',
+  'workflowMode',
   'commands',
   'contextUsage',
   'gitBranch',
@@ -302,6 +309,10 @@ interface ChatEditorProps {
   mountUnavailableModelTooltip?: WebShellUnavailableModelTooltipMount;
   onSelectMode?: (mode: string) => void;
   onSelectModel?: (model: string) => void;
+  workflowMode?: DaemonWorkflowMode;
+  workflowModeStatus?: DaemonWorkflowModeStatus;
+  workflowModePending?: boolean;
+  onWorkflowModeChange?: (requested: boolean) => void;
   reasoning?: DaemonReasoningControls;
   onSelectReasoningEffort?: (
     value: ReasoningSelection,
@@ -1596,6 +1607,10 @@ export const ChatEditor = memo(
       mountUnavailableModelTooltip,
       onSelectMode,
       onSelectModel,
+      workflowMode,
+      workflowModeStatus,
+      workflowModePending,
+      onWorkflowModeChange,
       reasoning,
       onSelectReasoningEffort,
       workspaces,
@@ -3264,6 +3279,14 @@ export const ChatEditor = memo(
                 <TooltipContent side="top">{planTooltip}</TooltipContent>
               </Tooltip>
             </TooltipProvider>
+          )}
+          {showToolbarAction('workflowMode') && (
+            <WorkflowModeControl
+              workflowMode={workflowMode}
+              workflowModeStatus={workflowModeStatus}
+              workflowModePending={workflowModePending}
+              onWorkflowModeChange={onWorkflowModeChange}
+            />
           )}
           {showModelAction && (
             <div
