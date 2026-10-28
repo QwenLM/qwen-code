@@ -2780,6 +2780,7 @@ describe('Server Config (config.ts)', () => {
             skillsDir: '/bundle/generated-ui/skills',
           },
         });
+        config.setMcpAppHostSupported(true);
         const admittedPolicy = config.getShellExecutionSandbox();
         const refreshExtensions = vi.spyOn(
           config.getExtensionManager(),
@@ -3200,12 +3201,18 @@ describe('Server Config (config.ts)', () => {
       server,
       skillsDir: '/bundle/generated-ui/skills',
     };
-    const create = (overrides: Partial<ConfigParameters> = {}) =>
-      makeConfig({
+    const create = (
+      overrides: Partial<ConfigParameters> = {},
+      mcpAppHost = true,
+    ) => {
+      const config = makeConfig({
         sandbox: undefined,
         bundledGeneratedUi: candidate,
         ...overrides,
       });
+      config.setMcpAppHostSupported(mcpAppHost);
+      return config;
+    };
     const ready = async (overrides: Partial<ConfigParameters> = {}) => {
       const config = create(overrides);
       await config.initialize();
@@ -3234,6 +3241,43 @@ describe('Server Config (config.ts)', () => {
       expect(
         config.isSkillEnabled({ name: 'generated-ui', level: 'user' }),
       ).toBe(true);
+    });
+
+    it('stays inactive for clients that do not render MCP Apps', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const config = create({}, false);
+        await config.initialize();
+        expectUnavailable(config, 'unsupported-client');
+        expect(config.getMcpServers()).not.toHaveProperty('generated-ui');
+        expect(config.getWarnings()).not.toContainEqual(
+          expect.stringContaining('Generated UI'),
+        );
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('stays inactive for channel sessions the daemon creates', async () => {
+      const config = create();
+      config.setSessionSource('channel', 'feishu-main');
+      await config.initialize();
+      expectUnavailable(config, 'unsupported-client');
+      expect(config.getMcpServers()).not.toHaveProperty('generated-ui');
+      expect(config.getWarnings()).not.toContainEqual(
+        expect.stringContaining('Generated UI'),
+      );
+    });
+
+    it('keeps a disabled setting ahead of the client check', async () => {
+      expectUnavailable(
+        await (async () => {
+          const config = create({ bundledGeneratedUi: undefined }, false);
+          await config.initialize();
+          return config;
+        })(),
+        'setting-disabled',
+      );
     });
 
     it('registers one independent binding after initialization and retains it across reloads', async () => {
@@ -3948,6 +3992,27 @@ describe('Server Config (config.ts)', () => {
     };
     const emptyResume = () =>
       ({ conversation: { messages: [] } }) as unknown as ResumedSessionData;
+
+    it('drops the extraction-cadence state of both sides of a session switch', async () => {
+      const config = await initConfig({}, LEGACY_SKIP_ALL_INIT);
+      const discard = vi.spyOn(
+        config.getMemoryManager(),
+        'discardExtractCadence',
+      );
+      const previous = config.getSessionId();
+
+      config.startNewSession('replacement-session');
+      expect(discard).toHaveBeenLastCalledWith(previous, 'replacement-session');
+
+      // Resuming the id the session already has is not a lifecycle transition,
+      // but the resumed id still must not inherit the earlier skip.
+      discard.mockClear();
+      config.startNewSession('replacement-session');
+      expect(discard).toHaveBeenCalledWith(
+        'replacement-session',
+        'replacement-session',
+      );
+    });
 
     it('clears loaded Skill state at the session boundary', async () => {
       const config = await initConfig({}, LEGACY_SKIP_ALL_INIT);
@@ -5933,9 +5998,9 @@ describe('Server Config (config.ts)', () => {
 
     it('shares a failed in-flight initialization with concurrent callers', async () => {
       const config = makeConfig();
-      vi.spyOn(internals(config), 'initializeInternal').mockRejectedValue(
-        new Error('startup discovery exploded'),
-      );
+      const initializeInternal = vi
+        .spyOn(internals(config), 'initializeInternal')
+        .mockRejectedValue(new Error('startup discovery exploded'));
 
       const [firstError, secondError] = await Promise.all([
         config.initialize().catch((error: unknown) => error),
@@ -5944,9 +6009,8 @@ describe('Server Config (config.ts)', () => {
       expect(firstError).toBeInstanceOf(Error);
       expect(secondError).toBe(firstError);
 
-      // A failed-and-settled first flight still flips `initializationSettled`,
-      // so a later call must throw rather than re-join the stale rejection.
-      await expect(config.initialize()).rejects.toThrow(ALREADY_INITIALIZED);
+      await expect(config.initialize()).rejects.toBe(firstError);
+      expect(initializeInternal).toHaveBeenCalledOnce();
     });
 
     it('should skip implicit startup discovery in bare mode', async () => {

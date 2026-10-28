@@ -25,6 +25,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -51,7 +52,7 @@ import static org.mockito.Mockito.when;
         "qwen.managed-agent.harness.enabled=false"
 })
 class ManagedApprovalChangeTest {
-    @Autowired private JdbcTemplate jdbc;
+    @Autowired private @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc;
     @Autowired private ObjectMapper json;
     @Autowired private ManagedWorkspaceRegistry registry;
     @Autowired private PlatformTransactionManager manager;
@@ -633,7 +634,7 @@ class ManagedApprovalChangeTest {
             jdbc.update("UPDATE ma_turn SET status='RECOVERY_BLOCKED' WHERE tenant_id=?", tenant);
         }
         if (shape.equals("cwd")) {
-            transaction().execute(status -> store.beginCwdChangeOperation(tenant, session, "actor", "actor-digest",
+            transaction().execute(status -> LegacyCwdOperations.seed(jdbc, store, tenant, session, "actor", "actor-digest",
                     "cwd", "digest-cwd", "sub", 1));
         }
         if (shape.equals("closed")) {

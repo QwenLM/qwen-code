@@ -208,11 +208,7 @@ export async function readManagedSessionRecords(options: {
   /** Bounds the projection to a frozen snapshot's byte length. */
   readonly maxBytes?: number;
 }): Promise<ChatRecord[]> {
-  const scan = await readManagedSessionLog(
-    options.transcriptPath,
-    options.sessionKey,
-    options.maxBytes,
-  );
+  const scan = await readManagedSessionLog(options);
   const resources = LocalManagedSessionResourceStore.create({
     runtimeBaseDir: options.runtimeBaseDir,
     sessionKey: options.sessionKey,
@@ -237,11 +233,7 @@ export async function readManagedSessionRecordsAndTitle(options: {
   records: ChatRecord[];
   titleInfo: { title?: string; source?: 'auto' | 'manual' };
 }> {
-  const scan = await readManagedSessionLog(
-    options.transcriptPath,
-    options.sessionKey,
-    options.maxBytes,
-  );
+  const scan = await readManagedSessionLog(options);
   const resources = LocalManagedSessionResourceStore.create({
     runtimeBaseDir: options.runtimeBaseDir,
     sessionKey: options.sessionKey,

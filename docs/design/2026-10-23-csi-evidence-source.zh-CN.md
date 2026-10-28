@@ -53,6 +53,8 @@ resident 运行时词表仅包含 `read_file`、`write_file`、`edit`；模型�
 
 ## 后续平台托管回收
 
+[S2/S3 回收设计](2026-10-27-resident-workspace-reclamation.zh-CN.md) 规定拟议的完成条件、原子释放与保留数据交接契约。其实现与平台验收独立于下文的历史 S1 证据跟踪。
+
 下一份设计把正常容器终止和卷清理交给受支持的 ACK/Kubernetes 生命周期机制，完整 CSI RPC 历史不再是必选实现方式。在实现释放前，设计必须明确：
 
 1. 原 Workspace、runtime generation、Pod/node、注册卷和当前 reservation 的精确资格与不可变身份关联。

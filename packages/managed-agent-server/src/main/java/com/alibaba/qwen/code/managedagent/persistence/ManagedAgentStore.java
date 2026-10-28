@@ -67,6 +67,7 @@ import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.http.HttpStatus;
@@ -96,6 +97,7 @@ import java.util.UUID;
 import java.util.regex.Pattern;
 
 @Repository
+@Qualifier("managedAgentTransactionManager")
 public class ManagedAgentStore implements AgentStateStore {
     private static final Logger LOG = LoggerFactory.getLogger(
             ManagedAgentStore.class);
@@ -325,8 +327,8 @@ public class ManagedAgentStore implements AgentStateStore {
                     result.getString("session_id"),
                     result.getString("operation_id"));
 
-    public ManagedAgentStore(JdbcTemplate jdbc, ObjectMapper objectMapper,
-            Clock clock, CommittedEventPublisher eventPublisher,
+    public ManagedAgentStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentObjectMapper") ObjectMapper objectMapper,
+            @Qualifier("managedAgentClock") Clock clock, CommittedEventPublisher eventPublisher,
             ManagedWorkspaceRegistry workspaces,
             ManagedAgentProperties properties) {
         this.jdbc = jdbc;
@@ -3332,130 +3334,6 @@ public class ManagedAgentStore implements AgentStateStore {
     private static Object[] compressionArguments(OperationRecord operation, String owner) {
         return new Object[] {operation.tenantId(), operation.sessionId(), operation.operationId(), owner,
                 operation.claimGeneration()};
-    }
-
-    @Override
-    @Transactional
-    public OperationAdmission beginCwdChangeOperation(String tenantId,
-            String sessionId, String actorId, String actorDigest,
-            String idempotencyKey, String requestDigest,
-            String targetCwdRelative, long expectedContextRevision) {
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
-        SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
-        ContextBinding binding = session.workspace();
-        if (binding == null) {
-            throw new ManagedAgentException(HttpStatus.BAD_REQUEST,
-                    "unsupported_feature",
-                    "The Session has no Workspace context.");
-        }
-        // Invisibility comes before any refusal that diagnoses facts:
-        // a caller without read access must not learn whether a Session,
-        // a key or the deployment flag exists. The replay follows it, so a
-        // lost 202 always resolves to the original operation even when the
-        // deployment has since disabled execution — the idempotency
-        // contract outranks the flag gate, exactly as beginLifecycle does.
-        // The mutable role refusal comes after the replay: the replay
-        // lookup is actor-scoped, so a role revoked after admission still
-        // resolves a retry to the caller's own operation instead of 403.
-        WorkspaceAccess cwdAccess = workspaces.accessOf(session.tenantId(),
-                actorId, binding.getWorkspaceId());
-        if (!cwdAccess.canRead()) {
-            throw new ManagedAgentException(
-                    HttpStatus.NOT_FOUND, "session_not_found", "The Session was not found.");
-        }
-        Optional<OperationRecord> existing = replayOperation(tenantId, sessionId,
-                OperationKind.CWD_CHANGE, actorDigest, idempotencyKey);
-        if (existing.isPresent()) {
-            if (!existing.get().requestDigest().equals(requestDigest)) {
-                throw new ManagedAgentException(HttpStatus.CONFLICT,
-                        "idempotency_conflict",
-                        "The idempotency key was reused with different content.");
-            }
-            return new OperationAdmission(existing.get(), true);
-        }
-        if (!cwdAccess.atLeast(WorkspaceAccess.OPERATOR)) {
-            throw new ManagedAgentException(HttpStatus.FORBIDDEN, "session_operation_forbidden",
-                    "Only a Workspace operator may change the Session directory.");
-        }
-        if (residentWorkspaces.find(binding) != null) {
-            throw workspaceExecutionUnavailable();
-        }
-        WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId,
-                binding.getStorageId());
-        if (!workspaceFilesEnabled) {
-            throw workspaceExecutionUnavailable();
-        }
-        if ("DELETED".equals(session.status())) {
-            throw new ManagedAgentException(HttpStatus.NOT_FOUND, "session_not_found",
-                    "The Session was not found.");
-        }
-        if (!"ACTIVE".equals(session.status())) {
-            throw sessionStateConflict(session.status());
-        }
-        requireCwdChangeRegistryFacts(session);
-        if (binding.getContextRevision() != expectedContextRevision) {
-            throw new ManagedAgentException(HttpStatus.CONFLICT,
-                    "context_revision_conflict",
-                    "The Session context revision has changed.");
-        }
-        // A requested permission Action is busy too — the sibling
-        // lifecycle admission refuses in exactly this state (409
-        // turn_active), so the directory change must hold as well.
-        if (hasOpenOperation(tenantId, sessionId)
-                || hasPendingRenameDelivery(tenantId, sessionId)
-                || hasActiveTurn(tenantId, sessionId)
-                || hasDecidableAction(session)
-                || hasRetainedRuntimeSession(tenantId, sessionId)) {
-            throw new ManagedAgentException(HttpStatus.CONFLICT,
-                    "session_context_busy",
-                    "The Session has an active Turn, operation or retained Runtime context.");
-        }
-        long now = lifecycleDatabaseTime();
-        String operationId = publicId("op");
-        jdbc.update(
-                "INSERT INTO ma_operation (operation_key, scope_key, session_scope_key,"
-                    + " target_kind, target_key, target_id, phase, request_json,"
-                    + " idempotency_digest, tenant_id, session_id, operation_id, operation_kind,"
-                    + " actor_digest, idempotency_key, request_digest, state, admission_stage,"
-                    + " delivery_state, session_status_before, target_cwd_relative,"
-                    + " expected_context_revision, actor_key, available_at, gmt_create, gmt_modified)"
-                    + " VALUES (?, ?, ?, 'SESSION', ?, ?, 'PENDING', ?, ?, ?, ?, ?, ?, ?, ?, ?,"
-                    + " 'PENDING', 'JAVA_DURABLE', 'PENDING', ?, ?, ?, ?, ?, ?, ?)",
-                sessionOperationKey(tenantId, sessionId, OperationKind.CWD_CHANGE, operationId),
-                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
-                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
-                sessionOperationTarget(sessionId),
-                sessionId,
-                writeJson(
-                        Map.of(
-                                "schemaVersion",
-                                1,
-                                "kind",
-                                "CWD_CHANGE",
-                                "sessionId",
-                                sessionId,
-                                "targetCwdRelative",
-                                targetCwdRelative,
-                                "expectedContextRevision",
-                                expectedContextRevision)),
-                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(
-                        idempotencyKey),
-                tenantId,
-                sessionId,
-                operationId,
-                OperationKind.CWD_CHANGE.name(),
-                actorDigest,
-                idempotencyKey,
-                requestDigest,
-                session.status(),
-                targetCwdRelative,
-                expectedContextRevision,
-                actorId == null ? null : ManagedWorkspaceRegistry.actorKey(tenantId, actorId),
-                now,
-                now,
-                now);
-        return new OperationAdmission(findOperation(tenantId, sessionId,
-                operationId).orElseThrow(), false);
     }
 
     @Override

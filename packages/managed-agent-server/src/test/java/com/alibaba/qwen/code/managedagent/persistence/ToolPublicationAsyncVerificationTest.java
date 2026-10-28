@@ -305,8 +305,8 @@ public class ToolPublicationAsyncVerificationTest {
                         "qwen.managed-agent.tool-publication.claim-timeout=2s",
                         "qwen.managed-agent.tool-publication.max-verification-timeout=25m",
                         "qwen.managed-agent.tool-publication.verification-bytes-per-second=16777216")
-                .withBean(org.springframework.jdbc.core.JdbcTemplate.class, () -> fixture.jdbc)
-                .withBean(PlatformTransactionManager.class, () -> fixture.manager)
+                .withBean("managedJdbcTemplate", org.springframework.jdbc.core.JdbcTemplate.class, () -> fixture.jdbc)
+                .withBean("managedAgentTransactionManager", PlatformTransactionManager.class, () -> fixture.manager)
                 .withBean(WriterCredentialPolicy.class, WriterCredentialPolicy::unbound)
                 .withBean(ManagedSessionStore.class, () -> fixture.sessions)
                 .withBean(com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository.class, () -> fixture.executions)

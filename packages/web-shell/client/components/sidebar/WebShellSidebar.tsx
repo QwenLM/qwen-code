@@ -1,7 +1,9 @@
 import {
   Fragment,
   useCallback,
+  useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -12,6 +14,7 @@ import {
   type ReactNode,
   type RefObject,
 } from 'react';
+import { createPortal } from 'react-dom';
 import {
   useActions,
   useChannels,
@@ -41,6 +44,7 @@ import {
   FolderKanbanIcon,
   ActivityIcon,
   CalendarClockIcon,
+  GitPullRequestIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   Columns2Icon,
@@ -73,6 +77,7 @@ import {
 import { WebShellThemeId, type WebShellTheme } from '../../themeContext';
 import { useBrand, useBrandName } from '../../brandContext';
 import { useI18n } from '../../i18n';
+import { McpAppGeneratedUiOwnerContext } from '../../mcpAppHostContext';
 import { Input } from '../ui/input';
 import { Button } from '../ui/button';
 import { Empty, EmptyMedia, EmptyDescription } from '../ui/empty';
@@ -109,6 +114,8 @@ import {
 import { useFanoutOrigins } from '../../config/host-fanout';
 import { WorkspaceRemovalDialog } from '../workspaces/WorkspaceRemovalDialog';
 import { WorkspaceSection, isAbsolutePath } from './WorkspaceSection';
+import type { SessionTreeRenderOptions } from './sessionTree';
+import { useSessionTree } from './useSessionTree';
 import { WorkspaceMenu, type WorkspaceMenuActions } from './WorkspaceMenu';
 import {
   moveWorkspace,
@@ -141,6 +148,7 @@ import {
   writeWorkspaceExpanded,
 } from './workspaceExpansion';
 import { SessionGroupSection } from './SessionGroupSection';
+import { SessionRenameEditor } from './SessionRenameEditor';
 import { SessionDetailsTooltip } from './SessionDetailsTooltip';
 import { groupSessionsByChannelType } from './channelSessionGroups';
 import {
@@ -290,6 +298,7 @@ export type WebShellSidebarPrimaryNavItem =
   | 'channels'
   | 'live'
   | 'scheduledTasks'
+  | 'prWatches'
   | 'workflows'
   | 'goals'
   | 'managed';
@@ -338,6 +347,7 @@ export const DEFAULT_PRIMARY_NAV_ITEMS: readonly WebShellSidebarPrimaryNavItem[]
     'channels',
     'live',
     'scheduledTasks',
+    'prWatches',
     'workflows',
     'goals',
     'managed',
@@ -457,6 +467,9 @@ interface WebShellSidebarProps {
   onOpenManagedSessions?: () => void;
   onOpenDaemonStatus: () => void;
   onOpenScheduledTasks: () => void;
+  /** Opens the PR watches page; absent when the daemon does not list
+   * `/autofix-pr` watches (`autofix_pr_watches`). */
+  onOpenPrWatches?: () => void;
   onOpenWorkflows: () => void;
   onOpenGoals: () => void;
   onOpenSessions: () => void;
@@ -535,6 +548,8 @@ interface WebShellSidebarProps {
   sessionContent?: ReactNode;
   sessionHeader?: ReactNode;
   managedWorkspaces?: ReactNode;
+  canOpenSettings?: boolean;
+  archivedSessionsTarget?: HTMLElement | null;
   managedArchivedSessions?: ManagedArchivedSessionsStatus & {
     content: ReactNode;
   };
@@ -1097,6 +1112,7 @@ export function WebShellSidebar({
   onOpenHome,
   onCollapsedChange,
   onOpenSettings,
+  canOpenSettings,
   onOpenAgents,
   onOpenPlugins,
   onOpenChannels,
@@ -1105,6 +1121,7 @@ export function WebShellSidebar({
   onOpenManagedSessions,
   onOpenDaemonStatus,
   onOpenScheduledTasks,
+  onOpenPrWatches,
   onOpenWorkflows,
   onOpenGoals,
   onOpenSessions,
@@ -1138,6 +1155,7 @@ export function WebShellSidebar({
   sessionHeader,
   managedWorkspaces,
   managedArchivedSessions,
+  archivedSessionsTarget,
   onSearchQueryChange,
   currentSessionActive = true,
   showSessionSourceSwitch = true,
@@ -1207,6 +1225,7 @@ export function WebShellSidebar({
   const actions = useActions();
   const workspaceActions = useWorkspaceActions();
   const workspace = useWorkspace();
+  const generatedUiOwner = useContext(McpAppGeneratedUiOwnerContext);
   // Fixed per-origin rank for host groups (#13727): every connected host,
   // including the focused one, occupies its stable position regardless of
   // focus, so switching hosts never reshuffles the sidebar.
@@ -1254,6 +1273,7 @@ export function WebShellSidebar({
         primaryNavItems.has('channels') ||
         (showLive && primaryNavItems.has('live') && Boolean(onOpenLive)) ||
         primaryNavItems.has('scheduledTasks') ||
+        (primaryNavItems.has('prWatches') && Boolean(onOpenPrWatches)) ||
         primaryNavItems.has('workflows') ||
         primaryNavItems.has('goals'))) ||
     (primaryNavItems.has('managed') && Boolean(onOpenManagedSessions)) ||
@@ -1322,6 +1342,13 @@ export function WebShellSidebar({
   const selectedSessionSource = sourceMetadataEnabled
     ? showSessionSourceSwitch
       ? sessionSource
+      : 'default'
+    : undefined;
+  const [archiveSessionSource, setArchiveSessionSource] =
+    useState<SidebarSessionSource>('default');
+  const archiveSourceType = sourceMetadataEnabled
+    ? showSessionSourceSwitch
+      ? archiveSessionSource
       : 'default'
     : undefined;
   const channelManagementEnabled = Boolean(
@@ -1574,8 +1601,7 @@ export function WebShellSidebar({
       view: 'organized',
       group: 'pinned',
     });
-  const [archivedExpanded, setArchivedExpanded] = useState(false);
-  const [archivedContentMounted, setArchivedContentMounted] = useState(false);
+  const archivedExpanded = Boolean(archivedSessionsTarget);
   const [standaloneRefreshKey, setStandaloneRefreshKey] = useState(0);
   const [standaloneArchivedStatus, setStandaloneArchivedStatus] = useState({
     count: 0,
@@ -1607,7 +1633,7 @@ export function WebShellSidebar({
       includePrimaryWorkspaceSessions,
     pageSize: SESSION_LIST_PAGE_SIZE,
     archiveState: 'archived',
-    ...(selectedSessionSource ? { sourceType: selectedSessionSource } : {}),
+    ...(archiveSourceType ? { sourceType: archiveSourceType } : {}),
     ...(organizationEnabled
       ? { view: 'organized' as const, group: 'all' }
       : {}),
@@ -1623,10 +1649,14 @@ export function WebShellSidebar({
   >(null);
   const [editingSession, setEditingSession] =
     useState<DaemonSessionSummary | null>(null);
-  const [editingName, setEditingName] = useState('');
   // Mirrors editingSessionIdentity for promise callbacks that outlive the
   // render where the rename started.
   const editingSessionIdentityRef = useRef<string | null>(null);
+  // Drafts outlive the row: a catalog refresh can remount it (for example
+  // the group catalog arriving after the session list), and the editor's
+  // local state would otherwise fall back to the stored title. A ref, not
+  // state, so recording a keystroke does not re-render the list.
+  const renameDraftsRef = useRef(new Map<string, string>());
   const [busySessionIds, setBusySessionIds] = useState<Set<string>>(
     () => new Set(),
   );
@@ -2063,15 +2093,13 @@ export function WebShellSidebar({
         options: {
           pageSize: SESSION_LIST_PAGE_SIZE,
           archiveState: 'archived',
-          ...(selectedSessionSource
-            ? { sourceType: selectedSessionSource }
-            : {}),
+          ...(archiveSourceType ? { sourceType: archiveSourceType } : {}),
           ...(organizationEnabled
             ? { view: 'organized' as const, group: 'all' }
             : {}),
         },
       })),
-    [organizationEnabled, secondaryWorkspaceCwds, selectedSessionSource],
+    [organizationEnabled, secondaryWorkspaceCwds, archiveSourceType],
   );
   const secondaryArchivedSnapshots = useSessionCatalogQueries(
     workspace.client,
@@ -2096,9 +2124,17 @@ export function WebShellSidebar({
   const secondaryArchivedError = secondaryArchivedSnapshots.some(
     (snapshot) => snapshot.error !== undefined,
   );
-  const toggleArchived = useCallback(() => {
-    if (!archivedExpanded) {
-      setArchivedContentMounted(true);
+  // Start the fresh read before catalog subscriptions auto-load the same entry.
+  useLayoutEffect(() => {
+    if (!archivedExpanded || archiveSourceType === 'channel') {
+      setStandaloneArchivedStatus((current) =>
+        current.count === 0 && !current.loading && !current.error
+          ? current
+          : { count: 0, loading: false, error: false },
+      );
+    }
+    if (!archivedExpanded) return;
+    if (sessionArchiveEnabled) {
       const queries = [
         ...(includePrimaryWorkspaceSessions && archivedCatalogQuery
           ? [archivedCatalogQuery]
@@ -2109,10 +2145,11 @@ export function WebShellSidebar({
         sessionCatalogController.refreshQueries(queries);
       }
     }
-    setArchivedExpanded((expanded) => !expanded);
   }, [
     archivedCatalogQuery,
     archivedExpanded,
+    archiveSourceType,
+    sessionArchiveEnabled,
     includePrimaryWorkspaceSessions,
     secondaryArchivedQueries,
     sessionCatalogController,
@@ -2477,7 +2514,7 @@ export function WebShellSidebar({
       ...(includePrimaryWorkspaceSessions ? archivedSessions : []),
       ...secondaryArchivedSessions,
     ]) {
-      if (!matchesSessionSource(session, selectedSessionSource)) continue;
+      if (!matchesSessionSource(session, archiveSourceType)) continue;
       byIdentity.set(getIdentityForSession(session), session);
     }
     return [...byIdentity.values()];
@@ -2485,7 +2522,7 @@ export function WebShellSidebar({
     archivedSessions,
     getIdentityForSession,
     includePrimaryWorkspaceSessions,
-    selectedSessionSource,
+    archiveSourceType,
     secondaryArchivedSessions,
   ]);
   const effectiveArchivedLoading =
@@ -3297,19 +3334,20 @@ export function WebShellSidebar({
       if (!canRenameSession(session)) return;
       const identity = getIdentityForSession(session);
       if (busySessionIdsRef.current.has(identity)) return;
+      renameDraftsRef.current.clear();
       setEditingSession(session);
       setEditingSessionIdentity(identity);
       editingSessionIdentityRef.current = identity;
-      setEditingName(getSessionLabel(session));
     },
     [canRenameSession, getIdentityForSession],
   );
 
   const cancelRename = useCallback(() => {
+    const identity = editingSessionIdentityRef.current;
+    if (identity !== null) renameDraftsRef.current.delete(identity);
     setEditingSession(null);
     setEditingSessionIdentity(null);
     editingSessionIdentityRef.current = null;
-    setEditingName('');
   }, []);
   useEffect(() => {
     if (editingSession && !canRenameSession(editingSession)) {
@@ -3375,93 +3413,92 @@ export function WebShellSidebar({
     setGroupMenu(null);
   }, [cancelRename, projectFeaturesEnabled]);
 
-  const saveRename = useCallback(() => {
-    const nextName = editingName.trim();
-    if (
-      !nextName ||
-      !editingSession ||
-      editingSessionIdentity !== getIdentityForSession(editingSession) ||
-      !canRenameSession(editingSession)
-    ) {
-      cancelRename();
-      return;
-    }
-    const sessionId = editingSession.sessionId;
-    const workspaceCwd = getSessionWorkspaceCwd(editingSession);
-    const sessionIdentity = getIdentityForSession(editingSession);
-    if (busySessionIdsRef.current.has(sessionIdentity)) {
-      return;
-    }
-    setSessionBusy(sessionId, true, workspaceCwd);
-    let renamed = false;
-    const rename = isCurrentSession(editingSession)
-      ? actions.renameSession(nextName)
-      : workspaceCwd
-        ? workspace.client
-            .workspaceByCwd(workspaceCwd)
-            .updateSessionMetadata(sessionId, { displayName: nextName })
-        : workspace.client.updateSessionMetadata(sessionId, {
-            displayName: nextName,
-          });
-    rename
-      .then((result: SessionMetadataResult | void) => {
-        renamed = true;
-        // The daemon clamps displayName to 256 chars and reports the stored
-        // value; propagate that instead of the locally typed string so the
-        // catalog cache never disagrees with the daemon.
-        const effectiveName =
-          typeof result?.displayName === 'string' && result.displayName
-            ? result.displayName
-            : nextName;
-        if (workspaceCwd) {
-          if (onSessionRenameConfirmed) {
-            onSessionRenameConfirmed(workspaceCwd, sessionId, effectiveName);
-          } else {
-            sessionCatalogController.renamed(
-              workspaceCwd,
-              sessionId,
-              effectiveName,
-            );
+  const saveRename = useCallback(
+    (displayName: string) => {
+      const nextName = displayName.trim();
+      if (
+        !nextName ||
+        !editingSession ||
+        editingSessionIdentity !== getIdentityForSession(editingSession) ||
+        !canRenameSession(editingSession)
+      ) {
+        cancelRename();
+        return;
+      }
+      const sessionId = editingSession.sessionId;
+      const workspaceCwd = getSessionWorkspaceCwd(editingSession);
+      const sessionIdentity = getIdentityForSession(editingSession);
+      if (busySessionIdsRef.current.has(sessionIdentity)) {
+        return;
+      }
+      setSessionBusy(sessionId, true, workspaceCwd);
+      // Close the editor before the round trip: the draft is committed, and
+      // holding the form open until the daemon answers reads as a stall.
+      if (editingSessionIdentityRef.current === sessionIdentity) {
+        cancelRename();
+      }
+      let renamed = false;
+      const rename = isCurrentSession(editingSession)
+        ? actions.renameSession(nextName)
+        : workspaceCwd
+          ? workspace.client
+              .workspaceByCwd(workspaceCwd)
+              .updateSessionMetadata(sessionId, { displayName: nextName })
+          : workspace.client.updateSessionMetadata(sessionId, {
+              displayName: nextName,
+            });
+      rename
+        .then((result: SessionMetadataResult | void) => {
+          renamed = true;
+          // The daemon clamps displayName to 256 chars and reports the stored
+          // value; propagate that instead of the locally typed string so the
+          // catalog cache never disagrees with the daemon.
+          const effectiveName =
+            typeof result?.displayName === 'string' && result.displayName
+              ? result.displayName
+              : nextName;
+          if (workspaceCwd) {
+            if (onSessionRenameConfirmed) {
+              onSessionRenameConfirmed(workspaceCwd, sessionId, effectiveName);
+            } else {
+              sessionCatalogController.renamed(
+                workspaceCwd,
+                sessionId,
+                effectiveName,
+              );
+            }
+            sessionCatalogController.refreshWorkspace(workspaceCwd);
           }
-          sessionCatalogController.refreshWorkspace(workspaceCwd);
-        }
-        // A late settle must not close an editor the user moved to another
-        // session with while this request was in flight.
-        if (editingSessionIdentityRef.current === sessionIdentity) {
-          cancelRename();
-        }
-        bumpWorkspaceReload();
-      })
-      .catch((err: unknown) => {
-        onError(err, t('sidebar.renameFailed'));
-        if (editingSessionIdentityRef.current === sessionIdentity) {
-          cancelRename();
-        }
-      })
-      .finally(() => {
-        if (!renamed && workspaceCwd) {
-          sessionCatalogController.refreshWorkspace(workspaceCwd);
-        }
-        setSessionBusy(sessionId, false, workspaceCwd);
-      });
-  }, [
-    actions,
-    bumpWorkspaceReload,
-    canRenameSession,
-    cancelRename,
-    editingName,
-    editingSession,
-    editingSessionIdentity,
-    getIdentityForSession,
-    getSessionWorkspaceCwd,
-    isCurrentSession,
-    onSessionRenameConfirmed,
-    onError,
-    sessionCatalogController,
-    setSessionBusy,
-    t,
-    workspace.client,
-  ]);
+          bumpWorkspaceReload();
+        })
+        .catch((err: unknown) => {
+          onError(err, t('sidebar.renameFailed'));
+        })
+        .finally(() => {
+          if (!renamed && workspaceCwd) {
+            sessionCatalogController.refreshWorkspace(workspaceCwd);
+          }
+          setSessionBusy(sessionId, false, workspaceCwd);
+        });
+    },
+    [
+      actions,
+      bumpWorkspaceReload,
+      canRenameSession,
+      cancelRename,
+      editingSession,
+      editingSessionIdentity,
+      getIdentityForSession,
+      getSessionWorkspaceCwd,
+      isCurrentSession,
+      onSessionRenameConfirmed,
+      onError,
+      sessionCatalogController,
+      setSessionBusy,
+      t,
+      workspace.client,
+    ],
+  );
 
   const handleDeleteSession = useCallback(
     (session: DaemonSessionSummary) => {
@@ -3576,9 +3613,13 @@ export function WebShellSidebar({
     const removeSession =
       scope.kind === 'locked' || scope.kind === 'restricted'
         ? async (id: string) => {
+            const invalidateDeleted = generatedUiOwner?.captureSessionDeletion(
+              scope.cwd,
+            );
             const result = await workspace.client
               .workspaceByCwd(scope.cwd)
               .deleteSessionsData([id]);
+            invalidateDeleted?.([...result.removed, ...result.notFound]);
             const itemError = result.errors.find(
               (entry) => entry.sessionId === id,
             );
@@ -3613,6 +3654,7 @@ export function WebShellSidebar({
     deleteArchivedSession,
     deleteCandidate,
     deleteSession,
+    generatedUiOwner,
     getIdentityForSession,
     isCurrentSession,
     onError,
@@ -4368,6 +4410,11 @@ export function WebShellSidebar({
     selectedSessionSource,
   ]);
 
+  const sessionTree = useSessionTree(
+    primaryWorkspaceExpansionId,
+    searchedSessions,
+    searchQuery.trim().length > 0,
+  );
   const channelCatalogLoaded = channelCatalogData !== undefined;
   const channelSessionSections = useMemo(
     () =>
@@ -4747,6 +4794,7 @@ export function WebShellSidebar({
         renameFormDisabled?: boolean;
         searchSnippet?: string | undefined;
         standalone?: StandaloneSessionRowAdapter;
+        tree?: SessionTreeRenderOptions;
         recent?: {
           isCurrent: boolean;
           isStandalone: boolean;
@@ -4762,6 +4810,7 @@ export function WebShellSidebar({
           ? contentSearchHits.get(session.sessionId)?.snippet
           : undefined,
         standalone,
+        tree,
         recent,
       } = options;
       const sessionIdentity = getIdentityForSession(session);
@@ -4864,28 +4913,17 @@ export function WebShellSidebar({
             }
           >
             {isEditing ? (
-              <form
-                className={styles.renameForm}
-                onKeyDown={(event) => event.stopPropagation()}
-                onDoubleClick={(event) => event.stopPropagation()}
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  saveRename();
+              <SessionRenameEditor
+                label={label}
+                initialName={
+                  renameDraftsRef.current.get(sessionIdentity) ?? label
+                }
+                onDraftChange={(value) => {
+                  renameDraftsRef.current.set(sessionIdentity, value);
                 }}
-              >
-                <input
-                  autoFocus
-                  aria-label={`${t('sidebar.rename')}: ${label}`}
-                  className={styles.renameInput}
-                  maxLength={256}
-                  value={editingName}
-                  onChange={(event) => setEditingName(event.target.value)}
-                  onBlur={cancelRename}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Escape') cancelRename();
-                  }}
-                />
-              </form>
+                onCommit={saveRename}
+                onCancel={cancelRename}
+              />
             ) : (
               <span className={styles.sessionText} data-web-shell-session-title>
                 <span className={styles.sessionTextInner}>{label}</span>
@@ -5109,11 +5147,15 @@ export function WebShellSidebar({
         <div
           className={cx(
             styles.sessionRow,
+            tree &&
+              (tree.childCount > 0 || tree.depth > 0) &&
+              styles.sessionTreeRow,
             isSelected && styles.currentSession,
             session.isPinned && styles.pinnedSession,
             running && !backgroundRunning && styles.runningSession,
             busy && styles.busySession,
           )}
+          data-session-tree-depth={tree ? tree.depth : undefined}
           onMouseEnter={(event) =>
             measureSessionTitleScroll(event.currentTarget)
           }
@@ -5133,6 +5175,34 @@ export function WebShellSidebar({
             }
           }}
         >
+          {tree && tree.childCount > 0 && (
+            <button
+              type="button"
+              className={styles.sessionTreeToggle}
+              aria-expanded={tree.expanded}
+              aria-label={t('sidebar.subSessions', { count: tree.childCount })}
+              title={t('sidebar.subSessions', { count: tree.childCount })}
+              onClick={(event) => {
+                event.stopPropagation();
+                tree.onToggle();
+              }}
+              // Enter/Space on this button must not reach the row's own
+              // keydown, which opens the session: one keypress would both
+              // toggle the tree and navigate away.
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.stopPropagation();
+                }
+              }}
+              onDoubleClick={(event) => event.stopPropagation()}
+            >
+              {tree.expanded ? (
+                <ChevronDownIcon size={12} />
+              ) : (
+                <ChevronRightIcon size={12} />
+              )}
+            </button>
+          )}
           <span className={styles.sessionStatusSlot}>
             {liveStarting ? (
               <LoaderCircleIcon
@@ -5181,32 +5251,17 @@ export function WebShellSidebar({
             ) : null}
           </span>
           {isEditing && showRename ? (
-            <form
-              className={styles.renameForm}
-              onClick={(event) => event.stopPropagation()}
-              onKeyDown={(event) => event.stopPropagation()}
-              onDoubleClick={(event) => event.stopPropagation()}
-              onSubmit={(event) => {
-                event.preventDefault();
-                saveRename();
+            <SessionRenameEditor
+              label={label}
+              initialName={
+                renameDraftsRef.current.get(sessionIdentity) ?? label
+              }
+              onDraftChange={(value) => {
+                renameDraftsRef.current.set(sessionIdentity, value);
               }}
-            >
-              <input
-                autoFocus
-                aria-label={`${t('sidebar.rename')}: ${label}`}
-                className={styles.renameInput}
-                maxLength={256}
-                value={editingName}
-                onChange={(event) => setEditingName(event.target.value)}
-                onBlur={cancelRename}
-                onKeyDown={(event) => {
-                  if (event.key === 'Escape') {
-                    event.preventDefault();
-                    cancelRename();
-                  }
-                }}
-              />
-            </form>
+              onCommit={saveRename}
+              onCancel={cancelRename}
+            />
           ) : (
             <>
               <span className={styles.sessionText} data-web-shell-session-title>
@@ -5489,7 +5544,6 @@ export function WebShellSidebar({
       cancelRename,
       completedUnreadIds,
       contentSearchHits,
-      editingName,
       editingSessionIdentity,
       exportingSessionIds,
       getArchivedExportWorkspaceCwd,
@@ -5523,28 +5577,96 @@ export function WebShellSidebar({
     ],
   );
 
+  // The Pinned section is not rendered in Live or Channels; a host check
+  // that ignored that would let an off-screen Pinned row disable the reveal
+  // guard for a row that is actually truncated.
+  const pinnedSectionVisible = useMemo(
+    () =>
+      !liveView &&
+      selectedSessionSource !== 'channel' &&
+      pinnedSessions.length > 0,
+    [liveView, pinnedSessions, selectedSessionSource],
+  );
+  // When the Pinned section hosts the editor, the row is already mounted
+  // there and a catalog's copy is `renameFormDisabled`; expanding that
+  // catalog would only add rows nobody is editing. Shared with the
+  // WorkspaceSection prop below so both reveal paths use one rule.
+  const pinnedSectionHostsEditing = useMemo(
+    () =>
+      pinnedSectionVisible &&
+      editingSessionIdentity !== null &&
+      pinnedExpanded &&
+      pinnedSessions.some(
+        (session) => getIdentityForSession(session) === editingSessionIdentity,
+      ),
+    [
+      editingSessionIdentity,
+      getIdentityForSession,
+      pinnedExpanded,
+      pinnedSectionVisible,
+      pinnedSessions,
+    ],
+  );
+  const editingSessionIdForSections = pinnedSectionHostsEditing
+    ? undefined
+    : editingSession?.sessionId;
+
+  const buildSessionTreeRows = useCallback(
+    (treeSessions: readonly DaemonSessionSummary[]) => {
+      const rows = sessionTree.buildRows(treeSessions);
+      return {
+        rows,
+        nodes: rows.map((row) => (
+          <Fragment key={row.session.sessionId}>
+            {renderSessionRow(row.session, {
+              tree: sessionTree.renderOptions(row),
+            })}
+          </Fragment>
+        )),
+      };
+    },
+    [renderSessionRow, sessionTree],
+  );
+
   const body = useMemo(() => {
+    // Rename only has to reveal the edited row. Expanding the whole catalog —
+    // or even the whole section — mounted hundreds of rows exactly when the
+    // rename editor opened, which is what made typing lag.
+    const editingSessionBeyondPreview = (
+      items: readonly DaemonSessionSummary[],
+    ): boolean =>
+      !pinnedSectionHostsEditing &&
+      editingSessionIdentity !== null &&
+      items.findIndex(
+        (session) => getIdentityForSession(session) === editingSessionIdentity,
+      ) >= SIDEBAR_SESSION_PREVIEW_LIMIT;
     const renderFlatSessions = () => {
       const showAll =
-        editingSessionIdentity !== null ||
         showAllProjectSessions ||
-        Boolean(searchQuery.trim());
-      const displayedSessions = showAll
-        ? filteredSessions
-        : filteredSessions.slice(0, SIDEBAR_SESSION_PREVIEW_LIMIT);
+        Boolean(searchQuery.trim()) ||
+        editingSessionBeyondPreview(filteredSessions);
+      const treeRows = sessionTree.buildRows(filteredSessions);
+      const displayedRows = showAll
+        ? treeRows
+        : treeRows.slice(0, SIDEBAR_SESSION_PREVIEW_LIMIT);
       return (
         <>
-          {displayedSessions.map((session) => renderSessionRow(session))}
-          {!showAll &&
-            filteredSessions.length > SIDEBAR_SESSION_PREVIEW_LIMIT && (
-              <button
-                type="button"
-                className={styles.showAllSessions}
-                onClick={() => setShowAllProjectSessions(true)}
-              >
-                {t('sidebar.showAllSessions')}
-              </button>
-            )}
+          {displayedRows.map((row) => (
+            <Fragment key={row.session.sessionId}>
+              {renderSessionRow(row.session, {
+                tree: sessionTree.renderOptions(row),
+              })}
+            </Fragment>
+          ))}
+          {!showAll && treeRows.length > SIDEBAR_SESSION_PREVIEW_LIMIT && (
+            <button
+              type="button"
+              className={styles.showAllSessions}
+              onClick={() => setShowAllProjectSessions(true)}
+            >
+              {t('sidebar.showAllSessions')}
+            </button>
+          )}
         </>
       );
     };
@@ -5575,19 +5697,25 @@ export function WebShellSidebar({
       return <div className={styles.notice}>{t('sidebar.noSessions')}</div>;
     }
     if (channelSessionSections) {
-      return channelSessionSections.map((section) => (
-        <SessionGroupSection
-          key={section.id}
-          id={section.id}
-          label={section.label}
-          count={section.sessions.length}
-          limitSessions={editingSessionIdentity === null && !searchQuery.trim()}
-          expanded={!collapsedSessionSectionIds.has(section.id)}
-          onToggle={() => toggleSessionSection(section.id)}
-        >
-          {section.sessions.map((session) => renderSessionRow(session))}
-        </SessionGroupSection>
-      ));
+      return channelSessionSections.map((section) => {
+        const tree = buildSessionTreeRows(section.sessions);
+        return (
+          <SessionGroupSection
+            key={section.id}
+            id={section.id}
+            label={section.label}
+            count={tree.rows.length}
+            limitSessions={
+              !editingSessionBeyondPreview(section.sessions) &&
+              !searchQuery.trim()
+            }
+            expanded={!collapsedSessionSectionIds.has(section.id)}
+            onToggle={() => toggleSessionSection(section.id)}
+          >
+            {tree.nodes}
+          </SessionGroupSection>
+        );
+      });
     }
     if (selectedSessionSource === 'channel') {
       return renderFlatSessions();
@@ -5599,19 +5727,23 @@ export function WebShellSidebar({
     return sessionSections.map((section) => {
       const expanded = !collapsedSessionSectionIds.has(section.id);
       const group = section.group;
+      const tree = buildSessionTreeRows(section.sessions);
       return (
         <SessionGroupSection
           key={section.id}
           id={section.id}
           label={section.label}
-          count={section.sessions.length}
+          count={tree.rows.length}
           color={section.color}
           icon={
             section.kind === 'scheduled-task' ? (
               <CalendarClockIcon data-web-shell-scheduled-task-group />
             ) : undefined
           }
-          limitSessions={editingSessionIdentity === null && !searchQuery.trim()}
+          limitSessions={
+            !editingSessionBeyondPreview(section.sessions) &&
+            !searchQuery.trim()
+          }
           expanded={expanded}
           onToggle={() => toggleSessionSection(section.id)}
           onRename={
@@ -5628,25 +5760,28 @@ export function WebShellSidebar({
           deleteLabel={t('sidebar.groupDelete')}
           actionsDisabled={groupBusy}
         >
-          {section.sessions.map((session) =>
-            renderSessionRow(session, {
-              // Pinned members also render in the Pinned section; while that
-              // section is expanded its row hosts the rename form, so this
-              // duplicate row must not mount a second autofocused input.
-              // Gate on the Pinned section actually carrying the row —
-              // content-search ghosts never appear there, so without the
-              // membership check no row would host the form at all and
-              // rename would be silently inoperable for them.
-              renameFormDisabled:
-                Boolean(session.isPinned) &&
-                pinnedExpanded &&
-                pinnedSessions.some(
-                  (candidate) =>
-                    getIdentityForSession(candidate) ===
-                    getIdentityForSession(session),
-                ),
-            }),
-          )}
+          {tree.rows.map((row) => (
+            <Fragment key={row.session.sessionId}>
+              {renderSessionRow(row.session, {
+                tree: sessionTree.renderOptions(row),
+                // Pinned members also render in the Pinned section; while that
+                // section is expanded its row hosts the rename form, so this
+                // duplicate row must not mount a second autofocused input.
+                // Gate on the Pinned section actually carrying the row —
+                // content-search ghosts never appear there, so without the
+                // membership check no row would host the form at all and
+                // rename would be silently inoperable for them.
+                renameFormDisabled:
+                  Boolean(row.session.isPinned) &&
+                  pinnedExpanded &&
+                  pinnedSessions.some(
+                    (candidate) =>
+                      getIdentityForSession(candidate) ===
+                      getIdentityForSession(row.session),
+                  ),
+              })}
+            </Fragment>
+          ))}
         </SessionGroupSection>
       );
     });
@@ -5665,8 +5800,11 @@ export function WebShellSidebar({
     organizationEnabled,
     pinnedExpanded,
     pinnedSessions,
+    pinnedSectionHostsEditing,
+    buildSessionTreeRows,
     reload,
     renderSessionRow,
+    sessionTree,
     searchQuery,
     selectedSessionSource,
     sessionSections,
@@ -5685,6 +5823,8 @@ export function WebShellSidebar({
       onLoadStandaloneSession &&
       onStandaloneNotice,
   );
+  const archivedStandaloneSessionsVisible =
+    standaloneSessionsVisible && archiveSourceType !== 'channel';
   const handleStandaloneMutation = useCallback(() => {
     setStandaloneRefreshKey((value) => value + 1);
   }, []);
@@ -5764,45 +5904,22 @@ export function WebShellSidebar({
       (!sessionArchiveEnabled &&
         !standaloneSessionsVisible &&
         managedArchivedSessions === undefined) ||
-      searchQuery.trim()
+      !archivedSessionsTarget
     ) {
       return null;
     }
 
     const archivedCount =
       allArchivedSessions.length +
-      (standaloneSessionsVisible ? standaloneArchivedStatus.count : 0) +
+      (archivedStandaloneSessionsVisible ? standaloneArchivedStatus.count : 0) +
       (managedArchivedSessions?.count ?? 0);
     const archivedLoadingWithStandalone =
       effectiveArchivedLoading ||
-      (standaloneSessionsVisible && standaloneArchivedStatus.loading) ||
+      (archivedStandaloneSessionsVisible && standaloneArchivedStatus.loading) ||
       managedArchivedSessions?.loading;
     const archivedErrorWithStandalone =
       effectiveArchivedError ||
-      (standaloneSessionsVisible && standaloneArchivedStatus.error);
-
-    const header = (
-      <button
-        type="button"
-        className={styles.archivedHeader}
-        aria-expanded={archivedExpanded}
-        onClick={toggleArchived}
-      >
-        <span className={styles.archivedTitle} style={{ flex: '0 1 auto' }}>
-          {t('sidebar.archivedTitle')}
-        </span>
-        <span className={styles.archivedChevron} aria-hidden="true">
-          {archivedExpanded ? <ChevronDownIcon /> : <ChevronRightIcon />}
-        </span>
-        {archivedExpanded && archivedCount > 0 && (
-          <span className={styles.archivedCount}>{archivedCount}</span>
-        )}
-      </button>
-    );
-
-    if (!archivedContentMounted) {
-      return <div className={styles.archivedSection}>{header}</div>;
-    }
+      (archivedStandaloneSessionsVisible && standaloneArchivedStatus.error);
 
     const retry = (
       <button
@@ -5838,8 +5955,35 @@ export function WebShellSidebar({
 
     const content = (
       <>
+        {showSessionSourceSwitch && sourceMetadataEnabled && (
+          <Tabs
+            className="px-2 pb-2"
+            value={archiveSessionSource}
+            onValueChange={(value) =>
+              setArchiveSessionSource(value as SidebarSessionSource)
+            }
+          >
+            <TabsList
+              className="w-full"
+              aria-label={t('sidebar.archiveSessionSource')}
+            >
+              <TabsTrigger value="default" className="min-w-0">
+                <ListTodoIcon />
+                <span className="min-w-0 truncate">
+                  {t('sidebar.sessionSource.tasks')}
+                </span>
+              </TabsTrigger>
+              <TabsTrigger value="channel" className="min-w-0">
+                <MessageCircleIcon />
+                <span className="min-w-0 truncate">
+                  {t('sidebar.sessionSource.channels')}
+                </span>
+              </TabsTrigger>
+            </TabsList>
+          </Tabs>
+        )}
         {managedArchivedSessions?.content}
-        {standaloneSessionsVisible &&
+        {archivedStandaloneSessionsVisible &&
           onLoadStandaloneSession &&
           onStandaloneNotice && (
             <StandaloneRecents
@@ -5892,18 +6036,16 @@ export function WebShellSidebar({
       </>
     );
 
-    return (
-      <div className={styles.archivedSection}>
-        {header}
-        <div className={styles.archivedList} hidden={!archivedExpanded}>
-          {content}
-        </div>
-      </div>
+    return createPortal(
+      <div className={styles.archivedList}>{content}</div>,
+      archivedSessionsTarget,
     );
   }, [
-    archivedContentMounted,
-    archivedExpanded,
+    archivedSessionsTarget,
     archivedWorkspaceGroups,
+    archiveSessionSource,
+    showSessionSourceSwitch,
+    sourceMetadataEnabled,
     allArchivedSessions,
     connection.catchingUp,
     connection.error,
@@ -5921,15 +6063,14 @@ export function WebShellSidebar({
     onStandaloneNotice,
     reloadArchived,
     renderSessionRow,
-    searchQuery,
     secondaryWorkspaceCwds,
     sessionCatalogController,
     sessionArchiveEnabled,
     standaloneArchivedStatus,
     standaloneRefreshKey,
+    archivedStandaloneSessionsVisible,
     standaloneSessionsVisible,
     t,
-    toggleArchived,
   ]);
   const primaryNavigation = hasScrollingPrimaryNav && (
     <div className={styles.primaryNav}>
@@ -6017,6 +6158,25 @@ export function WebShellSidebar({
           )}
         </button>
       )}
+      {projectFeaturesEnabled &&
+        primaryNavItems.has('prWatches') &&
+        onOpenPrWatches && (
+          <button
+            className={styles.pluginButton}
+            type="button"
+            title={railLayout ? undefined : t('sidebar.prWatches')}
+            aria-label={t('sidebar.prWatches')}
+            aria-current={
+              railLayout && activePage === 'prWatches' ? 'page' : undefined
+            }
+            onClick={() => openNavigation(onOpenPrWatches)}
+          >
+            <span className={styles.navIcon}>
+              <GitPullRequestIcon size={16} strokeWidth={1.2} />
+            </span>
+            {!collapsed && !railLayout && <span>{t('sidebar.prWatches')}</span>}
+          </button>
+        )}
       {projectFeaturesEnabled &&
         primaryNavItems.has('workflows') &&
         workflowsEnabled && (
@@ -6137,27 +6297,28 @@ export function WebShellSidebar({
           footer &&
           typeof footer === 'object' &&
           footer.render?.()}
-        {projectFeaturesEnabled && footerItems.has('settings') && (
-          <button
-            className={styles.footerButton}
-            type="button"
-            title={t('sidebar.settings')}
-            aria-label={t('sidebar.settings')}
-            aria-current={
-              railLayout && activePage === 'settings' ? 'page' : undefined
-            }
-            onClick={() => openNavigation(onOpenSettings)}
-          >
-            <span className={`${styles.navIcon} ${styles.settingsIcon}`}>
-              <SettingsIcon size={16} strokeWidth={1.2} />
-            </span>
-            {(railLayout || (!collapsed && !footerCompact)) && (
-              <span className={styles.footerButtonLabel}>
-                {t('sidebar.settings')}
+        {(canOpenSettings ?? projectFeaturesEnabled) &&
+          footerItems.has('settings') && (
+            <button
+              className={styles.footerButton}
+              type="button"
+              title={t('sidebar.settings')}
+              aria-label={t('sidebar.settings')}
+              aria-current={
+                railLayout && activePage === 'settings' ? 'page' : undefined
+              }
+              onClick={() => openNavigation(onOpenSettings)}
+            >
+              <span className={`${styles.navIcon} ${styles.settingsIcon}`}>
+                <SettingsIcon size={16} strokeWidth={1.2} />
               </span>
-            )}
-          </button>
-        )}
+              {(railLayout || (!collapsed && !footerCompact)) && (
+                <span className={styles.footerButtonLabel}>
+                  {t('sidebar.settings')}
+                </span>
+              )}
+            </button>
+          )}
       </div>
       <div className={styles.footerActions}>
         {footerItems.has('theme') && (
@@ -7003,6 +7164,7 @@ export function WebShellSidebar({
                       </span>
                     )}
                     client={workspace.client}
+                    editingSessionId={editingSessionIdForSections}
                     pendingSession={
                       livePresence &&
                       (!livePresence.coordinator ||
@@ -7038,7 +7200,6 @@ export function WebShellSidebar({
                       !liveView && selectedSessionSource !== 'channel'
                     }
                     mapSession={applyOptimisticPin}
-                    limitSessions={editingSessionIdentity === null}
                     isPinnedSectionMember={isPinnedSectionMember}
                     autoExpandKey={
                       livePresence &&
@@ -7059,32 +7220,28 @@ export function WebShellSidebar({
                     showSessionDetails={sessionActionItems.has('details')}
                   />
                 ))}
-              {!liveView &&
-                selectedSessionSource !== 'channel' &&
-                pinnedSessions.length > 0 && (
-                  <>
-                    <div className={styles.projectsHeader}>
-                      <button
-                        className={styles.projectsHeaderToggle}
-                        type="button"
-                        aria-expanded={pinnedExpanded}
-                        onClick={() =>
-                          setPinnedExpanded((expanded) => !expanded)
-                        }
-                      >
-                        <span>{t('sidebar.pinnedSessions')}</span>
-                        <IconChevron expanded={pinnedExpanded} />
-                      </button>
+              {pinnedSectionVisible && (
+                <>
+                  <div className={styles.projectsHeader}>
+                    <button
+                      className={styles.projectsHeaderToggle}
+                      type="button"
+                      aria-expanded={pinnedExpanded}
+                      onClick={() => setPinnedExpanded((expanded) => !expanded)}
+                    >
+                      <span>{t('sidebar.pinnedSessions')}</span>
+                      <IconChevron expanded={pinnedExpanded} />
+                    </button>
+                  </div>
+                  {pinnedExpanded && (
+                    <div className={styles.pinnedSessionList}>
+                      {pinnedSessions.map((session) =>
+                        renderSessionRow(session),
+                      )}
                     </div>
-                    {pinnedExpanded && (
-                      <div className={styles.pinnedSessionList}>
-                        {pinnedSessions.map((session) =>
-                          renderSessionRow(session),
-                        )}
-                      </div>
-                    )}
-                  </>
-                )}
+                  )}
+                </>
+              )}
               {!liveView && !hideProjectHeader && (
                 <div className={styles.projectsHeader}>
                   <button
@@ -7265,6 +7422,7 @@ export function WebShellSidebar({
                                 : undefined
                             }
                             client={workspace.client}
+                            editingSessionId={editingSessionIdForSections}
                             reloadToken={workspaceSessionsReloadToken}
                             untrustedLabel={t('sidebar.workspaceUntrusted')}
                             readOnlyLabel={t('sidebar.workspaceReadOnly')}
@@ -7303,7 +7461,6 @@ export function WebShellSidebar({
                             groupActionsDisabled={groupBusy}
                             excludePinned={selectedSessionSource !== 'channel'}
                             mapSession={applyOptimisticPin}
-                            limitSessions={editingSessionIdentity === null}
                             isPinnedSectionMember={isPinnedSectionMember}
                             onOpenGitDiff={
                               projectFeaturesEnabled ? onOpenGitDiff : undefined
@@ -7779,7 +7936,6 @@ export function WebShellSidebar({
                     }}
                   />
                 )}
-              {!liveView && archivedSection}
             </SidebarSessionSurface>
           </div>
 
@@ -7798,6 +7954,7 @@ export function WebShellSidebar({
           onPointerDown={handleResizePointerDown}
         />
       </aside>
+      {archivedSection}
     </>
   );
 }

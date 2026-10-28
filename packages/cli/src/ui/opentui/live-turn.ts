@@ -36,6 +36,7 @@ import {
   type RefObject,
 } from 'react';
 import { readFileSync } from 'node:fs';
+import { ShellExecutionService } from '@qwen-code/qwen-code-core/services/shellExecutionService.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import {
   MessageSenderType,
@@ -64,6 +65,7 @@ import {
   nextLivePromptId,
   type OpenTuiSteeringSubmission,
   type WaitingCallInfo,
+  type ExecutingShellCall,
   type PreparedLiveRequest,
 } from './live-session.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
@@ -158,6 +160,12 @@ export interface OpenTuiSubmitOptions {
   invocationEchoed?: boolean;
 }
 
+export interface ForegroundShellOwner {
+  callId: string;
+  pid: number;
+  turn: number;
+}
+
 export interface OpenTuiLiveTurn {
   items: readonly LiveHistoryItem[];
   streaming: boolean;
@@ -170,6 +178,15 @@ export interface OpenTuiLiveTurn {
   isReceivingContent: boolean;
   /** Scheduler calls parked in awaiting_approval, awaiting a dialog. */
   waitingCalls: readonly WaitingCallInfo[];
+  foregroundShell: ForegroundShellOwner | null;
+  promoteShellToBackground(): boolean;
+  writeShellInput(owner: ForegroundShellOwner, input: string): boolean;
+  resizeShell(
+    owner: ForegroundShellOwner,
+    columns: number,
+    rows: number,
+  ): boolean;
+  scrollShell(owner: ForegroundShellOwner, lines: number): boolean;
   /** Mid-turn queued prompts, oldest first (composer badge + Esc pop-back). */
   messageQueue: readonly string[];
   /** Pops composer submissions back together; generated turns stay queued. */
@@ -273,6 +290,92 @@ export function useOpenTuiLiveTurn(
   // Render-synced mirror: resetTranscript reads parked calls synchronously.
   const waitingCallsRef = useRef<readonly WaitingCallInfo[]>([]);
   waitingCallsRef.current = waitingCalls;
+
+  const [, setExecutingShells] = useState<readonly ExecutingShellCall[]>([]);
+  const executingShellsRef = useRef<readonly ExecutingShellCall[]>([]);
+  const updateExecutingShells = useCallback(
+    (calls: readonly ExecutingShellCall[]) => {
+      executingShellsRef.current = calls;
+      setExecutingShells(calls);
+    },
+    [],
+  );
+  const getForegroundShell = useCallback((): ForegroundShellOwner | null => {
+    if (
+      !mountedRef.current ||
+      !activeTurnRef.current ||
+      abortRef.current?.signal.aborted
+    )
+      return null;
+    const shells = executingShellsRef.current.filter(
+      (call) =>
+        call.pid !== undefined &&
+        call.pid > 0 &&
+        !call.promoteAbortController?.signal.aborted,
+    );
+    return shells.length === 1
+      ? {
+          callId: shells[0].callId,
+          pid: shells[0].pid!,
+          turn: turnSeqRef.current,
+        }
+      : null;
+  }, []);
+  const ownsShell = useCallback(
+    (owner: ForegroundShellOwner) => {
+      const current = getForegroundShell();
+      return (
+        current !== null &&
+        current.callId === owner.callId &&
+        current.pid === owner.pid &&
+        current.turn === owner.turn
+      );
+    },
+    [getForegroundShell],
+  );
+  const promoteShellToBackground = useCallback(() => {
+    if (
+      !mountedRef.current ||
+      !activeTurnRef.current ||
+      abortRef.current?.signal.aborted
+    )
+      return false;
+    const shells = executingShellsRef.current.filter(
+      (call) =>
+        call.promoteAbortController &&
+        !call.promoteAbortController.signal.aborted,
+    );
+    if (shells.length !== 1) return false;
+    shells[0].promoteAbortController!.abort({ kind: 'background' });
+    updateExecutingShells(
+      executingShellsRef.current.filter((call) => call !== shells[0]),
+    );
+    return true;
+  }, [updateExecutingShells]);
+  const writeShellInput = useCallback(
+    (owner: ForegroundShellOwner, input: string) => {
+      if (!ownsShell(owner)) return false;
+      ShellExecutionService.writeToPty(owner.pid, input);
+      return true;
+    },
+    [ownsShell],
+  );
+  const resizeShell = useCallback(
+    (owner: ForegroundShellOwner, columns: number, rows: number) => {
+      if (!ownsShell(owner)) return false;
+      ShellExecutionService.resizePty(owner.pid, columns, rows);
+      return true;
+    },
+    [ownsShell],
+  );
+  const scrollShell = useCallback(
+    (owner: ForegroundShellOwner, lines: number) => {
+      if (!ownsShell(owner)) return false;
+      ShellExecutionService.scrollPty(owner.pid, lines);
+      return true;
+    },
+    [ownsShell],
+  );
 
   const setBusy = useCallback((busy: boolean) => {
     if (streamingRef.current === busy) return;
@@ -407,6 +510,7 @@ export function useOpenTuiLiveTurn(
           },
           submittedPrompt: turnOptions?.submittedPrompt,
           humanInput: turnOptions?.humanInput,
+          workflowModeEligible: editablePrompt !== undefined,
           refreshContextFilesOnWrite: turnOptions?.refreshContextFilesOnWrite,
           isCurrentTurn: () => seq === turnSeqRef.current,
           ...(mods && {
@@ -437,6 +541,11 @@ export function useOpenTuiLiveTurn(
           drainSteering: () => (seq === turnSeqRef.current ? drainQueue() : []),
           restoreSteering: (submissions) => {
             if (seq === turnSeqRef.current) restoreQueue(submissions);
+          },
+          onExecutingShells: (calls) => {
+            if (mountedRef.current && seq === turnSeqRef.current) {
+              updateExecutingShells(abort.signal.aborted ? [] : calls);
+            }
           },
           onWaitingCall: (call) => {
             if (seq !== turnSeqRef.current) return;
@@ -538,6 +647,7 @@ export function useOpenTuiLiveTurn(
               options: turnOptions,
             };
           }
+          updateExecutingShells([]);
           waitingCallsRef.current = [];
           setWaitingCalls([]);
           setBusy(false);
@@ -590,7 +700,9 @@ export function useOpenTuiLiveTurn(
               ) {
                 itemsRef.current = history.slice(0, index);
                 setItems(itemsRef.current);
-                config.getLlmClient()?.stripOrphanedUserEntriesFromHistory();
+                config
+                  .getLlmClient()
+                  ?.stripOrphanedUserEntriesFromHistory(true);
                 if (active.canUndoLog)
                   void logger
                     ?.removeLastUserMessage()
@@ -661,6 +773,7 @@ export function useOpenTuiLiveTurn(
       setReceiving,
       syncQueue,
       popQueue,
+      updateExecutingShells,
     ],
   );
 
@@ -781,18 +894,22 @@ export function useOpenTuiLiveTurn(
     [config, apply, pushQueue, runTurn],
   );
 
-  const interrupt = useCallback((onSettled?: OpenTuiCancelSettled) => {
-    skipRetryDelayRef.current = undefined;
-    failedRequestRef.current = null;
-    const active = activeTurnRef.current;
-    if (active && active.seq === turnSeqRef.current) {
-      active.interrupted = true;
-      active.onCancelSettled ??= onSettled;
-      abortRef.current?.abort();
-    } else {
-      onSettled?.({ kind: 'cancelled', queued: null, prompt: null });
-    }
-  }, []);
+  const interrupt = useCallback(
+    (onSettled?: OpenTuiCancelSettled) => {
+      skipRetryDelayRef.current = undefined;
+      failedRequestRef.current = null;
+      const active = activeTurnRef.current;
+      if (active && active.seq === turnSeqRef.current) {
+        active.interrupted = true;
+        active.onCancelSettled ??= onSettled;
+        updateExecutingShells([]);
+        abortRef.current?.abort();
+      } else {
+        onSettled?.({ kind: 'cancelled', queued: null, prompt: null });
+      }
+    },
+    [updateExecutingShells],
+  );
 
   const scheduleTool = useCallback(
     (
@@ -874,6 +991,7 @@ export function useOpenTuiLiveTurn(
           .catch(() => {});
       }
       abort?.abort();
+      updateExecutingShells([]);
       queueRef.current = [];
       syncQueue();
       waitingCallsRef.current = [];
@@ -885,7 +1003,7 @@ export function useOpenTuiLiveTurn(
       setItems(itemsRef.current);
       onReset?.({ kind: 'reset' });
     },
-    [dualOutput, setBusy, syncQueue],
+    [dualOutput, setBusy, syncQueue, updateExecutingShells],
   );
 
   const rewindTranscript = useCallback(
@@ -920,6 +1038,7 @@ export function useOpenTuiLiveTurn(
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      executingShellsRef.current = [];
       skipRetryDelayRef.current = undefined;
       failedRequestRef.current = null;
       dualOutput?.finalizeAssistantMessage();
@@ -936,6 +1055,11 @@ export function useOpenTuiLiveTurn(
     streamingCharsRef,
     isReceivingContent,
     waitingCalls,
+    foregroundShell: getForegroundShell(),
+    promoteShellToBackground,
+    writeShellInput,
+    resizeShell,
+    scrollShell,
     messageQueue: queue,
     popQueue,
     submit,
