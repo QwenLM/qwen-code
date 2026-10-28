@@ -1684,6 +1684,8 @@ function mergeToolCall(
   target.status = source.status ?? target.status;
   target.title = source.title ?? target.title;
   target.toolName = source.toolName ?? target.toolName;
+  target.generatedUiToolCallId =
+    source.generatedUiToolCallId ?? target.generatedUiToolCallId;
   target.kind = source.kind ?? target.kind;
   target.sourceBlockIds = unionMessageIds(
     target.sourceBlockIds,
@@ -1784,6 +1786,7 @@ export function daemonToolBlockToToolCall(
 
   return {
     callId: block.toolCallId,
+    generatedUiToolCallId: block.toolCallId,
     toolName,
     title: block.title === block.toolName ? toolName : block.title,
     status:

@@ -247,7 +247,8 @@ describe('createTranscriptReplayMachine', () => {
       (update) =>
         (
           update._meta as
-            { qwenTranscript?: { segmentId?: string } } | undefined
+            | { qwenTranscript?: { segmentId?: string } }
+            | undefined
         )?.qwenTranscript?.segmentId,
     );
 
@@ -331,7 +332,8 @@ describe('createTranscriptReplayMachine', () => {
       }),
     );
     const meta = projected[0]?._meta as
-      { qwenAgentMessage?: { author?: Record<string, unknown> } } | undefined;
+      | { qwenAgentMessage?: { author?: Record<string, unknown> } }
+      | undefined;
     expect(meta?.qwenAgentMessage?.author).toEqual({
       agentId: 'ag_alice',
       name: 'alice',
@@ -2850,7 +2852,8 @@ describe('createTranscriptReplayMachine', () => {
           (update) =>
             (
               update._meta as
-                { qwenTranscript?: { segmentId?: string } } | undefined
+                | { qwenTranscript?: { segmentId?: string } }
+                | undefined
             )?.qwenTranscript?.segmentId,
         ),
     ).toEqual(['assistant-1:0', 'assistant-1:1']);

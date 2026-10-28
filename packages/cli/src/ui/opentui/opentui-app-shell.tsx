@@ -127,6 +127,9 @@ import { OpenTuiInputPrompt, type InputPromptProps } from './input-prompt.js';
 import { OpenTuiBanner } from './opentui-header.js';
 import { OpenTuiFooter, OpenTuiLoadingIndicator } from './opentui-footer.js';
 import { OpenTuiQueuedMessageDisplay } from './queued-message.js';
+import { OpenTuiModBand } from './mod-band.js';
+import { useModBand } from '../hooks/use-mod-band.js';
+import { modBandMaxRows } from '../utils/mod-band-tree.js';
 import {
   OpenTuiActionConfirmation,
   OpenTuiMcpApprovalDialog,
@@ -344,6 +347,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   const shellControllersRef = useRef<Set<AbortController>>(new Set());
   const { width: terminalWidth, height: terminalHeight } =
     useTerminalDimensions();
+  const modBand = useModBand(config);
   // ink renders every dialog inside a region of exactly this height, clipped,
   // with the composer swapped out (`DefaultAppLayout`'s dialog wrapper) — in
   // ink's default state: its show-more-lines key lifts `constrainHeight`, which
@@ -1080,7 +1084,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     );
     reloadRef.current = async () => {
       await dispatcher.loadCommands();
-      setCommandList(dispatcher.commands);
+      if (!disposed) setCommandList(dispatcher.commands);
     };
     let disposed = false;
     (async () => {
@@ -1614,6 +1618,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
               overflow="hidden"
             >
               <OpenTuiDialogMount
+                extensionRefreshState={extensionRefreshState}
                 key={dialog.dialog}
                 request={dialog}
                 host={host}
@@ -1650,6 +1655,10 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                 showPhrase={showLoadingPhrases}
               />
               <OpenTuiQueuedMessageDisplay messageQueue={displayedQueue} />
+              <OpenTuiModBand
+                band={modBand}
+                maxRows={modBandMaxRows(terminalHeight)}
+              />
               <OpenTuiInputPrompt
                 onSubmit={onSubmit}
                 onNotice={notify}

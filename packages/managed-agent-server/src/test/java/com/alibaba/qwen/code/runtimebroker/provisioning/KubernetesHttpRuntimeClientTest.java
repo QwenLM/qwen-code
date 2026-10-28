@@ -21,6 +21,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.Map;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
@@ -115,6 +116,44 @@ class KubernetesHttpRuntimeClientTest {
         assertEquals("GET", method.get());
         assertThrows(IllegalArgumentException.class, () -> client.create("configmaps", "runtimes", Map.of()));
         assertEquals(1, calls.get());
+    }
+
+    @Test
+    void reclamationReadsNodeLeaseAndPatchesOnlyTheExplicitPodPath() {
+        client.getNodeLease("node-a").toCompletableFuture().join();
+        assertEquals("/apis/coordination.k8s.io/v1/namespaces/kube-node-lease/leases/node-a", path.get());
+        var patch = JsonCodec.encode(List.of(Map.of("op", "test", "path", "/metadata/uid", "value", "original")));
+        status.set(409);
+        var result = client.patchPodFinalizers("runtime", "original", patch).toCompletableFuture().join();
+        assertEquals(409, result.status());
+        assertTrue(result.complete());
+        assertEquals("PATCH", method.get());
+        assertEquals("application/json-patch+json", contentType.get());
+        assertEquals("/api/v1/namespaces/runtime/pods/original", path.get());
+        assertEquals(new String(patch, StandardCharsets.UTF_8), requestBody.get());
+    }
+
+    @Test
+    void completeEmptyAttachmentListIsDifferentFromMissingOrPartialList() {
+        response.set(JsonCodec.encode(Map.of("kind", "VolumeAttachmentList", "metadata", Map.of("resourceVersion", "8"), "items", List.of())));
+        assertEquals(List.of(), client.listVolumeAttachments().toCompletableFuture().join());
+        assertEquals("/apis/storage.k8s.io/v1/volumeattachments?limit=128&continue=", path.get());
+        status.set(404);
+        assertEquals(502, failure(client.listVolumeAttachments().toCompletableFuture()).getStatusCode());
+        status.set(200);
+        response.set(JsonCodec.encode(Map.of("kind", "VolumeAttachmentList", "metadata",
+                Map.of("resourceVersion", "8", "continue", "same"), "items", List.of())));
+        assertEquals(502, failure(client.listVolumeAttachments().toCompletableFuture()).getStatusCode());
+    }
+
+    @Test
+    void duplicateListIdentitiesAndMissingListRevisionCannotProveCleanup() {
+        var item = Map.of("metadata", Map.of("name", "pv", "uid", "pv-uid"));
+        response.set(JsonCodec.encode(Map.of("kind", "PersistentVolumeList", "metadata", Map.of("resourceVersion", "8"),
+                "items", List.of(item, item))));
+        assertEquals(502, failure(client.listPersistentVolumes().toCompletableFuture()).getStatusCode());
+        response.set(JsonCodec.encode(Map.of("kind", "PodList", "metadata", Map.of(), "items", List.of())));
+        assertEquals(502, failure(client.listPods("runtime").toCompletableFuture()).getStatusCode());
     }
 
     @Test
