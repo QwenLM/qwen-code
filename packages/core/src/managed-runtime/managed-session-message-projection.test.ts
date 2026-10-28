@@ -216,6 +216,77 @@ const branchRecord: ChatRecord = {
 };
 
 describe('managed session message projection', () => {
+  it.each([null, 'external-owner', 'branch-1'])(
+    'restores historical branch context with parent %s and rejects only cycles',
+    async (parentUuid) => {
+      const harness = await createHarness();
+      let cold: LocalManagedSessionAuthority | undefined;
+      const first = { ...records[0], parentUuid };
+      const check = async (projection: ManagedSessionMessageProjection) => {
+        if (parentUuid === branchRecord.uuid) {
+          await expect(projection.projectModelRecords()).rejects.toThrow(
+            'parent cycle',
+          );
+          await expect(projection.projectContextRecords()).rejects.toThrow(
+            'parent cycle',
+          );
+        } else {
+          await expect(projection.projectModelRecords()).resolves.toEqual([
+            first,
+            records[1],
+          ]);
+          await expect(projection.projectContextRecords()).resolves.toEqual([
+            { ...first, parentUuid: null },
+            records[1],
+            branchRecord,
+          ]);
+        }
+      };
+      try {
+        const sink = new ManagedSessionRecordSink(
+          harness.authority,
+          harness.store,
+          () => HOLDS,
+        );
+        await sink.write(first);
+        await sink.write(records[1]);
+        const stateRef = await harness.store.publish(
+          'managed-branch-checkpoint',
+          Buffer.from(JSON.stringify(branchRecord)),
+        );
+        await harness.authority.appendExecution(
+          {
+            ...command('commitBranchCheckpoint', 'recorder:branch-1'),
+            contentDigest: stateRef.digest,
+          },
+          [historicalCheckpoint(harness, stateRef)],
+          HOLDS,
+        );
+        await check(harness.projection);
+        await harness.close();
+        cold = await LocalManagedSessionAuthority.openReadOnly({
+          sessionKey,
+          cwd: '/workspace',
+          version: 'test',
+          resources: harness.store,
+          scan: (consume) =>
+            LocalJsonlManagedSessionJournalStore.scan(
+              {
+                transcriptPath: harness.transcriptPath,
+                runtimeBaseDir: harness.runtimeBaseDir,
+                sessionKey,
+              },
+              consume,
+            ),
+        });
+        await check(new ManagedSessionMessageProjection(cold, harness.store));
+      } finally {
+        await cold?.disposeHistory();
+        await harness.close();
+      }
+    },
+  );
+
   it('accepts an external owner parent while rejecting an actual active-chain cycle', async () => {
     const harness = await createHarness();
     const sink = new ManagedSessionRecordSink(

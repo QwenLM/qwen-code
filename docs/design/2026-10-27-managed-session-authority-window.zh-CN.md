@@ -26,6 +26,8 @@ canonical native journal 继续作为权威。Hosted 通过 Java/JDBC 使用现�
 
 ## SQL 查询视图
 
+Session 与历史仓库显式选择 `managedJdbcTemplate`，历史 codec 选择 `managedAgentObjectMapper`。嵌入宿主的普通或 primary JDBC/JSON bean 不能改变 canonical 历史的数据库归属或序列化。
+
 复用 native journal 命令索引及源事务字节。增加历史事实版本，保存封闭事实类型、身份、来源 revision/sequence、定位与 digest，以及连续索引覆盖状态。新事实与 canonical commit 同事务写入。旧事务按有界批次补建，不在整个扫描期间持有 head 锁。覆盖未到指定前缀前拒绝返回不存在。恢复时对照源事务验证派生事实；缺失或不一致的索引从 canonical journal 重建，canonical 损坏则阻断恢复。
 
 历史路由属于持久化 Workspace/Session，保留既有租户凭据与 read grant。Core 不持有 SQL 凭据。历史版本查询不能替换成仅保存最新状态的 `ma_session_record` 投影。同步修改共享 V1 schema baseline、初始化/校验注册及 H2/MySQL 覆盖；不增加 V2 migration，不自动删除现有 catalog。
@@ -66,7 +68,9 @@ CSI application inventory 包含两张历史表的完整类型定义，共 40 �
 
 当前上下文只含有效压缩之后、选定分支上的模型材料。非模型 UI/attribution/attempt 元数据仍在 canonical 历史中，按需流式读取。重复 memory catalog 与本地命令对沿用既有 API 历史语义。取消、工具结果身份及原始 CSI 相邻性等恢复事实查询固定 canonical 前缀，不能根据上下文投影判断不存在。团队任务页默认 100 条、最多 256 条；cursor 绑定团队与前缀，依赖和 roster/plan 不混入较新修订。Hook 安装、有效 schedule/team 定义、活跃输入/任务清理和未决 Action 按生命周期保留必要状态。
 
-消息 parent 与 CSI 相邻性消费者使用 `iterateMessageRecords()`，保留既有消息/分支投影通道；`iterateRecords()` 另外包含终态和 domain 记录。不能仅因某个终态 UUID 是完整历史最后一条，就将其作为消息 parent。显式活跃 transcript 链 API 包含链上的元数据记录，与有界模型上下文投影独立。外部 canonical owner parent 正常结束选定链，链内实际重复身份则视为损坏。
+消息 parent 与 CSI 相邻性消费者使用 `iterateMessageRecords()`，保留既有消息/分支投影通道；`iterateRecords()` 另外包含终态和 domain 记录。不能仅因某个终态 UUID 是完整历史最后一条，就将其作为消息 parent。显式活跃 transcript 链 API 包含链上的元数据记录，与有界模型上下文投影独立。外部 canonical owner parent 正常结束选定链，包括从历史分支 checkpoint 恢复模型/上下文；只有已解析的链内身份消耗循环预算，链内实际重复身份则视为损坏。
+
+新的 Legacy 通知查询在首条记录之前可能找不到 transcript，此时继续原有严格持久化路径。没有 recorder 时，准入仍为 `accepted: false`。Managed transcript 缺失、固定前缀恢复查询失败及其他 I/O 错误仍然拒绝，不能把不可用的历史解释为不存在的通知。
 
 已提交模型输出的恢复判断读取固定前缀的完整尾部：后续终态记录必须阻止再次恢复已结算输出。终态身份来自 payload 中的 prompt ID，即使记录没有 daemon prompt ID；其他 prompt 的终态不能阻止本次恢复。该判断与选择对话 parent 不同，不能使用仅消息的流。
 

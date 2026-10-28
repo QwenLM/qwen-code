@@ -459,14 +459,11 @@ export class ManagedSessionMessageProjection {
       let id: string | null = branchRecord.uuid;
       let visited = 0;
       while (id) {
+        const identity = await identities.get(id);
+        if (!identity) break;
         if (++visited > identities.size)
           throw new ManagedSessionRecordError(
             'Active transcript contains a parent cycle.',
-          );
-        const identity = await identities.get(id);
-        if (!identity)
-          throw new ManagedSessionRecordError(
-            'Active transcript is missing a parent record.',
           );
         if (identity.included) await order.set(length++, identity.first);
         if (identity.compression) break;

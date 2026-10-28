@@ -20193,6 +20193,58 @@ describe('Session', () => {
       ).not.toHaveBeenCalled();
     });
 
+    it.each([undefined, 'legacy', 'managed'] as const)(
+      'preserves missing-transcript notification admission for engine %s',
+      async (engine) => {
+        mockConfig.getSessionExecutionEngine = vi.fn().mockReturnValue(engine);
+        const failure = Object.assign(new Error('transcript missing'), {
+          code: 'ENOENT',
+        });
+        vi.mocked(
+          SessionTranscriptReader.prototype.hasBackgroundNotification,
+        ).mockRejectedValueOnce(failure);
+        const admission = session.enqueueBackgroundNotification({
+          displayText: 'Worker completed.',
+          modelText: '<task-notification />',
+          taskId: 'worker-first-notification',
+          status: 'completed',
+          kind: 'agent',
+        });
+        if (engine === 'managed') {
+          await expect(admission).rejects.toBe(failure);
+          expect(
+            mockChatRecordingService.recordNotificationStrict,
+          ).not.toHaveBeenCalled();
+        } else {
+          await expect(admission).resolves.toEqual({ accepted: true });
+          expect(
+            mockChatRecordingService.recordNotificationStrict,
+          ).toHaveBeenCalledOnce();
+        }
+      },
+    );
+
+    it('returns unaccepted for a recorder-less Legacy session with no transcript', async () => {
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue(undefined);
+      vi.mocked(
+        SessionTranscriptReader.prototype.hasBackgroundNotification,
+      ).mockRejectedValueOnce(
+        Object.assign(new Error('transcript missing'), { code: 'ENOENT' }),
+      );
+      await expect(
+        session.enqueueBackgroundNotification({
+          displayText: 'Worker completed.',
+          modelText: '<task-notification />',
+          taskId: 'worker-without-recorder',
+          status: 'completed',
+          kind: 'agent',
+        }),
+      ).resolves.toEqual({ accepted: false });
+      expect(
+        mockChatRecordingService.recordNotificationStrict,
+      ).not.toHaveBeenCalled();
+    });
+
     it('coalesces concurrent retries while daemon completion persistence is in flight', async () => {
       (
         session as unknown as {

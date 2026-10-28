@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
@@ -25,7 +26,7 @@ public class ManagedSessionSkills {
     @org.springframework.context.annotation.Lazy
     private ManagedExtensionRecordStore resources;
 
-    public ManagedSessionSkills(JdbcTemplate jdbc, ObjectMapper json,
+    public ManagedSessionSkills(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentObjectMapper") ObjectMapper json,
             RequestDigests digests, ManagedAgentDefinitionStore definitions) {
         this.jdbc = jdbc;
         this.json = json;

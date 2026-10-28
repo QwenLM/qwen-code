@@ -12897,7 +12897,16 @@ export class Session implements SessionContext {
         this.config.storage.getProjectRoot(),
         undefined,
         this.runtimeBaseDir,
-      ).hasBackgroundNotification(this.sessionId, item.taskId))
+      )
+        .hasBackgroundNotification(this.sessionId, item.taskId)
+        .catch((error: unknown) => {
+          if (
+            this.config.getSessionExecutionEngine?.() !== 'managed' &&
+            (error as NodeJS.ErrnoException)?.code === 'ENOENT'
+          )
+            return false;
+          throw error;
+        }))
     ) {
       this.persistedBackgroundNotificationTaskIds.set(
         item.taskId,

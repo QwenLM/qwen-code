@@ -23,6 +23,7 @@ import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 import org.apache.commons.codec.digest.DigestUtils;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
@@ -55,7 +56,8 @@ public class ManagedSessionHistoryStore {
     private final JdbcTemplate jdbc;
     private final ObjectMapper json;
 
-    public ManagedSessionHistoryStore(JdbcTemplate jdbc, ObjectMapper json) {
+    public ManagedSessionHistoryStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
+            @Qualifier("managedAgentObjectMapper") ObjectMapper json) {
         this.jdbc = jdbc;
         this.json = json;
     }
