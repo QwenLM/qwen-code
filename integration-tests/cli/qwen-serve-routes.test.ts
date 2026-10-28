@@ -496,6 +496,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_generation',
       'workspace_generation',
       'session_btw',
+      'session_btw_stream',
       'mcp_workspace_pool',
       'mcp_pool_restart',
       'auth_device_flow',
