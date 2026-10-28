@@ -206,9 +206,10 @@ for is a file no round produces, and a check over an absent file is silent:
   without `--first-parent`, an artifact contract that never asked for
   `mutations.json` or for the ledger (two rows, one per file the checker reads
   and nothing produced), and a coverage claim accepted over an empty commit
-  list. Two further second-pass findings — a cross-reference to a report item
-  that does not exist and a return value no caller could observe — were fixed
-  without a row, because neither is a guard.
+  list. Three further findings — a cross-reference to a report item that does
+  not exist, a return value no caller could observe, and a contract that asked
+  for the matrix unconditionally while the checker treats it as optional — were
+  fixed without a row, because none of them is a guard.
 
 ## Acceptance criteria
 
