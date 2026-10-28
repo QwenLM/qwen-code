@@ -482,6 +482,11 @@ export class LocalManagedSessionAuthority {
   }
 
   private writeFailure: Error | undefined;
+  private unsettledActivationRenewal?: {
+    readonly activation: ManagedSessionActivationState;
+    readonly leaseDurationMs: number;
+    readonly renewalSeq: number;
+  };
   /**
    * The transaction whose append outcome the journal has not settled yet.
    * While it is held the log is not dead: the next append asks the journal
@@ -3349,6 +3354,8 @@ export class LocalManagedSessionAuthority {
       // extension record) while the commit itself replays.
       if (this.unsettledAppend !== undefined)
         await this.settleUnsettledAppend();
+      if (this.unsettledActivationRenewal !== undefined)
+        await this.settleActivationRenewal();
       return operation();
     };
     const pending = this.queue.then(run, run);
@@ -3727,6 +3734,33 @@ export class LocalManagedSessionAuthority {
       return undefined;
     }
     const renewalSeq = current.renewalSeq + 1;
+    if (this.journal.renewActivation) {
+      const renewed = await this.runSerial(async () => {
+        const live = this.activation;
+        if (
+          this.recoveryBlocked ||
+          !live ||
+          live.phase !== 'active' ||
+          live.activationId !== current.activationId ||
+          live.epoch !== current.epoch ||
+          live.renewalSeq !== current.renewalSeq
+        )
+          return { supported: true };
+        if (this.writeFailure)
+          throw new ManagedSessionWritesStoppedError(this.writeFailure);
+        this.unsettledActivationRenewal = {
+          activation: live,
+          leaseDurationMs: input.leaseDurationMs,
+          renewalSeq,
+        };
+        const supported = await this.settleActivationRenewal();
+        return {
+          supported,
+          activation: supported ? this.activation : undefined,
+        };
+      });
+      if (renewed.supported) return renewed.activation;
+    }
     const receipt = await this.commitActivation({
       activationId: current.activationId,
       epoch: current.epoch,
@@ -3754,6 +3788,48 @@ export class LocalManagedSessionAuthority {
     return receipt === undefined ? undefined : this.activation;
   }
 
+  private async settleActivationRenewal(): Promise<boolean> {
+    const pending = this.unsettledActivationRenewal!;
+    const current = pending.activation;
+    try {
+      const lease = await this.journal.renewActivation!({
+        activationId: current.activationId,
+        epoch: current.epoch,
+        renewalSeq: pending.renewalSeq,
+        leaseDurationMs: pending.leaseDurationMs,
+      });
+      if (!lease) {
+        this.unsettledActivationRenewal = undefined;
+        return false;
+      }
+      if (
+        lease.activationId !== current.activationId ||
+        lease.epoch !== current.epoch ||
+        lease.renewalSeq !== pending.renewalSeq ||
+        !Number.isSafeInteger(lease.expiresAt) ||
+        lease.expiresAt < current.expiresAt
+      )
+        throw new ManagedSessionRecordError(
+          'invalid activation lease receipt.',
+        );
+      this.activation = { ...current, ...lease };
+      this.unsettledActivationRenewal = undefined;
+      return true;
+    } catch (error) {
+      if (error instanceof ManagedSessionCommitRejectedError) {
+        this.unsettledActivationRenewal = undefined;
+        throw error;
+      }
+      if (!(error instanceof ManagedSessionAppendUnsettledError)) {
+        this.unsettledActivationRenewal = undefined;
+        this.writeFailure =
+          error instanceof Error ? error : new Error(String(error));
+        await this.journal.abort().catch(() => undefined);
+      }
+      throw error;
+    }
+  }
+
   /**
    * Records that the current activation stopped advancing the session.
    *
@@ -3762,10 +3838,14 @@ export class LocalManagedSessionAuthority {
    * that is already gone is not an error: there is nothing left to fence.
    */
   async releaseActivation(): Promise<void> {
+    const expected = this.activation;
+    if (this.unsettledActivationRenewal) await this.settlePendingAppend();
     if (this.recoveryBlocked) return;
     const current = this.activation;
     if (
       current === undefined ||
+      current.activationId !== expected?.activationId ||
+      current.epoch !== expected?.epoch ||
       current.phase === 'released' ||
       current.phase === 'revoked'
     ) {
@@ -3812,6 +3892,8 @@ export class LocalManagedSessionAuthority {
     const prepared = this.queue.then(async () => {
       if (this.unsettledAppend !== undefined)
         await this.settleUnsettledAppend();
+      if (this.unsettledActivationRenewal !== undefined)
+        await this.settleActivationRenewal();
       const current = this.activation;
       if (
         this.writeFailure ||

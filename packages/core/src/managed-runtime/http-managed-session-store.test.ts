@@ -36,7 +36,11 @@ import {
   parseManagedSessionEvent,
   parseManagedSessionHeader,
 } from './managed-session-records.js';
-import { ManagedSessionCommitRejectedError } from './managed-session-storage.js';
+import {
+  ManagedSessionCommitRejectedError,
+  scanManagedSessionJournal,
+  type ManagedSessionActivationLease,
+} from './managed-session-storage.js';
 import type {
   ManagedSessionDurableRef,
   ManagedSessionKey,
@@ -523,6 +527,189 @@ describe('HTTP Managed Session store', () => {
     });
     return { stores, authority };
   }
+
+  it('bounds idle activation renewal journal growth', async () => {
+    const server = new FakeManagedSessionStore();
+    server.activationLeaseRenewal = true;
+    const { stores, authority } = await bootOriginalCsiAuthority(server);
+    try {
+      const initialTransactions = server.commits.length;
+      const initialSequence = authority.committedSequence;
+      const initialExpiry = authority.currentActivation!.expiresAt;
+      for (let renewal = 1; renewal <= 100; renewal++) {
+        await authority.renewActivation({
+          leaseDurationMs: 60_000 + renewal,
+        });
+      }
+      expect(authority.currentActivation!.expiresAt).toBeGreaterThan(
+        initialExpiry,
+      );
+      expect(server.commits.length).toBe(initialTransactions);
+      expect(authority.committedSequence).toBe(initialSequence);
+      expect(authority.currentActivation!.renewalSeq).toBe(100);
+      const restored = await LocalManagedSessionAuthority.open({
+        journal: await stores.journalStore.open({ sessionKey: SESSION_KEY }),
+        sessionKey: SESSION_KEY,
+        cwd: '/workspace',
+        version: 'test',
+        resources: stores.resourceStore,
+      });
+      expect(restored.currentActivation).toEqual(authority.currentActivation);
+    } finally {
+      await stores.stopLocal();
+    }
+  });
+
+  it('settles a compact renewal with a lost acknowledgement before releasing the activation', async () => {
+    const server = new FakeManagedSessionStore();
+    server.activationLeaseRenewal = true;
+    let dropAcknowledgements = true;
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+      const response = await server.fetch(input, init);
+      if (
+        dropAcknowledgements &&
+        requestUrl(input).endsWith('/writers:renew') &&
+        JSON.parse(String(init?.body)).activation
+      )
+        throw new TypeError('lost activation renewal acknowledgement');
+      return response;
+    });
+    const { stores, authority } = await bootOriginalCsiAuthority(
+      server,
+      fetchFn,
+    );
+    try {
+      await expect(
+        authority.renewActivation({ leaseDurationMs: 120_000 }),
+      ).rejects.toBeInstanceOf(ManagedSessionAppendUnsettledError);
+      expect(server.commits).toHaveLength(2);
+      expect(authority.currentActivation!.renewalSeq).toBe(0);
+      dropAcknowledgements = false;
+      await authority.releaseActivation();
+      expect(authority.currentActivation!.phase).toBe('released');
+      const release = server.storedTransactions.at(-1)!;
+      const event = JSON.parse(
+        Buffer.from(String(release['recordBytesBase64']), 'base64')
+          .toString('utf8')
+          .split('\n')[0],
+      );
+      expect(event.managedSession.payload.expiresAt).toBe(
+        authority.currentActivation!.expiresAt,
+      );
+      expect(authority.currentActivation!.expiresAt).toBeGreaterThan(
+        Date.now() + 100_000,
+      );
+      expect(server.commits).toHaveLength(3);
+    } finally {
+      await stores.stopLocal();
+    }
+  });
+
+  it('refuses a restored compact lease for a different activation or a journal prefix', async () => {
+    const server = new FakeManagedSessionStore();
+    server.activationLeaseRenewal = true;
+    const { stores, authority } = await bootOriginalCsiAuthority(server);
+    try {
+      await authority.renewActivation({ leaseDurationMs: 120_000 });
+      const journal = await stores.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      const complete = await journal.read();
+      const prefix = await journal.read({ maxBytes: complete.committedBytes });
+      expect(prefix.activation!.renewalSeq).toBe(0);
+      expect(complete.activation!.renewalSeq).toBe(1);
+      server.headOverrides['activationLease'] = {
+        ...complete.activation,
+        activationId: 'foreign',
+      };
+      await expect(journal.read()).rejects.toThrow(
+        'activation lease conflicts',
+      );
+    } finally {
+      await stores.stopLocal();
+    }
+  });
+
+  it.each([
+    'workspace_lifecycle_admission_closed',
+    'workspace_lifecycle_claim_fenced',
+  ])('keeps compact renewal writable after rollbackable %s', async (code) => {
+    const server = new FakeManagedSessionStore();
+    server.activationLeaseRenewal = true;
+    let refuse = true;
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+      if (
+        refuse &&
+        requestUrl(input).endsWith('/writers:renew') &&
+        JSON.parse(String(init?.body)).activation
+      )
+        return jsonResponse(
+          { error: { code, message: 'Lifecycle claim pending.' } },
+          409,
+        );
+      return server.fetch(input, init);
+    });
+    const { stores, authority } = await bootOriginalCsiAuthority(
+      server,
+      fetchFn,
+    );
+    try {
+      await expect(
+        authority.renewActivation({ leaseDurationMs: 120_000 }),
+      ).rejects.toBeInstanceOf(ManagedSessionCommitRejectedError);
+      expect(authority.writesStopped).toBe(false);
+      expect(server.sealCount).toBe(0);
+      refuse = false;
+      await authority.renewActivation({ leaseDurationMs: 120_000 });
+      expect(authority.currentActivation!.renewalSeq).toBe(1);
+    } finally {
+      await stores.stopLocal();
+    }
+  });
+
+  it('reacquires a compact renewal lease that expires while the request is in flight', async () => {
+    const server = new FakeManagedSessionStore();
+    server.activationLeaseRenewal = true;
+    let now = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    let lapse = true;
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+      if (
+        lapse &&
+        requestUrl(input).endsWith('/writers:renew') &&
+        JSON.parse(String(init?.body)).activation
+      ) {
+        lapse = false;
+        now += 300_001;
+        return jsonResponse(
+          {
+            error: {
+              code: 'managed_session_writer_conflict',
+              message: 'Lease expired in flight.',
+            },
+          },
+          409,
+        );
+      }
+      return server.fetch(input, init);
+    });
+    const { stores, authority } = await bootOriginalCsiAuthority(
+      server,
+      fetchFn,
+    );
+    try {
+      await expect(
+        authority.renewActivation({ leaseDurationMs: 120_000 }),
+      ).rejects.toBeInstanceOf(ManagedSessionAppendUnsettledError);
+      expect(authority.writesStopped).toBe(false);
+      await authority.renewActivation({ leaseDurationMs: 120_000 });
+      expect(authority.currentActivation!.renewalSeq).toBe(1);
+      expect(server.commits).toHaveLength(2);
+      expect(server.sealCount).toBe(0);
+    } finally {
+      await stores.stopLocal();
+    }
+  });
 
   it('retries the frozen ownership release after a lost acknowledgement without reacquiring', async () => {
     const server = new FakeManagedSessionStore();
@@ -7007,6 +7194,8 @@ describe('HTTP Managed Session store', () => {
 });
 
 class FakeManagedSessionStore {
+  activationLeaseRenewal = false;
+  private activationLease?: ManagedSessionActivationLease;
   supportedStorageVersion: number | undefined = 2;
   readonly commits: Array<Record<string, unknown>> = [];
   readonly recoveryBlocks: Array<Record<string, unknown>> = [];
@@ -7094,6 +7283,52 @@ class FakeManagedSessionStore {
         );
       this.renewCount++;
       this.leaseUntil = Date.now() + 300_000;
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      if (body['activation']) {
+        const request = body['activation'] as {
+          activationId: string;
+          epoch: number;
+          renewalSeq: number;
+          leaseDurationMs: number;
+        };
+        const scan = scanManagedSessionJournal(
+          Buffer.concat(
+            this.transactions.map((transaction) =>
+              Buffer.from(String(transaction['recordBytesBase64']), 'base64'),
+            ),
+          ),
+          SESSION_KEY,
+        );
+        const current = this.activationLease ?? scan.activation;
+        if (
+          !this.activationLeaseRenewal ||
+          !current ||
+          scan.activation?.phase !== 'active' ||
+          current.activationId !== request.activationId ||
+          current.epoch !== request.epoch ||
+          request.renewalSeq < current.renewalSeq ||
+          request.renewalSeq > current.renewalSeq + 1
+        )
+          return jsonResponse(
+            {
+              error: {
+                code: 'managed_session_activation_conflict',
+                message: 'Activation changed.',
+              },
+            },
+            409,
+          );
+        if (request.renewalSeq !== current.renewalSeq)
+          this.activationLease = {
+            activationId: request.activationId,
+            epoch: request.epoch,
+            renewalSeq: request.renewalSeq,
+            expiresAt: Math.max(
+              current.expiresAt,
+              Date.now() + request.leaseDurationMs,
+            ),
+          };
+      }
       return jsonResponse(this.grant());
     }
     if (suffix === '/writers:seal') {
@@ -7114,6 +7349,9 @@ class FakeManagedSessionStore {
     }
     if (suffix === '/restore') {
       return jsonResponse({
+        ...(this.activationLease
+          ? { activationLease: this.activationLease }
+          : {}),
         state: this.state,
         storageVersion: 1,
         writerGeneration: this.writerGeneration,
@@ -7212,6 +7450,12 @@ class FakeManagedSessionStore {
       this.committedSequence = Number(body['lastSequence']);
       this.lastCommitDigest = (body['commitDigest'] as string | null) ?? null;
       this.activationEpoch = Number(body['activationEpoch']);
+      if (
+        ['installActivation', 'renewActivation', 'releaseActivation'].includes(
+          String(body['operation']),
+        )
+      )
+        this.activationLease = undefined;
       return jsonResponse({
         journalRevision,
         transactionId: body['transactionId'],
@@ -7280,6 +7524,10 @@ class FakeManagedSessionStore {
 
   private grant(): Record<string, unknown> {
     return {
+      activationLeaseRenewal: this.activationLeaseRenewal,
+      ...(this.activationLease
+        ? { activationLease: this.activationLease }
+        : {}),
       ...(this.supportedStorageVersion === undefined
         ? {}
         : { supportedStorageVersion: this.supportedStorageVersion }),

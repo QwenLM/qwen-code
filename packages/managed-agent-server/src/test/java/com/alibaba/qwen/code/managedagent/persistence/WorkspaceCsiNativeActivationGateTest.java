@@ -33,6 +33,8 @@ import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import javax.sql.DataSource;
+
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -73,8 +75,7 @@ class WorkspaceCsiNativeActivationGateTest {
 
     @BeforeEach
     void setUp(TestInfo info) throws Exception {
-        var source = new DriverManagerDataSource("jdbc:h2:mem:csi-native-" + UUID.randomUUID()
-                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE", "sa", "");
+        var source = dataSource();
         Flyway.configure().dataSource(source).locations("classpath:db/managed-schema").load().migrate();
         jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source);
         var manager = new DataSourceTransactionManager(source);
@@ -120,6 +121,54 @@ class WorkspaceCsiNativeActivationGateTest {
         token = nativeFixture.path("writerToken").textValue();
         transaction.execute(status -> journal.acquireWriter("tenant", sessionId, token,
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace", writerId, 300_000L)));
+    }
+
+    protected DataSource dataSource() {
+        return new DriverManagerDataSource("jdbc:h2:mem:csi-native-" + UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE", "sa", "");
+    }
+
+    @Test
+    void textConversationCompactsIdleActivationRenewalsAndKeepsNativeProof() throws Exception {
+        ready();
+        var before = journal.restore("tenant", "workspace", sessionId, token);
+        byte[] original = jdbc.queryForObject("SELECT record_bytes FROM ma_session_journal_tx WHERE journal_revision = 2", byte[].class);
+        String activationId = jdbc.queryForObject("SELECT activation_id FROM ma_session_head", String.class);
+        ManagedSessionStoreModels.WriterGrant grant = null;
+        for (int index = 1; index <= 100; index++) {
+            int sequence = index;
+            grant = transaction.execute(status -> journal.renewWriter("tenant", sessionId, token,
+                    new ManagedSessionStoreModels.RenewWriterRequest("workspace", writerId, 1, 300_000L,
+                            new ManagedSessionStoreModels.ActivationRenewal(activationId, 1, sequence, 120_000))));
+        }
+        assertThat(grant.activationLeaseRenewal()).isTrue();
+        assertThat(grant.activationLease().renewalSeq()).isEqualTo(100);
+        assertThat(grant.journalRevision()).isEqualTo(before.journalRevision());
+        assertThat(grant.committedSequence()).isEqualTo(before.committedSequence());
+        assertThat(grant.lastCommitDigest()).isEqualTo(before.lastCommitDigest());
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_journal_tx", Integer.class)).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT record_bytes FROM ma_session_journal_tx WHERE journal_revision = 2", byte[].class)).isEqualTo(original);
+        var lease = grant.activationLease();
+        assertThat(journal.restore("tenant", "workspace", sessionId, token).activationLease()).isEqualTo(lease);
+        transaction.executeWithoutResult(status -> jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
+            var head = com.alibaba.qwen.code.runtimebroker.JdbcCsiActivationAdmission.lockNativeHead(connection,
+                    JdbcCsiFilesRetirementGuard.lockBindingControl(connection, binding.getBindingId()));
+            assertThat(head.activation().expiresAt()).isEqualTo(lease.expiresAt());
+            assertThat(head.activation().renewalSequence()).isEqualTo(100);
+            return null;
+        }));
+        var duplicate = transaction.execute(status -> journal.renewWriter("tenant", sessionId, token,
+                new ManagedSessionStoreModels.RenewWriterRequest("workspace", writerId, 1, 300_000L,
+                        new ManagedSessionStoreModels.ActivationRenewal(activationId, 1, 100, 120_000))));
+        assertThat(duplicate.activationLease()).isEqualTo(lease);
+        for (long sequence : new long[] {99, 102}) {
+            assertThatThrownBy(() -> transaction.execute(status -> journal.renewWriter("tenant", sessionId, token,
+                    new ManagedSessionStoreModels.RenewWriterRequest("workspace", writerId, 1, 300_000L,
+                            new ManagedSessionStoreModels.ActivationRenewal(activationId, 1, sequence, 120_000)))))
+                    .isInstanceOf(ManagedAgentException.class);
+        }
+        assertThat(commit(2).replayed()).isFalse();
+        assertThat(journal.restore("tenant", "workspace", sessionId, token).activationLease()).isEqualTo(lease);
     }
 
     @Test
@@ -228,10 +277,14 @@ class WorkspaceCsiNativeActivationGateTest {
 
     private Map<String, List<String>> allRows() {
         Map<String, List<String>> rows = new TreeMap<>();
+        String schema = jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<String>) connection -> {
+            String current = connection.getSchema();
+            return current == null ? connection.getCatalog() : current;
+        });
         for (String table : jdbc.queryForList(
                         "SELECT table_name FROM information_schema.tables WHERE table_schema ="
-                                + " 'public' AND table_type = 'BASE TABLE' ORDER BY table_name", String.class)) {
-            rows.put(table, jdbc.queryForList("SELECT * FROM \"" + table + "\"").stream()
+                                + " ? AND table_type = 'BASE TABLE' ORDER BY table_name", String.class, schema)) {
+            rows.put(table, jdbc.queryForList("SELECT * FROM `" + table + "`").stream()
                     .map(row -> JSON.valueToTree(new TreeMap<>(row)).toString()).sorted().toList());
         }
         assertThat(rows).containsKeys("ma_delivery", "ma_session", "ma_session_head", "ma_request_receipt");
