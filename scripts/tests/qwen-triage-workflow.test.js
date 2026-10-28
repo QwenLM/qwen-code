@@ -38,7 +38,7 @@ const prSkill = readFileSync(
   'utf8',
 );
 const triageSkillDoc = readFileSync('.qwen/skills/triage/SKILL.md', 'utf8');
-import { VERDICTS } from '../../scripts/verify-pr-check.mjs';
+import { ATTRIBUTIONS, VERDICTS } from '../../scripts/verify-pr-check.mjs';
 
 const verifySkill = readFileSync('.qwen/skills/verify-pr/SKILL.md', 'utf8');
 const hasGnuRealpath =
@@ -5302,6 +5302,67 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(verifySkill.indexOf('Expected failures are passes')).toBeGreaterThan(
       verifySkill.indexOf('## Hard rules'),
     );
+  });
+
+  // The rule above named two causes (PR, harness) and left the third unnamed.
+  // A round proved a repo test red on both arms, booked that red twice, and
+  // published `findings` while its own verdict line said neither reason was a
+  // PR defect. The A/A paragraph taught how to prove a red environmental and
+  // never how to count it, so the two halves have to name each other.
+  it('names the environment attribution and connects the A/A proof to the count', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+    const rules = flat.slice(flat.indexOf('## Hard rules'));
+
+    expect(rules).toContain('failures: [{ id, attribution }]');
+    for (const attribution of ATTRIBUTIONS) {
+      expect(rules).toContain(`\`${attribution}\``);
+    }
+    expect(rules).toContain('Only `pr` can carry `findings` or `blocked`');
+    // The counting consequence lives with the A/A proof, not only in the rule.
+    const notCovered = flat.slice(
+      flat.indexOf('**Not covered** — every claim'),
+      flat.indexOf('**Methodology**'),
+    );
+    expect(notCovered).toContain(
+      'how you count it, not just how you describe it',
+    );
+    expect(notCovered).toContain('It never enters `fail`');
+    expect(notCovered).toContain('_Not covered_');
+  });
+
+  // Hand-run, the guard asks "is anything new?" — and a fetch that errored
+  // answers "no". 324 review comments became 0 and the comparison read clean.
+  it('makes the pre-publish guard fail closed and owns both halves', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+
+    expect(flat).toContain('scripts/verify-pr-guard.mjs');
+    expect(flat).toContain('the hand-run version fails open');
+    expect(flat).toContain('--compare --start');
+    expect(flat).toContain('a failed fetch as fatal and writes no snapshot');
+    expect(flat).toContain('shorter than the start snapshot');
+    expect(flat).toContain(
+      'A question you did not get answered is never a clean guard',
+    );
+    // Reviews carry submitted_at; one field name across all three lists
+    // compares undefined with undefined and never sees an edited review.
+    expect(flat).toContain('reviews carry `submitted_at`, not `updated_at`');
+  });
+
+  // "Every production commit was mutated on its own" shipped while two commits
+  // had no row. A coverage claim is a number over a set, so it is generated
+  // from the enumeration rather than asserted.
+  it('generates coverage claims from the enumeration', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+
+    expect(flat).toContain(
+      'A coverage claim is universally quantified, so generate it from the enumeration',
+    );
+    expect(flat).toContain('coverageClaim: "per-commit"');
+    expect(flat).toContain('productionCommits');
+    expect(flat).toContain('rows[].commit');
+    expect(flat).toContain('git log --no-merges base..head');
+    const rules = flat.slice(flat.indexOf('## Hard rules'));
+    expect(rules).toContain('The same binds a **coverage claim**');
   });
 
   // The whole report is already inside a <details> on the PR. With the

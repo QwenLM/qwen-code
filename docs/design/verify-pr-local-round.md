@@ -2,7 +2,8 @@
 
 [English](verify-pr-local-round.md) | [简体中文](verify-pr-local-round.zh-CN.md)
 
-Status: implementing with this change.
+Status: implemented; extended with the counting, guard and coverage rules
+below.
 
 ## Problem
 
@@ -30,9 +31,30 @@ step never sees, or counts that contradict the verdict.
   A local round has no equivalent and can publish counts that contradict the
   verdict it states.
 
+Three further gaps surfaced in a later round, all of the same kind — a rule
+stated in prose with no executable form, failing silently:
+
+- **The counting rule was taught halfway.** One paragraph explains how to
+  prove a red is environmental (boot both arms, show an identical failure);
+  another says expected reds are passes and a harness fault is `inconclusive`.
+  Nothing joined them, so a host-environment red had no category. The round
+  booked one repo test's red twice — at head and again for its base control —
+  published `fail: 2` with `findings`, and wrote in its own verdict line that
+  neither reason was a defect in the PR. The base cell was an assertion that
+  base fails; it failed as predicted, so it passed.
+- **The pre-publish guard failed open.** It asks "did anything new arrive?",
+  and a re-fetch that errors returns no items, so the answer is "no". Measured:
+  324 review comments at round start, 0 on the re-fetch, because the call
+  failed rather than the PR going quiet. This was the one safety rule in the
+  local path with no script behind it.
+- **A coverage claim was asserted rather than enumerated.** "Every production
+  commit since the previous round was mutated on its own" shipped while two
+  commits had no row. The matrix was per-guard, a weaker claim than the prose
+  made, and only a self-audit caught the difference.
+
 ## Proposal
 
-Two standalone scripts, plus the skill pointing at them where the flow needs
+Three standalone scripts, plus the skill pointing at them where the flow needs
 them rather than at the end of the document.
 
 - `scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo>` resolves the
@@ -49,6 +71,22 @@ them rather than at the end of the document.
   assertion. Report shape and evidence naming are warnings, because a
   documentation-only round has no capture and a checker cannot know whether a
   harness ran.
+- `scripts/verify-pr-guard.mjs` owns both halves of the pre-publish guard.
+  `--pr <n> --repo <owner>/<repo> --snapshot <file>` fetches the head, the PR
+  state and all three comment lists with `--paginate`, and writes the file only
+  when every call succeeded. `--compare --start <a> --now <b>` reports every
+  reason the round is dirty and exits 1.
+
+The checker gains two rules over the artifacts a round already writes:
+
+- `assertions.json` may carry `failures: [{ id, attribution }]`, one entry per
+  failed assertion, attributed `pr`, `harness` or `environment`. A
+  `findings`/`blocked` verdict whose ledger names no `pr` failure is an error,
+  as is a ledger whose length disagrees with `fail`. A round with failures and
+  no ledger is a warning, so older artifacts still pass.
+- `mutations.json` may claim `coverageClaim: "per-commit"` with
+  `productionCommits` from `git log` and `rows[].commit`. A listed commit with
+  no row is an error naming the commits.
 
 ## Design decisions
 
@@ -70,6 +108,24 @@ them rather than at the end of the document.
 4. **Warnings, not errors, for report shape.** The publisher does not enforce
    report structure either. A checker stricter than the publisher would reject
    artifact the lane accepts, which teaches maintainers to ignore it.
+5. **Attribution is a ledger, not a fifth verdict word.** The tempting fix for
+   an environment red is a verdict like `merge-ready-with-caveats`, which would
+   have to be added to the publisher, its case labels and their pin. The
+   vocabulary stays at four words: the red is re-encoded as the assertion it
+   actually is — both arms fail for reason R — and the ledger records who caused
+   what. The checker then reads the attribution instead of guessing from prose.
+6. **The guard owns the fetch, not just the comparison.** A script that only
+   compared two files would leave the hand-typed fetch in place, and an empty
+   file written after a failed call compares clean. So a failed call is fatal
+   and writes nothing, and the comparison independently treats a short list as
+   dirty. Either half alone leaves the hole open. There is no retry flag: a
+   refusal the maintainer re-runs is honest, while a silent retry budget would
+   hide a host that cannot reach the API.
+7. **The checker validates the coverage claim against the round's own
+   enumeration.** It has no repository, so it cannot derive the commit set; an
+   incomplete `productionCommits` list is the skill rule's job, and the doc says
+   so. What is machine-checkable is the claim against the list supplied, which
+   is exactly the gap the measured round had.
 
 ## Constraints and risks
 
@@ -86,6 +142,14 @@ them rather than at the end of the document.
   characters are dropped before it is printed.
 - These are local helpers: the lane pins `.qwen` from the base branch, so the
   skill text that references them takes effect only after this change merges.
+- The guard normalizes each item to `id` plus a stamp read as
+  `updated_at ?? submitted_at`, because reviews carry only the latter. Reading
+  one field name across all three lists would compare `undefined` with
+  `undefined` and never notice an edited review.
+- An `environment` attribution is only as good as the A/A control behind it.
+  The checker cannot see that control, so the skill still requires both arms
+  and the shared cause in the report; the ledger stops the miscount, not a
+  fabricated attribution.
 
 ## Validation plan
 
@@ -97,6 +161,16 @@ them rather than at the end of the document.
   directory; and artifact fixtures for each checker outcome.
 - A dry run of `prepare` against a real PR in a maintainer clone, and of
   `check` against a real artifact directory.
+- For the guard, a `gh` stand-in on `PATH` drives the real CLI down both
+  paths, so "writes no file when a call fails" is observed rather than inferred
+  from the pure function.
+- A vacuity matrix over the new guards: revert each one in place, run the
+  suite that should catch it, restore. Measured: 11 rows, 11 killed, including
+  a control row on the pre-existing `merge-ready`/`fail` guard. Three of those
+  rows exist because the self-audit found defects in this change itself: a
+  warning-suppression branch that let a malformed ledger reach a null read, a
+  refusal message that blamed the head for a malformed list item, and a
+  `--compare` that read clean when both sides were the same file.
 
 ## Acceptance criteria
 
@@ -109,7 +183,17 @@ them rather than at the end of the document.
 - `check` rejects `merge-ready` with a failed assertion, an inconsistent
   triple, and an unknown verdict word; it accepts `findings` with the same
   counts.
-- Neither script executes PR code.
+- `check` rejects `findings` and `blocked` when the failures ledger attributes
+  no failure to the PR, rejects a ledger whose length disagrees with `fail`,
+  accepts `inconclusive` with a `harness` failure, and only warns when an older
+  artifact carries no ledger.
+- `check` rejects a `per-commit` coverage claim whose listed commits are not
+  all covered by a row, matching abbreviated and full OIDs in either direction.
+- `guard --snapshot` writes nothing and exits 1 when any call fails;
+  `guard --compare` exits 1 on a malformed snapshot, a short list, a new,
+  edited or vanished item, a moved head and a changed state, exits 2 when both
+  sides are the same file, and exits 0 only when nothing moved.
+- No script executes PR code.
 
 ## Open questions
 
