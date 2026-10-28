@@ -41,6 +41,7 @@ import type { RetryInfo } from '../utils/rateLimit.js';
 import type { RetryDiagnostics } from '../utils/retryErrorClassification.js';
 import {
   getThoughtSummary,
+  getThoughtText,
   type ThoughtSummary,
 } from '../utils/thoughtUtils.js';
 import type { LoopStopDetail, LoopType } from '../telemetry/types.js';
@@ -51,6 +52,10 @@ import type {
 } from '../goals/goal-protocol.js';
 import { getProviderToolCallId } from './toolCallIdUtils.js';
 import { toolCallArgumentsWereIncomplete } from './incomplete-tool-call-args.js';
+import {
+  getToolCallPreparations,
+  type ToolCallPreparation,
+} from './tool-call-preparation.js';
 
 const ERROR_REPORT_HISTORY_TAIL_COUNT = 8;
 const ERROR_REPORT_TEXT_PREVIEW_CHARS = 200;
@@ -69,6 +74,7 @@ export interface ServerTool {
 export enum LlmEventType {
   Content = 'content',
   ToolCallRequest = 'tool_call_request',
+  ToolCallPreparation = 'tool_call_preparation',
   ToolCallResponse = 'tool_call_response',
   ToolCallConfirmation = 'tool_call_confirmation',
   UserCancelled = 'user_cancelled',
@@ -131,6 +137,16 @@ export interface StructuredError {
 
 export interface LlmErrorEventValue {
   error: StructuredError;
+}
+
+const structuredErrorCauses = new WeakMap<StructuredError, unknown>();
+
+/**
+ * The error a `Turn`'s `Error` event was built from, as the provider threw
+ * it, for a host that reports it the way a direct `LlmChat` send does.
+ */
+export function getStructuredErrorCause(error: StructuredError): unknown {
+  return structuredErrorCauses.get(error);
 }
 
 export interface SessionTokenLimitExceededValue {
@@ -430,11 +446,21 @@ export type ServerLlmContentEvent = {
 export type ServerLlmThoughtEvent = {
   type: LlmEventType.Thought;
   value: ThoughtSummary;
+  /** The chunk's thought text as the model sent it. */
+  text?: string;
 };
 
 export type ServerLlmToolCallRequestEvent = {
   type: LlmEventType.ToolCallRequest;
   value: ToolCallRequestInfo;
+  /** The function call the request was built from, as the stream sent it. */
+  functionCall?: FunctionCall;
+};
+
+/** A tool call the model started streaming, before its arguments arrive. */
+export type ServerLlmToolCallPreparationEvent = {
+  type: LlmEventType.ToolCallPreparation;
+  value: ToolCallPreparation;
 };
 
 export type ServerLlmToolCallResponseEvent = {
@@ -624,6 +650,7 @@ export type ServerLlmStreamEvent =
   | ServerLlmModelFallbackEvent
   | ServerLlmThoughtEvent
   | ServerLlmToolCallConfirmationEvent
+  | ServerLlmToolCallPreparationEvent
   | ServerLlmToolCallRequestEvent
   | ServerLlmToolCallResponseEvent
   | ServerLlmUserCancelledEvent
@@ -726,7 +753,9 @@ export class Turn {
     private readonly promptIdentity?: string,
     private readonly retractDeliveredOutputOnRetry?: boolean,
     private readonly onPreparedRequest?: LlmPreparedRequestCallback,
+    private readonly yieldsToolCallPreparations?: boolean,
     private readonly suppressedHookContext?: string,
+    private readonly onModelRequestDispatched?: () => void,
   ) {
     this.goalContext = goalContext ? { ...goalContext } : undefined;
   }
@@ -746,10 +775,14 @@ export class Turn {
         this.promptIdentity !== undefined ||
         this.retractDeliveredOutputOnRetry === true ||
         this.onPreparedRequest !== undefined ||
+        this.onModelRequestDispatched !== undefined ||
         this.suppressedHookContext !== undefined
           ? {
               ...(this.onPreparedRequest
                 ? { onPreparedRequest: this.onPreparedRequest }
+                : {}),
+              ...(this.onModelRequestDispatched
+                ? { onModelRequestDispatched: this.onModelRequestDispatched }
                 : {}),
               ...(this.suppressedHookContext
                 ? { suppressedHookContext: this.suppressedHookContext }
@@ -842,11 +875,13 @@ export class Turn {
           this.currentResponseId = resp.responseId;
         }
 
-        const thoughtSummary = getThoughtSummary(resp);
+        const thoughtText = getThoughtText(resp);
+        const thoughtSummary = getThoughtSummary(resp, thoughtText);
         if (thoughtSummary) {
           yield {
             type: LlmEventType.Thought,
             value: thoughtSummary,
+            text: thoughtText,
           };
         }
 
@@ -859,6 +894,15 @@ export class Turn {
             value: text,
             ...(hasImage ? { parts: displayParts } : {}),
           };
+        }
+
+        if (this.yieldsToolCallPreparations) {
+          for (const preparation of getToolCallPreparations(resp)) {
+            yield {
+              type: LlmEventType.ToolCallPreparation,
+              value: preparation,
+            };
+          }
         }
 
         // Handle function calls (requesting tool execution)
@@ -951,6 +995,7 @@ export class Turn {
         ...(requestId ? { requestId } : {}),
       };
       await this.chat.maybeIncludeSchemaDepthContext(structuredError);
+      structuredErrorCauses.set(structuredError, e);
       yield { type: LlmEventType.Error, value: { error: structuredError } };
       return;
     }
@@ -983,7 +1028,11 @@ export class Turn {
     this.pendingToolCalls.push(toolCallRequest);
 
     // Yield a request for the tool call, not the pending/confirming status
-    return { type: LlmEventType.ToolCallRequest, value: toolCallRequest };
+    return {
+      type: LlmEventType.ToolCallRequest,
+      value: toolCallRequest,
+      functionCall: fnCall,
+    };
   }
 }
 

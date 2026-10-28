@@ -831,6 +831,40 @@ button.livePendingSession:hover {
   cursor: pointer;
 }
 
+/* A parent row keeps its chevron left of the title; a child row aligns its
+   title under the parent's, so the lineage reads as one block. */
+.sessionRow.sessionTreeRow {
+  padding-left: 40px;
+}
+
+.sessionTreeToggle {
+  position: absolute;
+  top: 50%;
+  left: 25px;
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: color-mix(in srgb, currentColor 70%, transparent);
+  cursor: pointer;
+  transform: translateY(-50%);
+}
+
+.sessionTreeToggle:hover {
+  background: color-mix(in srgb, currentColor 12%, transparent);
+  color: currentColor;
+}
+
+.sessionTreeToggle:focus-visible {
+  outline: 2px solid var(--sidebar-ring, currentColor);
+  outline-offset: 1px;
+}
+
 .collapsedSessionPopover {
   overscroll-behavior: contain;
   width: min(
