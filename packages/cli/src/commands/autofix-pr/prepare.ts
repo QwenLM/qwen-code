@@ -231,6 +231,127 @@ function report(state: AutofixPrState, extra: Record<string, unknown>): void {
 }
 
 /**
+ * What the user's own copy of the watch's head branch holds, as the report
+ * says it: commits the PR does not have, uncommitted work in a checkout of
+ * that copy, and whether any of it could not be read — never a "no" that
+ * only means git could not answer. Only a local branch whose upstream is the
+ * head branch on the push remote counts as that copy.
+ */
+function localCopy(
+  state: Pick<
+    AutofixPrState,
+    'headRefName' | 'pushTarget' | 'lastKnownHeadSha'
+  >,
+): {
+  localUnpushedCommits: number;
+  localUncommittedChanges: boolean;
+  localWorkUnknown: boolean;
+} {
+  const upstream = gitOpt(
+    'for-each-ref',
+    '--format=%(upstream:short)',
+    `refs/heads/${state.headRefName}`,
+  );
+  if (upstream !== `${state.pushTarget}/${state.headRefName}`) {
+    return {
+      localUnpushedCommits: 0,
+      localUncommittedChanges: false,
+      localWorkUnknown: false,
+    };
+  }
+  // A head this clone does not have — pushed from another one — is unreadable
+  // here, and a zero would read as "nothing unpushed".
+  const unpushed = gitOpt(
+    'rev-list',
+    '--count',
+    `refs/heads/${state.headRefName}`,
+    '--not',
+    state.lastKnownHeadSha,
+  );
+  const checkouts = worktreeCheckouts(state.headRefName);
+  const work = checkouts?.map(checkoutHoldsWork) ?? null;
+  return {
+    localUnpushedCommits: unpushed === null ? 0 : Number(unpushed),
+    localUncommittedChanges: work?.some((held) => held === true) ?? false,
+    localWorkUnknown:
+      unpushed === null || work === null || work.some((held) => held === null),
+  };
+}
+
+/**
+ * Paths of this clone's worktrees that have `branch` checked out: the copies
+ * the user may be working in, or null when git cannot list them.
+ */
+function worktreeCheckouts(branch: string): string[] | null {
+  // `-z` keeps a path git would otherwise C-quote, which `git -C` then
+  // cannot open. Git before 2.36 has no `-z`; the line form still answers,
+  // and a path it quotes reads as unknown rather than as no work.
+  const z = gitOpt('worktree', 'list', '--porcelain', '-z');
+  if (z !== null) return parseWorktrees(z.split('\0'), branch);
+  const plain = gitOpt('worktree', 'list', '--porcelain');
+  return plain === null ? null : parseWorktrees(plain.split('\n'), branch);
+}
+
+/** `git worktree list --porcelain` records, split into fields. */
+function parseWorktrees(fields: string[], branch: string): string[] {
+  const paths: string[] = [];
+  let worktree: string | null = null;
+  for (const field of fields) {
+    if (field === '') {
+      worktree = null;
+    } else if (field.startsWith('worktree ')) {
+      worktree = field.slice('worktree '.length);
+    } else if (worktree !== null && field === `branch refs/heads/${branch}`) {
+      paths.push(worktree);
+    }
+  }
+  return paths;
+}
+
+/**
+ * Whether a checkout holds work git reports, or null when git cannot read it.
+ * The flags override `status.showUntrackedFiles` and submodule `ignore`
+ * settings, as this directory's other scans do. Only `.qwen` is the watch's:
+ * anything beside its `tmp` directory under there is the user's work.
+ */
+function checkoutHoldsWork(path: string): boolean | null {
+  const status = gitOpt(
+    '--no-optional-locks',
+    '-C',
+    path,
+    'status',
+    '--porcelain',
+    '--untracked-files=normal',
+    '--ignore-submodules=none',
+  );
+  if (status === null) return null;
+  const lines = status.split('\n').filter((line) => line !== '');
+  const onlyWatchDir = (line: string) =>
+    line.startsWith('??') && isUnderQwen(line.slice(3));
+  if (lines.some((line) => !onlyWatchDir(line))) return true;
+  if (lines.length === 0) return false;
+  // Only `.qwen` is untracked: ask what it holds besides the watch's `tmp`.
+  const userFiles = gitOpt(
+    '--no-optional-locks',
+    '-C',
+    path,
+    'ls-files',
+    '--others',
+    '--exclude-standard',
+    '--',
+    '.qwen',
+    ':(exclude).qwen/tmp',
+  );
+  if (userFiles === null) return null;
+  return userFiles.trim() !== '';
+}
+
+/** A porcelain path at or under `.qwen`. */
+function isUnderQwen(file: string): boolean {
+  return file === '.qwen' || file.startsWith('.qwen/');
+}
+
+/**
  * The clone's remote for the PR's repository and the target its head is
  * pushed to, from `git remote -v` — never from a state file, which the code
  * a round runs can reach.
@@ -350,9 +471,12 @@ export function runPrepare(args: PrepareArgs): void {
           '-R',
           args.repo,
           '--json',
-          'author,headRepository,headRepositoryOwner',
+          'author,headRepository,headRepositoryOwner,headRefOid',
         ),
-      ) as Pick<PrView, 'author' | 'headRepository' | 'headRepositoryOwner'>;
+      ) as Pick<
+        PrView,
+        'author' | 'headRepository' | 'headRepositoryOwner' | 'headRefOid'
+      >;
       if (!live.headRepository || !live.headRepositoryOwner) {
         throw new Error(
           `PR #${args.pr}'s head repository no longer exists; nothing can be pushed to it.`,
@@ -399,6 +523,9 @@ export function runPrepare(args: PrepareArgs): void {
         { ...existing, worktreePath: paths.worktreePath },
         {
           resumed: true,
+          // Against the PR's head now, not the one the watch last synced:
+          // a commit the user has since pushed is not unpushed.
+          ...localCopy({ ...existing, lastKnownHeadSha: live.headRefOid }),
           ...(tookOver ? { tookOver } : {}),
           ...(wasEnded ? { wasEnded } : {}),
         },
@@ -591,25 +718,8 @@ export function runPrepare(args: PrepareArgs): void {
     return state;
   });
 
-  // Commits on the user's own copy of the branch that the PR does not have
-  // yet: the worktree starts from the PR head and never sees them. Only a
-  // local branch tracking the head on the push remote is that copy; a fork's
-  // `main` is not the user's `main`.
-  const upstream = gitOpt(
-    'for-each-ref',
-    '--format=%(upstream:short)',
-    `refs/heads/${pr.headRefName}`,
-  );
-  const localUnpushed =
-    upstream === `${pushTarget}/${pr.headRefName}`
-      ? gitOpt(
-          'rev-list',
-          '--count',
-          `refs/heads/${pr.headRefName}`,
-          '--not',
-          state.lastKnownHeadSha,
-        )
-      : null;
+  // Work in the user's own copy of the head branch: the worktree starts from
+  // the PR head and never sees it, and the watch's push races the user's.
   report(state, {
     resumed: false,
     // The watch was there and keeps what it recorded: only its worktree is
@@ -619,7 +729,7 @@ export function runPrepare(args: PrepareArgs): void {
     url: pr.url,
     isDraft: pr.isDraft,
     isCrossRepository: pr.isCrossRepository,
-    localUnpushedCommits: localUnpushed === null ? 0 : Number(localUnpushed),
+    ...localCopy(state),
     ...(tookOver ? { tookOver } : {}),
   });
 }

@@ -222,7 +222,10 @@ describe('no-AK integration CI wiring', () => {
       './cli/workflow-ancestor-discovery.test.ts',
       './cli/daemon-workflow-ancestor-trust.test.ts',
       './cli/workflow-intent.test.ts',
+      './cli/workflow-mode.test.ts',
+      './cli/acp-workflow-mode.test.ts',
       './cli/daemon-workflow-intent.test.ts',
+      './cli/daemon-workflow-mode.test.ts',
       './cli/list_directory.test.ts',
       './cli/tool-hook-context.test.ts',
       './cli/tool-hook-updated-input.test.ts',
@@ -232,6 +235,7 @@ describe('no-AK integration CI wiring', () => {
       './cli/qwen-serve-standalone-concurrency.test.ts',
       './interactive/workflow-completion.test.ts',
       './interactive/workflow-intent.test.ts',
+      './interactive/workflow-mode.test.ts',
       './interactive/mods-tool-middleware.test.ts',
       './interactive/statusline-parity.test.ts',
       './interactive/tui-editor-parity.test.ts',
@@ -243,6 +247,7 @@ describe('no-AK integration CI wiring', () => {
       './sdk-typescript/system-control.test.ts',
       './sdk-typescript/tool-control.test.ts',
       './sdk-typescript/workflow-intent.test.ts',
+      './sdk-typescript/workflow-mode.test.ts',
     ];
     expect(packageJson.scripts[NO_AK_SCRIPT]).toBe(
       [
@@ -442,11 +447,11 @@ describe('no-AK integration CI wiring', () => {
     expect(jobIf).toContain(
       "(github.event_name == 'pull_request' || github.event_name == 'merge_group')",
     );
-    // PR head ref on pull_request, queue head on merge_group — the same
+    // Event PR head SHA on pull_request, queue head on merge_group — the same
     // shape the Ubuntu gate uses, so this check tests the pushed tree, not
     // the lagging merge ref.
     expect(getWorkflowStep(gateJob, 'Checkout')).toContain(
-      "format('refs/pull/{0}/head', github.event.pull_request.number)",
+      "github.event_name == 'pull_request' && github.event.pull_request.head.sha",
     );
     const trustedClassifierCheckout = getWorkflowStep(
       classifyJob,
@@ -635,25 +640,27 @@ describe('no-AK integration CI wiring', () => {
     }
   });
 
-  it('checks out the immutable PR head ref instead of the lagging merge ref', () => {
+  it('pins PR checkouts to the event head even after the PR ref advances', () => {
     const workflow = readFileSync(
       path.join(ROOT, '.github/workflows/ci.yml'),
       'utf8',
     );
     const ubuntuJob = getWorkflowJob(workflow, 'test');
     const webShellJob = getWorkflowJob(workflow, 'web_shell_e2e_smoke');
-    const macosJob = getWorkflowJob(workflow, 'test_macos');
+    const lintJob = getWorkflowJob(workflow, 'lint_and_static');
     const windowsJob = getWorkflowJob(workflow, 'test_windows');
     const integrationJob = getWorkflowJob(workflow, 'integration_cli');
     const noAkJob = getWorkflowJob(workflow, 'integration_no_ak');
 
-    // On PRs every gate checks out refs/pull/N/head, which is published the
-    // instant the branch is pushed, instead of the merge ref that GitHub
-    // rebuilds asynchronously and can serve stale for minutes.
-    for (const job of [ubuntuJob, macosJob, windowsJob, noAkJob]) {
-      expect(job).toContain(
-        "format('refs/pull/{0}/head', github.event.pull_request.number)",
+    // A retry retains the event head SHA while refs/pull/N/head may advance.
+    // Only these four lanes currently run on pull_request.
+    for (const job of [ubuntuJob, lintJob, webShellJob, noAkJob]) {
+      const checkout = getWorkflowStep(job, 'Checkout');
+      expect(checkout).toContain(
+        "github.event_name == 'pull_request' && github.event.pull_request.head.sha",
       );
+      expect(checkout).not.toContain('refs/pull/');
+      expect(checkout).toContain('fetch-depth: 1');
     }
 
     // The brittle merge-ref retry/refresh machinery is gone: in particular the
@@ -694,7 +701,6 @@ describe('no-AK integration CI wiring', () => {
     // stale ones this guard must reject, while the pin above stays green.
     expect(guardAction).toContain("EXPECTED_SHA: '${{ inputs.expected_sha }}'");
 
-    const lintJob = getWorkflowJob(workflow, 'lint_and_static');
     const guardCalls = {
       test: getWorkflowStep(ubuntuJob, GUARD_STEP),
       lint_and_static: getWorkflowStep(lintJob, GUARD_STEP),
