@@ -3258,6 +3258,17 @@ describe('Server Config (config.ts)', () => {
       }
     });
 
+    it('stays inactive for channel sessions the daemon creates', async () => {
+      const config = create();
+      config.setSessionSource('channel', 'feishu-main');
+      await config.initialize();
+      expectUnavailable(config, 'unsupported-client');
+      expect(config.getMcpServers()).not.toHaveProperty('generated-ui');
+      expect(config.getWarnings()).not.toContainEqual(
+        expect.stringContaining('Generated UI'),
+      );
+    });
+
     it('keeps a disabled setting ahead of the client check', async () => {
       expectUnavailable(
         await (async () => {

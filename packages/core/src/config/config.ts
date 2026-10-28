@@ -8732,9 +8732,15 @@ export class Config {
     return mcpServers;
   }
 
+  // A channel session the daemon creates for an IM bot comes through the
+  // daemon bridge too, but its user reads the reply in the IM client.
+  private rendersMcpApps(): boolean {
+    return this.mcpAppHostSupported && this.sessionSourceType !== 'channel';
+  }
+
   private generatedUiUnavailableReason(): BundledGeneratedUiStatus['reason'] {
     if (!this.bundledGeneratedUi.enabled) return 'setting-disabled';
-    if (!this.mcpAppHostSupported) return 'unsupported-client';
+    if (!this.rendersMcpApps()) return 'unsupported-client';
     if (
       this.getBareMode() ||
       this.isSafeMode() ||
@@ -8786,7 +8792,7 @@ export class Config {
   ): void {
     const reason =
       this.bundledGeneratedUi.enabled &&
-      this.mcpAppHostSupported &&
+      this.rendersMcpApps() &&
       (options?.disableBundledGeneratedUi || options?.skipSkillManager)
         ? 'unsupported-runtime'
         : this.generatedUiUnavailableReason();
