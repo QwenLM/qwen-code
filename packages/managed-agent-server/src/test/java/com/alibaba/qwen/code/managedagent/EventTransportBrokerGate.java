@@ -132,6 +132,7 @@ class EventTransportBrokerGate {
     private JdbcTemplate jdbc;
 
     @Autowired
+    @Qualifier("managedAgentClock")
     private Clock clock;
 
     @Autowired
