@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { createWriteStream, promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { Transform, type Readable } from 'node:stream';
+import { PassThrough, Transform, type Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { promisify } from 'node:util';
 
@@ -233,6 +233,17 @@ function isPlatformMetadataPath(value: string): boolean {
     );
 }
 
+function pathIsTakenAsFileOrDirectory(
+  normalized: string,
+  paths: Set<string>,
+): boolean {
+  const segments = normalized.split('/');
+  for (let i = 1; i < segments.length; i += 1) {
+    if (paths.has(segments.slice(0, i).join('/'))) return true;
+  }
+  return [...paths].some((existing) => existing.startsWith(`${normalized}/`));
+}
+
 function beginStagedFile(
   staging: string,
   relativePath: string,
@@ -245,6 +256,12 @@ function beginStagedFile(
     skillError(
       'invalid_skill_package',
       `Duplicate skill file path: ${normalized}`,
+    );
+  }
+  if (pathIsTakenAsFileOrDirectory(normalized, state.paths)) {
+    skillError(
+      'invalid_skill_package',
+      `Skill package has conflicting file and directory entries: ${normalized}`,
     );
   }
   if (state.count >= MAX_FILES) {
@@ -725,6 +742,11 @@ async function writeZipEntry(
   totalBytes: number,
 ): Promise<number> {
   const stream = await openZipStream(zipFile, entry);
+  // yauzl keeps its own destroy() on a deflated entry's stream and never
+  // emits 'close', so pipeline() must own a stream it can close itself.
+  const source = new PassThrough();
+  stream.on('error', (error) => source.destroy(error));
+  stream.pipe(source);
   let size = 0;
   const guard = new Transform({
     transform(chunk: Buffer, _encoding, callback) {
@@ -752,7 +774,12 @@ async function writeZipEntry(
       callback(null, chunk);
     },
   });
-  await stageWrite(() => pipeline(stream, guard, createWriteStream(target)));
+  try {
+    await stageWrite(() => pipeline(source, guard, createWriteStream(target)));
+  } finally {
+    stream.destroy();
+    source.destroy();
+  }
   return size;
 }
 
@@ -972,11 +999,7 @@ async function finalizeStagedPackage(
   }
   const stripped = new Set<string>();
   for (const filePath of state.paths) {
-    const next = normalizeRelativePath(filePath.slice(root.length + 1));
-    if (stripped.has(next)) {
-      skillError('invalid_skill_package', `Duplicate skill file path: ${next}`);
-    }
-    stripped.add(next);
+    stripped.add(normalizeRelativePath(filePath.slice(root.length + 1)));
   }
   const children = await fs.readdir(rootPath);
   let holdingName = '.qwen-skill-strip';

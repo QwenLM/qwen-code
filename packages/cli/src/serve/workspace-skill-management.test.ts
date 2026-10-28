@@ -1074,6 +1074,100 @@ describe('workspace Skill management', () => {
     await expectNoPartialInstall(workspace, 'zip-staging-fault');
   });
 
+  it.skipIf(!arePermissionBitsEnforced())(
+    'reports a ZIP staging write fault without wedging the install',
+    async () => {
+      const workspace = await temporaryDirectory('qwen-skill-workspace-');
+      const nativeMkdir = fs.mkdir.bind(fs);
+      const denied: string[] = [];
+      vi.spyOn(fs, 'mkdir').mockImplementation((async (
+        ...args: Parameters<typeof fs.mkdir>
+      ) => {
+        const created = await nativeMkdir(...args);
+        const match = /\.skills-zip-write-denied\.installing-[^/]+/.exec(
+          String(args[0]),
+        );
+        if (match && denied.length === 0) {
+          const artifact = match[0];
+          const root = String(args[0]).slice(0, match.index + artifact.length);
+          await fs.chmod(root, 0o555);
+          denied.push(root);
+        }
+        return created;
+      }) as typeof fs.mkdir);
+      try {
+        await expect(
+          installWorkspaceSkill(workspace, {
+            name: 'zip-write-denied',
+            scope: 'workspace',
+            source: {
+              type: 'zip',
+              contentBase64: await zip({
+                'SKILL.md': skillMarkdown('zip-write-denied'),
+                'notes.md': 'notes',
+              }),
+            },
+          }),
+        ).rejects.toMatchObject({
+          code: 'skill_staging_failed',
+          statusCode: 500,
+        });
+      } finally {
+        for (const root of denied) {
+          await fs.chmod(root, 0o700).catch(() => undefined);
+        }
+      }
+      await expectNoPartialInstall(workspace, 'zip-write-denied');
+    },
+  );
+
+  it.each([
+    ['a file after its directory', 'a/b.md', 'a'],
+    ['a directory after its file', 'a', 'a/b.md'],
+  ])('rejects a ZIP with %s', async (_label, first, second) => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+    const files: Record<string, string> = {
+      'SKILL.md': skillMarkdown('zip-path-conflict'),
+      [first]: 'content',
+      [second]: 'content',
+    };
+
+    await expect(
+      installWorkspaceSkill(workspace, {
+        name: 'zip-path-conflict',
+        scope: 'workspace',
+        source: { type: 'zip', contentBase64: await zip(files) },
+      }),
+    ).rejects.toMatchObject({
+      code: 'invalid_skill_package',
+      message: `Skill package has conflicting file and directory entries: ${second}`,
+    });
+    await expectNoPartialInstall(workspace, 'zip-path-conflict');
+  });
+
+  it('rejects a ZIP that repeats one path', async () => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+
+    await expect(
+      installWorkspaceSkill(workspace, {
+        name: 'zip-duplicate',
+        scope: 'workspace',
+        source: {
+          type: 'zip',
+          contentBase64: await zipSized([
+            { name: 'SKILL.md', content: skillMarkdown('zip-duplicate') },
+            { name: 'notes.md', content: 'one' },
+            { name: 'notes.md', content: 'two' },
+          ]),
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: 'invalid_skill_package',
+      message: 'Duplicate skill file path: notes.md',
+    });
+    await expectNoPartialInstall(workspace, 'zip-duplicate');
+  });
+
   it('cancels a GitHub file body when the generation closes before the read', async () => {
     const workspace = await temporaryDirectory('qwen-skill-workspace-');
     let cancelled = false;
