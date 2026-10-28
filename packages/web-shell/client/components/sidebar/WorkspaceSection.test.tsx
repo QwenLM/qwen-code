@@ -145,6 +145,8 @@ function renderSection(
     sessionStats: WorkspaceSessionStats | null;
     renderSessions: boolean;
     excludePinned: boolean;
+    limitSessions: boolean;
+    editingSessionId: string;
     searchQuery: string;
     gitBranchWanted: boolean;
     renderSession: (
@@ -180,6 +182,8 @@ function renderSection(
           sessionGroupCatalog={overrides.sessionGroupCatalog}
           sessionLiveStateEnabled={overrides.sessionLiveStateEnabled}
           excludePinned={overrides.excludePinned}
+          limitSessions={overrides.limitSessions}
+          editingSessionId={overrides.editingSessionId}
           searchQuery={overrides.searchQuery}
           sourceType={overrides.sourceType}
           channelGroupingEnabled={overrides.channelGroupingEnabled}
@@ -1066,6 +1070,68 @@ describe('WorkspaceSection session loading', () => {
     renderSection({ client, expanded: true });
     await flush();
     expect(container.textContent).not.toContain('Session 6');
+  });
+
+  it('keeps the edited row mounted when a refresh reorders it past the preview', async () => {
+    const sessions = Array.from({ length: 6 }, (_, index) => ({
+      sessionId: `session-${index + 1}`,
+      displayName: `Session ${index + 1}`,
+      workspaceCwd: trustedWorkspace.cwd,
+    })) as DaemonSessionSummary[];
+    const makeSessionClient = (ordered: DaemonSessionSummary[]) =>
+      ({
+        workspaceByCwd: vi.fn(() => ({
+          workspaceGit,
+          listWorkspaceSessionsPage: vi
+            .fn()
+            .mockResolvedValue({ sessions: ordered }),
+          listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+        })),
+      }) as unknown as DaemonClient;
+    const renderSession = (session: DaemonSessionSummary) =>
+      session.sessionId === 'session-5' ? (
+        <input
+          key={session.sessionId}
+          data-testid="rename-draft"
+          defaultValue="typed draft"
+        />
+      ) : (
+        <div key={session.sessionId}>{session.displayName}</div>
+      );
+
+    renderSection({
+      client: makeSessionClient(sessions),
+      expanded: true,
+      editingSessionId: 'session-5',
+      renderSession,
+    });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="rename-draft"]'),
+    ).not.toBeNull();
+    expect(container.textContent).not.toContain('Session 6');
+
+    // Another session's activity moves ahead of the edited row, pushing it
+    // past the five-row preview on the next catalog refresh.
+    renderSection({
+      client: makeSessionClient([
+        sessions[5]!,
+        sessions[0]!,
+        sessions[1]!,
+        sessions[2]!,
+        sessions[3]!,
+        sessions[4]!,
+      ]),
+      expanded: true,
+      editingSessionId: 'session-5',
+      renderSession,
+    });
+    await flush();
+
+    expect(container.textContent).toContain('Session 6');
+    expect(
+      container.querySelector('[data-testid="rename-draft"]'),
+    ).not.toBeNull();
   });
 
   it('refreshes the catalog when an expanded workspace loses trust', async () => {

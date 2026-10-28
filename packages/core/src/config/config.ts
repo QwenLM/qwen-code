@@ -11,6 +11,7 @@ import {
 } from '../hooks/hook-execution-context.js';
 import type { SessionSourceService } from '../services/session-sources.js';
 import type { RequestLifecycleEvent } from '../telemetry/request-lifecycle.js';
+import { getInvocationContext } from '../utils/invocation-context.js';
 
 import { resolveProviderProtocol } from '../models/modelRegistry.js';
 import { refreshModelCatalog } from '../models/model-catalog-refresh.js';
@@ -72,6 +73,16 @@ import { BaseLlmClient } from '../core/baseLlmClient.js';
 import { LlmClient } from '../core/client.js';
 import { resolveInteractionMode } from '../core/prompts.js';
 import type { OutputStyleDefinition } from '../core/output-styles.js';
+import {
+  WorkflowModeContext,
+  type PreparedWorkflowMode,
+  type WorkflowModeSnapshot,
+  type WorkflowModeState,
+} from '../core/workflow-mode.js';
+import {
+  resolveWorkflowContext,
+  type WorkflowIntent,
+} from '../core/workflow-intent.js';
 import {
   AuthType,
   createContentGenerator,
@@ -1137,6 +1148,7 @@ export interface ConfigParameters {
   executionEnvironment?: ExecutionEnvironment;
   sessionId?: string;
   sessionData?: ResumedSessionData;
+  workflowMode?: boolean;
   sessionRestoreProjection?: SessionRestoreProjection;
   sessionRestoreProjectionSource?: () => Promise<
     SessionRestoreProjection | undefined
@@ -2802,6 +2814,15 @@ export class Config {
   private sessionSourceType?: string;
   private sessionSourceId?: string;
   private sessionData?: ResumedSessionData;
+  private readonly workflowModeContext = new WorkflowModeContext();
+  private initialWorkflowMode: boolean | undefined;
+  private workflowModeReady = false;
+  private workflowModeEpoch = 0;
+  private workflowModeWriteTail: Promise<void> = Promise.resolve();
+  private workflowModePublishedState: WorkflowModeState | undefined;
+  private readonly workflowModeListeners = new Set<
+    (state: WorkflowModeState) => void
+  >();
   private pendingSessionRestoreProjection?: SessionRestoreProjection;
   private sessionRestoreRuntime?: SessionRuntimeResumeState;
   private readonly sessionRestoreProjectionSource?: () => Promise<
@@ -3993,13 +4014,17 @@ export class Config {
     this.hooks = params.hooks;
     this.settingsWatcher = params.settingsWatcher;
     this.memoryManager = new MemoryManager();
+    if (params.workflowMode !== undefined) {
+      this.stageInitialWorkflowMode(params.workflowMode);
+    }
   }
 
   /**
    * Must only be called once, throws if called again after the first call
    * settled. Callers arriving while the first call is still in flight join
    * that flight instead of throwing; a joining caller's options are ignored
-   * — the first caller's options win.
+   * — the first caller's options win. Later callers retain a failed flight's
+   * original rejection.
    * @param options Optional initialization options including sendSdkMcpMessage callback
    */
   async initialize(options?: ConfigInitializeOptions): Promise<void> {
@@ -4034,6 +4059,7 @@ export class Config {
         await this.initializationPromise;
         return;
       }
+      await this.initializationPromise;
       throw Error('Config was already initialized');
     }
     if (this.shutdownRequested) {
@@ -4130,10 +4156,22 @@ export class Config {
         }
       }
       options?.signal?.throwIfAborted();
+      this.workflowModeContext.restore(
+        this.isWorkflowModeSupported()
+          ? this.chatRecordingService?.getSessionWorkflowMode()
+          : undefined,
+      );
       await this.bindSessionExecutionEngine();
       registerSessionProjectDir(this.sessionId, this.storage.getProjectDir());
       this.sessionProjectDirRegistered = true;
       await this.initializeInternal(options);
+      this.workflowModeReady = true;
+      if (this.initialWorkflowMode !== undefined) {
+        const enabled = this.initialWorkflowMode;
+        this.initialWorkflowMode = undefined;
+        await this.setWorkflowMode(enabled);
+      }
+      this.refreshWorkflowMode();
     } catch (error) {
       this.clearSessionRestoreProjection();
       if (this.sessionProjectDirRegistered) {
@@ -6440,6 +6478,8 @@ export class Config {
 
     const previousSessionId = this.sessionId;
     const nextSessionId = sessionId ?? randomUUID();
+    // #13004: skipped extraction turns are not carried across a switch.
+    this.memoryManager.discardExtractCadence(previousSessionId, nextSessionId);
     // Resuming the session the user is already in keeps the same id. That is
     // not a lifecycle transition: ending it here would record session.end for
     // a live session and pair it with a duplicate session.start.
@@ -6462,6 +6502,8 @@ export class Config {
     unregisterSessionModel(previousSessionId);
     this.publishModelEnv();
     this.sessionData = sessionData;
+    this.workflowModeEpoch++;
+    this.workflowModeContext.retire();
     if (isSessionTransition) {
       const skillTool = this.toolRegistry?.getTool?.(ToolNames.SKILL);
       if (skillTool && 'clearLoadedSkills' in skillTool) {
@@ -6500,6 +6542,13 @@ export class Config {
     this.chatRecordingService = this.chatRecordingEnabled
       ? this.createChatRecordingService()
       : undefined;
+    this.workflowModeContext.restore(
+      this.isWorkflowModeSupported()
+        ? this.chatRecordingService?.getSessionWorkflowMode()
+        : undefined,
+    );
+    this.workflowModePublishedState = undefined;
+    this.refreshWorkflowMode();
     this.sessionSourceService = this.sessionSourceServiceFactory?.();
     this.initializeGoalRuntime(this.sessionData?.conversation.messages);
     // The file-read cache is session-scoped: its `file_unchanged`
@@ -8089,6 +8138,9 @@ export class Config {
     // installs is owned and cleaned up by that profile.
     if (isDerivedConfig(this)) return;
     this.shutdownRequested = true;
+    this.workflowModeEpoch++;
+    this.workflowModeContext.retire();
+    this.workflowModeListeners.clear();
     // What the session confirmed for autofix-pr ends with it: a daemon that
     // loads it again under the same id asks again.
     forgetAutofixPrSession(this.sessionId);
@@ -10712,6 +10764,205 @@ export class Config {
 
   setWorkflowsEnabled(enabled: boolean | undefined): void {
     this.workflowsEnabled = enabled;
+    this.refreshWorkflowMode();
+  }
+
+  isWorkflowModeSupported(): boolean {
+    return (
+      !isDerivedConfig(this) &&
+      this.chatRecordingEnabled &&
+      this.sessionExecutionEngine !== 'managed' &&
+      !this.executionEnvironment &&
+      this.sessionSourceType !== 'agent' &&
+      this.sessionSourceType !== 'agent-host' &&
+      !this.shutdownRequested &&
+      !this.sessionWriterShutdownRequested
+    );
+  }
+
+  getWorkflowMode(): WorkflowModeState {
+    if (!this.isWorkflowModeSupported()) {
+      return {
+        requested: false,
+        available: false,
+        effective: false,
+        reason: 'unsupported',
+      };
+    }
+    const requested = this.workflowModeContext.getRequested();
+    if (!this.workflowModeReady) {
+      return {
+        requested,
+        available: false,
+        effective: false,
+        reason: 'initializing',
+      };
+    }
+    let available = false;
+    try {
+      available = resolveWorkflowContext(this) !== null;
+    } catch {
+      // A registry refresh can temporarily make authoring unavailable.
+    }
+    return {
+      requested,
+      available,
+      effective: requested && available,
+      ...(!available ? { reason: 'workflow_unavailable' } : {}),
+    };
+  }
+
+  stageInitialWorkflowMode(enabled: boolean): void {
+    if (typeof enabled !== 'boolean') {
+      throw new Error('Workflow mode must be a boolean');
+    }
+    if (!this.isWorkflowModeSupported()) {
+      throw new Error('Workflow mode is unsupported for this session');
+    }
+    if (this.initialized) {
+      throw new Error(
+        'Initial workflow mode must be staged before initialization',
+      );
+    }
+    if (
+      this.initialWorkflowMode !== undefined &&
+      this.initialWorkflowMode !== enabled
+    ) {
+      throw new Error('Conflicting initial workflow mode values');
+    }
+    this.initialWorkflowMode = enabled;
+  }
+
+  async setWorkflowMode(enabled: boolean): Promise<WorkflowModeState> {
+    if (typeof enabled !== 'boolean') {
+      throw new Error('Workflow mode must be a boolean');
+    }
+    if (!this.isWorkflowModeSupported()) {
+      throw new Error('Workflow mode is unsupported for this session');
+    }
+    if (getInvocationContext()?.workflowModeWriteAllowed === false) {
+      throw new Error('Workspace is not trusted.');
+    }
+    if (!this.workflowModeReady) {
+      throw new Error('Workflow mode is not initialized');
+    }
+    if (this.getLlmClient().isTelemetrySwapInProgress()) {
+      throw new Error(
+        'A session switch is in progress. Try again in a moment.',
+      );
+    }
+    const epoch = this.workflowModeEpoch;
+    const recorder = this.chatRecordingService;
+    const write = this.workflowModeWriteTail.then(async () => {
+      if (
+        epoch !== this.workflowModeEpoch ||
+        recorder !== this.chatRecordingService ||
+        !this.isWorkflowModeSupported()
+      ) {
+        throw new Error('Workflow mode session changed');
+      }
+      const state = this.getWorkflowMode();
+      if (enabled && !state.available) {
+        throw new Error('Workflow mode is unavailable in this session');
+      }
+      if (!recorder) throw new SessionWriterUnavailableError();
+      await recorder.recordSessionWorkflowMode(enabled);
+      if (
+        epoch !== this.workflowModeEpoch ||
+        recorder !== this.chatRecordingService ||
+        !this.isWorkflowModeSupported()
+      ) {
+        throw new Error('Workflow mode session changed');
+      }
+      const changed =
+        !this.workflowModeContext.hasRecord() ||
+        this.workflowModeContext.getRequested() !== enabled;
+      this.workflowModeContext.setRequested(enabled);
+      if (changed) this.workflowModePublishedState = undefined;
+      this.refreshWorkflowMode();
+      return this.getWorkflowMode();
+    });
+    this.workflowModeWriteTail = write.then(
+      () => undefined,
+      () => undefined,
+    );
+    return write;
+  }
+
+  onWorkflowModeChange(
+    listener: (state: WorkflowModeState) => void,
+  ): () => void {
+    if (!this.isWorkflowModeSupported()) return () => {};
+    this.workflowModeListeners.add(listener);
+    return () => this.workflowModeListeners.delete(listener);
+  }
+
+  refreshWorkflowMode(): void {
+    if (isDerivedConfig(this)) return;
+    const state = Object.freeze(this.getWorkflowMode());
+    this.workflowModeContext.observeAvailability(state.available);
+    const previous = this.workflowModePublishedState;
+    this.workflowModePublishedState = state;
+    if (
+      previous?.requested === state.requested &&
+      previous.available === state.available &&
+      previous.reason === state.reason
+    ) {
+      return;
+    }
+    for (const listener of this.workflowModeListeners) {
+      try {
+        listener(state);
+      } catch (error) {
+        this.debugLogger.warn('Workflow mode listener failed:', error);
+      }
+    }
+  }
+
+  resetWorkflowModeContext(): void {
+    if (this.isWorkflowModeSupported()) {
+      this.workflowModeContext.resetContext();
+    }
+  }
+
+  hasWorkflowModeContext(): boolean {
+    return (
+      this.isWorkflowModeSupported() && this.workflowModeContext.hasContext()
+    );
+  }
+
+  async captureWorkflowModeState(): Promise<WorkflowModeSnapshot> {
+    // The swap latch blocks new writes; include any write already in flight.
+    await this.workflowModeWriteTail;
+    return this.isWorkflowModeSupported()
+      ? this.workflowModeContext.snapshot()
+      : new WorkflowModeContext().snapshot();
+  }
+
+  restoreWorkflowModeState(snapshot: WorkflowModeSnapshot): void {
+    if (!this.isWorkflowModeSupported()) return;
+    this.workflowModeEpoch++;
+    this.workflowModeContext.restoreSnapshot(snapshot);
+    this.chatRecordingService?.restoreSessionWorkflowMode(
+      snapshot.recorded ? snapshot.requested : undefined,
+    );
+    // Rollback replays persisted history, which can omit live notices.
+    this.workflowModeContext.resetContext();
+    this.refreshWorkflowMode();
+  }
+
+  prepareWorkflowMode(keyword: WorkflowIntent | null): PreparedWorkflowMode {
+    if (!this.isWorkflowModeSupported() || !this.workflowModeReady) {
+      return { reminder: keyword?.reminder };
+    }
+    this.refreshWorkflowMode();
+    let context = null;
+    try {
+      context = resolveWorkflowContext(this);
+    } catch {
+      // Keep a pending exit even when registry resolution fails.
+    }
+    return this.workflowModeContext.prepare(context, keyword);
   }
 
   getWorkflowKeywordTriggerEnabled(): boolean {
