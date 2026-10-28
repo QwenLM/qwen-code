@@ -61,7 +61,7 @@ The packager writes `bin/qwen-managed-agent-admin`, a POSIX shell script.
 - A known command runs `java -Dloader.main=<class> -cp lib/<server jar> org.springframework.boot.loader.launch.PropertiesLauncher <arguments>`.
 - It maps no environment. Each entry point keeps reading its own credentials, which the guide lists: `W1_JDBC_*` for the Workspace commands, `K2_JDBC_*` for the CSI commands, and the control plane's Spring datasource, `SPRING_DATASOURCE_*`, for `operator-recovery` and `resident-retirement`, which start the server's Spring configuration.
 
-Every classified jar in the module build is the same application repackaged with another main class, so the server jar already contains every entry point.
+Every classified jar in the module build is the same application repackaged with another main class, so the executable server jar, which the distribution ships as `lib/<server jar>`, already contains every entry point.
 
 ### Packaging check
 
@@ -71,7 +71,7 @@ Before writing the launcher, the packager reads each class's source under `packa
 
 - The deployment guide gains a "Maintenance commands" section.
 - The server README's storage-registration and Workspace-migration sections, and the K2 resident README's protection and retirement commands, show `bin/qwen-managed-agent-admin` first.
-- The module-build commands in the K2 README now use the plain server jar, which carries every entry point, instead of the `-csi-runtime` jar.
+- The module-build commands in the K2 README now use the executable server jar, `-exec.jar`, which carries every entry point, instead of the `-csi-runtime` jar.
 - The reference distribution design adds the launcher to the bundle layout.
 
 ## Compatibility and risks

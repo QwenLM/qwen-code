@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.R
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -26,12 +27,13 @@ import java.util.Optional;
  * revision it produced the first time.
  */
 @Repository
+@Qualifier("managedAgentTransactionManager")
 public class ManagedAgentDefinitionStore {
     private static final ObjectMapper JSON = new ObjectMapper();
     private final JdbcTemplate jdbc;
     private final RequestDigests digests;
 
-    public ManagedAgentDefinitionStore(JdbcTemplate jdbc, RequestDigests digests) {
+    public ManagedAgentDefinitionStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, RequestDigests digests) {
         this.jdbc = jdbc;
         this.digests = digests;
     }

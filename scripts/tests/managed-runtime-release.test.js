@@ -364,6 +364,38 @@ setInterval(() => {}, 1000);
 describe('Managed runtime publication gates', () => {
   const steps = workflow.jobs.release.steps;
   const step = (name) => steps.find((item) => item.name === name);
+  it('separates the Central dependency and executable bytes while retaining runtime download names', () => {
+    const verification = step(
+      'Verify the executable JAR and publication profile',
+    ).run;
+    expect(verification).toContain(
+      'qwen-managed-agent-server-${CLI_VERSION}-exec.jar',
+    );
+    expect(verification).toContain(
+      'Main-Class: org.springframework.boot.loader.launch.JarLauncher',
+    );
+    expect(verification).toContain('MANAGED_RUNTIME_JAR=${runtime_jar}');
+    const preflight = step(
+      'Recheck the immutable tag and existing publication bytes',
+    ).run;
+    expect(preflight).toContain(
+      'central_files=("packages/managed-agent-server/target/${jar}")',
+    );
+    expect(preflight).toContain('central_files+=("${MANAGED_RUNTIME_JAR}")');
+    expect(preflight).toContain(
+      'Partial Central publication; refusing an immutable redeploy.',
+    );
+    expect(step('Publish the signed server artifact to Central').run).toContain(
+      'cmp "${MANAGED_RUNTIME_JAR}"',
+    );
+    expect(
+      step('Verify Central availability before distribution').run,
+    ).toContain('missing == 0');
+    expect(step('Verify both public download channels').run).toContain(
+      'jar="qwen-managed-agent-server-${CLI_VERSION}.jar"',
+    );
+  });
+
   it('defaults manual runs to verification and restricts publication to the protected official repository', () => {
     expect(workflow.on.release.types).toEqual(['published']);
     expect(workflow.on.workflow_dispatch.inputs.dry_run.default).toBe(true);
@@ -548,6 +580,8 @@ describe.skipIf(process.platform === 'win32')('release gate execution', () => {
         RELEASE_TAG: 'v0.25.4',
         EVENT_NAME: 'workflow_dispatch',
         WORKFLOW_REF: 'refs/heads/main',
+        MANAGED_RUNTIME_JAR:
+          'packages/managed-agent-server/target/qwen-managed-agent-server-0.25.4-exec.jar',
         ...env,
       },
       encoding: 'utf8',
@@ -612,6 +646,44 @@ describe.skipIf(process.platform === 'win32')('release gate execution', () => {
         .status,
     ).not.toBe(0);
     expect(fs.existsSync(path.join(temporary, 'gh-called'))).toBe(false);
+  });
+
+  it('refuses partial Central publication before attempting runtime channel writes', () => {
+    executable('git', "printf '%s\\tref\\n' original-sha");
+    executable('gh', "printf '%s\\n' '{\"draft\":false}'");
+    executable(
+      'node',
+      'case "$*" in *repo.maven.apache.org*exec.jar*) echo missing ;; *repo.maven.apache.org*) echo present ;; *) touch unexpected-channel; echo missing ;; esac',
+    );
+    const result = run(preflight, {
+      SOURCE_SHA: 'original-sha',
+      CLI_VERSION: '0.25.4',
+    });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('Partial Central publication');
+    expect(fs.existsSync(path.join(temporary, 'unexpected-channel'))).toBe(
+      false,
+    );
+  });
+
+  it('retains the single Central artifact check for legacy executable release tags', () => {
+    executable('git', "printf '%s\\tref\\n' original-sha");
+    executable('gh', "printf '%s\\n' '{\"draft\":false}'");
+    executable(
+      'node',
+      'case "$*" in *exec.jar*) echo unexpected-exec >&2; exit 1 ;; *) echo missing ;; esac',
+    );
+    const result = run(preflight, {
+      SOURCE_SHA: 'original-sha',
+      CLI_VERSION: '0.25.4',
+      ALIYUN_OSS_BUCKET: 'release-bucket',
+      MANAGED_RUNTIME_JAR:
+        'packages/managed-agent-server/target/qwen-managed-agent-server-0.25.4.jar',
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(fs.readFileSync(path.join(temporary, 'output'), 'utf8')).toContain(
+      'central=missing',
+    );
   });
 
   it('aborts preflight on an artifact-verification error instead of treating it as present', () => {

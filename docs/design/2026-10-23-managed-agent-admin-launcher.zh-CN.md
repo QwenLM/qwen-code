@@ -61,7 +61,7 @@ server 有十二个离线维护入口，包括 Workspace storage 注册、Worksp
 - 已知命令运行 `java -Dloader.main=<class> -cp lib/<server jar> org.springframework.boot.loader.launch.PropertiesLauncher <arguments>`。
 - 它不做任何环境变量映射。每个入口继续读取自己的凭据，部署文档中列出了这些变量：Workspace 命令读取 `W1_JDBC_*`，CSI 命令读取 `K2_JDBC_*`，`operator-recovery` 和 `resident-retirement` 会启动服务端的 Spring 配置，使用控制面的 Spring 数据源 `SPRING_DATASOURCE_*`。
 
-模块构建中每个带 classifier 的 jar 都是同一个应用，只是换了 main class 重新打包，因此 server jar 已经包含所有入口。
+模块构建中每个带 classifier 的 jar 都是同一个应用，只是换了 main class 重新打包，因此可执行的 server jar（发行包中的 `lib/<server jar>`）已经包含所有入口。
 
 ### 打包检查
 
@@ -71,7 +71,7 @@ server 有十二个离线维护入口，包括 Workspace storage 注册、Worksp
 
 - 部署文档新增"维护命令"一节。
 - server README 中 storage 注册和 Workspace 迁移两节，以及 K2 resident README 中的保护和退役命令，都先给出 `bin/qwen-managed-agent-admin` 的写法。
-- K2 README 中模块构建的命令改用包含所有入口的普通 server jar，不再引用 `-csi-runtime` jar。
+- K2 README 中模块构建的命令改用包含所有入口的可执行 server jar（`-exec.jar`），不再引用 `-csi-runtime` jar。
 - reference 发行包设计文档的目录结构中加入该启动脚本。
 
 ## 兼容性与风险
