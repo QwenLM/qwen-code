@@ -1962,6 +1962,19 @@ function resolveSidebarOptions(sidebar: WebShellProps['sidebar']): {
   };
 }
 
+// One availability rule for the two footer items the view navigation hotkeys
+// govern (#13175): the rail table and the chord gates both read this
+// predicate, so a key never opens a view the sidebar withholds, and an edit
+// in one place cannot leave the other reading stale.
+function isSidebarFooterItemAvailable(
+  item: 'sessionsOverview' | 'splitView',
+  projectFeaturesAvailable: boolean,
+  isLargeScreen: boolean,
+): boolean {
+  if (item === 'sessionsOverview') return projectFeaturesAvailable;
+  return projectFeaturesAvailable && isLargeScreen;
+}
+
 function readSidebarCollapsed(defaultCollapsed: boolean): boolean {
   if (typeof window === 'undefined') return defaultCollapsed;
   try {
@@ -10240,14 +10253,17 @@ export function App({
         (sidebarOptions.footer !== false &&
           sidebarOptions.footer?.items?.some((item) => {
             if (item === 'collapse') return false;
-            if (item === 'settings' || item === 'sessionsOverview') {
-              return projectFeaturesAvailable;
+            if (item === 'settings') return projectFeaturesAvailable;
+            if (item === 'sessionsOverview' || item === 'splitView') {
+              return isSidebarFooterItemAvailable(
+                item,
+                projectFeaturesAvailable,
+                isLargeScreen,
+              );
             }
             if (item === 'workspacesOverview') return !lockedWorkspaceCwd;
             if (item === 'localFiles' || item === 'desktopRelay')
               return isPageOriginDaemon(workspace.baseUrl);
-            if (item === 'splitView')
-              return projectFeaturesAvailable && isLargeScreen;
             if (item === 'update') {
               return (
                 !isDesktopShell() &&
@@ -19743,9 +19759,18 @@ export function App({
     openSplitView();
   }, [closeMobileDrawer, openSplitView]);
   // The sidebar buttons' own availability gates, passed to WebShellSidebar
-  // below and shared with the view hotkeys.
-  const canOpenSessionsOverview = projectFeaturesAvailable;
-  const canOpenSplitView = isLargeScreen && projectFeaturesAvailable;
+  // below and shared with the view hotkeys; the rail table reads the same
+  // predicate, so button and chord cannot drift apart.
+  const canOpenSessionsOverview = isSidebarFooterItemAvailable(
+    'sessionsOverview',
+    projectFeaturesAvailable,
+    isLargeScreen,
+  );
+  const canOpenSplitView = isSidebarFooterItemAvailable(
+    'splitView',
+    projectFeaturesAvailable,
+    isLargeScreen,
+  );
   // Each chord is live only while the sidebar offers its button (sidebar
   // enabled, item in the resolved footer, the button's availability gate),
   // so a key never opens what the host's chrome withholds and an inert chord
