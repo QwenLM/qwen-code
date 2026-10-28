@@ -111,8 +111,8 @@ public final class ExternalStorageRegistrationController {
                 || token == null || token.isBlank() || authorization == null || authorization.length() > 4096
                 || !MessageDigest.isEqual(("Bearer " + token).getBytes(StandardCharsets.UTF_8),
                         authorization.getBytes(StandardCharsets.UTF_8))) {
-            throw new RuntimeBrokerException(403, "external_storage_registration_denied",
-                    "External storage registration requires a loopback operator credential.", false);
+            throw new RuntimeBrokerException(403, "operator_credential_required",
+                    "External storage operations require a loopback operator credential.", false);
         }
     }
 

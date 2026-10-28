@@ -382,9 +382,7 @@ public class WorkspaceExecutionStore {
     }
 
     public boolean isExternal(ContextBinding binding) {
-        return binding != null && jdbc.queryForList("SELECT storage_kind FROM ma_storage WHERE alias_key = ?",
-                String.class, JdbcRuntimeBindingRepository.storageAliasKey(binding.getTenantId(), binding.getStorageId()))
-                .contains("EXTERNAL");
+        return JdbcRuntimeBindingRepository.externalStorage(jdbc, binding);
     }
 
     public void authorizeExternal(SessionRecord session,

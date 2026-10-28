@@ -55,9 +55,7 @@ public class ManagedWorkspaceRegistry {
     }
 
     public boolean isExternal(ContextBinding binding) {
-        return binding != null && jdbc.queryForList("SELECT storage_kind FROM ma_storage WHERE alias_key = ?",
-                String.class, com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageAliasKey(
-                        binding.getTenantId(), binding.getStorageId())).contains("EXTERNAL");
+        return com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.externalStorage(jdbc, binding);
     }
 
     public boolean externalFilesAllowed(ContextBinding binding) {
