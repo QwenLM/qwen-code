@@ -417,6 +417,12 @@ describe('managed-agent-server e2e runner', () => {
     expect(source).toContain('storeFaultProxy?.allowTerminal()');
     expect(source).toContain('commitCarriesTurnSettled');
     expect(source).toContain('Terminal write fault was not compensated');
+    // C1 must drop every bounded retry, not only the first answer, or the
+    // doomed generation can receive a replay before the crash.
+    expect(source).toContain('&& !terminalAllowed');
+    // A terminal alone is not the answer: the surviving transcript must
+    // still carry the model response.
+    expect(source).toContain('Approval recovery answer differs');
   });
 
   // #12941: the Stage A acceptance criterion names a 15-second Runtime delay,

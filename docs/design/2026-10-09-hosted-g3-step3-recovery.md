@@ -526,8 +526,10 @@ published prefix. Three more cover the next barriers: a refused Runtime
 cleanup release followed by another crash must retry the original cleanup
 identity until one confirmation (C3); a committed `turn.settled` whose reply
 is lost must be replayed once after replacement with zero inference or tool
-calls (C1); and a refused terminal write must leave the payable checkpoint to
-be compensated exactly once by the replacement (C2). A lost takeover-load
+calls, and the surviving public text must still be the recovered answer
+(C1); and a refused terminal write must leave the payable checkpoint to be
+compensated exactly once by the replacement, with the recovered answer still
+visible (C2). A lost takeover-load
 reply (A4's load half) stays focused: the packaged arm showed the redrive's
 active handoff leaves the original Turn RUNNING instead of projecting its
 terminal, so fixing that recovery path is separate from this acceptance slice. Malformed or foreign

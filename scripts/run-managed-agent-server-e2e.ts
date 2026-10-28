@@ -70,9 +70,10 @@ let freeze = false;
 let modelRoundFailover = false;
 let frozenControlPlane = false;
 let g3VerifyArgument: string | undefined;
-// Step 3 A5/A5a barriers and the A4/C4 lost-reply arms layer one fault point
-// on the Allow arm; every other mode answers a different question and would
-// make the same crash prove two things at once.
+// Step 3 A5/A5a barriers, the A4/C4 lost-reply arms, and the C1-C3
+// cleanup/terminal arms layer one fault point on the Allow arm; every other
+// mode answers a different question and would make the same crash prove two
+// things at once.
 const approvalFaults = [
   'after-decision',
   'after-prepare',
@@ -860,7 +861,11 @@ function startStoreFaultProxy(targetOrigin: string): Promise<StoreFaultProxy> {
         });
         const upstreamBody = Buffer.from(await upstream.arrayBuffer());
         if (terminal) {
-          if (armed?.fault === 'drop-reply' && !terminalFaulted) {
+          if (armed?.fault === 'drop-reply' && !terminalAllowed) {
+            // Keep dropping every bounded retry until the crash. Dropping
+            // only the first answer would let the doomed generation's retry
+            // receive a replay, so the crash would land after the terminal
+            // was delivered rather than on a committed-but-undelivered one.
             terminalFaulted = true;
             if (upstream.status === 200) terminalAcceptCount += 1;
             observations.push(
@@ -2785,10 +2790,14 @@ try {
           releaseApprovalResultHold();
           approvalResultHold = undefined;
         }
-        // C2's doomed generation must not land the terminal after the
-        // refusal; the replacement may. C3 keeps its Broker proxy alive so
-        // the retry's successful release is witnessed there.
-        if (approvalFault === 'terminal-write-failed') {
+        // C1/C2's doomed generation must not land or deliver the terminal after
+        // the injected fault; the replacement may, including a replayed commit
+        // for C1. C3 keeps its Broker proxy alive so the retry's successful
+        // release is witnessed there.
+        if (
+          approvalFault === 'terminal-reply-lost' ||
+          approvalFault === 'terminal-write-failed'
+        ) {
           storeFaultProxy?.allowTerminal();
         }
         if (replacementBrokerProxy) {
@@ -2855,6 +2864,22 @@ try {
         );
       }
       verifiedOriginalTerminal = terminals[0].type;
+      // A terminal is not the answer. The surviving public transcript must
+      // still carry the one model response the recovered Turn produced, or
+      // a compensation that only projects a terminal would pass. The
+      // result-commit arm already owns the same check with its retraction
+      // diagnostic, so it keeps that message.
+      if (verificationMode === 'allow' && approvalFault !== 'after-result') {
+        const transcript = await publicTranscript(
+          replacementSpringUrl,
+          tenant,
+          session.id,
+        );
+        if (transcript.text !== continuationResponse)
+          throw new Error(
+            `Approval recovery answer differs: ${JSON.stringify(transcript.text)}`,
+          );
+      }
       if (approvalFault === 'after-result') {
         // The reissue must retract the held prefix: only the recovered
         // answer may remain in the public transcript.
@@ -3094,7 +3119,7 @@ try {
           (storeFaultProxy?.terminalAcceptCount() ?? 0) < 1
         )
           throw new Error(
-            `Terminal write fault was not compensated exactly once: reject=${storeFaultProxy?.terminalRejectCount()} accept=${storeFaultProxy?.terminalAcceptCount()} observations=${storeFaultProxy?.observations().join(' | ')}`,
+            `Terminal write fault was not compensated: reject=${storeFaultProxy?.terminalRejectCount()} accept=${storeFaultProxy?.terminalAcceptCount()} observations=${storeFaultProxy?.observations().join(' | ')}`,
           );
       }
       saveEvidence('approval-result.json', {

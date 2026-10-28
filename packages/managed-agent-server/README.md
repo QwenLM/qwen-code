@@ -1754,11 +1754,12 @@ npm run test:e2e:managed-harness-restart-approval-admission-reply-lost
 The remaining three cover the next barriers of the same matrix. The cleanup
 arm refuses the first Runtime release, crashes the Harness, and requires the
 replacement to retry the original cleanup identity until one confirmation.
-The terminal reply-loss arm commits `turn.settled`, loses only its reply, and
-restarts the Harness; the missing-terminal arm refuses the write itself, so
-the replacement must compensate the payable checkpoint exactly once. All
+The terminal reply-loss arm commits `turn.settled`, loses its reply (and
+every bounded retry of it) until the crash, and restarts the Harness; the
+missing-terminal arm refuses the write itself, so the replacement must
+compensate the payable checkpoint exactly once. All
 three keep one original Action, one settled execution, one file effect, one
-terminal and the original cleanup:
+terminal, the recovered model answer and the original cleanup:
 
 ```bash
 npm run test:e2e:managed-harness-restart-approval-cleanup-failed
