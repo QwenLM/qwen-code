@@ -4390,7 +4390,6 @@ describe('qwen-autofix workflow', () => {
         );
         // Both builders print ONE array (compact for the scan, pretty for
         // prepare), so the inspection reads it as a single value.
-        const inspect = 'jq -c';
         // Each builder assigns its own variable; the scan uses MARKERS, the
         // prepare leg LIVE_MARKS.
         const varName = name === 'scan' ? 'MARKERS' : 'LIVE_MARKS';
@@ -4398,7 +4397,7 @@ describe('qwen-autofix workflow', () => {
           'bash',
           [
             '-c',
-            `AUTOFIX_BOT='qwen-code-dev-bot'\nWORKDIR='${dir}'\n${builder.replace(/\n {10,12}/g, '\n')}\nprintf '%s' "$(${inspect} 'map("\\(.round)|\\(.win)|\\(.run // "null")")' <<< "$${varName}")"`,
+            `AUTOFIX_BOT='qwen-code-dev-bot'\nWORKDIR='${dir}'\n${builder.replace(/\n {10,12}/g, '\n')}\nprintf '%s' "$(jq -c 'map("\\(.round)|\\(.win)|\\(.run // "null")")' <<< "$${varName}")"`,
           ],
           { encoding: 'utf8' },
         ).trim();
