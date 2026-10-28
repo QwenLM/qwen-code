@@ -191,8 +191,11 @@ jobs:
       # and the post-job save tars that whole shared repository — 14 to 37
       # minutes per job on 2026-10-16 — only to lose the reservation race to
       # a parallel job and discard the archive.
+      # Only default _tool caches are candidates for permission repair; the
+      # helper still checks their canonical runner-local path. Shared caches
+      # keep their provisioned permissions and use normal setup-java.
       - name: 'Restore runner-local Java tool cache'
-        if: "${{ runner.environment == 'self-hosted' }}"
+        if: "${{ runner.environment == 'self-hosted' && endsWith(runner.tool_cache, '/_tool') }}"
         run: 'bash .github/scripts/restore-java-tool-cache.sh'
 
       - name: 'Set up Java'
@@ -795,7 +798,7 @@ jobs:
           ref: '${{ inputs.ref || github.sha }}'
 
       - name: 'Restore runner-local Java tool cache'
-        if: "${{ runner.environment == 'self-hosted' }}"
+        if: "${{ runner.environment == 'self-hosted' && endsWith(runner.tool_cache, '/_tool') }}"
         run: 'bash .github/scripts/restore-java-tool-cache.sh'
 
       - name: 'Set up Java'
@@ -1717,7 +1720,7 @@ jobs:
         with:
           ref: '${{ inputs.ref || github.sha }}'
       - name: 'Restore runner-local Java tool cache'
-        if: "${{ runner.environment == 'self-hosted' }}"
+        if: "${{ runner.environment == 'self-hosted' && endsWith(runner.tool_cache, '/_tool') }}"
         run: 'bash .github/scripts/restore-java-tool-cache.sh'
 
       - name: 'Set up Java'
@@ -1981,7 +1984,7 @@ jobs:
         with:
           ref: '${{ inputs.ref || github.sha }}'
       - name: 'Restore runner-local Java tool cache'
-        if: "${{ runner.environment == 'self-hosted' }}"
+        if: "${{ runner.environment == 'self-hosted' && endsWith(runner.tool_cache, '/_tool') }}"
         run: 'bash .github/scripts/restore-java-tool-cache.sh'
 
       - name: 'Set up Java'
@@ -2351,7 +2354,7 @@ jobs:
           package-manager-cache: false
 
       - name: 'Restore runner-local Java tool cache'
-        if: "${{ runner.environment == 'self-hosted' }}"
+        if: "${{ runner.environment == 'self-hosted' && endsWith(runner.tool_cache, '/_tool') }}"
         run: 'bash .github/scripts/restore-java-tool-cache.sh'
 
       - name: 'Use pre-installed Node.js (self-hosted)'

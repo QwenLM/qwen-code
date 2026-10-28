@@ -2418,7 +2418,7 @@ describe('setup-java Maven cache stays on hosted runners', () => {
 });
 
 describe('SDK Java runner-local tool-cache repair', () => {
-  it('repairs only pool-capable Java installers after checkout', () => {
+  it('repairs only default local caches without gating Java installation', () => {
     for (const [name, job] of Object.entries(parse(workflow).jobs)) {
       const steps = job.steps ?? [];
       const java = steps.findIndex((s) =>
@@ -2444,9 +2444,10 @@ describe('SDK Java runner-local tool-cache repair', () => {
         expect(repair, name).toBe(java - 1);
       }
       expect(steps[repair].if, name).toBe(
-        "${{ runner.environment == 'self-hosted' }}",
+        "${{ runner.environment == 'self-hosted' && endsWith(runner.tool_cache, '/_tool') }}",
       );
       expect(steps[repair]['continue-on-error'], name).toBeUndefined();
+      expect(steps[java].if, name).toBeUndefined();
       expect(steps[java].env?.RUNNER_TOOL_CACHE, name).toBeUndefined();
     }
   });
