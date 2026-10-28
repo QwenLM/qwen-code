@@ -6705,7 +6705,11 @@ jobs:
                 echo "<!-- autofix-regression round=${REGRESSED_ROUND} key=${WINDOW:-none} -->"
               fi
             } > "${WORKDIR}/report.md"
-            gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/report.md" || echo "::warning::Failed to post handoff comment on PR #${PR}"
+            # The handoff is the ONLY carrier for an error/timeout/crash round,
+            # so it retries like the re-arm ack: one lost post is a free attempt.
+            gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/report.md" \
+              || { sleep 5; gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/report.md"; } \
+              || echo "::warning::Failed to post handoff comment on PR #${PR} after one retry — that round was not recorded"
           fi
           # A failed round must not lose verified deferred findings: the
           # agent's analysis is independent of whether this round's commit
