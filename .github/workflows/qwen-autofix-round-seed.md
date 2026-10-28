@@ -162,13 +162,13 @@ ending it early.
 **A crash or a timeout spends its attempt; a breaker parks.** A crashed or
 timed-out round stamps the sentinel timestamp and only advances the round by
 one, so it consumes an attempt and nothing else — one such round does not stop
-anything. The release is withheld (`autofix/needs-human` plus the paused notice)
-only when the engagement holds `TIMEOUT_WINDOW_CAP` (3) sentinel-stamped rounds
-with silent-sandbox (idle) ones subtracted, when a round is past
+anything. A breaker withholds the release (`autofix/needs-human` plus the paused
+notice) when the engagement holds `TIMEOUT_WINDOW_CAP` (3) sentinel-stamped
+rounds with silent-sandbox (idle) ones subtracted, when a round is past
 `ROUND_START + attempts`, or when a convergence-break notice is newer than the
 window key. Those are the breaker's own thresholds, unchanged by `for N`; read a
-pause on a budgeted PR as "a human should look", never as "the budget
-finished".
+lasting pause on a budgeted PR as "a human should look", never as "the budget
+finished" — the one transient pause is the deferred release above.
 
 **A breaker stop is not a spent budget.** When the consecutive-failure, timeout
 or convergence breaker stops the loop early, it stamps a terminal sentinel round

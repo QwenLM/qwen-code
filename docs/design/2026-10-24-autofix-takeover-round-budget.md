@@ -98,12 +98,12 @@ that `for N` cannot bound.
    "the loop stopped and a human must unstick something"; a finished budget
    leaves nothing stuck, so the label and the paused notice would both be false.
    Release is just the label DELETE, so the PR leaves the managed pool on its
-   own. A forced dispatch is the one pass that cannot release: it has to answer
-   the dispatch out loud, so it pauses and the next passive scan releases. That
-   release therefore deletes the escalation label too — the note denies that
-   anything is waiting on a human, so the label its own deferral applied must
-   not outlive it — and the deferred pass's notices quote the attempts rather
-   than a round counter that no-ops never advance.
+   own. A forced dispatch cannot release either: it has to answer the dispatch
+   out loud, so it pauses and the next non-forced scan releases. That release
+   therefore deletes the escalation label too — the note denies that anything
+   is waiting on a human, so the label its own deferral applied must not outlive
+   it — and the deferred pass's notices quote the attempts rather than a round
+   counter that no-ops never advance.
 
 4. **Bot-authored PRs keep the paused path.** They are managed whether or not
    the label is present, so releasing it would hand them back to standard
