@@ -500,6 +500,14 @@
                         <configuration>
                             <excludes>
                                 <exclude>**/Hosted*IT.java</exclude>
+                                <!-- Packaging verification reads the jars the
+                                     package phase wrote and needs the
+                                     managed.artifact.version system property.
+                                     Only the surefire artifact-packaging
+                                     execution provides both; failsafe's
+                                     default *IT include would run it again
+                                     without either. -->
+                                <exclude>**/ManagedAgentPackagingIT.java</exclude>
                             </excludes>
                             <forkCount>${mysql.integration.forks}</forkCount>
                             <reuseForks>true</reuseForks>
