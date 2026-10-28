@@ -77,11 +77,10 @@ Hybrid 的 AgentCore 调用面从嵌套绑定中排除被 `tools.eager` 隐藏�
 会保留所有通过其他准入检查的普通 code-mode-callable binding。若执行 allowlist
 包含任一 MCP 工具项，MCP 绑定还必须匹配其中的精确工具名或服务器模式。
 Fork 分别继承父级的直接调用边界与嵌套绑定集合；嵌套访问权限不会扩大子级
-的直接调用授权。在 code mode 下，受外层智能体 allowlist 约束的 fork 会把两个
-边界写入后台元数据，resume 时按原样恢复。仅携带显式 `fork_tools` 列表或
-fork profile 的 fork 只持久化直接调用边界，resume 会依据父级的实时工具面
-重新推导嵌套绑定集合，因此该集合可能扩大。普通 fork 两个边界都不持久化，
-resume 会重新推导二者，因此子级的授权可能扩大。
+的直接调用授权。在 code mode 下，携带显式 `fork_tools` 列表、fork profile
+或受外层智能体 allowlist 约束的 fork 会把两个边界写入后台元数据，resume 时
+按原样恢复。普通 fork 两个边界都不持久化，resume 会依据父级的实时工具面
+重新推导二者，因此子级的授权可能扩大。
 
 ## 约束与风险
 

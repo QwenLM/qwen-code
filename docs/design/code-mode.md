@@ -87,13 +87,11 @@ otherwise admitted ordinary code-mode-callable bindings. An execution
 allowlist that mentions any MCP tool additionally restricts MCP bindings to
 matching exact names or server patterns. Forks inherit the parent's direct-call
 bound separately from its nested binding set; nested access never widens
-the child's direct-call grant. In a code mode, a fork launched under an
-enclosing agent allowlist writes both bounds to its background metadata, and
-resume restores them verbatim. A fork carrying only an explicit `fork_tools`
-list or a fork profile persists its direct-call bound alone, so resume
-re-derives its nested binding set from the parent's live surface and that set
-can widen. A plain fork persists neither bound, so resume re-derives both and
-the child's grant can widen.
+the child's direct-call grant. In a code mode, a fork carrying an explicit
+`fork_tools` list, a fork profile, or an enclosing agent allowlist writes both
+bounds to its background metadata, and resume restores them verbatim. A plain
+fork persists neither bound, so resume re-derives both from the parent's live
+surface and the child's grant can widen.
 
 ## Constraints and risks
 

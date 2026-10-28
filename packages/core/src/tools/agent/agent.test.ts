@@ -4198,6 +4198,71 @@ describe('AgentTool', () => {
           writeMetaSpy.mockRestore();
         },
       );
+
+      it.each([
+        {
+          forkTools: [ToolNames.READ_FILE],
+          direct: [ToolNames.READ_FILE],
+          nested: [ToolNames.READ_FILE],
+        },
+        {
+          forkTools: [ToolNames.EXEC],
+          direct: [ToolNames.EXEC],
+          nested: [ToolNames.READ_FILE, ToolNames.WRITE_FILE],
+        },
+      ])(
+        'derives the nested exec bound for a top-level hybrid fork (%j)',
+        async ({ forkTools, direct, nested }) => {
+          // Forks launch only from the top-level session, where no
+          // runWithAgentConfiguredToolAllowlist frame exists. The nested bound
+          // must still be concrete, or exec bypasses fork_tools.
+          preparePolicyRuntime('code_mode');
+          vi.mocked(config.getToolRegistry().getAllToolNames).mockReturnValue([
+            ToolNames.EXEC,
+            ToolNames.READ_FILE,
+            ToolNames.WRITE_FILE,
+          ]);
+          vi.mocked(config.getLlmClient).mockReturnValue({
+            getHistory: vi.fn().mockReturnValue([]),
+            getChat: vi.fn().mockReturnValue({
+              getGenerationConfig: vi.fn().mockReturnValue({
+                systemInstruction: 'parent system',
+                tools: [
+                  {
+                    functionDeclarations: [
+                      { name: ToolNames.EXEC },
+                      { name: ToolNames.READ_FILE },
+                      { name: ToolNames.WRITE_FILE },
+                    ],
+                  },
+                ],
+              }),
+            }),
+          } as unknown as ReturnType<Config['getLlmClient']>);
+          const writeMetaSpy = vi
+            .spyOn(transcript, 'writeAgentMeta')
+            .mockImplementation(() => {});
+          const invocation = (
+            agentTool as AgentToolWithProtectedMethods
+          ).createInvocation({
+            description: 'bound a top-level fork',
+            prompt: 'read the implementation',
+            subagent_type: 'fork',
+            fork_tools: forkTools,
+            run_in_background: true,
+          });
+          const result = await invocation.execute();
+          expect(result.error).toBeUndefined();
+          const tools = vi.mocked(AgentHeadless.create).mock.calls[0]?.[5];
+          expect(tools?.executionAllowedTools).toEqual(direct);
+          expect(tools?.nestedExecutionAllowedTools).toEqual(nested);
+          expect(writeMetaSpy.mock.calls[0]?.[1]).toMatchObject({
+            executionAllowedTools: direct,
+            nestedExecutionAllowedTools: nested,
+          });
+          writeMetaSpy.mockRestore();
+        },
+      );
     });
 
     it('preserves fork_tools deny-all inside a configured parent allowlist', async () => {

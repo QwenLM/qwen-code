@@ -2073,13 +2073,16 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       fallbackTools: readonly string[],
       forNestedBinding = false,
     ): string[] => {
-      if (parentConfiguredToolAllowlist === undefined) {
+      if (parentConfiguredToolAllowlist === undefined && !forNestedBinding) {
         return buildForkExecutionAllowlist(
           requestedTools,
           fallbackTools,
           parentToolNames,
         ).filter(keepOffParentBlocklist);
       }
+      const requestsExec = requestedTools?.includes(ToolNames.EXEC) === true;
+      const requestsMcp =
+        requestedTools?.some((name) => name.startsWith('mcp__')) === true;
       return fallbackTools.filter(
         (toolName) =>
           toolName !== ToolNames.ASK_USER_QUESTION &&
@@ -2088,10 +2091,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           (isRequestedByFork(toolName) ||
             (forNestedBinding &&
               isCodeModeEnabled(agentConfig.getToolMode?.()) &&
-              requestedTools?.includes(ToolNames.EXEC) &&
+              requestsExec &&
               getToolExposure(toolName) === 'code-mode-callable' &&
-              (!toolName.startsWith('mcp__') ||
-                !requestedTools.some((name) => name.startsWith('mcp__')))) ||
+              (!toolName.startsWith('mcp__') || !requestsMcp)) ||
             (requestedTools !== undefined &&
               requestedTools.length > 0 &&
               (toolName === ToolNames.TOOL_SEARCH ||
@@ -2099,12 +2101,19 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               parentToolNames.includes(toolName))),
       );
     };
+    // Forks launch only from the top-level session, where the enclosing-agent
+    // policy frame is never set. Derive a restricted fork's nested bound from
+    // the ambient code-mode names instead of that frame; an unrestricted fork
+    // carries no bound, so its prompt and execution surface stay unchanged.
     const nestedExecutionAllowedTools =
-      parentConfiguredToolAllowlist !== undefined &&
-      isCodeModeEnabled(agentConfig.getToolMode?.())
+      isCodeModeEnabled(agentConfig.getToolMode?.()) &&
+      (requestedTools !== undefined ||
+        parentConfiguredToolAllowlist !== undefined)
         ? buildParentBoundExecutionAllowlist(
             getCurrentCodeModeAllowedNames() ?? defaultExecutionToolNames,
             true,
+          ).filter(
+            (toolName) => getToolExposure(toolName) === 'code-mode-callable',
           )
         : undefined;
     const requestedExecutionAllowedTools =
@@ -3119,6 +3128,13 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           }).`,
         );
       }
+      // Only a restricted fork persists its launch-time bounds; a plain fork
+      // re-derives them from the live parent surface when it resumes.
+      const persistsForkPolicy =
+        isFork &&
+        (this.params.fork_tools !== undefined ||
+          this.forkProfile !== undefined ||
+          getCurrentAgentConfiguredToolAllowlist() !== undefined);
       const effectiveSubagentType = requestedType
         ? requestedType
         : DEFAULT_BUILTIN_SUBAGENT_TYPE;
@@ -4102,25 +4118,23 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           ...(backgroundFix
             ? { resumeBlockedReason: BACKGROUND_FIX_CONTINUATION_BLOCKED }
             : {}),
-          ...(isFork &&
-          (this.params.fork_tools !== undefined ||
-            this.forkProfile !== undefined ||
-            getCurrentAgentConfiguredToolAllowlist() !== undefined) &&
+          ...(persistsForkPolicy &&
           bgToolConfig?.executionAllowedTools !== undefined
             ? {
                 executionAllowedTools: [...bgToolConfig.executionAllowedTools],
               }
             : {}),
-          // Unlike the allowlist above, the blocklist persists whenever the
-          // fork carries one — it also bounds plain forks whose allowlist is
-          // rebuilt from the live parent surface on resume.
-          ...(isFork && bgToolConfig?.nestedExecutionAllowedTools !== undefined
+          ...(persistsForkPolicy &&
+          bgToolConfig?.nestedExecutionAllowedTools !== undefined
             ? {
                 nestedExecutionAllowedTools: [
                   ...bgToolConfig.nestedExecutionAllowedTools,
                 ],
               }
             : {}),
+          // Unlike the allowlists above, the blocklist persists whenever the
+          // fork carries one — it also bounds plain forks whose allowlist is
+          // rebuilt from the live parent surface on resume.
           ...(isFork && bgToolConfig?.disallowedTools?.length
             ? { disallowedTools: [...bgToolConfig.disallowedTools] }
             : {}),
@@ -5047,25 +5061,23 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             : undefined,
           lastUpdatedAt: new Date().toISOString(),
           resolvedApprovalMode,
-          ...(isFork &&
-          (this.params.fork_tools !== undefined ||
-            this.forkProfile !== undefined ||
-            getCurrentAgentConfiguredToolAllowlist() !== undefined) &&
+          ...(persistsForkPolicy &&
           toolConfig?.executionAllowedTools !== undefined
             ? {
                 executionAllowedTools: [...toolConfig.executionAllowedTools],
               }
             : {}),
-          // Unlike the allowlist above, the blocklist persists whenever the
-          // fork carries one — it also bounds plain forks whose allowlist is
-          // rebuilt from the live parent surface on resume.
-          ...(isFork && toolConfig?.nestedExecutionAllowedTools !== undefined
+          ...(persistsForkPolicy &&
+          toolConfig?.nestedExecutionAllowedTools !== undefined
             ? {
                 nestedExecutionAllowedTools: [
                   ...toolConfig.nestedExecutionAllowedTools,
                 ],
               }
             : {}),
+          // Unlike the allowlists above, the blocklist persists whenever the
+          // fork carries one — it also bounds plain forks whose allowlist is
+          // rebuilt from the live parent surface on resume.
           ...(isFork && toolConfig?.disallowedTools?.length
             ? { disallowedTools: [...toolConfig.disallowedTools] }
             : {}),
