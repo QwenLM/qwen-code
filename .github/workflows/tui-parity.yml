@@ -250,6 +250,8 @@ jobs:
     if: "${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}"
     runs-on: 'ubuntu-latest'
     timeout-minutes: 60
+    outputs:
+      canonical-artifact-id: '${{ steps.canonical.outputs.artifact-id }}'
     steps:
       - uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'
       - uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e'
@@ -277,6 +279,7 @@ jobs:
           QWEN_E2E_RENDERER: 'opentui'
         run: 'npx vitest run --config integration-tests/vitest.installed.config.ts --retry=0 --bail=1 --maxWorkers=1 --minWorkers=1 --dangerouslyIgnoreUnhandledErrors=false'
       - name: 'Upload canonical installed npm artifact'
+        id: 'canonical'
         if: '${{ success() }}'
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a'
         with:
@@ -381,7 +384,7 @@ jobs:
       - name: 'Download canonical installed npm artifact'
         uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c'
         with:
-          name: 'installed-npm-canonical-${{ github.run_id }}-${{ github.run_attempt }}'
+          artifact-ids: '${{ needs.installed-npm.outputs.canonical-artifact-id }}'
           path: '${{ env.QWEN_DISTRIBUTION_ARTIFACT_DIR }}'
       - name: 'Bind canonical artifact to this checkout'
         run: 'node --import tsx integration-tests/installed/bind-distribution-artifact.ts "$QWEN_DISTRIBUTION_ARTIFACT_DIR" "$QWEN_DISTRIBUTION_ARTIFACT"'

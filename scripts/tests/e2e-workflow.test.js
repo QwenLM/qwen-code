@@ -1015,6 +1015,10 @@ describe('installed distribution matrix workflow', () => {
       (step) => step.name === 'Upload canonical installed npm artifact',
     );
     expect(upload.if).toBe('${{ success() }}');
+    expect(canonical.outputs['canonical-artifact-id']).toBe(
+      '${{ steps.canonical.outputs.artifact-id }}',
+    );
+    expect(upload.id).toBe('canonical');
     expect(upload.with.name).toBe(
       'installed-npm-canonical-${{ github.run_id }}-${{ github.run_attempt }}',
     );
@@ -1107,12 +1111,12 @@ describe('installed distribution matrix workflow', () => {
   });
 
   it('binds the same downloaded canonical artifact once before either product leg', () => {
-    const upload = canonical.steps.find(
-      (step) => step.name === 'Upload canonical installed npm artifact',
-    );
     const download = named('Download canonical installed npm artifact');
     expect(download.uses).toMatch(/^actions\/download-artifact@/);
-    expect(download.with.name).toBe(upload.with.name);
+    expect(download.with['artifact-ids']).toBe(
+      '${{ needs.installed-npm.outputs.canonical-artifact-id }}',
+    );
+    expect(download.with.name).toBeUndefined();
     expect(download.with.path).toBe(
       '${{ env.QWEN_DISTRIBUTION_ARTIFACT_DIR }}',
     );
