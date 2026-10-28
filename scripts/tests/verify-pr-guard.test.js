@@ -229,6 +229,53 @@ describe('compareSnapshots', () => {
     );
   });
 
+  // Measured on the live PR: a truncated re-fetch printed the short-list reason
+  // and then 321 "disappeared" lines, burying the one actionable line. The ids
+  // are a consequence of the truncation, not independent reasons.
+  it('summarizes the ids a short list lost instead of naming every one', () => {
+    const before = Array.from({ length: 324 }, (_, i) => ({
+      id: i,
+      stamp: null,
+    }));
+    const result = compareSnapshots(
+      snapshot({ reviewComments: before }),
+      snapshot({ reviewComments: before.slice(0, 3) }),
+    );
+    expect(result.clean).toBe(false);
+    const listReasons = result.reasons.filter((r) =>
+      r.startsWith('reviewComments:'),
+    );
+    expect(listReasons).toEqual([
+      'reviewComments: re-fetch returned 3 of 324 items — a short list is a failed fetch, not a quiet PR',
+      'reviewComments: 321 ids absent from the re-fetch (implied by the short list)',
+    ]);
+    expect(result.reasons.some((r) => /disappeared$/.test(r))).toBe(false);
+  });
+
+  // The suppression must not swallow a genuine deletion: at equal length the
+  // missing id is the whole signal, so it is still named.
+  it('still names a vanished id when the list did not come back short', () => {
+    const result = compareSnapshots(
+      snapshot({
+        reviewComments: [
+          { id: 1, stamp: null },
+          { id: 2, stamp: null },
+        ],
+      }),
+      snapshot({
+        reviewComments: [
+          { id: 1, stamp: null },
+          { id: 3, stamp: null },
+        ],
+      }),
+    );
+    expect(result.reasons).toContain('reviewComments: 2 disappeared');
+    expect(result.reasons).toContain('reviewComments: 3 is new');
+    expect(
+      result.reasons.some((r) => /implied by the short list/.test(r)),
+    ).toBe(false);
+  });
+
   it('treats a malformed or absent snapshot as dirty', () => {
     expect(compareSnapshots(snapshot(), null).reasons).toContain(
       'now snapshot is missing or malformed',

@@ -146,6 +146,13 @@ The checker gains two rules over the artifacts a round already writes:
   `updated_at ?? submitted_at`, because reviews carry only the latter. Reading
   one field name across all three lists would compare `undefined` with
   `undefined` and never notice an edited review.
+- A short list reports its own reason and a count of the ids it lost, not one
+  line per id. Measured on a live PR: a truncated re-fetch printed the
+  short-list reason and then 321 `disappeared` lines, burying the one
+  actionable line under its own echoes. The ids are a consequence of the
+  truncation, not independent reasons. At equal length the missing id is the
+  whole signal, so it is still named — a separate pin keeps the suppression
+  from swallowing a genuine deletion.
 - An `environment` attribution is only as good as the A/A control behind it.
   The checker cannot see that control, so the skill still requires both arms
   and the shared cause in the report; the ledger stops the miscount, not a
@@ -165,12 +172,15 @@ The checker gains two rules over the artifacts a round already writes:
   paths, so "writes no file when a call fails" is observed rather than inferred
   from the pure function.
 - A vacuity matrix over the new guards: revert each one in place, run the
-  suite that should catch it, restore. Measured: 11 rows, 11 killed, including
-  a control row on the pre-existing `merge-ready`/`fail` guard. Three of those
+  suite that should catch it, restore. Measured: 13 rows, 13 killed, including
+  a control row on the pre-existing `merge-ready`/`fail` guard. Four of those
   rows exist because the self-audit found defects in this change itself: a
   warning-suppression branch that let a malformed ledger reach a null read, a
-  refusal message that blamed the head for a malformed list item, and a
-  `--compare` that read clean when both sides were the same file.
+  refusal message that blamed the head for a malformed list item, a
+  `--compare` that read clean when both sides were the same file, and a
+  short-list report that named all 321 lost ids and buried its own actionable
+  line. The last two rows are a pair — one proves the suppression happens, the
+  other proves it does not swallow a genuine deletion at equal length.
 
 ## Acceptance criteria
 
@@ -192,7 +202,9 @@ The checker gains two rules over the artifacts a round already writes:
 - `guard --snapshot` writes nothing and exits 1 when any call fails;
   `guard --compare` exits 1 on a malformed snapshot, a short list, a new,
   edited or vanished item, a moved head and a changed state, exits 2 when both
-  sides are the same file, and exits 0 only when nothing moved.
+  sides are the same file, and exits 0 only when nothing moved. A short list
+  reports its reason plus a count of lost ids; an equal-length list still names
+  each vanished id.
 - No script executes PR code.
 
 ## Open questions

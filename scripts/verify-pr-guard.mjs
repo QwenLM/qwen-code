@@ -185,21 +185,32 @@ export function compareSnapshots(start, now) {
   for (const [key] of LISTS) {
     const before = start[key];
     const after = now[key];
-    if (after.length < before.length) {
+    const short = after.length < before.length;
+    if (short) {
       reasons.push(
         `${key}: re-fetch returned ${after.length} of ${before.length} items — a short list is a failed fetch, not a quiet PR`,
       );
     }
     const byId = new Map(after.map((item) => [item.id, item]));
     const startIds = new Set(before.map((item) => item.id));
+    let missing = 0;
     for (const item of before) {
       const seen = byId.get(item.id);
-      if (!seen) reasons.push(`${key}: ${item.id} disappeared`);
-      else if (seen.stamp !== item.stamp) {
+      if (!seen) {
+        // A short list already says the fetch was truncated. Naming every
+        // absent id buries that one actionable line under hundreds of echoes.
+        if (short) missing++;
+        else reasons.push(`${key}: ${item.id} disappeared`);
+      } else if (seen.stamp !== item.stamp) {
         reasons.push(
           `${key}: ${item.id} was edited (${item.stamp} -> ${seen.stamp})`,
         );
       }
+    }
+    if (missing > 0) {
+      reasons.push(
+        `${key}: ${missing} ids absent from the re-fetch (implied by the short list)`,
+      );
     }
     for (const item of after) {
       if (!startIds.has(item.id)) reasons.push(`${key}: ${item.id} is new`);
