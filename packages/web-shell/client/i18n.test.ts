@@ -198,6 +198,19 @@ describe('web-shell ru locale', () => {
     expect(t('goal.tokens', { used: 21 })).toBe('21 токен');
   });
 
+  it('pluralises the token budget on the budget, not the used count', () => {
+    const t = getTranslator('ru');
+    // Plain numbers: production's abbreviated shape (>= 1000 → '1.2k')
+    // coerces to NaN on both arms and would test the coercion, not the
+    // operand.
+    expect(t('goal.tokensOfBudget', { used: 1, budget: 2 })).toBe(
+      '1 / 2 токена',
+    );
+    expect(t('goal.tokensOfBudget', { used: 3, budget: 11 })).toBe(
+      '3 / 11 токенов',
+    );
+  });
+
   it('pluralises the goals counter the Russian way', () => {
     const t = getTranslator('ru');
     expect(t('goals.count', { count: 1 })).toBe('1 активная цель');
