@@ -3887,6 +3887,7 @@ describe('qwen-autofix workflow', () => {
       notices = [],
       dryRun = 'false',
       actor = 'qwen-code-dev-bot',
+      writeFails = false,
     } = {}) => {
       const dir = mkdtempSync(join(tmpdir(), 'autofix-budget-release-'));
       try {
@@ -3901,6 +3902,7 @@ describe('qwen-autofix workflow', () => {
               '; exit 0; fi',
             'if [[ "$1" == "api" && "$2" == "user" ]]; then printf "%s" "$STUB_ACTOR"; exit 0; fi',
             'echo "WRITE $*" >> ' + join(dir, 'writes.log'),
+            'if [[ -n "${STUB_WRITE_FAIL:-}" && "$*" == *"labels/"* ]]; then echo "HTTP 502" >&2; exit 1; fi',
             'exit 0',
           ].join('\n'),
         );
@@ -3936,6 +3938,7 @@ describe('qwen-autofix workflow', () => {
               DRY_RUN: dryRun,
               IS_BOT_AUTHOR: 'false',
               STUB_ACTOR: actor,
+              STUB_WRITE_FAIL: writeFails ? '1' : '',
             },
             encoding: 'utf8',
           },
@@ -4002,6 +4005,14 @@ describe('qwen-autofix workflow', () => {
       ],
     });
     expect(older.writes).toContain('autofix-budget-reached');
+    // A failed DELETE only warns: the scan carries on to the next PR, and the
+    // fleet row stays absent because nothing was released. Unwrapping the
+    // `if !` here aborts the whole scan on one transient 502.
+    const failedDelete = runRelease({ writeFails: true });
+    expect(failedDelete.log).toContain('after budget failed');
+    expect(failedDelete.fleet).not.toContain('released');
+    expect(failedDelete.log).not.toContain('FELLTHROUGH');
+
     // Fail-closed and consent gates: none of these write anything.
     for (const variant of [
       { labelsJson: '' },
@@ -4064,6 +4075,7 @@ describe('qwen-autofix workflow', () => {
               '; exit 0; fi',
             'if [[ "$1" == "api" && "$2" == "user" ]]; then printf "%s" "$STUB_ACTOR"; exit 0; fi',
             'echo "WRITE $*" >> ' + join(dir, 'writes.log'),
+            'if [[ -n "${STUB_WRITE_FAIL:-}" && "$*" == *"labels/"* ]]; then echo "HTTP 502" >&2; exit 1; fi',
             'exit 0',
           ].join('\n'),
         );
