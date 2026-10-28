@@ -178,9 +178,16 @@ public class AutomationScanner {
                 }
                 if (failureSample.size() < 3) {
                     ScheduleRow row = task.getValue();
+                    // The sample is the only record of an additional
+                    // failure, so a message-less one must still name
+                    // itself instead of rendering "failure=null".
+                    Throwable cause = error.getCause();
+                    String detail = cause.getMessage() != null
+                            ? cause.getMessage()
+                            : cause.getClass().getName();
                     failureSample.add("tenant=" + row.tenantId()
                             + " schedule=" + row.scheduleId()
-                            + " failure=" + error.getCause().getMessage());
+                            + " failure=" + detail);
                 }
             }
         }

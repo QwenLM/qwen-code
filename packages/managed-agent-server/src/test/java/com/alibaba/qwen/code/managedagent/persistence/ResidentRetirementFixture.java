@@ -50,31 +50,36 @@ final class ResidentRetirementFixture {
     final ResidentWorkspaceRetirementStore.Request request;
     final RuntimeProvisionRequest runtimeRequest;
     final Map<String, Map<String, Object>> objects = new LinkedHashMap<>();
+    final List<Map<String, Object>> attachments = new java.util.ArrayList<>();
     RuntimeBindingRecord original;
     private final ManagedAgentProperties properties = new ManagedAgentProperties();
 
     ResidentRetirementFixture(DataSource source) {
+        this(source, "workspace");
+    }
+
+    ResidentRetirementFixture(DataSource source, String workspaceId) {
         this.source = source;
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
         manager = new DataSourceTransactionManager(source);
         bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
-        mapping = new ResidentWorkspace("workspace", 1,
+        mapping = new ResidentWorkspace(workspaceId, 1,
                 new WorkspaceCsiRegistration("tenant", "storage", "cluster", "runtime", "claim", "pvc-uid",
                         "volume", "pv-uid", "diskplugin.csi.alibabacloud.com", "handle", "backend", "serial", "/workspace", 1),
                 new WorkspaceCsiResourceGuard.ProtectionIdentity(UID, "protect", UID, 1, "protect-binding", UID, 1),
                 "worker@sha256:" + "a".repeat(64), List.of("node", "/worker/cli.js"), List.of());
         properties.getHarness().setWorkspaceFilesEnabled(true);
         properties.getRuntimeBroker().setResidentWorkspaces(List.of(mapping));
-        request = new ResidentWorkspaceRetirementStore.Request("tenant", "workspace", 1, "owner", UUID.randomUUID().toString());
+        request = new ResidentWorkspaceRetirementStore.Request("tenant", workspaceId, 1, "owner", UUID.randomUUID().toString());
         runtimeRequest = new RuntimeProvisionRequest(ResidentWorkspaces.scope(mapping), null, "kubernetes-workspace", "storage");
         storage = new WorkspaceCsiReservationStore(jdbc, manager, JSON);
         storage.register(mapping.registration());
         jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id, display_name,"
-                + " config_ref, policy_ref, state) VALUES ('tenant', 'workspace', 1, 'storage', 'resident', ?, ?, 'ACTIVE')",
-                WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
+                + " config_ref, policy_ref, state) VALUES ('tenant', ?, 1, 'storage', 'resident', ?, ?, 'ACTIVE')",
+                workspaceId, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
-                + " VALUES ('tenant', 'workspace', ?, 'OWNER')", ManagedWorkspaceRegistry.actorKey("tenant", "owner"));
+                + " VALUES ('tenant', ?, ?, 'OWNER')", workspaceId, ManagedWorkspaceRegistry.actorKey("tenant", "owner"));
     }
 
     ResidentWorkspaceRetirementStore store() {
@@ -85,7 +90,7 @@ final class ResidentRetirementFixture {
         var store = new ManagedAgentStore(jdbc, JSON, Clock.systemUTC(), mock(CommittedEventPublisher.class),
                 new ManagedWorkspaceRegistry(jdbc), properties);
         return new TransactionTemplate(manager).execute(status -> store.insertWorkspaceSessionCommand("tenant", "owner", key,
-                "digest-" + key, "qwen-code", null, "Session", List.of(), null, new WorkspaceSelection("workspace", ".")));
+                "digest-" + key, "qwen-code", null, "Session", List.of(), null, new WorkspaceSelection(mapping.workspaceId(), ".")));
     }
 
     RuntimeBindingRecord ready() {
@@ -102,11 +107,13 @@ final class ResidentRetirementFixture {
                 "backendDomain", registration.backendDomain(), "driver", registration.driver(), "volumeHandle", registration.volumeHandle(),
                 "diskSerial", registration.diskSerial(), "physicalKey", registration.physicalKey(), "pvcUid", registration.pvcUid(),
                 "pvUid", registration.pvUid(), "registrationRevision", "1"));
-        tuple.putAll(Map.of("reservationId", reserved.reservationId(), "reservationRevision", "1"));
+        tuple.putAll(Map.of("reservationId", reserved.reservationId(), "reservationRevision", Long.toString(reserved.revision())));
         String name = WorkspaceCsiRuntimeIdentity.name(seed);
+        String podUid = "workspace".equals(mapping.workspaceId()) ? UID
+                : UUID.nameUUIDFromBytes(mapping.workspaceId().getBytes(java.nio.charset.StandardCharsets.UTF_8)).toString();
         var placement = new LinkedHashMap<String, Object>();
         placement.putAll(Map.of("clusterDomain", "cluster", "namespace", "runtime", "namespaceUid", UID,
-                "podName", name, "podUid", UID, "nodeName", "node-a", "nodeUid", UID));
+                "podName", name, "podUid", podUid, "nodeName", "node-a", "nodeUid", UID));
         placement.putAll(Map.of("containerName", "runtime", "containerId", "containerd://" + "b".repeat(64),
                 "image", mapping.image(), "imageId", "sha256:" + "a".repeat(64), "podIp", "10.4.0.8",
                 "secretName", name, "secretUid", UID));
@@ -128,7 +135,7 @@ final class ResidentRetirementFixture {
                 new RuntimeResourceHandle("kubernetes-workspace", 1, identity), Instant.now(), Instant.now()));
         original = bindings.releaseOperation(attested.getBindingId(), "setup", attested.getOperationGeneration());
         WorkspaceCsiRuntimeIdentity.verify(original);
-        objects.put("pods", object("Pod", name, "runtime", UID, spec));
+        objects.put("pods", object("Pod", name, "runtime", podUid, spec));
         objects.get("pods").put("status", copy(Map.of("phase", "Running", "podIP", "10.4.0.8", "containerStatuses",
                 List.of(Map.of("name", "runtime", "containerID", placement.get("containerId"), "imageID", placement.get("imageId"),
                         "restartCount", 0, "ready", true, "state", Map.of("running", Map.of()))))));
@@ -146,7 +153,63 @@ final class ResidentRetirementFixture {
                 CompletableFuture.completedFuture(objects.get(call.<String>getArgument(0))));
         when(api.deletePod(anyString(), anyString(), any(byte[].class))).thenReturn(
                 CompletableFuture.completedFuture(new KubernetesHttpRuntimeClient.DeleteResponse(200, new byte[0], true)));
+        when(api.getNodeLease(anyString())).thenAnswer(call -> CompletableFuture.completedFuture(objects.get("leases")));
+        when(api.listPersistentVolumes()).thenAnswer(call -> CompletableFuture.completedFuture(List.of(objects.get("persistentvolumes"))));
+        when(api.listVolumeAttachments()).thenAnswer(call -> CompletableFuture.completedFuture(List.copyOf(attachments)));
+        when(api.listPods(anyString())).thenAnswer(call -> CompletableFuture.completedFuture(objects.containsKey("pods")
+                ? List.of(objects.get("pods")) : List.of()));
+        when(api.patchPodFinalizers(anyString(), anyString(), any(byte[].class))).thenAnswer(call -> {
+            var patch = JSON.readTree(call.<byte[]>getArgument(2));
+            var finalizers = JSON.convertValue(patch.get(patch.size() - 1).get("value"), new TypeReference<List<String>>() { });
+            var pod = objects.get("pods");
+            var metadata = map(pod.get("metadata"));
+            if (!patch.get(0).get("value").textValue().equals(metadata.get("uid"))
+                    || !patch.get(1).get("value").textValue().equals(metadata.get("resourceVersion"))) {
+                return CompletableFuture.completedFuture(new KubernetesHttpRuntimeClient.DeleteResponse(409, new byte[0], true));
+            }
+            metadata.put("finalizers", finalizers);
+            metadata.put("resourceVersion", Long.toString(Long.parseLong((String) metadata.get("resourceVersion")) + 1));
+            if (finalizers.isEmpty() && metadata.containsKey("deletionTimestamp")) {
+                objects.remove("pods");
+            }
+            return CompletableFuture.completedFuture(new KubernetesHttpRuntimeClient.DeleteResponse(200, new byte[0], true));
+        });
         return api;
+    }
+
+    void preparePlatform() {
+        var now = Instant.now();
+        String volume = "kubernetes.io/csi/" + mapping.registration().driver() + "^handle";
+        objects.get("nodes").put("status", copy(Map.of("nodeInfo", Map.of("bootID", "boot-a"),
+                "conditions", List.of(Map.of("type", "Ready", "status", "True", "lastHeartbeatTime", now.minusSeconds(10).toString())),
+                "volumesInUse", List.of(volume), "volumesAttached", List.of(Map.of("name", volume)))));
+        objects.put("leases", object("Lease", "node-a", "kube-node-lease", "lease-uid", Map.of("holderIdentity", "node-a",
+                "leaseDurationSeconds", 40, "renewTime", now.minusSeconds(2).toString())));
+        map(objects.get("leases").get("metadata")).put("ownerReferences", List.of(Map.of("apiVersion", "v1", "kind", "Node", "name", "node-a", "uid", UID)));
+        var attachment = object("VolumeAttachment", "attachment", null, "attachment-uid", Map.of("attacher", mapping.registration().driver(),
+                "source", Map.of("persistentVolumeName", "volume"), "nodeName", "node-a"));
+        attachment.put("status", Map.of("attached", true));
+        attachments.add(attachment);
+    }
+
+    void completePlatform() {
+        var now = Instant.now();
+        var pod = objects.get("pods");
+        map(pod.get("metadata")).put("deletionTimestamp", now.minusSeconds(3).toString());
+        var status = map(pod.get("status"));
+        status.put("phase", "Failed");
+        var container = map(((List<?>) status.get("containerStatuses")).getFirst());
+        container.put("ready", false);
+        container.put("state", Map.of("terminated", Map.of("containerID", container.get("containerID"),
+                "finishedAt", now.minusSeconds(2).toString(), "reason", "Error", "exitCode", 143)));
+        var nodeStatus = map(objects.get("nodes").get("status"));
+        nodeStatus.put("volumesInUse", List.of());
+        nodeStatus.put("volumesAttached", List.of());
+        nodeStatus.put("conditions", List.of(Map.of("type", "Ready", "status", "True", "lastHeartbeatTime", now.minusSeconds(1).toString())));
+        map(objects.get("nodes").get("metadata")).put("resourceVersion", "20");
+        map(objects.get("leases").get("metadata")).put("resourceVersion", "20");
+        map(objects.get("leases").get("spec")).put("renewTime", now.minusSeconds(1).toString());
+        attachments.clear();
     }
 
     void resourceVersion(String version) {

@@ -13,6 +13,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
@@ -345,6 +347,180 @@ class ResidentWorkspaceRetirementStoreTest {
         assertThat(original.getState()).isEqualTo(RuntimeBindingRecord.State.READY);
         assertThat(original.isDrainRequested()).isFalse();
         assertThat(original.getOperationOwner()).isNull();
+    }
+
+    @Test
+    void originalCleanupAtomicallyReleasesAndThreeHandoffsKeepTerminalReadback() {
+        var current = fixture;
+        var historical = new java.util.ArrayList<ResidentWorkspaceRetirementStore.Request>();
+        var receipts = new java.util.ArrayList<ResidentWorkspaceRetirementStore.Completion>();
+        for (int cycle = 0; cycle < 3; cycle++) {
+            var cycleFixture = current;
+            assertThat(current.storage.inspect(current.mapping.registration()).revision()).isEqualTo(cycle * 2L + 1);
+            var api = prepared(current);
+            assertThatThrownBy(() -> cycleFixture.store().reclaim(cycleFixture.request, api)).isInstanceOf(RuntimeBrokerException.class);
+            current.completePlatform();
+            var terminal = current.store().reclaim(current.request, api);
+            assertThat(terminal.state()).isEqualTo("RELEASED");
+            assertThat(terminal.completion().releasedRevision()).isEqualTo(cycle * 2L + 2);
+            assertThat(terminal.completion().dataPolicy()).isEqualTo(ResidentWorkspaceReclamation.DATA_POLICY);
+            historical.add(current.request);
+            receipts.add(terminal.completion());
+            assertThat(current.bindings.findById(current.original.getBindingId()).getState()).isEqualTo(RuntimeBindingRecord.State.RELEASED);
+            assertThat(current.jdbc.queryForObject("SELECT active_binding_id FROM ma_runtime_slot WHERE request_key = ?",
+                    String.class, current.runtimeRequest.requestKey())).isNull();
+            assertThat(current.jdbc.queryForObject("SELECT tenant_id FROM ma_storage_owner", String.class)).isEqualTo("tenant");
+            assertThatThrownBy(() -> cycleFixture.bindings.findOrCreate(cycleFixture.runtimeRequest))
+                    .isInstanceOf(RuntimeBrokerException.class);
+            var next = new ResidentRetirementFixture(fixture.source, "next-" + cycle);
+            next.ready();
+            var reader = new ResidentWorkspaceRetirementStore(next.jdbc, next.manager, next.bindings,
+                    List.of(next.mapping), new ObjectMapper());
+            for (int index = 0; index < historical.size(); index++) {
+                assertThat(reader.inspect(historical.get(index)).completion()).isEqualTo(receipts.get(index));
+            }
+            current = next;
+        }
+        assertThat(current.storage.inspect(current.mapping.registration()).revision()).isEqualTo(7);
+    }
+
+    @Test
+    void physicalReleasePreservesTenantAndRefusesAForeignAlias() {
+        var api = prepared(fixture);
+        fixture.completePlatform();
+        fixture.store().reclaim(fixture.request, api);
+        var original = fixture.mapping.registration();
+        var foreign = new WorkspaceCsiRegistration("foreign", "foreign-storage", original.clusterDomain(), original.namespace(),
+                original.pvcName(), original.pvcUid(), original.pvName(), original.pvUid(), original.driver(), original.volumeHandle(),
+                original.backendDomain(), original.diskSerial(), original.mountRoot(), original.revision());
+        var before = fixture.storage.inspect(original);
+        assertThatThrownBy(() -> fixture.storage.register(foreign)).isInstanceOf(RuntimeBrokerException.class);
+        assertThat(fixture.storage.inspect(original)).isEqualTo(before);
+        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage", Long.class)).isEqualTo(1);
+    }
+
+    @Test
+    void aLegacyDeletionOnlyPlanStaysReadableWithoutGainingReleaseAuthority() throws Exception {
+        fixture.store().begin(fixture.request);
+        var json = new ObjectMapper();
+        var plan = (com.fasterxml.jackson.databind.node.ObjectNode) json.readTree(fixture.jdbc.queryForObject(
+                "SELECT request_json FROM ma_operation WHERE operation_kind = 'WORKSPACE_RETIREMENT'", String.class));
+        plan.put("version", 1);
+        plan.remove("mapping");
+        fixture.jdbc.update("UPDATE ma_operation SET request_json = ?, request_digest = ? WHERE operation_kind = 'WORKSPACE_RETIREMENT'",
+                json.writeValueAsString(plan), com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity.digest(plan));
+        assertThat(fixture.store().inspect(fixture.request).state()).isEqualTo("DRAINING");
+        assertThatThrownBy(() -> fixture.store().prepareReclamation(fixture.request, "10", fixture.api())).isInstanceOf(RuntimeBrokerException.class);
+        assertThatThrownBy(() -> fixture.store().reclaim(fixture.request, fixture.api())).isInstanceOf(RuntimeBrokerException.class);
+        assertThat(fixture.storage.inspect(fixture.mapping.registration()).phase()).isEqualTo("RESERVED");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"missing-pod", "node-uid", "node-boot", "stale-lease", "lease-owner", "stale-heartbeat",
+            "container", "attachment", "pv-alias", "other-pod", "api-unavailable", "foreign-finalizer"})
+    void uncertainPlatformCompletionNeverReleases(String defect) {
+        var api = prepared(fixture);
+        var attachment = fixture.attachments.getFirst();
+        fixture.completePlatform();
+        switch (defect) {
+            case "missing-pod" -> fixture.objects.remove("pods");
+            case "node-uid" -> map(fixture.objects.get("nodes").get("metadata")).put("uid", "replacement");
+            case "node-boot" -> map(map(fixture.objects.get("nodes").get("status")).get("nodeInfo")).put("bootID", "new-boot");
+            case "stale-lease" -> map(fixture.objects.get("leases").get("spec")).put("renewTime", Instant.now().minusSeconds(120).toString());
+            case "lease-owner" -> map(fixture.objects.get("leases").get("metadata")).put("ownerReferences", List.of());
+            case "stale-heartbeat" -> map(fixture.objects.get("nodes").get("status")).put("conditions", List.of(
+                    Map.of("type", "Ready", "status", "True", "lastHeartbeatTime", Instant.now().minusSeconds(120).toString())));
+            case "container" -> map(((List<?>) map(fixture.objects.get("pods").get("status")).get("containerStatuses")).getFirst())
+                    .put("containerID", "replacement");
+            case "attachment" -> fixture.attachments.add(attachment);
+            case "pv-alias" -> when(api.listPersistentVolumes()).thenReturn(CompletableFuture.completedFuture(
+                    List.of(fixture.objects.get("persistentvolumes"), fixture.objects.get("persistentvolumes"))));
+            case "other-pod" -> when(api.listPods(anyString())).thenReturn(CompletableFuture.completedFuture(
+                    List.of(fixture.objects.get("pods"), fixture.objects.get("pods"))));
+            case "api-unavailable" -> when(api.getCluster(org.mockito.ArgumentMatchers.eq("nodes"), anyString()))
+                    .thenReturn(CompletableFuture.failedFuture(new IOException("unavailable")));
+            case "foreign-finalizer" -> map(fixture.objects.get("pods").get("metadata")).put("finalizers", List.of("foreign/finalizer"));
+            default -> throw new AssertionError(defect);
+        }
+        var held = fixture.storage.inspect(fixture.mapping.registration());
+        assertThatThrownBy(() -> fixture.store().reclaim(fixture.request, api)).isInstanceOf(RuntimeException.class);
+        assertThat(fixture.storage.inspect(fixture.mapping.registration())).isEqualTo(held);
+        assertThat(fixture.bindings.findById(fixture.original.getBindingId()).getState()).isEqualTo(RuntimeBindingRecord.State.DRAINING);
+        assertThat(fixture.store().inspect(fixture.request).state()).isEqualTo("DRAINING");
+    }
+
+    @Test
+    void freshReadAllowsBoundedMetadataRetryWithoutErasingUnknown() {
+        fixture.preparePlatform();
+        fixture.store().begin(fixture.request);
+        var api = fixture.api();
+        var patches = new AtomicInteger();
+        var delegate = fixture.api();
+        when(api.patchPodFinalizers(anyString(), anyString(), any(byte[].class))).thenAnswer(call -> patches.incrementAndGet() == 1
+                ? CompletableFuture.failedFuture(new IOException("reply lost before effect"))
+                : delegate.patchPodFinalizers(call.getArgument(0), call.getArgument(1), call.getArgument(2)));
+        var first = fixture.store().prepareReclamation(fixture.request, "10", api);
+        assertThat(first.finalizerAttempts().getFirst().state()).isEqualTo("UNKNOWN");
+        var second = fixture.store().prepareReclamation(fixture.request, "10", api);
+        assertThat(second.finalizerAttempts()).hasSize(2);
+        assertThat(second.finalizerAttempts().getFirst().state()).isEqualTo("UNKNOWN");
+        assertThat(second.finalizerAttempts().getLast().state()).isEqualTo("RETURNED");
+        fixture.store().prepareReclamation(fixture.request, "11", api);
+        assertThat(patches).hasValue(2);
+    }
+
+    @Test
+    void independentCleanupReceiptDoesNotRewriteALostDeleteResponse() {
+        fixture.preparePlatform();
+        fixture.store().begin(fixture.request);
+        var api = fixture.api();
+        fixture.store().prepareReclamation(fixture.request, "10", api);
+        when(api.deletePod(anyString(), anyString(), any(byte[].class)))
+                .thenReturn(CompletableFuture.failedFuture(new IOException("reply lost")));
+        assertThat(fixture.store().deletePod(fixture.request, "11", api).attempts().getFirst().state()).isEqualTo("UNKNOWN");
+        fixture.completePlatform();
+        var result = fixture.store().reclaim(fixture.request, api);
+        assertThat(result.state()).isEqualTo("RELEASED");
+        assertThat(result.attempts().getFirst().state()).isEqualTo("UNKNOWN");
+        verify(api, times(1)).deletePod(anyString(), anyString(), any(byte[].class));
+    }
+
+    @Test
+    void everyReleaseWriteRollsBackTogetherAndCanResumeAfterPodCleanup() {
+        var api = prepared(fixture);
+        fixture.completePlatform();
+        var held = fixture.storage.inspect(fixture.mapping.registration());
+        for (String cut : List.of("owner", "operation", "claim")) {
+            var failing = new ManagedSchemaJdbcTemplate(fixture.source) {
+                @Override
+                public int update(String sql, Object... args) {
+                    if (cut.equals("owner") && sql.startsWith("UPDATE ma_storage_owner SET csi_phase = 'RELEASED'")
+                            || cut.equals("operation") && sql.startsWith("UPDATE ma_operation SET state") && "RELEASED".equals(args[0])
+                            || cut.equals("claim") && sql.startsWith("UPDATE ma_operation SET claim_owner = NULL, claim_until = NULL, claim_generation")) {
+                        throw new IllegalStateException("release cut");
+                    }
+                    return super.update(sql, args);
+                }
+            };
+            var store = new ResidentWorkspaceRetirementStore(failing, fixture.manager, fixture.bindings,
+                    List.of(fixture.mapping), new ObjectMapper());
+            assertThatThrownBy(() -> store.reclaim(fixture.request, api)).isInstanceOf(IllegalStateException.class).hasMessage("release cut");
+            assertThat(fixture.storage.inspect(fixture.mapping.registration())).isEqualTo(held);
+            assertThat(fixture.bindings.findById(fixture.original.getBindingId()).getState()).isEqualTo(RuntimeBindingRecord.State.DRAINING);
+            assertThat(fixture.jdbc.queryForObject("SELECT active_binding_id FROM ma_runtime_slot", String.class)).isEqualTo(fixture.original.getBindingId());
+            assertThat(fixture.store().inspect(fixture.request).state()).isEqualTo("PLATFORM_CLEANED");
+        }
+        var released = fixture.store().reclaim(fixture.request, api);
+        assertThat(fixture.store().reclaim(fixture.request, api)).isEqualTo(released);
+    }
+
+    private static KubernetesHttpRuntimeClient prepared(ResidentRetirementFixture current) {
+        current.preparePlatform();
+        current.store().begin(current.request);
+        var api = current.api();
+        current.store().prepareReclamation(current.request, "10", api);
+        current.store().deletePod(current.request, "11", api);
+        return api;
     }
 
     private static boolean race(CyclicBarrier barrier, Runnable operation) throws Exception {
