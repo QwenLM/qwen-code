@@ -28,6 +28,8 @@ macOS controller仅在预览可见且owner有效时以约3fps采样，工作队�
 
 ## 原生浮动卡片展示
 
+panel加入全部Space，保持stationary且不参与窗口循环，全屏角色仅使用AppKit的FullScreenAuxiliary，不请求FullScreenPrimary或FullScreenNone。它可能出现在桌面共享或录屏中；自动检测共享不属于本功能，用户可在共享前关闭或禁用预览。
+
 每个私有session使用一个独立、无边框、不激活的NSPanel。窗口背景视觉透明，没有常驻标题栏。使用近透明的原生背景，使间隙仍属于本地输入区域；macOS否则会将点击穿过窗口的零alpha像素。默认位置为屏幕工作区右下角；用户可拖动卡片或明确的Move preview手柄，移动整个窗口。现有显式geometry仍指定初始位置和卡片最大尺寸。位置在该panel存活期间保留，后续刷新及卡片换层不重置位置。本轮不增加吸边、惯性、位置持久化或绑定某个客户端窗口的行为。
 
 每个已授权来源保留独立原生卡片view、精确window身份、图像及宽高比。选择统一宽度，使所有卡片都适配配置的最大宽高及可用屏幕区域。前卡位于右下slot，另一卡向左上错开。原生窗口为两个slot保留稳定透明包络，换层不移动用户选定的窗口位置。默认卡片最大尺寸为400×300 points。各图像分别准备，sampler不再把两张卡片合成一张PNG。
@@ -58,7 +60,7 @@ macOS controller仅在预览可见且owner有效时以约3fps采样，工作队�
 
 先由test-engineer对全局qwen CLI dry-run并记录实际安装产物，再构建本地Rust/SDK/CLI，执行定向测试并按顺序build、typecheck、bundle。真实验收需独立桌面录屏、应用事件/AX/落盘readback、系统鼠标/焦点readback。覆盖默认首次动作、drag、idle fade、两个窗口、无动作实时更新、cursor缩放、PiP控件与owner独立清理。反复create/close不能留下旧窗口、采样或Node timer。
 
-使用隔离desktop/runtime；不触碰原session的AP/R8实验及共享服务。远程前复核inventory与主机身份；不绕公司策略、TCC或签名限制。受阻平台记未验证，不记通过。创建本次已明确授权的功能PR前完成两遍clean diff审计和独立Codex review；没有合并或发布授权。
+使用隔离desktop/runtime；不触碰原session的AP/R8实验及共享服务。远程前复核inventory与主机身份；不绕公司策略、TCC或签名限制。受阻平台记未验证，不记通过。创建本次已明确授权的功能PR前完成两遍clean diff审计和独立Codex review；没有合并或发布授权。原生验收还须验证：来源全屏时预览保持辅助窗口角色，不激活宿主，也不使预览自身进入全屏。
 
 ## 风险与剩余决定
 

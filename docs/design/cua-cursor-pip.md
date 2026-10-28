@@ -28,6 +28,8 @@ One process owns AppKit infrastructure. Preview data and cleanup are runtime/ses
 
 ## Native floating-card presentation
 
+The panel joins all Spaces with stationary, cycle-excluded behavior and uses only AppKit's FullScreenAuxiliary full-screen role. It never requests FullScreenPrimary or FullScreenNone. It may appear in desktop sharing or recording; automatic sharing detection is outside this feature, and users can close or disable the preview before sharing.
+
 The preview is one independent, borderless, nonactivating NSPanel per private session. Its background is visually transparent and it has no permanent title bar. A near-clear native background keeps the gaps in the local input surface: macOS otherwise passes clicks through zero-alpha window pixels. The default location is the lower-right of the screen work area; the user can drag the cards or the explicit Move preview handle to reposition the whole window. Existing explicit geometry still selects the starting position and a maximum card size. Position is retained for that live panel, including subsequent frames and card-order changes. Snapping, inertia, position persistence and attaching to a particular client window are outside this change.
 
 Each authorized source keeps its own native card view, exact window identity, image and aspect ratio. A shared width is chosen to fit all cards within the configured maximum card width/height and the available screen area. The front card occupies the lower-right slot; the second card is offset toward the upper-left. The native panel reserves a stable transparent envelope for both slots, so switching cards does not move the user's chosen window position. The default maximum card size is 400×300 points. Images are prepared separately; the sampler no longer flattens the two cards into one PNG.
@@ -58,7 +60,7 @@ Modal panel shortcuts use the existing exact-window keyboard gate rather than th
 
 First dry-run the global qwen CLI and record exact installed artifacts, with a test-engineer agent. Then build the local Rust/SDK/CLI artifacts and run focused unit checks, build, typecheck and bundle in order. Real acceptance requires independent desktop recording, application event/AX/file readback, and system pointer/focus readback. Verify default first action, drag, idle fade, two windows, no-action live updates, cursor scaling, PiP controls and independent owner cleanup. Repeated create/close must not leave stale windows, samplers or Node timers.
 
-Use an isolated desktop and runtime. Do not touch the original session's AP/R8 experiments or shared services. Revalidate inventory/host identity before remote access; never bypass company policy, TCC or signing restrictions. A blocked platform is reported as unverified, not passed. Complete two clean diff audits and independent Codex review before the specifically authorized feature PR; no merge or release is authorized.
+Use an isolated desktop and runtime. Do not touch the original session's AP/R8 experiments or shared services. Revalidate inventory/host identity before remote access; never bypass company policy, TCC or signing restrictions. A blocked platform is reported as unverified, not passed. Complete two clean diff audits and independent Codex review before the specifically authorized feature PR; no merge or release is authorized. Native acceptance must also verify that the preview remains auxiliary over a full-screen source without activating the host or entering full-screen itself.
 
 ## Risks and remaining decisions
 

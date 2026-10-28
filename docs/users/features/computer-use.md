@@ -12,7 +12,9 @@ Qwen Code / any MCP client
 
 ## Setup
 
-Node.js 22 or later and npm are required. Register the MCP server, then restart Qwen Code:
+This checkout documents the upcoming CUA 0.27.0 release. The installation commands below require its native GitHub Release (`cua-driver-rs-v0.27.0`) and matching npm packages to be published; merging these sources does not publish them. Before publication, use the [local development setup](https://github.com/QwenLM/qwen-code/blob/890cb0349a259761a571da889f4fe1cccc6ed108/packages/node-repl/README.md#local-development-and-environment) to test a repository build.
+
+Node.js 22 or later and npm are required. Once the release is published, register the MCP server, then restart Qwen Code:
 
 ```bash
 qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.27.0
@@ -70,6 +72,10 @@ The server executes JavaScript with ordinary Node.js permissions and follows the
 `js` completes in one call and defaults to a 30-second timeout. A timeout can leave external effects; observe before retrying. `js_reset` discards bindings and gracefully closes the owning native/browser session. After context compaction call `cua.rewriteDocumentation()` before continuing.
 
 The native agent cursor is enabled by default. On macOS, a local PiP refreshes the session's two most recently observed, authorized windows even between actions. The borderless window starts near the lower-right; drag a card or its Move preview handle to reposition it. Hover reveals floating controls and brings a rear card forward. Close it to stop the preview; the image does not forward input to the target. Reset closes the owning cursor and preview. Add `--no-overlay` or `--no-pip` to the server arguments to disable either surface. PiP is macOS-only.
+
+To disable PiP without changing the MCP registration, set `"experimental_pip": false` in `~/.cua-driver/config.json`, preserving its other keys, then restart the owning MCP server or runtime. This existing key is retained for compatibility. CLI flags override the file: remove any explicit `--pip` or `--experimental-pip` flag if you want the file to control the setting.
+
+The preview may be visible to others when you share or record the desktop, including during a full-screen presentation. Close it before sharing, or disable it before starting the server; sharing is not detected automatically.
 
 ## Remote desktop relay
 

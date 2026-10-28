@@ -166,6 +166,11 @@ including while the agent is idle. Drag a card or its Move preview handle to mov
 Hover to reveal its floating controls, or close it to stop that preview. It does not forward input to the target app. Use
 `--no-overlay` and `--no-pip` when starting the owning host to disable them;
 `experimental_pip: false` in `~/.cua-driver/config.json` also disables PiP.
+Restart the owning host after editing the file, preserving its other keys.
+CLI flags take precedence: remove an explicit `--pip` or `--experimental-pip`
+if the file should control the setting. Close or disable PiP before sharing
+or recording the desktop if its mirrored windows should not be visible;
+screen sharing is not detected automatically.
 Windows and X11 retain cursor support; PiP is macOS-only.
 
 ## 0.20 runtime and SDK surface

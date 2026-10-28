@@ -7,10 +7,17 @@ use std::time::Instant;
 use objc2::declare::ClassBuilder;
 use objc2::runtime::{AnyClass, AnyObject, Bool, Sel};
 use objc2::{class, msg_send, sel};
+use objc2_app_kit::NSWindowCollectionBehavior;
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 
 use super::state::{self, Motion};
 use super::{PipSink, Scene, CONTROLLER};
+
+const COLLECTION_BEHAVIOR: NSWindowCollectionBehavior =
+    NSWindowCollectionBehavior::CanJoinAllSpaces
+        .union(NSWindowCollectionBehavior::Stationary)
+        .union(NSWindowCollectionBehavior::IgnoresCycle)
+        .union(NSWindowCollectionBehavior::FullScreenAuxiliary);
 
 struct CardViews {
     shell: *mut AnyObject,
@@ -360,6 +367,19 @@ fn card_bounds(
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn preview_joins_fullscreen_as_an_auxiliary_window_only() {
+        let fullscreen = NSWindowCollectionBehavior::FullScreenPrimary
+            | NSWindowCollectionBehavior::FullScreenAuxiliary
+            | NSWindowCollectionBehavior::FullScreenNone;
+        assert_eq!(
+            COLLECTION_BEHAVIOR & fullscreen,
+            NSWindowCollectionBehavior::FullScreenAuxiliary
+        );
+        assert!(COLLECTION_BEHAVIOR.contains(NSWindowCollectionBehavior::CanJoinAllSpaces));
+        assert!(COLLECTION_BEHAVIOR.contains(NSWindowCollectionBehavior::IgnoresCycle));
+    }
 
     fn presentation(now: Instant) -> Presentation {
         Presentation {
@@ -986,7 +1006,7 @@ unsafe fn create(
         msg_send![class!(NSColor), colorWithCalibratedWhite: 0.0f64 alpha: (1.0f64 / 255.0)];
     let _: () = msg_send![panel, setBackgroundColor: backing];
     let _: () = msg_send![panel, setLevel: 3i64];
-    let _: () = msg_send![panel, setCollectionBehavior: ((1 << 0) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 8)) as u64];
+    let _: () = msg_send![panel, setCollectionBehavior: COLLECTION_BEHAVIOR];
     let root: *mut AnyObject = msg_send![surface_class(false), alloc];
     let root: *mut AnyObject = msg_send![root, initWithFrame: rect([0.0, 0.0, width, height])];
     let _: () = msg_send![panel, setContentView: root];
