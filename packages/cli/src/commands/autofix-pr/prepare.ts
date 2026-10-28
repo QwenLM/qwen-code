@@ -409,6 +409,39 @@ function assertSessionCanRunWorktree(root: string, worktreePath: string): void {
   );
 }
 
+/**
+ * A PR's history an earlier watch kept in another worktree of this clone. The
+ * supported migration cleans up in the old owning worktree — which keeps the
+ * history beside the old state — and prepares in a new one, so the fresh watch
+ * imports it rather than answering the same comments again. The first readable
+ * history of this repository wins, the main worktree first. Only the JSON
+ * metadata is read; no git command runs in the discovered worktree.
+ */
+function importHistory(
+  prNumber: number,
+  repository: { host: string; owner: string; repo: string },
+  excludeRoot: string,
+): AutofixPrHistory | null {
+  const listed = gitOpt('worktree', 'list', '--porcelain');
+  if (listed === null) return null;
+  const exclude = realpathNearestExisting(excludeRoot);
+  for (const line of listed.split('\n')) {
+    if (!line.startsWith('worktree ')) continue;
+    const root = line.slice('worktree '.length);
+    if (realpathNearestExisting(root) === exclude) continue;
+    let history: AutofixPrHistory | null = null;
+    try {
+      history = readHistory(
+        historyPath(autofixPrPaths(root, prNumber), repository),
+      );
+    } catch {
+      continue;
+    }
+    if (history && sameRepository(history, repository)) return history;
+  }
+  return null;
+}
+
 export function runPrepare(args: PrepareArgs): void {
   if (!isOwnerRepo(args.repo)) {
     throw new TypeError(`--repo must be <owner>/<repo>, got ${args.repo}`);
@@ -661,6 +694,13 @@ export function runPrepare(args: PrepareArgs): void {
     }
     if (history && !sameRepository(history, { host, owner, repo: repoName })) {
       history = null;
+    }
+    // The supported migration cleans up in the old owning worktree (keeping
+    // the history beside the old state) and prepares in a new one. Import that
+    // history so the fresh watch does not forget the comments it already
+    // handled and answer them again.
+    if (!history && !existing) {
+      history = importHistory(args.pr, { host, owner, repo: repoName }, root);
     }
     const state: AutofixPrState = {
       version: 1,

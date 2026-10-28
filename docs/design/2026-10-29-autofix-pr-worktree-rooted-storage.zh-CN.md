@@ -85,16 +85,20 @@ linked-worktree 会话的 cwd 既不是主 worktree，也不是会话拥有的�
 落盘的 watch 与主 clone 会话行为完全一致。唯一的行为变化发生在 linked-worktree
 daemon 会话——而它们今天是死角。
 
-### 2. 信任检查与 root 无关（已核实，无需改动）
+### 2. 信任始终锚定到 genuine clone
 
-`untrustedGitfile` / `untrustedSubmodules`
-（`packages/cli/src/commands/autofix-pr/worktree.ts`）用
-`git -C <root> rev-parse --git-common-dir` 解析 clone 的公共 git 目录，这对
-clone 的每个 worktree 都相同，再校验 worktree 的 gitfile 指向
-`<common>/worktrees/<name>` 且反向指回。`requireWorktree` /
-`redirectedAncestor` 检查 worktree 与 `root` 之间的包含关系与符号链接；watch
-worktree 落在新 root 之内，包含关系成立。因此把 `root` 从主 worktree 换成
-linked worktree 不会削弱任何检查。
+信任检查函数（`packages/cli/src/commands/autofix-pr/worktree.ts` 的
+`untrustedGitfile` / `untrustedSubmodules`）本身不变：用
+`git -C <root> rev-parse --git-common-dir` 解析某个 clone 的公共 git 目录，
+再校验 worktree 的 gitfile 指向 `<common>/worktrees/<name>` 且反向指回。
+关键在于传给它们的 `root` 是谁。clone 全量列表会在兄弟 worktree 里发现
+watch，但兄弟检出的 `.git` 是一个 gitfile，在其中运行过的代码可以把它改写成
+指向一个替换仓库——所以绝不能把发现来的 worktree 当作信任根，否则它会为自己
+嵌套的 watch 担保，`status` 就会执行替换仓库的 `core.fsmonitor`。因此列表把
+每一次信任检查（以及 `unsavedWork`）都锚定到 `repoRoot()`，即 genuine clone
+的主 worktree，它的 `.git` 是兄弟无法改写的真实目录。rooted 在 linked
+worktree 的 watch 仍按 genuine clone 的 worktree 登记项来校验，所以合法 watch
+依旧受信任。
 
 ### 3. 按 clone 全量列出 watch
 
@@ -105,7 +109,9 @@ PR 的 watch worktree 至多存在于一个 worktree，合并绝不会重复计�
 daemon 视图仍把 clone 的主 worktree 作为展示用的 `root`；扫描覆盖所有
 worktree，从而保持「同一 clone 的两个 workspace 列出相同的 watch」。程序化
 传给 `runStatus` 的单个 `root`（测试、内部调用方）仍只扫描那一个 worktree；
-CLI 不提供 `--root` flag。
+CLI 不提供 `--root` flag。每个 worktree 的目录扫描相互隔离：某个兄弟的
+`.qwen/tmp` 是普通文件或不可访问（ENOTDIR/EACCES）时跳过它，而不会让其余所有
+worktree 的 watch 列表整体中止——经 daemon 那会是整个 clone 的 500。
 
 ### 4. prepare 拒绝作为安全网保留
 
@@ -143,6 +149,8 @@ daemon 会话现在会通过（worktree 在 cwd 之内）。当 worktree 仍会�
   文档化的补救：在拥有该 watch 的 worktree 里跑 `cleanup`（遗留 watch 在主
   worktree——从 linked 会话跑 `cleanup` 会以那里为根，找不到它），再在目标
   worktree 重新 `prepare`。cleanup 会保留持有工作的 worktree；不会静默丢失数据。
+  新根没有 history 时，`prepare` 会从旧 owning worktree 导入该 PR 的 history，
+  使已处理评论、已发回复与 CI 重跑记录在迁移后保留，而不是被再次回应。
 - **跨环境操作。** 在 daemon 下于 linked worktree prepare 的 watch 就落在
   那里；从该 worktree 操作它。plain-CLI 的 `status` 仍通过按 clone 全量扫描
   发现它。

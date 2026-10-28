@@ -7,6 +7,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -515,4 +516,143 @@ describe('runStatus', () => {
       rmSync(linked, { recursive: true, force: true });
     }
   });
+
+  it('keeps listing healthy watches when a sibling worktree has a malformed .qwen/tmp', () => {
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'user.email=t@example.com',
+        '-c',
+        'user.name=t',
+        'commit',
+        '-q',
+        '--allow-empty',
+        '-m',
+        'base',
+      ],
+      { cwd: repo },
+    );
+    write(7);
+    const sibling = `${repo}-sibling`;
+    execFileSync('git', ['worktree', 'add', '-q', '--detach', sibling], {
+      cwd: repo,
+    });
+    try {
+      // The sibling's `.qwen/tmp` is a regular file, so reading it throws
+      // ENOTDIR. One bad root must not abort the whole clone's listing.
+      mkdirSync(join(sibling, '.qwen'), { recursive: true });
+      writeFileSync(join(sibling, '.qwen', 'tmp'), 'not a directory');
+      const { watches } = runStatus({ work: false });
+      expect(watches.map(({ pr }) => pr)).toEqual([7]);
+    } finally {
+      execFileSync('git', ['worktree', 'remove', '--force', sibling], {
+        cwd: repo,
+      });
+      rmSync(sibling, { recursive: true, force: true });
+    }
+  });
+
+  // The rewritten gitfile and the fsmonitor hook are POSIX spellings.
+  it.skipIf(process.platform === 'win32')(
+    'does not trust a watch nested in a sibling worktree whose gitfile was rewritten',
+    () => {
+      execFileSync(
+        'git',
+        [
+          '-c',
+          'user.email=t@example.com',
+          '-c',
+          'user.name=t',
+          'commit',
+          '-q',
+          '--allow-empty',
+          '-m',
+          'base',
+        ],
+        { cwd: repo },
+      );
+      // A registered sibling worktree of the genuine clone.
+      const sibling = `${repo}-sibling`;
+      execFileSync('git', ['worktree', 'add', '-q', '--detach', sibling], {
+        cwd: repo,
+      });
+      // A replacement repository whose fsmonitor hook writes a marker.
+      const replacement = realpathSync(
+        mkdtempSync(join(tmpdir(), 'autofix-repl-')),
+      );
+      const marker = join(replacement, 'pwned');
+      execFileSync('git', ['init', '-q', '-b', 'main', replacement]);
+      execFileSync(
+        'git',
+        [
+          '-c',
+          'user.email=t@example.com',
+          '-c',
+          'user.name=t',
+          'commit',
+          '-q',
+          '--allow-empty',
+          '-m',
+          'r',
+        ],
+        { cwd: replacement },
+      );
+      const hook = join(replacement, 'fsmonitor.sh');
+      writeFileSync(hook, `#!/bin/sh\ntouch '${marker}'\n`, { mode: 0o755 });
+      execFileSync('git', ['config', 'core.fsmonitor', hook], {
+        cwd: replacement,
+      });
+      try {
+        // A watch worktree of the replacement, nested in the sibling, with a
+        // self-consistent gitfile and a planted state file.
+        const nestedPaths = autofixPrPaths(sibling, 7);
+        mkdirSync(dirname(nestedPaths.worktreePath), { recursive: true });
+        execFileSync(
+          'git',
+          ['worktree', 'add', '-q', '--detach', nestedPaths.worktreePath],
+          { cwd: replacement },
+        );
+        // Rewrite the sibling's gitfile so it vouches for the replacement.
+        writeFileSync(
+          join(sibling, '.git'),
+          `gitdir: ${join(replacement, '.git')}\n`,
+        );
+        writeState(nestedPaths.statePath, {
+          version: 1,
+          sessionId: 'session-a',
+          host: 'github.com',
+          owner: 'o',
+          repo: 'r',
+          prNumber: 7,
+          remote: 'origin',
+          pushTarget: 'origin',
+          headRefName: 'feat-7',
+          baseRefName: 'main',
+          branch: nestedPaths.branch,
+          worktreePath: nestedPaths.worktreePath,
+          viewer: 'me',
+          prAuthor: 'me',
+          lastKnownHeadSha: HEAD,
+          pushedShas: [],
+          handledCommentIds: [],
+          postedCommentIds: [],
+        });
+        // Status from the genuine clone must anchor trust to it, not to the
+        // rewritten sibling: the planted watch is untrusted and its config
+        // (the fsmonitor hook) never runs. Adding the nested worktree above
+        // already checked out through the replacement's hook, so clear the
+        // marker first to isolate what status itself executes.
+        rmSync(marker, { force: true });
+        const { watches } = runStatus({});
+        const planted = watches.find(({ pr }) => pr === 7);
+        expect(planted?.gitTrusted).toBe(false);
+        expect(existsSync(marker)).toBe(false);
+      } finally {
+        rmSync(sibling, { recursive: true, force: true });
+        rmSync(replacement, { recursive: true, force: true });
+        execFileSync('git', ['worktree', 'prune'], { cwd: repo });
+      }
+    },
+  );
 });

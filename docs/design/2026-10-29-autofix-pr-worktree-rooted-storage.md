@@ -93,17 +93,23 @@ main-rooted watches and main-clone sessions behave identically. The only
 behavior change is for linked-worktree daemon sessions, which today are dead
 zones.
 
-### 2. Trust checks are root-agnostic (verified, no change needed)
+### 2. Trust stays anchored to the genuine clone
 
-`untrustedGitfile` / `untrustedSubmodules`
-(`packages/cli/src/commands/autofix-pr/worktree.ts`) resolve the clone's
-common git dir with `git -C <root> rev-parse --git-common-dir`, which is
-identical for every worktree of the clone, then verify the worktree's gitfile
-points at `<common>/worktrees/<name>` and back. `requireWorktree` /
-`redirectedAncestor` check containment and symlinks between the worktree and
-`root`; the watch worktree is placed inside the new root, so containment
-holds. Changing `root` from the main worktree to a linked worktree therefore
-does not weaken any check.
+The trust-check functions (`untrustedGitfile` / `untrustedSubmodules` in
+`packages/cli/src/commands/autofix-pr/worktree.ts`) are unchanged: they
+resolve a clone's common git dir with `git -C <root> rev-parse
+--git-common-dir` and verify the worktree's gitfile points at
+`<common>/worktrees/<name>` and back. What matters is which `root` they are
+given. The clone-wide listing discovers watches in sibling worktrees, but a
+sibling checkout's `.git` is a gitfile that code running inside it can
+rewrite to point at a replacement repository — so a discovered worktree must
+never be passed as the trust root, or it would vouch for its own nested
+watches and `status` would execute the replacement's `core.fsmonitor`. The
+listing therefore anchors every trust check (and `unsavedWork`) to
+`repoRoot()`, the genuine clone's main worktree, whose `.git` is a real
+directory a sibling cannot rewrite. A watch rooted in a linked worktree is
+still validated against the genuine clone's worktree entries, so legitimate
+watches stay trusted.
 
 ### 3. Clone-wide watch listing
 
@@ -115,7 +121,11 @@ worktree and merges never double-count an active watch. The daemon view keeps
 reporting the clone's main worktree as `root` for display; the scan covers all
 worktrees, preserving "two workspaces of one clone list the same watches".
 A programmatic single `root` passed to `runStatus` (tests, internal callers)
-still scans just that worktree; the CLI exposes no `--root` flag.
+still scans just that worktree; the CLI exposes no `--root` flag. Each
+worktree's directory scan is isolated: a sibling whose `.qwen/tmp` is a
+regular file or inaccessible (ENOTDIR/EACCES) is skipped, not allowed to
+abort the listing of every other worktree's watches — which through the
+daemon would be a 500 for the whole clone.
 
 ### 4. prepare refusal stays as a safety net
 
@@ -157,7 +167,10 @@ to prepare from.
   from the worktree that owns the watch (the main worktree for a legacy watch
   — `cleanup` from the linked session roots there and would not find it), then
   re-`prepare` in the target worktree. `cleanup` keeps a worktree that holds
-  work; no silent data loss.
+  work; no silent data loss. `prepare` imports the PR's history from the old
+  owning worktree when the new root has none, so handled comments, posted
+  replies and CI rerun records survive the relocation instead of being
+  answered again.
 - **Cross-environment operation.** A watch prepared under the daemon in a
   linked worktree lives there; operate it from that worktree. Plain-CLI
   `status` still discovers it via the clone-wide scan.

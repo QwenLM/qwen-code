@@ -190,12 +190,21 @@ export function runStatus(args: {
   const rootByPr = new Map<number, string>();
   for (const root of roots) {
     const tmp = join(root, '.qwen', 'tmp');
-    const found = (existsSync(tmp) ? readdirSync(tmp) : [])
-      .map((name) => STATE_FILE_RE.exec(name)?.[1])
-      .filter((n): n is string => n !== undefined)
-      .map(Number)
-      .filter((n) => Number.isSafeInteger(n) && n > 0)
-      .filter((n) => args.pr === undefined || n === args.pr);
+    let found: number[];
+    try {
+      found = (existsSync(tmp) ? readdirSync(tmp) : [])
+        .map((name) => STATE_FILE_RE.exec(name)?.[1])
+        .filter((n): n is string => n !== undefined)
+        .map(Number)
+        .filter((n) => Number.isSafeInteger(n) && n > 0)
+        .filter((n) => args.pr === undefined || n === args.pr);
+    } catch {
+      // A sibling worktree's `.qwen/tmp` may be a regular file or
+      // inaccessible (ENOTDIR/EACCES). That root then holds no readable watch,
+      // and one bad root must not abort the listing of every other worktree's
+      // watches — which through the daemon would be a 500 for the whole clone.
+      continue;
+    }
     for (const pr of found) {
       const prev = rootByPr.get(pr);
       if (
@@ -207,6 +216,11 @@ export function runStatus(args: {
       }
     }
   }
+  // Trust is anchored to the genuine clone this process stands in, never to a
+  // discovered worktree: a sibling checkout's `.git` can be rewritten by code
+  // that ran inside it, so it must not vouch for its own nested watches. Only
+  // asked when git checks run — the daemon's `git: false` listing runs no git.
+  const trustRoot = args.git !== false ? repoRoot() : null;
   const numbers = [...rootByPr.keys()].sort((a, b) => a - b);
   const session =
     args.session === undefined ? currentSessionId() : args.session;
@@ -267,12 +281,17 @@ export function runStatus(args: {
         gitTrusted:
           args.git !== false &&
           existsSync(paths.worktreePath) &&
-          (untrustedGitfile(paths.worktreePath, root) ??
-            untrustedSubmodules(paths.worktreePath, root)) === null,
+          (untrustedGitfile(paths.worktreePath, trustRoot!) ??
+            untrustedSubmodules(paths.worktreePath, trustRoot!)) === null,
         worktreeWork:
           args.work === false || args.git === false
             ? null
-            : unsavedWork(paths, [state.lastKnownHeadSha, ...state.pushedShas]),
+            : unsavedWork(
+                paths,
+                [state.lastKnownHeadSha, ...state.pushedShas],
+                undefined,
+                trustRoot!,
+              ),
         fix: fixOf(paths, now),
       });
     } catch (err) {

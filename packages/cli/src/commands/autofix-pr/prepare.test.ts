@@ -78,6 +78,7 @@ import {
   runPrepare,
   type PrView,
 } from './prepare.js';
+import { runCleanup } from './cleanup.js';
 import {
   autofixPrPaths,
   historyPath,
@@ -356,6 +357,39 @@ describe('runPrepare (real git)', () => {
         worktreePath: paths.worktreePath,
         sessionId: 'session-a',
       });
+    } finally {
+      process.chdir(clone);
+      delete process.env['QWEN_CODE_SERVE'];
+    }
+  });
+
+  it('imports the PR history when a watch moves to another worktree', () => {
+    // The supported migration: cleanup in the old owning worktree keeps the
+    // history beside the old state, then a daemon session prepares in a linked
+    // worktree. The fresh watch must not forget the comments it already handled.
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const mainPaths = autofixPrPaths(clone, 7);
+    writeState(mainPaths.statePath, {
+      ...readState(mainPaths.statePath)!,
+      handledCommentIds: ['IC_already_handled'],
+      postedCommentIds: ['IC_posted'],
+    });
+    runCleanup(7, false);
+    expect(existsSync(mainPaths.worktreePath)).toBe(false);
+    expect(
+      existsSync(
+        historyPath(mainPaths, { host: 'github.com', owner: 'o', repo: 'r' }),
+      ),
+    ).toBe(true);
+    const linked = join(dir, 'linked');
+    run(clone, 'worktree', 'add', '-q', '-b', 'other', linked, 'origin/main');
+    process.env['QWEN_CODE_SERVE'] = '1';
+    process.chdir(linked);
+    try {
+      runPrepare({ pr: 7, repo: 'o/r' });
+      const moved = readState(autofixPrPaths(linked, 7).statePath)!;
+      expect(moved.handledCommentIds).toEqual(['IC_already_handled']);
+      expect(moved.postedCommentIds).toEqual(['IC_posted']);
     } finally {
       process.chdir(clone);
       delete process.env['QWEN_CODE_SERVE'];

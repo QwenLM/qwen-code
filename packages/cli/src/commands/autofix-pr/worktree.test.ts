@@ -108,7 +108,9 @@ describe('untrustedGitfile (real git)', () => {
     expect(() => requireWorktree(paths, 7, root)).toThrow(
       /no git command runs in/,
     );
-    expect(unsavedWork(paths, [])).toMatch(/not to this clone's own entry/);
+    expect(unsavedWork(paths, [], undefined, root)).toMatch(
+      /not to this clone's own entry/,
+    );
     expect(existsSync(marker)).toBe(false);
   });
 
@@ -195,7 +197,7 @@ describe('untrustedGitfile (real git)', () => {
     expect(untrustedSubmodules(worktree, root)).toMatch(
       /is not the gitfile of a submodule the clone keeps/,
     );
-    expect(unsavedWork(autofixPrPaths(root, 7), [])).toMatch(
+    expect(unsavedWork(autofixPrPaths(root, 7), [], undefined, root)).toMatch(
       /is not the gitfile of a submodule the clone keeps/,
     );
   });
@@ -300,7 +302,7 @@ describe('untrustedGitfile (real git)', () => {
     expect(() => requireWorktree(autofixPrPaths(root, 7), 7, root)).toThrow(
       /is not a git worktree/,
     );
-    expect(unsavedWork(autofixPrPaths(root, 7), [])).toMatch(
+    expect(unsavedWork(autofixPrPaths(root, 7), [], undefined, root)).toMatch(
       /is not a git worktree/,
     );
     expect(existsSync(marker)).toBe(false);
