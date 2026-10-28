@@ -172,6 +172,35 @@ describe('createGoalVerifier', () => {
     }
   });
 
+  it('appends the session output-language preference to the verdict instruction', async () => {
+    const { config, sent } = configFor(ACCEPT);
+    const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = await mkdtemp(join(tmpdir(), 'goal-verifier-lang-'));
+    const langFile = join(dir, 'output-language.md');
+    try {
+      await writeFile(langFile, 'Respond in Russian (ru).', 'utf8');
+      (
+        config as unknown as {
+          getOutputLanguageFilePath: {
+            mockReturnValue: (path: string) => void;
+          };
+        }
+      ).getOutputLanguageFilePath.mockReturnValue(langFile);
+
+      await createGoalVerifier(config)(input());
+
+      const { request } = sent();
+      expect(request.systemInstruction).toContain(
+        'Follow the user-visible output language preference',
+      );
+      expect(request.systemInstruction).toContain('Respond in Russian (ru).');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('includes blocked policy only for blocked proposals', async () => {
     const { config, sent } = configFor(
       '{"decision":"accept","reason":"requires authority"}',

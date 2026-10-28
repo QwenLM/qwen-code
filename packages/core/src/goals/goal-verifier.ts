@@ -233,7 +233,10 @@ export function createGoalVerifier(
         abortSignal,
         purpose: 'goal-verifier',
         maxAttempts: 1,
-        skipOutputLanguagePreference: true,
+        // The verdict reason is user-visible prose (the decision enum stays
+        // schema-bound regardless of language), so it honors the session's
+        // output-language preference instead of skipping it like the
+        // machine-only side queries.
         systemInstruction: GOAL_VERIFIER_SYSTEM_PROMPT,
         config: {
           temperature: 0,
