@@ -84,8 +84,9 @@ that `for N` cannot bound.
 2. **The budget is engagement-scoped, and carried on the ack.** It rides as its
    own marker on the comment that anchors the engagement, and it is read back
    from every ack/re-arm at or after that anchor — the scan's `BUDGET_FLOOR`
-   predicate: a `takeover-ack engaged`, or an `autofix-rearm` that does NOT also
-   carry an `autofix-eval ` marker. That exclusion is the whole point: it is
+   predicate: a `takeover-ack engaged`, a `takeover-ack released` (which closes
+   the engagement, so an explicit `stop` ends the budget), or an `autofix-rearm`
+   that does NOT also carry an `autofix-eval ` marker. That exclusion is the whole point: it is
    what tells a maintainer's command from the automatic growth-audit re-arm,
    whose comment carries the round's eval marker. Round accounting
    (`autofix-round-start`) stays window-keyed — equality with the ack comment's
