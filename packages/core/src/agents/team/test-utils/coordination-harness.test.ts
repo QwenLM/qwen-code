@@ -31,9 +31,11 @@ const { mockSendStructuredMessage, mockWriteMessage, realMailbox } = vi.hoisted(
     mockWriteMessage: vi.fn(),
     realMailbox: {
       sendStructuredMessage: undefined as
-        typeof import('../mailbox.js').sendStructuredMessage | undefined,
+        | typeof import('../mailbox.js').sendStructuredMessage
+        | undefined,
       writeMessage: undefined as
-        typeof import('../mailbox.js').writeMessage | undefined,
+        | typeof import('../mailbox.js').writeMessage
+        | undefined,
     },
   }),
 );

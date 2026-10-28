@@ -188,6 +188,7 @@ import {
   SessionSourceService,
   SessionSourceError,
 } from '@qwen-code/qwen-code-core';
+import { getApiHistoryPromptId } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { isDeepStrictEqual } from 'node:util';
@@ -543,6 +544,10 @@ import {
   GENERATION_TIMEOUT_MS,
   type GenerationEvent,
 } from './generation.js';
+import {
+  executeBtwGeneration,
+  BTW_STREAM_TIMEOUT_MS,
+} from './btw-generation.js';
 
 type SessionOwnedWorkflowTool = {
   buildSessionOwnedBackground(
@@ -1308,7 +1313,9 @@ function appendGoalUpdatesWithinLimits(
 
 function replayGoalBootstrap(
   projection:
-    SessionRestoreProjection | SessionLiveRestoreProjection | undefined,
+    | SessionRestoreProjection
+    | SessionLiveRestoreProjection
+    | undefined,
 ): ReturnType<typeof HistoryReplayer.v2GoalBootstrap> {
   if (projection && !('runtime' in projection)) {
     const sourceUuid = projection.goalRecoverySourceUuid;
@@ -1904,7 +1911,8 @@ function readExistingProviderConfig(
   const existing = findExistingProviderModels(
     config,
     (settings.merged as Record<string, unknown>)['modelProviders'] as
-      Record<string, unknown> | undefined,
+      | Record<string, unknown>
+      | undefined,
     settings.merged.providerProtocol,
     {
       authType: settings.merged.security?.auth?.selectedType,
@@ -2062,7 +2070,8 @@ function readProviderSetupInputs(
   ) => string | undefined,
 ): ProviderSetupInputs {
   const protocol = readOptionalString(params['protocol'], 'protocol') as
-    AuthType | undefined;
+    | AuthType
+    | undefined;
   if (
     protocol &&
     protocol !== config.protocol &&
@@ -4054,7 +4063,10 @@ class QwenAgent implements Agent {
   /** Set once the daemon negotiates active-work reporting; one per channel. */
   private activeWorkReporter: ActiveWorkReporter | undefined;
   private privateParentState:
-    'uninitialized' | 'trusted' | 'untrusted' | 'rejected' = 'uninitialized';
+    | 'uninitialized'
+    | 'trusted'
+    | 'untrusted'
+    | 'rejected' = 'uninitialized';
   // CPU-usage delta baseline for the daemon's `workspaceResource` extMethod
   // (Daemon Status child-resource chart). The daemon polls this at a fixed
   // cadence, so successive calls form a clean delta window independent of tool
@@ -4438,7 +4450,8 @@ class QwenAgent implements Agent {
 
   private getMcpServerStatus(config: Config, serverName: string) {
     const manager = config.getToolRegistry()?.getMcpClientManager() as
-      { getServerStatus?: (name: string) => MCPServerStatus } | undefined;
+      | { getServerStatus?: (name: string) => MCPServerStatus }
+      | undefined;
     return (
       manager?.getServerStatus?.(serverName) ?? getMCPServerStatus(serverName)
     );
@@ -4976,6 +4989,13 @@ class QwenAgent implements Agent {
        * unset and keep their force semantics.
        */
       onlyIfUnheld?: boolean;
+      /**
+       * Skip the #13004 memory flush — process teardown, where the design
+       * record already counts skipped turns as lost. The generation aborts
+       * below make the gate and drain return at once, so the flush would
+       * otherwise spend almost the whole drain budget and hold exit open for it.
+       */
+      skipMemoryFlush?: boolean;
       cancelReason?: 'user';
     },
   ): Promise<{ closed: boolean; holds: ActiveWorkHoldV1[] }> {
@@ -4990,6 +5010,9 @@ class QwenAgent implements Agent {
     const requireFlush = opts?.requireFlush === true;
     if (requireFlush) await recorder?.flush();
     const drainTimeoutMs = opts?.drainTimeoutMs ?? SESSION_DRAIN_TIMEOUT_MS;
+    // The memory flush below spends only what the close budget has left: the
+    // bridge sizes drainTimeoutMs under its own outer wait.
+    const closeDeadline = Date.now() + drainTimeoutMs;
     const cancelClose = opts?.waitForCloseGate
       ? await beginSessionCloseAfterCurrentGate(session, drainTimeoutMs)
       : opts?.cancelReason === 'user'
@@ -5060,6 +5083,39 @@ class QwenAgent implements Agent {
         // oncall grepping for a timeout setting that does not exist.
         drainTimeoutMs,
       );
+
+      // Turns are settled; extract any the #13004 cadence skipped before the
+      // session (and its cache-safe params) goes away, within what remains of
+      // the close budget. No-op unless pending.
+      const flushBudgetMs = closeDeadline - Date.now();
+      if (!opts?.skipMemoryFlush) {
+        const closingConfig = session.getConfig();
+        const closingSessionId = closingConfig.getSessionId();
+        const memoryManager = closingConfig.getMemoryManager?.();
+        if (flushBudgetMs > 0) {
+          await memoryManager?.flushPendingExtract?.(
+            closingSessionId,
+            flushBudgetMs,
+          );
+        } else {
+          // A close has no later boundary to retry at, so parked turns are
+          // lost here. Report the drop with its owed count instead of letting
+          // it vanish behind an exhausted budget.
+          const owedTurns =
+            memoryManager?.pendingExtractTurns?.(closingSessionId) ?? 0;
+          if (owedTurns > 0) {
+            debugLogger.warn(
+              `#13004: dropped the close auto-memory flush because the close budget was exhausted; ${owedTurns} skipped turn(s) are lost at this boundary.`,
+              {
+                sessionId: closingSessionId,
+                reason: 'close_budget_exhausted',
+                owedTurns,
+                flushBudgetMs,
+              },
+            );
+          }
+        }
+      }
 
       const blockedByHolds = await this.runExclusiveHistoryMutation(
         sessionId,
@@ -5154,6 +5210,7 @@ class QwenAgent implements Agent {
       drainTimeoutMs?: number;
       shutdownConfig?: boolean;
       waitForCloseGate?: boolean;
+      skipMemoryFlush?: boolean;
     },
   ): Promise<void> {
     if (this.sessions.get(sessionId) !== session) {
@@ -5346,6 +5403,9 @@ class QwenAgent implements Agent {
       [...this.sessions.entries()].map(([sessionId, session]) =>
         this.discardStoredSessionIfCurrent(sessionId, session, {
           waitForCloseGate: true,
+          // SIGTERM/SIGINT and IDE disconnect both land here: no outer bridge
+          // timeout bounds this drain, so the flush must not size it.
+          skipMemoryFlush: true,
         }),
       ),
     );
@@ -5861,7 +5921,8 @@ class QwenAgent implements Agent {
       ? this.reserveStartingSessionId(requestedSessionId)
       : undefined;
     let initializationDeadline:
-      { signal: AbortSignal; dispose: () => void } | undefined;
+      | { signal: AbortSignal; dispose: () => void }
+      | undefined;
     try {
       initializationDeadline = this.createSessionInitializationDeadline(
         params._meta?.[SESSION_INITIALIZATION_DEADLINE_META_KEY],
@@ -6993,6 +7054,38 @@ class QwenAgent implements Agent {
             },
             { persistDefault: false },
           );
+          break;
+        }
+        case 'workflow_mode': {
+          if (value !== 'on' && value !== 'off') {
+            throw RequestError.invalidParams(
+              undefined,
+              'Workflow mode must be on or off',
+            );
+          }
+          if (
+            params._meta?.[PERSIST_REASONING_SELECTION_META_KEY] !== undefined
+          ) {
+            throw RequestError.invalidParams(
+              undefined,
+              'Workflow mode always persists to the session',
+            );
+          }
+          if (!session.getConfig().isWorkflowModeSupported()) {
+            throw RequestError.invalidParams(
+              undefined,
+              'Session Workflow mode is unsupported',
+            );
+          }
+          await session.assertCanStartTurn();
+          if (this.sessions.get(sessionId) !== session) {
+            throw RequestError.invalidParams(undefined, 'Session changed');
+          }
+          await session.getConfig().setWorkflowMode(value === 'on');
+          await session.assertCanStartTurn();
+          if (this.sessions.get(sessionId) !== session) {
+            throw RequestError.invalidParams(undefined, 'Session changed');
+          }
           break;
         }
         case 'reasoning_effort': {
@@ -8548,7 +8641,7 @@ class QwenAgent implements Agent {
       return {
         v: STATUS_SCHEMA_VERSION,
         workspaceCwd: this.workspaceCwd(config),
-        initialized: true,
+        initialized: false,
         skills: [],
         errors: [this.errorCell('skills', error)],
       };
@@ -9651,17 +9744,19 @@ class QwenAgent implements Agent {
         .filter(
           (row) => row.origin === 'registry' && row.agentScope === undefined,
         )
-        .map((row): ServeHookEntry => ({
-          kind: 'hook',
-          eventName: row.eventName,
-          config: this.serializeHookConfig(row.config),
-          source: row.source as ServeHookSource,
-          ...(row.matcher ? { matcher: row.matcher } : {}),
-          ...(row.sequential !== undefined
-            ? { sequential: row.sequential }
-            : {}),
-          enabled: row.enabled,
-        }));
+        .map(
+          (row): ServeHookEntry => ({
+            kind: 'hook',
+            eventName: row.eventName,
+            config: this.serializeHookConfig(row.config),
+            source: row.source as ServeHookSource,
+            ...(row.matcher ? { matcher: row.matcher } : {}),
+            ...(row.sequential !== undefined
+              ? { sequential: row.sequential }
+              : {}),
+            enabled: row.enabled,
+          }),
+        );
       return {
         v: STATUS_SCHEMA_VERSION,
         workspaceCwd,
@@ -9934,10 +10029,15 @@ class QwenAgent implements Agent {
       typeof sessionId === 'string'
         ? this.sessions.get(sessionId)?.getConfig()
         : undefined;
+    const guardedMethod =
+      method === SERVE_CONTROL_EXT_METHODS.sessionGenerationStart &&
+      params['purpose'] === 'btw'
+        ? SERVE_CONTROL_EXT_METHODS.sessionBtw
+        : method;
     if (
       (this.config.getExecutionEnvironment?.() ||
         sessionConfig?.getExecutionEnvironment?.()) &&
-      !isSshWorkspaceExtMethodAllowed(method)
+      !isSshWorkspaceExtMethodAllowed(guardedMethod)
     ) {
       throw RequestError.invalidParams(
         { errorKind: 'unsupported_operation' },
@@ -10821,7 +10921,6 @@ class QwenAgent implements Agent {
         }
         const fhs = session.getConfig().getFileHistoryService();
         const snapshots = fhs.getSnapshots();
-        const rewindableTurnCount = session.getRewindableUserTurnCount();
         const prefix = (sessionId as string) + '########';
         const results = await Promise.all(
           snapshots
@@ -10831,11 +10930,15 @@ class QwenAgent implements Agent {
                 s.promptId.startsWith(prefix) &&
                 /^\d+$/.test(s.promptId.slice(prefix.length)),
             )
-            .filter(({ idx }) => idx < rewindableTurnCount)
+            .filter(({ s }) => session.getRewindCutPoint(s.promptId) >= 0)
             .map(async ({ s, idx }) => {
               const stats = await fhs.getDiffStats(s.promptId);
+              const daemonPromptId = session.getRewindDaemonPromptId(
+                s.promptId,
+              );
               return {
                 promptId: s.promptId,
+                ...(daemonPromptId ? { daemonPromptId } : {}),
                 turnIndex: idx,
                 timestamp: s.timestamp.toISOString(),
                 diffStats: {
@@ -13320,12 +13423,15 @@ class QwenAgent implements Agent {
         const sessionId = params['sessionId'];
         const requestId = params['requestId'];
         const prompt = params['prompt'];
+        const purpose = params['purpose'];
         if (
           typeof sessionId !== 'string' ||
           typeof requestId !== 'string' ||
           typeof prompt !== 'string' ||
           prompt.trim().length === 0 ||
-          Buffer.byteLength(prompt, 'utf8') > GENERATION_MAX_PROMPT_BYTES
+          Buffer.byteLength(prompt, 'utf8') > GENERATION_MAX_PROMPT_BYTES ||
+          (purpose !== undefined && purpose !== 'btw') ||
+          (purpose === 'btw' && prompt.length > BTW_MAX_INPUT_LENGTH)
         ) {
           throw RequestError.invalidParams(
             undefined,
@@ -13344,21 +13450,32 @@ class QwenAgent implements Agent {
         this.generationControllers.set(requestId, { sessionId, controller });
         const signal = AbortSignal.any([
           controller.signal,
-          AbortSignal.timeout(GENERATION_TIMEOUT_MS),
+          AbortSignal.timeout(
+            purpose === 'btw' ? BTW_STREAM_TIMEOUT_MS : GENERATION_TIMEOUT_MS,
+          ),
         ]);
         try {
-          const result = await executeGeneration(
-            session.getConfig(),
-            requestId,
-            prompt,
-            signal,
-            async (event) => {
-              await this.connection.extNotification(
-                'qwen/notify/session/generation/event',
-                { v: 1, sessionId, requestId, event },
-              );
-            },
-          );
+          const emit = async (event: GenerationEvent) => {
+            await this.connection.extNotification(
+              'qwen/notify/session/generation/event',
+              { v: 1, sessionId, requestId, event },
+            );
+          };
+          const result =
+            purpose === 'btw'
+              ? await executeBtwGeneration(
+                  session.getConfig(),
+                  prompt,
+                  signal,
+                  emit,
+                )
+              : await executeGeneration(
+                  session.getConfig(),
+                  requestId,
+                  prompt,
+                  signal,
+                  emit,
+                );
           return { sessionId, requestId, ...result };
         } finally {
           this.generationControllers.delete(requestId);
@@ -14504,7 +14621,8 @@ class QwenAgent implements Agent {
         const promptId =
           typeof rawPromptId === 'string' ? rawPromptId : undefined;
         let turnIndex: number | undefined = params['targetTurnIndex'] as
-          number | undefined;
+          | number
+          | undefined;
         const resolveFromPromptId =
           promptId !== undefined &&
           (turnIndex === undefined || turnIndex === null);
@@ -14552,7 +14670,12 @@ class QwenAgent implements Agent {
           }
 
           const rewindFiles = params['rewindFiles'] !== false;
-          const historyBeforeRewind = session.captureHistorySnapshot();
+          const historyBeforeRewind = session
+            .captureHistorySnapshot()
+            .map((content) => ({
+              ...content,
+              rewindId: getApiHistoryPromptId(content),
+            }));
           let rewindResult;
           let releaseHistoryMutation: () => void;
           try {
@@ -17276,6 +17399,11 @@ class QwenAgent implements Agent {
         );
       }
       this.sessions.set(sessionId, session);
+      session.bindWorkflowModeUpdates?.(
+        () =>
+          this.buildConfigOptions(config, session.getDefaultReasoningConfig()),
+        () => this.sessions.get(sessionId) === session,
+      );
       this.registerHostedSession(sessionId, config, settings);
       // Track the file-derived mode, not a mode restored from the transcript.
       // An unchanged settings reload must not overwrite session-local state.
@@ -17498,6 +17626,30 @@ class QwenAgent implements Agent {
       options: configModelOptions,
     };
 
+    const baseOptions = [modeConfigOption, modelConfigOption];
+    if (config.isWorkflowModeSupported?.()) {
+      const { requested, available, effective, reason } =
+        config.getWorkflowMode();
+      baseOptions.push({
+        id: 'workflow_mode',
+        name: 'Workflow mode',
+        description: 'Prefer Workflow orchestration for this session',
+        type: 'select',
+        currentValue: requested ? 'on' : 'off',
+        options: [
+          { value: 'off', name: 'Off' },
+          { value: 'on', name: 'On' },
+        ],
+        _meta: {
+          'qwen.workflowMode': {
+            available,
+            effective,
+            ...(reason ? { reason } : {}),
+          },
+        },
+      });
+    }
+
     const modelReasoning = this.getModelReasoningConfiguration(
       config,
       currentModelId,
@@ -17526,11 +17678,11 @@ class QwenAgent implements Agent {
         modelReasoning,
       )
     ) {
-      return [modeConfigOption, modelConfigOption];
+      return baseOptions;
     }
 
     if (!generation) {
-      return [modeConfigOption, modelConfigOption];
+      return baseOptions;
     }
     const currentModelEffort = config.getReasoningEffort?.();
     const reasoningOverride = config.getReasoningEffortOverride?.();
@@ -17574,7 +17726,7 @@ class QwenAgent implements Agent {
       gptOverride?.enabled &&
       gptOverride.useDefaultEffort
     ) {
-      return [modeConfigOption, modelConfigOption];
+      return baseOptions;
     }
     const gptEnableOverride =
       generation.reasoning === false
@@ -17657,7 +17809,7 @@ class QwenAgent implements Agent {
       ],
     };
 
-    return [modeConfigOption, modelConfigOption, reasoningEffortConfigOption];
+    return [...baseOptions, reasoningEffortConfigOption];
   }
 
   private getModelReasoningConfiguration(

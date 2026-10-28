@@ -48,6 +48,7 @@ import {
 } from './bridgeTypes.js';
 import type {
   BackgroundNotificationTurn,
+  BridgeSessionState,
   BridgeWorkspaceGenerationNotificationEvent,
   BridgeGenerationNotificationEvent,
   BridgePendingInteraction,
@@ -701,6 +702,7 @@ export interface BridgeClientSessionEntry {
   sourceType?: string;
   sourceId?: string;
   events: EventBus;
+  restoreState?: BridgeSessionState;
   artifacts: SessionArtifactStore;
   artifactWorkspaceReady: boolean;
   prepareArtifactWorkspace?: () => Promise<void>;
@@ -1012,11 +1014,14 @@ export class BridgeClient implements Client {
     /** Permits pre-registration client-MCP discovery without trusting its id. */
     private readonly hasSessionSpawnInFlight: () => boolean = () => false,
     private readonly getLiveScreenContextCaptureHandler: () =>
-      LiveScreenContextCaptureHandler | undefined = () => undefined,
+      | LiveScreenContextCaptureHandler
+      | undefined = () => undefined,
     private readonly getLiveTaskToolRequestHandler: () =>
-      LiveTaskToolRequestHandler | undefined = () => undefined,
+      | LiveTaskToolRequestHandler
+      | undefined = () => undefined,
     private readonly getLiveSpeakToUserHandler: () =>
-      LiveSpeakToUserHandler | undefined = () => undefined,
+      | LiveSpeakToUserHandler
+      | undefined = () => undefined,
     /**
      * Managed tool guard hosted by the daemon. Kept after the Live handlers so
      * existing direct BridgeClient constructors remain source-compatible.
@@ -1255,6 +1260,12 @@ export class BridgeClient implements Client {
     const events =
       entry?.events ?? this.resolvePendingRestoreEvents(params.sessionId);
     if (!events) return;
+    if (
+      entry?.restoreState &&
+      params.update.sessionUpdate === 'config_option_update'
+    ) {
+      entry.restoreState.configOptions = params.update.configOptions;
+    }
     const prepared = this.prepareSessionUpdateFrames(params, entry);
     for (const frame of prepared.frames) {
       events.publish(frame);
@@ -4040,7 +4051,8 @@ export function extractA2uiToolUpdate(
   const update = (params as { update?: Record<string, unknown> }).update;
   if (!update || update['sessionUpdate'] !== 'tool_call_update') return null;
   const meta = update['_meta'] as
-    { toolName?: string; serverId?: string } | undefined;
+    | { toolName?: string; serverId?: string }
+    | undefined;
   if (!isA2uiToolMeta(meta)) return null;
 
   // The result text lives at content[].content.text (ACP ToolCallContent

@@ -144,6 +144,33 @@ class WorkspaceCsiRuntimeIdentityTest {
     }
 
     @Test
+    void laterResidentReservationSurvivesAttestationAndReadonlyReconciliation() {
+        bindings.compareAndSet(original, original.withState(RuntimeBindingRecord.State.RELEASED, null, Instant.now()));
+        var jdbc = new ManagedSchemaJdbcTemplate(source);
+        jdbc.update("UPDATE ma_storage_owner SET csi_revision = 2, tenant_id = 'tenant'");
+        jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id, display_name,"
+                + " config_ref, policy_ref, state) VALUES ('tenant', 'later-workspace', 1, 'storage', 'resident', ?, ?, 'ACTIVE')",
+                WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
+        var request = new RuntimeProvisionRequest(new RuntimeScope("tenant", "later-workspace", "1", "/workspace",
+                com.alibaba.qwen.code.runtimebroker.ResidentWorkspaceProfile.CAPABILITY_DIGEST, "workspace"),
+                null, "kubernetes-workspace", "storage");
+        original = bindings.claimOperation(bindings.findOrCreate(request).getBindingId(), "owner", Duration.ofMinutes(5));
+        try (var provider = provider()) {
+            provider.reserveResource(original);
+            var handle = join(provider.ensureResource(request, original.getProvisionSeed(), null));
+            assertThat(nested(handle.getValue(), "storage").get("reservationRevision")).isEqualTo("3");
+            original = bindings.compareAndSet(original, original.withResourceHandle(handle, Instant.now()));
+            var lease = join(provider.provision(request, original.getProvisionSeed()));
+            original = bindings.compareAndSet(original, original.withAttestation(lease, handle, Instant.now(), Instant.now()));
+            assertThat(join(provider.reconcile(request, original.getProvisionSeed(), handle, lease)).getOutcome())
+                    .isEqualTo(RuntimeObservation.Outcome.READY);
+            join(provider.confirm(request, lease));
+            assertThat(api.creates).isEqualTo(2);
+            assertThat(storage.inspect(registration).revision()).isEqualTo(3);
+        }
+    }
+
+    @Test
     void existingOrAmbiguousCreateNeverAdoptsOrCreatesAnotherPod() {
         for (String resource : List.of("secrets", "pods")) {
             api = new Api();

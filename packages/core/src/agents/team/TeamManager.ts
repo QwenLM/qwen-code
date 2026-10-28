@@ -1647,9 +1647,9 @@ export class TeamManager {
     const ledger = this.shutdownLedgers.get(name);
     return Boolean(
       ledger &&
-      (ledger.inFlightWrites > 0 ||
-        ledger.outstandingTokens.some((token) => !token.consumed) ||
-        ledger.responsesInFlight > 0),
+        (ledger.inFlightWrites > 0 ||
+          ledger.outstandingTokens.some((token) => !token.consumed) ||
+          ledger.responsesInFlight > 0),
     );
   }
 
