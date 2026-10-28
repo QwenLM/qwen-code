@@ -37,7 +37,7 @@ import { isEntryPoint } from './lib/entry-point.js';
  * The third column says whether the list's items carry a review state, which
  * only reviews do and which a dismissal changes on its own.
  */
-export const LISTS = [
+const LISTS = [
   ['reviews', (pr) => `repos/{repo}/pulls/${pr}/reviews`, true],
   ['reviewComments', (pr) => `repos/{repo}/pulls/${pr}/comments`, false],
   ['issueComments', (pr) => `repos/{repo}/issues/${pr}/comments`, false],
