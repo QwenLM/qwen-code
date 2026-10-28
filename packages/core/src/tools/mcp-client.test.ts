@@ -1427,6 +1427,63 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       expect(tools[0].alwaysLoad).toBe(true);
     });
 
+    it('keeps the first tool of a duplicated name instead of discarding the server', async () => {
+      const listed = (name: string, description: string) => ({
+        name,
+        description,
+        inputSchema: { type: 'object', properties: {} },
+      });
+      const mockedClient = {
+        listTools: vi.fn().mockResolvedValue({
+          tools: [
+            listed('create', 'create group A'),
+            listed('create', 'create group B'),
+            listed('other', 'other tool'),
+          ],
+        }),
+      } as unknown as ClientLib.Client;
+      // Mirror @google/genai: one duplicated declaration fails the whole
+      // conversion, so the discovery adapter must never hand it a duplicate.
+      vi.mocked(GenAiLib.mcpToTool).mockImplementation(
+        ((client: ClientLib.Client) =>
+          ({
+            tool: async () => {
+              const { tools } = await client.listTools();
+              const names = new Set<string>();
+              for (const mcpTool of tools) {
+                if (names.has(mcpTool.name)) {
+                  throw new Error(
+                    `Duplicate function name ${mcpTool.name} found in MCP tools. Please ensure function names are unique.`,
+                  );
+                }
+                names.add(mcpTool.name);
+              }
+              return {
+                functionDeclarations: tools.map((mcpTool) => ({
+                  name: mcpTool.name,
+                  description: mcpTool.description,
+                })),
+              };
+            },
+          }) as unknown) as typeof GenAiLib.mcpToTool,
+      );
+
+      const tools = await discoverTools(
+        'unity',
+        { command: 'test-command' },
+        mockedClient,
+        cfgWithResources(),
+      );
+
+      expect(tools.map((tool) => tool.serverToolName)).toEqual([
+        'create',
+        'other',
+      ]);
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        expect.stringContaining("duplicate tool name 'create'"),
+      );
+    });
+
     it('preserves App-only tools for the separate App registry', async () => {
       const appTool = (
         name: string,

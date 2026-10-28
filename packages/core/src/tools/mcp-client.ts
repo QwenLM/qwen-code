@@ -1634,6 +1634,8 @@ async function discoverToolsWithMetadata(
     const listedTools: Array<
       Awaited<ReturnType<Client['listTools']>>['tools'][number]
     > = [];
+    const listedToolNames = new Set<string>();
+    const skippedDuplicateToolNames = new Set<string>();
     let didListTools = false;
     const listTools = async (params?: { cursor?: string }) => {
       // Clients without getProtocolEra (tests and the genai adapter) keep
@@ -1648,8 +1650,19 @@ async function discoverToolsWithMetadata(
               ListToolsResultSchema,
             );
       didListTools = true;
-      listedTools.push(...result.tools);
-      return result;
+      // @google/genai rejects the whole conversion when two tools share a
+      // name, which discards every tool of an otherwise usable server
+      // (#15741). Keep the first declaration of each name and drop the rest.
+      const uniqueTools = result.tools.filter((mcpTool) => {
+        if (listedToolNames.has(mcpTool.name)) {
+          skippedDuplicateToolNames.add(mcpTool.name);
+          return false;
+        }
+        listedToolNames.add(mcpTool.name);
+        return true;
+      });
+      listedTools.push(...uniqueTools);
+      return { ...result, tools: uniqueTools };
     };
     // @google/genai still types this structural adapter against SDK v1. Its
     // discovery path only calls listTools(); execution stays on the v2 client.
@@ -1667,6 +1680,17 @@ async function discoverToolsWithMetadata(
     if (!Array.isArray(tool.functionDeclarations)) {
       // This is a valid case for a prompt-only server
       return { tools: [], hadVisibilityFilteredTools: false };
+    }
+
+    if (skippedDuplicateToolNames.size > 0) {
+      const names = [...skippedDuplicateToolNames]
+        .map((name) => `'${name}'`)
+        .join(', ');
+      debugLogger.warn(
+        `MCP server '${mcpServerName}' returned duplicate tool name${
+          skippedDuplicateToolNames.size === 1 ? '' : 's'
+        } ${names}. Keeping the first declaration of each duplicate.`,
+      );
     }
 
     // Fetch raw tool list from MCP client to get annotations (readOnlyHint, etc.)
