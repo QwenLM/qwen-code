@@ -265,6 +265,11 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^qwen3\.\d/, LIMITS['1m']],
   [/^qwen-plus-latest$/, LIMITS['1m']],
   [/^qwen-flash-latest$/, LIMITS['1m']],
+  // Invite-only series aliases (`qwen-latest-series-invite-202610-m4`) name no
+  // model generation the rows above key on and are absent from models.dev, so
+  // they fell through to the 256K family row. The whole series is 1M; the
+  // trailing hyphen keeps the prefix off ids that merely share its letters.
+  [/^qwen-latest-series-/, LIMITS['1m']],
   [/^coder-model$/, LIMITS['1m']],
   // Commercial API models (256K context)
   [/^qwen3-max/, LIMITS['256k']],

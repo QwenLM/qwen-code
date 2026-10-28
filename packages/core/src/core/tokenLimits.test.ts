@@ -270,6 +270,24 @@ describe('tokenLimit', () => {
       expect(tokenLimit('qwen-flash-latest')).toBe(1000000);
     });
 
+    it('should return 1M for the invite-only latest series aliases', () => {
+      expect(tokenLimit('qwen-latest-series-invite-202610-m4')).toBe(1000000);
+      // A later invite code must not need another code change.
+      expect(tokenLimit('qwen-latest-series-invite-202611-m5')).toBe(1000000);
+      // The beta-series spelling, whose trailing -v28 normalize() strips as a
+      // version rather than a date.
+      expect(tokenLimit('qwen-latest-series-invite-beta-v28')).toBe(1000000);
+      // Without the trailing code, normalize() strips the date instead.
+      expect(tokenLimit('qwen-latest-series-invite-202610')).toBe(1000000);
+      expect(tokenLimit('openai/qwen-latest-series-invite-202610-m4')).toBe(
+        1000000,
+      );
+    });
+
+    it('should not claim ids that only share the series prefix letters', () => {
+      expect(tokenLimit('qwen-latest-seriesfoo')).toBe(262144);
+    });
+
     it('should return 256K for Qwen fallback', () => {
       expect(tokenLimit('qwen-plus')).toBe(262144);
       expect(tokenLimit('qwen-turbo')).toBe(262144);
