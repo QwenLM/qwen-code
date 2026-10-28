@@ -412,6 +412,16 @@ describe('SDK Java self-hosted workflow guards', () => {
     }
   });
 
+  // The deferred-status reporter is defined above the lock block it is called
+  // from, so a slice that starts at `lock_setup_fault()` (or lower) must carry
+  // the definition: without it every tolerated-skip arm dies with 127 and the
+  // failure reads as a code defect rather than a missing prelude.
+  const deferredReporter = (run) => {
+    const at = run.indexOf('mvn_report_failed_suite() {');
+    const end = run.indexOf('lock_setup_fault() {');
+    return at === -1 || end === -1 ? '' : run.slice(at, end);
+  };
+
   it.skipIf(process.platform !== 'linux')(
     'runs the Maven suite before taking the host lock',
     () => {
@@ -739,9 +749,10 @@ describe('SDK Java self-hosted workflow guards', () => {
         for (const [status, arm] of (deferred ? [0, 7] : [0]).flatMap((value) =>
           arms.map((candidate) => [value, candidate]),
         )) {
+          const prelude = deferredReporter(run);
           const acquisitionAndWriteBack = deferred
-            ? `mvn_status=${status}\nmvn_stage='sdk-java test'\n${slice}`
-            : slice;
+            ? `${prelude}\nmvn_status=${status}\nmvn_stage='sdk-java test'\n${slice}`
+            : `${prelude}\n${slice}`;
           const noFlock =
             arm === 'helper-no-flock' || arm === 'fallback-no-flock';
           const dir = mkdtempSync(join(tmpdir(), 'sdk-java-lock-skip-'));
@@ -1129,7 +1140,11 @@ describe('SDK Java self-hosted workflow guards', () => {
       try {
         const result = spawnSync(
           'bash',
-          ['-e', '-c', `mvn_status=0\nmvn_stage='sdk-java test'\n${body}`],
+          [
+            '-e',
+            '-c',
+            `${deferredReporter(run)}\nmvn_status=0\nmvn_stage='sdk-java test'\n${body}`,
+          ],
           {
             encoding: 'utf8',
             timeout: 5000,
@@ -1418,7 +1433,7 @@ describe('SDK Java self-hosted workflow guards', () => {
           [
             '-e',
             '-c',
-            `mvn_status=${suiteStatus}\nmvn_stage='sdk-java test'\n${body}`,
+            `${deferredReporter(run)}\nmvn_status=${suiteStatus}\nmvn_stage='sdk-java test'\n${body}`,
           ],
           {
             encoding: 'utf8',
@@ -1470,7 +1485,7 @@ describe('SDK Java self-hosted workflow guards', () => {
           [
             '-e',
             '-c',
-            `mvn_status=${suiteStatus}\nmvn_stage='sdk-java test'\n${body}`,
+            `${deferredReporter(run)}\nmvn_status=${suiteStatus}\nmvn_stage='sdk-java test'\n${body}`,
           ],
           {
             encoding: 'utf8',
