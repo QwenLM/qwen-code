@@ -408,11 +408,14 @@ describe('compareSnapshots', () => {
     expect(result.reasons).toEqual(['reviews: 1 was edited (body changed)']);
   });
 
-  // Measured on PR 15388: review 5673309455 was submitted CHANGES_REQUESTED at
-  // 2026-10-27T19:47:16Z and dismissed at 2026-10-28T01:22:57Z. Its body (4838
-  // characters) and its submitted_at are unchanged; only state moved. That
-  // dismissal is what unblocked the merge gate, and id+stamp+body reads clean.
-  it('catches a dismissed review, which moves neither stamp nor body', () => {
+  // Measured on PR 15388: review 5673309455 carries submitted_at 19:47:16Z and
+  // was dismissed at 01:22:57Z five and a half hours later. The stamp still
+  // reads the earlier time, so the dismissal did not move it, and the payload
+  // it reports is a 4838-character body — nothing but state records the
+  // dismissal. Whether the body was also edited is unobservable, which is why
+  // the state is compared: that dismissal is what unblocked the merge gate,
+  // and id+stamp+body alone reads clean.
+  it('catches a dismissed review, which no timestamp records', () => {
     const start = snapshot({
       reviews: [
         {

@@ -154,10 +154,12 @@ for is a file no round produces, and a check over an absent file is silent:
   `state`. The stamp alone cannot answer "did anything change?": measured
   against this repo's API, a review object carries `submitted_at` and no
   `updated_at`, and neither editing its body nor dismissing it moves that
-  stamp. On PR 15388, review 5673309455 was submitted `CHANGES_REQUESTED` at
-  2026-10-27T19:47:16Z and dismissed at 2026-10-28T01:22:57Z with its
-  4838-character body and its stamp unchanged; only `state` moved, and that
-  dismissal is what unblocked the merge gate. All three lists return a string
+  stamp. On PR 15388, review 5673309455 reports `submitted_at` 2026-10-27T19:47:16Z
+  and was dismissed at 2026-10-28T01:22:57Z, five and a half hours later. The
+  stamp still reads the earlier time, so the dismissal did not move it, and
+  the review still reports a 4838-character body: nothing but `state` records
+  that it was dismissed. Whether its body was edited too is unobservable,
+  which is the point — and that dismissal is what unblocked the merge gate. All three lists return a string
   `body` and reviews return a string `state`, so both are compared alongside
   the stamp, and a fetched item missing either is refused rather than compared
   as though nothing had changed. The cost is a larger snapshot file — bodies
