@@ -1032,8 +1032,31 @@ describe('post-merge push lane', () => {
       );
       expect(checkout, job).toBeDefined();
       expect(String(checkout.with?.ref ?? ''), job).toBe(
-        "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || (github.event_name == 'push' && github.sha) || github.ref }}",
+        "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || (github.event_name == 'push' && github.sha) || github.ref }}",
       );
+    }
+  });
+
+  it('pins the two PR-only lanes to their whole checkout ref', () => {
+    // Same order contract as above, for the two lanes that carry no push arm
+    // and so cannot join that loop. Whole literal, not a substring: moving
+    // `|| github.ref` ahead of the pull-request arm keeps every token in
+    // place — `toContain(head.sha)` and `not.toContain('refs/pull/')` both
+    // stay green — while the lane silently checks out the asynchronously
+    // rebuilt merge ref this PR exists to avoid, and the ancestor guard still
+    // passes because a newer merge tree contains the expected head.
+    const expectedRefs = {
+      web_shell_e2e_smoke:
+        "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || github.ref }}",
+      integration_no_ak:
+        "${{ (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}",
+    };
+    for (const [job, ref] of Object.entries(expectedRefs)) {
+      const checkout = (ci.jobs[job].steps ?? []).find((s) =>
+        String(s.uses ?? '').startsWith('actions/checkout'),
+      );
+      expect(checkout, job).toBeDefined();
+      expect(String(checkout.with?.ref ?? ''), job).toBe(ref);
     }
   });
 
