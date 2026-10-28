@@ -56,6 +56,8 @@ import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedArtifactReader;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.SessionWorktreeStore;
+import com.alibaba.qwen.code.managedagent.workspace.SessionWorktreeService;
 import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.workspace.runtime.RuntimeWarmer;
@@ -104,8 +106,6 @@ public class ManagedAgentService {
     private static final int TURN_ID_MAX_LENGTH = 64;
     // Catch-up reads of a stream use pages of this size.
     static final int STREAM_PAGE = 100;
-    // A context stays ready until cwd changes arrive (W2).
-    private static final String WORKSPACE_STATE = "ready";
     // "text" is the spelling that clients used before the contract.
     private static final Set<String> INPUT_TYPES = Set.of("input_text",
             "text");
@@ -119,6 +119,7 @@ public class ManagedAgentService {
     private final HarnessCoordinator coordinator;
     private final HarnessConnector harness;
     private RuntimeWarmer runtimeWarmer;
+    private SessionWorktreeService sessionWorktrees;
     private org.springframework.beans.factory.ObjectProvider<SessionRecoveryService> recoveryServices;
     private ManagedAgentProperties.Dispatch renameDispatch = new ManagedAgentProperties.Dispatch();
     private Clock renameClock = Clock.systemUTC();
@@ -132,6 +133,11 @@ public class ManagedAgentService {
     @Autowired(required = false)
     void setRuntimeWarmer(RuntimeWarmer runtimeWarmer) {
         this.runtimeWarmer = runtimeWarmer;
+    }
+
+    @Autowired(required = false)
+    public void setSessionWorktrees(SessionWorktreeService value) {
+        this.sessionWorktrees = value;
     }
 
     @Autowired
@@ -377,6 +383,17 @@ public class ManagedAgentService {
             List<InputBlock> blocks, WorkspaceSelection selection, String approvalMode, Boolean planMode,
             List<Map<String, Object>> skills, String modelId,
             List<com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionPackages.Pin> extensionPins) {
+        return createWorkspaceSession(tenantId, actorId, idempotencyKey, agentId, agentRevision,
+                title, metadata, blocks, selection, approvalMode, planMode, skills, modelId, extensionPins, null);
+    }
+
+    public CommandAdmission createWorkspaceSession(String tenantId,
+            String actorId, String idempotencyKey, String agentId,
+            String agentRevision, String title, Map<String, Object> metadata,
+            List<InputBlock> blocks, WorkspaceSelection selection, String approvalMode, Boolean planMode,
+            List<Map<String, Object>> skills, String modelId,
+            List<com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionPackages.Pin> extensionPins,
+            SessionWorktreeService.Request worktree) {
         validateIdempotencyKey(idempotencyKey);
         var additions = AgentDefinitionExtensions.sessionSkills(skills);
         if (actorId == null || actorId.isEmpty()) {
@@ -411,6 +428,9 @@ public class ManagedAgentService {
         if (extensionPins != null) {
             semantic.put("extensionPins", extensionPins);
         }
+        if (worktree != null) {
+            semantic.put("worktree", worktree.baseRef() == null ? Map.of() : Map.of("baseRef", worktree.baseRef()));
+        }
         String requestDigest = digests.digest(semantic);
         String payloadDigest = input.isEmpty() ? null
                 : SubmitHarnessTurn.computePayloadDigest(input);
@@ -442,20 +462,31 @@ public class ManagedAgentService {
         Set<String> extensionLifecycleProfiles = extensionPins == null ? Set.of()
                 : java.util.stream.Stream.of(WorkspaceToolProfiles.SHELL, WorkspaceToolProfiles.MCP)
                         .filter(harness::supportsLifecycle).collect(java.util.stream.Collectors.toSet());
+        if (worktree != null && sessionWorktrees == null) {
+            throw new ManagedAgentException(HttpStatus.CONFLICT, "worktree_unavailable", "Session worktrees are unavailable.");
+        }
+        SessionWorktreeStore.Plan worktreePlan = worktree == null ? null
+                : sessionWorktrees.preflight(tenantId, actorId, selection, worktree);
+        boolean approvalSelectionSupported = harness.supportsApprovalSelection()
+                && ("qwen-code".equals(agentId) || harness.supportsAgentDefinitionApprovalSelection());
         try {
-            admission = store.insertWorkspaceSessionCommand(tenantId,
+            admission = worktreePlan == null ? store.insertWorkspaceSessionCommand(tenantId,
                     actorId, idempotencyKey, requestDigest, agentId, agentRevision,
                     effectiveTitle, input, payloadDigest, selection, approvalMode,
-                    harness.supportsApprovalSelection() && ("qwen-code".equals(agentId)
-                            || harness.supportsAgentDefinitionApprovalSelection()),
+                    approvalSelectionSupported,
                     planMode, harness.supportsPlanMode(), additions, harness.supportsPublicChildAgents(), modelId, extensionPins,
-                    extensionLifecycleProfiles);
+                    extensionLifecycleProfiles)
+                    : store.insertWorkspaceSessionCommand(tenantId,
+                            actorId, idempotencyKey, requestDigest, agentId, agentRevision,
+                            effectiveTitle, input, payloadDigest, selection, approvalMode,
+                            approvalSelectionSupported, planMode, harness.supportsPlanMode(), additions,
+                            harness.supportsPublicChildAgents(), modelId, extensionPins, extensionLifecycleProfiles, worktreePlan);
         } catch (DuplicateKeyException error) {
             admission = store.replayWorkspaceSessionCommand(tenantId,
                     actorId, idempotencyKey, requestDigest);
         }
         // A creation with input warms through its first Turn's dispatch.
-        if (admission.turnId() == null) {
+        if (admission.turnId() == null && worktreeReady(tenantId, admission.sessionId())) {
             coordinator.warmSession(tenantId, admission.sessionId());
         }
         dispatch(tenantId, admission, true);
@@ -1202,6 +1233,7 @@ public class ManagedAgentService {
                 .toList();
         Map<String, TurnSummary> activeTurns = store.findActiveTurns(tenantId,
                 ids);
+        var worktrees = store.findSessionWorktrees(tenantId, ids);
         Map<String, Long> coveredSequences = store
                 .findSnapshotCoveredSequences(tenantId, ids);
         Set<String> closed = completedWorkspaceCloses(tenantId, sessions);
@@ -1212,7 +1244,7 @@ public class ManagedAgentService {
                         activeTurns.get(session.sessionId()),
                         coveredSequences.getOrDefault(session.sessionId(), 0L),
                         retention(session, closed), compressions.getOrDefault(session.sessionId(),
-                                new AgentStateStore.ContextCompressionState(0, null))))
+                                new AgentStateStore.ContextCompressionState(0, null)), worktrees.get(session.sessionId())))
                 .toList();
     }
 
@@ -1241,7 +1273,7 @@ public class ManagedAgentService {
 
     private PublicSession publicSession(SessionRecord session,
             TurnSummary activeTurn, long snapshotCoveredSequence,
-            boolean retention, AgentStateStore.ContextCompressionState compression) {
+            boolean retention, AgentStateStore.ContextCompressionState compression, SessionWorktreeStore.Descriptor worktree) {
         Map<String, Object> metadata = session.title() == null ? Map.of()
                 : Map.of("title", session.title());
         // Every route these capabilities gate reads through
@@ -1279,11 +1311,12 @@ public class ManagedAgentService {
                         visible,
                         hasActions(session), close, keep, keep,
                         visible && supportsDelete(session, retention),
-                        foregroundShell(session),
+                        foregroundShell(session, worktree),
                         visible && "ACTIVE".equals(session.status()) && session.workspace() != null
-                                && store.workspaceFilesEnabled() && compression.available() && harness.supportsContextCompression(),
-                        childAgentsCapability(session)),
-                publicWorkspace(session), compression.available() ? compression.compactionRevision() : null, compression.operationId());
+                                && ready(worktree) && store.workspaceFilesEnabled() && compression.available() && harness.supportsContextCompression(),
+                        childAgentsCapability(session, worktree)),
+                publicWorkspace(session, worktree), compression.available() ? compression.compactionRevision() : null, compression.operationId())
+                .withWorktree(worktree);
     }
 
     /** A page assembled from grouped batch reads instead of per-row ones. */
@@ -1295,6 +1328,7 @@ public class ManagedAgentService {
         String tenantId = sessions.getFirst().tenantId();
         List<String> ids = sessions.stream().map(SessionRecord::sessionId)
                 .toList();
+        var worktrees = store.findSessionWorktrees(tenantId, ids);
         Map<String, TurnSummary> latestTurns = store.findLatestTurns(tenantId,
                 ids);
         Map<String, EventRecord> environmentEvents = store
@@ -1320,15 +1354,16 @@ public class ManagedAgentService {
         // Cwd admission has no Turn execution-profile restriction. One role
         // grant read covers the workspaces of both shapes; the executable
         // facts read covers both id sets, retaining each capability's gates.
-        Set<String> shaped = sessions.stream().filter(this::maySubmitShape)
+        Set<String> shaped = sessions.stream().filter(session -> maySubmitShape(session, worktrees.get(session.sessionId())))
                 .map(SessionRecord::sessionId)
                 .collect(java.util.stream.Collectors.toSet());
-        Set<String> contextShaped = sessions.stream().filter(this::mayChangeContextShape)
+        Set<String> contextShaped = sessions.stream().filter(session -> mayChangeContextShape(session, worktrees.get(session.sessionId())))
                 .map(SessionRecord::sessionId)
                 .collect(java.util.stream.Collectors.toSet());
         Set<String> candidateIds = new java.util.HashSet<>(shaped);
         candidateIds.addAll(contextShaped);
-        sessions.stream().filter(this::mayCompressShape).map(SessionRecord::sessionId).forEach(candidateIds::add);
+        sessions.stream().filter(session -> mayCompressShape(session, worktrees.get(session.sessionId())))
+                .map(SessionRecord::sessionId).forEach(candidateIds::add);
         Set<String> grantWorkspaces = candidateIds.isEmpty() ? Set.of()
                 : sessions.stream()
                         .filter(session -> candidateIds.contains(
@@ -1357,17 +1392,17 @@ public class ManagedAgentService {
                         retention(session, closed),
                         session.workspace() == null || lifecycleOwners.contains(session.sessionId()),
                         lifecycleOperations.get(session.sessionId()),
-                        maySubmitWorkspaceTurn(session, grants, executable),
-                        mayChangeContext(session, grants, executable),
+                        maySubmitWorkspaceTurn(session, grants, executable, worktrees.get(session.sessionId())),
+                        mayChangeContext(session, grants, executable, worktrees.get(session.sessionId())),
                         modelContexts.get(session.sessionId()),
                         modelSelections.get(session.sessionId()), modelSelectionSupported, renameSupported,
-                        compressionSupported && mayCompressContext(session, grants, executable),
+                        compressionSupported && mayCompressContext(session, grants, executable, worktrees.get(session.sessionId())),
                         compressions.getOrDefault(session.sessionId(),
                                 new AgentStateStore.ContextCompressionState(0, null)),
                         approvalSelections.get(session.sessionId()), approvalSupported
                                 && WorkspaceToolProfiles.supportsApprovalSelection(session)
                                 && (session.agentDefinitionDigest() == null || definitionApprovalSupported)
-                                && lifecycleOwners.contains(session.sessionId())))
+                                && lifecycleOwners.contains(session.sessionId()), worktrees.get(session.sessionId())))
                 .toList();
     }
 
@@ -1395,7 +1430,7 @@ public class ManagedAgentService {
             WebShellModelContext modelContext, WebShellModelSelection modelSelection,
             boolean modelSelectionSupported, boolean renameSupported,
             boolean compressionSupported, AgentStateStore.ContextCompressionState compression,
-            WebShellApprovalSelection approvalSelection, boolean approvalSupported) {
+            WebShellApprovalSelection approvalSelection, boolean approvalSupported, SessionWorktreeStore.Descriptor worktree) {
         boolean visible = session.deletedAt() == null;
         boolean publicChild = session.publicChildAgentsVersion() == 1
                 && store.findChildLineage(session.tenantId(), session.sessionId()) != null;
@@ -1420,7 +1455,7 @@ public class ManagedAgentService {
                 latestTurn == null ? null : webShellTurn(latestTurn),
                 webShellEnvironment(environmentEvent),
                 session.lastSequence(),
-                webShellWorkspace(session),
+                webShellWorkspace(session, worktree),
                 // Every Session serves its task list and detail; the tasks come from the
                 // Stage H records its Session store holds (H0c). The
                 // tombstone gate matches publicSession: every route these
@@ -1429,14 +1464,14 @@ public class ManagedAgentService {
                         hasArtifacts(session),
                         hasActions(session), maySubmit && approvalExecutable, close, keep, keep,
                         visible && lifecycleOwner && supportsDelete(session, retention),
-                        false, foregroundShell(session),
+                        false, foregroundShell(session, worktree),
                         visible && modelSelectionSupported && mayChangeContext,
-                        visible && approvalSupported && mayChangeContext && !Boolean.FALSE.equals(foregroundShell(session)),
+                        visible && approvalSupported && mayChangeContext && !Boolean.FALSE.equals(foregroundShell(session, worktree)),
                         visible && maySubmit && harness.supportsInputAttachments(),
                         visible && "ACTIVE".equals(session.status()) && renameSupported
                                 && (session.workspace() == null || maySubmit),
                         visible && approvalExecutable && compressionSupported && compression.available(),
-                        childAgentsCapability(session)),
+                        childAgentsCapability(session, worktree)),
                 session.workspace() != null || session.agentDefinitionDigest() != null
                         ? approvalSelection == null ? session.approvalMode() : approvalSelection.mode() : null,
                 modelContext, modelSelection, approvalSelection == null ? null : approvalSelection.revision(),
@@ -1444,7 +1479,7 @@ public class ManagedAgentService {
                 approvalSelection != null && approvalSelection.planMode(), visible && approvalSupported
                         && mayChangeContext && harness.supportsPlanMode() && store.supportsPlanMode(session),
                 compression.available() ? compression.compactionRevision() : null, compression.operationId(),
-                lifecycleOperation);
+                lifecycleOperation).withWorktree(worktree);
     }
 
     private boolean supportsDelete(SessionRecord session, boolean retention) {
@@ -1456,37 +1491,45 @@ public class ManagedAgentService {
                 && harness.supportsLifecycle(session.toolProfile());
     }
 
-    private Boolean childAgentsCapability(SessionRecord session) {
+    private Boolean childAgentsCapability(SessionRecord session, SessionWorktreeStore.Descriptor worktree) {
         if (session.publicChildAgentsVersion() != 1) {
             return null;
         }
-        return session.deletedAt() == null && harness.supportsPublicChildAgents()
+        return session.deletedAt() == null && ready(worktree) && harness.supportsPublicChildAgents()
                 && store.findChildLineage(session.tenantId(), session.sessionId()) == null;
     }
 
     private Boolean foregroundShell(SessionRecord session) {
+        return foregroundShell(session, store.findSessionWorktree(session.tenantId(), session.sessionId()));
+    }
+
+    private Boolean foregroundShell(SessionRecord session, SessionWorktreeStore.Descriptor worktree) {
         if (session.workspace() == null || !WorkspaceToolProfiles.isPublicShell(session.toolProfile())) {
             return null;
         }
-        return session.deletedAt() == null && store.workspaceFilesEnabled() && store.workspaceShellEnabled()
+        return session.deletedAt() == null && ready(worktree) && store.workspaceFilesEnabled() && store.workspaceShellEnabled()
                 && WorkspaceToolProfiles.supportsApprovalMode(session.approvalMode())
                 && (!"yolo".equals(session.approvalMode()) || supportsApprovalSelection(session));
     }
 
-    private static WebShellWorkspace webShellWorkspace(SessionRecord session) {
+    private static WebShellWorkspace webShellWorkspace(SessionRecord session, SessionWorktreeStore.Descriptor worktree) {
         return session.workspace() == null ? null
                 : new WebShellWorkspace(session.workspace().getWorkspaceId(),
                         session.workspace().getCwdRelative(),
                         session.workspace().getContextRevision(),
-                        WORKSPACE_STATE);
+                        workspaceState(worktree));
     }
 
-    private static PublicWorkspace publicWorkspace(SessionRecord session) {
+    private static PublicWorkspace publicWorkspace(SessionRecord session, SessionWorktreeStore.Descriptor worktree) {
         return session.workspace() == null ? null
                 : new PublicWorkspace(session.workspace().getWorkspaceId(),
                         session.workspace().getCwdRelative(),
                         session.workspace().getContextRevision(),
-                        WORKSPACE_STATE);
+                        workspaceState(worktree));
+    }
+
+    private static String workspaceState(SessionWorktreeStore.Descriptor worktree) {
+        return ready(worktree) ? "ready" : "preparing".equals(worktree.state()) ? "changing" : "recovery_blocked";
     }
 
     private static Map<String, Object> webShellEnvironment(
@@ -1615,7 +1658,10 @@ public class ManagedAgentService {
         // Turn and the outage hold keeps spending the budget: there the
         // sweep is the spender, not the rescuer.
         if (admission.turnId() != null && harness.isAvailable()
-                && (!workspaceBound || harness.isWorkspaceFilesAvailable())) {
+                && (!workspaceBound || harness.isWorkspaceFilesAvailable())
+                && (worktreeReady(tenantId, admission.sessionId())
+                        || store.findTurn(tenantId, admission.sessionId(), admission.turnId())
+                                .filter(turn -> "CANCELLING".equals(turn.status())).isPresent())) {
             if (org.springframework.transaction.support.TransactionSynchronizationManager.isSynchronizationActive()) {
                 org.springframework.transaction.support.TransactionSynchronizationManager.registerSynchronization(
                         new org.springframework.transaction.support.TransactionSynchronization() {
@@ -1626,6 +1672,14 @@ public class ManagedAgentService {
                 coordinator.dispatch(tenantId, admission.sessionId(), admission.turnId());
             }
         }
+    }
+
+    private boolean worktreeReady(String tenantId, String sessionId) {
+        return ready(store.findSessionWorktree(tenantId, sessionId));
+    }
+
+    private static boolean ready(SessionWorktreeStore.Descriptor worktree) {
+        return worktree == null || "ready".equals(worktree.state());
     }
 
     String lifecycleDigest(String sessionId, String operation) {
@@ -1658,6 +1712,12 @@ public class ManagedAgentService {
             String actorId) {
         if (session.publicChildAgentsVersion() == 1 && store.findChildLineage(session.tenantId(), session.sessionId()) != null) {
             throw new ManagedAgentException(HttpStatus.CONFLICT, "unsupported_feature", "Public child Sessions accept only their delegated input");
+        }
+        var worktree = store.findSessionWorktree(session.tenantId(), session.sessionId());
+        if (!ready(worktree)) {
+            throw new ManagedAgentException(HttpStatus.CONFLICT,
+                    worktree.errorCode() == null ? "worktree_" + worktree.state() : worktree.errorCode(),
+                    "The Session worktree is not ready.");
         }
         if (session.workspace() != null
                 && !maySubmitWorkspaceTurn(session, actorId)) {
@@ -1785,8 +1845,8 @@ public class ManagedAgentService {
     // from the facts batch.
     private boolean maySubmitWorkspaceTurn(SessionRecord session,
             Map<String, ManagedWorkspaceRegistry.ReadableGrant> grants,
-            java.util.Set<String> executable) {
-        if (!maySubmitShape(session)) {
+            java.util.Set<String> executable, SessionWorktreeStore.Descriptor worktree) {
+        if (!maySubmitShape(session, worktree)) {
             return false;
         }
         var grant = grants.get(session.workspace().getWorkspaceId());
@@ -1798,8 +1858,8 @@ public class ManagedAgentService {
     // authority checks for changing an existing Session context.
     private boolean mayChangeContext(SessionRecord session,
             Map<String, ManagedWorkspaceRegistry.ReadableGrant> grants,
-            java.util.Set<String> executable) {
-        if (!mayChangeContextShape(session)) {
+            java.util.Set<String> executable, SessionWorktreeStore.Descriptor worktree) {
+        if (!mayChangeContextShape(session, worktree)) {
             return false;
         }
         var grant = grants.get(session.workspace().getWorkspaceId());
@@ -1808,6 +1868,10 @@ public class ManagedAgentService {
     }
 
     private boolean maySubmitShape(SessionRecord session) {
+        return maySubmitShape(session, store.findSessionWorktree(session.tenantId(), session.sessionId()));
+    }
+
+    private boolean maySubmitShape(SessionRecord session, SessionWorktreeStore.Descriptor worktree) {
         if (session.workspace() == null
                 || !harness.isWorkspaceFilesAvailable()) {
             return false;
@@ -1817,29 +1881,32 @@ public class ManagedAgentService {
         // that fails them can never execute, so admission must not certify
         // it. Empty bound creation skips that validation by design.
         return "ACTIVE".equals(session.status()) && session.deletedAt() == null
+                && ready(worktree)
                 && ("qwen-code".equals(session.agentId())
                         || session.agentDefinitionDigest() != null)
                 && WorkspaceExecutionProfile.CONTEXT_CONFIG_REF.equals(
                         session.workspace().getContextConfigRef());
     }
 
-    private boolean mayCompressShape(SessionRecord session) {
+    private boolean mayCompressShape(SessionRecord session, SessionWorktreeStore.Descriptor worktree) {
         return session.workspace() != null && "ACTIVE".equals(session.status())
-                && session.deletedAt() == null && store.workspaceFilesEnabled();
+                && session.deletedAt() == null && store.workspaceFilesEnabled()
+                && ready(worktree);
     }
 
     private boolean mayCompressContext(SessionRecord session,
-            Map<String, ManagedWorkspaceRegistry.ReadableGrant> grants, Set<String> executable) {
-        if (!mayCompressShape(session)) {
+            Map<String, ManagedWorkspaceRegistry.ReadableGrant> grants, Set<String> executable, SessionWorktreeStore.Descriptor worktree) {
+        if (!mayCompressShape(session, worktree)) {
             return false;
         }
         var grant = grants.get(session.workspace().getWorkspaceId());
         return grant != null && grant.canCreateSession() && executable.contains(session.sessionId());
     }
 
-    private boolean mayChangeContextShape(SessionRecord session) {
+    private boolean mayChangeContextShape(SessionRecord session, SessionWorktreeStore.Descriptor worktree) {
         return session.workspace() != null && "ACTIVE".equals(session.status())
                 && session.deletedAt() == null && store.workspaceFilesEnabled()
+                && ready(worktree)
                 && (runtimeWarmer == null || runtimeWarmer.supportsWorkspaceContextChange(session.workspace()));
     }
 

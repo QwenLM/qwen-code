@@ -70,6 +70,7 @@ import { toManagedPermissionRequest } from './managed-approval';
 import { isNonRetryableClientError } from './managed-request-error';
 import { ManagedSessionProgress } from './ManagedSessionProgress';
 import { WorkspaceBindingCreator } from './WorkspaceBindingCreator';
+import { ManagedWorktreeStatus } from './ManagedSessionWorktrees';
 import type { ManagedCreationSkillsSource } from './managed-creation-skills';
 import { ManagedWorkspaceNavigation } from './ManagedWorkspaceNavigation';
 import { ManagedSessionNavigationRow } from './ManagedSessionNavigationRow';
@@ -354,6 +355,8 @@ function ManagedSessionsContent({
   );
   const detail = useManagedSession(provider, clientId, sessionId);
   const summary = detail.summary;
+  const worktreeReady =
+    !summary?.worktree || summary.worktree.state === 'ready';
   const active = summary && isManagedSessionRunning(summary.phase);
   const recovery = useManagedRecovery(
     provider,
@@ -385,6 +388,7 @@ function ManagedSessionsContent({
     clientId,
     detail.summary &&
       detail.summary.sessionId === sessionId &&
+      worktreeReady &&
       detail.summary.capabilities.inputAttachments
       ? detail.summary.workspace
       : undefined,
@@ -1168,7 +1172,7 @@ function ManagedSessionsContent({
     attachmentCapability.current = { sessionId, enabled: false };
   if (summary)
     attachmentCapability.current.enabled =
-      summary.capabilities.inputAttachments === true;
+      summary.capabilities.inputAttachments === true && worktreeReady;
   const { request: requestTurnCancel, busy: turnCancelBusy } = turnCancel;
   const failureMessage = summary?.failure
     ? (FAILURE_MESSAGES[summary.failure.code]?.[language === 'zh-CN' ? 1 : 0] ??
@@ -1786,6 +1790,9 @@ function ManagedSessionsContent({
                 </p>
               )}
             </div>
+          )}
+          {summary?.worktree && (
+            <ManagedWorktreeStatus worktree={summary.worktree} />
           )}
           {summary?.failure && (
             <p className="text-sm text-destructive">{failureMessage}</p>

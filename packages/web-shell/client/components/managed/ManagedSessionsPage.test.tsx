@@ -315,6 +315,64 @@ describe('ManagedSessionsPage', () => {
     });
   }
 
+  it('refreshes a preparing empty worktree session until ready and keeps attachments unavailable during preparation', async () => {
+    vi.useFakeTimers();
+    const worktree = {
+      id: 'worktree-a',
+      sessionId: 's1',
+      workspaceId: 'ws-a',
+      state: 'preparing' as const,
+      branch: 'worktree-managed-a',
+      baseCommit: 'a'.repeat(40),
+      cwdRelative: '.qwen-managed-session-worktrees/a',
+      operationId: 'op-a',
+      revision: 1,
+    };
+    let current = summary('s1', {
+      phase: 'created',
+      activeTurnId: undefined,
+      worktree,
+      workspace: {
+        workspaceId: 'ws-a',
+        cwdRelative: worktree.cwdRelative,
+        state: 'changing',
+      },
+      capabilities: {
+        canSend: false,
+        canCancel: false,
+        inputAttachments: true,
+        workspaceTurns: true,
+      },
+    });
+    mocks.client.getSession.mockImplementation(async () => current);
+    mocks.client.getTranscript.mockResolvedValue({
+      events: [],
+      lastEventId: 0,
+    });
+    await render('s1');
+    expect(container.textContent).toContain('Preparing worktree');
+    expect(mocks.editorProps!.attachmentsEnabled).toBe(false);
+    expect(mocks.editorProps!.fileReferenceActions).toBeUndefined();
+    current = {
+      ...current,
+      worktree: { ...worktree, state: 'ready', revision: 2 },
+      workspace: { ...current.workspace!, state: 'ready' },
+      capabilities: {
+        canSend: true,
+        canCancel: false,
+        inputAttachments: true,
+        workspaceTurns: true,
+      },
+    };
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+      await flush();
+    });
+    expect(container.textContent).toContain('Worktree ready');
+    expect(mocks.editorProps!.attachmentsEnabled).toBe(true);
+    expect(mocks.client.getTranscript).toHaveBeenCalledOnce();
+  });
+
   it('leaves MCP management to Plugins and refreshes the selected composer catalog on return', async () => {
     const query = vi.fn();
     const list = vi.fn(async (id: string) => ({
@@ -1100,7 +1158,7 @@ describe('ManagedSessionsPage', () => {
     expect(mocks.editorProps?.skills).toEqual(skills);
     expect(mocks.editorProps?.fileReferenceActions).toBeDefined();
     expect(query).toHaveBeenCalledWith(
-      { workspaceId: 'ws', cwdRelative: '.', directory: '.', query: '' },
+      { sessionId: 's1', directory: '.', query: '' },
       expect.objectContaining({ clientId: expect.any(String) }),
     );
   });

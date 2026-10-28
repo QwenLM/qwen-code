@@ -156,7 +156,23 @@ public class ManagedAgentStore implements AgentStateStore {
     private final List<WebShellModelOption> modelCatalog;
     private ManagedAgentDefinitionStore definitions;
     private ManagedSessionSkills creationSkills;
+    private SessionWorktreeStore sessionWorktrees;
     private com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionPackageService extensionPackages;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setSessionWorktrees(SessionWorktreeStore value) {
+        this.sessionWorktrees = value;
+    }
+
+    @Override
+    public SessionWorktreeStore.Descriptor findSessionWorktree(String tenantId, String sessionId) {
+        return SessionWorktreeStore.descriptor(jdbc, tenantId, sessionId);
+    }
+
+    @Override
+    public Map<String, SessionWorktreeStore.Descriptor> findSessionWorktrees(String tenantId, List<String> sessionIds) {
+        return SessionWorktreeStore.descriptors(jdbc, tenantId, sessionIds);
+    }
 
     @org.springframework.beans.factory.annotation.Autowired
     public void setExtensionPackages(com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionPackageService value) {
@@ -479,6 +495,21 @@ public class ManagedAgentStore implements AgentStateStore {
             boolean planModeSupported, List<Map<String, Object>> skills, boolean publicChildrenSupported, String modelId,
             List<com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionPackages.Pin> extensionPins,
             Set<String> extensionLifecycleProfiles) {
+        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest,
+                agentId, requestedRevision, title, input, payloadDigest, selection, requestedApprovalMode,
+                approvalSelectionSupported, requestedPlanMode, planModeSupported, skills, publicChildrenSupported,
+                modelId, extensionPins, extensionLifecycleProfiles, null);
+    }
+
+    @Override
+    @Transactional
+    public Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
+            String idempotencyKey, String requestDigest, String agentId, String requestedRevision,
+            String title, List<Map<String, Object>> input, String payloadDigest, WorkspaceSelection selection,
+            String requestedApprovalMode, boolean approvalSelectionSupported, Boolean requestedPlanMode,
+            boolean planModeSupported, List<Map<String, Object>> skills, boolean publicChildrenSupported, String modelId,
+            List<com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionPackages.Pin> extensionPins,
+            Set<String> extensionLifecycleProfiles, SessionWorktreeStore.Plan worktree) {
         if (!input.isEmpty() && !workspaceFilesEnabled) {
             throw workspaceExecutionUnavailable();
         }
@@ -551,9 +582,16 @@ public class ManagedAgentStore implements AgentStateStore {
         }
         merged.addAll(skills);
         var effectiveSkills = AgentDefinitionExtensions.sessionSkills(merged);
+        if (worktree != null && sessionWorktrees == null) {
+            throw new ManagedAgentException(HttpStatus.CONFLICT, "worktree_unavailable", "Session worktrees are unavailable.");
+        }
+        ResolvedBinding target = worktree == null ? workspace : worktree.target(workspace);
         Admission admission = insertSession(tenantId, "CREATE_SESSION", idempotencyKey,
                 requestDigest, agentId, title, input, payloadDigest,
-                workspace, actorId, pin, null, planMode, modelId);
+                target, actorId, pin, null, planMode, modelId);
+        if (worktree != null) {
+            sessionWorktrees.admit(tenantId, actorId, admission.sessionId(), worktree, workspace);
+        }
         if (workspaceChildAgentsEnabled && publicChildrenSupported && !resident && (!sshWorkspace || managedExtensionExecutionEnabled)
                 && (managedExtensionExecutionEnabled || "qwen-code".equals(agentId) && pin.digest() == null)
                 && WorkspaceToolProfiles.SHELL.equals(pin.toolProfile())) {
@@ -1619,6 +1657,7 @@ public class ManagedAgentStore implements AgentStateStore {
             throw new ManagedAgentException(HttpStatus.CONFLICT, "session_not_active",
                     "The Session does not accept new Turns.");
         }
+        SessionWorktreeStore.requireReady(jdbc, tenantId, sessionId);
         ManagedConfigInstall.requireOpen(jdbc, tenantId, sessionId);
         if (hasActiveTurn(tenantId, sessionId)) {
             throw new ManagedAgentException(HttpStatus.CONFLICT, "turn_active",
@@ -3387,6 +3426,14 @@ public class ManagedAgentStore implements AgentStateStore {
                 operation)) {
             failure = "workspace_unavailable";
         }
+        if (failure == null) {
+            try {
+                SessionWorktreeStore.requireReady(jdbc, tenantId, sessionId);
+                SessionWorktreeStore.requireCwd(jdbc, tenantId, sessionId, operation.targetCwdRelative());
+            } catch (ManagedAgentException error) {
+                failure = error.getCode();
+            }
+        }
         if (failure != null) {
             jdbc.update(
                     "UPDATE ma_operation SET phase = 'FAILED', state ="
@@ -3934,6 +3981,7 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     private void requireCwdChangeRegistryFacts(SessionRecord session) {
+        SessionWorktreeStore.requireReady(jdbc, session.tenantId(), session.sessionId());
         if (!hasExecutionRegistryFacts(session.tenantId(),
                 session.sessionId())) {
             throw workspaceExecutionUnavailable();
@@ -5506,7 +5554,7 @@ public class ManagedAgentStore implements AgentStateStore {
         // Harness park enters only the coordinator's read-only observation
         // branch; cancellation still uses the normal dispatch lane.
         return jdbc.query(
-                "SELECT tenant_id, session_id, turn_id FROM ma_turn WHERE status IN ('ACCEPTED', 'RUNNING', 'CANCELLING') AND (dispatch_lease_until IS NULL OR dispatch_lease_until < ?) AND (retry_after IS NULL OR retry_after <= ?) AND (status = 'CANCELLING' OR error_code IS NULL OR error_code NOT IN ('" + AgentStateStore.WORKFLOW_RECOVERY_BLOCKED + "', '" + AgentStateStore.RUNTIME_RECOVERY_BLOCKED + "')) AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_turn.tenant_id AND private_scope.session_id = ma_turn.session_id AND private_scope.csi_guard = FALSE) ORDER BY gmt_modified ASC LIMIT ?",
+                "SELECT tenant_id, session_id, turn_id FROM ma_turn WHERE status IN ('ACCEPTED', 'RUNNING', 'CANCELLING') AND (dispatch_lease_until IS NULL OR dispatch_lease_until < ?) AND (retry_after IS NULL OR retry_after <= ?) AND (status = 'CANCELLING' OR error_code IS NULL OR error_code NOT IN ('" + AgentStateStore.WORKFLOW_RECOVERY_BLOCKED + "', '" + AgentStateStore.RUNTIME_RECOVERY_BLOCKED + "')) AND (status = 'CANCELLING' OR NOT EXISTS (SELECT 1 FROM ma_session_worktree w WHERE w.tenant_id = ma_turn.tenant_id AND w.session_id = ma_turn.session_id AND w.state <> 'READY')) AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_turn.tenant_id AND private_scope.session_id = ma_turn.session_id AND private_scope.csi_guard = FALSE) ORDER BY gmt_modified ASC LIMIT ?",
                 (result, row) -> new DispatchTarget(
                         result.getString("tenant_id"),
                         result.getString("session_id"),
@@ -5539,7 +5587,9 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " AND status IN ('ACCEPTED', 'RUNNING',"
                         + " 'CANCELLING') AND (dispatch_lease_until IS NULL"
                         + " OR dispatch_lease_until < ?) AND (retry_after IS"
-                        + " NULL OR retry_after <= ?)",
+                        + " NULL OR retry_after <= ?) AND (status = 'CANCELLING' OR NOT EXISTS"
+                        + " (SELECT 1 FROM ma_session_worktree w WHERE w.tenant_id = ma_turn.tenant_id"
+                        + " AND w.session_id = ma_turn.session_id AND w.state <> 'READY'))",
                 owner, now + leaseDuration.toMillis(), now, tenantId,
                 sessionId, turnId, now, now);
         return updated == 0 ? Optional.empty()
@@ -6414,6 +6464,27 @@ public class ManagedAgentStore implements AgentStateStore {
     public void failTurn(String tenantId, String sessionId, String turnId,
             String owner, String code, String message) {
         settleFailedTurn(tenantId, sessionId, turnId, owner, code, message, true);
+    }
+
+    @Transactional
+    public void failWorktreeInitialTurns(String tenantId, String sessionId, String code) {
+        requireLegacySessionForUpdate(tenantId, sessionId);
+        if (jdbc.queryForList("SELECT 1 FROM ma_session_worktree WHERE tenant_id = ? AND session_id = ?"
+                + " AND state IN ('FAILED', 'BLOCKED') FOR UPDATE", Integer.class, tenantId, sessionId).isEmpty()) {
+            return;
+        }
+        long now = clock.millis();
+        String message = "The Session worktree could not be prepared.";
+        List<String> turns = jdbc.queryForList("SELECT turn_id FROM ma_turn WHERE tenant_id = ? AND session_id = ?"
+                + " AND status = 'ACCEPTED' AND submission_attempted = FALSE FOR UPDATE", String.class, tenantId, sessionId);
+        for (String turnId : turns) {
+            jdbc.update("UPDATE ma_turn SET status = 'FAILED', error_code = ?, error_message = ?, completed_at = ?,"
+                    + " gmt_modified = ?, dispatch_owner = NULL, dispatch_lease_until = NULL, version = version + 1"
+                    + " WHERE tenant_id = ? AND session_id = ? AND turn_id = ? AND status = 'ACCEPTED'"
+                    + " AND submission_attempted = FALSE", code, message, now, now, tenantId, sessionId, turnId);
+            appendEvent(tenantId, sessionId, turnId, "turn.failed", Map.of("code", code, "message", message), true, null, now);
+            settleTurnCommands(tenantId, sessionId, turnId, now);
+        }
     }
 
     @Transactional

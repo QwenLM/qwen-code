@@ -96,8 +96,9 @@ export function useManagedFileReferences(
       try {
         const result = await api!.query(
           {
-            workspaceId: workspaceId!,
-            cwdRelative: cwdRelative!,
+            ...(sessionId === 'new'
+              ? { workspaceId: workspaceId!, cwdRelative: cwdRelative! }
+              : { sessionId }),
             directory,
             query,
           },
@@ -161,8 +162,9 @@ export function useManagedFileReferences(
           if (!revision) await query('.', '');
           const snapshot = await api.read(
             {
-              workspaceId,
-              cwdRelative,
+              ...(sessionId === 'new'
+                ? { workspaceId, cwdRelative }
+                : { sessionId }),
               path,
               expectedScopeRevision: revision!,
             },
@@ -200,7 +202,15 @@ export function useManagedFileReferences(
         }
       },
     };
-  }, [api, workspaceId, cwdRelative, source, clientId, workspace?.state]);
+  }, [
+    api,
+    workspaceId,
+    cwdRelative,
+    source,
+    clientId,
+    workspace?.state,
+    sessionId,
+  ]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -233,7 +243,12 @@ export function useManagedFileReferences(
       uploadScope?.source === source &&
       workspaceId &&
       cwdRelative
-      ? { ...uploadScope, workspaceId, cwdRelative }
+      ? {
+          ...uploadScope,
+          ...(sessionId === 'new'
+            ? { workspaceId, cwdRelative }
+            : { sessionId }),
+        }
       : undefined,
   );
 
@@ -298,7 +313,11 @@ export function useManagedFileReferences(
     if (!api || !workspaceId || !cwdRelative)
       throw new Error('Workspace file access is unavailable.');
     const scope = await api.query(
-      { workspaceId, cwdRelative, directory: '.', query: '' },
+      {
+        ...(sessionId === 'new' ? { workspaceId, cwdRelative } : { sessionId }),
+        directory: '.',
+        query: '',
+      },
       { clientId },
     );
     if (

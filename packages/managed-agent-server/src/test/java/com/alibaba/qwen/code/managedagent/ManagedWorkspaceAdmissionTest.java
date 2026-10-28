@@ -16,6 +16,7 @@ import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentDefinitionStor
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.SessionWorktreeStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
@@ -43,6 +44,7 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -2351,6 +2353,78 @@ class ManagedWorkspaceAdmissionTest {
     private ManagedAgentService workspaceFilesService(String tenant,
             boolean workspaceFiles) {
         return workspaceFilesService(tenant, workspaceFiles, null);
+    }
+
+    @Test
+    void preparingWorktreesProjectTheirTargetWithoutAdmittingMoreInput() throws Exception {
+        String tenant = "tenant-" + UUID.randomUUID();
+        String session = boundSession(tenant);
+        persistWorktree(tenant, session, "PREPARING");
+        ManagedAgentService enabled = boundServiceWithWorkingHarness();
+        var summary = enabled.getWebShellSession(tenant, "actor-a", session);
+        assertThat(summary.workspace().state()).isEqualTo("changing");
+        assertThat(summary.workspace().cwdRelative()).startsWith(".qwen-managed-worktrees/");
+        assertThat(summary.worktree().state()).isEqualTo("preparing");
+        assertThat(summary.capabilities().workspaceTurns()).isFalse();
+        assertRefused(() -> enabled.submitTurn(tenant, "actor-a", "next", session,
+                List.of(new InputBlock("text", "go"))), "worktree_preparing");
+        mvc.perform(get("/v1/agents/sessions/{sessionId}", session).header(TenantContextFilter.HEADER, tenant).principal(actor(tenant, "actor-a")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.worktree.session_id").value(session))
+                .andExpect(jsonPath("$.worktree.base_commit").value("a".repeat(40)))
+                .andExpect(jsonPath("$.worktree.state").value("preparing"));
+    }
+
+    @Test
+    void worktreePreparationGatesDispatchButPreservesCancellation() throws Exception {
+        String tenant = "tenant-" + UUID.randomUUID();
+        String session = boundSession(tenant);
+        var enabled = boundServiceWithWorkingHarness();
+        var admission = enabled.submitTurn(tenant, "actor-a", "initial", session, List.of(new InputBlock("text", "go")));
+        persistWorktree(tenant, session, "PREPARING");
+        assertThat(store.findDispatchable(System.currentTimeMillis(), 1000))
+                .noneMatch(target -> target.sessionId().equals(session));
+        assertThat(store.claimTurn(tenant, session, admission.turnId(), "owner", Duration.ofSeconds(30))).isEmpty();
+
+        jdbc.update("UPDATE ma_turn SET status = 'CANCELLING' WHERE tenant_id = ? AND session_id = ?", tenant, session);
+        assertThat(store.findDispatchable(System.currentTimeMillis(), 1000))
+                .anyMatch(target -> target.sessionId().equals(session));
+        assertThat(store.claimTurn(tenant, session, admission.turnId(), "owner", Duration.ofSeconds(30))).isPresent();
+        store.cancelBeforeAdmission(tenant, session, admission.turnId(), "owner");
+        assertThat(store.findTurn(tenant, session, admission.turnId()).orElseThrow().status()).isEqualTo("CANCELLED");
+    }
+
+    @Test
+    void failedWorktreePreparationSettlesInitialInputOnce() throws Exception {
+        String tenant = "tenant-" + UUID.randomUUID();
+        String session = boundSession(tenant);
+        var admission = boundServiceWithWorkingHarness().submitTurn(tenant, "actor-a", "initial", session,
+                List.of(new InputBlock("text", "go")));
+        persistWorktree(tenant, session, "FAILED");
+        store.failWorktreeInitialTurns(tenant, session, "worktree_prepare_failed");
+        store.failWorktreeInitialTurns(tenant, session, "worktree_prepare_failed");
+        assertThat(store.findTurn(tenant, session, admission.turnId()).orElseThrow().status()).isEqualTo("FAILED");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_public_event WHERE tenant_id = ? AND session_id = ?"
+                + " AND event_type = 'turn.failed'", Integer.class, tenant, session)).isEqualTo(1);
+    }
+
+    private void persistWorktree(String tenant, String session, String state) throws Exception {
+        String id = UUID.randomUUID().toString().replace("-", "");
+        String cwd = ".qwen-managed-worktrees/" + id;
+        var binding = store.requireSession(tenant, session).workspace();
+        var plan = new SessionWorktreeStore.Plan(tenant, "ws-a", 1, "storage-a", ".",
+                binding.getContextConfigRef(), 1, "/workspace", "root-identity", ".", ".",
+                "/workspace/.git", "common-identity", "main", "a".repeat(40), id, cwd, cwd, "qwen/" + id);
+        jdbc.update("UPDATE ma_session SET cwd_relative = ? WHERE tenant_id = ? AND session_id = ?", cwd, tenant, session);
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, operation_id, operation_kind, tenant_id,"
+                + " session_id, target_kind, target_key, request_digest, request_json, state, phase, gmt_create, gmt_modified)"
+                + " VALUES (?, ?, ?, 'SESSION_WORKTREE', ?, ?, 'SESSION', ?, 'digest', '{}', ?, ?, 1, 1)",
+                ManagedSchemaKeys.key(tenant, id), ManagedSchemaKeys.key(tenant), id, tenant, session,
+                ManagedSchemaKeys.key(session), state, state);
+        jdbc.update("INSERT INTO ma_session_worktree (tenant_id, session_id, workspace_id, storage_id, physical_key,"
+                + " worktree_id, owner_actor_key, state, revision, plan_json, operation_id, gmt_create, gmt_modified)"
+                + " VALUES (?, ?, 'ws-a', 'storage-a', ?, ?, ?, ?, 1, ?, ?, 1, 1)", tenant, session,
+                "a".repeat(64), id, ManagedWorkspaceRegistry.actorKey(tenant, "actor-a"), state, mapper.writeValueAsString(plan), id);
     }
 
     private ManagedAgentService workspaceFilesService(String tenant,

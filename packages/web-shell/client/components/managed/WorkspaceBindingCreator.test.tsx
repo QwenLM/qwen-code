@@ -11,6 +11,7 @@ import { JavaManagedAgentHttpError } from './java-managed-agent-client';
 import type {
   ManagedAgentProvider,
   ManagedSessionOptions,
+  ManagedSessionWorktree,
 } from './managed-agent-provider';
 import { WorkspaceBindingCreator } from './WorkspaceBindingCreator';
 import * as pendingStorage from './managed-pending-storage';
@@ -711,6 +712,218 @@ describe('WorkspaceBindingCreator', () => {
     });
     return createSession;
   }
+
+  const createdWorktree: ManagedSessionWorktree = {
+    id: 'worktree-a',
+    sessionId: 'session-a',
+    workspaceId: 'ws-a',
+    state: 'preparing',
+    branch: 'worktree-managed-a',
+    baseCommit: 'a'.repeat(40),
+    cwdRelative: '.qwen-managed-session-worktrees/a',
+    operationId: 'operation-a',
+    revision: 1,
+  };
+
+  function worktreeCreation() {
+    const createSession = directCreation();
+    provider.workspaceBinding!.list = vi.fn().mockResolvedValue({
+      data: [workspace],
+      defaultWorkspace: workspace,
+      supported: true,
+      supportsApprovalModeSelection: true,
+    });
+    provider.workspaceBinding!.getSessionOptions = vi.fn().mockResolvedValue({
+      approvalMode: 'default',
+      availableApprovalModes: ['default'],
+      inputAttachments: true,
+    });
+    const options = vi.fn().mockResolvedValue({
+      supported: true,
+      baseCommit: 'a'.repeat(40),
+      branches: ['main', 'topic'],
+    });
+    provider.sessionWorktrees = {
+      options,
+      list: vi.fn().mockResolvedValue({ data: [] }),
+      inspect: vi.fn(),
+      cleanup: vi.fn(),
+    };
+    getSession.mockResolvedValue({
+      sessionId: 'session-a',
+      agentId: 'agent-a',
+      initialApprovalMode: 'default',
+      workspace: {
+        workspaceId: 'ws-a',
+        cwdRelative: createdWorktree.cwdRelative,
+      },
+      worktree: createdWorktree,
+    });
+    return { createSession, options };
+  }
+
+  async function selectWorktree() {
+    await act(async () => {
+      container
+        .querySelectorAll<HTMLInputElement>(
+          'input[name="managed-worktree-mode"]',
+        )[1]!
+        .click();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200);
+    });
+  }
+
+  it('creates a worktree from HEAD and reads back the allocated target without accessing source files', async () => {
+    vi.useFakeTimers();
+    const { createSession, options } = worktreeCreation();
+    provider.workspaceFiles = { query: vi.fn(), read: vi.fn() };
+    await render();
+    vi.mocked(provider.workspaceFiles.query).mockClear();
+    await selectWorktree();
+    expect(options).toHaveBeenLastCalledWith(
+      { workspaceId: 'ws-a', cwdRelative: '.' },
+      expect.objectContaining({ clientId: 'client-a' }),
+    );
+    expect(editorMocks.props!.fileReferenceActions).toBeUndefined();
+    expect(editorMocks.props!.fileUploadTarget).toBeUndefined();
+    expect(editorMocks.props!.attachmentsEnabled).toBe(true);
+    await sendInitial('Work independently');
+    expect(createSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceId: 'ws-a',
+        cwdRelative: '.',
+        worktree: {},
+      }),
+      expect.anything(),
+    );
+    expect(provider.workspaceFiles.query).not.toHaveBeenCalled();
+    expect(onCreated).toHaveBeenCalledWith('session-a', 'ws-a');
+  });
+
+  it('keeps ordinary message attachments available before worktree preparation', async () => {
+    vi.useFakeTimers();
+    const { createSession } = worktreeCreation();
+    await render();
+    await selectWorktree();
+    await act(async () => {
+      editorMocks.props!.onSubmit(
+        'Read the attachment',
+        undefined,
+        [
+          {
+            name: 'notes.txt',
+            media_type: 'text/plain',
+            text: 'Message context',
+          },
+        ],
+        vi.fn(),
+      );
+      await flush();
+    });
+    expect(createSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        worktree: {},
+        input: expect.arrayContaining([
+          {
+            type: 'input_file',
+            name: 'notes.txt',
+            mime_type: 'text/plain',
+            text: 'Message context',
+          },
+        ]),
+      }),
+      expect.anything(),
+    );
+  });
+
+  it('freezes the selected base ref and idempotency key across a restored creation retry', async () => {
+    vi.useFakeTimers();
+    const { createSession } = worktreeCreation();
+    createSession.mockRejectedValueOnce(new TypeError('Lost response'));
+    await render();
+    await selectWorktree();
+    await typeInput('managed-worktree-base', 'topic');
+    expect(editorMocks.props!.disabled).toBe(true);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200);
+    });
+    await sendInitial('Frozen worktree input');
+    const first = createSession.mock.calls[0]!;
+    expect(first[0].worktree).toEqual({ baseRef: 'topic' });
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await render();
+    expect(
+      container.querySelector<HTMLInputElement>('#managed-worktree-base')!
+        .value,
+    ).toBe('topic');
+    expect(
+      container
+        .querySelector<HTMLInputElement>('#managed-worktree-base')!
+        .matches(':disabled'),
+    ).toBe(true);
+    await click('Retry the same request');
+    expect(createSession.mock.calls[1]![0]).toEqual(first[0]);
+    expect(createSession.mock.calls[1]![1].idempotencyKey).toBe(
+      first[1].idempotencyKey,
+    );
+    expect(onCreated).toHaveBeenCalledWith('session-a', 'ws-a');
+  });
+
+  it('keeps unsupported worktree creation blocked and does not silently use the current directory', async () => {
+    vi.useFakeTimers();
+    const { createSession, options } = worktreeCreation();
+    options.mockResolvedValue({
+      supported: false,
+      reason: 'worktree_layout_unsupported',
+      branches: [],
+    });
+    await render();
+    await selectWorktree();
+    expect(container.textContent).toContain('worktree_layout_unsupported');
+    expect(editorMocks.props!.disabled).toBe(true);
+    await sendInitial('Do not fall back');
+    expect(createSession).not.toHaveBeenCalled();
+    expect(createEmpty).not.toHaveBeenCalled();
+  });
+
+  it('rejects source workspace file annotations after switching to an independent worktree', async () => {
+    vi.useFakeTimers();
+    const { createSession } = worktreeCreation();
+    await render();
+    await selectWorktree();
+    await act(async () => {
+      editorMocks.props!.onSubmit(
+        'Read @source.ts',
+        undefined,
+        undefined,
+        vi.fn(),
+        {
+          inputAnnotations: [
+            {
+              type: 'reference',
+              start: 5,
+              end: 15,
+              text: '@source.ts',
+              reference: {
+                id: 'source',
+                kind: 'file',
+                label: 'source.ts',
+                metadata: {
+                  managedFile: { version: 1, source: 'previous-workspace' },
+                },
+              },
+            },
+          ],
+        },
+      );
+      await flush();
+    });
+    expect(createSession).not.toHaveBeenCalled();
+    expect(container.textContent).toContain('select the file again');
+  });
 
   async function sendInitial(text: string) {
     const commit = vi.fn();

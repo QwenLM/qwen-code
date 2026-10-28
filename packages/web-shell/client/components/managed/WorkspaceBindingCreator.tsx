@@ -9,6 +9,11 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import shellStyles from '../../App.module.css';
 import { useI18n } from '../../i18n';
 import { useManagedRecoveryText } from './managed-recovery-messages';
+import {
+  useManagedWorktreeReason,
+  useManagedWorktreeText,
+} from './managed-worktree-messages';
+import { ManagedSessionWorktrees } from './ManagedSessionWorktrees';
 import { ChatEditor } from '../ChatEditor';
 import type { WorkspaceSelectorOption } from '../WorkspaceSelector';
 import { HostLabel } from '../workspaces/HostLabel';
@@ -56,6 +61,7 @@ import type {
   ManagedModelPreset,
   ManagedInputBlock,
   ManagedSessionSkill,
+  ManagedSessionWorktreeOptions,
 } from './managed-agent-provider';
 import type { PromptImage, PromptFile } from '../../adapters/promptTypes';
 import {
@@ -90,6 +96,7 @@ interface PendingCreation {
   planMode?: boolean;
   skills?: ManagedSessionSkill[];
   extensionPins?: ManagedExtensionPin[];
+  worktree?: { baseRef?: string };
 }
 
 interface PendingWorkspace {
@@ -153,6 +160,7 @@ function readPending(
     if (typeof value !== 'object' || !value) return undefined;
     const item = value as Record<string, unknown>;
     const input = item['input'];
+    const worktree = item['worktree'];
     if (
       typeof item['agentId'] !== 'string' ||
       (item['modelId'] !== undefined &&
@@ -169,6 +177,14 @@ function readPending(
         !isManagedSessionSkills(item['skills'])) ||
       (item['extensionPins'] !== undefined &&
         !isManagedExtensionPins(item['extensionPins'])) ||
+      (worktree !== undefined &&
+        (typeof worktree !== 'object' ||
+          worktree === null ||
+          Array.isArray(worktree) ||
+          Object.keys(worktree).some((key) => key !== 'baseRef') ||
+          ('baseRef' in worktree &&
+            (typeof worktree.baseRef !== 'string' ||
+              !worktree.baseRef.trim())))) ||
       !isManagedInput(input) ||
       (item['sessionId'] !== undefined && typeof item['sessionId'] !== 'string')
     )
@@ -229,6 +245,8 @@ export function WorkspaceBindingCreator({
 }) {
   const { t } = useI18n();
   const recoveryText = useManagedRecoveryText();
+  const worktreeText = useManagedWorktreeText();
+  const worktreeReason = useManagedWorktreeReason();
   const workspaceId = explicitWorkspaceId ?? handoff?.workspaceId;
   const binding = provider.workspaceBinding!;
   const pendingKey = `qwen-managed-workspace-create:${provider.storageKey}`;
@@ -314,6 +332,27 @@ export function WorkspaceBindingCreator({
     selectingWorkspace ||
     Boolean(workspaceId && handledWorkspaceRequest.current !== workspaceId);
   const [cwdRelative, setCwdRelative] = useState(handoff?.cwdRelative ?? '.');
+  const [worktreeMode, setWorktreeMode] = useState(Boolean(pending?.worktree));
+  const [baseRef, setBaseRef] = useState(pending?.worktree?.baseRef ?? '');
+  const [worktreesOpen, setWorktreesOpen] = useState(false);
+  const [worktreeOptions, setWorktreeOptions] = useState<{
+    source: string;
+    value?: ManagedSessionWorktreeOptions;
+    error?: string;
+  }>();
+  const [worktreeOptionsRevision, setWorktreeOptionsRevision] = useState(0);
+  const worktreeSource = JSON.stringify([
+    selected,
+    cwdRelative,
+    baseRef.trim(),
+  ]);
+  const worktreeRequested = pending ? Boolean(pending.worktree) : worktreeMode;
+  const worktreeReady =
+    !worktreeRequested ||
+    Boolean(
+      worktreeOptions?.source === worktreeSource &&
+        worktreeOptions.value?.supported,
+    );
   const [cwdDraft, setCwdDraft] = useState<string>();
   const cwdEdited = useRef(Boolean(handoff?.cwdRelative));
   const modelPresets = binding.modelPresets ?? [];
@@ -382,6 +421,10 @@ export function WorkspaceBindingCreator({
         const saved = readPending(pendingKey, value);
         pendingRef.current = saved;
         setPending(saved);
+        if (saved?.worktree) {
+          setWorktreeMode(true);
+          setBaseRef(saved.worktree.baseRef ?? '');
+        }
         setBusy(false);
       },
       () => {
@@ -390,6 +433,51 @@ export function WorkspaceBindingCreator({
     );
     return () => abort.abort();
   }, [pendingKey]);
+
+  useEffect(() => {
+    if (!worktreeMode || !selected || pending || !provider.sessionWorktrees)
+      return;
+    const abort = new AbortController();
+    setWorktreeOptions(undefined);
+    const timer = setTimeout(() => {
+      void provider
+        .sessionWorktrees!.options(
+          {
+            workspaceId: selected,
+            cwdRelative,
+            ...(baseRef.trim() ? { baseRef: baseRef.trim() } : {}),
+          },
+          { clientId, signal: abort.signal },
+        )
+        .then(
+          (value) => {
+            if (!abort.signal.aborted)
+              setWorktreeOptions({ source: worktreeSource, value });
+          },
+          (failure: unknown) => {
+            if (!abort.signal.aborted)
+              setWorktreeOptions({
+                source: worktreeSource,
+                error: message(failure),
+              });
+          },
+        );
+    }, 200);
+    return () => {
+      abort.abort();
+      clearTimeout(timer);
+    };
+  }, [
+    provider.sessionWorktrees,
+    clientId,
+    selected,
+    cwdRelative,
+    baseRef,
+    worktreeSource,
+    worktreeMode,
+    pending,
+    worktreeOptionsRevision,
+  ]);
 
   useEffect(() => {
     try {
@@ -592,7 +680,7 @@ export function WorkspaceBindingCreator({
   const fileReferences = useManagedFileReferences(
     provider,
     clientId,
-    currentOptions?.inputAttachments
+    currentOptions?.inputAttachments && !worktreeRequested
       ? { workspaceId: selected, cwdRelative }
       : undefined,
   );
@@ -666,6 +754,8 @@ export function WorkspaceBindingCreator({
       currentOptions?.modelSelectionSupported !== true
     )
       return;
+    if (attempt?.worktree && !attempt.sessionId && !provider.sessionWorktrees)
+      return;
     const firstSubmission = !attempt;
     if (!attempt) {
       if (
@@ -683,7 +773,7 @@ export function WorkspaceBindingCreator({
         !files?.length
       )
         return;
-      if (!approvalReady) return;
+      if (!approvalReady || !worktreeReady) return;
       if (
         !supported ||
         !selectedPreset ||
@@ -737,6 +827,9 @@ export function WorkspaceBindingCreator({
         ...(modelId === undefined ? {} : { modelId }),
         workspaceId: selected,
         cwdRelative,
+        ...(worktreeRequested
+          ? { worktree: baseRef.trim() ? { baseRef: baseRef.trim() } : {} }
+          : {}),
         input,
         clientId,
         idempotencyKey: managedRequestId(),
@@ -777,6 +870,7 @@ export function WorkspaceBindingCreator({
             : { modelId: attempt.modelId }),
           workspaceId: attempt.workspaceId,
           cwdRelative: attempt.cwdRelative,
+          ...(attempt.worktree ? { worktree: attempt.worktree } : {}),
           ...(attempt.skills?.length ? { skills: attempt.skills } : {}),
           ...(attempt.extensionPins === undefined
             ? {}
@@ -837,7 +931,12 @@ export function WorkspaceBindingCreator({
         !session.workspace ||
         session.workspace.workspaceId !== attempt.workspaceId ||
         typeof session.workspace.cwdRelative !== 'string' ||
-        !session.workspace.cwdRelative
+        !session.workspace.cwdRelative ||
+        (attempt.worktree &&
+          (!session.worktree ||
+            session.worktree.sessionId !== createdSessionId ||
+            session.worktree.workspaceId !== attempt.workspaceId ||
+            session.worktree.cwdRelative !== session.workspace.cwdRelative))
       ) {
         throw new Error(
           t('managed.workspaceProtocolError', {
@@ -1246,6 +1345,90 @@ export function WorkspaceBindingCreator({
           {t('managed.newWorkspaceResume')}
         </Button>
       )}
+      {provider.sessionWorktrees && selected && interactive && (
+        <fieldset
+          className="space-y-2 rounded-md border p-3 text-sm"
+          disabled={busy || workspaceCreating || Boolean(pending) || loading}
+        >
+          <legend>{worktreeText('mode')}</legend>
+          <div className="flex flex-wrap gap-4">
+            <label className="flex items-center gap-2">
+              <input
+                type="radio"
+                name="managed-worktree-mode"
+                checked={!worktreeRequested}
+                onChange={() => setWorktreeMode(false)}
+              />
+              {worktreeText('current')}
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="radio"
+                name="managed-worktree-mode"
+                checked={worktreeRequested}
+                onChange={() => setWorktreeMode(true)}
+              />
+              {worktreeText('isolated')}
+            </label>
+          </div>
+          {worktreeRequested && (
+            <>
+              <label className="block" htmlFor="managed-worktree-base">
+                {worktreeText('base')}
+              </label>
+              <Input
+                id="managed-worktree-base"
+                value={pending?.worktree?.baseRef ?? baseRef}
+                placeholder={worktreeText('head')}
+                list="managed-worktree-branches"
+                onChange={(event) => setBaseRef(event.target.value)}
+              />
+              <datalist id="managed-worktree-branches">
+                {worktreeOptions?.value?.branches.map((branch) => (
+                  <option key={branch} value={branch} />
+                ))}
+              </datalist>
+              <p className="text-muted-foreground">
+                {worktreeText('committed')}
+              </p>
+              <p className="text-muted-foreground">{worktreeText('files')}</p>
+              {!pending &&
+                (worktreeOptions?.source !== worktreeSource ? (
+                  <p role="status">{worktreeText('checking')}</p>
+                ) : worktreeOptions.error ||
+                  !worktreeOptions.value?.supported ? (
+                  <div className="space-y-2">
+                    <p role="alert">
+                      {worktreeOptions.error ??
+                        worktreeReason(worktreeOptions.value?.reason)}
+                    </p>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() =>
+                        setWorktreeOptionsRevision((value) => value + 1)
+                      }
+                    >
+                      {t('managed.refresh')}
+                    </Button>
+                  </div>
+                ) : (
+                  <p>
+                    {worktreeText('baseCommit')}:{' '}
+                    {worktreeOptions.value.baseCommit?.slice(0, 12)}
+                  </p>
+                ))}
+            </>
+          )}
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => setWorktreesOpen(true)}
+          >
+            {worktreeText('manage')}
+          </Button>
+        </fieldset>
+      )}
       {extensionCatalog?.supported &&
         extensionCatalog.extensions.length > 0 && (
           <fieldset
@@ -1348,6 +1531,7 @@ export function WorkspaceBindingCreator({
                 (!pending.sessionId &&
                   (loading ||
                     !supported ||
+                    (Boolean(pending.worktree) && !provider.sessionWorktrees) ||
                     (pending.approvalMode !== undefined &&
                       !supportsApprovalModeSelection)))
               }
@@ -1556,6 +1740,7 @@ export function WorkspaceBindingCreator({
               workspaceSelectionBlocked ||
               Boolean(switchTo) ||
               !approvalReady ||
+              !worktreeReady ||
               busy ||
               !selectedPreset ||
               !items.some(
@@ -1814,14 +1999,16 @@ export function WorkspaceBindingCreator({
                 workspaceSelectionBlocked ||
                 workspaceCreating ||
                 Boolean(pending) ||
-                !approvalReady
+                !approvalReady ||
+                !worktreeReady
               }
               dialogOpen={
                 !interactive ||
                 workspaceDialogOpen ||
                 cwdDraft !== undefined ||
                 Boolean(directoryPicker) ||
-                registrationOpen
+                registrationOpen ||
+                worktreesOpen
               }
               isPreparing={
                 busy || fileReferences.busy || loading || optionsLoading
@@ -1840,6 +2027,15 @@ export function WorkspaceBindingCreator({
   return (
     <>
       {!creationOnly && sessionCreator}
+      {provider.sessionWorktrees && selected && worktreesOpen && (
+        <ManagedSessionWorktrees
+          provider={provider}
+          clientId={clientId}
+          workspaceId={selected}
+          open
+          onOpenChange={setWorktreesOpen}
+        />
+      )}
       {interactive && !creationOnly && cwdDraft !== undefined && (
         <Dialog
           open
