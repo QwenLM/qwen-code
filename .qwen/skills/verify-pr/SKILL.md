@@ -369,19 +369,19 @@ so "is anything new?" answers "no" and a hand-rolled comparison reads clean —
 measured: 324 review comments at the start, 0 on the re-fetch, because the call
 failed rather than the PR going quiet. The script therefore treats a failed
 fetch as fatal and writes no snapshot, and treats a list shorter than the start
-snapshot, a vanished id, a moved head or a changed state as dirty, and refuses a
-`--compare` whose two sides are the same file. **A question you did not get
-answered is never a clean guard.** Timestamps alone are not enough to answer
-"was anything edited?": reviews carry `submitted_at`, not `updated_at`, and
-neither editing a review body nor dismissing the review moves it — measured on
-this repo's API. A `CHANGES_REQUESTED` review rewritten to LGTM, or dismissed
+snapshot, a vanished id, a moved head or a changed PR state as dirty, and
+refuses a `--compare` whose two sides are the same file. **A question you did
+not get answered is never a clean guard.** Timestamps alone are not enough to
+answer "was anything edited?": reviews carry `submitted_at`, not `updated_at`,
+and neither editing a review body nor dismissing the review moves it — measured
+on this repo's API. A `CHANGES_REQUESTED` review rewritten to LGTM, or dismissed
 outright, is the most consequential change a round can miss, and a stamp-only
 comparison calls both clean. The snapshot therefore carries each item's body,
-and each review's state, next to its stamp and compares all three, and refuses
-a fetched list missing either rather than comparing it as though nothing had
-changed. Those are the fields that change what a reviewer said or decided;
-reaction counts are deliberately not compared, so a thumbs-up does not make a
-round dirty.
+and each review's state, next to its stamp and compares all three; it refuses a
+fetched item with no body, or a review with no state, rather than comparing
+them as though nothing had changed. Those are the fields that change what a
+reviewer said or decided; reaction counts are deliberately not compared, so a
+thumbs-up does not make a round dirty.
 
 **Local rounds start from CI.** Before building any harness, pull the
 failing test names from every red job and reproduce them on both arms: a

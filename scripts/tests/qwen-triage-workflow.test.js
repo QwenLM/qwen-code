@@ -5351,7 +5351,8 @@ describe('qwen-triage verify hardening round 2', () => {
       'neither editing a review body nor dismissing the review moves it',
     );
     expect(flat).toContain("and each review's state, next to its stamp");
-    expect(flat).toContain('refuses a fetched list missing either');
+    expect(flat).toContain('refuses a fetched item with no body');
+    expect(flat).toContain('or a review with no state');
     expect(flat).toContain('reaction counts are deliberately not compared');
   });
 
