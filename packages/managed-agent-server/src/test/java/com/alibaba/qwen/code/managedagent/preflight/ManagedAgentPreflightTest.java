@@ -13,6 +13,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.SQLException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -2056,6 +2057,53 @@ class ManagedAgentPreflightTest {
                 ManagedAgentPreflight.findManifest(relative.toString()));
         assertEquals("999",
                 ManagedAgentPreflight.expectedSchemaVersion(manifest));
+    }
+
+    @Test
+    void readsAnOlderSchemaAsTheUpgradeTheFirstStartFinishes() {
+        ManagedAgentPreflight.SchemaValidation valid = () -> {};
+        for (String[] same : new String[][] {
+                {"2", "2"}, {null, "2"}, {"2", null}, {"1.0", "1"}}) {
+            assertEquals(ManagedAgentPreflight.Status.PASS,
+                    ManagedAgentPreflight.schemaCheck(same[0], same[1], valid)
+                            .status(), same[0] + "/" + same[1]);
+        }
+        // Flyway order, not text order: 1.9 comes before 1.10.
+        ManagedAgentPreflight.Check older =
+                ManagedAgentPreflight.schemaCheck("1.9", "1.10", valid);
+        assertEquals(ManagedAgentPreflight.Status.WARN, older.status());
+        assertEquals("schema=1.9; the first start migrates it to 1.10,"
+                + " which only a database backup undoes", older.detail());
+        ManagedAgentPreflight.Check newer =
+                ManagedAgentPreflight.schemaCheck("10", "9", valid);
+        assertEquals(ManagedAgentPreflight.Status.FAIL, newer.status());
+        assertEquals("schema=10 but the manifest expects 9", newer.detail());
+        assertEquals(ManagedAgentPreflight.Status.FAIL,
+                ManagedAgentPreflight.schemaCheck("2a", "2", valid).status());
+    }
+
+    @Test
+    void validatesASchemaAtThisReleasesVersionAsTheServerDoes() {
+        int[] runs = {0};
+        ManagedAgentPreflight.SchemaValidation rewritten = () -> {
+            runs[0]++;
+            throw new SQLException(
+                    "Managed schema column is missing: ma_session.x");
+        };
+        ManagedAgentPreflight.Check check =
+                ManagedAgentPreflight.schemaCheck("1", "1", rewritten);
+        assertEquals(ManagedAgentPreflight.Status.FAIL, check.status());
+        assertEquals("schema=1 does not match this distribution: Managed"
+                + " schema column is missing: ma_session.x", check.detail());
+        // Neither a fresh database nor one an upgrade has yet to migrate is
+        // held to this release's baseline.
+        assertEquals(ManagedAgentPreflight.Status.PASS,
+                ManagedAgentPreflight.schemaCheck(null, "1", rewritten)
+                        .status());
+        assertEquals(ManagedAgentPreflight.Status.WARN,
+                ManagedAgentPreflight.schemaCheck("1", "2", rewritten)
+                        .status());
+        assertEquals(1, runs[0]);
     }
 
     @Test

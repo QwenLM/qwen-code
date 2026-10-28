@@ -467,6 +467,8 @@ export async function createReferenceDistribution({
   for (const file of [
     'qwen-managed-agent-bootstrap',
     'qwen-managed-agent-bootstrap.mjs',
+    'qwen-managed-agent-upgrade',
+    'qwen-managed-agent-upgrade.mjs',
   ]) {
     await copy(
       root,
@@ -601,6 +603,7 @@ export async function createReferenceDistribution({
     `${rootName}/bin/qwen-managed-agent-operator-recovery`,
     `${rootName}/bin/qwen-managed-agent-admin`,
     `${rootName}/bin/qwen-managed-agent-bootstrap`,
+    `${rootName}/bin/qwen-managed-agent-upgrade`,
     `${rootName}/config/application.example.yml`,
     ...systemdFiles.map((file) => `${rootName}/systemd/${file}`),
   ]) {

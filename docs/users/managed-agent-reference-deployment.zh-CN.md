@@ -101,7 +101,9 @@ bin/qwen-managed-agent-server --check
 
 检查范围包括 JDK、服务账号、配置文件及其权限、凭据密钥环、启动期属性校验、auth 与绑定组合、Harness、Workspace files 与 Shell 的交叉配置（含 mount、creation root 或 SSH 节点要求）、Broker 凭据与目录、Workspace `cwd`、端口占用、上次运行遗留的 Runtime worker，以及 MySQL 连通性、`performance_schema` 授权和 Flyway 版本与 `manifest.json` 的一致性。`WARN` 与 `SKIP` 不导致失败；任一 `FAIL` 退出码为 1。
 
-`harness` 行会像第一个 Session 那样与单个配置的 Harness 协商；使用 Harness pool 时，只有在 Session Store 已启用且配置了 binding key 后，才对 pool 的端点跳过，否则报 FAIL。capability digest 不一致、缺少协议或必需的 feature、或者 Harness 缺少某个已配置 Workspace profile 所需的 lifecycle 时报 FAIL；Harness 运行的 Qwen Code 版本与 `manifest.json` 写明的不同，或者 Harness 没有说明版本时报 WARN。端口检查会实际绑定配置地址，`workers` 行会对仍在 Runtime 状态目录中运行的 worker 给出警告，因此应先停止服务。服务运行期间请加上 `--online`：端口相关的行改为检查是否有进程在监听；`workers` 行只报告已停止的服务端遗留的 worker，对持久模式的 Broker 则跳过，因为它会接管这些 worker。该命令不校验原生 Workspace storage 注册。
+`harness` 行会像第一个 Session 那样与单个配置的 Harness 协商；使用 Harness pool 时，只有在 Session Store 已启用且配置了 binding key 后，才对 pool 的端点跳过，否则报 FAIL。capability digest 不一致、缺少协议或必需的 feature、或者 Harness 缺少某个已配置 Workspace profile 所需的 lifecycle 时报 FAIL；Harness 运行的 Qwen Code 版本与 `manifest.json` 写明的不同，或者 Harness 没有说明版本时报 WARN。端口检查会像服务端一样实际绑定配置地址，因此刚停止的服务端留在 `TIME_WAIT` 的端口算作空闲；`workers` 行会对仍在 Runtime 状态目录中运行的 worker 给出警告，因此应先停止服务。服务运行期间请加上 `--online`：端口相关的行改为检查是否有进程在监听；`workers` 行只报告已停止的服务端遗留的 worker，对持久模式的 Broker 则跳过，因为它会接管这些 worker。该命令不校验原生 Workspace storage 注册。
+
+数据库的 Flyway 版本低于 `manifest.json` 写明的版本时，`database` 行报 WARN：这是升级后、新版本首次启动迁移之前的数据库状态，首次启动会完成迁移。数据库版本更高时报 FAIL。版本正好等于 `manifest.json` 写明的版本时，该行会像服务端启动时那样校验 schema，不匹配就报 FAIL，例如实验版在原地修改了 schema 基线。
 
 ## 维护命令
 
@@ -133,6 +135,36 @@ Hosted Harness 通过它自己的环境访问同一个 Broker，既不经命令�
 
 ## 升级
 
+在 systemd 布局下，新分发产物中的 `bin/qwen-managed-agent-upgrade` 分阶段执行升级。每个阶段都以 root 身份、在已解压并校验过的新压缩包目录中运行：
+
+```bash
+cd qwen-managed-agent-reference-<new-version>
+bin/qwen-managed-agent-upgrade check
+# 停止新的入口准入，等待已准入的工作完成结算。
+bin/qwen-managed-agent-upgrade stop
+bin/qwen-managed-agent-upgrade backup --to /var/backups/qwen-managed-agent/<date>
+bin/qwen-managed-agent-upgrade install --backup /var/backups/qwen-managed-agent/<date>
+# 执行 check 打印的人工步骤，例如为 Harness 安装 Qwen Code。
+bin/qwen-managed-agent-upgrade start
+bin/qwen-managed-agent-upgrade verify --tenant <tenant> --turn
+# 恢复入口流量。
+```
+
+每个阶段都会重新读取 unit、其环境文件和已安装的版本；上一阶段留下的状态不符合预期时就拒绝执行，因此中断的升级可以从失败的阶段继续。unit 名不是 `qwen-managed-agent-server` 和 `qwen-hosted-harness` 时，用 `--server-unit` 和 `--harness-unit` 指定；命令通过这两个 unit 找到已安装的版本、环境文件和服务账号。
+
+- `check` 不做任何改动。它按 `SHA256SUMS` 校验新分发产物，比较新旧两个版本（版本号、服务端 jar 中的 Flyway 脚本、Java、Node.js 与 Qwen Code），并读取 Harness 的 Broker 配置、unit 模板、已安装版本 `config/` 中的运维文件以及版本目录布局。它为每项输入打印一行，再打印一份计划，把人工步骤放在对应位置；任一 FAIL 时退出码为 1。如果新版本修改或删除了已安装数据库执行过的脚本，`database` 行报 FAIL：在首个正式版发布之前，版本可能会原地重写 schema 基线，这样的版本无法在现有数据库上启动。
+- `stop` 重新执行上述检查，检查不通过就什么都不停。它先停止控制面，再停止 `KillMode=process` 留在其 cgroup 中的 Runtime worker 并等待它们退出（`--timeout`，默认 60 秒），最后停止 Harness。
+- `backup --to <新的空目录>` 要求两个 unit 都已停止且没有遗留 worker。它用 `mysqldump` 写出 `database.sql`，unit 中的 `SPRING_DATASOURCE_*` 凭据通过临时选项文件传入，而不是放在命令行上；写出 `QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY` 的 `runtime-state.tar`；以及 `configuration.tar`，其中包含 unit 文件、它们的环境文件、Harness 凭据文件、`SPRING_CONFIG_ADDITIONAL_LOCATION` 指向的文件和已安装版本的 `config/`。所有文件都是 `0600`，所在目录为 `0700`；最后写入的 `backup.json` 记录各文件的校验和。`--mysqldump <path>` 指定其他客户端；数据库已用其他方式备份时，用 `--skip-database` 跳过导出。备份失败时会删除已写出的内容。
+- `install --backup <目录>` 拒绝其他版本的备份、内容有变化的备份文件，以及控制面在备份之后又启动过的备份。它把新版本复制到 `<分发路径>-releases/<version>`，例如 `/opt/qwen-managed-agent-releases/<version>`（用 `--releases` 指定其他目录），把已安装版本 `config/` 中的运维文件连同属主和权限复制过去，再用一次 rename 把分发路径指向新版本。第一次运行会把已安装的目录移到 `<releases>/<旧版本>`，并在原位置放一个链接，因此 unit 中的路径不变。旧版本保留在原处。
+- `install` 之前，以及 Harness 的 Broker 配置仍需按下文第 5 步修改时，`start` 会拒绝执行。它先启动 Harness，再以服务账号、按 unit 的环境运行 `bin/qwen-managed-agent-server --check`，通过后才启动控制面，并等待 actuator 报告健康（`--timeout`，默认 300 秒）。Flyway 在这次启动中迁移 schema。
+- `verify` 以同样方式运行 `--check --online` 并读取 actuator。指定 `--tenant <id>` 时，它读取该租户最早的 Session 及其 Item；`--turn` 还会创建一个 Session 并等待一个 Turn 完成，这会调用模型。使用签名认证时两者都跳过，请通过入口读取 Session。
+
+该命令只启动和停止 unit，不会停止入口流量、安装 Qwen Code、修改环境文件或 unit 文件，也不会删除任何版本。`check` 提示 unit 模板有变化时，请在 `start` 之前把变化同步到已安装的 unit，并执行 `systemctl daemon-reload`。
+
+### 手工流程
+
+其他布局按以下步骤操作；systemd 布局下由上述命令自动完成这些步骤：
+
 1. 下载并校验新压缩包，读取新旧两个 manifest。在改动运行中部署前，确认新的 Qwen Code/Harness、Java、协议与数据库要求。
 2. 停止新的入口准入，按照部署既有 drain 流程等待已准入工作完成结算。
 3. 备份 MySQL、`QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY`、完整 Runtime credential key ring、运维自有的 `server.env` 与 `harness.env`，以及精确旧版分发产物。分发产物升级期间不要轮换 credential key。
@@ -142,6 +174,20 @@ Hosted Harness 通过它自己的环境访问同一个 Broker，既不经命令�
 7. 要求 actuator 健康检查通过，读取一个既有 Session 与历史，再完成一个新的无工具 Turn，之后才能恢复入口流量。任何可选工具 capability 都必须在重新验收后才能开启。
 
 不支持数据库降级。如果在恢复流量前启动或验证失败，应修正配置并重试同一产物。如需退回到 manifest 声明较旧 schema 范围的版本，必须在接受任何新写入前同时恢复升级前的数据库与 Runtime-state 备份；不得假设旧 server 可以直接运行在已迁移数据库上。任何退回旧版分发产物的操作，都要从同一份备份恢复 `server.env` 与 `harness.env`，因为第 5 步已为新版本改写了它们。
+
+使用该命令生成的备份时，在两个 unit 都已停止的情况下按以下步骤退回旧版本：
+
+```bash
+mysql -u root -e 'DROP DATABASE qwen_managed_agent'
+mysql -u root < <backup>/database.sql        # 重新创建数据库
+tar -C <runtime state directory> --numeric-owner -xpf <backup>/runtime-state.tar
+tar -C / --numeric-owner -xpf <backup>/configuration.tar
+ln -sfn /opt/qwen-managed-agent-releases/<old version> /opt/qwen-managed-agent
+systemctl daemon-reload
+systemctl start qwen-hosted-harness qwen-managed-agent-server
+```
+
+解压到 Runtime 状态目录之前先清空该目录。如果新控制面因为数据库与其 schema 不匹配而拒绝启动，它没有做任何迁移，只需恢复链接和文件。
 
 ## 轮换 Runtime credential key
 

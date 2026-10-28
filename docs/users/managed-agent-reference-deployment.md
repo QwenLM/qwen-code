@@ -101,7 +101,9 @@ bin/qwen-managed-agent-server --check
 
 It covers the JDK, the service account, the configuration file and its permissions, the credential key ring, the startup property validation, the auth/bind combination, the Harness, the Workspace files and Shell cross-settings (including the mount, creation-root or SSH-node requirement), broker credentials and directories, the Workspace `cwd`, free ports, Runtime workers an earlier run left alive, and MySQL connectivity, the `performance_schema` grant and the Flyway version against `manifest.json`. `WARN` and `SKIP` do not fail; any `FAIL` exits 1.
 
-The `harness` row negotiates with a single configured Harness as the first Session does; with a Harness pool it skips the pool's endpoints once the Session Store is enabled with a binding key, and fails until then. It fails when the capability digest differs, the protocol or a required feature is missing, or the Harness lacks the lifecycle a configured Workspace profile needs. It warns when the Harness runs another Qwen Code version than `manifest.json` names, or does not say which. The port checks bind the configured addresses, and the `workers` row warns about workers still running in the Runtime state directory, so stop the service first. While it runs, add `--online`: the port rows then check that something listens, and the `workers` row reports only workers a stopped server left behind, or is skipped for a durable Broker, which adopts them. The command does not verify the native Workspace storage registration.
+The `harness` row negotiates with a single configured Harness as the first Session does; with a Harness pool it skips the pool's endpoints once the Session Store is enabled with a binding key, and fails until then. It fails when the capability digest differs, the protocol or a required feature is missing, or the Harness lacks the lifecycle a configured Workspace profile needs. It warns when the Harness runs another Qwen Code version than `manifest.json` names, or does not say which. The port checks bind the configured addresses the way the server does, so a port the stopped server left in `TIME_WAIT` counts as free, and the `workers` row warns about workers still running in the Runtime state directory, so stop the service first. While it runs, add `--online`: the port rows then check that something listens, and the `workers` row reports only workers a stopped server left behind, or is skipped for a durable Broker, which adopts them. The command does not verify the native Workspace storage registration.
+
+The `database` row warns when the database's Flyway version is older than `manifest.json` names: that is an upgraded database before the first start of the new release, which migrates it. It fails when the database is newer. At the version `manifest.json` names, it validates the schema as the server does at startup, and fails when the database does not match, as when an experimental release changed its schema baseline in place.
 
 ## Maintenance commands
 
@@ -133,6 +135,36 @@ Before admitting file, Shell, or child Git work, complete the native storage reg
 
 ## Upgrade
 
+On the systemd layout, the new distribution's `bin/qwen-managed-agent-upgrade` runs the upgrade in phases. Run each as root from the extracted and verified archive:
+
+```bash
+cd qwen-managed-agent-reference-<new-version>
+bin/qwen-managed-agent-upgrade check
+# Stop new ingress and let admitted work settle.
+bin/qwen-managed-agent-upgrade stop
+bin/qwen-managed-agent-upgrade backup --to /var/backups/qwen-managed-agent/<date>
+bin/qwen-managed-agent-upgrade install --backup /var/backups/qwen-managed-agent/<date>
+# The manual steps check printed, such as installing Qwen Code for the Harness.
+bin/qwen-managed-agent-upgrade start
+bin/qwen-managed-agent-upgrade verify --tenant <tenant> --turn
+# Reopen ingress.
+```
+
+Each phase reads the units, their environment files and the installed release again, and refuses unless the previous phase left them as it expects, so an interrupted upgrade resumes at the phase that failed. `--server-unit` and `--harness-unit` name units other than `qwen-managed-agent-server` and `qwen-hosted-harness`; the command finds the installed release, the environment files and the service account through them.
+
+- `check` changes nothing. It verifies the new distribution against its `SHA256SUMS`, compares both releases (version, the Flyway scripts in the server jars, Java, Node.js and Qwen Code), and reads the Harness Broker settings, the unit templates, operator files in the installed `config/` and the release layout. It prints one row per input and a plan with the manual steps where they fall, and exits 1 on any FAIL. The `database` row fails when the new release changed or removed a script the installed database ran: until the first formal release, a release may rewrite its schema baseline in place, and such a release cannot start on the existing database.
+- `stop` repeats those checks and stops nothing unless they pass. It stops the control plane, stops the Runtime workers that `KillMode=process` leaves in its cgroup and waits for them (`--timeout`, 60 seconds by default), then stops the Harness.
+- `backup --to <new empty directory>` needs both units stopped and no worker left. It writes `database.sql` with `mysqldump`, passing the unit's `SPRING_DATASOURCE_*` credentials through a temporary option file rather than the command line; `runtime-state.tar` of `QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY`; and `configuration.tar` of the unit files, their environment files, the Harness credentials file, the `SPRING_CONFIG_ADDITIONAL_LOCATION` files and the installed `config/`. Every file is `0600` in a `0700` directory, and `backup.json`, written last, records their checksums. `--mysqldump <path>` names another client, and `--skip-database` skips the dump when the database is backed up another way. A failed backup removes what it wrote.
+- `install --backup <directory>` refuses a backup of another release, a backup file that changed, and a backup the control plane has started since. It copies the release to `<distribution>-releases/<version>`, such as `/opt/qwen-managed-agent-releases/<version>` (`--releases` names another directory), copies operator files from the installed `config/` with their owner and mode, and points the distribution path at the new release with one rename. The first run moves the installed directory to `<releases>/<old version>` and puts a link in its place, so the units keep their paths. The previous release stays where it is.
+- `start` refuses before `install`, and while the Harness Broker settings still need step 5 below. It starts the Harness, runs `bin/qwen-managed-agent-server --check` as the service account with the unit's environment, starts the control plane only when that passes, and waits for a healthy actuator (`--timeout`, 300 seconds by default). Flyway migrates the schema during this start.
+- `verify` runs `--check --online` the same way and reads the actuator. With `--tenant <id>`, it reads the tenant's oldest Session and its Items; `--turn` also creates a Session and waits for one Turn, which calls the model. Signed authentication skips both; read a Session through the ingress instead.
+
+The command starts and stops units only. It never stops ingress, installs Qwen Code, edits environment or unit files, or deletes a release. When `check` warns that a unit template changed, carry the change over to the installed unit and run `systemctl daemon-reload` before `start`.
+
+### Manual procedure
+
+Other layouts follow these steps, which the command automates on the systemd layout:
+
 1. Download and verify the new archive and read both manifests. Confirm the new Qwen Code/Harness, Java, protocol, and database requirements before touching the running deployment.
 2. Stop new ingress. Wait for admitted work to settle according to the deployment's existing drain procedure.
 3. Back up MySQL, `QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY`, the complete Runtime credential key ring, the operator-owned `server.env` and `harness.env`, and the exact old distribution. Do not rotate the credential key during the distribution upgrade.
@@ -142,6 +174,20 @@ Before admitting file, Shell, or child Git work, complete the native storage reg
 7. Require a healthy actuator response, read an existing Session and history, then complete one new no-tool Turn before reopening ingress. Requalify any optional tool capability before enabling it.
 
 Database downgrade is unsupported. If startup or validation fails before traffic resumes, correct the configuration and retry the same artifact. To return to a version whose manifest has an older schema range, restore the pre-upgrade database and Runtime-state backup together before accepting any new write; never run an older server against a migrated database by assumption. Any return to the previous distribution also restores `server.env` and `harness.env` from the same backup, because step 5 rewrites them for the new version.
+
+With the command's backup, return to the previous release with both units stopped:
+
+```bash
+mysql -u root -e 'DROP DATABASE qwen_managed_agent'
+mysql -u root < <backup>/database.sql        # recreates the database
+tar -C <runtime state directory> --numeric-owner -xpf <backup>/runtime-state.tar
+tar -C / --numeric-owner -xpf <backup>/configuration.tar
+ln -sfn /opt/qwen-managed-agent-releases/<old version> /opt/qwen-managed-agent
+systemctl daemon-reload
+systemctl start qwen-hosted-harness qwen-managed-agent-server
+```
+
+Empty the Runtime state directory before extracting into it. When the new control plane refused to start because the database did not match its schema, it migrated nothing, and the link and the files alone go back.
 
 ## Rotate the Runtime credential key
 

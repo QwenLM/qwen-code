@@ -77,6 +77,10 @@ async function fixture(root) {
       '#!/usr/bin/env sh\n',
     'packages/managed-agent-server/distribution/bin/qwen-managed-agent-bootstrap.mjs':
       'export {};\n',
+    'packages/managed-agent-server/distribution/bin/qwen-managed-agent-upgrade':
+      '#!/usr/bin/env sh\nupgrade\n',
+    'packages/managed-agent-server/distribution/bin/qwen-managed-agent-upgrade.mjs':
+      'export {};\n',
     'packages/managed-agent-server/src/main/resources/openapi/managed-agent-public-api.openapi.json':
       JSON.stringify({ info: { version: '1.46.0' } }),
     'packages/managed-agent-server/src/main/resources/db/managed-schema/V1__baseline.sql':
@@ -189,6 +193,12 @@ test('packages an independently verifiable reference distribution', async () => 
       ),
       '#!/usr/bin/env sh\n',
     );
+    const upgrade = path.join(bundle, 'bin/qwen-managed-agent-upgrade');
+    assert.equal(
+      await readFile(upgrade, 'utf8'),
+      '#!/usr/bin/env sh\nupgrade\n',
+    );
+    assert.equal((await stat(upgrade)).mode & 0o777, 0o755);
     execFileSync('sha256sum', ['--check', 'SHA256SUMS.txt'], {
       cwd: output,
       stdio: 'pipe',
