@@ -11528,6 +11528,53 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('reports an uninitialized snapshot when catalog enumeration throws', async () => {
+    // A partial build failure must not look like a valid empty catalog: the
+    // daemon latches `initialized: true` and then prefers it over its own
+    // enumeration, and sibling routes publish the same envelope.
+    mockConfig = {
+      ...mockConfig,
+      getTargetDir: vi.fn().mockReturnValue('/work/status'),
+      getWorkingDir: vi.fn().mockReturnValue('/work/status'),
+      isSafeMode: vi.fn().mockReturnValue(false),
+      getBareMode: vi.fn().mockReturnValue(false),
+      getExtensionManager: vi.fn().mockReturnValue({
+        refreshCache: vi.fn().mockResolvedValue(undefined),
+        refreshCacheIfSourcesChanged: vi.fn().mockResolvedValue(false),
+      }),
+      getSkillManager: vi.fn().mockReturnValue({
+        getCachedSkills: vi.fn().mockImplementation(() => {
+          throw new Error('broken skill catalog');
+        }),
+      }),
+    } as unknown as Config;
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.workspaceSkills, {}),
+    ).resolves.toMatchObject({
+      initialized: false,
+      skills: [],
+      errors: [
+        { kind: 'skills', status: 'error', error: 'broken skill catalog' },
+      ],
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('refreshes the skill cache when extension sources moved under a read', async () => {
     // Extensions have no watcher, so this is the only path by which an
     // extension installed outside the daemon reaches the snapshot. Extension
