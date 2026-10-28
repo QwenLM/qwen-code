@@ -13371,12 +13371,15 @@ describe('Session', () => {
         });
 
         session.dispose();
+        getAvailableCommandsSpy.mockClear();
         vi.mocked(mockClient.sessionUpdate).mockClear();
         await fs.writeFile(
           skillFile,
           '---\nname: review\ndescription: Review after disposal\n---\n\nReview.\n',
         );
         await skillManager.refreshCache();
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(getAvailableCommandsSpy).not.toHaveBeenCalled();
         expect(mockClient.sessionUpdate).not.toHaveBeenCalled();
       } finally {
         if (previousQwenHome === undefined) {
@@ -13413,6 +13416,95 @@ describe('Session', () => {
       ]);
 
       expect(outcome).toBe('resolved');
+    });
+
+    describe('with a real SkillManager', () => {
+      const makeCommand = (name: string) => ({
+        name,
+        description: name,
+        kind: 'built-in' as const,
+        source: 'builtin-command' as const,
+        sourceLabel: 'Built-in',
+        supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+        modelInvocable: false,
+      });
+      const frames = () =>
+        vi
+          .mocked(mockClient.sessionUpdate)
+          .mock.calls.filter(
+            ([params]) =>
+              params.update.sessionUpdate === 'available_commands_update',
+          );
+      const flush = () => new Promise((resolve) => setTimeout(resolve, 20));
+      let skillManager: InstanceType<typeof core.SkillManager>;
+
+      beforeEach(() => {
+        session.dispose();
+        skillManager = new core.SkillManager(mockConfig);
+        vi.mocked(mockConfig.getSkillManager).mockReturnValue(skillManager);
+        session = new Session(
+          'test-session-id',
+          mockConfig,
+          mockClient,
+          mockSettings,
+        );
+        getAvailableCommandsSpy.mockReset();
+        vi.mocked(mockClient.sessionUpdate).mockReset();
+        vi.mocked(mockClient.sessionUpdate).mockResolvedValue(undefined);
+      });
+
+      it('does not let a never-settling client write wedge later publications', async () => {
+        getAvailableCommandsSpy
+          .mockResolvedValueOnce([makeCommand('first')])
+          .mockResolvedValue([makeCommand('second')]);
+        vi.mocked(mockClient.sessionUpdate)
+          .mockReset()
+          .mockImplementationOnce(() => new Promise(() => undefined))
+          .mockResolvedValue(undefined);
+
+        await skillManager.notifyConfigChanged();
+        await vi.waitFor(() => expect(frames()).toHaveLength(1));
+        await skillManager.notifyConfigChanged();
+
+        await vi.waitFor(() => {
+          expect(frames()).toHaveLength(2);
+          expect(frames()[1]?.[0].update).toEqual(
+            expect.objectContaining({
+              availableCommands: [expect.objectContaining({ name: 'second' })],
+            }),
+          );
+        });
+      });
+
+      it('emits nothing for a publish in flight when the session is disposed', async () => {
+        let releaseBuild!: () => void;
+        const buildGate = new Promise<void>((resolve) => {
+          releaseBuild = resolve;
+        });
+        getAvailableCommandsSpy.mockImplementation(async () => {
+          await buildGate;
+          return [makeCommand('late')];
+        });
+
+        await skillManager.notifyConfigChanged();
+        await vi.waitFor(() =>
+          expect(getAvailableCommandsSpy).toHaveBeenCalledTimes(1),
+        );
+        session.dispose();
+        releaseBuild();
+        await flush();
+
+        expect(frames()).toHaveLength(0);
+      });
+
+      it('publishes exactly one frame for refreshSkillsFromSettings', async () => {
+        getAvailableCommandsSpy.mockResolvedValue([makeCommand('same')]);
+
+        await session.refreshSkillsFromSettings();
+        await flush();
+
+        expect(frames()).toHaveLength(1);
+      });
     });
 
     it('sends available_commands_update from getAvailableCommands()', async () => {

@@ -2718,6 +2718,7 @@ export class Session implements SessionContext {
   private removeSkillChangeListener?: () => void;
   private commandSnapshotInFlight?: Promise<void>;
   private commandSnapshotPending = false;
+  private lastCommandsPublicationKey?: string;
   private lastGoalSnapshot?: GoalSnapshotV2;
   private lastGoalPublicationKey?: string;
   // Set only when runtime recovery selected a Goal that initial replay hid.
@@ -3018,8 +3019,8 @@ export class Session implements SessionContext {
     this.removeSkillChangeListener = this.config
       .getSkillManager()
       ?.addChangeListener(() => {
-        if (commandSnapshotBuildContext.getStore()) return;
-        void this.sendAvailableCommandsUpdate();
+        if (this.disposed || commandSnapshotBuildContext.getStore()) return;
+        void this.sendAvailableCommandsUpdate({ skipIfUnchanged: true });
       });
     this.config
       .getWorkflowRunRegistry?.()
@@ -14044,9 +14045,11 @@ export class Session implements SessionContext {
     }
   }
 
-  async sendAvailableCommandsUpdate(): Promise<void> {
+  async sendAvailableCommandsUpdate(
+    options: { skipIfUnchanged?: boolean } = {},
+  ): Promise<void> {
     try {
-      await this.sendAvailableCommandsUpdateOrThrow();
+      await this.sendAvailableCommandsUpdateOrThrow(options);
     } catch (error) {
       // Log error but don't fail session creation
       debugLogger.error('Error sending available commands update:', error);
@@ -14099,42 +14102,70 @@ export class Session implements SessionContext {
     );
   }
 
-  private async sendAvailableCommandsUpdateOrThrow(): Promise<void> {
+  private async sendAvailableCommandsUpdateOrThrow(
+    options: { skipIfUnchanged?: boolean } = {},
+  ): Promise<void> {
     if (this.commandSnapshotInFlight) {
       this.commandSnapshotPending = true;
       return this.commandSnapshotInFlight;
     }
+    // The latch covers only the snapshot build. A client write that never
+    // settles must not wedge later publications, and a change that lands
+    // while the build runs is republished once the build is done.
+    let releaseLatch: () => void = () => {};
     const publish = (async () => {
-      if (this.#isAutomaticWorkHeld()) return;
-      const { availableCommands, availableSkills, availableSkillDetails } =
-        await commandSnapshotBuildContext.run(true, () =>
-          this.buildAvailableCommandsSnapshot(),
-        );
-      this.config.refreshWorkflowMode?.();
-      const update: SessionUpdate = {
-        sessionUpdate: 'available_commands_update',
-        availableCommands,
-        ...(availableSkills !== undefined
-          ? {
-              _meta: {
-                availableSkills,
-                ...(availableSkillDetails ? { availableSkillDetails } : {}),
-              },
-            }
-          : {}),
-      };
-      await this.sendUpdate(update);
+      try {
+        if (this.#isAutomaticWorkHeld()) return;
+        const { availableCommands, availableSkills, availableSkillDetails } =
+          await commandSnapshotBuildContext.run(true, () =>
+            this.buildAvailableCommandsSnapshot(),
+          );
+        releaseLatch();
+        this.config.refreshWorkflowMode?.();
+        const update: SessionUpdate = {
+          sessionUpdate: 'available_commands_update',
+          availableCommands,
+          ...(availableSkills !== undefined
+            ? {
+                _meta: {
+                  availableSkills,
+                  ...(availableSkillDetails ? { availableSkillDetails } : {}),
+                },
+              }
+            : {}),
+        };
+        if (this.disposed) return;
+        const key = createHash('sha256')
+          .update(JSON.stringify(update))
+          .digest('hex');
+        if (
+          options.skipIfUnchanged &&
+          key === this.lastCommandsPublicationKey
+        ) {
+          return;
+        }
+        await this.sendUpdate(update);
+        this.lastCommandsPublicationKey = key;
+      } finally {
+        releaseLatch();
+      }
     })();
     this.commandSnapshotInFlight = publish;
-    try {
-      await publish;
-    } finally {
+    releaseLatch = () => {
+      if (this.commandSnapshotInFlight !== publish) return;
       this.commandSnapshotInFlight = undefined;
       if (this.commandSnapshotPending) {
         this.commandSnapshotPending = false;
-        void this.sendAvailableCommandsUpdate();
+        void this.sendAvailableCommandsUpdate({ skipIfUnchanged: true });
       }
-    }
+    };
+    // A publish that returns before its first await finishes before the latch
+    // is set; settle it here as well so the latch can never stay armed.
+    void publish.then(
+      () => releaseLatch(),
+      () => releaseLatch(),
+    );
+    await publish;
   }
 
   #withBackgroundPermission(
