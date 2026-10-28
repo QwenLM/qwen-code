@@ -12,8 +12,9 @@ import type {
   DaemonSessionArtifactChange,
 } from '../types.js';
 import { DAEMON_ERROR_KINDS, parseDaemonBackgroundTurn } from '../types.js';
-import { isSettingsChangedData } from '../events.js';
+import { asKnownDaemonEvent, isSettingsChangedData } from '../events.js';
 import type {
+  DaemonLoopStop,
   DaemonUiEvent,
   DaemonUiPermissionOption,
   DaemonUiToolProvenance,
@@ -29,8 +30,10 @@ import {
   getString,
   getTextContent,
   extractContentPart,
+  getFiniteNumber,
   isRecord,
   redactSensitiveFields,
+  sanitizeTerminalText,
   stringifyJson,
   stringifyRedactedJson,
 } from './utils.js';
@@ -225,7 +228,10 @@ export function normalizeDaemonEvent(
       // most once per overflow episode (daemon-side hysteresis).
       if (typeof console !== 'undefined') {
         // eslint-disable-next-line no-console -- intentional diagnostic for subscriber backpressure
-        console.warn?.('[daemon-ui] SSE stream is lagging', event.data);
+        console.warn?.(
+          '[daemon-ui] SSE stream is lagging',
+          sanitizeTerminalText(stringifyJson(event.data)),
+        );
       }
       return [];
     case 'retry_scheduled':
@@ -255,6 +261,10 @@ export function normalizeDaemonEvent(
       const code = getString(event.data, 'code');
       const errorKind = asDaemonErrorKind(getString(event.data, 'errorKind'));
       const promptId = getString(event.data, 'promptId');
+      const loop =
+        errorKind === 'loop_detected'
+          ? parseDaemonLoopStop(event.data)
+          : undefined;
       return [
         {
           ...base,
@@ -264,6 +274,7 @@ export function normalizeDaemonEvent(
           ...(code ? { code } : {}),
           ...(errorKind ? { errorKind } : {}),
           ...(promptId ? { promptId } : {}),
+          ...(loop ? { loop } : {}),
           text:
             getString(event.data, 'message') ??
             'Prompt failed (no details available)',
@@ -276,8 +287,11 @@ export function normalizeDaemonEvent(
     case 'history_truncated':
       return normalizeHistoryTruncated(event, base);
 
+    case 'session_messages_deleted':
+      return [];
+
     case 'session_rewound':
-      return normalizeSessionRewound(event, base);
+      return normalizeSessionRewound(event, base, opts);
 
     case 'session_branched':
       return normalizeSessionBranched(event, base);
@@ -577,6 +591,7 @@ function normalizeHistoryTruncated(
 function normalizeSessionRewound(
   event: DaemonEvent,
   base: NormalizedEventBase,
+  opts: NormalizeDaemonEventOptions,
 ): DaemonUiEvent[] {
   const promptId = getString(event.data, 'promptId');
   const targetTurnIndex = numberField(event.data, 'targetTurnIndex');
@@ -584,11 +599,25 @@ function normalizeSessionRewound(
     return fallbackDebug(event, base, 'malformed session_rewound payload');
   }
   const sessionId = getString(event.data, 'sessionId');
+  const daemonPromptId = getString(event.data, 'daemonPromptId');
+  let replay: DaemonUiEvent[] | undefined;
+  if (isRecord(event.data) && event.data['replay'] !== undefined) {
+    const known = asKnownDaemonEvent(event);
+    if (known?.type !== 'session_rewound') {
+      return fallbackDebug(event, base, 'malformed session_rewound replay');
+    }
+    // Replacement includes our own formerly optimistic user rows too.
+    replay = known.data.replay?.flatMap((frame) =>
+      normalizeDaemonEvent(frame, { ...opts, suppressOwnUserEcho: false }),
+    );
+  }
   return [
     {
       ...base,
       type: 'session.rewound',
+      ...(replay !== undefined ? { replay } : {}),
       promptId,
+      ...(daemonPromptId ? { daemonPromptId } : {}),
       targetTurnIndex,
       ...(sessionId ? { sessionId } : {}),
     },
@@ -1113,6 +1142,7 @@ function normalizeSessionUpdate(
     }
     case 'plan':
       return [normalizePlanUpdate(update, base)];
+    case 'config_option_update':
     case 'current_mode_update':
     case 'session_info_update':
     case 'usage_update':
@@ -1418,6 +1448,21 @@ function extractToolProvenance(
     }
   }
   return {};
+}
+
+function parseDaemonLoopStop(data: unknown): DaemonLoopStop | undefined {
+  if (!isRecord(data)) return undefined;
+  const loopType = getString(data, 'loopType');
+  const loopReason = getString(data, 'loopReason');
+  const toolCallCount = getFiniteNumber(data, 'toolCallCount');
+  const toolCallLimit = getFiniteNumber(data, 'toolCallLimit');
+  if (!loopType && !loopReason) return undefined;
+  return {
+    ...(loopType ? { loopType } : {}),
+    ...(loopReason ? { loopReason } : {}),
+    ...(toolCallCount !== undefined ? { toolCallCount } : {}),
+    ...(toolCallLimit !== undefined ? { toolCallLimit } : {}),
+  };
 }
 
 function asDaemonErrorKind(

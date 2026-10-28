@@ -128,6 +128,59 @@ describe('useManagedApprovalChange', () => {
     expect(sessionStorage.getItem(key)).toBeNull();
   });
 
+  it('persists an independent Plan toggle with the same execution mode and confirms both fields', async () => {
+    vi.mocked(provider.approvalChange!.queryOptions).mockResolvedValue({
+      ...options,
+      planModeSupported: true,
+      planMode: false,
+    });
+    vi.mocked(provider.approvalChange!.submit).mockResolvedValue({
+      ...result,
+      approvalMode: 'default',
+      planMode: true,
+    });
+    refresh.mockResolvedValue({
+      ...summary,
+      approvalRevision: 1,
+      planMode: true,
+    });
+    await render();
+    await act(async () => {
+      await current.submit('default', true);
+    });
+    expect(provider.approvalChange!.submit).toHaveBeenCalledWith(
+      's1',
+      { approvalMode: 'default', expectedRevision: 0, planMode: true },
+      expect.anything(),
+    );
+    expect(current.blocked).toBe(false);
+    expect(sessionStorage.getItem(key)).toBeNull();
+  });
+
+  it('keeps a Plan receipt unconfirmed if readback reports only the mode and revision', async () => {
+    vi.mocked(provider.approvalChange!.queryOptions).mockResolvedValue({
+      ...options,
+      planModeSupported: true,
+    });
+    vi.mocked(provider.approvalChange!.submit).mockResolvedValue({
+      ...result,
+      approvalMode: 'default',
+      planMode: true,
+    });
+    refresh.mockResolvedValue({
+      ...summary,
+      approvalRevision: 1,
+      planMode: false,
+    });
+    await render();
+    await act(async () => {
+      await current.submit('default', true);
+    });
+    expect(current.blocked).toBe(true);
+    expect(current.pending?.planMode).toBe(true);
+    expect(current.errorCode).toBe('unconfirmed');
+  });
+
   it('restores a lost ACK after refresh and retries the exact frozen request only on confirmation', async () => {
     vi.mocked(provider.approvalChange!.submit).mockRejectedValueOnce(
       new TypeError('lost response'),
@@ -295,6 +348,42 @@ describe('useManagedApprovalChange', () => {
     expect(provider.approvalChange!.submit).not.toHaveBeenCalled();
   });
 
+  it.each(['agent_running', 'tool_running', 'waiting_runtime'] as const)(
+    'changes the execution policy during %s only with live support and keeps Plan idle-only',
+    async (phase) => {
+      vi.mocked(provider.approvalChange!.queryOptions).mockResolvedValue({
+        ...options,
+        liveSupported: true,
+        planModeSupported: true,
+      });
+      await render({ ...summary, phase });
+      await act(async () => {
+        await current.submit('default', true);
+      });
+      expect(provider.approvalChange!.submit).not.toHaveBeenCalled();
+      await act(async () => {
+        await current.submit('yolo');
+      });
+      expect(provider.approvalChange!.submit).toHaveBeenCalledWith(
+        's1',
+        { approvalMode: 'yolo', expectedRevision: 0 },
+        expect.objectContaining({ clientId: 'client' }),
+      );
+    },
+  );
+
+  it('refuses a new live selection while the Turn is cancelling', async () => {
+    vi.mocked(provider.approvalChange!.queryOptions).mockResolvedValue({
+      ...options,
+      liveSupported: true,
+    });
+    await render({ ...summary, phase: 'cancelling' });
+    await act(async () => {
+      await current.submit('yolo');
+    });
+    expect(provider.approvalChange!.submit).not.toHaveBeenCalled();
+  });
+
   it('does not fetch or submit while hidden and can confirm a frozen receipt after capability withdrawal', async () => {
     await render(summary, false);
     expect(provider.approvalChange!.queryOptions).not.toHaveBeenCalled();
@@ -327,6 +416,86 @@ describe('useManagedApprovalChange', () => {
       expect.objectContaining({ idempotencyKey: 'original' }),
     );
     expect(current.pending).toBeUndefined();
+  });
+
+  it('persists rule changes and retries the original policy after a lost reply', async () => {
+    const permissionRules = { allow: ['Read'], ask: [], deny: ['Bash(rm *)'] };
+    vi.mocked(provider.approvalChange!.queryOptions).mockResolvedValue({
+      ...options,
+      permissionRulesSupported: true,
+    });
+    vi.mocked(provider.approvalChange!.submit)
+      .mockRejectedValueOnce(new TypeError('lost reply'))
+      .mockResolvedValue({
+        ...result,
+        approvalMode: 'default',
+        permissionRules,
+      });
+    refresh.mockResolvedValue({ ...summary, approvalRevision: 1 });
+    await render();
+    await act(async () => {
+      await current.submit('default', undefined, permissionRules);
+    });
+    const intent = JSON.parse(sessionStorage.getItem(key)!);
+    expect(intent.permissionRules).toEqual(permissionRules);
+    expect(current.blocked).toBe(true);
+    vi.mocked(provider.approvalChange!.queryOptions).mockResolvedValue({
+      ...options,
+      approvalRevision: 1,
+      permissionRulesSupported: true,
+      permissionRules,
+    });
+    await act(async () => {
+      await current.confirm();
+    });
+    expect(current.pending).toBeUndefined();
+    expect(
+      vi.mocked(provider.approvalChange!.submit).mock.calls[1][2]
+        .idempotencyKey,
+    ).toBe(intent.idempotencyKey);
+    expect(provider.approvalChange!.submit).toHaveBeenLastCalledWith(
+      's1',
+      { approvalMode: 'default', expectedRevision: 0, permissionRules },
+      expect.objectContaining({ idempotencyKey: intent.idempotencyKey }),
+    );
+  });
+
+  it('blocks rule edits during a Turn even when live mode changes are available', async () => {
+    vi.mocked(provider.approvalChange!.queryOptions).mockResolvedValue({
+      ...options,
+      liveSupported: true,
+      permissionRulesSupported: true,
+    });
+    await render({ ...summary, phase: 'agent_running' });
+    await act(async () => {
+      await current.submit('default', undefined, {
+        allow: [],
+        ask: ['Read'],
+        deny: [],
+      });
+    });
+    expect(provider.approvalChange!.submit).not.toHaveBeenCalled();
+  });
+
+  it('retains an unconfirmed rule intent when the receipt contains another policy', async () => {
+    vi.mocked(provider.approvalChange!.queryOptions).mockResolvedValue({
+      ...options,
+      permissionRulesSupported: true,
+    });
+    vi.mocked(provider.approvalChange!.submit).mockResolvedValue({
+      ...result,
+      approvalMode: 'default',
+    });
+    await render();
+    await act(async () => {
+      await current.submit('default', undefined, {
+        allow: [],
+        ask: ['Read'],
+        deny: [],
+      });
+    });
+    expect(current.errorCode).toBe('unconfirmed');
+    expect(current.pending?.permissionRules?.ask).toEqual(['Read']);
   });
 
   it('confirms the original receipt after another Turn becomes active without admitting a new selection', async () => {

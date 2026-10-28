@@ -21,6 +21,7 @@ import {
   ManagedActivationStaleLeaseError,
   type ManagedActivationDescriptor,
 } from './managed-activation-store.js';
+import { MANAGED_JOURNAL_COMPACT_BYTES } from './managed-journal-snapshot.js';
 
 // Journal fault injection for the persist tail-repair: a failed append whose
 // repair succeeds is transient; one whose repair fails is fatal.
@@ -386,6 +387,106 @@ describe('FileManagedActivationStore', () => {
     await expect(
       store.enqueue(activation('a1', { payloadRef: 'event:other' }), limits),
     ).rejects.toThrow('reused with different data');
+  });
+
+  it('compacts repeated renewals and restores the latest lease without replaying old renewals', async () => {
+    const store = await openStore();
+    const input = activation('long-lived');
+    await store.enqueue(input, limits);
+    let current = (await store.claim(input, 'worker-a', 1000))!;
+    for (let index = 0; index < 1024; index++) {
+      now += 100;
+      current = await store.renew(current, 1000);
+    }
+    const contents = await readFile(filePath, 'utf8');
+    const lines = contents.trimEnd().split('\n');
+    expect(JSON.parse(lines[0])).toMatchObject({
+      v: 2,
+      type: 'activation.snapshot',
+    });
+    expect(Buffer.byteLength(contents)).toBeLessThan(
+      MANAGED_JOURNAL_COMPACT_BYTES + Buffer.byteLength(lines[0]) + 512,
+    );
+    const reopened = await openStore();
+    expect(reopened.get(input)).toEqual(store.get(input));
+    expect(reopened.get(input)?.lease).toEqual(current);
+    await reopened.release(current, 'completed');
+    expect((await openStore()).get(input)?.status).toBe('released');
+  }, 60_000);
+
+  it('preserves all identities, FIFO, and per-Session epochs across snapshots', async () => {
+    const store = await openStore();
+    const released = activation('released');
+    const cancelled = activation('cancelled');
+    const first = activation('first');
+    const second = activation('second');
+    const assigned = activation('assigned', { sessionId: 'session-b' });
+    const padding = activation('padding', {
+      sessionId: 'session-c',
+      payloadRef: 'x'.repeat(MANAGED_JOURNAL_COMPACT_BYTES),
+    });
+    await store.enqueue(released, limits);
+    const releasedLease = (await store.claim(released, 'worker-a', 1000))!;
+    await store.release(releasedLease, 'completed');
+    await store.enqueue(cancelled, limits);
+    await store.cancelQueued(cancelled);
+    await store.enqueue(first, limits);
+    await store.enqueue(second, limits);
+    await store.enqueue(assigned, limits);
+    const current = (await store.claim(assigned, 'worker-a', 1000))!;
+    await store.enqueue(padding, limits);
+    now++;
+    await store.renew(current, 1000);
+    const reopened = await openStore();
+    for (const input of [
+      released,
+      cancelled,
+      first,
+      second,
+      assigned,
+      padding,
+    ]) {
+      expect(reopened.get(input)).toEqual(store.get(input));
+    }
+    expect(reopened.listPending()).toEqual(store.listPending());
+    expect(reopened.listRunnable()).toEqual(store.listRunnable());
+    await expect(reopened.enqueue(released, limits)).resolves.toMatchObject({
+      created: false,
+      activation: { status: 'released', outcome: 'completed' },
+    });
+    await expect(
+      reopened.enqueue({ ...released, payloadRef: 'changed' }, limits),
+    ).rejects.toThrow('reused with different data');
+    expect(await reopened.claim(second, 'worker-b', 1000)).toBeUndefined();
+    const next = (await reopened.claim(first, 'worker-b', 1000))!;
+    expect(next.epoch).toBe(releasedLease.epoch + 1);
+    await expect(reopened.release(releasedLease, 'completed')).rejects.toThrow(
+      'stale',
+    );
+  });
+
+  it('repairs a torn tail after a snapshot and rebases append-repair bytes', async () => {
+    const store = await openStore();
+    const input = activation('large', {
+      payloadRef: 'x'.repeat(MANAGED_JOURNAL_COMPACT_BYTES),
+    });
+    await store.enqueue(input, limits);
+    const current = (await store.claim(input, 'worker-a', 1000))!;
+    const committed = await readFile(filePath, 'utf8');
+    expect(JSON.parse(committed.split('\n')[0])['type']).toBe(
+      'activation.snapshot',
+    );
+    await appendFile(filePath, '{"v":1,"sequence":');
+    const reopened = await openStore();
+    expect(await readFile(filePath, 'utf8')).toBe(committed);
+    now++;
+    fsFault.failAppends = 1;
+    fsFault.tornWrite = true;
+    await expect(reopened.renew(current, 1000)).rejects.toThrow('disk busy');
+    expect(reopened.haltedError).toBeUndefined();
+    expect(await readFile(filePath, 'utf8')).toBe(committed);
+    await reopened.renew(current, 1000);
+    expect((await openStore()).get(input)).toEqual(reopened.get(input));
   });
 
   it('enforces tenant and global queue limits for new work', async () => {

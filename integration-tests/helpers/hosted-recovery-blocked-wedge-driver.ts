@@ -34,6 +34,7 @@ import { LISTENING_LINE_RE, stopDaemon } from './daemon-process.js';
 import { HOSTED_HOME_PREFIX } from '../scratch-dir.js';
 import { relayUpstream } from './hosted-relay-headers.js';
 import { waitUntil } from './hosted-harness-process.js';
+import { parseWireRows, type WireRow } from './wire-rows.js';
 
 const config = JSON.parse(await readFile(process.argv[2], 'utf8')) as {
   tenantId: string;
@@ -544,25 +545,9 @@ const model = await startFakeOpenAIServer(({ body }) => {
 
 const daemon = await new WedgeDaemon().start(model.baseUrl);
 
-interface WireRow {
-  kind?: string;
-  requestId?: number;
-  at?: number;
-  method?: string;
-  url?: string;
-  operation?: string;
-  status?: number;
-  requestSnippet?: string;
-  responseSnippet?: string;
-  replied?: string;
-}
-
 async function readWire(): Promise<WireRow[]> {
   try {
-    return (await readFile(config.wireFile, 'utf8'))
-      .split('\n')
-      .filter(Boolean)
-      .map((line) => JSON.parse(line) as WireRow);
+    return parseWireRows(await readFile(config.wireFile, 'utf8'));
   } catch (cause) {
     if ((cause as NodeJS.ErrnoException)?.code === 'ENOENT') return [];
     throw cause;

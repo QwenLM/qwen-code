@@ -32,6 +32,10 @@ import {
   WorkspaceRuntimeStillStartingError,
 } from '../workspace-runtime-coordinator.js';
 import { sendBridgeError } from './error-response.js';
+import {
+  SessionArtifactLibraryError,
+  SessionStorageEntryError,
+} from '@qwen-code/qwen-code-core/services/sessionService.js';
 import { DaemonDrainingError } from './session-archive.js';
 import {
   BridgeTimeoutError,
@@ -55,6 +59,154 @@ function responseMock(): {
   json.mockReturnValue(response);
   return { response: response as unknown as Response, set, status, json };
 }
+
+describe('session cd errors', () => {
+  it.each(['directory_not_found', 'containment_violation'])(
+    'maps %s to a path validation response',
+    (errorKind) => {
+      const { response, status, json } = responseMock();
+      const targetPath = '/outside/workspace';
+      sendBridgeError(
+        response,
+        new RequestError(-32004, 'Invalid working directory', {
+          errorKind,
+          path: targetPath,
+        }),
+        { route: 'POST /session/:id/cd', sessionId: 'session-1' },
+      );
+      expect(status).toHaveBeenCalledWith(400);
+      expect(json).toHaveBeenCalledWith({
+        error: 'Invalid working directory',
+        code: errorKind,
+        path: targetPath,
+      });
+    },
+  );
+
+  it.each([
+    undefined,
+    'POST /session',
+    'POST /session/:id/load',
+    'POST /session/:id/worktree-reset',
+  ])('preserves non-cd containment errors and logging for %s', (route) => {
+    const { response, status, json } = responseMock();
+    const daemonLog = { error: vi.fn() } as unknown as DaemonLogger;
+    const data = {
+      errorKind: 'containment_violation',
+      path: '/outside/workspace',
+    };
+    const error = new RequestError(-32004, 'Invalid working directory', data);
+    const context = route ? { route, sessionId: 'session-1' } : undefined;
+
+    sendBridgeError(response, error, context, daemonLog);
+
+    expect(status).toHaveBeenCalledWith(500);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Invalid working directory',
+      code: -32004,
+      data,
+    });
+    expect(daemonLog.error).toHaveBeenCalledWith(
+      error.message,
+      error,
+      context ?? {},
+    );
+  });
+});
+
+describe('artifact library errors', () => {
+  it.each([
+    'foreign_project',
+    'ambiguous_project',
+    'unknown_project',
+    'non_regular',
+  ] as const)('maps %s storage failures explicitly', (reason) => {
+    const { response, status, json } = responseMock();
+    sendBridgeError(
+      response,
+      new SessionStorageEntryError('session-1', reason),
+    );
+    expect(status).toHaveBeenCalledWith(
+      reason === 'foreign_project' ? 404 : 409,
+    );
+    expect(json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code:
+          reason === 'foreign_project'
+            ? 'session_not_found'
+            : 'session_storage_conflict',
+      }),
+    );
+  });
+  it('keeps artifact mutation refusal distinct from resume failures', () => {
+    const { response, status, json } = responseMock();
+    sendBridgeError(
+      response,
+      new SessionArtifactLibraryError(
+        'session-1',
+        'artifact_mutation_requires_managed_authority',
+        'Artifact mutation must use its managed session authority.',
+      ),
+    );
+    expect(status).toHaveBeenCalledWith(409);
+    expect(json).toHaveBeenCalledWith({
+      code: 'artifact_mutation_requires_managed_authority',
+      error: 'Artifact mutation must use its managed session authority.',
+    });
+  });
+});
+
+describe('message deletion errors', () => {
+  it('does not certify a later request as persisted while context recovery is required', () => {
+    const { response, status, json } = responseMock();
+    sendBridgeError(
+      response,
+      new RequestError(-32000, 'Reload the session', {
+        errorKind: 'session_history_context_unavailable',
+      }),
+    );
+    expect(status).toHaveBeenCalledWith(503);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Reload the session',
+      code: 'session_history_context_unavailable',
+    });
+  });
+
+  it('preserves committed deletion identities in the 503 response', () => {
+    const { response, status, json } = responseMock();
+    sendBridgeError(
+      response,
+      new RequestError(-32000, 'Reopen the session', {
+        errorKind: 'message_deletion_context_unavailable',
+        deletedGroupIds: ['group'],
+        deletedPromptIds: ['prompt'],
+      }),
+    );
+    expect(status).toHaveBeenCalledWith(503);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Reopen the session',
+      code: 'message_deletion_context_unavailable',
+      persisted: true,
+      deletedGroupIds: ['group'],
+      deletedPromptIds: ['prompt'],
+    });
+  });
+
+  it('reports invalid stored history separately from invalid selections', () => {
+    const { response, status, json } = responseMock();
+    sendBridgeError(
+      response,
+      new RequestError(-32602, 'Invalid history', {
+        errorKind: 'message_history_invalid',
+      }),
+    );
+    expect(status).toHaveBeenCalledWith(409);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Invalid history',
+      code: 'message_history_invalid',
+    });
+  });
+});
 
 describe('session attachment upload errors', () => {
   it('records storage failures with their cause without exposing it to clients', () => {

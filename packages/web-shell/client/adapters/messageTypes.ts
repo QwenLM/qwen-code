@@ -65,10 +65,13 @@ export interface DaemonMessageToolCall {
   parentToolCallId?: string;
   /** The producer's own call ID when `callId` is keyed by something else. */
   toolCallId?: string;
+  /** Stable producer identity from the daemon tool-block projection only. */
+  generatedUiToolCallId?: string;
   title?: string;
   content?: readonly DaemonMessageToolCallContent[];
   rawOutput?: unknown;
   toolResult?: components['schemas']['PublicToolResult'];
+  toolDetailsRevision?: number;
   locations?: DaemonMessageToolCallLocation[];
   kind?: DaemonMessageToolKind;
   startTime?: number;
@@ -104,6 +107,8 @@ export interface DaemonMessageAuthor {
  * cross-cutting field is declared once rather than on each role.
  */
 export interface DaemonMessageMeta {
+  sourceRecordIds?: string[];
+  localCommandId?: string;
   backgroundTurn?: DaemonBackgroundTurn;
   /**
    * Admitted prompt this message belongs to, copied from the daemon-stamped
