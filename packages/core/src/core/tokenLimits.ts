@@ -263,6 +263,10 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^qwen3-coder-plus/, LIMITS['1m']],
   [/^qwen3-coder-flash/, LIMITS['1m']],
   [/^qwen3\.\d/, LIMITS['1m']],
+  // 1M is the forward default for the qwen4 generation, so qwen4.x releases
+  // need no further code change. The catalog still wins once models.dev
+  // publishes a qwen4 entry with a different window.
+  [/^qwen4/, LIMITS['1m']],
   [/^qwen-plus-latest$/, LIMITS['1m']],
   [/^qwen-flash-latest$/, LIMITS['1m']],
   // Invite-only series aliases (`qwen-latest-series-invite-202610-m4`) name no

@@ -829,9 +829,16 @@ describe('dryRunGitWorktreePrune', () => {
       path.join(adminDir(repo), 'dangling'),
     );
 
-    const entries = await dryRunGitWorktreePrune(repo);
-    entries.sort((a, b) => (a.id ?? '').localeCompare(b.id ?? ''));
-    expect(entries).toEqual([
+    // git announces in readdir() order, not by name, so which of the two
+    // comes first is a filesystem property, not a contract: on a filesystem
+    // whose hash puts `stale` ahead of `dangling`, the same two entries come
+    // back reversed. The set and each entry's attribution are what this
+    // protects, so the order is normalised away rather than pinned.
+    expect(
+      (await dryRunGitWorktreePrune(repo)).sort((a, b) =>
+        String(a.id).localeCompare(String(b.id)),
+      ),
+    ).toEqual([
       { id: 'dangling', worktreePath: null },
       { id: 'stale', worktreePath: fs.realpathSync(stale) },
     ]);
