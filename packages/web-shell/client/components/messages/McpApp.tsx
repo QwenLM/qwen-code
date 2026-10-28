@@ -2,6 +2,7 @@ import { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AppBridge,
   PostMessageTransport,
+  type McpUiStyles,
 } from '@modelcontextprotocol/ext-apps/app-bridge';
 import {
   McpAppHostContext,
@@ -129,9 +130,53 @@ export function applySandboxCspQuery(
     : sandboxUrl;
 }
 
-function mcpAppHostContext(theme: ReturnType<typeof useTheme>) {
+// Standard MCP App style variables resolved from the Web Shell tokens the
+// card itself sees, so Apps can match the current theme instead of the
+// operating system's color scheme. Secondary text uses the token that keeps
+// readable contrast in each theme.
+function hostStyleVariables(
+  element: Element | null,
+  theme: ReturnType<typeof useTheme>,
+): Record<string, string> | undefined {
+  if (!element || typeof getComputedStyle !== 'function') return undefined;
+  const computed = getComputedStyle(element);
+  const tokens: Record<string, string> = {
+    '--color-background-primary': '--background',
+    '--color-background-secondary': '--muted',
+    '--color-background-inverse': '--primary',
+    '--color-text-primary': '--foreground',
+    '--color-text-secondary':
+      theme === 'light' ? '--secondary-foreground' : '--muted-foreground',
+    '--color-text-inverse': '--primary-foreground',
+    '--color-text-danger': '--destructive',
+    '--color-border-primary': '--border',
+    '--color-border-secondary': '--input',
+    '--color-ring-primary': '--ring',
+    '--font-sans': '--font-sans',
+    '--border-radius-md': '--radius',
+  };
+  const variables: Record<string, string> = {};
+  for (const [name, token] of Object.entries(tokens)) {
+    const value = computed.getPropertyValue(token).trim();
+    if (value) variables[name] = value;
+  }
+  return Object.keys(variables).length ? variables : undefined;
+}
+
+function mcpAppHostContext(
+  theme: ReturnType<typeof useTheme>,
+  variables?: Record<string, string>,
+) {
   return {
     theme,
+    // Hosts may send any subset of the standard variables.
+    ...(variables
+      ? {
+          styles: {
+            variables: variables as Partial<McpUiStyles> as McpUiStyles,
+          },
+        }
+      : {}),
     platform: 'web' as const,
     displayMode: 'inline' as const,
     availableDisplayModes: ['inline' as const],
@@ -238,6 +283,7 @@ export function McpAppRuntime({
     sessionId && tools?.sessionId === sessionId ? tools.callTool : undefined;
   const theme = useTheme();
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const cardRef = useRef<HTMLDivElement>(null);
   const bridgeRef = useRef<AppBridge | null>(null);
   const mountGenerationRef = useRef(0);
   const displayRef = useRef(display);
@@ -280,7 +326,12 @@ export function McpAppRuntime({
           ...(current.csp ? { csp: current.csp } : {}),
         },
       },
-      { hostContext: mcpAppHostContext(themeRef.current) },
+      {
+        hostContext: mcpAppHostContext(
+          themeRef.current,
+          hostStyleVariables(cardRef.current, themeRef.current),
+        ),
+      },
     );
     bridgeRef.current = bridge;
     const appAbort = new AbortController();
@@ -478,7 +529,9 @@ export function McpAppRuntime({
   ]);
 
   useEffect(() => {
-    bridgeRef.current?.setHostContext(mcpAppHostContext(theme));
+    bridgeRef.current?.setHostContext(
+      mcpAppHostContext(theme, hostStyleVariables(cardRef.current, theme)),
+    );
   }, [theme]);
 
   if (!display.html || !sandboxUrl) {
@@ -486,7 +539,7 @@ export function McpAppRuntime({
   }
 
   return (
-    <div className={styles.card} data-testid="mcp-app">
+    <div ref={cardRef} className={styles.card} data-testid="mcp-app">
       <div className={styles.header}>
         <span>MCP App</span>
         <span className={styles.server}>{display.serverName}</span>

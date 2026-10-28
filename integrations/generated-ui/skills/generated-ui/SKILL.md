@@ -51,6 +51,19 @@ Keep calculations synchronous. Uncaught synchronous exceptions and rejected prom
 
 The guest has 32 MiB of heap, a 256 KiB stack and 250 ms for each initialization/event. A round can drain at most 256 pending microtask jobs and emit at most 64 patches; exceeding either limit ends the activation. Input values are limited to 2,048 characters; smaller authored `maxlength` bounds on text inputs and textareas are preserved; each complete input snapshot and patch batch must fit 16,000 characters and UTF-8 bytes. Avoid unbounded loops, large allocations, recursion, continuous animation or artificial delays. Stop, teardown or a failure reported to the host ends the current activation. Refresh may start a new activation from the saved initial values; it does not restore the user's slider positions.
 
+## Styling
+
+The view follows the host's light or dark theme. Headings, text, labels, inputs, selects, buttons, tables and `output` already have styles that match it, so most views need little or no CSS. Do not hard-code text or background colors, and do not set fixed widths; a color chosen for one theme becomes unreadable in the other. When you need color, use these variables:
+
+- `var(--gu-text)` and `var(--gu-muted)` for primary and secondary text
+- `var(--gu-surface)` for a raised background, `var(--gu-border)` for borders
+- `var(--gu-accent)` for highlights and `var(--gu-danger)` for warnings
+- `var(--gu-radius)` for rounded corners
+
+The card already shows the title, summary and status above the view and draws its border. Do not repeat the title as a heading, and do not wrap the whole view in a panel or another bordered box; use at most one level of `panel` to group related controls or results.
+
+Layout helpers are available as classes: `panel` (bordered surface), `grid` (responsive columns that wrap on narrow screens), `stat` (a large tabular number), `muted`, `danger`, and `num` (right-aligned tabular numbers in table cells). Charts drawn with basic SVG can use `fill="currentColor"` or `style="fill: var(--gu-accent)"`.
+
 ## Complete example: parameter simulation
 
 This example uses illustrative capacity assumptions and makes no latency or production-performance claim. Pass this entire object to `generated_ui_show`:
@@ -59,8 +72,8 @@ This example uses illustrative capacity assumptions and makes no latency or prod
 {
   "title": "Worker capacity simulation",
   "summary": "With the initial 4 workers and an assumed 25 requests/s per worker, estimated capacity is 100 requests/s. Change either input to explore this simple linear model. It does not account for bottlenecks or queueing latency.",
-  "html": "<section><h2>Estimated capacity</h2><label for=\"workers\">Workers</label><input id=\"workers\" type=\"range\" min=\"1\" max=\"20\" value=\"4\"><label for=\"rate\">Requests/s per worker</label><input id=\"rate\" type=\"number\" min=\"1\" max=\"100\" value=\"25\"><p id=\"answer\"></p><p>Formula: workers × requests/s per worker.</p></section>",
-  "css": "section { padding: 16px; font-family: sans-serif; } label { display: block; margin-top: 12px; } input { max-width: 100%; }",
+  "html": "<section><label for=\"workers\">Workers</label><input id=\"workers\" type=\"range\" min=\"1\" max=\"20\" value=\"4\"><label for=\"rate\">Requests/s per worker</label><input id=\"rate\" type=\"number\" min=\"1\" max=\"100\" value=\"25\"><p id=\"answer\"></p><p>Formula: workers × requests/s per worker.</p></section>",
+  "css": "",
   "javascript": "function number(id,min,max){var n=Number(ui.input(id).value);return Number.isFinite(n)?Math.max(min,Math.min(max,n)):min;}function render(){var workers=number('workers',1,20);var rate=number('rate',1,100);ui.text('answer',workers+' workers × '+rate+' requests/s = '+(workers*rate).toFixed(0)+' requests/s');}ui.on('workers','input',render);ui.on('rate','input',render);render();"
 }
 ```
@@ -73,8 +86,8 @@ The scores below are explicit fictional inputs. Higher scores are better. Changi
 {
   "title": "Weighted plan comparison",
   "summary": "For fictional Plan A scores of 9 responsiveness / 4 simplicity and Plan B scores of 6 / 9, the initial 60% / 40% weights yield 7.0 for A and 7.2 for B. The preferred plan depends on these assumptions and the selected weight.",
-  "html": "<section><h2>Compare plans</h2><p>Scores: A = 9 responsiveness, 4 simplicity; B = 6 responsiveness, 9 simplicity. Higher is better.</p><label for=\"weight\">Responsiveness weight (%)</label><input id=\"weight\" type=\"range\" min=\"0\" max=\"100\" value=\"60\"><p id=\"weights\"></p><p id=\"scores\"></p><p id=\"ranking\"></p><p>Weighted score = responsiveness × weight + simplicity × remaining weight.</p></section>",
-  "css": "section { padding: 16px; font-family: sans-serif; } label { display: block; } input { width: 100%; } p { line-height: 1.5; }",
+  "html": "<section><p>Scores: A = 9 responsiveness, 4 simplicity; B = 6 responsiveness, 9 simplicity. Higher is better.</p><label for=\"weight\">Responsiveness weight (%)</label><input id=\"weight\" type=\"range\" min=\"0\" max=\"100\" value=\"60\"><p id=\"weights\"></p><p id=\"scores\"></p><p id=\"ranking\"></p><p>Weighted score = responsiveness × weight + simplicity × remaining weight.</p></section>",
+  "css": "#ranking { margin-top: 8px; }",
   "javascript": "function render(){var n=Number(ui.input('weight').value);var w=Number.isFinite(n)?Math.max(0,Math.min(100,n)):60;var a=(9*w+4*(100-w))/100;var b=(6*w+9*(100-w))/100;ui.text('weights','Responsiveness '+w+'%; simplicity '+(100-w)+'%');ui.text('scores','Plan A: '+a.toFixed(2)+'; Plan B: '+b.toFixed(2));ui.html('ranking',a===b?'Tie under these assumptions.':'<strong>Plan '+(a>b?'A':'B')+'</strong> ranks higher under these assumptions.');}ui.on('weight','input',render);render();"
 }
 ```
