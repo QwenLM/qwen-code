@@ -159,10 +159,11 @@ for is a file no round produces, and a check over an absent file is silent:
   stamp still reads the earlier time, so the dismissal did not move it, and
   the review still reports a 4838-character body: nothing but `state` records
   that it was dismissed. Whether its body was edited too is unobservable,
-  which is the point — and that dismissal is what unblocked the merge gate. All three lists return a string
-  `body` and reviews return a string `state`, so both are compared alongside
-  the stamp, and a fetched item missing either is refused rather than compared
-  as though nothing had changed. The cost is a larger snapshot file — bodies
+  which is the point — and that dismissal is what unblocked the merge gate.
+  All three lists return a string `body` and reviews return a string `state`,
+  so both are compared alongside the stamp, and a fetch is refused rather than
+  compared as though nothing had changed when an item has no body or a review
+  has no state. The cost is a larger snapshot file — bodies
   are stored verbatim, which also lets the round read what arrived without a
   second fetch.
 - The compared fields are the ones that change what a reviewer said or decided.
@@ -239,11 +240,13 @@ for is a file no round produces, and a check over an absent file is silent:
   dismissed review, measured on PR 15388 — one row for the state comparison,
   one for accepting a review list with no state, and one for the rule text that
   named the body but not the state. That pass also fixed the boundary in writing
-  so the next one does not reopen it. Three other
-  findings — a cross-reference to a report item that does not exist, a return
-  value no caller could observe, and a contract that asked for the matrix
-  unconditionally while the checker treats it as optional — were fixed without
-  a row, because none of them is a guard.
+  so the next one does not reopen it. Five further findings were fixed without
+  a row, because none of them is a guard: a cross-reference to a report item
+  that does not exist, a return value no caller could observe, a contract that
+  asked for the matrix unconditionally while the checker treats it as optional,
+  a note that cited a dismissed review's body as unchanged when only its stamp
+  is on the record, and a rule sentence that said a fetched list missing either
+  field is refused when a comment item has no state to miss.
 
 ## Acceptance criteria
 
