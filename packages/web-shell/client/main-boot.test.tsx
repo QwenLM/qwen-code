@@ -149,6 +149,31 @@ describe('web shell boot', () => {
     expect(gate.props.unconfirmedTarget).toBe(false);
   });
 
+  it('gates a daemon no catalog names', async () => {
+    // The case above pins only the false direction. Without this one,
+    // replacing the computation with `const unconfirmedDaemonTarget = false`
+    // would ship green and send a stored credential to an origin the user
+    // never approved.
+    window.localStorage.clear();
+    const invoke = vi.fn(async () => null);
+    (window as { __TAURI__?: unknown }).__TAURI__ = { core: { invoke } };
+    testState.daemonBaseUrl = 'https://unknown.example';
+    window.history.replaceState(null, '', '/?daemon=https://unknown.example');
+    document.body.innerHTML = '<div id="root"></div>';
+    await import('./main');
+    await vi.waitFor(() => expect(testState.rendered).toHaveLength(1));
+
+    const strictMode = testState.rendered[0] as React.ReactElement<{
+      children: React.ReactElement<{
+        baseUrl: string;
+        unconfirmedTarget: boolean;
+      }>;
+    }>;
+    const gate = strictMode.props.children;
+    expect(gate.props.baseUrl).toBe('https://unknown.example');
+    expect(gate.props.unconfirmedTarget).toBe(true);
+  });
+
   it('keeps the native HTML update message on unsupported browsers', async () => {
     document.documentElement.setAttribute(
       'data-web-shell-unsupported-browser',

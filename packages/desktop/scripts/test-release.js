@@ -1640,10 +1640,17 @@ function testBootstrapBridgeConfiguration() {
       body.length > 0 && !body.includes('/*'),
       `${command} must keep its origin gate live, not commented out.`,
     );
-    assert.match(
-      body,
+    const gate = body.match(
       /\n\s*require_runtime_origin\(&webview, state\.inner\(\)\)\?;/,
-      `${command} must gate on require_runtime_origin.`,
+    );
+    assert.ok(gate, `${command} must gate on require_runtime_origin.`);
+    // `shell_state_read` reaches the store through `Ok(state.settings…)`, so
+    // this lookup is not line-anchored: an anchored one leaves that command's
+    // ordering unchecked.
+    const storeAt = body.indexOf('state.settings.');
+    assert.ok(
+      storeAt === -1 || gate.index < storeAt,
+      `${command} must gate on require_runtime_origin before touching the store.`,
     );
   }
 
