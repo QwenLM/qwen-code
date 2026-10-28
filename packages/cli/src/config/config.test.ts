@@ -329,6 +329,25 @@ describe('isValidSessionId', () => {
 });
 
 describe('parseArguments', () => {
+  it.each(['on', 'off'] as const)(
+    'accepts explicit workflow mode %s',
+    async (mode) => {
+      process.argv = [
+        'node',
+        'script.js',
+        '--workflow-mode',
+        mode,
+        '-p',
+        'ordinary',
+      ];
+      expect(await parseArguments()).toMatchObject({ workflowMode: mode });
+    },
+  );
+
+  it('preserves an absent workflow mode as undefined', async () => {
+    process.argv = ['node', 'script.js', '-p', 'ordinary'];
+    expect((await parseArguments()).workflowMode).toBeUndefined();
+  });
   const originalArgv = process.argv;
 
   afterEach(() => {
@@ -4081,6 +4100,39 @@ describe('loadCliConfig', () => {
         tools: { webSearch: { maxPerSession: 10 } },
       });
       expect(config.getWebSearchSettings()).toEqual({ maxPerSession: 10 });
+    });
+
+    it('lets WEB_SEARCH_ALLOWED_HOSTS override tools.webSearch.allowedHosts', async () => {
+      vi.stubEnv(
+        'WEB_SEARCH_ALLOWED_HOSTS',
+        ' gw.example.com , other.example.net ,',
+      );
+      const config = await loadWithSettings({
+        tools: { webSearch: { allowedHosts: ['settings.example.com'] } },
+      });
+      expect(config.getWebSearchSettings()?.allowedHosts).toEqual([
+        'gw.example.com',
+        'other.example.net',
+      ]);
+    });
+
+    it('falls back to tools.webSearch.allowedHosts when the env var is empty', async () => {
+      vi.stubEnv('WEB_SEARCH_ALLOWED_HOSTS', '   ');
+      const config = await loadWithSettings({
+        tools: { webSearch: { allowedHosts: ['settings.example.com'] } },
+      });
+      expect(config.getWebSearchSettings()?.allowedHosts).toEqual([
+        'settings.example.com',
+      ]);
+    });
+
+    it('passes an allowedHosts-only setting through without other web search keys', async () => {
+      const config = await loadWithSettings({
+        tools: { webSearch: { allowedHosts: ['gw.example.com'] } },
+      });
+      expect(config.getWebSearchSettings()).toEqual({
+        allowedHosts: ['gw.example.com'],
+      });
     });
 
     // Both modes must turn the tool off explicitly: leaving the settings

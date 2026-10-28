@@ -104,12 +104,14 @@ public final class ManagedSchemaContract {
         RUNTIME_BINDING,
         CSI_WORKER_ACK,
         RECOVERY_EVIDENCE,
-        POD_DELETE_ATTEMPT
+        POD_DELETE_ATTEMPT,
+        POD_FINALIZER_ATTEMPT
     }
 
     public enum ResourceOwnerKind {
         JOURNAL,
         SNAPSHOT,
+        NATIVE_SNAPSHOT,
         CAPTURE,
         ARTIFACT,
         MESSAGE,

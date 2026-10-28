@@ -6,6 +6,7 @@
 
 import {
   useCallback,
+  useContext,
   useEffect,
   useId,
   useMemo,
@@ -50,6 +51,7 @@ import {
   useReactTable,
 } from '@tanstack/react-table';
 import { useI18n } from '../i18n';
+import { McpAppGeneratedUiOwnerContext } from '../mcpAppHostContext';
 import { SessionPrBadge } from './SessionPrBadge';
 import { formatRelativeTime } from '../utils/formatRelativeTime';
 import { buildSplitUrl, MAX_SPLIT_PANES } from '../utils/splitUrl';
@@ -290,6 +292,7 @@ function SessionOverviewPanelInner({
   manageLiveState: boolean;
 }) {
   const { t } = useI18n();
+  const generatedUiOwner = useContext(McpAppGeneratedUiOwnerContext);
   const connection = useConnection();
   const connectionRef = useRef(connection);
   connectionRef.current = connection;
@@ -745,7 +748,10 @@ function SessionOverviewPanelInner({
                 : undefined;
             }
           } else {
+            const invalidateDeleted =
+              generatedUiOwner?.captureSessionDeletion(ownerCwd);
             const result = await client.deleteSessionsData(ids);
+            invalidateDeleted?.([...result.removed, ...result.notFound]);
             for (const id of [...result.removed, ...result.notFound]) {
               const card = cardsById.get(id);
               if (card) succeededIdentities.add(getSessionIdentity(card));
@@ -768,6 +774,7 @@ function SessionOverviewPanelInner({
     [
       canArchiveCard,
       canDeleteCard,
+      generatedUiOwner,
       primaryCwd,
       sessionCatalogController,
       t,

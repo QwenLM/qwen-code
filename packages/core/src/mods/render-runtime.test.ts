@@ -39,12 +39,13 @@ describe('ui.render through the real QuickJS worker', () => {
   const create = async (
     sources: string[],
     render: ModRenderHost | null = host,
+    entry = '/fixture/mod.js',
   ) => {
     const runtime = await ModRuntime.createGroup(
       sources.map((source, index) => ({
         id: `mod-${index}`,
         name: `mod-${index}`,
-        source: { root: '/fixture', entry: '/fixture/mod.js', source },
+        source: { root: '/fixture', entry, source },
         options: {},
       })),
       '/workspace',
@@ -80,6 +81,45 @@ describe('ui.render through the real QuickJS worker', () => {
       });`),
     ]);
     expect(runtime.renderHooks).toEqual(['mod-0']);
+    await expect(runtime.render(band(), signal())).resolves.toEqual({
+      tree: {
+        type: 'Box',
+        props: { flexDirection: 'row', paddingX: 1 },
+        children: [
+          {
+            type: 'Text',
+            props: { color: 'yellow', bold: true },
+            children: ['☀  Clear'],
+          },
+          { type: 'Text', children: ['  ', '95', ' columns'] },
+          { type: 'Text', props: { dimColor: true }, children: ['  done'] },
+        ],
+      },
+      notes: [],
+    });
+  });
+
+  it('draws the same band from a .tsx entry written in JSX', async () => {
+    const runtime = await create(
+      [
+        `type Props = { columns: number };
+        export function register(on: any) {
+          on('ui.render', { component: 'AbovePrompt' }, ($: any, e: any) => {
+            const { Box, Text } = $.ui.resolve(e);
+            const Columns = ({ columns }: Props) => <Text>  {columns} columns</Text>;
+            return (
+              <Box flexDirection="row" paddingX={1}>
+                <Text color="yellow" bold>☀  Clear</Text>
+                <Columns columns={e.props.bodyColumns} />
+                <Text dimColor>{null}{false}  done</Text>
+              </Box>
+            );
+          });
+        }`,
+      ],
+      host,
+      '/fixture/mod.tsx',
+    );
     await expect(runtime.render(band(), signal())).resolves.toEqual({
       tree: {
         type: 'Box',
