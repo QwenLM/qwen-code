@@ -187,29 +187,51 @@ function getPlatformSystemFilePath(fileName: string): string {
 const WINDOWS_SYSTEM_SETTINGS_DIR = 'C:\\ProgramData\\qwen-code';
 
 /**
- * Whether a Windows path stays inside the system-wide settings directory
- * once normalized: the path is case-folded and its forward slashes turned
- * into backslashes, then each `..` segment is resolved against the segments
- * that precede it, so a path such as `C:\ProgramData\qwen-code\..\..` cannot
- * be written to point outside the directory.
+ * Whether a Windows path names a location inside the system-wide settings
+ * directory. A UNC root is a remote share and never names the local system
+ * location, and a relative path is resolved against an arbitrary working
+ * directory, so both are rejected up front; what remains is an absolute
+ * drive path, and the platform canonicalizer — not a re-implementation of
+ * its rules — decides where it points: `..` cannot climb past the drive
+ * root, and case and separator spelling are folded.
  */
 export function isInsideWindowsSystemSettingsDir(configured: string): boolean {
-  const segments: string[] = [];
-  for (const segment of String(configured)
-    .toLowerCase()
-    .replace(/\//g, '\\')
-    .split('\\')) {
-    if (segment === '' || segment === '.') continue;
-    if (segment === '..') {
-      // A `..` with no segment left to resolve against stays outside.
-      if (segments.length > 0) segments.pop();
-      continue;
-    }
-    segments.push(segment);
+  if (/^[\\/]{2}/.test(configured)) {
+    return false; // a UNC root is a remote share
   }
-  return segments
-    .join('\\')
+  if (!/^[a-zA-Z]:[\\/]/.test(configured)) {
+    return false; // not an absolute drive path
+  }
+  return path
+    .win32.resolve(configured)
+    .toLowerCase()
     .startsWith(`${WINDOWS_SYSTEM_SETTINGS_DIR.toLowerCase()}\\`);
+}
+
+/**
+ * Whether the file actually read at `candidate` is an administrator file:
+ * links are resolved first, because an installed or mounted file may be
+ * delivered through one (the Kubernetes harness pool mounts its settings as
+ * a link), and the resolved target must be a regular file owned by root in
+ * a directory owned by root — both the content and the place it sits are
+ * under the administrator's control, so the current user cannot replace or
+ * remove either. A target a user can move or replace does not qualify.
+ */
+function isTrustedSystemFile(candidate: string): boolean {
+  let target: string;
+  try {
+    target = fs.realpathSync(candidate);
+  } catch {
+    return false;
+  }
+  try {
+    const stats = fs.statSync(target);
+    if (!stats.isFile() || stats.uid !== 0) return false;
+    const parent = fs.statSync(path.dirname(target));
+    return parent.isDirectory() && parent.uid === 0;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -222,35 +244,40 @@ export function isInsideWindowsSystemSettingsDir(configured: string): boolean {
  * environment point the system layer at a file its user controls. So an
  * override is honored only while it names a location the operating system
  * keeps out of reach of ordinary users, and fails closed to the platform
- * default otherwise: on Unix, a regular file owned by root, checked with
- * `lstatSync` so a link to a root-owned file does not qualify; on Windows, a
- * path that stays inside the system-wide settings directory once normalized.
+ * default otherwise: on Unix, a root-owned regular file in a root-owned
+ * directory, judged on the file a link resolves to; on Windows, a path that
+ * stays inside the system-wide settings directory once normalized and names
+ * a file that is there — a name that resolves to nothing would read as an
+ * empty system layer and blank the installed administrator file.
  */
 export function isSystemSettingsPathTrusted(configured: string): boolean {
   if (os.platform() === 'win32') {
-    return isInsideWindowsSystemSettingsDir(configured);
+    if (!isInsideWindowsSystemSettingsDir(configured)) return false;
+    return fs.existsSync(configured);
   }
-  try {
-    const stats = fs.lstatSync(configured);
-    return stats.isFile() && stats.uid === 0;
-  } catch {
-    return false;
-  }
+  return isTrustedSystemFile(configured);
 }
 
 /**
  * Whether the entry at `candidate` is an administrator-installed system
- * file, proven rather than assumed: the entry must be a root-owned
- * (`uid === 0`) file or directory, judged as itself by `lstatSync` so a
- * planted link does not qualify, and its parent directory must be a
+ * file, proven rather than assumed: links are resolved first, because an
+ * installed or mounted file may be delivered through one, and the resolved
+ * entry must be a root-owned (`uid === 0`) file or directory in a
  * root-owned directory, so the current user cannot create, replace, or
- * remove the entry. An entry whose ownership cannot be read proves nothing
- * and does not qualify.
+ * remove either. A planted link that does not resolve to such an entry, and
+ * an entry whose ownership cannot be read, prove nothing and do not
+ * qualify.
  */
 function isInstalledAdministratorFile(candidate: string): boolean {
+  let target: string;
+  try {
+    target = fs.realpathSync(candidate);
+  } catch {
+    return false;
+  }
   let entry: fs.Stats;
   try {
-    entry = fs.lstatSync(candidate);
+    entry = fs.statSync(target);
   } catch {
     return false;
   }
@@ -258,7 +285,7 @@ function isInstalledAdministratorFile(candidate: string): boolean {
     return false;
   }
   try {
-    const parent = fs.statSync(path.dirname(candidate));
+    const parent = fs.statSync(path.dirname(target));
     return parent.isDirectory() && parent.uid === 0;
   } catch {
     return false;
@@ -305,34 +332,98 @@ function warnIgnoredOverride(name: string, message: string): void {
 }
 
 /**
- * Whether the override `name` may replace a system layer: only while no
- * administrator file is installed and the file it names is trusted (see
- * `isSystemSettingsPathTrusted`).
+ * A system layer override the resolver is refusing to honor: the variable,
+ * the path it was set to, and why. `not-administrator-controlled` means the
+ * file it names is not an administrator file, so the platform default is
+ * used instead and the operator policy the variable names is dropped;
+ * `administrator-file-installed` means an administrator file is installed at
+ * the platform default, which the override may not move.
  */
+export interface IgnoredSystemPathOverride {
+  name: string;
+  configured: string;
+  reason: 'not-administrator-controlled' | 'administrator-file-installed';
+}
+
+type SystemPathOverrideDecision =
+  | { honored: true }
+  | {
+      honored: false;
+      reason: IgnoredSystemPathOverride['reason'];
+      administratorFile?: string;
+    };
+
+/**
+ * The resolver's decision for one configured system layer: only while no
+ * administrator file is installed and the file it names is trusted (see
+ * `isSystemSettingsPathTrusted`) may it replace the layer.
+ */
+function systemPathOverrideDecision(
+  configured: string,
+): SystemPathOverrideDecision {
+  const administratorFile = findInstalledAdministratorFile();
+  if (administratorFile !== undefined) {
+    return {
+      honored: false,
+      reason: 'administrator-file-installed',
+      administratorFile,
+    };
+  }
+  if (!isSystemSettingsPathTrusted(configured)) {
+    return { honored: false, reason: 'not-administrator-controlled' };
+  }
+  return { honored: true };
+}
+
+/**
+ * The system layer overrides set in `env` that the resolver is refusing to
+ * honor, with the reason for each refusal. A consumer reading the resolved
+ * paths cannot tell a configured-but-rejected layer from an absent one
+ * otherwise, and the two are not the same: a rejected layer means the
+ * operator policy the variable names is dropped, not applied.
+ */
+export function ignoredSystemPathOverrides(
+  env: Readonly<NodeJS.ProcessEnv> = process.env,
+): IgnoredSystemPathOverride[] {
+  const ignored: IgnoredSystemPathOverride[] = [];
+  for (const name of [
+    'QWEN_CODE_SYSTEM_SETTINGS_PATH',
+    'QWEN_CODE_SYSTEM_DEFAULTS_PATH',
+  ]) {
+    const configured = readEnvironmentVariable(env, name);
+    if (!configured) continue;
+    const decision = systemPathOverrideDecision(configured);
+    if (!decision.honored) {
+      ignored.push({ name, configured, reason: decision.reason });
+    }
+  }
+  return ignored;
+}
+
 function isSystemPathOverrideHonored(
   name: string,
   configured: string,
 ): boolean {
-  const administratorFile = findInstalledAdministratorFile();
-  if (administratorFile !== undefined) {
+  const decision = systemPathOverrideDecision(configured);
+  if (decision.honored) return true;
+  if (decision.reason === 'administrator-file-installed') {
     warnIgnoredOverride(
       name,
-      `${name} is set to ${JSON.stringify(configured)}, but administrator settings are installed at ${JSON.stringify(administratorFile)}, so the override is ignored.`,
+      `${name} is set to ${JSON.stringify(configured)}, but administrator settings are installed at ${JSON.stringify(decision.administratorFile)}, so the override is ignored.`,
     );
-    return false;
-  }
-  if (!isSystemSettingsPathTrusted(configured)) {
+  } else {
     const reason =
       os.platform() === 'win32'
-        ? `does not point inside ${WINDOWS_SYSTEM_SETTINGS_DIR}\\`
+        ? !isInsideWindowsSystemSettingsDir(configured)
+          ? `does not point inside ${WINDOWS_SYSTEM_SETTINGS_DIR}\\`
+          : `does not name an existing file inside ${WINDOWS_SYSTEM_SETTINGS_DIR}\\`
         : 'is not a regular root-owned file';
     warnIgnoredOverride(
       name,
       `${name} is set to ${JSON.stringify(configured)}, which ${reason}, so the platform default is used instead.`,
     );
-    return false;
   }
-  return true;
+  return false;
 }
 
 /**

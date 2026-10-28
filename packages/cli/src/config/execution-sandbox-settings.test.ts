@@ -21,25 +21,40 @@ import { loadServeFastPathSettings } from '../serve/fast-path-settings.js';
 
 // The system settings overrides are only honored for a root-owned file,
 // which a non-root test host cannot arrange for its temp fixtures; the
-// fixtures stand in for administrator-created system files.
+// fixtures stand in for administrator-created system files. Paths the tests
+// want the gate to count as existing, where the real check cannot reach them
+// (the platform default on a host that has no such file).
+const { mockExistingSystemPaths } = vi.hoisted(() => ({
+  mockExistingSystemPaths: new Set<string>(),
+}));
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
-  const { trustedSystemSettingsLstat } = await import(
-    '../test-utils/trusted-system-settings.js'
-  );
+  const {
+    trustedSystemSettingsLstat,
+    trustedSystemSettingsStat,
+  } = await import('../test-utils/trusted-system-settings.js');
   return {
     ...actual,
     lstatSync: trustedSystemSettingsLstat(actual.lstatSync.bind(actual)),
+    statSync: trustedSystemSettingsStat(actual.statSync.bind(actual)),
+    existsSync: (location: fs.PathLike) =>
+      mockExistingSystemPaths.has(String(location)) ||
+      actual.existsSync(location),
   };
 });
 vi.mock('fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('fs')>();
-  const { trustedSystemSettingsLstat } = await import(
-    '../test-utils/trusted-system-settings.js'
-  );
+  const {
+    trustedSystemSettingsLstat,
+    trustedSystemSettingsStat,
+  } = await import('../test-utils/trusted-system-settings.js');
   return {
     ...actual,
     lstatSync: trustedSystemSettingsLstat(actual.lstatSync.bind(actual)),
+    statSync: trustedSystemSettingsStat(actual.statSync.bind(actual)),
+    existsSync: (location: fs.PathLike) =>
+      mockExistingSystemPaths.has(String(location)) ||
+      actual.existsSync(location),
   };
 });
 
@@ -70,6 +85,11 @@ beforeEach(() => {
   vi.stubEnv('QWEN_HOME', path.dirname(user));
   vi.stubEnv('QWEN_CODE_SYSTEM_SETTINGS_PATH', system);
   vi.stubEnv('QWEN_CODE_SYSTEM_DEFAULTS_PATH', defaults);
+  // Pin the system layers in place: the trust gate rejects an override whose
+  // file does not exist, and the operator readers fail loudly for a rejected
+  // layer while the platform default is also absent.
+  write(system, {});
+  write(defaults, {});
   for (const key of [
     'SANDBOX',
     'QWEN_SANDBOX',
@@ -82,6 +102,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllEnvs();
   trustedSystemSettingsDirs.delete(fixture);
+  mockExistingSystemPaths.clear();
   fs.rmSync(fixture, { recursive: true, force: true });
 });
 
@@ -290,6 +311,55 @@ describe('operator execution sandbox policy', () => {
       '{"tools":{"executionSandbox":',
     );
   });
+  // The rejection guard checks the real platform default; only a Unix host
+  // can prove the ownership facts for the fixtures below.
+  const itOnUnix = os.platform() === 'win32' ? it.skip : it;
+  const euid = typeof process.getuid === 'function' ? process.getuid() : -1;
+  const platformSystemSettingsPath = () =>
+    process.platform === 'win32'
+      ? 'C:\\ProgramData\\qwen-code\\settings.json'
+      : process.platform === 'darwin'
+        ? '/Library/Application Support/QwenCode/settings.json'
+        : '/etc/qwen-code/settings.json';
+
+  itOnUnix(
+    'fails loud when a rejected override is the only available system layer',
+    () => {
+      const outside = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'qwen-sandbox-rejected-'),
+      );
+      const rejected = path.join(outside, 'settings.json');
+      write(rejected, { tools: { executionSandbox: restricted } });
+      if (euid === 0) fs.chownSync(rejected, 12345, 12345);
+      vi.stubEnv('QWEN_CODE_SYSTEM_SETTINGS_PATH', rejected);
+      try {
+        expect(() => readOperatorSandboxSettings()).toThrow(
+          'not administrator-controlled',
+        );
+      } finally {
+        fs.rmSync(outside, { recursive: true, force: true });
+      }
+    },
+  );
+
+  itOnUnix(
+    'reads the platform layer instead of failing when it is present',
+    () => {
+      const outside = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'qwen-sandbox-rejected-'),
+      );
+      const rejected = path.join(outside, 'settings.json');
+      write(rejected, { tools: { executionSandbox: restricted } });
+      if (euid === 0) fs.chownSync(rejected, 12345, 12345);
+      mockExistingSystemPaths.add(platformSystemSettingsPath());
+      vi.stubEnv('QWEN_CODE_SYSTEM_SETTINGS_PATH', rejected);
+      try {
+        expect(() => readOperatorSandboxSettings()).not.toThrow();
+      } finally {
+        fs.rmSync(outside, { recursive: true, force: true });
+      }
+    },
+  );
   it.each([
     ['system defaults', () => defaults],
     ['user', () => user],

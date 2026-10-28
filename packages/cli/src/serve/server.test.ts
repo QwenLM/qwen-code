@@ -288,9 +288,10 @@ vi.mock('node:os', async (importOriginal) => {
 });
 vi.mock('node:fs', async (importOriginal) => {
   const original = await importOriginal<typeof import('node:fs')>();
-  const { trustedSystemSettingsLstat } = await import(
-    '../test-utils/trusted-system-settings.js'
-  );
+  const {
+    trustedSystemSettingsLstat,
+    trustedSystemSettingsStat,
+  } = await import('../test-utils/trusted-system-settings.js');
   const wrapped = ((...args: [fs.PathLike, fs.EncodingOption?]) =>
     mockWt.realpath && args[1] === undefined
       ? mockWt.realpath(String(args[0]))
@@ -307,6 +308,7 @@ vi.mock('node:fs', async (importOriginal) => {
     // which a non-root test host cannot arrange for its temp fixtures; the
     // fixtures stand in for administrator-created system files.
     lstatSync: trustedSystemSettingsLstat(original.lstatSync.bind(original)),
+    statSync: trustedSystemSettingsStat(original.statSync.bind(original)),
   };
 });
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {

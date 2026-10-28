@@ -15,22 +15,30 @@ import { trustedSystemSettingsDirs } from '../test-utils/trusted-system-settings
 // fixtures stand in for administrator-created system files.
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
-  const { trustedSystemSettingsLstat } = await import(
+  const {
+    trustedSystemSettingsLstat,
+    trustedSystemSettingsStat,
+  } = await import(
     '../test-utils/trusted-system-settings.js'
   );
   return {
     ...actual,
     lstatSync: trustedSystemSettingsLstat(actual.lstatSync.bind(actual)),
+    statSync: trustedSystemSettingsStat(actual.statSync.bind(actual)),
   };
 });
 vi.mock('fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('fs')>();
-  const { trustedSystemSettingsLstat } = await import(
+  const {
+    trustedSystemSettingsLstat,
+    trustedSystemSettingsStat,
+  } = await import(
     '../test-utils/trusted-system-settings.js'
   );
   return {
     ...actual,
     lstatSync: trustedSystemSettingsLstat(actual.lstatSync.bind(actual)),
+    statSync: trustedSystemSettingsStat(actual.statSync.bind(actual)),
   };
 });
 

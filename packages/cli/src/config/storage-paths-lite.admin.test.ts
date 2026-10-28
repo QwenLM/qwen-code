@@ -9,8 +9,14 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Entries the resolver may stat, with the ownership metadata it reads;
-// every other path goes to the real lstatSync/statSync.
-type Entry = { uid: number; kind: 'file' | 'directory' | 'symlink' };
+// every other path goes to the real lstatSync/statSync/realpathSync. A
+// symlink entry resolves to its `target` when one is registered, and to
+// nothing (ENOENT) when the link dangles.
+type Entry = {
+  uid: number;
+  kind: 'file' | 'directory' | 'symlink';
+  target?: string;
+};
 const entries = new Map<string, Entry>();
 const uninspectable = new Set<string>();
 
@@ -39,11 +45,34 @@ vi.mock('node:fs', async (importOriginal) => {
     const entry = entries.get(text);
     return entry ? statsFor(entry) : actual.statSync(location);
   };
+  const realpathSync = (location: fs.PathLike) => {
+    const text = String(location);
+    if (uninspectable.has(text)) {
+      throw Object.assign(new Error(`EACCES: ${text}`), { code: 'EACCES' });
+    }
+    const entry = entries.get(text);
+    if (entry?.kind === 'symlink') {
+      if (entry.target === undefined) {
+        throw Object.assign(new Error(`ENOENT: ${text}`), { code: 'ENOENT' });
+      }
+      return entry.target;
+    }
+    if (entry) return text;
+    return actual.realpathSync(location);
+  };
+  const existsSync = (location: fs.PathLike) => {
+    const text = String(location);
+    if (uninspectable.has(text)) return false;
+    if (entries.has(text)) return true;
+    return actual.existsSync(location);
+  };
   return {
     ...actual,
-    default: { ...actual, lstatSync, statSync },
+    default: { ...actual, lstatSync, statSync, realpathSync, existsSync },
     lstatSync,
     statSync,
+    realpathSync,
+    existsSync,
   };
 });
 
@@ -57,6 +86,8 @@ describe('system settings path overrides while an administrator file is installe
   const defaultsOverride = path.resolve('/override', 'system-defaults.json');
   const trust = (location: string, uid = 0) => {
     entries.set(location, { uid, kind: 'file' });
+    // The gate also requires the containing directory to be root-owned.
+    entries.set(path.dirname(location), { uid: 0, kind: 'directory' });
   };
   const install = (file: string, uid = 0) => {
     entries.set(file, { uid, kind: 'file' });
@@ -256,6 +287,7 @@ describe('system settings path overrides while an administrator file is installe
   it('honors a Windows override that stays inside the system directory', () => {
     runOn('win32');
     const windowsOverride = 'C:\\ProgramData\\qwen-code\\policy.json';
+    entries.set(windowsOverride, { uid: 0, kind: 'file' });
 
     expect(
       resolver.getSystemSettingsPath({
@@ -278,6 +310,7 @@ describe('system settings path overrides while an administrator file is installe
     });
     entries.set('.', { uid: 0, kind: 'directory' });
     const windowsOverride = 'C:\\ProgramData\\qwen-code\\policy.json';
+    entries.set(windowsOverride, { uid: 0, kind: 'file' });
 
     expect(
       resolver.getSystemSettingsPath({
@@ -294,6 +327,7 @@ describe('system settings path overrides while an administrator file is installe
       kind: 'file',
     });
     const windowsOverride = 'C:\\ProgramData\\qwen-code\\policy.json';
+    entries.set(windowsOverride, { uid: 0, kind: 'file' });
 
     expect(
       resolver.getSystemSettingsPath({
@@ -301,5 +335,80 @@ describe('system settings path overrides while an administrator file is installe
       }),
     ).toBe(windowsOverride);
     expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('fails closed for a Windows override that names no file inside the system directory', () => {
+    runOn('win32');
+    const windowsOverride = 'C:\\ProgramData\\qwen-code\\no-such-file.json';
+
+    expect(
+      resolver.getSystemSettingsPath({
+        QWEN_CODE_SYSTEM_SETTINGS_PATH: windowsOverride,
+      }),
+    ).toBe('C:\\ProgramData\\qwen-code\\settings.json');
+    expect(String(warn.mock.calls[0]?.[0])).toBe(
+      `QWEN_CODE_SYSTEM_SETTINGS_PATH is set to ${JSON.stringify(windowsOverride)}, which does not name an existing file inside C:\\ProgramData\\qwen-code\\, so the platform default is used instead.`,
+    );
+  });
+
+  it('honors an override delivered by a symlink to a root-owned file in a root-owned directory', () => {
+    const link = '/override/link.json';
+    entries.set(settingsOverride, { uid: 0, kind: 'file' });
+    entries.set('/override', { uid: 0, kind: 'directory' });
+    entries.set(link, {
+      uid: 0,
+      kind: 'symlink',
+      target: settingsOverride,
+    });
+
+    expect(
+      resolver.getSystemSettingsPath({
+        QWEN_CODE_SYSTEM_SETTINGS_PATH: link,
+      }),
+    ).toBe(link);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('keeps rejecting a link whose target sits in a user-owned directory', () => {
+    const link = '/override/link.json';
+    entries.set('/user-owned/settings.json', { uid: 0, kind: 'file' });
+    entries.set('/user-owned', { uid: 1000, kind: 'directory' });
+    entries.set(link, {
+      uid: 0,
+      kind: 'symlink',
+      target: '/user-owned/settings.json',
+    });
+
+    expect(
+      resolver.getSystemSettingsPath({
+        QWEN_CODE_SYSTEM_SETTINGS_PATH: link,
+      }),
+    ).toBe('/etc/qwen-code/settings.json');
+    expect(String(warn.mock.calls[0]?.[0])).toBe(
+      `QWEN_CODE_SYSTEM_SETTINGS_PATH is set to ${JSON.stringify(link)}, which is not a regular root-owned file, so the platform default is used instead.`,
+    );
+  });
+
+  it('counts an administrator file delivered by a symlink as installed', () => {
+    entries.set('/etc/qwen-code/settings.json', {
+      uid: 0,
+      kind: 'symlink',
+      target: '/etc/qwen-code/..data/settings.json',
+    });
+    entries.set('/etc/qwen-code/..data/settings.json', {
+      uid: 0,
+      kind: 'file',
+    });
+    entries.set('/etc/qwen-code/..data', { uid: 0, kind: 'directory' });
+    trust(settingsOverride);
+
+    expect(
+      resolver.getSystemSettingsPath({
+        QWEN_CODE_SYSTEM_SETTINGS_PATH: settingsOverride,
+      }),
+    ).toBe('/etc/qwen-code/settings.json');
+    expect(String(warn.mock.calls[0]?.[0])).toContain(
+      '"/etc/qwen-code/settings.json"',
+    );
   });
 });

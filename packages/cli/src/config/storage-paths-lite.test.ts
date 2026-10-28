@@ -23,6 +23,22 @@ import {
   spawnedEnvironmentView,
 } from './storage-paths-lite.js';
 
+// The trust gate for the Windows system directory also requires the name to
+// point at a file that is there; on a non-Windows host the real check cannot
+// say so, so the tests register the paths they want to count as present.
+const { mockExistingWindowsPaths } = vi.hoisted(() => ({
+  mockExistingWindowsPaths: new Set<string>(),
+}));
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    existsSync: (location: fs.PathLike) =>
+      mockExistingWindowsPaths.has(String(location)) ||
+      actual.existsSync(location),
+  };
+});
+
 describe('settings locations in a given environment', () => {
   const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
   const runOn = (value: string) =>
@@ -36,6 +52,7 @@ describe('settings locations in a given environment', () => {
   afterEach(() => {
     Object.defineProperty(process, 'platform', platform);
     vi.unstubAllEnvs();
+    mockExistingWindowsPaths.clear();
   });
 
   it.each([
@@ -246,6 +263,8 @@ describe('settings locations in a given environment', () => {
 
   it('finds a name spelled in another case on Windows', () => {
     runOn('win32');
+    mockExistingWindowsPaths.add(settingsPath);
+    mockExistingWindowsPaths.add(defaultsPath);
 
     expect(getGlobalQwenDirLite({ qwen_home: home })).toBe(home);
     expect(
@@ -389,6 +408,8 @@ describe('system settings overrides are honored only for administrator-controlle
     ['qwen-code\\settings.json', false],
     ['..\\..\\settings.json', false],
     ['\\\\server\\share\\settings.json', false],
+    ['\\\\server\\share\\..\\..\\C:\\ProgramData\\qwen-code\\settings.json', false],
+    ['..\\C:\\ProgramData\\qwen-code\\settings.json', false],
     ['', false],
   ])(
     'on Windows, treats %s as inside the system settings directory: %s',
@@ -397,6 +418,31 @@ describe('system settings overrides are honored only for administrator-controlle
     },
   );
 
+  // The rows above resolve against the host working directory, which on a
+  // Unix host cannot point inside the Windows system directory; pin the
+  // guards against a working directory that sits inside it, where a relative
+  // spelling would resolve into the directory if the guards were absent.
+  it('on Windows, refuses a relative or UNC spelling even from a working directory inside the system settings directory', () => {
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(
+      'C:\\ProgramData\\qwen-code\\nested',
+    );
+    try {
+      expect(
+        isInsideWindowsSystemSettingsDir(
+          '..\\C:\\ProgramData\\qwen-code\\settings.json',
+        ),
+      ).toBe(false);
+      expect(
+        isInsideWindowsSystemSettingsDir('..\\settings.json'),
+      ).toBe(false);
+      expect(
+        isInsideWindowsSystemSettingsDir('\\\\server\\share\\settings.json'),
+      ).toBe(false);
+    } finally {
+      cwdSpy.mockRestore();
+    }
+  });
+
   it.each([
     'C:\\ProgramData\\qwen-code\\settings.json',
     'c:/programdata/qwen-code/system-defaults.json',
@@ -404,6 +450,8 @@ describe('system settings overrides are honored only for administrator-controlle
     'on Windows, honors an override that stays inside the system settings directory: %s',
     (configured) => {
       runOn('win32');
+      // The gate checks existence on the configured spelling itself.
+      mockExistingWindowsPaths.add(configured);
 
       expect(
         getSystemSettingsPath({ QWEN_CODE_SYSTEM_SETTINGS_PATH: configured }),
@@ -413,6 +461,17 @@ describe('system settings overrides are honored only for administrator-controlle
       ).toBe(configured);
     },
   );
+
+  it('on Windows, fails closed to the platform default for a name inside the system settings directory that names no file', () => {
+    runOn('win32');
+
+    expect(
+      getSystemSettingsPath({
+        QWEN_CODE_SYSTEM_SETTINGS_PATH:
+          'C:\\ProgramData\\qwen-code\\no-such-file.json',
+      }),
+    ).toBe('C:\\ProgramData\\qwen-code\\settings.json');
+  });
 
   it.each([
     'C:\\evil\\settings.json',
@@ -443,15 +502,17 @@ describe('system settings overrides are honored only for administrator-controlle
           isSystemSettingsPathTrusted(path.join(root, 'absent.json')),
         ).toBe(false);
         expect(isSystemSettingsPathTrusted(root)).toBe(false);
-        // A link is judged as itself, not as the file it points at.
-        expect(isSystemSettingsPathTrusted(link)).toBe(false);
         if (euid === 0) {
-          // Root owns what root creates, and can give a file away to prove the
-          // other direction.
+          // Root owns what root creates: the trusted case for the file and a
+          // link to it, and chowning gives the other direction.
           expect(isSystemSettingsPathTrusted(file)).toBe(true);
+          expect(isSystemSettingsPathTrusted(link)).toBe(true);
           fs.chownSync(file, 12345, 12345);
         }
+        // A link is judged by the file it resolves to; that file is
+        // user-owned here (the host user owns it, or root gave it away).
         expect(isSystemSettingsPathTrusted(file)).toBe(false);
+        expect(isSystemSettingsPathTrusted(link)).toBe(false);
       } finally {
         fs.rmSync(root, { recursive: true, force: true });
       }

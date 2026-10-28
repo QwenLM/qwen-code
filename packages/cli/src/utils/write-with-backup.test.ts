@@ -19,7 +19,10 @@ import { trustedSystemSettingsDirs } from '../test-utils/trusted-system-settings
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof fs>();
-  const { trustedSystemSettingsLstat } = await import(
+  const {
+    trustedSystemSettingsLstat,
+    trustedSystemSettingsStat,
+  } = await import(
     '../test-utils/trusted-system-settings.js'
   );
   return {
@@ -36,16 +39,20 @@ vi.mock('node:fs', async (importOriginal) => {
     // regular file; the wrapper reports the temp fixtures as root-owned so
     // the trust gate resolves them instead of the platform default.
     lstatSync: trustedSystemSettingsLstat(actual.lstatSync.bind(actual)),
+    statSync: trustedSystemSettingsStat(actual.statSync.bind(actual)),
   };
 });
 vi.mock('fs', async (importOriginal) => {
   const actual = await importOriginal<typeof fs>();
-  const { trustedSystemSettingsLstat } = await import(
+  const {
+    trustedSystemSettingsLstat,
+    trustedSystemSettingsStat,
+  } = await import(
     '../test-utils/trusted-system-settings.js'
   );
   // Identical to the node:fs factory: vitest normalizes the two specifiers
   // to one module, the last registered factory wins, so it must carry the
-  // same vi.fn wrappers plus the lstat override.
+  // same vi.fn wrappers plus the lstat/statSync overrides.
   return {
     ...actual,
     mkdtempSync: vi.fn(actual.mkdtempSync),
@@ -57,6 +64,7 @@ vi.mock('fs', async (importOriginal) => {
     rmSync: vi.fn(actual.rmSync),
     unlinkSync: vi.fn(actual.unlinkSync),
     lstatSync: trustedSystemSettingsLstat(actual.lstatSync.bind(actual)),
+    statSync: trustedSystemSettingsStat(actual.statSync.bind(actual)),
   };
 });
 
