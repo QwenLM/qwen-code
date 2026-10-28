@@ -102,8 +102,12 @@ abort the entire tick, taking every lever and the dashboard write down with a
 read-only report.
 
 **Workflow names are untrusted, and the rows are rendered without an
-interpreter.** A `pull_request` run executes the head branch's workflow file, so
-the author of that file chooses the `name` that appears in the run listing. The
+interpreter.** A run executes the workflow file of the branch it came from, so
+whoever owns that branch chooses the `name` that appears in the run listing.
+That is enough to establish the path: the autofix bot and any contributor with
+write access can open a same-repo branch. Whether a fork PR also controls the
+name is deliberately NOT claimed — this repository's own bridge notes record
+fork-triggered runs executing the base branch's file. The
 queue section is emitted before the liveness watermark that the next tick
 recovers with `head -1`, so a name carrying a newline could end its row early and
 place a forged watermark above the real one — and that watermark gates the

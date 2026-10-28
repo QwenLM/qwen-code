@@ -541,10 +541,13 @@ jobs:
                 | ((($now | tonumber) - (.created_at | fromdateiso8601)) / 60 | floor) ] | sort
               | if length == 0 then "n/a"
                 else "p50 \(.[length / 2 | floor])m · max \(.[-1])m" end' /tmp/queue-runs.json)" || QUEUE_OK=false
-            # `.name` is UNTRUSTED and reaches a control signal: a `pull_request`
-            # run executes the head branch's workflow file, so its author picks
-            # the name, and this section is emitted BEFORE the liveness marker
-            # that the next tick recovers with `head -1`. A name carrying a
+            # `.name` is UNTRUSTED and reaches a control signal: a run executes
+            # the workflow file of the branch it came from, so whoever owns that
+            # branch picks the name (the autofix bot and any write-access
+            # contributor included; fork-triggered runs are documented here as
+            # executing the BASE file, so that case is not claimed). This
+            # section is emitted BEFORE the liveness marker that the next tick
+            # recovers with `head -1`. A name carrying a
             # newline could therefore end the row early and land a forged
             # watermark above the real one, and that watermark gates the
             # liveness dispatch. Control characters collapse to spaces here;
