@@ -1308,9 +1308,7 @@ function appendGoalUpdatesWithinLimits(
 
 function replayGoalBootstrap(
   projection:
-    | SessionRestoreProjection
-    | SessionLiveRestoreProjection
-    | undefined,
+    SessionRestoreProjection | SessionLiveRestoreProjection | undefined,
 ): ReturnType<typeof HistoryReplayer.v2GoalBootstrap> {
   if (projection && !('runtime' in projection)) {
     const sourceUuid = projection.goalRecoverySourceUuid;
@@ -1906,8 +1904,7 @@ function readExistingProviderConfig(
   const existing = findExistingProviderModels(
     config,
     (settings.merged as Record<string, unknown>)['modelProviders'] as
-      | Record<string, unknown>
-      | undefined,
+      Record<string, unknown> | undefined,
     settings.merged.providerProtocol,
     {
       authType: settings.merged.security?.auth?.selectedType,
@@ -2065,8 +2062,7 @@ function readProviderSetupInputs(
   ) => string | undefined,
 ): ProviderSetupInputs {
   const protocol = readOptionalString(params['protocol'], 'protocol') as
-    | AuthType
-    | undefined;
+    AuthType | undefined;
   if (
     protocol &&
     protocol !== config.protocol &&
@@ -4058,10 +4054,7 @@ class QwenAgent implements Agent {
   /** Set once the daemon negotiates active-work reporting; one per channel. */
   private activeWorkReporter: ActiveWorkReporter | undefined;
   private privateParentState:
-    | 'uninitialized'
-    | 'trusted'
-    | 'untrusted'
-    | 'rejected' = 'uninitialized';
+    'uninitialized' | 'trusted' | 'untrusted' | 'rejected' = 'uninitialized';
   // CPU-usage delta baseline for the daemon's `workspaceResource` extMethod
   // (Daemon Status child-resource chart). The daemon polls this at a fixed
   // cadence, so successive calls form a clean delta window independent of tool
@@ -4220,6 +4213,11 @@ class QwenAgent implements Agent {
     this.workspaceGenerationControllers.clear();
 
     const configs = new Set<Config>([this.config, ...this.initializingConfigs]);
+    // Landing a peer report must wait for the cancel to settle: cancelling a
+    // delivery turn re-queues its report on a later microtask, so flushing
+    // synchronously would iterate a queue that no longer holds it and the
+    // writer close below would then make the re-queued landing a silent no-op.
+    const peerFlushes: Array<Promise<void>> = [];
     for (const session of this.sessions.values()) {
       try {
         session.beginCloseIfAvailable();
@@ -4231,25 +4229,32 @@ class QwenAgent implements Agent {
         );
       }
       session.cancelMcpAppCalls();
-      void session.cancelPendingPrompt().catch((error) => {
-        debugLogger.debug(
-          `Session ${session.getId()} cancel during managed shutdown failed: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      });
-      try {
-        // Queued teammate reports are already marked read in the on-disk
-        // mailbox, so land them here: the writer-close loop below runs before
-        // `dispose()`, and `appendRecord` is a silent no-op once it has closed.
-        session.flushPendingPeerNotifications?.();
-      } catch (error) {
-        debugLogger.debug(
-          `Session ${session.getId()} peer notification flush during managed shutdown failed: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      }
+      peerFlushes.push(
+        session
+          .cancelPendingPrompt()
+          .catch((error) => {
+            debugLogger.debug(
+              `Session ${session.getId()} cancel during managed shutdown failed: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          })
+          .then(() => {
+            try {
+              // Queued teammate reports are already marked read in the on-disk
+              // mailbox, so land them here: the writer-close loop below runs
+              // before `dispose()`, and `appendRecord` is a silent no-op once
+              // it has closed.
+              session.flushPendingPeerNotifications?.();
+            } catch (error) {
+              debugLogger.debug(
+                `Session ${session.getId()} peer notification flush during managed shutdown failed: ${
+                  error instanceof Error ? error.message : String(error)
+                }`,
+              );
+            }
+          }),
+      );
       configs.add(session.getConfig());
     }
     for (const pending of this.pendingConfigCleanup.values()) {
@@ -4281,8 +4286,9 @@ class QwenAgent implements Agent {
         writerTerminals.push(Promise.reject(error));
       }
     }
-    const writerShutdown = Promise.allSettled(writerTerminals).then(
-      (results) => {
+    const writerShutdown = Promise.allSettled(peerFlushes)
+      .then(() => Promise.allSettled(writerTerminals))
+      .then((results) => {
         const failures = results.flatMap((result) =>
           result.status === 'rejected' ? [result.reason] : [],
         );
@@ -4292,8 +4298,7 @@ class QwenAgent implements Agent {
             'Managed session writer shutdown failed',
           );
         }
-      },
-    );
+      });
     return { configs: configList, writerShutdown };
   }
 
@@ -4433,8 +4438,7 @@ class QwenAgent implements Agent {
 
   private getMcpServerStatus(config: Config, serverName: string) {
     const manager = config.getToolRegistry()?.getMcpClientManager() as
-      | { getServerStatus?: (name: string) => MCPServerStatus }
-      | undefined;
+      { getServerStatus?: (name: string) => MCPServerStatus } | undefined;
     return (
       manager?.getServerStatus?.(serverName) ?? getMCPServerStatus(serverName)
     );
@@ -5857,8 +5861,7 @@ class QwenAgent implements Agent {
       ? this.reserveStartingSessionId(requestedSessionId)
       : undefined;
     let initializationDeadline:
-      | { signal: AbortSignal; dispose: () => void }
-      | undefined;
+      { signal: AbortSignal; dispose: () => void } | undefined;
     try {
       initializationDeadline = this.createSessionInitializationDeadline(
         params._meta?.[SESSION_INITIALIZATION_DEADLINE_META_KEY],
@@ -9648,19 +9651,17 @@ class QwenAgent implements Agent {
         .filter(
           (row) => row.origin === 'registry' && row.agentScope === undefined,
         )
-        .map(
-          (row): ServeHookEntry => ({
-            kind: 'hook',
-            eventName: row.eventName,
-            config: this.serializeHookConfig(row.config),
-            source: row.source as ServeHookSource,
-            ...(row.matcher ? { matcher: row.matcher } : {}),
-            ...(row.sequential !== undefined
-              ? { sequential: row.sequential }
-              : {}),
-            enabled: row.enabled,
-          }),
-        );
+        .map((row): ServeHookEntry => ({
+          kind: 'hook',
+          eventName: row.eventName,
+          config: this.serializeHookConfig(row.config),
+          source: row.source as ServeHookSource,
+          ...(row.matcher ? { matcher: row.matcher } : {}),
+          ...(row.sequential !== undefined
+            ? { sequential: row.sequential }
+            : {}),
+          enabled: row.enabled,
+        }));
       return {
         v: STATUS_SCHEMA_VERSION,
         workspaceCwd,
@@ -14503,8 +14504,7 @@ class QwenAgent implements Agent {
         const promptId =
           typeof rawPromptId === 'string' ? rawPromptId : undefined;
         let turnIndex: number | undefined = params['targetTurnIndex'] as
-          | number
-          | undefined;
+          number | undefined;
         const resolveFromPromptId =
           promptId !== undefined &&
           (turnIndex === undefined || turnIndex === null);
