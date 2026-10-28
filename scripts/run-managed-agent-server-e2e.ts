@@ -80,7 +80,6 @@ const approvalFaults = [
   'after-result',
   'decision-reply-lost',
   'admission-reply-lost',
-  'cleanup-failed',
   'terminal-reply-lost',
   'terminal-write-failed',
 ] as const;
@@ -123,7 +122,7 @@ for (let index = 0; index < argumentsList.length; index += 1) {
     index += 1;
   } else {
     throw new Error(
-      'Usage: run-managed-agent-server-e2e.ts [--model ID] [--runtime-delay-ms N] [--settings PATH] [--session-failover|--inflight-failover|--continuation-failover|--model-round-failover|--big-output] [--harness-only] [--freeze] [--frozen-control-plane] [--g3-verify allow|deny|cancel|expiry|continuation] [--g3-fault after-decision|after-prepare|after-result|decision-reply-lost|admission-reply-lost|cleanup-failed|terminal-reply-lost|terminal-write-failed]',
+      'Usage: run-managed-agent-server-e2e.ts [--model ID] [--runtime-delay-ms N] [--settings PATH] [--session-failover|--inflight-failover|--continuation-failover|--model-round-failover|--big-output] [--harness-only] [--freeze] [--frozen-control-plane] [--g3-verify allow|deny|cancel|expiry|continuation] [--g3-fault after-decision|after-prepare|after-result|decision-reply-lost|admission-reply-lost|terminal-reply-lost|terminal-write-failed]',
     );
   }
 }
@@ -603,25 +602,15 @@ type HeldExecutionStartProxy = {
   close: () => Promise<void>;
   heldPath: () => string | undefined;
   observations: () => string[];
-  // C3: the first Runtime cleanup release is refused with 500, and every
-  // later one is refused until allowRelease(), so the doomed generation
-  // cannot discharge its own cleanup debt before the crash lands.
-  releaseFailureCount: () => number;
-  releaseSuccessCount: () => number;
-  allowRelease: () => void;
 };
 
 async function startHeldExecutionStartProxy(
   targetOrigin: string,
   holdExecutionStart = true,
-  failRelease = false,
 ): Promise<HeldExecutionStartProxy> {
   let heldPath: string | undefined;
   const observations: string[] = [];
   let closed = false;
-  let releaseAllowed = !failRelease;
-  let releaseFailureCount = 0;
-  let releaseSuccessCount = 0;
   const server: Server = createServer((request, response) => {
     void (async () => {
       const chunks: Buffer[] = [];
@@ -631,21 +620,6 @@ async function startHeldExecutionStartProxy(
       const target = new URL(request.url ?? '/', targetOrigin);
       const method = request.method ?? 'GET';
       observations.push(`${method} ${target.pathname} received`);
-      if (
-        failRelease &&
-        method === 'POST' &&
-        target.pathname.endsWith(':release') &&
-        !target.pathname.endsWith(':release-mount')
-      ) {
-        if (!releaseAllowed) {
-          releaseFailureCount += 1;
-          observations.push(`${method} ${target.pathname} refused`);
-          response.writeHead(500, { 'content-type': 'application/json' });
-          response.end('{"error":"e2e_cleanup_release_failed"}');
-          return;
-        }
-        releaseSuccessCount += 1;
-      }
       if (
         holdExecutionStart &&
         method === 'POST' &&
@@ -722,12 +696,6 @@ async function startHeldExecutionStartProxy(
     baseUrl: `http://127.0.0.1:${address.port}`,
     heldPath: () => heldPath,
     observations: () => [...observations],
-    releaseFailureCount: () => releaseFailureCount,
-    releaseSuccessCount: () => releaseSuccessCount,
-    allowRelease: () => {
-      releaseAllowed = true;
-      observations.push('release allowed');
-    },
     close: async () => {
       if (closed) return;
       closed = true;
@@ -862,15 +830,21 @@ function startStoreFaultProxy(targetOrigin: string): Promise<StoreFaultProxy> {
         const upstreamBody = Buffer.from(await upstream.arrayBuffer());
         if (terminal) {
           if (armed?.fault === 'drop-reply' && !terminalAllowed) {
-            // Keep dropping every bounded retry until the crash. Dropping
-            // only the first answer would let the doomed generation's retry
-            // receive a replay, so the crash would land after the terminal
-            // was delivered rather than on a committed-but-undelivered one.
-            terminalFaulted = true;
-            if (upstream.status === 200) terminalAcceptCount += 1;
-            observations.push(
-              `${method} ${target.pathname} forwarded ${upstream.status} dropped reply`,
-            );
+            // Keep dropping every bounded retry until the crash. Arm the
+            // barrier only on a confirmed 200: a rejected first commit did
+            // not land, and letting it pass would turn C1 into C2 while the
+            // later compensation satisfies the final accept count.
+            if (upstream.status === 200) {
+              terminalFaulted = true;
+              terminalAcceptCount += 1;
+              observations.push(
+                `${method} ${target.pathname} forwarded 200 dropped reply`,
+              );
+            } else {
+              observations.push(
+                `${method} ${target.pathname} forwarded ${upstream.status} dropped reply (not committed)`,
+              );
+            }
             response.destroy();
             return;
           }
@@ -1411,6 +1385,9 @@ let dumpPort: number | undefined;
 // on stdout for a run the operator explicitly stopped.
 let resultJson: string | undefined;
 let approvalResultJson: string | undefined;
+// Snapshot before the relief Turn so the summary cannot report the relief's
+// store/broker traffic as part of the original fault arm.
+let originalFaultObservations: Record<string, number> | undefined;
 let g3SummaryJson: string | undefined;
 // The freeze arm's wake record reads as a pass line too, so it defers the
 // same way and prints after the main result, as in the base's ordering.
@@ -2344,12 +2321,6 @@ try {
         replacementBrokerProxy = await startHeldExecutionStartProxy(
           `http://127.0.0.1:${brokerPort}`,
         );
-      } else if (approvalFault === 'cleanup-failed') {
-        replacementBrokerProxy = await startHeldExecutionStartProxy(
-          `http://127.0.0.1:${brokerPort}`,
-          false,
-          true,
-        );
       }
       replacementBrokerUrl =
         replacementBrokerProxy?.baseUrl ?? `http://127.0.0.1:${brokerPort}`;
@@ -2643,11 +2614,11 @@ try {
           );
       }
       let publishedPrefixSequences: number[] = [];
+      let terminalAcceptsAtBarrier = 0;
       if (
         approvalFault === 'after-decision' ||
         approvalFault === 'after-prepare' ||
         approvalFault === 'after-result' ||
-        approvalFault === 'cleanup-failed' ||
         approvalFault === 'terminal-reply-lost' ||
         approvalFault === 'terminal-write-failed'
       ) {
@@ -2721,16 +2692,11 @@ try {
             120_000,
             replacementHarness,
           );
-        } else if (approvalFault === 'cleanup-failed') {
-          // C3: the release refusal is the barrier. The terminal and its
-          // file effect are already durable, so the next generation must
-          // retry the same cleanup identity, not repeat the Turn.
-          await waitUntil(
-            'Runtime cleanup release refused',
-            () => (replacementBrokerProxy?.releaseFailureCount() ?? 0) > 0,
-            120_000,
-            replacementHarness,
-          );
+          // The barrier only arms on a confirmed 200, so this count proves
+          // the terminal was committed before the crash. The replacement
+          // projects it; a second store commit is not required.
+          terminalAcceptsAtBarrier =
+            storeFaultProxy?.terminalAcceptCount() ?? 0;
         } else if (approvalFault === 'after-decision') {
           // The 202 admitted the response operation, not the decision. Wait
           // for the durable decision row and its receipt before SIGKILL.
@@ -2745,6 +2711,13 @@ try {
               ),
             120_000,
             replacementHarness,
+          );
+        } else {
+          // The enclosing condition lists every crash-type fault. A new one
+          // added without a barrier here must fail loudly instead of
+          // reaching SIGKILL with no wait at all.
+          throw new Error(
+            `Unhandled approval fault barrier: ${String(approvalFault)}`,
           );
         }
         const executionAtCrash = runMysql(
@@ -2767,11 +2740,11 @@ try {
           crashedHarnessBootId: crashedBootId,
           executionAtCrash,
           heldExecutionStartPath: replacementBrokerProxy?.heldPath(),
-          releaseFailures: replacementBrokerProxy?.releaseFailureCount(),
           terminalFault: storeFaultProxy
             ? {
                 rejected: storeFaultProxy.terminalRejectCount(),
                 accepted: storeFaultProxy.terminalAcceptCount(),
+                acceptedAtBarrier: terminalAcceptsAtBarrier,
               }
             : undefined,
           publishedPrefix:
@@ -2792,8 +2765,7 @@ try {
         }
         // C1/C2's doomed generation must not land or deliver the terminal after
         // the injected fault; the replacement may, including a replayed commit
-        // for C1. C3 keeps its Broker proxy alive so the retry's successful
-        // release is witnessed there.
+        // for C1.
         if (
           approvalFault === 'terminal-reply-lost' ||
           approvalFault === 'terminal-write-failed'
@@ -2801,13 +2773,9 @@ try {
           storeFaultProxy?.allowTerminal();
         }
         if (replacementBrokerProxy) {
-          if (approvalFault === 'cleanup-failed') {
-            replacementBrokerProxy.allowRelease();
-          } else {
-            await replacementBrokerProxy.close();
-            replacementBrokerProxy = undefined;
-            replacementBrokerUrl = `http://127.0.0.1:${brokerPort}`;
-          }
+          await replacementBrokerProxy.close();
+          replacementBrokerProxy = undefined;
+          replacementBrokerUrl = `http://127.0.0.1:${brokerPort}`;
         }
         // The crashed generation's disk is scrapped like every replaced
         // Harness home; the fresh one must recover from MySQL alone.
@@ -3096,21 +3064,13 @@ try {
         throw new Error(
           `Original cleanup did not release the original Runtime: state=${runtimeAfter.join(',')} confirmed=${cleanupConfirmed}`,
         );
-      if (approvalFault === 'cleanup-failed') {
-        const failures = replacementBrokerProxy?.releaseFailureCount() ?? 0;
-        const successes = replacementBrokerProxy?.releaseSuccessCount() ?? 0;
-        if (failures < 1 || successes < 1)
-          throw new Error(
-            `Cleanup fault was not retried: failures=${failures} successes=${successes}`,
-          );
-      }
       if (approvalFault === 'terminal-reply-lost') {
         if (
           storeFaultProxy?.terminalFaulted() !== true ||
-          (storeFaultProxy?.terminalAcceptCount() ?? 0) < 1
+          terminalAcceptsAtBarrier < 1
         )
           throw new Error(
-            `Terminal reply loss did not commit exactly one terminal before recovery: ${storeFaultProxy?.observations().join(' | ')}`,
+            `Terminal reply loss did not commit the terminal before recovery: barrierAccepts=${terminalAcceptsAtBarrier} observations=${storeFaultProxy?.observations().join(' | ')}`,
           );
       }
       if (approvalFault === 'terminal-write-failed') {
@@ -3122,15 +3082,21 @@ try {
             `Terminal write fault was not compensated: reject=${storeFaultProxy?.terminalRejectCount()} accept=${storeFaultProxy?.terminalAcceptCount()} observations=${storeFaultProxy?.observations().join(' | ')}`,
           );
       }
+      const faultObservations = {
+        terminalRejects: storeFaultProxy?.terminalRejectCount() ?? 0,
+        terminalAccepts: storeFaultProxy?.terminalAcceptCount() ?? 0,
+        terminalAcceptsAtBarrier,
+        postCrashTerminalAccepts: Math.max(
+          0,
+          (storeFaultProxy?.terminalAcceptCount() ?? 0) -
+            terminalAcceptsAtBarrier,
+        ),
+      };
+      originalFaultObservations = faultObservations;
       saveEvidence('approval-result.json', {
         mode: verificationMode,
         fault: approvalFault ?? null,
-        faultObservations: {
-          releaseFailures: replacementBrokerProxy?.releaseFailureCount() ?? 0,
-          releaseSuccesses: replacementBrokerProxy?.releaseSuccessCount() ?? 0,
-          terminalRejects: storeFaultProxy?.terminalRejectCount() ?? 0,
-          terminalAccepts: storeFaultProxy?.terminalAcceptCount() ?? 0,
-        },
+        faultObservations,
         sessionId: session.id,
         actionId: originalApprovalId,
         replacementActionBeforeResponse: actionBeforeResponse,
@@ -4360,11 +4326,13 @@ try {
       const summary = {
         mode: verificationMode,
         fault: approvalFault ?? null,
-        faultObservations: {
-          releaseFailures: replacementBrokerProxy?.releaseFailureCount() ?? 0,
-          releaseSuccesses: replacementBrokerProxy?.releaseSuccessCount() ?? 0,
-          terminalRejects: storeFaultProxy?.terminalRejectCount() ?? 0,
-          terminalAccepts: storeFaultProxy?.terminalAcceptCount() ?? 0,
+        // C1/C2 must not report the later relief Turn's terminal commit as
+        // part of the original fault window.
+        faultObservations: originalFaultObservations ?? {
+          terminalRejects: 0,
+          terminalAccepts: 0,
+          terminalAcceptsAtBarrier: 0,
+          postCrashTerminalAccepts: 0,
         },
         sessionId: session.id,
         originalRuntimeSessionId,

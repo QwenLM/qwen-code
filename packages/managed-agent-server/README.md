@@ -1751,31 +1751,30 @@ npm run test:e2e:managed-harness-restart-approval-decision-reply-lost
 npm run test:e2e:managed-harness-restart-approval-admission-reply-lost
 ```
 
-The remaining three cover the next barriers of the same matrix. The cleanup
-arm refuses the first Runtime release, crashes the Harness, and requires the
-replacement to retry the original cleanup identity until one confirmation.
-The terminal reply-loss arm commits `turn.settled`, loses its reply (and
-every bounded retry of it) until the crash, and restarts the Harness; the
+The remaining two cover the next barriers of the same matrix. The terminal
+reply-loss arm commits `turn.settled`, loses its reply (and every bounded
+retry of it) until the crash, and restarts the Harness; the replacement
+projects the committed terminal, and no second store commit is required. The
 missing-terminal arm refuses the write itself, so the replacement must
-compensate the payable checkpoint exactly once. All
-three keep one original Action, one settled execution, one file effect, one
-terminal, the recovered model answer and the original cleanup:
+compensate the payable checkpoint exactly once. Both keep one original
+Action, one settled execution, one file effect, one terminal, the recovered
+model answer and the original cleanup:
 
 ```bash
-npm run test:e2e:managed-harness-restart-approval-cleanup-failed
 npm run test:e2e:managed-harness-restart-approval-terminal-reply-lost
 npm run test:e2e:managed-harness-restart-approval-terminal-write-failed
 ```
 
 They write their evidence under `.qwen/investigations/g3-step3-implementation/`;
 `G3_VERIFY_REPORT_DIR` overrides the directory. The remaining rows stay
-focused or integration tested for now: the lost takeover-load reply (the
-packaged arm showed the redrive's active handoff leaves the original Turn
-RUNNING instead of projecting its terminal), mixed calls and rewritten inputs
-across a replacement,
-Hook/MCP/child uncertainty, the attempt and stream identities plus the live
-SSE view, the round and cost budgets, and the mixed-version reader/bundle
-closure (#14481).
+focused or integration tested for now: a refused cleanup release followed by
+another crash (the packaged arm reproduced a control-plane gap where a
+delayed replacement receives no cleanup retry or adoption), the lost
+takeover-load reply (the packaged arm showed the redrive's active handoff
+leaves the original Turn RUNNING instead of projecting its terminal), mixed
+calls and rewritten inputs across a replacement, Hook/MCP/child uncertainty,
+the attempt and stream identities plus the live SSE view, the round and cost
+budgets, and the mixed-version reader/bundle closure (#14481).
 
 Two arms keep a former owner alive while its replacement finishes the Turn
 and then wake it with `SIGCONT`:

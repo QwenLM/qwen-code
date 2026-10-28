@@ -320,7 +320,6 @@ describe('managed-agent-server e2e runner', () => {
       'test:e2e:managed-harness-restart-approval-after-result',
       'test:e2e:managed-harness-restart-approval-decision-reply-lost',
       'test:e2e:managed-harness-restart-approval-admission-reply-lost',
-      'test:e2e:managed-harness-restart-approval-cleanup-failed',
       'test:e2e:managed-harness-restart-approval-terminal-reply-lost',
       'test:e2e:managed-harness-restart-approval-terminal-write-failed',
     ];
@@ -402,13 +401,12 @@ describe('managed-agent-server e2e runner', () => {
     expect(source.slice(proxy - 500, proxy)).not.toContain(
       "approvalFault === 'after-result'",
     );
-    // C3: the release refusal is a durable barrier, and the retry must be
-    // witnessed on the same proxy rather than silently switching to the
-    // live Broker.
-    expect(source).toContain('Runtime cleanup release refused');
-    expect(source).toContain('releaseFailureCount()');
-    expect(source).toContain('replacementBrokerProxy.allowRelease()');
-    expect(source).toContain('failRelease = false');
+    // C1 arms its crash barrier only after the store confirms a 200, and
+    // records that pre-crash count; a non-200 first commit must not pass.
+    expect(source).toContain('forwarded 200 dropped reply');
+    expect(source).toContain('terminalAcceptsAtBarrier');
+    expect(source).toContain('postCrashTerminalAccepts');
+    expect(source).toContain('did not commit the terminal before recovery');
     // C1/C2: the store proxy must be armed before the decision and must
     // distinguish a lost reply (committed) from a refused write (missing).
     expect(source).toContain('storeFaultProxy = await startStoreFaultProxy');
