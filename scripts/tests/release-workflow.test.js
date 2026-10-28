@@ -3476,6 +3476,24 @@ exit 0`,
     );
   });
 
+  it('reads the release tree with the run-scoped token, not the bot PAT', () => {
+    // The publish checkout is read-only and the repository is public, so
+    // authenticating it with the long-lived bot PAT adds an auth dependency
+    // without adding access: a transient PAT rejection failed the release at
+    // Checkout (#15726). The PAT stays exported to the steps that write.
+    const steps = releaseYaml.jobs.publish.steps;
+    const checkout = steps.find((step) => step.name === 'Checkout');
+    expect(checkout.with.token).toBeUndefined();
+    expect(checkout.with['persist-credentials']).toBe(false);
+    expect(
+      steps.find((step) => step.id === 'push_release_branch').env.CI_BOT_PAT,
+    ).toBe('${{ secrets.CI_BOT_PAT }}');
+    expect(
+      steps.find((step) => step.name === 'Create GitHub Release and Tag').env
+        .GITHUB_TOKEN,
+    ).toBe('${{ secrets.CI_BOT_PAT }}');
+  });
+
   it('serializes publish jobs per release tag', () => {
     // The pre-push re-validation below is only sound while at most one
     // publish job pushes and publishes a given version at a time; --force
