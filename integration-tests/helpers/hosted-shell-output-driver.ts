@@ -49,7 +49,15 @@ const reports = config.sessions.map((session) => ({
   target: undefined as Transaction | undefined,
   targetDigest: '',
   receipt: undefined as Record<string, unknown> | undefined,
+  restoreHead: undefined as
+    | {
+        journalRevision: number;
+        committedSequence: number;
+        lastCommitDigest: string;
+      }
+    | undefined,
   restoreTransactions: [] as Transaction[],
+  postRestoreTransactions: [] as Transaction[],
 }));
 let current = reports[0];
 let cli = new HostedHarnessProcess();
@@ -260,7 +268,26 @@ const proxy = createServer(async (req, res) => {
       res.destroy();
       return;
     }
+    if (
+      restoring &&
+      store &&
+      url.pathname.endsWith('/restore') &&
+      !current.restoreHead
+    ) {
+      assert(Number.isSafeInteger(json.journalRevision));
+      assert(Number.isSafeInteger(json.committedSequence));
+      assert.equal(typeof json.lastCommitDigest, 'string');
+      current.restoreHead = {
+        journalRevision: json.journalRevision,
+        committedSequence: json.committedSequence,
+        lastCommitDigest: json.lastCommitDigest,
+      };
+    }
     if (restoring && store && url.pathname.endsWith('/transactions')) {
+      assert(
+        current.restoreHead,
+        'Restore transactions require a frozen initial head',
+      );
       for (const transaction of json.transactions as Transaction[]) {
         assert(Number.isSafeInteger(transaction.journalRevision));
         const key = `${current.sessionId}:${transaction.journalRevision}`;
@@ -268,10 +295,12 @@ const proxy = createServer(async (req, res) => {
         if (previous) assert.deepEqual(transaction, previous);
         else {
           restoredByRevision.set(key, transaction);
-          current.restoreTransactions.push(transaction);
-          current.restoreTransactions.sort(
-            (a, b) => a.journalRevision - b.journalRevision,
-          );
+          const transactions =
+            transaction.journalRevision <= current.restoreHead.journalRevision
+              ? current.restoreTransactions
+              : current.postRestoreTransactions;
+          transactions.push(transaction);
+          transactions.sort((a, b) => a.journalRevision - b.journalRevision);
         }
       }
     }
@@ -435,7 +464,20 @@ try {
     const operations = current.operations.length;
     const loaded = await json(route + '/load', connection(), 409);
     assert.equal(loaded.error, 'hosted_turn_recovery_required');
-    assert(current.restoreTransactions.length > 0);
+    assert(current.restoreHead);
+    assert.equal(
+      current.restoreTransactions.length,
+      current.restoreHead.journalRevision,
+    );
+    assert.deepEqual(
+      current.restoreTransactions.map(
+        (transaction) => transaction.journalRevision,
+      ),
+      Array.from(
+        { length: current.restoreHead.journalRevision },
+        (_, index) => index + 1,
+      ),
+    );
     const restored = current.restoreTransactions.flatMap(events);
     assert.equal(
       restored.filter((event) => event.kind === 'input.accepted').length,

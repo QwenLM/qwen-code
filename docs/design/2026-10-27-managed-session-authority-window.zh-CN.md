@@ -116,6 +116,8 @@ CSI 资格快照保留既有总计 128 MiB/4,096 引用上限，逐事务验证�
 | Native 查询路由与 V1 schema  | `packages/managed-agent-server/` 的历史 store、Session controller、schema contract/projection、retirement 清理和 SQL baseline |
 | 消费者                       | CLI serve/recovery/领域读取、ACP 重放和通知去重、Core Config/recorder/模型恢复                                                |
 
+已结算 resident 的生命周期恢复必须先进入既有 claim 授权续约，再读取冷 cleanup 历史。只有未结算 prompt 才需要授权前的 cleanup-debt 拒绝，且该拒绝不能写入 lifecycle authority。未知追加结果仍须拒绝历史与 transcript 视图，直到原结算路径判定 landed 或 absent；故障验收分别记录该拒绝和独立 canonical journal 证据。冷恢复取证固定初始 revision、sequence 与 digest，后续 canonical 来源读取需独立校验，不能扩大原恢复前缀。
+
 ## 流式恢复与本地转换
 
 增量验证完整 journal 事务，保留精确 marker 链、记录/字节位置和 torn-tail 语义。逐页消费选定 native 快照和连续尾部，不拼接完整 journal。将资源 census/frontier 及 checkpoint 事实落文件视图，避免另建无限 Map。

@@ -8102,8 +8102,8 @@ export function registerHostedHarnessSessionRoutes(
     )
       return error(res, 409, 'hosted_turn_active');
     if (
-      (await hasHostedCleanupDebt(session.managed)) &&
-      unsettledPromptId(session)
+      unsettledPromptId(session) &&
+      (await hasHostedCleanupDebt(session.managed))
     )
       return error(res, 503, 'hosted_lifecycle_recovery_required');
     const previousAuthority = session.lifecycle;

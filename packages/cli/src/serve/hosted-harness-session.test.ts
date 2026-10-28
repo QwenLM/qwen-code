@@ -23170,6 +23170,50 @@ describe('Hosted Harness no-tool session', () => {
       .expect(204);
   });
 
+  it('authorizes lifecycle recovery before reading settled resident cleanup history', async () => {
+    const f = await recoveryFileSession();
+    await f.submit();
+    await f.idle();
+    await f.owe();
+    f.resident.monitorWake?.close();
+    const authority = { operationId: 'expired-resident', claimGeneration: 2 };
+    let authorized = false;
+    state.authorizeLifecycle.mockImplementationOnce(async () => {
+      expect(state.setLifecycleAuthority).toHaveBeenLastCalledWith(authority);
+      authorized = true;
+    });
+    const iterate = f.resident.managed.authority.iterateEvents.bind(
+      f.resident.managed.authority,
+    );
+    const history = vi
+      .spyOn(f.resident.managed.authority, 'iterateEvents')
+      .mockImplementation((...args) => {
+        if (!authorized)
+          throw new ManagedSessionStoreHttpError(
+            409,
+            'managed_session_writer_fenced',
+            'The resident read grant expired before lifecycle renewal.',
+          );
+        return iterate(...args);
+      });
+    vi.mocked(HostedWorkspaceBroker.prototype.acquire).mockClear();
+    try {
+      await f
+        .authorize(supertest(f.server).post(`/session/${SESSION_ID}/lifecycle`))
+        .send({
+          kind: 'close',
+          sessionKey: f.resident.managed.authority.sessionHeader.sessionKey,
+          authority,
+        })
+        .expect(200);
+      expect(authorized).toBe(true);
+      expect(history).toHaveBeenCalled();
+      expect(HostedWorkspaceBroker.prototype.acquire).not.toHaveBeenCalled();
+    } finally {
+      history.mockRestore();
+    }
+  });
+
   it('leaves a parked owner operable after lifecycle close requires recovery (R3-5)', async () => {
     const f = await recoveryFileSession();
     state.model.mockImplementationOnce(async () => {

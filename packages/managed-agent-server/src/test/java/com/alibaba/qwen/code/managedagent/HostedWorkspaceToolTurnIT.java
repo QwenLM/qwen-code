@@ -721,6 +721,11 @@ class HostedWorkspaceToolTurnIT {
         boolean applied = fault.endsWith("-reply");
         JsonNode target = report.path("target");
         assertThat(report.path("fault").asText()).isEqualTo(fault);
+        assertThat(report.path("liveTranscriptStatus").asInt()).isIn(200, 503);
+        if (report.path("liveTranscriptStatus").asInt() == 503) {
+            assertThat(fault).isIn("arguments", "intent", "await-runtime", "result-message");
+            assertThat(report.path("faults").asInt()).isEqualTo(3);
+        }
         assertThat(target.path("workspaceId").asText()).isEqualTo(session.get("workspaceId"));
         assertThat(target.path("resources").isArray()).isTrue();
         List<Map<String, Object>> committed = jdbc.queryForList("SELECT " + ManagedSchemaProjection.SESSION_JOURNAL_TX.columns() + " FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ? AND operation = ? AND command_id = ?",

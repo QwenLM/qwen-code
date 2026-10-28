@@ -52,6 +52,7 @@ const reports = config.sessions.map((session) => ({
   target: undefined as Transaction | undefined,
   targetDigest: '',
   receipt: undefined as Receipt | undefined,
+  liveTranscriptStatus: 0,
   restoreTransactions: [] as Transaction[],
 }));
 let cli = new HostedHarnessProcess();
@@ -310,7 +311,7 @@ function input(text: string) {
   };
 }
 
-async function transcript() {
+async function transcript(allowUnavailable = false) {
   const result: Array<{
     type: string;
     promptId?: string;
@@ -318,9 +319,20 @@ async function transcript() {
   }> = [];
   let cursor = '0';
   while (true) {
-    const page = await json(
+    if (proxyFailure) throw proxyFailure;
+    const response = await cli.request(
       `/session/${current.sessionId}/transcript?cursor=${cursor}&limit=256`,
+      { headers: cli.headers(current.clientId) },
     );
+    const text = await response.text();
+    if (allowUnavailable && response.status === 503) {
+      assert.equal(cursor, '0', 'A partial transcript must not be discarded');
+      assert.equal(JSON.parse(text).error, 'managed_transcript_unavailable');
+      return undefined;
+    }
+    assert.equal(response.status, 200, text + cli.output);
+    if (proxyFailure) throw proxyFailure;
+    const page = JSON.parse(text);
     result.push(...page.events);
     if (!page.hasMore) return result;
     cursor = page.nextCursor;
@@ -377,7 +389,8 @@ try {
       // method's @Timeout(180) with room for the harness boots either side.
       await waitUntil(async () => {
         const status = await json(`${route}/status`);
-        const applied = await transcript();
+        const applied = await transcript(true);
+        if (!applied) return false;
         return (
           !status.hasActivePrompt &&
           applied.filter((event) => event.data.record?.type === 'tool_result')
@@ -388,18 +401,23 @@ try {
       }, 30_000);
     assert.equal((await json(`${route}/status`)).recoveryBlocked, !settled);
     assert.equal(current.modelCalls, settled ? 2 : 1);
-    const records = await transcript();
-    const terminals = terminalsOf(records);
-    assert.equal(terminals.length, settled ? 1 : 0);
-    if (settled) {
-      assert.equal(terminals[0].type, 'turn_complete');
-      assert.equal(terminals[0].promptId, current.promptId);
+    const records = await transcript(!settles);
+    current.liveTranscriptStatus = records ? 200 : 503;
+    // The Java canonical-journal probe independently checks terminal/result
+    // counts when an unresolved append correctly refuses the live transcript.
+    if (records) {
+      const terminals = terminalsOf(records);
+      assert.equal(terminals.length, settled ? 1 : 0);
+      if (settled) {
+        assert.equal(terminals[0].type, 'turn_complete');
+        assert.equal(terminals[0].promptId, current.promptId);
+      }
+      assert.equal(
+        records.filter((event) => event.data.record?.type === 'tool_result')
+          .length,
+        settles ? 1 : 0,
+      );
     }
-    assert.equal(
-      records.filter((event) => event.data.record?.type === 'tool_result')
-        .length,
-      settles ? 1 : 0,
-    );
     const started = current.fault.startsWith('result-') || settled;
     for (const [operation, count] of [
       ['acquire', 1],
@@ -444,6 +462,7 @@ try {
     if (completed) {
       current.clientId = loaded.clientId;
       const records = await transcript();
+      assert(records);
       const terminals = records.filter((event) =>
         event.type.startsWith('turn_'),
       );

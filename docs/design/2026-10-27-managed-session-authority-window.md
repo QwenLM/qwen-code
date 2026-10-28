@@ -116,6 +116,8 @@ The CSI qualification snapshot retains its existing aggregate 128 MiB/4,096-refe
 | Native query routes and V1 schema        | `packages/managed-agent-server/` history store, Session controller, schema contract/projection, retirement cleanup and SQL baseline |
 | Consumers                                | CLI serve/recovery/domain readers, ACP replay and notification deduplication, Core Config/recorder/model resume                     |
 
+Settled resident lifecycle recovery must reach the existing claim-authorized renewal before cold cleanup-history I/O. Only an unsettled prompt needs the pre-authority cleanup-debt refusal; that refusal must not stamp lifecycle authority. Pending unknown append outcomes continue to refuse history/transcript views until the original settlement path decides landed or absent. Fault qualification records this refusal separately from independent canonical-journal evidence. Cold-restore evidence fixes its initial revision, sequence and digest; later canonical source reads remain independently verified and cannot enlarge that restore prefix.
+
 ## Streaming restore and local conversion
 
 Incrementally validate complete journal transactions, retaining exact marker chains, record/byte positions and torn-tail semantics. Consume selected native snapshots and continuous tails without whole-journal concatenation. Spill resource census/frontiers and checkpoint facts to the file view rather than growing alternate Maps.
