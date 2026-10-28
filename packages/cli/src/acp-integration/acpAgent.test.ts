@@ -4521,6 +4521,48 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     },
   );
 
+  it.each([
+    [true, true],
+    [false, false],
+    [undefined, false],
+  ])(
+    'declares an MCP App host only when the client advertises one (%s)',
+    async (advertised, expected) => {
+      const innerConfig = await setupSessionMocks('mcp-app-host-session');
+      const agentPromise = runAcpAgent(
+        mockConfig,
+        makeSessionSettings(),
+        mockArgv,
+      );
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+      try {
+        await agent.initialize({
+          clientCapabilities:
+            advertised === undefined
+              ? {}
+              : { _meta: { 'qwen.mcpAppHost': advertised } },
+        });
+        await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+        if (expected) {
+          expect(innerConfig.setMcpAppHostSupported).toHaveBeenCalledWith(true);
+          expect(
+            innerConfig.setMcpAppHostSupported.mock.invocationCallOrder[0],
+          ).toBeLessThan(innerConfig.initialize.mock.invocationCallOrder[0]);
+        } else {
+          expect(innerConfig.setMcpAppHostSupported).not.toHaveBeenCalled();
+        }
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
   it('profiles newSession stages under the daemon trace context', async () => {
     const parentContext = { trace: 'parent' };
     mockExtractDaemonTraceContext.mockReturnValue(parentContext);
@@ -5782,6 +5824,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       setSessionSource: vi.fn(),
       setArtifactSnapshotsEnabled: vi.fn(),
       setGoalProposalHostSupported: vi.fn(),
+      setMcpAppHostSupported: vi.fn(),
       setSessionSourceServiceFactory: vi.fn(),
       registerSessionSourceTool: vi.fn().mockResolvedValue(undefined),
       getSessionSourceService: vi.fn(),
@@ -11521,6 +11564,53 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       workspaceCwd: '/work/status',
       initialized: false,
       skills: [],
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('reports an uninitialized snapshot when catalog enumeration throws', async () => {
+    // A partial build failure must not look like a valid empty catalog: the
+    // daemon latches `initialized: true` and then prefers it over its own
+    // enumeration, and sibling routes publish the same envelope.
+    mockConfig = {
+      ...mockConfig,
+      getTargetDir: vi.fn().mockReturnValue('/work/status'),
+      getWorkingDir: vi.fn().mockReturnValue('/work/status'),
+      isSafeMode: vi.fn().mockReturnValue(false),
+      getBareMode: vi.fn().mockReturnValue(false),
+      getExtensionManager: vi.fn().mockReturnValue({
+        refreshCache: vi.fn().mockResolvedValue(undefined),
+        refreshCacheIfSourcesChanged: vi.fn().mockResolvedValue(false),
+      }),
+      getSkillManager: vi.fn().mockReturnValue({
+        getCachedSkills: vi.fn().mockImplementation(() => {
+          throw new Error('broken skill catalog');
+        }),
+      }),
+    } as unknown as Config;
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.workspaceSkills, {}),
+    ).resolves.toMatchObject({
+      initialized: false,
+      skills: [],
+      errors: [
+        { kind: 'skills', status: 'error', error: 'broken skill catalog' },
+      ],
     });
 
     mockConnectionState.resolve();
@@ -30111,6 +30201,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       setSessionSource: vi.fn(),
       setArtifactSnapshotsEnabled: vi.fn(),
       setGoalProposalHostSupported: vi.fn(),
+      setMcpAppHostSupported: vi.fn(),
       setSessionSourceServiceFactory: vi.fn(),
       registerSessionSourceTool: vi.fn().mockResolvedValue(undefined),
       getSessionSourceService: vi.fn(),
