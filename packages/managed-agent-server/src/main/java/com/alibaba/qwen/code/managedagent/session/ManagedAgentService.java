@@ -68,6 +68,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -125,7 +126,7 @@ public class ManagedAgentService {
     private boolean externalFilesConfiguration;
 
     @Autowired
-    void configureRenameDelivery(ManagedAgentProperties properties, Clock clock) {
+    void configureRenameDelivery(ManagedAgentProperties properties, @Qualifier("managedAgentClock") Clock clock) {
         renameDispatch = properties.getDispatch();
         renameClock = clock;
         externalFilesConfiguration = com.alibaba.qwen.code.runtimebroker.provisioning.ExternalWorkspaceProvisioner.KIND

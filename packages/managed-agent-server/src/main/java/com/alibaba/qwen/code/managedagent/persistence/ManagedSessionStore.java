@@ -36,6 +36,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.dao.DeadlockLoserDataAccessException;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.dao.PessimisticLockingFailureException;
@@ -70,6 +71,7 @@ import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
 @Repository
+@Qualifier("managedAgentTransactionManager")
 public class ManagedSessionStore {
     private static final int STORAGE_VERSION = 1;
     private static final ObjectMapper CSI_JSON = new ObjectMapper();
@@ -163,7 +165,7 @@ public class ManagedSessionStore {
 
     @Autowired
     public ManagedSessionStore(
-            JdbcTemplate jdbc,
+            @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
             ManagedExtensionRecordStore extensionRecords,
             ManagedActionStore actions) {
         this.jdbc = jdbc;
