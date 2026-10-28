@@ -668,8 +668,29 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     await setLanguageAsync('zh');
     try {
       renderDialog();
+      // The main-menu labels are what this conversion unfroze. `translations`
+      // is empty at import time, so the pre-conversion module-scope
+      // `MAIN_ITEMS` would still paint the English 'QwenCloud' here; the
+      // render-time `getMainItems()` paints the zh entry. Asserting the menu
+      // before pressing return is what makes this case discriminate — the
+      // sub-menu title asserted below was already render-time at the base.
+      await vi.waitFor(() => {
+        expect(document.body.textContent).toContain('千问AI平台');
+      });
+      expect(document.body.textContent).toContain(
+        '官方推荐配置：Token Plan 或 Standard API Key',
+      );
       await press('return'); // main: QwenCloud → qwencloud-select
       expect(screen.getByText('千问AI平台 · 接入方式')).toBeTruthy();
+      // The nav hint is the one converted symbol whose key is translated and
+      // that no other suite can observe — this file is the only importer of the
+      // real dialog — and the select branch above is what paints it
+      // (`dialogs-auth.tsx:1730`). Freezing it back to a module-scope `t(...)`
+      // keeps every other assertion in this file green, so this is the line
+      // that has to go red if the render-time conversion is reverted.
+      expect(document.body.textContent).toContain(
+        'Enter 选择，↑↓ 导航，Esc 返回',
+      );
       await press('return'); // Token Plan → provider-setup
       await vi.waitFor(() => {
         expect(document.body.textContent).toContain('千问AI平台');
