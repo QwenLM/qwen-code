@@ -1786,7 +1786,7 @@ public class ManagedAgentService {
 
     private void requireCancellerShape(SessionRecord session,
             String actorId) {
-        if (session.workspace() != null && !maySubmitShape(session)) {
+        if (session.workspace() != null && !maySubmitShape(session, null)) {
             requireLegacyWorkspace(session, actorId);
         }
     }

@@ -63,14 +63,46 @@ class SessionWorktreeGitTest {
     }
 
     @Test
-    void repositoryAtStorageRootSupportsSessionWorktrees() throws Exception {
+    void storageRootRepositoryKeepsCurrentModeButRefusesNewNestedCheckouts() throws Exception {
         root = repository;
-        Plan plan = plan(".", null);
-        String identity = git.prepare(plan);
-        assertThat(Files.readString(target(plan).resolve("file.txt"))).isEqualTo("committed\n");
+        assertThat(git.currentBranch(root, ".")).isEqualTo("main");
+        assertThatThrownBy(() -> git.source(root, ".", null))
+                .isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("worktree_layout_unsupported"));
+        Plan plan = storageRootPlan();
+        assertThatThrownBy(() -> git.prepare(plan))
+                .isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("worktree_layout_unsupported"));
+        assertThat(Files.exists(root.resolve(SessionWorktreeGit.CONTAINER))).isFalse();
+        assertThat(run(root, "status", "--porcelain=v1")).isEmpty();
+        assertThat(run(root, "branch", "--list", plan.branch())).isEmpty();
+        assertThat(run(root, "branch", "--show-current").strip()).isEqualTo("main");
+    }
+
+    @Test
+    void persistedStorageRootCheckoutCanStillBeVerifiedAndSafelyCleaned() throws Exception {
+        root = repository;
+        Plan plan = storageRootPlan();
+        Path container = Files.createDirectory(root.resolve(SessionWorktreeGit.CONTAINER));
+        var mapper = new ObjectMapper();
+        Files.writeString(container.resolve(plan.worktreeId() + ".json"), mapper.writeValueAsString(plan));
+        run(root, "worktree", "add", "-b", plan.branch(), "--", target(plan).toString(), plan.baseCommit());
+        Path gitfile = target(plan).resolve(".git");
+        Path gitdir = Path.of(run(target(plan), "rev-parse", "--absolute-git-dir").strip());
+        String identity = mapper.writeValueAsString(java.util.Map.of(
+                "target", SessionWorktreeGit.identity(target(plan)), "gitfile", SessionWorktreeGit.identity(gitfile),
+                "gitdir", gitdir.toString(), "gitdirIdentity", SessionWorktreeGit.identity(gitdir)));
+        Files.writeString(container.resolve(plan.worktreeId() + ".ready"), identity);
         assertThat(SessionWorktreeGit.verify(plan, identity)).isEqualTo(identity);
+        Files.writeString(target(plan).resolve("file.txt"), "valuable\n");
+        assertThat(git.cleanupBlocker(plan, identity)).isEqualTo("worktree_dirty");
+        assertThatThrownBy(() -> git.cleanup(plan, identity)).isInstanceOf(ManagedAgentException.class);
+        assertThat(Files.readString(target(plan).resolve("file.txt"))).isEqualTo("valuable\n");
+        Files.writeString(target(plan).resolve("file.txt"), "committed\n");
         git.cleanup(plan, identity);
         assertThat(Files.exists(target(plan))).isFalse();
+        assertThat(Files.readString(root.resolve("file.txt"))).isEqualTo("committed\n");
+        assertThat(run(root, "branch", "--show-current").strip()).isEqualTo("main");
     }
 
     @Test
@@ -355,6 +387,15 @@ class SessionWorktreeGitTest {
         run(repository, "add", ".");
         run(repository, "commit", "-m", "empty");
         assertThatThrownBy(() -> git.source(root, "project/src", "empty")).isInstanceOf(RuntimeException.class);
+    }
+
+    private Plan storageRootPlan() throws Exception {
+        String id = UUID.randomUUID().toString().replace("-", "");
+        String directory = SessionWorktreeGit.CONTAINER + "/" + id;
+        Path common = root.resolve(".git");
+        return new Plan("tenant", "workspace", 1, "storage", ".", "config", 1, root.toString(),
+                SessionWorktreeGit.identity(root), ".", ".", common.toString(), SessionWorktreeGit.identity(common),
+                null, run(root, "rev-parse", "HEAD").strip(), id, directory, directory, "worktree-managed-" + id);
     }
 
     private Plan plan(String cwd, String ref) {

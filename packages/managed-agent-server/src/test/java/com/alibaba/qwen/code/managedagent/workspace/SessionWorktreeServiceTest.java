@@ -1,6 +1,8 @@
 package com.alibaba.qwen.code.managedagent.workspace;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.config.ManagedArtifactConfiguration;
+import com.alibaba.qwen.code.managedagent.event.MessageMaterializer;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.SessionWorktreeStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
@@ -8,13 +10,24 @@ import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.boot.autoconfigure.task.TaskSchedulingAutoConfiguration;
+import org.springframework.context.annotation.AnnotationConfigApplicationContext;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.scheduling.annotation.EnableScheduling;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 
+import java.time.Instant;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -30,6 +43,42 @@ class SessionWorktreeServiceTest {
     @AfterEach
     void stop() {
         service.stop();
+    }
+
+    @Configuration
+    @EnableScheduling
+    static class SchedulingHarness { }
+
+    @Test
+    void parkedWorktreeScanDoesNotBlockTheDefaultScheduler() throws Exception {
+        var entered = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var scanThread = new AtomicReference<String>();
+        doAnswer(invocation -> {
+            scanThread.set(Thread.currentThread().getName());
+            entered.countDown();
+            release.await(10, TimeUnit.SECONDS);
+            return null;
+        }).when(store).resumeStopped();
+        var context = new AnnotationConfigApplicationContext();
+        context.register(SchedulingHarness.class,
+                TaskSchedulingAutoConfiguration.class,
+                ManagedArtifactConfiguration.class);
+        context.registerBean(ManagedAgentProperties.class, ManagedAgentProperties::new);
+        context.registerBean(MessageMaterializer.class, () -> mock(MessageMaterializer.class));
+        context.registerBean("worktrees", SessionWorktreeService.class, () -> service);
+        try {
+            context.refresh();
+            assertThat(entered.await(5, TimeUnit.SECONDS)).isTrue();
+            var tick = new CountDownLatch(1);
+            context.getBean("taskScheduler", ThreadPoolTaskScheduler.class)
+                    .schedule(tick::countDown, Instant.now());
+            assertThat(tick.await(2, TimeUnit.SECONDS)).isTrue();
+            assertThat(scanThread.get()).startsWith("session-worktree-");
+        } finally {
+            release.countDown();
+            context.close();
+        }
     }
 
     @Test

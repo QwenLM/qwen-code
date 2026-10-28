@@ -19,6 +19,8 @@ worktree 隔离编辑目录，不隔离主机权限及共享 Git refs。
 `worktree-managed-<id>`，所有权元数据置于工作树外。实际 cwd 保留源目录相对仓库的偏移，
 该目录必须存在于选定 commit。仓库和 Git 元数据必须位于已授权存储内。
 linked source 的 common directory 越出存储根时拒绝，不自动扩大挂载。
+新建 worktree 要求源仓库严格位于存储根之下，使其 Git add/clean 命令不会包含旁侧的内部目录。
+存储根本身是仓库时，仍支持当前目录会话和已有 worktree 的安全清理，但拒绝新建准备。
 
 ## 创建与执行
 
@@ -72,8 +74,8 @@ Workspace 下增加 options、query、inspect、cleanup，提供支持情况、�
 修订纳入 scope revision；后者保留用于创建前浏览，禁止进入内部 worktree 路径。
 仅服务端解析的 Session base 可通过内部保留目录，用户相对路径仍沿用原有验证。
 
-WebShell 提供当前目录/worktree 和可选起始 ref，显示解析版本与未提交内容不带入的说明，
-冻结待提交请求，并显示准备、等待、失败和受阻。目标创建前暂停目录文件引用与上传，
+WebShell 在输入框中提供当前目录/worktree，从 HEAD 创建隔离工作树；显式起始 ref 仍可通过 API 指定。
+界面显示当前分支，冻结待提交请求，并显示准备、等待、失败和受阻。目标创建前暂停目录文件引用与上传，
 普通输入附件仍可用；ready 后按目标恢复文件能力。旧目录引用提示重选，保留文字草稿。
 
 项目指令从目标 cwd 读取。模型、审批、Skills、MCP 和 Extensions 沿用当前 Session pin。

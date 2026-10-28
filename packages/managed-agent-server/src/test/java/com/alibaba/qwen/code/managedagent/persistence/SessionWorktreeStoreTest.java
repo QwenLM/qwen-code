@@ -10,6 +10,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
@@ -55,7 +56,25 @@ class SessionWorktreeStoreTest {
                 path -> new WorkspaceStorageGuard.Identity(path.toString(), "test-host", "1", "2", "2026-10-15T00:00:00.123456789Z"));
         workspace = new WorkspaceCreationStore(jdbc, manager, guard, registry, properties, new ObjectMapper(), Clock.systemUTC())
                 .create("tenant", "actor", "Worktrees", "create").workspaceId();
-        store = new SessionWorktreeStore(jdbc, manager, registry, guard);
+        store = new SessionWorktreeStore(jdbc, registry, guard);
+    }
+
+    @Test
+    void usesManagedJdbcWhenTheHostProvidesDefaultPersistenceBeans() {
+        var host = new DriverManagerDataSource("jdbc:h2:mem:host-" + UUID.randomUUID(), "sa", "");
+        new ApplicationContextRunner().withUserConfiguration(SessionWorktreeStore.class)
+                .withBean("managedJdbcTemplate", JdbcTemplate.class, () -> jdbc, definition -> ((org.springframework.beans.factory.support.AbstractBeanDefinition) definition).setDefaultCandidate(false))
+                .withBean("hostJdbcTemplate", JdbcTemplate.class, () -> new JdbcTemplate(host))
+                .withBean("hostTransactionManager", org.springframework.transaction.PlatformTransactionManager.class,
+                        () -> new DataSourceTransactionManager(host))
+                .withBean(ManagedWorkspaceRegistry.class, () -> new ManagedWorkspaceRegistry(jdbc))
+                .withBean(WorkspaceStorageGuard.class, () -> org.mockito.Mockito.mock(WorkspaceStorageGuard.class))
+                .withBean(SshWorkspaceStore.class, () -> org.mockito.Mockito.mock(SshWorkspaceStore.class))
+                .withBean(ManagedAgentProperties.class, ManagedAgentProperties::new)
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context.getBean(SessionWorktreeStore.class).describe("tenant", "missing")).isNull();
+                });
     }
 
     @Test
@@ -133,6 +152,55 @@ class SessionWorktreeStoreTest {
             assertThat(SessionWorktreeStore.descriptor(jdbc, "tenant", "session").state()).isEqualTo("blocked");
             assertThatThrownBy(() -> SessionWorktreeStore.requireReady(jdbc, "tenant", "session"))
                     .hasMessageContaining("worktree_identity_conflict");
+        }
+    }
+
+    @Test
+    void cleanupReusesItsReceiptAndRemovesTheCheckoutUnderMaintenance() throws Exception {
+        var location = store.source("tenant", "actor", new WorkspaceSelection(workspace, "."));
+        Path repository = Files.createDirectory(location.root().resolve("project"));
+        git(repository, "init", "-b", "main");
+        Files.writeString(repository.resolve("file.txt"), "base\n");
+        git(repository, "add", ".");
+        git(repository, "commit", "-m", "base");
+        location = store.source("tenant", "actor", new WorkspaceSelection(workspace, "project"));
+        var binding = location.resolved().binding();
+        try (var git = new SessionWorktreeGit(new ChildWorktreeGit("git", Duration.ofSeconds(10)))) {
+            var source = git.source(location.root(), "project", null);
+            String id = UUID.randomUUID().toString().replace("-", "");
+            String cwd = SessionWorktreeGit.CONTAINER + "/" + id;
+            Plan plan = new Plan("tenant", workspace, binding.getWorkspaceGeneration(), binding.getStorageId(), "project",
+                    binding.getContextConfigRef(), 1, location.root().toString(), SessionWorktreeGit.identity(location.root()),
+                    source.repositoryRelative(), source.offset(), source.commonDirectory(), source.commonIdentity(), null,
+                    source.commit(), id, cwd, cwd, "worktree-managed-" + id);
+            var resolved = location.resolved();
+            transaction.executeWithoutResult(status -> {
+                jdbc.update("INSERT INTO ma_session (tenant_id,session_id,agent_id,gmt_create,gmt_modified) VALUES ('tenant','cleanup-session','agent',1,1)");
+                store.admit("tenant", "actor", "cleanup-session", plan, resolved);
+            });
+            var claim = store.claim(store.due().getFirst(), "prepare", 120000);
+            assertThat(store.complete(claim, "prepare", "READY", git.prepare(plan), null)).isTrue();
+            jdbc.update("UPDATE ma_session SET status = 'CLOSED' WHERE tenant_id = ? AND session_id = ?", "tenant", "cleanup-session");
+            transaction.executeWithoutResult(status -> {
+                store.cleanup("tenant", "actor", workspace, id, "rollback-removal");
+                status.setRollbackOnly();
+            });
+            assertThat(store.describe("tenant", "cleanup-session").state()).isEqualTo("ready");
+            var removal = store.cleanup("tenant", "actor", workspace, id, "remove");
+            assertThat(store.cleanup("tenant", "actor", workspace, id, "remove").operationId()).isEqualTo(removal.operationId());
+            var execution = new WorkspaceExecutionStore(jdbc, new DataSourceTransactionManager(jdbc.getDataSource()));
+            var service = new com.alibaba.qwen.code.managedagent.workspace.SessionWorktreeService(store, execution,
+                    new ManagedAgentProperties(), org.mockito.Mockito.mock(ManagedAgentStore.class),
+                    org.mockito.Mockito.mock(com.alibaba.qwen.code.managedagent.session.HarnessCoordinator.class));
+            try {
+                service.drive(removal);
+            } finally {
+                org.springframework.test.util.ReflectionTestUtils.invokeMethod(service, "stop");
+            }
+            assertThat(store.describe("tenant", "cleanup-session").state())
+                    .as("cleanup outcome: %s", store.describe("tenant", "cleanup-session")).isEqualTo("removed");
+            assertThat(Files.exists(location.root().resolve(cwd))).isFalse();
+            assertThat(store.cleanup("tenant", "actor", workspace, id, "remove").state()).isEqualTo("REMOVED");
         }
     }
 

@@ -2409,12 +2409,25 @@ class ManagedWorkspaceAdmissionTest {
                 .noneMatch(target -> target.sessionId().equals(session));
         assertThat(store.claimTurn(tenant, session, admission.turnId(), "owner", Duration.ofSeconds(30))).isEmpty();
 
-        jdbc.update("UPDATE ma_turn SET status = 'CANCELLING' WHERE tenant_id = ? AND session_id = ?", tenant, session);
+        enabled.cancelTurn(tenant, "actor-a", "cancel-initial", session, admission.turnId());
         assertThat(store.findDispatchable(System.currentTimeMillis(), 1000))
                 .anyMatch(target -> target.sessionId().equals(session));
         assertThat(store.claimTurn(tenant, session, admission.turnId(), "owner", Duration.ofSeconds(30))).isPresent();
         store.cancelBeforeAdmission(tenant, session, admission.turnId(), "owner");
         assertThat(store.findTurn(tenant, session, admission.turnId()).orElseThrow().status()).isEqualTo("CANCELLED");
+    }
+
+    @Test
+    void failedAndBlockedWorktreesStillAllowCancellation() throws Exception {
+        for (String state : List.of("FAILED", "BLOCKED")) {
+            String tenant = "tenant-" + UUID.randomUUID();
+            String session = boundSession(tenant);
+            var enabled = boundServiceWithWorkingHarness();
+            var admission = enabled.submitTurn(tenant, "actor-a", "initial", session, List.of(new InputBlock("text", "go")));
+            persistWorktree(tenant, session, state);
+            enabled.cancelTurn(tenant, "actor-a", "cancel-initial", session, admission.turnId());
+            assertThat(store.findTurn(tenant, session, admission.turnId()).orElseThrow().status()).isEqualTo("CANCELLING");
+        }
     }
 
     @Test
@@ -2508,6 +2521,11 @@ class ManagedWorkspaceAdmissionTest {
                 new ManagedAgentProperties()) {
             @Override
             public void dispatch(String tenantId, String sessionId,
+                    String turnId) {
+            }
+
+            @Override
+            public void cancel(String tenantId, String sessionId,
                     String turnId) {
             }
         };

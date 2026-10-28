@@ -138,7 +138,7 @@ public class SessionWorktreeService {
         return store.cleanup(tenant, actor, workspace, id, key).descriptor();
     }
 
-    @Scheduled(fixedDelayString = "${qwen.managed-agent.session-worktree.scan-delay:1000}")
+    @Scheduled(scheduler = "sessionWorktreeScheduler", fixedDelayString = "${qwen.managed-agent.session-worktree.scan-delay:1000}")
     public void scan() {
         store.resumeStopped();
         for (String[] failure : store.failedInitialSessions()) {

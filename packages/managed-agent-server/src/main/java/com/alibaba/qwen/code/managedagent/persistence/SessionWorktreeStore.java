@@ -5,8 +5,11 @@ import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry.R
 import com.alibaba.qwen.code.managedagent.workspace.SessionWorktreeGit;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -31,6 +34,12 @@ public class SessionWorktreeStore {
     private final ManagedWorkspaceRegistry registry;
     private final WorkspaceStorageGuard guard;
     private String resumeAfter = "";
+
+    @Autowired
+    public SessionWorktreeStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
+            ManagedWorkspaceRegistry registry, WorkspaceStorageGuard guard) {
+        this(jdbc, new DataSourceTransactionManager(jdbc.getDataSource()), registry, guard);
+    }
 
     public SessionWorktreeStore(JdbcTemplate jdbc, PlatformTransactionManager manager,
             ManagedWorkspaceRegistry registry, WorkspaceStorageGuard guard) {
@@ -349,7 +358,7 @@ public class SessionWorktreeStore {
             WorkspaceStorageKindGuard.lockDomain(jdbc, tenant);
             Row row = get(tenant, actor, workspace, id, true);
             String operation = UUID.nameUUIDFromBytes((tenant + "\0" + actor + "\0" + id + "\0" + idempotencyKey)
-                    .getBytes(java.nio.charset.StandardCharsets.UTF_8)).toString();
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8)).toString().replace("-", "");
             if (row.operationId().equals(operation) || "REMOVED".equals(row.state())) {
                 return row;
             }

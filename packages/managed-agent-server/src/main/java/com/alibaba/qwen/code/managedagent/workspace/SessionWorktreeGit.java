@@ -40,6 +40,7 @@ public final class SessionWorktreeGit implements AutoCloseable {
             throw error("worktree_invalid_ref", "Choose an existing local branch, tag or commit.");
         }
         var layout = sourceLayout(root, cwd);
+        requireSeparateRepository(root, layout.repositoryRelative());
         var repository = git.sessionOpen(root, layout.repositoryRelative());
         String commit;
         try {
@@ -87,6 +88,7 @@ public final class SessionWorktreeGit implements AutoCloseable {
     public String prepare(Plan plan) {
         Path root = Path.of(plan.root());
         requireRoot(plan);
+        requireSeparateRepository(root, plan.repositoryRelative());
         Path container = root.resolve(CONTAINER);
         try {
             if (!Files.exists(container, LinkOption.NOFOLLOW_LINKS)) {
@@ -250,6 +252,12 @@ public final class SessionWorktreeGit implements AutoCloseable {
     private static void requireDirectory(Path path) throws IOException {
         if (!Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS) || !path.toRealPath().equals(path)) {
             throw new IOException("Not a real directory");
+        }
+    }
+
+    private static void requireSeparateRepository(Path root, String repositoryRelative) {
+        if (root.resolve(repositoryRelative).normalize().equals(root)) {
+            throw error("worktree_layout_unsupported", "Select a project below the storage root so Session worktrees stay outside its repository.");
         }
     }
 

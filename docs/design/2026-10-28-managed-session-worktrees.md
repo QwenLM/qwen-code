@@ -25,6 +25,10 @@ the checkout. The actual cwd preserves the source's repository-relative offset;
 that directory must exist in the selected commit. Repository and Git metadata
 must stay within the authorized storage. A linked source whose common directory
 escapes that root is refused; mounts are never enlarged automatically.
+New worktrees require the source repository strictly below the storage root so
+its Git add/clean commands cannot include the sibling private container. A
+repository at the storage root still supports current-directory Sessions and
+safe cleanup of existing worktrees, but new preparation is refused.
 
 ## Creation and execution
 
@@ -99,8 +103,9 @@ scope revision. The latter remains for pre-creation browsing and cannot enter
 private worktree paths. Only server-resolved Session bases may bypass the
 private-base restriction; user-relative paths keep their existing validation.
 
-WebShell offers current directory/worktree and an optional starting ref, shows
-the resolved commit and exclusion of dirty files, freezes pending submissions
+WebShell offers current directory/worktree in the composer and creates isolated
+worktrees from HEAD; an explicit starting ref remains available through the API.
+It shows the current branch, freezes pending submissions
 and reports preparing, waiting, failed or blocked states. Directory references
 and uploads pause before a selected worktree exists; ordinary input attachments
 remain available. Ready Sessions restore file capabilities against their target.
