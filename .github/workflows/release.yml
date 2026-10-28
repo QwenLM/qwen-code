@@ -656,7 +656,7 @@ jobs:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
-          token: '${{ secrets.CI_BOT_PAT }}'
+          # Read-only fetch; the bot PAT is only exported to the write steps.
           ref: '${{ needs.prepare.outputs.release_sha }}'
           fetch-depth: 0
           persist-credentials: false
