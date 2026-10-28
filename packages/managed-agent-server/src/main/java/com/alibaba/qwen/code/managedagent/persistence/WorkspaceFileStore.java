@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.provisioning.WorkspaceFileProcess;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
@@ -32,8 +33,8 @@ public class WorkspaceFileStore {
     private final java.util.concurrent.Semaphore reads = new java.util.concurrent.Semaphore(4);
 
     public WorkspaceFileStore(ManagedWorkspaceRegistry registry, WorkspaceStorageGuard guard,
-            SshWorkspaceService ssh, ManagedAgentProperties properties, JdbcTemplate jdbc,
-            PlatformTransactionManager manager, ObjectMapper mapper) {
+            SshWorkspaceService ssh, ManagedAgentProperties properties, @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
+            @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager, @Qualifier("managedAgentObjectMapper") ObjectMapper mapper) {
         this.registry = registry;
         this.guard = guard;
         this.ssh = ssh;

@@ -12,6 +12,7 @@ import com.alibaba.qwen.code.runtimebroker.transport.ManagedExtensionCommandProt
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
@@ -27,7 +28,7 @@ public final class ManagedExtensionCommandVerifier implements RuntimeExtensionCo
     private final AgentStateStore sessions;
     private final ObjectMapper json;
 
-    public ManagedExtensionCommandVerifier(JdbcTemplate jdbc, ManagedExtensionRecordStore records, AgentStateStore sessions, ObjectMapper json) {
+    public ManagedExtensionCommandVerifier(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, ManagedExtensionRecordStore records, AgentStateStore sessions, @Qualifier("managedAgentObjectMapper") ObjectMapper json) {
         this.jdbc = jdbc;
         this.records = records;
         this.sessions = sessions;
