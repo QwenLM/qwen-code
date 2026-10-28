@@ -16488,6 +16488,11 @@ class QwenAgent implements Agent {
     ) {
       config.setGoalProposalHostSupported(true);
     }
+    // Only the daemon bridge, whose Web Shell renders MCP Apps, declares this;
+    // TUI, headless, editor and channel clients never receive Generated UI.
+    if (this.clientCapabilities?._meta?.['qwen.mcpAppHost'] === true) {
+      config.setMcpAppHostSupported(true);
+    }
     if (chatRecording !== false) {
       this.initializingConfigs.add(config);
     }
