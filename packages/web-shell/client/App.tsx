@@ -18269,9 +18269,8 @@ export function App({
                 ]);
                 return true;
               }
-              const nextLanguage = languageSettingToWebShellLanguage(
-                languageArg,
-              );
+              const nextLanguage =
+                languageSettingToWebShellLanguage(languageArg);
               if (nextLanguage === undefined) {
                 pushToast('error', t('language.invalid'));
                 return true;
