@@ -366,6 +366,7 @@ const capabilities = {
     'multi_workspace_sessions',
     'workspace_runtime_removal',
     'session_archive',
+    'session_archive_idle_guard',
     'workspace_qualified_rest_core',
     'workspace_session_metadata',
     'session_source_metadata',
@@ -1566,6 +1567,7 @@ describe('WebShellSidebar workspace removal', () => {
       features: [
         'multi_workspace_sessions',
         'session_archive',
+        'session_archive_idle_guard',
         'session_organization',
         'workspace_session_export',
       ],

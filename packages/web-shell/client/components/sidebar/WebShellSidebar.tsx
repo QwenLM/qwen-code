@@ -1361,6 +1361,12 @@ export function WebShellSidebar({
   const sessionArchiveEnabled = Boolean(
     connection.capabilities?.features?.includes('session_archive'),
   );
+  // Without `requireIdle` support the daemon cannot refuse an archive of a
+  // session that started working again, so the current session stays
+  // off-limits on such a daemon.
+  const sessionArchiveIdleGuard = Boolean(
+    connection.capabilities?.features?.includes('session_archive_idle_guard'),
+  );
   const workspaceQualifiedRestCoreEnabled = Boolean(
     connection.capabilities?.features?.includes(
       'workspace_qualified_rest_core',
@@ -2480,10 +2486,22 @@ export function WebShellSidebar({
       // guarantee itself with `requireIdle`.
       session.sourceType !== 'qwen-live' &&
       sessionActionItems.has('archive') &&
+      // The idle guard only governs the session this tab is attached to,
+      // which lives in the primary workspace; a same-id row from another
+      // workspace archives through that workspace's daemon.
+      (!isCurrentSession(session) ||
+        sessionArchiveIdleGuard ||
+        resolveSessionWorkspaceScope(session).kind !== 'primary') &&
       !session.hasActivePrompt &&
       session.activeWorkState !== 'active' &&
       canMutateSessionArchive(session),
-    [canMutateSessionArchive, sessionActionItems],
+    [
+      canMutateSessionArchive,
+      isCurrentSession,
+      resolveSessionWorkspaceScope,
+      sessionActionItems,
+      sessionArchiveIdleGuard,
+    ],
   );
   const canUnarchiveSession = useCallback(
     (session: DaemonSessionSummary) =>
@@ -5444,7 +5462,9 @@ export function WebShellSidebar({
                                 disabled={
                                   busy ||
                                   running ||
-                                  Boolean(standalone && isCurrent)
+                                  (standalone
+                                    ? isCurrent
+                                    : isCurrent && !sessionArchiveIdleGuard)
                                 }
                                 title={
                                   standalone && isCurrent
@@ -5564,6 +5584,7 @@ export function WebShellSidebar({
       saveRename,
       searchQuery,
       sessionActionItems,
+      sessionArchiveIdleGuard,
       inlineActionItems,
       livePresence,
       startRename,
