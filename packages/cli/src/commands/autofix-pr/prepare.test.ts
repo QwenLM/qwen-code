@@ -524,6 +524,187 @@ describe('runPrepare (real git)', () => {
     expect(lastReport()).toMatchObject({ localUnpushedCommits: 1 });
   });
 
+  it("reports uncommitted changes in the user's own checkout", () => {
+    expect(run(clone, 'branch', '--show-current')).toBe('feat');
+    writeFileSync(join(clone, 'scratch.txt'), 'work in progress\n');
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(lastReport()).toMatchObject({
+      localUnpushedCommits: 0,
+      localUncommittedChanges: true,
+    });
+  });
+
+  it('reports no uncommitted changes for a clean checkout', () => {
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(lastReport()).toMatchObject({ localUncommittedChanges: false });
+  });
+
+  it('reports uncommitted changes when it resumes a watch', () => {
+    runPrepare({ pr: 7, repo: 'o/r' });
+    writeFileSync(join(clone, 'scratch.txt'), 'work in progress\n');
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(lastReport()).toMatchObject({
+      resumed: true,
+      localUncommittedChanges: true,
+    });
+  });
+
+  it('reports no uncommitted work on the head branch no checkout has', () => {
+    // The local branch whose upstream is the head branch stays, but nothing
+    // has it checked out: work in another checkout is not work on that copy.
+    run(clone, 'checkout', '-q', '-b', 'scratch');
+    writeFileSync(join(clone, 'scratch.txt'), 'work in progress\n');
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(lastReport()).toMatchObject({ localUncommittedChanges: false });
+  });
+
+  it('reports no uncommitted work on a branch that does not track the head', () => {
+    run(clone, 'branch', '--unset-upstream');
+    writeFileSync(join(clone, 'scratch.txt'), 'work in progress\n');
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(lastReport()).toMatchObject({
+      localUnpushedCommits: 0,
+      localUncommittedChanges: false,
+    });
+  });
+
+  it('counts untracked work whatever status.showUntrackedFiles says', () => {
+    run(clone, 'config', 'status.showUntrackedFiles', 'no');
+    writeFileSync(join(clone, 'new-source.ts'), 'export {};\n');
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(lastReport()).toMatchObject({
+      localUncommittedChanges: true,
+      localWorkUnknown: false,
+    });
+  });
+
+  it('counts uncommitted work under .qwen outside the watch directory', () => {
+    mkdirSync(join(clone, '.qwen', 'skills'), { recursive: true });
+    writeFileSync(join(clone, '.qwen', 'skills', 'mine.md'), 'work\n');
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(lastReport()).toMatchObject({
+      localUncommittedChanges: true,
+      localWorkUnknown: false,
+    });
+  });
+
+  it('reports unknown when the PR head is not in this clone', () => {
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const other = join(dir, 'other');
+    run(dir, 'clone', '-q', join(dir, 'bare.git'), other);
+    run(other, 'config', 'user.email', 't@example.com');
+    run(other, 'config', 'user.name', 't');
+    run(other, 'commit', '-q', '--allow-empty', '-m', 'pushed elsewhere');
+    const elsewhere = run(other, 'rev-parse', 'HEAD');
+    run(other, 'push', '-q', 'origin', 'feat');
+    run(join(dir, 'bare.git'), 'update-ref', 'refs/pull/7/head', elsewhere);
+    mocks.gh.mockImplementation((...args: string[]) => {
+      if (args[0] === 'pr') {
+        return JSON.stringify(prView({ headRefOid: elsewhere }));
+      }
+      if (args[0] === 'repo') return JSON.stringify(writable);
+      if (args[0] === 'config') return 'https';
+      throw new Error(`unexpected gh ${args.join(' ')}`);
+    });
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(lastReport()).toMatchObject({
+      resumed: true,
+      localUnpushedCommits: 0,
+      localWorkUnknown: true,
+    });
+  });
+
+  it('falls back when git has no worktree -z', () => {
+    const realGit = execFileSync('sh', ['-c', 'command -v git'], {
+      encoding: 'utf8',
+    }).trim();
+    const bin = join(dir, 'old-git');
+    mkdirSync(bin);
+    writeFileSync(
+      join(bin, 'git'),
+      `#!/bin/sh\nif [ "$1" = worktree ] && [ "$2" = list ] && [ "$4" = -z ]; then exit 129; fi\nexec ${realGit} "$@"\n`,
+      { mode: 0o755 },
+    );
+    const savedPath = process.env['PATH'];
+    process.env['PATH'] = `${bin}:${savedPath}`;
+    try {
+      runPrepare({ pr: 7, repo: 'o/r' });
+    } finally {
+      process.env['PATH'] = savedPath;
+    }
+    expect(lastReport()).toMatchObject({
+      localUncommittedChanges: false,
+      localWorkUnknown: false,
+    });
+  });
+
+  it('counts a dirty submodule whatever diff.ignoreSubmodules says', () => {
+    const sub = join(dir, 'subsrc');
+    run(dir, 'init', '-q', '-b', 'main', sub);
+    run(sub, 'config', 'user.email', 't@example.com');
+    run(sub, 'config', 'user.name', 't');
+    writeFileSync(join(sub, 'a.txt'), 'a\n');
+    run(sub, 'add', 'a.txt');
+    run(sub, 'commit', '-q', '-m', 'sub');
+    run(
+      clone,
+      '-c',
+      'protocol.file.allow=always',
+      'submodule',
+      'add',
+      '-q',
+      sub,
+      'mod',
+    );
+    run(clone, 'commit', '-q', '-m', 'add submodule');
+    run(clone, 'config', 'diff.ignoreSubmodules', 'all');
+    writeFileSync(join(clone, 'mod', 'a.txt'), 'dirty\n');
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(lastReport()).toMatchObject({ localUncommittedChanges: true });
+  });
+
+  it('reads a linked checkout of the head branch', () => {
+    // The work belongs to a checkout beside this one, so a scan that asked
+    // the directory prepare ran in would miss it.
+    run(clone, 'checkout', '-q', 'main');
+    const linked = join(dir, 'linked');
+    run(clone, 'worktree', 'add', '-q', linked, 'feat');
+    writeFileSync(join(linked, 'dirty.txt'), 'work\n');
+    const savedServe = process.env['QWEN_CODE_SERVE'];
+    delete process.env['QWEN_CODE_SERVE'];
+    try {
+      runPrepare({ pr: 7, repo: 'o/r' });
+    } finally {
+      if (savedServe === undefined) delete process.env['QWEN_CODE_SERVE'];
+      else process.env['QWEN_CODE_SERVE'] = savedServe;
+    }
+    expect(lastReport()).toMatchObject({ localUncommittedChanges: true });
+  });
+
+  it('counts commits against the live head when it resumes a watch', () => {
+    runPrepare({ pr: 7, repo: 'o/r' });
+    run(clone, 'config', 'user.email', 't@example.com');
+    run(clone, 'config', 'user.name', 't');
+    run(clone, 'commit', '-q', '--allow-empty', '-m', 'pushed to the PR');
+    const pushed = run(clone, 'rev-parse', 'HEAD');
+    run(clone, 'push', '-q', 'origin', 'feat');
+    // GitHub moves the PR head with the branch.
+    run(join(dir, 'bare.git'), 'update-ref', 'refs/pull/7/head', pushed);
+    mocks.gh.mockImplementation((...args: string[]) => {
+      if (args[0] === 'pr') {
+        return JSON.stringify(prView({ headRefOid: pushed }));
+      }
+      if (args[0] === 'repo') return JSON.stringify(writable);
+      if (args[0] === 'config') return 'https';
+      throw new Error(`unexpected gh ${args.join(' ')}`);
+    });
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(lastReport()).toMatchObject({
+      resumed: true,
+      localUnpushedCommits: 0,
+    });
+  });
+
   it('resumes in the owning session without touching the worktree', () => {
     runPrepare({ pr: 7, repo: 'o/r' });
     const answer = mocks.gh.getMockImplementation()!;
@@ -531,7 +712,7 @@ describe('runPrepare (real git)', () => {
     mocks.gh.mockImplementation((...args: string[]) => {
       if (
         args[0] !== 'pr' ||
-        args.at(-1) !== 'author,headRepository,headRepositoryOwner'
+        args.at(-1) !== 'author,headRepository,headRepositoryOwner,headRefOid'
       ) {
         throw new Error(`a resume must not call gh ${args.join(' ')}`);
       }
