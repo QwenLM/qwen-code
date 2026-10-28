@@ -50,6 +50,7 @@ import {
 } from '../customization';
 import { useI18n } from '../i18n';
 import { formatContextTokens } from '../utils/formatTokenCount';
+import { formatTurnDuration } from '../utils/turnDuration';
 import { useWebShellPortalRoot } from '../portalRoot';
 import { useTranscriptRenderMode } from '../transcriptRenderMode';
 import { useAssistantFeedback } from '../hooks/useAssistantFeedback';
@@ -2434,14 +2435,6 @@ export function shouldAdjustVirtualScrollPosition(
   return itemEnd <= scrollOffset;
 }
 
-function formatDuration(ms: number): string {
-  const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
-  if (totalSeconds < 60) return `${totalSeconds}s`;
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds - minutes * 60;
-  return `${minutes}m ${seconds}s`;
-}
-
 type Translate = (
   key: string,
   vars?: Record<string, string | number>,
@@ -2449,7 +2442,7 @@ type Translate = (
 
 function durationMetricText(elapsedMs: number | undefined): string {
   return elapsedMs !== undefined && elapsedMs >= 0
-    ? formatDuration(elapsedMs)
+    ? formatTurnDuration(elapsedMs)
     : '';
 }
 

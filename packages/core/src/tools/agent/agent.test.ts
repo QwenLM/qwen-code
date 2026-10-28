@@ -4,6 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { convertToFunctionResponse } from '../../core/coreToolScheduler.js';
+import {
+  enforceFunctionResponseBudget,
+  finalizeToolResponses,
+} from '../tool-response-finalizer.js';
+
 import { goalTurnContext } from '../../goals/goal-turn-context.js';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
@@ -15,11 +21,18 @@ import {
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { ToolResultDisplay, AgentResultDisplay } from '../tools.js';
 import { ToolConfirmationOutcome } from '../tools.js';
-import type { ResidentBackgroundAgent } from '../../agents/background-tasks.js';
+import type {
+  AgentTaskRegistration,
+  ResidentBackgroundAgent,
+} from '../../agents/background-tasks.js';
 import { ToolNames } from '../tool-names.js';
 import {
+  backgroundFixAt,
   canonicalWorktreePath,
   grantUnattendedFixes,
+  openBackgroundFix,
+  recordConfirmedWatch,
+  recordWatchTask,
   resetUnattendedFixGrantsForTests,
 } from '../autofix-pr-grants.js';
 import {
@@ -1994,6 +2007,102 @@ describe('AgentTool', () => {
       }
     });
 
+    it('never pins a teammate beside a background fix of /autofix-pr', async () => {
+      const spies = await stubWorktreeProbes(async () => ({
+        branch: 'worktree-writer',
+        headCommit: 'abc123',
+      }));
+      const wt = path.resolve('/test/project', '.qwen/tmp/review-pr-1');
+      grantUnattendedFixes('test-session-id', {
+        pr: 1,
+        worktree: canonicalWorktreePath(wt),
+        check: async () => true,
+        open: async () => ({ task: 't' }),
+        close: async () => {},
+      });
+      recordConfirmedWatch('test-session-id', {
+        pr: 1,
+        repo: 'o/r',
+        host: null,
+        targetDir: '/test/project',
+        preparedAt: null,
+        worktree: canonicalWorktreePath(wt),
+        authorCanPush: true,
+      });
+      recordWatchTask('test-session-id', 1, {
+        task: 't',
+        reply: true,
+        instructions: '',
+      });
+      try {
+        await openBackgroundFix(
+          'test-session-id',
+          wt,
+          new AbortController().signal,
+        );
+        const spawnTeammate = activeTeam();
+        const result = await buildAndRun({
+          description: 'Review',
+          prompt: 'Review the diff',
+          subagent_type: 'file-search',
+          name: 'reviewer',
+          working_dir: '.qwen/tmp/review-pr-1',
+        });
+        expect(spawnTeammate).not.toHaveBeenCalled();
+        expect(textOf(result)).toMatch(
+          /a background fix agent of \/autofix-pr is working/,
+        );
+      } finally {
+        resetUnattendedFixGrantsForTests();
+        for (const spy of spies) spy.mockRestore();
+      }
+    });
+
+    it("never spawns a teammate in the session's own directory when a background fix holds it", async () => {
+      const wt = '/test/project';
+      grantUnattendedFixes('test-session-id', {
+        pr: 2,
+        worktree: canonicalWorktreePath(wt),
+        check: async () => true,
+        open: async () => ({ task: 't' }),
+        close: async () => {},
+      });
+      recordConfirmedWatch('test-session-id', {
+        pr: 2,
+        repo: 'o/r',
+        host: null,
+        targetDir: '/test',
+        preparedAt: null,
+        worktree: canonicalWorktreePath(wt),
+        authorCanPush: true,
+      });
+      recordWatchTask('test-session-id', 2, {
+        task: 't',
+        reply: true,
+        instructions: '',
+      });
+      try {
+        await openBackgroundFix(
+          'test-session-id',
+          wt,
+          new AbortController().signal,
+        );
+        const spawnTeammate = activeTeam();
+        const result = await buildAndRun({
+          description: 'Review',
+          prompt: 'Review the diff',
+          subagent_type: 'file-search',
+          name: 'reviewer',
+        });
+        expect(spawnTeammate).not.toHaveBeenCalled();
+        expect(textOf(result)).toMatch(
+          /a background fix agent of \/autofix-pr is working/,
+        );
+      } finally {
+        resetUnattendedFixGrantsForTests();
+      }
+    });
+
     it('aborts a named teammate after working_dir validation', async () => {
       const controller = new AbortController();
       const spies = await stubWorktreeProbes(async () => {
@@ -2561,12 +2670,32 @@ describe('AgentTool', () => {
 
     describe('unattended fixes of an autofix-pr watch', () => {
       afterEach(() => resetUnattendedFixGrantsForTests());
+      const open = vi.fn();
+      const close = vi.fn();
       const grant = (wt: string, allowed: boolean) => {
         const check = vi.fn().mockResolvedValue(allowed);
+        open.mockReset().mockResolvedValue({ task: 'feedc0ffee12' });
+        close.mockReset().mockResolvedValue(undefined);
         grantUnattendedFixes('test-session-id', {
           pr: 7,
           worktree: canonicalWorktreePath(wt),
           check,
+          open,
+          close,
+        });
+        recordConfirmedWatch('test-session-id', {
+          pr: 7,
+          repo: 'o/r',
+          host: 'github.com',
+          targetDir: '/test/project',
+          preparedAt: null,
+          worktree: canonicalWorktreePath(wt),
+          authorCanPush: true,
+        });
+        recordWatchTask('test-session-id', 7, {
+          task: 'feedc0ffee12',
+          reply: false,
+          instructions: 'keep the API',
         });
         return check;
       };
@@ -2661,6 +2790,257 @@ describe('AgentTool', () => {
           expect(check).not.toHaveBeenCalled();
         },
       );
+
+      describe('in the background', () => {
+        const bgFix = (wt: string) =>
+          review(wt, {
+            subagent_type: 'general-purpose',
+            run_in_background: true,
+          });
+        const registered = () =>
+          vi
+            .mocked(config.getBackgroundTaskRegistry().register)
+            .mock.calls.at(-1)?.[0] as AgentTaskRegistration | undefined;
+
+        it("takes working_dir with run_in_background only for a granted worktree's general-purpose agent", () => {
+          const wt = '/test/project/.qwen/tmp/autofix-pr-7';
+          expect(agentTool.validateToolParams(bgFix(wt))).toMatch(
+            /incompatible/,
+          );
+          grant(wt, true);
+          expect(agentTool.validateToolParams(bgFix(wt))).toBeNull();
+          // Relative, as the session's directory resolves it.
+          expect(
+            agentTool.validateToolParams(
+              bgFix(path.join('.qwen', 'tmp', 'autofix-pr-7')),
+            ),
+          ).toBeNull();
+          expect(
+            agentTool.validateToolParams(
+              review(wt, { run_in_background: true }),
+            ),
+          ).toMatch(/incompatible/);
+        });
+
+        itInRepo(
+          'runs the fix in the background in YOLO mode, its attempt open and never continued',
+          async (repo) => {
+            const wt = addWorktree(repo);
+            vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+            grant(wt, true);
+            vi.mocked(mockAgent.getCore).mockReturnValue(
+              emitterCore() as never,
+            );
+            Object.assign(mockAgent, messagingHooks());
+            const writeMeta = vi.spyOn(transcript, 'writeAgentMeta');
+            // How its registry entry ends, read once the body settles.
+            vi.mocked(config.getBackgroundTaskRegistry().get).mockReturnValue({
+              status: 'completed',
+              result: 'fixed it',
+            } as never);
+            expect(await llm(bgFix(wt))).toContain('Background agent launched');
+            expect(open).toHaveBeenCalledOnce();
+            expect(childConfig().getApprovalMode()).toBe(YOLO);
+            const entry = registered()!;
+            // Its inputs (a Monitor it starts) reach it while it runs; no
+            // message does.
+            expect(entry.resumeBlockedReason).toBeUndefined();
+            expect(entry.messagesBlockedReason).toMatch(/never continued/);
+            // Its saved record: never resumed, and the mode it would have
+            // had without the grant, should anything read it back.
+            const meta = writeMeta.mock.calls[0]?.[1];
+            writeMeta.mockRestore();
+            expect(meta).toMatchObject({
+              resumeBlockedReason: expect.stringMatching(/never continued/),
+              resolvedApprovalMode: AUTO_EDIT,
+              persistedCliFlags: expect.objectContaining({
+                approvalMode: AUTO_EDIT,
+              }),
+            });
+            const live = backgroundFixAt(wt)!;
+            expect(live.attempt).toBe(open.mock.calls[0]![0]);
+            expect(live.agentId).toBe(entry.agentId);
+            // Its own agents: one it started, by the registry's parent
+            // link, at any depth the session allows (up to 100).
+            const own = config.getBackgroundTaskRegistry().get(entry.agentId);
+            const parents: Record<string, string> = {
+              'depth-1': entry.agentId!,
+              'loop-a': 'loop-b',
+              'loop-b': 'loop-a',
+            };
+            for (let depth = 2; depth <= 100; depth++) {
+              parents[`depth-${depth}`] = `depth-${depth - 1}`;
+            }
+            vi.mocked(
+              config.getBackgroundTaskRegistry().get,
+            ).mockImplementation(((id: string) =>
+              id === entry.agentId
+                ? own
+                : id in parents
+                  ? { parentAgentId: parents[id] }
+                  : undefined) as never);
+            expect(live.ownsCaller(entry.agentId!)).toBe(true);
+            expect(live.ownsCaller('depth-1')).toBe(true);
+            expect(live.ownsCaller('depth-100')).toBe(true);
+            expect(live.ownsCaller('stranger')).toBe(false);
+            expect(live.ownsCaller('loop-a')).toBe(false);
+            expect(live.ownsCaller(null)).toBe(false);
+            expect(
+              config.getBackgroundTaskRegistry().registerResidentAgent,
+            ).not.toHaveBeenCalled();
+            // No other agent works beside it, in either mode.
+            expect(textOf(await run(fix(wt)))).toMatch(
+              /a background fix agent of \/autofix-pr is working/,
+            );
+            expect(
+              mockSubagentManager.createAgentHeadless,
+            ).toHaveBeenCalledOnce();
+            // The notification tells the round to go on, once the agent ended;
+            // the entry is never continued from then on.
+            await live.settled;
+            expect(
+              config.getBackgroundTaskRegistry().get(entry.agentId)
+                ?.resumeBlockedReason,
+            ).toMatch(/never continued/);
+            const followUp = entry.notificationFollowUp!()!;
+            expect(followUp).toContain(
+              `after-fix o/r#7 --task feedc0ffee12 --attempt ${live.attempt} --no-reply -- keep the API`,
+            );
+            expect(live.ended).toEqual({
+              status: 'completed',
+              report: 'fixed it',
+            });
+            live.claim();
+            expect(entry.notificationFollowUp!()).toBeUndefined();
+            expect(backgroundFixAt(wt)).toBeUndefined();
+          },
+        );
+
+        itInRepo(
+          "refuses an agent in the session's own directory inside a running fix's worktree",
+          async (repo) => {
+            const wt = addWorktree(repo);
+            vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+            grant(wt, true);
+            vi.mocked(mockAgent.getCore).mockReturnValue(
+              emitterCore() as never,
+            );
+            Object.assign(mockAgent, messagingHooks());
+            expect(await llm(bgFix(wt))).toContain('Background agent launched');
+            // A `/cd` into the worktree: the next agent would work beside it.
+            vi.mocked(config.getTargetDir).mockReturnValue(wt);
+            for (const params of [fg(), fg({ isolation: 'worktree' })]) {
+              expect(textOf(await run(params))).toMatch(
+                /a background fix agent of \/autofix-pr is working/,
+              );
+            }
+            expect(
+              mockSubagentManager.createAgentHeadless,
+            ).toHaveBeenCalledOnce();
+          },
+        );
+
+        itInRepo(
+          "lets the fix's own agent pin its agents to the worktree, and waits for a dropped fix's agent to settle",
+          async (repo) => {
+            const wt = addWorktree(repo);
+            vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+            grant(wt, true);
+            const live = await openBackgroundFix(
+              'test-session-id',
+              canonicalWorktreePath(wt),
+              new AbortController().signal,
+            );
+            live.attach('fix-agent', () => {});
+            const pinned = review(wt, { subagent_type: 'general-purpose' });
+            // The session's agent beside it: refused.
+            expect(textOf(await run(pinned))).toMatch(
+              /a background fix agent of \/autofix-pr is working/,
+            );
+            // One the fix's own agent starts: its own.
+            const own = await runWithAgentContext('fix-agent', () =>
+              invoke(pinned).execute(new AbortController().signal),
+            );
+            expect(textOf(own)).not.toMatch(/background fix agent/);
+            // Dropped while its agent still writes: an agent in the
+            // session's own directory there waits for it first.
+            live.drop();
+            vi.mocked(config.getTargetDir).mockReturnValue(wt);
+            let returned = false;
+            const waiting = run(fg()).then((result) => {
+              returned = true;
+              return result;
+            });
+            await new Promise((resolve) => setTimeout(resolve, 100));
+            expect(returned).toBe(false);
+            live.bodySettled();
+            expect(textOf(await waiting)).not.toMatch(/background fix agent/);
+          },
+        );
+
+        itInRepo(
+          'refuses rather than run in the background when the grant no longer holds',
+          async (repo) => {
+            const wt = addWorktree(repo);
+            vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+            grant(wt, false);
+            expectNotLaunched(
+              await run(bgFix(wt)),
+              /no longer runs without asking/,
+            );
+            expect(open).not.toHaveBeenCalled();
+            expect(backgroundFixAt(wt)).toBeUndefined();
+          },
+        );
+
+        itInRepo(
+          "refuses when the attempt cannot open, with the helper's reason",
+          async (repo) => {
+            const wt = addWorktree(repo);
+            vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+            grant(wt, true);
+            open.mockRejectedValue(new Error('no round of PR #7 has a fix'));
+            expectNotLaunched(
+              await run(bgFix(wt)),
+              /background fix cannot start: no round of PR #7 has a fix/,
+            );
+            expect(backgroundFixAt(wt)).toBeUndefined();
+          },
+        );
+
+        itInRepo(
+          'ends the attempt when the launch fails after it opened',
+          async (repo) => {
+            const wt = addWorktree(repo);
+            vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+            grant(wt, true);
+            vi.mocked(
+              config.getBackgroundTaskRegistry().register,
+            ).mockImplementationOnce(() => {
+              throw new Error('registry full');
+            });
+            expect(await llm(bgFix(wt))).toMatch(/registry full/);
+            expect(close).toHaveBeenCalledWith(open.mock.calls[0]![0]);
+            expect(backgroundFixAt(wt)).toBeUndefined();
+          },
+        );
+
+        itInRepo(
+          'refuses an attempt on a watch whose task is not the one this session scheduled',
+          async (repo) => {
+            const wt = addWorktree(repo);
+            vi.mocked(config.isTrustedFolder).mockReturnValue(true);
+            grant(wt, true);
+            open.mockResolvedValue({ task: 'aaaaaaaaaaaa' });
+            expectNotLaunched(
+              await run(bgFix(wt)),
+              /no longer driven by the task this session scheduled/,
+            );
+            expect(close).toHaveBeenCalledOnce();
+            expect(backgroundFixAt(wt)).toBeUndefined();
+          },
+        );
+      });
 
       itInRepo(
         'grants nothing to another kind of agent, or to one a subagent starts',
@@ -5947,6 +6327,90 @@ describe('AgentTool', () => {
         expect(text).toMatch(
           /subagents[\\/]test-session-id[\\/]agent-[A-Za-z0-9_-]+\.jsonl/,
         );
+      },
+    );
+
+    it.each([
+      [AgentTerminateMode.TIMEOUT, false, 'runConfig.max_time_minutes'],
+      [AgentTerminateMode.TIMEOUT, true, 'runConfig.max_time_minutes'],
+      [AgentTerminateMode.MAX_TURNS, false, 'runConfig.max_turns'],
+      [AgentTerminateMode.MAX_TURNS, true, 'runConfig.max_turns'],
+    ] as const)(
+      'preserves a real %s reason and transcript across two budgets (persistence failure: %s)',
+      async (mode, failPersistence, remediation) => {
+        await withTempDir('agent recovery ', async (dir) => {
+          loadForeground();
+          vi.mocked(mockAgent.getFinalText).mockReturnValue('x'.repeat(60_000));
+          vi.mocked(mockAgent.getTerminateMode).mockReturnValue(mode);
+          const result = await invoke(fg()).execute();
+          const original = textOf(result);
+          const marker = original
+            .split('\n')
+            .find((line) => line.startsWith('The full output is in '))!;
+          expect(marker).toBeDefined();
+          const finalizerConfig = {
+            getToolOutputBatchBudget: () => 1000,
+            getToolResultBytesWritten: () =>
+              failPersistence ? Number.MAX_SAFE_INTEGER : 0,
+            trackToolResultBytes: () => {},
+            storage: { getToolResultsDir: () => dir },
+          } as unknown as Config;
+          let entries = [
+            {
+              callId: 'timeout',
+              toolName: 'agent',
+              responseParts: convertToFunctionResponse(
+                'agent',
+                'timeout',
+                result.llmContent,
+                result,
+              ),
+            },
+          ];
+          entries = await finalizeToolResponses(finalizerConfig, entries);
+          for (const budget of [1000, 700]) {
+            entries = await finalizeToolResponses(
+              finalizerConfig,
+              entries.map(({ callId, toolName, responseParts }) => ({
+                callId,
+                toolName,
+                responseParts,
+              })),
+              undefined,
+              false,
+              false,
+              budget,
+              false,
+            );
+            entries = enforceFunctionResponseBudget(
+              entries.map(({ callId, toolName, responseParts }) => ({
+                callId,
+                toolName,
+                responseParts,
+              })),
+              budget,
+            );
+            const output = entries[0].responseParts[0].functionResponse!
+              .response!['output'] as string;
+            expect(output).toContain(original.split('\n\n')[0]);
+            expect(output).toContain(remediation);
+            expect(output).toContain(marker);
+            expect(output.length).toBeLessThanOrEqual(budget);
+          }
+          const preserved = entries;
+          expect(enforceFunctionResponseBudget(entries, 100)).toBe(preserved);
+          expect(
+            await finalizeToolResponses(
+              finalizerConfig,
+              entries,
+              undefined,
+              false,
+              false,
+              100,
+              false,
+            ),
+          ).toBe(preserved);
+        });
       },
     );
 

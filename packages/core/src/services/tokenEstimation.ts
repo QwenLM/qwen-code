@@ -100,15 +100,16 @@ export const CONSERVATIVE_NEW_CONTENT_SAFETY_FACTOR = 1.5;
 
 export function estimatePromptTokens(
   history: Content[],
-  userMessage: Content,
+  userMessage: Content | Content[],
   lastPromptTokenCount: number,
   lastOutputTokenCount: number = 0,
   imageTokenEstimate: number = DEFAULT_IMAGE_TOKEN_ESTIMATE,
   conservative: boolean = false,
 ): number {
+  const newContent = Array.isArray(userMessage) ? userMessage : [userMessage];
   if (lastPromptTokenCount > 0) {
     const newContentTokens = estimateContentTokens(
-      [userMessage],
+      newContent,
       imageTokenEstimate,
     );
     return (
@@ -124,7 +125,7 @@ export function estimatePromptTokens(
   // skill content, and cache headers — typically ~15-20K of under-estimate.
   // The reactive overflow handler is the safety net if the hard-tier rescue
   // misses for that reason. See review #4168 R3.3.
-  return estimateContentTokens([...history, userMessage], imageTokenEstimate);
+  return estimateContentTokens([...history, ...newContent], imageTokenEstimate);
 }
 
 export function getUsageOutputTokenCountForPromptEstimate(

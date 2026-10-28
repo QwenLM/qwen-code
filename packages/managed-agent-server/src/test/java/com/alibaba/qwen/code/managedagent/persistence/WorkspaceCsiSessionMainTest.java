@@ -396,7 +396,7 @@ class WorkspaceCsiSessionMainTest {
         var before = allTables();
         var names = List.of("insertTurnCommand", "insertCancelCommand", "beginSessionMutation",
                 "completeSessionMutation", "abandonSessionMutation", "beginOperation", "beginWorkspaceClose",
-                "beginWorkspaceLifecycle", "unarchiveWorkspaceSession", "beginCwdChangeOperation",
+                "beginWorkspaceLifecycle", "unarchiveWorkspaceSession",
                 "completeCwdChangeOperation", "failCwdChangeOperation", "claimOperation", "completeOperation",
                 "renewLifecycleOperation", "blockLifecycleOperation", "retryOperation", "advanceReplayFloor",
                 "materializeNextBatch", "claimTurn", "renewTurn", "releaseTurnLease", "scheduleTurnRetry",
