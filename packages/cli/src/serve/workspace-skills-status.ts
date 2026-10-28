@@ -287,6 +287,13 @@ async function buildWorkspaceSkillsStatus(
       skipWorkspaceSettings: !workspaceTrusted,
       workspaceTrusted,
     });
+    const safeMode =
+      (!workspaceTrusted && !includeUntrustedSkills) || isSafeModeEnv();
+    // Only a trusted, non-safe catalog watches the workspace: an untrusted or
+    // safe-mode read lists bundled Skills only, so a subscription (and the user
+    // Skills directory `startWatching` creates) would be a side effect with
+    // nothing to observe.
+    const watchEnabled = watch && workspaceTrusted && !safeMode;
     const rawLanguage = settings.merged.general?.language;
     const locale = resolveLanguage(
       resolveLanguageSetting(
@@ -309,8 +316,6 @@ async function buildWorkspaceSkillsStatus(
             )
           : [],
       );
-      const safeMode =
-        (!workspaceTrusted && !includeUntrustedSkills) || isSafeModeEnv();
       let extensionManager: ExtensionManager | undefined;
       const extensionSkillStates = new Map<Extension, Map<string, boolean>>();
       if (workspaceTrusted && !safeMode) {
@@ -383,7 +388,9 @@ async function buildWorkspaceSkillsStatus(
           }
         }
       }
-      if (watch) await startSkillsWatcher(workspaceCwd, skillManager);
+      const watching = watchEnabled
+        ? await startSkillsWatcher(workspaceCwd, skillManager)
+        : false;
       cached = {
         skillManager,
         extensionManager,
@@ -392,12 +399,20 @@ async function buildWorkspaceSkillsStatus(
       };
       if (!canInstall || canInstall()) {
         managers.set(workspaceCwd, cached);
-      } else if (watch) {
+      } else if (watching) {
         stopWatchingManager(workspaceCwd, skillManager);
       }
     }
     const { disablements, enabledNames } = resolveSkillSettings(settings);
     const { skillManager, extensionManager, extensionSkillStates } = cached;
+    // A workspace removal stops the watchers but keeps this provider alive, so
+    // the next read after it must re-subscribe instead of trusting the cache.
+    if (
+      watchEnabled &&
+      !watchingManagers.get(workspaceCwd)?.has(skillManager)
+    ) {
+      await startSkillsWatcher(workspaceCwd, skillManager);
+    }
     const extensions = extensionManager?.getLoadedExtensions() ?? [];
     if (watch && managers.get(workspaceCwd) === cached) {
       scheduleSkillsRevalidation(workspaceCwd, cached, managers);
@@ -489,10 +504,11 @@ async function buildWorkspaceSkillsStatus(
 async function startSkillsWatcher(
   workspaceCwd: string,
   manager: SkillManager,
-): Promise<void> {
+): Promise<boolean> {
   try {
     await manager.startWatching();
     trackWatchingManager(workspaceCwd, manager);
+    return true;
   } catch (error) {
     manager.stopWatching();
     writeStderrLine(
@@ -500,6 +516,7 @@ async function startSkillsWatcher(
         error instanceof Error ? error.message : String(error)
       }`,
     );
+    return false;
   }
 }
 

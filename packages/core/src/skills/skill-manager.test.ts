@@ -231,6 +231,9 @@ describe('SkillManager', () => {
   });
 
   afterEach(() => {
+    // Release this test's shared watcher subscriptions so the next test starts
+    // from an empty registry.
+    manager.stopWatching();
     vi.restoreAllMocks();
   });
 

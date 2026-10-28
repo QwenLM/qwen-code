@@ -73,6 +73,37 @@ export function watcherIgnored(
 }
 
 /**
+ * One native watcher per directory, shared by every `SkillManager` that
+ * watches it. The daemon keeps a manager per provider (trusted/untrusted
+ * route catalogs plus the workspace-service fallback), and the ACP child keeps
+ * its own, so several managers can watch the same `.qwen/skills` at once.
+ * Sharing the chokidar subscription keeps that to one set of handles per
+ * directory while still refreshing every subscriber's cache.
+ */
+interface SharedSkillWatcher {
+  watcher: FSWatcher;
+  managers: Set<SkillManager>;
+}
+
+const sharedSkillWatchers = new Map<string, SharedSkillWatcher>();
+
+/** Number of native skill-directory watchers currently open. */
+export function getActiveSkillWatcherCount(): number {
+  return sharedSkillWatchers.size;
+}
+
+function unsubscribeSkillWatcher(manager: SkillManager, watchPath: string) {
+  const shared = sharedSkillWatchers.get(watchPath);
+  if (!shared) return;
+  shared.managers.delete(manager);
+  if (shared.managers.size > 0) return;
+  sharedSkillWatchers.delete(watchPath);
+  void closeFileWatcher(shared.watcher).catch((error) => {
+    debugLogger.warn(`Failed to close skills watcher for ${watchPath}:`, error);
+  });
+}
+
+/**
  * Manages skill configurations stored as directories containing SKILL.md files.
  * Provides discovery, parsing, validation, and caching for skills.
  */
@@ -95,7 +126,8 @@ export class SkillManager {
   private slashReloadSuppressed = false;
   private parseErrors: Map<string, SkillError> = new Map();
   private discoveryHasErrors = false;
-  private readonly watchers: Map<string, FSWatcher> = new Map();
+  /** Directories this manager subscribes to; the watcher itself is shared. */
+  private readonly watchedPaths: Set<string> = new Set();
   private watchStarted = false;
   private refreshTimer: NodeJS.Timeout | null = null;
   private readonly bundledSkillsDir: string;
@@ -651,12 +683,10 @@ export class SkillManager {
    */
   stopWatching(): void {
     debugLogger.info('Stopping skill directory watchers...');
-    for (const watcher of this.watchers.values()) {
-      void closeFileWatcher(watcher).catch((error) => {
-        debugLogger.warn('Failed to close skills watcher:', error);
-      });
+    for (const watchPath of [...this.watchedPaths]) {
+      this.watchedPaths.delete(watchPath);
+      unsubscribeSkillWatcher(this, watchPath);
     }
-    this.watchers.clear();
     this.watchStarted = false;
     if (this.refreshTimer) {
       clearTimeout(this.refreshTimer);
@@ -1301,38 +1331,44 @@ export class SkillManager {
         .filter((baseDir) => fsSync.existsSync(baseDir)),
     );
 
-    for (const existingPath of this.watchers.keys()) {
+    for (const existingPath of [...this.watchedPaths]) {
       if (!watchTargets.has(existingPath)) {
-        void closeFileWatcher(this.watchers.get(existingPath)).catch(
-          (error) => {
-            debugLogger.warn(
-              `Failed to close skills watcher for ${existingPath}:`,
-              error,
-            );
-          },
-        );
-        this.watchers.delete(existingPath);
+        this.watchedPaths.delete(existingPath);
+        unsubscribeSkillWatcher(this, existingPath);
       }
     }
 
     for (const watchPath of watchTargets) {
-      if (this.watchers.has(watchPath)) {
+      if (this.watchedPaths.has(watchPath)) {
+        continue;
+      }
+
+      const shared = sharedSkillWatchers.get(watchPath);
+      if (shared) {
+        // Subscribe to the watcher another manager already opened; its event
+        // handler refreshes every subscriber.
+        shared.managers.add(this);
+        this.watchedPaths.add(watchPath);
         continue;
       }
 
       try {
+        const managers = new Set<SkillManager>([this]);
         const watcher = watchFs(watchPath, {
           ignoreInitial: true,
           ignored: watcherIgnored,
           depth: WATCHER_MAX_DEPTH,
         })
           .on('all', () => {
-            this.scheduleRefresh();
+            for (const manager of managers) {
+              manager.scheduleRefresh();
+            }
           })
           .on('error', (error) => {
             debugLogger.warn(`Skills watcher error for ${watchPath}:`, error);
           });
-        this.watchers.set(watchPath, watcher);
+        sharedSkillWatchers.set(watchPath, { watcher, managers });
+        this.watchedPaths.add(watchPath);
       } catch (error) {
         debugLogger.warn(
           `Failed to watch skills directory at ${watchPath}:`,
