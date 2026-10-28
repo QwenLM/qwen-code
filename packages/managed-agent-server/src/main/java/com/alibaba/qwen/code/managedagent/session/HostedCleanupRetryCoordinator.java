@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.persistence.HostedCleanupDebtStore;
 import com.alibaba.qwen.code.managedagent.persistence.HostedCleanupDebtStore.CleanupDebt;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -45,7 +46,9 @@ public class HostedCleanupRetryCoordinator {
     }
 
     public HostedCleanupRetryCoordinator(HostedCleanupDebtStore store,
-            HarnessConnector harness, ExecutorService executor, Clock clock) {
+            HarnessConnector harness,
+            @Qualifier("managedAgentExecutor") ExecutorService executor,
+            @Qualifier("managedAgentClock") Clock clock) {
         this.store = store;
         this.harness = harness;
         this.executor = executor;
