@@ -2424,11 +2424,6 @@ const STANDALONE_PERMISSION_PERSISTENCE_POLICY: PermissionPersistencePolicy =
     allowUserPersistence: true,
   });
 
-type CommandSnapshotWaiter = {
-  resolve: () => void;
-  reject: (error: unknown) => void;
-};
-
 const commandSnapshotBuildContext = new AsyncLocalStorage<boolean>();
 
 const STANDALONE_WORKTREE_ACTION_ERROR =
@@ -2724,7 +2719,6 @@ export class Session implements SessionContext {
   private commandSnapshotInFlight?: Promise<void>;
   private commandSnapshotPending = false;
   private lastCommandsPublicationKey?: string;
-  private commandSnapshotWaiters: CommandSnapshotWaiter[] = [];
   private lastGoalSnapshot?: GoalSnapshotV2;
   private lastGoalPublicationKey?: string;
   // Set only when runtime recovery selected a Goal that initial replay hid.
@@ -14109,107 +14103,72 @@ export class Session implements SessionContext {
   }
 
   private async sendAvailableCommandsUpdateOrThrow(
-    options: {
-      skipIfUnchanged?: boolean;
-      carriedWaiters?: CommandSnapshotWaiter[];
-    } = {},
+    options: { skipIfUnchanged?: boolean } = {},
   ): Promise<void> {
+    // The latch covers only the snapshot build, so a client write that never
+    // settles cannot wedge later publications. A caller that arrives during
+    // the build resolves with it, and the change is republished afterwards.
     if (this.commandSnapshotInFlight) {
-      // Join the replacement publication, not the in-flight one: its client
-      // write may never settle, and this caller needs the newest state.
       this.commandSnapshotPending = true;
-      return new Promise<void>((resolve, reject) => {
-        this.commandSnapshotWaiters.push({ resolve, reject });
-      });
+      await this.commandSnapshotInFlight;
+      return;
     }
-    // The latch covers only the snapshot build. A client write that never
-    // settles must not wedge later publications, and a change that lands
-    // while the build runs is republished once the build is done.
-    let releaseLatch: () => void = () => {};
-    const publish = (async () => {
-      try {
-        if (this.#isAutomaticWorkHeld()) return;
-        const { availableCommands, availableSkills, availableSkillDetails } =
-          await commandSnapshotBuildContext.run(true, () =>
-            this.buildAvailableCommandsSnapshot(),
-          );
-        releaseLatch();
-        this.config.refreshWorkflowMode?.();
-        const update: SessionUpdate = {
-          sessionUpdate: 'available_commands_update',
-          availableCommands,
-          ...(availableSkills !== undefined
-            ? {
-                _meta: {
-                  availableSkills,
-                  ...(availableSkillDetails ? { availableSkillDetails } : {}),
-                },
-              }
-            : {}),
-        };
-        if (this.disposed) return;
-        const key = createHash('sha256')
-          .update(JSON.stringify(update))
-          .digest('hex');
-        if (
-          options.skipIfUnchanged &&
-          key === this.lastCommandsPublicationKey
-        ) {
-          return;
-        }
-        // Record the key when the write starts: client writes are ordered, so
-        // the last started frame is the state the client ends up with.
-        this.lastCommandsPublicationKey = key;
-        try {
-          await this.sendUpdate(update);
-        } catch (error) {
-          if (this.lastCommandsPublicationKey === key) {
-            this.lastCommandsPublicationKey = undefined;
-          }
-          throw error;
-        }
-      } finally {
-        releaseLatch();
-      }
+    const build = (async () => {
+      if (this.#isAutomaticWorkHeld()) return undefined;
+      return commandSnapshotBuildContext.run(true, () =>
+        this.buildAvailableCommandsSnapshot(),
+      );
     })();
-    this.commandSnapshotInFlight = publish;
-    // Callers that joined an earlier build ride along to the newest
-    // publication, so a superseded write that never settles cannot hang them.
-    const carried = options.carriedWaiters ?? [];
-    let handedOver = false;
-    releaseLatch = () => {
-      if (this.commandSnapshotInFlight !== publish) return;
-      this.commandSnapshotInFlight = undefined;
-      if (!this.commandSnapshotPending) return;
-      this.commandSnapshotPending = false;
-      const waiters = carried.concat(this.commandSnapshotWaiters.splice(0));
-      handedOver = true;
-      if (this.disposed) {
-        for (const waiter of waiters) waiter.resolve();
-        return;
-      }
-      this.sendAvailableCommandsUpdateOrThrow({
-        skipIfUnchanged: true,
-        carriedWaiters: waiters,
-      }).catch((error: unknown) => {
-        if (waiters.length === 0) {
-          debugLogger.error('Error sending available commands update:', error);
-        }
-      });
-    };
-    // A publish that returns before its first await finishes before the latch
-    // is set; settle it here as well so the latch can never stay armed.
-    void publish.then(
-      () => {
-        releaseLatch();
-        if (!handedOver) for (const waiter of carried) waiter.resolve();
-      },
-      (error: unknown) => {
-        releaseLatch();
-        if (!handedOver) for (const waiter of carried) waiter.reject(error);
-      },
+    this.commandSnapshotInFlight = build.then(
+      () => undefined,
+      () => undefined,
     );
-    await publish;
+    let snapshot: Awaited<typeof build>;
+    try {
+      snapshot = await build;
+    } finally {
+      this.commandSnapshotInFlight = undefined;
+      if (this.commandSnapshotPending) {
+        this.commandSnapshotPending = false;
+        if (!this.disposed) {
+          void this.sendAvailableCommandsUpdate({ skipIfUnchanged: true });
+        }
+      }
+    }
+    if (!snapshot) return;
+    const { availableCommands, availableSkills, availableSkillDetails } =
+      snapshot;
+    this.config.refreshWorkflowMode?.();
+    const update: SessionUpdate = {
+      sessionUpdate: 'available_commands_update',
+      availableCommands,
+      ...(availableSkills !== undefined
+        ? {
+            _meta: {
+              availableSkills,
+              ...(availableSkillDetails ? { availableSkillDetails } : {}),
+            },
+          }
+        : {}),
+    };
+    if (this.disposed) return;
+    const key = createHash('sha256')
+      .update(JSON.stringify(update))
+      .digest('hex');
+    if (options.skipIfUnchanged && key === this.lastCommandsPublicationKey) {
+      return;
+    }
+    // Record the key when the write starts: client writes are ordered, so the
+    // last started frame is the state the client ends up with.
+    this.lastCommandsPublicationKey = key;
+    try {
+      await this.sendUpdate(update);
+    } catch (error) {
+      if (this.lastCommandsPublicationKey === key) {
+        this.lastCommandsPublicationKey = undefined;
+      }
+      throw error;
+    }
   }
 
   #withBackgroundPermission(

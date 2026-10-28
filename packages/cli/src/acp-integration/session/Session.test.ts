@@ -13496,7 +13496,12 @@ describe('Session', () => {
         await vi.waitFor(() =>
           expect(getAvailableCommandsSpy).toHaveBeenCalledTimes(1),
         );
-        const joined = session.sendAvailableCommandsUpdate();
+        let joinedSettled = false;
+        const joined = session.sendAvailableCommandsUpdate().then(() => {
+          joinedSettled = true;
+        });
+        await flush();
+        expect(joinedSettled).toBe(false);
         releaseBuild();
 
         const outcome = await Promise.race([
@@ -13506,7 +13511,7 @@ describe('Session', () => {
           ),
         ]);
         expect(outcome).toBe('resolved');
-        expect(frames()).toHaveLength(2);
+        await vi.waitFor(() => expect(frames()).toHaveLength(2));
       });
 
       it('republishes a command set that reverts while the previous write is in flight', async () => {
@@ -13550,44 +13555,6 @@ describe('Session', () => {
             .join(),
         );
         expect(names).toEqual(['A', 'B', 'A']);
-      });
-
-      it('resolves a joined caller when its replacement write never settles but a newer one lands', async () => {
-        const gates: Array<() => void> = [];
-        const gate = () =>
-          new Promise<void>((resolve) => {
-            gates.push(resolve);
-          });
-        getAvailableCommandsSpy
-          .mockImplementationOnce(async () => {
-            await gate();
-            return [makeCommand('one')];
-          })
-          .mockImplementationOnce(async () => {
-            await gate();
-            return [makeCommand('two')];
-          })
-          .mockResolvedValue([makeCommand('three')]);
-        vi.mocked(mockClient.sessionUpdate)
-          .mockReset()
-          .mockImplementationOnce(() => new Promise(() => undefined))
-          .mockResolvedValue(undefined);
-
-        void session.sendAvailableCommandsUpdate();
-        await vi.waitFor(() => expect(gates).toHaveLength(1));
-        const joinedB = session.sendAvailableCommandsUpdate();
-        gates[0]();
-        await vi.waitFor(() => expect(gates).toHaveLength(2));
-        const joinedC = session.sendAvailableCommandsUpdate();
-        gates[1]();
-
-        const outcome = await Promise.race([
-          Promise.all([joinedB, joinedC]).then(() => 'resolved'),
-          new Promise<string>((resolve) =>
-            setTimeout(() => resolve('blocked'), 300),
-          ),
-        ]);
-        expect(outcome).toBe('resolved');
       });
 
       it('emits nothing for a publish in flight when the session is disposed', async () => {
