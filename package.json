@@ -82,6 +82,8 @@
     "test:e2e:managed-harness-restart-approval-after-result": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify allow --g3-fault after-result",
     "test:e2e:managed-harness-restart-approval-decision-reply-lost": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify allow --g3-fault decision-reply-lost",
     "test:e2e:managed-harness-restart-approval-admission-reply-lost": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify allow --g3-fault admission-reply-lost",
+    "test:e2e:managed-harness-restart-approval-terminal-reply-lost": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify allow --g3-fault terminal-reply-lost",
+    "test:e2e:managed-harness-restart-approval-terminal-write-failed": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify allow --g3-fault terminal-write-failed",
     "test:e2e:managed-harness-restart-continuation-closeout": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify continuation",
     "test:e2e:managed-harness-restart-model-round-failover": "tsx scripts/run-managed-agent-server-e2e.ts --model-round-failover --harness-only",
     "test:e2e:managed-frozen-control-plane-failover": "tsx scripts/run-managed-agent-server-e2e.ts --model-round-failover --frozen-control-plane",

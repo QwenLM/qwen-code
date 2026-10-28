@@ -1733,19 +1733,18 @@ npm run test:e2e:managed-harness-restart-approval-expiry
 npm run test:e2e:managed-harness-restart-continuation-closeout
 ```
 
-Five additional arms layer one fault on the Allow path (#14481 step 2). The
-first crashes the replacement Harness as soon as the decision is durably
-recorded; the second holds the Runtime Broker's execution `:start` so the
-crash lands after the `PREPARED` row and before the physical dispatch; the
-third crashes after the approved result commits while the post-tool model
-round is held, so its reissue must reuse the saved request and retract the
-published prefix. All three leave the original Action, prepare key, digest
-and Runtime identity in place, start a third Harness generation, and require
-exactly one settled execution, one file effect and one terminal. The other
-two drop the control plane's reply after it committed; the retry under the
-same `Idempotency-Key` must land on the original record, so a lost decision
-produces one `ACTION_RESPONSE` operation and a lost Turn admission produces
-one Turn row:
+Five arms from #14481 step 2 layer one fault on the Allow path. The first
+crashes the replacement Harness as soon as the decision is durably recorded;
+the second holds the Runtime Broker's execution `:start` so the crash lands
+after the `PREPARED` row and before the physical dispatch; the third crashes
+after the approved result commits while the post-tool model round is held, so
+its reissue must reuse the saved request and retract the published prefix. All
+three leave the original Action, prepare key, digest and Runtime identity in
+place, start a third Harness generation, and require exactly one settled
+execution, one file effect and one terminal. The other two drop the control
+plane's reply after it committed; the retry under the same `Idempotency-Key`
+must land on the original record, so a lost decision produces one
+`ACTION_RESPONSE` operation and a lost Turn admission produces one Turn row:
 
 ```bash
 npm run test:e2e:managed-harness-restart-approval-after-decision
@@ -1755,12 +1754,30 @@ npm run test:e2e:managed-harness-restart-approval-decision-reply-lost
 npm run test:e2e:managed-harness-restart-approval-admission-reply-lost
 ```
 
+The remaining two cover the next barriers of the same matrix. The terminal
+reply-loss arm commits `turn.settled`, loses its reply (and every bounded
+retry of it) until the crash, and restarts the Harness; the replacement
+projects the committed terminal, and no second store commit is required. The
+missing-terminal arm refuses the write itself, so the replacement must
+compensate the payable checkpoint exactly once. Both keep one original
+Action, one settled execution, one file effect, one terminal, the recovered
+model answer and the original cleanup:
+
+```bash
+npm run test:e2e:managed-harness-restart-approval-terminal-reply-lost
+npm run test:e2e:managed-harness-restart-approval-terminal-write-failed
+```
+
 They write their evidence under `.qwen/investigations/g3-step3-implementation/`;
-`G3_VERIFY_REPORT_DIR` overrides the directory. The approval path still has no
-packaged arm for a lost load reply, a failed cleanup followed by another
-crash, a committed terminal that was not delivered, or a payable checkpoint
-whose terminal write is missing; those rows stay focused or integration
-tested (#14481).
+`G3_VERIFY_REPORT_DIR` overrides the directory. The remaining rows stay
+focused or integration tested for now: a refused cleanup release followed by
+another crash (the packaged arm reproduced a control-plane gap where a
+delayed replacement receives no cleanup retry or adoption), the lost
+takeover-load reply (the packaged arm showed the redrive's active handoff
+leaves the original Turn RUNNING instead of projecting its terminal), mixed
+calls and rewritten inputs across a replacement, Hook/MCP/child uncertainty,
+the attempt and stream identities plus the live SSE view, the round and cost
+budgets, and the mixed-version reader/bundle closure (#14481).
 
 Two arms keep a former owner alive while its replacement finishes the Turn
 and then wake it with `SIGCONT`:
