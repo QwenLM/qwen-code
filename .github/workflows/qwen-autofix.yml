@@ -104,7 +104,7 @@ env:
   # Upper bound on candidates INSPECTED per scan.
   # Full rationale → qwen-autofix.md#af-078
   MAX_CANDIDATE_INSPECTIONS: '${{ vars.QWEN_AUTOFIX_MAX_CANDIDATE_INSPECTIONS || 60 }}'
-  # TAKEOVER opts in; SKIP opts out and wins. → af-160
+  # TAKEOVER opts in; SKIP opts out and wins. → qwen-autofix.md#af-160
   TAKEOVER_LABEL: 'autofix/takeover'
   SKIP_LABEL: 'autofix/skip'
   # PENDING marker stamped on a PR head when a scan dispatches. → qwen-autofix.md#af-079
