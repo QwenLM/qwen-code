@@ -11,8 +11,14 @@ pub(super) struct Sessions {
 pub(super) struct Preview {
     pub generation: u64,
     pub targets: Vec<PipTarget>,
-    pub frame: Option<super::Scene>,
+    pub frame: Frame,
     pub queued: bool,
+}
+
+pub(super) enum Frame {
+    Pending,
+    Invalid,
+    Ready(super::Scene),
 }
 
 impl Sessions {
@@ -24,11 +30,11 @@ impl Sessions {
             .or_insert(Preview {
                 generation: self.serial,
                 targets: Vec::new(),
-                frame: None,
+                frame: Frame::Pending,
                 queued: false,
             });
         preview.generation = self.serial;
-        preview.frame = None;
+        preview.frame = Frame::Pending;
         preview
             .targets
             .retain(|old| old.window_id != target.window_id);
@@ -46,7 +52,7 @@ impl Sessions {
         else {
             return false;
         };
-        preview.frame = frame;
+        preview.frame = frame.map_or(Frame::Invalid, Frame::Ready);
         if preview.queued {
             false
         } else {
@@ -55,10 +61,13 @@ impl Sessions {
         }
     }
 
-    pub fn take_frame(&mut self, session: &str) -> Option<(u64, Option<super::Scene>)> {
+    pub fn take_frame(&mut self, session: &str) -> Option<(u64, Frame)> {
         self.entries.get_mut(session).map(|preview| {
             preview.queued = false;
-            (preview.generation, preview.frame.take())
+            (
+                preview.generation,
+                std::mem::replace(&mut preview.frame, Frame::Pending),
+            )
         })
     }
 
@@ -239,10 +248,10 @@ mod tests {
         assert!(!sessions.publish("owner", old, frame(1)));
         assert!(sessions.publish("owner", current, frame(2)));
         assert!(!sessions.publish("owner", current, frame(3)));
-        assert_eq!(
-            sessions.take_frame("owner").unwrap().1.unwrap().cards[0].png,
-            Some(vec![3])
-        );
+        let Frame::Ready(captured) = sessions.take_frame("owner").unwrap().1 else {
+            panic!("the latest published frame must be ready");
+        };
+        assert_eq!(captured.cards[0].png, Some(vec![3]));
         sessions.entries.remove("owner");
         assert!(!sessions.publish("owner", current, frame(4)));
         sessions.observe(target("owner", 1));

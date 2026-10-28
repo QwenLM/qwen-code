@@ -176,9 +176,17 @@ unsafe extern "C" fn draw_callback(context: *mut c_void) {
             return;
         };
         let current = controller.sessions.lock().unwrap().take_frame(&session);
-        let Some((generation, Some(scene))) = current else {
+        let Some((generation, frame)) = current else {
             close_now(&session);
             return;
+        };
+        let scene = match frame {
+            state::Frame::Pending => return,
+            state::Frame::Invalid => {
+                close_now(&session);
+                return;
+            }
+            state::Frame::Ready(scene) => scene,
         };
         if scene.cards.is_empty()
             || !crate::permissions::status::screen_recording_granted()
@@ -375,6 +383,94 @@ mod tests {
         for (actual, expected) in actual.into_iter().zip(expected) {
             assert!((actual - expected).abs() < 1e-8, "{actual} != {expected}");
         }
+    }
+
+    #[test]
+    fn superseded_draw_preserves_the_existing_panel_until_the_next_frame() {
+        use std::sync::{Arc, Mutex};
+
+        extern "C" fn order_out(_: &AnyObject, _: Sel, _: *mut AnyObject) {}
+        extern "C" fn close(_: &AnyObject, _: Sel) {}
+        extern "C" fn frame(_: &AnyObject, _: Sel) -> NSRect {
+            rect([321.25, 654.5, 424.0, 247.0])
+        }
+        let mut builder =
+            ClassBuilder::new("QwenCuPreviewDrawTestPanel", class!(NSObject)).unwrap();
+        unsafe {
+            builder.add_method(sel!(orderOut:), order_out as extern "C" fn(_, _, _));
+            builder.add_method(sel!(close), close as extern "C" fn(_, _));
+            builder.add_method(sel!(frame), frame as extern "C" fn(_, _) -> NSRect);
+        }
+        let panel_class = builder.register();
+        let panel = unsafe { msg_send![panel_class, new] };
+        let controller = CONTROLLER.get_or_init(|| {
+            Arc::new(super::super::Controller {
+                config: pip_preview::PipConfig::default(),
+                sessions: Mutex::new(state::Sessions::default()),
+                sampling: Mutex::new(false),
+                busy: Mutex::new(HashMap::new()),
+                drained: tokio::sync::Notify::new(),
+            })
+        });
+        let session = "superseded-draw-test";
+        let target = || cua_driver_core::pip_hook::PipTarget {
+            session: session.into(),
+            pid: 1,
+            window_id: 1,
+            is_live: Arc::new(|| true),
+        };
+        let scene = || Scene {
+            cards: Vec::new(),
+            targets: Vec::new(),
+        };
+        let nil = std::ptr::null_mut();
+        let handles = Rc::new(Handles {
+            session: session.into(),
+            panel,
+            root: nil,
+            cards: std::array::from_fn(|_| CardViews {
+                shell: nil,
+                image: nil,
+            }),
+            controls: nil,
+            button: nil,
+            mover: nil,
+            timer: Cell::new(nil),
+            closed: Cell::new(false),
+            dragging: Cell::new(false),
+            presentation: RefCell::new(presentation(Instant::now())),
+        });
+        WINDOWS.with(|windows| windows.borrow_mut().insert(session.into(), handles.clone()));
+        let generation = {
+            let mut sessions = controller.sessions.lock().unwrap();
+            sessions.observe(target());
+            let first = sessions.entries[session].generation;
+            assert!(sessions.publish(session, first, Some(scene())));
+            sessions.observe(target());
+            sessions.entries[session].generation
+        };
+        unsafe {
+            draw_callback(Box::into_raw(Box::new(session.to_owned())).cast());
+        }
+        assert!(!handles.closed.get());
+        WINDOWS.with(|windows| assert!(Rc::ptr_eq(&windows.borrow()[session], &handles)));
+        let position: NSRect = unsafe { msg_send![handles.panel, frame] };
+        assert_eq!((position.origin.x, position.origin.y), (321.25, 654.5));
+        {
+            let mut sessions = controller.sessions.lock().unwrap();
+            assert!(sessions.publish(session, generation, Some(scene())));
+            assert_eq!(sessions.take_frame(session).unwrap().0, generation);
+            assert!(sessions.publish(session, generation, None));
+        }
+        unsafe {
+            draw_callback(Box::into_raw(Box::new(session.to_owned())).cast());
+        }
+        assert!(
+            handles.closed.get(),
+            "an explicitly invalid frame still closes"
+        );
+        WINDOWS.with(|windows| assert!(!windows.borrow().contains_key(session)));
+        controller.sessions.lock().unwrap().entries.remove(session);
     }
 
     #[test]
