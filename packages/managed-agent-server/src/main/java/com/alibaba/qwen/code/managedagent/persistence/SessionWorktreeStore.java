@@ -144,12 +144,16 @@ public class SessionWorktreeStore {
 
     public static Descriptor descriptor(JdbcTemplate jdbc, String tenant, String session) {
         Row row = find(jdbc, tenant, session);
+        return verifiedDescriptor(jdbc, row);
+    }
+
+    private static Descriptor verifiedDescriptor(JdbcTemplate jdbc, Row row) {
         if (row != null && "READY".equals(row.state())) {
             try {
                 return row.descriptor(SessionWorktreeGit.currentBranch(SessionWorktreeGit.verify(row.plan(), row.identityJson())));
             } catch (ManagedAgentException exception) {
                 long revision = blockIdentity(jdbc, row, exception.getCode());
-                return new Descriptor(row.worktreeId(), session, row.workspaceId(), "blocked", row.plan().branch(),
+                return new Descriptor(row.worktreeId(), row.sessionId(), row.workspaceId(), "blocked", row.plan().branch(),
                         row.plan().baseCommit(), row.plan().cwdRelative(), row.operationId(), revision, exception.getCode());
             }
         }
@@ -165,26 +169,17 @@ public class SessionWorktreeStore {
         if (sessions.isEmpty()) {
             return Map.of();
         }
-        var result = new java.util.LinkedHashMap<String, Descriptor>();
         var args = new java.util.ArrayList<Object>();
         args.add(tenant);
         args.addAll(sessions);
-        jdbc.query(SELECT + " WHERE w.tenant_id = ? AND w.session_id IN ("
+        return descriptors(jdbc, jdbc.query(SELECT + " WHERE w.tenant_id = ? AND w.session_id IN ("
                         + String.join(",", java.util.Collections.nCopies(sessions.size(), "?")) + ")",
-                (record, index) -> row(record, index), args.toArray()).forEach(row -> {
-                    Descriptor descriptor = row.descriptor();
-                    if ("READY".equals(row.state())) {
-                        try {
-                            descriptor = row.descriptor(SessionWorktreeGit.currentBranch(SessionWorktreeGit.verify(row.plan(), row.identityJson())));
-                        } catch (ManagedAgentException exception) {
-                            long revision = blockIdentity(jdbc, row, exception.getCode());
-                            descriptor = new Descriptor(row.worktreeId(), row.sessionId(), row.workspaceId(), "blocked",
-                                    row.plan().branch(), row.plan().baseCommit(), row.plan().cwdRelative(), row.operationId(),
-                                    revision, exception.getCode());
-                        }
-                    }
-                    result.put(row.sessionId(), descriptor);
-                });
+                (record, index) -> row(record, index), args.toArray()));
+    }
+
+    static Map<String, Descriptor> descriptors(JdbcTemplate jdbc, List<Row> rows) {
+        var result = new java.util.LinkedHashMap<String, Descriptor>();
+        rows.forEach(row -> result.put(row.sessionId(), verifiedDescriptor(jdbc, row)));
         return result;
     }
 
@@ -362,8 +357,9 @@ public class SessionWorktreeStore {
                     + " AND tenant_id = ? AND operation_id = ?", Integer.class, tenant, operation).isEmpty()) {
                 return row;
             }
-            if (!List.of("READY", "FAILED").contains(row.state()) || cleanupBlocker(row) != null) {
-                throw error(cleanupBlocker(row) == null ? "worktree_not_ready" : cleanupBlocker(row));
+            String blocker = cleanupBlocker(row);
+            if (!List.of("READY", "FAILED").contains(row.state()) || blocker != null) {
+                throw error(blocker == null ? "worktree_not_ready" : blocker);
             }
             createOperation(tenant, row.sessionId(), row.plan(), operation, "REMOVING",
                     json(Map.of("worktreeId", id, "actor", actor, "idempotencyKey", idempotencyKey)));
@@ -439,12 +435,16 @@ public class SessionWorktreeStore {
     }
 
     private static Row row(ResultSet result, int index) throws SQLException {
+        return readRow(result, "");
+    }
+
+    static Row readRow(ResultSet result, String prefix) throws SQLException {
         try {
-            return new Row(result.getString("tenant_id"), result.getString("session_id"), result.getString("workspace_id"),
-                    result.getString("worktree_id"), result.getString("state"), JSON.readValue(result.getString("plan_json"), Plan.class),
-                    result.getString("identity_json"), result.getString("operation_id"), result.getString("claim_owner"),
-                    result.getLong("claim_generation"), result.getObject("claim_until") instanceof Number claim ? claim.longValue() : null, result.getString("phase"),
-                    result.getInt("attempt_count"), result.getLong("revision"), result.getString("failure_code"), result.getString("owner_actor_key"));
+            return new Row(result.getString(prefix + "tenant_id"), result.getString(prefix + "session_id"), result.getString(prefix + "workspace_id"),
+                    result.getString(prefix + "worktree_id"), result.getString(prefix + "state"), JSON.readValue(result.getString(prefix + "plan_json"), Plan.class),
+                    result.getString(prefix + "identity_json"), result.getString(prefix + "operation_id"), result.getString(prefix + "claim_owner"),
+                    result.getLong(prefix + "claim_generation"), result.getObject(prefix + "claim_until") instanceof Number claim ? claim.longValue() : null, result.getString(prefix + "phase"),
+                    result.getInt(prefix + "attempt_count"), result.getLong(prefix + "revision"), result.getString(prefix + "failure_code"), result.getString(prefix + "owner_actor_key"));
         } catch (java.io.IOException exception) {
             throw new IllegalStateException("Invalid Session worktree record", exception);
         }

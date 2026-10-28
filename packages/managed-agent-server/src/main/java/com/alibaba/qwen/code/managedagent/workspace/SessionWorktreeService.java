@@ -172,8 +172,9 @@ public class SessionWorktreeService {
                 }
                 return;
             }
-            if (!preparing && store.cleanupBlocker(row) != null) {
-                store.complete(row, owner, "READY", null, store.cleanupBlocker(row));
+            String storedBlocker = preparing ? null : store.cleanupBlocker(row);
+            if (storedBlocker != null) {
+                store.complete(row, owner, "READY", null, storedBlocker);
                 return;
             }
             var binding = SessionWorktreeStore.storageBinding(row.plan());

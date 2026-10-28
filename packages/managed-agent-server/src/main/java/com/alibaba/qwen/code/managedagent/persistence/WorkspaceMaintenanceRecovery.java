@@ -42,11 +42,12 @@ public final class WorkspaceMaintenanceRecovery {
             throw blocked();
         }
         var owner = owner(jdbc, binding, true);
-        var child = kind(jdbc, binding, maintenance) == WorkspaceOperations.Kind.CHILD_WORKSPACE
+        var operationKind = kind(jdbc, binding, maintenance);
+        var child = operationKind == WorkspaceOperations.Kind.CHILD_WORKSPACE
                 ? WorkspaceOperations.rows(jdbc, "SELECT parent_session_id FROM ma_workspace WHERE tenant_id = ?"
                         + " AND child_workspace_id = ? AND workspace_kind = 'CHILD_GIT'", binding.getTenantId(), maintenance)
                 : WorkspaceOperations.rows(jdbc, "SELECT session_id AS parent_session_id FROM ma_operation WHERE tenant_id = ?"
-                        + " AND operation_id = ? AND operation_kind = ?", binding.getTenantId(), maintenance, kind(jdbc, binding, maintenance).name());
+                        + " AND operation_id = ? AND operation_kind = ?", binding.getTenantId(), maintenance, operationKind.name());
         if (owner == null || child.size() != 1 || !maintenance.equals(owner.get("maintenance_id"))
                 || !(owner.get("maintenance_generation") instanceof Number saved) || saved.longValue() != generation) {
             throw blocked();
@@ -54,21 +55,21 @@ public final class WorkspaceMaintenanceRecovery {
         String session = (String) child.getFirst().get("parent_session_id");
         String execution = UUID.randomUUID().toString();
         String step = stepTarget(maintenance, generation, execution);
-        Map<String, Object> identity = WorkspaceOperations.values("schemaVersion", 1, "kind", kind(jdbc, binding, maintenance) == WorkspaceOperations.Kind.CHILD_WORKSPACE ? "child-git-maintenance" : "session-git-maintenance",
+        Map<String, Object> identity = WorkspaceOperations.values("schemaVersion", 1, "kind", operationKind == WorkspaceOperations.Kind.CHILD_WORKSPACE ? "child-git-maintenance" : "session-git-maintenance",
                 "maintenanceId", maintenance, "generation", generation, "executionId", execution,
                 "tenantId", binding.getTenantId(), "workspaceId", binding.getWorkspaceId(),
                 "workspaceGeneration", binding.getWorkspaceGeneration(), "storageId", binding.getStorageId(), "holderKey", owner.get("holder_key"),
                 "mount", mount(owner), "host", nativeHost());
         byte[] bytes = bytes(identity);
         String resource = WorkspaceEvidenceResources.publish(jdbc, binding.getTenantId(), binding.getWorkspaceId(), session, step, bytes);
-        operations.insertWork(kind(jdbc, binding, maintenance), maintenance, WORK_KIND, step, maintenance + ":" + generation + ":" + execution, session,
+        operations.insertWork(operationKind, maintenance, WORK_KIND, step, maintenance + ":" + generation + ":" + execution, session,
                 WorkspaceOperations.values("execution_id", execution, "evidence_resource_key", resource,
                         "evidence_sha256", WorkspaceEvidenceResources.digest(bytes)), "EXECUTING");
         var pointer = WorkspaceOperations.values("execution_id", execution, "step_target", step);
-        if (operations.findWork(kind(jdbc, binding, maintenance), maintenance, WORK_KIND, slot, true) == null) {
-            operations.insertWork(kind(jdbc, binding, maintenance), maintenance, WORK_KIND, slot, maintenance + ":" + generation, session, pointer, "INDEX");
+        if (operations.findWork(operationKind, maintenance, WORK_KIND, slot, true) == null) {
+            operations.insertWork(operationKind, maintenance, WORK_KIND, slot, maintenance + ":" + generation, session, pointer, "INDEX");
         } else {
-            operations.updateWork(kind(jdbc, binding, maintenance), maintenance, WORK_KIND, slot, pointer);
+            operations.updateWork(operationKind, maintenance, WORK_KIND, slot, pointer);
         }
         return execution;
     }

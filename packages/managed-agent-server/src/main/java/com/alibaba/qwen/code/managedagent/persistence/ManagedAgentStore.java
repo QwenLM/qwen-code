@@ -4688,13 +4688,26 @@ public class ManagedAgentStore implements AgentStateStore {
             arguments.add(beforeSessionId);
         }
         arguments.add(limit + 1);
+        Map<String, SessionWorktreeStore.Row> worktrees = new LinkedHashMap<>();
         List<SessionRecord> rows =
                 jdbc.query(
                         "SELECT " + ManagedSchemaProjection.SESSION.columns("ma_session") + ", COALESCE(es.last_sequence, 0) AS list_last_sequence,"
-                            + " COALESCE(es.replay_floor_sequence, 0) AS list_floor_sequence FROM"
+                            + " COALESCE(es.replay_floor_sequence, 0) AS list_floor_sequence,"
+                            + " w.tenant_id AS worktree_tenant_id, w.session_id AS worktree_session_id,"
+                            + " w.workspace_id AS worktree_workspace_id, w.worktree_id AS worktree_worktree_id,"
+                            + " w.state AS worktree_state, w.plan_json AS worktree_plan_json,"
+                            + " w.identity_json AS worktree_identity_json, w.operation_id AS worktree_operation_id,"
+                            + " w.revision AS worktree_revision, w.failure_code AS worktree_failure_code,"
+                            + " w.owner_actor_key AS worktree_owner_actor_key, o.claim_owner AS worktree_claim_owner,"
+                            + " o.claim_generation AS worktree_claim_generation, o.claim_until AS worktree_claim_until,"
+                            + " o.phase AS worktree_phase, o.attempt_count AS worktree_attempt_count FROM"
                             + " ma_session LEFT JOIN ma_event_stream es ON es.tenant_id ="
                             + " ma_session.tenant_id AND es.session_id = ma_session.session_id AND"
-                            + " es.stream_kind = 'SESSION' AND es.stream_id = X'' WHERE"
+                            + " es.stream_kind = 'SESSION' AND es.stream_id = X''"
+                            + " LEFT JOIN ma_session_worktree w ON w.tenant_id = ma_session.tenant_id"
+                            + " AND w.session_id = ma_session.session_id LEFT JOIN ma_operation o"
+                            + " ON o.operation_kind = 'SESSION_WORKTREE' AND o.tenant_id = w.tenant_id"
+                            + " AND o.operation_id = w.operation_id WHERE"
                             + " ma_session.session_kind = 'PUBLIC' AND ma_session.tenant_id = ? AND"
                             + " ma_session.status <> 'DELETED' AND (ma_session.workspace_id IS NULL OR EXISTS (SELECT 1"
                             + " FROM ma_workspace_access wa WHERE wa.tenant_id ="
@@ -4704,13 +4717,21 @@ public class ManagedAgentStore implements AgentStateStore {
                                 + archiveClause + titleClause + cursorClause
                                 + " ORDER BY ma_session.gmt_create DESC, ma_session.session_id DESC"
                                 + " LIMIT ?",
-                        sessionListMapper,
+                        (result, index) -> {
+                            SessionRecord session = sessionListMapper.mapRow(result, index);
+                            if (result.getString("worktree_worktree_id") != null) {
+                                worktrees.put(session.sessionId(), SessionWorktreeStore.readRow(result, "worktree_"));
+                            }
+                            return session;
+                        },
                         arguments.toArray());
         boolean hasMore = rows.size() > limit;
         if (hasMore) {
             rows = new ArrayList<>(rows.subList(0, limit));
         }
-        return new SessionPage(List.copyOf(rows), hasMore);
+        var selectedWorktrees = rows.stream().map(row -> worktrees.get(row.sessionId()))
+                .filter(java.util.Objects::nonNull).toList();
+        return new SessionPage(List.copyOf(rows), hasMore, SessionWorktreeStore.descriptors(jdbc, selectedWorktrees));
     }
 
     public Map<String, WebShellLifecycleOperation>

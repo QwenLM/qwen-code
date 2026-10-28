@@ -78,6 +78,9 @@ storage migration/deletion; completed historical children do not block forever.
 Session creation accepts optional `worktree: {baseRef?}` (`base_ref` publicly).
 Omission selects the current directory; an empty object selects HEAD. The
 server chooses paths and branch names. Session GET/list includes a descriptor.
+Session pages join the durable worktree rows in the existing page query, then
+verify only the selected rows after closing the result set. The ordinary list
+query budget stays unchanged, and invalid ready identities are durably blocked.
 Workspace-scoped options, query, inspect and cleanup operations expose support,
 retained checkouts, progress and idempotent cleanup, including deleted chats.
 Read access follows Workspace grants; deletion additionally checks ownership

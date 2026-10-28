@@ -1025,7 +1025,7 @@ public class ManagedAgentService {
         int limit = limit(requestedLimit);
         SessionCursor decoded = decodeCursor(cursor, archiveState, titleQuery);
         SessionPage page = filteredSessions(tenantId, actorId, decoded, limit, archiveState, titleQuery);
-        return new PublicList<>("list", publicSessions(page.sessions()), page.hasMore(),
+        return new PublicList<>("list", publicSessions(page.sessions(), page.worktrees()), page.hasMore(),
                 nextSessionCursor(page, archiveState, titleQuery));
     }
 
@@ -1048,7 +1048,7 @@ public class ManagedAgentService {
         int limit = limit(requestedLimit);
         SessionCursor decoded = decodeCursor(cursor, archiveState, titleQuery);
         SessionPage page = filteredSessions(tenantId, actorId, decoded, limit, archiveState, titleQuery);
-        return new WebShellPage<>(webShellSessions(page.sessions(), actorId),
+        return new WebShellPage<>(webShellSessions(page.sessions(), actorId, page.worktrees()),
                 nextSessionCursor(page, archiveState, titleQuery), page.hasMore());
     }
 
@@ -1225,6 +1225,13 @@ public class ManagedAgentService {
 
     /** A page assembled from grouped batch reads instead of per-row ones. */
     private List<PublicSession> publicSessions(List<SessionRecord> sessions) {
+        return publicSessions(sessions, sessions.isEmpty() ? Map.of() : store.findSessionWorktrees(
+                sessions.getFirst().tenantId(), sessions.stream().filter(session -> session.workspace() != null)
+                        .map(SessionRecord::sessionId).toList()));
+    }
+
+    private List<PublicSession> publicSessions(List<SessionRecord> sessions,
+            Map<String, SessionWorktreeStore.Descriptor> worktrees) {
         if (sessions.isEmpty()) {
             return List.of();
         }
@@ -1233,7 +1240,6 @@ public class ManagedAgentService {
                 .toList();
         Map<String, TurnSummary> activeTurns = store.findActiveTurns(tenantId,
                 ids);
-        var worktrees = store.findSessionWorktrees(tenantId, ids);
         Map<String, Long> coveredSequences = store
                 .findSnapshotCoveredSequences(tenantId, ids);
         Set<String> closed = completedWorkspaceCloses(tenantId, sessions);
@@ -1322,13 +1328,19 @@ public class ManagedAgentService {
     /** A page assembled from grouped batch reads instead of per-row ones. */
     private List<WebShellSession> webShellSessions(
             List<SessionRecord> sessions, String actorId) {
+        return webShellSessions(sessions, actorId, sessions.isEmpty() ? Map.of() : store.findSessionWorktrees(
+                sessions.getFirst().tenantId(), sessions.stream().filter(session -> session.workspace() != null)
+                        .map(SessionRecord::sessionId).toList()));
+    }
+
+    private List<WebShellSession> webShellSessions(List<SessionRecord> sessions, String actorId,
+            Map<String, SessionWorktreeStore.Descriptor> worktrees) {
         if (sessions.isEmpty()) {
             return List.of();
         }
         String tenantId = sessions.getFirst().tenantId();
         List<String> ids = sessions.stream().map(SessionRecord::sessionId)
                 .toList();
-        var worktrees = store.findSessionWorktrees(tenantId, ids);
         Map<String, TurnSummary> latestTurns = store.findLatestTurns(tenantId,
                 ids);
         Map<String, EventRecord> environmentEvents = store

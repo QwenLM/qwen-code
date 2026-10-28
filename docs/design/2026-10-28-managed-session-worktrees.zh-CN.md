@@ -58,6 +58,8 @@ claim 过期不证明物理进程已停止。Git 结果未知时保留维护占�
 
 创建 Session 接受可选 `worktree: {baseRef?}`（公开字段为 `base_ref`）。省略即当前目录，
 空对象即 HEAD。路径及分支由服务端分配。Session GET/list 返回描述。
+会话分页在既有分页查询中联接持久化 worktree 记录，关闭结果集后仅验证选中的行。
+普通列表的查询预算不变，ready 身份无效时持久化阻塞状态。
 Workspace 下增加 options、query、inspect、cleanup，提供支持情况、保留目录、进度及幂等
 清理，覆盖已删除聊天。读取遵循 Workspace 授权，删除还检查所有权与写权限。
 

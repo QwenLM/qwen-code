@@ -81,6 +81,10 @@ class SessionWorktreeStoreTest {
                 jdbc.update("INSERT INTO ma_session (tenant_id,session_id,agent_id,gmt_create,gmt_modified) VALUES ('tenant','session','agent',1,1)");
                 store.admit("tenant", "actor", "session", plan, resolved);
             });
+            var sessions = new ManagedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {},
+                    new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties());
+            assertThat(sessions.listSessions("tenant", null, null, null, 1).worktrees().get("session").state())
+                    .isEqualTo("preparing");
             assertThat(SessionWorktreeStore.isReady(jdbc, "tenant", "session")).isFalse();
             assertThat(store.due()).hasSize(1);
             var candidate = store.due().getFirst();
@@ -111,6 +115,9 @@ class SessionWorktreeStoreTest {
             String identity = git.prepare(plan);
             assertThat(store.complete(claim, "foreign", "READY", identity, null)).isFalse();
             assertThat(store.complete(claim, claim.claimedBy(), "READY", identity, null)).isTrue();
+            var ready = sessions.listSessions("tenant", null, null, null, 1).worktrees().get("session");
+            assertThat(ready.id()).isEqualTo(id);
+            assertThat(ready.state()).isEqualTo("ready");
             SessionWorktreeStore.requireReady(jdbc, "tenant", "session");
             assertThat(store.due()).isEmpty();
             assertThat(store.list("tenant", "actor", workspace)).hasSize(1);
@@ -121,6 +128,8 @@ class SessionWorktreeStoreTest {
                 SessionWorktreeStore.requireReady(jdbc, "tenant", "session");
                 return null;
             })).hasMessageContaining("worktree_identity_conflict");
+            assertThat(sessions.listSessions("tenant", null, null, null, 1).worktrees().get("session").state())
+                    .isEqualTo("blocked");
             assertThat(SessionWorktreeStore.descriptor(jdbc, "tenant", "session").state()).isEqualTo("blocked");
             assertThatThrownBy(() -> SessionWorktreeStore.requireReady(jdbc, "tenant", "session"))
                     .hasMessageContaining("worktree_identity_conflict");

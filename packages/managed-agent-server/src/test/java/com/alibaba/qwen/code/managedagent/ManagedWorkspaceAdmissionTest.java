@@ -2376,6 +2376,29 @@ class ManagedWorkspaceAdmissionTest {
     }
 
     @Test
+    void sessionPagesPreserveWorktreeGatingAndBlockInvalidReadyIdentities() throws Exception {
+        for (String state : List.of("PREPARING", "FAILED", "READY")) {
+            String tenant = "tenant-" + UUID.randomUUID();
+            String session = boundSession(tenant);
+            persistWorktree(tenant, session, state);
+            var enabled = boundServiceWithWorkingHarness();
+            var publicPage = enabled.listPublicSessions(tenant, "actor-a", null, 1).data();
+            assertThat(publicPage).hasSize(1);
+            String expected = "READY".equals(state) ? "blocked" : state.toLowerCase(java.util.Locale.ROOT);
+            assertThat(publicPage.getFirst().worktree().sessionId()).isEqualTo(session);
+            assertThat(publicPage.getFirst().worktree().state()).isEqualTo(expected);
+            var page = enabled.listWebShellSessions(tenant, "actor-a", null, 1).data();
+            assertThat(page).hasSize(1);
+            assertThat(page.getFirst().worktree().state()).isEqualTo(expected);
+            assertThat(page.getFirst().capabilities().workspaceTurns()).isFalse();
+            if ("READY".equals(state)) {
+                assertThat(jdbc.queryForObject("SELECT state FROM ma_session_worktree WHERE tenant_id = ? AND session_id = ?",
+                        String.class, tenant, session)).isEqualTo("BLOCKED");
+            }
+        }
+    }
+
+    @Test
     void worktreePreparationGatesDispatchButPreservesCancellation() throws Exception {
         String tenant = "tenant-" + UUID.randomUUID();
         String session = boundSession(tenant);
