@@ -48,6 +48,11 @@ import {
   type MicrocompactOptions,
 } from '../services/microcompaction/microcompact.js';
 import { buildLegacyRelevantAutoMemoryPrompt } from '../memory/recall.js';
+import {
+  EXTRACT_TAIL_ENTRIES,
+  getExtractNoopSkipTurns,
+} from '../memory/extract-cadence.js';
+import { isBelowCompactionWarn } from '../services/chatCompressionService.js';
 import { slimCompactionInput } from '../services/compactionInputSlimming.js';
 import { appendAutoMemoryContext } from '../memory/request-context.js';
 import {
@@ -278,6 +283,7 @@ export interface SendMessageOptions {
    */
   memoryRecallQuery?: string;
   humanInput?: HumanPromptInput;
+  workflowModeEligible?: boolean;
   onWorkflowIntentApplied?: (trigger: WorkflowIntentTrigger) => void;
   /**
    * Called once when UserPromptSubmit lets the prompt through, before any
@@ -909,6 +915,10 @@ export class LlmClient {
     return true;
   }
 
+  isTelemetrySwapInProgress(): boolean {
+    return this.telemetrySwap !== undefined;
+  }
+
   /**
    * The swap committed: drop the armed undo without restoring. The replayed
    * history legitimately belongs to the session the user is now on, and a
@@ -1220,7 +1230,7 @@ export class LlmClient {
    *     one and the new one — and the model would see context the user
    *     thought had been undone.
    */
-  stripOrphanedUserEntriesFromHistory(): Content[] {
+  stripOrphanedUserEntriesFromHistory(rearmWorkflowMode = false): Content[] {
     const chat = this.getChat();
     const before = chat.getHistoryLength();
     const strippedEntries = chat.stripOrphanedUserEntriesFromHistory();
@@ -1230,6 +1240,17 @@ export class LlmClient {
       return strippedEntries;
     }
     this.trustedUserAnswers.clear();
+    // Retry replays removed notices; cancellation discards them.
+    if (
+      rearmWorkflowMode &&
+      strippedEntries.some((entry) =>
+        entry.parts?.some((part) =>
+          part.text?.startsWith('<system-reminder>\nWorkflow mode '),
+        ),
+      )
+    ) {
+      this.config.resetWorkflowModeContext();
+    }
     // Stripped trailing user entries can include read_file
     // functionResponses from a failed-then-retried request. The
     // FileReadCache would still record those reads, so the retry's
@@ -1321,6 +1342,7 @@ export class LlmClient {
   setHistory(history: Content[]) {
     this.trustedUserAnswers.clear();
     this.getChat().setHistory(history);
+    this.config.resetWorkflowModeContext();
     // Replacing history wholesale drops any prior read_file tool
     // results the FileReadCache still believes the model has seen.
     // Without clearing, a follow-up Read of an unchanged file would
@@ -1342,6 +1364,12 @@ export class LlmClient {
     // its chain so the next turn cannot continue work the restore removed.
     this.activeTodoWorkChainPromptId = undefined;
     this.config.clearActiveTodoReminders();
+    // A restore/rewind rewrites the timeline the parked cadence snapshot was
+    // cut from; replaying it at close would fork turns this history no longer
+    // holds.
+    this.config
+      .getMemoryManager()
+      .invalidatePendingExtract(this.config.getSessionId());
     this.forceFullIdeContext = true;
   }
 
@@ -1358,6 +1386,7 @@ export class LlmClient {
     // the clear, reintroducing the file_unchanged placeholder bug).
     const newLen = this.getChat().getHistoryLength();
     if (newLen < prevLen) {
+      this.config.resetWorkflowModeContext();
       this.trustedUserAnswers.clear();
       debugLogger.debug(
         `[FILE_READ_CACHE] clear after truncateHistory(keep=${keepCount}, prev=${prevLen}, new=${newLen})`,
@@ -1376,6 +1405,11 @@ export class LlmClient {
       // continuing work that was rewound away.
       this.activeTodoWorkChainPromptId = undefined;
       this.config.clearActiveTodoReminders();
+      // Same rewind hazard for the parked cadence snapshot: its history is the
+      // one this truncation just discarded.
+      this.config
+        .getMemoryManager()
+        .invalidatePendingExtract(this.config.getSessionId());
     }
     this.forceFullIdeContext = true;
   }
@@ -1405,6 +1439,7 @@ export class LlmClient {
       ? [{ functionDeclarations: toolDeclarations }]
       : [];
     this.getChat().setTools(tools);
+    this.config.refreshWorkflowMode();
     this.queueAddedMcpToolsReminder(deferredTools ?? []);
     this.queueMcpServerInstructionsReminder(
       toolRegistry.getMcpServerInstructions(),
@@ -1591,7 +1626,10 @@ export class LlmClient {
   captureCacheSafeParams(): void {
     try {
       const chat = this.getChat();
-      const historyForCache = this.getHistoryTailShallow(40, true);
+      const historyForCache = this.getHistoryTailShallow(
+        EXTRACT_TAIL_ENTRIES,
+        true,
+      );
       const cachedHistory = slimCompactionInput(
         historyForCache,
         this.config.getEffectiveInputModalities(),
@@ -3330,6 +3368,14 @@ export class LlmClient {
         sessionId,
         history,
         config: this.config,
+        ...(getExtractNoopSkipTurns() > 0 && {
+          // The next prompt's known base; see isBelowCompactionWarn.
+          belowCompactionWarn: isBelowCompactionWarn(
+            this.config,
+            this.getChat().getLastPromptTokenCount() +
+              this.getChat().getLastOutputTokenCount(),
+          ),
+        }),
       })
       .then((result) => result.touchedTopics.length)
       .catch((error: unknown) => {
@@ -3737,15 +3783,24 @@ export class LlmClient {
         ? { text: options.humanInput.text }
         : undefined;
     const onWorkflowIntentApplied = options?.onWorkflowIntentApplied;
+    const workflowModeEligible =
+      options?.workflowModeEligible === true &&
+      messageType === SendMessageType.UserQuery &&
+      !options.isConcurrentSideQuery &&
+      isTopLevelSession();
     const onPromptAdmitted = options?.onPromptAdmitted;
     if (
       options &&
-      (options.humanInput || onWorkflowIntentApplied || onPromptAdmitted)
+      (options.humanInput ||
+        onWorkflowIntentApplied ||
+        options.workflowModeEligible ||
+        onPromptAdmitted)
     ) {
       options = {
         ...options,
         humanInput: undefined,
         onWorkflowIntentApplied: undefined,
+        workflowModeEligible: undefined,
         onPromptAdmitted: undefined,
       };
     }
@@ -4826,6 +4881,7 @@ export class LlmClient {
         }
       }
 
+      let onModelRequestDispatched: (() => void) | undefined;
       const turn = new Turn(
         this.getChat(),
         prompt_id,
@@ -4837,6 +4893,7 @@ export class LlmClient {
         options?.onPreparedRequest,
         options?.toolCallPreparations,
         suppressedHookContext,
+        workflowModeEligible ? () => onModelRequestDispatched?.() : undefined,
       );
 
       // Assemble the outgoing request. IDE context is merged into the
@@ -4997,8 +5054,54 @@ export class LlmClient {
 
       if (!signal.aborted) {
         const workflowIntent = resolveWorkflowIntent(this.config, humanInput);
+        const preparedWorkflow =
+          workflowModeEligible && !goalPermit
+            ? this.config.prepareWorkflowMode(workflowIntent)
+            : undefined;
+        onModelRequestDispatched = preparedWorkflow?.onModelRequestDispatched;
+        const reminder = preparedWorkflow?.reminder ?? workflowIntent?.reminder;
+        const reminders = new Set(reminder ? [reminder] : []);
+        // Retry replaces the failed user entry after its dispatch token was
+        // consumed. Preserve its mode envelope without preparing another turn.
+        for (const entry of strippedRetryEntries) {
+          for (const { text } of entry.parts ?? []) {
+            if (
+              text &&
+              /^<system-reminder>\nWorkflow mode (?:is enabled for this session|remains enabled for this session|is off for this session|is temporarily unavailable)\. [\s\S]*\n<\/system-reminder>$/.test(
+                text,
+              ) &&
+              text.indexOf('</system-reminder>') ===
+                text.length - '</system-reminder>'.length &&
+              text.indexOf('<system-reminder>', 1) === -1
+            ) {
+              // Keep the last occurrence so mode transitions stay ordered.
+              reminders.delete(text);
+              reminders.add(text);
+            }
+          }
+        }
+        const missingReminders = [...reminders].filter(
+          (text) =>
+            !requestToSend.some(
+              (part) =>
+                part === text ||
+                (typeof part === 'object' && part?.text === text),
+            ),
+        );
+        if (missingReminders.length > 0) {
+          const insertAt = requestToSend.findIndex(
+            (part) =>
+              typeof part !== 'object' ||
+              part === null ||
+              !('functionResponse' in part),
+          );
+          requestToSend.splice(
+            insertAt < 0 ? requestToSend.length : insertAt,
+            0,
+            ...missingReminders.map((text) => ({ text })),
+          );
+        }
         if (workflowIntent) {
-          requestToSend.unshift({ text: workflowIntent.reminder });
           logWorkflowKeyword(this.config, new WorkflowKeywordEvent());
           onWorkflowIntentApplied?.(workflowIntent.trigger);
         }
@@ -5464,6 +5567,11 @@ export class LlmClient {
           // the previous merged IDE context.
           if (event.type === LlmEventType.ChatCompressed) {
             this.forceFullIdeContext = true;
+            if (
+              event.value?.compressionStatus === CompressionStatus.COMPRESSED
+            ) {
+              this.config.resetWorkflowModeContext();
+            }
             this.resetManagedAutoMemoryAfterCompression();
             memoryDeliveryStateInvalidated = true;
             // Auto-compaction summarized away the startup prelude. Rebuild it
@@ -6242,6 +6350,7 @@ export class LlmClient {
       const compressedHistory =
         previousChat.getHistoryShallow?.() ?? previousChat.getHistory();
       await this.startChat(compressedHistory, SessionStartSource.Compact);
+      this.config.resetWorkflowModeContext();
       this.getChat().setCompletedToolCallIds(
         previousChat.getCompletedToolCallIds(),
       );
@@ -6374,6 +6483,12 @@ export class LlmClient {
     // the old history (legacy recall exclusions, prefetched-body refs) must
     // be dropped exactly as on the LLM compression path.
     this.resetManagedAutoMemoryDeliveryState();
+    this.config.resetWorkflowModeContext();
+    // compressFast() rewrites history via LlmChat.setHistory, bypassing both
+    // shrink hooks: the parked snapshot describes turns now gone.
+    this.config
+      .getMemoryManager()
+      .invalidatePendingExtract(this.config.getSessionId());
     this.forceFullIdeContext = true;
 
     return info;
