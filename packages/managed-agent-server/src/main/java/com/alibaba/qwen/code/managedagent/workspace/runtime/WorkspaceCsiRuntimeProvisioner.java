@@ -325,7 +325,9 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
                         RuntimeBindingRecord.State.RECOVERY_BLOCKED).contains(original.getState())
                 && (fresh && original.getResourceHandle() == null || handle.equals(original.getResourceHandle())));
         var expectedStorage = storageTuple(reserved);
-        expectedStorage.put("reservationRevision", "1");
+        require(com.alibaba.qwen.code.runtimebroker.ResidentWorkspaceProfile.selects(request.getScope())
+                ? com.alibaba.qwen.code.runtimebroker.CsiOwnershipRevision.residentReserved(reserved.revision())
+                : com.alibaba.qwen.code.runtimebroker.CsiOwnershipRevision.reserved(reserved.revision()));
         require(same(expectedStorage, value.get("storage")));
         checkObservation(request, seed, handle);
         var receipt = attest(request, seed, placement, WorkspaceCsiRuntimeIdentity.boot(request, seed, handle));

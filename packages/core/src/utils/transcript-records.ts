@@ -147,6 +147,7 @@ const KNOWN_RECORD_SUBTYPES = new Set([
   'session_execution_engine',
   'session_sources_snapshot',
   'session_approval_mode',
+  'session_workflow_mode',
   'branch_checkpoint',
   'goal_state',
   'goal_runtime',

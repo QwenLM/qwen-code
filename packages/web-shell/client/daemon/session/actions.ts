@@ -5,6 +5,7 @@
  */
 
 import type { Dispatch, SetStateAction } from 'react';
+import type { McpAppGeneratedUiInvalidation } from '../../mcpAppHostContext.js';
 import type {
   DaemonApprovalMode,
   DaemonClient,
@@ -283,6 +284,11 @@ export interface CreateDaemonSessionActionsArgs {
   setAttachSessionNonce: Dispatch<SetStateAction<number>>;
   setNewSessionNonce: Dispatch<SetStateAction<number>>;
   clearLiveJournalRepair?: () => void;
+  onGeneratedUiInvalidated?: (
+    owner: DaemonSessionClient,
+    reason: McpAppGeneratedUiInvalidation['reason'],
+    sessionId?: string,
+  ) => void;
   onPromptAdmitted?: (
     owner: DaemonSessionClient,
     admission: {
@@ -479,6 +485,7 @@ export function createDaemonSessionActions({
   setAttachSessionNonce,
   setNewSessionNonce,
   clearLiveJournalRepair = () => undefined,
+  onGeneratedUiInvalidated,
   onPromptAdmitted,
   onContinuationAdmitted,
   onPromptRemoved,
@@ -2519,6 +2526,7 @@ export function createDaemonSessionActions({
     async clearSession(options?: { dropSessionContext?: boolean }) {
       const session = sessionRef.current;
       manualSessionClearRef.current = true;
+      if (session) onGeneratedUiInvalidated?.(session, 'cleared');
       if (pendingPersistedReasoningAction) {
         await pendingPersistedReasoningAction.catch(() => undefined);
       }
@@ -2584,6 +2592,7 @@ export function createDaemonSessionActions({
           session.client.closeSession(sessionId),
           'Release session timed out',
         );
+        onGeneratedUiInvalidated?.(session, 'deleted', sessionId);
       } catch (error) {
         throw dispatchActionError(
           addNotice,
@@ -2857,10 +2866,12 @@ export function createDaemonSessionActions({
         'rewind_session',
       );
       try {
-        return await withActionTimeout(
+        const result = await withActionTimeout(
           session.rewind(promptId, opts),
           'Rewind session timed out',
         );
+        onGeneratedUiInvalidated?.(session, 'rewound');
+        return result;
       } catch (error) {
         if (opts?.silent) throw error;
         throw dispatchActionError(
