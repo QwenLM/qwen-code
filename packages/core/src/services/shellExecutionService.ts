@@ -1380,21 +1380,23 @@ export class ShellExecutionService {
             // The first chunk picked the decoder, and an ASCII one is valid
             // UTF-8; decode each stream again from its complete bytes, as
             // the PTY path does at exit.
-            // A cancel or a signal ends both streams; the capture limit cuts
-            // only the streams it dropped bytes from, and the post-exit drain
-            // only the streams it stopped waiting for. A background promote
-            // that finds the shell already exited cut nothing.
+            // A stream that ended delivered every byte. A cancel or a signal
+            // cuts only the streams still open when it ended the shell, the
+            // capture limit only the streams it dropped bytes from, and the
+            // post-exit drain only the streams it stopped waiting for. A
+            // background promote that finds the shell already exited cut
+            // nothing.
             const endedEarly =
               (abortSignal.aborted &&
                 getShellAbortReasonKind(abortSignal.reason) !== 'background') ||
               signal !== null;
             stdout = decodeCompleteOutput(
               Buffer.concat(stdoutBytes),
-              stdoutCut || stdoutHeld || endedEarly,
+              stdoutCut || stdoutHeld || (endedEarly && !stdoutEnded),
             );
             stderr = decodeCompleteOutput(
               Buffer.concat(stderrBytes),
-              stderrCut || stderrHeld || endedEarly,
+              stderrCut || stderrHeld || (endedEarly && !stderrEnded),
             );
           }
           // Ensure we don't add an extra newline if stdout already ends with one.
@@ -1529,16 +1531,15 @@ export class ShellExecutionService {
 
         child.stdout?.on('data', stdoutHandler);
         child.stderr?.on('data', stderrHandler);
-        if (rawCapture || streamStdout) {
-          // streamStdout reads the stdout end too: the drain reports a
-          // stdout still held, not a held stderr.
-          child.stdout?.on('end', () => {
-            stdoutEnded = true;
-          });
-          child.stderr?.on('end', () => {
-            stderrEnded = true;
-          });
-        }
+        // The drain reports a stdout still held (raw capture and streaming),
+        // and the buffered re-decode treats only a stream still open at a
+        // cancel or kill as cut off.
+        child.stdout?.on('end', () => {
+          stdoutEnded = true;
+        });
+        child.stderr?.on('end', () => {
+          stderrEnded = true;
+        });
         child.on('error', errorHandler);
 
         const detachServiceListeners = () => {

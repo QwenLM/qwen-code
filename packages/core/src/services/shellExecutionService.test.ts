@@ -2357,6 +2357,35 @@ describe('ShellExecutionService child_process fallback', () => {
     },
   );
 
+  it('keeps complete stderr in the code page when a kill ends a raw-capture shell after stderr closed', async () => {
+    useSystemEncoding('gbk');
+    for (const pipe of [mockChildProcess.stdout!, mockChildProcess.stderr!]) {
+      Object.assign(pipe, { pause: vi.fn(), resume: vi.fn() });
+    }
+    const capture = {
+      write: vi.fn(async () => {}),
+      finish: vi.fn(async () => {}),
+      setStarted: vi.fn(),
+      setProcessResult: vi.fn(),
+    };
+    const handle = await ShellExecutionService.execute(
+      'build',
+      '/test/dir',
+      onOutputEventMock,
+      new AbortController().signal,
+      true,
+      shellExecutionConfig,
+      { rawCapture: capture },
+    );
+    // stderr ends with the complete 目浣 (GBK C4 BF E4 BD); stdout stays
+    // open until the kill.
+    emitOut(Buffer.from('c4bfe4bd', 'hex'), 'stderr');
+    mockChildProcess.stderr!.emit('end');
+    finish(null, 'SIGKILL');
+    const result = await handle.result;
+    expect(result.output).toBe('目浣');
+  });
+
   it('keeps recent stderr visible after later stdout fills the preview tail', async () => {
     const { result, capture } = await runCaptured(
       'failing build',
@@ -2599,6 +2628,31 @@ describe('ShellExecutionService child_process fallback', () => {
       });
       expect(result.promoted).toBeUndefined();
       expect(result.output).toBe('目浣');
+    });
+
+    it('keeps complete stderr in the code page when a cancel ends the shell after stderr closed', async () => {
+      useSystemEncoding('gbk');
+      // 目浣 in GBK (C4 BF E4 BD) arrives complete and stderr ends before
+      // the cancel, so nothing cut it.
+      const { result } = await simulateExecution('build', (cp, ac) => {
+        emitOut(Buffer.from('c4bfe4bd', 'hex'), 'stderr');
+        cp.stderr?.emit('end');
+        ac.abort();
+        finish(1);
+      });
+      expect(result.output).toBe('目浣');
+    });
+
+    it('decodes cut-off output that is not UTF-8 before the cut with the code page', async () => {
+      useSystemEncoding('gbk');
+      // 管理员 in GBK (B9 DC C0 ED D4 B1) is not UTF-8 even before the cut,
+      // so the UTF-8 check gives up and the code page decodes it.
+      const { result } = await simulateExecution('dir', () => {
+        emitOut('C:\\Users\\');
+        emitOut(Buffer.from('b9dcc0edd4b1', 'hex'));
+        finish(null, 'SIGKILL');
+      });
+      expect(result.output).toBe('C:\\Users\\管理员');
     });
 
     it('decodes buffered stderr from its complete output on a legacy code page', async () => {
