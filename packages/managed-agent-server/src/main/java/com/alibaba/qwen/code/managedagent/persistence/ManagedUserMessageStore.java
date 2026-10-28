@@ -8,6 +8,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -21,6 +22,7 @@ import java.util.Objects;
 import java.util.UUID;
 
 @Service
+@Qualifier("managedAgentTransactionManager")
 public class ManagedUserMessageStore {
     private static final TypeReference<List<Map<String, Object>>> INPUT = new TypeReference<>() { };
     private final JdbcTemplate jdbc;
@@ -28,7 +30,7 @@ public class ManagedUserMessageStore {
     private final RequestDigests digests;
     private final ManagedAgentService agents;
 
-    public ManagedUserMessageStore(JdbcTemplate jdbc, ObjectMapper json, RequestDigests digests, ManagedAgentService agents) {
+    public ManagedUserMessageStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentObjectMapper") ObjectMapper json, RequestDigests digests, ManagedAgentService agents) {
         this.jdbc = jdbc;
         this.json = json;
         this.digests = digests;

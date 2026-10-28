@@ -45,6 +45,7 @@ import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -96,9 +97,9 @@ public class ManagedChannelService {
 
     @org.springframework.beans.factory.annotation.Autowired
     public ManagedChannelService(ChannelInstanceStore instances,
-            JdbcTemplate jdbc, ManagedAgentService sessions,
+            @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, ManagedAgentService sessions,
             ManagedWorkspaceRegistry workspaces, HarnessConnector harness,
-            ObjectMapper mapper, ManagedAgentProperties properties) {
+            @Qualifier("managedAgentObjectMapper") ObjectMapper mapper, ManagedAgentProperties properties) {
         this(instances, new JdbcChannelRouteRepository(jdbc),
                 new JdbcChannelDeliveryRepository(jdbc), sessions, workspaces,
                 harness, mapper, properties.getChannels().getClaimLease(),
@@ -342,7 +343,7 @@ public class ManagedChannelService {
      * lost, so a delivered delivery is never requested unknown and a
      * committed claim is never invisible to both recovery entry points.
      */
-    @Scheduled(fixedDelayString =
+    @Scheduled(scheduler = "managedAgentScheduler", fixedDelayString =
             "${qwen.managed-agent.channels.scan-delay:30s}")
     public void reconcile() {
         long before = clock.get() - claimLease.toMillis();

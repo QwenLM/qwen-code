@@ -303,7 +303,7 @@ export async function createReferenceDistribution({
     {
       name: 'qwen-managed-agent-server',
       version: serverVersion,
-      source: `packages/managed-agent-server/target/${serverJar}`,
+      source: `packages/managed-agent-server/target/qwen-managed-agent-server-${serverVersion}-exec.jar`,
       destination: `lib/${serverJar}`,
       role: 'control-plane',
     },

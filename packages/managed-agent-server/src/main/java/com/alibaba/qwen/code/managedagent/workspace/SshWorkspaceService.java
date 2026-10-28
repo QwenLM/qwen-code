@@ -18,6 +18,7 @@ import com.alibaba.qwen.code.runtimebroker.provisioning.SshConnectionManager;
 import com.alibaba.qwen.code.runtimebroker.provisioning.SshRuntimeNode;
 import com.alibaba.qwen.code.runtimebroker.provisioning.SshRuntimeStorage;
 import jakarta.annotation.PreDestroy;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
@@ -53,7 +54,7 @@ public class SshWorkspaceService implements AutoCloseable, AcceptanceEvidence {
             new ArrayBlockingQueue<>(32), Thread.ofPlatform().daemon().name("ssh-workspace-", 0).factory());
 
     @org.springframework.beans.factory.annotation.Autowired
-    public SshWorkspaceService(ManagedAgentProperties properties, SshWorkspaceStore store, Clock clock) {
+    public SshWorkspaceService(ManagedAgentProperties properties, SshWorkspaceStore store, @Qualifier("managedAgentClock") Clock clock) {
         this(properties, store, properties.getRuntimeBroker().getSsh().getNodes().isEmpty() ? null
                 : new SshConnectionManager(URI.create(properties.getToolPublication().getServiceBaseUrl())), clock);
     }
