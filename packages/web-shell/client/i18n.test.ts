@@ -174,6 +174,16 @@ describe('web-shell ru locale', () => {
     expect(languageLabel('ru')).toBe('Русский [ru]');
   });
 
+  it('lists every shipped language in the /language error and usage copy', () => {
+    // The /language gate, help and completions derive from WEB_SHELL_LANGUAGES;
+    // the error/usage copy must carry the same set, in both locales.
+    for (const language of ['en', 'zh-CN'] as const) {
+      const t = getTranslator(language);
+      expect(t('language.invalid')).toContain('en, zh-CN, ru');
+      expect(t('language.usage')).toContain('en|zh-CN|ru');
+    }
+  });
+
   it('pluralises turn counters the Russian way', () => {
     const t = getTranslator('ru');
     expect(t('goal.turns', { count: 1 })).toBe('1 ход');
