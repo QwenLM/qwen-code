@@ -1070,6 +1070,9 @@ export class ShellExecutionService {
         let stderr = '';
         const stdoutBytes: Buffer[] = [];
         const stderrBytes: Buffer[] = [];
+        // Whether the capture limit dropped bytes from this stream.
+        let stdoutCut = false;
+        let stderrCut = false;
         let stdoutPreview = '';
         let stderrPreview = '';
         const outputChunks: Buffer[] = [];
@@ -1231,6 +1234,10 @@ export class ShellExecutionService {
           previewTail?.add(data);
           if (stream === 'stderr') stderrTail?.add(data);
           const capturedData = captureOutputData(data);
+          if ((capturedData?.length ?? 0) < data.length) {
+            if (stream === 'stdout') stdoutCut = true;
+            else stderrCut = true;
+          }
           if (streamRawOutput) {
             onOutputEvent({
               type: 'raw_data',
@@ -1369,12 +1376,21 @@ export class ShellExecutionService {
             // The first chunk picked the decoder, and an ASCII one is valid
             // UTF-8; decode each stream again from its complete bytes, as
             // the PTY path does at exit.
-            const wasCut =
-              outputCaptureLimitExceeded ||
-              abortSignal.aborted ||
+            // A cancel or a signal ends both streams; the capture limit cuts
+            // only the streams it dropped bytes from. A background promote
+            // that finds the shell already exited cut nothing.
+            const endedEarly =
+              (abortSignal.aborted &&
+                getShellAbortReasonKind(abortSignal.reason) !== 'background') ||
               signal !== null;
-            stdout = decodeCompleteOutput(Buffer.concat(stdoutBytes), wasCut);
-            stderr = decodeCompleteOutput(Buffer.concat(stderrBytes), wasCut);
+            stdout = decodeCompleteOutput(
+              Buffer.concat(stdoutBytes),
+              stdoutCut || endedEarly,
+            );
+            stderr = decodeCompleteOutput(
+              Buffer.concat(stderrBytes),
+              stderrCut || endedEarly,
+            );
           }
           // Ensure we don't add an extra newline if stdout already ends with one.
           const separator = stdout.endsWith('\n') ? '' : '\n';

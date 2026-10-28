@@ -2521,6 +2521,38 @@ describe('ShellExecutionService child_process fallback', () => {
       },
     );
 
+    it('keeps complete stdout in the code page when only stderr hit the capture limit', async () => {
+      useSystemEncoding('gbk');
+      // 目浣 in GBK (C4 BF E4 BD) arrives complete; the limit cuts stderr.
+      const { result } = await simulateExecution(
+        'python report.py',
+        () => {
+          emitOut(Buffer.from('c4bfe4bd', 'hex'));
+          emitOut('1234567', 'stderr');
+          finish(1);
+        },
+        {},
+        { ...shellExecutionConfig, maxBufferedOutputBytes: 10 },
+      );
+      expect(result.output).toMatch(/^目浣\n123456\n\n\[Output exceeded/);
+    });
+
+    it('decodes complete output with the code page when a background promote finds the shell already exited', async () => {
+      useSystemEncoding('gbk');
+      const { result } = await simulateExecution('type notes.txt', (cp, ac) => {
+        emitOut(Buffer.from('c4bfe4bd', 'hex'));
+        Object.defineProperty(cp, 'exitCode', {
+          value: 0,
+          writable: true,
+          configurable: true,
+        });
+        ac.abort(bg('bg_test123'));
+        finish();
+      });
+      expect(result.promoted).toBeUndefined();
+      expect(result.output).toBe('目浣');
+    });
+
     it('decodes buffered stderr from its complete output on a legacy code page', async () => {
       useSystemEncoding('gbk');
       const { result } = await simulateExecution('python report.py', () => {
@@ -2547,6 +2579,7 @@ describe('ShellExecutionService child_process fallback', () => {
       ['UTF-8', 'utf-8'],
       ['unknown', null],
       ['plain ASCII (macOS with no locale set)', 'us-ascii'],
+      ['plain ASCII (a locale that reports the ascii label)', 'ascii'],
     ])(
       'still picks the decoder from the first chunk when the system encoding is %s',
       async (_label, encoding) => {
