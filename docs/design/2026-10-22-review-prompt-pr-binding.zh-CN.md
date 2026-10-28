@@ -13,7 +13,9 @@ Web Shell 的 PR 徽标来自会话 PR sidecar。用户可以在 Web Shell 会�
 没有 PR 绑定。绑定模型与 sidecar 格式见
 [会话 PR 绑定设计](2026-08-20-webshell-session-pr-binding.md)。
 
-按需回填（`POST /sessions/backfill-prs`）可以从用户输入的命令推导绑定。它读取
+按需回填（`POST /sessions/backfill-prs`）可以从用户输入的命令推导绑定。结果里的
+`repoDeclined` 按「被拒绝的声明」计数——号码或 URL 形态——因此即使另一个来源仍然
+绑定了该号码，策略性拒绝与空运行也可以区分。它读取
 transcript。这个设计有两个缺口：
 
 1. 正常的 Web Shell 流程不会触发回填。
@@ -78,7 +80,8 @@ daemon 接纳 `/review` 或 `/verify-pr` 提示词时，立即绑定 PR。
 - 提示路由测试覆盖：首个文本块的传递、后续文本块、untrusted workspace、渠道
   提示词、binder 拒绝/挂起、coordinator 交接。
 - `/verify-pr` 覆盖：实时接受/拒绝成对（`--repo` 指向本 workspace 时绑定；指向
-  另一仓库时拒绝并上报 `repoDeclined`）、取值语法读不出的引号与 `-R` 写法、
+  另一仓库时拒绝并上报 `repoDeclined`）、取值语法读不出的 `-R` 各种写法（裸写、
+  附着、带引号、URL 形态、取值在下一行）、
   `--repo=` 形态、`--assets-repo` 不受影响、后一次指向本 workspace 的声明胜过
   先前的他仓声明、不带限定的 `/review` 声明清除限定、分歧页面下绑定到号码被限定
   的那个仓库、transcript `slash_command` 扫描，以及拒绝 `/verify-pr-watch` 与
@@ -91,6 +94,10 @@ daemon 接纳 `/review` 或 `/verify-pr` 提示词时，立即绑定 PR。
   会话徽标与搜索中。
 - `/verify-pr 15172` 与 `/review 15172` 绑定同一枚徽标，实时路径与 transcript
   回填路径都成立。
+- 不带限定、或限定指向本 workspace 仓库（含 gh 页已确认的 fork 父仓库）的
+  `/verify-pr <N>` 绑定 PR `<N>`，且解析出的 PR 必须属于该仓库：解析结果是 fork
+  另一侧的同号 PR、或在该仓库中无法解析时，号码保持不绑定。全部限定都指向另一
+  仓库的号码不产生绑定，除非该号码由 URL 形态或 worktree 约定提供。
 - 被限定到另一仓库的 `/verify-pr` 号码不产生绑定、不写 sidecar、不标记 catalog
   变更；拒绝会计入 `repoDeclined` 并进入 live 钩子的告警。
 - 非显式 PR 审查的提示词不创建绑定，也不发起平台查询。

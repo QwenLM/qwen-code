@@ -421,6 +421,29 @@ describe('OpenTuiExtensionsDialog management keys (#44)', () => {
     expect(screen.getByText('Update Now')).toBeTruthy();
   });
 
+  it.each(['up-to-date', undefined] as const)(
+    'adopts a settled update state: %s',
+    async (state) => {
+      const onDetailAction = vi
+        .fn()
+        .mockResolvedValueOnce('update-available')
+        .mockResolvedValueOnce(state);
+      renderDialog({ onDetailAction });
+      await press('return');
+      await press('down');
+      await press('down');
+      await press('down');
+      await press('return');
+      expect(screen.getByText('Update Now')).toBeTruthy();
+      await press('down');
+      await press('return');
+      expect(onDetailAction).toHaveBeenLastCalledWith(ROWS[0], 'update');
+      expect(screen.queryByText('Update Now') !== null).toBe(
+        state === undefined,
+      );
+    },
+  );
+
   it('falls back to the list when the open row disappears after a reload', async () => {
     const { rerender } = render(<div />);
     const onClose = vi.fn();
