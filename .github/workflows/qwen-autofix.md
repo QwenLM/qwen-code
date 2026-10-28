@@ -4779,8 +4779,10 @@ plus a pointer.
   # need dozens of feedback rounds — that is the point of takeover — so the
   # unattended cap (MAX_ROUNDS) would strangle it. The circuit breaker stays
   # (a bot↔review-bot ping-pong is still bounded), it is just sized for
-  # explicitly delegated work; removing the label restores the strict cap,
-  # and re-engaging opens a fresh counting window (see REARM_KEY below).
+  # explicitly delegated work; removing the label restores the strict cap —
+  # EXCEPT while a 'for N' budget is still live (af-159: a spent one on a
+  # bot-authored PR outlives a silent removal and keeps clamping) — and
+  # re-engaging opens a fresh counting window (see REARM_KEY below).
 
 # RETRY_COMMAND — Re-arm sugar. Recovering a stranded PR
   # Re-arm sugar. Recovering a stranded PR previously meant DELETING the

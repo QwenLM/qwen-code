@@ -193,9 +193,10 @@ accounting is the read that stays window-keyed.
 so releasing it would hand them back to standard ten-round management and the
 budget would be a lie. They land on the existing paused path instead: paused
 notice plus `autofix/needs-human`, and the fleet shepherd's auto-release ages the
-label out. The budget stops them at N while the engagement is live; once that
-auto-release takes the label away, the PR is back to standard ten-round
-management like any other bot PR.
+label out. The budget stops them at N, and a SPENT one outlives that auto-release
+(and a hand-removal, which leaves no marker either): the PR stays parked at N/N
+until a new command moves the engagement. Only an explicit `stop` ends it, which
+is why its ack says standard management continues.
 
 **A budgeted re-arm also cancels queued work, conflicts included.** A conflict
 round is normally exempt from the superseded-window discard because it stays
