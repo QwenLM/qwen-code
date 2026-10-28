@@ -383,4 +383,136 @@ describe('runStatus', () => {
       { pr: 8, error: expect.stringMatching(/has an invalid remote/) },
     ]);
   });
+
+  it('lists a watch rooted in a linked worktree of the clone', () => {
+    // A daemon session prepares its watch under its own worktree; the listing
+    // scans every worktree of the clone, so the main worktree still sees it.
+    const linked = `${repo}-linked`;
+    // This suite's clone has no commit of its own; a worktree needs a HEAD.
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'user.email=t@example.com',
+        '-c',
+        'user.name=t',
+        'commit',
+        '-q',
+        '--allow-empty',
+        '-m',
+        'base',
+      ],
+      { cwd: repo },
+    );
+    execFileSync('git', ['worktree', 'add', '-q', '--detach', linked], {
+      cwd: repo,
+    });
+    try {
+      const paths = autofixPrPaths(linked, 7);
+      mkdirSync(dirname(paths.statePath), { recursive: true });
+      writeState(paths.statePath, {
+        version: 1,
+        sessionId: 'session-a',
+        host: 'github.com',
+        owner: 'o',
+        repo: 'r',
+        prNumber: 7,
+        remote: 'origin',
+        pushTarget: 'origin',
+        headRefName: 'feat-7',
+        baseRefName: 'main',
+        branch: paths.branch,
+        worktreePath: paths.worktreePath,
+        viewer: 'me',
+        prAuthor: 'me',
+        lastKnownHeadSha: HEAD,
+        pushedShas: [],
+        handledCommentIds: [],
+        postedCommentIds: [],
+      });
+      const { watches } = runStatus({ work: false });
+      expect(watches.map(({ pr }) => pr)).toEqual([7]);
+      expect(watches[0]!.worktreePath).toBe(paths.worktreePath);
+      // An explicit root still scans just that one worktree.
+      expect(runStatus({ root: repo, work: false }).watches).toEqual([]);
+    } finally {
+      execFileSync('git', ['worktree', 'remove', '--force', linked], {
+        cwd: repo,
+      });
+      rmSync(linked, { recursive: true, force: true });
+    }
+  });
+
+  it('prefers the root with a live worktree when a PR has state in two roots', () => {
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'user.email=t@example.com',
+        '-c',
+        'user.name=t',
+        'commit',
+        '-q',
+        '--allow-empty',
+        '-m',
+        'base',
+      ],
+      { cwd: repo },
+    );
+    const linked = `${repo}-linked`;
+    execFileSync('git', ['worktree', 'add', '-q', '--detach', linked], {
+      cwd: repo,
+    });
+    const live = autofixPrPaths(linked, 7);
+    try {
+      // A stale state file in the main worktree, with no worktree there.
+      write(7);
+      // A live watch in the linked worktree: its branch checked out.
+      execFileSync('git', ['branch', live.branch], { cwd: repo });
+      mkdirSync(dirname(live.worktreePath), { recursive: true });
+      execFileSync(
+        'git',
+        ['worktree', 'add', '-q', live.worktreePath, live.branch],
+        { cwd: repo },
+      );
+      writeState(live.statePath, {
+        version: 1,
+        sessionId: 'session-a',
+        host: 'github.com',
+        owner: 'o',
+        repo: 'r',
+        prNumber: 7,
+        remote: 'origin',
+        pushTarget: 'origin',
+        headRefName: 'feat-7',
+        baseRefName: 'main',
+        branch: live.branch,
+        worktreePath: live.worktreePath,
+        viewer: 'me',
+        prAuthor: 'me',
+        lastKnownHeadSha: HEAD,
+        pushedShas: [],
+        handledCommentIds: [],
+        postedCommentIds: [],
+      });
+      const { watches } = runStatus({ work: false });
+      expect(watches.map(({ pr }) => pr)).toEqual([7]);
+      // The live worktree's root wins over the stale main-worktree state.
+      expect(watches[0]!.worktreePath).toBe(live.worktreePath);
+      expect(watches[0]!.worktreeExists).toBe(true);
+    } finally {
+      execFileSync(
+        'git',
+        ['worktree', 'remove', '--force', live.worktreePath],
+        {
+          cwd: repo,
+        },
+      );
+      execFileSync('git', ['worktree', 'remove', '--force', linked], {
+        cwd: repo,
+      });
+      execFileSync('git', ['branch', '-D', live.branch], { cwd: repo });
+      rmSync(linked, { recursive: true, force: true });
+    }
+  });
 });

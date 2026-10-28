@@ -31,7 +31,7 @@ import {
   TASK_OPTION,
   taskArg,
   autofixPrPaths,
-  repoRoot,
+  watchRoot,
   requireState,
   withWatchLock,
   writeState,
@@ -76,7 +76,7 @@ export function runSync(
   discard = false,
   task?: string,
 ): SyncOutcome {
-  const root = repoRoot();
+  const root = watchRoot();
   const paths = autofixPrPaths(root, prNumber);
   return withWatchLock(paths, prNumber, () => {
     // Before anything moves: the attempt's agent may be working in the

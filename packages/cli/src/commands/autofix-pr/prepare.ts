@@ -36,7 +36,7 @@ import {
   isCommandSafeName,
   readHistory,
   readState,
-  repoRoot,
+  watchRoot,
   requireState,
   sameRepository,
   withWatchLock,
@@ -415,7 +415,7 @@ export function runPrepare(args: PrepareArgs): void {
   }
   const [owner, repoName] = args.repo.split('/');
   const host = resolveGhHost(args.host) ?? 'github.com';
-  const root = repoRoot();
+  const root = watchRoot();
   const paths = autofixPrPaths(root, args.pr);
 
   // A resume hands back the same worktree, so both refusals come before the

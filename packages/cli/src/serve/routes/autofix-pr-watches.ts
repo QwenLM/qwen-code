@@ -54,11 +54,13 @@ export interface AutofixPrWatchesView {
 }
 
 /**
- * The clone's main worktree, where every watch of the clone keeps its files
- * (`.qwen/tmp`), whichever of its worktrees the workspace is; null when the
- * directory is in no git repository.
+ * Every worktree of the clone of `cwd`, main first; empty when the directory
+ * is in no git repository. A watch keeps its files (`.qwen/tmp`) under the
+ * worktree it was prepared from — under the daemon, the session's own — so
+ * the listing scans all of them to find every watch of the clone. One git
+ * call answers, on the listing's own short timeout.
  */
-export async function cloneRootOf(cwd: string): Promise<string | null> {
+export async function cloneWorktreesOf(cwd: string): Promise<string[]> {
   try {
     const { stdout } = await execFileAsync(
       'git',
@@ -71,12 +73,12 @@ export async function cloneRootOf(cwd: string): Promise<string | null> {
         env: { ...sanitizedGitEnv(), GIT_TERMINAL_PROMPT: '0' },
       },
     );
-    const first = stdout.split('\n')[0] ?? '';
-    return first.startsWith('worktree ')
-      ? first.slice('worktree '.length).replace(/\r$/, '')
-      : null;
+    return stdout
+      .split('\n')
+      .filter((line) => line.startsWith('worktree '))
+      .map((line) => line.slice('worktree '.length).replace(/\r$/, ''));
   } catch {
-    return null;
+    return [];
   }
 }
 
@@ -94,10 +96,13 @@ export async function listAutofixPrWatches(
   assertGenerationOpen?: () => void,
 ): Promise<AutofixPrWatchesView> {
   assertGenerationOpen?.();
-  const root = await cloneRootOf(cwd);
+  const worktrees = await cloneWorktreesOf(cwd);
   assertGenerationOpen?.();
-  if (root === null) return { v: 1, available: false, watches: [] };
-  const outcome = runStatus({ root, git: false, session: null });
+  if (worktrees.length === 0) return { v: 1, available: false, watches: [] };
+  // The main worktree names the clone for display; the scan covers every
+  // worktree, so a watch prepared from any of them is listed.
+  const root = worktrees[0]!;
+  const outcome = runStatus({ roots: worktrees, git: false, session: null });
   return {
     v: 1,
     available: true,

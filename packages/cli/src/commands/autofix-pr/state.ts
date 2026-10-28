@@ -27,6 +27,7 @@ import {
   isOwnerRepo,
   normalizeGhHostForUrl,
 } from '../review/lib/gh.js';
+import { git, repoRoot } from '../review/lib/git.js';
 import { normalizeSegment } from '../review/lib/remote-match.js';
 
 export const REPLY_MARKER = '<!-- qwen-autofix-pr:v1 -->';
@@ -249,10 +250,30 @@ export interface AutofixPrPaths {
 
 /**
  * The root of the clone's main worktree. Branches are shared by every
- * worktree of a clone, so a watch belongs to the clone rather than to the
- * worktree a helper runs from, the autofix worktree itself included.
+ * worktree of a clone, so the clone-wide watch listing reads every worktree's
+ * files from here, and outside the daemon a watch is rooted here too.
  */
-export { repoRoot } from '../review/lib/git.js';
+export { repoRoot };
+
+/**
+ * The directory a watch's worktree and state live under (`.qwen/tmp`).
+ *
+ * A daemon session runs the fix agent's commands only inside its own working
+ * directory, so a watch prepared from a linked worktree must keep its files
+ * there: under the clone's main worktree they would sit permanently outside
+ * that boundary, where the daemon shell guard refuses every command, and
+ * `prepare` fails closed before creating anything. Rooting at the session's
+ * own worktree toplevel puts them inside it. Outside the daemon there is no
+ * such boundary, so the watch stays clone-rooted and every worktree of the
+ * clone shares it, as before. A main-worktree session resolves to the same
+ * directory either way.
+ */
+export function watchRoot(): string {
+  if (process.env['QWEN_CODE_SERVE'] === '1') {
+    return git('rev-parse', '--show-toplevel');
+  }
+  return repoRoot();
+}
 
 /** Throws unless `value` is a positive integer; `what` names it. */
 export function assertPositiveInteger(value: number, what: string): void {

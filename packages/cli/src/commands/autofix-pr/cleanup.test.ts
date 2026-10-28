@@ -66,6 +66,7 @@ describe('runCleanup (real git)', () => {
   let headSha: string;
   let savedCwd: string;
   let savedSession: string | undefined;
+  let savedServe: string | undefined;
   let paths: ReturnType<typeof autofixPrPaths>;
 
   const run = (cwd: string, ...args: string[]) =>
@@ -108,6 +109,10 @@ describe('runCleanup (real git)', () => {
     savedCwd = process.cwd();
     savedSession = process.env['QWEN_CODE_SESSION_ID'];
     process.env['QWEN_CODE_SESSION_ID'] = 'session-a';
+    // `watchRoot` roots a daemon session's watch at its own worktree; a runner
+    // under `qwen serve` must not leak that into these clone-rooted tests.
+    savedServe = process.env['QWEN_CODE_SERVE'];
+    delete process.env['QWEN_CODE_SERVE'];
     process.chdir(repo);
   });
 
@@ -117,6 +122,8 @@ describe('runCleanup (real git)', () => {
     process.chdir(savedCwd);
     if (savedSession === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
     else process.env['QWEN_CODE_SESSION_ID'] = savedSession;
+    if (savedServe === undefined) delete process.env['QWEN_CODE_SERVE'];
+    else process.env['QWEN_CODE_SERVE'] = savedServe;
     rmSync(repo, { recursive: true, force: true });
   });
 

@@ -21,7 +21,7 @@ import type { AutofixPrPaths } from './state.js';
  * any git command in the worktree, the file must name this clone's own
  * admin entry for a worktree, and that entry must point back at it. Read
  * from the files, not asked of git, which would read the config in
- * question; `root` is the clone's main worktree, whose git is the user's.
+ * question; `root` is the watch's root worktree, whose git is the user's.
  */
 export function untrustedGitfile(
   worktreePath: string,

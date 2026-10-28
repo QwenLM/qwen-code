@@ -28,7 +28,7 @@ import {
   isRegularFile,
   keepHistory,
   readState,
-  repoRoot,
+  watchRoot,
   requireState,
   withWatchLock,
   writeState,
@@ -68,7 +68,7 @@ export function unsavedWork(
 ): string | null {
   const hasWorktree = existsSync(paths.worktreePath);
   if (hasWorktree) {
-    // The clone's main worktree: the watch's files sit in its `.qwen/tmp`.
+    // The watch's root worktree: its files sit in that worktree's `.qwen/tmp`.
     const root = dirname(dirname(dirname(paths.worktreePath)));
     const untrusted =
       untrustedGitfile(paths.worktreePath, root) ??
@@ -146,7 +146,7 @@ export function runCleanup(
   force: boolean,
   takeOver = false,
 ): void {
-  const root = repoRoot();
+  const root = watchRoot();
   const paths = autofixPrPaths(root, prNumber);
   if (
     existsSync(paths.worktreePath) &&

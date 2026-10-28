@@ -175,6 +175,32 @@ describe('autofix-pr watch routes', () => {
     }
   });
 
+  it('lists a watch rooted in a linked worktree from the main workspace', async () => {
+    // A daemon session in a linked worktree roots its watch there; the clone
+    // listing scans every worktree, so the main workspace still lists it.
+    rmSync(paths.statePath, { force: true });
+    const linked = join(root, '..', `${root.split('/').at(-1)}-linked`);
+    git(root, 'worktree', 'add', '-q', '--detach', linked);
+    try {
+      const linkedPaths = autofixPrPaths(linked, 7);
+      mkdirSync(dirname(linkedPaths.statePath), { recursive: true });
+      writeState(
+        linkedPaths.statePath,
+        watchState({
+          branch: linkedPaths.branch,
+          worktreePath: linkedPaths.worktreePath,
+        }),
+      );
+      const view = await listAutofixPrWatches(root);
+      expect(view.available).toBe(true);
+      expect(view.root).toBe(root);
+      expect(view.watches.map((watch) => watch.pr)).toEqual([7]);
+    } finally {
+      git(root, 'worktree', 'remove', '--force', linked);
+      rmSync(linked, { recursive: true, force: true });
+    }
+  });
+
   it.skipIf(process.platform === 'win32')(
     'runs no git command but the one that finds the clone',
     async () => {

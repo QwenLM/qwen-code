@@ -208,6 +208,7 @@ describe('runPrepare (real git)', () => {
   let savedCwd: string;
   let savedSession: string | undefined;
   let savedHost: string | undefined;
+  let savedServe: string | undefined;
 
   // The runner may have no git identity of its own: a commit the test
   // makes in a repository it configures none for (a submodule's checkout)
@@ -263,6 +264,11 @@ describe('runPrepare (real git)', () => {
     // `runPrepare` without a host falls back to an exported GH_HOST.
     savedHost = process.env['GH_HOST'];
     delete process.env['GH_HOST'];
+    // `watchRoot` roots a daemon session's watch at its own worktree, so a
+    // runner that itself runs under `qwen serve` must not leak that into the
+    // non-daemon tests: each daemon test sets it explicitly.
+    savedServe = process.env['QWEN_CODE_SERVE'];
+    delete process.env['QWEN_CODE_SERVE'];
     process.chdir(clone);
   });
 
@@ -272,6 +278,8 @@ describe('runPrepare (real git)', () => {
     else process.env['QWEN_CODE_SESSION_ID'] = savedSession;
     if (savedHost === undefined) delete process.env['GH_HOST'];
     else process.env['GH_HOST'] = savedHost;
+    if (savedServe === undefined) delete process.env['QWEN_CODE_SERVE'];
+    else process.env['QWEN_CODE_SERVE'] = savedServe;
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -284,10 +292,11 @@ describe('runPrepare (real git)', () => {
     expect(existsSync(autofixPrPaths(clone, 7).worktreePath)).toBe(false);
   });
 
-  it('refuses in a daemon session a clone outside the session working directory', () => {
-    // The watch belongs to the clone's main worktree, so a session opened in
-    // a sibling checkout prepares it outside its own directory — where the
-    // daemon refuses every command the fix agent would run.
+  it('prepares in a daemon session opened in a linked worktree, rooting under it', () => {
+    // A linked worktree of the same clone is a session working directory of
+    // its own: the watch roots there, inside it, where the daemon runs the
+    // fix agent's commands — not under the clone's main worktree, outside it,
+    // where every command would be refused (the b1887512 dead end).
     const elsewhere = join(dir, 'elsewhere');
     run(
       clone,
@@ -299,18 +308,19 @@ describe('runPrepare (real git)', () => {
       elsewhere,
       'origin/main',
     );
-    const savedServe = process.env['QWEN_CODE_SERVE'];
     process.env['QWEN_CODE_SERVE'] = '1';
     process.chdir(elsewhere);
     try {
-      expect(() => runPrepare({ pr: 7, repo: 'o/r' })).toThrow(
-        /outside this session's working directory/,
-      );
+      runPrepare({ pr: 7, repo: 'o/r' });
+      const paths = autofixPrPaths(elsewhere, 7);
+      expect(existsSync(paths.worktreePath)).toBe(true);
+      expect(run(paths.worktreePath, 'rev-parse', 'HEAD')).toBe(headSha);
+      expect(lastReport()).toMatchObject({ worktreePath: paths.worktreePath });
+      // Nothing was rooted under the main worktree, outside this session.
       expect(existsSync(autofixPrPaths(clone, 7).worktreePath)).toBe(false);
     } finally {
       process.chdir(clone);
-      if (savedServe === undefined) delete process.env['QWEN_CODE_SERVE'];
-      else process.env['QWEN_CODE_SERVE'] = savedServe;
+      delete process.env['QWEN_CODE_SERVE'];
     }
   });
 
@@ -326,26 +336,18 @@ describe('runPrepare (real git)', () => {
     expect(existsSync(autofixPrPaths(clone, 7).worktreePath)).toBe(true);
   });
 
-  it('refuses a resume in a daemon session that cannot run the worktree', () => {
+  it('refuses a daemon session whose working directory is below the watch root', () => {
+    // The watch roots at the worktree toplevel; a session opened in a
+    // subdirectory of it cannot run a worktree rooted above its own directory.
     // A resume reports the worktree already there, so the refusal has to come
     // before the state is read: otherwise this session is handed a watch whose
     // every command the daemon will refuse.
     runPrepare({ pr: 7, repo: 'o/r' });
     const paths = autofixPrPaths(clone, 7);
-    const elsewhere = join(dir, 'elsewhere');
-    run(
-      clone,
-      'worktree',
-      'add',
-      '-q',
-      '-b',
-      'other',
-      elsewhere,
-      'origin/main',
-    );
-    const savedServe = process.env['QWEN_CODE_SERVE'];
+    const sub = join(clone, 'src', 'deep');
+    mkdirSync(sub, { recursive: true });
     process.env['QWEN_CODE_SERVE'] = '1';
-    process.chdir(elsewhere);
+    process.chdir(sub);
     try {
       expect(() => runPrepare({ pr: 7, repo: 'o/r' })).toThrow(
         /outside this session's working directory/,
@@ -356,8 +358,7 @@ describe('runPrepare (real git)', () => {
       });
     } finally {
       process.chdir(clone);
-      if (savedServe === undefined) delete process.env['QWEN_CODE_SERVE'];
-      else process.env['QWEN_CODE_SERVE'] = savedServe;
+      delete process.env['QWEN_CODE_SERVE'];
     }
   });
 

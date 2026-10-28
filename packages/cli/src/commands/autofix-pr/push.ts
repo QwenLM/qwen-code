@@ -23,7 +23,7 @@ import {
   autofixPrPaths,
   isBranchName,
   isCommandSafeName,
-  repoRoot,
+  watchRoot,
   requireState,
   withWatchLock,
   writeState,
@@ -213,7 +213,7 @@ function pushRef(
 }
 
 export function runPush(prNumber: number, task?: string): PushOutcome {
-  const root = repoRoot();
+  const root = watchRoot();
   const paths = autofixPrPaths(root, prNumber);
   return withWatchLock(paths, prNumber, () =>
     pushLocked(paths, prNumber, root, task),

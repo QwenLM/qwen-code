@@ -12,6 +12,7 @@ import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { CommandModule } from 'yargs';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
+import { gitOpt } from '../review/lib/git.js';
 import { unsavedWork } from './cleanup.js';
 import { untrustedGitfile, untrustedSubmodules } from './worktree.js';
 import { DEFAULT_EVERY } from './schedule.js';
@@ -144,6 +145,22 @@ function modifiedAt(path: string): string | null {
   }
 }
 
+/**
+ * Every worktree of the clone, main first: a watch keeps its files under the
+ * worktree it was prepared from, which under the daemon is the session's own
+ * rather than necessarily the main one. Falls back to the main worktree when
+ * git cannot list them — which throws outside a repository, as `repoRoot`
+ * always has.
+ */
+function worktreeRoots(): string[] {
+  const listed = gitOpt('worktree', 'list', '--porcelain');
+  const roots = (listed ?? '')
+    .split('\n')
+    .filter((line) => line.startsWith('worktree '))
+    .map((line) => line.slice('worktree '.length));
+  return roots.length > 0 ? roots : [repoRoot()];
+}
+
 export function runStatus(args: {
   pr?: number;
   /** false skips `worktreeWork` (null), a git scan of the worktree. */
@@ -152,23 +169,45 @@ export function runStatus(args: {
    * `gitTrusted` false, unchecked. The daemon's listing runs on its own
    * thread, where a git command that hangs would hold every request. */
   git?: boolean;
-  /** The clone's main worktree: by default, the one the working directory
-   * is in. The daemon names it, as its own directory is not the clone's. */
+  /** Scan only this worktree's `.qwen/tmp`, not the whole clone. By default
+   * every worktree of the clone is scanned, so a watch is found whichever of
+   * them holds it. */
   root?: string;
+  /** Scan exactly these worktrees' `.qwen/tmp`, running no git command to
+   * find them: the daemon enumerates the clone's worktrees itself, on its
+   * own short timeout, and passes them here. Takes precedence over `root`. */
+  roots?: string[];
   /** Whose watches are `thisSession`: by default, the session this runs in
    * (`QWEN_CODE_SESSION_ID`); null for none. */
   session?: string | null;
 }): StatusOutcome {
   if (args.pr !== undefined) assertPositiveInteger(args.pr, 'PR number');
-  const root = args.root ?? repoRoot();
-  const tmp = join(root, '.qwen', 'tmp');
-  const numbers = (existsSync(tmp) ? readdirSync(tmp) : [])
-    .map((name) => STATE_FILE_RE.exec(name)?.[1])
-    .filter((n): n is string => n !== undefined)
-    .map(Number)
-    .filter((n) => Number.isSafeInteger(n) && n > 0)
-    .filter((n) => args.pr === undefined || n === args.pr)
-    .sort((a, b) => a - b);
+  const roots =
+    args.roots ?? (args.root !== undefined ? [args.root] : worktreeRoots());
+  // The worktree whose `.qwen/tmp` holds each PR's state. Git forbids one
+  // branch in two worktrees, so a PR's watch lives in at most one; a stale
+  // state file left in another loses to the one with a live worktree.
+  const rootByPr = new Map<number, string>();
+  for (const root of roots) {
+    const tmp = join(root, '.qwen', 'tmp');
+    const found = (existsSync(tmp) ? readdirSync(tmp) : [])
+      .map((name) => STATE_FILE_RE.exec(name)?.[1])
+      .filter((n): n is string => n !== undefined)
+      .map(Number)
+      .filter((n) => Number.isSafeInteger(n) && n > 0)
+      .filter((n) => args.pr === undefined || n === args.pr);
+    for (const pr of found) {
+      const prev = rootByPr.get(pr);
+      if (
+        prev === undefined ||
+        (!existsSync(autofixPrPaths(prev, pr).worktreePath) &&
+          existsSync(autofixPrPaths(root, pr).worktreePath))
+      ) {
+        rootByPr.set(pr, root);
+      }
+    }
+  }
+  const numbers = [...rootByPr.keys()].sort((a, b) => a - b);
   const session =
     args.session === undefined ? currentSessionId() : args.session;
   const now = Date.now();
@@ -177,6 +216,7 @@ export function runStatus(args: {
     watches: [],
   };
   for (const pr of numbers) {
+    const root = rootByPr.get(pr)!;
     const paths = autofixPrPaths(root, pr);
     try {
       if (!isRegularFile(paths.statePath)) {
