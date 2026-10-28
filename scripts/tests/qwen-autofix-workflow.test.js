@@ -3978,6 +3978,30 @@ describe('qwen-autofix workflow', () => {
     });
     expect(noticed.writes).not.toContain('autofix-budget-reached');
     expect(noticed.writes).toContain('labels/autofix%2Ftakeover');
+    // The dedup has TWO filters, and the fixture above satisfies both: a
+    // newer notice from the bot. Each filter on its own must still be load
+    // bearing — a human-quoted marker must not suppress the note…
+    const quoted = runRelease({
+      notices: [
+        {
+          user: { login: 'maint-a' },
+          created_at: '2026-07-18T11:00:00Z',
+          body: '🏁 … <!-- autofix-budget-reached -->',
+        },
+      ],
+    });
+    expect(quoted.writes).toContain('autofix-budget-reached');
+    // …and a bot notice from BEFORE the anchor must not either.
+    const older = runRelease({
+      notices: [
+        {
+          user: { login: 'qwen-code-dev-bot' },
+          created_at: '2026-07-18T09:00:00Z',
+          body: '🏁 … <!-- autofix-budget-reached -->',
+        },
+      ],
+    });
+    expect(older.writes).toContain('autofix-budget-reached');
     // Fail-closed and consent gates: none of these write anything.
     for (const variant of [
       { labelsJson: '' },
@@ -7210,7 +7234,7 @@ exit 1
           'bash',
           [
             '-c',
-            `${sanitize.replace(/\n {10}/g, '\n')}\nEVENT_NAME=issue_comment\nTAKEOVER_CMD=''\nTAKEOVER_FROM=''\nTAKEOVER_FOR=''\nCMD_PR=''\n${cmdBranch.replace(/\n {14}/g, '\n')}\nprintf '%s|%s' "$TAKEOVER_CMD" "$(sanitize_number "$TAKEOVER_FOR")"`,
+            `${sanitize.replace(/\n {10}/g, '\n')}\nEVENT_NAME=issue_comment\nTAKEOVER_CMD=''\nTAKEOVER_FROM=''\nTAKEOVER_FOR=''\nCMD_PR=''\n${cmdBranch.replace(/\n {14}/g, '\n')}\nprintf '%s|%s|%s' "$TAKEOVER_CMD" "$(sanitize_number "$TAKEOVER_FOR")" "$(sanitize_number "$TAKEOVER_FROM")"`,
           ],
           {
             env: {
@@ -7236,17 +7260,17 @@ exit 1
         rmSync(dir, { recursive: true, force: true });
       }
     };
-    expect(budgetOf('@qwen-code /takeover for 1')).toBe('add|1');
-    expect(budgetOf('  @qwen-code /takeover for 12  ')).toBe('add|12');
-    expect(budgetOf('@qwen-code /takeover for 99')).toBe('add|99');
+    expect(budgetOf('@qwen-code /takeover for 1')).toBe('add|1|');
+    expect(budgetOf('  @qwen-code /takeover for 12  ')).toBe('add|12|');
+    expect(budgetOf('@qwen-code /takeover for 99')).toBe('add|99|');
     // Leading zeros are decimal, not octal ('08'/'09' would error outright).
-    expect(budgetOf('@qwen-code /takeover for 02')).toBe('add|2');
-    expect(budgetOf('@qwen-code /takeover for 08')).toBe('add|8');
+    expect(budgetOf('@qwen-code /takeover for 02')).toBe('add|2|');
+    expect(budgetOf('@qwen-code /takeover for 08')).toBe('add|8|');
     // The unparameterized forms carry no budget.
-    expect(budgetOf('@qwen-code /takeover')).toBe('add|');
-    expect(budgetOf('@qwen-code /takeover stop')).toBe('remove|');
+    expect(budgetOf('@qwen-code /takeover')).toBe('add||');
+    expect(budgetOf('@qwen-code /takeover stop')).toBe('remove||');
     // A seed is not a budget and vice versa.
-    expect(budgetOf('@qwen-code /takeover from 3')).toBe('add|');
+    expect(budgetOf('@qwen-code /takeover from 3')).toBe('add||3');
     for (const body of [
       '@qwen-code /takeover for 0',
       '@qwen-code /takeover for 00',
@@ -7264,7 +7288,7 @@ exit 1
       '@qwen-code /takeover for $(id)',
       '@qwen-code /takeover for `id`',
     ]) {
-      expect(budgetOf(body)).toBe('|');
+      expect(budgetOf(body)).toBe('||');
     }
     // The value crosses a GITHUB_OUTPUT write and two job-boundary wires no
     // behavioral harness exercises — pin them verbatim, or a typo silently
@@ -10076,6 +10100,12 @@ exit 1
     // sound on a completed round → verdict marker AND re-arm.
     expect(emitWith({ allow: 'true' })).toBe(
       '<!-- autofix-growth-audit verdict=sound win=W1 -->\n<!-- autofix-rearm -->',
+    );
+    // The audit's window field prefers GROWTH_BASE_WIN, and only falls back to
+    // WINDOW: the two differ whenever a conflict round ran under a newer key,
+    // and swapping the arguments would stamp the wrong window.
+    expect(emitWith({ allow: 'true', growthBaseWin: 'A1', window: 'B2' })).toBe(
+      '<!-- autofix-growth-audit verdict=sound win=A1 -->\n<!-- autofix-rearm -->',
     );
     // sound on the FAILED report path → verdict marker, never the re-arm.
     expect(emitWith({ allow: 'false' })).toBe(
