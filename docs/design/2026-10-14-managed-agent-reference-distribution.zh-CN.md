@@ -30,6 +30,7 @@
 ```text
 bin/qwen-managed-agent-server
 bin/qwen-managed-agent-operator-recovery
+bin/qwen-managed-agent-admin
 bin/qwen-managed-agent-bootstrap
 bin/qwen-managed-agent-bootstrap.mjs
 config/application.example.yml
@@ -109,7 +110,7 @@ LICENSE
 - CI 和手工 dry run 生成同名发布产物且不执行发布。
 - Manifest 标识精确源码以及所有声明的兼容边界。
 - 使用者无需仓库 checkout 即可核验和解压产物。
-- Bundle 中的 server 与 operator-recovery 启动脚本只引用 bundle 内相对文件。
+- Bundle 中的 server、operator-recovery 与 admin 启动脚本只引用 bundle 内相对文件。
 - 精确解压得到的 server 能启动并完成参考 smoke path。
 - 生产流程只从 `main` 发布不可覆盖的实验性 prerelease。
 - Public Shell 执行默认保持关闭；统一 Shell v2 能力声明默认开启，MCP 生命周期须显式启用。
