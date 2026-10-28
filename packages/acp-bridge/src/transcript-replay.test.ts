@@ -247,8 +247,7 @@ describe('createTranscriptReplayMachine', () => {
       (update) =>
         (
           update._meta as
-            | { qwenTranscript?: { segmentId?: string } }
-            | undefined
+            { qwenTranscript?: { segmentId?: string } } | undefined
         )?.qwenTranscript?.segmentId,
     );
 
@@ -332,8 +331,7 @@ describe('createTranscriptReplayMachine', () => {
       }),
     );
     const meta = projected[0]?._meta as
-      | { qwenAgentMessage?: { author?: Record<string, unknown> } }
-      | undefined;
+      { qwenAgentMessage?: { author?: Record<string, unknown> } } | undefined;
     expect(meta?.qwenAgentMessage?.author).toEqual({
       agentId: 'ag_alice',
       name: 'alice',
@@ -2202,6 +2200,99 @@ describe('createTranscriptReplayMachine', () => {
     ).toBeUndefined();
   });
 
+  it.each([
+    [
+      'worktree provisioning failed',
+      {
+        status: 'failed',
+        executionMode: 'foreground',
+        terminateReason: 'worktree provisioning failed',
+      },
+    ],
+    [
+      'foreground model-slot cancel',
+      { status: 'cancelled', executionMode: 'foreground' },
+    ],
+  ])(
+    'leaves a %s display unattributed although it carries an execution mode',
+    (_label, extra) => {
+      // Both rejection paths persist `executionMode` for a subagent whose
+      // session never registered, so the mode alone is not evidence that
+      // anything ran; the live wire stamps nothing on these frames either.
+      const machine = createTranscriptReplayMachine();
+      const result = updates(
+        machine,
+        record('agent-result', 'tool_result', {
+          toolCallResult: {
+            callId: 'agent-1',
+            status: 'error',
+            resultDisplay: {
+              type: 'task_execution',
+              subagentName: 'researcher',
+              subagentSessionReady: false,
+              ...extra,
+            },
+          },
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'agent-1',
+                  name: 'agent',
+                  response: { output: 'failed' },
+                },
+              },
+            ],
+          },
+        }),
+      );
+      expect(
+        (result[0] as { _meta?: Record<string, unknown> })._meta?.['agent'],
+      ).toBeUndefined();
+    },
+  );
+
+  it.each([
+    ['absent', undefined],
+    ['non-string', 42],
+    ['null', null],
+  ])('leaves a display with %s status unattributed', (_label, status) => {
+    // A truncated record or an older writer can omit the status entirely.
+    // Only an allowlisted status is evidence that a subagent ran.
+    const machine = createTranscriptReplayMachine();
+    const display: Record<string, unknown> = {
+      type: 'task_execution',
+      subagentName: 'reviewer',
+    };
+    if (status !== undefined) display['status'] = status;
+    const result = updates(
+      machine,
+      record('agent-result', 'tool_result', {
+        toolCallResult: {
+          callId: 'agent-1',
+          status: 'success',
+          resultDisplay: display,
+        },
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'agent-1',
+                name: 'agent',
+                response: { output: 'done' },
+              },
+            },
+          ],
+        },
+      }),
+    );
+    expect(
+      (result[0] as { _meta?: Record<string, unknown> })._meta?.['agent'],
+    ).toBeUndefined();
+  });
+
   it('attributes a background or cancelled subagent that really ran', () => {
     // `background` (AgentTool detaches after spawn) and `cancelled` are
     // resolved statuses whose display carries the validated
@@ -2268,6 +2359,7 @@ describe('createTranscriptReplayMachine', () => {
               subagentName: 'researcher',
               status: 'failed',
               executionMode,
+              subagentSessionReady: true,
               terminateReason: 'Failed to run subagent: boom',
             },
           },
@@ -2758,8 +2850,7 @@ describe('createTranscriptReplayMachine', () => {
           (update) =>
             (
               update._meta as
-                | { qwenTranscript?: { segmentId?: string } }
-                | undefined
+                { qwenTranscript?: { segmentId?: string } } | undefined
             )?.qwenTranscript?.segmentId,
         ),
     ).toEqual(['assistant-1:0', 'assistant-1:1']);
