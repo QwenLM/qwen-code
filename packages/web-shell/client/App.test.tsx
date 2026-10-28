@@ -33758,6 +33758,42 @@ describe('App session callbacks', () => {
     },
   );
 
+  it('runs built-in local slash commands while offline', async () => {
+    const { availability } = offlineDaemon();
+    const onThemeChange = vi.fn();
+    try {
+      await availability.check(true);
+      const { container } = renderApp(
+        { onThemeChange },
+        undefined,
+        false,
+        false,
+        availability,
+      );
+      await flush();
+      testState.prompt = '/theme dark';
+      await clickSubmit(container);
+      await flush();
+      expect(onThemeChange).toHaveBeenCalledWith('dark');
+      testState.prompt = '!echo hello';
+      await clickSubmit(container);
+      await flush();
+      await flush();
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+      expect(mockSessionActions.sendShellCommand).not.toHaveBeenCalled();
+      await act(async () => {
+        testState.latestChatEditorProps?.onSubmit('/help');
+        await Promise.resolve();
+      });
+      await flush();
+      expect(
+        container.querySelector('[data-dialog-title="Help"]'),
+      ).not.toBeNull();
+    } finally {
+      availability.dispose();
+    }
+  });
+
   it('keeps actionable connection notices while offline and suppresses stream noise', async () => {
     const { availability } = offlineDaemon();
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});

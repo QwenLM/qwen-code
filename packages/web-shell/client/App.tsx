@@ -17931,7 +17931,6 @@ export function App({
         pushToast('info', t('settings.models.addDisabled'));
         return true;
       }
-      if (!daemonAvailableRef.current) return false;
       if (connectionRef.current.loadingTranscript) {
         pushToast('warning', t('editor.sessionLoading'));
         return false;
@@ -17974,6 +17973,7 @@ export function App({
           trackSendFailure?: boolean;
         },
       ) => {
+        if (!daemonAvailableRef.current) return false;
         const admissionAttachment = {
           current: sessionOwnerGuard.capture(),
         };
@@ -19206,6 +19206,10 @@ export function App({
             inputAnnotations: metadata?.inputAnnotations,
           },
         );
+      } else if (!daemonAvailableRef.current) {
+        // Local slash commands above stay reachable during an outage; only
+        // network submissions are gated.
+        return false;
       } else if (text.startsWith('!')) {
         const cmd = text.slice(1).trim();
         if (!cmd) return false;
