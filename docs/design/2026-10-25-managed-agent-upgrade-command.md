@@ -80,20 +80,20 @@ The phases keep no state file. Each re-reads the units, files and links, so a ph
 
 ### Check rows
 
-| Row             | FAIL                                                                                                                                   | WARN                                                                         |
-| --------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| `distribution`  | a file differs from `SHA256SUMS`                                                                                                       |                                                                              |
-| `deployment`    | a unit is not loaded, the server does not start a distribution launcher, the new manifest is unreadable, or an install was interrupted |                                                                              |
-| `version`       | same or older release                                                                                                                  |                                                                              |
-| `database`      | a script the installed database ran was changed or removed; a repeatable script was removed                                            | scripts to apply, a changed repeatable one included; the jars cannot be read |
-| `java`, `node`  | below the manifest's minimum, or not found                                                                                             | a range the command cannot read                                              |
-| `qwen-code`     |                                                                                                                                        | the Harness runs another version than the manifest                           |
-| `harness-env`   |                                                                                                                                        | `QWEN_HOSTED_HARNESS_BROKER_ARGS`, or the Broker token set twice             |
-| `config`        | a non-file in the installed `config/`                                                                                                  |                                                                              |
-| `unit-files`    |                                                                                                                                        | a unit template changed between the releases                                 |
-| `layout`        | the releases directory is inside either distribution, or on another file system than a directory install moves                         |                                                                              |
-| `backup-tools`  | the `--mysqldump` client is not installed, or the datasource is not a single-host MySQL URL                                            | (SKIP with `--skip-database`)                                                |
-| `runtime-state` | another source can set the state directory and `--runtime-state` is absent; `--runtime-state` is not a directory                       | the configured directory does not exist (SKIP when none is configured)       |
+| Row             | FAIL                                                                                                                                   | WARN                                                                                                   |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `distribution`  | a file differs from `SHA256SUMS`                                                                                                       |                                                                                                        |
+| `deployment`    | a unit is not loaded, the server does not start a distribution launcher, the new manifest is unreadable, or an install was interrupted |                                                                                                        |
+| `version`       | same or older release                                                                                                                  |                                                                                                        |
+| `database`      | a script the installed database ran was changed or removed; a repeatable script was removed                                            | scripts to apply, a changed repeatable one included; the jars cannot be read                           |
+| `java`, `node`  | below the manifest's minimum, or not found                                                                                             | a range the command cannot read                                                                        |
+| `qwen-code`     |                                                                                                                                        | the Harness runs another version than the manifest                                                     |
+| `harness-env`   |                                                                                                                                        | `QWEN_HOSTED_HARNESS_BROKER_ARGS`, or the Broker token set twice                                       |
+| `config`        | a non-file in the installed `config/`                                                                                                  |                                                                                                        |
+| `unit-files`    |                                                                                                                                        | a unit template changed between the releases                                                           |
+| `layout`        | the releases directory is inside either distribution, or on another file system than a directory install moves                         |                                                                                                        |
+| `backup-tools`  | the `--mysqldump` client is not installed, or the datasource is not a single-host MySQL URL                                            | (SKIP with `--skip-database`)                                                                          |
+| `runtime-state` | another source can set the state directory and `--runtime-state` is absent; `--runtime-state` is not a directory                       | the configured directory does not exist (SKIP when none is configured, or with `--runtime-state none`) |
 
 `check` takes the options of the later phases and prints them into its plan, so the rows describe the run the operator will make. `stop` and `install` repeat all rows above `backup-tools`; `backup` repeats the last two.
 
@@ -103,9 +103,9 @@ The `database` row reads the Flyway scripts from both server jars: the manifest'
 
 ### Runtime state directory
 
-The server's `application.yml` maps `qwen.managed-agent.runtime-broker.state-directory` to `QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY`, and that variable is the only source the command reads. Spring resolves the property from many other places: a literal in a configuration file the launcher passes, system properties in `JAVA_OPTS` and its siblings, `SPRING_APPLICATION_JSON`, the relaxed-binding variable `QWEN_MANAGEDAGENT_RUNTIMEBROKER_STATEDIRECTORY`, the unit's arguments, and profile or import files. Each of them wins over the mapped variable.
+The server's `application.yml` maps `qwen.managed-agent.runtime-broker.state-directory` to `QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY`, and that variable is the only source the command reads. Spring resolves the property from many other places: a literal in a configuration file the launcher passes, system properties in `JAVA_OPTS` and its siblings, `SPRING_APPLICATION_JSON`, the relaxed-binding variable `QWEN_MANAGEDAGENT_RUNTIMEBROKER_STATEDIRECTORY`, the unit's arguments, and the files that an import or a profile brings in, whether a variable or a configuration file names them through `spring.config.import` or `spring.profiles.*`. Each of them wins over the mapped variable.
 
-The command does not reimplement Spring's resolution. It names any of these sources that mentions the property, or that loads configuration the command cannot read, and `backup` then refuses until `--runtime-state` names the directory. A backup without the Runtime state the database refers to cannot be restored consistently, so a backup that silently left it out would be worse than a refusal. When no source configures the directory, as on a deployment without the tool path, `backup` archives none and prints that.
+The command does not reimplement Spring's resolution. It names any of these sources that mentions the property, or that loads configuration the command cannot read, and `backup` then refuses until `--runtime-state` names the directory. It reads a configuration file's keys line by line, by YAML indentation or as properties keys, so an import in a file counts as such a source; it does not follow the import. `--runtime-state none` declares a deployment that keeps no Runtime state. A backup without the Runtime state the database refers to cannot be restored consistently, so a backup that silently left it out would be worse than a refusal. When no source configures the directory, as on a deployment without the tool path, `backup` archives none and prints that.
 
 ### Backup freshness
 
@@ -147,7 +147,7 @@ The control-plane unit adds `SuccessExitStatus=143`. `check` reports the changed
   - each check row;
   - every phase's refusals and its steps.
 - **Environment files.** 1579 random files read back through `systemd-run` on systemd 257, with no difference from the command's reader.
-- **Mutation testing.** 52 mutants of the script's decisions and 5 of the preflight changes.
+- **Mutation testing.** 61 mutants of the script's decisions and 5 of the preflight changes.
 - **Preflight unit tests:**
   - Flyway ordering;
   - the validation hook;

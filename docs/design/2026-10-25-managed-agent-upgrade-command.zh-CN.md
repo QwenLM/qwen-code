@@ -93,7 +93,7 @@
 | `unit-files`    |                                                                                            | 两个版本之间 unit 模板有变化                                     |
 | `layout`        | 版本目录位于任一分发产物内部，或与 install 要移动的目录不在同一文件系统                    |                                                                  |
 | `backup-tools`  | `--mysqldump` 指定的客户端未安装，或数据源不是单主机 MySQL URL                             | （指定 `--skip-database` 时为 SKIP）                             |
-| `runtime-state` | 有其他来源可以设置状态目录且未传 `--runtime-state`；`--runtime-state` 不是目录             | 配置的目录不存在（未配置时为 SKIP）                              |
+| `runtime-state` | 有其他来源可以设置状态目录且未传 `--runtime-state`；`--runtime-state` 不是目录             | 配置的目录不存在（未配置或传 `--runtime-state none` 时为 SKIP）  |
 
 `check` 接受后续阶段的选项，并把它们写进打印的计划，因此这些行描述的正是运维将要执行的那次运行。`stop` 和 `install` 会重复 `backup-tools` 以上的所有行；`backup` 重复最后两行。
 
@@ -103,9 +103,9 @@
 
 ### Runtime 状态目录
 
-服务端的 `application.yml` 把 `qwen.managed-agent.runtime-broker.state-directory` 映射到 `QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY`，而这个变量是命令读取的唯一来源。Spring 还会从许多其他地方解析这个属性：launcher 传入的配置文件中的字面量、`JAVA_OPTS` 等变量中的系统属性、`SPRING_APPLICATION_JSON`、relaxed binding 形式的变量 `QWEN_MANAGEDAGENT_RUNTIMEBROKER_STATEDIRECTORY`、unit 的启动参数，以及 profile 或 import 引入的文件。它们都优先于映射的变量。
+服务端的 `application.yml` 把 `qwen.managed-agent.runtime-broker.state-directory` 映射到 `QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY`，而这个变量是命令读取的唯一来源。Spring 还会从许多其他地方解析这个属性：launcher 传入的配置文件中的字面量、`JAVA_OPTS` 等变量中的系统属性、`SPRING_APPLICATION_JSON`、relaxed binding 形式的变量 `QWEN_MANAGEDAGENT_RUNTIMEBROKER_STATEDIRECTORY`、unit 的启动参数，以及 import 或 profile 引入的文件——不论是变量还是配置文件通过 `spring.config.import` 或 `spring.profiles.*` 引入的。它们都优先于映射的变量。
 
-命令不重新实现 Spring 的解析。只要上述来源中有提到该属性的，或者加载了命令无法读取的配置，它就逐一列出，`backup` 随即拒绝执行，直到 `--runtime-state` 指明目录。缺少数据库所引用的 Runtime 状态的备份无法一致地恢复，因此悄悄漏掉状态的备份比拒绝更糟。没有任何来源配置该目录时（例如未开启工具路径的部署），`backup` 不归档 Runtime 状态，并打印说明。
+命令不重新实现 Spring 的解析。只要上述来源中有提到该属性的，或者加载了命令无法读取的配置，它就逐一列出，`backup` 随即拒绝执行，直到 `--runtime-state` 指明目录。它逐行读取配置文件中的键（YAML 按缩进，properties 按键名），因此文件中的 import 也算作这样的来源；命令不会跟进 import 去读被引入的文件。`--runtime-state none` 表示部署不保存 Runtime 状态。缺少数据库所引用的 Runtime 状态的备份无法一致地恢复，因此悄悄漏掉状态的备份比拒绝更糟。没有任何来源配置该目录时（例如未开启工具路径的部署），`backup` 不归档 Runtime 状态，并打印说明。
 
 ### 备份是否仍然有效
 
@@ -147,7 +147,7 @@
   - check 的每一行；
   - 每个阶段的拒绝条件与执行步骤。
 - **环境文件。** 通过 systemd 257 的 `systemd-run` 读回 1579 个随机文件，与命令的读取结果没有任何差异。
-- **变异测试。** 脚本中的判断 52 个变异，预检改动 5 个变异。
+- **变异测试。** 脚本中的判断 61 个变异，预检改动 5 个变异。
 - **预检单元测试：**
   - Flyway 顺序；
   - 校验钩子；

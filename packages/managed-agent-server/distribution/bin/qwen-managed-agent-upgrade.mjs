@@ -89,8 +89,9 @@ Options:
   --releases <dir>         release directory (default <distribution link>-releases)
   --mysqldump <path>       check, backup: mysqldump to run (default mysqldump)
   --skip-database          check, backup: the database is backed up another way
-  --runtime-state <dir>    check, backup: the Runtime state directory, when not
-                           only QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY sets it
+  --runtime-state <dir>    check, backup: the Runtime state directory, or none,
+                           when not only QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY
+                           sets it
   --server-url <url>       start, verify: control-plane URL (default from server.env)
   --timeout <seconds>      stop, start, verify: how long to wait
   --turn                   verify: create a Session and run one Turn, which calls the model`;
@@ -1285,6 +1286,85 @@ const STATE_VARIABLE = 'QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY';
 // relaxed binding accepts.
 const STATE_PROPERTY = /state[-_]?directory/i;
 const STATE_ENVIRONMENT_NAME = 'qwen.managedagent.runtimebroker.statedirectory';
+// Keys that make Spring read further configuration: an import, or profiles
+// whose files this command does not read.
+const INDIRECT_KEY =
+  /^spring\.(config\.import|profiles\.(active|include|group))(\.|\[|$)/;
+const INDIRECT_PROPERTY =
+  /spring[._-]?config[._-]?import|spring[._-]?profiles[._-]?(active|include|group)/i;
+
+// Relaxed binding ignores case, dashes and underscores within a segment.
+const uniform = (key) => key.toLowerCase().replace(/[-_]/g, '');
+
+/**
+ * The keys a configuration file sets, as dotted paths, read line by line:
+ * YAML block mappings by indentation, a properties file by its keys. A flow
+ * collection that names an indirect key counts as an import.
+ */
+export function configurationKeys(text, properties = false) {
+  const keys = [];
+  const stack = [];
+  for (const line of text.split(/\r?\n/)) {
+    if (/^\s*(#|$)/.test(line) || (properties && /^\s*!/.test(line))) {
+      continue;
+    }
+    if (properties) {
+      const key = /^\s*((?:\\.|[^=:\s\\])+)/.exec(line)?.[1];
+      if (key) {
+        keys.push(key.replace(/\\(.)/g, '$1'));
+      }
+      continue;
+    }
+    if (/^(---|\.\.\.)\s*$/.test(line)) {
+      stack.length = 0;
+      continue;
+    }
+    const match =
+      /^(\s*)(?:-\s+)?("[^"]*"|'[^']*'|[^\s:#'"][^:#]*?)\s*:(\s|$)/.exec(line);
+    if (!match) {
+      continue;
+    }
+    const indent = match[1].length;
+    while (stack.length > 0 && stack.at(-1).indent >= indent) {
+      stack.pop();
+    }
+    stack.push({ indent, key: match[2].replace(/^(["'])(.*)\1$/, '$2') });
+    const key = stack.map((each) => each.key).join('.');
+    keys.push(key);
+    // spring: {config: {import: …}} names its keys inside the value.
+    if (
+      /[{[]/.test(line.slice(match[0].length)) &&
+      !INDIRECT_KEY.test(uniform(key))
+    ) {
+      const parent = stack
+        .slice(0, -1)
+        .map((each) => each.key)
+        .join('.');
+      const nested = INDIRECT_PROPERTY.exec(
+        `${parent}.${line.trim().replace(/[\s{}:,"']+/g, '.')}`,
+      );
+      if (nested) {
+        keys.push(nested[0]);
+      }
+    }
+  }
+  return keys;
+}
+
+/** The dotted keys of a JSON document, such as SPRING_APPLICATION_JSON. */
+function jsonKeys(value, prefix = '') {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return [];
+  }
+  return Object.entries(value).flatMap(([key, child]) => {
+    const name = prefix ? `${prefix}.${key}` : key;
+    return [name, ...jsonKeys(child, name)];
+  });
+}
+
+const indirectKeys = (keys) => [
+  ...new Set(keys.map(uniform).filter((key) => INDIRECT_KEY.test(key))),
+];
 
 /** The configuration files the server's launcher hands to Spring. */
 function serverConfigurationFiles(deployment) {
@@ -1294,7 +1374,7 @@ function serverConfigurationFiles(deployment) {
   // The launcher's default when the variable is unset.
   return locations === undefined
     ? {
-        files: [path.join(deployment.currentTarget, 'config/application.yml')],
+        files: [path.join(deployment.current, 'config/application.yml')],
         unread: [],
       }
     : configurationFiles(locations);
@@ -1307,6 +1387,9 @@ function serverConfigurationFiles(deployment) {
  * so it names them instead of guessing.
  */
 export async function runtimeState(deployment, options) {
+  if (options.runtimeState === 'none') {
+    return { none: true };
+  }
   if (options.runtimeState) {
     return { directory: options.runtimeState, source: '--runtime-state' };
   }
@@ -1316,27 +1399,40 @@ export async function runtimeState(deployment, options) {
     if (name.toLowerCase().replaceAll('_', '.') === STATE_ENVIRONMENT_NAME) {
       elsewhere.push(name);
     } else if (
-      [
-        'JAVA_OPTS',
-        'JAVA_TOOL_OPTIONS',
-        'JDK_JAVA_OPTIONS',
-        'SPRING_APPLICATION_JSON',
-      ].includes(name) &&
-      STATE_PROPERTY.test(value)
+      ['JAVA_OPTS', 'JAVA_TOOL_OPTIONS', 'JDK_JAVA_OPTIONS'].includes(name) &&
+      (STATE_PROPERTY.test(value) || INDIRECT_PROPERTY.test(value))
     ) {
       elsewhere.push(name);
+    } else if (name === 'SPRING_APPLICATION_JSON') {
+      let keys;
+      try {
+        keys = jsonKeys(JSON.parse(value));
+      } catch {
+        keys = undefined;
+      }
+      if (
+        !keys ||
+        STATE_PROPERTY.test(value) ||
+        indirectKeys(keys).length > 0
+      ) {
+        elsewhere.push(name);
+      }
     } else if (
       [
         'SPRING_CONFIG_LOCATION',
         'SPRING_CONFIG_IMPORT',
         'SPRING_PROFILES_ACTIVE',
+        'SPRING_PROFILES_INCLUDE',
       ].includes(name) &&
       value.trim()
     ) {
       elsewhere.push(`the configuration ${name} selects`);
     }
   }
-  if (STATE_PROPERTY.test(deployment.server.execStart)) {
+  if (
+    STATE_PROPERTY.test(deployment.server.execStart) ||
+    INDIRECT_PROPERTY.test(deployment.server.execStart)
+  ) {
     elsewhere.push(`the arguments of ${deployment.server.name}`);
   }
   const { files, unread } = serverConfigurationFiles(deployment);
@@ -1352,12 +1448,17 @@ export async function runtimeState(deployment, options) {
     } catch {
       continue;
     }
+    const properties = file.endsWith('.properties');
     const settings = text
       .split('\n')
-      .filter((line) => !/^\s*[#!]/.test(line))
+      .filter((line) => !(properties ? /^\s*[#!]/ : /^\s*#/).test(line))
       .join('\n');
+    // An import or a profile can set the directory in a file never read here.
+    const indirect = indirectKeys(configurationKeys(text, properties));
     if (STATE_PROPERTY.test(settings)) {
       elsewhere.push(file);
+    } else if (indirect.length > 0) {
+      elsewhere.push(`${file} (${indirect.join(', ')})`);
     }
   }
   if (elsewhere.length > 0) {
@@ -1369,12 +1470,19 @@ export async function runtimeState(deployment, options) {
 
 async function runtimeStateRow(deployment, options) {
   const state = await runtimeState(deployment, options);
+  if (state.none) {
+    return row(
+      'runtime-state',
+      'SKIP',
+      'backup archives no Runtime state, as --runtime-state none asks',
+    );
+  }
   if (state.elsewhere) {
     return row(
       'runtime-state',
       'FAIL',
       `${state.elsewhere.join(', ')} can set the Runtime state directory, which this command reads only from ${STATE_VARIABLE}`,
-      'pass --runtime-state <the directory the server uses> to check and backup',
+      'pass --runtime-state <the directory the server uses>, or none when it keeps no Runtime state, to check and backup',
     );
   }
   if (!state.directory) {
@@ -2374,7 +2482,9 @@ export async function runUpgrade(argv, system = createSystem()) {
     mysqldump: values.mysqldump,
     skipDatabase: values['skip-database'],
     runtimeState:
-      values['runtime-state'] && path.resolve(values['runtime-state']),
+      values['runtime-state'] === 'none'
+        ? 'none'
+        : values['runtime-state'] && path.resolve(values['runtime-state']),
     serverUrl: values['server-url']?.replace(/\/+$/, ''),
     timeout,
     tenant: values.tenant,

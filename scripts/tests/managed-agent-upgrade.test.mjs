@@ -1478,7 +1478,7 @@ test('backup archives the Runtime state directory the server uses', async (t) =>
   );
   assert.match(
     host.output.join('\n'),
-    /backup refused: .*application.yml can set the Runtime state directory, .*; pass --runtime-state <the directory the server uses> to check and backup\./,
+    /backup refused: .*application.yml can set the Runtime state directory, .*; pass --runtime-state <the directory the server uses>, or none when it keeps no Runtime state, to check and backup\./,
   );
   await assert.rejects(stat(target), { code: 'ENOENT' });
   assert.equal(
@@ -1520,6 +1520,17 @@ test('backup archives the Runtime state directory the server uses', async (t) =>
     [
       ['SPRING_CONFIG_ADDITIONAL_LOCATION=classpath:extra.yml'],
       'SPRING_CONFIG_ADDITIONAL_LOCATION entry classpath:extra.yml',
+    ],
+    [['JAVA_TOOL_OPTIONS=-Dspring.profiles.active=local'], 'JAVA_TOOL_OPTIONS'],
+    [
+      [`SPRING_APPLICATION_JSON='{"spring":{"config":{"import":"file:/x"}}}'`],
+      'SPRING_APPLICATION_JSON',
+    ],
+    [
+      [
+        `SPRING_APPLICATION_JSON='{"qwen":{"managed-agent":{"runtime-broker":{"state-directory":"/x"}}}}'`,
+      ],
+      'SPRING_APPLICATION_JSON',
     ],
   ]) {
     const other = await rig(t, { serverEnv });
@@ -1707,5 +1718,156 @@ test('install leaves no partial copy, and an interrupted one is reported', async
   assert.match(
     host.output.join('\n'),
     /install refused: .*finish the install with mv -T/,
+  );
+});
+
+test('check names the configuration a file imports or activates', async (t) => {
+  // Spring reads these, and the directory they name, from files this
+  // command never opens.
+  for (const [content, key] of [
+    [
+      'spring:\n  config:\n    import: file:/etc/qwen-managed-agent/runtime.yml\n',
+      'spring.config.import',
+    ],
+    [
+      'spring:\n  config:\n    import:\n      - optional:file:/etc/x.yml\n',
+      'spring.config.import',
+    ],
+    ['spring.config.import: file:/etc/x.yml\n', 'spring.config.import'],
+    [
+      'spring:\n  profiles:\n    active: managed-local\n',
+      'spring.profiles.active',
+    ],
+    ['spring:\n  Profiles:\n    include_: [a]\n', 'spring.profiles.include'],
+    ['spring: {config: {import: "file:/etc/x.yml"}}\n', 'spring.config.import'],
+    [
+      'spring:\n  config: {import: "file:/etc/x.yml"}\n',
+      'spring.config.import',
+    ],
+  ]) {
+    const host = await rig(t);
+    const yaml = path.join(host.current, 'config/application.yml');
+    await writeFile(yaml, content);
+    assert.equal(await host.check(), 1, content);
+    assert.equal(
+      rowsOf(host.output)['runtime-state'],
+      `FAIL ${yaml} (${key}) can set the Runtime state directory, which this command reads only from QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY`,
+      content,
+    );
+  }
+
+  // The review's case: the directory is set only in an imported file, and
+  // the variable is unset, so nothing would have been archived.
+  const imported = await rig(t, { state: null });
+  const runtime = path.join(imported.etc, 'runtime.yml');
+  await writeFile(
+    runtime,
+    `qwen:\n  managed-agent:\n    runtime-broker:\n      state-directory: ${imported.state}\n`,
+  );
+  await writeFile(
+    path.join(imported.current, 'config/application.yml'),
+    `spring:\n  config:\n    import: file:${runtime}\n`,
+  );
+  assert.equal(await imported.check(), 1);
+  assert.match(
+    rowsOf(imported.output)['runtime-state'],
+    /^FAIL .*\(spring\.config\.import\)/,
+  );
+  await imported.stop();
+  const target = path.join(imported.root, 'backup');
+  const mysqldump = path.join(imported.tools, 'mysqldump');
+  assert.equal(
+    await imported.upgrade('backup', '--to', target, '--mysqldump', mysqldump),
+    1,
+  );
+  await assert.rejects(stat(target), { code: 'ENOENT' });
+  assert.equal(
+    await imported.upgrade(
+      'backup',
+      '--to',
+      target,
+      '--mysqldump',
+      mysqldump,
+      '--runtime-state',
+      imported.state,
+    ),
+    0,
+  );
+  assert.ok((await readdir(target)).includes('runtime-state.tar'));
+
+  // A properties file that SPRING_CONFIG_ADDITIONAL_LOCATION names.
+  const host = await rig(t);
+  const properties = path.join(host.etc, 'extra.properties');
+  await writeFile(properties, '! a comment\nspring.config.import[0]=file:/x\n');
+  await writeFile(
+    path.join(host.etc, 'server.env'),
+    `${await readFile(path.join(host.etc, 'server.env'), 'utf8')}SPRING_CONFIG_ADDITIONAL_LOCATION=file:${properties}\n`,
+  );
+  assert.equal(await host.check(), 1);
+  assert.ok(
+    rowsOf(host.output)['runtime-state'].startsWith(
+      `FAIL ${properties} (spring.config.import[0]) can set`,
+    ),
+    rowsOf(host.output)['runtime-state'],
+  );
+
+  // Comments, and the same words under other keys, do not count.
+  const quiet = await rig(t);
+  await writeFile(
+    path.join(quiet.current, 'config/application.yml'),
+    [
+      '# spring.config.import: file:/x',
+      'qwen:',
+      '  managed-agent:',
+      '    extensions:',
+      '      allowed-actors: [ops]',
+      '      import: x',
+      'logging:',
+      '  group:',
+      '    web: x',
+      '',
+    ].join('\n'),
+  );
+  assert.equal(await quiet.check(), 0);
+  assert.match(rowsOf(quiet.output)['runtime-state'], /^PASS backup archives /);
+});
+
+test('--runtime-state none backs up a deployment that keeps no state', async (t) => {
+  const host = await rig(t, { state: null });
+  await writeFile(
+    path.join(host.current, 'config/application.yml'),
+    'spring:\n  profiles:\n    active: reference\n',
+  );
+  assert.equal(await host.check('--runtime-state', 'none'), 0);
+  assert.equal(
+    rowsOf(host.output)['runtime-state'],
+    'SKIP backup archives no Runtime state, as --runtime-state none asks',
+  );
+  assert.ok(
+    host.output.some((line) =>
+      line.endsWith(
+        ` backup --to <new empty directory> --mysqldump ${path.join(host.tools, 'mysqldump')} --runtime-state none`,
+      ),
+    ),
+  );
+  await host.stop();
+  const target = path.join(host.root, 'backup');
+  assert.equal(
+    await host.upgrade(
+      'backup',
+      '--to',
+      target,
+      '--mysqldump',
+      path.join(host.tools, 'mysqldump'),
+      '--runtime-state',
+      'none',
+    ),
+    0,
+  );
+  assert.ok(!(await readdir(target)).includes('runtime-state.tar'));
+  assert.equal(
+    JSON.parse(await readFile(path.join(target, 'backup.json'), 'utf8'))
+      .runtimeState,
+    null,
   );
 });
