@@ -3,6 +3,7 @@
  * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { checkDocument, readMarkup } from './check.js';
 import type { ShowInput } from './contracts.js';
@@ -48,6 +49,16 @@ describe('readMarkup', () => {
 });
 
 describe('checkDocument', () => {
+  it.each(['../README.md', '../skills/generated-ui/SKILL.md'])(
+    'accepts every documented example in %s',
+    async (path) => {
+      const text = readFileSync(new URL(path, import.meta.url), 'utf8');
+      for (const [, json] of text.matchAll(/```json\n([\s\S]*?)\n```/g)) {
+        await expect(checkDocument(JSON.parse(json))).resolves.toBeUndefined();
+      }
+    },
+  );
+
   it('accepts a view whose initial calculation succeeds', async () => {
     await expect(
       checkDocument(
