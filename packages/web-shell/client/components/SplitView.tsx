@@ -17,10 +17,11 @@ import {
   useConnection,
   type DaemonSessionActions,
 } from '@qwen-code/web-shell/daemon-react-sdk';
-import type {
-  DaemonSessionArtifact,
-  DaemonSessionMonitorTaskStatus,
-  DaemonWorkspaceCapability,
+import {
+  setSseBudgetFocus,
+  type DaemonSessionArtifact,
+  type DaemonSessionMonitorTaskStatus,
+  type DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
 import type { WebShellSlashCommandHandler } from '../App';
 import type { WebShellModelManagementOptions } from '../modelManagement';
@@ -590,6 +591,10 @@ export function SplitView({
                 onFocusCapture={(event) => {
                   if (event.currentTarget.contains(event.target as Node)) {
                     setActivePaneId(sessionId);
+                    // The focused pane gets live-stream priority in the
+                    // SDK's SSE budget; background panes do catch-up
+                    // cycles until a slot frees up.
+                    setSseBudgetFocus(sessionId);
                   }
                 }}
                 // Include the resolved workspace in the key on a multi-workspace

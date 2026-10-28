@@ -13,6 +13,12 @@ import type {
 import { DaemonTransportClosedError } from './DaemonTransport.js';
 import { DaemonHttpError } from './DaemonHttpError.js';
 import { parseSseStream } from './sse.js';
+import {
+  SSE_CATCH_UP_RETRY_DELAY_MS,
+  getSseBudgetRegistry,
+  type SseCatchUpCursor,
+} from './SseBudget.js';
+import { composeAbortSignals } from './abortSignals.js';
 
 // Keep in sync with the daemon route's predecessor-query validator.
 const SSE_STREAM_ID_RE =
@@ -95,6 +101,14 @@ export class RestSseTransport implements DaemonTransport {
     const requestCtrl = new AbortController();
     this.activeSseRequests.add(requestCtrl);
 
+    // Every subscription owns a live-stream budget slot (see
+    // SseBudget.ts). The key is created before the try so the finally
+    // below can release the slot even when the live fetch itself
+    // throws. It is unique per (session, connection) via the registry
+    // sequence.
+    const budget = getSseBudgetRegistry();
+    const budgetKey = `${sessionId}#${budget.seq++}`;
+
     try {
       const headers: Record<string, string> = { Accept: 'text/event-stream' };
       if (this.token) {
@@ -133,6 +147,51 @@ export class RestSseTransport implements DaemonTransport {
       const queryString = query.toString();
       if (queryString) {
         url += `?${queryString}`;
+      }
+
+      // Live-stream budget (see SseBudget.ts): at most `budget.max`
+      // concurrent live SSE streams per context, so 4-5 split-view
+      // panes cannot saturate the browser's per-origin HTTP/1.1
+      // connection pool (QwenLM/qwen-code#13908). A subscription that
+      // cannot take a slot does catch-up cycles instead of opening a
+      // live connection — serialized replay requests with the running
+      // cursor — until a slot frees up. Consumers dedupe by event id,
+      // so replayed frames are idempotent. The focused pane has
+      // priority over the least-recently active background holder.
+      const catchUpCursor: SseCatchUpCursor = { value: opts.lastEventId };
+      for (;;) {
+        if (fetchSignal.aborted) return;
+        const focused = budget.focus === null || budget.focus === sessionId;
+        if (budget.acquire(budgetKey, sessionId, focused, requestCtrl)) {
+          break;
+        }
+        if (!budget.startCycle()) {
+          // Another subscription is catching up: wait a beat and
+          // probe again.
+          await budget.wait(SSE_CATCH_UP_RETRY_DELAY_MS, fetchSignal);
+          continue;
+        }
+        try {
+          for await (const event of budget.catchUp(
+            this._fetch,
+            url,
+            headers,
+            fetchSignal,
+            catchUpCursor,
+          )) {
+            yield event;
+          }
+        } finally {
+          budget.endCycle();
+        }
+        await budget.wait(SSE_CATCH_UP_RETRY_DELAY_MS, fetchSignal);
+      }
+      // The live connection resumes from the furthest id the catch-up
+      // cycles delivered (or the caller's own cursor when there was no
+      // catch-up, in which case this only re-asserts the header set
+      // above).
+      if (catchUpCursor.value !== undefined) {
+        headers['Last-Event-ID'] = String(catchUpCursor.value);
       }
 
       // Connect-phase timeout (request → headers received). The SSE
@@ -221,8 +280,14 @@ export class RestSseTransport implements DaemonTransport {
         opts.onEpoch?.(responseEpoch);
       }
 
-      yield* parseSseStream(res.body, fetchSignal);
+      for await (const event of parseSseStream(res.body, fetchSignal)) {
+        // Keep the LRU ordering honest: a pane that is actively
+        // delivering frames is the last one the budget evicts.
+        budget.touch(budgetKey);
+        yield event;
+      }
     } finally {
+      budget.release(budgetKey);
       requestCtrl.abort();
       this.activeSseRequests.delete(requestCtrl);
     }
@@ -236,46 +301,4 @@ export class RestSseTransport implements DaemonTransport {
     }
     this.activeSseRequests.clear();
   }
-}
-
-// ---------------------------------------------------------------------------
-// Minimal abort-signal composition (same logic as DaemonClient's
-// `composeAbortSignals` but kept transport-local to avoid a circular
-// import). REST is the only transport that needs this inline; the ACP
-// transports compose differently.
-// ---------------------------------------------------------------------------
-
-function composeAbortSignals(signals: AbortSignal[]): AbortSignal {
-  const anyFn = (
-    AbortSignal as unknown as { any?: (s: AbortSignal[]) => AbortSignal }
-  ).any;
-  if (typeof anyFn === 'function') return anyFn.call(AbortSignal, signals);
-
-  const ctrl = new AbortController();
-  const cleanups: Array<() => void> = [];
-  const detachAll = () => {
-    while (cleanups.length > 0) {
-      const fn = cleanups.pop();
-      try {
-        fn?.();
-      } catch {
-        /* swallow */
-      }
-    }
-  };
-  for (const s of signals) {
-    if (s.aborted) {
-      ctrl.abort(s.reason);
-      detachAll();
-      return ctrl.signal;
-    }
-    const onAbort = () => {
-      ctrl.abort(s.reason);
-      detachAll();
-    };
-    s.addEventListener('abort', onAbort, { once: true });
-    cleanups.push(() => s.removeEventListener('abort', onAbort));
-  }
-  ctrl.signal.addEventListener('abort', detachAll, { once: true });
-  return ctrl.signal;
 }

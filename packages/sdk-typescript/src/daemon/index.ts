@@ -45,6 +45,15 @@ export type {
   DaemonTransportType,
 } from './DaemonTransport.js';
 export type { RestSseTransport } from './RestSseTransport.js';
+export {
+  DEFAULT_MAX_LIVE_SSE_STREAMS,
+  SSE_CATCH_UP_RETRY_DELAY_MS,
+  SseBudgetRegistry,
+  getSseBudgetRegistry,
+  resetSseBudgetRegistry,
+  setSseBudgetFocus,
+} from './SseBudget.js';
+export type { SseCatchUpCursor } from './SseBudget.js';
 // negotiateTransport + the concrete ACP transport classes are intentionally
 // NOT re-exported here: a static import chain from this barrel would pull
 // their framing/SSE code into the budget-checked browser bundle (see
