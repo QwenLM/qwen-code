@@ -31,11 +31,9 @@ const { mockSendStructuredMessage, mockWriteMessage, realMailbox } = vi.hoisted(
     mockWriteMessage: vi.fn(),
     realMailbox: {
       sendStructuredMessage: undefined as
-        | typeof import('../mailbox.js').sendStructuredMessage
-        | undefined,
+        typeof import('../mailbox.js').sendStructuredMessage | undefined,
       writeMessage: undefined as
-        | typeof import('../mailbox.js').writeMessage
-        | undefined,
+        typeof import('../mailbox.js').writeMessage | undefined,
     },
   }),
 );
@@ -1656,11 +1654,19 @@ describe('TeamCoordinationHarness', () => {
       const h = await createHarness();
       await h.spawnTeammate('worker');
       await h.spawnTeammate('reviewer');
-      const exited: Array<{ name: string; status: string }> = [];
+      const exited: Array<{
+        name: string;
+        status: string;
+        teardown?: boolean;
+      }> = [];
       h.teamManager
         .getEventEmitter()
         .on(TeamEventType.TEAMMATE_EXITED, (event) => {
-          exited.push({ name: event.name, status: event.status });
+          exited.push({
+            name: event.name,
+            status: event.status,
+            teardown: event.teardown,
+          });
         });
 
       await h.teamManager.cleanup();
@@ -1670,8 +1676,8 @@ describe('TeamCoordinationHarness', () => {
       // after the emitter has no listeners, so the exit has to be published by
       // the teardown itself.
       expect(exited.sort((a, b) => a.name.localeCompare(b.name))).toEqual([
-        { name: 'reviewer', status: AgentStatus.CANCELLED },
-        { name: 'worker', status: AgentStatus.CANCELLED },
+        { name: 'reviewer', status: AgentStatus.CANCELLED, teardown: true },
+        { name: 'worker', status: AgentStatus.CANCELLED, teardown: true },
       ]);
     });
 

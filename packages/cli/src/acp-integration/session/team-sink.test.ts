@@ -227,6 +227,58 @@ describe('attachTeamSink', () => {
     expect(respond.mock.calls[0]![0]).toBe(offered!.options[0]!.optionId);
   });
 
+  it('does not report a host failure when the abort rejects the request', async () => {
+    // The real collaborator rejects with an abort-shaped error when the signal
+    // fires (`requestPermissionWithAbort`), so the rejection must be swallowed
+    // by the abort guard instead of reaching the fail-closed branch, which
+    // would answer a second time and tell the leader the host stayed silent.
+    requestPermission.mockImplementation(
+      (_params: RequestPermissionRequest, signal: AbortSignal) =>
+        new Promise<RequestPermissionResponse>((_resolve, reject) => {
+          signal.addEventListener('abort', () =>
+            reject(new Error('Permission request was aborted.')),
+          );
+        }),
+    );
+    const detach = attachTeamSink(deps);
+    const { event, respond } = approvalEvent();
+    manager.emitter.emit(TeamEventType.TEAMMATE_APPROVAL_REQUEST, event);
+
+    detach();
+
+    await vi.waitFor(() => expect(respond).toHaveBeenCalledTimes(1));
+    expect(respond.mock.calls[0]![0]).toBe(ToolConfirmationOutcome.Cancel);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(respond).toHaveBeenCalledTimes(1);
+    expect(deps.injectLeaderMessage).not.toHaveBeenCalledWith(
+      expect.stringContaining('could not answer'),
+      expect.anything(),
+    );
+  });
+
+  it('cancels without a leader notice when the answer names a stripped option', async () => {
+    // A direct ACP client can answer with an option the policy filter removed.
+    // The host did answer, so the fail-closed leader notice would be false; the
+    // tool still must not proceed unreviewed.
+    requestPermission.mockResolvedValue({
+      outcome: {
+        outcome: 'selected',
+        optionId: 'proceed_always_project_NOT_OFFERED',
+      },
+    } as RequestPermissionResponse);
+    const detach = attachTeamSink(deps);
+    const { event, respond } = approvalEvent();
+    manager.emitter.emit(TeamEventType.TEAMMATE_APPROVAL_REQUEST, event);
+
+    await vi.waitFor(() => expect(respond).toHaveBeenCalledTimes(1));
+    expect(respond.mock.calls[0]![0]).toBe(ToolConfirmationOutcome.Cancel);
+    expect(deps.injectLeaderMessage).not.toHaveBeenCalledWith(
+      expect.stringContaining('could not answer'),
+      expect.anything(),
+    );
+    detach();
+  });
+
   it('keeps simultaneous approvals from the same teammate independently addressable', async () => {
     const detach = attachTeamSink(deps);
     const pending = new Map<
@@ -503,7 +555,23 @@ describe('attachTeamSink', () => {
     expect(retireTeammateApprovals).toHaveBeenCalledExactlyOnceWith(
       'correctness',
     );
+
+    const rosterReportsBeforeDetach = reportRosterChange.mock.calls.length;
     detach();
+    // Every other manager listener is pinned quiet after detach; a leaked exit
+    // listener would keep retiring approvals and queueing roster items for a
+    // team this session no longer manages.
+    expect(manager.emitter.listenerCount('teammate_exited')).toBe(0);
+    manager.emitter.emit(TeamEventType.TEAMMATE_EXITED, {
+      agentId: 'a2',
+      name: 'correctness',
+      status: 'completed',
+      timestamp: 2,
+    });
+    expect(retireTeammateApprovals).toHaveBeenCalledTimes(1);
+    expect(reportRosterChange.mock.calls.length).toBe(
+      rosterReportsBeforeDetach,
+    );
   });
 
   it('ignores a same-instance manager re-notification instead of doubling listeners', () => {

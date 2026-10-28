@@ -1647,9 +1647,9 @@ export class TeamManager {
     const ledger = this.shutdownLedgers.get(name);
     return Boolean(
       ledger &&
-        (ledger.inFlightWrites > 0 ||
-          ledger.outstandingTokens.some((token) => !token.consumed) ||
-          ledger.responsesInFlight > 0),
+      (ledger.inFlightWrites > 0 ||
+        ledger.outstandingTokens.some((token) => !token.consumed) ||
+        ledger.responsesInFlight > 0),
     );
   }
 
@@ -1793,6 +1793,7 @@ export class TeamManager {
         // them, so the terminal status is a cancellation, not a completion.
         status: AgentStatus.CANCELLED,
         timestamp: Date.now(),
+        teardown: true,
       });
     }
 

@@ -64,6 +64,12 @@ export interface TeamSinkDeps {
     type: 'joined' | 'exited';
     name: string;
     status?: string;
+    /**
+     * True when the team teardown published this exit as part of a burst. The
+     * listener must still learn about every member, but turning each one into
+     * its own leader turn is the noise the activity path exists to avoid.
+     */
+    teardown?: boolean;
   }) => void;
   /**
    * Observational teammate progress (tool calls/results) and inter-teammate
@@ -257,7 +263,24 @@ export function attachTeamSink(deps: TeamSinkDeps): () => void {
         const output = await deps.requestPermission(params, signal);
         if (signal.aborted) return;
         signal.removeEventListener('abort', cancelOnAbort);
-        const outcome = resolvePermissionOutcome(output, offered);
+        let outcome: ToolConfirmationOutcome;
+        try {
+          outcome = resolvePermissionOutcome(output, offered);
+        } catch (error) {
+          // The host answered, but named an option the policy filter stripped.
+          // That is a client contract violation, not a host failure: cancel the
+          // tool without telling the leader the host stayed silent.
+          debugLogger.warn(
+            `Teammate permission answer for ${who} named no offered option; cancelling without a leader notice.`,
+            error,
+          );
+          // No `<team_notice>`: the host did answer, so the leader must not be
+          // told it stayed silent. The tool still cannot proceed unreviewed.
+          event
+            .respond(ToolConfirmationOutcome.Cancel)
+            .catch((respondError) => swallow(respondError, 'Cancel'));
+          return;
+        }
         // Past this point the host *has* answered, so a rejection from
         // `respond` is the resumed tool body failing, not an unanswered
         // approval. It must not reach the fail-closed branch: the cancel there
@@ -303,6 +326,7 @@ export function attachTeamSink(deps: TeamSinkDeps): () => void {
       type: 'exited',
       name: event.name,
       status: event.status,
+      ...(event.teardown ? { teardown: true } : {}),
     });
   };
 
