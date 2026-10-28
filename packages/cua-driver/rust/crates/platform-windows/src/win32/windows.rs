@@ -95,6 +95,13 @@ pub(crate) fn resolve_app_window(windows: &[WindowInfo]) -> Option<u64> {
     let selected = visible
         .iter()
         .find(|w| w.hwnd == foreground)
+        // Start at an owner before resolving its active popup, not an idle helper.
+        .or_else(|| {
+            visible.iter().find(|w| {
+                window_owner_handle(w.hwnd)
+                    .is_none_or(|owner| !visible.iter().any(|parent| parent.hwnd == owner))
+            })
+        })
         .or_else(|| visible.first())?;
     let popup = unsafe { GetLastActivePopup(HWND(selected.hwnd as *mut _)) }.0 as usize as u64;
     if visible
@@ -501,6 +508,57 @@ mod exact_window_tests {
             is_on_screen: true,
             minimized: false,
         }
+    }
+
+    #[test]
+    fn app_fallback_starts_at_owner_instead_of_idle_owned_window() {
+        use super::{resolve_app_window, window_owner_handle};
+        use windows::core::w;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WS_OVERLAPPEDWINDOW, WS_POPUP,
+        };
+        struct Window(windows::Win32::Foundation::HWND);
+        impl Drop for Window {
+            fn drop(&mut self) {
+                let _ = unsafe { DestroyWindow(self.0) };
+            }
+        }
+        // Hidden native windows exercise ownership without changing the desktop.
+        let create = |owner: Option<windows::Win32::Foundation::HWND>| {
+            Window(unsafe {
+                CreateWindowExW(
+                    WINDOW_EX_STYLE(0),
+                    w!("STATIC"),
+                    w!("CUA owner selection test"),
+                    if owner.is_some() {
+                        WS_POPUP
+                    } else {
+                        WS_OVERLAPPEDWINDOW
+                    },
+                    0,
+                    0,
+                    100,
+                    100,
+                    owner.unwrap_or_default(),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap()
+            })
+        };
+        let owner = create(None);
+        let helper = create(Some(owner.0));
+        let owner_id = owner.0 .0 as usize as u64;
+        let helper_id = helper.0 .0 as usize as u64;
+        assert_eq!(window_owner_handle(helper_id), Some(owner_id));
+        let owner_info = window(std::process::id(), owner_id);
+        let helper_info = window(std::process::id(), helper_id);
+        assert_eq!(
+            resolve_app_window(&[helper_info.clone(), owner_info]),
+            Some(owner_id)
+        );
+        assert_eq!(resolve_app_window(&[helper_info]), Some(helper_id));
     }
 
     #[test]
