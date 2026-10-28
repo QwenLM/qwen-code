@@ -2684,24 +2684,30 @@ function agentIdentityFromTaskExecution(
   if (typeof subagentName !== 'string' || subagentName.length === 0) {
     return undefined;
   }
-  // `executionMode` is set only on the display built once `SubagentValidator`
-  // has resolved `subagentConfig.name`, and every frame that spreads an
-  // admitted display inherits it. `buildSpawnBlockedResult` — the only
-  // producer of the raw model-supplied `subagent_type` — sets none. So this
-  // field, not `status`, separates a validated name from a raw one.
-  const started =
-    display['executionMode'] === 'foreground' ||
-    display['executionMode'] === 'background';
-  const status = display['status'];
-  if (
-    !started &&
-    typeof status === 'string' &&
-    status !== 'completed' &&
-    status !== 'running' &&
-    status !== 'background' &&
-    status !== 'cancelled'
-  ) {
-    return undefined;
+  // `executionMode` separates a validated name from the raw model-supplied
+  // `subagent_type` (`buildSpawnBlockedResult` sets neither), but it is written
+  // by rejection paths too — worktree-provisioning failure and the foreground
+  // model-slot cancel both persist it for a subagent whose session never
+  // registered. `subagentSessionReady` is the positive evidence that a session
+  // existed, so a mode-shaped display without it stays unattributed rather
+  // than minting an identity the live wire never stamped.
+  const executionMode = display['executionMode'];
+  if (executionMode === 'foreground' || executionMode === 'background') {
+    if (display['subagentSessionReady'] !== true) return undefined;
+  } else {
+    // Positive allowlist. A persisted record may come from a truncated or
+    // older writer, so an absent or non-string status is not evidence that
+    // anything ran; a negative allowlist would mint on exactly that input.
+    const status = display['status'];
+    if (
+      typeof status !== 'string' ||
+      (status !== 'completed' &&
+        status !== 'running' &&
+        status !== 'background' &&
+        status !== 'cancelled')
+    ) {
+      return undefined;
+    }
   }
   if (!SUBAGENT_NAME_PATTERN.test(subagentName)) return undefined;
   // A persisted `task_execution` carries no lineage beyond its own type name,
