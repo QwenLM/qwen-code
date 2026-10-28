@@ -478,11 +478,21 @@ function GenericToolDetails({
     () => formatJsonPayload(resultText, formatBudget, formatBudget),
     [resultText, formatBudget],
   );
+  const argumentsNeedsExpansion = useMemo(
+    () =>
+      !documentMode &&
+      sanitizeControlChars(argumentsPayload.text).length >
+        MAX_TOOL_PAYLOAD_LENGTH,
+    [argumentsPayload.text, documentMode],
+  );
+  const resultNeedsExpansion = useMemo(
+    () =>
+      !documentMode &&
+      sanitizeControlChars(resultPayload.text).length > MAX_TOOL_PAYLOAD_LENGTH,
+    [resultPayload.text, documentMode],
+  );
   const canExpand =
-    !documentMode &&
-    !expanded &&
-    (argumentsPayload.text.length > MAX_TOOL_PAYLOAD_LENGTH ||
-      resultPayload.text.length > MAX_TOOL_PAYLOAD_LENGTH);
+    !expanded && (argumentsNeedsExpansion || resultNeedsExpansion);
   return (
     <div className={styles.payloadSections}>
       {argumentsText && (

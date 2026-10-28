@@ -3531,11 +3531,12 @@ describe('generic tool card details', () => {
     expect(text).not.toContain('\u202e');
   });
 
-  it('bounds the rendered payload after escaping control characters', () => {
+  it('offers Show more when escaping grows the payload past the cap', () => {
+    const tail = 'NUL-TAIL';
     const container = renderToolLine(
       makeTool({
         toolName: 'mcp__demo__nul',
-        rawOutput: '\u0000'.repeat(2000),
+        rawOutput: `${'\u0000'.repeat(2000)}${tail}`,
       }),
       { forceExpanded: true },
     );
@@ -3543,6 +3544,15 @@ describe('generic tool card details', () => {
     const payload = container.querySelector('[class*="payloadText"]');
     expect(payload).not.toBeNull();
     expect(payload?.textContent?.length ?? 0).toBeLessThanOrEqual(4003);
+    expect(container.textContent).toContain('Content truncated');
+    expect(container.textContent).not.toContain(tail);
+
+    const more = [...container.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Show more',
+    );
+    expect(more).toBeDefined();
+    act(() => more?.click());
+    expect(container.textContent).toContain(tail);
   });
 
   it('does not repeat a cancelled call input as the result', () => {
@@ -3565,6 +3575,59 @@ describe('generic tool card details', () => {
     expect(text).toContain('partial');
     expect(text).not.toContain('"reason"');
     expect(text.split('"method": "ping"').length - 1).toBe(1);
+  });
+
+  it.each(['output', 'stdout'] as const)(
+    'keeps cancelled %s output visible',
+    (key) => {
+      const output = `partial-${key}`;
+      const container = renderToolLine(
+        makeTool({
+          toolName: 'mcp__demo__cancel-output',
+          status: 'completed',
+          wasCancelled: true,
+          rawOutput: {
+            status: 'cancelled',
+            reason: '{"method":"ping"}',
+            [key]: output,
+          },
+        }),
+        { forceExpanded: true },
+      );
+
+      const text = container.textContent ?? '';
+      expect(text).toContain(output);
+      expect(text).not.toContain('"reason"');
+    },
+  );
+
+  it('keeps a cancelled string output visible', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__cancel-string',
+        status: 'completed',
+        wasCancelled: true,
+        rawOutput: 'partial-string',
+      }),
+      { forceExpanded: true },
+    );
+
+    expect(container.textContent).toContain('partial-string');
+  });
+
+  it('shows Cancelled when a cancelled call has no output', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__cancel-empty',
+        status: 'completed',
+        wasCancelled: true,
+        rawOutput: {},
+      }),
+      { forceExpanded: true },
+    );
+
+    expect(container.textContent).toContain('Cancelled');
+    expect(container.textContent).not.toContain('Waiting for output…');
   });
 
   it('offers Show more for a large arguments payload', () => {
