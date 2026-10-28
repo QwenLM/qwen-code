@@ -4701,6 +4701,18 @@ DELETE: once the label is gone the PR is in neither selection pool, so
 nothing would ever re-post it, and "retry next scan" would be a promise
 no branch can keep.
 
+A FORCED dispatch defers that release to the next non-forced scan. The
+shepherd's conflict dispatch has to be answered out loud (af-031), so the
+pass that meets a spent budget takes the paused path instead — cap-refused
+note, paused notice, needs-human — and the next passive scan releases. Two
+consequences are load-bearing. The release DELETEs needs-human as well
+(404-tolerant, and only after the takeover DELETE landed): the note says
+nothing is waiting on a human, so the escalation its own deferral applied
+must not outlive it. And the notices on that deferred pass quote the
+ATTEMPTS, not ROUND: a no-op-only engagement reaches this gate at round 0,
+and '0/N' would name a cap the PR never reached — the same reason the log
+line and the fleet row already speak of the budget rather than the cap.
+
 'for 0' is rejected rather than aliased to the bare command: a
 zero-round engagement is what 'stop' already means (af-007).
 ```

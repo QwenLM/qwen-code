@@ -60,7 +60,7 @@ that `for N` cannot bound.
 
 | State                                                           | What happens                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | --------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Budget spent on a human-authored PR                             | One bilingual "budget spent — released" note, then `autofix/takeover` is removed. No `autofix/needs-human`, no paused notice.                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Budget spent on a human-authored PR                             | One bilingual "budget spent — released" note, then `autofix/takeover` is removed. No `autofix/needs-human`, no paused notice. A FORCED dispatch defers this to the next non-forced scan: that pass answers the dispatch out loud on the paused path, and the release that follows deletes the `autofix/needs-human` that pause applied. The deferred pass's notices quote the attempts spent, not the round counter a no-op-only engagement leaves at 0.                                                                                       |
 | Budget spent on a bot-authored PR                               | The label is NOT removed (the bot PR is managed without it), so it lands on the existing paused path: paused notice + `autofix/needs-human`. A SPENT budget outlives any removal that leaves no `takeover-ack released` marker — the shepherd's three-day auto-release and a hand-removal alike — and the PR stays parked at N/N. An explicit `stop` posts that marker, which moves the engagement floor, so the budget ends there and standard management resumes, exactly as the ack says. An UNSPENT budget ends with the label either way. |
 | A breaker stops the loop BEFORE the budget is spent             | The existing paused path runs: paused notice + `autofix/needs-human`. A breaker asks for a human, so it is never reported as a finished budget.                                                                                                                                                                                                                                                                                                                                                                                                |
 | A breaker's condition met ON the attempt that spends the budget | The budget wins: that attempt is already counted, so the PR takes the release path and its note instead of the paused one. The consecutive-failure breaker cannot fire on the round that reaches N (its entry gate skips the cap round), so no breaker diagnosis is posted for a window that ended by design.                                                                                                                                                                                                                                  |
@@ -98,7 +98,12 @@ that `for N` cannot bound.
    "the loop stopped and a human must unstick something"; a finished budget
    leaves nothing stuck, so the label and the paused notice would both be false.
    Release is just the label DELETE, so the PR leaves the managed pool on its
-   own.
+   own. A forced dispatch is the one pass that cannot release: it has to answer
+   the dispatch out loud, so it pauses and the next passive scan releases. That
+   release therefore deletes the escalation label too — the note denies that
+   anything is waiting on a human, so the label its own deferral applied must
+   not outlive it — and the deferred pass's notices quote the attempts rather
+   than a round counter that no-ops never advance.
 
 4. **Bot-authored PRs keep the paused path.** They are managed whether or not
    the label is present, so releasing it would hand them back to standard
@@ -168,8 +173,9 @@ constant, default, or behaviour changes.
   Critical-only brake, or the growth budgets. The fleet shepherd is touched in
   exactly one place — its resume detector learns the two parameterized command
   forms — and its release policy is unchanged.
-- No new labels. Budget exhaustion deliberately does NOT use
-  `autofix/needs-human` on human-authored PRs.
+- No new labels. Budget exhaustion deliberately does NOT leave
+  `autofix/needs-human` on human-authored PRs: a deferred release clears the
+  one its own pause applied.
 - No change to admission: the same author/write+ gate, fork rules and
   `autofix/skip` precedence apply to `for N` as to the bare command.
 
@@ -215,7 +221,9 @@ constant, default, or behaviour changes.
   engagement floor (not the window key) is what carries it across an automatic
   re-arm, and that the census keeps `win=none` markers out.
 - Cap-branch replay proving the release path posts one note, deletes the label,
-  and never applies `autofix/needs-human`.
+  and never APPLIES `autofix/needs-human` — while the deferred (forced-dispatch)
+  pass pauses, quotes the attempts in its notices, and has its escalation
+  cleared by the release that follows, 404 included.
 - Not verifiable locally end to end: the command only runs in the upstream
   repository with the bot PAT. The shell blocks are replayed verbatim from the
   workflow file, so drift fails the suite.

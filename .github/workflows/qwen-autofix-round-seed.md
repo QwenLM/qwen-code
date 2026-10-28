@@ -141,6 +141,14 @@ cap of 100). When the counter reaches `N`, the loop **releases** the PR:
   "reached its round cap" notice — a finished budget leaves nothing stuck, so
   both would be false.
 
+**A forced dispatch defers that release to the next non-forced scan.** If the
+fleet shepherd dispatches a conflict round at the moment the budget finishes,
+that pass has to answer the dispatch out loud, so it takes the paused path
+(paused notice plus `autofix/needs-human`) and the next scheduled scan releases
+— clearing that escalation label with it. The notices on the deferred pass
+quote the attempts spent (N/N), not the change-producing round counter, which a
+no-op-only engagement leaves at 0.
+
 **Every finished attempt counts.** The budget is measured by the round's eval
 marker, one per attempt: a no-op round writes one with its round number
 unchanged, and a round that is cancelled or dies in setup writes one with the
