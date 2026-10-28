@@ -4274,32 +4274,34 @@ class QwenAgent implements Agent {
     }
 
     const configList = [...configs];
-    const writerTerminals: Array<Promise<void>> = [];
-    for (const config of configList) {
-      // A Managed session's Runtime worker stops before its log is handed
-      // off, so no call outlives the log; other writers close at once.
-      if (config.getSessionExecutionEngine?.() === 'managed') {
-        writerTerminals.push(
-          Promise.resolve()
-            .then(() => config.closeManagedRuntime())
-            .catch((error: unknown) => {
-              debugLogger.error(
-                '[ACP] Managed Runtime worker shutdown error:',
-                error,
-              );
-            })
-            .then(() => config.closeSessionWriter({ handoff: true })),
-        );
-        continue;
-      }
-      try {
-        writerTerminals.push(config.closeSessionWriter({ handoff: true }));
-      } catch (error) {
-        writerTerminals.push(Promise.reject(error));
-      }
-    }
     const writerShutdown = Promise.allSettled(peerFlushes)
-      .then(() => Promise.allSettled(writerTerminals))
+      .then(() => {
+        const writerTerminals: Array<Promise<void>> = [];
+        for (const config of configList) {
+          // A Managed session's Runtime worker stops before its log is handed
+          // off, so no call outlives the log; other writers close at once.
+          if (config.getSessionExecutionEngine?.() === 'managed') {
+            writerTerminals.push(
+              Promise.resolve()
+                .then(() => config.closeManagedRuntime())
+                .catch((error: unknown) => {
+                  debugLogger.error(
+                    '[ACP] Managed Runtime worker shutdown error:',
+                    error,
+                  );
+                })
+                .then(() => config.closeSessionWriter({ handoff: true })),
+            );
+            continue;
+          }
+          try {
+            writerTerminals.push(config.closeSessionWriter({ handoff: true }));
+          } catch (error) {
+            writerTerminals.push(Promise.reject(error));
+          }
+        }
+        return Promise.allSettled(writerTerminals);
+      })
       .then((results) => {
         const failures = results.flatMap((result) =>
           result.status === 'rejected' ? [result.reason] : [],
