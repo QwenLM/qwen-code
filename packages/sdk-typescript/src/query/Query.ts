@@ -39,6 +39,7 @@ import type {
   EffortOverride,
   EffortStatus,
   EffortTier,
+  WorkflowModeState,
 } from '../types/types.js';
 import { isSdkMcpServerConfig } from '../types/types.js';
 import { Stream } from '../utils/Stream.js';
@@ -91,6 +92,27 @@ function parseEffortStatus(value: unknown): EffortStatus | undefined {
   };
 }
 
+function parseWorkflowModeState(
+  value: Record<string, unknown> | null,
+): WorkflowModeState {
+  if (
+    !value ||
+    typeof value.requested !== 'boolean' ||
+    typeof value.available !== 'boolean' ||
+    typeof value.effective !== 'boolean' ||
+    value.effective !== (value.requested && value.available) ||
+    (value.reason !== undefined && typeof value.reason !== 'string')
+  ) {
+    throw new Error('Invalid Workflow mode response from CLI');
+  }
+  return {
+    requested: value.requested,
+    available: value.available,
+    effective: value.effective,
+    ...(typeof value.reason === 'string' ? { reason: value.reason } : {}),
+  };
+}
+
 export class Query implements AsyncIterable<SDKMessage> {
   private transport: Transport;
   private options: QueryOptions;
@@ -105,6 +127,7 @@ export class Query implements AsyncIterable<SDKMessage> {
   private sdkMcpServers: Map<string, McpServer> = new Map();
   readonly initialized: Promise<void>;
   private initialEffortStatus: EffortStatus | undefined;
+  private workflowModeSupported = false;
   private closed = false;
   private messageRouterStarted = false;
   private transportReadFinalized = false;
@@ -185,6 +208,9 @@ export class Query implements AsyncIterable<SDKMessage> {
           error instanceof Error ? error : new Error(errorMessage),
         );
       }
+      this.close().catch((cleanupError) => {
+        logger.error('Error during initialization cleanup:', cleanupError);
+      });
     });
 
     this.startMessageRouter();
@@ -341,8 +367,21 @@ export class Query implements AsyncIterable<SDKMessage> {
               : undefined,
           agents: this.options.agents,
           effort: this.options.effort,
+          workflowMode: this.options.workflowMode,
         },
       );
+      const capabilities = response?.['capabilities'];
+      this.workflowModeSupported =
+        typeof capabilities === 'object' &&
+        capabilities !== null &&
+        'can_set_workflow_mode' in capabilities &&
+        capabilities.can_set_workflow_mode === true;
+      if (
+        this.options.workflowMode !== undefined &&
+        !this.workflowModeSupported
+      ) {
+        throw new Error('The CLI does not support session Workflow mode');
+      }
       this.initialEffortStatus = parseEffortStatus(response?.['effort_status']);
       if (this.initialEffortStatus?.applied === false) {
         // The CLI-side reason joins every cause that holds; prefer it over
@@ -1013,6 +1052,31 @@ export class Query implements AsyncIterable<SDKMessage> {
 
   async setModel(model: string): Promise<void> {
     await this.sendControlRequest(ControlRequestType.SET_MODEL, { model });
+  }
+
+  async getWorkflowMode(): Promise<WorkflowModeState> {
+    await this.initialized;
+    if (!this.workflowModeSupported) {
+      throw new Error('The CLI does not support session Workflow mode');
+    }
+    return parseWorkflowModeState(
+      await this.sendControlRequest(ControlRequestType.GET_WORKFLOW_MODE),
+    );
+  }
+
+  async setWorkflowMode(enabled: boolean): Promise<WorkflowModeState> {
+    if (typeof enabled !== 'boolean') {
+      throw new Error('Workflow mode must be a boolean');
+    }
+    await this.initialized;
+    if (!this.workflowModeSupported) {
+      throw new Error('The CLI does not support session Workflow mode');
+    }
+    return parseWorkflowModeState(
+      await this.sendControlRequest(ControlRequestType.SET_WORKFLOW_MODE, {
+        enabled,
+      }),
+    );
   }
 
   /**

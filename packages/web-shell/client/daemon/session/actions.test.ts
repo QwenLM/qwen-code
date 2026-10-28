@@ -7,6 +7,7 @@ import {
   DaemonStandaloneCreationOutcomeUnknownError,
   DaemonTransportClosedError,
   type DaemonCapabilities,
+  type DaemonSessionBtwStreamEvent,
   type DaemonContinueSessionResult,
   DaemonSessionClient,
   type DaemonSessionContextStatus,
@@ -30,6 +31,70 @@ import type {
   PendingSessionLoad,
   SettledPrompt,
 } from './types';
+
+describe('Generated UI action invalidation', () => {
+  it('revokes the cleared session before waiting for detach', async () => {
+    const session = createMockSession('original');
+    const detach = createDeferred<void>();
+    session.detach.mockReturnValue(detach.promise);
+    const onGeneratedUiInvalidated = vi.fn();
+    const h = createActionsHarness({ session, onGeneratedUiInvalidated });
+    const clearing = h.actions.clearSession();
+    expect(onGeneratedUiInvalidated).toHaveBeenCalledWith(session, 'cleared');
+    detach.resolve();
+    await clearing;
+  });
+
+  it.each(['release', 'rewind'] as const)(
+    'invalidates the original owner after successful %s, even after navigation',
+    async (operation) => {
+      const session = createMockSession('original');
+      const finished = createDeferred<unknown>();
+      session.client.closeSession.mockReturnValue(finished.promise);
+      session.rewind.mockReturnValue(finished.promise);
+      const onGeneratedUiInvalidated = vi.fn();
+      const h = createActionsHarness({ session, onGeneratedUiInvalidated });
+      const pending =
+        operation === 'release'
+          ? h.actions.releaseSession('background')
+          : h.actions.rewindSession('prompt');
+      expect(onGeneratedUiInvalidated).not.toHaveBeenCalled();
+      h.sessionRef.current = createMockSession(
+        'replacement',
+      ) as unknown as DaemonSessionClient;
+      finished.resolve({});
+      await pending;
+      if (operation === 'release')
+        expect(onGeneratedUiInvalidated).toHaveBeenCalledWith(
+          session,
+          'deleted',
+          'background',
+        );
+      else
+        expect(onGeneratedUiInvalidated).toHaveBeenCalledWith(
+          session,
+          'rewound',
+        );
+    },
+  );
+
+  it.each(['release', 'rewind'] as const)(
+    'does not report an unsuccessful %s as a deletion',
+    async (operation) => {
+      const session = createMockSession('original');
+      session.client.closeSession.mockRejectedValue(new Error('refused'));
+      session.rewind.mockRejectedValue(new Error('refused'));
+      const onGeneratedUiInvalidated = vi.fn();
+      const h = createActionsHarness({ session, onGeneratedUiInvalidated });
+      await expect(
+        operation === 'release'
+          ? h.actions.releaseSession('background')
+          : h.actions.rewindSession('prompt'),
+      ).rejects.toThrow('refused');
+      expect(onGeneratedUiInvalidated).not.toHaveBeenCalled();
+    },
+  );
+});
 
 describe('context usage counter reconciliation', () => {
   function snapshot() {
@@ -1451,6 +1516,30 @@ describe('createDaemonSessionActions', () => {
       label: 'exact label',
     });
     expect(onPromptRemoved).toHaveBeenCalledWith(session, 'prompt-1');
+  });
+
+  it('binds admission to a caller-supplied block when no optimistic message is appended', async () => {
+    const session = createMockSession('session-a');
+    const onPromptAdmitted = vi.fn();
+    const { actions, store } = createActionsHarness({
+      session,
+      onPromptAdmitted,
+    });
+
+    const prompt = actions.sendPrompt('retried text', {
+      optimisticUserMessage: false,
+      bindBlockId: 'block-failed',
+    });
+
+    await vi.waitFor(() => expect(onPromptAdmitted).toHaveBeenCalledOnce());
+    expect(store.appendLocalUserMessage).not.toHaveBeenCalled();
+    expect(onPromptAdmitted).toHaveBeenCalledWith(session, {
+      promptId: 'prompt-1',
+      label: 'retried text',
+      blockId: 'block-failed',
+    });
+    await actions.cancel();
+    await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
   });
 
   it('notifies prompt removal on the stale-session branch with the foreign session id', async () => {
@@ -6968,6 +7057,7 @@ function createActionsHarness(
     onPromptAdmitted?: ReturnType<typeof vi.fn>;
     onContinuationAdmitted?: ReturnType<typeof vi.fn>;
     onPromptRemoved?: ReturnType<typeof vi.fn>;
+    onGeneratedUiInvalidated?: ReturnType<typeof vi.fn>;
     passiveAssistantDoneTimerRef?: {
       current: ReturnType<typeof setTimeout> | undefined;
     };
@@ -7063,6 +7153,7 @@ function createActionsHarness(
     onPromptAdmitted: opts.onPromptAdmitted,
     onContinuationAdmitted: opts.onContinuationAdmitted,
     onPromptRemoved: opts.onPromptRemoved,
+    onGeneratedUiInvalidated: opts.onGeneratedUiInvalidated,
     setConnection: (update) => {
       connection = typeof update === 'function' ? update(connection) : update;
       opts.onConnectionChange?.(connection);
@@ -7151,6 +7242,17 @@ function createMockSession(
     },
     savedWorkflow: vi.fn(),
     cancel: vi.fn(async () => undefined),
+    btw: vi.fn(async () => ({ sessionId, answer: 'Legacy answer' })),
+    btwStream: vi.fn(
+      async function* (): AsyncGenerator<DaemonSessionBtwStreamEvent> {
+        yield {
+          v: 1,
+          type: 'done',
+          requestId: 'btw-request',
+          answer: 'Side answer',
+        } as const;
+      },
+    ),
     context: vi.fn(async () => contextStatus(sessionId)),
     detach: vi.fn(async () => undefined),
     setModel: vi.fn(async () => ({})),
@@ -7875,4 +7977,219 @@ describe('model catalog refresh', () => {
       expect(h.workspace.reloadModelProviders).not.toHaveBeenCalled();
     },
   );
+});
+
+describe('streaming side questions', () => {
+  const connection: DaemonConnectionState = {
+    status: 'connected',
+    workspaceCwd: '/workspace',
+    capabilities: { features: ['session_btw_stream'] } as DaemonCapabilities,
+  };
+
+  it.each([undefined, [], ['session_btw']])(
+    'uses legacy JSON when streaming is not advertised: %j',
+    async (features) => {
+      const session = createMockSession('session-a');
+      const legacyConnection: DaemonConnectionState = {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        ...(features === undefined
+          ? {}
+          : { capabilities: { features } as DaemonCapabilities }),
+      };
+      const { actions } = createActionsHarness({
+        session,
+        connection: legacyConnection,
+      });
+      const signal = new AbortController().signal;
+      const events = [];
+      for await (const event of actions.btwSessionStream('Question', {
+        signal,
+      }))
+        events.push(event);
+      expect(events).toEqual([{ type: 'done', answer: 'Legacy answer' }]);
+      expect(session.btw).toHaveBeenCalledWith('Question', { signal });
+      expect(session.btwStream).not.toHaveBeenCalled();
+    },
+  );
+
+  it('does not retry JSON after an advertised stream fails', async () => {
+    const session = createMockSession('session-a');
+    session.btwStream.mockImplementationOnce(async function* () {
+      yield await Promise.reject(new Error('Stream not found'));
+    });
+    const addNotice = vi.fn();
+    const { actions } = createActionsHarness({
+      session,
+      connection,
+      addNotice,
+    });
+    await expect(
+      actions.btwSessionStream('Question').next(),
+    ).rejects.toMatchObject({ message: 'Stream not found' });
+    expect(session.btwStream).toHaveBeenCalledOnce();
+    expect(session.btw).not.toHaveBeenCalled();
+    expect(addNotice).toHaveBeenCalledOnce();
+  });
+
+  it('keeps streaming beyond the ordinary 30-second action deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      const session = createMockSession('session-a');
+      const finish = createDeferred<void>();
+      session.btwStream.mockImplementationOnce(async function* () {
+        await finish.promise;
+        yield {
+          v: 1,
+          type: 'done',
+          requestId: 'btw-request',
+          answer: 'Slow answer',
+        } as const;
+      });
+      const addNotice = vi.fn();
+      const { actions } = createActionsHarness({
+        session,
+        addNotice,
+        connection,
+      });
+      const stream = actions.btwSessionStream('Question');
+      const answer = stream.next();
+      await vi.advanceTimersByTimeAsync(31_000);
+      expect(addNotice).not.toHaveBeenCalled();
+      finish.resolve();
+      expect((await answer).value).toMatchObject({
+        type: 'done',
+        answer: 'Slow answer',
+      });
+      await stream.next();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(['btw_timeout', 'btw_cancelled', 'btw_failed'])(
+    'preserves terminal error code %s in the notice',
+    async (code) => {
+      const session = createMockSession('session-a');
+      const addNotice = vi.fn();
+      session.btwStream.mockImplementationOnce(async function* () {
+        yield {
+          v: 1,
+          type: 'error',
+          requestId: 'btw-request',
+          code,
+          message: 'Stream failed',
+        } as const;
+      });
+      const { actions } = createActionsHarness({
+        session,
+        addNotice,
+        connection,
+      });
+      await expect(
+        actions.btwSessionStream('Question').next(),
+      ).rejects.toMatchObject({ message: 'Stream failed' });
+      expect(addNotice).toHaveBeenCalledWith(
+        expect.objectContaining({
+          operation: 'btw_session',
+          code,
+          message: 'Side question failed: Stream failed',
+        }),
+      );
+    },
+  );
+  it.each([
+    [410, 'btw_expired'],
+    [409, 'btw_request_conflict'],
+    [429, 'btw_limit'],
+    [501, 'btw_stream_not_supported'],
+  ] as const)(
+    'preserves HTTP %i error code %s in the notice',
+    async (status, code) => {
+      const session = createMockSession('session-a');
+      const error = new DaemonHttpError(status, { code }, 'Server explanation');
+      session.btwStream.mockImplementationOnce(async function* () {
+        yield await Promise.reject(error);
+      });
+      const addNotice = vi.fn();
+      const { actions } = createActionsHarness({
+        session,
+        connection,
+        addNotice,
+      });
+      await expect(actions.btwSessionStream('Question').next()).rejects.toBe(
+        error,
+      );
+      expect(addNotice).toHaveBeenCalledWith(
+        expect.objectContaining({
+          operation: 'btw_session',
+          code,
+          message: 'Side question failed: Server explanation',
+        }),
+      );
+      expect(session.btw).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['legacy action', 'stream fallback'] as const)(
+    'keeps the 30-second deadline for %s',
+    async (path) => {
+      vi.useFakeTimers();
+      try {
+        const session = createMockSession('session-a');
+        session.btw.mockImplementationOnce(() => new Promise(() => {}));
+        const addNotice = vi.fn();
+        const { actions } = createActionsHarness({
+          session,
+          addNotice,
+          connection: {
+            ...connection,
+            capabilities: { features: [] } as DaemonCapabilities,
+          },
+        });
+        const result =
+          path === 'legacy action'
+            ? actions.btwSession('Question')
+            : actions.btwSessionStream('Question').next();
+        const failed = result.catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(29_999);
+        expect(addNotice).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(1);
+        expect(await failed).toMatchObject({
+          message: 'Side question timed out after 30000ms',
+        });
+        expect(addNotice).toHaveBeenCalledOnce();
+        expect(session.btwStream).not.toHaveBeenCalled();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it('reports a stream that ends without a terminal snapshot', async () => {
+    const session = createMockSession('session-a');
+    session.btwStream.mockImplementationOnce(async function* () {
+      yield {
+        v: 1,
+        type: 'answer',
+        requestId: 'request',
+        answer: 'Partial',
+      } as const;
+    });
+    const addNotice = vi.fn();
+    const { actions } = createActionsHarness({
+      session,
+      connection,
+      addNotice,
+    });
+    const stream = actions.btwSessionStream('Question');
+    expect((await stream.next()).value).toEqual({
+      type: 'answer',
+      answer: 'Partial',
+    });
+    await expect(stream.next()).rejects.toThrow('ended before completion');
+    expect(addNotice).toHaveBeenCalledOnce();
+    expect(session.btw).not.toHaveBeenCalled();
+  });
 });

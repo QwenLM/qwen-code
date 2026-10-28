@@ -120,6 +120,74 @@ describe('SessionCatalogStore', () => {
     }
   });
 
+  it('keeps a pending prompt title on every catalog read until a custom title lands', async () => {
+    store.setPendingSessionTitle('/work', 'session-1', 'Fix login');
+    legacy.mockResolvedValueOnce(page('session-1'));
+    await store.loadOnce(query('/work'), { fresh: true });
+    expect(
+      store.getSnapshot(query('/work')).page?.sessions[0]?.displayName,
+    ).toBe('Fix login');
+
+    legacy.mockResolvedValueOnce({
+      ...page('session-1'),
+      sessions: [
+        {
+          sessionId: 'session-1',
+          workspaceCwd: '/work',
+          displayName: 'a long first prompt',
+        },
+      ],
+    });
+    await store.loadOnce(query('/work'), { fresh: true });
+    expect(
+      store.getSnapshot(query('/work')).page?.sessions[0]?.displayName,
+    ).toBe('Fix login');
+
+    legacy.mockResolvedValueOnce({
+      ...page('session-1'),
+      sessions: [
+        {
+          sessionId: 'session-1',
+          workspaceCwd: '/work',
+          displayName: 'Server title',
+          titleSource: 'manual',
+        },
+      ],
+    });
+    await store.loadOnce(query('/work'), { fresh: true });
+    expect(
+      store.getSnapshot(query('/work')).page?.sessions[0]?.displayName,
+    ).toBe('Server title');
+
+    legacy.mockResolvedValueOnce(page('session-1'));
+    await store.loadOnce(query('/work'), { fresh: true });
+    expect(
+      store.getSnapshot(query('/work')).page?.sessions[0]?.displayName,
+    ).toBeUndefined();
+  });
+
+  it('drops a pending title when a real rename clears it', async () => {
+    store.setPendingSessionTitle('/work', 'session-1', 'Fix login');
+    store.clearPendingSessionTitle('/work', 'session-1');
+    legacy.mockResolvedValueOnce(page('session-1'));
+    await store.loadOnce(query('/work'), { fresh: true });
+    expect(
+      store.getSnapshot(query('/work')).page?.sessions[0]?.displayName,
+    ).toBeUndefined();
+  });
+
+  it('does not let a cleared pending title overwrite a manual rename', async () => {
+    legacy.mockResolvedValueOnce(page('session-1'));
+    await store.loadOnce(query('/work'), { fresh: true });
+    store.setPendingSessionTitle('/work', 'session-1', 'Fix login');
+    store.clearPendingSessionTitle('/work', 'session-1');
+    store.patchSession('/work', 'session-1', { displayName: 'Bug hunt' });
+    store.invalidateWorkspace('/work');
+    expect(
+      store.getSnapshot(query('/work')).page?.sessions[0]?.displayName,
+    ).toBe('Bug hunt');
+  });
+
   it('peeks a cached display name without scheduling a request', async () => {
     const response = deferred<DaemonSessionListPage>();
     legacy.mockReturnValue(response.promise);
@@ -1261,6 +1329,23 @@ describe('SessionCatalogStore', () => {
     expect(store.getSnapshot(other).stale).toBe(false);
     expect(store.getSnapshot(active).page?.sessions[0]?.sessionId).toBe(
       '/work',
+    );
+    unsubscribe();
+  });
+
+  it('applies a pending title when a staged workspace refresh commits', async () => {
+    const active = query('/work');
+    legacy.mockResolvedValueOnce(page('cached'));
+    await store.loadOnce(active, { fresh: true });
+    const unsubscribe = store.subscribe(active, vi.fn());
+    store.setPendingSessionTitle('/work', 'fresh', 'Fix login');
+    legacy.mockResolvedValueOnce(page('fresh'));
+
+    const staged = await store.stageWorkspaceRefresh('/work');
+
+    expect(store.commitWorkspaceRefresh(staged)).toBe(true);
+    expect(store.getSnapshot(active).page?.sessions[0]?.displayName).toBe(
+      'Fix login',
     );
     unsubscribe();
   });

@@ -126,6 +126,11 @@ import {
   type BridgeSessionCatalogVersion,
 } from '../acp-session-bridge.js';
 import type { DaemonLogger } from '../daemon-logger.js';
+import {
+  BtwStreamError,
+  BtwStreamRequests,
+  streamBtwSnapshots,
+} from '../btw-stream.js';
 import type { SendBridgeError } from '../server/error-response.js';
 import {
   WorktreeMarkerMissingError,
@@ -175,7 +180,7 @@ import {
 } from '../server/session-artifact-library.js';
 import { WorkspaceArtifactCache } from '../server/workspace-artifact-cache.js';
 import { ArtifactLibraryStream } from '../server/artifact-library-stream.js';
-import { bindSessionPrsFromReviewPrompt } from './session-pr-backfill.js';
+import { bindSessionPrsFromPromptCommand } from './session-pr-backfill.js';
 import { acquireWorktreeOwnershipOp } from '../server/worktree-ownership-op.js';
 import {
   exportSessionTranscript,
@@ -237,6 +242,8 @@ import {
   sendWorkspaceRuntimeUnavailable,
 } from '../workspace-route-runtime.js';
 import {
+  redactWorkflowModeFromConfigOptions,
+  redactWorkflowModeFromSessionState,
   redactWorkflowsFromAvailableCommandsEvent,
   redactWorkflowsFromReplayArrays,
   redactWorkflowsFromSupportedCommands,
@@ -856,6 +863,7 @@ export function registerSessionRoutes(
   app: Application,
   deps: RegisterSessionRoutesDeps,
 ): { resolveSubagentSessionRuntime: ResolveSubagentSessionRuntime } {
+  const btwStreams = new BtwStreamRequests();
   const {
     boundWorkspace,
     workspaceRegistry,
@@ -6986,9 +6994,14 @@ export function registerSessionRoutes(
     withOwnerReadSession(
       'GET /session/:id/context',
       async (_req, res, sessionId, runtime) => {
+        const status = await runtime.bridge.getSessionContextStatus(sessionId);
         res
           .status(200)
-          .json(await runtime.bridge.getSessionContextStatus(sessionId));
+          .json(
+            runtime.trusted
+              ? status
+              : redactWorkflowModeFromSessionState(status),
+          );
       },
     ),
   );
@@ -8608,9 +8621,10 @@ export function registerSessionRoutes(
         }
         res.off('close', onResClose);
 
-        // A `/review <N|url>` prompt binds the PR to this session as soon as
-        // the turn is admitted, instead of waiting for an on-demand backfill
-        // sweep. Off the prompt path: a failed bind never affects the turn.
+        // A `/review` or `/verify-pr` prompt binds the PR to this session as
+        // soon as the turn is admitted, instead of waiting for an on-demand
+        // backfill sweep. Off the prompt path: a failed bind never affects
+        // the turn.
         if (runtime.trusted && channelPrompt === undefined) {
           // Only the prompt the user typed is a source: take the first text
           // block. Later blocks can carry @-imported file content whose
@@ -8626,7 +8640,7 @@ export function registerSessionRoutes(
               ? (firstTextBlock['text'] as string)
               : undefined;
           if (promptText !== undefined) {
-            void bindSessionPrsFromReviewPrompt(
+            void bindSessionPrsFromPromptCommand(
               runtime,
               sessionId,
               promptText,
@@ -8636,10 +8650,19 @@ export function registerSessionRoutes(
             )
               .then((result) => {
                 if (!result) return;
-                if (result.writeErrors || result.unresolved) {
-                  daemonLog?.warn('review PR bind incomplete', {
+                // A `--repo` decline is a policy outcome, not a failure, but
+                // it still has to reach the log: a badge missing because the
+                // number named another repository is otherwise
+                // indistinguishable from one that never resolved.
+                if (
+                  result.writeErrors ||
+                  result.unresolved ||
+                  result.repoDeclined
+                ) {
+                  daemonLog?.warn('session PR bind incomplete', {
                     sessionId,
                     unresolved: result.unresolved,
+                    repoDeclined: result.repoDeclined,
                     writeErrors: result.writeErrors,
                     overLimit: result.overLimit,
                   });
@@ -8652,7 +8675,7 @@ export function registerSessionRoutes(
                 ) {
                   return;
                 }
-                daemonLog?.warn('review PR bind failed', {
+                daemonLog?.warn('session PR bind failed', {
                   sessionId,
                   error: describePromptTurnFailure(error),
                 });
@@ -10305,9 +10328,9 @@ export function registerSessionRoutes(
         const configId = body['configId'];
         const value = body['value'];
         const persist = body['persist'];
-        if (configId !== 'reasoning_effort') {
+        if (configId !== 'reasoning_effort' && configId !== 'workflow_mode') {
           res.status(400).json({
-            error: '`configId` must be reasoning_effort',
+            error: '`configId` must be reasoning_effort or workflow_mode',
           });
           return;
         }
@@ -10317,12 +10340,40 @@ export function registerSessionRoutes(
           });
           return;
         }
+        if (configId === 'workflow_mode') {
+          if ((value !== 'on' && value !== 'off') || persist !== undefined) {
+            res.status(400).json({
+              error:
+                'Workflow mode requires on/off and does not accept persist',
+            });
+            return;
+          }
+          if (!runtime.trusted) {
+            sendUntrustedSessionOwner(
+              res,
+              'POST /session/:id/config-option',
+              sessionId,
+              runtime,
+            );
+            return;
+          }
+          if (runtime.routeFileSystemFactory.sshWorkspace) {
+            res.status(501).json({
+              code: 'ssh_workspace_operation_unsupported',
+              error: 'Workflow mode is unsupported for SSH workspaces',
+            });
+            return;
+          }
+        }
         if (persist !== undefined && typeof persist !== 'boolean') {
           res.status(400).json({
             error: '`persist` must be a boolean when provided',
           });
           return;
         }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const assertOpen = captureRuntimeGenerationAssertion(runtime);
         const response = await runtime.bridge.setSessionConfigOption(
           sessionId,
           {
@@ -10337,10 +10388,16 @@ export function registerSessionRoutes(
                 }
               : {}),
           },
+          clientId !== undefined ? { clientId } : undefined,
+          assertOpen,
         );
+        assertOpen?.();
         res.status(200).json({
-          configOptions: response.configOptions,
+          configOptions: runtime.trusted
+            ? response.configOptions
+            : redactWorkflowModeFromConfigOptions(response).configOptions,
           persisted:
+            configId === 'workflow_mode' ||
             response._meta?.[REASONING_SELECTION_PERSISTED_META_KEY] === true,
         });
       },
@@ -10375,6 +10432,85 @@ export function registerSessionRoutes(
         res.status(200).json(response);
       },
     ),
+  );
+
+  const btwRequestId = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/);
+  const btwStreamInput = z.object({
+    question: z.string().max(BTW_MAX_INPUT_LENGTH).trim().min(1),
+    requestId: btwRequestId,
+    resume: z.boolean().optional(),
+  });
+  const btwStreamHandler = (method: 'post' | 'delete') =>
+    withOwnerMutableSession(
+      method === 'post'
+        ? 'POST /session/:id/btw/stream'
+        : 'DELETE /session/:id/btw/stream/:requestId',
+      (req, res, sessionId, runtime) => {
+        const parsed =
+          method === 'post'
+            ? btwStreamInput.safeParse(safeBody(req))
+            : btwRequestId.safeParse(req.params['requestId']);
+        if (!parsed.success) {
+          res.status(400).json({
+            code: 'invalid_btw_request',
+            error:
+              method === 'post'
+                ? 'A valid requestId and non-empty question are required'
+                : 'A valid requestId is required',
+          });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const bridge = runtime.bridge;
+        // Session detach can win the race with cancelling its own cached request.
+        if (
+          typeof parsed.data !== 'string' ||
+          !btwStreams.has(bridge, sessionId, clientId, parsed.data)
+        ) {
+          // Authorize this live-session client without starting model work.
+          bridge.getPendingPrompts(
+            sessionId,
+            clientId !== undefined ? { clientId } : undefined,
+          );
+        }
+        try {
+          if (typeof parsed.data === 'string') {
+            btwStreams.cancel(bridge, sessionId, clientId, parsed.data);
+            res.status(204).end();
+            return;
+          }
+          if (!bridge.generateSessionBtwStream) {
+            res.status(501).json({
+              code: 'btw_stream_not_supported',
+              error: 'Streaming side questions are not supported',
+            });
+            return;
+          }
+          const { requestId, question, resume } = parsed.data;
+          const request = btwStreams.open(
+            bridge,
+            sessionId,
+            clientId,
+            requestId,
+            question,
+            resume === true,
+          );
+          // The bridge's side request holds generation alive independently of HTTP.
+          void streamBtwSnapshots(res, request);
+        } catch (error) {
+          if (!(error instanceof BtwStreamError)) throw error;
+          res
+            .status(error.status)
+            .json({ code: error.code, error: error.message });
+        }
+      },
+    );
+  app.post('/session/:id/btw/stream', mutate(), btwStreamHandler('post'));
+  app.delete(
+    '/session/:id/btw/stream/:requestId',
+    mutate(),
+    btwStreamHandler('delete'),
   );
 
   app.post(

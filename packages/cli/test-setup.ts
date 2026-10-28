@@ -43,6 +43,13 @@ delete process.env['QWEN_RUNTIME_DIR'];
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { EXTRACT_NOOP_SKIP_TURNS_ENV } from '@qwen-code/qwen-code-core/memory/extract-cadence.js';
+
+// The extraction-cadence experiment is default-off and its gate reads
+// process.env on every call, so an ambient export would switch it on for every
+// suite whose session schedules an extraction. Deleting rather than pinning:
+// tests that exercise the experiment stub the variable in-body.
+delete process.env[EXTRACT_NOOP_SKIP_TURNS_ENV];
 
 // QWEN_HOME is the OPERATOR's config home, and inheriting it lets the host's
 // real ~/.qwen leak into this suite: every unpinned settings read
