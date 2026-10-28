@@ -87,16 +87,13 @@ public final class SessionWorktreeGit implements AutoCloseable {
                 if (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
                     throw error("worktree_path_conflict", "The allocated directory already exists and was preserved.");
                 }
-                try (FileChannel channel = FileChannel.open(marker, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)) {
-                    ByteBuffer bytes = ByteBuffer.wrap(expected);
-                    while (bytes.hasRemaining()) {
-                        channel.write(bytes);
-                    }
-                    channel.force(true);
-                }
+                writeRecord(marker, expected);
             }
             requireMarker(plan);
             if (!Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
+                if (Files.exists(completion(plan), LinkOption.NOFOLLOW_LINKS)) {
+                    throw error("worktree_identity_conflict", "The completed worktree is missing; its record was preserved.");
+                }
                 var repository = git.sessionOpen(root, plan.repositoryRelative());
                 if (!repository.commonDir().toString().equals(plan.commonDirectory())) {
                     throw error("worktree_identity_conflict", "The source Git repository changed.");
@@ -106,6 +103,8 @@ public final class SessionWorktreeGit implements AutoCloseable {
                     throw error("worktree_branch_conflict", "The allocated branch already exists; its contents were preserved.");
                 }
                 command(repository.top(), root, "worktree", "add", "-b", plan.branch(), "--", target.toString(), plan.baseCommit());
+                requireDirectory(root.resolve(plan.cwdRelative()));
+                writeRecord(completion(plan), captureIdentity(plan, null).getBytes(java.nio.charset.StandardCharsets.UTF_8));
             }
             requireDirectory(root.resolve(plan.cwdRelative()));
             return verify(plan, null);
@@ -167,6 +166,18 @@ public final class SessionWorktreeGit implements AutoCloseable {
     }
 
     public static String verify(Plan plan, String savedIdentity) {
+        String actual = captureIdentity(plan, savedIdentity);
+        try {
+            if (!JSON.readTree(actual).equals(JSON.readTree(regularText(completion(plan))))) {
+                throw new IOException("Checkout completion identity changed");
+            }
+            return actual;
+        } catch (IOException exception) {
+            throw error("worktree_identity_conflict", "Initial checkout completion cannot be verified; the directory was preserved.");
+        }
+    }
+
+    private static String captureIdentity(Plan plan, String savedIdentity) {
         requireRoot(plan);
         requireMarker(plan);
         Path root = Path.of(plan.root());
@@ -231,6 +242,20 @@ public final class SessionWorktreeGit implements AutoCloseable {
 
     private static Path marker(Plan plan) {
         return Path.of(plan.root()).resolve(CONTAINER).resolve(plan.worktreeId() + ".json");
+    }
+
+    private static Path completion(Plan plan) {
+        return Path.of(plan.root()).resolve(CONTAINER).resolve(plan.worktreeId() + ".ready");
+    }
+
+    private static void writeRecord(Path path, byte[] content) throws IOException {
+        try (FileChannel channel = FileChannel.open(path, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)) {
+            ByteBuffer bytes = ByteBuffer.wrap(content);
+            while (bytes.hasRemaining()) {
+                channel.write(bytes);
+            }
+            channel.force(true);
+        }
     }
 
     private boolean absent(Plan plan) {

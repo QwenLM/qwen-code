@@ -64,6 +64,13 @@ maintenance hold and enters blocked until existing stop evidence permits
 reconciliation. macOS automatic recovery from a JVM killed during Git is not
 introduced. A recheck cannot force-release that hold.
 
+Only a successful initial `git worktree add` records a forced-to-disk completion
+receipt outside the checkout, bound to its filesystem and Git identity. Reentry
+and ready checks require that receipt. An existing checkout with missing, partial
+or mismatched completion evidence stays blocked, including after verified stop
+recovery or Session closure. Recovery never resets files to infer completion;
+normal edits and branch renames after a recorded completion remain valid.
+
 Close/archive/delete preserve the checkout. Cleanup requires the recorded owner,
 current Workspace write permission, a terminal Session and drained Runtime,
 children, uploads and preparation. Under the maintenance hold it rechecks

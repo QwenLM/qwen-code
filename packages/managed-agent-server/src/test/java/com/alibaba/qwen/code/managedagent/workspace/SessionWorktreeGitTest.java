@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.persistence.SessionWorktreeStore;
 import com.alibaba.qwen.code.managedagent.persistence.SessionWorktreeStore.Plan;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -121,6 +122,63 @@ class SessionWorktreeGitTest {
         assertThat(Files.readString(target(plan).resolve("file.txt"))).isEqualTo("keep me\n");
         assertThat(run(target(plan), "branch", "--show-current").strip()).isEqualTo("renamed-work");
         assertThat(SessionWorktreeGit.currentBranch(SessionWorktreeGit.verify(plan, identity))).isEqualTo("renamed-work");
+    }
+
+    @Test
+    void interruptedInitialCheckoutIsNeverAdoptedOnReentry() throws Exception {
+        Path bulk = Files.createDirectory(repository.resolve("bulk"));
+        for (int i = 0; i < 10000; i++) {
+            Files.writeString(bulk.resolve(String.format("%05d.txt", i)), "committed\n");
+        }
+        run(repository, "add", ".");
+        run(repository, "commit", "--quiet", "-m", "many files");
+        Plan plan = plan("project", null);
+        Path container = Files.createDirectory(root.resolve(SessionWorktreeGit.CONTAINER));
+        Files.write(container.resolve(plan.worktreeId() + ".json"), new ObjectMapper().writeValueAsBytes(plan));
+        Process checkout = new ProcessBuilder("git", "-c", "core.hooksPath=/dev/null", "-C", repository.toString(),
+                "worktree", "add", "-b", plan.branch(), "--", target(plan).toString(), plan.baseCommit())
+                .redirectErrorStream(true).redirectOutput(root.resolve("checkout.log").toFile()).start();
+        List<ProcessHandle> descendants = List.of();
+        try {
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+            while (checkout.isAlive() && !Files.exists(target(plan).resolve("bulk/00000.txt"))
+                    && System.nanoTime() < deadline) {
+                Thread.sleep(1);
+            }
+            descendants = checkout.descendants().toList();
+        } finally {
+            checkout.destroyForcibly();
+            descendants.forEach(ProcessHandle::destroyForcibly);
+            assertThat(checkout.waitFor(5, TimeUnit.SECONDS)).isTrue();
+            for (ProcessHandle child : descendants) {
+                child.onExit().get(5, TimeUnit.SECONDS);
+            }
+        }
+        long checkedOut;
+        try (var files = Files.list(target(plan).resolve("bulk"))) {
+            checkedOut = files.count();
+        }
+        assertThat(checkedOut).isBetween(1L, 9999L);
+        Files.writeString(target(plan).resolve("user.txt"), "preserve me\n");
+        assertThatThrownBy(() -> git.prepare(plan)).isInstanceOf(ManagedAgentException.class)
+                .hasMessageContaining("checkout completion");
+        assertThatThrownBy(() -> SessionWorktreeGit.verify(plan, null)).isInstanceOf(ManagedAgentException.class);
+        assertThat(Files.readString(target(plan).resolve("user.txt"))).isEqualTo("preserve me\n");
+        try (var files = Files.list(target(plan).resolve("bulk"))) {
+            assertThat(files.count()).isEqualTo(checkedOut);
+        }
+    }
+
+    @Test
+    void missingOrPartialCompletionRecordBlocksEvenACompletedCheckout() throws Exception {
+        Plan plan = plan("project", null);
+        String identity = git.prepare(plan);
+        Path completion = root.resolve(SessionWorktreeGit.CONTAINER).resolve(plan.worktreeId() + ".ready");
+        Files.delete(completion);
+        assertThatThrownBy(() -> git.prepare(plan)).isInstanceOf(ManagedAgentException.class);
+        Files.writeString(completion, "{");
+        assertThatThrownBy(() -> SessionWorktreeGit.verify(plan, identity)).isInstanceOf(ManagedAgentException.class);
+        assertThat(Files.readString(target(plan).resolve("file.txt"))).isEqualTo("committed\n");
     }
 
     @Test
