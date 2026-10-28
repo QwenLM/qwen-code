@@ -74,11 +74,12 @@ function sameCommit(a, b) {
  * production commit since the previous round was mutated on its own" while two
  * commits had no row; only a self-audit caught it.
  *
- * The enumeration comes from `git log --first-parent --no-merges` in the round,
- * not from this script: a checker with no repository cannot derive it, so an
- * incomplete list is the skill rule's job. What is machine-checkable is the
- * claim against the list the round itself supplies — plus the one incomplete
- * list that would otherwise pass every check, the empty one.
+ * The enumeration comes from `git log --no-merges <previous>..<head> --not
+ * <target>` in the round, not from this script: a checker with no repository
+ * cannot derive it, so an incomplete list is the skill rule's job. What is
+ * machine-checkable is the claim against the list the round itself supplies —
+ * plus the one incomplete list that would otherwise pass every check, the
+ * empty one.
  */
 export function checkMutationCoverage(text) {
   const errors = [];
@@ -115,7 +116,7 @@ export function checkMutationCoverage(text) {
   // "every commit was mutated" is vacuously true over no commits at all.
   if (commits.length === 0) {
     errors.push(
-      'mutations.json claims per-commit coverage over an empty productionCommits list: a claim over an empty set is vacuously true, so enumerate the commits (git log --first-parent --no-merges) or drop the claim',
+      'mutations.json claims per-commit coverage over an empty productionCommits list: a claim over an empty set is vacuously true, so enumerate the commits (git log --no-merges <previous>..<head> --not <target>) or drop the claim',
     );
     return { errors };
   }

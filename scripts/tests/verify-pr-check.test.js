@@ -335,7 +335,13 @@ describe('checkMutationCoverage', () => {
     expect(result.errors.join('\n')).toMatch(
       /empty productionCommits list: a claim over an empty set is vacuously true/,
     );
-    expect(result.errors.join('\n')).toContain('--first-parent');
+    // The refusal has to recommend the recipe the skill actually teaches: the
+    // one that cuts at the first parent drops the PR's own feature-merge
+    // commits, which is the under-count this rule exists to prevent.
+    expect(result.errors.join('\n')).toContain(
+      'git log --no-merges <previous>..<head> --not <target>',
+    );
+    expect(result.errors.join('\n')).not.toContain('--first-parent');
     // Dropping the claim is the honest way out for a docs-only round.
     expect(
       checkMutationCoverage(JSON.stringify({ rows: [], productionCommits: [] }))
