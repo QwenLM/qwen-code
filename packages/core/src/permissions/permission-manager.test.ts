@@ -3366,6 +3366,16 @@ describe('PermissionManager — compound shell write attribution', () => {
     ['printf TXT >"&protected.txt"', 'WriteFileTool(&protected.txt)', 'deny'],
     ['printf TXT >\\&protected.txt', 'WriteFileTool(&protected.txt)', 'deny'],
     ['printf TXT >&protected.txt', 'WriteFileTool(&protected.txt)', 'allow'],
+    // A quoted `-` after `>&` is a file name; an unquoted one closes the
+    // descriptor and the rest of the word is an argument (`rm` removes it).
+    ['printf TXT >&"-x"', 'Edit', 'deny'],
+    ['printf TXT >&\\-x', 'Edit', 'deny'],
+    ['printf TXT >&-x', 'Edit', 'allow'],
+    ['rm >&-notes.txt', 'Edit', 'deny'],
+    ['rm >&-notes.txt', 'Edit(notes.txt)', 'deny'],
+    ['rm 2>&-notes.txt', 'Edit(notes.txt)', 'deny'],
+    ['cat <&-notes.txt', 'Read', 'deny'],
+    ['cat <&-notes.txt', 'Read(notes.txt)', 'deny'],
   ])(
     'Bash(*) allow, %s with %s denied → %s',
     async (command, deny, expected) => {

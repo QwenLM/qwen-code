@@ -474,6 +474,46 @@ describe('extractShellOperations', () => {
     expect(ops('printf TXT >&$OUT')).toEqual([write(`${CWD}/&$OUT`)]);
   });
 
+  // Only a whole number or `-` is a descriptor; anything else names a file.
+  // (`2>&file` and `<&file` are errors in bash; reporting them keeps the
+  // check strict.)
+  it.each<[command: string, expected: ShellOperation[]]>([
+    ['printf TXT >&1.log', [write(`${CWD}/1.log`)]],
+    ['printf TXT >&2fa-notes.md', [write(`${CWD}/2fa-notes.md`)]],
+    ['printf TXT 2>&protected.txt', [write(`${CWD}/protected.txt`)]],
+    ['cat <&protected.txt', [read(`${CWD}/protected.txt`)]],
+  ])('fd redirect word: %s', (command, expected) => {
+    expectSorted(command, expected);
+  });
+
+  // After an unquoted `>&`, `N>&` or `<&`, bash reads an unquoted `-` as
+  // "close" and starts a new word: `rm >&-notes.txt` closes stdout and
+  // removes notes.txt.
+  it.each<[command: string, expected: ShellOperation[]]>([
+    ['rm >&-notes.txt', [edit(`${CWD}/notes.txt`)]],
+    ['rm 1>&-notes.txt', [edit(`${CWD}/notes.txt`)]],
+    ['rm 2>&-notes.txt', [edit(`${CWD}/notes.txt`)]],
+    ['rm <&-notes.txt', [edit(`${CWD}/notes.txt`)]],
+    ['rm >&-"notes.txt"', [edit(`${CWD}/notes.txt`)]],
+    ['cat <&-notes.txt', [read(`${CWD}/notes.txt`)]],
+    ['printf TXT >&-x', []],
+    ['df -hT / >&"-"', []],
+  ])('unquoted - closes the descriptor: %s', (command, expected) => {
+    expectSorted(command, expected);
+  });
+
+  // A quoted or escaped `-` is part of the file name: `>&"-x"` writes `-x`.
+  it.each<[command: string, file: string]>([
+    ['printf TXT >&"-x"', '-x'],
+    ["printf TXT >&'-x'", '-x'],
+    ['printf TXT >&\\-x', '-x'],
+    ['printf TXT 1>&"-x"', '-x'],
+    ['printf TXT >&"-1"', '-1'],
+    ['rm >&"-"notes.txt', '-notes.txt'],
+  ])('quoted or escaped - after >& names a file: %s', (command, file) => {
+    expect(ops(command)).toEqual([write(`${CWD}/${file}`)]);
+  });
+
   it('regression: ordinary file redirects still tracked', () => {
     expect(ops('echo hi > out.txt')).toContainEqual(write(`${CWD}/out.txt`));
     expect(ops('sort < in.txt')).toContainEqual(read(`${CWD}/in.txt`));

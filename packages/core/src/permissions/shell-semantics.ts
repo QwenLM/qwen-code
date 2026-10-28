@@ -91,7 +91,9 @@ export interface ShellOperation {
  * Quote removal hides whether a `&` was typed bare: `>&1` duplicates a file
  * descriptor, but `>"&1"` and `>\&1` write a file named `&1`. When
  * `fdRedirects` is given, it receives the index of each token that starts
- * with `>&`, `1>&`, `2>&` or `<&` whose `>`/`<` and `&` were both unquoted.
+ * with `>&`, `1>&`, `2>&` or `<&` whose `>`/`<` and `&` were both unquoted,
+ * and an unquoted `-` right after such an operator becomes its own token,
+ * as bash reads it: `>&-notes.txt` is `>&-` plus the argument `notes.txt`.
  */
 function tokenize(command: string, fdRedirects?: Set<number>): string[] {
   const tokens: string[] = [];
@@ -147,11 +149,34 @@ function pushToken(
   if (token === '{' || token === '}') return;
   const normalized = trimShellSyntax(token, bare);
   if (!normalized) return;
+  if (!fdRedirects) {
+    tokens.push(normalized);
+    return;
+  }
+  // trimShellSyntax only drops leading `(` and trailing `)`/`&`.
+  const start = /^\(*/.exec(token)![0].length;
+  const normBare = bare.slice(start, start + normalized.length);
   const op = /^[12]?>&|^<&/.exec(normalized)?.[0];
-  if (op && fdRedirects) {
-    const start = /^\(*/.exec(token)![0].length;
-    const opEnd = start + op.length;
-    if (bare.slice(opEnd - 2, opEnd) === '11') fdRedirects.add(tokens.length);
+  if (op && normBare.slice(op.length - 2, op.length) === '11') {
+    fdRedirects.add(tokens.length);
+    // Right after an unquoted `>&`, `N>&` or `<&`, bash reads an unquoted
+    // `-` as "close the descriptor" and starts a new word after it:
+    // `rm >&-notes.txt` closes stdout and removes `notes.txt`.
+    const close = op.length;
+    if (
+      normalized[close] === '-' &&
+      normBare[close] === '1' &&
+      normalized.length > close + 1
+    ) {
+      tokens.push(normalized.slice(0, close + 1));
+      pushToken(
+        tokens,
+        normalized.slice(close + 1),
+        normBare.slice(close + 1),
+        fdRedirects,
+      );
+      return;
+    }
   }
   tokens.push(normalized);
 }
@@ -249,6 +274,25 @@ function isNetworkPseudoDevice(target: string): boolean {
 }
 
 /**
+ * The file that `>&word`, `N>&word` or `<&word` opens, or undefined when it
+ * only duplicates or closes a descriptor (`2>&1`, `>&2`, `<&0`, `2>&-`).
+ *
+ * `>&file` and `1>&file` write `file` (stdout and stderr). `2>&file` and
+ * `<&file` are errors in bash; treating them as file operations keeps the
+ * check strict. A `$`/backtick word may expand to a descriptor or a file, so
+ * it keeps the literal `&word` write.
+ */
+function fdRedirectFile(word: string): string | undefined {
+  if (/^(\d+|-)$/.test(word)) return undefined;
+  if (isDynamicShellPath(word)) return `&${word}`;
+  if (word === '/dev/null' || isNetworkPseudoDevice(word)) return undefined;
+  // `tokenize` splits off an unquoted leading `-`, so a `-` still here was
+  // quoted or escaped: `>&"-x"` writes the file `-x`, it isn't a flag.
+  if (word.startsWith('-') || looksLikePath(word)) return word;
+  return undefined;
+}
+
+/**
  * Extract I/O redirections from a token array.
  *
  * Modifies `tokens` in-place to remove redirect operators and their targets.
@@ -273,6 +317,19 @@ function extractRedirects(
 
   for (let i = 0; i < tokens.length; i++) {
     const tok = tokens[i]!;
+
+    // ── `>&word`, `N>&word`, `<&word` with an unquoted `>&`/`<&` ─────────
+    const fdOp = fdRedirects.has(i)
+      ? /^(?:[12]?>&|<&)/.exec(tok)?.[0]
+      : undefined;
+    if (fdOp) {
+      toRemove.add(i);
+      const file = fdRedirectFile(tok.slice(fdOp.length));
+      if (file !== undefined) {
+        (fdOp === '<&' ? readFiles : writeFiles).push(resolvePath(file, cwd));
+      }
+      continue;
+    }
 
     // ── Separate-token redirect operators ─────────────────────────────────
     if (tok === '>' || tok === '1>') {
@@ -332,26 +389,10 @@ function extractRedirects(
       const m = tok.match(/^(<<-?|1>>|1>|>>|>|2>>|2>|&>>|&>|<)([\s\S]+)$/);
       if (m) {
         const op = m[1]!;
-        let target = m[2]!;
+        const target = m[2]!;
         if (op.startsWith('<<')) {
           toRemove.add(i);
           continue;
-        }
-        // `>&`, `N>&` and `<&` take a file descriptor, not a file name.
-        if (fdRedirects.has(i)) {
-          const word = target.slice(1);
-          // `2>&1`, `>&2`, `<&0`, `2>&-`: duplicate or close a descriptor.
-          // Bash opens no file, so there is no file operation to check.
-          if (/^(\d+|-)$/.test(word)) {
-            toRemove.add(i);
-            continue;
-          }
-          // `>&file` and `1>&file` write `file` (stdout and stderr). Check
-          // that path, not `&file`. (`2>&file` and `<&file` are errors in
-          // bash; treating them as file operations keeps the check strict.)
-          // A `$`/backtick word may expand to a descriptor or a file, so it
-          // keeps the literal `&word` write.
-          if (!isDynamicShellPath(word)) target = word;
         }
         if (
           target !== '/dev/null' &&
