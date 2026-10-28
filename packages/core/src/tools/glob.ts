@@ -36,6 +36,7 @@ import {
   type GlobPath,
 } from './glob-search.js';
 import { selectPathsDeniedByPermissionRules } from '../core/permission-helpers.js';
+import { formatPermissionOmissionNote } from './grepReadTracking.js';
 export type { GlobPath } from './glob-search.js';
 
 const debugLogger = createDebugLogger('GLOB');
@@ -301,10 +302,7 @@ class GlobToolInvocation extends BaseToolInvocation<
         collectedPaths,
       );
       const omittedFileCount = deniedPaths.size;
-      const omittedFilesNote =
-        omittedFileCount > 0
-          ? ` [${omittedFileCount} ${omittedFileCount === 1 ? 'file' : 'files'} omitted by permission rules]`
-          : '';
+      const omittedFilesNote = formatPermissionOmissionNote(omittedFileCount);
       if (omittedFileCount > 0) {
         debugLogger.debug('Files omitted by permission rules:', [
           ...deniedPaths,
@@ -319,10 +317,19 @@ class GlobToolInvocation extends BaseToolInvocation<
       if (!filteredEntries || filteredEntries.length === 0) {
         const noFilesMsg = hitCollectionLimit
           ? `No permitted files found among the first ${allFilteredEntries.length} matching files scanned for pattern "${this.params.pattern}" ${searchLocationDescription}. Narrow the pattern or path.`
-          : `No files found matching pattern "${this.params.pattern}" ${searchLocationDescription}`;
+          : omittedFileCount > 0
+            ? `No permitted files found matching pattern "${this.params.pattern}" ${searchLocationDescription}`
+            : `No files found matching pattern "${this.params.pattern}" ${searchLocationDescription}`;
+        const displayMessage = hitCollectionLimit
+          ? 'No permitted files found (truncated)'
+          : omittedFileCount > 0
+            ? 'No permitted files found'
+            : 'No files found';
         return {
-          llmContent: noFilesMsg + omittedFilesNote,
-          returnDisplay: `${hitCollectionLimit ? 'No permitted files found (truncated)' : 'No files found'}${omittedFilesNote}`,
+          llmContent:
+            noFilesMsg + (omittedFilesNote ? `\n---\n${omittedFilesNote}` : ''),
+          returnDisplay:
+            displayMessage + (omittedFilesNote ? ` ${omittedFilesNote}` : ''),
         };
       }
 
@@ -368,15 +375,15 @@ class GlobToolInvocation extends BaseToolInvocation<
         resultMessage += `\n---\n[${omittedFiles} ${fileTerm} truncated] ...`;
       }
       if (omittedFileCount > 0) {
-        resultMessage += `\n---\n[${omittedFileCount} ${omittedFileCount === 1 ? 'file' : 'files'} omitted by permission rules]`;
+        resultMessage += `\n---\n${omittedFilesNote}`;
       }
 
       return {
         llmContent: resultMessage,
-        returnDisplay: `${hitCollectionLimit ? 'Found at least' : 'Found'} ${totalFileCount} matching file(s)${truncated ? ' (truncated)' : ''}${omittedFilesNote}`,
+        returnDisplay: `${hitCollectionLimit ? 'Found at least' : 'Found'} ${totalFileCount} matching file(s)${truncated ? ' (truncated)' : ''}${omittedFilesNote ? ` ${omittedFilesNote}` : ''}`,
         resultFilePaths: sortedAbsolutePaths,
         // The certified count covers the collected set, not the display
-        // slice — containment consumers must check this, never the slice.
+        // slice. Containment consumers must check this, never the slice.
         collectedFilePaths: sortedEntries.map((entry) => entry.fullpath()),
       };
     } catch (error) {

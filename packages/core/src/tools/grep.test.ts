@@ -794,7 +794,7 @@ describe('GrepTool', () => {
 
       const result = await run({ pattern: 'second line' }, tool);
 
-      expect(result.llmContent).toContain('No matches found');
+      expect(result.llmContent).toContain('No permitted matches found');
       expect(result.llmContent).toContain('1 file omitted by permission rules');
       expect(result.returnDisplay).toContain(
         '1 file omitted by permission rules',
@@ -834,6 +834,41 @@ describe('GrepTool', () => {
       expect(result.resultFilePaths).toEqual([
         path.join(tempRootDir, 'sub/fileD.md'),
       ]);
+    });
+
+    it('filters denied files before truncation and read tracking', async () => {
+      const tool = toolWithPm(denyPm(['Read(./fileB.js)']));
+
+      const result = await run({ pattern: 'hello', limit: 1 }, tool);
+
+      expect(result.llmContent).toContain('File: fileA.txt');
+      expect(result.llmContent).not.toContain('fileB.js');
+      expect(result.llmContent).not.toContain('truncated');
+      expect(
+        fileReadCache.check(await fs.stat(path.join(tempRootDir, 'fileB.js')))
+          .state,
+      ).toBe('unknown');
+      expect(
+        fileReadCache.check(await fs.stat(path.join(tempRootDir, 'fileA.txt')))
+          .state,
+      ).toBe('fresh');
+    });
+
+    it('keeps files matched only by ask rules visible', async () => {
+      const pm = new PermissionManager({
+        getPermissionsAllow: () => [],
+        getPermissionsAsk: () => ['Read(./fileA.txt)'],
+        getPermissionsDeny: () => [],
+        getProjectRoot: () => tempRootDir,
+        getCwd: () => tempRootDir,
+      });
+      pm.initialize();
+
+      const result = await run({ pattern: 'hello' }, toolWithPm(pm));
+
+      expect(result.llmContent).toContain('File: fileA.txt');
+      expect(result.llmContent).toContain('hello world');
+      expect(result.llmContent).not.toContain('omitted by permission rules');
     });
 
     it('keeps results unchanged without a permission manager', async () => {

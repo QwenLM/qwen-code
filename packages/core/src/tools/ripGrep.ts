@@ -27,7 +27,10 @@ import {
   getQwenIgnoreFileNames,
   QwenIgnoreParser,
 } from '../utils/qwenIgnoreParser.js';
-import { recordGrepResultFileReads } from './grepReadTracking.js';
+import {
+  formatPermissionOmissionNote,
+  recordGrepResultFileReads,
+} from './grepReadTracking.js';
 import { logRipgrepRuntimeRecovery } from '../telemetry/loggers.js';
 import { RipgrepRuntimeRecoveryEvent } from '../telemetry/types.js';
 import { selectPathsDeniedByPermissionRules } from '../core/permission-helpers.js';
@@ -334,27 +337,27 @@ class GrepToolInvocation extends BaseToolInvocation<
         });
       }
 
-      const deniedPaths = await selectPathsDeniedByPermissionRules(
-        this.config.getPermissionManager?.(),
-        ToolNames.GREP,
-        this.config.getTargetDir(),
-        Array.from(
-          new Set(
-            allLines.map((line) =>
-              toAbsoluteResultPath(
-                line.filePath,
-                searchPaths,
-                resolvedPathCache,
+      const permissionManager = this.config.getPermissionManager?.();
+      const deniedPaths = permissionManager
+        ? await selectPathsDeniedByPermissionRules(
+            permissionManager,
+            ToolNames.GREP,
+            this.config.getTargetDir(),
+            Array.from(
+              new Set(
+                allLines.map((line) =>
+                  toAbsoluteResultPath(
+                    line.filePath,
+                    searchPaths,
+                    resolvedPathCache,
+                  ),
+                ),
               ),
             ),
-          ),
-        ),
-      );
+          )
+        : new Set<string>();
       const omittedFileCount = deniedPaths.size;
-      const omittedFilesNote =
-        omittedFileCount > 0
-          ? ` [${omittedFileCount} ${omittedFileCount === 1 ? 'file' : 'files'} omitted by permission rules]`
-          : '';
+      const omittedFilesNote = formatPermissionOmissionNote(omittedFileCount);
       if (omittedFileCount > 0) {
         debugLogger.debug('Files omitted by permission rules:', [
           ...deniedPaths,
@@ -380,14 +383,17 @@ class GrepToolInvocation extends BaseToolInvocation<
             searchResult.error,
           );
           return {
-            llmContent: incompleteMsg + omittedFilesNote,
-            returnDisplay: `Error: Search incomplete${omittedFilesNote}`,
+            llmContent:
+              incompleteMsg +
+              (omittedFilesNote ? `\n---\n${omittedFilesNote}` : ''),
+            returnDisplay: `Error: Search incomplete${omittedFilesNote ? ` ${omittedFilesNote}` : ''}`,
           };
         }
-        const noMatchMsg = `No matches found for pattern "${this.params.pattern}" ${searchLocationDescription}${filterDescription}.`;
+        const noMatchMsg = `${omittedFileCount > 0 ? 'No permitted matches found' : 'No matches found'} for pattern "${this.params.pattern}" ${searchLocationDescription}${filterDescription}.`;
         return {
-          llmContent: noMatchMsg + omittedFilesNote,
-          returnDisplay: `No matches found${omittedFilesNote}`,
+          llmContent:
+            noMatchMsg + (omittedFilesNote ? `\n---\n${omittedFilesNote}` : ''),
+          returnDisplay: `${omittedFileCount > 0 ? 'No permitted matches found' : 'No matches found'}${omittedFilesNote ? ` ${omittedFilesNote}` : ''}`,
         };
       }
       const matchTerm = totalMatches === 1 ? 'match' : 'matches';
@@ -455,7 +461,9 @@ class GrepToolInvocation extends BaseToolInvocation<
       if (searchResult.incomplete) {
         llmContent += `\n---\n[${RIPGREP_INCOMPLETE_NOTICE}]`;
       }
-      llmContent += omittedFilesNote;
+      if (omittedFilesNote) {
+        llmContent += `\n---\n${omittedFilesNote}`;
+      }
 
       // Build display message (show real count, not truncated)
       let displayMessage = `Found ${totalMatches} ${matchTerm}`;
@@ -469,7 +477,9 @@ class GrepToolInvocation extends BaseToolInvocation<
       if (displayTags.length > 0) {
         displayMessage += ` (${displayTags.join(', ')})`;
       }
-      displayMessage += omittedFilesNote;
+      if (omittedFilesNote) {
+        displayMessage += ` ${omittedFilesNote}`;
+      }
 
       const resultFilePaths = Array.from(
         new Set(

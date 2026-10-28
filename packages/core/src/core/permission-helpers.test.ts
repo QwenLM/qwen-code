@@ -66,6 +66,28 @@ describe('selectPathsDeniedByPermissionRules', () => {
       expect(evaluate).toHaveBeenCalledTimes(2);
     },
   );
+
+  it('skips evaluation when only an allow rule matches the result', async () => {
+    const pm = new PermissionManager({
+      getPermissionsAllow: () => ['Read(./file.txt)'],
+      getPermissionsAsk: () => [],
+      getPermissionsDeny: () => [],
+      getProjectRoot: () => process.cwd(),
+      getCwd: () => process.cwd(),
+    });
+    pm.initialize();
+    const evaluate = vi.spyOn(pm, 'evaluate');
+
+    expect(
+      await selectPathsDeniedByPermissionRules(
+        pm,
+        ToolNames.GREP,
+        process.cwd(),
+        [path.resolve('file.txt')],
+      ),
+    ).toEqual(new Set());
+    expect(evaluate).not.toHaveBeenCalled();
+  });
 });
 
 describe('buildPermissionCheckContext', () => {

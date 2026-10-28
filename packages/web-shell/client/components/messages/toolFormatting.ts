@@ -457,8 +457,21 @@ function getDescriptionFromTitle(
 }
 
 function parseGrepSummary(text: string): string | null {
-  if (text === 'No matches found') return text;
-  if (/^Found \d+ match(?:es)?(?: \(truncated\))?$/.test(text)) return text;
+  const summary = text.replace(
+    / \[\d+ files? omitted by permission rules\]$/,
+    '',
+  );
+  if (
+    summary === 'No matches found' ||
+    summary === 'No permitted matches found'
+  )
+    return text;
+  if (
+    /^Found \d+ match(?:es)?(?: \((?:truncated(?:, incomplete)?|incomplete)\))?$/.test(
+      summary,
+    )
+  )
+    return text;
   return null;
 }
 

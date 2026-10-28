@@ -345,6 +345,22 @@ describe('toolFormatting', () => {
     ).toBe('No matches found');
   });
 
+  it.each([
+    'No matches found [1 file omitted by permission rules]',
+    'No permitted matches found [1 file omitted by permission rules]',
+    'Found 2 matches [1 file omitted by permission rules]',
+    'Found 12 matches (truncated, incomplete) [2 files omitted by permission rules]',
+  ])('keeps permission-aware grep_search summaries unchanged', (rawOutput) => {
+    expect(
+      getToolResultSummary(
+        tool({
+          toolName: 'grep_search',
+          rawOutput,
+        }),
+      ),
+    ).toBe(rawOutput);
+  });
+
   it('prefers grep_search returnDisplay when content is also present', () => {
     expect(
       getToolResultSummary(

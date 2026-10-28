@@ -135,7 +135,15 @@ export async function selectPathsDeniedByPermissionRules(
       { file_path: filePath },
       targetDir,
     );
-    if (pm.hasRelevantRules(ctx) && (await pm.evaluate(ctx)) === 'deny') {
+    if (pm.findMatchingDenyRule(ctx) === undefined) {
+      continue;
+    }
+    const { finalPermission } = await evaluatePermissionRules(
+      pm,
+      'default',
+      ctx,
+    );
+    if (finalPermission === 'deny') {
       denied.add(filePath);
     }
   }

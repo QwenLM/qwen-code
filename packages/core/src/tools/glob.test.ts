@@ -1008,7 +1008,9 @@ describe('GlobTool', () => {
         }),
       );
 
-      expect(result.llmContent).toContain('No files found');
+      expect(result.llmContent).toContain(
+        'No permitted files found matching pattern',
+      );
       expect(result.llmContent).not.toContain('fileC');
       expect(result.llmContent).not.toContain('fileD');
       expect(result.llmContent).toContain(
@@ -1039,6 +1041,25 @@ describe('GlobTool', () => {
       );
       expect(result.resultFilePaths ?? []).toEqual([]);
       expect(result.collectedFilePaths ?? []).toEqual([]);
+    });
+
+    it('reports the scanned count separately from permitted results', async () => {
+      mockGlobStreamResults('denied-', 1002);
+      const denied = path.join(tempRootDir, 'denied-1.streamlimit');
+      const result = await run(
+        { pattern: '*.streamlimit' },
+        toolWith({
+          getPermissionManager: () => denyPm(['Read(./denied-1.streamlimit)']),
+        }),
+      );
+
+      expect(result.llmContent).toContain('Found at least 999 file(s)');
+      expect(result.llmContent).toContain(
+        'Results truncated after scanning 1000 matching files',
+      );
+      expect(result.llmContent).toContain('1 file omitted by permission rules');
+      expect(result.collectedFilePaths).toHaveLength(999);
+      expect(result.collectedFilePaths).not.toContain(denied);
     });
 
     it('keeps files matched only by ask rules visible', async () => {

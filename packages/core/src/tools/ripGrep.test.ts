@@ -223,6 +223,9 @@ describe('RipGrepTool', () => {
         expect(result.returnDisplay).toContain(
           '1 file omitted by permission rules',
         );
+        expect(result.llmContent).toMatch(
+          /\n---\n\[1 file omitted by permission rules\]$/,
+        );
         expect(result.resultFilePaths).toEqual([
           path.join(tempRootDir, 'fileB.js'),
         ]);
@@ -264,7 +267,7 @@ describe('RipGrepTool', () => {
 
       expectLlm(
         result,
-        ['No matches found', '1 file omitted by permission rules'],
+        ['No permitted matches found', '1 file omitted by permission rules'],
         ['fileC', 'another world'],
       );
       expect(result.returnDisplay).toContain(
@@ -276,6 +279,32 @@ describe('RipGrepTool', () => {
           await fs.stat(path.join(tempRootDir, 'sub/fileC.txt')),
         ).state,
       ).toBe('unknown');
+    });
+
+    it('reports omissions when an incomplete search has no permitted matches', async () => {
+      rgRecovered(
+        hit('sub/fileC.txt', 1, 'another world'),
+        {
+          selectionMode: 'builtin',
+          retryTriggered: false,
+          failureKind: 'max_buffer',
+        },
+        new Error('stdout maxBuffer length exceeded'),
+      );
+
+      const result = await search(
+        { pattern: 'world' },
+        toolWithRules(['Read(./sub/**)']),
+      );
+
+      expectLlm(result, [
+        'Search did not complete for pattern',
+        'No valid matches were returned',
+        '1 file omitted by permission rules',
+      ]);
+      expect(result.returnDisplay).toBe(
+        'Error: Search incomplete [1 file omitted by permission rules]',
+      );
     });
 
     it('keeps files matched only by ask rules visible', async () => {

@@ -10,7 +10,20 @@ import os from 'node:os';
 import path from 'node:path';
 import type { Config } from '../config/config.js';
 import { FileReadCache } from '../services/fileReadCache.js';
-import { recordGrepResultFileReads } from './grepReadTracking.js';
+import {
+  formatPermissionOmissionNote,
+  recordGrepResultFileReads,
+} from './grepReadTracking.js';
+
+describe('formatPermissionOmissionNote', () => {
+  it.each([
+    [0, ''],
+    [1, '[1 file omitted by permission rules]'],
+    [2, '[2 files omitted by permission rules]'],
+  ])('formats %i omitted files', (count, expected) => {
+    expect(formatPermissionOmissionNote(count)).toBe(expected);
+  });
+});
 
 describe('recordGrepResultFileReads', () => {
   let tempRootDir: string;

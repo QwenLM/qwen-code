@@ -480,8 +480,8 @@ The first matching rule wins. Rules use the format `"ToolName"` or `"ToolName(sp
 | Alias                 | Canonical tool      | Notes                     |
 | --------------------- | ------------------- | ------------------------- |
 | `Bash`, `Shell`       | `run_shell_command` |                           |
-| `Read`, `ReadFile`    | `read_file`         | `Read` group; see below   |
-| `Edit`, `EditFile`    | `edit`              | Meta-category — see below |
+| `Read`, `ReadFile`    | `read_file`         | Meta-category: see below. |
+| `Edit`, `EditFile`    | `edit`              | Meta-category: see below. |
 | `Write`, `WriteFile`  | `write_file`        |                           |
 | `NotebookEdit`        | `notebook_edit`     |                           |
 | `NotebookEditTool`    | `notebook_edit`     |                           |
@@ -502,9 +502,8 @@ Some rule names automatically cover multiple tools:
 | `Edit`    | `edit`, `write_file`, `notebook_edit`                |
 
 > [!important]
-> `Read(/path/**)` matches **all four** read tools (file read, grep, glob, and directory listing).
-> Tool-call rules are checked against the requested path. Search results are also filtered by `deny` rules, for both content search backends and glob. Per-result `ask` rules do not pause a search for confirmation. Directory listing does not yet filter individual entries.
-> To restrict only file reading, use `ReadFile(/path/**)` or `read_file(/path/**)`.
+> `Read(/path/**)`, `ReadFile(/path/**)`, and `read_file(/path/**)` are equivalent aliases. Each matches all four read tools: file read, grep, glob, and directory listing. No alias limits matching to file reads alone.
+> Tool-call rules are checked against the requested path. In local sessions backed by a permission manager, search results are also filtered by `deny` rules for both content search backends and glob. Per-result `ask` rules do not pause a search for confirmation. Hosted managed rules currently check only the requested path, so individual glob result entries are not filtered. Directory listing does not yet filter individual entries.
 
 **Rule syntax examples:**
 
