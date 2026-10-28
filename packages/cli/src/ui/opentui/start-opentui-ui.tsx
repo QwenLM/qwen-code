@@ -45,6 +45,7 @@ import {
   useRenderer,
 } from '@opentui/react';
 import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
+import { modBandInput } from '../utils/mod-band-tree.js';
 import type { PartListUnion } from '@google/genai';
 import {
   createDebugLogger,
@@ -102,6 +103,7 @@ import {
   foldBatch,
   useOpenTuiLiveTurn,
   type OpenTuiSubmitOptions,
+  type ForegroundShellOwner,
 } from './live-turn.js';
 import type { LiveHistoryItem } from './live-session-model.js';
 import { ensureConfigInitialized } from './live-session.js';
@@ -167,6 +169,18 @@ function OpenTuiEntryApp({
   });
   const { applyEvent, submit, interrupt, resetTranscript, settleWaitingCall } =
     live;
+  // The Mods' band above the prompt. OpenTUI has no session survey.
+  useEffect(() => {
+    getInteractiveModSession(config)?.setRenderInput(
+      modBandInput({
+        columns: width,
+        rows: height,
+        isFullscreen: renderer.screenMode === 'alternate-screen',
+        hasSurvey: false,
+        isWorking: live.streaming,
+      }),
+    );
+  }, [config, renderer, width, height, live.streaming]);
 
   const userMessagesRef = useRef<readonly string[]>([]);
   const userMessages = useMemo(() => {
@@ -356,7 +370,7 @@ function OpenTuiEntryApp({
 
   // --- seams handed to the shell ---------------------------------------------
   const renderMain = useCallback(
-    () => (
+    (shell?: { owner: ForegroundShellOwner | null; focused: boolean }) => (
       <box flexDirection="column">
         {/* The transcript box carries two columns of margin on each side, so
             its content budget is 4 short of the terminal width. */}
@@ -372,6 +386,8 @@ function OpenTuiEntryApp({
           }
           mouseTracking={settings.merged.ui?.mouseTracking !== false}
           awaitingCallId={live.waitingCalls[0]?.callId}
+          activeShellCallId={shell?.owner?.callId}
+          focusedShellCallId={shell?.focused ? shell.owner?.callId : undefined}
         />
       </box>
     ),
@@ -485,6 +501,7 @@ function OpenTuiEntryApp({
       approvalMode={config.getApprovalMode()}
       messageQueue={live.messageQueue}
       onPopQueue={live.popQueue}
+      foregroundShellControl={live}
       waitingToolCalls={live.waitingCalls}
       onToolCallSettled={live.settleWaitingCall}
       onRenderError={handleRenderError}

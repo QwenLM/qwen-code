@@ -49,11 +49,15 @@ class ListAgentsInvocation extends BaseToolInvocation<
         status: entry.status,
         can_message:
           !entry.resumeBlockedReason &&
+          !entry.messagesBlockedReason &&
           (entry.status === 'running' ||
             entry.status === 'paused' ||
             entry.status === 'completed'),
-        ...(entry.resumeBlockedReason
-          ? { resume_blocked_reason: entry.resumeBlockedReason }
+        ...(entry.resumeBlockedReason || entry.messagesBlockedReason
+          ? {
+              resume_blocked_reason:
+                entry.resumeBlockedReason ?? entry.messagesBlockedReason,
+            }
           : {}),
       }));
 

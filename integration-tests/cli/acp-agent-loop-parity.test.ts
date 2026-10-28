@@ -44,6 +44,16 @@ interface Scenario {
   /** Sends `session/cancel` once this file exists in the test directory. */
   cancelOnFile?: string;
   /**
+   * The calls run concurrently on the shared loop, so their updates are
+   * compared per call.
+   */
+  concurrent?: boolean;
+  /**
+   * The client's loop guard stops the last response as it streams, so on
+   * the shared loop that request ends interrupted and reports no usage.
+   */
+  cutByLoopGuard?: boolean;
+  /**
    * The model's reply to a streaming request, from its message history;
    * `index` counts this run's streaming requests, retries included.
    */
@@ -62,6 +72,8 @@ interface Run {
   /** Each prompt's stop reason, or the error it failed with. */
   stopReasons: unknown[];
   permissions: unknown[];
+  /** How many updates had arrived when each permission request did. */
+  permissionsAt: number[];
 }
 
 const PROMPT_TIMEOUT_MS = 60_000;
@@ -154,6 +166,32 @@ function modelRequests(server: FakeOpenAIServer, dir: string): unknown[] {
   );
 }
 
+/** Leaves out `available_commands_update`, sent on its own schedule. */
+const isPromptUpdate = (update: unknown) =>
+  (update as JsonObject)?.['sessionUpdate'] !== 'available_commands_update';
+
+/** The usage and the request end a finished response reports. */
+const isResponseEnd = (update: unknown) => {
+  const meta = (update as JsonObject)?.['_meta'] as JsonObject | undefined;
+  return (
+    meta?.['usage'] !== undefined ||
+    (meta?.['executionLifecycle'] as JsonObject | undefined)?.['phase'] ===
+      'ended'
+  );
+};
+
+/** Each call's updates in order, and the updates of no call in order. */
+function byToolCall(updates: unknown[]) {
+  const calls: Record<string, unknown[]> = {};
+  const others: unknown[] = [];
+  for (const update of updates) {
+    const id = (update as JsonObject)?.['toolCallId'];
+    if (typeof id === 'string') (calls[id] ??= []).push(update);
+    else others.push(update);
+  }
+  return { calls, others };
+}
+
 const allowOnce = () => ({
   outcome: { outcome: 'selected', optionId: 'proceed_once' },
 });
@@ -227,6 +265,7 @@ const allowOnce = () => ({
 
       const updates: unknown[] = [];
       const permissions: unknown[] = [];
+      const permissionsAt: number[] = [];
       const pending = new Map<
         number,
         { resolve: (value: unknown) => void; reject: (error: Error) => void }
@@ -290,6 +329,7 @@ const allowOnce = () => ({
         if (typeof id !== 'number' || typeof method !== 'string') return;
         if (method === 'session/request_permission') {
           permissions.push(params?.['toolCall']);
+          permissionsAt.push(updates.filter(isPromptUpdate).length);
           send({
             id,
             result: (scenario.permission ?? allowOnce)(params ?? {}),
@@ -373,17 +413,13 @@ const allowOnce = () => ({
           ),
         ).length,
         updates: updates
-          // Sent after session/new on its own schedule, not by the prompt.
-          .filter(
-            (update) =>
-              (update as JsonObject)?.['sessionUpdate'] !==
-              'available_commands_update',
-          )
+          .filter(isPromptUpdate)
           .map((update) => normalize(update, dir, sessionId)),
         stopReasons: stopReasons.map((reason) =>
           normalize(reason, dir, sessionId),
         ),
         permissions: permissions.map((call) => normalize(call, dir, sessionId)),
+        permissionsAt,
       };
     }
 
@@ -445,6 +481,7 @@ const allowOnce = () => ({
       {
         name: 'two reads in one response',
         prompts: ['Read both files.'],
+        concurrent: true,
         prepare: (r) => {
           r.createFile('a.txt', 'alpha\n');
           r.createFile('b.txt', 'beta\n');
@@ -462,6 +499,7 @@ const allowOnce = () => ({
       {
         name: 'reads past the per-turn tool-call cap',
         prompts: ['Read the files one by one.'],
+        cutByLoopGuard: true,
         settings: { model: { maxToolCallsPerTurn: 2 } },
         prepare: (r) => {
           r.createFile('a.txt', 'alpha\n');
@@ -482,6 +520,7 @@ const allowOnce = () => ({
       {
         name: 'an approved write between reads',
         prompts: ['Read, write, read.'],
+        settings: { tools: { approvalMode: 'default' } },
         prepare: (r) => r.createFile('in.txt', 'input\n'),
         reply: (messages, dir) =>
           toolResults(messages) === 0
@@ -497,6 +536,7 @@ const allowOnce = () => ({
       {
         name: 'a denied write',
         prompts: ['Write the file.'],
+        settings: { tools: { approvalMode: 'default' } },
         permission: () => ({ outcome: { outcome: 'cancelled' } }),
         reply: (messages, dir) =>
           toolResults(messages) === 0
@@ -598,11 +638,53 @@ const allowOnce = () => ({
 
         expect(shared.stopReasons).toEqual(current.stopReasons);
         expect(shared.requests).toEqual(current.requests);
-        expect(shared.updates).toEqual(current.updates);
+        const updates = (run: Run) =>
+          scenario.cutByLoopGuard
+            ? run.updates.filter((update) => !isResponseEnd(update))
+            : run.updates;
+        if (scenario.concurrent) {
+          expect(byToolCall(updates(shared))).toEqual(
+            byToolCall(updates(current)),
+          );
+        } else {
+          expect(updates(shared)).toEqual(updates(current));
+        }
+        if (scenario.cutByLoopGuard) {
+          const lastEnd = shared.updates.findLast(isResponseEnd) as JsonObject;
+          expect(
+            (
+              (lastEnd['_meta'] as JsonObject)[
+                'executionLifecycle'
+              ] as JsonObject
+            )['outcome'],
+          ).toBe('interrupted');
+        }
         expect(shared.permissions).toEqual(current.permissions);
       },
       120_000,
     );
+
+    it('asks for every approval of a batch before running any of its calls, as other surfaces do', async () => {
+      const { current, shared } = await both(
+        scenarios.find(
+          ({ name }) => name === 'an approved write between reads',
+        )!,
+      );
+      const started = (run: Run, id: string) =>
+        run.updates.findIndex(
+          (update) =>
+            (update as JsonObject)['toolCallId'] === id &&
+            (update as JsonObject)['status'] === 'in_progress',
+        );
+
+      // The current loop asks when it reaches the write, after the first read.
+      expect(current.permissionsAt[0]).toBeGreaterThan(
+        started(current, 'call_in'),
+      );
+      expect(shared.permissionsAt[0]).toBeLessThanOrEqual(
+        started(shared, 'call_in'),
+      );
+    }, 120_000);
 
     it('runs UserPromptSubmit on tool-result requests too, as other surfaces do', async () => {
       const hookCalls: number[] = [];
