@@ -65,7 +65,7 @@ WebView2 按 origin 隔离 `localStorage` 与 `sessionStorage`，因此每次启
 
 ## 失败模式
 
-- `QWEN_DESKTOP_DISABLE_SETTINGS_PERSISTENCE=1` 会让 `update()` 变成空操作。会话可用，同源重载会回推较新的镜像，重启会丢失目录。
+- `QWEN_DESKTOP_DISABLE_SETTINGS_PERSISTENCE=1` 会让 `update()` 变成空操作，因此回推会报告成功但不会落盘。水合随后会消费并删除镜像：第一次同源重载仍能读到目录，若期间没有新的写入，第二次重载就会丢失，重启同样会丢失。
 - 水合失败时该键不进入缓存，读取退回当前 origin 的 `localStorage`。
 - 原生写入失败时，内存副本和 `localStorage` 镜像仍然存在；下一次同源水合会回推镜像，只有在全新 origin 上启动才会丢失该变更。
 - 畸形的目录 JSON 会被既有目录读取器过滤。损坏的设置文件仍像以前一样回退到默认值。
@@ -81,7 +81,7 @@ WebView2 按 origin 隔离 `localStorage` 与 `sessionStorage`，因此每次启
 
 ## 验证
 
-- `packages/desktop/src-tauri` 中的 `cargo test`：39 个测试。其中包括一个设置重载测试：写入目录、丢弃存储、重新加载并读回该值，以及白名单和大小上限测试。
+- `packages/desktop/src-tauri` 中的 `cargo test`：42 个 `#[test]` 函数，其中 Windows 上运行 39 个、macOS 上运行 38 个，其余按平台门控。其中包括一个设置重载测试：写入目录、丢弃存储、重新加载并读回该值，以及白名单和大小上限测试。
 - `cargo clippy --all-targets -- -D warnings`：干净。
 - `npm run typecheck --workspace=@qwen-code/web-shell`：干净。
 - 对改动文件运行 ESLint 与 Prettier：干净。

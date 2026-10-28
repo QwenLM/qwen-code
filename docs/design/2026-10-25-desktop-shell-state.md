@@ -65,7 +65,7 @@ Both call `require_runtime_origin`, which compares the calling webview's URL ori
 
 ## Failure modes
 
-- `QWEN_DESKTOP_DISABLE_SETTINGS_PERSISTENCE=1` makes `update()` a no-op. The session works, a same-origin reload re-pushes the newer mirror, and a restart loses the catalogs.
+- `QWEN_DESKTOP_DISABLE_SETTINGS_PERSISTENCE=1` makes `update()` a no-op, so a re-push reports success without landing. Hydration then consumes the mirror and deletes it: one same-origin reload still reads the catalog, a second reload without an intervening write loses it, and a restart loses it as well.
 - A hydration failure leaves the key uncached, so reads fall back to the current origin's `localStorage`.
 - A native write failure leaves the in-memory copy and the `localStorage` mirror; the next same-origin hydration re-pushes the mirror, and only a launch on a fresh origin loses the change.
 - Malformed catalog JSON is filtered by the existing catalog readers. A corrupt settings file still falls back to defaults as before.
@@ -81,7 +81,7 @@ Both call `require_runtime_origin`, which compares the calling webview's URL ori
 
 ## Verification
 
-- `cargo test` in `packages/desktop/src-tauri`: 39 tests. They include a settings reload test that writes a catalog, drops the store, reloads it, and reads the value back, plus allowlist and size-cap tests.
+- `cargo test` in `packages/desktop/src-tauri`: 42 `#[test]` functions, 39 of which run on Windows and 38 on macOS because the rest are platform-gated. They include a settings reload test that writes a catalog, drops the store, reloads it, and reads the value back, plus allowlist and size-cap tests.
 - `cargo clippy --all-targets -- -D warnings`: clean.
 - `npm run typecheck --workspace=@qwen-code/web-shell`: clean.
 - ESLint and Prettier on the touched files: clean.
