@@ -104,6 +104,35 @@ it('preserves literal slash-command output and artifact references when a direct
   });
 });
 
+it('leaves a message row unchipped when it carries no author', () => {
+  // The wire `agent` names the recipient on a message row, so chipping it
+  // would attribute the message to the wrong teammate. With no structured
+  // author the row stays unattributed instead.
+  const recipientOnly = statusBlock(
+    'activity-message',
+    'writer → checker: sky sentence',
+    1,
+    {
+      source: 'teammate_activity',
+      data: { status: 'message', kind: 'peer' },
+      agent: { agentName: '/root/checker', depth: 1, kind: 'teammate' },
+    },
+  );
+  const [message] = transcriptBlocksToDaemonMessages([recipientOnly]);
+  expect(message).not.toHaveProperty('teammate');
+
+  // A tool row's actor and recipient coincide, so the wire field still names
+  // the right teammate there.
+  const toolRow = {
+    ...recipientOnly,
+    id: 'activity-tool',
+    text: 'checker started read_file',
+    data: { status: 'call', kind: 'peer' },
+  };
+  const [toolMessage] = transcriptBlocksToDaemonMessages([toolRow]);
+  expect(toolMessage).toMatchObject({ teammate: { name: 'checker' } });
+});
+
 it('retains slash-command insight cards when no export descriptor is reported', () => {
   const messages = transcriptBlocksToDaemonMessages([
     {
