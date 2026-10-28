@@ -11,6 +11,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.HmacAlgorithms;
 import org.apache.commons.codec.digest.HmacUtils;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -58,7 +59,7 @@ public class WorkspaceStorageGuard {
     private final ObjectMapper json = new ObjectMapper();
 
     @Autowired
-    public WorkspaceStorageGuard(JdbcTemplate jdbc, PlatformTransactionManager manager,
+    public WorkspaceStorageGuard(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager,
             ManagedAgentProperties properties) {
         this(jdbc, manager, properties, WorkspaceStorageGuard::nativeIdentity);
         if (enabled && !List.of("Linux", "Mac OS X").contains(System.getProperty("os.name"))) {
