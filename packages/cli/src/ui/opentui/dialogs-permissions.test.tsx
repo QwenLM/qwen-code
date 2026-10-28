@@ -116,6 +116,23 @@ describe('OpenTuiPermissionsDialog rule rows', () => {
     mocks.state.width = 100;
   });
 
+  it('marks malformed rules as not applied', () => {
+    const { container } = renderPermissions([
+      {
+        raw: 'Bash(docker *',
+        toolName: 'Bash',
+        type: 'deny',
+        scope: 'user',
+        invalid: true,
+      },
+    ]);
+
+    press('right');
+    press('right');
+    expect(container.textContent).toContain('Bash(docker *');
+    expect(container.textContent).toContain('(invalid: not applied)');
+  });
+
   it('clips the add-rule scope row to the framed width, so it cannot wrap', () => {
     // The scope step paints inside the DialogFrame — border and padding take
     // four columns of the area width first — but the label clip was budgeted

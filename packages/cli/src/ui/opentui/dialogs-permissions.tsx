@@ -142,6 +142,7 @@ export interface PermissionRuleEntry {
   toolName: string;
   type: 'allow' | 'ask' | 'deny';
   scope: string;
+  invalid?: boolean;
 }
 
 /** The workspace-directory add validation, exactly as the ink dialog runs it. */
@@ -274,7 +275,7 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
   const ruleListItems = [
     { label: t('Add a new rule…'), key: '__add__', value: '__add__' },
     ...filteredRules.map((r) => ({
-      label: r.raw,
+      label: r.invalid ? `${r.raw} ${t('(invalid: not applied)')}` : r.raw,
       value: r.raw,
       key: `${r.type}-${r.scope}-${r.raw}`,
     })),

@@ -733,6 +733,7 @@ export function buildPermissionsData(
     toolName: entry.rule.toolName,
     type: entry.type,
     scope: entry.scope,
+    ...(entry.rule.invalid ? { invalid: true } : {}),
   }));
   const workspace = config?.getWorkspaceContext();
   return {

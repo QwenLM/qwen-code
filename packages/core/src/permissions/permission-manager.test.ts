@@ -2741,14 +2741,14 @@ describe('PermissionManager', () => {
       expect(sessionAllowRules(pm)).toHaveLength(1);
     });
 
-    it('malformed session allow rule is silently ignored', async () => {
+    it('malformed session allow rule does not match', async () => {
       pm.addSessionAllowRule('Bash(git commit');
       // 'git commit' is not readonly, so default is 'ask'.
       // The malformed rule must not act as catch-all allow.
       expect(await pm.evaluate(sh('git commit'))).toBe('ask');
     });
 
-    it('malformed session deny rule is silently ignored', async () => {
+    it('malformed session deny rule does not match', async () => {
       pm.addSessionDenyRule('Bash(rm -rf /)*');
       // Should NOT deny — the malformed rule must not act as catch-all
       expect(await pm.evaluate(sh('git status'))).not.toBe('deny');
@@ -2779,15 +2779,39 @@ describe('PermissionManager', () => {
       expect(sessionAllow?.rule.toolName).toBe('run_shell_command');
     });
 
-    it('excludes malformed rules from listing', async () => {
+    it('includes malformed rules in listing as not applied', async () => {
       pm = makePm({
         permissionsAllow: ['ReadFileTool'],
         permissionsDeny: ['Bash(rm -rf /)*'],
       });
 
       const rules = pm.listRules();
-      expect(rules.length).toBe(1);
-      expect(rules[0]!.rule.toolName).toBe('read_file');
+      expect(rules.length).toBe(2);
+      expect(rules[0]!.rule.toolName).toBe('run_shell_command');
+      expect(rules[0]!.rule.invalid).toBe(true);
+      expect(rules[1]!.rule.toolName).toBe('read_file');
+    });
+
+    it('warns on every malformed rule ingestion path', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        parseRules(['Bash(git *']);
+        pm.addSessionAllowRule('Bash(git *');
+        pm.addSessionDenyRule('Bash(git *');
+        pm.addSessionAskRule('Bash(git *');
+        pm.addPersistentRule('Bash(git *', 'deny');
+
+        expect(warn).toHaveBeenCalledTimes(5);
+        expect(warn.mock.calls.map(([message]) => message)).toEqual([
+          'Ignoring malformed rule (unbalanced parentheses): Bash(git *',
+          'Ignoring malformed allow rule (unbalanced parentheses): Bash(git *',
+          'Ignoring malformed deny rule (unbalanced parentheses): Bash(git *',
+          'Ignoring malformed ask rule (unbalanced parentheses): Bash(git *',
+          'Ignoring malformed deny rule (unbalanced parentheses): Bash(git *',
+        ]);
+      } finally {
+        warn.mockRestore();
+      }
     });
   });
 

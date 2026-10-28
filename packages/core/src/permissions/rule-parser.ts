@@ -577,7 +577,8 @@ export function parseRules(raws: string[]): PermissionRule[] {
     .map(parseRule)
     .map((r) => {
       if (r.invalid) {
-        debugLogger.warn(
+        // eslint-disable-next-line no-console -- malformed security controls must be visible without debug logging
+        console.warn(
           `Ignoring malformed rule (unbalanced parentheses): ${r.raw}`,
         );
       }

@@ -45,6 +45,13 @@ import type {
 
 const debugLogger = createDebugLogger('PERMISSIONS');
 
+function warnMalformedRule(kind: RuleType | undefined, raw: string) {
+  // eslint-disable-next-line no-console -- malformed security controls must be visible without debug logging
+  console.warn(
+    `Ignoring malformed${kind ? ` ${kind}` : ''} rule (unbalanced parentheses): ${raw}`,
+  );
+}
+
 /**
  * How a tool participates in the registry for this session.
  *
@@ -1438,9 +1445,7 @@ export class PermissionManager {
       const rule = parseRule(raw);
       if (options?.trustGated) rule.trustGated = true;
       if (rule.invalid) {
-        debugLogger.warn(
-          `Ignoring malformed allow rule (unbalanced parentheses): ${rule.raw}`,
-        );
+        warnMalformedRule('allow', rule.raw);
         return;
       }
       // AUTO mode invariant: while dangerous allow rules are stripped,
@@ -1491,9 +1496,7 @@ export class PermissionManager {
     if (raw && raw.trim()) {
       const rule = parseRule(raw);
       if (rule.invalid) {
-        debugLogger.warn(
-          `Ignoring malformed deny rule (unbalanced parentheses): ${rule.raw}`,
-        );
+        warnMalformedRule('deny', rule.raw);
         return;
       }
       this.sessionRules.deny.push(rule);
@@ -1507,9 +1510,7 @@ export class PermissionManager {
     if (raw && raw.trim()) {
       const rule = parseRule(raw);
       if (rule.invalid) {
-        debugLogger.warn(
-          `Ignoring malformed ask rule (unbalanced parentheses): ${rule.raw}`,
-        );
+        warnMalformedRule('ask', rule.raw);
         return;
       }
       this.sessionRules.ask.push(rule);
@@ -1532,9 +1533,7 @@ export class PermissionManager {
   addPersistentRule(raw: string, type: RuleType): PermissionRule {
     const rule = parseRule(raw);
     if (rule.invalid) {
-      debugLogger.warn(
-        `Ignoring malformed ${type} rule (unbalanced parentheses): ${rule.raw}`,
-      );
+      warnMalformedRule(type, rule.raw);
       return rule;
     }
     // AUTO mode invariant: see addSessionAllowRule above. A dangerous
@@ -1618,8 +1617,8 @@ export class PermissionManager {
   // ---------------------------------------------------------------------------
 
   /**
-   * Return all active rules with their types and scopes, suitable for
-   * display in the /permissions dialog.
+   * Return all parsed rules with their types and scopes, including invalid
+   * entries that must be marked as not applied in the /permissions dialog.
    */
   listRules(): RuleWithSource[] {
     const result: RuleWithSource[] = [];
@@ -1630,9 +1629,7 @@ export class PermissionManager {
       scope: RuleScope,
     ) => {
       for (const rule of rules) {
-        if (!rule.invalid) {
-          result.push({ rule, type, scope });
-        }
+        result.push({ rule, type, scope });
       }
     };
 
