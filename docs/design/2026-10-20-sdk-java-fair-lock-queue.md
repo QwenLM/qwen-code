@@ -2,6 +2,14 @@
 
 [English](2026-10-20-sdk-java-fair-lock-queue.md) | [简体中文](2026-10-20-sdk-java-fair-lock-queue.zh-CN.md)
 
+## Current PR scope
+
+The suite/write-back lock split described below already landed on main through
+#15128 and #15254. PR #15274 now carries the remaining hardening: preserving
+failed-suite status through cache write-back, excluding mutable resolver
+metadata, and keeping cache seeding best-effort and observable. The historical
+lock design below is context, not a new relocation delivered by this PR.
+
 ## Problem
 
 `.github/workflows/sdk-java.yml` serializes every self-hosted Maven step on one

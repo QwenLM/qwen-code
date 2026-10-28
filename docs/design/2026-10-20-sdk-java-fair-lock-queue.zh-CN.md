@@ -2,6 +2,13 @@
 
 [English](2026-10-20-sdk-java-fair-lock-queue.md) | [简体中文](2026-10-20-sdk-java-fair-lock-queue.zh-CN.md)
 
+## 本次 PR 的当前范围
+
+下文所述的测试套件与写回锁拆分，已通过 #15128 和 #15254 合入 main。
+PR #15274 现在承载的是剩余的加固：缓存写回期间保留失败套件的状态、
+排除可变的解析器元数据，以及保持缓存播种尽力而为且故障可见。
+下文的历史锁设计作为背景，不代表本次 PR 新交付了一次锁范围迁移。
+
 ## 问题
 
 `.github/workflows/sdk-java.yml` 通过 `flock --wait` 把所有 self-hosted 的
