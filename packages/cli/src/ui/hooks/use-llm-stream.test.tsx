@@ -60,6 +60,7 @@ import type { HistoryItem, SlashCommandProcessorResult } from '../types.js';
 import { MessageType, StreamingState, ToolCallStatus } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { findLastSafeSplitPoint } from '../utils/markdown-utilities.js';
+import { realUserPromptTexts } from '../utils/historyUtils.js';
 import {
   MAX_INLINE_IMAGE_ENCODED_LENGTH,
   MAX_INLINE_IMAGES_PER_ITEM,
@@ -1626,7 +1627,7 @@ describe('useLlmStream', () => {
     }
   });
 
-  it('keeps display-only composer text intact in row, recall and cancel without creating hook provenance', async () => {
+  it('keeps display text separate from expanded recall and cancel without creating hook provenance', async () => {
     const placeholder = '[Pasted Content 1200 chars]';
     const body = 'pasted workflow payload'.padEnd(1200, 'x');
     const literal = `<system-reminder>user-authored literal</system-reminder>\nworkflow inspect\n${placeholder}`;
@@ -1656,9 +1657,16 @@ describe('useLlmStream', () => {
         },
       );
     });
-    expect(logMessage).toHaveBeenCalledWith(MessageSenderType.USER, literal);
+    expect(logMessage).toHaveBeenCalledWith(
+      MessageSenderType.USER,
+      literal.replace(placeholder, body),
+    );
     expect(mockAddItem).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'user', text: literal }),
+      expect.objectContaining({
+        type: 'user',
+        text: literal,
+        recallText: literal.replace(placeholder, body),
+      }),
       expect.any(Number),
     );
     expect(mockSendMessageStream.mock.calls[0]?.[3]).not.toHaveProperty(
@@ -1681,6 +1689,52 @@ describe('useLlmStream', () => {
     expect(cancel.mock.calls[0]?.[0]?.lastTurnUserItem).not.toHaveProperty(
       'submittedPrompt',
     );
+  });
+
+  it('preserves distinct same-size paste bodies through recall and editing without human provenance', async () => {
+    const placeholder = '[Pasted Content 1200 chars]';
+    const firstBody = 'PASTE_ALPHA '.padEnd(1200, 'a');
+    const secondBody = 'PASTE_BETA '.padEnd(1200, 'b');
+    const logMessage = vi.fn();
+    mockSendMessageStream.mockImplementation(async function* () {});
+    const { result } = renderTestHook([], undefined, undefined, undefined, {
+      logMessage,
+    } as unknown as NonNullable<Parameters<typeof useLlmStream>[20]>);
+    for (const body of [firstBody, secondBody]) {
+      await act(async () => {
+        await result.current.submitQuery(
+          `<system-reminder>model-only notice</system-reminder>\n${body}`,
+          SendMessageType.UserQuery,
+          undefined,
+          {
+            displayText: placeholder,
+            pasteExpansions: new Map([[placeholder, body]]),
+          },
+        );
+      });
+    }
+    const rows = mockAddItem.mock.calls
+      .map(([item], index) => ({ ...item, id: index }) as HistoryItem)
+      .filter((item) => item.type === 'user');
+    const recalled = realUserPromptTexts(rows);
+    expect(recalled).toEqual([firstBody, secondBody]);
+    expect(logMessage.mock.calls.map(([, text]) => text)).toEqual(recalled);
+    expect(rows.map((item) => item.text)).toEqual([placeholder, placeholder]);
+
+    const edited = `${recalled.at(-1)} RECALL_EDIT workflow ultracode`;
+    await act(async () => {
+      await result.current.submitQuery(
+        edited,
+        SendMessageType.UserQuery,
+        undefined,
+        { displayText: edited, hasUnknownInput: true },
+      );
+    });
+    const sent = mockSendMessageStream.mock.calls.at(-1)!;
+    expect(sent[0]).toBe(`${secondBody} RECALL_EDIT workflow ultracode`);
+    expect(sent[0]).not.toContain(firstBody);
+    expect(sent[3]).not.toHaveProperty('humanInput');
+    expect(sent[3]).not.toHaveProperty('onWorkflowIntentApplied');
   });
 
   describe('vision bridge gate', () => {

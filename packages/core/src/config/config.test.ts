@@ -5958,9 +5958,9 @@ describe('Server Config (config.ts)', () => {
 
     it('shares a failed in-flight initialization with concurrent callers', async () => {
       const config = makeConfig();
-      vi.spyOn(internals(config), 'initializeInternal').mockRejectedValue(
-        new Error('startup discovery exploded'),
-      );
+      const initializeInternal = vi
+        .spyOn(internals(config), 'initializeInternal')
+        .mockRejectedValue(new Error('startup discovery exploded'));
 
       const [firstError, secondError] = await Promise.all([
         config.initialize().catch((error: unknown) => error),
@@ -5969,9 +5969,8 @@ describe('Server Config (config.ts)', () => {
       expect(firstError).toBeInstanceOf(Error);
       expect(secondError).toBe(firstError);
 
-      // A failed-and-settled first flight still flips `initializationSettled`,
-      // so a later call must throw rather than re-join the stale rejection.
-      await expect(config.initialize()).rejects.toThrow(ALREADY_INITIALIZED);
+      await expect(config.initialize()).rejects.toBe(firstError);
+      expect(initializeInternal).toHaveBeenCalledOnce();
     });
 
     it('should skip implicit startup discovery in bare mode', async () => {
