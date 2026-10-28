@@ -12,8 +12,15 @@ import type {
   GoalTurnEndRecordPayload,
   SlashCommandRecordPayload,
   TurnResultRecordPayload,
+  UserPromptRecordPayload,
 } from './chatRecordingService.js';
+import { restoreUserPromptSubmitContextReceipt } from '../hooks/user-prompt-submit-context.js';
 import { isInternalCodeModeToolResult } from '../utils/transcript-records.js';
+import {
+  appendAutoMemorySnapshot,
+  AUTO_MEMORY_SNAPSHOT_METADATA,
+  findLatestAutoMemorySnapshot,
+} from '../memory/request-context.js';
 import { markCompressedHistory } from '../core/environmentContext.js';
 import {
   clearApiHistoryDirectoryContext,
@@ -28,7 +35,27 @@ export {
   markApiHistoryPrompt,
 } from '../utils/api-history-metadata.js';
 
-/** Returns the unique matching entry at or after `startIndex`, or -1. */
+const LEGACY_RECORD_REWIND_PREFIX = 'legacy-record:';
+
+/** Record-derived rewind keys are not file-checkpoint prompt IDs. */
+export function getRecordRewindId(record: ChatRecord): string | undefined {
+  if (typeof record.promptId === 'string' && record.promptId.length > 0) {
+    return record.promptId;
+  }
+  return typeof record.uuid === 'string' && record.uuid.length > 0
+    ? `${LEGACY_RECORD_REWIND_PREFIX}${record.uuid}`
+    : undefined;
+}
+
+/**
+ * A turn starts at its prompt entry; a tool-loop continuation carries the
+ * turn's id but no prompt of its own.
+ */
+function isPromptEntry(content: Content): boolean {
+  return !content.parts?.some((part) => part.functionResponse);
+}
+
+/** Returns the unique matching prompt entry at or after `startIndex`, or -1. */
 export function findApiHistoryPromptIndex(
   history: readonly Content[],
   promptId: string,
@@ -36,7 +63,13 @@ export function findApiHistoryPromptIndex(
 ): number {
   let match = -1;
   for (let index = startIndex; index < history.length; index++) {
-    if (getApiHistoryPromptId(history[index]!) !== promptId) continue;
+    const content = history[index]!;
+    if (getApiHistoryPromptId(content) !== promptId) continue;
+    // A turn cancelled between tool-loop laps pushes its continuation into
+    // history stamped with the turn's own id, so two entries carry the mark.
+    // Only the prompt entry starts the turn; counting the continuation would
+    // turn every such cancellation into a permanent refusal.
+    if (!isPromptEntry(content)) continue;
     if (match !== -1) return -1;
     match = index;
   }
@@ -49,7 +82,13 @@ export function getLastApiHistoryPromptId(
 ): string | undefined {
   const prompt = history
     .slice(0, history.length - (trailingSystemNotifications ?? 0))
-    .findLast((content) => getApiHistoryPromptId(content) !== undefined);
+    .findLast((content) => {
+      const id = getApiHistoryPromptId(content);
+      // Callers use this as a transport turn id (Session retry/continue), so
+      // it must stay a real prompt id: a record-derived key would also be
+      // stamped on the continuation entry, and a duplicate resolves to -1.
+      return id !== undefined && !id.startsWith(LEGACY_RECORD_REWIND_PREFIX);
+    });
   return prompt && getApiHistoryPromptId(prompt);
 }
 
@@ -205,7 +244,14 @@ function appendApiHistoryRecord(
 
   const message = copyContentForApiHistory(record.message);
   if (record.type === 'user' && !record.subtype) {
-    markApiHistoryPrompt(message, record.promptId);
+    markApiHistoryPrompt(message, getRecordRewindId(record));
+    const payload = record.systemPayload as UserPromptRecordPayload | undefined;
+    // Only the injector records per-turn hookContext provenance, so a
+    // trailing tagged part matching it is injector-owned: restore the
+    // receipt the JSON transcript could not carry.
+    if (typeof payload?.hookContext === 'string' && payload.hookContext) {
+      restoreUserPromptSubmitContextReceipt(message, payload.hookContext);
+    }
   }
   // Session multi-agent records (`agent_mention` / `agent_message`) need no
   // branch: their `message` is the enveloped model text, pushed below as its
@@ -304,6 +350,25 @@ export class SessionApiHistoryAccumulator {
       return;
     }
     if (record.type === 'system') {
+      if (record.subtype === 'memory_catalog_snapshot') {
+        const snapshot = record.message?.parts?.[0];
+        if (
+          snapshot?.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true &&
+          typeof snapshot.text === 'string'
+        ) {
+          if (
+            findLatestAutoMemorySnapshot(this.history)?.text === snapshot.text
+          ) {
+            return;
+          }
+          const length = this.history.length;
+          appendAutoMemorySnapshot(this.history, { ...snapshot });
+          if (this.history.length > length) {
+            this.systemNotificationFlags.push(false);
+          }
+        }
+        return;
+      }
       if (record.subtype === 'slash_command') {
         const payload = record.systemPayload as
           | SlashCommandRecordPayload

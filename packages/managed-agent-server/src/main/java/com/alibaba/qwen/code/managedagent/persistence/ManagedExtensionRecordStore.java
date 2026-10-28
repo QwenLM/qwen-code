@@ -24,6 +24,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -118,7 +119,7 @@ public class ManagedExtensionRecordStore {
     private final ManagedTaskEventStore taskEvents;
 
     @Autowired
-    public ManagedExtensionRecordStore(JdbcTemplate jdbc,
+    public ManagedExtensionRecordStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
             AgentStateStore sessions, ManagedTaskEventStore taskEvents) {
         this.jdbc = jdbc;
         this.sessions = sessions;
@@ -529,7 +530,7 @@ public class ManagedExtensionRecordStore {
             requireDomainCommitted(payload, domain, body != null);
             if (ManagedMcpSettings.DOMAIN.equals(domain)) {
                 projectMcpSettings(tenantId, workspaceId, sessionId, payload, resources,
-                        firstSequence + index, occurredAt);
+                        firstSequence + index, occurredAt, lines);
             }
             if (body != null) {
                 require(applied == 0, "A transaction carries at most one"
@@ -674,9 +675,8 @@ public class ManagedExtensionRecordStore {
     }
 
     private void projectMcpSettings(String tenantId, String workspaceId, String sessionId, JsonNode payload,
-            Function<String, StoredResource> resources, long sequence, long occurredAt) {
-        require(sessions != null, "MCP management admission is unavailable");
-        sessions.requireMcpSettingsCommit(tenantId, workspaceId, sessionId);
+            Function<String, StoredResource> resources, long sequence, long occurredAt, String[] lines) {
+        require(sessions != null, "Configuration management admission is unavailable");
         JsonNode ref = payload.get("recordRef");
         StoredResource resource = resources.apply(ref.get("resourceId").textValue());
         requireReference(resource, ref);
@@ -686,8 +686,21 @@ public class ManagedExtensionRecordStore {
         } catch (InvalidRecordException error) {
             throw rejected(error.getMessage());
         }
-        require(settings.get("operationId").equals(payload.get("operationId")), "MCP command identity conflicts");
+        require(settings.get("operationId").equals(payload.get("operationId")), "Configuration command identity conflicts");
         JsonNode previous = ManagedMcpSettings.find(jdbc, tenantId, sessionId);
+        if (ManagedConfigInstall.isPackageConfig(settings)) {
+            sessions.requireConfigurationCommit(tenantId, workspaceId, sessionId, settings);
+            try {
+                ManagedConfigInstall.successor(previous, settings);
+            } catch (InvalidRecordException error) {
+                throw rejected(error.getMessage());
+            }
+            requireConfigurationBinding(settings, lines);
+        } else {
+            require(!ManagedConfigInstall.isPackageConfig(previous), "Legacy MCP writes cannot replace package configuration");
+            sessions.requireMcpSettingsCommit(tenantId, workspaceId, sessionId);
+        }
+        Long settledAt = ManagedConfigInstall.barrier(settings) ? null : occurredAt;
         long revision = settings.get("revision").longValue();
         require(revision == (previous == null ? 1 : previous.get("revision").longValue() + 1), "MCP settings revision conflicts");
         String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
@@ -697,7 +710,7 @@ public class ManagedExtensionRecordStore {
                             + " session_id, domain, record_id, revision, record_resource_id, gmt_create, settled_at, first_sequence)"
                             + " VALUES ('DOMAIN', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", scope, key, tenantId, workspaceId,
                     sessionId, ManagedMcpSettings.DOMAIN, ManagedMcpSettings.RECORD_ID, revision, resource.resourceId(),
-                    occurredAt, occurredAt, sequence);
+                    occurredAt, settledAt, sequence);
         } else {
             JsonNode predecessor = settings.get("previousRecordRef");
             String previousResource = jdbc.queryForObject("SELECT record_resource_id FROM ma_session_record"
@@ -706,13 +719,31 @@ public class ManagedExtensionRecordStore {
             requireReference(resources.apply(previousResource), predecessor);
             jdbc.update("UPDATE ma_session_record SET revision=?, record_resource_id=?, settled_at=?"
                     + " WHERE session_scope_key=? AND record_key=? AND revision=?",
-                    revision, resource.resourceId(), occurredAt, scope, key, revision - 1);
+                    revision, resource.resourceId(), settledAt, scope, key, revision - 1);
         }
         jdbc.update("DELETE FROM ma_resource_ref WHERE session_scope_key=? AND owner_kind='SESSION_RECORD' AND owner_key=?", scope, key);
         jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key,"
                         + " tenant_id, workspace_id, session_id, resource_id, gmt_create) VALUES (?, 'SESSION_RECORD', ?, ?, ?, ?, ?, ?, ?, "
                         + ManagedSchemaTime.SQL_NOW + ")", scope, key, revision,
                 ManagedSchemaKeys.key(scope, resource.resourceId()), tenantId, workspaceId, sessionId, resource.resourceId());
+    }
+
+    private static void requireConfigurationBinding(JsonNode settings, String[] lines) {
+        List<JsonNode> bindings = java.util.Arrays.stream(lines).map(ManagedExtensionRecordStore::parse)
+                .filter(Objects::nonNull).map(line -> line.path("managedSession"))
+                .filter(event -> "config.bound".equals(event.path("kind").asText())).map(event -> event.path("payload")).toList();
+        if (!"committed".equals(settings.path("phase").asText())) {
+            require(bindings.isEmpty(), "Only a committed configuration may bind");
+            return;
+        }
+        require(bindings.size() == 1, "Configuration binding must commit atomically");
+        JsonNode binding = bindings.getFirst();
+        ManagedExtensionRecords.closed(binding, Set.of("revision", "previousRevision", "bundleRef", "rootSnapshotRef"), "Configuration binding");
+        require(binding.path("revision").equals(settings.get("configRevision"))
+                && (settings.path("previousConfigRevision").asLong() == 0
+                        ? binding.path("previousRevision").isNull() : binding.path("previousRevision").equals(settings.get("previousConfigRevision")))
+                && binding.get("bundleRef").equals(settings.get("bundleRef"))
+                && binding.get("rootSnapshotRef").equals(settings.get("rootSnapshotRef")), "Configuration binding conflicts");
     }
 
     /**
@@ -805,9 +836,9 @@ public class ManagedExtensionRecordStore {
             boolean hookDomain = "hook_execution".equals(domain)
                     || "hook_registration".equals(domain);
             if (v2 && (resourcePhase || List.of("monitor_run", "mcp_configuration", "mcp_operation",
-                    "schedule", "automation_run", "session_message", "channel_delivery").contains(domain))) {
+                    "schedule", "automation_run", "session_message", "channel_delivery", "tool_stage").contains(domain))) {
                 if (!List.of("monitor_run", "child_run", "child_acceptance", "mcp_configuration", "mcp_operation",
-                        "hook_execution", "hook_registration", "schedule", "automation_run", "session_message", "channel_delivery").contains(domain)) {
+                        "hook_execution", "hook_registration", "schedule", "automation_run", "session_message", "channel_delivery", "tool_stage").contains(domain)) {
                     throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
                 }
                 JsonNode next = readBody(resources.apply(payload.path("recordRef").path("resourceId").asText()));
@@ -1132,8 +1163,8 @@ public class ManagedExtensionRecordStore {
         } catch (InvalidRecordException error) {
             throw rejected(error.getMessage());
         }
-        if (List.of("mcp_configuration", "mcp_operation", "hook_registration", "hook_execution").contains(domain)) {
-            for (String field : List.of("catalogRef", "argsRef", "resultRef", "planRef", "inputRef")) {
+        if (List.of("mcp_configuration", "mcp_operation", "hook_registration", "hook_execution", "tool_stage").contains(domain)) {
+            for (String field : List.of("catalogRef", "argsRef", "resultRef", "planRef", "inputRef", "permissionRef")) {
                 JsonNode ref = record.get(field);
                 if (ref != null && !ref.isNull()) {
                     requireReference(resources.apply(ref.get("resourceId").textValue()), ref);

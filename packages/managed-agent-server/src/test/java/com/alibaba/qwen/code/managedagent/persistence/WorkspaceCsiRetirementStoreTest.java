@@ -294,15 +294,17 @@ class WorkspaceCsiRetirementStoreTest {
 
     @Test
     void sameVolumeAliasIsStillBusyWhileUnrelatedVolumeCanReserve() {
-        store.beginRetirement(registration, bindings, original, reservation, UUID.randomUUID().toString());
-        var alias = WorkspaceCsiReservationStoreTest.registration("other", "alias", "backend", "handle", 1);
+        var alias = WorkspaceCsiReservationStoreTest.registration("tenant", "alias", "backend", "handle", 1);
         store.register(alias);
         var contender = binding(alias);
+        store.beginRetirement(registration, bindings, original, reservation, UUID.randomUUID().toString());
         assertThatThrownBy(() -> store.reserve(alias, bindings, contender, UUID.randomUUID().toString()))
                 .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
                     assertThat(error.getCode()).isEqualTo("workspace_csi_busy");
                     assertThat(error.isRetryable()).isTrue();
                 });
+        var foreign = WorkspaceCsiReservationStoreTest.registration("other", "foreign-alias", "backend", "handle", 1);
+        assertUnavailable(() -> store.register(foreign));
         var unrelated = WorkspaceCsiReservationStoreTest.registration("other", "another", "backend", "another-handle", 1);
         store.register(unrelated);
         assertThat(store.reserve(unrelated, bindings, binding(unrelated), UUID.randomUUID().toString()).phase()).isEqualTo("RESERVED");

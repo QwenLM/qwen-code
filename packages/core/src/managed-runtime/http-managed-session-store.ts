@@ -4,8 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  parseManagedPermissionRules,
+  nonEmptyManagedPermissionRules,
+  type ManagedPermissionRules,
+} from './managed-permission-rules.js';
+
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { isIPv4 } from 'node:net';
+import { isDeepStrictEqual } from 'node:util';
 import { managedToolDigest } from '../tools/managed-tool-protocol.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
@@ -81,6 +88,7 @@ export const HTTP_MANAGED_SESSION_STORE_CONTRACT = {
 } as const;
 
 const MAX_ATTACHMENT_INPUT_BYTES = 8 * 1024 * 1024;
+const MAX_NATIVE_SNAPSHOT_PAGE_BYTES = 16 * 1024 * 1024;
 
 export function managedSessionInlineResourceBytes(kind: string): number {
   if (kind === 'managed-checkpoint')
@@ -142,6 +150,12 @@ export interface CsiApplicationRetirementStatus {
   readonly finalizeReceiptSha256: string | null;
 }
 
+export interface ManagedQueuedUserMessage {
+  readonly id: string;
+  readonly revision: number;
+  readonly input: readonly unknown[];
+}
+
 export interface HttpManagedSessionStores {
   readonly journalStore: ManagedSessionJournalStore;
   readonly resourceStore: ManagedSessionResourceStore;
@@ -164,12 +178,19 @@ export interface HttpManagedSessionStores {
   close(): Promise<void>;
   setLifecycleAuthority(authority?: ManagedSessionLifecycleAuthority): void;
   authorizeLifecycle(kind?: 'close' | 'delete'): Promise<void>;
-  authorizeOrdinary(kind?: 'legacy-close'): Promise<void>;
+  authorizeOrdinary(
+    kind?: 'legacy-close' | `configuration:${string}`,
+  ): Promise<void>;
   approvalSelection(): Promise<ManagedSessionApprovalSelection | undefined>;
+  claimUserMessages(
+    promptId: string,
+    initialOnly?: boolean,
+  ): Promise<ManagedQueuedUserMessage[]>;
 }
 
 export interface ManagedSessionApprovalSelection {
-  readonly mode: 'default' | 'auto-edit' | 'yolo';
+  readonly mode: 'default' | 'auto-edit' | 'yolo' | 'auto';
+  readonly permissionRules?: ManagedPermissionRules;
   readonly revision: number;
 }
 
@@ -263,6 +284,8 @@ export function createHttpManagedSessionStores(
     authorizeLifecycle: (kind) => client.authorizeLifecycle(kind),
     authorizeOrdinary: (kind) => client.authorizeOrdinary(kind),
     approvalSelection: () => client.approvalSelection(),
+    claimUserMessages: (promptId, initialOnly) =>
+      client.claimUserMessages(promptId, initialOnly),
   };
 }
 
@@ -707,6 +730,17 @@ interface RestoreHead {
   readonly recoveryDetailCode: string | null;
 }
 
+interface NativeSnapshotManifest {
+  readonly snapshotId: string;
+  readonly coveredJournalRevision: number;
+  readonly committedSequence: number;
+  readonly lastCommitDigest: string | null;
+  readonly activationEpoch: number;
+  readonly latestCheckpointResourceId: string | null;
+  readonly resourceCount: number;
+  readonly lastPageDigest: string;
+}
+
 interface CommitResource {
   readonly resourceId: string;
   readonly kind: string;
@@ -789,13 +823,58 @@ class ManagedSessionStoreHttpClient {
     this.lifecycleAuthority = authority;
   }
 
-  async authorizeOrdinary(kind?: 'legacy-close'): Promise<void> {
+  async authorizeOrdinary(
+    kind?: 'legacy-close' | `configuration:${string}`,
+  ): Promise<void> {
     await this.assertWritable();
     await this.json('/execution:authorize', 'POST', {
       ...(kind ? { kind } : {}),
       workspaceId: this.sessionKey.workspaceId,
       writerId: this.writerId,
       writerGeneration: this.grant!.writerGeneration,
+    });
+  }
+
+  async claimUserMessages(
+    promptId: string,
+    initialOnly?: boolean,
+  ): Promise<ManagedQueuedUserMessage[]> {
+    await this.assertWritable();
+    let value: unknown;
+    try {
+      value = await this.json('/user-messages:claim', 'POST', {
+        workspaceId: this.sessionKey.workspaceId,
+        writerId: this.writerId,
+        writerGeneration: this.grant!.writerGeneration,
+        promptId,
+        initialOnly: initialOnly ?? false,
+      });
+    } catch (error) {
+      if (
+        error instanceof ManagedSessionStoreHttpError &&
+        error.status === 404 &&
+        error.remoteCode === 'not_found'
+      )
+        return [];
+      throw error;
+    }
+    if (!Array.isArray(value) || value.length > 32)
+      throw corrupt('invalid user message queue.');
+    return value.map((entry) => {
+      const message = asRecord(entry, 'queued user message');
+      if (
+        typeof message['id'] !== 'string' ||
+        !message['id'].startsWith('umsg_') ||
+        !Number.isSafeInteger(message['revision']) ||
+        Number(message['revision']) < 1 ||
+        !Array.isArray(message['input'])
+      )
+        throw corrupt('invalid queued user message.');
+      return {
+        id: message['id'],
+        revision: Number(message['revision']),
+        input: message['input'],
+      };
     });
   }
 
@@ -811,17 +890,37 @@ class ManagedSessionStoreHttpClient {
     if (value === null) return undefined;
     const selection = asRecord(value, 'approval selection');
     if (
-      Object.keys(selection).length !== 2 ||
-      !['default', 'auto-edit', 'yolo'].includes(String(selection['mode'])) ||
+      Object.keys(selection).length !==
+        (selection['permissionRules'] === undefined ? 2 : 3) ||
+      !['default', 'auto-edit', 'yolo', 'auto'].includes(
+        String(selection['mode']),
+      ) ||
       typeof selection['mode'] !== 'string' ||
       typeof selection['revision'] !== 'number' ||
       !Number.isSafeInteger(selection['revision']) ||
       selection['revision'] < 0
     )
       throw corrupt('approval selection is invalid.');
+    let permissionRules: ManagedPermissionRules | undefined;
+    try {
+      permissionRules =
+        selection['permissionRules'] === undefined
+          ? undefined
+          : nonEmptyManagedPermissionRules(
+              parseManagedPermissionRules(selection['permissionRules']),
+            );
+    } catch {
+      throw corrupt('approval selection rules are invalid.');
+    }
+    if (
+      selection['revision'] === 0 &&
+      (selection['mode'] === 'auto' || permissionRules)
+    )
+      throw corrupt('approval selection revision is invalid.');
     return {
       mode: selection['mode'] as ManagedSessionApprovalSelection['mode'],
       revision: selection['revision'],
+      ...(permissionRules ? { permissionRules } : {}),
     };
   }
 
@@ -924,12 +1023,15 @@ class ManagedSessionStoreHttpClient {
 
   async readJournal(maxBytes?: number): Promise<ManagedSessionJournalScan> {
     await this.ensureWriter();
-    const head = parseRestoreHead(
+    const response = asRecord(
       await this.json(
-        `/restore?workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}`,
+        `/restore?workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}&includeNativeSnapshot=true`,
         'GET',
       ),
+      'restore head',
     );
+    const head = parseRestoreHead(response);
+    const usesSnapshot = response['nativeSnapshot'] != null;
     this.requireHeadMatchesGrant(head);
     // Sanitized grant/head pair (review #14522): a restored head that
     // matches the acquired writer generation proves the previous boot's
@@ -941,11 +1043,78 @@ class ManagedSessionStoreHttpClient {
     const chunks: Buffer[] = [];
     let afterRevision = 0;
     let activationEpoch = 0;
+    let committedSequence = 0;
+    let lastCommitDigest: string | null = null;
+    let latestCheckpointResourceId: string | null = null;
+    const append = (value: unknown): TransactionDescriptor => {
+      const transaction = parseStoredTransaction(value);
+      if (
+        transaction.journalRevision !== afterRevision + 1 ||
+        (usesSnapshot && transaction.journalRevision > head.journalRevision)
+      ) {
+        throw corrupt('transaction revisions are not contiguous.');
+      }
+      const bytes = decodeBase64(
+        transaction.recordBytesBase64,
+        'recordBytesBase64',
+      );
+      if (
+        bytes.byteLength !== transaction.byteLength ||
+        sha256(bytes) !== transaction.recordDigest
+      ) {
+        throw corrupt('transaction bytes do not match their metadata.');
+      }
+      const descriptor = describeTransaction(
+        decodeRecords(bytes),
+        bytes,
+        activationEpoch,
+        this.sessionKey,
+      );
+      requireStoredTransactionMatches(transaction, descriptor);
+      if (
+        usesSnapshot &&
+        (transaction.previousCommitDigest !== lastCommitDigest ||
+          (afterRevision === 0
+            ? transaction.operation !== 'session.create' ||
+              transaction.eventCount !== 0
+            : transaction.operation === 'session.create' ||
+              transaction.firstSequence !== committedSequence + 1))
+      ) {
+        throw corrupt('snapshot transaction chain is discontinuous.');
+      }
+      activationEpoch = descriptor.activationEpoch;
+      committedSequence = transaction.lastSequence;
+      lastCommitDigest = transaction.commitDigest;
+      latestCheckpointResourceId =
+        descriptor.latestCheckpointResourceId ?? latestCheckpointResourceId;
+      chunks.push(bytes);
+      afterRevision = transaction.journalRevision;
+      return descriptor;
+    };
+    if (usesSnapshot) {
+      const snapshot = await this.readNativeSnapshot(
+        response['nativeSnapshot'],
+        head,
+        append,
+      );
+      if (
+        afterRevision !== snapshot.coveredJournalRevision ||
+        committedSequence !== snapshot.committedSequence ||
+        lastCommitDigest !== snapshot.lastCommitDigest ||
+        activationEpoch !== snapshot.activationEpoch ||
+        latestCheckpointResourceId !== snapshot.latestCheckpointResourceId
+      ) {
+        throw corrupt('snapshot prefix does not match its manifest.');
+      }
+    }
     while (afterRevision < head.journalRevision) {
       await this.ensureWriter();
+      const limit = usesSnapshot
+        ? Math.min(100, head.journalRevision - afterRevision)
+        : 100;
       const page = asRecord(
         await this.json(
-          `/transactions?workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}&afterRevision=${afterRevision}&limit=100`,
+          `/transactions?workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}&afterRevision=${afterRevision}&limit=${limit}`,
           'GET',
         ),
         'transaction page',
@@ -955,30 +1124,7 @@ class ManagedSessionStoreHttpClient {
         throw corrupt('transaction page did not advance the journal.');
       }
       for (const value of transactions) {
-        const transaction = parseStoredTransaction(value);
-        if (transaction.journalRevision !== afterRevision + 1) {
-          throw corrupt('transaction revisions are not contiguous.');
-        }
-        const bytes = decodeBase64(
-          transaction.recordBytesBase64,
-          'recordBytesBase64',
-        );
-        if (
-          bytes.byteLength !== transaction.byteLength ||
-          sha256(bytes) !== transaction.recordDigest
-        ) {
-          throw corrupt('transaction bytes do not match their metadata.');
-        }
-        const descriptor = describeTransaction(
-          decodeRecords(bytes),
-          bytes,
-          activationEpoch,
-          this.sessionKey,
-        );
-        requireStoredTransactionMatches(transaction, descriptor);
-        activationEpoch = descriptor.activationEpoch;
-        chunks.push(bytes);
-        afterRevision = transaction.journalRevision;
+        append(value);
       }
       const nextRevision = safeCounter(page['nextRevision'], 'nextRevision');
       const hasMore = boolean(page['hasMore'], 'hasMore');
@@ -990,14 +1136,36 @@ class ManagedSessionStoreHttpClient {
       }
     }
     const bytes = Buffer.concat(chunks);
-    const scan = scanManagedSessionJournal(bytes, this.sessionKey, maxBytes);
+    const scan = scanManagedSessionJournal(
+      bytes,
+      this.sessionKey,
+      usesSnapshot ? undefined : maxBytes,
+    );
     if (
-      maxBytes === undefined &&
+      (usesSnapshot || maxBytes === undefined) &&
       (scan.committed !== head.committedSequence ||
         scan.lastMarkerDigest !== head.lastCommitDigest ||
-        (scan.activation?.epoch ?? 0) !== head.activationEpoch)
+        (scan.activation?.epoch ?? 0) !== head.activationEpoch ||
+        (usesSnapshot &&
+          latestCheckpointResourceId !== head.latestCheckpointResourceId))
     ) {
       throw corrupt('journal bytes do not match the durable head.');
+    }
+    if (usesSnapshot) {
+      await this.ensureWriter();
+      const current = parseRestoreHead(
+        await this.json(
+          `/restore?workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}`,
+          'GET',
+        ),
+      );
+      this.requireHeadMatchesGrant(current);
+      this.requireHeadMatchesGrant(head);
+      if (
+        current.journalRevision < head.journalRevision ||
+        current.committedSequence < head.committedSequence
+      )
+        throw corrupt('restore head regressed while reading the snapshot.');
     }
     this.grant = {
       ...this.requireGrant(),
@@ -1008,7 +1176,194 @@ class ManagedSessionStoreHttpClient {
       lastCommitDigest: head.lastCommitDigest,
       activationEpoch: head.activationEpoch,
     };
-    return scan;
+    return usesSnapshot && maxBytes !== undefined
+      ? scanManagedSessionJournal(bytes, this.sessionKey, maxBytes)
+      : scan;
+  }
+
+  private async readNativeSnapshot(
+    value: unknown,
+    head: RestoreHead,
+    append: (transaction: unknown) => TransactionDescriptor,
+  ): Promise<NativeSnapshotManifest> {
+    const descriptor = asRecord(value, 'native snapshot descriptor');
+    const raw = asRecord(descriptor['snapshot'], 'native snapshot manifest');
+    const manifestRef = assertManagedSessionDurableRef(
+      descriptor['manifest'] as ManagedSessionJsonValue,
+      'native manifest',
+    );
+    const snapshot: NativeSnapshotManifest = {
+      snapshotId: string(raw['snapshotId'], 'snapshotId'),
+      coveredJournalRevision: safeCounter(
+        raw['coveredJournalRevision'],
+        'coveredJournalRevision',
+      ),
+      committedSequence: safeCounter(
+        raw['committedSequence'],
+        'committedSequence',
+      ),
+      lastCommitDigest: nullableDigest(
+        raw['lastCommitDigest'],
+        'lastCommitDigest',
+      ),
+      activationEpoch: safeCounter(raw['activationEpoch'], 'activationEpoch'),
+      latestCheckpointResourceId: nullableString(
+        raw['latestCheckpointResourceId'],
+        'latestCheckpointResourceId',
+      ),
+      resourceCount: safeCounter(raw['resourceCount'], 'resourceCount'),
+      lastPageDigest: digest(raw['lastPageDigest'], 'lastPageDigest'),
+    };
+    const storageVersion = safeCounter(
+      raw['storageVersion'],
+      'snapshot storageVersion',
+    );
+    if (
+      raw['format'] !== 'qwen-managed-native-session-snapshot/1' ||
+      raw['payloadFormat'] !== 'committed-prefix-v1' ||
+      raw['tenantId'] !== this.sessionKey.tenantId ||
+      raw['workspaceId'] !== this.sessionKey.workspaceId ||
+      raw['sessionId'] !== this.sessionKey.sessionId ||
+      snapshot.snapshotId.length === 0 ||
+      Buffer.byteLength(snapshot.snapshotId, 'utf8') > 512 ||
+      ![1, 2].includes(storageVersion) ||
+      storageVersion > head.storageVersion ||
+      snapshot.coveredJournalRevision < 1 ||
+      snapshot.coveredJournalRevision > head.journalRevision ||
+      snapshot.committedSequence > head.committedSequence ||
+      snapshot.activationEpoch > head.activationEpoch ||
+      raw['pageCount'] !== snapshot.coveredJournalRevision ||
+      manifestRef.kind !== 'managed-native-journal-snapshot' ||
+      manifestRef.schemaVersion !== 1 ||
+      manifestRef.byteLength > MAX_NATIVE_SNAPSHOT_PAGE_BYTES
+    ) {
+      throw corrupt('native snapshot scope, format or coverage is invalid.');
+    }
+    const resources = new Map<string, ManagedSessionDurableRef>();
+    let after = 0;
+    let previousDigest: string | null = null;
+    while (after < snapshot.coveredJournalRevision) {
+      await this.ensureWriter();
+      const result = asRecord(
+        await this.json(
+          `/journal-snapshots/${encodeURIComponent(snapshot.snapshotId)}/pages?workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}&afterRevision=${after}&limit=100`,
+          'GET',
+        ),
+        'native snapshot pages',
+      );
+      const pages = asArray(result['pages'], 'native snapshot pages');
+      if (pages.length === 0 || pages.length > 100)
+        throw corrupt('native snapshot pages did not advance.');
+      let responseBytes = 0;
+      for (const item of pages) {
+        const stored = asRecord(item, 'native snapshot page');
+        const ref = assertManagedSessionDurableRef(
+          stored['resource'] as ManagedSessionJsonValue,
+          'native page resource',
+        );
+        if (
+          ref.kind !== 'managed-native-journal-snapshot-page' ||
+          ref.schemaVersion !== 1 ||
+          ref.byteLength > MAX_NATIVE_SNAPSHOT_PAGE_BYTES ||
+          string(stored['bytesBase64'], 'native page bytes').length >
+            Math.ceil(ref.byteLength / 3) * 4
+        ) {
+          throw corrupt('native snapshot page resource is invalid.');
+        }
+        const bytes = decodeBase64(
+          string(stored['bytesBase64'], 'native page bytes'),
+          'native page bytes',
+        );
+        responseBytes += bytes.byteLength;
+        if (
+          bytes.byteLength !== ref.byteLength ||
+          sha256(bytes) !== ref.digest ||
+          responseBytes > MAX_NATIVE_SNAPSHOT_PAGE_BYTES
+        )
+          throw corrupt('native snapshot page digest or size is invalid.');
+        const page = asRecord(
+          parseManagedSessionRecordJson(
+            bytes.toString('utf8'),
+            MAX_NATIVE_SNAPSHOT_PAGE_BYTES,
+          ),
+          'native snapshot page body',
+        );
+        if (
+          stored['journalRevision'] !== after + 1 ||
+          page['journalRevision'] !== after + 1 ||
+          page['previousPageDigest'] !== previousDigest ||
+          after >= snapshot.coveredJournalRevision
+        ) {
+          throw corrupt('native snapshot page chain is discontinuous.');
+        }
+        const census = asArray(page['resources'], 'native resource census');
+        if (
+          census.length >
+          HTTP_MANAGED_SESSION_STORE_CONTRACT.maxResourcesPerTransaction
+        )
+          throw corrupt('native resource census is too large.');
+        const seen = new Set<string>();
+        const added: ManagedSessionDurableRef[] = [];
+        for (const item of census) {
+          const { bytesBase64, ...metadata } = asRecord(
+            item,
+            'native resource',
+          );
+          const resource = assertManagedSessionDurableRef(
+            metadata as ManagedSessionJsonValue,
+            'native resource',
+          );
+          if (
+            bytesBase64 != null ||
+            seen.has(resource.resourceId) ||
+            [
+              'managed-native-journal-snapshot',
+              'managed-native-journal-snapshot-page',
+            ].includes(resource.kind) ||
+            (resources.has(resource.resourceId) &&
+              !isDeepStrictEqual(resources.get(resource.resourceId), resource))
+          ) {
+            throw corrupt('native resource census conflicts.');
+          }
+          seen.add(resource.resourceId);
+          if (!resources.has(resource.resourceId)) added.push(resource);
+          resources.set(resource.resourceId, resource);
+        }
+        const transaction = asRecord(
+          page['transaction'],
+          'native snapshot transaction',
+        );
+        if (transaction['journalRevision'] !== after + 1)
+          throw corrupt('native snapshot transaction revision conflicts.');
+        const declared = append(transaction).refs;
+        for (const resource of added) {
+          const body = await this.readResource(resource);
+          declared.push(...collectNestedResourceRefs(resource, body));
+        }
+        for (const resource of declared) {
+          if (!isDeepStrictEqual(resources.get(resource.resourceId), resource))
+            throw corrupt(
+              'native resource dependency is missing or conflicting.',
+            );
+        }
+        previousDigest = ref.digest;
+        after++;
+      }
+      if (
+        safeCounter(result['nextRevision'], 'nextRevision') !== after ||
+        boolean(result['hasMore'], 'hasMore') !==
+          after < snapshot.coveredJournalRevision
+      ) {
+        throw corrupt('native snapshot cursor is inconsistent.');
+      }
+    }
+    if (
+      previousDigest !== snapshot.lastPageDigest ||
+      resources.size !== snapshot.resourceCount
+    ) {
+      throw corrupt('native snapshot digest or resource count conflicts.');
+    }
+    return snapshot;
   }
 
   async appendTransaction(records: readonly unknown[]): Promise<void> {

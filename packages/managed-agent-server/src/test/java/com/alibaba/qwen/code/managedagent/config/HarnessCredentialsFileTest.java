@@ -81,6 +81,10 @@ class HarnessCredentialsFileTest {
             {"QWEN_SERVER_TOKEN = " + secret, "whitespace around `=` in QWEN_SERVER_TOKEN"},
             {"QWEN_SERVER_TOKEN\t=" + secret, "whitespace around `=` in QWEN_SERVER_TOKEN"},
             {"QWEN_SERVER_TOKEN= " + secret, "whitespace around `=` in QWEN_SERVER_TOKEN"},
+            // systemd ignores an `export` line that a shell assigns, and a shell runs the second as a command.
+            {"export QWEN_SERVER_TOKEN=" + secret, "a key that is not a bare variable name"},
+            {"export HTTPS_PROXY=" + secret, "a key that is not a bare variable name"},
+            {"NODE_OPTIONS HTTPS_PROXY=" + secret, "a key that is not a bare variable name"},
             // The Harness row probes only the token, so a digest line must not slip through either.
             {"QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST =sha256:" + secret,
                 "whitespace around `=` in QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST"},
@@ -177,6 +181,92 @@ class HarnessCredentialsFileTest {
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessage("Configure the Hosted Harness token and capability digest either in"
                             + " harness.credentials-file or directly, not both");
+        }
+    }
+
+    @Test
+    void sharesTheBrokerTokenWhenTheFileCarriesIt(@TempDir Path directory) throws IOException {
+        String credentials = "QWEN_SERVER_TOKEN=" + TOKEN + "\nQWEN_HOSTED_HARNESS_CAPABILITY_DIGEST=" + DIGEST + "\n";
+        Path shared = Files.writeString(directory.resolve("shared.env"), credentials
+                + "QWEN_MANAGED_RUNTIME_BROKER_URL=http://127.0.0.1:4182\n"
+                + "QWEN_MANAGED_RUNTIME_BROKER_TOKEN=broker-token\n");
+        ManagedAgentProperties fromFile = withFile(shared);
+        fromFile.validateWorkspaceFiles();
+        assertThat(fromFile.getRuntimeBroker().getToken()).isEqualTo("broker-token");
+        // Preflight compares the URL with the address the Broker binds.
+        assertThat(fromFile.harnessBrokerUrl()).isEqualTo("http://127.0.0.1:4182");
+        // Both readers take the brackets of an IPv6 literal as they are.
+        Path ipv6 = Files.writeString(directory.resolve("ipv6.env"), credentials
+                + "QWEN_MANAGED_RUNTIME_BROKER_URL=http://[::1]:4182\n"
+                + "QWEN_MANAGED_RUNTIME_BROKER_TOKEN=broker-token\n");
+        ManagedAgentProperties bracketed = withFile(ipv6);
+        bracketed.validateWorkspaceFiles();
+        assertThat(bracketed.harnessBrokerUrl()).isEqualTo("http://[::1]:4182");
+
+        // The Harness takes the URL and token together, so one without the other binds nothing.
+        String[] halves = {"QWEN_MANAGED_RUNTIME_BROKER_TOKEN=broker-token",
+            "QWEN_MANAGED_RUNTIME_BROKER_URL=http://127.0.0.1:4182"};
+        for (String half : halves) {
+            Path file = Files.writeString(directory.resolve("half.env"), credentials + half + "\n");
+            ManagedAgentProperties properties = withFile(file);
+            assertThatThrownBy(properties::validateWorkspaceFiles).as(half)
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessage("Set QWEN_MANAGED_RUNTIME_BROKER_URL and QWEN_MANAGED_RUNTIME_BROKER_TOKEN"
+                            + " together in harness.credentials-file, or neither");
+            assertThat(properties.getRuntimeBroker().getToken()).isEmpty();
+            assertThat(properties.getHarness().getToken()).isEmpty();
+            assertThat(properties.harnessCredentialsApplied()).isFalse();
+        }
+        // The Harness takes an empty value as set, and then refuses to start
+        // without the other half, so the file cannot pass as setting neither.
+        for (String empty : new String[] {
+                "QWEN_MANAGED_RUNTIME_BROKER_URL=", "QWEN_MANAGED_RUNTIME_BROKER_TOKEN=''"}) {
+            String key = empty.substring(0, empty.indexOf('='));
+            Path file = Files.writeString(directory.resolve("empty.env"), credentials + empty + "\n");
+            ManagedAgentProperties properties = withFile(file);
+            assertThatThrownBy(properties::validateWorkspaceFiles).as(empty)
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessage("Hosted Harness credentials file " + file + " sets " + key
+                            + " to an empty value, which the Hosted Harness refuses; set it or remove the line");
+            assertThat(properties.harnessBrokerUrl()).isEmpty();
+            assertThat(properties.harnessCredentialsApplied()).isFalse();
+        }
+
+        ManagedAgentProperties twice = withFile(shared);
+        twice.getRuntimeBroker().setToken("direct-token");
+        assertThatThrownBy(twice::validateWorkspaceFiles)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Configure the Runtime Broker token either in"
+                        + " harness.credentials-file or directly, not both");
+        assertThat(twice.getHarness().getToken()).isEmpty();
+        assertThat(twice.harnessBrokerUrl()).isEmpty();
+        assertThat(twice.harnessCredentialsApplied()).isFalse();
+
+        // Without the key, for example on a text-only deployment, the direct value stays in charge.
+        Path textOnly = Files.writeString(directory.resolve("text-only.env"), credentials);
+        ManagedAgentProperties direct = withFile(textOnly);
+        direct.getRuntimeBroker().setToken("direct-token");
+        direct.validateWorkspaceFiles();
+        assertThat(direct.getRuntimeBroker().getToken()).isEqualTo("direct-token");
+
+        // The Harness reads these lines too, so they are held to the same rules as the other two.
+        for (String[] refused : new String[][] {
+            {"QWEN_MANAGED_RUNTIME_BROKER_TOKEN =broker-token",
+                "whitespace around `=` in QWEN_MANAGED_RUNTIME_BROKER_TOKEN"},
+            {"QWEN_MANAGED_RUNTIME_BROKER_TOKEN=broker&token",
+                "a character other than letters, digits and `._:/+=-` in QWEN_MANAGED_RUNTIME_BROKER_TOKEN"},
+            {"QWEN_MANAGED_RUNTIME_BROKER_TOKEN=broker[token]",
+                "a character other than letters, digits and `._:/+=-` in QWEN_MANAGED_RUNTIME_BROKER_TOKEN"},
+            {"export QWEN_MANAGED_RUNTIME_BROKER_TOKEN=broker-token", "a key that is not a bare variable name"},
+            {"QWEN_MANAGED_RUNTIME_BROKER_URL =http://127.0.0.1:4182",
+                "whitespace around `=` in QWEN_MANAGED_RUNTIME_BROKER_URL"},
+            {"QWEN_MANAGED_RUNTIME_BROKER_URL=http://h;rm",
+                "a character other than letters, digits, `[`, `]` and `._:/+=-` in QWEN_MANAGED_RUNTIME_BROKER_URL"},
+        }) {
+            Path file = Files.writeString(directory.resolve("refused.env"), credentials + refused[0] + "\n");
+            assertThatThrownBy(withFile(file)::validateWorkspaceFiles).as(refused[0])
+                    .hasMessageStartingWith(
+                            "Hosted Harness credentials file " + file + " line 3 uses " + refused[1] + ";");
         }
     }
 

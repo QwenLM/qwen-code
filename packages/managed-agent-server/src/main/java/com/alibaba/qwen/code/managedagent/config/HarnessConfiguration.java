@@ -15,6 +15,7 @@ import com.alibaba.qwen.code.managedagent.persistence.SshWorkspaceStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.session.AgentStateStore;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
@@ -36,7 +37,9 @@ public class HarnessConfiguration {
             WorkspaceExecutionStore workspaceExecution,
             ManagedActionStore actions, ManagedAgentDefinitionStore definitions,
             ManagedSessionStore resources, SshWorkspaceStore ssh, HarnessPlacementStore placements,
-            ManagedSessionSkills skills, ObjectMapper json) {
+            ManagedSessionSkills skills, @Qualifier("managedAgentObjectMapper") ObjectMapper json,
+            com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore extensionRecords) {
+        BrokerSecurity.checkHarnessTransport(properties, new java.util.ArrayList<>());
         var pool = properties.getHarness().getPool();
         if (pool.isEnabled()) {
             if ("kubernetes-workspace".equals(properties.getRuntimeBroker().getProvisioner())) {
@@ -65,8 +68,12 @@ public class HarnessConfiguration {
             }
             try {
                 return new HarnessPoolConnector(properties, placements, discovery,
-                        endpoint -> new QwenHostedHarnessConnector(properties, sessions, workspaceExecution,
-                                actions, definitions, resources, ssh), skills);
+                        endpoint -> {
+                            var connector = new QwenHostedHarnessConnector(properties, sessions, workspaceExecution,
+                                    actions, definitions, resources, ssh);
+                            connector.configureExtensionResources(extensionRecords, json);
+                            return connector;
+                        }, skills);
             } catch (RuntimeException error) {
                 discovery.close();
                 throw error;

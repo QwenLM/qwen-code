@@ -34,6 +34,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.stubbing.Answer;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
@@ -85,7 +86,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 class ManagedActionsTest {
     @Autowired private MockMvc mvc;
     @Autowired private ObjectMapper json;
-    @Autowired private JdbcTemplate jdbc;
+    @Autowired private @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc;
     @Autowired private ManagedSessionStore journals;
     @Autowired private ManagedActionStore actions;
     @Autowired private AgentStateStore sessions;
@@ -114,8 +115,9 @@ class ManagedActionsTest {
     @TestConfiguration
     static class Configuration {
         @Bean @Primary
-        ManagedAgentStore actionStore(JdbcTemplate jdbc, ObjectMapper mapper, ManagedWorkspaceRegistry registry,
-                Clock clock, com.alibaba.qwen.code.managedagent.event.CommittedEventPublisher publisher) {
+        ManagedAgentStore actionStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, ObjectMapper mapper,
+                ManagedWorkspaceRegistry registry, @Qualifier("managedAgentClock") Clock clock,
+                com.alibaba.qwen.code.managedagent.event.CommittedEventPublisher publisher) {
             var properties = new ManagedAgentProperties();
             properties.getHarness().setWorkspaceFilesEnabled(true);
             return new ManagedAgentStore(jdbc, mapper, clock, publisher, registry, properties);
@@ -176,6 +178,7 @@ class ManagedActionsTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"web_fetch", "read_file", "write_file", "edit", "run_shell_command",
+            "todo_write",
             "team_create", "task_create", "task_update", "workflow",
             "request_shutdown", "exit_plan_mode", "team_plan_approval"})
     void previewsExactInputOnPublicAndWebShellListsAndDetails(String tool) throws Exception {
@@ -187,6 +190,8 @@ class ManagedActionsTest {
             case "write_file" -> "{ \"file_path\" : \"notes.md\", \"content\" : \"\\u4e2d\\n\" }";
             case "edit" -> "{ \"file_path\" : \"notes.md\", \"old_string\" : \"a\", \"new_string\" : \"b\" }";
             case "run_shell_command" -> "{ \"command\" : \"printf 'text'\" }";
+            // #15076: the task list is the only preview this profile adds.
+            case "todo_write" -> "{ \"todos\" : [ { \"id\" : \"1\", \"content\" : \"audit\", \"status\" : \"pending\" } ] }";
             case "team_create" -> "{ \"team_name\" : \"review\" }";
             case "task_create" -> "{ \"subject\" : \"Audit\", \"description\" : \"the diff\" }";
             case "task_update" -> "{ \"taskId\" : \"1\", \"status\" : \"in_progress\", \"owner\" : \"alice\" }";

@@ -278,6 +278,7 @@ function toolBlock(
     parentToolCallId: overrides.parentToolCallId,
     subagentType: overrides.subagentType,
     subagentSessionReady: overrides.subagentSessionReady,
+    agent: overrides.agent,
     serverTimestamp: overrides.serverTimestamp,
     clientReceivedAt: createdAt,
     createdAt,
@@ -286,6 +287,35 @@ function toolBlock(
 }
 
 describe('transcriptBlocksToDaemonMessages', () => {
+  it('keeps producer identity across live/history projections and separates identical tool results', () => {
+    const output = {
+      resultDisplay: { type: 'mcp_app', documentId: 'same-content' },
+    };
+    const live = transcriptBlocksToDaemonMessages([
+      toolBlock('live-block', 'producer-a', 'completed', 1, {
+        rawOutput: output,
+      }),
+    ]);
+    const history = transcriptBlocksToDaemonMessages([
+      toolBlock('history-block', 'producer-a', 'completed', 1, {
+        rawOutput: output,
+      }),
+      toolBlock('history-block-2', 'producer-b', 'completed', 2, {
+        rawOutput: output,
+      }),
+    ]);
+    const ids = (
+      messages: ReturnType<typeof transcriptBlocksToDaemonMessages>,
+    ) =>
+      messages.flatMap((message) =>
+        message.role === 'tool_group'
+          ? message.tools.map((tool) => tool.generatedUiToolCallId)
+          : [],
+      );
+    expect(ids(live)).toEqual(['producer-a']);
+    expect(ids(history)).toEqual(['producer-a', 'producer-b']);
+  });
+
   it('keeps shell input previews out of output while preserving actual content', () => {
     const block = toolBlock('shell-live', 'shell-1', 'in_progress', 1000, {
       toolName: 'run_shell_command',
@@ -4015,6 +4045,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
       status: 'in_progress',
       kind: 'fetch',
     });
+    expect(pendingTool?.generatedUiToolCallId).toBeUndefined();
 
     const messages = transcriptBlocksToDaemonMessages([
       {
@@ -4057,6 +4088,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
       toolName: 'web_fetch',
       status: 'completed',
       rawOutput: 'Content processed successfully.',
+      generatedUiToolCallId: 'webfetch-1',
     });
   });
 
@@ -5492,6 +5524,37 @@ describe('transcriptBlocksToDaemonMessages', () => {
       messages[1].role === 'tool_group' ? messages[1].tools[0] : undefined;
     expect(agentA!.subContent).toBeUndefined();
     expect(agentB!.subContent).toBeUndefined();
+  });
+});
+
+describe('replayed agent identity', () => {
+  function firstTool(blocks: DaemonTranscriptBlock[]) {
+    return transcriptBlocksToDaemonMessages(blocks).find(
+      (message) => message.role === 'tool_group',
+    )?.tools[0];
+  }
+
+  it('adopts the block agent path for a replayed Agent result', () => {
+    const tool = firstTool([
+      toolBlock('agent', 'agent-1', 'completed', 1_000, {
+        toolName: 'Agent',
+        agent: {
+          agentName: '/root/general-purpose',
+          depth: 1,
+          kind: 'subagent',
+        },
+      }),
+    ]);
+    expect(tool?.agentPath).toBe('/root/general-purpose');
+  });
+
+  it('stays unattributed when the replay carried no identity', () => {
+    const tool = firstTool([
+      toolBlock('agent', 'agent-1', 'completed', 1_000, {
+        toolName: 'Agent',
+      }),
+    ]);
+    expect(tool?.agentPath).toBeUndefined();
   });
 });
 

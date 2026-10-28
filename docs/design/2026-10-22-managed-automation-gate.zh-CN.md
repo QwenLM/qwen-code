@@ -2,7 +2,7 @@
 
 [English](2026-10-22-managed-automation-gate.md) | [简体中文](2026-10-22-managed-automation-gate.zh-CN.md)
 
-- **状态**：2026-10-22，随本次改动实现，叠在[定时任务闸门](2026-10-21-scheduled-task-gate.zh-CN.md)（PR #15069）之上，复用其运行器与文本构造。对应该设计交付项第 5 步：把同一闸门带到 Managed 自动化。
+- **状态**：2026-10-22，随本次改动实现，叠在[定时任务闸门](2026-10-21-scheduled-task-gate.zh-CN.md)（PR #15069）之上，复用其运行器与文本构造。对应该设计交付项第 5 步：把同一闸门带到 Managed 自动化。§4.4，以及 §10 中的扫描器容量数据，于 2026-10-24 补充，其中的耗时来自一次使用 PR 监视探针的 rig 运行，以及同样探针在本机的运行。§2 的策略条目和 §10 的扫描器容量条目也在同一天做了更正。§4.4 的测量说明和 §10 的扫描器容量条目于 2026-10-26 按扫描器行线程池（#15442）更新，§10 条目于 2026-10-28 按关于共用 Session 排队的决定（#15667）更新。
 - **相关**：[Managed 自动化（H6）](2026-10-04-managed-automation.zh-CN.md)、[Managed 自动化运行时（H6b）](2026-10-07-managed-automation-runtime.zh-CN.md)、[Managed 运行时工具契约](2026-09-24-managed-runtime-tool-contract.zh-CN.md)、[自动化故障门禁 A](2026-10-18-automation-fault-gates-a.zh-CN.md)。
 
 ## 1. 问题
@@ -18,7 +18,7 @@ Managed 世界还有本地闸门没有的约束。Harness 从不自己生成进�
 - **定义契约。** `managed-schedule` 第 1 版携带 `goal`、`cron`、`timezone`、`promptRef`、`sessionMode`、`targetSessionId`、`overlap`、`catchUp`、`catchUpLimit`、`enabled` 和逻辑 `run`，封闭键集由 `managed-automation-record-v1.fixtures.json` 在两端（`managed-automation-record.ts`、`ManagedExtensionRecords.java`）锚定。`managed-automation_run` 第 1 版锚定 occurrence 身份与 run 块。`assertAutomationDefinition` 拒绝未知定义字段；`automationDefinitionDigest` 决定一次修订是否追加。
 - **流水线。** 扫描器在租约下记录 occurrence 行为 `firing`，然后请求 Harness 的 `fire_run`；Harness 提交 claim（修订 1），并在与输入、唤醒同一事务里提交 dispatch（修订 2）；扫描器把行结算为 `fired`。丢失的应答按退避重新驱动，最多 64 次，之后记为 `unknown`。确定性的拒绝以拒绝码结算为 `skipped`（`AutomationScanner.java`、`hosted-harness-session.ts`、`hosted-automation-session.ts`）。
 - **执行。** Harness 每回合构造一个 `HostedWorkspaceBroker`，所有工具调用都是 Broker 执行：`prepare` 以 `idempotencyKey = <runtimeSessionId>:<callId>` 和引用 `{sessionId, promptId, callId, argsDigest}` 预留一次执行，`start` 把负载 `{toolName, input}` 派发给 Runtime worker，worker 用按调用构造的 `Config` 运行工具，cwd 为 Session 的上下文目录，审批模式为 `yolo`（`createManagedToolSet`）。Broker 的 `ma_tool_execution` 行保存结算结果；对已终结记录的键再次 `prepare`，引用相同则返回该记录，否则以 `runtime_idempotency_conflict` 拒绝。今天没有任何 Harness 代码在模型回合之外运行命令；hook 在操作授权下运行 Runtime 侧清单里的命令。
-- **策略。** Session 的工具 profile 决定存在哪些工具：`run_shell_command` 属于 `hosted-workspace-shell/1`、`/2` 与 `team-lead/1`；无工具 Session 拒绝一切工具调用。在 `default` 和 `auto-edit` 下 Harness 会为 shell 调用打开一个审批 Action，自动化回合继承 Session 固定的设置。
+- **策略。** Session 的工具 profile 决定存在哪些工具：`run_shell_command` 属于 `hosted-workspace-shell/1`（#15330 之前还有 `/2`）与 `hosted-workspace-team-lead/1`；无工具 Session 拒绝一切工具调用。在 `default` 和 `auto-edit` 下 Harness 会为 shell 调用打开一个审批 Action。自动化回合以 Session 固定的设置起步；在不是子 Session 的 `hosted-workspace-files/1` 或 `hosted-workspace-shell/1`（#15330 之前还有 `/2`）Session 上，它在每次检查时读取 Session 当前的审批选择。
 - **中继。** `HostedHarnessClient.runAutomationOperation` 要求 `202` 且 `state: settled`、`operationId` 相同；其余情况（包括客户端 30 s 的请求超时）抛出 `MutationOutcomeUnknownException`，扫描器据此延后并重新驱动。
 - **公开 API。** `AutomationDefinitionRequest`、`PublicAutomation`、`PublicAutomationRun` 是 公开契约（本改动前为 1.89.0）中 `additionalProperties: false` 的 schema；`ManagedAgentApiContractTest` 对 `ApiModels` 记录、挂载路由与文档之间的任何漂移都会失败。
 - **账本。** `ma_schedule` 为扫描器镜像定义；`ma_schedule_occurrence` 每个决定一行，带 `outcome`、`reason`（64 字符）、`attempts` 和 `last_error`。规范 DDL 是 V1 基线加 `ManagedSchema.java` 里的迁移列表；`ManagedSchemaTimeContractTest` 锚定每个纪元时间列。
@@ -71,6 +71,51 @@ Gate output. The task's gate command printed this at <ISO instant> (`<gate>`, ex
 ```
 
 输出逐行净化（去掉控制字符和 tag 字符，每个 `<` 写成 `&lt;`），在 16 KiB 处截断并注明。
+
+### 4.4 用 PR 监视探针做闸门
+
+[`/autofix-pr` 设计](2026-10-21-autofix-pr-command.zh-CN.md)里的 PR 监视探针本身就是闸门命令：`qwen autofix-pr snapshot <n> --gate --repo <owner>/<repo>` 盯一个 PR，`qwen review watch-repo --repo <owner>/<repo>` 盯一个仓库。它们各自维护游标，只输出游标上次写入以来的变化，所以 Managed 定义可以原样使用：
+
+```
+POST /v1/agent-automations
+Content-Type: application/json
+Idempotency-Key: watch-pr-123
+
+{"session_id": "<session>", "goal": "Watch PR 123", "cron": "*/2 * * * *",
+ "timezone": "UTC", "prompt": "Handle the pull-request events below.",
+ "gate": "qwen autofix-pr snapshot 123 --gate --repo acme/app"}
+```
+
+示例省略了认证和租户相关的请求头。
+
+部署方需要开启自动化（`QWEN_MANAGED_AGENT_AUTOMATION_ENABLED`）和 Workspace files（`QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED`，它另有自己的前提），两者默认都关闭，并且 Session 要有 Shell profile。内置 `qwen-code` Workspace Session 在 Workspace Shell 开启时（`QWEN_MANAGED_AGENT_WORKSPACE_SHELL_ENABLED`，默认关闭，要求 `QWEN_MANAGED_AGENT_APPROVAL_MODE` 为 `default` 或 `auto-edit`）新建才会得到它；服务端 README 的 [Shell 准入一节](../../packages/managed-agent-server/README.md#public-foreground-shell-admission)说明了这个开关和审批模式。存储的 AgentDefinition Session 在其定义选了 `hosted-workspace-shell/1` 且 `QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES` 允许时得到它。闸门看的是 Session 的 profile，不看 Shell 开关，所以关掉开关并不能停住闸门。Session 还需要允许闸门（§4.1）；在其他 Session 上定义闸门会被 `409 automation_gate_unsupported` 拒绝。
+
+Session 的审批模式同样约束闸门唤醒的回合。在 `default` 和 `auto-edit` 下，回合里的 shell 调用会发起审批 Action（§2，策略），没人应答的 Action 在审批超时（默认 10 分钟）后被拒绝。这样的回合等待期间，默认的 `skip` 重叠策略会跳过后面的时间槽，不跑探针。所以在这两种模式下，监视可以无人值守地唤醒 Session，但回合执行的命令要等人批准。如果被拒，探针不会再报这些事件：它输出时游标已经前移。README 里的 "Shell always asks permission" 说的是沿用部署审批模式的 Session（Shell 要求它为 `default` 或 `auto-edit`）。在 Harness 支持审批选择时，通过 WebShell 还可以直接以 Full Access（`yolo`）创建内置 Shell Session，或由所有者在 Workspace Shell 开启期间把 Session 切换过去（[审批选择设计](managed-approval-selection.zh-CN.md)）。之后闸门唤醒的回合执行命令就不再询问，而驱动它的部分内容是别人写的 PR 文本。
+
+用这些探针做闸门，还需要：
+
+- **git 仓库。** 两个探针都把游标放在包含 Session 目录的仓库的主 worktree 下（`<主 worktree>/.qwen/tmp/`），通过 `git worktree list` 找到它。一个空的 `git init` 就够。不在仓库里时探针以退出码 1 结束，每次触发都结算为 `gate_failed`。
+- **跨触发保留的游标，一个游标只给一个监视用。** 下一次触发靠游标判断哪些是新的。那个主 worktree 被重建的话，`snapshot` 会把所有尚未处理的内容再报一遍，`watch-repo` 会重新静默记录。游标是主 worktree 里的文件，不按 Session 区分：`snapshot` 的游标只按 PR 号命名，`watch-repo` 的按被盯的仓库和过滤项命名。所以两个定义所在的 Session 共用一个目录（或一个主 worktree）时，如果盯的是同一个 PR，或者是同一个仓库且过滤项相同，就会各拿到一部分事件。在同一个主 worktree 里，另一个仓库里号码相同的 PR 的 `snapshot` 闸门每次触发都会失败（`gate_failed`），先写下游标的那个闸门则不受影响。
+- **探针运行处要有 `git`、`gh`、`node` 和 `qwen`。** Workspace Shell 要求 Broker 配置为 `local-process` provisioner。它的 worker 运行在服务端所在主机上；SSH Workspace 的 worker 则通过 Broker 的 `ssh-process` provisioner 运行在 SSH 节点上；探针在 worker 的环境变量下通过 `gh api graphql` 读 GitHub。
+  - 在服务端所在主机上，worker 继承服务端的环境变量，只去掉控制面变量（`QWEN_MANAGED_AGENT_*`、`QWEN_MANAGEDAGENT_*`、`SPRING_*`、`OSS_*`）。所以 `gh` 会像服务端用户那样登录：读取 `GH_TOKEN` 或 `GITHUB_TOKEN`（Enterprise 主机用 `GH_ENTERPRISE_TOKEN`），或 `GH_CONFIG_DIR`、`XDG_CONFIG_HOME` 或 `HOME` 下的配置。只存在桌面钥匙串里的 token，服务进程可能拿不到。不论 `gh` 在那里找到什么凭据，该主机上每个由模型发起的 shell 调用也都能读到：服务端的环境变量会进入 Broker 在该主机上启动的每个 worker（服务端 README，[Broker deployment](../../packages/managed-agent-server/README.md#broker-deployment)）。所以请给它一个只读、只限被盯仓库的 token。闸门唤醒的回合看到的也是同一个凭据，所以用只读 token 时，回合同样不能借它 push 或回复；但服务账号持有的其他凭据（SSH key、git 凭据助手）仍会被回合拿到。worker 只在启动时复制一次环境变量，所以轮换 `GH_TOKEN` 需要重启服务，并且只对之后启动的 worker 生效；被 Broker 接管的常驻 worker 仍保留启动时的值。
+  - 在 SSH 节点上，worker 只保留节点上的 `PATH`、`HOME`、`USER`、`LOGNAME`、`SHELL`、`LANG`、`LC_ALL`、`TMPDIR`、`TMP`、`TEMP` 和 `TZ`。其中 `PATH` 是非交互 SSH 命令的 `PATH`，没有登录 shell 额外加的部分。所以 `gh` 必须在那个 `HOME` 下登录；任何 `GH_*` 变量、`GITHUB_TOKEN` 和 `XDG_CONFIG_HOME` 都传不过去。
+  - 两种情况下，`git` 和 `gh` 都必须在那个 `PATH` 上，因为探针按名字调用它们。`qwen` 也要在上面，npm 安装时还包括它启动所用的 `node`，除非闸门用绝对路径写出它们（`/path/to/node /path/to/cli.js …`）。
+- **在命令行上写明目标。** `watch-repo` 总是要 `--repo`。`snapshot` 也需要：仓库里没有准备好的监视，它的第一次触发没有游标可以提供目标。非 github.com 实例两者都用 `--host`；`GH_HOST` 只在 worker 的环境变量带着它时才有效。
+- **20 秒。** 探针必须在 Managed 闸门的 20 秒上限内结束（§5.2），只有定时任务闸门 60 秒的三分之一。第一次 GraphQL 查询约 3 秒，之后每页约 1.5 秒。`snapshot` 对 check context 和 review 线程各最多读十页、check suite 最多五页，并对最多 20 条开启线程的机器人评论做 REST 查询，但 15 秒后不再发起新的读取：来不及读完的 PR 改为只盯一部分，而不是失败，没读到的部分留给之后的触发（[`/autofix-pr` 设计](2026-10-21-autofix-pr-command.zh-CN.md)第 6.2 节）。已经在进行的读取仍可能让一次运行超过 20 秒；这次触发会在写游标之前失败，下一次重新读取。这些耗时取决于 Runtime 主机到 GitHub 的网络路径：另一次在工作机上的核对中，下面那个已合入 PR 的静默运行走代理为 9–10 秒，直连为 21–29 秒，超过了上限。
+- **输出分多次触发排空。** 探针把每次运行限制在 12 KiB 的预算内，在 16 KiB 上限之内（§4.3），放不下的留给下一次触发。这些触发每一次都是一个回合。对一个 PR 的第一次触发会报出探针所能判断的尚未处理的内容：失败的 check、冲突，以及其他人在未解决线程里的评论、review 正文和最近的对话评论，不论是否已经回复过。下面那个 open PR 总共约需 35 次触发，这是按 `deferred` 每次约减少 13 估算的。Managed 的上限在净化之后才应用（§5.5），净化把每个 `<` 写成四个字节；探针的预算同样把每个 `<` 按四个字节计数，所以净化不会让它们的输出超过上限。
+- **需要停用或删除的定义。** 报出 `stop`（PR 已合入或关闭）之后，定义仍会在每个时间槽探测，直到把它停用（用 `"enabled": false` 修订）或删除（`DELETE /v1/agent-automations/{id}`）；两者都要带 `Idempotency-Key`。这些探测静默且开销很小：`snapshot` 对已合入或已关闭的 PR 只调一次 GraphQL。（#15385 之前它每个时间槽都会读完所有 check 分页：下面那个已合入的 PR 在扫描线程上占 10.6–11.5 秒。）
+
+探针准备好的监视（CLI 会话启动的 `/autofix-pr` 监视）属于那个 CLI 会话，不适用于 Managed Session：在那里每个回合、每次闸门运行都是各自独立的 Runtime Session。在 Managed Session 上，这个探针只用作闸门：不写 `--session` 的闸门不做所有者检查。
+
+2026-10-24 在本机 hosted rig 上的测量（#15385 与 #15442 之前）：main `9e16932bee`，每个探针一个 Session、一个定义，都是每分钟到期，四个时间槽，rig 的 `scan-delay` 为 1 秒：
+
+| 探针                                            | 每个时间槽                                                               | 一次闸门运行 |
+| ----------------------------------------------- | ------------------------------------------------------------------------ | ------------ |
+| 已合入 PR 上的 `snapshot`                       | 触发一次报 `stop`，之后静默                                              | 10.6–12.7 秒 |
+| 有 437 个 review 线程的 open PR 上的 `snapshot` | 每个时间槽都触发，输出 11.4–11.9 KiB；`deferred` 依次 459、446、433、419 | 9.5–10.4 秒  |
+| `watch-repo`                                    | 静默：第一次运行静默记录，之后被盯的 PR 没有变化                         | 2.5–2.9 秒   |
+
+当时扫描器只用一个线程处理各行，所以每个时间槽里闸门一个接一个地运行，每个耗时是它的执行结算时刻与前一个执行结算时刻之差（第一个则与 tick 的开始时刻相比）。因此除第一个外，每个耗时还包含前一个闸门的释放与结算；每个耗时都包含本闸门获取 Runtime Session 的时间。已合入 PR 的探针当时读完了它 head 上 569 个 check context 的所有分页；现在只调一次。扫描器发出的带闸门的 fire 在作答之前（包括探针运行）占着所在控制面节点的一个扫描线程，而同一 Session 的探针在 Harness 里一次只跑一个，这两点分别限制了一个节点能服务、一个 Session 能承载多少个监视（§10，扫描器容量）。
 
 ## 5. 设计
 
@@ -170,4 +215,11 @@ Gate output. The task's gate command printed this at <ISO instant> (`<gate>`, ex
 - 失败连段超过某个上限时，是否应像时区无法解析那样把定义停放（`blocked_reason`）？今天只计数。
 - 为连段的第一次失败做一次 channel 投递，让操作者不必轮询 `gate_status` 就能知道凭据过期。
 - `per_run` 分支：等 H4 给它子意图后，探针应在子 Session 创建之前、在父 Session 的 Runtime 里运行。
-- 扫描器容量。带闸门的 `fire_run` 现在会在探针运行期间(最多 20 秒，在中继的 30 秒之内)占用扫描线程，而扫描器逐行处理。同一分钟到期的慢闸门足够多时，一次 tick 会超过迟到容忍度，该节点上所有定义随后的时间槽都会被记为 `missed`。各行是逐行加租约的，所以用有界线程池处理(或让带闸门的 fire 异步作答)是自然的修法；这会改变扫描器的线程模型，留给单独的改动。Harness 侧也是同样的形态：探针在自动化 funnel 的串行队列里运行，所以慢闸门在运行期间也会推迟该 Session 的其他自动化操作(定义、取消、已结束的自动化回合的结算)。
+- 扫描器容量。这里原有两条修法：用有界线程池处理扫描器的各行，或让带闸门的 fire 异步作答。[自动化扫描器行线程池](2026-10-24-automation-scanner-row-pool.zh-CN.md)（#15442）走了第一条：一次 tick 在 `automation.scanner-threads`（默认 4）个线程的池上处理各行，每个任务认领自己的行并从认领时刻起算租约，tick 在返回前等待所有任务结束。第二条，即 fire 的异步作答，在那里仍保持开放。`automation.concurrency` 设置（默认 4）不是线程数：它限制单个 `allow` 定义未结束的运行数，并限定一次决定最多 reconcile 几个阻塞中的运行（concurrency + 1，至少 2），这些 reconcile 在该行内逐个进行。那份设计接受的残留上限里包括：Session 的自动化 funnel 仍是串行的；共用一个 Session 的定义会并发地准入和 fire；单个 fire 可能超过它的租约。结合扫描器和 funnel 的代码，对闸门意味着：
+  - 不同 Session 的探针可以并行（以该节点的扫描线程数为限）；同一 Session 的探针在其 funnel 队列里一次只跑一个，该 Session 的其他自动化操作（定义、退役、取消、已结束的自动化回合的结算）要排在它们之前已排队的闸门之后。公共 API 的创建、修订和退役调用中继的就是这些定义和退役操作，公共手动运行的 fire 也在那里排队；它们各自的等待都计入自己那次中继的 30 秒。
+  - 共用一个 Session 且同时到期的定义，现在可能由一个节点并发发出 fire。它们在队列里的等待也算在中继的 30 秒之内，所以等待加上自身工作超过 30 秒的 fire 会丢失应答，但 Harness 仍会把这次 fire 做完：occurrence 行保持 `firing`，之后的 tick 按退避重驱它，与其他应答丢失的情况一样。每个 fire 在等待期间都占着一个扫描线程。在 Harness 池里，丢失应答还会让那个 Harness 在池的下一次成功刷新之前退出选择，这会影响落在它上面的各 Session 的其他调用，不只是 fire：公共自动化路由随后可能答 `409 harness_owner_still_live`（#15666）。§5.2 把探针上限定为 20 秒，是为了让一次获取加一次探针装进中继的 30 秒；这样的取值没有给这段等待留余量。行线程池设计已把这种排队及其造成的应答丢失记为预期行为（#15667，由 #15724 决定）：funnel 与公共中继和其他节点共用，在单个节点内按 Session 串行处理各行并不能消除排队。该设计的建议是：探针慢的带闸门定义单独放一个 Session。
+  - 一行的工作（重驱、各时间槽和 reconcile）在同一个不续期的租约下逐个调用，所以可能超出租约；走接管加载且加载很慢时（见下文），单个 fire 就可能超出。若此间另一节点或一次手动运行认领了这一行，fence 会拒绝原持有者的账本写入，occurrence 保持 `firing`，之后的 tick 会重驱它；派生的 run id 让原持有者的调用和这次重驱保持幂等。
+
+  #15442 之前，扫描器在它唯一的线程上逐行处理，带闸门的 `fire_run` 会在探针运行期间占住这个线程，最长可达中继的 30 秒。当时用 PR 监视探针实测（§4.4，rig 的 `scan-delay` 为 1 秒）：在四个时间槽的第一个里，三次闸门执行依次在时间槽后 13.0、23.1、25.7 秒结算。一次 tick 以自己的开始时刻判断是否迟到，对每个定义自上次 tick 以来到期、且被准入的每个时间槽各跑一次闸门，然后等 `scan-delay`（默认 10 秒，可用 `QWEN_MANAGED_AGENT_AUTOMATION_SCAN_DELAY` 配置）再开始下一次 tick。所以当时同一个时间槽到期的探针，加上 `scan-delay`，必须在下一个时间槽之前跑完。闸门每次运行 10–13 秒时（实测中读取需要五六次 GraphQL 调用的 PR 就是这样），当时每个节点的上限约为四个每分钟一次的 PR 监视（10 秒时五个，13 秒时三个），每两分钟一次的约九个。
+
+  tick 现在的工作方式相同，所以这个条件仍然适用，只是同一个时间槽到期的探针现在分摊到线程池的各个线程上：带闸门的定义分布在不同 Session 上时，这个上限随 `scanner-threads` 增大；一次 tick 最多读取 `SCAN_LIMIT`（100）个已布防的定义（不论是否到期），其余留给之后的 tick。按每个线程算，原来的推算适用：一次调用就能读完的 PR（已合入或已关闭的 PR 总是如此），整次运行约需 4 秒，含进程启动和 `gh auth status`（根据调用轨迹估算），每分钟约十二个；大 open PR 的一次运行虽然 15 秒后不再发起新的读取（§4.4），仍可能达到 15 秒以上，每分钟两三个。一次 tick 至少持续到它最慢的那一行结束，所以一行慢了，该节点处理的所有定义的下一次 tick 都会推迟。任何 fire，不管有没有闸门，在 Harness 需要先加载 Session 时，都会在中继的 30 秒开始之前占住线程：普通加载最长 30 秒，接管加载最长 `load-timeout` 的 120 秒；节点上没有某个已被 Harness 服务过的 Session 的挂接时就会走接管加载，例如控制面或 Harness 重启之后。超出上限后，tick 会变长，触发会迟到，超过 5 分钟迟到容忍度的时间槽会被记为 `missed`，该节点处理的所有定义都一样，除非某个定义的补跑策略让它迟到执行。这些影响以及线程池下的上限都是根据扫描器和 Harness funnel 的代码推算的，没有实测。

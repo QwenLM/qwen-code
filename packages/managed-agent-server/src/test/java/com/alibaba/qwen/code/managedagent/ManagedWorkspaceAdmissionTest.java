@@ -32,6 +32,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -80,7 +81,7 @@ class ManagedWorkspaceAdmissionTest {
     private ObjectMapper mapper;
 
     @Autowired
-    private JdbcTemplate jdbc;
+    private @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc;
 
     @Autowired
     private ManagedAgentStore store;
@@ -122,12 +123,16 @@ class ManagedWorkspaceAdmissionTest {
                  "origin":{"modelId":"source-model","authType":"openai","endpointDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                  "providerPin":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}}}
                 """);
-        jdbc.update("UPDATE ma_session SET selected_approval_mode = 'yolo', approval_revision = 3 WHERE tenant_id = ? AND session_id = ?",
+        jdbc.update("UPDATE ma_session SET selected_approval_mode = 'auto', approval_revision = 3 WHERE tenant_id = ? AND session_id = ?",
                 tenant, parent.sessionId());
         properties.getHarness().setWorkspaceChildAgentsEnabled(false);
         var disabled = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties);
         var lineage = new com.alibaba.qwen.code.managedagent.model.StoreModels.SessionLineage(parent.sessionId(), parent.sessionId(), "run-public", 1);
         var input = List.<Map<String, Object>>of(Map.of("type", "text", "text", "write a file"));
+        var autoSnapshot = ((com.fasterxml.jackson.databind.node.ObjectNode) snapshot.deepCopy()).put("approvalMode", "auto");
+        assertThatThrownBy(() -> tx.execute(status -> disabled.insertPublicChildSessionCommand(tenant, parent.sessionId(), "auto-launch", "auto-digest",
+                "child", input, "payload", lineage, autoSnapshot))).isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("child_launch_snapshot_invalid"));
         var child = tx.execute(status -> disabled.insertPublicChildSessionCommand(tenant, parent.sessionId(), "launch", "launch-digest",
                 "child", input, "payload", lineage, snapshot));
         assertThat(disabled.requireSession(tenant, child.sessionId()).publicChildAgentsVersion()).isEqualTo(1);
