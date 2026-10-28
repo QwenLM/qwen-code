@@ -3522,6 +3522,41 @@ describe('restore checkpoint branch on confirmed real transcript bytes', () => {
     },
   );
 
+  it.each([true, false])(
+    'preserves the current Workflow mode %s across tool restore and cold load',
+    async (enabled) => {
+      await restoreFixture(async ({ fixture, recorder, input }) => {
+        await recorder.recordSessionWorkflowMode(!enabled);
+        await recorder.recordSessionWorkflowMode(enabled);
+        expect(await recorder.restoreToolBranch(input)).toBe(true);
+        await recorder.flush();
+        const selected = prepareTranscriptRecords(
+          await readRecords(fixture.transcriptPath),
+        ).records;
+        expect(
+          selected
+            .filter((record) => record.subtype === 'session_workflow_mode')
+            .map((record) => record.systemPayload),
+        ).toEqual([{ enabled }]);
+        expect(recorder.getSessionWorkflowMode()).toBe(enabled);
+
+        const before = await fs.readFile(fixture.transcriptPath, 'utf8');
+        await recorder.recordSessionWorkflowMode(enabled);
+        await recorder.flush();
+        expect(await fs.readFile(fixture.transcriptPath, 'utf8')).toBe(before);
+        await recorder.close();
+        const resumed = await sessionServiceFor(fixture).loadSession(
+          input.sessionId,
+        );
+        expect(
+          resumed?.conversation.messages
+            .filter((record) => record.subtype === 'session_workflow_mode')
+            .map((record) => record.systemPayload),
+        ).toEqual([{ enabled }]);
+      });
+    },
+  );
+
   it('retains actual model/approval/title metadata and serialized surviving file snapshots', async () => {
     await restoreFixture(async ({ fixture, recorder, input }) => {
       await recorder.recordSessionModel({
