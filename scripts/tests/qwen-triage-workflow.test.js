@@ -5390,7 +5390,7 @@ describe('qwen-triage verify hardening round 2', () => {
     // enumeration, while another section could legitimately want it.
     const paragraph = flat.slice(
       flat.indexOf('A coverage claim is universally quantified'),
-      flat.indexOf('Survivors are not noise'),
+      flat.indexOf('Survivors of that matrix are not noise'),
     );
     expect(paragraph).not.toContain('git log --no-merges');
   });

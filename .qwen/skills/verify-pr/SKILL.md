@@ -789,7 +789,7 @@ commit since the previous round was mutated on its own" shipped while two of
 that round's production commits had no row at all, and only a self-audit caught
 it — the matrix was per-guard, a different and weaker claim than the prose made.
 
-Survivors are not noise — classify each as an ordinary
+Survivors of that matrix are not noise — classify each as an ordinary
 **coverage gap** (the behaviour is right, nothing asserts it), as **dead
 code** (the clause cannot decide any outcome), or as **redundant defence** (a
 sibling hunk in this same PR closes the same hazard, so nothing can observe
