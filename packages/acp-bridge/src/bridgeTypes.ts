@@ -84,6 +84,7 @@ import type {
 
 export interface RewindSnapshotInfo {
   promptId: string;
+  daemonPromptId?: string;
   turnIndex: number;
   timestamp: string;
   diffStats: { filesChanged: number; insertions: number; deletions: number };
@@ -2781,6 +2782,8 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   setSessionConfigOption(
     sessionId: string,
     req: SetSessionConfigOptionRequest,
+    context?: BridgeClientRequestContext,
+    assertCanCommit?: () => void,
   ): Promise<SetSessionConfigOptionResponse>;
 
   /**
@@ -2881,6 +2884,14 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   generateSessionContent?(
     sessionId: string,
     prompt: string,
+    signal: AbortSignal,
+    context?: BridgeClientRequestContext,
+  ): AsyncIterable<BridgeGenerationStreamEvent>;
+
+  /** Stream a tool-free side answer using the session's conversation context. */
+  generateSessionBtwStream?(
+    sessionId: string,
+    question: string,
     signal: AbortSignal,
     context?: BridgeClientRequestContext,
   ): AsyncIterable<BridgeGenerationStreamEvent>;
