@@ -11498,6 +11498,7 @@ Other open files:
       vi.mocked(mockConfig.getGoalRuntime).mockReturnValue(goalRuntime);
       await queueIdenticalReminder(promptId);
 
+      const turnRunCallsBeforeSend = mockTurnRunFn.mock.calls.length;
       const stream = client.sendMessageStream(
         [fnShellResult()],
         new AbortController().signal,
@@ -11507,10 +11508,11 @@ Other open files:
       const iterator = stream[Symbol.asyncIterator]();
       const first = await iterator.next();
       expect(first.value).toMatchObject({ type: LlmEventType.GoalState });
-      // Suspended after the take, before any model-bound request: the only
-      // turn.run call so far belonged to the reminder-queueing turn above.
-      mockTurnRunFn.mockClear();
-      expect(mockTurnRunFn).not.toHaveBeenCalled();
+      // Suspended after the take, before any model-bound request: no turn.run
+      // call was issued for this send, so the count still matches the
+      // reminder-queueing turn above. Comparing the count is what pins the
+      // premise — clearing the mock first would make the assertion vacuous.
+      expect(mockTurnRunFn.mock.calls.length).toBe(turnRunCallsBeforeSend);
       await iterator.return!(undefined as unknown as Turn);
 
       expect(remindedDecisions()).toEqual([]);

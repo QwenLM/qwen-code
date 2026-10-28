@@ -611,12 +611,17 @@ export class LoopDetectionService {
   /**
    * Puts the delivery takeLoopReminder() prepared back into the pending map
    * after the request carrying it exited without model acceptance, so the
-   * same streak's warning stays eligible for the next send. Keys stay marked
-   * handled — the remind decision stood, and unmarking would let a refire
-   * queue a duplicate alongside the restored entry; a retry still unmarks
-   * them through dropPendingReminders now that the entry is pending again.
-   * A reset clears the prepared delivery instead, so an abandoned send
-   * cannot leak a stale warning into a new prompt.
+   * same streak's warning stays eligible for the next send.
+   *
+   * The keys stay marked handled here: the remind decision stood, and
+   * unmarking would let a refire queue a duplicate beside the restored entry.
+   * They do not survive everything — a Retry drops the consecutive streak
+   * through resetToolCallCount(), which deletes `identical`,
+   * `identical-unverified` and `shell` from loopProtectionHandled. The
+   * retry's dropPendingReminders() cannot do that on this path, because the
+   * taken entries are no longer in pendingReminders when it runs. A reset
+   * clears this prepared delivery instead, so an abandoned send cannot leak
+   * a stale warning into a new prompt.
    */
   abandonLoopReminderDelivery(): void {
     const prepared = this.preparedReminderDelivery;

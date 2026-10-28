@@ -1715,13 +1715,13 @@ describe('subagent.ts', () => {
         expect(reminders).toEqual([3]);
       });
 
-      it('abandons the prepared reminder when the next round exits at maxTurns', async () => {
-        // Deterministic negative control: the reminder is taken at the end
-        // of round 3 (three identical tool results), and the next round
-        // exits at the maxTurns check before any second request is
-        // attempted. The delivery must be abandoned — `reminded` telemetry
-        // never credits a warning the model never saw — instead of
-        // committing at take time.
+      it('does not credit a prepared reminder when the run ends at maxTurns', async () => {
+        // Negative control: the reminder is taken at the end of round 3
+        // (three identical tool results), and the run exits at the maxTurns
+        // check before a fourth request is attempted. No round then crosses
+        // a model-acceptance boundary, so `reminded` telemetry never credits
+        // a warning the model never saw — the earlier take-time commit is
+        // what this pins against.
         const missingPath = '/workspace/project/missing-directory';
         const { config, toolConfig } = await setupReadTool(
           decl('list_directory', 'Lists a directory'),

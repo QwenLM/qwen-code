@@ -1057,21 +1057,18 @@ export class AgentCore {
       // Check abort before starting a new round — prevents unnecessary API
       // calls after processFunctionCalls was unblocked by an abort signal.
       if (abortController.signal.aborted) {
-        loopDetector.abandonLoopReminderDelivery();
         terminateMode = AgentTerminateMode.CANCELLED;
         break;
       }
 
       // Check termination conditions.
       if (options?.maxTurns && turnCounter >= options.maxTurns) {
-        loopDetector.abandonLoopReminderDelivery();
         terminateMode = AgentTerminateMode.MAX_TURNS;
         break;
       }
 
       let durationMin = (Date.now() - startTime) / (1000 * 60);
       if (options?.maxTimeMinutes && durationMin >= options.maxTimeMinutes) {
-        loopDetector.abandonLoopReminderDelivery();
         terminateMode = AgentTerminateMode.TIMEOUT;
         break;
       }
@@ -1437,10 +1434,9 @@ export class AgentCore {
             // abort/maxTurns/time checks or fail in prepareTools() before
             // any request is attempted. Like the core client, the delivery
             // stays prepared here and only settles when that round crosses
-            // the model-acceptance boundary (first chunk above); every
-            // earlier exit abandons it (round finally + the pre-round
-            // checks), so `reminded` telemetry credits a warning the model
-            // actually saw.
+            // the model-acceptance boundary (first chunk above); a round that
+            // exits before its first chunk abandons it in the round finally,
+            // so `reminded` telemetry credits a warning the model actually saw.
           }
         } else {
           const immediateExternalInputs = this.drainExternalInputs(options);

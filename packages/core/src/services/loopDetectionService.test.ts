@@ -2501,6 +2501,39 @@ ${boardState}
       expect(service.takeLoopReminder()).toBeUndefined();
     });
 
+    it('credits and restores every entry of a multi-entry delivery', () => {
+      withMode('stop');
+      const queueTwoStreaks = () => {
+        const commands = [
+          'git status',
+          'git status --short',
+          'git status -sb',
+          'git status --porcelain',
+        ];
+        for (let i = 0; i < 6; i++) {
+          expect(
+            guardTool('run_shell_command', { command: commands[i % 4] }),
+          ).toBe(false);
+        }
+        for (let i = 0; i < 3; i++) expect(same()).toBe(false);
+      };
+
+      queueTwoStreaks();
+      expect(service.takeLoopReminder()?.split('\n\n')).toHaveLength(2);
+      service.abandonLoopReminderDelivery();
+      expect(decisions()).toEqual([]);
+
+      // The whole delivery was restored, not just its first entry: the next
+      // send carries both warnings and credits both decisions.
+      expect(service.takeLoopReminder()?.split('\n\n')).toHaveLength(2);
+      service.commitLoopReminderDelivery();
+      expect(decisions()).toHaveLength(2);
+      expect(decisions().every((entry) => entry.endsWith(':reminded'))).toBe(
+        true,
+      );
+      expect(service.takeLoopReminder()).toBeUndefined();
+    });
+
     it('logs the reminder only when the delivery commits, not when queued or taken', () => {
       withMode('stop');
       reminders(2, same);
