@@ -91,7 +91,6 @@ describe('workflowsCommand', () => {
     context = createMockCommandContext({
       services: {
         config: {
-          isWorkflowsEnabled: () => true,
           getWorkflowRunRegistry: () => ({
             list: listMock,
             get: getMock,
@@ -110,59 +109,6 @@ describe('workflowsCommand', () => {
       type: 'message',
       messageType: 'info',
       content: 'No workflow runs recorded yet.',
-    });
-  });
-
-  it('keeps status/off available with tools disabled and only the child runs while streaming', async () => {
-    const state = {
-      requested: true,
-      available: false,
-      effective: false,
-      reason: 'workflow_unavailable',
-    };
-    const setWorkflowMode = vi.fn(async (enabled: boolean) => ({
-      ...state,
-      requested: enabled,
-    }));
-    Object.assign(context.services.config!, {
-      isWorkflowsEnabled: () => false,
-      isWorkflowModeSupported: () => true,
-      getWorkflowMode: () => state,
-      setWorkflowMode,
-    });
-    const mode = workflowsCommand.subCommands!.find(
-      (command) => command.name === 'mode',
-    )!;
-    expect(workflowsCommand.canRunDuringStreaming).not.toBe(true);
-    expect(mode.canRunDuringStreaming).toBe(true);
-    expect(await mode.action!(context, '')).toMatchObject({
-      content: expect.stringContaining('on (unavailable)'),
-    });
-    expect(await mode.action!(context, 'off')).toMatchObject({
-      content: expect.stringContaining('Workflow mode: off'),
-    });
-    expect(setWorkflowMode).toHaveBeenCalledExactlyOnceWith(false);
-    expect(await workflowsCommand.action!(context, '')).toMatchObject({
-      messageType: 'error',
-    });
-    expect(listMock).not.toHaveBeenCalled();
-  });
-
-  it('does not report success when a mode write fails', async () => {
-    Object.assign(context.services.config!, {
-      isWorkflowModeSupported: () => true,
-      setWorkflowMode: vi.fn().mockRejectedValue(new Error('disk unavailable')),
-    });
-    const mode = workflowsCommand.subCommands!.find(
-      (command) => command.name === 'mode',
-    )!;
-    expect(await mode.action!(context, 'on')).toMatchObject({
-      messageType: 'error',
-      content: 'disk unavailable',
-    });
-    expect(await mode.action!(context, 'on extra')).toMatchObject({
-      messageType: 'error',
-      content: 'Usage: /workflows mode [status|on|off]',
     });
   });
 
@@ -252,7 +198,6 @@ describe('workflowsCommand', () => {
     const ctx = createMockCommandContext({
       services: {
         config: {
-          isWorkflowsEnabled: () => true,
           getWorkflowRunRegistry: () => ({ list: listMock, get: getMock }),
         },
       },
@@ -425,7 +370,6 @@ describe('workflowsCommand', () => {
       const ctx = createMockCommandContext({
         services: {
           config: {
-            isWorkflowsEnabled: () => true,
             getWorkflowRunRegistry: () => ({
               list: listMock,
               get: getMock,
@@ -800,7 +744,6 @@ describe('workflowsCommand', () => {
       return createMockCommandContext({
         services: {
           config: {
-            isWorkflowsEnabled: () => true,
             getWorkflowRunRegistry: () => ({ list: listMock, get: getMock }),
             storage: {
               getWorkflowRunsDir: () => dir,

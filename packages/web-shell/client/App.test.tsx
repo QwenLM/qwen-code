@@ -19635,7 +19635,6 @@ describe('App session callbacks', () => {
   describe('cancelling a prompt before it produced anything', () => {
     const snapshot = (turnIndex: number) => ({
       promptId: `prompt-${turnIndex}`,
-      daemonPromptId: turnIndex === 1 ? PROMPT_ID : 'daemon-first',
       turnIndex,
       timestamp: '2026-01-01T00:00:00.000Z',
       diffStats: { filesChanged: 0, insertions: 0, deletions: 0 },
@@ -19653,7 +19652,7 @@ describe('App session callbacks', () => {
       mockSessionActions.sendPrompt.mockImplementation((text, options) => {
         testState.blocks = [
           ...testState.blocks,
-          { id: 'u1', kind: 'user', text, promptId: PROMPT_ID },
+          { id: 'u1', kind: 'user', text },
         ];
         options?.onAdmissionStarted?.();
         options?.onAdmitted?.({ promptId: PROMPT_ID });
@@ -19726,40 +19725,6 @@ describe('App session callbacks', () => {
       expect(mockSessionActions.rewindSession).not.toHaveBeenCalled();
     }
 
-    it.each(['checkpoint', 'user'] as const)(
-      'restores cancelled text without rewinding a duplicated %s identity',
-      async (kind) => {
-        if (kind === 'checkpoint') {
-          mockSessionActions.getRewindSnapshots.mockResolvedValue({
-            snapshots: [
-              snapshot(1),
-              { ...snapshot(2), daemonPromptId: PROMPT_ID },
-            ],
-          });
-        }
-        renderApp({ language: 'en' });
-        await flush();
-        await submitAndCancel(() => {
-          if (kind === 'user') {
-            testState.blocks = [
-              {
-                id: 'duplicate-user',
-                kind: 'user',
-                text: 'older duplicate',
-                promptId: PROMPT_ID,
-              },
-              ...testState.blocks,
-            ];
-          }
-        });
-        await settleTurn();
-        expect(testState.prompt).toBe('oops typo');
-        expect(mockSessionActions.getRewindSnapshots).toHaveBeenCalledOnce();
-        expect(mockSessionActions.rewindSession).not.toHaveBeenCalled();
-        expect(testState.queuedPromptWriteBlocked).toBe(false);
-      },
-    );
-
     it('hands the prompt back to the composer and rewinds the turn once it settles', async () => {
       const images = [{ data: 'aGVsbG8=', media_type: 'image/png' }];
       renderApp({ language: 'en' });
@@ -19811,7 +19776,7 @@ describe('App session callbacks', () => {
           await Promise.resolve();
           testState.blocks = [
             ...testState.blocks,
-            { id: 'u1', kind: 'user', text, promptId: PROMPT_ID },
+            { id: 'u1', kind: 'user', text },
           ];
           options?.onAdmissionStarted?.();
           options?.onAdmitted?.({ promptId: PROMPT_ID });
@@ -19844,7 +19809,7 @@ describe('App session callbacks', () => {
         });
       });
 
-      it('returns an unassociated prompt to the composer without rewinding another turn', async () => {
+      it('is taken back when a turn of this client settles cancelled', async () => {
         renderApp({ language: 'en' });
         await flush();
         await submitAndCancel();
@@ -19853,7 +19818,9 @@ describe('App session callbacks', () => {
         await settleTurn('cancelled', 'http-prompt-unseen');
 
         expect(testState.prompt).toBe('oops typo');
-        expect(mockSessionActions.rewindSession).not.toHaveBeenCalled();
+        await vi.waitFor(() =>
+          expect(mockSessionActions.rewindSession).toHaveBeenCalledOnce(),
+        );
       });
 
       it("is only stopped when another client's turn settles", async () => {
@@ -20361,14 +20328,7 @@ describe('App session callbacks', () => {
 
   describe('inline user message edits', () => {
     beforeEach(() => {
-      testState.blocks = [
-        {
-          id: 'u0',
-          kind: 'user',
-          text: 'original',
-          promptId: 'daemon-original',
-        },
-      ];
+      testState.blocks = [{ id: 'u0', kind: 'user', text: 'original' }];
       mockStore.appendLocalUserMessage.mockImplementation(
         (text, images, meta, files) => {
           testState.blocks = [
@@ -20388,8 +20348,7 @@ describe('App session callbacks', () => {
         snapshots: [
           {
             promptId: 'prompt-1',
-            daemonPromptId: 'daemon-original',
-            turnIndex: 2,
+            turnIndex: 0,
             timestamp: '2026-01-01T00:00:00.000Z',
             diffStats: { filesChanged: 0, insertions: 0, deletions: 0 },
           },
@@ -20412,47 +20371,6 @@ describe('App session callbacks', () => {
         content,
       );
     }
-
-    it.each(['missing block identity', 'duplicate checkpoint identity'])(
-      'refuses an inline edit with %s without changing the transcript',
-      async (kind) => {
-        if (kind === 'missing block identity') {
-          testState.blocks = [{ id: 'u0', kind: 'user', text: 'original' }];
-        }
-        const checkpoint = {
-          promptId: 'prompt-1',
-          daemonPromptId: 'daemon-original',
-          turnIndex: 0,
-          timestamp: '2026-01-01T00:00:00.000Z',
-          diffStats: { filesChanged: 0, insertions: 0, deletions: 0 },
-        };
-        mockSessionActions.getRewindSnapshots.mockResolvedValue({
-          snapshots:
-            kind === 'duplicate checkpoint identity'
-              ? [
-                  checkpoint,
-                  {
-                    ...checkpoint,
-                    promptId: 'another-checkpoint',
-                    turnIndex: 7,
-                  },
-                ]
-              : [checkpoint],
-        });
-        const before = [...testState.blocks];
-        renderApp({ language: 'en' });
-        await flush();
-        let accepted;
-        await act(async () => {
-          accepted = await submit();
-        });
-        expect(accepted).toBe(false);
-        expect(mockSessionActions.getRewindSnapshots).toHaveBeenCalledOnce();
-        expect(mockSessionActions.rewindSession).not.toHaveBeenCalled();
-        expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
-        expect(testState.blocks).toEqual(before);
-      },
-    );
 
     it('opens without rewinding and sends only after preflight and rewind', async () => {
       const prepareSubmit = vi.fn().mockResolvedValue(undefined);
@@ -20498,12 +20416,7 @@ describe('App session callbacks', () => {
         expect(mockSessionActions.rewindSession).not.toHaveBeenCalled();
         expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
         expect(testState.blocks).toEqual([
-          {
-            id: 'u0',
-            kind: 'user',
-            text: 'original',
-            promptId: 'daemon-original',
-          },
+          { id: 'u0', kind: 'user', text: 'original' },
         ]);
         expect(testState.prompt).toBe('hello');
       },
@@ -20590,15 +20503,7 @@ describe('App session callbacks', () => {
           mockSessionActions.getRewindSnapshots.mockImplementationOnce(
             async () => {
               await gate.promise;
-              return {
-                snapshots: [
-                  {
-                    promptId: 'prompt-1',
-                    daemonPromptId: 'daemon-original',
-                    turnIndex: 2,
-                  },
-                ],
-              };
+              return { snapshots: [{ promptId: 'prompt-1', turnIndex: 0 }] };
             },
           );
         } else {
@@ -20733,7 +20638,6 @@ describe('App session callbacks', () => {
               id: 'u0',
               kind: 'user',
               text: 'original',
-              promptId: 'daemon-original',
               images: [{ data: 'AQID', mimeType: 'image/png' }],
             },
           ];
@@ -20780,28 +20684,16 @@ describe('App session callbacks', () => {
         '@qwen-code/sdk/daemon'
       );
       const transcript = createDaemonTranscriptStore();
-      transcript.dispatch({
-        type: 'user.text.delta',
-        text: 'original',
-        promptId: 'daemon-original',
-      });
+      transcript.appendLocalUserMessage('original');
       testState.blocks = transcript.getSnapshot().blocks;
-      const snapshots = [
-        {
-          promptId: 'original',
-          daemonPromptId: 'daemon-original',
-          turnIndex: 2,
-        },
-      ];
+      const snapshots = [{ promptId: 'original', turnIndex: 0 }];
       mockSessionActions.getRewindSnapshots.mockImplementation(async () => ({
         snapshots: [...snapshots],
       }));
       mockSessionActions.rewindSession.mockImplementation(async (promptId) => {
         transcript.dispatch({
           type: 'session.rewound',
-          targetTurnIndex: snapshots[0].turnIndex,
-          daemonPromptId: snapshots[0].daemonPromptId,
-          replay: [],
+          targetTurnIndex: 0,
           promptId,
         });
         testState.blocks = transcript.getSnapshot().blocks;
@@ -20819,23 +20711,8 @@ describe('App session callbacks', () => {
         async (text, options) => {
           if (options?.optimisticUserMessage !== false)
             transcript.appendLocalUserMessage(text);
-          const blockId = transcript.getSnapshot().blocks.at(-1)!.id;
-          const current = transcript.getSnapshot();
-          transcript.reset({
-            ...current,
-            retainedBytes: undefined,
-            blocks: current.blocks.map((block) =>
-              block.id === blockId
-                ? { ...block, promptId: 'daemon-accepted' }
-                : block,
-            ),
-          });
           testState.blocks = transcript.getSnapshot().blocks;
-          snapshots.push({
-            promptId: 'accepted',
-            daemonPromptId: 'daemon-accepted',
-            turnIndex: 6,
-          });
+          snapshots.push({ promptId: 'accepted', turnIndex: 0 });
           options?.onAdmissionStarted?.();
           options?.onAdmitted?.();
         },
@@ -20857,13 +20734,6 @@ describe('App session callbacks', () => {
       });
       act(() => {
         rerender();
-      });
-      // The retry reuses the block the failed attempt appended.
-      expect(
-        mockSessionActions.sendPrompt.mock.calls.at(-1)?.[1],
-      ).toMatchObject({
-        optimisticUserMessage: false,
-        bindBlockId: failedUsers[0].id,
       });
       const users = transcript
         .getSnapshot()
@@ -20930,7 +20800,6 @@ describe('App session callbacks', () => {
           id: 'u0',
           kind: 'user',
           text: 'original',
-          promptId: 'daemon-original',
           images: [
             { data: 'aW5saW5l', mimeType: 'image/png' },
             { data: '', mimeType: 'image/png', attachmentId: 'image-ref' },

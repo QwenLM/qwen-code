@@ -1,4 +1,4 @@
-import { useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import {
   useActions,
@@ -9,7 +9,6 @@ import {
 import type { Message } from '../adapters/types';
 import { useInteractionBlocker } from '../interactionBlockContext';
 import { useI18n } from '../i18n';
-import { McpAppGeneratedUiOwnerContext } from '../mcpAppHostContext';
 import {
   localMessageDeletionGroups,
   hasPendingLocalCommands,
@@ -41,7 +40,6 @@ export function useMessageDeletion(
   sessionBlocked: boolean,
   historical = false,
 ) {
-  const generatedUiOwner = useContext(McpAppGeneratedUiOwnerContext);
   const connection = useConnection();
   const actions = useActions();
   const store = useTranscriptStore();
@@ -218,13 +216,6 @@ export function useMessageDeletion(
         }
       }
       deleted = true;
-      if (generatedUiOwner && connection.sessionId && persisted.length > 0) {
-        generatedUiOwner.invalidate({
-          scopeId: generatedUiOwner.scopeId,
-          sessionId: connection.sessionId,
-          reason: 'deleted',
-        });
-      }
       if (currentKey.current !== key || token !== operation.current) return;
       if (localIds.size > 0) {
         const snapshot = store.getSnapshot();

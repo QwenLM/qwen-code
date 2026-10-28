@@ -1,6 +1,5 @@
 import {
   useCallback,
-  useContext,
   useEffect,
   useMemo,
   useRef,
@@ -25,7 +24,6 @@ import {
   type SessionCatalogQuery,
   type SessionCatalogSnapshot,
 } from './session-catalog-store';
-import { McpAppGeneratedUiOwnerContext } from '../mcpAppHostContext';
 
 const EMPTY_SNAPSHOTS: readonly SessionCatalogSnapshot[] = [];
 const EMPTY_QUERIES: readonly SessionCatalogQuery[] = [];
@@ -488,7 +486,6 @@ export function useSessionCatalogController(client: DaemonClient) {
 }
 
 export function useWebShellSessions(options: WebShellSessionsOptions = {}) {
-  const generatedUiOwner = useContext(McpAppGeneratedUiOwnerContext);
   const {
     autoLoad = false,
     enabled = true,
@@ -573,30 +570,22 @@ export function useWebShellSessions(options: WebShellSessionsOptions = {}) {
   const deleteSession = useCallback(
     async (sessionId: string) => {
       try {
-        const invalidateDeleted =
-          generatedUiOwner?.captureSessionDeletion(workspaceCwd);
-        const removed = await workspace.actions.deleteSession(sessionId);
-        if (removed) invalidateDeleted?.([sessionId]);
-        return removed;
+        return await workspace.actions.deleteSession(sessionId);
       } finally {
         invalidate();
       }
     },
-    [generatedUiOwner, invalidate, workspace.actions, workspaceCwd],
+    [invalidate, workspace.actions],
   );
   const deleteSessions = useCallback(
     async (sessionIds: string[]) => {
       try {
-        const invalidateDeleted =
-          generatedUiOwner?.captureSessionDeletion(workspaceCwd);
-        const result = await workspace.actions.deleteSessions(sessionIds);
-        invalidateDeleted?.([...result.removed, ...result.notFound]);
-        return result;
+        return await workspace.actions.deleteSessions(sessionIds);
       } finally {
         invalidate();
       }
     },
-    [generatedUiOwner, invalidate, workspace.actions, workspaceCwd],
+    [invalidate, workspace.actions],
   );
   const archiveSession = useCallback(
     async (sessionId: string) => {

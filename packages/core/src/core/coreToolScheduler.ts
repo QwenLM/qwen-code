@@ -4,12 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  attachToolOutputRecovery,
-  getToolOutputRecovery,
-  type ToolOutputRecovery,
-} from '../tools/tool-output-recovery.js';
-
 import { logToolResultSize } from '../telemetry/loggers.js';
 import { ToolResultSizeEvent } from '../telemetry/types.js';
 import {
@@ -1008,18 +1002,11 @@ export function convertToFunctionResponse(
   toolName: string,
   callId: string,
   llmContent: PartListUnion,
-  producerResult?: Pick<
-    ToolResult,
-    | 'rawOutputSize'
-    | 'truncatedByProducer'
-    | 'recoveryText'
-    | 'persistedOutputFiles'
-  >,
+  producerResult?: Pick<ToolResult, 'rawOutputSize' | 'truncatedByProducer'>,
   config?: Pick<Config, 'getChatCompression'>,
 ): Part[] {
   const processed = measureToolOutput(llmContent, config);
   let rawSize: ReturnType<typeof measureToolOutput> | undefined;
-  let recovery: ToolOutputRecovery = {};
   try {
     if (producerResult) {
       // A producer that bounds its own render declares null, so its raw size
@@ -1029,32 +1016,25 @@ export function convertToFunctionResponse(
         producerResult.rawOutputSize === null
           ? undefined
           : (producerResult.rawOutputSize ?? processed);
-      recovery = {
-        text: producerResult.recoveryText,
-        persistedOutputFiles: producerResult.persistedOutputFiles,
-      };
     }
   } catch {
     // Optional observation metadata must not change a tool's outcome.
   }
-  return attachToolOutputRecovery(
-    attachToolOutputProvenance(
-      convertToFunctionResponseParts(toolName, callId, llmContent),
-      {
-        callId,
-        toolName,
-        promptId: '',
-        toolType: toolName.startsWith('mcp__') ? 'mcp' : 'native',
-        rawSize,
-        truncated:
-          producerResult?.truncatedByProducer === true
-            ? true
-            : rawSize === undefined
-              ? undefined
-              : rawSize.chars > processed.chars,
-      },
-    ),
-    recovery,
+  return attachToolOutputProvenance(
+    convertToFunctionResponseParts(toolName, callId, llmContent),
+    {
+      callId,
+      toolName,
+      promptId: '',
+      toolType: toolName.startsWith('mcp__') ? 'mcp' : 'native',
+      rawSize,
+      truncated:
+        producerResult?.truncatedByProducer === true
+          ? true
+          : rawSize === undefined
+            ? undefined
+            : rawSize.chars > processed.chars,
+    },
   );
 }
 
@@ -6431,8 +6411,9 @@ export class CoreToolScheduler {
           this.config,
         ).chars;
         const budgetReduced = !replacement && appliedOutputBudget !== undefined;
-        response.responseParts = attachToolOutputRecovery(
-          attachToolOutputProvenance(response.responseParts, {
+        response.responseParts = attachToolOutputProvenance(
+          response.responseParts,
+          {
             callId,
             toolName: getModelFacingToolName(scheduledCall.request),
             promptId: scheduledCall.request.prompt_id,
@@ -6453,10 +6434,6 @@ export class CoreToolScheduler {
             budgetSource: budgetReduced
               ? appliedOutputBudget?.source
               : undefined,
-          }),
-          {
-            text: replacement ? undefined : producerToolResult?.recoveryText,
-            persistedOutputFiles: response.persistedOutputFiles,
           },
         );
         try {
@@ -7064,7 +7041,6 @@ export class CoreToolScheduler {
           getModelFacingToolName(scheduledCall.request),
           callId,
           content,
-          { recoveryText: toolResult.recoveryText, persistedOutputFiles },
         );
         const processedImages = await this.processToolResultImages(
           convertedResponse,
@@ -7933,16 +7909,9 @@ export class CoreToolScheduler {
                 ...call,
                 response: {
                   ...call.response,
-                  // The provenance stamp spreads each part, which drops the
-                  // non-enumerable recovery handle, so re-attach it last.
-                  responseParts: attachToolOutputRecovery(
-                    attachToolOutputProvenance(
-                      call.response.responseParts,
-                      provenance,
-                    ),
-                    call.response.responseParts
-                      .map(getToolOutputRecovery)
-                      .find(Boolean) ?? {},
+                  responseParts: attachToolOutputProvenance(
+                    call.response.responseParts,
+                    provenance,
                   ),
                 },
               }
@@ -7976,23 +7945,15 @@ export class CoreToolScheduler {
             call.response.responseParts
               .map(getToolOutputProvenance)
               .find(Boolean) ?? provenanceByCall.get(call.request.callId);
-          // Read the recovery handle before the provenance spread drops it.
-          const recovery =
-            call.response.responseParts
-              .map(getToolOutputRecovery)
-              .find(Boolean) ?? {};
-          call.response.responseParts = attachToolOutputRecovery(
-            attachToolOutputProvenance(
-              call.response.responseParts,
-              provenance ?? {
-                callId: call.request.callId,
-                toolName: getModelFacingToolName(call.request),
-                promptId: call.request.prompt_id,
-                toolType:
-                  call.tool instanceof DiscoveredMCPTool ? 'mcp' : 'native',
-              },
-            ),
-            recovery,
+          call.response.responseParts = attachToolOutputProvenance(
+            call.response.responseParts,
+            provenance ?? {
+              callId: call.request.callId,
+              toolName: getModelFacingToolName(call.request),
+              promptId: call.request.prompt_id,
+              toolType:
+                call.tool instanceof DiscoveredMCPTool ? 'mcp' : 'native',
+            },
           );
           this.runtimeContentGeneratorViews.delete(call.request.callId);
           // A call its owner refused to launch never ran.

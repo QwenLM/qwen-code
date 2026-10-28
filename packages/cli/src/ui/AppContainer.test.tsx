@@ -881,10 +881,6 @@ describe('AppContainer State Management', () => {
     ['unknown', 'workflow inspect', false, false, true, true],
     ['opt-out', 'workflow inspect', true, true, true, true],
     ['missing tool', 'workflow inspect', true, false, false, true],
-    ['mode', 'Run the tests', false, false, true, false],
-    ['mode running', 'Run the tests', false, false, true, false],
-    ['pending exit', 'Run the tests', false, false, true, false],
-    ['late mode transition', 'Run the tests', false, false, true, false],
   ] as const)(
     'accepts completed speculation only without a current workflow intent: %s',
     async (_label, text, human, optOut, reachable, acceptCached) => {
@@ -917,33 +913,16 @@ describe('AppContainer State Management', () => {
       mockSettings.merged.ui!.disableWorkflowKeywordTrigger = optOut;
       generatePromptSuggestionMock.mockResolvedValue({ suggestion: text });
       const controller = new AbortController();
-      const cleanupOverlay = vi.fn().mockResolvedValue(undefined);
       const speculation = {
-        status: _label === 'mode running' ? 'running' : 'completed',
+        status: 'completed',
         suggestion: text,
         messages: [{ role: 'model', parts: [{ text: 'cached result' }] }],
-        overlayFs: acceptCached ? null : { cleanup: cleanupOverlay },
+        overlayFs: null,
         abortController: controller,
         startTime: Date.now(),
         toolUseCount: 0,
       };
-      let resolveSpeculation!: (state: typeof speculation) => void;
-      if (_label === 'late mode transition') {
-        startSpeculationMock.mockReturnValue(
-          new Promise((resolve) => {
-            resolveSpeculation = resolve;
-          }),
-        );
-      } else {
-        startSpeculationMock.mockResolvedValue(speculation);
-      }
-      let modeChanged: (() => void) | undefined;
-      vi.spyOn(mockConfig, 'onWorkflowModeChange').mockImplementation(
-        (listener) => {
-          modeChanged = () => listener(mockConfig.getWorkflowMode());
-          return () => {};
-        },
-      );
+      startSpeculationMock.mockResolvedValue(speculation);
       const queue = vi.fn();
       mockedUseMessageQueue.mockReturnValue({
         ...mockedUseMessageQueue(),
@@ -978,28 +957,6 @@ describe('AppContainer State Management', () => {
       await vi.waitFor(() =>
         expect(startSpeculationMock).toHaveBeenCalledOnce(),
       );
-      if (
-        _label === 'mode' ||
-        _label === 'mode running' ||
-        _label === 'pending exit' ||
-        _label === 'late mode transition'
-      ) {
-        const modeContext = vi
-          .spyOn(mockConfig, 'hasWorkflowModeContext')
-          .mockReturnValue(true);
-        if (_label !== 'mode') {
-          await act(async () => modeChanged?.());
-          if (_label === 'late mode transition') {
-            modeContext.mockReturnValue(false);
-            await act(async () => {
-              modeChanged?.();
-              resolveSpeculation(speculation);
-            });
-          }
-          expect(controller.signal.aborted).toBe(true);
-          expect(cleanupOverlay).toHaveBeenCalledOnce();
-        }
-      }
       await act(async () => {
         capturedUIActions.handleFinalSubmit(text, {
           submittedPrompt: text,
@@ -1017,10 +974,9 @@ describe('AppContainer State Management', () => {
         expect(addHistory).not.toHaveBeenCalled();
         expect(queue).toHaveBeenCalledWith(text, false, text, false, {
           displayText: text,
-          humanInput: human ? { text } : undefined,
+          humanInput: { text },
         });
         expect(controller.signal.aborted).toBe(true);
-        expect(cleanupOverlay).toHaveBeenCalledOnce();
       }
     },
   );
@@ -5199,7 +5155,7 @@ describe('AppContainer State Management', () => {
       // Third cleanup leg: in-memory chat history is stripped so the
       // cancelled prompt doesn't ride along on the next request as an
       // orphan user turn.
-      expect(mockStripOrphans).toHaveBeenCalledWith(true);
+      expect(mockStripOrphans).toHaveBeenCalled();
       // Fourth cleanup leg: Ink's static-rendered transcript region
       // is append-only — shrinking the underlying array doesn't unprint
       // already-flushed lines. `refreshStatic` writes the clear-terminal
@@ -5350,7 +5306,7 @@ describe('AppContainer State Management', () => {
         wasGoalTurn: true,
       });
 
-      expect(mockStripOrphans).toHaveBeenCalledWith(true);
+      expect(mockStripOrphans).toHaveBeenCalled();
       // Auto-restore itself bailed: there was no user item to rewind.
       expect(mockTruncateToItem).not.toHaveBeenCalled();
     });

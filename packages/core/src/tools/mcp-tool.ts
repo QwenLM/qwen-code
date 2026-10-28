@@ -702,17 +702,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
           ...(invocationContext
             ? {
                 _meta: {
-                  [INVOCATION_CONTEXT_META_KEY]: {
-                    version: invocationContext.version,
-                    sessionId: invocationContext.sessionId,
-                    promptId: invocationContext.promptId,
-                    ...(invocationContext.originatorClientId
-                      ? {
-                          originatorClientId:
-                            invocationContext.originatorClientId,
-                        }
-                      : {}),
-                  },
+                  [INVOCATION_CONTEXT_META_KEY]: invocationContext,
                 },
               }
             : {}),

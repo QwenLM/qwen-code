@@ -32,7 +32,6 @@ export function makeSwapSlotClient() {
       open = true;
       return true;
     }),
-    isTelemetrySwapInProgress: () => open,
     commitTelemetrySwap: vi.fn(() => {
       open = false;
     }),

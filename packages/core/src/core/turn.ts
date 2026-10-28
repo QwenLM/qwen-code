@@ -755,7 +755,6 @@ export class Turn {
     private readonly onPreparedRequest?: LlmPreparedRequestCallback,
     private readonly yieldsToolCallPreparations?: boolean,
     private readonly suppressedHookContext?: string,
-    private readonly onModelRequestDispatched?: () => void,
   ) {
     this.goalContext = goalContext ? { ...goalContext } : undefined;
   }
@@ -775,14 +774,10 @@ export class Turn {
         this.promptIdentity !== undefined ||
         this.retractDeliveredOutputOnRetry === true ||
         this.onPreparedRequest !== undefined ||
-        this.onModelRequestDispatched !== undefined ||
         this.suppressedHookContext !== undefined
           ? {
               ...(this.onPreparedRequest
                 ? { onPreparedRequest: this.onPreparedRequest }
-                : {}),
-              ...(this.onModelRequestDispatched
-                ? { onModelRequestDispatched: this.onModelRequestDispatched }
                 : {}),
               ...(this.suppressedHookContext
                 ? { suppressedHookContext: this.suppressedHookContext }

@@ -45,7 +45,6 @@ const mocks = vi.hoisted(() => ({
 
 interface RewindSnapshotStub {
   promptId: string;
-  daemonPromptId?: string;
   turnIndex: number;
   timestamp: string;
   diffStats: { filesChanged: number; insertions: number; deletions: number };
@@ -55,11 +54,7 @@ const sdkMocks = vi.hoisted(() => ({
   listWorkspaceSessionsPage: vi.fn(),
   getRewindSnapshots: vi.fn<
     (sessionId: string) => Promise<{
-      snapshots: Array<{
-        turnIndex: number;
-        promptId: string;
-        daemonPromptId?: string;
-      }>;
+      snapshots: Array<{ turnIndex: number; promptId: string }>;
     }>
   >(async () => ({ snapshots: [] })),
   rewindSession: vi.fn<
@@ -80,13 +75,7 @@ const sdkMocks = vi.hoisted(() => ({
   },
 }));
 
-vi.mock('@qwen-code/sdk/daemon', async (importOriginal) => ({
-  findDaemonRewindUserBlock: (
-    await importOriginal<typeof import('@qwen-code/sdk/daemon')>()
-  ).findDaemonRewindUserBlock,
-  isDaemonRewindUserBlock: (
-    await importOriginal<typeof import('@qwen-code/sdk/daemon')>()
-  ).isDaemonRewindUserBlock,
+vi.mock('@qwen-code/sdk/daemon', () => ({
   DaemonClient: class {
     workspaceByCwd() {
       return {
@@ -1662,7 +1651,6 @@ describe('EmbeddedApp message edit rewind', () => {
   function snapshot(turnIndex: number): RewindSnapshotStub {
     return {
       promptId: `prompt-${turnIndex}`,
-      daemonPromptId: `daemon-${turnIndex}`,
       turnIndex,
       timestamp: '2026-09-06T00:00:00.000Z',
       diffStats: { filesChanged: 0, insertions: 0, deletions: 0 },
@@ -1695,7 +1683,7 @@ describe('EmbeddedApp message edit rewind', () => {
   });
 
   function userBlock(id: string, text: string): Record<string, unknown> {
-    return { id, kind: 'user', text, promptId: `daemon-${id.slice(1)}` };
+    return { id, kind: 'user', text };
   }
 
   async function deliverTranscript(
@@ -1755,12 +1743,8 @@ describe('EmbeddedApp message edit rewind', () => {
         }),
       );
     });
-    await deliverTranscript(props, [userBlock('u3', 'original text')]);
-    sdkMocks.rewindSession.mockImplementation(async () => {
-      await deliverTranscript(props, []);
-    });
     sdkMocks.getRewindSnapshots.mockResolvedValue({ snapshots: [snapshot(3)] });
-    const prepareSubmit = await startEditing(props, 0);
+    const prepareSubmit = await startEditing(props, 3);
 
     await act(async () => {
       await expect(
@@ -1807,17 +1791,10 @@ describe('EmbeddedApp message edit rewind', () => {
 
   it('rewinds to the snapshot for the edited turn, not the newest one', async () => {
     const props = await renderApp();
-    await deliverTranscript(props, [
-      userBlock('u2', 'earlier'),
-      userBlock('u3', 'original text'),
-    ]);
-    sdkMocks.rewindSession.mockImplementation(async () => {
-      await deliverTranscript(props, [userBlock('u2', 'earlier')]);
-    });
     sdkMocks.getRewindSnapshots.mockResolvedValue({
       snapshots: [snapshot(2), snapshot(5), snapshot(3)],
     });
-    const prepareSubmit = await startEditing(props, 1);
+    const prepareSubmit = await startEditing(props, 3);
 
     await act(async () => {
       await prepareSubmit({
@@ -1828,7 +1805,7 @@ describe('EmbeddedApp message edit rewind', () => {
     });
 
     expect(sdkMocks.getRewindSnapshots).toHaveBeenCalledWith('session-1');
-    // Visible turn 1 maps to raw snapshot 3, not the newer snapshot 5.
+    // Turn 3, even though turn 5 is newer and listed before it.
     expect(sdkMocks.rewindSession).toHaveBeenCalledWith(
       'session-1',
       'prompt-3',
@@ -1845,55 +1822,8 @@ describe('EmbeddedApp message edit rewind', () => {
     );
   });
 
-  it('refuses a stale edit ordinal without touching the composer or arming rewind', async () => {
-    const props = await renderApp();
-    await deliverTranscript(props, [
-      userBlock('u0', 'first'),
-      userBlock('u1', 'second'),
-    ]);
-    const composer = { clear: vi.fn(), setText: vi.fn(), focus: vi.fn() };
-    (props.composerRef as { current: typeof composer | null }).current =
-      composer;
-    const onEdit = callback<(turnIndex: number, content: string) => boolean>(
-      props,
-      'onUserMessageEditRequest',
-    );
-    await act(async () => {
-      expect(onEdit(5, 'stale target')).toBe(false);
-    });
-    expect(composer.clear).not.toHaveBeenCalled();
-    expect(composer.setText).not.toHaveBeenCalled();
-    expect(composer.focus).not.toHaveBeenCalled();
-    await expectNextSubmitIsOrdinary();
-  });
-
-  it('explains a legacy checkpoint with no daemon identity before refusing the edit', async () => {
-    const props = await renderApp();
-    await deliverTranscript(props, [userBlock('u0', 'original text')]);
-    sdkMocks.getRewindSnapshots.mockResolvedValue({
-      snapshots: [{ promptId: 'legacy-prompt', turnIndex: 0 }],
-    });
-    const prepareSubmit = await startEditing(props, 0);
-    await act(async () => {
-      await expect(
-        prepareSubmit({
-          sessionId: 'session-1',
-          prompt: 'edited text',
-          inputAnnotations: [],
-        }),
-      ).rejects.toThrow('This checkpoint has no prompt identity to rewind to.');
-    });
-    expect(sdkMocks.rewindSession).not.toHaveBeenCalled();
-  });
-
   it('refuses the edit when the turn no longer has a snapshot', async () => {
     const props = await renderApp();
-    await deliverTranscript(
-      props,
-      Array.from({ length: 8 }, (_, index) =>
-        userBlock(`u${index}`, `turn ${index}`),
-      ),
-    );
     sdkMocks.getRewindSnapshots.mockResolvedValue({
       snapshots: [snapshot(2)],
     });
@@ -1914,45 +1844,6 @@ describe('EmbeddedApp message edit rewind', () => {
     expect(sdkMocks.rewindSession).not.toHaveBeenCalled();
   });
 
-  it('edits the turn the web shell numbered, skipping an injected row', async () => {
-    const props = await renderApp();
-    const injectedRow = {
-      id: 'n1',
-      kind: 'user',
-      text: 'injected note',
-      promptId: 'daemon-1',
-      meta: { source: 'mid_turn_message_injected' },
-    };
-    await deliverTranscript(props, [
-      userBlock('u0', 'first'),
-      injectedRow,
-      userBlock('u1', 'original text'),
-    ]);
-    sdkMocks.getRewindSnapshots.mockResolvedValue({
-      snapshots: [snapshot(1)],
-    });
-    sdkMocks.rewindSession.mockImplementation(async () => {
-      await deliverTranscript(props, [userBlock('u0', 'first'), injectedRow]);
-    });
-    // The web shell numbers only `role === 'user'` rows and the injected row
-    // renders as `role: 'system'`, so ordinal 1 is u1, not n1.
-    const prepareSubmit = await startEditing(props, 1);
-
-    await act(async () => {
-      await prepareSubmit({
-        sessionId: 'session-1',
-        prompt: 'edited text',
-        inputAnnotations: [],
-      });
-    });
-
-    expect(sdkMocks.rewindSession).toHaveBeenCalledWith(
-      'session-1',
-      'prompt-1',
-      expect.objectContaining({ rewindFiles: false }),
-    );
-  });
-
   // The clear has to happen before the branch can throw, not after the
   // snapshot fetch: with no session there is no rewind to retry, so a refused
   // send must leave edit mode instead of re-entering the branch every time.
@@ -1961,7 +1852,6 @@ describe('EmbeddedApp message edit rewind', () => {
     delete document.body.dataset.qwenSessionId;
     try {
       const props = await renderApp();
-      await deliverTranscript(props, [userBlock('u0', 'original text')]);
       const prepareSubmit = await startEditing(props, 0);
 
       await act(async () => {
@@ -1981,7 +1871,6 @@ describe('EmbeddedApp message edit rewind', () => {
 
   it('leaves edit mode after a refused edit so the next send is not stuck', async () => {
     const props = await renderApp();
-    await deliverTranscript(props, [userBlock('u0', 'original text')]);
     const prepareSubmit = await startEditing(props, 0);
 
     await act(async () => {
@@ -2018,14 +1907,10 @@ describe('EmbeddedApp message edit rewind', () => {
   // the edited text as a new turn instead of replacing the original.
   it('re-arms the edit after a transient snapshot failure so the retry rewinds', async () => {
     const props = await renderApp();
-    await deliverTranscript(props, [userBlock('u3', 'original text')]);
-    sdkMocks.rewindSession.mockImplementation(async () => {
-      await deliverTranscript(props, []);
-    });
     sdkMocks.getRewindSnapshots.mockRejectedValueOnce(
       new sdkMocks.DaemonHttpError(503),
     );
-    const prepareSubmit = await startEditing(props, 0);
+    const prepareSubmit = await startEditing(props, 3);
 
     await act(async () => {
       await expect(
@@ -2069,14 +1954,13 @@ describe('EmbeddedApp message edit rewind', () => {
   // succeed — the wedged composer this change exists to remove.
   it('keeps edit mode cleared when the rewind is refused permanently', async () => {
     const props = await renderApp();
-    await deliverTranscript(props, [userBlock('u3', 'original text')]);
     sdkMocks.getRewindSnapshots.mockResolvedValue({
       snapshots: [snapshot(3)],
     });
     sdkMocks.rewindSession.mockRejectedValueOnce(
       new sdkMocks.DaemonHttpError(400),
     );
-    const prepareSubmit = await startEditing(props, 0);
+    const prepareSubmit = await startEditing(props, 3);
 
     await act(async () => {
       await expect(
@@ -2096,7 +1980,6 @@ describe('EmbeddedApp message edit rewind', () => {
   // turn index that belongs to the one they left.
   it('does not re-arm the edit when the session switched during the failed fetch', async () => {
     const props = await renderApp();
-    await deliverTranscript(props, [userBlock('u3', 'original text')]);
     let rejectSnapshots!: (error: unknown) => void;
     sdkMocks.getRewindSnapshots.mockImplementationOnce(
       () =>
@@ -2104,7 +1987,7 @@ describe('EmbeddedApp message edit rewind', () => {
           rejectSnapshots = reject;
         }),
     );
-    const prepareSubmit = await startEditing(props, 0);
+    const prepareSubmit = await startEditing(props, 3);
     let submission!: Promise<unknown>;
     await act(async () => {
       submission = prepareSubmit({
@@ -2136,10 +2019,6 @@ describe('EmbeddedApp message edit rewind', () => {
   // send inside the branch, or every later prompt would rewind the session.
   it('treats the send after a successful edit as an ordinary prompt', async () => {
     const props = await renderApp();
-    await deliverTranscript(props, [userBlock('u0', 'original text')]);
-    sdkMocks.rewindSession.mockImplementation(async () => {
-      await deliverTranscript(props, []);
-    });
     sdkMocks.getRewindSnapshots.mockResolvedValue({
       snapshots: [snapshot(0)],
     });
@@ -2165,10 +2044,6 @@ describe('EmbeddedApp message edit rewind', () => {
 
   it('rewinds the session captured before the snapshot fetch, not the one navigated to', async () => {
     const props = await renderApp();
-    await deliverTranscript(props, [userBlock('u3', 'original text')]);
-    sdkMocks.rewindSession.mockImplementation(async () => {
-      await deliverTranscript(props, []);
-    });
 
     // Hold the snapshot fetch open so the session can switch while it is in
     // flight.
@@ -2180,7 +2055,7 @@ describe('EmbeddedApp message edit rewind', () => {
         }),
     );
 
-    const prepareSubmit = await startEditing(props, 0);
+    const prepareSubmit = await startEditing(props, 3);
     let submission!: Promise<unknown>;
     await act(async () => {
       submission = prepareSubmit({
@@ -2306,19 +2181,6 @@ describe('EmbeddedApp rewind preflight localization', () => {
   it('rethrows a localized error when getRewindSnapshots rejects', async () => {
     await renderApp();
     const props = mocks.embeddedProps.current as CapturedProps;
-    await act(async () => {
-      callback<(blocks: unknown[]) => void>(
-        props,
-        'onTranscriptChange',
-      )([
-        {
-          id: 'u0',
-          kind: 'user',
-          text: 'original text',
-          promptId: 'daemon-localized',
-        },
-      ]);
-    });
 
     const onUserMessageEditRequest = callback<
       (turnIndex: number, content: string) => boolean
@@ -2348,12 +2210,7 @@ describe('EmbeddedApp rewind preflight localization', () => {
     // of appending the edited text as a new turn.
     sdkMocks.getRewindSnapshots.mockClear();
     sdkMocks.getRewindSnapshots.mockResolvedValueOnce({
-      snapshots: [
-        { turnIndex: 0, promptId: 'p-1', daemonPromptId: 'daemon-localized' },
-      ],
-    });
-    sdkMocks.rewindSession.mockImplementationOnce(async () => {
-      callback<(blocks: unknown[]) => void>(props, 'onTranscriptChange')([]);
+      snapshots: [{ turnIndex: 0, promptId: 'p-1' }],
     });
     const retry = callback<
       (submission: {
@@ -2376,19 +2233,6 @@ describe('EmbeddedApp rewind preflight localization', () => {
   it('rethrows a localized error when rewindSession rejects', async () => {
     await renderApp();
     const props = mocks.embeddedProps.current as CapturedProps;
-    await act(async () => {
-      callback<(blocks: unknown[]) => void>(
-        props,
-        'onTranscriptChange',
-      )([
-        {
-          id: 'u0',
-          kind: 'user',
-          text: 'original text',
-          promptId: 'daemon-localized',
-        },
-      ]);
-    });
 
     const onUserMessageEditRequest = callback<
       (turnIndex: number, content: string) => boolean
@@ -2399,9 +2243,7 @@ describe('EmbeddedApp rewind preflight localization', () => {
     });
 
     sdkMocks.getRewindSnapshots.mockResolvedValueOnce({
-      snapshots: [
-        { turnIndex: 0, promptId: 'p-1', daemonPromptId: 'daemon-localized' },
-      ],
+      snapshots: [{ turnIndex: 0, promptId: 'p-1' }],
     });
     sdkMocks.rewindSession.mockRejectedValueOnce(new Error('HTTP 503'));
 
@@ -2422,12 +2264,7 @@ describe('EmbeddedApp rewind preflight localization', () => {
     // again rather than send the edited text as a new prompt.
     sdkMocks.getRewindSnapshots.mockClear();
     sdkMocks.getRewindSnapshots.mockResolvedValueOnce({
-      snapshots: [
-        { turnIndex: 0, promptId: 'p-1', daemonPromptId: 'daemon-localized' },
-      ],
-    });
-    sdkMocks.rewindSession.mockImplementationOnce(async () => {
-      callback<(blocks: unknown[]) => void>(props, 'onTranscriptChange')([]);
+      snapshots: [{ turnIndex: 0, promptId: 'p-1' }],
     });
     const retry = callback<
       (submission: {
@@ -2441,7 +2278,6 @@ describe('EmbeddedApp rewind preflight localization', () => {
       ).resolves.toBeUndefined();
     });
     expect(sdkMocks.getRewindSnapshots).toHaveBeenCalledOnce();
-    expect(sdkMocks.rewindSession).toHaveBeenCalledTimes(2);
     expect(sdkMocks.rewindSession).toHaveBeenLastCalledWith(
       'session-1',
       'p-1',

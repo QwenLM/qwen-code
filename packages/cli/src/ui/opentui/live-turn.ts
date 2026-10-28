@@ -510,7 +510,6 @@ export function useOpenTuiLiveTurn(
           },
           submittedPrompt: turnOptions?.submittedPrompt,
           humanInput: turnOptions?.humanInput,
-          workflowModeEligible: editablePrompt !== undefined,
           refreshContextFilesOnWrite: turnOptions?.refreshContextFilesOnWrite,
           isCurrentTurn: () => seq === turnSeqRef.current,
           ...(mods && {
@@ -700,9 +699,7 @@ export function useOpenTuiLiveTurn(
               ) {
                 itemsRef.current = history.slice(0, index);
                 setItems(itemsRef.current);
-                config
-                  .getLlmClient()
-                  ?.stripOrphanedUserEntriesFromHistory(true);
+                config.getLlmClient()?.stripOrphanedUserEntriesFromHistory();
                 if (active.canUndoLog)
                   void logger
                     ?.removeLastUserMessage()

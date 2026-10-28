@@ -41,7 +41,6 @@ export interface IControlContext {
   mcpClients: Map<string, { client: Client; config: MCPServerConfig }>;
   inputClosed: boolean;
 
-  waitForInitialization?: () => Promise<void>;
   onInterrupt?: () => void;
   /**
    * Continue the most recent unfinished turn (continue_last_turn control
@@ -69,7 +68,6 @@ export class ControlContext implements IControlContext {
   mcpClients: Map<string, { client: Client; config: MCPServerConfig }>;
   inputClosed: boolean;
 
-  waitForInitialization?: () => Promise<void>;
   onInterrupt?: () => void;
   onContinueLastTurn?: () => Promise<Record<string, unknown>>;
 
@@ -81,7 +79,6 @@ export class ControlContext implements IControlContext {
     getActiveTurnAbortSignal?: () => AbortSignal | undefined;
     settings: LoadedSettings;
     permissionMode?: PermissionMode;
-    waitForInitialization?: () => Promise<void>;
     onInterrupt?: () => void;
     onContinueLastTurn?: () => Promise<Record<string, unknown>>;
   }) {
@@ -96,7 +93,6 @@ export class ControlContext implements IControlContext {
     this.sdkMcpServers = new Set();
     this.mcpClients = new Map();
     this.inputClosed = false;
-    this.waitForInitialization = options.waitForInitialization;
     this.onInterrupt = options.onInterrupt;
     this.onContinueLastTurn = options.onContinueLastTurn;
   }
