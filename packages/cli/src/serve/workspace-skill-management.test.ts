@@ -1770,4 +1770,23 @@ describe('workspace Skill management', () => {
     });
     await expectNoPartialInstall(workspace, 'empty-skill');
   });
+
+  it('rejects a file-only root as a missing manifest', async () => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+    const source = await temporaryDirectory('qwen-skill-source-');
+    await fs.writeFile(path.join(source, 'README.md'), 'readme');
+
+    await expect(
+      installWorkspaceSkill(workspace, {
+        name: 'file-root-skill',
+        scope: 'workspace',
+        source: { type: 'folder', path: source },
+      }),
+    ).rejects.toMatchObject({
+      code: 'skill_manifest_missing',
+      message: 'Skill package must contain a root SKILL.md',
+      statusCode: 400,
+    });
+    await expectNoPartialInstall(workspace, 'file-root-skill');
+  });
 });

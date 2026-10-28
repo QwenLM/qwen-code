@@ -962,14 +962,6 @@ async function finalizeStagedPackage(
       'Skill package must contain a root SKILL.md',
     );
   }
-  const stripped = new Set<string>();
-  for (const filePath of state.paths) {
-    const next = normalizeRelativePath(filePath.slice(root.length + 1));
-    if (stripped.has(next)) {
-      skillError('invalid_skill_package', `Duplicate skill file path: ${next}`);
-    }
-    stripped.add(next);
-  }
   const rootPath = path.join(staging, root);
   const rootStats = await fs.lstat(rootPath);
   if (!rootStats.isDirectory()) {
@@ -977,6 +969,14 @@ async function finalizeStagedPackage(
       'skill_manifest_missing',
       'Skill package must contain a root SKILL.md',
     );
+  }
+  const stripped = new Set<string>();
+  for (const filePath of state.paths) {
+    const next = normalizeRelativePath(filePath.slice(root.length + 1));
+    if (stripped.has(next)) {
+      skillError('invalid_skill_package', `Duplicate skill file path: ${next}`);
+    }
+    stripped.add(next);
   }
   const children = await fs.readdir(rootPath);
   let holdingName = '.qwen-skill-strip';
