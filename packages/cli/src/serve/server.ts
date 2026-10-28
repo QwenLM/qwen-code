@@ -63,7 +63,11 @@ import type {
 import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 import { createDaemonStatusProvider } from './daemon-status-provider.js';
 import { createWorkspaceProvidersStatusProvider } from './workspace-providers-status.js';
-import { createWorkspaceSkillsStatusProvider } from './workspace-skills-status.js';
+import {
+  createWorkspaceSkillsStatusProvider,
+  disposeAllSkillsWatchers,
+  disposeWorkspaceSkillsWatchers,
+} from './workspace-skills-status.js';
 import {
   deleteWorkspaceSkill,
   installWorkspaceSkill,
@@ -1184,6 +1188,15 @@ export function createServeApp(
           )
         );
       },
+      sessionBtwStreamAvailable: () => {
+        const runtimes = workspaceRegistry.listAll();
+        return (
+          runtimes.length > 0 &&
+          runtimes.every(
+            (runtime) => runtime.bridge.generateSessionBtwStream !== undefined,
+          )
+        );
+      },
       currentSessionSchedulingAvailable:
         deps.manageScheduledTaskSessions === true &&
         deps.currentSessionSchedulingAvailable === true,
@@ -1360,6 +1373,20 @@ export function createServeApp(
     injectedWorkspaceRegistry?.primary.bridge ??
     deps.bridge ??
     createAcpSessionBridge({
+      isWorkflowModeWriteAllowed: (sessionId): boolean => {
+        const registry = primaryTrustRegistry;
+        if (!registry) return false;
+        const owner = registry.resolveLiveSessionOwner(sessionId);
+        const entry = registry.primaryEntry;
+        return (
+          owner.kind === 'found' &&
+          owner.runtime.trusted &&
+          owner.runtime.bridge === defaultBridgeForAdmission &&
+          entry.state === 'active' &&
+          entry.current?.runtime === owner.runtime &&
+          !entry.current.guard.closed
+        );
+      },
       artifactSnapshotRuntimeBaseDir: Storage.getRuntimeBaseDir(),
       sessionAttachmentsRoot: attachmentsRoots.root,
       sessionAttachmentsFallbackRoot: attachmentsRoots.fallback,
@@ -3274,7 +3301,12 @@ export function createServeApp(
     workspaceRegistrationStore: deps.workspaceRegistrationStore,
     getAcpHandle: () => acpHandleRef.current,
     runtimeRemoval: deps.workspaceRuntimeRemoval,
-    onWorkspaceRemoved: invalidateSkillsConfigStatus,
+    onWorkspaceRemoved: (workspaceCwd: string) => {
+      invalidateSkillsConfigStatus(workspaceCwd);
+      // Watchers are per workspace: a removed workspace must not keep one
+      // alive for a catalog nobody reads anymore.
+      disposeWorkspaceSkillsWatchers(workspaceCwd);
+    },
     ...(deps.liveConversationWorkspace
       ? { reservedWorkspaceRoots: [deps.liveConversationWorkspace.rootPath] }
       : {}),
@@ -4333,6 +4365,13 @@ export function createServeApp(
           .stopAgentHostRestore,
       );
       stopAppResource(() => webTerminalRegistry.dispose());
+      // The catalogs' watchers belong to this daemon process, whichever service
+      // created them.
+      stopAppResource(() => {
+        trustedSkillsConfigStatus.dispose?.();
+        untrustedSkillsConfigStatus.dispose?.();
+        disposeAllSkillsWatchers();
+      });
       const drains = await Promise.allSettled(pendingDrains);
       stopAppResource(() => acpHandleRef.current?.dispose());
       const bridgeDrains = await Promise.allSettled(

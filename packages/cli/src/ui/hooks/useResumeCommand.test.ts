@@ -161,6 +161,58 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 });
 
 describe('useResumeCommand', () => {
+  it('waits for the mode snapshot under the swap latch before loading', async () => {
+    resumeMocks.reset();
+    const client = makeSwapSlotClient();
+    client.initialize.mockRejectedValueOnce(new Error('destination failed'));
+    const config = makeSwapSlotConfig(client);
+    const snapshot = {
+      requested: true,
+      recorded: true,
+      pending: true,
+      turns: 0,
+    };
+    let finish!: () => void;
+    const held = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const restore = vi.fn();
+    Object.assign(config, {
+      captureWorkflowModeState: async () => {
+        expect(client.isTelemetrySwapInProgress()).toBe(true);
+        await held;
+        return snapshot;
+      },
+      restoreWorkflowModeState: restore,
+    });
+    const { result } = renderHook(() =>
+      useResumeCommand({
+        config,
+        settings: mockSettings,
+        historyManager: {
+          addItem: vi.fn(),
+          clearItems: vi.fn(),
+          loadHistory: vi.fn(),
+        },
+        startNewSession: vi.fn(),
+        seedPromptCount: vi.fn(),
+      }),
+    );
+    let pending!: Promise<void>;
+    await act(async () => {
+      pending = result.current.handleResume('new-session-id');
+    });
+    const swappedBeforeSnapshot = vi.mocked(config.startNewSession).mock.calls
+      .length;
+    await act(async () => {
+      finish();
+      await pending;
+    });
+    expect(swappedBeforeSnapshot).toBe(0);
+    expect(restore).toHaveBeenCalledExactlyOnceWith(snapshot);
+    expect(client.isTelemetrySwapInProgress()).toBe(false);
+  });
+
   it.each([
     'rollback-init',
     'forward-old',
