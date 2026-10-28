@@ -559,6 +559,7 @@ import {
   type RepeatedToolFailureGuardDecision,
   type RepeatedToolFailureGuardState,
 } from './repeated-tool-failure-guard.js';
+import { defangPeerNotificationTags } from './peer-envelope.js';
 import {
   getToolExplorationKind,
   TOOL_EXPLORATION_REMINDER,
@@ -5049,16 +5050,16 @@ export class Session implements SessionContext {
     // only executing turns so it can reopen and let those queues progress.
     return Boolean(
       this.mcpAppCalls.size > 0 ||
-        this.pendingPrompt ||
-        this.historyMutationActive ||
-        this.pendingPromptCompletion ||
-        this.goalProcessing ||
-        this.cronProcessing ||
-        this.cronAbortController ||
-        this.cronCompletion ||
-        this.notificationProcessing ||
-        this.notificationAbortController ||
-        this.notificationCompletion,
+      this.pendingPrompt ||
+      this.historyMutationActive ||
+      this.pendingPromptCompletion ||
+      this.goalProcessing ||
+      this.cronProcessing ||
+      this.cronAbortController ||
+      this.cronCompletion ||
+      this.notificationProcessing ||
+      this.notificationAbortController ||
+      this.notificationCompletion,
     );
   }
 
@@ -6632,13 +6633,13 @@ export class Session implements SessionContext {
         historyMutation: this.historyMutationActive,
         notification: Boolean(
           this.notificationProcessing ||
-            this.notificationAbortController ||
-            this.notificationCompletion,
+          this.notificationAbortController ||
+          this.notificationCompletion,
         ),
         cron: Boolean(
           this.cronProcessing ||
-            this.cronAbortController ||
-            this.cronCompletion,
+          this.cronAbortController ||
+          this.cronCompletion,
         ),
         goal: this.goalProcessing,
       });
@@ -7873,8 +7874,7 @@ export class Session implements SessionContext {
                   ? null
                   : this.#createMessageDisplayDispatcher(pendingSend.signal);
                 let channelDeliveryResponseBlock:
-                  | ChannelDeliveryResponseBlock
-                  | undefined;
+                  ChannelDeliveryResponseBlock | undefined;
                 let channelDeliveryCheckpoint = 0;
                 // The send result assigns this before any read; null-stream
                 // paths return before the record site, so a pre-send route
@@ -7908,8 +7908,7 @@ export class Session implements SessionContext {
                   // does on the current path.
                   let responsePushCount: number | undefined;
                   let loopStop:
-                    | ({ loopType: LoopType } & LoopStopDetail)
-                    | undefined;
+                    ({ loopType: LoopType } & LoopStopDetail) | undefined;
                   let roundStop: AgentLoopStopReason | undefined;
                   let streamFailed = false;
                   let responseOpened = false;
@@ -9207,8 +9206,7 @@ export class Session implements SessionContext {
         pendingSend.signal,
       );
       let channelDeliveryResponseBlock:
-        | ChannelDeliveryResponseBlock
-        | undefined;
+        ChannelDeliveryResponseBlock | undefined;
       let channelDeliveryCheckpoint = 0;
       let providerSendChat: LlmChat | undefined;
       let userContentPushCountBeforeSend = 0;
@@ -12240,8 +12238,7 @@ export class Session implements SessionContext {
                 if (!responseStream) return;
                 const requestRouteKey = sendResult.requestRouteKey;
                 const channelDeliveryResponseBlock:
-                  | ChannelDeliveryResponseBlock
-                  | undefined =
+                  ChannelDeliveryResponseBlock | undefined =
                   beginChannelDeliveryResponseBlock(responseCapture);
                 const channelDeliveryCheckpoint =
                   channelDeliveryResponseBlock?.parts.length ?? 0;
@@ -12572,7 +12569,7 @@ export class Session implements SessionContext {
       // on `taskId`, and teammate reports must never collapse into one another.
       taskId: `teammate-message-${this.teammateIdPrefix}-${++this.teammateMessageSeq}`,
       status: 'message',
-      modelText: `<peer-notification>\n${escapeXml(modelText)}\n</peer-notification>`,
+      modelText: `<peer-notification>\n${defangPeerNotificationTags(modelText)}\n</peer-notification>`,
       displayText,
       ...(sender
         ? {
@@ -12597,14 +12594,54 @@ export class Session implements SessionContext {
    * and idle pulses are deliberately not projected: they fire on every
    * transition and each would wake the leader into an automatic turn for noise.
    */
+  #pendingTeardownExits: Array<{ name: string; status?: string }> = [];
+  #teardownFlushScheduled = false;
+
+  #flushTeardownRosterExits(): void {
+    this.#teardownFlushScheduled = false;
+    const exits = this.#pendingTeardownExits.splice(0);
+    if (exits.length === 0 || this.disposed) return;
+    const names = exits.map((exit) => exit.name);
+    const head =
+      names.length === 1
+        ? `Teammate ${names[0]}`
+        : `Teammates ${names.join(', ')}`;
+    const tail = `left the team (${exits[0]?.status ?? 'cancelled'})`;
+    this.#enqueueBackgroundNotification({
+      kind: 'peer',
+      taskId: `teammate-roster-${this.teammateIdPrefix}-${++this.teammateMessageSeq}`,
+      status: 'exited',
+      modelText: `<peer-notification>\n${escapeXml(`${head} ${tail}.`)}\n</peer-notification>`,
+      displayText: `teammate ${names.join(', ')} ${tail}`,
+      label: names.length === 1 ? names[0] : 'team',
+      continuesTodoStopGuardWorkChain: false,
+    });
+  }
+
   #enqueueTeamRosterChange(change: {
     type: 'joined' | 'exited';
     name: string;
     status?: string;
+    teardown?: boolean;
   }): void {
     // Same reasoning as `#enqueueTeammateMessage`: a reversible close must not
     // swallow the notice, since the queue is drained when the gate releases.
     if (this.disposed) return;
+    if (change.type === 'exited' && change.teardown) {
+      // One `cleanup()` publishes an exit per surviving teammate (up to ten),
+      // and every queued peer item drains as its own automatic leader turn.
+      // Collect the synchronous burst and enqueue a single item instead; the
+      // per-teammate events still reach the wire and the approval retirement.
+      this.#pendingTeardownExits.push({
+        name: change.name,
+        status: change.status,
+      });
+      if (!this.#teardownFlushScheduled) {
+        this.#teardownFlushScheduled = true;
+        queueMicrotask(() => this.#flushTeardownRosterExits());
+      }
+      return;
+    }
     const joined = change.type === 'joined';
     const tail = joined
       ? 'joined the team'
@@ -13195,7 +13232,7 @@ export class Session implements SessionContext {
       getInvocationContext()?.promptId ??
       promptId;
     const parts: Part[] = [];
-    for (let index = 0; index < this.notificationQueue.length; ) {
+    for (let index = 0; index < this.notificationQueue.length;) {
       const item = this.notificationQueue[index];
       if (item.sourceTurnId !== turnId) {
         index++;
@@ -16082,8 +16119,7 @@ export class Session implements SessionContext {
     let removeAgentToolAbortPropagation: (() => void) | undefined;
     let todoPlanApprovalGeneration: number | undefined;
     let todoPlanApprovalRevision:
-      | { planId: string; sourceCallId: string }
-      | undefined;
+      { planId: string; sourceCallId: string } | undefined;
     let subAgentCleanupFunctions: Array<() => void> = [];
 
     const cleanupSubAgentTracking = () => {
@@ -18365,8 +18401,7 @@ export class Session implements SessionContext {
                       .map((part) => part.functionResponse)
                       .find((part) => part?.id === nestedCallId);
                     const response = functionResponse?.response as
-                      | Record<string, unknown>
-                      | undefined;
+                      Record<string, unknown> | undefined;
                     const nestedError = response?.['error'];
                     onResult?.({
                       callId: nestedCallId,
@@ -18635,9 +18670,8 @@ export class Session implements SessionContext {
             // iconvHelper's top-level iconv-lite import, its ~550 KB of
             // encoding tables — into the ACP agent's static closure
             // (scripts/check-serve-fast-path-bundle.js enforces that).
-            const { collectModelPolicyCall } = await import(
-              '@qwen-code/qwen-code-core/omniPolicyCollection'
-            );
+            const { collectModelPolicyCall } =
+              await import('@qwen-code/qwen-code-core/omniPolicyCollection');
             await collectModelPolicyCall({
               config: this.config,
               batch: {
@@ -18781,9 +18815,8 @@ export class Session implements SessionContext {
           if (this.config.isOmniEnabled?.()) {
             // Dynamic import: keeps omni out of the ACP static closure
             // (serve fast-path bundle-closure CI check).
-            const { processToolResultOmniMedia } = await import(
-              '@qwen-code/qwen-code-core/omni'
-            );
+            const { processToolResultOmniMedia } =
+              await import('@qwen-code/qwen-code-core/omni');
             responseParts = await processToolResultOmniMedia(
               responseParts,
               this.config,

@@ -21,6 +21,7 @@ import {
   resolveHomeLoopResolverRoots,
   Session,
 } from './Session.js';
+import { defangPeerNotificationTags } from './peer-envelope.js';
 import {
   getStartupContextLength,
   markCompressedHistory,
@@ -1420,9 +1421,7 @@ describe('Session', () => {
         )
         .join('\n');
       expect(prompted).toContain(
-        escapeXml(
-          '<teammate_message from="security">found an injection</teammate_message>',
-        ),
+        '<teammate_message from="security">found an injection</teammate_message>',
       );
 
       session.dispose();
@@ -1469,8 +1468,15 @@ describe('Session', () => {
         );
         const sent = vi.mocked(mockChat.sendMessageStream).mock
           .calls[0]![1] as { message: Part[] };
+        // The report body is a teammate envelope: only its own delimiters are
+        // defanged. The roster notice composes bare prose, so it keeps the
+        // blanket escape that neutralises a name carrying markup.
+        const expectedBody =
+          kind === 'report'
+            ? defangPeerNotificationTags(text)
+            : escapeXml(text);
         expect(sent.message).toContainEqual({
-          text: `<peer-notification>\n${escapeXml(text)}\n</peer-notification>`,
+          text: `<peer-notification>\n${expectedBody}\n</peer-notification>`,
         });
         const warmParts = vi
           .mocked(mockChatRecordingService.recordNotification)
@@ -1550,9 +1556,7 @@ describe('Session', () => {
         )
         .join('\n');
       expect(prompted).toContain(
-        escapeXml(
-          '<teammate_message from="security">found an injection</teammate_message>',
-        ),
+        '<teammate_message from="security">found an injection</teammate_message>',
       );
       session.dispose();
     });
@@ -1610,6 +1614,53 @@ describe('Session', () => {
         expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
       },
     );
+
+    it('coalesces a teardown burst into one automatic leader turn', async () => {
+      // `cleanup()` publishes one exit per surviving teammate (up to ten). Each
+      // queued peer item drains as its own automatic leader turn, so carrying
+      // the burst into the queue would wake the leader ten times for a team it
+      // just deleted. The per-teammate events still reach the wire and the
+      // approval retirement; only this queue hop coalesces.
+      const manager = makeFakeTeamManager();
+      session.dispose();
+      vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
+      vi.mocked(mockConfig.getTeamManager).mockReturnValue(manager as never);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+      const sendMessageStream = vi.mocked(mockChat.sendMessageStream);
+      sendMessageStream.mockClear();
+      sendMessageStream.mockResolvedValue(createEmptyStream());
+      for (let i = 0; i < 10; i++) {
+        manager.emit('teammate_exited', {
+          agentId: `a${i}`,
+          name: `qa-${i}`,
+          status: 'cancelled',
+          timestamp: i,
+          teardown: true,
+        });
+      }
+
+      await vi.waitFor(() =>
+        expect(sendMessageStream).toHaveBeenCalledTimes(1),
+      );
+      // Give a second, uncoalesced turn the chance to show up before asserting.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(sendMessageStream).toHaveBeenCalledTimes(1);
+      const prompted = sendMessageStream.mock.calls
+        .flatMap((call) =>
+          ((call[1] as { message?: Array<{ text?: string }> }).message ?? [])
+            .map((part) => part.text ?? '')
+            .join('\n'),
+        )
+        .join('\n');
+      expect(prompted).toContain('qa-0');
+      expect(prompted).toContain('qa-9');
+      session.dispose();
+    });
 
     it('lands a rejected peer report when every queued notification is protected', () => {
       const manager = makeFakeTeamManager();
@@ -1708,7 +1759,7 @@ describe('Session', () => {
       expect(mockChatRecordingService.recordNotification).toHaveBeenCalledWith(
         [
           {
-            text: `<task-notification>\n<peer-notification>\n${escapeXml(envelope)}\n</peer-notification>\n</task-notification>`,
+            text: `<task-notification>\n<peer-notification>\n${defangPeerNotificationTags(envelope)}\n</peer-notification>\n</task-notification>`,
           },
         ],
         '[team] security: found an injection',

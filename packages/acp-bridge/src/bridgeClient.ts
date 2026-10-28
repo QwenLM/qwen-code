@@ -833,6 +833,14 @@ function takeUserMidTurnMessages(
   return taken;
 }
 
+/** A teammate approval awaiting a host answer, keyed by request id. */
+interface PendingTeammatePermission {
+  /** Child-process-monotonic epoch of the binding that issued the request. */
+  bindingId: number;
+  /** Teammate that asked, when the child identified one. */
+  teammateName?: string;
+}
+
 /**
  * Bridge `Client` implementation — the daemon's response surface for things
  * the agent asks the client (file reads/writes, permission prompts).
@@ -854,13 +862,6 @@ function takeUserMidTurnMessages(
  * theatre. Stage 4+ remote-sandbox deployments swap this `Client` for a
  * sandbox-aware variant.
  */
-interface PendingTeammatePermission {
-  /** Child-process-monotonic epoch of the binding that issued the request. */
-  bindingId: number;
-  /** Teammate that asked, when the child identified one. */
-  teammateName?: string;
-}
-
 export class BridgeClient implements Client {
   private readonly teammatePermissions = new WeakMap<
     BridgeClientSessionEntry,
@@ -1011,14 +1012,11 @@ export class BridgeClient implements Client {
     /** Permits pre-registration client-MCP discovery without trusting its id. */
     private readonly hasSessionSpawnInFlight: () => boolean = () => false,
     private readonly getLiveScreenContextCaptureHandler: () =>
-      | LiveScreenContextCaptureHandler
-      | undefined = () => undefined,
+      LiveScreenContextCaptureHandler | undefined = () => undefined,
     private readonly getLiveTaskToolRequestHandler: () =>
-      | LiveTaskToolRequestHandler
-      | undefined = () => undefined,
+      LiveTaskToolRequestHandler | undefined = () => undefined,
     private readonly getLiveSpeakToUserHandler: () =>
-      | LiveSpeakToUserHandler
-      | undefined = () => undefined,
+      LiveSpeakToUserHandler | undefined = () => undefined,
     /**
      * Managed tool guard hosted by the daemon. Kept after the Live handlers so
      * existing direct BridgeClient constructors remain source-compatible.
@@ -4042,8 +4040,7 @@ export function extractA2uiToolUpdate(
   const update = (params as { update?: Record<string, unknown> }).update;
   if (!update || update['sessionUpdate'] !== 'tool_call_update') return null;
   const meta = update['_meta'] as
-    | { toolName?: string; serverId?: string }
-    | undefined;
+    { toolName?: string; serverId?: string } | undefined;
   if (!isA2uiToolMeta(meta)) return null;
 
   // The result text lives at content[].content.text (ACP ToolCallContent
