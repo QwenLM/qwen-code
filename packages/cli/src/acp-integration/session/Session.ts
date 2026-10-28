@@ -2719,6 +2719,10 @@ export class Session implements SessionContext {
   private commandSnapshotInFlight?: Promise<void>;
   private commandSnapshotPending = false;
   private lastCommandsPublicationKey?: string;
+  private commandSnapshotWaiters: Array<{
+    resolve: () => void;
+    reject: (error: unknown) => void;
+  }> = [];
   private lastGoalSnapshot?: GoalSnapshotV2;
   private lastGoalPublicationKey?: string;
   // Set only when runtime recovery selected a Goal that initial replay hid.
@@ -14106,8 +14110,12 @@ export class Session implements SessionContext {
     options: { skipIfUnchanged?: boolean } = {},
   ): Promise<void> {
     if (this.commandSnapshotInFlight) {
+      // Join the replacement publication, not the in-flight one: its client
+      // write may never settle, and this caller needs the newest state.
       this.commandSnapshotPending = true;
-      return this.commandSnapshotInFlight;
+      return new Promise<void>((resolve, reject) => {
+        this.commandSnapshotWaiters.push({ resolve, reject });
+      });
     }
     // The latch covers only the snapshot build. A client write that never
     // settles must not wedge later publications, and a change that lands
@@ -14144,8 +14152,17 @@ export class Session implements SessionContext {
         ) {
           return;
         }
-        await this.sendUpdate(update);
+        // Record the key when the write starts: client writes are ordered, so
+        // the last started frame is the state the client ends up with.
         this.lastCommandsPublicationKey = key;
+        try {
+          await this.sendUpdate(update);
+        } catch (error) {
+          if (this.lastCommandsPublicationKey === key) {
+            this.lastCommandsPublicationKey = undefined;
+          }
+          throw error;
+        }
       } finally {
         releaseLatch();
       }
@@ -14154,10 +14171,27 @@ export class Session implements SessionContext {
     releaseLatch = () => {
       if (this.commandSnapshotInFlight !== publish) return;
       this.commandSnapshotInFlight = undefined;
-      if (this.commandSnapshotPending) {
-        this.commandSnapshotPending = false;
-        void this.sendAvailableCommandsUpdate({ skipIfUnchanged: true });
+      if (!this.commandSnapshotPending) return;
+      this.commandSnapshotPending = false;
+      const waiters = this.commandSnapshotWaiters.splice(0);
+      if (this.disposed) {
+        for (const waiter of waiters) waiter.resolve();
+        return;
       }
+      this.sendAvailableCommandsUpdateOrThrow({ skipIfUnchanged: true }).then(
+        () => {
+          for (const waiter of waiters) waiter.resolve();
+        },
+        (error: unknown) => {
+          if (waiters.length === 0) {
+            debugLogger.error(
+              'Error sending available commands update:',
+              error,
+            );
+          }
+          for (const waiter of waiters) waiter.reject(error);
+        },
+      );
     };
     // A publish that returns before its first await finishes before the latch
     // is set; settle it here as well so the latch can never stay armed.
