@@ -1415,11 +1415,12 @@ workflow globs). It must contain:
   with `attribution` one of `pr`, `harness` or `environment` — the verdict is
   read from that ledger, so a red the PR did not cause cannot decide it (see
   **Hard rules**).
-- `mutations.json` — the mutation matrix as data: `rows[]`, and, when the
-  report claims per-commit coverage, `coverageClaim: "per-commit"` plus
-  `productionCommits` from `git log --first-parent --no-merges` and a `commit`
-  on each row. The claim is checked against that enumeration (see the mutation
-  matrix section); without this file the claim is prose nothing verifies.
+- `mutations.json` — the mutation matrix as data, whenever the round ran one:
+  `rows[]`, and, when the report claims per-commit coverage,
+  `coverageClaim: "per-commit"` plus `productionCommits` from
+  `git log --first-parent --no-merges` and a `commit` on each row. The claim is
+  checked against that enumeration (see the mutation matrix section); without
+  this file the claim is prose nothing verifies.
 - Harness scripts and raw logs (per-cell stdout/stderr, build logs).
 - `evidence/*.png` — image evidence. **Produce these whenever you ran a
   harness**, not only for TUI work. A table in the report is your _claim_
