@@ -5368,7 +5368,7 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain('coverageClaim: "per-commit"');
     expect(flat).toContain('productionCommits');
     expect(flat).toContain('rows[].commit');
-    expect(flat).toContain('git log --first-parent --no-merges base..head');
+    expect(flat).toContain('git log --no-merges base..head --not <target>');
     // The claim is earned by the enumeration, not by having run mutations: a
     // round with an uncovered commit reports per-guard and names the gap.
     expect(flat).toContain('only when every enumerated commit has a row');
@@ -5377,22 +5377,36 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(rules).toContain('The same binds a **coverage claim**');
   });
 
-  // --no-merges drops the merge commit but keeps everything the merge brought
-  // in, so a branch that merged main enumerates main's work as its own.
-  // Measured on the round that shipped the wrong claim: 85 production commits
-  // without --first-parent, 24 with, 61 of them from one Merge branch 'main'.
-  it('enumerates the commits the branch authored, not the ones a merge brought in', () => {
+  // Both obvious recipes are wrong in opposite directions. --no-merges keeps
+  // everything a merge brought in, so a branch that merged main counts main's
+  // work as its own; --first-parent throws away every second parent, so it also
+  // drops the PR's own feature-branch commits. Measured on a graph with one
+  // feature merge and one main merge: 5, 1, and 3 for the correct answer.
+  it('enumerates the commits the branch authored, and only those', () => {
     const flat = verifySkill.replace(/\s+/g, ' ');
 
-    expect(flat).toContain('`--first-parent` is load-bearing');
-    expect(flat).toContain('`--no-merges` drops the merge commit but keeps');
-    // Scoped to the coverage paragraph: the bare recipe is wrong for this
-    // enumeration, while another section could legitimately want it.
+    expect(flat).toContain(
+      'Both obvious recipes are wrong, in opposite directions',
+    );
+    expect(flat).toContain(
+      '`--no-merges` alone drops the merge commit but keeps',
+    );
+    expect(flat).toContain('also throws away the PR');
+    expect(flat).toContain('subtract the target with `--not`');
+    // --not returns nothing once the branch has landed, so the recipe carries
+    // the precondition it depends on rather than reading as unconditional.
+    expect(flat).toContain('Do this while the PR is open');
+    expect(flat).toContain('once the branch has landed in the target');
+    // Scoped to the coverage paragraph: neither recipe may be presented as the
+    // command to run, though another section could legitimately cite one.
     const paragraph = flat.slice(
       flat.indexOf('A coverage claim is universally quantified'),
       flat.indexOf('Survivors of that matrix are not noise'),
     );
-    expect(paragraph).not.toContain('git log --no-merges');
+    expect(paragraph).not.toContain('git log --first-parent');
+    expect(paragraph).not.toContain(
+      'derive the set (`git log --no-merges base..head`)',
+    );
   });
 
   // A rule the artifact contract never asks for is a rule nothing produces:
@@ -5405,7 +5419,9 @@ describe('qwen-triage verify hardening round 2', () => {
 
     expect(contract).toContain('`mutations.json`');
     expect(contract).toContain('coverageClaim: "per-commit"');
-    expect(contract).toContain('git log --first-parent --no-merges');
+    expect(contract).toContain(
+      'git log --no-merges <previous>..<head> --not <target>',
+    );
     expect(contract).toContain(
       'one `{id, attribution}` entry per failed assertion',
     );

@@ -767,18 +767,32 @@ one row per guard the PR introduces, the suite that should catch it, and
 pinned / not-pinned. **A coverage claim is universally quantified, so generate
 it from the enumeration instead of writing it.** "Every production commit since
 the previous round was mutated on its own" is a claim over a set `git log` can
-list; derive the set (`git log --first-parent --no-merges base..head` minus test
-and generated files), give each row its `commit`, and let the difference name
-what you did not reach. **`--first-parent` is load-bearing, and `--no-merges`
-does not substitute for it**: `--no-merges` drops the merge commit but keeps
-every commit that merge brought in, so a branch that merged `main` hands you
-main's own work as if the PR had authored it. Measured on the round that shipped
-the wrong claim, over its previous-round range: `--no-merges` alone listed 85
-production commits, `--first-parent --no-merges` listed 24, and the 61 extra
-came from one `Merge branch 'main'`. Enumerate the wrong set and the claim
-either demands 61 rows for commits the PR never touched, or gets quietly
-narrowed to whatever was convenient. Record it as `mutations.json` with
-`productionCommits` from that log and `rows[].commit`, and claim
+list; derive the set (`git log --no-merges base..head --not <target>`
+minus test and generated files, where `<target>` is the branch the PR merges
+into), give each row its `commit`, and let the difference name what you did not
+reach. **Both obvious recipes are wrong, in opposite directions.**
+`--no-merges` alone drops the merge commit but keeps every commit that merge
+brought in, so a branch that merged `main` hands you main's own work as if the
+PR had authored it — measured on the round that shipped the wrong claim, over
+its previous-round range, 85 production commits where 24 were the branch's own,
+the 61 extra from one `Merge branch 'main'`. `--first-parent` fixes that by
+throwing away every second parent, which also throws away the PR's own work when
+it merged one of its own feature branches. Measured on a four-commit graph with
+one feature merge and one `main` merge: `--no-merges` lists 5, of which 2 are
+main's; `--first-parent --no-merges` lists 1, dropping the 2 feature commits
+the PR did author; `--no-merges --not <target>` lists the right 3. That
+undercount is the dangerous one, because the checker sees a complete-looking
+enumeration and accepts the claim while those commits have no row. So subtract
+the target with `--not`, which is what the merge is relative to, rather than
+cutting history at the first parent. **Do this while the PR is open**, against
+the target tip the round recorded: once the branch has landed in the target,
+`--not` returns nothing, and an enumeration that comes back empty while
+`--first-parent` still lists commits means you are measuring a merged PR
+rather than a round — which the checker's refusal of an empty enumeration
+catches rather than certifies. Enumerate the wrong set and the claim
+either demands rows for commits the PR never touched, or silently omits commits
+it did. Record it as `mutations.json` with `productionCommits` from that log
+and `rows[].commit`, and claim
 `coverageClaim: "per-commit"` **only when every enumerated commit has a row**;
 otherwise report the matrix per-guard and name what you did not reach.
 `verify-pr-check.mjs` refuses the claim when a listed commit has no row, and
@@ -1430,7 +1444,8 @@ workflow globs). It must contain:
 - `mutations.json` — the mutation matrix as data, whenever the round ran one:
   `rows[]`, and, when the report claims per-commit coverage,
   `coverageClaim: "per-commit"` plus `productionCommits` from
-  `git log --first-parent --no-merges` and a `commit` on each row. The claim is
+  `git log --no-merges <previous>..<head> --not <target>` and a `commit` on
+  each row. The claim is
   checked against that enumeration (see the mutation matrix section); without
   this file the claim is prose nothing verifies.
 - Harness scripts and raw logs (per-cell stdout/stderr, build logs).

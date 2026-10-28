@@ -88,7 +88,8 @@ for is a file no round produces, and a check over an absent file is silent:
   round with failures and no ledger is a warning, so older artifacts still
   pass.
 - `mutations.json` may claim `coverageClaim: "per-commit"` with
-  `productionCommits` from `git log --first-parent --no-merges` and
+  `productionCommits` from `git log --no-merges <previous>..<head> --not
+<target>` and
   `rows[].commit`. A listed commit with no row is an error naming the commits,
   and so is an empty list: a claim over no commits is vacuously true.
 
@@ -182,14 +183,31 @@ for is a file no round produces, and a check over an absent file is silent:
   The checker cannot see that control, so the skill still requires both arms
   and the shared cause in the report; the ledger stops the miscount, not a
   fabricated attribution.
-- The enumeration is `git log --first-parent --no-merges`, and the
-  `--first-parent` half is load-bearing: `--no-merges` drops the merge commit
-  but keeps every commit that merge brought in. Measured on the branch that
-  shipped the wrong coverage claim, over its previous-round range: 85
-  production commits without `--first-parent`, 24 with, and the 61 extra came
-  from a single `Merge branch 'main'`. The checker cannot catch this — it has
-  no repository — so the recipe and a pin on it are the only defence, and the
-  first draft of this change shipped the recipe without the flag.
+- The enumeration is `git log --no-merges <previous>..<head> --not <target>`,
+  because both obvious recipes fail in opposite directions. `--no-merges`
+  drops the merge commit but keeps every commit that merge brought in: measured
+  on the branch that shipped the wrong coverage claim, over its previous-round
+  range, 85 production commits where 24 were its own, and the 61 extra came
+  from a single `Merge branch 'main'`. `--first-parent` removes that
+  over-count by discarding every second parent, and with it the PR's own work
+  whenever it merged one of its own feature branches: measured on a four-commit
+  graph carrying one feature merge and one `main` merge, `--no-merges` lists
+  5 of which 2 belong to `main`, `--first-parent --no-merges` lists 1 and
+  drops the 2 feature commits the PR did author, and `--not <target>` lists
+  the right 3. The under-count is the more dangerous of the two, because the
+  checker sees a complete-looking enumeration and accepts the claim while the
+  omitted commits have no row. The checker cannot catch either — it has no
+  repository — so the recipe and a pin on it are the only defence, and the
+  first draft of this change shipped `--no-merges` alone while the second
+  shipped `--first-parent`.
+- `--not <target>` is a live-round recipe, and the constraint is real: it
+  subtracts what the target already contains, so once the branch has landed the
+  enumeration is empty. Measured on this change's own previous-round range
+  `36b6d9c77f..5a86a0e352`, which has since been merged: `--no-merges` lists
+  85, `--first-parent --no-merges` 24, and `--not origin/main` 0. On a live
+  range all three agree — `f08535976c..HEAD` on this PR is 15 for each. So the
+  skill states the precondition and the empty-enumeration refusal is what
+  catches a round that runs it too late.
 
 ## Validation plan
 
@@ -271,7 +289,8 @@ for is a file no round produces, and a check over an absent file is silent:
   and rejects the claim over an empty commit list while staying silent when no
   claim is made.
 - The skill's artifact contract asks for both files those rules read, and its
-  enumeration recipe carries `--first-parent`; a pin fails if either is
+  enumeration recipe subtracts `<target>` rather than cutting at the first
+  parent; a pin fails if either is
   dropped.
 - `guard --snapshot` writes nothing and exits 1 when any call fails;
   `guard --compare` exits 1 on a malformed snapshot, a short list, a new,
