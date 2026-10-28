@@ -62,6 +62,16 @@ body as `<!-- fleet-shepherd queue-sample: ts=… ids=… -->`, parsed the same 
 the existing liveness watermark. The marker is written only for a complete,
 readable enumeration; otherwise the previous marker is carried forward verbatim.
 
+## Self-starvation and the rescue lane
+
+Measuring the queue exposed a second defect in the workflow that reports it: the shepherd had stopped running. In the thirty runs before 2026-10-28 16:00 Beijing, eighteen were cancelled, every one of them within a second of the next run's creation, and nothing completed between 14:13 and 15:19.
+
+The mechanism is a concurrency-group property rather than a capacity problem. A group keeps one _pending_ run, and a newer pending run **cancels** the older one — `cancel-in-progress: false` protects only runs that have already started. With a hosted-pool wait longer than the tick interval, each tick replaced the previous tick's queue position, so no tick ever reached a runner. Depth alone would have reported "queued", which is exactly the reading that hides this.
+
+Three changes, all inside the same workflow. The fleet cadence drops from fifteen to thirty minutes, so a tick has a full interval in which it can be scheduled. The concurrency key becomes an expression with three groups — `fleet-shepherd` for ticks, `fleet-shepherd-watchdog` for the rescue watch, and `fleet-shepherd-rescue` for rescued runs — so a rescued run keeps its position, because nothing else arrives in its group to replace it. And a second cron (`10,40 * * * *`) runs the same job in a watch mode that ends before any dashboard work: it reads this workflow's own run history and, when nothing has completed for `SHEPHERD_STALE_MINUTES` (75) and nothing is in progress, sends one `repository_dispatch` of type `shepherd-rescue`.
+
+Four decisions in that watch are load-bearing. Staleness is measured from `updatedAt` of the last success, never `createdAt`: a run that waited ninety minutes for a runner and finished a minute ago is fresh, and `createdAt` would call it stale and duplicate it. A `pending` run does not defer the rescue — pending is the state that dies here. An `in_progress` run always does defer it, because a tick that started is making progress on its own. At most one `repository_dispatch` run may be unresolved, since one keeps its position and a second would only add queue pressure. And an unreadable _or empty_ history takes no action at all: reading an empty answer as "nothing running, never succeeded" would dispatch a rescue on no evidence.
+
 ## Decisions and rationale
 
 **Set difference, not depth delta.** Depth is non-monotonic: it falls when runs
@@ -165,13 +175,15 @@ replaying it against fixtures with real `jq` and a PATH-stubbed `gh`:
 - Marker: recorded when complete, carried forward when unreadable or capped,
   absent when there is nothing to carry.
 
-Nine mutations were each confirmed to fail the suite: keeping aged runs in the
+The rescue watch adds contract cases over the three trigger literals and the three groups, plus a behavioral replay of the watch decision: stale and idle dispatches once, a fresh completion does not, an in-progress run defers, a pending-only queue does not, an outstanding rescue defers, a failed or empty history takes no action, a failed dispatch is surfaced, and the staleness threshold is the env value.
+
+Fourteen mutations were each confirmed to fail the suite: keeping aged runs in the
 breakdown, dropping the completeness gate on the trend, dropping it on the
 marker, stopping on a full page, sorting the fan-out ascending, turning one stat
 back into a bare assignment (which aborts the whole replay under `set -e` — the
 failure the `|| QUEUE_OK=false` guards exist to prevent), dropping the
 control-character collapse, dropping the pipe escaping, and rendering the rows
-with `'%b'` again.
+with `'%b'` again; and, on the rescue lane, putting rescued runs back in the tick group, measuring staleness from `createdAt`, dropping the outstanding-rescue guard, letting a pending run defer the rescue, and dispatching on an empty history.
 
 Live read-only rehearsal against `QwenLM/qwen-code` on 2026-10-28 produced the
 figures quoted above, including a real set difference against a snapshot taken

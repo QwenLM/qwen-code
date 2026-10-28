@@ -82,7 +82,9 @@ describe('fleet shepherd workflow', () => {
   });
 
   it('ticks on a schedule with a manual dry-run escape hatch', () => {
-    expect(workflow).toContain("cron: '*/15 * * * *'");
+    // */30 since 2026-10-28: a 15-minute tick starved itself on the hosted
+    // pool (see the rescue-watch cases below).
+    expect(workflow).toContain("cron: '*/30 * * * *'");
     expect(workflow).toContain('workflow_dispatch');
     expect(workflow).toContain('dry_run');
     expect(workflow).toContain('DRY-RUN');
@@ -93,7 +95,9 @@ describe('fleet shepherd workflow', () => {
     // Global kill switch: flipping one repository variable stops all writes.
     expect(workflow).toContain("vars.FLEET_SHEPHERD_DISABLED != 'true'");
     // A tick performs real writes; a newer tick must queue, not cancel it.
-    expect(workflow).toContain("group: 'fleet-shepherd'");
+    // The group is an expression now (tick / watch / rescue), so the tick
+    // group appears as its own fallback literal.
+    expect(workflow).toContain("'fleet-shepherd'");
     expect(workflow).toContain('cancel-in-progress: false');
     expect(workflow).toContain('timeout-minutes: 15');
     // The strict-mode contract the comments, if-wrappers, and the act()
@@ -3598,6 +3602,217 @@ exit 1`;
       expect(note(state, '—')).toBe('—');
       expect(note(state, 'synced with main')).toBe('synced with main');
     }
+  });
+
+  // ---- rescue watch -----------------------------------------------------
+  // The starvation cure rests on three literals agreeing with each other: the
+  // watch cron must be the SAME string in the schedule, in the mode expression
+  // and in the group expression, or the watch silently runs the fleet levers —
+  // or never runs at all.
+  it('separates the tick, the watch and the rescue into different groups', () => {
+    expect(workflow).toContain("cron: '*/30 * * * *'");
+    expect(workflow).toContain("cron: '10,40 * * * *'");
+    // */15 is the cadence that starved itself.
+    expect(workflow).not.toContain("cron: '*/15");
+    expect(workflow).toContain("SHEPHERD_STALE_MINUTES: '75'");
+    // The rescue is reachable only through its own event type.
+    expect(workflow).toContain('repository_dispatch:');
+    expect(workflow).toContain("- 'shepherd-rescue'");
+    // A pending run is replaced by the next arrival in the same group, so the
+    // rescue must never share the tick's group — that split is the whole point.
+    expect(workflow).toMatch(
+      /github\.event_name == 'repository_dispatch' && 'fleet-shepherd-rescue'/,
+    );
+    // Three groups, each reachable from exactly one trigger.
+    expect(workflow).toContain('fleet-shepherd-watchdog');
+    expect(workflow).toContain("'fleet-shepherd'");
+    // The watch cron literal is identical in the schedule, the mode expression
+    // and the group expression.
+    expect(workflow.split("'10,40 * * * *'").length - 1).toBe(3);
+  });
+
+  it('behaviorally proves the rescue watch fires only on a stale, idle shepherd', () => {
+    const watch = workflow.match(
+      /(if \[\[ "\$\{WATCHDOG_MODE\}" == 'true' \]\]; then\n[\s\S]*?exit 0\n {10}fi)\n/,
+    )?.[1];
+    expect(watch).toBeTruthy();
+    const NOW = Math.floor(Date.parse('2026-10-28T08:30:00Z') / 1000);
+    const at = (minutesAgo) =>
+      new Date((NOW - minutesAgo * 60) * 1000)
+        .toISOString()
+        .replace(/\.\d+Z$/, 'Z');
+    const run = (fields) => ({ event: 'schedule', ...fields });
+    const replay = ({
+      runs,
+      empty = false,
+      dispatchFails = false,
+      stale = '75',
+    }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'shepherd-watch-'));
+      try {
+        // An absent runs.json makes the stub's read fail — the fail-closed arm.
+        // `empty` is the subtler one: the command SUCCEEDS and prints nothing,
+        // which must also take no action.
+        if (runs !== null) {
+          writeFileSync(
+            join(dir, 'runs.json'),
+            empty ? '' : JSON.stringify(runs),
+          );
+        }
+        if (dispatchFails) writeFileSync(join(dir, 'dispatch-fails'), '');
+        writeFileSync(
+          join(dir, 'gh'),
+          `#!/bin/bash
+if [[ "$1" == 'run' && "$2" == 'list' ]]; then
+  cat '${dir}/runs.json' || exit 1
+  exit 0
+fi
+if [[ "$1" == 'api' ]]; then
+  printf 'POST %s\\n' "$*" >> '${dir}/dispatches'
+  [[ -f '${dir}/dispatch-fails' ]] && exit 1
+  exit 0
+fi
+exit 1
+`,
+        );
+        chmodSync(join(dir, 'gh'), 0o755);
+        const out = execFileSync(
+          'bash',
+          [
+            '-c',
+            `${gnuDateShim}
+set -eo pipefail
+WATCHDOG_MODE='true'
+NOW_EPOCH='${NOW}'
+SHEPHERD_STALE_MINUTES='${stale}'
+REPO='QwenLM/qwen-code'
+ACTIONS_TOKEN='x'
+( ${watch.replace(/\n {10}/g, '\n')} )
+`,
+          ],
+          {
+            env: { ...process.env, PATH: `${dir}:${process.env.PATH}` },
+            encoding: 'utf8',
+          },
+        );
+        return { log: out, dispatched: existsSync(join(dir, 'dispatches')) };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+
+    // Nothing completed inside the threshold and nothing is running → exactly
+    // one dispatch, through the rescue-only event type.
+    const stale = replay({
+      runs: [
+        run({ status: 'completed', conclusion: 'success', updatedAt: at(120) }),
+      ],
+    });
+    expect(stale.dispatched).toBe(true);
+    expect(stale.log).toContain('dispatched a rescue');
+
+    // A fresh completion means no dispatch. updatedAt is what counts: a run
+    // created long ago and finished a minute ago is FRESH, and reading
+    // createdAt instead would dispatch a duplicate here.
+    const fresh = replay({
+      runs: [
+        run({ status: 'completed', conclusion: 'success', updatedAt: at(5) }),
+      ],
+    });
+    expect(fresh.dispatched).toBe(false);
+    expect(fresh.log).toContain('the shepherd is current');
+
+    // A tick that actually STARTED defers the rescue even though nothing has
+    // completed recently — it is making progress on its own.
+    const running = replay({
+      runs: [
+        run({ status: 'completed', conclusion: 'success', updatedAt: at(120) }),
+        run({ status: 'in_progress', conclusion: null, updatedAt: at(2) }),
+      ],
+    });
+    expect(running.dispatched).toBe(false);
+    expect(running.log).toContain('a tick is in progress');
+
+    // `pending` is the state that dies here — it must NOT defer the rescue.
+    const pendingOnly = replay({
+      runs: [
+        run({ status: 'completed', conclusion: 'success', updatedAt: at(120) }),
+        run({ status: 'pending', conclusion: null, updatedAt: at(1) }),
+      ],
+    });
+    expect(pendingOnly.dispatched).toBe(true);
+
+    // At most one outstanding rescue: it keeps its queue position in its own
+    // group, so a second would only add pressure.
+    const alreadyQueued = replay({
+      runs: [
+        run({ status: 'completed', conclusion: 'success', updatedAt: at(120) }),
+        run({
+          event: 'repository_dispatch',
+          status: 'pending',
+          conclusion: null,
+          updatedAt: at(1),
+        }),
+      ],
+    });
+    expect(alreadyQueued.dispatched).toBe(false);
+    expect(alreadyQueued.log).toContain('already queued or running');
+
+    // An unresolvable history takes NO action: a rescue launched on an
+    // unreadable snapshot could double up on a live tick.
+    const unreadable = replay({ runs: null });
+    expect(unreadable.dispatched).toBe(false);
+    expect(unreadable.log).toContain('unreadable');
+
+    // The subtler fail-open: the read SUCCEEDS and answers nothing. Reading
+    // that as "nothing running, never succeeded" would dispatch a rescue on no
+    // evidence, so an empty answer is treated as unreadable too.
+    const emptyAnswer = replay({ runs: [], empty: true });
+    expect(emptyAnswer.dispatched).toBe(false);
+    expect(emptyAnswer.log).toContain('unreadable');
+
+    // No success anywhere in the window reads as maximally stale.
+    const neverRan = replay({
+      runs: [
+        run({ status: 'completed', conclusion: 'cancelled', updatedAt: at(3) }),
+      ],
+    });
+    expect(neverRan.dispatched).toBe(true);
+
+    // A failed dispatch is surfaced for the next watch, not swallowed.
+    const dispatchFails = replay({
+      runs: [
+        run({ status: 'completed', conclusion: 'success', updatedAt: at(120) }),
+      ],
+      dispatchFails: true,
+    });
+    expect(dispatchFails.log).toContain('rescue dispatch failed');
+
+    // The threshold is the env value, not a hardcoded 75.
+    expect(
+      replay({
+        runs: [
+          run({
+            status: 'completed',
+            conclusion: 'success',
+            updatedAt: at(30),
+          }),
+        ],
+        stale: '10',
+      }).dispatched,
+    ).toBe(true);
+    expect(
+      replay({
+        runs: [
+          run({
+            status: 'completed',
+            conclusion: 'success',
+            updatedAt: at(30),
+          }),
+        ],
+        stale: '600',
+      }).dispatched,
+    ).toBe(false);
   });
 
   // ---- Actions queue census (read-only) ---------------------------------

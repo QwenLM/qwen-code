@@ -82,7 +82,18 @@ name: 'Fleet Shepherd'
 # trigger CI and all writes carry the bot identity.
 on:
   schedule:
-    - cron: '*/15 * * * *'
+    # Two cadences, two concurrency groups (see the group expression below).
+    # */15 was measured to starve itself: a pending run is REPLACED by the next
+    # arrival, so with a pool wait longer than the interval every tick reset the
+    # previous one's position and nothing ever started (2026-10-28).
+    - cron: '*/30 * * * *' # the fleet tick
+    - cron: '10,40 * * * *' # the rescue watch: dispatches a rescue when no tick has landed
+  # The only way to enter the rescue group. repository_dispatch is also what
+  # makes a rescue run identifiable in the run list, so the watch can tell its
+  # own outstanding dispatch from a scheduled tick that is merely queued.
+  repository_dispatch:
+    types:
+      - 'shepherd-rescue'
   workflow_dispatch:
     inputs:
       dry_run:
@@ -95,8 +106,18 @@ permissions:
   contents: 'read'
   actions: 'write'
 
+# Three groups, because a pending run is REPLACED by the next arrival in the
+# same group: `cancel-in-progress: false` protects only runs that already
+# started. One shared group is what made the shepherd eat itself (18 of 30 runs
+# cancelled within a second of the next creation, nothing ran 14:13-15:19
+# Beijing on 2026-10-28, dashboard stale). The rescue group is separate so those
+# runs are never replaced, and the watch group is separate so the watch cannot
+# be cancelled by the very ticks it is watching.
 concurrency:
-  group: 'fleet-shepherd'
+  group: >-
+    ${{ github.event_name == 'repository_dispatch' && 'fleet-shepherd-rescue'
+    || (github.event.schedule == '10,40 * * * *' && 'fleet-shepherd-watchdog'
+    || 'fleet-shepherd') }}
   cancel-in-progress: false
 
 env:
@@ -172,6 +193,11 @@ env:
   RESUME_COMMAND_GRACE_SEC: '7200'
   # Stale needs-human cleanups (manual UI releases on fork PRs) per tick.
   MAX_CLEANUPS_PER_TICK: '5'
+  # The rescue watch fires when no tick has COMPLETED for this long. Two and a
+  # half tick intervals: long enough that a healthy tick (which may spend most
+  # of an interval waiting for a runner) is never doubled up, short enough that
+  # a starved shepherd is noticed inside the same hour.
+  SHEPHERD_STALE_MINUTES: '75'
 
 jobs:
   shepherd:
@@ -181,8 +207,9 @@ jobs:
     # that pool. When the pool is wedged, drained, or offline — exactly when
     # the shepherd is needed — a pool-routed shepherd would queue behind the
     # failure it exists to fix, and recovery would need the manual kill-switch
-    # flip the shepherd exists to avoid. One 15-minute hosted job per tick is
-    # a negligible queue cost for that independence.
+    # flip the shepherd exists to avoid. That independence is no longer free:
+    # the hosted pool itself now queues past a tick interval, which is why the
+    # cadence and the rescue watch below exist.
     runs-on: 'ubuntu-latest'
     timeout-minutes: 15
     steps:
@@ -192,6 +219,10 @@ jobs:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           ACTIONS_TOKEN: '${{ github.token }}'
           DRY_RUN: '${{ inputs.dry_run }}'
+          # The rescue watch is a separate mode, not a lever: it reads this
+          # workflow's own run history and either dispatches one rescue or
+          # does nothing, then exits before any dashboard work.
+          WATCHDOG_MODE: "${{ github.event.schedule == '10,40 * * * *' }}"
         run: |-
           # Explicit, not implied: the act() contract, every if-wrapper, and
           # the behavioral test all assume these semantics (Actions' default
@@ -228,6 +259,69 @@ jobs:
             fi
             return "${rc}"
           }
+
+          # ---- rescue watch (separate mode, no lever, no dashboard) --------
+          # Runs on the 10,40 cadence in its OWN concurrency group, so the very
+          # ticks it watches can never cancel it. Its only possible write is one
+          # repository_dispatch that lands in a third group where the next
+          # scheduled tick cannot replace it — which is the whole point, since
+          # replacement is what starved the shepherd.
+          #
+          # The decision is deliberately conservative on three counts:
+          #   • a rescue is dispatched only when nothing has COMPLETED for
+          #     SHEPHERD_STALE_MINUTES. A run that is merely `pending` proves
+          #     nothing: pending is exactly the state that dies here.
+          #   • an `in_progress` run always defers the rescue — a tick that
+          #     actually started is making progress on its own.
+          #   • an unresolved `repository_dispatch` run defers it too, so at most
+          #     one rescue is outstanding. That run keeps its queue position, so
+          #     one is enough; a second would only add queue pressure.
+          # Every read fails CLOSED: an unreadable history dispatches nothing.
+          if [[ "${WATCHDOG_MODE}" == 'true' ]]; then
+            if ! env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh run list --repo "${REPO}" \
+              --workflow qwen-fleet-shepherd.yml --limit 40 \
+              --json event,status,conclusion,createdAt,updatedAt > /tmp/self-runs.json 2> /dev/null; then
+              echo "::warning::shepherd run history unreadable; rescue watch takes no action this tick"
+              exit 0
+            fi
+            # ONE jq pass, and an EMPTY answer is a failure, not three zeroes:
+            # an empty run list would otherwise read as "nothing running, never
+            # succeeded" and dispatch a rescue on no evidence at all.
+            # updatedAt, not createdAt: a run that sat in the queue for 90
+            # minutes and completed one minute ago is FRESH — createdAt would
+            # call it stale and dispatch a duplicate.
+            if ! WATCH_STATE="$(jq -r '
+              [ ([ .[] | select(.status == "in_progress") ] | length),
+                ([ .[] | select(.event == "repository_dispatch" and .status != "completed") ] | length),
+                ([ .[] | select(.conclusion == "success") | .updatedAt ] | max // "") ]
+              | @tsv' /tmp/self-runs.json 2> /dev/null)" || [[ -z "${WATCH_STATE}" ]]; then
+              echo "::warning::shepherd run history unreadable; rescue watch takes no action this tick"
+              exit 0
+            fi
+            IFS="$(printf '\t')" read -r WATCH_INPROGRESS WATCH_RESCUE WATCH_LAST <<< "${WATCH_STATE}"
+            WATCH_AGE=999999
+            if [[ -n "${WATCH_LAST}" && "${WATCH_LAST}" != "null" ]]; then
+              WATCH_AGE=$(( (NOW_EPOCH - $(date -u -d "${WATCH_LAST}" +%s)) / 60 ))
+            fi
+            echo "⛑ rescue watch: last success ${WATCH_LAST:-never} (${WATCH_AGE}m ago), threshold ${SHEPHERD_STALE_MINUTES}m, in-progress ${WATCH_INPROGRESS}, unresolved rescues ${WATCH_RESCUE}"
+            if [[ "${WATCH_INPROGRESS}" -gt 0 ]]; then
+              echo "⛑ a tick is in progress; no rescue"
+            elif [[ "${WATCH_RESCUE}" -gt 0 ]]; then
+              echo "⛑ a rescue is already queued or running; no second one"
+            elif [[ "${WATCH_AGE}" -lt "${SHEPHERD_STALE_MINUTES}" ]]; then
+              echo "⛑ the shepherd is current; no rescue"
+            # The dispatch rides CI_DEV_BOT_PAT (GITHUB_TOKEN in this step), not
+            # the workflow token: repository_dispatch wants contents:write, and
+            # this workflow deliberately grants itself contents:read only. A
+            # refused dispatch lands in the warning branch below and retries.
+            elif gh api -X POST "repos/${REPO}/dispatches" \
+              -f event_type=shepherd-rescue > /dev/null 2>&1; then
+              echo "⛑ no tick has completed for ${WATCH_AGE}m — dispatched a rescue"
+            else
+              echo "::warning::rescue dispatch failed; the next watch tick retries"
+            fi
+            exit 0
+          fi
 
           # ---- identity: all PAT writes must be the bot -------------------
           bot_actor="$(gh api user --jq '.login' 2> /dev/null || echo '')"
