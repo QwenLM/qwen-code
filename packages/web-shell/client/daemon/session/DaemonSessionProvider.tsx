@@ -5811,9 +5811,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const generatedUi = appSession?.session?.generatedUi;
   const generatedUiClientId = appSession?.clientId;
   const generatedUiEventEpoch = appSession?.eventEpoch;
-  const generatedUiRecoveryGeneration = appSession
-    ? sessionRecoveryGenerationRef.current.get(appSession)
-    : undefined;
   const generatedUiOwnerSource = useMemo<
     McpAppGeneratedUiOwnerSource | undefined
   >(() => {
@@ -5840,10 +5837,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         const owner = ownerGuardValue.capture({ includeRecovery: true });
         return {
           isCurrent: () =>
+            // owner.isCurrent() already rejects a recovery that started after
+            // this capture. Comparing with the generation seen at render as
+            // well rejected every attach during a turn: sending a prompt
+            // advances the generation without changing the capability receipt.
             owner.isCurrent() &&
             !manualSessionClearRef.current &&
-            sessionRecoveryGenerationRef.current.get(appSession) ===
-              generatedUiRecoveryGeneration &&
             generatedUiScopeRef.current === generatedUiScope &&
             sessionRef.current === appSession &&
             appSession.clientId === generatedUiClientId &&
@@ -5864,7 +5863,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     generatedUi,
     generatedUiClientId,
     generatedUiEventEpoch,
-    generatedUiRecoveryGeneration,
     generatedUiScope,
     ownerGuardValue,
   ]);

@@ -30,6 +30,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
@@ -81,7 +82,7 @@ public class ManagedAutomationService {
     public ManagedAutomationService(AutomationLedgerStore ledger,
             ManagedAgentStore sessions, ManagedWorkspaceRegistry workspaces,
             HarnessConnector harness, AutomationScanner scanner,
-            RequestDigests digests, ObjectMapper mapper,
+            RequestDigests digests, @Qualifier("managedAgentObjectMapper") ObjectMapper mapper,
             ManagedAgentProperties properties) {
         this(ledger, sessions, workspaces, harness, scanner, digests, mapper,
                 properties.getAutomation(),
