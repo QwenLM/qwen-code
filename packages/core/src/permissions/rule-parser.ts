@@ -570,19 +570,13 @@ export function parseRule(raw: string): PermissionRule {
 /**
  * Parse an array of raw rule strings into PermissionRule objects,
  * silently skipping any empty entries.
+ *
+ * A rule whose parentheses do not balance comes back with `invalid: true`
+ * rather than being dropped, so the caller can report it. `PermissionManager`
+ * does that; this function stays free of side effects.
  */
 export function parseRules(raws: string[]): PermissionRule[] {
-  return raws
-    .filter((r) => r && r.trim())
-    .map(parseRule)
-    .map((r) => {
-      if (r.invalid) {
-        debugLogger.warn(
-          `Ignoring malformed rule (unbalanced parentheses): ${r.raw}`,
-        );
-      }
-      return r;
-    });
+  return raws.filter((r) => r && r.trim()).map(parseRule);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

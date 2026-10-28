@@ -429,7 +429,9 @@ export function PermissionsDialog({
     ];
     for (const r of filteredRules) {
       items.push({
-        label: `${r.rule.raw}`,
+        label: r.rule.invalid
+          ? `${r.rule.raw} ${t('(unparsable)')}`
+          : r.rule.raw,
         value: r.rule.raw,
         key: `${r.type}-${r.scope}-${r.rule.raw}`,
       });

@@ -280,6 +280,34 @@ export class PermissionManager {
   constructor(private readonly config: PermissionManagerConfig) {}
 
   /**
+   * Parse one configuration list into rules, reporting every entry whose
+   * parentheses do not balance.
+   *
+   * A malformed rule is inert: it matches nothing. For an `allow` list that is
+   * the safe direction, but for `deny`/`ask` it silently removes the
+   * restriction the operator wrote, so the report has to reach the operator —
+   * the debug log file is off in default runs.
+   */
+  private parsePersistentRules(
+    raws: string[],
+    type: RuleType,
+  ): PermissionRule[] {
+    const rules = parseRules(raws);
+    for (const rule of rules) {
+      if (rule.invalid) this.warnMalformedRule(type, rule.raw);
+    }
+    return rules;
+  }
+
+  private warnMalformedRule(type: RuleType, raw: string): void {
+    // eslint-disable-next-line no-console -- operator-facing breadcrumb; the debug log file is off in default runs, where a dropped rule would otherwise be invisible
+    console.warn(
+      `permissions.${type}: ignoring malformed ${type} rule (unbalanced parentheses): "${raw}". ` +
+        `The rule has no effect; fix the parentheses to apply it.`,
+    );
+  }
+
+  /**
    * Initialise from the config's permission parameters.
    * Must be called once before any rule lookups.
    *
@@ -288,9 +316,18 @@ export class PermissionManager {
    */
   initialize(): void {
     this.persistentRules = {
-      allow: parseRules(this.config.getPermissionsAllow() ?? []),
-      ask: parseRules(this.config.getPermissionsAsk() ?? []),
-      deny: parseRules(this.config.getPermissionsDeny() ?? []),
+      allow: this.parsePersistentRules(
+        this.config.getPermissionsAllow() ?? [],
+        'allow',
+      ),
+      ask: this.parsePersistentRules(
+        this.config.getPermissionsAsk() ?? [],
+        'ask',
+      ),
+      deny: this.parsePersistentRules(
+        this.config.getPermissionsDeny() ?? [],
+        'deny',
+      ),
     };
 
     // Build the coreTools allowlist (legacy whitelist semantic).
@@ -1438,9 +1475,7 @@ export class PermissionManager {
       const rule = parseRule(raw);
       if (options?.trustGated) rule.trustGated = true;
       if (rule.invalid) {
-        debugLogger.warn(
-          `Ignoring malformed allow rule (unbalanced parentheses): ${rule.raw}`,
-        );
+        this.warnMalformedRule('allow', rule.raw);
         return;
       }
       // AUTO mode invariant: while dangerous allow rules are stripped,
@@ -1491,9 +1526,7 @@ export class PermissionManager {
     if (raw && raw.trim()) {
       const rule = parseRule(raw);
       if (rule.invalid) {
-        debugLogger.warn(
-          `Ignoring malformed deny rule (unbalanced parentheses): ${rule.raw}`,
-        );
+        this.warnMalformedRule('deny', rule.raw);
         return;
       }
       this.sessionRules.deny.push(rule);
@@ -1507,9 +1540,7 @@ export class PermissionManager {
     if (raw && raw.trim()) {
       const rule = parseRule(raw);
       if (rule.invalid) {
-        debugLogger.warn(
-          `Ignoring malformed ask rule (unbalanced parentheses): ${rule.raw}`,
-        );
+        this.warnMalformedRule('ask', rule.raw);
         return;
       }
       this.sessionRules.ask.push(rule);
@@ -1532,9 +1563,7 @@ export class PermissionManager {
   addPersistentRule(raw: string, type: RuleType): PermissionRule {
     const rule = parseRule(raw);
     if (rule.invalid) {
-      debugLogger.warn(
-        `Ignoring malformed ${type} rule (unbalanced parentheses): ${rule.raw}`,
-      );
+      this.warnMalformedRule(type, rule.raw);
       return rule;
     }
     // AUTO mode invariant: see addSessionAllowRule above. A dangerous
@@ -1624,15 +1653,15 @@ export class PermissionManager {
   listRules(): RuleWithSource[] {
     const result: RuleWithSource[] = [];
 
+    // Unparsable rules are listed too, flagged by `rule.invalid`, so the
+    // operator can see — and delete — a rule that is silently doing nothing.
     const addRules = (
       rules: PermissionRule[],
       type: RuleType,
       scope: RuleScope,
     ) => {
       for (const rule of rules) {
-        if (!rule.invalid) {
-          result.push({ rule, type, scope });
-        }
+        result.push({ rule, type, scope });
       }
     };
 

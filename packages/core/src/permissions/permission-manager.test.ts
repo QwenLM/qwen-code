@@ -2741,17 +2741,31 @@ describe('PermissionManager', () => {
       expect(sessionAllowRules(pm)).toHaveLength(1);
     });
 
-    it('malformed session allow rule is silently ignored', async () => {
+    it('a malformed session allow rule grants nothing and reports itself', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       pm.addSessionAllowRule('Bash(git commit');
       // 'git commit' is not readonly, so default is 'ask'.
       // The malformed rule must not act as catch-all allow.
       expect(await pm.evaluate(sh('git commit'))).toBe('ask');
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'permissions.allow: ignoring malformed allow rule (unbalanced parentheses): "Bash(git commit"',
+        ),
+      );
+      warnSpy.mockRestore();
     });
 
-    it('malformed session deny rule is silently ignored', async () => {
+    it('a malformed session deny rule denies nothing and reports itself', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       pm.addSessionDenyRule('Bash(rm -rf /)*');
       // Should NOT deny — the malformed rule must not act as catch-all
       expect(await pm.evaluate(sh('git status'))).not.toBe('deny');
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'permissions.deny: ignoring malformed deny rule (unbalanced parentheses): "Bash(rm -rf /)*"',
+        ),
+      );
+      warnSpy.mockRestore();
     });
   });
 
@@ -2779,15 +2793,47 @@ describe('PermissionManager', () => {
       expect(sessionAllow?.rule.toolName).toBe('run_shell_command');
     });
 
-    it('excludes malformed rules from listing', async () => {
+    it('lists malformed rules as unparsable instead of hiding them', () => {
+      // A dropped deny rule is a restriction the operator thinks exists. The
+      // listing has to show it so it can be seen and deleted.
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       pm = makePm({
         permissionsAllow: ['ReadFileTool'],
         permissionsDeny: ['Bash(rm -rf /)*'],
       });
 
       const rules = pm.listRules();
-      expect(rules.length).toBe(1);
-      expect(rules[0]!.rule.toolName).toBe('read_file');
+      expect(rules).toHaveLength(2);
+      const malformed = rules.find((r) => r.type === 'deny');
+      expect(malformed?.rule.invalid).toBe(true);
+      expect(malformed?.rule.raw).toBe('Bash(rm -rf /)*');
+      warnSpy.mockRestore();
+    });
+  });
+
+  describe('malformed rule reporting', () => {
+    it('reports a malformed settings deny rule at startup, naming the list', () => {
+      // The reported case (#15752): a legal JSON string whose parentheses do
+      // not balance is accepted, then silently enforces nothing.
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      pm = makePm({ permissionsDeny: ['Bash(docker *'] });
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'permissions.deny: ignoring malformed deny rule (unbalanced parentheses): "Bash(docker *"',
+        ),
+      );
+      warnSpy.mockRestore();
+    });
+
+    it('stays quiet when every configured rule parses', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      pm = makePm({ permissionsDeny: ['Bash(docker *)'] });
+
+      expect(warnSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining('permissions.'),
+      );
+      warnSpy.mockRestore();
     });
   });
 
