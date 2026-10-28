@@ -288,10 +288,8 @@ vi.mock('node:os', async (importOriginal) => {
 });
 vi.mock('node:fs', async (importOriginal) => {
   const original = await importOriginal<typeof import('node:fs')>();
-  const {
-    trustedSystemSettingsLstat,
-    trustedSystemSettingsStat,
-  } = await import('../test-utils/trusted-system-settings.js');
+  const { trustedSystemSettingsLstat, trustedSystemSettingsStat } =
+    await import('../test-utils/trusted-system-settings.js');
   const wrapped = ((...args: [fs.PathLike, fs.EncodingOption?]) =>
     mockWt.realpath && args[1] === undefined
       ? mockWt.realpath(String(args[0]))
@@ -7141,6 +7139,13 @@ describe('createServeApp', () => {
           tempHome,
           'system-defaults.json',
         );
+        trustedSystemSettingsDirs.add(tempHome);
+        // The override fixtures must exist and read as administrator-controlled:
+        // the trust gate rejects a missing file, and the operator sandbox
+        // reader fails loud for a rejected system layer while the platform
+        // default is absent. Empty files keep the system scopes inert.
+        await fsp.writeFile(path.join(tempHome, 'system-settings.json'), '{}');
+        await fsp.writeFile(path.join(tempHome, 'system-defaults.json'), '{}');
         resetHomeEnvBootstrapForTesting();
 
         const bridge = fakeBridge({
@@ -7177,6 +7182,7 @@ describe('createServeApp', () => {
         restoreEnv('QWEN_CODE_SYSTEM_SETTINGS_PATH', previousSystemSettings);
         restoreEnv('QWEN_CODE_SYSTEM_DEFAULTS_PATH', previousSystemDefaults);
         resetHomeEnvBootstrapForTesting();
+        trustedSystemSettingsDirs.delete(tempHome);
         await fsp.rm(tempHome, { recursive: true, force: true });
       }
     });

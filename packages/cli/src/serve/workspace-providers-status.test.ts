@@ -21,12 +21,8 @@ import { listModelConfigurations } from './model-configuration.js';
 // fixtures stand in for administrator-created system files.
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
-  const {
-    trustedSystemSettingsLstat,
-    trustedSystemSettingsStat,
-  } = await import(
-    '../test-utils/trusted-system-settings.js'
-  );
+  const { trustedSystemSettingsLstat, trustedSystemSettingsStat } =
+    await import('../test-utils/trusted-system-settings.js');
   return {
     ...actual,
     lstatSync: trustedSystemSettingsLstat(actual.lstatSync.bind(actual)),
@@ -35,12 +31,8 @@ vi.mock('node:fs', async (importOriginal) => {
 });
 vi.mock('fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('fs')>();
-  const {
-    trustedSystemSettingsLstat,
-    trustedSystemSettingsStat,
-  } = await import(
-    '../test-utils/trusted-system-settings.js'
-  );
+  const { trustedSystemSettingsLstat, trustedSystemSettingsStat } =
+    await import('../test-utils/trusted-system-settings.js');
   return {
     ...actual,
     lstatSync: trustedSystemSettingsLstat(actual.lstatSync.bind(actual)),
@@ -105,6 +97,12 @@ describe('createWorkspaceProvidersStatusProvider', () => {
       tmpDir,
       'system-defaults.json',
     );
+    // The override fixtures must exist and read as administrator-controlled:
+    // the trust gate rejects a missing file, and the operator sandbox reader
+    // fails loud for a rejected system layer while the platform default is
+    // absent. Empty files keep the system scopes inert.
+    await fs.writeFile(path.join(tmpDir, 'system-settings.json'), '{}');
+    await fs.writeFile(path.join(tmpDir, 'system-defaults.json'), '{}');
     coreMock.throwModelsConfigError = false;
     coreMock.modelsConfigErrorMessage =
       'Failed loading provider https://user:secret@broken.example/v1';
