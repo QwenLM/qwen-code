@@ -56,6 +56,7 @@ class ManagedApprovalSelectionTest {
     @Autowired private MockMvc mvc;
     @Autowired private ManagedWorkspaceRegistry registry;
     @Autowired private ManagedAgentDefinitionStore definitions;
+    @Qualifier("managedAgentTransactionManager")
     @Autowired private PlatformTransactionManager manager;
 
     @ParameterizedTest

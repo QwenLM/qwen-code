@@ -12,6 +12,7 @@ import com.alibaba.qwen.code.runtimebroker.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.security.SecretProtector;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -59,6 +60,7 @@ class RuntimeBrokerConfigurationIntegrationTest {
     @Autowired
     private SecretProtector secretProtector;
     @Autowired
+    @Qualifier("managedJdbcTemplate")
     private JdbcTemplate jdbcTemplate;
     @Autowired
     private org.springframework.context.ApplicationContext context;

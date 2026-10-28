@@ -129,6 +129,7 @@ class EventTransportBrokerGate {
     private MessageMaterializer materializer;
 
     @Autowired
+    @Qualifier("managedJdbcTemplate")
     private JdbcTemplate jdbc;
 
     @Autowired
