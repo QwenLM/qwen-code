@@ -14,6 +14,7 @@ import {
   getUserAutoMemoryRoot,
 } from './paths.js';
 import { runForkedAgent, getCacheSafeParams } from '../agents/forkedAgent.js';
+import { slimCompactionInput } from '../services/compactionInputSlimming.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { formatDateForContext } from '../core/environmentContext.js';
 import { AUTO_MEMORY_TREE_CATEGORIES } from './types.js';
@@ -53,6 +54,7 @@ describe('runAutoMemoryExtractionByAgent', () => {
     getMemoryAgentTimeoutMinutes: vi.fn().mockReturnValue(undefined),
     getMemoryAgentMaxTurns: vi.fn().mockReturnValue(undefined),
     getAutoMemoryPrompt: vi.fn().mockReturnValue('session routing contract'),
+    getEffectiveInputModalities: vi.fn().mockReturnValue({}),
   } as unknown as Config;
 
   // Runs extraction after a completed forked run that touched `files`; the run
@@ -62,7 +64,7 @@ describe('runAutoMemoryExtractionByAgent', () => {
       status: 'completed',
       finalText: '',
       filesTouched: files,
-      ...(written ? { filesWritten: files } : {}),
+      ...(written ? { filesWritten: files } : { filesRead: files }),
     });
     return runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
   }
@@ -116,6 +118,7 @@ describe('runAutoMemoryExtractionByAgent', () => {
       touchedProjectScope: true,
       touchedUserScope: false,
       hasToolActivity: true,
+      extractorEngaged: true,
       systemMessage: 'Managed auto-memory updated: user.md',
     });
     expect(getCacheSafeParams).toHaveBeenCalledWith('session-1');
@@ -470,8 +473,240 @@ describe('runAutoMemoryExtractionByAgent', () => {
       touchedProjectScope: false,
       touchedUserScope: false,
       hasToolActivity: false,
+      extractorEngaged: false,
       systemMessage: undefined,
     });
+  });
+
+  it.each([
+    { filesRead: [], engaged: false },
+    { filesRead: ['/tmp/outside.md'], engaged: false },
+    { filesRead: ['/tmp/auto-memory/user/prefs.md'], engaged: true },
+  ])(
+    'counts only successful memory-scoped reads as engagement: %j',
+    async ({ filesRead, engaged }) => {
+      vi.mocked(runForkedAgent).mockResolvedValue({
+        status: 'completed',
+        filesTouched: ['/tmp/auto-memory/user/missing.md'],
+        filesRead,
+        filesWritten: [],
+      });
+      const result = await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+      expect(result.hasToolActivity).toBe(true);
+      expect(result.extractorEngaged).toBe(engaged);
+      expect(result.touchedTopics).toEqual([]);
+    },
+  );
+
+  it('preserves skipped history when the live captured tail no longer contains it', async () => {
+    const skipped = {
+      role: 'user',
+      parts: [{ text: 'Remember that I prefer reviews in Chinese.' }],
+    };
+    await extract([]);
+    vi.mocked(runForkedAgent).mockClear();
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp', [skipped]);
+    expect(forkedCall()?.extraHistory?.[0]).toEqual(skipped);
+    expect(forkedCall()?.extraHistory).toContainEqual({
+      role: 'user',
+      parts: [{ text: 'I prefer terse responses.' }],
+    });
+  });
+
+  it('forwards only the skipped entries the captured tail no longer holds', async () => {
+    // The parked slice and the captured tail are separate copies of the same
+    // live history, so their shared entries are equal by value, not identity.
+    vi.mocked(getCacheSafeParams).mockReturnValue({
+      generationConfig: {},
+      history: [
+        { role: 'user', parts: [{ text: 'turn 2' }] },
+        { role: 'model', parts: [{ text: 'reply 2' }] },
+        { role: 'user', parts: [{ text: 'turn 3' }] },
+        { role: 'model', parts: [{ text: 'reply 3' }] },
+      ],
+      model: 'qwen3-coder-plus',
+      version: 1,
+    });
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp', [
+      { role: 'user', parts: [{ text: 'turn 1' }] },
+      { role: 'model', parts: [{ text: 'reply 1' }] },
+      { role: 'user', parts: [{ text: 'turn 2' }] },
+      { role: 'model', parts: [{ text: 'reply 2' }] },
+    ]);
+    const texts = (forkedCall()?.extraHistory ?? []).flatMap((entry) =>
+      (entry.parts ?? []).map((part) => part.text),
+    );
+    expect(texts).toEqual([
+      'turn 1',
+      'reply 1',
+      'turn 2',
+      'reply 2',
+      'turn 3',
+      'reply 3',
+    ]);
+  });
+
+  it('drops a parked slice the captured tail covers from before it', async () => {
+    // The close-flush shape: the tail is the whole short history, so it starts
+    // before the parked slice instead of inside it. Whole-slice contiguity is
+    // the only proof that the slice is covered, and it must drop it entirely.
+    vi.mocked(getCacheSafeParams).mockReturnValue({
+      generationConfig: {},
+      history: [
+        { role: 'user', parts: [{ text: 'turn 0' }] },
+        { role: 'model', parts: [{ text: 'reply 0' }] },
+        { role: 'user', parts: [{ text: 'turn 1' }] },
+        { role: 'model', parts: [{ text: 'reply 1' }] },
+        { role: 'user', parts: [{ text: 'turn 2' }] },
+        { role: 'model', parts: [{ text: 'reply 2' }] },
+      ],
+      model: 'qwen3-coder-plus',
+      version: 1,
+    });
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp', [
+      { role: 'user', parts: [{ text: 'turn 2' }] },
+      { role: 'model', parts: [{ text: 'reply 2' }] },
+    ]);
+    const texts = (forkedCall()?.extraHistory ?? []).flatMap((entry) =>
+      (entry.parts ?? []).map((part) => part.text),
+    );
+    expect(texts.filter((text) => text === 'turn 2')).toHaveLength(1);
+    expect(texts).toEqual([
+      'turn 0',
+      'reply 0',
+      'turn 1',
+      'reply 1',
+      'turn 2',
+      'reply 2',
+    ]);
+  });
+
+  it('drops a parked slice whose captured copy was slimmed and curated', async () => {
+    // The tail is the curated, slimmed rendering of raw history: media became
+    // placeholder text and adjacent user entries merged. The slice is still
+    // covered, so it must neither come first again nor re-ship the media.
+    const image = { inlineData: { mimeType: 'image/png', data: 'AAAA' } };
+    const [placeholder] = slimCompactionInput([
+      { role: 'user', parts: [image] },
+    ]).slimmedHistory[0].parts!;
+    vi.mocked(getCacheSafeParams).mockReturnValue({
+      generationConfig: {},
+      history: [
+        { role: 'user', parts: [{ text: 'turn 0' }] },
+        { role: 'model', parts: [{ text: 'reply 0' }] },
+        {
+          role: 'user',
+          parts: [{ text: 'Remember: target release/2.6.' }, placeholder],
+        },
+        { role: 'model', parts: [{ text: 'reply 1' }] },
+      ],
+      model: 'qwen3-coder-plus',
+      version: 1,
+    });
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp', [
+      { role: 'user', parts: [{ text: 'Remember: target release/2.6.' }] },
+      { role: 'user', parts: [image] },
+      { role: 'model', parts: [{ text: 'reply 1' }] },
+    ]);
+    const history = forkedCall()?.extraHistory ?? [];
+    expect(history[0]?.parts?.[0]?.text).toBe('turn 0');
+    expect(
+      history.flatMap((entry) => entry.parts ?? []).some((p) => p.inlineData),
+    ).toBe(false);
+    expect(
+      history
+        .flatMap((entry) => (entry.parts ?? []).map((part) => part.text))
+        .filter((text) => text === 'reply 1'),
+    ).toHaveLength(1);
+  });
+
+  it('ships a supported image once when the captured tail kept it', async () => {
+    const image = { inlineData: { mimeType: 'image/png', data: 'AAAA' } };
+    vi.mocked(mockConfig.getEffectiveInputModalities).mockReturnValueOnce({
+      image: true,
+    });
+    vi.mocked(getCacheSafeParams).mockReturnValue({
+      generationConfig: {},
+      history: [
+        { role: 'user', parts: [{ text: 'turn 0' }] },
+        { role: 'model', parts: [{ text: 'reply 0' }] },
+        { role: 'user', parts: [image] },
+        { role: 'model', parts: [{ text: 'reply 1' }] },
+      ],
+      model: 'qwen3-coder-plus',
+      version: 1,
+    });
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp', [
+      { role: 'user', parts: [image] },
+      { role: 'model', parts: [{ text: 'reply 1' }] },
+    ]);
+    const parts = (forkedCall()?.extraHistory ?? []).flatMap(
+      (entry) => entry.parts ?? [],
+    );
+    expect(parts.filter((part) => part.inlineData)).toHaveLength(1);
+  });
+
+  it('forwards parked turns when the tail only shares their first entry', async () => {
+    // The tail begins after the slice, and only the slice's first entry
+    // happens to equal the tail's first one. A single equal entry is not
+    // proof of coverage: dropping the rest would lose the skipped turn.
+    vi.mocked(getCacheSafeParams).mockReturnValue({
+      generationConfig: {},
+      history: [
+        { role: 'model', parts: [{ text: 'reply 2' }] },
+        { role: 'user', parts: [{ text: 'turn 3' }] },
+      ],
+      model: 'qwen3-coder-plus',
+      version: 1,
+    });
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp', [
+      { role: 'model', parts: [{ text: 'reply 2' }] },
+      { role: 'user', parts: [{ text: 'turn 2' }] },
+    ]);
+    const texts = (forkedCall()?.extraHistory ?? []).flatMap((entry) =>
+      (entry.parts ?? []).map((part) => part.text),
+    );
+    expect(texts).toContain('turn 2');
+  });
+
+  it('does not treat two tool calls with the same name as the same turn', async () => {
+    // Two `read_file` calls on different paths compare equal by name alone,
+    // which would drop the parked instruction behind the unrelated call.
+    vi.mocked(getCacheSafeParams).mockReturnValue({
+      generationConfig: {},
+      history: [
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                name: 'read_file',
+                args: { path: '/repo/OTHER.ts' },
+              },
+            },
+          ],
+        },
+        { role: 'user', parts: [{ text: 'turn 4' }] },
+      ],
+      model: 'qwen3-coder-plus',
+      version: 1,
+    });
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp', [
+      {
+        role: 'model',
+        parts: [
+          { functionCall: { name: 'read_file', args: { path: '/repo/a.ts' } } },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [{ text: 'Remember: every release PR targets release/2.6.' }],
+      },
+    ]);
+    const texts = (forkedCall()?.extraHistory ?? []).flatMap((entry) =>
+      (entry.parts ?? []).map((part) => part.text),
+    );
+    expect(texts).toContain('Remember: every release PR targets release/2.6.');
   });
 
   it('uses a scoped config that denies shell and outside writes', async () => {

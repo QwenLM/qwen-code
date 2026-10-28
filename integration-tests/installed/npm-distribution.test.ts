@@ -50,8 +50,19 @@ const npm = fs.realpathSync(
   process.env['QWEN_DISTRIBUTION_NPM'] ?? 'MATCHING_NPM_REQUIRED',
 );
 const expectedNode = process.env['QWEN_DISTRIBUTION_NODE_VERSION'];
+const runnerGitPath = execFileSync('/bin/sh', ['-c', 'command -v git'], {
+  encoding: 'utf8',
+  timeout: 10_000,
+}).trim();
+assert.ok(path.isAbsolute(runnerGitPath));
+const runnerGit = fs.realpathSync(runnerGitPath);
 const initialSource = checkout(root);
 const tools = {
+  git: {
+    path: runnerGit,
+    sha256: sha(runnerGit),
+    mode: fs.statSync(runnerGit).mode & 0o777,
+  },
   node: { path: node, sha256: sha(node), mode: fs.statSync(node).mode & 0o777 },
   npm: { path: npm, sha256: sha(npm), mode: fs.statSync(npm).mode & 0o777 },
 };
@@ -103,6 +114,8 @@ let published: Record<string, Entry>;
 let distBefore: Record<string, Entry>;
 function frozenInputs() {
   assert.deepEqual(checkout(root), initialSource);
+  assert.equal(sha(runnerGit), tools.git.sha256);
+  assert.equal(fs.statSync(runnerGit).mode & 0o777, tools.git.mode);
   assert.equal(sha(node), tools.node.sha256);
   assert.equal(sha(npm), tools.npm.sha256);
   assert.equal(fs.statSync(node).mode & 0o777, tools.node.mode);
@@ -297,6 +310,35 @@ beforeAll(async () => {
           decoy,
           'decoy must actually be discoverable on PATH',
         );
+        const priorCleanGit = execFileSync(
+          '/bin/sh',
+          ['-c', 'command -v git'],
+          {
+            cwd,
+            env,
+            encoding: 'utf8',
+            timeout: 10_000,
+          },
+        ).trim();
+        const gitLink = path.join(cwd, 'git');
+        fs.symlinkSync(runnerGit, gitLink);
+        assert.equal(
+          execFileSync('/bin/sh', ['-c', 'command -v git'], {
+            cwd,
+            env,
+            encoding: 'utf8',
+            timeout: 10_000,
+          }).trim(),
+          gitLink,
+        );
+        assert.equal(fs.realpathSync(gitLink), runnerGit);
+        save(path.join(out, 'git-selection.json'), {
+          runnerGitPath,
+          runnerGit: tools.git,
+          priorCleanGit,
+          gitLink,
+          selected: gitLink,
+        });
         let packageRoot: string;
         let installRoot: string;
         let bin: string;
@@ -514,6 +556,7 @@ for (const kind of ['global', 'npx'] as const) {
           ],
         }));
         let session: InteractiveSession | undefined;
+        let startupOutput: string | undefined;
         let failure: unknown;
         const facts: Record<string, unknown> = {
           outcome: 'RUNNING',
@@ -540,8 +583,12 @@ for (const kind of ['global', 'npx'] as const) {
             'default',
           ]);
           let startupError: unknown;
+          const startupStartedAt = Date.now();
           try {
             session = await InteractiveSession.start({
+              onStartupFailure: (output) => {
+                startupOutput = output;
+              },
               command: {
                 bin: '/bin/sh',
                 args: [launcher, command.bin, ...command.args],
@@ -563,6 +610,10 @@ for (const kind of ['global', 'npx'] as const) {
                 QWEN_CODE_DISABLE_CRON: '1',
                 QWEN_CODE_SKIP_UPDATE_CHECK_ONCE: 'true',
                 QWEN_CODE_MODELS_DEV_REFRESH: 'off',
+                QWEN_DEBUG_LOG_FILE: '1',
+                QWEN_CODE_PROFILE_STARTUP: '1',
+                QWEN_CODE_PROFILE_STARTUP_OUTER: '1',
+                QWEN_CODE_PROFILE_STARTUP_NO_HEAP: '1',
                 DISTRIBUTION_PID: pidFile,
                 DISTRIBUTION_EXIT: exitFile,
                 DISTRIBUTION_STDERR: stderr,
@@ -573,6 +624,8 @@ for (const kind of ['global', 'npx'] as const) {
           } catch (error) {
             startupError = error;
           }
+          facts.startupElapsedMs = Date.now() - startupStartedAt;
+          facts.startupObserverTiming = observer.timing();
           facts.startupError = startupError ? String(startupError) : undefined;
           observer.poll();
           if (mode === 'no-relaunch-strict') {
@@ -703,6 +756,7 @@ for (const kind of ['global', 'npx'] as const) {
             fs.writeFileSync(
               path.join(out, 'terminal.ansi'),
               session?.output() ??
+                startupOutput ??
                 String(facts.startupError ?? 'STARTUP_NOT_RETURNED'),
             ),
           );
