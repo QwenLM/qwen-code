@@ -1941,6 +1941,24 @@ function withSettingsLock<T>(
   return next;
 }
 
+/**
+ * Per-workspace promise chain that keeps Skill toggle requests in arrival
+ * order. A toggle resolves its catalog identity before taking the settings
+ * lock; without this chain a later toggle could enqueue first and then be
+ * overwritten by the earlier one. It is separate from `withSettingsLock` so
+ * the identity read never blocks unrelated settings writes.
+ */
+const skillToggleChains = new Map<string, Promise<unknown>>();
+function withSkillToggleOrder<T>(
+  workspace: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const prev = skillToggleChains.get(workspace) ?? Promise.resolve();
+  const next = prev.then(fn, fn);
+  skillToggleChains.set(workspace, next);
+  return next;
+}
+
 export interface RunHandle {
   server: Server;
   url: string;
@@ -5938,10 +5956,13 @@ async function runQwenServeImpl(
         const workspaceRuntime =
           workspaceRegistryForPersistence.current?.getByWorkspaceCwd(workspace);
         const status =
-          await workspaceRuntime?.workspaceService.getWorkspaceSkillsStatus({
-            route: 'skill settings persistence',
-            workspaceCwd: workspace,
-          });
+          await workspaceRuntime?.workspaceService.getWorkspaceSkillsStatus(
+            {
+              route: 'skill settings persistence',
+              workspaceCwd: workspace,
+            },
+            { requireFresh: true },
+          );
         if (status?.initialized) {
           skills = status.skills;
           // An untrusted workspace's catalog omits Extension Skills, so an
@@ -6056,170 +6077,73 @@ async function runQwenServeImpl(
       enabled: boolean,
       assertGenerationOpen?: () => void,
     ) =>
-      withSettingsLock(workspace, async () => {
-        assertGenerationOpen?.();
-        const {
-          skillSettingStrings,
-          skillToggleBlockForName,
-          updateWorkspaceSkillSettingLists,
-        } = await import('../config/skill-settings.js');
-        const fresh = loadSettingsForPersistence(workspace);
-        const workspaceDisabled = skillSettingStrings(
-          fresh,
-          WORKSPACE_SETTING_SCOPE,
-          'disabled',
-        );
-        const workspaceEnabled = skillSettingStrings(
-          fresh,
-          WORKSPACE_SETTING_SCOPE,
-          'enabled',
-        );
-        // A grant a standing entry still forbids is not a write: the picker
-        // locks such rows, and a route that persists anyway reports an
-        // enable the merged config still denies.
-        if (enabled) {
-          const {
-            identities: [skillIdentity],
-          } = await resolveSkillToggleIdentities(workspace, [skillName]);
-          const block = skillToggleBlockForName(
-            fresh,
-            blockSkillIdentity(skillIdentity, skillName),
-          );
-          if (block) {
-            return { changed: false, disabled: workspaceDisabled, block };
-          }
-        }
-        const next = updateWorkspaceSkillSettingLists(
-          { disabled: workspaceDisabled, enabled: workspaceEnabled },
-          skillName,
-          enabled,
-        );
-        const settingsChanges: Array<{
-          key: 'skills.disabled' | 'skills.enabled';
-          value: string[] | undefined;
-        }> = [];
-        if (
-          JSON.stringify(next.disabled) !== JSON.stringify(workspaceDisabled)
-        ) {
-          settingsChanges.push({
-            key: 'skills.disabled',
-            value: next.disabled.length > 0 ? next.disabled : undefined,
-          });
-        }
-        if (JSON.stringify(next.enabled) !== JSON.stringify(workspaceEnabled)) {
-          settingsChanges.push({
-            key: 'skills.enabled',
-            value: next.enabled.length > 0 ? next.enabled : undefined,
-          });
-        }
-        if (settingsChanges.length === 0) {
-          return { changed: false, disabled: workspaceDisabled };
-        }
-
-        assertGenerationOpen?.();
-        fresh.setValues(
-          settingsChanges.map((change) => ({
-            scope: WORKSPACE_SETTING_SCOPE,
-            ...change,
-          })),
-          undefined,
-          assertGenerationOpen,
-        );
-        return {
-          changed: true,
-          disabled: next.disabled,
-          settingsChanges,
-        };
-      });
-    const persistDisabledSkillsBatchFn = (
-      workspace: string,
-      skillNames: readonly string[],
-      enabled: boolean,
-      assertGenerationOpen?: () => void,
-    ): Promise<PersistDisabledSkillsBatchResult> =>
-      withSettingsLock(workspace, async () => {
-        assertGenerationOpen?.();
-        const {
-          skillSettingStrings,
-          skillToggleBlockForName,
-          updateWorkspaceSkillSettingLists,
-        } = await import('../config/skill-settings.js');
-        const fresh = loadSettingsForPersistence(workspace);
-        const initialDisabled = skillSettingStrings(
-          fresh,
-          WORKSPACE_SETTING_SCOPE,
-          'disabled',
-        );
-        const initialEnabled = skillSettingStrings(
-          fresh,
-          WORKSPACE_SETTING_SCOPE,
-          'enabled',
-        );
-        const skillIdentities = enabled
-          ? (await resolveSkillToggleIdentities(workspace, skillNames))
+      withSkillToggleOrder(workspace, async () => {
+        // Resolving a catalog identity can block on ACP. Do it before taking
+        // the settings write lock so an enable does not serialize every other
+        // settings write for this workspace behind a cold read.
+        const [skillIdentity] = enabled
+          ? (await resolveSkillToggleIdentities(workspace, [skillName]))
               .identities
-          : skillNames.map((name) => ({ name }));
-        let next = { disabled: initialDisabled, enabled: initialEnabled };
-        const outcomes: PersistDisabledSkillsBatchResult['outcomes'] =
-          skillNames.map((skillName) => ({ skillName, changed: false }));
-        let pending = skillNames.map((_, index) => index);
-
-        for (let pass = 0; pass < skillNames.length; pass += 1) {
-          const refused: number[] = [];
-          let listChanged = false;
-          for (const index of pending) {
-            const skillName = skillNames[index];
-            if (enabled) {
-              const block = skillToggleBlockForName(
-                fresh,
-                blockSkillIdentity(skillIdentities[index], skillName),
-              );
-              if (
-                block &&
-                !(
-                  block.scope === 'Workspace' &&
-                  block.list === 'disabled' &&
-                  !next.disabled.some(
-                    (name) => name.trim().toLowerCase() === block.entry,
-                  )
-                )
-              ) {
-                refused.push(index);
-                continue;
-              }
-            }
-            const updated = updateWorkspaceSkillSettingLists(
-              next,
-              skillName,
-              enabled,
+          : [{ name: skillName }];
+        return withSettingsLock(workspace, async () => {
+          assertGenerationOpen?.();
+          const {
+            skillSettingStrings,
+            skillToggleBlockForName,
+            updateWorkspaceSkillSettingLists,
+          } = await import('../config/skill-settings.js');
+          const fresh = loadSettingsForPersistence(workspace);
+          const workspaceDisabled = skillSettingStrings(
+            fresh,
+            WORKSPACE_SETTING_SCOPE,
+            'disabled',
+          );
+          const workspaceEnabled = skillSettingStrings(
+            fresh,
+            WORKSPACE_SETTING_SCOPE,
+            'enabled',
+          );
+          // A grant a standing entry still forbids is not a write: the picker
+          // locks such rows, and a route that persists anyway reports an
+          // enable the merged config still denies.
+          if (enabled) {
+            const block = skillToggleBlockForName(
+              fresh,
+              blockSkillIdentity(skillIdentity, skillName),
             );
-            const changed =
-              JSON.stringify(updated.disabled) !==
-                JSON.stringify(next.disabled) ||
-              JSON.stringify(updated.enabled) !== JSON.stringify(next.enabled);
-            next = updated;
-            outcomes[index] = { skillName, changed };
-            listChanged ||= changed;
+            if (block) {
+              return { changed: false, disabled: workspaceDisabled, block };
+            }
           }
-          pending = refused;
-          if (pending.length === 0 || !listChanged) break;
-        }
+          const next = updateWorkspaceSkillSettingLists(
+            { disabled: workspaceDisabled, enabled: workspaceEnabled },
+            skillName,
+            enabled,
+          );
+          const settingsChanges: Array<{
+            key: 'skills.disabled' | 'skills.enabled';
+            value: string[] | undefined;
+          }> = [];
+          if (
+            JSON.stringify(next.disabled) !== JSON.stringify(workspaceDisabled)
+          ) {
+            settingsChanges.push({
+              key: 'skills.disabled',
+              value: next.disabled.length > 0 ? next.disabled : undefined,
+            });
+          }
+          if (
+            JSON.stringify(next.enabled) !== JSON.stringify(workspaceEnabled)
+          ) {
+            settingsChanges.push({
+              key: 'skills.enabled',
+              value: next.enabled.length > 0 ? next.enabled : undefined,
+            });
+          }
+          if (settingsChanges.length === 0) {
+            return { changed: false, disabled: workspaceDisabled };
+          }
 
-        const settingsChanges: PersistDisabledSkillsBatchResult['settingsChanges'] =
-          [];
-        if (JSON.stringify(next.disabled) !== JSON.stringify(initialDisabled)) {
-          settingsChanges.push({
-            key: 'skills.disabled',
-            value: next.disabled.length > 0 ? next.disabled : undefined,
-          });
-        }
-        if (JSON.stringify(next.enabled) !== JSON.stringify(initialEnabled)) {
-          settingsChanges.push({
-            key: 'skills.enabled',
-            value: next.enabled.length > 0 ? next.enabled : undefined,
-          });
-        }
-        if (settingsChanges.length > 0) {
           assertGenerationOpen?.();
           fresh.setValues(
             settingsChanges.map((change) => ({
@@ -6229,8 +6153,120 @@ async function runQwenServeImpl(
             undefined,
             assertGenerationOpen,
           );
-        }
-        return { outcomes, settingsChanges };
+          return {
+            changed: true,
+            disabled: next.disabled,
+            settingsChanges,
+          };
+        });
+      });
+    const persistDisabledSkillsBatchFn = (
+      workspace: string,
+      skillNames: readonly string[],
+      enabled: boolean,
+      assertGenerationOpen?: () => void,
+    ): Promise<PersistDisabledSkillsBatchResult> =>
+      withSkillToggleOrder(workspace, async () => {
+        // Resolve catalog identities before the lock for the same reason as
+        // the single toggle above.
+        const skillIdentities = enabled
+          ? (await resolveSkillToggleIdentities(workspace, skillNames))
+              .identities
+          : skillNames.map((name) => ({ name }));
+        return withSettingsLock(workspace, async () => {
+          assertGenerationOpen?.();
+          const {
+            skillSettingStrings,
+            skillToggleBlockForName,
+            updateWorkspaceSkillSettingLists,
+          } = await import('../config/skill-settings.js');
+          const fresh = loadSettingsForPersistence(workspace);
+          const initialDisabled = skillSettingStrings(
+            fresh,
+            WORKSPACE_SETTING_SCOPE,
+            'disabled',
+          );
+          const initialEnabled = skillSettingStrings(
+            fresh,
+            WORKSPACE_SETTING_SCOPE,
+            'enabled',
+          );
+          let next = { disabled: initialDisabled, enabled: initialEnabled };
+          const outcomes: PersistDisabledSkillsBatchResult['outcomes'] =
+            skillNames.map((skillName) => ({ skillName, changed: false }));
+          let pending = skillNames.map((_, index) => index);
+
+          for (let pass = 0; pass < skillNames.length; pass += 1) {
+            const refused: number[] = [];
+            let listChanged = false;
+            for (const index of pending) {
+              const skillName = skillNames[index];
+              if (enabled) {
+                const block = skillToggleBlockForName(
+                  fresh,
+                  blockSkillIdentity(skillIdentities[index], skillName),
+                );
+                if (
+                  block &&
+                  !(
+                    block.scope === 'Workspace' &&
+                    block.list === 'disabled' &&
+                    !next.disabled.some(
+                      (name) => name.trim().toLowerCase() === block.entry,
+                    )
+                  )
+                ) {
+                  refused.push(index);
+                  continue;
+                }
+              }
+              const updated = updateWorkspaceSkillSettingLists(
+                next,
+                skillName,
+                enabled,
+              );
+              const changed =
+                JSON.stringify(updated.disabled) !==
+                  JSON.stringify(next.disabled) ||
+                JSON.stringify(updated.enabled) !==
+                  JSON.stringify(next.enabled);
+              next = updated;
+              outcomes[index] = { skillName, changed };
+              listChanged ||= changed;
+            }
+            pending = refused;
+            if (pending.length === 0 || !listChanged) break;
+          }
+
+          const settingsChanges: PersistDisabledSkillsBatchResult['settingsChanges'] =
+            [];
+          if (
+            JSON.stringify(next.disabled) !== JSON.stringify(initialDisabled)
+          ) {
+            settingsChanges.push({
+              key: 'skills.disabled',
+              value: next.disabled.length > 0 ? next.disabled : undefined,
+            });
+          }
+          if (JSON.stringify(next.enabled) !== JSON.stringify(initialEnabled)) {
+            settingsChanges.push({
+              key: 'skills.enabled',
+              value: next.enabled.length > 0 ? next.enabled : undefined,
+            });
+          }
+          if (settingsChanges.length > 0) {
+            assertGenerationOpen?.();
+            fresh.setValues(
+              settingsChanges.map((change) => ({
+                scope: WORKSPACE_SETTING_SCOPE,
+                ...change,
+              })),
+              undefined,
+              assertGenerationOpen,
+            );
+          }
+          return { outcomes, settingsChanges };
+        });
       });
     // User-scope writes are keyed on the primary workspace: every other
     // user-scope writer (`/workspace/settings`, `/workspace/config/mcp`)
@@ -6242,124 +6278,134 @@ async function runQwenServeImpl(
       mode: import('../config/skill-settings.js').SkillDisableMode,
       assertGenerationOpen?: () => void,
     ): Promise<PersistUserSkillActivationResult> =>
-      withSettingsLock(workspace, async () => {
-        assertGenerationOpen?.();
-        const {
-          skillSettingStrings,
-          skillToggleBlockForName,
-          updateSkillActivationLists,
-        } = await import('../config/skill-settings.js');
-        const fresh = loadSettingsForPersistence(workspace);
-        const initial = {
-          disabled: skillSettingStrings(fresh, USER_SETTING_SCOPE, 'disabled'),
-          defaultDisabled: skillSettingStrings(
-            fresh,
-            USER_SETTING_SCOPE,
-            'defaultDisabled',
-          ),
-          enabled: skillSettingStrings(fresh, USER_SETTING_SCOPE, 'enabled'),
-        };
+      withSkillToggleOrder(workspace, async () => {
+        // Resolving a catalog identity can block on ACP. Do it before taking
+        // the settings write lock so an enable does not serialize every other
+        // settings write for this workspace behind a cold read.
         const { identities: skillIdentities, catalogAvailable } =
           await resolveSkillToggleIdentities(workspace, skillNames);
-        const writtenName = (index: number) =>
-          skillIdentities[index]!.registryName ?? skillIdentities[index]!.name;
-        let next = initial;
-        const outcomes: PersistUserSkillActivationResult['outcomes'] =
-          skillNames.map((_, index) => ({
-            skillName: writtenName(index),
-            changed: false,
-          }));
-        // A grant a standing entry still forbids is not a write: the merged
-        // config would keep the skill disabled while the route reported an
-        // enable. A `defaultDisabled` entry a grant the batch records cancels,
-        // or a User entry another name already removed, no longer forbids it,
-        // so refused names are rechecked until the batch converges and the
-        // result does not depend on request order.
-        const stillBlocked = (index: number) => {
-          const block = skillToggleBlockForName(
-            fresh,
-            blockSkillIdentity(skillIdentities[index]!, writtenName(index)),
-            USER_SETTING_SCOPE,
-          );
-          if (
-            block?.reason === 'default' &&
-            next.enabled.some(
-              (name) => name.trim().toLowerCase() === block.entry,
-            )
-          ) {
-            return null;
-          }
-          if (!block || block.scope !== 'User') return block;
-          const removed = !next[block.list].some(
-            (name) => name.trim().toLowerCase() === block.entry,
-          );
-          return removed ? null : block;
-        };
-        let pending = skillNames.map((_, index) => index);
-        for (let pass = 0; pass < skillNames.length; pass += 1) {
-          const refused: number[] = [];
-          let listChanged = false;
-          for (const index of pending) {
-            const skillName = writtenName(index);
-            if (enabled && !skillIdentities[index]!.resolved) {
-              if (!catalogAvailable) {
-                throw new SkillCatalogUnavailableError();
-              }
-              outcomes[index] = {
-                skillName,
-                changed: false,
-                reason: 'unresolved_skill_name',
-              };
-              continue;
-            }
-            const block = enabled ? stillBlocked(index) : null;
-            if (block) {
-              outcomes[index] = { skillName, changed: false, block };
-              refused.push(index);
-              continue;
-            }
-            const updated = updateSkillActivationLists(
-              next,
-              skillName,
-              enabled,
-              mode,
-            );
-            const changed = JSON.stringify(updated) !== JSON.stringify(next);
-            outcomes[index] = { skillName, changed };
-            next = updated;
-            listChanged ||= changed;
-          }
-          pending = refused;
-          if (pending.length === 0 || !listChanged) break;
-        }
-
-        const settingsChanges: PersistUserSkillActivationResult['settingsChanges'] =
-          [];
-        for (const [list, key] of [
-          ['disabled', 'skills.disabled'],
-          ['defaultDisabled', 'skills.defaultDisabled'],
-          ['enabled', 'skills.enabled'],
-        ] as const) {
-          if (JSON.stringify(next[list]) === JSON.stringify(initial[list])) {
-            continue;
-          }
-          settingsChanges.push({
-            key,
-            value: next[list].length > 0 ? next[list] : undefined,
-          });
-        }
-        if (settingsChanges.length > 0) {
+        return withSettingsLock(workspace, async () => {
           assertGenerationOpen?.();
-          fresh.setValues(
-            settingsChanges.map((change) => ({
-              scope: USER_SETTING_SCOPE,
-              ...change,
-            })),
-            undefined,
-            assertGenerationOpen,
-          );
-        }
-        return { outcomes, settingsChanges };
+          const {
+            skillSettingStrings,
+            skillToggleBlockForName,
+            updateSkillActivationLists,
+          } = await import('../config/skill-settings.js');
+          const fresh = loadSettingsForPersistence(workspace);
+          const initial = {
+            disabled: skillSettingStrings(
+              fresh,
+              USER_SETTING_SCOPE,
+              'disabled',
+            ),
+            defaultDisabled: skillSettingStrings(
+              fresh,
+              USER_SETTING_SCOPE,
+              'defaultDisabled',
+            ),
+            enabled: skillSettingStrings(fresh, USER_SETTING_SCOPE, 'enabled'),
+          };
+          const writtenName = (index: number) =>
+            skillIdentities[index]!.registryName ??
+            skillIdentities[index]!.name;
+          let next = initial;
+          const outcomes: PersistUserSkillActivationResult['outcomes'] =
+            skillNames.map((_, index) => ({
+              skillName: writtenName(index),
+              changed: false,
+            }));
+          // A grant a standing entry still forbids is not a write: the merged
+          // config would keep the skill disabled while the route reported an
+          // enable. A `defaultDisabled` entry a grant the batch records cancels,
+          // or a User entry another name already removed, no longer forbids it,
+          // so refused names are rechecked until the batch converges and the
+          // result does not depend on request order.
+          const stillBlocked = (index: number) => {
+            const block = skillToggleBlockForName(
+              fresh,
+              blockSkillIdentity(skillIdentities[index]!, writtenName(index)),
+              USER_SETTING_SCOPE,
+            );
+            if (
+              block?.reason === 'default' &&
+              next.enabled.some(
+                (name) => name.trim().toLowerCase() === block.entry,
+              )
+            ) {
+              return null;
+            }
+            if (!block || block.scope !== 'User') return block;
+            const removed = !next[block.list].some(
+              (name) => name.trim().toLowerCase() === block.entry,
+            );
+            return removed ? null : block;
+          };
+          let pending = skillNames.map((_, index) => index);
+          for (let pass = 0; pass < skillNames.length; pass += 1) {
+            const refused: number[] = [];
+            let listChanged = false;
+            for (const index of pending) {
+              const skillName = writtenName(index);
+              if (enabled && !skillIdentities[index]!.resolved) {
+                if (!catalogAvailable) {
+                  throw new SkillCatalogUnavailableError();
+                }
+                outcomes[index] = {
+                  skillName,
+                  changed: false,
+                  reason: 'unresolved_skill_name',
+                };
+                continue;
+              }
+              const block = enabled ? stillBlocked(index) : null;
+              if (block) {
+                outcomes[index] = { skillName, changed: false, block };
+                refused.push(index);
+                continue;
+              }
+              const updated = updateSkillActivationLists(
+                next,
+                skillName,
+                enabled,
+                mode,
+              );
+              const changed = JSON.stringify(updated) !== JSON.stringify(next);
+              outcomes[index] = { skillName, changed };
+              next = updated;
+              listChanged ||= changed;
+            }
+            pending = refused;
+            if (pending.length === 0 || !listChanged) break;
+          }
+
+          const settingsChanges: PersistUserSkillActivationResult['settingsChanges'] =
+            [];
+          for (const [list, key] of [
+            ['disabled', 'skills.disabled'],
+            ['defaultDisabled', 'skills.defaultDisabled'],
+            ['enabled', 'skills.enabled'],
+          ] as const) {
+            if (JSON.stringify(next[list]) === JSON.stringify(initial[list])) {
+              continue;
+            }
+            settingsChanges.push({
+              key,
+              value: next[list].length > 0 ? next[list] : undefined,
+            });
+          }
+          if (settingsChanges.length > 0) {
+            assertGenerationOpen?.();
+            fresh.setValues(
+              settingsChanges.map((change) => ({
+                scope: USER_SETTING_SCOPE,
+                ...change,
+              })),
+              undefined,
+              assertGenerationOpen,
+            );
+          }
+          return { outcomes, settingsChanges };
+        });
       });
     const persistSettingFn = (
       workspace: string,
