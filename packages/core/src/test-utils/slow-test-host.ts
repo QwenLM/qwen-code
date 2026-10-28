@@ -18,5 +18,5 @@ export function isSlowTestHost(): boolean {
   if (process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')) {
     return true;
   }
-  return os.loadavg()[0] >= os.availableParallelism();
+  return os.loadavg()[0] >= os.availableParallelism() * 0.5;
 }
