@@ -3539,6 +3539,8 @@ export function App({
   managedModeRef.current = managedMode;
   const [managedNavigationTarget, setManagedNavigationTarget] =
     useState<HTMLDivElement | null>(null);
+  const [archivedSessionsTarget, setArchivedSessionsTarget] =
+    useState<HTMLElement | null>(null);
   const [managedArchivedNavigationTarget, setManagedArchivedNavigationTarget] =
     useState<HTMLDivElement | null>(null);
   const [managedArchivedStatus, setManagedArchivedStatus] = useState({
@@ -4324,6 +4326,17 @@ export function App({
     ordinaryWorkspaces.length > 0 ||
     (workspace.capabilities?.workspaces === undefined &&
       Boolean(workspace.capabilities?.workspaceCwd));
+  const archiveManagementAvailable = Boolean(
+    sidebarOptions.enabled &&
+      (connection.capabilities?.features?.includes('session_archive') ||
+        (!lockedWorkspaceCwd &&
+          workspace.capabilities?.features?.includes(
+            STANDALONE_SESSIONS_CAPABILITY,
+          )) ||
+        managedAgentProvider?.lifecycle),
+  );
+  const settingsAvailable =
+    projectFeaturesAvailable || archiveManagementAvailable;
   const externalManagedAgentAvailable = managedAgentProvider !== undefined;
   // The daemon lists the `/autofix-pr` watches of its workspaces' clones.
   const prWatchesAvailable =
@@ -10072,7 +10085,10 @@ export function App({
     if (
       !projectFeaturesAvailable &&
       activePanel !== 'status' &&
-      !(activePanel === 'settings' && initialConnectionsSettingsCategory)
+      !(
+        activePanel === 'settings' &&
+        (settingsAvailable || initialConnectionsSettingsCategory)
+      )
     ) {
       setActivePanel(null);
     }
@@ -10109,6 +10125,7 @@ export function App({
     modelDialogMode,
     projectFeaturesAvailable,
     initialConnectionsSettingsCategory,
+    settingsAvailable,
     workspaceContextActive,
   ]);
   const handleUseSkill = useCallback(
@@ -10225,7 +10242,8 @@ export function App({
         (sidebarOptions.footer !== false &&
           sidebarOptions.footer?.items?.some((item) => {
             if (item === 'collapse') return false;
-            if (item === 'settings' || item === 'sessionsOverview') {
+            if (item === 'settings') return settingsAvailable;
+            if (item === 'sessionsOverview') {
               return projectFeaturesAvailable;
             }
             if (item === 'workspacesOverview') return !lockedWorkspaceCwd;
@@ -10432,15 +10450,17 @@ export function App({
           : page;
     const allowed =
       page === 'chat' ||
-      (projectFeaturesAvailable &&
-        (page !== 'live' || liveSidebarEnabled) &&
-        (page !== 'pr-watches' || prWatchesAvailable) &&
-        (page === 'settings'
-          ? hostSidebar?.footer !== false &&
-            (hostSidebar?.footer?.items?.includes('settings') ?? true)
-          : (hostSidebar?.primaryNav?.items?.some(
-              (item) => item === primaryItem,
-            ) ?? true)));
+      (page === 'settings'
+        ? settingsAvailable &&
+          hostSidebar?.footer !== false &&
+          (hostSidebar?.footer?.items?.includes('settings') ?? true)
+        : projectFeaturesAvailable &&
+          (page !== 'live' || liveSidebarEnabled) &&
+          (page !== 'pr-watches' || prWatchesAvailable) &&
+          (hostSidebar?.primaryNav?.items?.some(
+            (item) => item === primaryItem,
+          ) ??
+            true));
     if (navigationAppliedRef.current === navigation.revision && allowed) return;
     navigationAppliedRef.current = navigation.revision;
     navigationSettledRef.current = false;
@@ -10469,6 +10489,7 @@ export function App({
   }, [
     navigation,
     projectFeaturesAvailable,
+    settingsAvailable,
     hostSidebar?.footer,
     hostSidebar?.primaryNav?.items,
     liveSidebarEnabled,
@@ -22205,6 +22226,7 @@ export function App({
                     closeMobileDrawer();
                     openPanel('sessions');
                   }}
+                  canOpenSettings={settingsAvailable}
                   canOpenSessionsOverview={projectFeaturesAvailable}
                   onOpenSplitView={() => {
                     closeMobileDrawer();
@@ -22253,6 +22275,7 @@ export function App({
                       <div ref={setManagedNavigationTarget} />
                     ) : undefined
                   }
+                  archivedSessionsTarget={archivedSessionsTarget}
                   managedArchivedSessions={
                     managedAgentProvider?.lifecycle
                       ? {
@@ -22661,7 +22684,8 @@ export function App({
                   </button>
                 )}
               {activePanel &&
-                (projectFeaturesAvailable || activePanel === 'status') && (
+                (projectFeaturesAvailable || activePanel === 'status' ||
+                  (activePanel === 'settings' && settingsAvailable)) && (
                 <section
                   className={styles.panelHost}
                   role="region"
@@ -22824,12 +22848,17 @@ export function App({
                         connections={
                           standalone ? <DaemonConnectionsSettings /> : undefined
                         }
+                        archivedSessions={
+                          archiveManagementAvailable ? (
+                            <div ref={setArchivedSessionsTarget} data-web-shell-archived-sessions />
+                          ) : undefined
+                        }
                         workspaceDirectoriesSection={
                           workspaceDirectoriesSupported ? (
                             <WorkspaceDirectoriesSection />
                           ) : undefined
                         }
-                        modelManagementSectionProps={{
+                        modelManagementSectionProps={projectFeaturesAvailable ? {
                           ...modelManagementPolicy,
                           providers: providersState.providers,
                           configurations: modelConfigurations.models,
@@ -22857,7 +22886,7 @@ export function App({
                               'builtin:model-management';
                             setShowAuthDialog(true);
                           },
-                        }}
+                        } : undefined}
                         onSubDialog={(key, scope) => {
                           if (!isSettingVisible(key, settingsPresentation)) return;
                           settingsDialogKeyRef.current = key;
