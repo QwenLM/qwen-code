@@ -30,6 +30,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.ApplicationContext;
 import org.springframework.http.HttpStatus;
@@ -97,7 +98,7 @@ class AutomationScannerTest {
     private ObjectMapper mapper;
 
     @Autowired
-    private JdbcTemplate jdbc;
+    private @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc;
 
     @Autowired
     private ApplicationContext applicationContext;
@@ -1467,7 +1468,7 @@ class AutomationScannerTest {
         assertThat(applicationContext.containsBean("managedAutomationScheduler"))
                 .isTrue();
         assertThat(applicationContext.getBean("managedAutomationScheduler"))
-                .isNotSameAs(applicationContext.getBean("taskScheduler"));
+                .isNotSameAs(applicationContext.getBean("managedAgentScheduler"));
         var scheduled = AutomationScanner.class.getMethod("scan")
                 .getAnnotation(org.springframework.scheduling.annotation.Scheduled.class);
         assertThat(scheduled.scheduler())
