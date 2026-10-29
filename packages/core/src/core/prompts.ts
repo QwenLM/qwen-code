@@ -11,7 +11,6 @@ import { fileURLToPath } from 'node:url';
 import { ToolNames } from '../tools/tool-names.js';
 import process from 'node:process';
 import { isGitRepository } from '../utils/gitUtils.js';
-import { QWEN_DIR } from '../config/storage.js';
 import type { GenerateContentConfig } from '@google/genai';
 import { InputFormat } from '../output/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -757,18 +756,10 @@ export function getCoreSystemPrompt(
   // if QWEN_SYSTEM_MD is set (and not 0|false), override system prompt from file
   // default path is .qwen/system.md (project-level), can be overridden via QWEN_SYSTEM_MD
   const systemMdEnabled = isSystemMdActive();
-  // Resolve the bundled prompt relative to the project root at runtime.
-  // QWEN_SYSTEM_MD can specify an explicit deployed copy.
-  let systemMdPath = path.resolve(fileURLToPath(new URL('./system.md', import.meta.url)));
+  // Load the packaged prompt alongside the compiled prompt module.
+  const systemMdPath = fileURLToPath(new URL('./system.md', import.meta.url));
 
   if (systemMdEnabled) {
-    // Resolve the environment variable to get either a path or a switch value.
-    const systemMdResolution = resolvePathFromEnv(
-      process.env['QWEN_SYSTEM_MD'],
-    );
-
-    // We update systemMdPath to this new custom path.
-    // Keep the distribution's bundled prompt regardless of environment overrides.
 
     // require file to exist when override is enabled
     if (!fs.existsSync(systemMdPath)) {
